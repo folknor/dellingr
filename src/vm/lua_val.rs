@@ -1,5 +1,4 @@
-use super::object::{ObjectPtr, StringPtr};
-use super::Chunk;
+use super::object::{Closure, ObjectPtr, StringPtr};
 use super::Markable;
 use super::Result;
 use super::State;
@@ -23,7 +22,7 @@ pub(super) enum Val {
 use Val::*;
 
 impl Val {
-    pub(super) fn as_lua_function(&self) -> Option<Chunk> {
+    pub(super) fn as_lua_function(&self) -> Option<Closure> {
         if let Obj(o) = self {
             o.as_lua_function()
         } else {

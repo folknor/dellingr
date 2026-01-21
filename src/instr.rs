@@ -29,6 +29,12 @@ pub(super) enum Instr {
     /// Pop a value from the stack and discard it.
     Pop,
 
+    /// Duplicate the value at the top of the stack.
+    Dup,
+
+    /// Swap the two values at the top of the stack.
+    Swap,
+
     /// Use the param as an index into the string literal set. Using that
     /// string, index the global table and push onto the stack.
     GetGlobal(u8),
@@ -44,6 +50,13 @@ pub(super) enum Instr {
     /// Pop the value at the top of the stack, and place it in the given local
     /// index.
     SetLocal(u8),
+
+    /// Copy the given upvalue to the top of the stack.
+    GetUpvalue(u8),
+
+    /// Pop the value at the top of the stack, and place it in the given upvalue
+    /// index.
+    SetUpvalue(u8),
 
     /// Create a new table and place it on the stack.
     NewTable,
@@ -99,6 +112,21 @@ pub(super) enum Instr {
     /// track its progress. If the loop isn't over, jump using the second
     /// parameter.
     ForLoop(u8, isize),
+
+    /// Prepare a generic for loop. Pop 3 values (iterator, state, initial)
+    /// from the stack and store them in the locals starting at the given slot.
+    /// The first param is the local slot, second is the number of loop variables.
+    TForPrep(u8),
+
+    /// Call the iterator function for a generic for loop. The first param is
+    /// the local slot where (iterator, state, var) are stored. Second param is
+    /// the number of loop variables to receive.
+    TForCall(u8, u8),
+
+    /// Check if the first loop variable is nil. If so, jump by the offset.
+    /// Otherwise, copy the first loop variable to the control variable slot.
+    /// First param is the local slot, second is the jump offset.
+    TForLoop(u8, isize),
 
     /// Function call (number of arguments, number of needed return values).
     Call(u8, u8),
@@ -164,6 +192,11 @@ pub(super) enum Instr {
 
     /// Create a closure from a Chunk and push it onto the stack.
     Closure(u8),
+
+    /// Push varargs onto the stack.
+    /// The parameter indicates how many values to push (padding with nil if needed).
+    /// 255 means push all varargs.
+    Vararg(u8),
 
     /// Pop n values from the stack, then pop a table. Assign the last value
     /// popped to `table[1]`, the second-to-last value to `table[2]`, etc.

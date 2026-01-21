@@ -9,6 +9,15 @@ use super::error;
 use super::Instr;
 use super::Result;
 
+/// Describes where an upvalue comes from when creating a closure.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum UpvalueDesc {
+    /// Capture a local variable from the immediately enclosing function.
+    Local(u8),
+    /// Capture an upvalue from the immediately enclosing function.
+    Upvalue(u8),
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct Chunk {
     pub(super) code: Vec<Instr>,
@@ -17,6 +26,10 @@ pub(super) struct Chunk {
     pub(super) num_params: u8,
     pub(super) num_locals: u8,
     pub(super) nested: Vec<Chunk>,
+    /// Describes the upvalues this function captures.
+    pub(super) upvalues: Vec<UpvalueDesc>,
+    /// Whether this function accepts varargs (...).
+    pub(super) is_vararg: bool,
 }
 
 pub(super) fn parse_str(source: impl AsRef<str>) -> Result<Chunk> {

@@ -4,6 +4,8 @@
 #[derive(Debug)]
 pub(super) enum ExpDesc {
     Prefix(PrefixExp),
+    /// A vararg expression (...)
+    Vararg,
     Other,
 }
 
@@ -25,6 +27,8 @@ pub(super) enum PrefixExp {
 pub(super) enum PlaceExp {
     /// A local variable, and its index in the list of locals
     Local(u8),
+    /// An upvalue (captured variable from enclosing scope), and its index
+    Upvalue(u8),
     /// A global variable, and its index in the list of string literals
     Global(u8),
     /// A table index, with `[` and `]`

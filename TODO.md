@@ -1,71 +1,66 @@
 # Script VM TODO
 
-## Priority 1: Essential
+## Priority 2: Useful Additions
 
-### Break Statement
-- **Files:** `src/compiler/parser.rs`, `src/compiler/token.rs`, `src/instr.rs`, `src/vm/frame.rs`
-- **Test:** `examples/loops.lua`
-- [ ] Add `Break` token
-- [ ] Parse `break` in loops
-- [ ] Add `Break` instruction
-- [ ] Execute break (jump to loop end)
+### Global Functions
+- [ ] `_G` - global environment table
 
-### Generic For Loops
-- **Files:** `src/compiler/parser.rs`, `src/instr.rs`, `src/vm/frame.rs`, `src/lua_std/basic.rs`
-- **Test:** `examples/loops.lua`
-- [ ] Parse `for k, v in expr do`
-- [ ] Add iterator instructions
-- [ ] Implement `pairs(t)`
-- [ ] Fix `ipairs(t)` to work with generic for
+### Math Library
+- [ ] `math.tan(x)` - tangent
+- [ ] `math.acos(x)`, `math.asin(x)` - inverse trig
+- [ ] `math.atan(y [, x])` - Lua 5.3+ style (replaces atan2)
+- [ ] `math.deg(x)`, `math.rad(x)` - angle conversion
+- [ ] `math.exp(x)` - e^x
+- [ ] `math.log(x [, base])` - logarithm with optional base
+- [ ] `math.fmod(x, y)` - float modulo
+- [ ] `math.modf(x)` - returns integer and fractional parts
+- [ ] `math.huge` - infinity constant
 
-## Priority 2: Important
-
-### Closures / Upvalues
-- **Files:** `src/compiler/parser.rs`, `src/compiler.rs` (Chunk), `src/vm/frame.rs`, `src/vm.rs`
-- **Test:** `examples/closures.lua`
-- [ ] Track upvalue references in compiler
-- [ ] Add upvalue storage to Chunk
-- [ ] Add `GetUpvalue`/`SetUpvalue` instructions
-- [ ] Capture variables at closure creation
-
-### Multiple Return Values
-- **Files:** `src/compiler/parser.rs`, `src/vm/frame.rs`, `src/vm.rs`
-- **Test:** `examples/functions.lua`
-- [ ] Handle multiple returns in compiler
-- [ ] Fix return instruction for N values
-- [ ] Handle multiple assignment targets
+### String Library
+- [ ] `string.byte(s [, i [, j]])` - get byte values of characters
+- [ ] `string.char(...)` - create string from byte values
 
 ## Priority 3: Nice to Have
 
-### String Library
-- **Files:** `src/lua_std/string.rs` (new), `src/lua_std.rs`
-- **Test:** `examples/strings.lua`
-- [ ] `string.sub(s, i, j)`
-- [ ] `string.find(s, pattern)`
-- [ ] `string.format(fmt, ...)`
+### Global Functions
+- [ ] `rawlen(v)` - length without metamethods (Lua 5.2+). This is kind of silly, we should just make #tbl return this size by default if we add metatables
+- [ ] `require(modname)` - module system, but we only allow to require files already loaded by us, we need to define this system properly with regards to mods and such
 
 ### Table Library
-- **Files:** `src/lua_std/table.rs` (new), `src/lua_std.rs`
-- **Test:** `examples/tables.lua`
-- [ ] `table.insert(t, v)`
-- [ ] `table.remove(t, i)`
-- [ ] `table.sort(t)`
+- [ ] `table.move(a1, f, e, t [, a2])` - move elements (Lua 5.3+)
 
-### Method Call Syntax
-- **Files:** `src/compiler/parser.rs`
-- **Test:** `examples/methods.lua`
-- [ ] Parse `obj:method(args)` as `obj.method(obj, args)`
+## Known Limitations
 
-### Varargs
-- **Files:** `src/compiler/parser.rs`, `src/instr.rs`, `src/vm/frame.rs`
-- **Test:** `examples/functions.lua`
-- [ ] Parse `...` in function params
-- [ ] Store varargs in frame
-- [ ] Access varargs in function body
+### Closures: Capture-by-Value
+Upvalues are captured by value (copy) rather than by reference. This means:
+- Modifications to captured variables inside a closure don't affect the original
+- Multiple closures capturing the same variable get independent copies
+- Counter patterns like `local count = 0; return function() count = count + 1; return count end` won't work as expected (each call returns 1)
+
+Full Lua semantics would require "open upvalues" that point to stack slots and get "closed" to heap storage when the enclosing function returns.
+
+### Multiple Returns/Varargs as Function Arguments
+Using multiple return values or varargs directly as function arguments doesn't work:
+```lua
+local add = function(a, b) return a + b end
+local vals = function() return 3, 4 end
+add(vals())  -- Won't work: only first return value is passed
+
+local f = function(...)
+    print(...)  -- Won't work: only first vararg is passed
+end
+```
+Workaround: capture values first, then pass them:
+```lua
+local a, b = vals()
+add(a, b)  -- Works correctly
+
+local a, b = ...
+print(a, b)  -- Works correctly
+```
 
 ## Won't Implement
 
-- Metatables
 - Integer division (`//`)
 - Coroutines
 - IO/OS libraries
@@ -89,7 +84,24 @@
 - [x] `print(...)`
 - [x] `type(val)`
 - [x] `tonumber(s)`, `tostring(x)`
-- [x] `ipairs(t)` (iterator only, generic for not working)
+- [x] `ipairs(t)`, `pairs(t)`, `next(t, k)` with generic for loops
 - [x] `unpack(t)`
 - [x] Math library: `sin`, `cos`, `atan2`, `sqrt`, `abs`, `min`, `max`, `floor`, `ceil`, `random`, `pi`
 - [x] Bug fix: function calls with many locals
+- [x] Break statement in loops (`while`, `for`, `repeat`)
+- [x] Generic for loops (`for k, v in pairs(t) do`)
+- [x] Closures/upvalues (capture-by-value semantics)
+- [x] Multiple return values (including empty return, chained returns)
+- [x] Method call syntax (`obj:method(args)`)
+- [x] Varargs (`...` in function parameters and body)
+- [x] Table library: `table.insert`, `table.remove`, `table.sort`, `table.unpack`
+- [x] String library: `string.sub`, `string.find`, `string.format`, `string.len`, `string.upper`, `string.lower`, `string.rep`, `string.reverse`
+- [x] Metatables: `setmetatable`, `getmetatable`
+- [x] Metamethods: `__index`, `__newindex`, `__tostring`, `__call`, `__len`
+- [x] String methods: `str:upper()` syntax via implicit string metatable
+- [x] `string.match`, `string.gmatch`, `string.gsub` - pattern matching
+- [x] `table.concat` - join array elements with separator
+- [x] `select(index, ...)` and `select('#', ...)` - vararg selection
+- [x] `rawget`, `rawset` - table access bypassing metamethods
+- [x] `table.pack(...)` - returns `{..., n=count}` with explicit length field
+- [x] `{...}` syntax - collect varargs into table

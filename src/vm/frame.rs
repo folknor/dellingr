@@ -1,5 +1,6 @@
 use std::ops;
 
+use super::super::compiler::UpvalueDesc;
 use super::super::error::TypeError;
 use super::Chunk;
 use super::Instr;
@@ -17,17 +18,28 @@ pub(super) struct Frame {
     /// Offset into `State.string_literals` where this chunk's literals are
     /// stored.
     string_literal_start: usize,
+    /// The upvalues captured by this closure.
+    upvalues: Vec<Val>,
+    /// The varargs passed to this function (if it's a vararg function).
+    varargs: Vec<Val>,
 }
 
 impl Frame {
     /// Create a new Frame.
     #[must_use]
-    pub(super) fn new(chunk: Chunk, string_literal_start: usize) -> Self {
+    pub(super) fn new(
+        chunk: Chunk,
+        upvalues: Vec<Val>,
+        varargs: Vec<Val>,
+        string_literal_start: usize,
+    ) -> Self {
         let ip = 0;
         Self {
             chunk,
             ip,
             string_literal_start,
+            upvalues,
+            varargs,
         }
     }
 
@@ -69,6 +81,14 @@ impl Frame {
                 Instr::Pop => {
                     state.pop_val();
                 }
+                Instr::Dup => {
+                    let val = state.stack.last().unwrap().clone();
+                    state.stack.push(val);
+                }
+                Instr::Swap => {
+                    let len = state.stack.len();
+                    state.stack.swap(len - 1, len - 2);
+                }
                 Instr::Jump(offset) => self.jump(offset),
                 Instr::BranchFalse(ofst) => state.instr_branch(self, false, ofst, false),
                 Instr::BranchFalseKeep(ofst) => state.instr_branch(self, false, ofst, true),
@@ -79,6 +99,10 @@ impl Frame {
                 Instr::GetLocal(i) => state.instr_get_local(i),
                 Instr::SetLocal(i) => state.instr_set_local(i),
 
+                // Upvalues
+                Instr::GetUpvalue(i) => state.instr_get_upvalue(self, i),
+                Instr::SetUpvalue(i) => state.instr_set_upvalue(self, i),
+
                 Instr::GetGlobal(i) => state.instr_get_global(self, i),
                 Instr::SetGlobal(i) => state.instr_set_global(self, i),
 
@@ -87,6 +111,24 @@ impl Frame {
                 Instr::Call(num_args, num_rets) => state.call(num_args, num_rets)?,
                 Instr::Return(n) => {
                     return Ok(n);
+                }
+                Instr::Vararg(n) => {
+                    if n == u8::MAX {
+                        // Push all varargs
+                        for val in &self.varargs {
+                            state.stack.push(val.clone());
+                        }
+                    } else {
+                        // Push exactly n values, padding with nil if needed
+                        let n = n as usize;
+                        for i in 0..n {
+                            if i < self.varargs.len() {
+                                state.stack.push(self.varargs[i].clone());
+                            } else {
+                                state.push_nil();
+                            }
+                        }
+                    }
                 }
 
                 // Literals
@@ -127,9 +169,14 @@ impl Frame {
                 Instr::LessEqual => state.eval_float_bool(<f64 as PartialOrd>::le)?,
                 Instr::GreaterEqual => state.eval_float_bool(<f64 as PartialOrd>::ge)?,
 
-                // `for` loops
+                // `for` loops (numeric)
                 Instr::ForLoop(slot, offset) => state.instr_for_loop(self, slot, offset)?,
                 Instr::ForPrep(slot, len) => state.instr_for_prep(self, slot, len)?,
+
+                // `for` loops (generic/iterator)
+                Instr::TForPrep(slot) => state.instr_tfor_prep(slot),
+                Instr::TForCall(slot, num_vars) => state.instr_tfor_call(slot, num_vars)?,
+                Instr::TForLoop(slot, offset) => state.instr_tfor_loop(self, slot, offset),
 
                 // Unary
                 Instr::Length => state.instr_length()?,
@@ -171,7 +218,22 @@ impl State {
 
     fn instr_closure(&mut self, frame: &mut Frame, i: u8) {
         let chunk = frame.get_nested_chunk(i);
-        self.push_chunk(chunk);
+        // Capture upvalues based on the chunk's upvalue descriptors
+        let mut captured_upvalues = Vec::with_capacity(chunk.upvalues.len());
+        for desc in &chunk.upvalues {
+            let val = match desc {
+                UpvalueDesc::Local(idx) => {
+                    // Capture a local variable from the current frame's stack
+                    self.stack[self.stack_bottom + *idx as usize].clone()
+                }
+                UpvalueDesc::Upvalue(idx) => {
+                    // Capture an upvalue from the current frame's upvalues
+                    frame.upvalues[*idx as usize].clone()
+                }
+            };
+            captured_upvalues.push(val);
+        }
+        self.push_closure(chunk, captured_upvalues);
     }
 
     fn instr_for_prep(&mut self, frame: &mut Frame, local: u8, body_len: isize) -> Result<()> {
@@ -205,15 +267,86 @@ impl State {
         Ok(())
     }
 
+    /// TForPrep: Pop 3 values (iterator, state, control) and store in locals.
+    fn instr_tfor_prep(&mut self, local_slot: u8) {
+        let base = local_slot as usize + self.stack_bottom;
+        // Pop in reverse order: control, state, iterator
+        let control = self.pop_val();
+        let state = self.pop_val();
+        let iterator = self.pop_val();
+        // Store in order: iterator, state, control
+        self.stack[base] = iterator;
+        self.stack[base + 1] = state;
+        self.stack[base + 2] = control;
+    }
+
+    /// TForCall: Call iterator(state, control), store results in loop variable slots.
+    fn instr_tfor_call(&mut self, local_slot: u8, num_vars: u8) -> Result<()> {
+        let base = local_slot as usize + self.stack_bottom;
+        // Push iterator function, state, and control onto stack for call
+        let iterator = self.stack[base].clone();
+        let state = self.stack[base + 1].clone();
+        let control = self.stack[base + 2].clone();
+
+        self.stack.push(iterator);
+        self.stack.push(state);
+        self.stack.push(control);
+
+        // Call with 2 args (state, control), expecting num_vars returns
+        self.call(2, num_vars)?;
+
+        // Move results from stack to loop variable slots (base + 3, base + 4, ...)
+        let results_start = self.stack.len() - num_vars as usize;
+        for i in 0..num_vars as usize {
+            self.stack[base + 3 + i] = self.stack[results_start + i].clone();
+        }
+        // Pop the results from stack
+        self.stack.truncate(results_start);
+
+        Ok(())
+    }
+
+    /// TForLoop: If first loop variable is nil, jump. Otherwise update control var.
+    fn instr_tfor_loop(&mut self, frame: &mut Frame, local_slot: u8, offset: isize) {
+        let base = local_slot as usize + self.stack_bottom;
+        let first_var = &self.stack[base + 3];
+
+        if matches!(first_var, Val::Nil) {
+            // Exit loop
+            frame.jump(offset);
+        } else {
+            // Update control variable with first loop variable
+            self.stack[base + 2] = self.stack[base + 3].clone();
+        }
+    }
+
     fn instr_get_field(&mut self, frame: &mut Frame, field_id: u8) -> Result<()> {
-        let mut tbl_val = self.pop_val();
-        if let Some(t) = tbl_val.as_table() {
-            let key = self.get_string_constant(frame, field_id);
-            let val = t.get(&key);
+        // Pop value, handle both tables and strings
+        let val = self.pop_val();
+        let key = self.get_string_constant(frame, field_id);
+
+        if val.as_table_ref().is_some() {
+            // Table: use get_table_with_key for metamethod support
             self.stack.push(val);
+            let table_idx = self.stack.len() - 1;
+            self.get_table_with_key(table_idx, key)?;
+            // Stack now: [... table, result]
+            let result = self.pop_val();
+            self.pop_val(); // Remove table
+            self.stack.push(result);
+            Ok(())
+        } else if val.as_string().is_some() {
+            // String: look up method in the 'string' global table
+            self.get_global("string");
+            let string_lib_idx = self.stack.len() - 1;
+            self.get_table_with_key(string_lib_idx, key)?;
+            // Stack now: [... string_lib, result]
+            let result = self.pop_val();
+            self.pop_val(); // Remove string_lib
+            self.stack.push(result);
             Ok(())
         } else {
-            Err(self.type_error(TypeError::TableIndex(tbl_val.typ())))
+            Err(self.type_error(TypeError::TableIndex(val.typ())))
         }
     }
 
@@ -228,15 +361,32 @@ impl State {
         self.stack.push(val);
     }
 
+    fn instr_get_upvalue(&mut self, frame: &Frame, upvalue_num: u8) {
+        let val = frame.upvalues[upvalue_num as usize].clone();
+        self.stack.push(val);
+    }
+
+    fn instr_set_upvalue(&mut self, frame: &mut Frame, upvalue_num: u8) {
+        let val = self.pop_val();
+        frame.upvalues[upvalue_num as usize] = val;
+    }
+
     fn instr_get_table(&mut self) -> Result<()> {
         let key = self.pop_val();
-        let mut tbl = self.pop_val();
-        if let Some(t) = tbl.as_table() {
-            self.stack.push(t.get(&key));
-            Ok(())
-        } else {
-            Err(self.type_error(TypeError::TableIndex(tbl.typ())))
+        // Table is now on top of the stack
+        let tbl_val = self.stack.last().unwrap();
+        if tbl_val.as_table_ref().is_none() {
+            let typ = tbl_val.typ();
+            self.pop_val();
+            return Err(self.type_error(TypeError::TableIndex(typ)));
         }
+        let table_idx = self.stack.len() - 1;
+        self.get_table_with_key(table_idx, key)?;
+        // Stack now: [... table, result]
+        let result = self.pop_val();
+        self.pop_val(); // Remove table
+        self.stack.push(result);
+        Ok(())
     }
 
     fn instr_init_field(&mut self, frame: &Frame, negative_offset: u8, key_id: u8) -> Result<()> {
@@ -282,6 +432,21 @@ impl State {
             }
             LuaType::Table => {
                 let tbl = val.as_table_ref().unwrap();
+                // Check for __len metamethod
+                if let Some(mt_ptr) = tbl.get_metatable() {
+                    let len_key = self.alloc_string("__len".to_string());
+                    if let Some(mt) = Val::Obj(mt_ptr).as_table() {
+                        let len_handler = mt.get(&len_key);
+                        if !matches!(len_handler, Val::Nil) {
+                            // Call __len(table)
+                            self.stack.push(len_handler);
+                            self.stack.push(val);
+                            self.call(1, 1)?;
+                            return Ok(());
+                        }
+                    }
+                }
+                // No __len, use default array_len
                 let len = tbl.array_len();
                 self.stack.push(Val::Num(len as f64));
                 Ok(())
@@ -304,14 +469,15 @@ impl State {
     fn instr_set_field(&mut self, frame: &Frame, stack_offset: u8, field_id: u8) -> Result<()> {
         let val = self.pop_val();
         let idx = self.stack.len() - stack_offset as usize - 1;
-        let mut tbl = self.stack.remove(idx);
-        if let Some(t) = tbl.as_table() {
-            let key = self.get_string_constant(frame, field_id);
-            t.insert(key, val)?;
-            Ok(())
-        } else {
-            Err(self.type_error(TypeError::TableIndex(tbl.typ())))
+        let tbl_val = &self.stack[idx];
+        if tbl_val.as_table_ref().is_none() {
+            let typ = tbl_val.typ();
+            return Err(self.type_error(TypeError::TableIndex(typ)));
         }
+        let key = self.get_string_constant(frame, field_id);
+        self.set_table_with_key(idx, key, val)?;
+        self.stack.remove(idx);
+        Ok(())
     }
 
     fn instr_set_global(&mut self, frame: &Frame, string_num: u8) {
@@ -326,8 +492,22 @@ impl State {
     }
 
     fn instr_set_list(&mut self, count: u8) -> Result<()> {
-        assert!(count > 0, "Shouldn't use SetList with count 0");
-        let values = self.stack.split_off(self.stack.len() - count as usize);
+        // Find the table on the stack (it's below the values)
+        // count=0 means "use all values above the table"
+        let values = if count == 0 {
+            // Find the table - it's the first table value scanning from the bottom of current frame
+            let mut table_idx = None;
+            for i in self.stack_bottom..self.stack.len() {
+                if self.stack[i].as_table_ref().is_some() {
+                    table_idx = Some(i);
+                    break;
+                }
+            }
+            let table_idx = table_idx.expect("SetList(0) but no table found on stack");
+            self.stack.split_off(table_idx + 1)
+        } else {
+            self.stack.split_off(self.stack.len() - count as usize)
+        };
         let mut tbl_value = self.pop_val();
         if let Some(tbl) = tbl_value.as_table() {
             let counter = 1..;
@@ -351,14 +531,15 @@ impl State {
     fn instr_set_table(&mut self, offset: u8) -> Result<()> {
         let val = self.pop_val();
         let index = self.stack.len() - offset as usize - 2;
-        let mut tbl = self.stack.remove(index);
-        let key = self.stack.remove(index);
-        if let Some(t) = tbl.as_table() {
-            t.insert(key, val)?;
-            Ok(())
-        } else {
-            Err(self.type_error(TypeError::TableIndex(tbl.typ())))
+        let key = self.stack.remove(index + 1); // Remove the key first (it's after the table)
+        let tbl_val = &self.stack[index];
+        if tbl_val.as_table_ref().is_none() {
+            let typ = tbl_val.typ();
+            return Err(self.type_error(TypeError::TableIndex(typ)));
         }
+        self.set_table_with_key(index, key, val)?;
+        self.stack.remove(index); // Remove the table
+        Ok(())
     }
 
     // Helper methods

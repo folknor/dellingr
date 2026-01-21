@@ -15,6 +15,14 @@ use std::ptr::{self, NonNull};
 use super::Chunk;
 use super::LuaType;
 use super::Table;
+use super::Val;
+
+/// A Lua closure: a function with captured upvalues.
+#[derive(Clone, Debug)]
+pub(super) struct Closure {
+    pub(super) chunk: Chunk,
+    pub(super) upvalues: Vec<Val>,
+}
 
 /// A wrapper around the `LuaVal`s which need to be garbage-collected.
 struct WrappedObject {
@@ -30,7 +38,7 @@ struct WrappedObject {
 enum RawObject {
     // Wrap this in a box to reduce the memory usage. Minimal performance impact
     // because functions are rarely accessed.
-    LuaFn(Box<Chunk>),
+    LuaFn(Box<Closure>),
     Table(Table),
 }
 
@@ -51,9 +59,9 @@ pub(super) struct ObjectPtr {
 }
 
 impl ObjectPtr {
-    pub(super) fn as_lua_function(self) -> Option<Chunk> {
+    pub(super) fn as_lua_function(self) -> Option<Closure> {
         match &self.deref().raw {
-            RawObject::LuaFn(chunk) => Some((**chunk).clone()),
+            RawObject::LuaFn(closure) => Some((**closure).clone()),
             _ => None,
         }
     }
@@ -177,8 +185,9 @@ impl GcHeap {
         self.size >= self.threshold
     }
 
-    pub(super) fn new_lua_fn(&mut self, chunk: Chunk, mark: impl FnOnce()) -> ObjectPtr {
-        let raw = RawObject::LuaFn(Box::new(chunk));
+    pub(super) fn new_lua_fn(&mut self, chunk: Chunk, upvalues: Vec<Val>, mark: impl FnOnce()) -> ObjectPtr {
+        let closure = Closure { chunk, upvalues };
+        let raw = RawObject::LuaFn(Box::new(closure));
         self.new_obj_from_raw(raw, mark)
     }
 
@@ -262,7 +271,7 @@ impl Markable for WrappedObject {
 impl Markable for RawObject {
     fn mark_reachable(&self) {
         match self {
-            RawObject::LuaFn(_) => (),
+            RawObject::LuaFn(closure) => closure.upvalues.mark_reachable(),
             RawObject::Table(tbl) => tbl.mark_reachable(),
         }
     }
