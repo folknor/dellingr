@@ -169,6 +169,10 @@ impl<'a> Parser<'a> {
         self.outer_chunks.push(self.chunk.clone());
         self.chunk = Chunk::default();
 
+        // Save and reset locals for the new chunk - each function has its own
+        // local variable slots starting at 0
+        let outer_locals = std::mem::take(&mut self.locals);
+
         self.chunk.num_params = params.len() as u8;
         for &param in params {
             self.locals.push((param.into(), self.nest_level));
@@ -179,6 +183,9 @@ impl<'a> Parser<'a> {
 
         let tmp_chunk = self.chunk.clone();
         self.chunk = self.outer_chunks.pop().unwrap();
+
+        // Restore outer locals
+        self.locals = outer_locals;
 
         if option_env!("LUA_DEBUG_PARSER").is_some() {
             println!("Compiled chunk: {:#?}", &tmp_chunk);

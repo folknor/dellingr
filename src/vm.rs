@@ -209,6 +209,26 @@ impl State {
         }
     }
 
+    /// Does the equivalent of `t[k] = v`, where `t` is the value at the given
+    /// valid index, `k` is the value at the top of the stack minus 1, and `v`
+    /// is the value at the top of the stack.
+    ///
+    /// This function pops both the key and the value from the stack.
+    pub fn set_table_raw(&mut self, i: isize) -> Result<()> {
+        let idx = self.convert_idx(i);
+        let key = self.pop_val();
+        let val = self.pop_val();
+        let table = &mut self.stack[idx];
+        let typ = table.typ();
+        match table.as_table() {
+            Some(t) => {
+                t.insert(key, val)?;
+                Ok(())
+            }
+            None => Err(self.type_error(TypeError::TableIndex(typ))),
+        }
+    }
+
     /// Returns the index of the top element in the stack. Because indices start
     /// at 1, this result is equal to the number of elements in the stack (and
     /// so 0 means an empty stack).

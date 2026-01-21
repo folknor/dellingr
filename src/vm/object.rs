@@ -65,6 +65,13 @@ impl ObjectPtr {
         }
     }
 
+    pub(super) fn as_table_ref(&self) -> Option<&Table> {
+        match &self.deref().raw {
+            RawObject::Table(t) => Some(t),
+            _ => None,
+        }
+    }
+
     pub(super) fn typ(self) -> LuaType {
         self.deref().raw.typ()
     }

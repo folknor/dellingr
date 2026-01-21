@@ -281,7 +281,10 @@ impl State {
                 Ok(())
             }
             LuaType::Table => {
-                panic!("Unsupported: Length of tables");
+                let tbl = val.as_table_ref().unwrap();
+                let len = tbl.array_len();
+                self.stack.push(Val::Num(len as f64));
+                Ok(())
             }
             typ => Err(self.type_error(TypeError::Length(typ))),
         }

@@ -1,0 +1,157 @@
+//! Lua's Math Library
+
+use crate::LuaType;
+use crate::State;
+use rand::Rng;
+use std::f64::consts::PI;
+
+pub(crate) fn open_math(state: &mut State) {
+    // Create the math table
+    state.new_table();
+
+    // Helper to add a function to the table at stack index -1
+    // Stack order: value first, then key (set_table_raw pops key, then value)
+    macro_rules! add_fn {
+        ($name:expr, $func:expr) => {
+            state.push_rust_fn($func);
+            state.push_string($name.to_string());
+            state.set_table_raw(-3).unwrap();
+        };
+    }
+
+    // math.sin(x)
+    add_fn!("sin", |state| {
+        state.check_type(1, LuaType::Number)?;
+        let x = state.to_number(1)?;
+        state.set_top(0);
+        state.push_number(x.sin());
+        Ok(1)
+    });
+
+    // math.cos(x)
+    add_fn!("cos", |state| {
+        state.check_type(1, LuaType::Number)?;
+        let x = state.to_number(1)?;
+        state.set_top(0);
+        state.push_number(x.cos());
+        Ok(1)
+    });
+
+    // math.atan2(y, x)
+    add_fn!("atan2", |state| {
+        state.check_type(1, LuaType::Number)?;
+        state.check_type(2, LuaType::Number)?;
+        let y = state.to_number(1)?;
+        let x = state.to_number(2)?;
+        state.set_top(0);
+        state.push_number(y.atan2(x));
+        Ok(1)
+    });
+
+    // math.sqrt(x)
+    add_fn!("sqrt", |state| {
+        state.check_type(1, LuaType::Number)?;
+        let x = state.to_number(1)?;
+        state.set_top(0);
+        state.push_number(x.sqrt());
+        Ok(1)
+    });
+
+    // math.abs(x)
+    add_fn!("abs", |state| {
+        state.check_type(1, LuaType::Number)?;
+        let x = state.to_number(1)?;
+        state.set_top(0);
+        state.push_number(x.abs());
+        Ok(1)
+    });
+
+    // math.min(a, b)
+    add_fn!("min", |state| {
+        state.check_type(1, LuaType::Number)?;
+        state.check_type(2, LuaType::Number)?;
+        let a = state.to_number(1)?;
+        let b = state.to_number(2)?;
+        state.set_top(0);
+        state.push_number(a.min(b));
+        Ok(1)
+    });
+
+    // math.max(a, b)
+    add_fn!("max", |state| {
+        state.check_type(1, LuaType::Number)?;
+        state.check_type(2, LuaType::Number)?;
+        let a = state.to_number(1)?;
+        let b = state.to_number(2)?;
+        state.set_top(0);
+        state.push_number(a.max(b));
+        Ok(1)
+    });
+
+    // math.floor(x)
+    add_fn!("floor", |state| {
+        state.check_type(1, LuaType::Number)?;
+        let x = state.to_number(1)?;
+        state.set_top(0);
+        state.push_number(x.floor());
+        Ok(1)
+    });
+
+    // math.ceil(x)
+    add_fn!("ceil", |state| {
+        state.check_type(1, LuaType::Number)?;
+        let x = state.to_number(1)?;
+        state.set_top(0);
+        state.push_number(x.ceil());
+        Ok(1)
+    });
+
+    // math.random() / math.random(n) / math.random(m, n)
+    add_fn!("random", |state| {
+        let num_args = state.get_top();
+        let mut rng = rand::thread_rng();
+
+        let result = match num_args {
+            0 => {
+                // math.random() - returns [0, 1)
+                rng.r#gen::<f64>()
+            }
+            1 => {
+                // math.random(n) - returns integer in [1, n]
+                state.check_type(1, LuaType::Number)?;
+                let n = state.to_number(1)? as i64;
+                if n < 1 {
+                    state.set_top(0);
+                    state.push_nil();
+                    return Ok(1);
+                }
+                rng.gen_range(1..=n) as f64
+            }
+            _ => {
+                // math.random(m, n) - returns integer in [m, n]
+                state.check_type(1, LuaType::Number)?;
+                state.check_type(2, LuaType::Number)?;
+                let m = state.to_number(1)? as i64;
+                let n = state.to_number(2)? as i64;
+                if m > n {
+                    state.set_top(0);
+                    state.push_nil();
+                    return Ok(1);
+                }
+                rng.gen_range(m..=n) as f64
+            }
+        };
+
+        state.set_top(0);
+        state.push_number(result);
+        Ok(1)
+    });
+
+    // math.pi (constant)
+    state.push_number(PI);
+    state.push_string("pi".to_string());
+    state.set_table_raw(-3).unwrap();
+
+    // Set the math table as a global
+    state.set_global("math");
+}

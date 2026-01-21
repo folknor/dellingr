@@ -63,6 +63,44 @@ pub(crate) fn open_base(state: &mut State) {
         Ok(1)
     });
 
+    // Converts a string to a number, returns nil if invalid.
+    add("tonumber", |state| {
+        state.check_any(1)?;
+        let typ = state.typ(1);
+        match typ {
+            LuaType::Number => {
+                let num = state.to_number(1).unwrap();
+                state.pop(state.get_top() as isize);
+                state.push_number(num);
+                Ok(1)
+            }
+            LuaType::String => {
+                let s = state.to_string(1);
+                state.pop(state.get_top() as isize);
+                if let Ok(num) = s.parse::<f64>() {
+                    state.push_number(num);
+                } else {
+                    state.push_nil();
+                }
+                Ok(1)
+            }
+            _ => {
+                state.pop(state.get_top() as isize);
+                state.push_nil();
+                Ok(1)
+            }
+        }
+    });
+
+    // Converts any value to its string representation.
+    add("tostring", |state| {
+        state.check_any(1)?;
+        let s = state.to_string(1);
+        state.pop(state.get_top() as isize);
+        state.push_string(s);
+        Ok(1)
+    });
+
     // unpack(list)
     //
     // Returns list[1], list[2], ... list[#list]. The Lua version can take

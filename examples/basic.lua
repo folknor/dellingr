@@ -16,3 +16,13 @@ if a > b then
 else
     print(b)
 end
+
+-- tonumber tests
+print(tonumber("42"))      -- 42
+print(tonumber("3.14"))    -- 3.14
+print(tonumber("hello"))   -- nil
+
+-- tostring tests
+print(tostring(123))       -- 123
+print(tostring(true))      -- true
+print(tostring(nil))       -- nil

@@ -54,6 +54,14 @@ impl Val {
         }
     }
 
+    pub(super) fn as_table_ref(&self) -> Option<&Table> {
+        if let Obj(o) = self {
+            o.as_table_ref()
+        } else {
+            None
+        }
+    }
+
     pub(super) fn truthy(&self) -> bool {
         !matches!(self, Nil | Bool(false))
     }
@@ -91,7 +99,8 @@ impl fmt::Display for Val {
             Bool(b) => b.fmt(f),
             Num(n) => n.fmt(f),
             Obj(o) => o.fmt(f),
-            _ => write!(f, "{:#?}", self),
+            Str(s) => s.fmt(f),
+            RustFn(func) => write!(f, "<function: {:p}>", func),
         }
     }
 }

@@ -20,6 +20,20 @@ impl Table {
         }
     }
 
+    /// Returns the "array length" of the table using standard Lua semantics.
+    /// Counts consecutive integer keys starting from 1, stopping at the first nil.
+    pub(super) fn array_len(&self) -> usize {
+        let mut len = 0;
+        loop {
+            let key = Val::Num((len + 1) as f64);
+            match self.map.get(&key) {
+                Some(val) if !matches!(val, Val::Nil) => len += 1,
+                _ => break,
+            }
+        }
+        len
+    }
+
     pub(super) fn insert(&mut self, key: Val, value: Val) -> Result<()> {
         match key {
             Val::Nil => Err(Error::new(TypeError::TableKeyNil, 0, 0)),
