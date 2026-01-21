@@ -267,4 +267,35 @@ pub(crate) fn open_base(state: &mut State) {
 
         Ok(count as u8)
     });
+
+    // _G - Global environment table (proxy with metamethods)
+    state.new_table(); // _G table
+    state.new_table(); // metatable
+
+    // __index: function(t, k) return globals[k] end
+    state.push_rust_fn(|state| {
+        state.check_any(2)?;
+        let key = state.to_string(2);
+        state.set_top(0);
+        state.get_global(&key);
+        Ok(1)
+    });
+    state.push_string("__index".to_string());
+    state.set_table_raw(-3).unwrap();
+
+    // __newindex: function(t, k, v) globals[k] = v end
+    state.push_rust_fn(|state| {
+        state.check_any(2)?;
+        state.check_any(3)?;
+        let key = state.to_string(2);
+        state.push_value(3);
+        state.set_global(&key);
+        state.set_top(0);
+        Ok(0)
+    });
+    state.push_string("__newindex".to_string());
+    state.set_table_raw(-3).unwrap();
+
+    state.set_metatable_of(1).unwrap();
+    state.set_global("_G");
 }

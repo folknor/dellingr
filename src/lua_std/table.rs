@@ -209,6 +209,49 @@ pub(crate) fn open_table(state: &mut State) {
         Ok(1)
     });
 
+    // table.move(a1, f, e, t [, a2])
+    // Moves elements from table a1 to table a2 (or a1 if not given).
+    // Copies a1[f..e] to a2[t..t+(e-f)]. Returns a2.
+    add_fn!("move", |state| {
+        state.check_type(1, LuaType::Table)?;
+        state.check_type(2, LuaType::Number)?;
+        state.check_type(3, LuaType::Number)?;
+        state.check_type(4, LuaType::Number)?;
+
+        let f = state.to_number(2)? as isize;
+        let e = state.to_number(3)? as isize;
+        let t = state.to_number(4)? as isize;
+
+        // Determine destination table (a2 or a1)
+        let has_a2 = state.get_top() >= 5 && state.typ(5) == LuaType::Table;
+        let dest_idx: isize = if has_a2 { 5 } else { 1 };
+
+        // Copy elements (if any)
+        if f <= e {
+            let count = e - f + 1;
+            for i in 0..count {
+                let src_key = (f + i) as f64;
+                let dest_key = (t + i) as f64;
+
+                // Get a1[f+i]
+                state.push_number(src_key);
+                state.get_table(1)?;
+                // Stack: [..., value]
+
+                // Set a2[t+i] = value
+                state.push_number(dest_key);
+                state.set_table_raw(dest_idx)?;
+            }
+        }
+
+        // Return destination table - push it first, then clear below it
+        state.push_value(dest_idx);
+        // Now move it to position 1 and clear rest
+        state.replace(1);
+        state.set_top(1);
+        Ok(1)
+    });
+
     // Set the table table as a global
     state.set_global("table");
 }

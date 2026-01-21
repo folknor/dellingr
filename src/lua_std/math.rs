@@ -147,9 +147,123 @@ pub(crate) fn open_math(state: &mut State) {
         Ok(1)
     });
 
+    // math.tan(x)
+    add_fn!("tan", |state| {
+        state.check_type(1, LuaType::Number)?;
+        let x = state.to_number(1)?;
+        state.set_top(0);
+        state.push_number(x.tan());
+        Ok(1)
+    });
+
+    // math.acos(x)
+    add_fn!("acos", |state| {
+        state.check_type(1, LuaType::Number)?;
+        let x = state.to_number(1)?;
+        state.set_top(0);
+        state.push_number(x.acos());
+        Ok(1)
+    });
+
+    // math.asin(x)
+    add_fn!("asin", |state| {
+        state.check_type(1, LuaType::Number)?;
+        let x = state.to_number(1)?;
+        state.set_top(0);
+        state.push_number(x.asin());
+        Ok(1)
+    });
+
+    // math.atan(y [, x]) - Lua 5.3+ style
+    // With one arg: returns atan(y)
+    // With two args: returns atan2(y, x)
+    add_fn!("atan", |state| {
+        state.check_type(1, LuaType::Number)?;
+        let y = state.to_number(1)?;
+        let result = if state.get_top() >= 2 {
+            state.check_type(2, LuaType::Number)?;
+            let x = state.to_number(2)?;
+            y.atan2(x)
+        } else {
+            y.atan()
+        };
+        state.set_top(0);
+        state.push_number(result);
+        Ok(1)
+    });
+
+    // math.deg(x) - radians to degrees
+    add_fn!("deg", |state| {
+        state.check_type(1, LuaType::Number)?;
+        let x = state.to_number(1)?;
+        state.set_top(0);
+        state.push_number(x.to_degrees());
+        Ok(1)
+    });
+
+    // math.rad(x) - degrees to radians
+    add_fn!("rad", |state| {
+        state.check_type(1, LuaType::Number)?;
+        let x = state.to_number(1)?;
+        state.set_top(0);
+        state.push_number(x.to_radians());
+        Ok(1)
+    });
+
+    // math.exp(x) - e^x
+    add_fn!("exp", |state| {
+        state.check_type(1, LuaType::Number)?;
+        let x = state.to_number(1)?;
+        state.set_top(0);
+        state.push_number(x.exp());
+        Ok(1)
+    });
+
+    // math.log(x [, base]) - natural log, or log with base
+    add_fn!("log", |state| {
+        state.check_type(1, LuaType::Number)?;
+        let x = state.to_number(1)?;
+        let result = if state.get_top() >= 2 {
+            state.check_type(2, LuaType::Number)?;
+            let base = state.to_number(2)?;
+            x.log(base)
+        } else {
+            x.ln()
+        };
+        state.set_top(0);
+        state.push_number(result);
+        Ok(1)
+    });
+
+    // math.fmod(x, y) - float modulo (same sign as x)
+    add_fn!("fmod", |state| {
+        state.check_type(1, LuaType::Number)?;
+        state.check_type(2, LuaType::Number)?;
+        let x = state.to_number(1)?;
+        let y = state.to_number(2)?;
+        state.set_top(0);
+        state.push_number(x % y);
+        Ok(1)
+    });
+
+    // math.modf(x) - returns integer and fractional parts
+    add_fn!("modf", |state| {
+        state.check_type(1, LuaType::Number)?;
+        let x = state.to_number(1)?;
+        state.set_top(0);
+        state.push_number(x.trunc());
+        state.push_number(x.fract());
+        Ok(2)
+    });
+
     // math.pi (constant)
     state.push_number(PI);
     state.push_string("pi".to_string());
+    state.set_table_raw(-3).unwrap();
+
+    // math.huge (infinity constant)
+    state.push_number(f64::INFINITY);
+    state.push_string("huge".to_string());
     state.set_table_raw(-3).unwrap();
 
     // Set the math table as a global

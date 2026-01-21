@@ -1,33 +1,9 @@
 # Script VM TODO
 
-## Priority 2: Useful Additions
-
-### Global Functions
-- [ ] `_G` - global environment table
-
-### Math Library
-- [ ] `math.tan(x)` - tangent
-- [ ] `math.acos(x)`, `math.asin(x)` - inverse trig
-- [ ] `math.atan(y [, x])` - Lua 5.3+ style (replaces atan2)
-- [ ] `math.deg(x)`, `math.rad(x)` - angle conversion
-- [ ] `math.exp(x)` - e^x
-- [ ] `math.log(x [, base])` - logarithm with optional base
-- [ ] `math.fmod(x, y)` - float modulo
-- [ ] `math.modf(x)` - returns integer and fractional parts
-- [ ] `math.huge` - infinity constant
-
-### String Library
-- [ ] `string.byte(s [, i [, j]])` - get byte values of characters
-- [ ] `string.char(...)` - create string from byte values
-
 ## Priority 3: Nice to Have
 
 ### Global Functions
-- [ ] `rawlen(v)` - length without metamethods (Lua 5.2+). This is kind of silly, we should just make #tbl return this size by default if we add metatables
 - [ ] `require(modname)` - module system, but we only allow to require files already loaded by us, we need to define this system properly with regards to mods and such
-
-### Table Library
-- [ ] `table.move(a1, f, e, t [, a2])` - move elements (Lua 5.3+)
 
 ## Known Limitations
 
@@ -105,3 +81,7 @@ print(a, b)  -- Works correctly
 - [x] `rawget`, `rawset` - table access bypassing metamethods
 - [x] `table.pack(...)` - returns `{..., n=count}` with explicit length field
 - [x] `{...}` syntax - collect varargs into table
+- [x] Table methods: `tbl:insert()`, `tbl:concat()` syntax via implicit table lookup
+- [x] `_G` - global environment table (proxy with metamethods)
+- [x] Math library: `tan`, `acos`, `asin`, `atan`, `deg`, `rad`, `exp`, `log`, `fmod`, `modf`, `huge`
+- [x] `table.move` - move/copy elements between tables

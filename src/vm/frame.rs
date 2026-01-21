@@ -329,11 +329,23 @@ impl State {
             // Table: use get_table_with_key for metamethod support
             self.stack.push(val);
             let table_idx = self.stack.len() - 1;
-            self.get_table_with_key(table_idx, key)?;
+            self.get_table_with_key(table_idx, key.clone())?;
             // Stack now: [... table, result]
             let result = self.pop_val();
             self.pop_val(); // Remove table
-            self.stack.push(result);
+
+            // If result is nil, fall back to the 'table' global library
+            // This enables tbl:insert(), tbl:concat() etc.
+            if matches!(result, Val::Nil) {
+                self.get_global("table");
+                let table_lib_idx = self.stack.len() - 1;
+                self.get_table_with_key(table_lib_idx, key)?;
+                let lib_result = self.pop_val();
+                self.pop_val(); // Remove table_lib
+                self.stack.push(lib_result);
+            } else {
+                self.stack.push(result);
+            }
             Ok(())
         } else if val.as_string().is_some() {
             // String: look up method in the 'string' global table
