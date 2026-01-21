@@ -354,18 +354,7 @@ pub(crate) fn open_string(state: &mut State) {
         Ok(1)
     });
 
-    // string.rep(s, n) - bonus
-    add_fn!("rep", |state| {
-        state.check_type(1, LuaType::String)?;
-        state.check_type(2, LuaType::Number)?;
-        let s = state.to_string(1);
-        let n = state.to_number(2)? as usize;
-        state.set_top(0);
-        state.push_string(s.repeat(n));
-        Ok(1)
-    });
-
-    // string.reverse(s) - bonus
+    // string.reverse(s)
     add_fn!("reverse", |state| {
         state.check_type(1, LuaType::String)?;
         let s = state.to_string(1);

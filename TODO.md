@@ -1,8 +1,54 @@
 # Script VM TODO
 
-## Priority 3: Nice to Have
+## Cost
 
-### Global Functions
+Players write fleets to run in fcomm2, and all fleets get a certain budget per tick to execute code. We don't penalize users for writing good code (clean architecture, many functions), only for actual computational work.
+
+### Budget overflow
+Example: each fleet gets 10 points per tick. Normal operations cost 1 point, decisive actions cost 7-10 points. The action that pushes you over budget always completes, then the tick ends.
+
+A savvy player can "squeeze" more value by front-loading calculations:
+- Spend 9 points on analysis (headings, trajectories, threat assessment)
+- Then commit one 10-point decisive action (spawn, fire, move)
+- Total: 19 points of work from a 10-point budget
+
+This rewards thoughtful code organization while ensuring every fleet can do at least one decisive action per tick (can't be starved out of acting).
+
+### Free (no cost)
+- Function calls and returns
+- Variable declaration and access (local/global)
+- Control flow (`if`, `while`, `for`, `repeat`, `break`)
+- Logical operators (`and`, `or`, `not`)
+- Comparisons (`<`, `>`, `==`, `~=`, `<=`, `>=`)
+- Iteration (`pairs`, `ipairs`, `next`, each step)
+- Length operator (`#t`, `#str`)
+- Table/metatable reads (`t[k]`, `t.field`, `rawget`, `getmetatable`)
+- `setmetatable` (but creating the metatable table itself costs)
+- `type()`, `select`, `unpack`
+- `print`
+- All string operations (`..`, `tostring`, `tonumber`, all `string.*` functions)
+
+### Costs (normal)
+- Arithmetic (`+`, `-`, `*`, `/`, `%`, `^`)
+- All `math.*` functions
+- Table writes (`t[k] = v`, `rawset`)
+- Table creation (`{}`)
+- `table.insert`, `table.remove`, `table.sort`, `table.concat`, `table.move`, `table.pack`
+- Game API queries (positions, health, distances, cooldowns, etc.)
+- `remote.send` (cost based on message length)
+
+### Decisive actions (high cost / rate-limited)
+These actions commit irreversible changes to the game world:
+- Spawning a ship
+- Firing/launching weapons
+- Self-destruct
+- Movement commands (move to, orbit, intercept)
+- Building/constructing
+
+### Tooling
+- [ ] Cost analyzer: CLI tool that takes a Lua file and prints each statement with its cost annotated, so players can optimize their scripts
+
+## Global Functions
 - [ ] `require(modname)` - module system, but we only allow to require files already loaded by us, we need to define this system properly with regards to mods and such
 
 ## Known Limitations
@@ -45,6 +91,7 @@ print(a, b)  -- Works correctly
 - assert
 - goto/labels
 - Bitwise operators
+- `string.rep`, `string.byte`, `string.char` (exploitable for free computation)
 
 ## Done
 
@@ -71,7 +118,7 @@ print(a, b)  -- Works correctly
 - [x] Method call syntax (`obj:method(args)`)
 - [x] Varargs (`...` in function parameters and body)
 - [x] Table library: `table.insert`, `table.remove`, `table.sort`, `table.unpack`
-- [x] String library: `string.sub`, `string.find`, `string.format`, `string.len`, `string.upper`, `string.lower`, `string.rep`, `string.reverse`
+- [x] String library: `string.sub`, `string.find`, `string.format`, `string.len`, `string.upper`, `string.lower`, `string.reverse`
 - [x] Metatables: `setmetatable`, `getmetatable`
 - [x] Metamethods: `__index`, `__newindex`, `__tostring`, `__call`, `__len`
 - [x] String methods: `str:upper()` syntax via implicit string metatable
