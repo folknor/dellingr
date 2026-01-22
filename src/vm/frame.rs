@@ -161,7 +161,8 @@ impl Frame {
                 Instr::OP_CLOSURE => state.instr_closure(self, inst.a()),
                 Instr::OP_CALL => state.call(ArgCount::from_u8(inst.a()), RetCount::from_u8(inst.b()))?,
                 Instr::OP_MARK_CALL_BASE => {
-                    state.vararg_call_bases.push(state.stack.len());
+                    let adjustment = inst.a() as usize;
+                    state.vararg_call_bases.push(state.stack.len() - adjustment);
                 }
                 Instr::OP_CLOSE_UPVALUES => {
                     // Close upvalues for locals at or above the given slot

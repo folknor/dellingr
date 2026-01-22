@@ -353,7 +353,7 @@ impl Instr {
     pub(crate) const fn not() -> Self { Self::op(Self::OP_NOT) }
     pub(crate) const fn length() -> Self { Self::op(Self::OP_LENGTH) }
     pub(crate) const fn negate() -> Self { Self::op(Self::OP_NEGATE) }
-    pub(crate) const fn mark_call_base() -> Self { Self::op(Self::OP_MARK_CALL_BASE) }
+    pub(crate) const fn mark_call_base(adjustment: u8) -> Self { Self::op_a(Self::OP_MARK_CALL_BASE, adjustment) }
     pub(crate) const fn push_nil() -> Self { Self::op(Self::OP_PUSH_NIL) }
 
     // One u8 operand

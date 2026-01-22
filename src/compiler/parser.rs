@@ -1283,8 +1283,14 @@ impl<'a> Parser<'a> {
             }
             TokenType::LParen => {
                 // Always mark call base - needed when last arg is vararg or function call
+                // Adjustment: if we've already pushed the table/receiver (FieldAccess or TableIndex),
+                // subtract 1 from the base since the function will replace what's already there
+                let adjustment = match &base_expr {
+                    PrefixExp::Place(PlaceExp::FieldAccess(_)) | PrefixExp::Place(PlaceExp::TableIndex) => 1,
+                    _ => 0,
+                };
                 let mark_idx = self.chunk.code.len();
-                self.push(Instr::mark_call_base());
+                self.push(Instr::mark_call_base(adjustment));
                 self.eval_prefix_exp(&base_expr);
                 self.input.next()?;
                 let (num_args, last_exp) = self.parse_call()?;
@@ -1319,8 +1325,13 @@ impl<'a> Parser<'a> {
             TokenType::Colon => {
                 // Method call: obj:method(args) becomes obj.method(obj, args)
                 // Always mark call base - needed when last arg is vararg or function call
+                // Same adjustment logic as function calls
+                let adjustment = match &base_expr {
+                    PrefixExp::Place(PlaceExp::FieldAccess(_)) | PrefixExp::Place(PlaceExp::TableIndex) => 1,
+                    _ => 0,
+                };
                 let mark_idx = self.chunk.code.len();
-                self.push(Instr::mark_call_base());
+                self.push(Instr::mark_call_base(adjustment));
                 self.eval_prefix_exp(&base_expr);
                 self.input.next()?; // consume ':'
                 let method_name = self.expect_identifier()?;
@@ -2220,7 +2231,7 @@ mod tests {
             Instr::push_nil(),
             Instr::set_local(1),
             Instr::set_local(0),
-            Instr::mark_call_base(),      // Mark stack position before function
+            Instr::mark_call_base(0),      // Mark stack position before function (no adjustment, not a field access)
             Instr::get_local(1),       // Get print
             Instr::get_local(0),       // Get type
             Instr::push_nil(),           // Push nil argument
