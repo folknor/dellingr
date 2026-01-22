@@ -80,14 +80,14 @@ c1.set(50)
 print("after c1.set(50): c1.get() = " .. tostring(c1.get()))  -- 50
 print("")
 
--- 5. Upvalue from loop variable
+-- 5. Upvalue from loop variable (each iteration captures its own value)
 print("5. Upvalues from loop variables")
 local funcs = {}
 for i = 1, 3 do
     local capture = i  -- capture loop variable in a local
     funcs[i] = function() return capture end
 end
-print("funcs[1]() = " .. tostring(funcs[1]()))  -- 1
+print("funcs[1]() = " .. tostring(funcs[1]()))  -- 1 (correct per-iteration capture)
 print("funcs[2]() = " .. tostring(funcs[2]()))  -- 2
 print("funcs[3]() = " .. tostring(funcs[3]()))  -- 3
 print("")

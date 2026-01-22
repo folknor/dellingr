@@ -195,6 +195,10 @@ pub(super) enum Instr {
     /// Return n values from the chunk.
     Return(u8),
 
+    /// Close all upvalues at or above the given local slot.
+    /// Used at the end of loop iterations to capture per-iteration locals.
+    CloseUpvalues(u8),
+
     /// Create a closure from a Chunk and push it onto the stack.
     Closure(u8),
 

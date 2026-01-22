@@ -701,6 +701,9 @@ impl<'a> Parser<'a> {
         // The actual local is in a fourth slot, so that it can be reassigned to.
         self.add_local(name)?;
 
+        // Track locals count after loop variable (before body locals)
+        let body_locals_start = self.locals.len() as u8;
+
         // First, all 3 control expressions are evaluated.
         self.parse_expr()?;
         self.expect(TokenType::Comma)?;
@@ -718,6 +721,13 @@ impl<'a> Parser<'a> {
         self.enter_loop();
         self.parse_statements()?;
         self.expect(TokenType::End)?;
+
+        // Close upvalues for any locals declared inside the loop body.
+        // This ensures each iteration captures its own values.
+        if self.locals.len() as u8 > body_locals_start {
+            self.push(Instr::CloseUpvalues(body_locals_start));
+        }
+
         let body_length = (self.chunk.code.len() - loop_start_instr_index) as isize;
         self.push(Instr::ForLoop(current_local_slot, -(body_length)));
 
@@ -766,6 +776,9 @@ impl<'a> Parser<'a> {
         for name in &names {
             self.add_local(name)?;
         }
+
+        // Track locals count after loop variables (before body locals)
+        let body_locals_start = self.locals.len() as u8;
 
         // Evaluate the expression list (should produce iterator, state, initial)
         // We expect exactly 3 values
@@ -816,6 +829,12 @@ impl<'a> Parser<'a> {
         self.parse_statements()?;
         self.expect(TokenType::End)?;
 
+        // Close upvalues for any locals declared inside the loop body.
+        // This ensures each iteration captures its own values.
+        if self.locals.len() as u8 > body_locals_start {
+            self.push(Instr::CloseUpvalues(body_locals_start));
+        }
+
         // Jump back to TForCall
         let body_end = self.chunk.code.len();
         self.push(Instr::Jump(-((body_end + 1 - loop_start) as isize)));
@@ -842,11 +861,22 @@ impl<'a> Parser<'a> {
     fn parse_repeat(&mut self) -> Result<()> {
         self.input.next()?; // `repeat` keyword
         self.nest_level += 1;
+
+        // Track locals before body
+        let body_locals_start = self.locals.len() as u8;
+
         let body_start = self.chunk.code.len() as isize;
         self.enter_loop();
         self.parse_statements()?;
         self.expect(TokenType::Until)?;
         self.parse_expr()?;
+
+        // Close upvalues for any locals declared inside the loop body
+        // (before the conditional jump back)
+        if self.locals.len() as u8 > body_locals_start {
+            self.push(Instr::CloseUpvalues(body_locals_start));
+        }
+
         let expr_end = self.chunk.code.len() as isize;
         self.push(Instr::BranchFalse(body_start - (expr_end + 1)));
         self.exit_loop();
@@ -860,6 +890,7 @@ impl<'a> Parser<'a> {
         // - Condition instructions
         // - `BranchFalse` to evaluate condition and skip body
         // - Body instructions
+        // - CloseUpvalues for body-local variables
         // - `Jump` back to condition start
         self.input.next()?;
         self.nest_level += 1;
@@ -870,9 +901,17 @@ impl<'a> Parser<'a> {
         let test_position = self.chunk.code.len();
         self.push(Instr::BranchFalse(0));
 
+        // Track locals before body
+        let body_locals_start = self.locals.len() as u8;
+
         self.enter_loop();
         self.parse_statements()?;
         self.expect(TokenType::End)?;
+
+        // Close upvalues for any locals declared inside the loop body
+        if self.locals.len() as u8 > body_locals_start {
+            self.push(Instr::CloseUpvalues(body_locals_start));
+        }
 
         let body_end = self.chunk.code.len();
         self.push(Instr::Jump(-((body_end + 1 - condition_start) as isize)));
@@ -1752,6 +1791,7 @@ mod tests {
 
     #[test]
     fn test15() {
+        // repeat local x = 5 until a == b - body locals get CloseUpvalues before jump
         let text = "repeat local x = 5 until a == b y = 4";
         let code = vec![
             PushNum(0),
@@ -1759,7 +1799,8 @@ mod tests {
             GetGlobal(0),
             GetGlobal(1),
             Instr::Equal,
-            BranchFalse(-6),
+            CloseUpvalues(0), // close body-local x before potential jump back
+            BranchFalse(-7),
             PushNum(1),
             SetGlobal(2),
             Return(0),
@@ -2144,13 +2185,15 @@ mod tests {
 
     #[test]
     fn test34() {
+        // while false do local b end - body locals get CloseUpvalues before jump
         let text = "while false do local b end b()";
         let code = vec![
             PushBool(false),
-            BranchFalse(3),
+            BranchFalse(4),
             PushNil,
             SetLocal(0),
-            Jump(-5),
+            CloseUpvalues(0), // close body-local b before jump back
+            Jump(-6),
             GetGlobal(0),
             Call(0, 0),
             Return(0),

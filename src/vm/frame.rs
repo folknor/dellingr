@@ -158,6 +158,12 @@ impl Frame {
                 Instr::MarkCallBase => {
                     state.vararg_call_bases.push(state.stack.len());
                 }
+                Instr::CloseUpvalues(level) => {
+                    // Close upvalues for locals at or above the given slot
+                    // Used at end of loop iterations to capture per-iteration locals
+                    let stack_level = state.stack_bottom + level as usize;
+                    state.close_upvalues(stack_level);
+                }
                 Instr::Return(n) => {
                     // Flush any remaining accumulated cost before returning
                     if local_cost > 0 {
