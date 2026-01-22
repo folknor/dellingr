@@ -321,7 +321,7 @@ impl State {
     #[cfg(test)]
     pub(super) fn eval_chunk(&mut self, chunk: Chunk, num_args: u8) -> Result<u8> {
         let closure = Closure {
-            chunk,
+            chunk: std::rc::Rc::new(chunk),
             upvalues: Vec::new(),
         };
         self.eval_closure(closure, num_args)

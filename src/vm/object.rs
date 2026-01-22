@@ -31,9 +31,11 @@ pub(super) enum Upvalue {
 }
 
 /// A Lua closure: a function with captured upvalues.
+/// Uses Rc<Chunk> to share chunk data between closure instances,
+/// avoiding expensive clones of the entire chunk on every closure copy.
 #[derive(Clone, Debug)]
 pub(super) struct Closure {
-    pub(super) chunk: Chunk,
+    pub(super) chunk: Rc<Chunk>,
     pub(super) upvalues: Vec<UpvalueRef>,
 }
 
@@ -199,7 +201,7 @@ impl GcHeap {
     }
 
     pub(super) fn new_lua_fn(&mut self, chunk: Chunk, upvalues: Vec<UpvalueRef>, mark: impl FnOnce()) -> ObjectPtr {
-        let closure = Closure { chunk, upvalues };
+        let closure = Closure { chunk: Rc::new(chunk), upvalues };
         let raw = RawObject::LuaFn(Box::new(closure));
         self.new_obj_from_raw(raw, mark)
     }

@@ -105,10 +105,10 @@ impl State {
     pub fn empty() -> Self {
         Self {
             globals: HashMap::new(),
-            stack: Vec::new(),
+            stack: Vec::with_capacity(256), // Pre-size for typical function depth * locals
             stack_bottom: 0,
             heap: GcHeap::with_threshold(Self::GC_INITIAL_THRESHOLD),
-            string_literals: Vec::new(),
+            string_literals: Vec::with_capacity(64), // Pre-size for string literals
             open_upvalues: Vec::new(),
             vararg_call_base: None,
             cost_remaining: i64::MAX,
@@ -142,6 +142,7 @@ impl State {
     /// Consume cost from the budget. Returns an error if budget is exhausted
     /// and cost > 0. The action that pushes you over budget completes before
     /// stopping (checked at the START of each operation).
+    #[inline(always)]
     pub(crate) fn consume_cost(&mut self, cost: u64) -> Result<()> {
         if cost > 0 && self.cost_remaining <= 0 {
             return Err(self.error(ErrorKind::BudgetExceeded {

@@ -58,6 +58,7 @@ impl State {
     }
 
     /// Pop a value from the stack (internal helper).
+    #[inline(always)]
     pub(super) fn pop_val(&mut self) -> Val {
         self.stack.pop().unwrap()
     }

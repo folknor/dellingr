@@ -1,4 +1,5 @@
 use std::ops;
+use std::rc::Rc;
 
 use super::super::compiler::UpvalueDesc;
 use super::super::error::{Error, ErrorKind, TypeError};
@@ -12,8 +13,8 @@ use super::Val;
 
 /// A `Frame` represents a single stack-frame of a Lua function.
 pub(super) struct Frame {
-    /// The chunk being executed
-    chunk: Chunk,
+    /// The chunk being executed (shared via Rc to avoid cloning)
+    chunk: Rc<Chunk>,
     /// The index of the next (not current) instruction
     ip: usize,
     /// Offset into `State.string_literals` where this chunk's literals are
@@ -31,7 +32,7 @@ impl Frame {
     /// Create a new Frame.
     #[must_use]
     pub(super) fn new(
-        chunk: Chunk,
+        chunk: Rc<Chunk>,
         upvalues: Vec<UpvalueRef>,
         varargs: Vec<Val>,
         string_literal_start: usize,
@@ -492,6 +493,7 @@ impl State {
         self.get_global(s);
     }
 
+    #[inline(always)]
     fn instr_get_local(&mut self, local_num: u8) {
         let i = local_num as usize + self.stack_bottom;
         let val = self.stack[i].clone();
@@ -672,6 +674,7 @@ impl State {
         }
     }
 
+    #[inline(always)]
     fn instr_set_local(&mut self, local_num: u8) {
         let val = self.pop_val();
         let i = local_num as usize + self.stack_bottom;
@@ -694,6 +697,7 @@ impl State {
 
     // Helper methods
 
+    #[inline(always)]
     fn eval_float_bool(&mut self, f: impl Fn(&f64, &f64) -> bool) -> Result<()> {
         let n2 = self.pop_num()?;
         let n1 = self.pop_num()?;
@@ -701,6 +705,7 @@ impl State {
         Ok(())
     }
 
+    #[inline(always)]
     fn eval_float_float(&mut self, f: impl Fn(f64, f64) -> f64) -> Result<()> {
         let n2 = self.pop_num()?;
         let n1 = self.pop_num()?;

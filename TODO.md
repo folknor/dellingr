@@ -154,24 +154,21 @@ Findings from expert code review (January 2026). Organized by priority.
 
 ### MEDIUM PRIORITY - Performance Optimizations
 
-- [ ] **Add `#[inline(always)]` to hot paths**
-  - `State::instr_get_local()`, `State::instr_set_local()`, `State::pop_val()`
-  - `State::eval_float_float()`, `State::eval_float_bool()`
-  - `State::consume_cost()` (at minimum the fast path)
+- [x] **Add `#[inline(always)]` to hot paths**
+  - Added to: `consume_cost`, `instr_get_local`, `instr_set_local`, `pop_val`,
+    `eval_float_float`, `eval_float_bool`
 
-- [ ] **Avoid cloning `Chunk` in closures** (`object.rs` `ObjectPtr::as_lua_function()`, `frame.rs` `get_nested_chunk()`)
-  - Every closure creation clones entire chunk including string literals
-  - **Fix:** Use `Rc<Chunk>` to share chunk data between instances
+- [x] **Avoid cloning `Chunk` in closures**
+  - Changed `Closure.chunk` and `Frame.chunk` to `Rc<Chunk>`
+  - Closure copies now just clone the Rc, not the entire chunk
 
 - [ ] **Replace `Rc<RefCell<Upvalue>>` with arena** (`vm.rs` `State::find_or_create_upvalue()`)
   - Three allocations per upvalue + atomic refcounting on every clone
   - Lifetime is well-defined: closed when owning frame returns
   - **Fix:** Arena-allocated pool with indices instead of Rc pointers
 
-- [ ] **Pre-size stack vector** (`vm.rs` `State::empty()`)
-  ```rust
-  stack: Vec::with_capacity(256),  // Typical function depth * locals
-  ```
+- [x] **Pre-size stack vector** (`vm.rs` `State::empty()`)
+  - Stack pre-sized to 256, string_literals pre-sized to 64
 
 - [ ] **Small-table optimization** (`table.rs` `Table` struct)
   - HashMap overhead is high for 1-4 entry tables
