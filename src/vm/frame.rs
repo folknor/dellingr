@@ -558,10 +558,10 @@ impl State {
             tbl.insert(key, val)?;
             Ok(())
         } else {
-            panic!(
-                "Table for constructor was a {}, not a table",
+            Err(self.error(ErrorKind::InternalError(format!(
+                "InitField: expected table, got {}",
                 tbl_value.typ()
-            );
+            ))))
         }
     }
 
@@ -569,15 +569,17 @@ impl State {
         let val = self.pop_val();
         let key = self.pop_val();
         let positive_offset = self.stack.len() - negative_offset as usize - 1;
+        let tbl_typ = self.stack[positive_offset].typ();
         let tbl = &mut self.stack[positive_offset];
         match tbl.as_table() {
             Some(tbl) => {
                 tbl.insert(key, val)?;
                 Ok(())
             }
-            None => {
-                panic!("Table for constructor was a {}, not a table", tbl.typ());
-            }
+            None => Err(self.error(ErrorKind::InternalError(format!(
+                "InitIndex: expected table, got {}",
+                tbl_typ
+            )))),
         }
     }
 
@@ -666,7 +668,14 @@ impl State {
                     break;
                 }
             }
-            let table_idx = table_idx.expect("SetList(0) but no table found on stack");
+            let table_idx = match table_idx {
+                Some(idx) => idx,
+                None => {
+                    return Err(self.error(ErrorKind::InternalError(
+                        "SetList(0): no table found on stack".to_string(),
+                    )));
+                }
+            };
             self.stack.split_off(table_idx + 1)
         } else {
             self.stack.split_off(self.stack.len() - count as usize)
@@ -681,7 +690,10 @@ impl State {
             self.stack.push(tbl_value);
             Ok(())
         } else {
-            panic!("Used Instr::SetList on a {}", tbl_value.typ())
+            Err(self.error(ErrorKind::InternalError(format!(
+                "SetList: expected table, got {}",
+                tbl_value.typ()
+            ))))
         }
     }
 
