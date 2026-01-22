@@ -86,4 +86,35 @@ local x4 = get()  -- should see count == 2
 result6 = x1 == 1 and x2 == 1 and x3 == 2 and x4 == 2
 print("Test 6 - Shared upvalue between closures: " .. tostring(result6))
 
+-- Test 7: do...end block upvalue capture
+local f7
+do
+    local secret = 42
+    f7 = function() return secret end
+end
+-- secret is out of scope, but f7 should still access it
+result7 = f7() == 42
+print("Test 7 - do...end block capture: " .. tostring(result7))
+
+-- Test 8: While loop variable capture
+local whileFuncs = {}
+local i = 1
+while i <= 3 do
+    local capture = i
+    whileFuncs[i] = function() return capture end
+    i = i + 1
+end
+result8 = whileFuncs[1]() == 1 and whileFuncs[2]() == 2 and whileFuncs[3]() == 3
+print("Test 8 - While loop capture: " .. tostring(result8))
+
+-- Test 9: Generic for loop variable capture
+local forFuncs = {}
+local items = {"a", "b", "c"}
+for k, v in ipairs(items) do
+    local capture = v
+    forFuncs[k] = function() return capture end
+end
+result9 = forFuncs[1]() == "a" and forFuncs[2]() == "b" and forFuncs[3]() == "c"
+print("Test 9 - Generic for loop capture: " .. tostring(result9))
+
 print("All closure tests complete!")

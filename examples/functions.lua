@@ -53,8 +53,21 @@ local swap = function(a, b) return b, a end
 local s1, s2 = swap(10, 20)
 print("Test 10 - Swap: " .. tostring(s1 == 20 and s2 == 10))
 
-print("All function tests complete!")
+-- Test 11: Multiple returns as function arguments (last position)
+local add = function(a, b) return a + b end
+local getValues = function() return 3, 4 end
+local r11 = add(getValues())
+print("Test 11 - Multi-return as args: " .. tostring(r11 == 7))
 
--- NOTE: Using multiple returns directly as function arguments is not supported.
--- For example: add(getValues()) won't work as expected.
--- Workaround: capture returns first: local a, b = getValues(); add(a, b)
+-- Test 12: Multiple returns in middle position (only first used)
+local threeArgs = function(a, b, c) return a + b + c end
+local twoVals = function() return 10, 20 end
+local r12 = threeArgs(twoVals(), 5, 100)  -- twoVals() in middle, only first value (10) used
+print("Test 12 - Multi-return in middle: " .. tostring(r12 == 115))  -- 10 + 5 + 100 = 115
+
+-- Test 13: Nested multi-return as arguments
+local identity = function(x, y) return x, y end
+local r13 = add(identity(5, 10))  -- identity returns 5, 10; add gets both
+print("Test 13 - Nested multi-return args: " .. tostring(r13 == 15))
+
+print("All function tests complete!")
