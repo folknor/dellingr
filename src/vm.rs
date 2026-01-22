@@ -86,6 +86,9 @@ pub struct State {
     /// Current source name (for callback context).
     /// Updated when loading a new chunk.
     pub(super) current_source: Option<String>,
+    /// User-defined data that RustFuncs can access.
+    /// Use `set_user_data<T>()` and `user_data<T>()` to store/retrieve.
+    user_data: Option<Box<dyn std::any::Any>>,
 }
 
 /// Maximum call depth to prevent stack overflow from deep recursion.
@@ -168,6 +171,7 @@ impl State {
             call_stack: Vec::with_capacity(64), // Pre-size for call stack
             callbacks,
             current_source: None,
+            user_data: None,
         }
     }
 
@@ -194,8 +198,10 @@ impl State {
     /// Consume cost from the budget. Returns an error if budget is exhausted
     /// and cost > 0. The action that pushes you over budget completes before
     /// stopping (checked at the START of each operation).
+    ///
+    /// Use this in RustFuncs to charge for expensive operations.
     #[inline(always)]
-    pub(crate) fn consume_cost(&mut self, cost: u64) -> Result<()> {
+    pub fn consume_cost(&mut self, cost: u64) -> Result<()> {
         if cost > 0 && self.cost_remaining <= 0 {
             return Err(self.error(ErrorKind::BudgetExceeded {
                 used: self.cost_used,
@@ -205,6 +211,62 @@ impl State {
         self.cost_remaining -= cost as i64;
         self.cost_used += cost;
         Ok(())
+    }
+
+    // ========================================================================
+    // User data
+    // ========================================================================
+
+    /// Store arbitrary user data that RustFuncs can access.
+    ///
+    /// Useful for passing context to Rust callbacks, like a command collector.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let collector = Rc::new(RefCell::new(CommandCollector::default()));
+    /// state.set_user_data(collector.clone());
+    ///
+    /// state.push_rust_fn(|state| {
+    ///     let collector = state.user_data::<Rc<RefCell<CommandCollector>>>().unwrap();
+    ///     collector.borrow_mut().turn = Some(0.5);
+    ///     Ok(0)
+    /// });
+    /// ```
+    pub fn set_user_data<T: 'static>(&mut self, data: T) {
+        self.user_data = Some(Box::new(data));
+    }
+
+    /// Get a reference to the stored user data.
+    /// Returns None if no data is stored or if the type doesn't match.
+    pub fn user_data<T: 'static>(&self) -> Option<&T> {
+        self.user_data.as_ref()?.downcast_ref()
+    }
+
+    /// Get a mutable reference to the stored user data.
+    /// Returns None if no data is stored or if the type doesn't match.
+    pub fn user_data_mut<T: 'static>(&mut self) -> Option<&mut T> {
+        self.user_data.as_mut()?.downcast_mut()
+    }
+
+    /// Clear the stored user data.
+    pub fn clear_user_data(&mut self) {
+        self.user_data = None;
+    }
+
+    // ========================================================================
+    // Callbacks
+    // ========================================================================
+
+    /// Get a mutable reference to the host callbacks.
+    ///
+    /// Use this to retrieve collected print output or other callback state.
+    pub fn callbacks_mut(&mut self) -> &mut dyn HostCallbacks {
+        self.callbacks.as_mut()
+    }
+
+    /// Replace the host callbacks with new ones, returning the old callbacks.
+    pub fn replace_callbacks(&mut self, callbacks: Box<dyn HostCallbacks>) -> Box<dyn HostCallbacks> {
+        std::mem::replace(&mut self.callbacks, callbacks)
     }
 
     // ========================================================================

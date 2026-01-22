@@ -52,6 +52,22 @@ These actions commit irreversible changes to the game world:
 - [ ] `SetList(0)` charges 1 regardless of actual element count - should charge after computing count
 - [ ] `table.sort` uses O(n²) bubble sort but only charges once
 
+## Game Engine Integration
+
+Features implemented for fcomm2 integration:
+
+- [x] **User data / context in RustFunc**
+  - `State::set_user_data<T>()` / `user_data<T>()` / `user_data_mut<T>()` / `clear_user_data()`
+  - Game commands access `Rc<RefCell<CommandCollector>>` via user_data
+
+- [x] **Access host callbacks from State**
+  - `State::callbacks_mut() -> &mut dyn HostCallbacks`
+  - `State::replace_callbacks()` to swap callbacks
+
+- [x] **Cost consumption from RustFunc**
+  - `state.consume_cost(amount)` is now public
+  - Game API queries (`distance_to`, `angle_to`) charge appropriate costs
+
 ## Global Functions
 - [ ] `require(modname)` - module system, but we only allow to require files already loaded by us, we need to define this system properly with regards to mods and such
 
@@ -102,6 +118,24 @@ Findings from expert code review (January 2026). Organized by priority.
   - **Blocked on:** Real fleet scripts running in fcomm2 to measure typical allocation patterns
 
 ### MEDIUM PRIORITY - Correctness Issues
+
+- [ ] **String concatenation doesn't auto-convert numbers** (`..` operator)
+  - Lua allows `"foo" .. 123` which produces `"foo123"`
+  - Our VM requires explicit `tostring()` for non-string values
+  - Should auto-convert numbers (and possibly booleans) like standard Lua
+
+- [ ] **Upvalue/closure bug causes segfault** (`frame.rs` upvalue handling)
+  - Local functions called from global functions crash with SIGSEGV (exit code 139)
+  - Reproduction: define `local function foo() ... end` then call `foo()` from a global function
+  - Global functions work fine, only local functions trigger the crash
+  - Workaround: use global functions instead of local
+  - Likely related to how upvalues are captured/closed when the main chunk finishes
+  - The upvalue may be pointing to a stack slot that no longer exists
+
+- [ ] **Error line numbers sometimes point to wrong lines**
+  - Observed "attempt to call a table value" errors pointing to comparison lines like `if x == 0 then`
+  - These lines don't call anything, so the error message doesn't match the reported location
+  - May be an off-by-one in line tracking, or error is thrown after advancing past the actual problematic line
 
 - [x] **Integer overflow in jump** (`frame.rs` `Frame::jump()`)
   - `wrapping_add` with negative offset cast to usize wraps incorrectly
