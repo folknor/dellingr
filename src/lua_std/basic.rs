@@ -1,5 +1,6 @@
 //! Lua's Standard Library
 
+use crate::error::{ArgError, ErrorKind};
 use crate::LuaType;
 use crate::State;
 
@@ -218,6 +219,43 @@ pub(crate) fn open_base(state: &mut State) {
         state.set_table_raw(1)?;
         // Stack: [table, key, value]
         state.set_top(1);
+        Ok(1)
+    });
+
+    // rawequal(v1, v2)
+    // Returns true if v1 and v2 are primitively equal (without __eq metamethod).
+    add("rawequal", |state| {
+        state.check_any(1)?;
+        state.check_any(2)?;
+        let equal = state.raw_equal(1, 2);
+        state.set_top(0);
+        state.push_boolean(equal);
+        Ok(1)
+    });
+
+    // rawlen(v)
+    // Returns the length of a table or string without invoking __len metamethod.
+    add("rawlen", |state| {
+        state.check_any(1)?;
+        let typ = state.typ(1);
+        let len = match typ {
+            LuaType::String => {
+                let s = state.to_string(1)?;
+                s.len()
+            }
+            LuaType::Table => state.table_len(1),
+            _ => {
+                let e = ArgError {
+                    arg_number: 1,
+                    func_name: Some("rawlen".to_string()),
+                    expected: Some(LuaType::Table),
+                    received: Some(typ),
+                };
+                return Err(state.error(ErrorKind::ArgError(e)));
+            }
+        };
+        state.set_top(0);
+        state.push_number(len as f64);
         Ok(1)
     });
 

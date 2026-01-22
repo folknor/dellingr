@@ -163,6 +163,15 @@ impl State {
         }
     }
 
+    /// Returns true if the values at the two indices are primitively equal.
+    /// Does not invoke __eq metamethod.
+    pub fn raw_equal(&self, idx1: isize, idx2: isize) -> bool {
+        match (self.at_index(idx1), self.at_index(idx2)) {
+            (Ok(v1), Ok(v2)) => v1 == v2,
+            _ => false,
+        }
+    }
+
     /// Get the value at the given index. Returns error if out of bounds.
     pub(super) fn at_index(&self, idx: isize) -> Result<Val> {
         let i = self.convert_idx(idx)?;

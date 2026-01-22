@@ -147,4 +147,22 @@ print("'hello' <= 'hello' = " .. tostring("hello" <= "hello"))  -- true
 print("'' < 'a' = " .. tostring("" < "a"))  -- true (empty is smallest)
 print("")
 
+-- 18. rawequal (no __eq metamethod)
+print("18. rawequal")
+local t1 = {}
+local t2 = {}
+print("rawequal(t1, t1) = " .. tostring(rawequal(t1, t1)))  -- true
+print("rawequal(t1, t2) = " .. tostring(rawequal(t1, t2)))  -- false
+print("rawequal(1, '1') = " .. tostring(rawequal(1, "1")))  -- false (different types)
+print("")
+
+-- 19. rawlen (no __len metamethod)
+print("19. rawlen")
+local mt = { __len = function() return 999 end }
+local arr = setmetatable({1, 2, 3}, mt)
+print("#arr (with __len) = " .. tostring(#arr))     -- 999
+print("rawlen(arr) = " .. tostring(rawlen(arr)))    -- 3
+print("rawlen('hello') = " .. tostring(rawlen("hello")))  -- 5
+print("")
+
 print("=== All edge case tests passed! ===")

@@ -308,3 +308,5 @@ add_fn!("broken", |state| {
 - [x] Fix `ipairs` to continue on `false` values (only stop on `nil`)
 - [x] Fix `%` modulo operator to use Lua's floored semantics (not C's truncated remainder)
 - [x] String comparison operators (`<`, `>`, `<=`, `>=`) for lexicographic ordering
+- [x] `rawequal(v1, v2)` - primitive equality without __eq metamethod
+- [x] `rawlen(v)` - length without __len metamethod
