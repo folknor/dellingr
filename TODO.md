@@ -48,7 +48,7 @@ These actions commit irreversible changes to the game world:
 ### Tooling
 - [ ] Cost analyzer: CLI tool that takes a Lua file and prints each statement with its cost annotated, so players can optimize their scripts
 
-### Cost System Gaps
+### Cost System Gaps (needs discussion before implementation)
 - [ ] `SetList(0)` charges 1 regardless of actual element count - should charge after computing count
 - [ ] `table.sort` uses O(n²) bubble sort but only charges once
 
