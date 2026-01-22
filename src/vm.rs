@@ -21,6 +21,7 @@ use super::error::Error;
 use super::error::ErrorKind;
 use super::error::StackFrame;
 use super::error::TypeError;
+use super::host::{DefaultCallbacks, HostCallbacks};
 use super::instr::Builtin;
 use super::Chunk;
 use super::Instr;
@@ -80,6 +81,11 @@ pub struct State {
     /// Call stack for generating stack traces on errors.
     /// Each entry represents an active Lua function call.
     pub(super) call_stack: Vec<CallInfo>,
+    /// Host callbacks for print output, error handling, etc.
+    pub(super) callbacks: Box<dyn HostCallbacks>,
+    /// Current source name (for callback context).
+    /// Updated when loading a new chunk.
+    pub(super) current_source: Option<String>,
 }
 
 /// Maximum call depth to prevent stack overflow from deep recursion.
@@ -110,9 +116,27 @@ impl Markable for State {
 impl State {
     const GC_INITIAL_THRESHOLD: usize = 20;
 
-    /// Creates a new, independent state.
+    /// Creates a new, independent state with default callbacks (stdout).
     pub fn new() -> Self {
-        let mut me = Self::empty();
+        Self::with_callbacks(Box::new(DefaultCallbacks))
+    }
+
+    /// Creates a new state with custom host callbacks.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// struct MyCallbacks { output: Vec<String> }
+    /// impl HostCallbacks for MyCallbacks {
+    ///     fn on_print(&mut self, _source: Option<&str>, _line: u32, message: &str) {
+    ///         self.output.push(message.to_string());
+    ///     }
+    /// }
+    ///
+    /// let mut state = State::with_callbacks(Box::new(MyCallbacks { output: vec![] }));
+    /// ```
+    pub fn with_callbacks(callbacks: Box<dyn HostCallbacks>) -> Self {
+        let mut me = Self::empty_with_callbacks(callbacks);
         me.open_libs();
         me
     }
@@ -121,6 +145,11 @@ impl State {
     /// The global namespace of this state is entirely empty. This corresponds
     /// to the `lua_newstate' function in the C API.
     pub fn empty() -> Self {
+        Self::empty_with_callbacks(Box::new(DefaultCallbacks))
+    }
+
+    /// Creates an empty state with custom callbacks.
+    fn empty_with_callbacks(callbacks: Box<dyn HostCallbacks>) -> Self {
         Self {
             globals: HashMap::new(),
             builtins: std::array::from_fn(|_| Val::Nil),
@@ -137,6 +166,8 @@ impl State {
             metamethod_depth: 0,
             call_depth: 0,
             call_stack: Vec::with_capacity(64), // Pre-size for call stack
+            callbacks,
+            current_source: None,
         }
     }
 
@@ -241,6 +272,40 @@ impl State {
             string_literals.mark_reachable();
             upvalue_pool.mark_closed_upvalues();
         });
+    }
+
+    // ========================================================================
+    // Host callbacks
+    // ========================================================================
+
+    /// Called by the built-in `print()` function.
+    /// Routes output through host callbacks with source context.
+    pub(crate) fn host_print(&mut self, message: &str) {
+        // Get current line from call stack (if available)
+        let line = self
+            .call_stack
+            .last()
+            .and_then(|info| {
+                info.chunk
+                    .line_info
+                    .get(info.ip.saturating_sub(1))
+                    .copied()
+            })
+            .unwrap_or(0);
+
+        let source = self.current_source.as_deref();
+        self.callbacks.on_print(source, line, message);
+    }
+
+    /// Called when an error occurs. Notifies host callbacks.
+    pub(crate) fn host_error(&mut self, error: &Error) {
+        let source = self.current_source.as_deref();
+        self.callbacks.on_error(source, error);
+    }
+
+    /// Returns the current source name (if set).
+    pub fn current_source(&self) -> Option<&str> {
+        self.current_source.as_deref()
     }
 
     /// Pushes onto the stack the value of the global `name`.

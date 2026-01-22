@@ -101,6 +101,7 @@ impl State {
     /// The source name is used in error messages and stack traces.
     /// Use a filename for files, or something like "[fleet:123]" for dynamically loaded code.
     pub fn load_string_named(&mut self, s: impl AsRef<str>, source_name: Option<String>) -> Result<()> {
+        self.current_source = source_name.clone();
         let c = compiler::parse_str_named(s, source_name)?;
         self.push_chunk(c);
         Ok(())
@@ -222,7 +223,10 @@ impl State {
                 // (inner function calls may have already attached the trace)
                 let e = if e.stack_trace.is_empty() {
                     let trace = self.build_stack_trace(&frame);
-                    e.with_stack_trace(trace)
+                    let e = e.with_stack_trace(trace);
+                    // Notify host callbacks of the error
+                    self.host_error(&e);
+                    e
                 } else {
                     e
                 };

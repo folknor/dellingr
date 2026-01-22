@@ -1,4 +1,20 @@
-//! TODO: Crate-level description
+//! A Lua VM designed for game scripting with cost budgets and host callbacks.
+//!
+//! # Features
+//!
+//! - **Cost budgets**: Control script execution with configurable operation costs
+//! - **Host callbacks**: Redirect print output and handle errors
+//! - **Stack traces**: Detailed error messages with source locations
+//!
+//! # Example
+//!
+//! ```
+//! use lua::{State, ArgCount, RetCount};
+//!
+//! let mut state = State::new();
+//! state.load_string("print('Hello!')").unwrap();
+//! state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
+//! ```
 
 #![warn(future_incompatible)]
 #![warn(non_ascii_idents)]
@@ -11,6 +27,7 @@
 #![warn(variant_size_differences)]
 
 mod compiler;
+mod host;
 mod instr;
 mod lua_std;
 mod vm;
@@ -18,6 +35,7 @@ mod vm_aux;
 
 pub mod error;
 
+pub use host::{DefaultCallbacks, HostCallbacks};
 pub use instr::{ArgCount, Builtin, RetCount};
 pub use vm::LuaType;
 pub use vm::RustFunc;

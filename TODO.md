@@ -234,9 +234,12 @@ Findings from expert code review (January 2026). Organized by priority.
 
 ### User Experience
 
+- [x] **Stack traces with source info**
+  - Source line numbers tracked in bytecode
+  - Function names shown in stack traces (local/global/method)
+  - Source file/chunk name included
+
 - [ ] **Make VM informative for users**
-  - Add source line numbers to Chunk for better error messages
-  - Show function names in stack traces
   - Runtime cost warnings (e.g., "approaching budget limit")
   - Helpful suggestions in common error scenarios
 
@@ -246,11 +249,23 @@ Findings from expert code review (January 2026). Organized by priority.
   - Explain common mistakes (e.g., "table has no field 'x' - did you forget to initialize it?")
   - Test error messages with non-programmer users
 
-- [ ] **Host-controlled print output**
-  - Allow game engine to redirect `print()` to custom handler
-  - Include context: script name/ID, fleet ID, source location
-  - Enables per-fleet console output in game UI
-  - API: `State::set_print_handler(fn(context: &PrintContext, args: &[Val]))`
+- [x] **Host callbacks (print, errors, interruption)**
+  - `HostCallbacks` trait for customizing VM behavior
+  - `on_print(source, line, message)` - redirect print output
+  - `on_error(source, error)` - get notified when errors occur
+  - Default implementation prints to stdout (CLI usage)
+  - Interruption via cost budget: `state.set_cost_budget(0)` stops immediately
+  - API: `State::with_callbacks(Box<dyn HostCallbacks>)`
+  - Example:
+    ```rust
+    struct FleetCallbacks { fleet_id: u32, output: Vec<String> }
+    impl HostCallbacks for FleetCallbacks {
+        fn on_print(&mut self, source: Option<&str>, _line: u32, msg: &str) {
+            self.output.push(format!("[fleet:{}] {}", self.fleet_id, msg));
+        }
+    }
+    let state = State::with_callbacks(Box::new(FleetCallbacks { fleet_id: 123, output: vec![] }));
+    ```
 
 ## Development Guidelines
 
@@ -365,3 +380,6 @@ add_fn!("broken", |state| {
 - [x] Replace VM panics with proper `InternalError` for corrupt bytecode cases
 - [x] Uppercase hex literals (`0XFF` in addition to `0xff`)
 - [x] Empty table with separator (`{;}` and `{,}`)
+- [x] Stack traces with source line numbers and function names
+- [x] Host callbacks for print routing and error notification
+- [x] Script interruption via cost budget (`set_cost_budget(0)`)

@@ -80,19 +80,16 @@ pub(crate) fn open_base(state: &mut State) {
     });
 
     // Receives any number of arguments, and prints their values to `stdout`.
+    // Output is routed through host callbacks, allowing the game engine to
+    // redirect print output to per-script consoles.
     add("print", |state| {
         let top = state.get_top();
-        let mut first = true;
+        let mut parts = Vec::with_capacity(top);
         for i in 1..=top {
-            let s = state.to_string_with_meta(i as isize)?;
-            if first {
-                print!("{}", s);
-                first = false;
-            } else {
-                print!("\t{}", s);
-            }
+            parts.push(state.to_string_with_meta(i as isize)?);
         }
-        println!();
+        let message = parts.join("\t");
+        state.host_print(&message);
         Ok(0)
     });
 
