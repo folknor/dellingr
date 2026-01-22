@@ -137,4 +137,14 @@ local result = string.gsub("hello world", "(%w+)", map)
 print("gsub with table: " .. result)
 print("")
 
+-- 17. String comparisons (lexicographic)
+print("17. String comparisons")
+print("'a' < 'b' = " .. tostring("a" < "b"))  -- true
+print("'abc' < 'abd' = " .. tostring("abc" < "abd"))  -- true
+print("'abc' < 'ab' = " .. tostring("abc" < "ab"))  -- false (longer string)
+print("'10' < '9' = " .. tostring("10" < "9"))  -- true (lexicographic, not numeric!)
+print("'hello' <= 'hello' = " .. tostring("hello" <= "hello"))  -- true
+print("'' < 'a' = " .. tostring("" < "a"))  -- true (empty is smallest)
+print("")
+
 print("=== All edge case tests passed! ===")

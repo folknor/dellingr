@@ -307,3 +307,4 @@ add_fn!("broken", |state| {
 - [x] `math.min`/`math.max` now accept varargs (was only comparing first 2 args)
 - [x] Fix `ipairs` to continue on `false` values (only stop on `nil`)
 - [x] Fix `%` modulo operator to use Lua's floored semantics (not C's truncated remainder)
+- [x] String comparison operators (`<`, `>`, `<=`, `>=`) for lexicographic ordering

@@ -215,10 +215,11 @@ impl Frame {
                 }
 
                 // Orderings (comparisons are free)
-                Instr::Less => state.eval_float_bool(<f64 as PartialOrd>::lt)?,
-                Instr::Greater => state.eval_float_bool(<f64 as PartialOrd>::gt)?,
-                Instr::LessEqual => state.eval_float_bool(<f64 as PartialOrd>::le)?,
-                Instr::GreaterEqual => state.eval_float_bool(<f64 as PartialOrd>::ge)?,
+                // Supports both number and string comparisons
+                Instr::Less => state.eval_compare(std::cmp::Ordering::Less, false)?,
+                Instr::Greater => state.eval_compare(std::cmp::Ordering::Greater, false)?,
+                Instr::LessEqual => state.eval_compare(std::cmp::Ordering::Greater, true)?,  // <= is !>
+                Instr::GreaterEqual => state.eval_compare(std::cmp::Ordering::Less, true)?,  // >= is !<
 
                 // `for` loops - control flow is free
                 Instr::ForLoop(slot, offset) => state.instr_for_loop(self, slot, offset)?,
@@ -704,11 +705,29 @@ impl State {
 
     // Helper methods
 
-    #[inline(always)]
-    fn eval_float_bool(&mut self, f: impl Fn(&f64, &f64) -> bool) -> Result<()> {
-        let n2 = self.pop_num()?;
-        let n1 = self.pop_num()?;
-        self.stack.push(Val::Bool(f(&n1, &n2)));
+    /// Compare two values (numbers or strings).
+    /// `target` is the ordering we're checking for.
+    /// `negate` inverts the result (for <= and >=).
+    fn eval_compare(&mut self, target: std::cmp::Ordering, negate: bool) -> Result<()> {
+        let v2 = self.pop_val();
+        let v1 = self.pop_val();
+
+        let result = match (&v1, &v2) {
+            (Val::Num(n1), Val::Num(n2)) => {
+                let cmp = n1.partial_cmp(n2).unwrap_or(std::cmp::Ordering::Equal);
+                cmp == target
+            }
+            (Val::Str(s1), Val::Str(s2)) => {
+                let cmp = s1.as_str().cmp(s2.as_str());
+                cmp == target
+            }
+            _ => {
+                // Type mismatch - error
+                return Err(self.error(ErrorKind::TypeError(TypeError::Comparison(v1.typ(), v2.typ()))));
+            }
+        };
+
+        self.stack.push(Val::Bool(if negate { !result } else { result }));
         Ok(())
     }
 
