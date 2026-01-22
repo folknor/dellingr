@@ -159,10 +159,12 @@ Findings from expert code review (January 2026). Organized by priority.
   - Tables with ≤4 entries use inline array with linear scan
   - Automatically promotes to `IndexMap` when exceeding capacity or for shift operations
 
-- [ ] **String interning overhead** (`object.rs` `GcHeap::new_string()`)
-  - Every allocation goes through HashSet lookup
-  - `new_string` takes closure for marking (function call overhead)
-  - **Fix:** Dedicated string arena with inline hash buckets
+- [x] **String interning overhead** (`object.rs` `GcHeap::new_string()`)
+  - Every allocation went through HashSet lookup + separate Box allocation per string
+  - **Fixed:** `StringPool` with chunked arena storage + open-addressed hash table
+  - FNV-1a hash with cached values in each entry (no rehashing on lookup)
+  - Linear probing for cache-friendly collision resolution
+  - Separate lookup/insert phases allow GC check only when allocating new strings
 
 ### LOW PRIORITY - Performance Optimizations
 

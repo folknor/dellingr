@@ -10,7 +10,7 @@
 
 use std::borrow::Borrow;
 use std::cell::Cell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt;
 use std::hash::Hash;
 use std::ptr::NonNull;
@@ -237,8 +237,8 @@ pub(crate) struct GcHeap {
     capacity: usize,
     /// When the heap grows this large, run the GC.
     threshold: usize,
-    /// The collection of interned Strings.
-    strings: HashSet<StringPtr>,
+    /// Pool for interned strings (chunked arena + open-addressed hash table).
+    strings: StringPool,
 }
 
 impl GcHeap {
@@ -250,7 +250,7 @@ impl GcHeap {
             size: 0,
             capacity: 0,
             threshold,
-            strings: HashSet::new(),
+            strings: StringPool::new(),
         }
     }
 
@@ -363,23 +363,8 @@ impl GcHeap {
             }
         }
 
-        // String collection (unchanged from linked-list implementation)
-        let mut strings_to_remove = Vec::new();
-        for ptr in &self.strings {
-            let val = unsafe { ptr.0.as_ref() };
-            match val.color.get() {
-                Color::Reachable => {
-                    val.color.set(Color::Unmarked);
-                }
-                Color::Unmarked => {
-                    strings_to_remove.push(ptr.clone());
-                }
-            }
-        }
-        for ptr in strings_to_remove {
-            self.strings.remove(&ptr);
-            let _boxed = unsafe { Box::from_raw(ptr.0.as_ptr()) };
-        }
+        // String collection: sweep through StringPool's chunked arena
+        self.strings.collect();
 
         // Dynamic threshold: double the surviving size (minimum 20)
         self.threshold = (self.size * 2).max(20);
@@ -409,21 +394,20 @@ impl GcHeap {
     }
 
     pub(super) fn new_string(&mut self, s: String, mark: impl FnOnce()) -> StringPtr {
-        if let Some(ptr) = self.strings.get(s.as_str()) {
-            ptr.clone()
-        } else {
-            if self.is_full() {
-                mark();
-                self.collect();
-            }
-            let boxed = Box::new(MarkedString {
-                data: s,
-                color: Cell::new(Color::Unmarked),
-            });
-            let ptr = StringPtr(NonNull::new(Box::into_raw(boxed)).unwrap());
-            self.strings.insert(ptr.clone());
-            ptr
+        // Check if string is already interned (fast path - no GC check needed)
+        let hash = StringPool::hash_string(&s);
+        if let Some(ptr) = self.strings.find_by_hash(&s, hash) {
+            return ptr;
         }
+
+        // String not found - may need to trigger GC before allocating
+        if self.is_full() {
+            mark();
+            self.collect();
+        }
+
+        // Insert new string into pool
+        self.strings.insert_with_hash(s, hash)
     }
 
     pub(super) fn new_table(&mut self, mark: impl FnOnce()) -> ObjectPtr {
@@ -439,10 +423,7 @@ impl GcHeap {
 impl Drop for GcHeap {
     fn drop(&mut self) {
         // Chunks and their slots are automatically dropped when Vec is dropped.
-        // We just need to clean up the interned strings.
-        for ptr in self.strings.drain() {
-            let _boxed = unsafe { Box::from_raw(ptr.0.as_ptr()) };
-        }
+        // StringPool also handles its own cleanup via Drop.
     }
 }
 
@@ -504,18 +485,300 @@ impl<K, V: Markable> Markable for HashMap<K, V> {
 }
 
 // ============================================================================
-// String Interning (unchanged from linked-list implementation)
+// String Pool - Chunked arena with open-addressed hash table
 // ============================================================================
 
-struct MarkedString {
+const STRING_POOL_CHUNK_SIZE: usize = 64;
+
+/// Initial hash table size (must be power of 2).
+const STRING_POOL_INITIAL_BUCKETS: usize = 64;
+
+/// A string entry in the pool with cached hash for fast lookup.
+struct StringEntry {
     data: String,
+    hash: u64,
     color: Cell<Color>,
 }
 
-/// Wrapper type around a pointer to a String.
+/// A slot in the string arena.
+enum StringSlot {
+    Occupied(StringEntry),
+    Free { next_free: u32 },
+}
+
+impl Default for StringSlot {
+    fn default() -> Self {
+        StringSlot::Free { next_free: u32::MAX }
+    }
+}
+
+/// A chunk of string slots. Once allocated, never moves.
+struct StringPoolChunk {
+    slots: Box<[StringSlot; STRING_POOL_CHUNK_SIZE]>,
+}
+
+impl StringPoolChunk {
+    fn new() -> Self {
+        Self {
+            slots: Box::new(std::array::from_fn(|_| StringSlot::default())),
+        }
+    }
+}
+
+/// Pool for interned strings with chunked arena storage and open-addressed hash table.
+///
+/// Benefits over HashSet<StringPtr>:
+/// - Chunked storage: better cache locality during GC sweep
+/// - Open addressing with linear probing: fewer indirections than chained hashing
+/// - Cached hash values: avoid rehashing strings on lookup
+/// - Stable pointers: chunks never move, so StringPtr remains valid
+pub(super) struct StringPool {
+    /// Chunked storage. Old chunks never move, ensuring stable pointers.
+    chunks: Vec<StringPoolChunk>,
+    /// Head of free list (u32::MAX = no free slots).
+    free_head: u32,
+    /// Open-addressed hash table with linear probing.
+    /// Each bucket stores a slot index (u32::MAX = empty).
+    buckets: Vec<u32>,
+    /// Number of interned strings.
+    size: usize,
+    /// Total slot capacity across all chunks.
+    capacity: usize,
+}
+
+impl StringPool {
+    pub(super) fn new() -> Self {
+        Self {
+            chunks: Vec::new(),
+            free_head: u32::MAX,
+            buckets: vec![u32::MAX; STRING_POOL_INITIAL_BUCKETS],
+            size: 0,
+            capacity: 0,
+        }
+    }
+
+    /// Get a slot by global index.
+    #[inline]
+    fn get_slot(&self, idx: usize) -> &StringSlot {
+        let chunk_idx = idx / STRING_POOL_CHUNK_SIZE;
+        let slot_idx = idx % STRING_POOL_CHUNK_SIZE;
+        &self.chunks[chunk_idx].slots[slot_idx]
+    }
+
+    /// Get a mutable slot by global index.
+    #[inline]
+    fn get_slot_mut(&mut self, idx: usize) -> &mut StringSlot {
+        let chunk_idx = idx / STRING_POOL_CHUNK_SIZE;
+        let slot_idx = idx % STRING_POOL_CHUNK_SIZE;
+        &mut self.chunks[chunk_idx].slots[slot_idx]
+    }
+
+    /// Get the StringEntry at a slot index (panics if slot is free).
+    #[inline]
+    fn get_entry(&self, idx: usize) -> &StringEntry {
+        match self.get_slot(idx) {
+            StringSlot::Occupied(entry) => entry,
+            StringSlot::Free { .. } => panic!("get_entry on free slot"),
+        }
+    }
+
+    /// Ensure we have at least one free slot.
+    fn ensure_capacity(&mut self) {
+        if self.free_head != u32::MAX {
+            return;
+        }
+
+        let mut chunk = StringPoolChunk::new();
+        let base = self.capacity;
+
+        // Link all slots into free list (reverse order so slot 0 is head)
+        for i in (0..STRING_POOL_CHUNK_SIZE).rev() {
+            chunk.slots[i] = StringSlot::Free { next_free: self.free_head };
+            self.free_head = (base + i) as u32;
+        }
+
+        self.chunks.push(chunk);
+        self.capacity += STRING_POOL_CHUNK_SIZE;
+    }
+
+    /// Compute hash of a string using FNV-1a (fast, good distribution).
+    #[inline]
+    pub(super) fn hash_string(s: &str) -> u64 {
+        // FNV-1a hash
+        let mut hash: u64 = 0xcbf29ce484222325;
+        for byte in s.bytes() {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        hash
+    }
+
+    /// Find bucket index for a hash value.
+    #[inline]
+    fn bucket_index(&self, hash: u64) -> usize {
+        (hash as usize) & (self.buckets.len() - 1)
+    }
+
+    /// Rehash the table when load factor is too high.
+    fn rehash(&mut self) {
+        let new_size = self.buckets.len() * 2;
+        self.buckets = vec![u32::MAX; new_size];
+
+        // Re-insert all occupied slots
+        for idx in 0..self.capacity {
+            if let StringSlot::Occupied(entry) = self.get_slot(idx) {
+                let hash = entry.hash;
+                let mut bucket = self.bucket_index(hash);
+
+                // Linear probing to find empty bucket
+                while self.buckets[bucket] != u32::MAX {
+                    bucket = (bucket + 1) & (self.buckets.len() - 1);
+                }
+                self.buckets[bucket] = idx as u32;
+            }
+        }
+    }
+
+    /// Look up a string by pre-computed hash. Returns None if not found.
+    /// Used to check if string exists before triggering GC.
+    pub(super) fn find_by_hash(&self, s: &str, hash: u64) -> Option<StringPtr> {
+        let mut bucket = self.bucket_index(hash);
+
+        loop {
+            let slot_idx = self.buckets[bucket];
+            if slot_idx == u32::MAX {
+                return None; // Empty bucket - string not found
+            }
+
+            let entry = self.get_entry(slot_idx as usize);
+            if entry.hash == hash && entry.data == s {
+                // Found existing string
+                let ptr = match self.get_slot(slot_idx as usize) {
+                    StringSlot::Occupied(e) => NonNull::from(e),
+                    StringSlot::Free { .. } => unreachable!(),
+                };
+                return Some(StringPtr(ptr));
+            }
+
+            // Collision - continue probing
+            bucket = (bucket + 1) & (self.buckets.len() - 1);
+        }
+    }
+
+    /// Insert a string with pre-computed hash. Assumes string is not already present.
+    /// Used after find_by_hash returns None and GC has been triggered if needed.
+    pub(super) fn insert_with_hash(&mut self, s: String, hash: u64) -> StringPtr {
+        // Allocate new slot
+        self.ensure_capacity();
+
+        let slot_idx = self.free_head as usize;
+        let slot = self.get_slot_mut(slot_idx);
+        let next_free = match slot {
+            StringSlot::Free { next_free } => *next_free,
+            StringSlot::Occupied(_) => panic!("free_head points to occupied slot"),
+        };
+
+        *slot = StringSlot::Occupied(StringEntry {
+            data: s,
+            hash,
+            color: Cell::new(Color::Unmarked),
+        });
+
+        self.free_head = next_free;
+        self.size += 1;
+
+        // Find bucket for insertion
+        let mut bucket = self.bucket_index(hash);
+        while self.buckets[bucket] != u32::MAX {
+            bucket = (bucket + 1) & (self.buckets.len() - 1);
+        }
+        self.buckets[bucket] = slot_idx as u32;
+
+        // Rehash if load factor > 0.75
+        if self.size * 4 > self.buckets.len() * 3 {
+            self.rehash();
+        }
+
+        // Return pointer to the new entry
+        let ptr = match self.get_slot(slot_idx) {
+            StringSlot::Occupied(e) => NonNull::from(e),
+            StringSlot::Free { .. } => unreachable!(),
+        };
+        StringPtr(ptr)
+    }
+
+    /// Look up or insert a string, returning its pointer.
+    #[allow(dead_code)]
+    pub(super) fn intern(&mut self, s: String) -> StringPtr {
+        let hash = Self::hash_string(&s);
+        if let Some(ptr) = self.find_by_hash(&s, hash) {
+            return ptr;
+        }
+        self.insert_with_hash(s, hash)
+    }
+
+    /// Collect unreachable strings. Called during GC.
+    /// Sweeps through all slots linearly (cache-friendly) and rebuilds hash table.
+    pub(super) fn collect(&mut self) {
+        // First pass: sweep and free unreachable strings
+        for idx in 0..self.capacity {
+            let should_free = {
+                let slot = self.get_slot(idx);
+                match slot {
+                    StringSlot::Occupied(entry) => match entry.color.get() {
+                        Color::Reachable => {
+                            entry.color.set(Color::Unmarked);
+                            false
+                        }
+                        Color::Unmarked => true,
+                    },
+                    StringSlot::Free { .. } => false,
+                }
+            };
+
+            if should_free {
+                // Free the slot
+                let old_free_head = self.free_head;
+                let slot = self.get_slot_mut(idx);
+                *slot = StringSlot::Free { next_free: old_free_head };
+                self.free_head = idx as u32;
+                self.size -= 1;
+            }
+        }
+
+        // Second pass: rebuild hash table with survivors
+        self.buckets.fill(u32::MAX);
+        for idx in 0..self.capacity {
+            if let StringSlot::Occupied(entry) = self.get_slot(idx) {
+                let hash = entry.hash;
+                let mut bucket = self.bucket_index(hash);
+
+                while self.buckets[bucket] != u32::MAX {
+                    bucket = (bucket + 1) & (self.buckets.len() - 1);
+                }
+                self.buckets[bucket] = idx as u32;
+            }
+        }
+    }
+
+    /// Number of interned strings (used in tests).
+    #[cfg(test)]
+    pub(super) fn len(&self) -> usize {
+        self.size
+    }
+}
+
+impl Drop for StringPool {
+    fn drop(&mut self) {
+        // Slots are automatically dropped when chunks are dropped.
+        // String data in each StringEntry is also dropped automatically.
+    }
+}
+
+/// Wrapper type around a pointer to a StringEntry.
 /// Behaves like a String for the purposes of Hashing and Equality.
 #[derive(Clone, Debug)]
-pub(crate) struct StringPtr(NonNull<MarkedString>);
+pub(crate) struct StringPtr(NonNull<StringEntry>);
 
 impl StringPtr {
     #[must_use]
@@ -537,12 +800,19 @@ impl Borrow<str> for StringPtr {
 
 impl Hash for StringPtr {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.as_str().hash(state);
+        // Use cached hash for speed
+        let entry = unsafe { self.0.as_ref() };
+        entry.hash.hash(state);
     }
 }
 
 impl PartialEq for StringPtr {
     fn eq(&self, other: &Self) -> bool {
+        // Fast path: pointer equality (same interned string)
+        if self.0 == other.0 {
+            return true;
+        }
+        // Slow path: compare contents
         self.as_str() == other.as_str()
     }
 }
@@ -634,5 +904,79 @@ mod test {
         assert_eq!(gc.chunks.len(), 2);
         assert_eq!(gc.size, CHUNK_SIZE + 10);
         assert_eq!(gc.capacity, CHUNK_SIZE * 2);
+    }
+
+    #[test]
+    fn string_pool_interning() {
+        let mut pool = StringPool::new();
+
+        // Intern same string twice - should return same pointer
+        let ptr1 = pool.intern("hello".into());
+        let ptr2 = pool.intern("hello".into());
+        assert!(StringPtr::eq_physical(&ptr1, &ptr2));
+        assert_eq!(pool.len(), 1);
+
+        // Different string - different pointer
+        let ptr3 = pool.intern("world".into());
+        assert!(!StringPtr::eq_physical(&ptr1, &ptr3));
+        assert_eq!(pool.len(), 2);
+
+        // Verify string content
+        assert_eq!(ptr1.as_str(), "hello");
+        assert_eq!(ptr3.as_str(), "world");
+    }
+
+    #[test]
+    fn string_pool_hash_table_growth() {
+        let mut pool = StringPool::new();
+
+        // Insert enough strings to trigger rehash (load factor > 0.75)
+        // Initial bucket size is 64, so we need > 48 strings
+        for i in 0..100 {
+            pool.intern(format!("string_{}", i));
+        }
+
+        assert_eq!(pool.len(), 100);
+
+        // Verify all strings can still be found
+        for i in 0..100 {
+            let s = format!("string_{}", i);
+            let ptr1 = pool.intern(s.clone());
+            let ptr2 = pool.intern(s);
+            assert!(StringPtr::eq_physical(&ptr1, &ptr2));
+        }
+
+        // Size should still be 100 (no duplicates added)
+        assert_eq!(pool.len(), 100);
+    }
+
+    #[test]
+    fn string_pool_collect() {
+        let mut pool = StringPool::new();
+
+        // Intern some strings
+        let kept = pool.intern("kept".into());
+        let _dropped = pool.intern("dropped".into());
+        assert_eq!(pool.len(), 2);
+
+        // Mark one as reachable
+        kept.mark_reachable();
+
+        // Collect - should free the unreachable one
+        pool.collect();
+        assert_eq!(pool.len(), 1);
+
+        // Can still access the kept string
+        assert_eq!(kept.as_str(), "kept");
+
+        // Intern the same string again - should return same pointer
+        let kept2 = pool.intern("kept".into());
+        assert!(StringPtr::eq_physical(&kept, &kept2));
+        assert_eq!(pool.len(), 1);
+
+        // Intern the previously dropped string - should get new slot
+        let new_dropped = pool.intern("dropped".into());
+        assert_eq!(new_dropped.as_str(), "dropped");
+        assert_eq!(pool.len(), 2);
     }
 }
