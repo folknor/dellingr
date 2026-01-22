@@ -226,11 +226,11 @@ Findings from expert code review (January 2026). Organized by priority.
   - Extracted evaluation/call logic to `vm/eval.rs`
   - Core vm.rs now ~200 lines (struct, constructors, globals, cost budget)
 
-- [ ] **Improve test coverage**
-  - Metamethod edge cases
-  - Upvalue stress tests
-  - GC stress scenarios
-  - Error recovery paths
+- [x] **Improve test coverage**
+  - Metamethod edge cases (`metatable_edge_cases.lua`)
+  - Upvalue stress tests (`upvalue_stress.lua`)
+  - ~~GC stress scenarios~~ (skipped - not needed for game scripting)
+  - Error recovery paths (`error_cases.lua`)
 
 ## Development Guidelines
 
