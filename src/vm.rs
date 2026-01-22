@@ -43,9 +43,10 @@ pub struct State {
     /// Each entry is (stack_index, upvalue_ref). Kept sorted by stack_index descending
     /// so we can efficiently close them when a function returns.
     pub(super) open_upvalues: Vec<(usize, UpvalueRef)>,
-    /// Stack position marked before a vararg function call.
-    /// Used to calculate arg count when `...` is passed as an argument.
-    pub(super) vararg_call_base: Option<usize>,
+    /// Stack of call base positions for dynamic argument counting.
+    /// Pushed by MarkCallBase, popped by Call(255, ...).
+    /// Supports nested function calls where each level needs its own base.
+    pub(super) vararg_call_bases: Vec<usize>,
     /// Cost budget remaining. When this reaches 0 or below, operations with cost > 0
     /// will fail. The action that pushes you over budget completes before stopping.
     /// Uses i64 to allow going negative (the final action that exceeds budget completes).
@@ -110,7 +111,7 @@ impl State {
             heap: GcHeap::with_threshold(Self::GC_INITIAL_THRESHOLD),
             string_literals: Vec::with_capacity(64), // Pre-size for string literals
             open_upvalues: Vec::new(),
-            vararg_call_base: None,
+            vararg_call_bases: Vec::new(),
             cost_remaining: i64::MAX,
             cost_budget: i64::MAX,
             cost_used: 0,

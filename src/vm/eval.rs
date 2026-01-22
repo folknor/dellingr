@@ -25,11 +25,11 @@ impl State {
     /// pushed first), so that after the call the last result is on the top of
     /// the stack.
     pub fn call(&mut self, num_args: u8, num_ret_expected: u8) -> Result<()> {
-        // Handle vararg call: num_args == 255 means calculate from vararg_call_base
+        // Handle vararg call: num_args == 255 means calculate from vararg_call_bases stack
         let (idx, actual_num_args) = if num_args == u8::MAX {
             let base = self
-                .vararg_call_base
-                .take()
+                .vararg_call_bases
+                .pop()
                 .expect("Call with 255 args but no vararg_call_base set");
             let actual = (self.stack.len() - base - 1) as u8;
             (base, actual)

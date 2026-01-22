@@ -56,27 +56,6 @@ These actions commit irreversible changes to the game world:
 ## Global Functions
 - [ ] `require(modname)` - module system, but we only allow to require files already loaded by us, we need to define this system properly with regards to mods and such
 
-## Known Limitations
-
-### Multiple Returns as Function Arguments
-Using multiple return values directly as function arguments doesn't fully work:
-```lua
-local add = function(a, b) return a + b end
-local vals = function() return 3, 4 end
-add(vals())  -- Won't work: only first return value is passed
-```
-Workaround: capture values first, then pass them:
-```lua
-local a, b = vals()
-add(a, b)  -- Works correctly
-```
-Note: Varargs (`...`) as function arguments now works correctly:
-```lua
-local f = function(...)
-    print(...)  -- Works! All varargs are passed
-end
-```
-
 ## Code Review Findings
 
 Findings from expert code review (January 2026). Organized by priority.
@@ -329,3 +308,4 @@ add_fn!("broken", |state| {
 - [x] `_G` - global environment table (proxy with metamethods)
 - [x] Math library: `tan`, `acos`, `asin`, `atan`, `deg`, `rad`, `exp`, `log`, `fmod`, `modf`, `huge`
 - [x] `table.move` - move/copy elements between tables
+- [x] Multiple return values as function arguments (`add(vals())` passes all returns)
