@@ -1,5 +1,6 @@
 //! Lua's Math Library
 
+use crate::error::{ArgError, ErrorKind};
 use crate::LuaType;
 use crate::State;
 use rand::Rng;
@@ -71,27 +72,57 @@ pub(crate) fn open_math(state: &mut State) {
         Ok(1)
     });
 
-    // math.min(a, b) - costs 1
+    // math.min(...) - costs 1, returns minimum of all arguments
     add_fn!("min", |state| {
         state.consume_cost(1)?;
+        let n = state.get_top() as isize;
+        if n == 0 {
+            let e = ArgError {
+                arg_number: 1,
+                func_name: Some("min".to_string()),
+                expected: Some(LuaType::Number),
+                received: None,
+            };
+            return Err(state.error(ErrorKind::ArgError(e)));
+        }
         state.check_type(1, LuaType::Number)?;
-        state.check_type(2, LuaType::Number)?;
-        let a = state.to_number(1)?;
-        let b = state.to_number(2)?;
+        let mut result = state.to_number(1)?;
+        for i in 2..=n {
+            state.check_type(i, LuaType::Number)?;
+            let v = state.to_number(i)?;
+            if v < result {
+                result = v;
+            }
+        }
         state.set_top(0);
-        state.push_number(a.min(b));
+        state.push_number(result);
         Ok(1)
     });
 
-    // math.max(a, b) - costs 1
+    // math.max(...) - costs 1, returns maximum of all arguments
     add_fn!("max", |state| {
         state.consume_cost(1)?;
+        let n = state.get_top() as isize;
+        if n == 0 {
+            let e = ArgError {
+                arg_number: 1,
+                func_name: Some("max".to_string()),
+                expected: Some(LuaType::Number),
+                received: None,
+            };
+            return Err(state.error(ErrorKind::ArgError(e)));
+        }
         state.check_type(1, LuaType::Number)?;
-        state.check_type(2, LuaType::Number)?;
-        let a = state.to_number(1)?;
-        let b = state.to_number(2)?;
+        let mut result = state.to_number(1)?;
+        for i in 2..=n {
+            state.check_type(i, LuaType::Number)?;
+            let v = state.to_number(i)?;
+            if v > result {
+                result = v;
+            }
+        }
         state.set_top(0);
-        state.push_number(a.max(b));
+        state.push_number(result);
         Ok(1)
     });
 
