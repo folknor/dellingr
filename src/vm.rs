@@ -162,7 +162,7 @@ impl State {
         self.stack.push(val);
     }
 
-    /// Pops a value from the stack and sets it as the new value of global
+    /// Instr::pop()s a value from the stack and sets it as the new value of global
     /// `name`.
     pub fn set_global(&mut self, name: &str) {
         let val = self.pop_val();
@@ -207,9 +207,9 @@ impl Default for State {
 mod tests {
     use super::compiler::parse_str;
     use super::lua_val::Val;
-    use super::Chunk;
-    use super::Instr::*;
     use super::State;
+    use super::Chunk;
+    use super::Instr;
 
     #[test]
     fn vm_test01() {
@@ -224,11 +224,11 @@ mod tests {
         let mut state = State::new();
         let input = Chunk {
             code: vec![
-                PushString(1),
-                PushString(2),
-                Concat,
-                SetGlobal(0),
-                Return(0),
+                Instr::push_string(1),
+                Instr::push_string(2),
+                Instr::concat(),
+                Instr::set_global(0),
+                Instr::ret(0),
             ],
             string_literals: vec!["key".to_string(), "a".to_string(), "b".to_string()],
             ..Chunk::default()
@@ -242,7 +242,7 @@ mod tests {
     fn vm_test04() {
         let mut state = State::new();
         let input = Chunk {
-            code: vec![PushNum(0), PushNum(0), Equal, SetGlobal(0), Return(0)],
+            code: vec![Instr::push_num(0), Instr::push_num(0), Instr::equal(), Instr::set_global(0), Instr::ret(0)],
             number_literals: vec![2.5],
             string_literals: vec!["a".to_string()],
             ..Chunk::default()
@@ -256,12 +256,12 @@ mod tests {
         let mut state = State::new();
         let input = Chunk {
             code: vec![
-                PushBool(true),
-                BranchFalseKeep(2),
-                Pop,
-                PushBool(false),
-                SetGlobal(0),
-                Return(0),
+                Instr::push_bool(true),
+                Instr::branch_false_keep(2),
+                Instr::pop(),
+                Instr::push_bool(false),
+                Instr::set_global(0),
+                Instr::ret(0),
             ],
             string_literals: vec!["key".to_string()],
             ..Chunk::default()
@@ -274,11 +274,11 @@ mod tests {
     fn vm_test06() {
         let mut state = State::new();
         let code = vec![
-            PushBool(true),
-            BranchFalse(3),
-            PushNum(0),
-            SetGlobal(0),
-            Return(0),
+            Instr::push_bool(true),
+            Instr::branch_false(3),
+            Instr::push_num(0),
+            Instr::set_global(0),
+            Instr::ret(0),
         ];
         let chunk = Chunk {
             code,
@@ -294,13 +294,13 @@ mod tests {
     fn vm_test07() {
         let mut state = State::new();
         let code = vec![
-            PushNum(0),
-            PushNum(0),
-            Less,
-            BranchFalse(2),
-            PushBool(true),
-            SetGlobal(0),
-            Return(0),
+            Instr::push_num(0),
+            Instr::push_num(0),
+            Instr::less(),
+            Instr::branch_false(2),
+            Instr::push_bool(true),
+            Instr::set_global(0),
+            Instr::ret(0),
         ];
         let chunk = Chunk {
             code,
@@ -315,18 +315,18 @@ mod tests {
     #[test]
     fn vm_test08() {
         let code = vec![
-            PushNum(2), // a = 2
-            SetGlobal(0),
-            GetGlobal(0), // a <0
-            PushNum(0),
-            Less,
-            BranchFalse(5),
-            GetGlobal(0),
-            PushNum(1),
-            Add,
-            SetGlobal(0),
-            Jump(-9),
-            Return(0),
+            Instr::push_num(2), // a = 2
+            Instr::set_global(0),
+            Instr::get_global(0), // a <0
+            Instr::push_num(0),
+            Instr::less(),
+            Instr::branch_false(5),
+            Instr::get_global(0),
+            Instr::push_num(1),
+            Instr::add(),
+            Instr::set_global(0),
+            Instr::jump(-9),
+            Instr::ret(0),
         ];
         let chunk = Chunk {
             code,
@@ -346,20 +346,20 @@ mod tests {
         // end
         // x = a
         let code = vec![
-            PushNum(0),
-            SetLocal(0),
-            GetLocal(0),
-            PushNum(1),
-            Less,
-            BranchFalse(5),
-            GetLocal(0),
-            PushNum(2),
-            Add,
-            SetLocal(0),
-            Jump(-9),
-            GetLocal(0),
-            SetGlobal(0),
-            Return(0),
+            Instr::push_num(0),
+            Instr::set_local(0),
+            Instr::get_local(0),
+            Instr::push_num(1),
+            Instr::less(),
+            Instr::branch_false(5),
+            Instr::get_local(0),
+            Instr::push_num(2),
+            Instr::add(),
+            Instr::set_local(0),
+            Instr::jump(-9),
+            Instr::get_local(0),
+            Instr::set_global(0),
+            Instr::ret(0),
         ];
         let chunk = Chunk {
             code,
@@ -377,16 +377,16 @@ mod tests {
     fn vm_test10() {
         let code = vec![
             // For loop control variables
-            PushNum(0), // start = 6
-            PushNum(1), // limit = 2
-            PushNum(1), // step = 2
+            Instr::push_num(0), // start = 6
+            Instr::push_num(1), // limit = 2
+            Instr::push_num(1), // step = 2
             // Start loop
-            ForPrep(0, 3),
-            PushNum(0),
-            SetGlobal(0), // a = 2
+            Instr::for_prep(0, 3),
+            Instr::push_num(0),
+            Instr::set_global(0), // a = 2
             // End loop
-            ForLoop(0, -3),
-            Return(0),
+            Instr::for_loop(0, -3),
+            Instr::ret(0),
         ];
         let chunk = Chunk {
             code,

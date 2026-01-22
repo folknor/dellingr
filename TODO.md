@@ -117,9 +117,11 @@ Findings from expert code review (January 2026). Organized by priority.
   - Accumulated cost locally, flushed every 64 ops
   - Reduces per-operation overhead by avoiding budget check on every costed op
 
-- [ ] **Replace GC linked list with arena** (`object.rs` `GcHeap` struct)
-  - Linked list traversal is cache-hostile (each node is separate allocation)
-  - **Fix:** Use contiguous `Vec<Option<WrappedObject>>` with free list
+- [x] **Replace GC linked list with arena** (`object.rs` `GcHeap` struct)
+  - Linked list traversal was cache-hostile (each node is separate allocation)
+  - **Fixed:** Chunked arena with `Vec<ArenaChunk>` where each chunk is `Box<[Slot; 256]>`
+  - Slots are either `Occupied(WrappedObject)` or `Free { next_free: u32 }` (free list)
+  - O(1) allocation via free list, linear sweep for cache-friendly GC
 
 - [x] **Cache table `array_len`** (`table.rs` `Table::array_len()`)
   - Added `Cell<Option<usize>>` cache, invalidated on integer key changes

@@ -3,14 +3,17 @@
 //! - May have references to other `Object`s
 //!
 //! Because of this, it needs to be garbage collected.
+//!
+//! This implementation uses a chunked arena for cache-friendly iteration
+//! during garbage collection. Each chunk is a fixed-size array that never
+//! moves, so pointers to objects remain stable.
 
 use std::borrow::Borrow;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::hash::Hash;
-use std::ops::Drop;
-use std::ptr::{self, NonNull};
+use std::ptr::NonNull;
 use std::rc::Rc;
 
 use super::Chunk;
@@ -39,17 +42,16 @@ pub(super) struct Closure {
     pub(super) upvalues: Vec<UpvalueRef>,
 }
 
-/// A wrapper around the `LuaVal`s which need to be garbage-collected.
-struct WrappedObject {
-    /// The value this object holds.
-    raw: RawObject,
-    /// The next object in the heap.
-    next: *mut WrappedObject,
-    /// A flag used in garbage-collection. This is behind a `Cell` so that
-    /// we can alter the keys of a table.
-    color: Cell<Color>,
-}
+// ============================================================================
+// Arena-Based GC Implementation
+// ============================================================================
 
+/// Number of slots per arena chunk. Chosen to balance:
+/// - Cache efficiency (chunk fits in L2 cache)
+/// - Allocation frequency (fewer chunk allocations)
+const CHUNK_SIZE: usize = 256;
+
+/// The raw object data managed by GC.
 enum RawObject {
     // Wrap this in a box to reduce the memory usage. Minimal performance impact
     // because functions are rarely accessed.
@@ -63,6 +65,46 @@ impl RawObject {
         match self {
             RawObject::LuaFn(_) => LuaType::Function,
             RawObject::Table(_) => LuaType::Table,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Color {
+    Unmarked,
+    Reachable,
+}
+
+/// A GC-managed object with its metadata.
+struct WrappedObject {
+    raw: RawObject,
+    color: Cell<Color>,
+}
+
+/// A slot in the arena: either occupied with an object or free.
+enum Slot {
+    /// An occupied slot containing a GC-managed object.
+    Occupied(WrappedObject),
+    /// A free slot, with index of next free slot (u32::MAX = end of free list).
+    Free { next_free: u32 },
+}
+
+impl Default for Slot {
+    fn default() -> Self {
+        Slot::Free { next_free: u32::MAX }
+    }
+}
+
+/// A fixed-size chunk of slots. Once allocated, a chunk never moves,
+/// so pointers to objects within it remain stable.
+struct ArenaChunk {
+    slots: Box<[Slot; CHUNK_SIZE]>,
+}
+
+impl ArenaChunk {
+    fn new() -> Self {
+        Self {
+            slots: Box::new(std::array::from_fn(|_| Slot::default())),
         }
     }
 }
@@ -117,18 +159,17 @@ impl fmt::Display for ObjectPtr {
     }
 }
 
-#[derive(Clone, Copy)]
-enum Color {
-    Unmarked,
-    Reachable,
-}
-
 /// A collection of objects which need to be garbage-collected.
+/// Uses a chunked arena for cache-friendly iteration during GC.
 pub(crate) struct GcHeap {
-    /// The start of the linked list which contains every Object.
-    start: *mut WrappedObject,
-    /// The number of objects currently in the heap.
+    /// Chunks of slots. Old chunks are never moved, ensuring stable pointers.
+    chunks: Vec<ArenaChunk>,
+    /// Index of first free slot (u32::MAX = no free slots).
+    free_head: u32,
+    /// Number of occupied slots.
     size: usize,
+    /// Total capacity across all chunks.
+    capacity: usize,
     /// When the heap grows this large, run the GC.
     threshold: usize,
     /// The collection of interned Strings.
@@ -139,11 +180,91 @@ impl GcHeap {
     /// Create a new heap, with the given initial threshold.
     pub(super) fn with_threshold(threshold: usize) -> Self {
         Self {
-            start: ptr::null_mut(),
+            chunks: Vec::new(),
+            free_head: u32::MAX,
             size: 0,
+            capacity: 0,
             threshold,
             strings: HashSet::new(),
         }
+    }
+
+    /// Get a reference to a slot by global index.
+    #[inline]
+    fn get_slot(&self, idx: usize) -> &Slot {
+        let chunk_idx = idx / CHUNK_SIZE;
+        let slot_idx = idx % CHUNK_SIZE;
+        &self.chunks[chunk_idx].slots[slot_idx]
+    }
+
+    /// Get a mutable reference to a slot by global index.
+    #[inline]
+    fn get_slot_mut(&mut self, idx: usize) -> &mut Slot {
+        let chunk_idx = idx / CHUNK_SIZE;
+        let slot_idx = idx % CHUNK_SIZE;
+        &mut self.chunks[chunk_idx].slots[slot_idx]
+    }
+
+    /// Ensure we have at least one free slot, allocating a new chunk if needed.
+    fn ensure_capacity(&mut self) {
+        if self.free_head != u32::MAX {
+            return; // Already have free slots
+        }
+
+        // Allocate a new chunk
+        let mut chunk = ArenaChunk::new();
+        let base = self.capacity;
+
+        // Link all slots in the new chunk into the free list (in reverse order
+        // so that slot 0 is at the head, giving sequential allocation)
+        for i in (0..CHUNK_SIZE).rev() {
+            chunk.slots[i] = Slot::Free { next_free: self.free_head };
+            self.free_head = (base + i) as u32;
+        }
+
+        self.chunks.push(chunk);
+        self.capacity += CHUNK_SIZE;
+    }
+
+    /// Allocate a new object slot, returning a stable pointer to it.
+    fn alloc_slot(&mut self, raw: RawObject) -> ObjectPtr {
+        self.ensure_capacity();
+
+        let idx = self.free_head as usize;
+        let slot = self.get_slot_mut(idx);
+
+        // Get next free index before overwriting the slot
+        let next_free = match slot {
+            Slot::Free { next_free } => *next_free,
+            Slot::Occupied(_) => panic!("free_head points to occupied slot"),
+        };
+
+        // Create the wrapped object and store it in the slot
+        let wrapped = WrappedObject {
+            raw,
+            color: Cell::new(Color::Unmarked),
+        };
+
+        *slot = Slot::Occupied(wrapped);
+        self.free_head = next_free;
+        self.size += 1;
+
+        // Get a stable pointer to the object (safe because chunks never move)
+        let ptr = match self.get_slot(idx) {
+            Slot::Occupied(obj) => NonNull::from(obj),
+            Slot::Free { .. } => unreachable!(),
+        };
+
+        ObjectPtr { ptr }
+    }
+
+    /// Free a slot by index, adding it to the free list.
+    fn free_slot(&mut self, idx: usize) {
+        let old_free_head = self.free_head;
+        let slot = self.get_slot_mut(idx);
+        *slot = Slot::Free { next_free: old_free_head };
+        self.free_head = idx as u32;
+        self.size -= 1;
     }
 
     /// Run the garbage-collector.
@@ -155,27 +276,29 @@ impl GcHeap {
             println!("Initial size: {}", self.size);
         }
 
-        let mut next_ptr_ref = &mut self.start;
-        while !next_ptr_ref.is_null() {
-            // From right-to-left, this unsafe block means:
-            // - deref the reference (safe) to get a pointer
-            // - deref the pointer (unsafe) to get a WrappedObject
-            // - make a mutable reference to that WrappedObject
-            let next_obj = unsafe { &mut **next_ptr_ref };
-            match next_obj.color.get() {
-                Color::Reachable => {
-                    // Reset its color.
-                    next_obj.color.set(Color::Unmarked);
-                    next_ptr_ref = &mut next_obj.next;
+        // Sweep phase: iterate contiguously through all slots (cache-friendly)
+        for idx in 0..self.capacity {
+            let should_free = {
+                let slot = self.get_slot(idx);
+                match slot {
+                    Slot::Occupied(obj) => match obj.color.get() {
+                        Color::Reachable => {
+                            // Reset color for next cycle
+                            obj.color.set(Color::Unmarked);
+                            false
+                        }
+                        Color::Unmarked => true,
+                    },
+                    Slot::Free { .. } => false,
                 }
-                Color::Unmarked => {
-                    let boxed = unsafe { Box::from_raw(*next_ptr_ref) };
-                    *next_ptr_ref = boxed.next;
-                    self.size -= 1;
-                }
+            };
+
+            if should_free {
+                self.free_slot(idx);
             }
         }
 
+        // String collection (unchanged from linked-list implementation)
         let mut strings_to_remove = Vec::new();
         for ptr in &self.strings {
             let val = unsafe { ptr.0.as_ref() };
@@ -193,7 +316,11 @@ impl GcHeap {
             let _boxed = unsafe { Box::from_raw(ptr.0.as_ptr()) };
         }
 
-        self.threshold = self.size * 2;
+        // Dynamic threshold: double the surviving size (minimum 20)
+        self.threshold = (self.size * 2).max(20);
+
+        #[cfg(feature = "debug_gc")]
+        println!("Final size: {}", self.size);
     }
 
     #[must_use]
@@ -201,10 +328,19 @@ impl GcHeap {
         self.size >= self.threshold
     }
 
-    pub(super) fn new_lua_fn(&mut self, chunk: Chunk, upvalues: Vec<UpvalueRef>, mark: impl FnOnce()) -> ObjectPtr {
+    pub(super) fn new_lua_fn(
+        &mut self,
+        chunk: Chunk,
+        upvalues: Vec<UpvalueRef>,
+        mark: impl FnOnce(),
+    ) -> ObjectPtr {
+        if self.is_full() {
+            mark();
+            self.collect();
+        }
         let closure = Closure { chunk: Rc::new(chunk), upvalues };
         let raw = RawObject::LuaFn(Box::new(closure));
-        self.new_obj_from_raw(raw, mark)
+        self.alloc_slot(raw)
     }
 
     pub(super) fn new_string(&mut self, s: String, mark: impl FnOnce()) -> StringPtr {
@@ -226,47 +362,28 @@ impl GcHeap {
     }
 
     pub(super) fn new_table(&mut self, mark: impl FnOnce()) -> ObjectPtr {
-        let raw = RawObject::Table(Table::default());
-        self.new_obj_from_raw(raw, mark)
-    }
-
-    fn new_obj_from_raw(&mut self, raw: RawObject, mark: impl FnOnce()) -> ObjectPtr {
         if self.is_full() {
             mark();
             self.collect();
         }
-        let new_object = WrappedObject {
-            next: self.start,
-            color: Cell::new(Color::Unmarked),
-            raw,
-        };
-        let boxed = Box::new(new_object);
-        let raw_ptr = Box::into_raw(boxed);
-        // Pointers from Box::into_raw are guaranteed to not be null.
-        let obj_ptr = ObjectPtr {
-            ptr: NonNull::new(raw_ptr).unwrap(),
-        };
-
-        self.start = raw_ptr;
-        self.size += 1;
-
-        obj_ptr
+        let raw = RawObject::Table(Table::default());
+        self.alloc_slot(raw)
     }
 }
 
 impl Drop for GcHeap {
     fn drop(&mut self) {
-        let mut next_ptr = self.start;
-        while !next_ptr.is_null() {
-            let boxed = unsafe { Box::from_raw(next_ptr) };
-            next_ptr = boxed.next;
-            // Now the boxed object is dropped.
-        }
+        // Chunks and their slots are automatically dropped when Vec is dropped.
+        // We just need to clean up the interned strings.
         for ptr in self.strings.drain() {
             let _boxed = unsafe { Box::from_raw(ptr.0.as_ptr()) };
         }
     }
 }
+
+// ============================================================================
+// Markable Trait (unchanged from linked-list implementation)
+// ============================================================================
 
 /// An item is `Markable` if it can be marked as reachable, and thus it and
 /// anything it references will not be collected by the GC.
@@ -324,6 +441,10 @@ impl<K, V: Markable> Markable for HashMap<K, V> {
     }
 }
 
+// ============================================================================
+// String Interning (unchanged from linked-list implementation)
+// ============================================================================
+
 struct MarkedString {
     data: String,
     color: Cell<Color>,
@@ -377,6 +498,10 @@ impl fmt::Display for StringPtr {
     }
 }
 
+// ============================================================================
+// Tests
+// ============================================================================
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -392,5 +517,60 @@ mod test {
         assert_eq!(2, gc.strings.len());
         gc.collect();
         assert_eq!(0, gc.strings.len());
+    }
+
+    #[test]
+    fn arena_alloc_and_collect() {
+        let mut gc = GcHeap::with_threshold(100);
+
+        // Allocate some tables
+        let t1 = gc.new_table(|| {});
+        let _t2 = gc.new_table(|| {});
+        let _t3 = gc.new_table(|| {});
+
+        assert_eq!(gc.size, 3);
+
+        // Mark t1 as reachable
+        t1.mark_reachable();
+
+        // Collect - should free t2 and t3
+        gc.collect();
+
+        assert_eq!(gc.size, 1);
+
+        // Can still use t1
+        assert!(t1.as_table_ref().is_some());
+    }
+
+    #[test]
+    fn arena_free_list_reuse() {
+        let mut gc = GcHeap::with_threshold(100);
+
+        // Allocate and free
+        let _t1 = gc.new_table(|| {});
+        assert_eq!(gc.size, 1);
+
+        gc.collect(); // t1 is unreachable, gets freed
+
+        assert_eq!(gc.size, 0);
+        assert!(gc.free_head != u32::MAX); // Free list has entry
+
+        // Allocate again - should reuse the slot
+        let _t2 = gc.new_table(|| {});
+        assert_eq!(gc.size, 1);
+    }
+
+    #[test]
+    fn arena_chunk_growth() {
+        let mut gc = GcHeap::with_threshold(1000);
+
+        // Allocate more than one chunk's worth
+        for _ in 0..(CHUNK_SIZE + 10) {
+            gc.new_table(|| {});
+        }
+
+        assert_eq!(gc.chunks.len(), 2);
+        assert_eq!(gc.size, CHUNK_SIZE + 10);
+        assert_eq!(gc.capacity, CHUNK_SIZE * 2);
     }
 }
