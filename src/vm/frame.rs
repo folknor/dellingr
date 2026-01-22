@@ -72,16 +72,25 @@ impl Frame {
     }
 
     /// Start evaluating instructions from the current position.
+    ///
+    /// Cost system: Most operations are free. Only arithmetic, table writes,
+    /// and table creation cost points. This rewards thoughtful code organization
+    /// while ensuring every script can do meaningful work.
+    ///
+    /// Free operations: control flow, variable access, comparisons, function calls,
+    /// table reads, string operations, length operator.
+    ///
+    /// Costs 1: arithmetic (+, -, *, /, %, ^, unary -), table creation,
+    /// table writes (including array initialization).
     pub(super) fn eval(&mut self, state: &mut State) -> Result<u8> {
         loop {
-            // Check instruction budget before executing
-            state.consume_instruction()?;
-
             let inst = self.get_instr();
             if option_env!("LUA_DEBUG_VM").is_some() {
                 println!("{:?}", inst);
             }
             match inst {
+                // === FREE OPERATIONS (cost 0) ===
+
                 // General control flow
                 Instr::Pop => {
                     state.pop_val();
@@ -97,7 +106,6 @@ impl Frame {
                 Instr::Jump(offset) => self.jump(offset),
                 Instr::BranchFalse(ofst) => state.instr_branch(self, false, ofst, false),
                 Instr::BranchFalseKeep(ofst) => state.instr_branch(self, false, ofst, true),
-                //Instr::BranchTrue(ofst) => state.instr_branch(self, true, ofst, false),
                 Instr::BranchTrueKeep(ofst) => state.instr_branch(self, true, ofst, true),
 
                 // Local variables
@@ -108,10 +116,11 @@ impl Frame {
                 Instr::GetUpvalue(i) => state.instr_get_upvalue(self, i),
                 Instr::SetUpvalue(i) => state.instr_set_upvalue(self, i),
 
+                // Globals
                 Instr::GetGlobal(i) => state.instr_get_global(self, i),
                 Instr::SetGlobal(i) => state.instr_set_global(self, i),
 
-                // Functions
+                // Functions (calls and returns are free)
                 Instr::Closure(i) => state.instr_closure(self, i),
                 Instr::Call(num_args, num_rets) => state.call(num_args, num_rets)?,
                 Instr::MarkCallBase => {
@@ -139,7 +148,7 @@ impl Frame {
                     }
                 }
 
-                // Literals
+                // Literals (free)
                 Instr::PushNil => state.push_nil(),
                 Instr::PushBool(b) => state.push_boolean(b),
                 Instr::PushNum(i) => {
@@ -151,15 +160,7 @@ impl Frame {
                     state.stack.push(val);
                 }
 
-                // Arithmetic
-                Instr::Add => state.eval_float_float(<f64 as ops::Add>::add)?,
-                Instr::Subtract => state.eval_float_float(<f64 as ops::Sub>::sub)?,
-                Instr::Multiply => state.eval_float_float(<f64 as ops::Mul>::mul)?,
-                Instr::Divide => state.eval_float_float(<f64 as ops::Div>::div)?,
-                Instr::Mod => state.eval_float_float(<f64 as ops::Rem>::rem)?,
-                Instr::Pow => state.eval_float_float(f64::powf)?,
-
-                // Equality
+                // Equality (comparisons are free)
                 Instr::Equal => {
                     let val2 = state.pop_val();
                     let val1 = state.pop_val();
@@ -171,39 +172,105 @@ impl Frame {
                     state.push_boolean(val1 != val2);
                 }
 
-                // Orderings
+                // Orderings (comparisons are free)
                 Instr::Less => state.eval_float_bool(<f64 as PartialOrd>::lt)?,
                 Instr::Greater => state.eval_float_bool(<f64 as PartialOrd>::gt)?,
                 Instr::LessEqual => state.eval_float_bool(<f64 as PartialOrd>::le)?,
                 Instr::GreaterEqual => state.eval_float_bool(<f64 as PartialOrd>::ge)?,
 
-                // `for` loops (numeric)
+                // `for` loops - control flow is free
                 Instr::ForLoop(slot, offset) => state.instr_for_loop(self, slot, offset)?,
                 Instr::ForPrep(slot, len) => state.instr_for_prep(self, slot, len)?,
 
-                // `for` loops (generic/iterator)
+                // Generic `for` loops - iteration is free
                 Instr::TForPrep(slot) => state.instr_tfor_prep(slot),
                 Instr::TForCall(slot, num_vars) => state.instr_tfor_call(slot, num_vars)?,
                 Instr::TForLoop(slot, offset) => state.instr_tfor_loop(self, slot, offset),
 
-                // Unary
+                // Length operator is free
                 Instr::Length => state.instr_length()?,
-                Instr::Negate => state.instr_negate()?,
+
+                // Logical not is free
                 Instr::Not => state.instr_not(),
 
-                // Manipulating tables
-                Instr::NewTable => state.new_table(),
+                // Table reads are free
                 Instr::GetField(i) => state.instr_get_field(self, i)?,
                 Instr::GetTable => state.instr_get_table()?,
-                Instr::InitField(offset, key_id) => state.instr_init_field(self, offset, key_id)?,
-                Instr::InitIndex(offset) => state.instr_init_index(offset)?,
-                Instr::SetField(offset, i) => state.instr_set_field(self, offset, i)?,
-                Instr::SetTable(offset) => state.instr_set_table(offset)?,
 
-                Instr::SetList(n) => state.instr_set_list(n)?,
-
-                // Misc.
+                // String concatenation is free
                 Instr::Concat => state.concat_helper(2)?,
+
+                // === COSTED OPERATIONS (cost 1) ===
+
+                // Arithmetic costs 1
+                Instr::Add => {
+                    state.consume_cost(1)?;
+                    state.eval_float_float(<f64 as ops::Add>::add)?;
+                }
+                Instr::Subtract => {
+                    state.consume_cost(1)?;
+                    state.eval_float_float(<f64 as ops::Sub>::sub)?;
+                }
+                Instr::Multiply => {
+                    state.consume_cost(1)?;
+                    state.eval_float_float(<f64 as ops::Mul>::mul)?;
+                }
+                Instr::Divide => {
+                    state.consume_cost(1)?;
+                    state.eval_float_float(<f64 as ops::Div>::div)?;
+                }
+                Instr::Mod => {
+                    state.consume_cost(1)?;
+                    state.eval_float_float(<f64 as ops::Rem>::rem)?;
+                }
+                Instr::Pow => {
+                    state.consume_cost(1)?;
+                    state.eval_float_float(f64::powf)?;
+                }
+
+                // Unary negation costs 1
+                Instr::Negate => {
+                    state.consume_cost(1)?;
+                    state.instr_negate()?;
+                }
+
+                // Table creation costs 1
+                Instr::NewTable => {
+                    state.consume_cost(1)?;
+                    state.new_table();
+                }
+
+                // Table writes cost 1
+                Instr::InitField(offset, key_id) => {
+                    state.consume_cost(1)?;
+                    state.instr_init_field(self, offset, key_id)?;
+                }
+                Instr::InitIndex(offset) => {
+                    state.consume_cost(1)?;
+                    state.instr_init_index(offset)?;
+                }
+                Instr::SetField(offset, i) => {
+                    state.consume_cost(1)?;
+                    state.instr_set_field(self, offset, i)?;
+                }
+                Instr::SetTable(offset) => {
+                    state.consume_cost(1)?;
+                    state.instr_set_table(offset)?;
+                }
+
+                // Array initialization: cost per element
+                Instr::SetList(n) => {
+                    let count = if n == 0 {
+                        // SetList(0) means "use all values above table"
+                        // We'll charge based on actual count after operation
+                        // For now, just charge 1 for the operation
+                        1
+                    } else {
+                        n as u64
+                    };
+                    state.consume_cost(count)?;
+                    state.instr_set_list(n)?;
+                }
             }
         }
     }

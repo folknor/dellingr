@@ -44,13 +44,14 @@ pub struct State {
     /// Stack position marked before a vararg function call.
     /// Used to calculate arg count when `...` is passed as an argument.
     vararg_call_base: Option<usize>,
-    /// Instruction counter - decrements with each instruction executed.
-    /// When it reaches 0, execution stops with InstructionLimitExceeded.
-    instructions_remaining: u64,
-    /// The original instruction limit (for error reporting).
-    instruction_limit: u64,
-    /// Total instructions executed (for reporting).
-    instructions_executed: u64,
+    /// Cost budget remaining. When this reaches 0 or below, operations with cost > 0
+    /// will fail. The action that pushes you over budget completes before stopping.
+    /// Uses i64 to allow going negative (the final action that exceeds budget completes).
+    cost_remaining: i64,
+    /// The original cost budget (for error reporting).
+    cost_budget: i64,
+    /// Total cost consumed (for reporting).
+    cost_used: u64,
 }
 
 // Important note on how the stack is tracked:
@@ -96,40 +97,44 @@ impl State {
             string_literals: Vec::new(),
             open_upvalues: Vec::new(),
             vararg_call_base: None,
-            instructions_remaining: u64::MAX,
-            instruction_limit: u64::MAX,
-            instructions_executed: 0,
+            cost_remaining: i64::MAX,
+            cost_budget: i64::MAX,
+            cost_used: 0,
         }
     }
 
-    /// Sets the instruction budget for this VM.
-    /// When the budget is exhausted, execution stops with InstructionLimitExceeded.
-    pub fn set_instruction_limit(&mut self, limit: u64) {
-        self.instruction_limit = limit;
-        self.instructions_remaining = limit;
-        self.instructions_executed = 0;
+    /// Sets the cost budget for this VM.
+    /// When the budget is exhausted, operations with cost > 0 will fail.
+    /// The action that pushes you over budget always completes before stopping.
+    pub fn set_cost_budget(&mut self, budget: i64) {
+        self.cost_budget = budget;
+        self.cost_remaining = budget;
+        self.cost_used = 0;
     }
 
-    /// Returns the number of instructions executed since the last reset.
-    pub fn instructions_executed(&self) -> u64 {
-        self.instructions_executed
+    /// Returns the total cost consumed since the last budget reset.
+    pub fn cost_used(&self) -> u64 {
+        self.cost_used
     }
 
-    /// Returns the number of instructions remaining in the budget.
-    pub fn instructions_remaining(&self) -> u64 {
-        self.instructions_remaining
+    /// Returns the cost remaining in the budget.
+    /// Can be negative if the last action pushed over budget.
+    pub fn cost_remaining(&self) -> i64 {
+        self.cost_remaining
     }
 
-    /// Consume one instruction from the budget. Returns an error if exhausted.
-    pub(crate) fn consume_instruction(&mut self) -> Result<()> {
-        if self.instructions_remaining == 0 {
-            return Err(self.error(ErrorKind::InstructionLimitExceeded {
-                used: self.instructions_executed,
-                limit: self.instruction_limit,
+    /// Consume cost from the budget. Returns an error if budget is exhausted
+    /// and cost > 0. The action that pushes you over budget completes before
+    /// stopping (checked at the START of each operation).
+    pub(crate) fn consume_cost(&mut self, cost: u64) -> Result<()> {
+        if cost > 0 && self.cost_remaining <= 0 {
+            return Err(self.error(ErrorKind::BudgetExceeded {
+                used: self.cost_used,
+                budget: self.cost_budget,
             }));
         }
-        self.instructions_remaining -= 1;
-        self.instructions_executed += 1;
+        self.cost_remaining -= cost as i64;
+        self.cost_used += cost;
         Ok(())
     }
 

@@ -9,7 +9,7 @@ fn main() {
 
     // Parse arguments
     let mut filename = None;
-    let mut limit = None;
+    let mut limit: Option<i64> = None;
     let mut i = 1;
 
     while i < args.len() {
@@ -47,12 +47,12 @@ fn main() {
     let mut state = State::new();
 
     if let Some(l) = limit {
-        state.set_instruction_limit(l);
+        state.set_cost_budget(l);
     }
 
     let result = state.load_string(&source).and_then(|()| state.call(0, 0));
 
-    println!("Instructions executed: {}", state.instructions_executed());
+    println!("Cost used: {}", state.cost_used());
 
     if let Err(e) = result {
         eprintln!("Error: {}", e);

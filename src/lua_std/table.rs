@@ -16,10 +16,11 @@ pub(crate) fn open_table(state: &mut State) {
         };
     }
 
-    // table.insert(t, [pos,] value)
+    // table.insert(t, [pos,] value) - costs 1
     // Inserts value at position pos in t, shifting elements up.
     // If pos is omitted, inserts at the end.
     add_fn!("insert", |state| {
+        state.consume_cost(1)?;
         state.check_type(1, LuaType::Table)?;
         let num_args = state.get_top();
 
@@ -43,10 +44,11 @@ pub(crate) fn open_table(state: &mut State) {
         Ok(0)
     });
 
-    // table.remove(t [, pos])
+    // table.remove(t [, pos]) - costs 1
     // Removes and returns the element at position pos.
     // If pos is omitted, removes the last element.
     add_fn!("remove", |state| {
+        state.consume_cost(1)?;
         state.check_type(1, LuaType::Table)?;
         let num_args = state.get_top();
 
@@ -65,10 +67,11 @@ pub(crate) fn open_table(state: &mut State) {
         Ok(1)
     });
 
-    // table.sort(t [, comp])
+    // table.sort(t [, comp]) - costs 1
     // Sorts the array portion of t in place.
     // comp is an optional comparison function.
     add_fn!("sort", |state| {
+        state.consume_cost(1)?;
         state.check_type(1, LuaType::Table)?;
         let num_args = state.get_top();
         let has_comp = num_args >= 2;
@@ -124,10 +127,11 @@ pub(crate) fn open_table(state: &mut State) {
         Ok(count as u8)
     });
 
-    // table.pack(...)
+    // table.pack(...) - costs 1
     // Returns a new table with all arguments stored into keys 1, 2, etc.
     // and with a field "n" with the total number of arguments.
     add_fn!("pack", |state| {
+        state.consume_cost(1)?;
         let num_args = state.get_top();
 
         // Create new table
@@ -155,10 +159,11 @@ pub(crate) fn open_table(state: &mut State) {
         Ok(1)
     });
 
-    // table.concat(list [, sep [, i [, j]]])
+    // table.concat(list [, sep [, i [, j]]]) - costs 1
     // Returns list[i]..sep..list[i+1]..sep..list[j].
     // Default: sep="", i=1, j=#list
     add_fn!("concat", |state| {
+        state.consume_cost(1)?;
         state.check_type(1, LuaType::Table)?;
         let num_args = state.get_top();
 
@@ -209,10 +214,11 @@ pub(crate) fn open_table(state: &mut State) {
         Ok(1)
     });
 
-    // table.move(a1, f, e, t [, a2])
+    // table.move(a1, f, e, t [, a2]) - costs 1
     // Moves elements from table a1 to table a2 (or a1 if not given).
     // Copies a1[f..e] to a2[t..t+(e-f)]. Returns a2.
     add_fn!("move", |state| {
+        state.consume_cost(1)?;
         state.check_type(1, LuaType::Table)?;
         state.check_type(2, LuaType::Number)?;
         state.check_type(3, LuaType::Number)?;

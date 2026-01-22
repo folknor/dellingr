@@ -16,8 +16,8 @@ pub enum ErrorKind {
     TypeError(TypeError),
     ArgError(ArgError),
     SyntaxError(SyntaxError),
-    /// Script exceeded its instruction budget
-    InstructionLimitExceeded { used: u64, limit: u64 },
+    /// Script exceeded its cost budget
+    BudgetExceeded { used: u64, budget: i64 },
 }
 
 #[derive(Debug)]
@@ -117,8 +117,8 @@ impl fmt::Display for ErrorKind {
             ArgError(e) => e.fmt(f),
             SyntaxError(e) => e.fmt(f),
             TypeError(e) => e.fmt(f),
-            InstructionLimitExceeded { used, limit } => {
-                write!(f, "instruction limit exceeded: used {} of {} instructions", used, limit)
+            BudgetExceeded { used, budget } => {
+                write!(f, "budget exceeded: used {} cost with budget of {}", used, budget)
             }
         }
     }
