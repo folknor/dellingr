@@ -49,7 +49,6 @@ These actions commit irreversible changes to the game world:
 - [ ] Cost analyzer: CLI tool that takes a Lua file and prints each statement with its cost annotated, so players can optimize their scripts
 
 ### Cost System Gaps
-- [ ] String concatenation is free but allocates memory - consider charging based on output length
 - [ ] `SetList(0)` charges 1 regardless of actual element count - should charge after computing count
 - [ ] `table.sort` uses O(n²) bubble sort but only charges once
 
@@ -192,11 +191,6 @@ Findings from expert code review (January 2026). Organized by priority.
   - `num_ret_expected == 255`: return all
   - `Return(255)`: return all
   - **Fix:** Use `Option<u8>` or dedicated enum
-
-- [ ] **Expose GC control to host** (`object.rs` `GcHeap`)
-  - `gc_step()` for incremental collection
-  - `gc_collect()` for explicit full collection
-  - Allow hosts to run GC at known safe points
 
 ### Code Organization
 
