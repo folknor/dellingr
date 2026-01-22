@@ -263,7 +263,9 @@ impl Frame {
                 }
                 Instr::Mod => {
                     add_cost!(state, local_cost, 1);
-                    state.eval_float_float(<f64 as ops::Rem>::rem)?;
+                    // Lua uses floored modulo: a % b = a - floor(a/b) * b
+                    // This differs from Rust's remainder when signs differ
+                    state.eval_float_float(|a, b| a - (a / b).floor() * b)?;
                 }
                 Instr::Pow => {
                     add_cost!(state, local_cost, 1);
