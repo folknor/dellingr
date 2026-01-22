@@ -137,4 +137,16 @@ end
 print("sum 1 to 0 (empty) = " .. tostring(sum))  -- 0
 print("")
 
+-- 13. ipairs with false values
+print("13. ipairs handles false values correctly")
+local with_false = {1, false, 3, nil, 5}
+local ipairs_result = {}
+for i, v in ipairs(with_false) do
+    ipairs_result[i] = tostring(v)
+end
+-- Should stop at nil (index 4), not at false (index 2)
+print("ipairs result: " .. table.concat(ipairs_result, ", "))  -- 1, false, 3
+print("Expected: 1, false, 3 (stops at nil)")
+print("")
+
 print("=== All error case tests completed! ===")
