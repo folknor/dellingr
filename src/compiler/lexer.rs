@@ -324,8 +324,8 @@ impl<'a> Lexer<'a> {
 
     /// Reads in a number which starts with a digit (as opposed to a decimal point).
     fn lex_full_number(&mut self, tok_start: usize, first_char: char) -> Result<TokenType> {
-        // Check for hex values
-        if first_char == '0' && self.try_next('x') {
+        // Check for hex values (both 0x and 0X)
+        if first_char == '0' && (self.try_next('x') || self.try_next('X')) {
             // Has to be at least one digit
             match self.next_char() {
                 Some(c) if c.is_ascii_hexdigit() => (),

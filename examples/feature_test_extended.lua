@@ -18,7 +18,7 @@ print("=== Extended Lua Feature Tests ===\n")
 -- ============================================================================
 print("--- Lexer/Parser ---")
 
--- SKIP: uppercase hex 0XFF not supported (only lowercase 0xff)
+test("uppercase hex 0XFF", 0XFF == 255 and 0XAB == 171)
 test("number with leading dot", .5 == 0.5 and .125 == 0.125)
 test("number with trailing dot", 5. == 5.0)
 test("negative exponent", 1e-3 == 0.001)
@@ -66,7 +66,11 @@ test("mixed separators", t3[1] == 1 and t3[4] == 4)
 local t4 = {}  -- empty table
 test("empty table", #t4 == 0)
 
--- SKIP: {;} not supported (empty table with semicolon)
+local t5 = {;}  -- empty table with semicolon
+test("empty table with semicolon", #t5 == 0)
+
+local t5b = {,}  -- empty table with comma
+test("empty table with comma", #t5b == 0)
 
 local key = "dynamic"
 local t6 = {[key] = 42, ["literal"] = 100, [1+1] = 200}

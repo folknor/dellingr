@@ -343,3 +343,5 @@ add_fn!("broken", |state| {
 - [x] String escape sequences (`\n`, `\t`, `\r`, `\\`, `\"`, `\'`, `\0`, `\a`, `\b`, `\f`, `\v`)
 - [x] Multi-line comments (`--[[ ... ]]`)
 - [x] Replace VM panics with proper `InternalError` for corrupt bytecode cases
+- [x] Uppercase hex literals (`0XFF` in addition to `0xff`)
+- [x] Empty table with separator (`{;}` and `{,}`)

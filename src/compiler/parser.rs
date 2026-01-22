@@ -1486,6 +1486,10 @@ impl<'a> Parser<'a> {
     /// Parses a table constructor.
     fn parse_table(&mut self) -> Result<()> {
         self.push(Instr::new_table());
+        // Skip any leading separators (handles {;} and {,})
+        while let TokenType::Comma | TokenType::Semi = self.input.peek_type()? {
+            self.input.next()?;
+        }
         if self.input.try_pop(TokenType::RCurly)?.is_none() {
             // i is the number of array-style entries.
             let mut i = 0;
