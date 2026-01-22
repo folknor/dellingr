@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 rand = "0.8"
 lua-patterns = "0.4"
+indexmap = "2.0"

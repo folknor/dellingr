@@ -89,10 +89,10 @@ Findings from expert code review (January 2026). Organized by priority.
   - `debug_assert!` in `Hash for Val` only fires in debug builds
   - **Fixed:** Changed `debug_assert!` to `assert!` in release builds
 
-- [ ] **Non-deterministic table iteration** (`table.rs` `Table::next()`)
+- [x] **Non-deterministic table iteration** (`table.rs` `Table::next()`)
   - `HashMap::iter()` order is not guaranteed
   - `pairs(t)` returns elements in arbitrary order that can change between runs
-  - **Fix:** Use `IndexMap` or maintain insertion order separately if determinism matters
+  - **Fixed:** Replaced HashMap with IndexMap to maintain insertion order
 
 - [x] **No metamethod recursion limit** (`vm.rs` `handle_index_metamethod`, `handle_newindex_metamethod`)
   - `__index` and `__newindex` chains have no depth limit
