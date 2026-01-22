@@ -241,15 +241,52 @@ Findings from expert code review (January 2026). Organized by priority.
 
 ### Code Organization
 
-- [ ] **Split `vm.rs` (~1300 lines)**
-  - Extract metamethod handling to `vm/metamethod.rs`
-  - Move table operations to standard library (currently duplicates logic)
+- [x] **Split `vm.rs` (~1300 lines)**
+  - Extracted metamethod handling to `vm/metamethod.rs`
+  - Extracted stack operations to `vm/stack.rs`
+  - Extracted table operations to `vm/table_ops.rs`
+  - Extracted evaluation/call logic to `vm/eval.rs`
+  - Core vm.rs now ~200 lines (struct, constructors, globals, cost budget)
 
 - [ ] **Improve test coverage**
   - Metamethod edge cases
   - Upvalue stress tests
   - GC stress scenarios
   - Error recovery paths
+
+## Development Guidelines
+
+### Error Handling in RustFunc
+
+As of commit efc1da2, most VM stack operations return `Result` instead of panicking. When writing a `RustFunc` (a Rust function callable from Lua), you must propagate errors:
+
+```rust
+// CORRECT - propagate errors with ?
+add_fn!("example", |state| {
+    state.check_type(1, LuaType::Table)?;
+    let val = state.to_string(2)?;
+    state.remove(1)?;
+    state.push_value(1)?;
+    Ok(1)
+});
+
+// WRONG - these will fail to compile
+add_fn!("broken", |state| {
+    state.remove(1);  // Error: returns Result, not ()
+    Ok(0)
+});
+```
+
+**Methods that return `Result` (partial list):**
+- Stack access: `remove()`, `insert()`, `replace()`, `push_value()`, `copy_val()`
+- Table ops: `get_table()`, `set_table_raw()`, `get_metatable_of()`, `set_metatable_of()`
+- Type conversion: `to_string()`, `to_number()`
+- Validation: `check_type()`
+
+**Methods that are infallible:**
+- `push_nil()`, `push_number()`, `push_boolean()`, `push_string()`, `push_rust_fn()`
+- `pop()`, `set_top()`, `get_top()`
+- `new_table()`, `set_global()`, `get_global()`
 
 ### Positive Highlights (from review)
 
