@@ -149,7 +149,8 @@ impl GcHeap {
     /// Run the garbage-collector.
     /// Make sure you mark all the roots before calling this function.
     pub(super) fn collect(&mut self) {
-        if option_env!("LUA_DEBUG_GC").is_some() {
+        #[cfg(feature = "debug_gc")]
+        {
             println!("Running garbage collector");
             println!("Initial size: {}", self.size);
         }

@@ -107,9 +107,9 @@ Findings from expert code review (January 2026). Organized by priority.
   - Malicious script could cause stack overflow or memory exhaustion
   - **Fixed:** Added `call_depth` counter with MAX_CALL_DEPTH=1000 and stack size check with MAX_STACK_SIZE=1_000_000
 
-- [ ] **O(n²) upvalue closing** (`vm.rs` `State::close_upvalues()`)
+- [x] **O(n²) upvalue closing** (`vm.rs` `State::close_upvalues()`)
   - `Vec::remove(0)` is O(n), called in a loop
-  - **Fix:** Use `VecDeque` or reverse sort order and pop from end
+  - **Fixed:** Reversed sort order (ascending) and pop from end in O(1)
 
 ### HIGH PRIORITY - Performance Optimizations
 
@@ -181,8 +181,8 @@ Findings from expert code review (January 2026). Organized by priority.
   - `print`, `pairs`, `ipairs`, `type`, etc. accessed frequently
   - String interning for global names enables pointer comparison
 
-- [ ] **Use `#[cfg(feature = "debug_vm")]` instead of `option_env!`** (`frame.rs` `Frame::eval()` debug print)
-  - Current debug print may pull in format machinery even when disabled
+- [x] **Use `#[cfg(feature = "debug_vm")]` instead of `option_env!`** (`frame.rs` `Frame::eval()` debug print)
+  - **Fixed:** Added `debug_parser`, `debug_vm`, `debug_gc` features to Cargo.toml
 
 ### API Improvements
 

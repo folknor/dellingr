@@ -293,11 +293,11 @@ impl State {
         }
         // Create a new open upvalue
         let uv_ref = std::rc::Rc::new(std::cell::RefCell::new(Upvalue::Open(stack_idx)));
-        // Insert in order (sorted by stack index descending for efficient closing)
+        // Insert in order (sorted by stack index ascending, so we can pop from end in O(1))
         let pos = self
             .open_upvalues
             .iter()
-            .position(|(idx, _)| *idx < stack_idx)
+            .position(|(idx, _)| *idx > stack_idx)
             .unwrap_or(self.open_upvalues.len());
         self.open_upvalues.insert(pos, (stack_idx, uv_ref.clone()));
         uv_ref
@@ -307,11 +307,13 @@ impl State {
     /// This is called when a function returns to capture the values from the stack
     /// before they are popped.
     pub(crate) fn close_upvalues(&mut self, level: usize) {
-        while let Some(&(idx, _)) = self.open_upvalues.first() {
+        // Upvalues are sorted ascending by stack index, so highest indices are at the end.
+        // We close highest first (they go out of scope first), popping from end in O(1).
+        while let Some(&(idx, _)) = self.open_upvalues.last() {
             if idx < level {
                 break;
             }
-            let (_, uv_ref) = self.open_upvalues.remove(0);
+            let (_, uv_ref) = self.open_upvalues.pop().unwrap();
             let val = self.stack[idx].clone();
             *uv_ref.borrow_mut() = Upvalue::Closed(val);
         }

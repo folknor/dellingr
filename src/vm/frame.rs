@@ -118,9 +118,8 @@ impl Frame {
 
         loop {
             let inst = self.get_instr();
-            if option_env!("LUA_DEBUG_VM").is_some() {
-                println!("{:?}", inst);
-            }
+            #[cfg(feature = "debug_vm")]
+            println!("{:?}", inst);
             match inst {
                 // === FREE OPERATIONS (cost 0) ===
 

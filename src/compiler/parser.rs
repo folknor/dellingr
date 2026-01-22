@@ -245,9 +245,8 @@ impl<'a> Parser<'a> {
         self.locals = self.outer_locals.pop().unwrap();
         self.upvalues = self.outer_upvalues.pop().unwrap();
 
-        if option_env!("LUA_DEBUG_PARSER").is_some() {
-            println!("Compiled chunk: {:#?}", &tmp_chunk);
-        }
+        #[cfg(feature = "debug_parser")]
+        println!("Compiled chunk: {:#?}", &tmp_chunk);
 
         Ok(tmp_chunk)
     }
