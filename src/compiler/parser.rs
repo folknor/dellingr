@@ -649,6 +649,12 @@ impl<'a> Parser<'a> {
     /// Parses a `local` declaration.
     fn parse_locals(&mut self) -> Result<()> {
         self.input.next().unwrap(); // `local` keyword
+
+        // Check for `local function name(...) ... end`
+        if self.input.check_type(TokenType::Function)? {
+            return self.parse_local_function();
+        }
+
         let old_local_count = self.locals.len() as u8;
 
         let names = self.parse_namelist()?;
@@ -695,6 +701,27 @@ impl<'a> Parser<'a> {
         for name in names {
             self.add_local(name)?;
         }
+
+        Ok(())
+    }
+
+    /// Parses `local function name(...) ... end`.
+    /// This is equivalent to `local name; name = function(...) ... end`
+    /// The name is in scope within the function body, allowing direct recursion.
+    fn parse_local_function(&mut self) -> Result<()> {
+        self.input.next()?; // `function` keyword
+        let name = self.expect_identifier()?;
+        let local_slot = self.locals.len() as u8;
+
+        // Add the local FIRST so it's in scope within the function body
+        // (this allows recursive calls like `local function fib(n) ... fib(n-1) ... end`)
+        self.add_local(name)?;
+
+        // Parse the function definition (pushes a Closure instruction)
+        self.parse_fndef()?;
+
+        // Assign the closure to the local
+        self.push(Instr::set_local(local_slot));
 
         Ok(())
     }
