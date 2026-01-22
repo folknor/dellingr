@@ -173,7 +173,28 @@ impl<'a> Lexer<'a> {
 
     /// Skips over the characters in a comment.
     fn comment(&mut self) -> Result<Token> {
-        // TODO multi-line comments
+        // Check for multi-line comment: --[[ ... ]]
+        if self.peek_char() == Some('[') {
+            self.next_char(); // consume '['
+            if self.peek_char() == Some('[') {
+                self.next_char(); // consume second '['
+                // Multi-line comment: skip until ]]
+                loop {
+                    match self.next_char() {
+                        Some(']') => {
+                            if self.peek_char() == Some(']') {
+                                self.next_char(); // consume second ']'
+                                return self.next_token();
+                            }
+                        }
+                        None => return Ok(self.end_of_file()),
+                        _ => {}
+                    }
+                }
+            }
+            // Single '[' after '--' is just a regular comment, fall through
+        }
+        // Single-line comment: skip until newline
         while let Some(c) = self.next_char() {
             if c == '\n' {
                 return self.next_token();
