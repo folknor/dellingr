@@ -305,3 +305,5 @@ add_fn!("broken", |state| {
 - [x] Multiple return values as function arguments (`add(vals())` passes all returns)
 - [x] Loop variable capture fix - each iteration now has its own local binding via `CloseUpvalues`
 - [x] `math.min`/`math.max` now accept varargs (was only comparing first 2 args)
+- [x] Fix `ipairs` to continue on `false` values (only stop on `nil`)
+- [x] Fix `%` modulo operator to use Lua's floored semantics (not C's truncated remainder)
