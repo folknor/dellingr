@@ -60,4 +60,33 @@ local t12 = {"banana", "apple", "cherry"}
 table.sort(t12)
 print("Test 12 - sort strings: " .. tostring(t12[1] == "apple" and t12[2] == "banana" and t12[3] == "cherry"))
 
+-- Test 13: table.pack basic
+local t13 = table.pack("a", "b", "c")
+print("Test 13 - table.pack basic: " .. tostring(t13.n == 3 and t13[1] == "a" and t13[2] == "b" and t13[3] == "c"))
+
+-- Test 14: table.pack empty
+local t14 = table.pack()
+print("Test 14 - table.pack empty: " .. tostring(t14.n == 0))
+
+-- Test 15: table.concat basic
+local t15 = {"a", "b", "c"}
+local s15 = table.concat(t15, "-")
+print("Test 15 - table.concat: " .. tostring(s15 == "a-b-c"))
+
+-- Test 16: table.concat with range
+local t16 = {1, 2, 3, 4, 5}
+local s16 = table.concat(t16, ",", 2, 4)
+print("Test 16 - table.concat range: " .. tostring(s16 == "2,3,4"))
+
+-- Test 17: table.move
+local t17src = {1, 2, 3, 4, 5}
+local t17dst = {}
+table.move(t17src, 2, 4, 1, t17dst)
+print("Test 17 - table.move: " .. tostring(t17dst[1] == 2 and t17dst[2] == 3 and t17dst[3] == 4))
+
+-- Test 18: table.move within same table
+local t18 = {1, 2, 3, 4, 5}
+table.move(t18, 1, 3, 4)  -- copy elements 1-3 to positions 4-6
+print("Test 18 - table.move same: " .. tostring(t18[4] == 1 and t18[5] == 2 and t18[6] == 3))
+
 print("All table library tests complete!")
