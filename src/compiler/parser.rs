@@ -1172,9 +1172,29 @@ impl<'a> Parser<'a> {
                 self.parse_prefix_extension(prefix)
             }
             TokenType::LParen => {
+                // Mark call base if in vararg function (only place where ... can appear as arg)
+                let mark_idx = if self.chunk.is_vararg {
+                    let idx = self.chunk.code.len();
+                    self.push(Instr::MarkCallBase);
+                    Some(idx)
+                } else {
+                    None
+                };
                 self.eval_prefix_exp(&base_expr);
                 self.input.next()?;
-                let (num_args, _) = self.parse_call()?;
+                let (num_args, last_exp) = self.parse_call()?;
+                // If last arg is vararg, adjust to pass all varargs
+                let num_args = if let ExpDesc::Vararg = last_exp {
+                    self.chunk.code.pop(); // Pop Vararg(1)
+                    self.push(Instr::Vararg(u8::MAX)); // Push all varargs
+                    u8::MAX // Signal to VM to calculate arg count from call base
+                } else {
+                    // No varargs used, remove the MarkCallBase if we added one
+                    if let Some(idx) = mark_idx {
+                        self.chunk.code.remove(idx);
+                    }
+                    num_args
+                };
                 let prefix = PrefixExp::FunctionCall(num_args);
                 self.parse_prefix_extension(prefix)
             }
@@ -1184,6 +1204,14 @@ impl<'a> Parser<'a> {
             }
             TokenType::Colon => {
                 // Method call: obj:method(args) becomes obj.method(obj, args)
+                // Mark call base if in vararg function (only place where ... can appear as arg)
+                let mark_idx = if self.chunk.is_vararg {
+                    let idx = self.chunk.code.len();
+                    self.push(Instr::MarkCallBase);
+                    Some(idx)
+                } else {
+                    None
+                };
                 self.eval_prefix_exp(&base_expr);
                 self.input.next()?; // consume ':'
                 let method_name = self.expect_identifier()?;
@@ -1202,10 +1230,21 @@ impl<'a> Parser<'a> {
 
                 // Now parse the arguments
                 self.expect(TokenType::LParen)?;
-                let (num_args, _) = self.parse_call()?;
+                let (num_args, last_exp) = self.parse_call()?;
+                // If last arg is vararg, adjust to pass all varargs
+                let num_args = if let ExpDesc::Vararg = last_exp {
+                    self.chunk.code.pop(); // Pop Vararg(1)
+                    self.push(Instr::Vararg(u8::MAX)); // Push all varargs
+                    u8::MAX // Signal to VM to calculate arg count from call base
+                } else {
+                    // No varargs used, remove the MarkCallBase if we added one
+                    if let Some(idx) = mark_idx {
+                        self.chunk.code.remove(idx);
+                    }
+                    num_args + 1 // +1 for implicit self argument
+                };
                 // Stack: [method, obj, arg1, arg2, ...]
-                // Call with num_args + 1 (the implicit self/obj argument)
-                let prefix = PrefixExp::FunctionCall(num_args + 1);
+                let prefix = PrefixExp::FunctionCall(num_args);
                 self.parse_prefix_extension(prefix)
             }
             TokenType::LiteralString | TokenType::LCurly => {

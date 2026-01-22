@@ -114,6 +114,9 @@ impl Frame {
                 // Functions
                 Instr::Closure(i) => state.instr_closure(self, i),
                 Instr::Call(num_args, num_rets) => state.call(num_args, num_rets)?,
+                Instr::MarkCallBase => {
+                    state.vararg_call_base = Some(state.stack.len());
+                }
                 Instr::Return(n) => {
                     return Ok(n);
                 }

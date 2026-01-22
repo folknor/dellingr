@@ -47,17 +47,15 @@ end
 local f = first(5, 100, 200)
 print("Test 6 - Vararg in expression: " .. tostring(f == 15))
 
--- Test 7: Nested vararg functions (with workaround for limitation)
-local outer = function(...)
-    local inner = function(...)
-        return ...
-    end
-    -- Workaround: capture varargs before passing to inner function
-    local a, b = ...
-    return inner(a, b)
+-- Test 7: Pass varargs directly to another function
+local inner = function(a, b, c)
+    return a + b + c
 end
-local n1, n2 = outer(7, 8)
-print("Test 7 - Nested varargs: " .. tostring(n1 == 7 and n2 == 8))
+local outer = function(...)
+    return inner(...)
+end
+local n = outer(10, 20, 30)
+print("Test 7 - Pass ... to function: " .. tostring(n == 60))
 
 -- Test 8: Vararg-only function (no regular params)
 local varonly = function(...)
@@ -67,8 +65,48 @@ end
 local v = varonly(1, 2, 3, 4)
 print("Test 8 - Vararg-only: " .. tostring(v == 10))
 
-print("All vararg tests complete!")
+-- Test 9: Pass varargs to print
+local printall = function(...)
+    print(...)
+end
+print("Test 9 - Pass ... to print (should show: hello world 42):")
+printall("hello", "world", 42)
 
--- NOTE: Using ... directly as function arguments is not fully supported.
--- For example: print(...) only passes the first vararg.
--- Workaround: capture varargs first: local a, b = ...; print(a, b)
+-- Test 10: Nested vararg passing
+local level1 = function(...)
+    return ...
+end
+local level2 = function(...)
+    return level1(...)
+end
+local level3 = function(...)
+    return level2(...)
+end
+local r10a, r10b, r10c = level3(100, 200, 300)
+print("Test 10 - Nested vararg passing: " .. tostring(r10a == 100 and r10b == 200 and r10c == 300))
+
+-- Test 11: Varargs with method call
+local obj = {
+    sum = function(self, ...)
+        local a, b = ...
+        return (a or 0) + (b or 0)
+    end
+}
+local wrapper = function(...)
+    return obj:sum(...)
+end
+local r11 = wrapper(5, 7)
+print("Test 11 - Varargs with method call: " .. tostring(r11 == 12))
+
+-- Test 12: Mixed fixed args and varargs in call
+local adder = function(base, ...)
+    local a, b = ...
+    return base + (a or 0) + (b or 0)
+end
+local caller = function(...)
+    return adder(100, ...)
+end
+local r12 = caller(10, 20)
+print("Test 12 - Fixed + varargs in call: " .. tostring(r12 == 130))
+
+print("All vararg tests complete!")

@@ -41,6 +41,9 @@ pub struct State {
     /// Each entry is (stack_index, upvalue_ref). Kept sorted by stack_index descending
     /// so we can efficiently close them when a function returns.
     open_upvalues: Vec<(usize, UpvalueRef)>,
+    /// Stack position marked before a vararg function call.
+    /// Used to calculate arg count when `...` is passed as an argument.
+    vararg_call_base: Option<usize>,
     /// Instruction counter - decrements with each instruction executed.
     /// When it reaches 0, execution stops with InstructionLimitExceeded.
     instructions_remaining: u64,
@@ -92,6 +95,7 @@ impl State {
             heap: GcHeap::with_threshold(Self::GC_INITIAL_THRESHOLD),
             string_literals: Vec::new(),
             open_upvalues: Vec::new(),
+            vararg_call_base: None,
             instructions_remaining: u64::MAX,
             instruction_limit: u64::MAX,
             instructions_executed: 0,
@@ -177,7 +181,15 @@ impl State {
     /// pushed first), so that after the call the last result is on the top of
     /// the stack.
     pub fn call(&mut self, num_args: u8, num_ret_expected: u8) -> Result<()> {
-        let idx = self.stack.len() - num_args as usize - 1;
+        // Handle vararg call: num_args == 255 means calculate from vararg_call_base
+        let (idx, actual_num_args) = if num_args == u8::MAX {
+            let base = self.vararg_call_base.take()
+                .expect("Call with 255 args but no vararg_call_base set");
+            let actual = (self.stack.len() - base - 1) as u8;
+            (base, actual)
+        } else {
+            (self.stack.len() - num_args as usize - 1, num_args)
+        };
         let func_val = self.stack.remove(idx);
         let num_ret_actual = if let Val::RustFn(f) = func_val {
             let old_stack_bottom = self.stack_bottom;
@@ -202,7 +214,7 @@ impl State {
             self.stack_bottom = old_stack_bottom;
             num_ret_reported
         } else if let Some(closure) = func_val.as_lua_function() {
-            self.eval_closure(closure, num_args)?
+            self.eval_closure(closure, actual_num_args)?
         } else if let Some(t) = func_val.as_table_ref() {
             // Check for __call metamethod
             if let Some(mt_ptr) = t.get_metatable() {
@@ -215,8 +227,8 @@ impl State {
                         // We need: [handler, table, arg1, arg2, ..., argN]
                         self.stack.insert(idx, func_val.clone());
                         self.stack.insert(idx, call_handler);
-                        // Now call with num_args + 1 (table is first arg)
-                        return self.call(num_args + 1, num_ret_expected);
+                        // Now call with actual_num_args + 1 (table is first arg)
+                        return self.call(actual_num_args + 1, num_ret_expected);
                     }
                 }
             }

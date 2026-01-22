@@ -129,7 +129,12 @@ pub(super) enum Instr {
     TForLoop(u8, isize),
 
     /// Function call (number of arguments, number of needed return values).
+    /// If num_args is 255, the actual arg count is calculated from the call base.
     Call(u8, u8),
+
+    /// Mark the current stack position as the call base for a vararg call.
+    /// Used when the last argument is `...` and we don't know the arg count at compile time.
+    MarkCallBase,
 
     /// Add the two values on the top of the stack.
     Add,
