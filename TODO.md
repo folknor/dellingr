@@ -46,7 +46,7 @@ These actions commit irreversible changes to the game world:
 - Building/constructing
 
 ### Tooling
-- [ ] Cost analyzer: CLI tool that takes a Lua file and prints each statement with its cost annotated, so players can optimize their scripts
+- [x] Cost analyzer: CLI `--analyze` flag shows static cost breakdown by operation type
 
 ### Cost System Gaps (needs discussion before implementation)
 - [ ] `SetList(0)` charges 1 regardless of actual element count - should charge after computing count
@@ -231,6 +231,20 @@ Findings from expert code review (January 2026). Organized by priority.
   - Upvalue stress tests (`upvalue_stress.lua`)
   - ~~GC stress scenarios~~ (skipped - not needed for game scripting)
   - Error recovery paths (`error_cases.lua`)
+
+### User Experience
+
+- [ ] **Make VM informative for users**
+  - Add source line numbers to Chunk for better error messages
+  - Show function names in stack traces
+  - Runtime cost warnings (e.g., "approaching budget limit")
+  - Helpful suggestions in common error scenarios
+
+- [ ] **Review error handling for non-programmers**
+  - Audit all error messages for clarity (avoid jargon like "stack index", "upvalue")
+  - Add "did you mean?" suggestions for typos in function/variable names
+  - Explain common mistakes (e.g., "table has no field 'x' - did you forget to initialize it?")
+  - Test error messages with non-programmer users
 
 ## Development Guidelines
 

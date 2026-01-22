@@ -30,6 +30,8 @@ pub(super) struct Chunk {
     pub(super) upvalues: Vec<UpvalueDesc>,
     /// Whether this function accepts varargs (...).
     pub(super) is_vararg: bool,
+    /// Optional function name (for debugging/analysis).
+    pub(super) name: Option<String>,
 }
 
 pub(super) fn parse_str(source: impl AsRef<str>) -> Result<Chunk> {

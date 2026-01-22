@@ -337,7 +337,7 @@ impl<'a> Parser<'a> {
             PlaceExp::Builtin(b) => Instr::set_builtin(b),
             _ => unreachable!("place expression was not a local, upvalue, or global variable"),
         };
-        self.parse_fndef()?;
+        self.parse_fndef_named(Some(name.to_string()))?;
         self.push(instr);
         Ok(())
     }
@@ -353,16 +353,24 @@ impl<'a> Parser<'a> {
         };
         self.push(table_instr);
 
-        // Parse all the fields. There must be at least one.
+        // Parse all the fields, building the full name (e.g., "foo.bar.baz").
+        let mut full_name = table_name.to_string();
         self.expect(TokenType::Dot)?;
-        let mut last_field_id = self.expect_identifier_id()?;
+        let mut last_field = self.expect_identifier()?;
+        full_name.push('.');
+        full_name.push_str(last_field);
+        let mut last_field_id = self.find_or_add_string(last_field)?;
+
         while self.input.try_pop(TokenType::Dot)?.is_some() {
             self.push(Instr::get_field(last_field_id));
-            last_field_id = self.expect_identifier_id()?;
+            last_field = self.expect_identifier()?;
+            full_name.push('.');
+            full_name.push_str(last_field);
+            last_field_id = self.find_or_add_string(last_field)?;
         }
 
         // Parse the function params and body.
-        self.parse_fndef()?;
+        self.parse_fndef_named(Some(full_name))?;
         self.push(Instr::set_field(0, last_field_id));
         Ok(())
     }
@@ -718,7 +726,7 @@ impl<'a> Parser<'a> {
         self.add_local(name)?;
 
         // Parse the function definition (pushes a Closure instruction)
-        self.parse_fndef()?;
+        self.parse_fndef_named(Some(name.to_string()))?;
 
         // Assign the closure to the local
         self.push(Instr::set_local(local_slot));
@@ -1468,13 +1476,19 @@ impl<'a> Parser<'a> {
 
     /// Parses the parameters and body of a function definition.
     fn parse_fndef(&mut self) -> Result<()> {
+        self.parse_fndef_named(None)
+    }
+
+    /// Parses the parameters and body of a function definition with an optional name.
+    fn parse_fndef_named(&mut self, name: Option<String>) -> Result<()> {
         let (params, is_vararg) = self.parse_params()?;
         if self.chunk.nested.len() >= u8::MAX as usize {
             return Err(self.error(SyntaxError::Complexity));
         }
 
         self.nest_level += 1;
-        let new_chunk = self.parse_chunk(&params, is_vararg)?;
+        let mut new_chunk = self.parse_chunk(&params, is_vararg)?;
+        new_chunk.name = name;
         self.level_down();
 
         self.chunk.nested.push(new_chunk);
