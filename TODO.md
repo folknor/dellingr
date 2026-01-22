@@ -53,32 +53,23 @@ These actions commit irreversible changes to the game world:
 
 ## Known Limitations
 
-### Closures: Capture-by-Value
-Upvalues are captured by value (copy) rather than by reference. This means:
-- Modifications to captured variables inside a closure don't affect the original
-- Multiple closures capturing the same variable get independent copies
-- Counter patterns like `local count = 0; return function() count = count + 1; return count end` won't work as expected (each call returns 1)
-
-Full Lua semantics would require "open upvalues" that point to stack slots and get "closed" to heap storage when the enclosing function returns.
-
-### Multiple Returns/Varargs as Function Arguments
-Using multiple return values or varargs directly as function arguments doesn't work:
+### Multiple Returns as Function Arguments
+Using multiple return values directly as function arguments doesn't fully work:
 ```lua
 local add = function(a, b) return a + b end
 local vals = function() return 3, 4 end
 add(vals())  -- Won't work: only first return value is passed
-
-local f = function(...)
-    print(...)  -- Won't work: only first vararg is passed
-end
 ```
 Workaround: capture values first, then pass them:
 ```lua
 local a, b = vals()
 add(a, b)  -- Works correctly
-
-local a, b = ...
-print(a, b)  -- Works correctly
+```
+Note: Varargs (`...`) as function arguments now works correctly:
+```lua
+local f = function(...)
+    print(...)  -- Works! All varargs are passed
+end
 ```
 
 ## Won't Implement
@@ -113,8 +104,9 @@ print(a, b)  -- Works correctly
 - [x] Bug fix: function calls with many locals
 - [x] Break statement in loops (`while`, `for`, `repeat`)
 - [x] Generic for loops (`for k, v in pairs(t) do`)
-- [x] Closures/upvalues (capture-by-value semantics)
+- [x] Closures/upvalues with proper capture-by-reference (open/closed upvalues)
 - [x] Multiple return values (including empty return, chained returns)
+- [x] Varargs as function arguments (`foo(...)` passes all varargs)
 - [x] Method call syntax (`obj:method(args)`)
 - [x] Varargs (`...` in function parameters and body)
 - [x] Table library: `table.insert`, `table.remove`, `table.sort`, `table.unpack`
