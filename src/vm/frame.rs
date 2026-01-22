@@ -50,7 +50,7 @@ impl Frame {
     }
 
     /// Jump forward/back by `offset` instructions.
-    fn jump(&mut self, offset: isize) -> Result<()> {
+    fn jump(&mut self, offset: i16) -> Result<()> {
         let new_ip = if offset >= 0 {
             self.ip.checked_add(offset as usize)
         } else {
@@ -63,7 +63,7 @@ impl Frame {
             }
             _ => Err(Error::without_location(ErrorKind::InvalidJump {
                 ip: self.ip,
-                offset,
+                offset: offset as isize,
             })),
         }
     }
@@ -120,58 +120,59 @@ impl Frame {
             let inst = self.get_instr();
             #[cfg(feature = "debug_vm")]
             println!("{:?}", inst);
-            match inst {
+            match inst.opcode() {
                 // === FREE OPERATIONS (cost 0) ===
 
                 // General control flow
-                Instr::Pop => {
+                Instr::OP_POP => {
                     state.pop_val();
                 }
-                Instr::Dup => {
+                Instr::OP_DUP => {
                     let val = state.stack.last().unwrap().clone();
                     state.stack.push(val);
                 }
-                Instr::Swap => {
+                Instr::OP_SWAP => {
                     let len = state.stack.len();
                     state.stack.swap(len - 1, len - 2);
                 }
-                Instr::Jump(offset) => self.jump(offset)?,
-                Instr::BranchFalse(ofst) => state.instr_branch(self, false, ofst, false)?,
-                Instr::BranchFalseKeep(ofst) => state.instr_branch(self, false, ofst, true)?,
-                Instr::BranchTrueKeep(ofst) => state.instr_branch(self, true, ofst, true)?,
+                Instr::OP_JUMP => self.jump(inst.sbx())?,
+                Instr::OP_BRANCH_FALSE => state.instr_branch(self, false, inst.sbx(), false)?,
+                Instr::OP_BRANCH_FALSE_KEEP => state.instr_branch(self, false, inst.sbx(), true)?,
+                Instr::OP_BRANCH_TRUE_KEEP => state.instr_branch(self, true, inst.sbx(), true)?,
 
                 // Local variables
-                Instr::GetLocal(i) => state.instr_get_local(i),
-                Instr::SetLocal(i) => state.instr_set_local(i),
+                Instr::OP_GET_LOCAL => state.instr_get_local(inst.a()),
+                Instr::OP_SET_LOCAL => state.instr_set_local(inst.a()),
 
                 // Upvalues
-                Instr::GetUpvalue(i) => state.instr_get_upvalue(self, i),
-                Instr::SetUpvalue(i) => state.instr_set_upvalue(self, i),
+                Instr::OP_GET_UPVALUE => state.instr_get_upvalue(self, inst.a()),
+                Instr::OP_SET_UPVALUE => state.instr_set_upvalue(self, inst.a()),
 
                 // Globals
-                Instr::GetGlobal(i) => state.instr_get_global(self, i),
-                Instr::SetGlobal(i) => state.instr_set_global(self, i)?,
+                Instr::OP_GET_GLOBAL => state.instr_get_global(self, inst.a()),
+                Instr::OP_SET_GLOBAL => state.instr_set_global(self, inst.a())?,
 
                 // Functions (calls and returns are free)
-                Instr::Closure(i) => state.instr_closure(self, i),
-                Instr::Call(num_args, num_rets) => state.call(num_args, num_rets)?,
-                Instr::MarkCallBase => {
+                Instr::OP_CLOSURE => state.instr_closure(self, inst.a()),
+                Instr::OP_CALL => state.call(inst.a(), inst.b())?,
+                Instr::OP_MARK_CALL_BASE => {
                     state.vararg_call_bases.push(state.stack.len());
                 }
-                Instr::CloseUpvalues(level) => {
+                Instr::OP_CLOSE_UPVALUES => {
                     // Close upvalues for locals at or above the given slot
                     // Used at end of loop iterations to capture per-iteration locals
-                    let stack_level = state.stack_bottom + level as usize;
+                    let stack_level = state.stack_bottom + inst.a() as usize;
                     state.close_upvalues(stack_level);
                 }
-                Instr::Return(n) => {
+                Instr::OP_RETURN => {
                     // Flush any remaining accumulated cost before returning
                     if local_cost > 0 {
                         state.consume_cost(local_cost)?;
                     }
-                    return Ok(n);
+                    return Ok(inst.a());
                 }
-                Instr::Vararg(n) => {
+                Instr::OP_VARARG => {
+                    let n = inst.a();
                     if n == u8::MAX {
                         // Push all varargs
                         for val in &self.varargs {
@@ -191,24 +192,24 @@ impl Frame {
                 }
 
                 // Literals (free)
-                Instr::PushNil => state.push_nil(),
-                Instr::PushBool(b) => state.push_boolean(b),
-                Instr::PushNum(i) => {
-                    let n = self.get_number_constant(i);
+                Instr::OP_PUSH_NIL => state.push_nil(),
+                Instr::OP_PUSH_BOOL => state.push_boolean(inst.a() != 0),
+                Instr::OP_PUSH_NUM => {
+                    let n = self.get_number_constant(inst.a());
                     state.push_number(n);
                 }
-                Instr::PushString(i) => {
-                    let val = state.get_string_constant(self, i);
+                Instr::OP_PUSH_STRING => {
+                    let val = state.get_string_constant(self, inst.a());
                     state.stack.push(val);
                 }
 
                 // Equality (comparisons are free)
-                Instr::Equal => {
+                Instr::OP_EQUAL => {
                     let val2 = state.pop_val();
                     let val1 = state.pop_val();
                     state.push_boolean(val1 == val2);
                 }
-                Instr::NotEqual => {
+                Instr::OP_NOT_EQUAL => {
                     let val2 = state.pop_val();
                     let val1 = state.pop_val();
                     state.push_boolean(val1 != val2);
@@ -216,95 +217,96 @@ impl Frame {
 
                 // Orderings (comparisons are free)
                 // Supports both number and string comparisons
-                Instr::Less => state.eval_compare(std::cmp::Ordering::Less, false)?,
-                Instr::Greater => state.eval_compare(std::cmp::Ordering::Greater, false)?,
-                Instr::LessEqual => state.eval_compare(std::cmp::Ordering::Greater, true)?,  // <= is !>
-                Instr::GreaterEqual => state.eval_compare(std::cmp::Ordering::Less, true)?,  // >= is !<
+                Instr::OP_LESS => state.eval_compare(std::cmp::Ordering::Less, false)?,
+                Instr::OP_GREATER => state.eval_compare(std::cmp::Ordering::Greater, false)?,
+                Instr::OP_LESS_EQUAL => state.eval_compare(std::cmp::Ordering::Greater, true)?,  // <= is !>
+                Instr::OP_GREATER_EQUAL => state.eval_compare(std::cmp::Ordering::Less, true)?,  // >= is !<
 
                 // `for` loops - control flow is free
-                Instr::ForLoop(slot, offset) => state.instr_for_loop(self, slot, offset)?,
-                Instr::ForPrep(slot, len) => state.instr_for_prep(self, slot, len)?,
+                Instr::OP_FOR_LOOP => state.instr_for_loop(self, inst.a(), inst.sbx())?,
+                Instr::OP_FOR_PREP => state.instr_for_prep(self, inst.a(), inst.sbx())?,
 
                 // Generic `for` loops - iteration is free
-                Instr::TForPrep(slot) => state.instr_tfor_prep(slot),
-                Instr::TForCall(slot, num_vars) => state.instr_tfor_call(slot, num_vars)?,
-                Instr::TForLoop(slot, offset) => state.instr_tfor_loop(self, slot, offset)?,
+                Instr::OP_TFOR_PREP => state.instr_tfor_prep(inst.a()),
+                Instr::OP_TFOR_CALL => state.instr_tfor_call(inst.a(), inst.b())?,
+                Instr::OP_TFOR_LOOP => state.instr_tfor_loop(self, inst.a(), inst.sbx())?,
 
                 // Length operator is free
-                Instr::Length => state.instr_length()?,
+                Instr::OP_LENGTH => state.instr_length()?,
 
                 // Logical not is free
-                Instr::Not => state.instr_not(),
+                Instr::OP_NOT => state.instr_not(),
 
                 // Table reads are free
-                Instr::GetField(i) => state.instr_get_field(self, i)?,
-                Instr::GetTable => state.instr_get_table()?,
+                Instr::OP_GET_FIELD => state.instr_get_field(self, inst.a())?,
+                Instr::OP_GET_TABLE => state.instr_get_table()?,
 
                 // String concatenation is free
-                Instr::Concat => state.concat_helper(2)?,
+                Instr::OP_CONCAT => state.concat_helper(2)?,
 
                 // === COSTED OPERATIONS (cost 1) ===
 
                 // Arithmetic costs 1
-                Instr::Add => {
+                Instr::OP_ADD => {
                     add_cost!(state, local_cost, 1);
                     state.eval_float_float(<f64 as ops::Add>::add)?;
                 }
-                Instr::Subtract => {
+                Instr::OP_SUBTRACT => {
                     add_cost!(state, local_cost, 1);
                     state.eval_float_float(<f64 as ops::Sub>::sub)?;
                 }
-                Instr::Multiply => {
+                Instr::OP_MULTIPLY => {
                     add_cost!(state, local_cost, 1);
                     state.eval_float_float(<f64 as ops::Mul>::mul)?;
                 }
-                Instr::Divide => {
+                Instr::OP_DIVIDE => {
                     add_cost!(state, local_cost, 1);
                     state.eval_float_float(<f64 as ops::Div>::div)?;
                 }
-                Instr::Mod => {
+                Instr::OP_MOD => {
                     add_cost!(state, local_cost, 1);
                     // Lua uses floored modulo: a % b = a - floor(a/b) * b
                     // This differs from Rust's remainder when signs differ
                     state.eval_float_float(|a, b| a - (a / b).floor() * b)?;
                 }
-                Instr::Pow => {
+                Instr::OP_POW => {
                     add_cost!(state, local_cost, 1);
                     state.eval_float_float(f64::powf)?;
                 }
 
                 // Unary negation costs 1
-                Instr::Negate => {
+                Instr::OP_NEGATE => {
                     add_cost!(state, local_cost, 1);
                     state.instr_negate()?;
                 }
 
                 // Table creation costs 1
-                Instr::NewTable => {
+                Instr::OP_NEW_TABLE => {
                     add_cost!(state, local_cost, 1);
                     state.new_table();
                 }
 
                 // Table writes cost 1
-                Instr::InitField(offset, key_id) => {
+                Instr::OP_INIT_FIELD => {
                     add_cost!(state, local_cost, 1);
-                    state.instr_init_field(self, offset, key_id)?;
+                    state.instr_init_field(self, inst.a(), inst.b())?;
                 }
-                Instr::InitIndex(offset) => {
+                Instr::OP_INIT_INDEX => {
                     add_cost!(state, local_cost, 1);
-                    state.instr_init_index(offset)?;
+                    state.instr_init_index(inst.a())?;
                 }
-                Instr::SetField(offset, i) => {
+                Instr::OP_SET_FIELD => {
                     add_cost!(state, local_cost, 1);
-                    state.instr_set_field(self, offset, i)?;
+                    state.instr_set_field(self, inst.a(), inst.b())?;
                 }
-                Instr::SetTable(offset) => {
+                Instr::OP_SET_TABLE => {
                     add_cost!(state, local_cost, 1);
-                    state.instr_set_table(offset)?;
+                    state.instr_set_table(inst.a())?;
                 }
 
                 // Array initialization: cost per element
-                Instr::SetList(n) => {
+                Instr::OP_SET_LIST => {
+                    let n = inst.a();
                     let count = if n == 0 {
                         // SetList(0) means "use all values above table"
                         // We'll charge based on actual count after operation
@@ -315,6 +317,13 @@ impl Frame {
                     };
                     add_cost!(state, local_cost, count);
                     state.instr_set_list(n)?;
+                }
+
+                // Unknown opcode
+                _ => {
+                    return Err(Error::without_location(ErrorKind::InternalError(
+                        format!("unknown opcode: {}", inst.opcode())
+                    )));
                 }
             }
         }
@@ -329,7 +338,7 @@ impl State {
         &mut self,
         frame: &mut Frame,
         cond: bool,
-        offset: isize,
+        offset: i16,
         keep_cond: bool,
     ) -> Result<()> {
         let val = self.pop_val();
@@ -364,7 +373,7 @@ impl State {
         self.push_closure(chunk, captured_upvalues);
     }
 
-    fn instr_for_prep(&mut self, frame: &mut Frame, local: u8, body_len: isize) -> Result<()> {
+    fn instr_for_prep(&mut self, frame: &mut Frame, local: u8, body_len: i16) -> Result<()> {
         // These slots should only be assigned to during this function.
         let step = self.pop_val().as_num().unwrap();
         let end = self.pop_val().as_num().unwrap();
@@ -381,7 +390,7 @@ impl State {
         Ok(())
     }
 
-    fn instr_for_loop(&mut self, frame: &mut Frame, local_slot: u8, offset: isize) -> Result<()> {
+    fn instr_for_loop(&mut self, frame: &mut Frame, local_slot: u8, offset: i16) -> Result<()> {
         let slot = local_slot as usize + self.stack_bottom;
         let mut var = self.stack[slot].as_num().unwrap();
         let limit = self.stack[slot + 1].as_num().unwrap();
@@ -439,7 +448,7 @@ impl State {
         &mut self,
         frame: &mut Frame,
         local_slot: u8,
-        offset: isize,
+        offset: i16,
     ) -> Result<()> {
         let base = local_slot as usize + self.stack_bottom;
         let first_var = &self.stack[base + 3];

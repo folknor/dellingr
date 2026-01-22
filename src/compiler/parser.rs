@@ -213,8 +213,8 @@ impl<'a> Parser<'a> {
         for break_idx in breaks {
             // The break instruction is a Jump with placeholder offset.
             // Patch it to jump to the end of the loop.
-            let offset = (loop_end - break_idx - 1) as isize;
-            self.chunk.code[break_idx] = Instr::Jump(offset);
+            let offset = (loop_end - break_idx - 1) as i16;
+            self.chunk.code[break_idx] = Instr::jump(offset);
         }
     }
 
@@ -225,7 +225,7 @@ impl<'a> Parser<'a> {
             let idx = self.chunk.code.len();
             breaks.push(idx);
             // Emit a placeholder Jump that will be patched by exit_loop
-            self.push(Instr::Jump(0));
+            self.push(Instr::jump(0));
             Ok(())
         } else {
             Err(self.error(SyntaxError::BreakOutsideLoop))
@@ -268,7 +268,7 @@ impl<'a> Parser<'a> {
         }
 
         self.parse_statements()?;
-        self.push(Instr::Return(0));
+        self.push(Instr::ret(0));
 
         // Copy upvalues to chunk
         self.chunk.upvalues = self.upvalues.iter().map(|(_, desc)| *desc).collect();
@@ -330,9 +330,9 @@ impl<'a> Parser<'a> {
     fn parse_fndecl_basic(&mut self, name: &'a str) -> Result<()> {
         let place_exp = self.parse_prefix_identifier(name)?;
         let instr = match place_exp {
-            PlaceExp::Local(i) => Instr::SetLocal(i),
-            PlaceExp::Upvalue(i) => Instr::SetUpvalue(i),
-            PlaceExp::Global(i) => Instr::SetGlobal(i),
+            PlaceExp::Local(i) => Instr::set_local(i),
+            PlaceExp::Upvalue(i) => Instr::set_upvalue(i),
+            PlaceExp::Global(i) => Instr::set_global(i),
             _ => unreachable!("place expression was not a local, upvalue, or global variable"),
         };
         self.parse_fndef()?;
@@ -343,9 +343,9 @@ impl<'a> Parser<'a> {
     fn parse_fndecl_table(&mut self, table_name: &'a str) -> Result<()> {
         // Push the table onto the stack.
         let table_instr = match self.parse_prefix_identifier(table_name)? {
-            PlaceExp::Local(i) => Instr::GetLocal(i),
-            PlaceExp::Upvalue(i) => Instr::GetUpvalue(i),
-            PlaceExp::Global(i) => Instr::GetGlobal(i),
+            PlaceExp::Local(i) => Instr::get_local(i),
+            PlaceExp::Upvalue(i) => Instr::get_upvalue(i),
+            PlaceExp::Global(i) => Instr::get_global(i),
             _ => unreachable!("place expression was not a local, upvalue, or global variable"),
         };
         self.push(table_instr);
@@ -354,13 +354,13 @@ impl<'a> Parser<'a> {
         self.expect(TokenType::Dot)?;
         let mut last_field_id = self.expect_identifier_id()?;
         while self.input.try_pop(TokenType::Dot)?.is_some() {
-            self.push(Instr::GetField(last_field_id));
+            self.push(Instr::get_field(last_field_id));
             last_field_id = self.expect_identifier_id()?;
         }
 
         // Parse the function params and body.
         self.parse_fndef()?;
-        self.push(Instr::SetField(0, last_field_id));
+        self.push(Instr::set_field(0, last_field_id));
         Ok(())
     }
 
@@ -376,12 +376,12 @@ impl<'a> Parser<'a> {
             match last_exp {
                 ExpDesc::Prefix(PrefixExp::FunctionCall(num_args)) => {
                     self.chunk.code.pop(); // Pop the Call(num_args, 1) instruction
-                    self.push(Instr::Call(num_args, u8::MAX)); // Emit Call with "return all"
+                    self.push(Instr::call(num_args, u8::MAX)); // Emit Call with "return all"
                     u8::MAX
                 }
                 ExpDesc::Vararg => {
                     self.chunk.code.pop(); // Pop the Vararg(1) instruction
-                    self.push(Instr::Vararg(u8::MAX)); // Emit Vararg with "return all"
+                    self.push(Instr::vararg(u8::MAX)); // Emit Vararg with "return all"
                     u8::MAX
                 }
                 _ => n,
@@ -390,7 +390,7 @@ impl<'a> Parser<'a> {
             0
         };
 
-        self.push(Instr::Return(n));
+        self.push(Instr::ret(n));
         self.input.try_pop(TokenType::Semi)?;
         Ok(())
     }
@@ -426,7 +426,7 @@ impl<'a> Parser<'a> {
                 Err(self.err_unexpected(tok, TokenType::Assign))
             }
             PrefixExp::FunctionCall(num_args) => {
-                self.push(Instr::Call(num_args, 0));
+                self.push(Instr::call(num_args, 0));
                 Ok(())
             }
             PrefixExp::Place(first_place) => self.parse_assign(first_place),
@@ -448,35 +448,35 @@ impl<'a> Parser<'a> {
         if diff > 0 {
             if let ExpDesc::Prefix(PrefixExp::FunctionCall(_)) = last_exp {
                 let num_args = match self.chunk.code.pop() {
-                    Some(Instr::Call(args, _)) => args,
+                    Some(instr) if instr.opcode() == Instr::OP_CALL => instr.a(),
                     i => unreachable!("PrefixExp::FunctionCall but last instruction was {:?}", i),
                 };
-                self.push(Instr::Call(num_args, 1 + diff as u8));
+                self.push(Instr::call(num_args, 1 + diff as u8));
             } else {
                 for _ in 0..diff {
-                    self.push(Instr::PushNil);
+                    self.push(Instr::push_nil());
                 }
             }
         } else {
             // discard excess rvals
             for _ in diff..0 {
-                self.push(Instr::Pop);
+                self.push(Instr::pop());
             }
         }
 
         places.reverse();
         for (i, place_exp) in places.into_iter().enumerate() {
             let instr = match place_exp {
-                PlaceExp::Local(i) => Instr::SetLocal(i),
-                PlaceExp::Upvalue(i) => Instr::SetUpvalue(i),
-                PlaceExp::Global(i) => Instr::SetGlobal(i),
+                PlaceExp::Local(i) => Instr::set_local(i),
+                PlaceExp::Upvalue(i) => Instr::set_upvalue(i),
+                PlaceExp::Global(i) => Instr::set_global(i),
                 PlaceExp::FieldAccess(literal_id) => {
                     let stack_offset = num_lvals as u8 - i as u8 - 1;
-                    Instr::SetField(stack_offset, literal_id)
+                    Instr::set_field(stack_offset, literal_id)
                 }
                 PlaceExp::TableIndex => {
                     let stack_offset = num_lvals as u8 - i as u8 - 1;
-                    Instr::SetTable(stack_offset)
+                    Instr::set_table(stack_offset)
                 }
             };
             self.push(instr);
@@ -500,16 +500,16 @@ impl<'a> Parser<'a> {
     fn eval_prefix_exp(&mut self, exp: &PrefixExp) {
         match exp {
             PrefixExp::FunctionCall(num_args) => {
-                self.push(Instr::Call(*num_args, 1));
+                self.push(Instr::call(*num_args, 1));
             }
             PrefixExp::Parenthesized => (),
             PrefixExp::Place(place) => {
                 let instr = match place {
-                    PlaceExp::Local(i) => Instr::GetLocal(*i),
-                    PlaceExp::Upvalue(i) => Instr::GetUpvalue(*i),
-                    PlaceExp::Global(i) => Instr::GetGlobal(*i),
-                    PlaceExp::FieldAccess(i) => Instr::GetField(*i),
-                    PlaceExp::TableIndex => Instr::GetTable,
+                    PlaceExp::Local(i) => Instr::get_local(*i),
+                    PlaceExp::Upvalue(i) => Instr::get_upvalue(*i),
+                    PlaceExp::Global(i) => Instr::get_global(*i),
+                    PlaceExp::FieldAccess(i) => Instr::get_field(*i),
+                    PlaceExp::TableIndex => Instr::get_table(),
                 };
                 self.push(instr);
             }
@@ -650,19 +650,19 @@ impl<'a> Parser<'a> {
             match num_names.cmp(&num_rvalues) {
                 Ordering::Less => {
                     for _ in num_names..num_rvalues {
-                        self.push(Instr::Pop);
+                        self.push(Instr::pop());
                     }
                 }
                 Ordering::Greater => {
                     if let ExpDesc::Prefix(PrefixExp::FunctionCall(num_args)) = last_exp {
                         self.chunk.code.pop(); // Pop the old 'Call' instruction
-                        self.push(Instr::Call(num_args, 1 + num_names - num_rvalues));
+                        self.push(Instr::call(num_args, 1 + num_names - num_rvalues));
                     } else if let ExpDesc::Vararg = last_exp {
                         self.chunk.code.pop(); // Pop the old 'Vararg(1)' instruction
-                        self.push(Instr::Vararg(1 + num_names - num_rvalues));
+                        self.push(Instr::vararg(1 + num_names - num_rvalues));
                     } else {
                         for _ in num_rvalues..num_names {
-                            self.push(Instr::PushNil);
+                            self.push(Instr::push_nil());
                         }
                     }
                 }
@@ -671,13 +671,13 @@ impl<'a> Parser<'a> {
         } else {
             // They've only been declared, just set them all nil
             for _ in &names {
-                self.push(Instr::PushNil);
+                self.push(Instr::push_nil());
             }
         }
 
         // Actually perform the assignment
         for i in (0..num_names).rev() {
-            self.push(Instr::SetLocal(i + old_local_count));
+            self.push(Instr::set_local(i + old_local_count));
         }
 
         // Bring the new variables into scope. It is important they are not
@@ -750,7 +750,7 @@ impl<'a> Parser<'a> {
         // The ForPrep command pulls three values off the stack and places them
         // into locals to use in the loop.
         let loop_start_instr_index = self.chunk.code.len();
-        self.push(Instr::ForPrep(current_local_slot, -1));
+        self.push(Instr::for_prep(current_local_slot, -1));
 
         // body
         self.enter_loop();
@@ -760,14 +760,14 @@ impl<'a> Parser<'a> {
         // Close upvalues for any locals declared inside the loop body.
         // This ensures each iteration captures its own values.
         if self.locals.len() as u8 > body_locals_start {
-            self.push(Instr::CloseUpvalues(body_locals_start));
+            self.push(Instr::close_upvalues(body_locals_start));
         }
 
-        let body_length = (self.chunk.code.len() - loop_start_instr_index) as isize;
-        self.push(Instr::ForLoop(current_local_slot, -(body_length)));
+        let body_length = (self.chunk.code.len() - loop_start_instr_index) as i16;
+        self.push(Instr::for_loop(current_local_slot, -body_length));
 
         // Correct the ForPrep instruction.
-        self.chunk.code[loop_start_instr_index] = Instr::ForPrep(current_local_slot, body_length);
+        self.chunk.code[loop_start_instr_index] = Instr::for_prep(current_local_slot, body_length);
 
         self.exit_loop();
         Ok(())
@@ -784,7 +784,7 @@ impl<'a> Parser<'a> {
             }
             TokenType::Do => {
                 let i = self.find_or_add_number(1.0)?;
-                self.push(Instr::PushNum(i));
+                self.push(Instr::push_num(i));
                 Ok(())
             }
             _ => Err(self.err_unexpected(next_token, TokenType::Do)),
@@ -826,27 +826,27 @@ impl<'a> Parser<'a> {
             if let ExpDesc::Prefix(PrefixExp::FunctionCall(_)) = last_exp {
                 // Adjust the Call instruction to return enough values
                 let num_args = match self.chunk.code.pop() {
-                    Some(Instr::Call(args, _)) => args,
+                    Some(instr) if instr.opcode() == Instr::OP_CALL => instr.a(),
                     i => unreachable!("PrefixExp::FunctionCall but last instruction was {:?}", i),
                 };
-                self.push(Instr::Call(num_args, 3 - num_exprs + 1));
+                self.push(Instr::call(num_args, 3 - num_exprs + 1));
             } else {
                 // Push nils to make up the difference
                 for _ in num_exprs..3 {
-                    self.push(Instr::PushNil);
+                    self.push(Instr::push_nil());
                 }
             }
         } else if num_exprs > 3 {
             // Discard excess values
             for _ in 3..num_exprs {
-                self.push(Instr::Pop);
+                self.push(Instr::pop());
             }
         }
 
         self.expect(TokenType::Do)?;
 
         // TForPrep: pop 3 values into the hidden locals
-        self.push(Instr::TForPrep(base_slot));
+        self.push(Instr::tfor_prep(base_slot));
 
         // Loop structure:
         // TForCall - call iterator, place results in loop var slots
@@ -855,9 +855,9 @@ impl<'a> Parser<'a> {
         // Jump back to TForCall
 
         let loop_start = self.chunk.code.len();
-        self.push(Instr::TForCall(base_slot, num_loop_vars));
+        self.push(Instr::tfor_call(base_slot, num_loop_vars));
         let tforloop_index = self.chunk.code.len();
-        self.push(Instr::TForLoop(base_slot, 0)); // placeholder offset
+        self.push(Instr::tfor_loop(base_slot, 0)); // placeholder offset
 
         // body
         self.enter_loop();
@@ -867,16 +867,16 @@ impl<'a> Parser<'a> {
         // Close upvalues for any locals declared inside the loop body.
         // This ensures each iteration captures its own values.
         if self.locals.len() as u8 > body_locals_start {
-            self.push(Instr::CloseUpvalues(body_locals_start));
+            self.push(Instr::close_upvalues(body_locals_start));
         }
 
         // Jump back to TForCall
         let body_end = self.chunk.code.len();
-        self.push(Instr::Jump(-((body_end + 1 - loop_start) as isize)));
+        self.push(Instr::jump(-((body_end + 1 - loop_start) as i16)));
 
         // Patch the TForLoop to jump past the body
-        let exit_offset = (self.chunk.code.len() - tforloop_index - 1) as isize;
-        self.chunk.code[tforloop_index] = Instr::TForLoop(base_slot, exit_offset);
+        let exit_offset = (self.chunk.code.len() - tforloop_index - 1) as i16;
+        self.chunk.code[tforloop_index] = Instr::tfor_loop(base_slot, exit_offset);
 
         self.exit_loop();
         Ok(())
@@ -900,7 +900,7 @@ impl<'a> Parser<'a> {
         // Track locals before body
         let body_locals_start = self.locals.len() as u8;
 
-        let body_start = self.chunk.code.len() as isize;
+        let body_start = self.chunk.code.len() as i16;
         self.enter_loop();
         self.parse_statements()?;
         self.expect(TokenType::Until)?;
@@ -909,11 +909,11 @@ impl<'a> Parser<'a> {
         // Close upvalues for any locals declared inside the loop body
         // (before the conditional jump back)
         if self.locals.len() as u8 > body_locals_start {
-            self.push(Instr::CloseUpvalues(body_locals_start));
+            self.push(Instr::close_upvalues(body_locals_start));
         }
 
-        let expr_end = self.chunk.code.len() as isize;
-        self.push(Instr::BranchFalse(body_start - (expr_end + 1)));
+        let expr_end = self.chunk.code.len() as i16;
+        self.push(Instr::branch_false(body_start - (expr_end + 1)));
         self.exit_loop();
         self.level_down();
         Ok(())
@@ -934,7 +934,7 @@ impl<'a> Parser<'a> {
         self.expect(TokenType::Do)?;
 
         let test_position = self.chunk.code.len();
-        self.push(Instr::BranchFalse(0));
+        self.push(Instr::branch_false(0));
 
         // Track locals before body
         let body_locals_start = self.locals.len() as u8;
@@ -945,14 +945,14 @@ impl<'a> Parser<'a> {
 
         // Close upvalues for any locals declared inside the loop body
         if self.locals.len() as u8 > body_locals_start {
-            self.push(Instr::CloseUpvalues(body_locals_start));
+            self.push(Instr::close_upvalues(body_locals_start));
         }
 
         let body_end = self.chunk.code.len();
-        self.push(Instr::Jump(-((body_end + 1 - condition_start) as isize)));
+        self.push(Instr::jump(-((body_end + 1 - condition_start) as i16)));
 
         let body_len = body_end - test_position;
-        self.chunk.code[test_position] = Instr::BranchFalse(body_len as isize);
+        self.chunk.code[test_position] = Instr::branch_false(body_len as i16);
 
         self.exit_loop();
         self.level_down();
@@ -974,7 +974,7 @@ impl<'a> Parser<'a> {
         self.nest_level += 1;
 
         let branch_instr_index = self.chunk.code.len();
-        self.push(Instr::BranchFalse(0));
+        self.push(Instr::branch_false(0));
 
         self.parse_statements()?;
         let mut branch_target = self.chunk.code.len();
@@ -986,8 +986,8 @@ impl<'a> Parser<'a> {
             branch_target += 1;
         }
 
-        let branch_offset = (branch_target - branch_instr_index - 1) as isize;
-        self.chunk.code[branch_instr_index] = Instr::BranchFalse(branch_offset);
+        let branch_offset = (branch_target - branch_instr_index - 1) as i16;
+        self.chunk.code[branch_instr_index] = Instr::branch_false(branch_offset);
         Ok(())
     }
 
@@ -1009,7 +1009,7 @@ impl<'a> Parser<'a> {
     /// for the end of the preceding block.
     fn parse_else_or_elseif(&mut self, elseif: bool) -> Result<()> {
         let jump_instr_index = self.chunk.code.len();
-        self.push(Instr::Jump(0));
+        self.push(Instr::jump(0));
         if elseif {
             self.parse_if_arm()?;
         } else {
@@ -1017,7 +1017,7 @@ impl<'a> Parser<'a> {
         }
         let new_len = self.chunk.code.len();
         let jump_len = new_len - jump_instr_index - 1;
-        self.chunk.code[jump_instr_index] = Instr::Jump(jump_len as isize);
+        self.chunk.code[jump_instr_index] = Instr::jump(jump_len as i16);
         Ok(())
     }
 
@@ -1061,12 +1061,12 @@ impl<'a> Parser<'a> {
         while self.input.try_pop(TokenType::Or)?.is_some() {
             exp_desc = ExpDesc::Other;
             let branch_instr_index = self.chunk.code.len();
-            self.push(Instr::BranchTrueKeep(0));
+            self.push(Instr::branch_true_keep(0));
             // If we don't short-circuit, pop the left-hand expression
-            self.push(Instr::Pop);
+            self.push(Instr::pop());
             self.parse_and()?;
-            let branch_offset = (self.chunk.code.len() - branch_instr_index - 1) as isize;
-            self.chunk.code[branch_instr_index] = Instr::BranchTrueKeep(branch_offset);
+            let branch_offset = (self.chunk.code.len() - branch_instr_index - 1) as i16;
+            self.chunk.code[branch_instr_index] = Instr::branch_true_keep(branch_offset);
         }
 
         Ok(exp_desc)
@@ -1079,12 +1079,12 @@ impl<'a> Parser<'a> {
         while self.input.try_pop(TokenType::And)?.is_some() {
             exp_desc = ExpDesc::Other;
             let branch_instr_index = self.chunk.code.len();
-            self.push(Instr::BranchFalseKeep(0));
+            self.push(Instr::branch_false_keep(0));
             // If we don't short-circuit, pop the left-hand expression
-            self.push(Instr::Pop);
+            self.push(Instr::pop());
             self.parse_comparison()?;
-            let branch_offset = (self.chunk.code.len() - branch_instr_index - 1) as isize;
-            self.chunk.code[branch_instr_index] = Instr::BranchFalseKeep(branch_offset);
+            let branch_offset = (self.chunk.code.len() - branch_instr_index - 1) as i16;
+            self.chunk.code[branch_instr_index] = Instr::branch_false_keep(branch_offset);
         }
 
         Ok(exp_desc)
@@ -1097,12 +1097,12 @@ impl<'a> Parser<'a> {
         let mut exp_desc = self.parse_concat()?;
         loop {
             let instr = match self.input.peek_type()? {
-                TokenType::Less => Instr::Less,
-                TokenType::LessEqual => Instr::LessEqual,
-                TokenType::Greater => Instr::Greater,
-                TokenType::GreaterEqual => Instr::GreaterEqual,
-                TokenType::Equal => Instr::Equal,
-                TokenType::NotEqual => Instr::NotEqual,
+                TokenType::Less => Instr::less(),
+                TokenType::LessEqual => Instr::less_equal(),
+                TokenType::Greater => Instr::greater(),
+                TokenType::GreaterEqual => Instr::greater_equal(),
+                TokenType::Equal => Instr::equal(),
+                TokenType::NotEqual => Instr::not_equal(),
                 _ => break,
             };
             exp_desc = ExpDesc::Other;
@@ -1119,7 +1119,7 @@ impl<'a> Parser<'a> {
         if self.input.try_pop(TokenType::DotDot)?.is_some() {
             exp_desc = ExpDesc::Other;
             self.parse_concat()?;
-            self.push(Instr::Concat);
+            self.push(Instr::concat());
         }
 
         Ok(exp_desc)
@@ -1130,8 +1130,8 @@ impl<'a> Parser<'a> {
         let mut exp_desc = self.parse_multiplication()?;
         loop {
             let instr = match self.input.peek_type()? {
-                TokenType::Plus => Instr::Add,
-                TokenType::Minus => Instr::Subtract,
+                TokenType::Plus => Instr::add(),
+                TokenType::Minus => Instr::subtract(),
                 _ => break,
             };
             exp_desc = ExpDesc::Other;
@@ -1147,9 +1147,9 @@ impl<'a> Parser<'a> {
         let mut exp_desc = self.parse_unary()?;
         loop {
             let instr = match self.input.peek_type()? {
-                TokenType::Star => Instr::Multiply,
-                TokenType::Slash => Instr::Divide,
-                TokenType::Mod => Instr::Mod,
+                TokenType::Star => Instr::multiply(),
+                TokenType::Slash => Instr::divide(),
+                TokenType::Mod => Instr::modulo(),
                 _ => break,
             };
             exp_desc = ExpDesc::Other;
@@ -1163,9 +1163,9 @@ impl<'a> Parser<'a> {
     /// Parses a unary expression (`not`, `#`, `-`). Precedence 2.
     fn parse_unary(&mut self) -> Result<ExpDesc> {
         let instr = match self.input.peek_type()? {
-            TokenType::Not => Instr::Not,
-            TokenType::Hash => Instr::Length,
-            TokenType::Minus => Instr::Negate,
+            TokenType::Not => Instr::not(),
+            TokenType::Hash => Instr::length(),
+            TokenType::Minus => Instr::negate(),
             _ => {
                 return self.parse_pow();
             }
@@ -1183,7 +1183,7 @@ impl<'a> Parser<'a> {
         if self.input.try_pop(TokenType::Caret)?.is_some() {
             exp_desc = ExpDesc::Other;
             self.parse_unary()?;
-            self.push(Instr::Pow);
+            self.push(Instr::pow());
         }
 
         Ok(exp_desc)
@@ -1247,25 +1247,25 @@ impl<'a> Parser<'a> {
             TokenType::LParen => {
                 // Always mark call base - needed when last arg is vararg or function call
                 let mark_idx = self.chunk.code.len();
-                self.push(Instr::MarkCallBase);
+                self.push(Instr::mark_call_base());
                 self.eval_prefix_exp(&base_expr);
                 self.input.next()?;
                 let (num_args, last_exp) = self.parse_call()?;
                 // If last arg is vararg, adjust to pass all varargs
                 let num_args = if let ExpDesc::Vararg = last_exp {
                     self.chunk.code.pop(); // Pop Vararg(1)
-                    self.push(Instr::Vararg(u8::MAX)); // Push all varargs
+                    self.push(Instr::vararg(u8::MAX)); // Push all varargs
                     u8::MAX // Signal to VM to calculate arg count from call base
                 } else if let ExpDesc::Prefix(PrefixExp::FunctionCall(_)) = last_exp {
                     // Last argument is a function call - adjust it to return all values
                     let inner_num_args = match self.chunk.code.pop() {
-                        Some(Instr::Call(args, _)) => args,
+                        Some(instr) if instr.opcode() == Instr::OP_CALL => instr.a(),
                         i => unreachable!(
                             "PrefixExp::FunctionCall but last instruction was {:?}",
                             i
                         ),
                     };
-                    self.push(Instr::Call(inner_num_args, u8::MAX)); // Return all values
+                    self.push(Instr::call(inner_num_args, u8::MAX)); // Return all values
                     u8::MAX // Signal to VM to calculate arg count from call base
                 } else {
                     // No special handling needed, remove the MarkCallBase
@@ -1283,7 +1283,7 @@ impl<'a> Parser<'a> {
                 // Method call: obj:method(args) becomes obj.method(obj, args)
                 // Always mark call base - needed when last arg is vararg or function call
                 let mark_idx = self.chunk.code.len();
-                self.push(Instr::MarkCallBase);
+                self.push(Instr::mark_call_base());
                 self.eval_prefix_exp(&base_expr);
                 self.input.next()?; // consume ':'
                 let method_name = self.expect_identifier()?;
@@ -1291,13 +1291,13 @@ impl<'a> Parser<'a> {
 
                 // Stack: [obj]
                 // Duplicate obj (need it as both receiver and first arg)
-                self.push(Instr::Dup);
+                self.push(Instr::dup());
                 // Stack: [obj, obj]
                 // Get the method from the object
-                self.push(Instr::GetField(name_idx));
+                self.push(Instr::get_field(name_idx));
                 // Stack: [obj, method]
                 // Swap so method is below obj (Call expects [func, args...])
-                self.push(Instr::Swap);
+                self.push(Instr::swap());
                 // Stack: [method, obj]
 
                 // Now parse the arguments
@@ -1306,18 +1306,18 @@ impl<'a> Parser<'a> {
                 // If last arg is vararg, adjust to pass all varargs
                 let num_args = if let ExpDesc::Vararg = last_exp {
                     self.chunk.code.pop(); // Pop Vararg(1)
-                    self.push(Instr::Vararg(u8::MAX)); // Push all varargs
+                    self.push(Instr::vararg(u8::MAX)); // Push all varargs
                     u8::MAX // Signal to VM to calculate arg count from call base
                 } else if let ExpDesc::Prefix(PrefixExp::FunctionCall(_)) = last_exp {
                     // Last argument is a function call - adjust it to return all values
                     let inner_num_args = match self.chunk.code.pop() {
-                        Some(Instr::Call(args, _)) => args,
+                        Some(instr) if instr.opcode() == Instr::OP_CALL => instr.a(),
                         i => unreachable!(
                             "PrefixExp::FunctionCall but last instruction was {:?}",
                             i
                         ),
                     };
-                    self.push(Instr::Call(inner_num_args, u8::MAX)); // Return all values
+                    self.push(Instr::call(inner_num_args, u8::MAX)); // Return all values
                     u8::MAX // Signal to VM to calculate arg count from call base
                 } else {
                     // No special handling needed, remove the MarkCallBase
@@ -1349,31 +1349,31 @@ impl<'a> Parser<'a> {
                 let text = self.get_text(tok);
                 let number = text.parse().unwrap();
                 let idx = self.find_or_add_number(number)?;
-                self.push(Instr::PushNum(idx));
+                self.push(Instr::push_num(idx));
             }
             TokenType::LiteralHexNumber => {
                 // Cut off the "0x"
                 let text = &self.get_text(tok)[2..];
                 let number = u128::from_str_radix(text, 16).unwrap() as f64;
                 let idx = self.find_or_add_number(number)?;
-                self.push(Instr::PushNum(idx));
+                self.push(Instr::push_num(idx));
             }
             TokenType::LiteralString => {
                 let text = self.get_literal_string_contents(tok);
                 let idx = self.find_or_add_string(&text)?;
-                self.push(Instr::PushString(idx));
+                self.push(Instr::push_string(idx));
             }
             TokenType::Function => self.parse_fndef()?,
-            TokenType::Nil => self.push(Instr::PushNil),
-            TokenType::False => self.push(Instr::PushBool(false)),
-            TokenType::True => self.push(Instr::PushBool(true)),
+            TokenType::Nil => self.push(Instr::push_nil()),
+            TokenType::False => self.push(Instr::push_bool(false)),
+            TokenType::True => self.push(Instr::push_bool(true)),
             TokenType::DotDotDot => {
                 // Check if we're in a vararg function
                 if !self.chunk.is_vararg {
                     return Err(self.error(SyntaxError::UnexpectedTok));
                 }
                 // Default: push 1 value (will be adjusted if in tail position)
-                self.push(Instr::Vararg(1));
+                self.push(Instr::vararg(1));
                 return Ok(ExpDesc::Vararg);
             }
             _ => {
@@ -1430,14 +1430,14 @@ impl<'a> Parser<'a> {
         self.level_down();
 
         self.chunk.nested.push(new_chunk);
-        self.push(Instr::Closure(self.chunk.nested.len() as u8 - 1));
+        self.push(Instr::closure(self.chunk.nested.len() as u8 - 1));
         self.expect(TokenType::End)?;
         Ok(())
     }
 
     /// Parses a table constructor.
     fn parse_table(&mut self) -> Result<()> {
-        self.push(Instr::NewTable);
+        self.push(Instr::new_table());
         if self.input.try_pop(TokenType::RCurly)?.is_none() {
             // i is the number of array-style entries.
             let mut i = 0;
@@ -1459,9 +1459,9 @@ impl<'a> Parser<'a> {
 
             if has_vararg {
                 // Use SetList(0) to indicate "use all values above table"
-                self.push(Instr::SetList(0));
+                self.push(Instr::set_list(0));
             } else if i > 0 {
-                self.push(Instr::SetList(i));
+                self.push(Instr::set_list(i));
             }
         }
         Ok(())
@@ -1475,7 +1475,7 @@ impl<'a> Parser<'a> {
                 let index = self.expect_identifier_id().unwrap();
                 self.expect(TokenType::Assign)?;
                 self.parse_expr()?;
-                self.push(Instr::InitField(counter, index));
+                self.push(Instr::init_field(counter, index));
                 Ok((counter, false))
             }
             TokenType::LSquare => {
@@ -1484,7 +1484,7 @@ impl<'a> Parser<'a> {
                 self.expect(TokenType::RSquare)?;
                 self.expect(TokenType::Assign)?;
                 self.parse_expr()?;
-                self.push(Instr::InitIndex(counter));
+                self.push(Instr::init_index(counter));
                 Ok((counter, false))
             }
             TokenType::DotDotDot => {
@@ -1494,7 +1494,7 @@ impl<'a> Parser<'a> {
                     return Err(self.error(SyntaxError::UnexpectedTok));
                 }
                 // Push all varargs onto stack
-                self.push(Instr::Vararg(u8::MAX));
+                self.push(Instr::vararg(u8::MAX));
                 // Return special marker indicating vararg was used
                 Ok((counter, true))
             }
@@ -1646,7 +1646,7 @@ mod tests {
     fn test06() {
         let text = "x=  not not 1";
         let output = Chunk {
-            code: vec![PushNum(0), Instr::Not, Instr::Not, SetGlobal(0), Return(0)],
+            code: vec![PushNum(0), Instr::not(), Instr::not(), SetGlobal(0), Return(0)],
             number_literals: vec![1.0],
             string_literals: vec!["x".into()],
             ..Chunk::default()
@@ -1782,7 +1782,7 @@ mod tests {
             Jump(9),
             PushNum(1),
             PushNum(2),
-            Instr::Equal,
+            Instr::equal(),
             BranchFalse(3),
             PushNum(3),
             SetGlobal(0),
@@ -1806,7 +1806,7 @@ mod tests {
         let code = vec![
             GetGlobal(0),
             PushNum(0),
-            Instr::Less,
+            Instr::less(),
             BranchFalse(5),
             GetGlobal(0),
             PushNum(1),
@@ -1833,7 +1833,7 @@ mod tests {
             SetLocal(0),
             GetGlobal(0),
             GetGlobal(1),
-            Instr::Equal,
+            Instr::equal(),
             CloseUpvalues(0), // close body-local x before potential jump back
             BranchFalse(-7),
             PushNum(1),

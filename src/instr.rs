@@ -1,214 +1,278 @@
-/// Instr is the instruction which can be read by the VM.
-///
-/// Many of the variants use an `isize` parameter, as an offset for the VM to
-/// jump.
-///
-/// Several others use a u8 parameter to index either the locals, the number
-/// literals, or the string literals.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(super) enum Instr {
-    /// Move the instruction pointer by the given offset.
-    Jump(isize),
+//! Fixed-width 32-bit instruction encoding.
+//!
+//! Format: [opcode:8][A:8][B:8][C:8] or [opcode:8][A:8][sBx:16]
+//!
+//! This encoding is 4x smaller than the previous enum-based representation
+//! (~16 bytes per instruction) and much more cache-friendly.
 
-    /// Pop a value from the stack. If it's truthy, add the given offset to the
-    /// instruction pointer.
-    //BranchTrue(isize),
+/// A 32-bit encoded instruction.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(transparent)]
+pub(crate) struct Instr(u32);
 
-    /// Pop a value from the stack. If it's falsey, add the given offset to the
-    /// instruction pointer.
-    BranchFalse(isize),
+// Opcode constants
+impl Instr {
+    // No operands
+    pub(crate) const OP_POP: u8 = 0;
+    pub(crate) const OP_DUP: u8 = 1;
+    pub(crate) const OP_SWAP: u8 = 2;
+    pub(crate) const OP_NEW_TABLE: u8 = 3;
+    pub(crate) const OP_GET_TABLE: u8 = 4;
+    pub(crate) const OP_ADD: u8 = 5;
+    pub(crate) const OP_SUBTRACT: u8 = 6;
+    pub(crate) const OP_MULTIPLY: u8 = 7;
+    pub(crate) const OP_DIVIDE: u8 = 8;
+    pub(crate) const OP_POW: u8 = 9;
+    pub(crate) const OP_MOD: u8 = 10;
+    pub(crate) const OP_CONCAT: u8 = 11;
+    pub(crate) const OP_LESS: u8 = 12;
+    pub(crate) const OP_LESS_EQUAL: u8 = 13;
+    pub(crate) const OP_GREATER: u8 = 14;
+    pub(crate) const OP_GREATER_EQUAL: u8 = 15;
+    pub(crate) const OP_EQUAL: u8 = 16;
+    pub(crate) const OP_NOT_EQUAL: u8 = 17;
+    pub(crate) const OP_NOT: u8 = 18;
+    pub(crate) const OP_LENGTH: u8 = 19;
+    pub(crate) const OP_NEGATE: u8 = 20;
+    pub(crate) const OP_MARK_CALL_BASE: u8 = 21;
+    pub(crate) const OP_PUSH_NIL: u8 = 22;
 
-    /// Examine, but do not pop a value from the stack. If it's truthy, add the
-    /// given offset to the instruction pointer.
-    BranchTrueKeep(isize),
+    // One u8 operand (in A slot)
+    pub(crate) const OP_GET_GLOBAL: u8 = 30;
+    pub(crate) const OP_SET_GLOBAL: u8 = 31;
+    pub(crate) const OP_GET_LOCAL: u8 = 32;
+    pub(crate) const OP_SET_LOCAL: u8 = 33;
+    pub(crate) const OP_GET_UPVALUE: u8 = 34;
+    pub(crate) const OP_SET_UPVALUE: u8 = 35;
+    pub(crate) const OP_GET_FIELD: u8 = 36;
+    pub(crate) const OP_INIT_INDEX: u8 = 37;
+    pub(crate) const OP_PUSH_NUM: u8 = 38;
+    pub(crate) const OP_PUSH_STRING: u8 = 39;
+    pub(crate) const OP_TFOR_PREP: u8 = 40;
+    pub(crate) const OP_RETURN: u8 = 41;
+    pub(crate) const OP_CLOSE_UPVALUES: u8 = 42;
+    pub(crate) const OP_CLOSURE: u8 = 43;
+    pub(crate) const OP_VARARG: u8 = 44;
+    pub(crate) const OP_SET_LIST: u8 = 45;
+    pub(crate) const OP_SET_TABLE: u8 = 46;
+    pub(crate) const OP_PUSH_BOOL: u8 = 47; // A=0 for false, A=1 for true
 
-    /// Examine, but do not pop a value from the stack. If it's falsey, add the
-    /// given offset to the instruction pointer.
-    BranchFalseKeep(isize),
+    // Two u8 operands (in A and B slots)
+    pub(crate) const OP_SET_FIELD: u8 = 50;
+    pub(crate) const OP_INIT_FIELD: u8 = 51;
+    pub(crate) const OP_TFOR_CALL: u8 = 52;
+    pub(crate) const OP_CALL: u8 = 53;
 
-    /// Pop a value from the stack and discard it.
-    Pop,
+    // Jump instructions (signed 16-bit offset in B+C slots)
+    pub(crate) const OP_JUMP: u8 = 60;
+    pub(crate) const OP_BRANCH_FALSE: u8 = 61;
+    pub(crate) const OP_BRANCH_TRUE_KEEP: u8 = 62;
+    pub(crate) const OP_BRANCH_FALSE_KEEP: u8 = 63;
 
-    /// Duplicate the value at the top of the stack.
-    Dup,
+    // u8 + signed 16-bit offset (A slot + sBx)
+    pub(crate) const OP_FOR_PREP: u8 = 70;
+    pub(crate) const OP_FOR_LOOP: u8 = 71;
+    pub(crate) const OP_TFOR_LOOP: u8 = 72;
+}
 
-    /// Swap the two values at the top of the stack.
-    Swap,
+impl Instr {
+    /// Create an instruction with no operands.
+    #[inline]
+    pub(crate) const fn op(opcode: u8) -> Self {
+        Instr((opcode as u32) << 24)
+    }
 
-    /// Use the param as an index into the string literal set. Using that
-    /// string, index the global table and push onto the stack.
-    GetGlobal(u8),
+    /// Create an instruction with one u8 operand (A).
+    #[inline]
+    pub(crate) const fn op_a(opcode: u8, a: u8) -> Self {
+        Instr((opcode as u32) << 24 | (a as u32) << 16)
+    }
 
-    /// Use the param as an index into the string literal set. Using that
-    /// string as a key, pop a value from the stack and assign to the global
-    /// table.
-    SetGlobal(u8),
+    /// Create an instruction with two u8 operands (A, B).
+    #[inline]
+    pub(crate) const fn op_ab(opcode: u8, a: u8, b: u8) -> Self {
+        Instr((opcode as u32) << 24 | (a as u32) << 16 | (b as u32) << 8)
+    }
 
-    /// Copy the given local to the top of the stack.
-    GetLocal(u8),
+    /// Create an instruction with three u8 operands (A, B, C).
+    #[inline]
+    #[allow(dead_code)]
+    pub(crate) const fn op_abc(opcode: u8, a: u8, b: u8, c: u8) -> Self {
+        Instr((opcode as u32) << 24 | (a as u32) << 16 | (b as u32) << 8 | c as u32)
+    }
 
-    /// Pop the value at the top of the stack, and place it in the given local
-    /// index.
-    SetLocal(u8),
+    /// Create an instruction with a signed 16-bit offset (sBx).
+    #[inline]
+    pub(crate) const fn op_sbx(opcode: u8, sbx: i16) -> Self {
+        Instr((opcode as u32) << 24 | (sbx as u16 as u32))
+    }
 
-    /// Copy the given upvalue to the top of the stack.
-    GetUpvalue(u8),
+    /// Create an instruction with one u8 and a signed 16-bit offset (A, sBx).
+    #[inline]
+    pub(crate) const fn op_a_sbx(opcode: u8, a: u8, sbx: i16) -> Self {
+        Instr((opcode as u32) << 24 | (a as u32) << 16 | (sbx as u16 as u32))
+    }
 
-    /// Pop the value at the top of the stack, and place it in the given upvalue
-    /// index.
-    SetUpvalue(u8),
+    /// Get the opcode.
+    #[inline]
+    pub(crate) const fn opcode(self) -> u8 {
+        (self.0 >> 24) as u8
+    }
 
-    /// Create a new table and place it on the stack.
-    NewTable,
+    /// Get the A operand.
+    #[inline]
+    pub(crate) const fn a(self) -> u8 {
+        (self.0 >> 16) as u8
+    }
 
-    /// Pop a table from the top of the stack, index it with the string literal
-    /// with the given index, and push the value onto the stack.
-    GetField(u8),
+    /// Get the B operand.
+    #[inline]
+    pub(crate) const fn b(self) -> u8 {
+        (self.0 >> 8) as u8
+    }
 
-    /// Assign to a table. The key will be string literal `op1`.
-    /// From the top, the stack should contain:
-    /// * The new value, which will be popped
-    /// * `op0` number of other values
-    /// * The table, which will be removed
-    SetField(u8, u8),
+    /// Get the C operand.
+    #[inline]
+    #[allow(dead_code)]
+    pub(crate) const fn c(self) -> u8 {
+        self.0 as u8
+    }
 
-    /// Pop a value from the stack. Use `op1` as a string literal's id to get
-    /// the key. The table will be `op0` positions from the top of the stack.
-    /// Put the table back where it was afterwards.
-    InitField(u8, u8),
+    /// Get the signed 16-bit offset (sBx).
+    #[inline]
+    pub(crate) const fn sbx(self) -> i16 {
+        self.0 as u16 as i16
+    }
 
-    /// Pop a value then a key. The table will be `op0` positions from the top
-    /// of the stack. Put the table back after the assignment.
-    InitIndex(u8),
+    /// Get the raw u32 value.
+    #[inline]
+    #[allow(dead_code)]
+    pub(crate) const fn raw(self) -> u32 {
+        self.0
+    }
+}
 
-    /// Get a value from a table.
-    GetTable,
+// Convenient constructors for each instruction type
+impl Instr {
+    // No operands
+    pub(crate) const fn pop() -> Self { Self::op(Self::OP_POP) }
+    pub(crate) const fn dup() -> Self { Self::op(Self::OP_DUP) }
+    pub(crate) const fn swap() -> Self { Self::op(Self::OP_SWAP) }
+    pub(crate) const fn new_table() -> Self { Self::op(Self::OP_NEW_TABLE) }
+    pub(crate) const fn get_table() -> Self { Self::op(Self::OP_GET_TABLE) }
+    pub(crate) const fn add() -> Self { Self::op(Self::OP_ADD) }
+    pub(crate) const fn subtract() -> Self { Self::op(Self::OP_SUBTRACT) }
+    pub(crate) const fn multiply() -> Self { Self::op(Self::OP_MULTIPLY) }
+    pub(crate) const fn divide() -> Self { Self::op(Self::OP_DIVIDE) }
+    pub(crate) const fn pow() -> Self { Self::op(Self::OP_POW) }
+    pub(crate) const fn modulo() -> Self { Self::op(Self::OP_MOD) }
+    pub(crate) const fn concat() -> Self { Self::op(Self::OP_CONCAT) }
+    pub(crate) const fn less() -> Self { Self::op(Self::OP_LESS) }
+    pub(crate) const fn less_equal() -> Self { Self::op(Self::OP_LESS_EQUAL) }
+    pub(crate) const fn greater() -> Self { Self::op(Self::OP_GREATER) }
+    pub(crate) const fn greater_equal() -> Self { Self::op(Self::OP_GREATER_EQUAL) }
+    pub(crate) const fn equal() -> Self { Self::op(Self::OP_EQUAL) }
+    pub(crate) const fn not_equal() -> Self { Self::op(Self::OP_NOT_EQUAL) }
+    pub(crate) const fn not() -> Self { Self::op(Self::OP_NOT) }
+    pub(crate) const fn length() -> Self { Self::op(Self::OP_LENGTH) }
+    pub(crate) const fn negate() -> Self { Self::op(Self::OP_NEGATE) }
+    pub(crate) const fn mark_call_base() -> Self { Self::op(Self::OP_MARK_CALL_BASE) }
+    pub(crate) const fn push_nil() -> Self { Self::op(Self::OP_PUSH_NIL) }
 
-    /// Assign to a table.
-    /// From the top, the stack should contain:
-    /// * The new value
-    /// * The given number of other values, which will be ignored
-    /// * The key
-    /// * The table
-    SetTable(u8),
+    // One u8 operand
+    pub(crate) const fn get_global(idx: u8) -> Self { Self::op_a(Self::OP_GET_GLOBAL, idx) }
+    pub(crate) const fn set_global(idx: u8) -> Self { Self::op_a(Self::OP_SET_GLOBAL, idx) }
+    pub(crate) const fn get_local(slot: u8) -> Self { Self::op_a(Self::OP_GET_LOCAL, slot) }
+    pub(crate) const fn set_local(slot: u8) -> Self { Self::op_a(Self::OP_SET_LOCAL, slot) }
+    pub(crate) const fn get_upvalue(idx: u8) -> Self { Self::op_a(Self::OP_GET_UPVALUE, idx) }
+    pub(crate) const fn set_upvalue(idx: u8) -> Self { Self::op_a(Self::OP_SET_UPVALUE, idx) }
+    pub(crate) const fn get_field(idx: u8) -> Self { Self::op_a(Self::OP_GET_FIELD, idx) }
+    pub(crate) const fn init_index(offset: u8) -> Self { Self::op_a(Self::OP_INIT_INDEX, offset) }
+    pub(crate) const fn push_num(idx: u8) -> Self { Self::op_a(Self::OP_PUSH_NUM, idx) }
+    pub(crate) const fn push_string(idx: u8) -> Self { Self::op_a(Self::OP_PUSH_STRING, idx) }
+    pub(crate) const fn tfor_prep(slot: u8) -> Self { Self::op_a(Self::OP_TFOR_PREP, slot) }
+    pub(crate) const fn ret(n: u8) -> Self { Self::op_a(Self::OP_RETURN, n) }
+    pub(crate) const fn close_upvalues(level: u8) -> Self { Self::op_a(Self::OP_CLOSE_UPVALUES, level) }
+    pub(crate) const fn closure(idx: u8) -> Self { Self::op_a(Self::OP_CLOSURE, idx) }
+    pub(crate) const fn vararg(n: u8) -> Self { Self::op_a(Self::OP_VARARG, n) }
+    pub(crate) const fn set_list(count: u8) -> Self { Self::op_a(Self::OP_SET_LIST, count) }
+    pub(crate) const fn set_table(offset: u8) -> Self { Self::op_a(Self::OP_SET_TABLE, offset) }
+    pub(crate) const fn push_bool(b: bool) -> Self { Self::op_a(Self::OP_PUSH_BOOL, b as u8) }
 
-    /// Push a `nil` value onto the stack.
-    PushNil,
+    // Two u8 operands
+    pub(crate) const fn set_field(offset: u8, idx: u8) -> Self { Self::op_ab(Self::OP_SET_FIELD, offset, idx) }
+    pub(crate) const fn init_field(offset: u8, idx: u8) -> Self { Self::op_ab(Self::OP_INIT_FIELD, offset, idx) }
+    pub(crate) const fn tfor_call(slot: u8, num_vars: u8) -> Self { Self::op_ab(Self::OP_TFOR_CALL, slot, num_vars) }
+    pub(crate) const fn call(num_args: u8, num_rets: u8) -> Self { Self::op_ab(Self::OP_CALL, num_args, num_rets) }
 
-    /// Push the given boolean value onto the stack.
-    PushBool(bool),
+    // Jump instructions (signed 16-bit offset)
+    pub(crate) const fn jump(offset: i16) -> Self { Self::op_sbx(Self::OP_JUMP, offset) }
+    pub(crate) const fn branch_false(offset: i16) -> Self { Self::op_sbx(Self::OP_BRANCH_FALSE, offset) }
+    pub(crate) const fn branch_true_keep(offset: i16) -> Self { Self::op_sbx(Self::OP_BRANCH_TRUE_KEEP, offset) }
+    pub(crate) const fn branch_false_keep(offset: i16) -> Self { Self::op_sbx(Self::OP_BRANCH_FALSE_KEEP, offset) }
 
-    /// Fetch the number (float) from the literal set at the given index.
-    PushNum(u8),
+    // u8 + signed 16-bit offset
+    pub(crate) const fn for_prep(slot: u8, offset: i16) -> Self { Self::op_a_sbx(Self::OP_FOR_PREP, slot, offset) }
+    pub(crate) const fn for_loop(slot: u8, offset: i16) -> Self { Self::op_a_sbx(Self::OP_FOR_LOOP, slot, offset) }
+    pub(crate) const fn tfor_loop(slot: u8, offset: i16) -> Self { Self::op_a_sbx(Self::OP_TFOR_LOOP, slot, offset) }
+}
 
-    /// Fetch the string from the literal set at the given index.
-    PushString(u8),
-
-    /// Initializes a for loop, which will use the four local slots starting
-    /// at `param0`. End the loop by jumping `param1` forward.
-    ForPrep(u8, isize),
-
-    /// End a for loop, using the locals starting at the first parameter to
-    /// track its progress. If the loop isn't over, jump using the second
-    /// parameter.
-    ForLoop(u8, isize),
-
-    /// Prepare a generic for loop. Pop 3 values (iterator, state, initial)
-    /// from the stack and store them in the locals starting at the given slot.
-    /// The first param is the local slot, second is the number of loop variables.
-    TForPrep(u8),
-
-    /// Call the iterator function for a generic for loop. The first param is
-    /// the local slot where (iterator, state, var) are stored. Second param is
-    /// the number of loop variables to receive.
-    TForCall(u8, u8),
-
-    /// Check if the first loop variable is nil. If so, jump by the offset.
-    /// Otherwise, copy the first loop variable to the control variable slot.
-    /// First param is the local slot, second is the jump offset.
-    TForLoop(u8, isize),
-
-    /// Function call (number of arguments, number of needed return values).
-    /// If num_args is 255, the actual arg count is calculated from the call base.
-    Call(u8, u8),
-
-    /// Mark the current stack position as the call base for a vararg call.
-    /// Used when the last argument is `...` and we don't know the arg count at compile time.
-    MarkCallBase,
-
-    /// Add the two values on the top of the stack.
-    Add,
-
-    /// Subtract the top value on the stack from the second value on the stack.
-    Subtract,
-
-    /// Multiply the two values on the top of the stack.
-    Multiply,
-
-    /// Divide the second value on the stack by the first.
-    Divide,
-
-    /// Raise the second value on the stack to the power of the first.
-    Pow,
-
-    /// Take the remainder, after dividing the second value on the stack by the
-    /// first.
-    Mod,
-
-    /// Concatenate the two values on the top of the stack.
-    Concat,
-
-    /// `true` if the second value on the stack is less than the first; `false`
-    /// otherwise.
-    Less,
-
-    /// `true` if the second value on the stack is less than or equal to the
-    /// first; `false` otherwise.
-    LessEqual,
-
-    /// `true` if the second value on the stack is greater than the first;
-    /// `false` otherwise.
-    Greater,
-
-    /// `true` if the second value on the stack is greater than or equal to the
-    /// first; `false` otherwise.
-    GreaterEqual,
-
-    /// `true` if and only if the two values at the top of the stack are equal.
-    Equal,
-
-    /// `true` if and only if the two values at the top of the stack are not
-    /// equal.
-    NotEqual,
-
-    /// `true` if the value at the top of the stack is `false` or `nil`,
-    /// `false` otherwise.
-    Not,
-
-    /// Applies the length operator (`#`) to the value at the top of the stack.
-    Length,
-
-    /// Applies the unary negation operator to the value at the top of the
-    /// stack.
-    Negate,
-
-    /// Return n values from the chunk.
-    Return(u8),
-
-    /// Close all upvalues at or above the given local slot.
-    /// Used at the end of loop iterations to capture per-iteration locals.
-    CloseUpvalues(u8),
-
-    /// Create a closure from a Chunk and push it onto the stack.
-    Closure(u8),
-
-    /// Push varargs onto the stack.
-    /// The parameter indicates how many values to push (padding with nil if needed).
-    /// 255 means push all varargs.
-    Vararg(u8),
-
-    /// Pop n values from the stack, then pop a table. Assign the last value
-    /// popped to `table[1]`, the second-to-last value to `table[2]`, etc.
-    /// Push the table back afterwards.
-    SetList(u8),
+impl std::fmt::Debug for Instr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.opcode() {
+            Self::OP_POP => write!(f, "Pop"),
+            Self::OP_DUP => write!(f, "Dup"),
+            Self::OP_SWAP => write!(f, "Swap"),
+            Self::OP_NEW_TABLE => write!(f, "NewTable"),
+            Self::OP_GET_TABLE => write!(f, "GetTable"),
+            Self::OP_ADD => write!(f, "Add"),
+            Self::OP_SUBTRACT => write!(f, "Subtract"),
+            Self::OP_MULTIPLY => write!(f, "Multiply"),
+            Self::OP_DIVIDE => write!(f, "Divide"),
+            Self::OP_POW => write!(f, "Pow"),
+            Self::OP_MOD => write!(f, "Mod"),
+            Self::OP_CONCAT => write!(f, "Concat"),
+            Self::OP_LESS => write!(f, "Less"),
+            Self::OP_LESS_EQUAL => write!(f, "LessEqual"),
+            Self::OP_GREATER => write!(f, "Greater"),
+            Self::OP_GREATER_EQUAL => write!(f, "GreaterEqual"),
+            Self::OP_EQUAL => write!(f, "Equal"),
+            Self::OP_NOT_EQUAL => write!(f, "NotEqual"),
+            Self::OP_NOT => write!(f, "Not"),
+            Self::OP_LENGTH => write!(f, "Length"),
+            Self::OP_NEGATE => write!(f, "Negate"),
+            Self::OP_MARK_CALL_BASE => write!(f, "MarkCallBase"),
+            Self::OP_PUSH_NIL => write!(f, "PushNil"),
+            Self::OP_GET_GLOBAL => write!(f, "GetGlobal({})", self.a()),
+            Self::OP_SET_GLOBAL => write!(f, "SetGlobal({})", self.a()),
+            Self::OP_GET_LOCAL => write!(f, "GetLocal({})", self.a()),
+            Self::OP_SET_LOCAL => write!(f, "SetLocal({})", self.a()),
+            Self::OP_GET_UPVALUE => write!(f, "GetUpvalue({})", self.a()),
+            Self::OP_SET_UPVALUE => write!(f, "SetUpvalue({})", self.a()),
+            Self::OP_GET_FIELD => write!(f, "GetField({})", self.a()),
+            Self::OP_INIT_INDEX => write!(f, "InitIndex({})", self.a()),
+            Self::OP_PUSH_NUM => write!(f, "PushNum({})", self.a()),
+            Self::OP_PUSH_STRING => write!(f, "PushString({})", self.a()),
+            Self::OP_TFOR_PREP => write!(f, "TForPrep({})", self.a()),
+            Self::OP_RETURN => write!(f, "Return({})", self.a()),
+            Self::OP_CLOSE_UPVALUES => write!(f, "CloseUpvalues({})", self.a()),
+            Self::OP_CLOSURE => write!(f, "Closure({})", self.a()),
+            Self::OP_VARARG => write!(f, "Vararg({})", self.a()),
+            Self::OP_SET_LIST => write!(f, "SetList({})", self.a()),
+            Self::OP_SET_TABLE => write!(f, "SetTable({})", self.a()),
+            Self::OP_PUSH_BOOL => write!(f, "PushBool({})", self.a() != 0),
+            Self::OP_SET_FIELD => write!(f, "SetField({}, {})", self.a(), self.b()),
+            Self::OP_INIT_FIELD => write!(f, "InitField({}, {})", self.a(), self.b()),
+            Self::OP_TFOR_CALL => write!(f, "TForCall({}, {})", self.a(), self.b()),
+            Self::OP_CALL => write!(f, "Call({}, {})", self.a(), self.b()),
+            Self::OP_JUMP => write!(f, "Jump({})", self.sbx()),
+            Self::OP_BRANCH_FALSE => write!(f, "BranchFalse({})", self.sbx()),
+            Self::OP_BRANCH_TRUE_KEEP => write!(f, "BranchTrueKeep({})", self.sbx()),
+            Self::OP_BRANCH_FALSE_KEEP => write!(f, "BranchFalseKeep({})", self.sbx()),
+            Self::OP_FOR_PREP => write!(f, "ForPrep({}, {})", self.a(), self.sbx()),
+            Self::OP_FOR_LOOP => write!(f, "ForLoop({}, {})", self.a(), self.sbx()),
+            Self::OP_TFOR_LOOP => write!(f, "TForLoop({}, {})", self.a(), self.sbx()),
+            op => write!(f, "Unknown(op={}, raw={:#x})", op, self.0),
+        }
+    }
 }

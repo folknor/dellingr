@@ -125,10 +125,12 @@ Findings from expert code review (January 2026). Organized by priority.
   - Added `Cell<Option<usize>>` cache, invalidated on integer key changes
   - `array_insert`/`array_remove`/`set_array` update cache directly with known length
 
-- [ ] **Fixed-width 32-bit instruction encoding** (`instr.rs` `Instr` enum)
-  - Current instructions are ~16 bytes each (enum with isize variant)
+- [x] **Fixed-width 32-bit instruction encoding** (`instr.rs` `Instr` struct)
+  - Previous instructions were ~16 bytes each (enum with isize variant)
   - 1000-instruction function = 16KB, may not fit L1 cache
-  - **Fix:** Use 32-bit encoding `[opcode:8][A:8][B:8][C:8]` (4x smaller)
+  - **Fixed:** New 32-bit encoding `[opcode:8][A:8][B:8][C:8]` or `[opcode:8][A:8][sBx:16]` (4x smaller)
+  - Jump offsets now use i16 (±32767 instructions, plenty for scripts)
+  - Opcode-based dispatch in VM frame.rs using `match inst.opcode()`
 
 ### MEDIUM PRIORITY - Performance Optimizations
 
