@@ -286,6 +286,10 @@ add_fn!("broken", |state| {
 - goto/labels
 - Bitwise operators
 - `string.rep`, `string.byte`, `string.char` (exploitable for free computation)
+- Arithmetic metamethods (`__add`, `__sub`, `__mul`, `__div`, `__mod`, `__pow`, `__unm`)
+- Comparison metamethods (`__eq`, `__lt`, `__le`)
+- Concat metamethod (`__concat`)
+- Long strings (`[[...]]`, `[=[...]=]`)
 
 ## Done
 
