@@ -9,7 +9,7 @@
 //! moves, so pointers to objects remain stable.
 
 use std::borrow::Borrow;
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::hash::Hash;
@@ -21,8 +21,9 @@ use super::LuaType;
 use super::Table;
 use super::Val;
 
-/// A reference to an upvalue, which can be shared between closures.
-pub(super) type UpvalueRef = Rc<RefCell<Upvalue>>;
+// ============================================================================
+// Upvalue Pool - Arena-based upvalue storage with reference counting
+// ============================================================================
 
 /// An upvalue - either open (pointing to stack) or closed (holding value).
 #[derive(Clone, Debug)]
@@ -31,6 +32,70 @@ pub(crate) enum Upvalue {
     Open(usize),
     /// Closed upvalue holding the value directly
     Closed(Val),
+}
+
+/// Index into the upvalue pool.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct UpvalueRef(u32);
+
+impl UpvalueRef {
+    fn new(idx: u32) -> Self {
+        Self(idx)
+    }
+
+    fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// Pool for upvalue storage. Avoids per-upvalue heap allocations by storing
+/// all upvalues contiguously. Upvalues are never freed until the VM is dropped,
+/// which is fine for game scripting where VMs have short lifetimes.
+pub(crate) struct UpvaluePool {
+    slots: Vec<Upvalue>,
+}
+
+impl Default for UpvaluePool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl UpvaluePool {
+    pub(super) fn new() -> Self {
+        Self {
+            slots: Vec::with_capacity(64),
+        }
+    }
+
+    /// Allocate a new upvalue and return its reference.
+    pub(super) fn alloc(&mut self, upvalue: Upvalue) -> UpvalueRef {
+        let idx = self.slots.len() as u32;
+        self.slots.push(upvalue);
+        UpvalueRef::new(idx)
+    }
+
+    /// Get immutable access to an upvalue.
+    #[inline]
+    pub(super) fn get(&self, uv_ref: UpvalueRef) -> &Upvalue {
+        &self.slots[uv_ref.index()]
+    }
+
+    /// Get mutable access to an upvalue.
+    #[inline]
+    pub(super) fn get_mut(&mut self, uv_ref: UpvalueRef) -> &mut Upvalue {
+        &mut self.slots[uv_ref.index()]
+    }
+
+    /// Mark all closed upvalues' values for GC.
+    /// Called during garbage collection to ensure closed upvalue contents are preserved.
+    pub(super) fn mark_closed_upvalues(&self) {
+        for upvalue in &self.slots {
+            if let Upvalue::Closed(val) = upvalue {
+                val.mark_reachable();
+            }
+        }
+    }
 }
 
 /// A Lua closure: a function with captured upvalues.
@@ -404,12 +469,9 @@ impl Markable for WrappedObject {
 impl Markable for RawObject {
     fn mark_reachable(&self) {
         match self {
-            RawObject::LuaFn(closure) => {
-                for uv in &closure.upvalues {
-                    if let Upvalue::Closed(val) = &*RefCell::borrow(uv) {
-                        val.mark_reachable();
-                    }
-                }
+            RawObject::LuaFn(_closure) => {
+                // Upvalues are marked through State::mark_reachable via the upvalue pool.
+                // The closure's upvalue indices don't need separate marking.
             }
             RawObject::Table(tbl) => tbl.mark_reachable(),
         }

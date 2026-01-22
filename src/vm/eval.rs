@@ -233,6 +233,7 @@ impl State {
                     stack,
                     globals,
                     string_literals,
+                    upvalue_pool,
                     open_upvalues,
                     ..
                 } = self;
@@ -240,8 +241,9 @@ impl State {
                     stack.mark_reachable();
                     globals.mark_reachable();
                     string_literals.mark_reachable();
+                    // Mark closed upvalues in case any are in open_upvalues list
                     for (_, uv_ref) in open_upvalues {
-                        if let Upvalue::Closed(val) = &*uv_ref.borrow() {
+                        if let Upvalue::Closed(val) = upvalue_pool.get(*uv_ref) {
                             val.mark_reachable();
                         }
                     }
@@ -267,6 +269,7 @@ impl State {
             stack,
             globals,
             string_literals,
+            upvalue_pool,
             open_upvalues,
             ..
         } = self;
@@ -274,8 +277,9 @@ impl State {
             stack.mark_reachable();
             globals.mark_reachable();
             string_literals.mark_reachable();
+            // Mark closed upvalues in case any are in open_upvalues list
             for (_, uv_ref) in open_upvalues {
-                if let Upvalue::Closed(val) = &*uv_ref.borrow() {
+                if let Upvalue::Closed(val) = upvalue_pool.get(*uv_ref) {
                     val.mark_reachable();
                 }
             }
@@ -288,18 +292,18 @@ impl State {
         // Check if we already have an open upvalue for this stack slot
         for (idx, uv_ref) in &self.open_upvalues {
             if *idx == stack_idx {
-                return uv_ref.clone();
+                return *uv_ref;
             }
         }
-        // Create a new open upvalue
-        let uv_ref = std::rc::Rc::new(std::cell::RefCell::new(Upvalue::Open(stack_idx)));
+        // Create a new open upvalue in the pool
+        let uv_ref = self.upvalue_pool.alloc(Upvalue::Open(stack_idx));
         // Insert in order (sorted by stack index ascending, so we can pop from end in O(1))
         let pos = self
             .open_upvalues
             .iter()
             .position(|(idx, _)| *idx > stack_idx)
             .unwrap_or(self.open_upvalues.len());
-        self.open_upvalues.insert(pos, (stack_idx, uv_ref.clone()));
+        self.open_upvalues.insert(pos, (stack_idx, uv_ref));
         uv_ref
     }
 
@@ -315,7 +319,7 @@ impl State {
             }
             let (_, uv_ref) = self.open_upvalues.pop().unwrap();
             let val = self.stack[idx].clone();
-            *uv_ref.borrow_mut() = Upvalue::Closed(val);
+            *self.upvalue_pool.get_mut(uv_ref) = Upvalue::Closed(val);
         }
     }
 

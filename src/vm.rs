@@ -24,7 +24,7 @@ use super::Instr;
 use super::Result;
 
 use lua_val::Val;
-use object::{GcHeap, Markable, Upvalue, UpvalueRef};
+use object::{GcHeap, Markable, UpvaluePool, UpvalueRef};
 use table::Table;
 
 /// The main interface into the Lua VM.
@@ -39,8 +39,10 @@ pub struct State {
     pub(super) heap: GcHeap,
     /// The string literals (as `Val`s) of every active `Frame`.
     pub(super) string_literals: Vec<Val>,
+    /// Pool for upvalue storage. Avoids per-upvalue heap allocations.
+    pub(super) upvalue_pool: UpvaluePool,
     /// Open upvalues currently pointing to stack slots.
-    /// Each entry is (stack_index, upvalue_ref). Kept sorted by stack_index descending
+    /// Each entry is (stack_index, upvalue_ref). Kept sorted by stack_index ascending
     /// so we can efficiently close them when a function returns.
     pub(super) open_upvalues: Vec<(usize, UpvalueRef)>,
     /// Stack of call base positions for dynamic argument counting.
@@ -81,12 +83,8 @@ impl Markable for State {
         self.stack.mark_reachable();
         self.globals.mark_reachable();
         self.string_literals.mark_reachable();
-        // Mark closed upvalues (open ones point to stack which is already marked)
-        for (_, uv_ref) in &self.open_upvalues {
-            if let Upvalue::Closed(val) = &*uv_ref.borrow() {
-                val.mark_reachable();
-            }
-        }
+        // Mark all closed upvalues (open ones point to stack which is already marked)
+        self.upvalue_pool.mark_closed_upvalues();
     }
 }
 
@@ -110,6 +108,7 @@ impl State {
             stack_bottom: 0,
             heap: GcHeap::with_threshold(Self::GC_INITIAL_THRESHOLD),
             string_literals: Vec::with_capacity(64), // Pre-size for string literals
+            upvalue_pool: UpvaluePool::new(),
             open_upvalues: Vec::new(),
             vararg_call_bases: Vec::new(),
             cost_remaining: i64::MAX,

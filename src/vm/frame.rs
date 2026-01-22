@@ -518,8 +518,8 @@ impl State {
     }
 
     fn instr_get_upvalue(&mut self, frame: &Frame, upvalue_num: u8) {
-        let uv_ref = &frame.upvalues[upvalue_num as usize];
-        let val = match &*uv_ref.borrow() {
+        let uv_ref = frame.upvalues[upvalue_num as usize];
+        let val = match self.upvalue_pool.get(uv_ref) {
             Upvalue::Open(stack_idx) => self.stack[*stack_idx].clone(),
             Upvalue::Closed(v) => v.clone(),
         };
@@ -528,14 +528,13 @@ impl State {
 
     fn instr_set_upvalue(&mut self, frame: &Frame, upvalue_num: u8) {
         let val = self.pop_val();
-        let uv_ref = &frame.upvalues[upvalue_num as usize];
-        let mut uv = uv_ref.borrow_mut();
-        match &mut *uv {
+        let uv_ref = frame.upvalues[upvalue_num as usize];
+        match self.upvalue_pool.get(uv_ref).clone() {
             Upvalue::Open(stack_idx) => {
-                self.stack[*stack_idx] = val;
+                self.stack[stack_idx] = val;
             }
-            Upvalue::Closed(v) => {
-                *v = val;
+            Upvalue::Closed(_) => {
+                *self.upvalue_pool.get_mut(uv_ref) = Upvalue::Closed(val);
             }
         }
     }

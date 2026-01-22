@@ -144,10 +144,11 @@ Findings from expert code review (January 2026). Organized by priority.
   - Changed `Closure.chunk` and `Frame.chunk` to `Rc<Chunk>`
   - Closure copies now just clone the Rc, not the entire chunk
 
-- [ ] **Replace `Rc<RefCell<Upvalue>>` with arena** (`vm.rs` `State::find_or_create_upvalue()`)
+- [x] **Replace `Rc<RefCell<Upvalue>>` with arena** (`vm.rs` `State::find_or_create_upvalue()`)
   - Three allocations per upvalue + atomic refcounting on every clone
   - Lifetime is well-defined: closed when owning frame returns
-  - **Fix:** Arena-allocated pool with indices instead of Rc pointers
+  - **Fixed:** `UpvaluePool` stores upvalues in contiguous Vec, `UpvalueRef` is just a u32 index
+  - Upvalues never freed until VM dropped (fine for short-lived game scripting VMs)
 
 - [x] **Pre-size stack vector** (`vm.rs` `State::empty()`)
   - Stack pre-sized to 256, string_literals pre-sized to 64
