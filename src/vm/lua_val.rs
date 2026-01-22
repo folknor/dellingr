@@ -10,7 +10,7 @@ use std::hash::{Hash, Hasher};
 pub type RustFunc = fn(&mut State) -> Result<u8>;
 
 #[derive(Clone, Default)]
-pub(super) enum Val {
+pub(crate) enum Val {
     #[default]
     Nil,
     Bool(bool),

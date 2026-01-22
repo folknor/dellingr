@@ -23,7 +23,7 @@ pub(super) type UpvalueRef = Rc<RefCell<Upvalue>>;
 
 /// An upvalue - either open (pointing to stack) or closed (holding value).
 #[derive(Clone, Debug)]
-pub(super) enum Upvalue {
+pub(crate) enum Upvalue {
     /// Open upvalue pointing to an absolute stack index
     Open(usize),
     /// Closed upvalue holding the value directly
@@ -69,7 +69,7 @@ impl RawObject {
 
 /// The internal pointer type objects use to point to each other.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(super) struct ObjectPtr {
+pub(crate) struct ObjectPtr {
     ptr: NonNull<WrappedObject>,
 }
 
@@ -124,7 +124,7 @@ enum Color {
 }
 
 /// A collection of objects which need to be garbage-collected.
-pub(super) struct GcHeap {
+pub(crate) struct GcHeap {
     /// The start of the linked list which contains every Object.
     start: *mut WrappedObject,
     /// The number of objects currently in the heap.

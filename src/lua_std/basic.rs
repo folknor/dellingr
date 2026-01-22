@@ -21,7 +21,8 @@ pub(crate) fn open_base(state: &mut State) {
             state.pop(1); // pop the old number
             state.push_number(new_index);
             state.get_table(1)?;
-            if state.to_boolean(-1) {
+            // ipairs stops only on nil, not on false
+            if state.typ(-1) != LuaType::Nil {
                 state.push_number(new_index);
                 state.replace(1)?; // Replaces the table with the index
                 Ok(2)
