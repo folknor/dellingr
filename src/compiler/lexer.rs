@@ -291,9 +291,7 @@ impl<'a> Lexer<'a> {
             if c == quote {
                 return Ok(LiteralString);
             } else if c == '\\' {
-                // TODO make backslash-escapes actually work. For now, we just
-                // ignore the next character, which is the correct behavior for
-                // newlines and quotes, but not escapes like '\n'.
+                // Skip the escaped character - escape processing is done in the parser
                 self.next_char();
             } else if c == '\n' {
                 return Err(self.error(SyntaxError::UnclosedString));

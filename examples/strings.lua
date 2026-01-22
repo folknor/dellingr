@@ -69,4 +69,17 @@ print("Test 18 - string.reverse: " .. tostring(string.reverse("hello") == "olleh
 local start19, end19 = string.find("hello hello", "hello", 2)
 print("Test 19 - string.find with init: " .. tostring(start19 == 7 and end19 == 11))
 
+-- Test 20: Escape sequences
+print("Test 20 - escape newline: " .. tostring(string.find("hello\nworld", "\n") == 6))
+print("Test 21 - escape tab: " .. tostring(string.find("hello\tworld", "\t") == 6))
+print("Test 22 - escape backslash: " .. tostring(string.find("hello\\world", "\\") == 6))
+print("Test 23 - escape quote: " .. tostring(string.find("hello\"world", "\"") == 6))
+print("Test 24 - escape single quote: " .. tostring(string.find('hello\'world', "'") == 6))
+
+-- Verify actual content
+local with_newline = "a\nb"
+print("Test 25 - newline length: " .. tostring(#with_newline == 3))
+local with_tab = "a\tb"
+print("Test 26 - tab length: " .. tostring(#with_tab == 3))
+
 print("All string library tests complete!")

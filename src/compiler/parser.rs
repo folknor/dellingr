@@ -131,15 +131,50 @@ impl<'a> Parser<'a> {
             .ok_or_else(|| self.error(SyntaxError::TooManyNumbers))
     }
 
-    /// Converts a literal string's offsets into a real String.
+    /// Converts a literal string's offsets into a real String, processing escape sequences.
     #[must_use]
-    fn get_literal_string_contents(&self, tok: Token) -> &'a str {
+    fn get_literal_string_contents(&self, tok: Token) -> String {
         // Chop off the quotes
         let Token { start, len, typ } = tok;
         assert_eq!(typ, TokenType::LiteralString);
         assert!(len >= 2);
         let range = (start + 1)..(start + len as usize - 1);
-        self.input.substring(range)
+        let raw = self.input.substring(range);
+
+        // Process escape sequences
+        let mut result = String::with_capacity(raw.len());
+        let mut chars = raw.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\\' {
+                if let Some(&next) = chars.peek() {
+                    chars.next();
+                    match next {
+                        'n' => result.push('\n'),
+                        't' => result.push('\t'),
+                        'r' => result.push('\r'),
+                        '\\' => result.push('\\'),
+                        '"' => result.push('"'),
+                        '\'' => result.push('\''),
+                        '0' => result.push('\0'),
+                        'a' => result.push('\x07'), // bell
+                        'b' => result.push('\x08'), // backspace
+                        'f' => result.push('\x0C'), // form feed
+                        'v' => result.push('\x0B'), // vertical tab
+                        '\n' => result.push('\n'),  // escaped newline continues string
+                        _ => {
+                            // Unknown escape, keep as-is
+                            result.push('\\');
+                            result.push(next);
+                        }
+                    }
+                } else {
+                    result.push('\\');
+                }
+            } else {
+                result.push(c);
+            }
+        }
+        result
     }
 
     /// Gets the original source code contained by a token.
@@ -1325,7 +1360,7 @@ impl<'a> Parser<'a> {
             }
             TokenType::LiteralString => {
                 let text = self.get_literal_string_contents(tok);
-                let idx = self.find_or_add_string(text)?;
+                let idx = self.find_or_add_string(&text)?;
                 self.push(Instr::PushString(idx));
             }
             TokenType::Function => self.parse_fndef()?,
