@@ -28,6 +28,8 @@ pub enum ErrorKind {
     StackOverflow { size: usize },
     /// Invalid stack index
     InvalidStackIndex { index: isize },
+    /// Internal error (corrupt bytecode or VM bug)
+    InternalError(String),
 }
 
 #[derive(Debug)]
@@ -144,6 +146,9 @@ impl fmt::Display for ErrorKind {
             }
             InvalidStackIndex { index } => {
                 write!(f, "invalid stack index {}", index)
+            }
+            InternalError(msg) => {
+                write!(f, "internal error: {}", msg)
             }
         }
     }

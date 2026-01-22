@@ -150,7 +150,7 @@ impl Frame {
 
                 // Globals
                 Instr::GetGlobal(i) => state.instr_get_global(self, i),
-                Instr::SetGlobal(i) => state.instr_set_global(self, i),
+                Instr::SetGlobal(i) => state.instr_set_global(self, i)?,
 
                 // Functions (calls and returns are free)
                 Instr::Closure(i) => state.instr_closure(self, i),
@@ -640,14 +640,17 @@ impl State {
         Ok(())
     }
 
-    fn instr_set_global(&mut self, frame: &Frame, string_num: u8) {
+    fn instr_set_global(&mut self, frame: &Frame, string_num: u8) -> Result<()> {
         let s = self.get_string_constant(frame, string_num);
         let val = self.pop_val();
         if let Some(s) = s.as_string() {
             self.globals.insert(s.into(), val);
+            Ok(())
         } else {
-            // TODO handle this better
-            panic!("Tried to index globals with {} instead of string", s.typ());
+            Err(self.error(ErrorKind::InternalError(format!(
+                "SetGlobal: expected string constant, got {}",
+                s.typ()
+            ))))
         }
     }
 
