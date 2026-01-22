@@ -310,6 +310,10 @@ impl<'a> Parser<'a> {
     /// Parses 0 or more statements, possibly separated by semicolons.
     fn parse_statements(&mut self) -> Result<()> {
         loop {
+            // Update line number at start of each statement for accurate error reporting
+            let stmt_start = self.input.peek()?.start;
+            self.update_line(stmt_start);
+
             match self.input.peek_type()? {
                 TokenType::Identifier | TokenType::LParen | TokenType::LParenLineStart => {
                     self.parse_assign_or_call()?

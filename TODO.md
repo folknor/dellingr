@@ -119,23 +119,24 @@ Findings from expert code review (January 2026). Organized by priority.
 
 ### MEDIUM PRIORITY - Correctness Issues
 
-- [ ] **String concatenation doesn't auto-convert numbers** (`..` operator)
+- [x] **String concatenation doesn't auto-convert numbers** (`..` operator)
   - Lua allows `"foo" .. 123` which produces `"foo123"`
-  - Our VM requires explicit `tostring()` for non-string values
-  - Should auto-convert numbers (and possibly booleans) like standard Lua
+  - **Fixed:** `concat_helper` now auto-converts numbers to strings
+  - Integers print without decimal (42 not 42.0), floats keep their precision
 
-- [ ] **Upvalue/closure bug causes segfault** (`frame.rs` upvalue handling)
+- [x] **Upvalue/closure bug causes segfault** (`frame.rs` upvalue handling)
   - Local functions called from global functions crash with SIGSEGV (exit code 139)
   - Reproduction: define `local function foo() ... end` then call `foo()` from a global function
-  - Global functions work fine, only local functions trigger the crash
-  - Workaround: use global functions instead of local
-  - Likely related to how upvalues are captured/closed when the main chunk finishes
-  - The upvalue may be pointing to a stack slot that no longer exists
+  - **Fixed:** Replaced `Rc<RefCell<Upvalue>>` with arena-based `UpvaluePool` (commit d6ddda2)
+  - The original issue was likely related to dangling references when the main chunk finished
+  - Now upvalues are stored in a pool with indices, eliminating reference counting issues
+  - Added comprehensive callback pattern tests to prevent regression
 
-- [ ] **Error line numbers sometimes point to wrong lines**
+- [x] **Error line numbers sometimes point to wrong lines**
   - Observed "attempt to call a table value" errors pointing to comparison lines like `if x == 0 then`
-  - These lines don't call anything, so the error message doesn't match the reported location
-  - May be an off-by-one in line tracking, or error is thrown after advancing past the actual problematic line
+  - **Fixed:** Added `update_line()` call at the start of each statement in `parse_statements()`
+  - The issue was that line tracking only updated in `expect()`, but statement parsing uses `peek_type()`
+  - Now each statement records its starting line before parsing begins
 
 - [x] **Integer overflow in jump** (`frame.rs` `Frame::jump()`)
   - `wrapping_add` with negative offset cast to usize wraps incorrectly

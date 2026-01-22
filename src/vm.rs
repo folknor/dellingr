@@ -724,4 +724,126 @@ mod tests {
         // Now GC should be needed (but won't auto-run since we're just checking)
         // Note: threshold may have been adjusted by auto-GC during eval
     }
+
+    /// Test the callback pattern used by fcomm2:
+    /// - Main chunk defines local functions and global callbacks that capture them
+    /// - Main chunk finishes (upvalues should be closed)
+    /// - Later, the global callback is called from Rust (simulating game tick)
+    #[test]
+    fn callback_pattern_local_upvalue() {
+        use crate::{ArgCount, RetCount};
+
+        let mut state = State::new();
+
+        // Load and execute main chunk that defines a global callback
+        // capturing a local function
+        let code = r#"
+            local function helper()
+                return 42
+            end
+
+            function on_tick()
+                return helper()
+            end
+        "#;
+
+        state.load_string(code).unwrap();
+        state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
+
+        // Now the main chunk has finished. The upvalue for `helper` should be closed.
+        // Call the global callback from "outside" (simulating fcomm2's callback pattern)
+        state.get_global("on_tick");
+        assert_eq!(state.typ(-1), crate::LuaType::Function);
+
+        state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
+
+        // Should get 42 back
+        let result = state.to_number(-1).unwrap();
+        assert_eq!(result, 42.0);
+    }
+
+    /// More complex callback pattern with mutable upvalue
+    #[test]
+    fn callback_pattern_mutable_upvalue() {
+        use crate::{ArgCount, RetCount};
+
+        let mut state = State::new();
+
+        let code = r#"
+            local counter = 0
+
+            local function increment()
+                counter = counter + 1
+                return counter
+            end
+
+            function tick()
+                return increment()
+            end
+        "#;
+
+        state.load_string(code).unwrap();
+        state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
+
+        // Call tick multiple times
+        for expected in 1..=5 {
+            state.get_global("tick");
+            state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
+            let result = state.to_number(-1).unwrap();
+            state.pop(1);
+            assert_eq!(result, expected as f64);
+        }
+    }
+
+    /// Nested local functions with upvalues
+    #[test]
+    fn callback_pattern_nested_locals() {
+        use crate::{ArgCount, RetCount};
+
+        let mut state = State::new();
+
+        let code = r#"
+            local base = 100
+
+            local function inner()
+                return base
+            end
+
+            local function outer()
+                return inner() + 10
+            end
+
+            function callback()
+                return outer() + 1
+            end
+        "#;
+
+        state.load_string(code).unwrap();
+        state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
+
+        state.get_global("callback");
+        state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
+        let result = state.to_number(-1).unwrap();
+        assert_eq!(result, 111.0); // 100 + 10 + 1
+    }
+
+    /// Test that error line numbers are accurate
+    #[test]
+    fn error_line_numbers() {
+        use crate::{ArgCount, RetCount};
+
+        let mut state = State::new();
+
+        // Error is on line 3 (t() call), not line 2 (t = {})
+        let code = "-- comment\nlocal t = {}\nt()";
+
+        state.load_string(code).unwrap();
+        let result = state.call(ArgCount::Fixed(0), RetCount::Fixed(0));
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        // Check the stack trace points to line 3
+        assert!(!err.stack_trace.is_empty());
+        assert_eq!(err.stack_trace[0].line, 3);
+    }
 }

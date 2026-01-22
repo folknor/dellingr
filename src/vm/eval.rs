@@ -133,6 +133,14 @@ impl State {
         for val in drain {
             if let Some(s) = val.as_string() {
                 buffer.push_str(s);
+            } else if let Some(num) = val.as_num() {
+                // Auto-convert numbers to strings (standard Lua behavior)
+                // Format integers without decimal point, floats with
+                if num.fract() == 0.0 && num.abs() < 1e15 {
+                    buffer.push_str(&format!("{}", num as i64));
+                } else {
+                    buffer.push_str(&format!("{}", num));
+                }
             } else {
                 abort = Some(TypeError::Concat(val.typ()));
                 break;
