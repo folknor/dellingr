@@ -156,8 +156,14 @@ print("rawequal(t1, t2) = " .. tostring(rawequal(t1, t2)))  -- false
 print("rawequal(1, '1') = " .. tostring(rawequal(1, "1")))  -- false (different types)
 print("")
 
--- 19. rawlen (no __len metamethod)
-print("19. rawlen")
+-- 19. Empty pattern in string.find (edge case)
+print("19. Empty pattern")
+local start, finish = string.find("abc", "")
+print("string.find('abc', '') = " .. tostring(start) .. ", " .. tostring(finish))  -- 1, 0
+print("")
+
+-- 20. rawlen (no __len metamethod)
+print("20. rawlen")
 local mt = { __len = function() return 999 end }
 local arr = setmetatable({1, 2, 3}, mt)
 print("#arr (with __len) = " .. tostring(#arr))     -- 999

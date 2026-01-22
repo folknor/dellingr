@@ -98,6 +98,14 @@ pub(crate) fn open_string(state: &mut State) {
 
         state.set_top(0);
 
+        // Handle empty pattern - matches at position init+1 with zero length
+        if pattern.is_empty() {
+            let start = init + 1;
+            state.push_number(start as f64);
+            state.push_number(init as f64);  // end is start-1 for empty match
+            return Ok(2);
+        }
+
         let search_str = if init > 0 && init < s.len() {
             &s[init..]
         } else if init >= s.len() {
@@ -388,6 +396,12 @@ pub(crate) fn open_string(state: &mut State) {
 
         state.set_top(0);
 
+        // Handle empty pattern - returns empty string
+        if pattern.is_empty() {
+            state.push_string(String::new());
+            return Ok(1);
+        }
+
         let search_str = if init > 0 && init < s.len() {
             &s[init..]
         } else if init >= s.len() {
@@ -435,6 +449,38 @@ pub(crate) fn open_string(state: &mut State) {
         let pattern = state.to_string(2)?;
 
         state.set_top(0);
+
+        // Handle empty pattern - return iterator that yields empty string once
+        if pattern.is_empty() {
+            // Return a simple iterator that returns empty string once then nil
+            state.new_table();
+            state.push_boolean(false);  // done flag
+            state.push_string("done".to_string());
+            state.set_table_raw(-3).unwrap();
+
+            state.push_rust_fn(|state| {
+                state.push_string("done".to_string());
+                state.get_table(1)?;
+                if state.to_boolean(-1) {
+                    state.set_top(0);
+                    state.push_nil();
+                    return Ok(1);
+                }
+                state.pop(1);
+                // Mark as done
+                state.push_boolean(true);
+                state.push_string("done".to_string());
+                state.set_table_raw(1).unwrap();
+                state.set_top(0);
+                state.push_string(String::new());
+                Ok(1)
+            });
+
+            state.push_value(-2)?;
+            state.remove(-3)?;
+            state.push_nil();
+            return Ok(3);
+        }
 
         // Create a state table: { s = string, p = pattern, pos = 0 }
         state.new_table();
@@ -546,6 +592,14 @@ pub(crate) fn open_string(state: &mut State) {
         };
 
         let repl_type = state.typ(3);
+
+        // Handle empty pattern - no replacement, return original string
+        if pattern.is_empty() {
+            state.set_top(0);
+            state.push_string(s);
+            state.push_number(0.0);
+            return Ok(2);
+        }
 
         match LuaPattern::new_try(&pattern) {
             Ok(mut m) => {
