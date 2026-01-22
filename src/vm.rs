@@ -22,7 +22,7 @@ use super::Result;
 
 use frame::Frame;
 use lua_val::Val;
-use object::{Closure, GcHeap, Markable};
+use object::{Closure, GcHeap, Markable, Upvalue, UpvalueRef};
 use table::Table;
 
 /// The main interface into the Lua VM.
@@ -37,6 +37,10 @@ pub struct State {
     heap: GcHeap,
     /// The string literals (as `Val`s) of every active `Frame`.
     string_literals: Vec<Val>,
+    /// Open upvalues currently pointing to stack slots.
+    /// Each entry is (stack_index, upvalue_ref). Kept sorted by stack_index descending
+    /// so we can efficiently close them when a function returns.
+    open_upvalues: Vec<(usize, UpvalueRef)>,
     /// Instruction counter - decrements with each instruction executed.
     /// When it reaches 0, execution stops with InstructionLimitExceeded.
     instructions_remaining: u64,
@@ -58,6 +62,12 @@ impl Markable for State {
         self.stack.mark_reachable();
         self.globals.mark_reachable();
         self.string_literals.mark_reachable();
+        // Mark closed upvalues (open ones point to stack which is already marked)
+        for (_, uv_ref) in &self.open_upvalues {
+            if let Upvalue::Closed(val) = &*uv_ref.borrow() {
+                val.mark_reachable();
+            }
+        }
     }
 }
 
@@ -81,6 +91,7 @@ impl State {
             stack_bottom: 0,
             heap: GcHeap::with_threshold(Self::GC_INITIAL_THRESHOLD),
             string_literals: Vec::new(),
+            open_upvalues: Vec::new(),
             instructions_remaining: u64::MAX,
             instruction_limit: u64::MAX,
             instructions_executed: 0,
@@ -116,6 +127,40 @@ impl State {
         self.instructions_remaining -= 1;
         self.instructions_executed += 1;
         Ok(())
+    }
+
+    /// Find an existing open upvalue for the given stack index, or create a new one.
+    fn find_or_create_upvalue(&mut self, stack_idx: usize) -> UpvalueRef {
+        // Check if we already have an open upvalue for this stack slot
+        for (idx, uv_ref) in &self.open_upvalues {
+            if *idx == stack_idx {
+                return uv_ref.clone();
+            }
+        }
+        // Create a new open upvalue
+        let uv_ref = std::rc::Rc::new(std::cell::RefCell::new(Upvalue::Open(stack_idx)));
+        // Insert in order (sorted by stack index descending for efficient closing)
+        let pos = self
+            .open_upvalues
+            .iter()
+            .position(|(idx, _)| *idx < stack_idx)
+            .unwrap_or(self.open_upvalues.len());
+        self.open_upvalues.insert(pos, (stack_idx, uv_ref.clone()));
+        uv_ref
+    }
+
+    /// Close all open upvalues at or above the given stack level.
+    /// This is called when a function returns to capture the values from the stack
+    /// before they are popped.
+    pub(crate) fn close_upvalues(&mut self, level: usize) {
+        while let Some(&(idx, _)) = self.open_upvalues.first() {
+            if idx < level {
+                break;
+            }
+            let (_, uv_ref) = self.open_upvalues.remove(0);
+            let val = self.stack[idx].clone();
+            *uv_ref.borrow_mut() = Upvalue::Closed(val);
+        }
     }
 
     /// Calls a function.
@@ -930,6 +975,9 @@ impl State {
         let ret_start = self.stack.len() - actual_num_returned as usize;
         let ret_vals: Vec<Val> = self.stack.drain(ret_start..).collect();
 
+        // Close any open upvalues in this frame before clearing the stack
+        self.close_upvalues(self.stack_bottom);
+
         // Clear the frame's stack space
         self.stack.truncate(self.stack_bottom);
         self.stack_bottom = old_stack_bottom;
@@ -948,17 +996,23 @@ impl State {
                     stack,
                     globals,
                     string_literals,
+                    open_upvalues,
                     ..
                 } = self;
                 self.heap.new_string(s.into(), || {
                     stack.mark_reachable();
                     globals.mark_reachable();
                     string_literals.mark_reachable();
+                    for (_, uv_ref) in open_upvalues {
+                        if let Upvalue::Closed(val) = &*uv_ref.borrow() {
+                            val.mark_reachable();
+                        }
+                    }
                 })
             };
             self.string_literals.push(Val::Str(string_ptr));
         }
-        Frame::new(closure.chunk, closure.upvalues, varargs, string_literal_start)
+        Frame::new(closure.chunk, closure.upvalues, varargs, string_literal_start, self.stack_bottom)
     }
 
     /// Pop a value from the stack
@@ -970,17 +1024,23 @@ impl State {
         self.push_closure(chunk, Vec::new());
     }
 
-    fn push_closure(&mut self, chunk: Chunk, upvalues: Vec<Val>) {
+    fn push_closure(&mut self, chunk: Chunk, upvalues: Vec<UpvalueRef>) {
         let Self {
             stack,
             globals,
             string_literals,
+            open_upvalues,
             ..
         } = self;
         let obj = self.heap.new_lua_fn(chunk, upvalues, || {
             stack.mark_reachable();
             globals.mark_reachable();
             string_literals.mark_reachable();
+            for (_, uv_ref) in open_upvalues {
+                if let Upvalue::Closed(val) = &*uv_ref.borrow() {
+                    val.mark_reachable();
+                }
+            }
         });
         self.stack.push(Val::Obj(obj));
     }

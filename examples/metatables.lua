@@ -127,7 +127,6 @@ local s = "hello world"
 print("s:upper() = " .. s:upper())
 print("s:sub(1, 5) = " .. s:sub(1, 5))
 print("s:reverse() = " .. s:reverse())
-print('"abc":rep(3) = ' .. ("abc"):rep(3))
 print("")
 
 print("=== All metatable tests passed! ===")

@@ -2,6 +2,7 @@ use std::ops;
 
 use super::super::compiler::UpvalueDesc;
 use super::super::error::TypeError;
+use super::object::{Upvalue, UpvalueRef};
 use super::Chunk;
 use super::Instr;
 use super::LuaType;
@@ -19,9 +20,11 @@ pub(super) struct Frame {
     /// stored.
     string_literal_start: usize,
     /// The upvalues captured by this closure.
-    upvalues: Vec<Val>,
+    upvalues: Vec<UpvalueRef>,
     /// The varargs passed to this function (if it's a vararg function).
     varargs: Vec<Val>,
+    /// The stack bottom when this frame was created (used for closing upvalues).
+    pub(super) stack_bottom: usize,
 }
 
 impl Frame {
@@ -29,9 +32,10 @@ impl Frame {
     #[must_use]
     pub(super) fn new(
         chunk: Chunk,
-        upvalues: Vec<Val>,
+        upvalues: Vec<UpvalueRef>,
         varargs: Vec<Val>,
         string_literal_start: usize,
+        stack_bottom: usize,
     ) -> Self {
         let ip = 0;
         Self {
@@ -40,6 +44,7 @@ impl Frame {
             string_literal_start,
             upvalues,
             varargs,
+            stack_bottom,
         }
     }
 
@@ -221,17 +226,18 @@ impl State {
         // Capture upvalues based on the chunk's upvalue descriptors
         let mut captured_upvalues = Vec::with_capacity(chunk.upvalues.len());
         for desc in &chunk.upvalues {
-            let val = match desc {
+            let uv_ref = match desc {
                 UpvalueDesc::Local(idx) => {
                     // Capture a local variable from the current frame's stack
-                    self.stack[self.stack_bottom + *idx as usize].clone()
+                    let stack_idx = frame.stack_bottom + *idx as usize;
+                    self.find_or_create_upvalue(stack_idx)
                 }
                 UpvalueDesc::Upvalue(idx) => {
-                    // Capture an upvalue from the current frame's upvalues
+                    // Share an upvalue from the current frame's upvalues
                     frame.upvalues[*idx as usize].clone()
                 }
             };
-            captured_upvalues.push(val);
+            captured_upvalues.push(uv_ref);
         }
         self.push_closure(chunk, captured_upvalues);
     }
@@ -374,13 +380,26 @@ impl State {
     }
 
     fn instr_get_upvalue(&mut self, frame: &Frame, upvalue_num: u8) {
-        let val = frame.upvalues[upvalue_num as usize].clone();
+        let uv_ref = &frame.upvalues[upvalue_num as usize];
+        let val = match &*uv_ref.borrow() {
+            Upvalue::Open(stack_idx) => self.stack[*stack_idx].clone(),
+            Upvalue::Closed(v) => v.clone(),
+        };
         self.stack.push(val);
     }
 
-    fn instr_set_upvalue(&mut self, frame: &mut Frame, upvalue_num: u8) {
+    fn instr_set_upvalue(&mut self, frame: &Frame, upvalue_num: u8) {
         let val = self.pop_val();
-        frame.upvalues[upvalue_num as usize] = val;
+        let uv_ref = &frame.upvalues[upvalue_num as usize];
+        let mut uv = uv_ref.borrow_mut();
+        match &mut *uv {
+            Upvalue::Open(stack_idx) => {
+                self.stack[*stack_idx] = val;
+            }
+            Upvalue::Closed(v) => {
+                *v = val;
+            }
+        }
     }
 
     fn instr_get_table(&mut self) -> Result<()> {

@@ -5,23 +5,36 @@
 //! Because of this, it needs to be garbage collected.
 
 use std::borrow::Borrow;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::hash::Hash;
 use std::ops::Drop;
 use std::ptr::{self, NonNull};
+use std::rc::Rc;
 
 use super::Chunk;
 use super::LuaType;
 use super::Table;
 use super::Val;
 
+/// A reference to an upvalue, which can be shared between closures.
+pub(super) type UpvalueRef = Rc<RefCell<Upvalue>>;
+
+/// An upvalue - either open (pointing to stack) or closed (holding value).
+#[derive(Clone, Debug)]
+pub(super) enum Upvalue {
+    /// Open upvalue pointing to an absolute stack index
+    Open(usize),
+    /// Closed upvalue holding the value directly
+    Closed(Val),
+}
+
 /// A Lua closure: a function with captured upvalues.
 #[derive(Clone, Debug)]
 pub(super) struct Closure {
     pub(super) chunk: Chunk,
-    pub(super) upvalues: Vec<Val>,
+    pub(super) upvalues: Vec<UpvalueRef>,
 }
 
 /// A wrapper around the `LuaVal`s which need to be garbage-collected.
@@ -185,7 +198,7 @@ impl GcHeap {
         self.size >= self.threshold
     }
 
-    pub(super) fn new_lua_fn(&mut self, chunk: Chunk, upvalues: Vec<Val>, mark: impl FnOnce()) -> ObjectPtr {
+    pub(super) fn new_lua_fn(&mut self, chunk: Chunk, upvalues: Vec<UpvalueRef>, mark: impl FnOnce()) -> ObjectPtr {
         let closure = Closure { chunk, upvalues };
         let raw = RawObject::LuaFn(Box::new(closure));
         self.new_obj_from_raw(raw, mark)
@@ -271,7 +284,13 @@ impl Markable for WrappedObject {
 impl Markable for RawObject {
     fn mark_reachable(&self) {
         match self {
-            RawObject::LuaFn(closure) => closure.upvalues.mark_reachable(),
+            RawObject::LuaFn(closure) => {
+                for uv in &closure.upvalues {
+                    if let Upvalue::Closed(val) = &*RefCell::borrow(uv) {
+                        val.mark_reachable();
+                    }
+                }
+            }
             RawObject::Table(tbl) => tbl.mark_reachable(),
         }
     }

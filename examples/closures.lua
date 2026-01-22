@@ -1,7 +1,6 @@
 -- Closure tests for the Lua VM
--- Note: Our implementation captures upvalues by VALUE (copy), not by reference.
--- This means modifications to captured variables don't propagate across closures.
--- This is a simplification - full Lua semantics would require "open upvalues".
+-- Our implementation properly captures upvalues by REFERENCE using open/closed upvalues.
+-- This means modifications to captured variables propagate correctly.
 
 -- Test 1: Basic closure capturing a local variable
 local x = 10
@@ -12,8 +11,7 @@ result1 = getX()
 print("Test 1 - Basic closure capture: " .. tostring(result1 == 10))
 
 -- Test 2: Closure modifies captured variable
--- NOTE: This test demonstrates our capture-by-value semantics.
--- Each call gets a snapshot of 'counter' at closure creation time.
+-- With proper capture-by-reference, each increment actually modifies the counter.
 local counter = 0
 local increment = function()
     counter = counter + 1
@@ -21,9 +19,9 @@ local increment = function()
 end
 local a = increment()
 local b = increment()
--- With capture-by-value, each call sees counter=0, so both return 1
-result2 = a == 1 and b == 1
-print("Test 2 - Capture-by-value semantics: " .. tostring(result2))
+-- With capture-by-reference, a == 1 and b == 2
+result2 = a == 1 and b == 2
+print("Test 2 - Capture-by-reference semantics: " .. tostring(result2))
 
 -- Test 3: Multiple closures capturing the same variable
 local y = 5
@@ -50,7 +48,7 @@ result4 = g() == 150
 print("Test 4 - Nested closures: " .. tostring(result4))
 
 -- Test 5: Counter factory
--- NOTE: Each counter is independent, but each call captures the current value.
+-- With proper capture-by-reference, each counter maintains its own state.
 local makeCounter = function()
     local count = 0
     local inc = function()
@@ -64,8 +62,28 @@ local c2 = makeCounter()
 local v1 = c1()
 local v2 = c1()
 local v3 = c2()
--- With capture-by-value: c1 and c2 are independent, each call returns 1
-result5 = v1 == 1 and v2 == 1 and v3 == 1
-print("Test 5 - Counter factory (capture-by-value): " .. tostring(result5))
+-- c1 returns 1, then 2; c2 returns 1 (independent counter)
+result5 = v1 == 1 and v2 == 2 and v3 == 1
+print("Test 5 - Counter factory: " .. tostring(result5))
+
+-- Test 6: Two closures sharing the same upvalue
+local makeCounter2 = function()
+    local count = 0
+    local inc = function()
+        count = count + 1
+        return count
+    end
+    local get = function()
+        return count
+    end
+    return inc, get
+end
+local inc, get = makeCounter2()
+local x1 = inc()  -- count becomes 1
+local x2 = get()  -- should see count == 1
+local x3 = inc()  -- count becomes 2
+local x4 = get()  -- should see count == 2
+result6 = x1 == 1 and x2 == 1 and x3 == 2 and x4 == 2
+print("Test 6 - Shared upvalue between closures: " .. tostring(result6))
 
 print("All closure tests complete!")

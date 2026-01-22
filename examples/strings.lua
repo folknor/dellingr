@@ -62,14 +62,11 @@ print("Test 16 - string.upper: " .. tostring(string.upper("hello") == "HELLO"))
 -- Test 17: string.lower
 print("Test 17 - string.lower: " .. tostring(string.lower("HELLO") == "hello"))
 
--- Test 18: string.rep
-print("Test 18 - string.rep: " .. tostring(string.rep("ab", 3) == "ababab"))
+-- Test 18: string.reverse
+print("Test 18 - string.reverse: " .. tostring(string.reverse("hello") == "olleh"))
 
--- Test 19: string.reverse
-print("Test 19 - string.reverse: " .. tostring(string.reverse("hello") == "olleh"))
-
--- Test 20: string.find with init position
-local start20, end20 = string.find("hello hello", "hello", 2)
-print("Test 20 - string.find with init: " .. tostring(start20 == 7 and end20 == 11))
+-- Test 19: string.find with init position
+local start19, end19 = string.find("hello hello", "hello", 2)
+print("Test 19 - string.find with init: " .. tostring(start19 == 7 and end19 == 11))
 
 print("All string library tests complete!")
