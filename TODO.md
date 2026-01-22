@@ -303,3 +303,5 @@ add_fn!("broken", |state| {
 - [x] Math library: `tan`, `acos`, `asin`, `atan`, `deg`, `rad`, `exp`, `log`, `fmod`, `modf`, `huge`
 - [x] `table.move` - move/copy elements between tables
 - [x] Multiple return values as function arguments (`add(vals())` passes all returns)
+- [x] Loop variable capture fix - each iteration now has its own local binding via `CloseUpvalues`
+- [x] `math.min`/`math.max` now accept varargs (was only comparing first 2 args)
