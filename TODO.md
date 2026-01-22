@@ -152,15 +152,11 @@ Findings from expert code review (January 2026). Organized by priority.
 - [x] **Pre-size stack vector** (`vm.rs` `State::empty()`)
   - Stack pre-sized to 256, string_literals pre-sized to 64
 
-- [ ] **Small-table optimization** (`table.rs` `Table` struct)
-  - HashMap overhead is high for 1-4 entry tables
-  - **Fix:** Inline small arrays with linear scan:
-  ```rust
-  enum TableStorage {
-      Inline([(Val, Val); 4], u8),  // len field
-      Map(HashMap<Val, Val>),
-  }
-  ```
+- [x] **Small-table optimization** (`table.rs` `Table` struct)
+  - HashMap overhead was high for 1-4 entry tables
+  - **Fixed:** `TableStorage` enum with `Inline { entries: [(Val, Val); 4], len: u8 }` for small tables
+  - Tables with ≤4 entries use inline array with linear scan
+  - Automatically promotes to `IndexMap` when exceeding capacity or for shift operations
 
 - [ ] **String interning overhead** (`object.rs` `GcHeap::new_string()`)
   - Every allocation goes through HashSet lookup
@@ -169,9 +165,11 @@ Findings from expert code review (January 2026). Organized by priority.
 
 ### LOW PRIORITY - Performance Optimizations
 
-- [ ] **NaN-boxing for Val** (`lua_val.rs` `Val` enum)
+- [ ] **NaN-boxing for Val** (`lua_val.rs` `Val` enum) - DEFERRED (too invasive)
   - Current Val is ~16-24 bytes, every stack op copies this
-  - **Fix:** Pack all values into 64-bit float with tag bits in NaN space
+  - Would reduce to 8 bytes by packing values into NaN bit patterns
+  - **Analysis (Jan 2026):** Requires rewriting ~8-10 core files (lua_val.rs, frame.rs, eval.rs, metamethod.rs, table.rs, table_ops.rs, stack.rs). All pattern matching becomes bit extraction. RustFunc (function pointers) need special handling since they require 64 bits. High risk of subtle bugs in bit manipulation. GC marking must still correctly identify heap pointers.
+  - **Recommendation:** Only pursue if profiling shows Val copying as a bottleneck
 
 - [ ] **Superinstructions for common patterns**
   - `GetLocal` + `GetField` (method dispatch)
