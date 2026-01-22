@@ -153,6 +153,10 @@ impl Frame {
                 Instr::OP_GET_GLOBAL => state.instr_get_global(self, inst.a()),
                 Instr::OP_SET_GLOBAL => state.instr_set_global(self, inst.a())?,
 
+                // Builtins (fast path for well-known globals)
+                Instr::OP_GET_BUILTIN => state.instr_get_builtin(inst.a()),
+                Instr::OP_SET_BUILTIN => state.instr_set_builtin(inst.a()),
+
                 // Functions (calls and returns are free)
                 Instr::OP_CLOSURE => state.instr_closure(self, inst.a()),
                 Instr::OP_CALL => state.call(ArgCount::from_u8(inst.a()), RetCount::from_u8(inst.b()))?,
@@ -509,6 +513,24 @@ impl State {
     fn instr_get_global(&mut self, frame: &Frame, string_num: u8) {
         let s = &frame.chunk.string_literals[string_num as usize];
         self.get_global(s);
+    }
+
+    /// Fast path for getting well-known builtin globals.
+    #[inline(always)]
+    fn instr_get_builtin(&mut self, slot: u8) {
+        let val = self.builtins[slot as usize].clone();
+        self.stack.push(val);
+    }
+
+    /// Fast path for setting well-known builtin globals.
+    #[inline(always)]
+    fn instr_set_builtin(&mut self, slot: u8) {
+        let val = self.pop_val();
+        self.builtins[slot as usize] = val.clone();
+        // Also update the HashMap for _G compatibility
+        if let Some(builtin) = crate::instr::Builtin::from_u8(slot) {
+            self.globals.insert(builtin.name().to_string(), val);
+        }
     }
 
     #[inline(always)]

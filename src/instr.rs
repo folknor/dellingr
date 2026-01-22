@@ -69,6 +69,117 @@ impl RetCount {
     }
 }
 
+/// Well-known global names that get fast array-indexed access instead of HashMap lookup.
+///
+/// These are the most commonly accessed globals in typical Lua scripts.
+/// Using a fixed array eliminates string hashing and comparison overhead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Builtin {
+    // Common functions
+    Print = 0,
+    Type = 1,
+    Tonumber = 2,
+    Tostring = 3,
+    // Iteration
+    Pairs = 4,
+    Ipairs = 5,
+    Next = 6,
+    // Table operations
+    Getmetatable = 7,
+    Setmetatable = 8,
+    Rawget = 9,
+    Rawset = 10,
+    Rawequal = 11,
+    Rawlen = 12,
+    // Vararg helpers
+    Select = 13,
+    Unpack = 14,
+    // Library tables
+    Math = 15,
+    String = 16,
+    Table = 17,
+    // Global environment
+    G = 18, // _G
+}
+
+impl Builtin {
+    /// Total number of builtin slots.
+    pub const COUNT: usize = 19;
+
+    /// Try to convert a global name to a Builtin slot.
+    #[inline]
+    pub const fn from_name(name: &str) -> Option<Self> {
+        // Use a const-compatible match on bytes
+        let bytes = name.as_bytes();
+        match bytes {
+            b"print" => Some(Builtin::Print),
+            b"type" => Some(Builtin::Type),
+            b"tonumber" => Some(Builtin::Tonumber),
+            b"tostring" => Some(Builtin::Tostring),
+            b"pairs" => Some(Builtin::Pairs),
+            b"ipairs" => Some(Builtin::Ipairs),
+            b"next" => Some(Builtin::Next),
+            b"getmetatable" => Some(Builtin::Getmetatable),
+            b"setmetatable" => Some(Builtin::Setmetatable),
+            b"rawget" => Some(Builtin::Rawget),
+            b"rawset" => Some(Builtin::Rawset),
+            b"rawequal" => Some(Builtin::Rawequal),
+            b"rawlen" => Some(Builtin::Rawlen),
+            b"select" => Some(Builtin::Select),
+            b"unpack" => Some(Builtin::Unpack),
+            b"math" => Some(Builtin::Math),
+            b"string" => Some(Builtin::String),
+            b"table" => Some(Builtin::Table),
+            b"_G" => Some(Builtin::G),
+            _ => None,
+        }
+    }
+
+    /// Get the name of this builtin.
+    #[inline]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Builtin::Print => "print",
+            Builtin::Type => "type",
+            Builtin::Tonumber => "tonumber",
+            Builtin::Tostring => "tostring",
+            Builtin::Pairs => "pairs",
+            Builtin::Ipairs => "ipairs",
+            Builtin::Next => "next",
+            Builtin::Getmetatable => "getmetatable",
+            Builtin::Setmetatable => "setmetatable",
+            Builtin::Rawget => "rawget",
+            Builtin::Rawset => "rawset",
+            Builtin::Rawequal => "rawequal",
+            Builtin::Rawlen => "rawlen",
+            Builtin::Select => "select",
+            Builtin::Unpack => "unpack",
+            Builtin::Math => "math",
+            Builtin::String => "string",
+            Builtin::Table => "table",
+            Builtin::G => "_G",
+        }
+    }
+
+    /// Convert to u8 for instruction encoding.
+    #[inline]
+    pub const fn to_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Convert from u8. Returns None if out of range.
+    #[inline]
+    pub const fn from_u8(n: u8) -> Option<Self> {
+        if n < Self::COUNT as u8 {
+            // SAFETY: n is in range and repr(u8) ensures valid transmute
+            Some(unsafe { std::mem::transmute(n) })
+        } else {
+            None
+        }
+    }
+}
+
 /// A 32-bit encoded instruction.
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(transparent)]
@@ -120,6 +231,8 @@ impl Instr {
     pub(crate) const OP_SET_LIST: u8 = 45;
     pub(crate) const OP_SET_TABLE: u8 = 46;
     pub(crate) const OP_PUSH_BOOL: u8 = 47; // A=0 for false, A=1 for true
+    pub(crate) const OP_GET_BUILTIN: u8 = 48; // A=builtin slot index
+    pub(crate) const OP_SET_BUILTIN: u8 = 49; // A=builtin slot index
 
     // Two u8 operands (in A and B slots)
     pub(crate) const OP_SET_FIELD: u8 = 50;
@@ -262,6 +375,8 @@ impl Instr {
     pub(crate) const fn set_list(count: u8) -> Self { Self::op_a(Self::OP_SET_LIST, count) }
     pub(crate) const fn set_table(offset: u8) -> Self { Self::op_a(Self::OP_SET_TABLE, offset) }
     pub(crate) const fn push_bool(b: bool) -> Self { Self::op_a(Self::OP_PUSH_BOOL, b as u8) }
+    pub(crate) const fn get_builtin(slot: Builtin) -> Self { Self::op_a(Self::OP_GET_BUILTIN, slot.to_u8()) }
+    pub(crate) const fn set_builtin(slot: Builtin) -> Self { Self::op_a(Self::OP_SET_BUILTIN, slot.to_u8()) }
 
     // Two u8 operands
     pub(crate) const fn set_field(offset: u8, idx: u8) -> Self { Self::op_ab(Self::OP_SET_FIELD, offset, idx) }
@@ -327,6 +442,8 @@ impl std::fmt::Debug for Instr {
             Self::OP_SET_LIST => write!(f, "SetList({})", self.a()),
             Self::OP_SET_TABLE => write!(f, "SetTable({})", self.a()),
             Self::OP_PUSH_BOOL => write!(f, "PushBool({})", self.a() != 0),
+            Self::OP_GET_BUILTIN => write!(f, "GetBuiltin({:?})", Builtin::from_u8(self.a())),
+            Self::OP_SET_BUILTIN => write!(f, "SetBuiltin({:?})", Builtin::from_u8(self.a())),
             Self::OP_SET_FIELD => write!(f, "SetField({}, {})", self.a(), self.b()),
             Self::OP_INIT_FIELD => write!(f, "InitField({}, {})", self.a(), self.b()),
             Self::OP_TFOR_CALL => write!(f, "TForCall({}, {})", self.a(), self.b()),

@@ -10,7 +10,7 @@ use super::token::TokenType;
 use super::Chunk;
 use super::Instr;
 use super::Result;
-use crate::instr::{ArgCount, RetCount};
+use crate::instr::{ArgCount, Builtin, RetCount};
 use super::UpvalueDesc;
 
 use std::borrow::Borrow;
@@ -334,6 +334,7 @@ impl<'a> Parser<'a> {
             PlaceExp::Local(i) => Instr::set_local(i),
             PlaceExp::Upvalue(i) => Instr::set_upvalue(i),
             PlaceExp::Global(i) => Instr::set_global(i),
+            PlaceExp::Builtin(b) => Instr::set_builtin(b),
             _ => unreachable!("place expression was not a local, upvalue, or global variable"),
         };
         self.parse_fndef()?;
@@ -347,6 +348,7 @@ impl<'a> Parser<'a> {
             PlaceExp::Local(i) => Instr::get_local(i),
             PlaceExp::Upvalue(i) => Instr::get_upvalue(i),
             PlaceExp::Global(i) => Instr::get_global(i),
+            PlaceExp::Builtin(b) => Instr::get_builtin(b),
             _ => unreachable!("place expression was not a local, upvalue, or global variable"),
         };
         self.push(table_instr);
@@ -471,6 +473,7 @@ impl<'a> Parser<'a> {
                 PlaceExp::Local(i) => Instr::set_local(i),
                 PlaceExp::Upvalue(i) => Instr::set_upvalue(i),
                 PlaceExp::Global(i) => Instr::set_global(i),
+                PlaceExp::Builtin(b) => Instr::set_builtin(b),
                 PlaceExp::FieldAccess(literal_id) => {
                     let stack_offset = num_lvals as u8 - i as u8 - 1;
                     Instr::set_field(stack_offset, literal_id)
@@ -509,6 +512,7 @@ impl<'a> Parser<'a> {
                     PlaceExp::Local(i) => Instr::get_local(*i),
                     PlaceExp::Upvalue(i) => Instr::get_upvalue(*i),
                     PlaceExp::Global(i) => Instr::get_global(*i),
+                    PlaceExp::Builtin(b) => Instr::get_builtin(*b),
                     PlaceExp::FieldAccess(i) => Instr::get_field(*i),
                     PlaceExp::TableIndex => Instr::get_table(),
                 };
@@ -534,7 +538,12 @@ impl<'a> Parser<'a> {
             return Ok(PlaceExp::Upvalue(i));
         }
 
-        // Otherwise it's a global
+        // Check if it's a well-known builtin for fast access
+        if let Some(builtin) = Builtin::from_name(name) {
+            return Ok(PlaceExp::Builtin(builtin));
+        }
+
+        // Otherwise it's a regular global
         let i = self.find_or_add_string(name)?;
         Ok(PlaceExp::Global(i))
     }
@@ -1560,7 +1569,7 @@ mod tests {
     use super::parse_str;
     use super::Chunk;
     use super::Instr;
-    use crate::instr::{ArgCount, RetCount};
+    use crate::instr::{ArgCount, Builtin, RetCount};
 
     fn check_it(input: &str, mut output: Chunk) {
         // Top-level chunks are always vararg functions
@@ -1873,14 +1882,13 @@ mod tests {
             Instr::push_nil(),
             Instr::set_local(1),
             Instr::set_local(0),
-            Instr::get_global(0),
+            Instr::get_builtin(Builtin::Print),
             Instr::get_local(1),
             Instr::call(ArgCount::Fixed(1), RetCount::Fixed(0)),
             Instr::ret(RetCount::Fixed(0)),
         ];
         let chunk = Chunk {
             code,
-            string_literals: vec!["print".into()],
             num_locals: 2,
             ..Chunk::default()
         };
@@ -2139,12 +2147,11 @@ mod tests {
             code: vec![
                 Instr::closure(0),
                 Instr::set_local(0),
-                Instr::get_global(0),
+                Instr::get_builtin(Builtin::Print),
                 Instr::get_local(0),
                 Instr::call(ArgCount::Fixed(1), RetCount::Fixed(0)),
                 Instr::ret(RetCount::Fixed(0)),
             ],
-            string_literals: vec!["print".into()],
             nested: vec![y],
             num_locals: 1,
             ..Chunk::default()
@@ -2167,12 +2174,11 @@ mod tests {
     #[test]
     fn test31() {
         let text = "local s = type(4)";
-        let code = vec![Instr::get_global(0), Instr::push_num(0), Instr::call(ArgCount::Fixed(1), RetCount::Fixed(1)), Instr::set_local(0), Instr::ret(RetCount::Fixed(0))];
+        let code = vec![Instr::get_builtin(Builtin::Type), Instr::push_num(0), Instr::call(ArgCount::Fixed(1), RetCount::Fixed(1)), Instr::set_local(0), Instr::ret(RetCount::Fixed(0))];
         let chunk = Chunk {
             code,
             num_locals: 1,
             number_literals: vec![4.0],
-            string_literals: vec!["type".into()],
             ..Chunk::default()
         };
         check_it(text, chunk);

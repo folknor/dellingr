@@ -19,6 +19,7 @@ use super::compiler;
 use super::error::Error;
 use super::error::ErrorKind;
 use super::error::TypeError;
+use super::instr::Builtin;
 use super::Chunk;
 use super::Instr;
 use super::Result;
@@ -31,6 +32,9 @@ use table::Table;
 pub struct State {
     /// The global environment. This may be changed to an actual Table in the future.
     pub(super) globals: HashMap<String, Val>,
+    /// Fast array for well-known builtin globals (print, pairs, type, etc.).
+    /// Indexed by Builtin enum. Avoids HashMap lookup for common globals.
+    pub(super) builtins: [Val; Builtin::COUNT],
     /// The main stack which stores values.
     pub(super) stack: Vec<Val>,
     /// The bottom index of the current frame in the stack.
@@ -82,6 +86,7 @@ impl Markable for State {
     fn mark_reachable(&self) {
         self.stack.mark_reachable();
         self.globals.mark_reachable();
+        self.builtins.mark_reachable();
         self.string_literals.mark_reachable();
         // Mark all closed upvalues (open ones point to stack which is already marked)
         self.upvalue_pool.mark_closed_upvalues();
@@ -104,6 +109,7 @@ impl State {
     pub fn empty() -> Self {
         Self {
             globals: HashMap::new(),
+            builtins: std::array::from_fn(|_| Val::Nil),
             stack: Vec::with_capacity(256), // Pre-size for typical function depth * locals
             stack_bottom: 0,
             heap: GcHeap::with_threshold(Self::GC_INITIAL_THRESHOLD),
@@ -157,7 +163,12 @@ impl State {
 
     /// Pushes onto the stack the value of the global `name`.
     pub fn get_global(&mut self, name: &str) {
-        let val = self.globals.get(name).cloned().unwrap_or_default();
+        // Check builtins first for common names
+        let val = if let Some(slot) = Builtin::from_name(name) {
+            self.builtins[slot as usize].clone()
+        } else {
+            self.globals.get(name).cloned().unwrap_or_default()
+        };
         self.stack.push(val);
     }
 
@@ -165,6 +176,10 @@ impl State {
     /// `name`.
     pub fn set_global(&mut self, name: &str) {
         let val = self.pop_val();
+        // Update builtins array if this is a well-known name
+        if let Some(slot) = Builtin::from_name(name) {
+            self.builtins[slot as usize] = val.clone();
+        }
         self.globals.insert(name.to_string(), val);
     }
 
@@ -173,12 +188,14 @@ impl State {
         let Self {
             stack,
             globals,
+            builtins,
             string_literals,
             ..
         } = self;
         let ptr = self.heap.new_string(s, || {
             stack.mark_reachable();
             globals.mark_reachable();
+            builtins.mark_reachable();
             string_literals.mark_reachable();
         });
         Val::Str(ptr)

@@ -180,9 +180,11 @@ Findings from expert code review (January 2026). Organized by priority.
 - [ ] **Pointer tagging for Val**
   - If allocations are 8-byte aligned, use low bits for type tags
 
-- [ ] **Fixed-size array for well-known globals**
-  - `print`, `pairs`, `ipairs`, `type`, etc. accessed frequently
-  - String interning for global names enables pointer comparison
+- [x] **Fixed-size array for well-known globals**
+  - `print`, `pairs`, `ipairs`, `type`, etc. accessed frequently via HashMap string lookup
+  - **Fixed:** `Builtin` enum with 19 well-known names, `builtins: [Val; 19]` array in State
+  - New `GetBuiltin`/`SetBuiltin` opcodes use direct array indexing (no hash lookup)
+  - Compiler emits fast opcodes for well-known names, fallback to global for others
 
 - [x] **Use `#[cfg(feature = "debug_vm")]` instead of `option_env!`** (`frame.rs` `Frame::eval()` debug print)
   - **Fixed:** Added `debug_parser`, `debug_vm`, `debug_gc` features to Cargo.toml

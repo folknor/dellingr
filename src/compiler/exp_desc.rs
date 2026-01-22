@@ -1,6 +1,8 @@
 //! This module holds enums which describe the different types of Lua
 //! expressions.
 
+use crate::instr::Builtin;
+
 #[derive(Debug)]
 pub(super) enum ExpDesc {
     Prefix(PrefixExp),
@@ -31,6 +33,8 @@ pub(super) enum PlaceExp {
     Upvalue(u8),
     /// A global variable, and its index in the list of string literals
     Global(u8),
+    /// A well-known builtin global (print, pairs, etc.) - uses fast array access
+    Builtin(Builtin),
     /// A table index, with `[` and `]`
     TableIndex,
     /// A field access, and the index of the field's identifier in the list of

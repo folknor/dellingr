@@ -18,7 +18,7 @@ mod vm_aux;
 
 pub mod error;
 
-pub use instr::{ArgCount, RetCount};
+pub use instr::{ArgCount, Builtin, RetCount};
 pub use vm::LuaType;
 pub use vm::RustFunc;
 pub use vm::State;
