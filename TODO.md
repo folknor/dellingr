@@ -312,3 +312,4 @@ add_fn!("broken", |state| {
 - [x] `rawlen(v)` - length without __len metamethod
 - [x] Fix crash with empty patterns in string functions
 - [x] String escape sequences (`\n`, `\t`, `\r`, `\\`, `\"`, `\'`, `\0`, `\a`, `\b`, `\f`, `\v`)
+- [x] Multi-line comments (`--[[ ... ]]`)
