@@ -6,6 +6,7 @@
 use super::lua_val::Val;
 use super::object::Markable;
 use super::{Result, State, TypeError};
+use crate::instr::{ArgCount, RetCount};
 
 impl State {
     /// Creates a new empty table and pushes it onto the stack.
@@ -216,7 +217,7 @@ impl State {
                     self.stack.push(a.clone());
                     self.stack.push(b.clone());
                     // Call
-                    self.call(2, 1)?;
+                    self.call(ArgCount::Fixed(2), RetCount::Fixed(1))?;
                     // Get result
                     let result = self.pop_val();
 
@@ -271,7 +272,7 @@ impl State {
                         // Call the __tostring metamethod
                         self.stack.push(tostring_handler);
                         self.stack.push(val);
-                        self.call(1, 1)?;
+                        self.call(ArgCount::Fixed(1), RetCount::Fixed(1))?;
                         let result = self.pop_val();
                         return Ok(result.to_string());
                     }

@@ -189,11 +189,12 @@ Findings from expert code review (January 2026). Organized by priority.
 
 ### API Improvements
 
-- [ ] **Replace magic 255 values with proper types** (`vm.rs` `State::call()`, `instr.rs` `Instr::Return`)
+- [x] **Replace magic 255 values with proper types** (`vm.rs` `State::call()`, `instr.rs` `Instr::Return`)
   - `num_args == 255`: vararg call base
   - `num_ret_expected == 255`: return all
   - `Return(255)`: return all
-  - **Fix:** Use `Option<u8>` or dedicated enum
+  - **Fixed:** Added `ArgCount` enum (Fixed/Dynamic) and `RetCount` enum (Fixed/All)
+  - Public API `State::call()` now takes semantic types instead of raw u8 values
 
 ### Code Organization
 

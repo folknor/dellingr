@@ -10,6 +10,7 @@ use super::LuaType;
 use super::Result;
 use super::State;
 use super::Val;
+use crate::instr::{ArgCount, RetCount};
 
 /// A `Frame` represents a single stack-frame of a Lua function.
 pub(super) struct Frame {
@@ -101,7 +102,7 @@ impl Frame {
     ///
     /// Costs 1: arithmetic (+, -, *, /, %, ^, unary -), table creation,
     /// table writes (including array initialization).
-    pub(super) fn eval(&mut self, state: &mut State) -> Result<u8> {
+    pub(super) fn eval(&mut self, state: &mut State) -> Result<RetCount> {
         // Batch cost checking: accumulate locally and flush periodically
         let mut local_cost: u64 = 0;
 
@@ -154,7 +155,7 @@ impl Frame {
 
                 // Functions (calls and returns are free)
                 Instr::OP_CLOSURE => state.instr_closure(self, inst.a()),
-                Instr::OP_CALL => state.call(inst.a(), inst.b())?,
+                Instr::OP_CALL => state.call(ArgCount::from_u8(inst.a()), RetCount::from_u8(inst.b()))?,
                 Instr::OP_MARK_CALL_BASE => {
                     state.vararg_call_bases.push(state.stack.len());
                 }
@@ -169,7 +170,7 @@ impl Frame {
                     if local_cost > 0 {
                         state.consume_cost(local_cost)?;
                     }
-                    return Ok(inst.a());
+                    return Ok(RetCount::from_u8(inst.a()));
                 }
                 Instr::OP_VARARG => {
                     let n = inst.a();
@@ -430,7 +431,7 @@ impl State {
         self.stack.push(control);
 
         // Call with 2 args (state, control), expecting num_vars returns
-        self.call(2, num_vars)?;
+        self.call(ArgCount::Fixed(2), RetCount::Fixed(num_vars))?;
 
         // Move results from stack to loop variable slots (base + 3, base + 4, ...)
         let results_start = self.stack.len() - num_vars as usize;
@@ -611,7 +612,7 @@ impl State {
                             // Call __len(table)
                             self.stack.push(len_handler);
                             self.stack.push(val);
-                            self.call(1, 1)?;
+                            self.call(ArgCount::Fixed(1), RetCount::Fixed(1))?;
                             return Ok(());
                         }
                     }

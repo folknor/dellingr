@@ -209,6 +209,7 @@ mod tests {
     use super::State;
     use super::Chunk;
     use super::Instr;
+    use crate::instr::RetCount;
 
     #[test]
     fn vm_test01() {
@@ -227,7 +228,7 @@ mod tests {
                 Instr::push_string(2),
                 Instr::concat(),
                 Instr::set_global(0),
-                Instr::ret(0),
+                Instr::ret(RetCount::Fixed(0)),
             ],
             string_literals: vec!["key".to_string(), "a".to_string(), "b".to_string()],
             ..Chunk::default()
@@ -241,7 +242,7 @@ mod tests {
     fn vm_test04() {
         let mut state = State::new();
         let input = Chunk {
-            code: vec![Instr::push_num(0), Instr::push_num(0), Instr::equal(), Instr::set_global(0), Instr::ret(0)],
+            code: vec![Instr::push_num(0), Instr::push_num(0), Instr::equal(), Instr::set_global(0), Instr::ret(RetCount::Fixed(0))],
             number_literals: vec![2.5],
             string_literals: vec!["a".to_string()],
             ..Chunk::default()
@@ -260,7 +261,7 @@ mod tests {
                 Instr::pop(),
                 Instr::push_bool(false),
                 Instr::set_global(0),
-                Instr::ret(0),
+                Instr::ret(RetCount::Fixed(0)),
             ],
             string_literals: vec!["key".to_string()],
             ..Chunk::default()
@@ -277,7 +278,7 @@ mod tests {
             Instr::branch_false(3),
             Instr::push_num(0),
             Instr::set_global(0),
-            Instr::ret(0),
+            Instr::ret(RetCount::Fixed(0)),
         ];
         let chunk = Chunk {
             code,
@@ -299,7 +300,7 @@ mod tests {
             Instr::branch_false(2),
             Instr::push_bool(true),
             Instr::set_global(0),
-            Instr::ret(0),
+            Instr::ret(RetCount::Fixed(0)),
         ];
         let chunk = Chunk {
             code,
@@ -325,7 +326,7 @@ mod tests {
             Instr::add(),
             Instr::set_global(0),
             Instr::jump(-9),
-            Instr::ret(0),
+            Instr::ret(RetCount::Fixed(0)),
         ];
         let chunk = Chunk {
             code,
@@ -358,7 +359,7 @@ mod tests {
             Instr::jump(-9),
             Instr::get_local(0),
             Instr::set_global(0),
-            Instr::ret(0),
+            Instr::ret(RetCount::Fixed(0)),
         ];
         let chunk = Chunk {
             code,
@@ -385,7 +386,7 @@ mod tests {
             Instr::set_global(0), // a = 2
             // End loop
             Instr::for_loop(0, -3),
-            Instr::ret(0),
+            Instr::ret(RetCount::Fixed(0)),
         ];
         let chunk = Chunk {
             code,

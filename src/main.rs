@@ -2,7 +2,7 @@ use std::env::args;
 use std::fs;
 use std::process::exit;
 
-use lua::State;
+use lua::{ArgCount, RetCount, State};
 
 fn main() {
     let args: Vec<String> = args().collect();
@@ -50,7 +50,7 @@ fn main() {
         state.set_cost_budget(l);
     }
 
-    let result = state.load_string(&source).and_then(|()| state.call(0, 0));
+    let result = state.load_string(&source).and_then(|()| state.call(ArgCount::Fixed(0), RetCount::Fixed(0)));
 
     println!("Cost used: {}", state.cost_used());
 

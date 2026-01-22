@@ -1,5 +1,6 @@
 //! Lua's String Library
 
+use crate::instr::{ArgCount, RetCount};
 use crate::LuaType;
 use crate::State;
 use lua_patterns::LuaPattern;
@@ -681,10 +682,10 @@ pub(crate) fn open_string(state: &mut State) {
                                     for cap in captures.iter().skip(1) {
                                         state.push_string(cap.to_string());
                                     }
-                                    state.call((captures.len() - 1) as u8, 1).ok();
+                                    state.call(ArgCount::Fixed((captures.len() - 1) as u8), RetCount::Fixed(1)).ok();
                                 } else {
                                     state.push_string(captures[0].to_string());
-                                    state.call(1, 1).ok();
+                                    state.call(ArgCount::Fixed(1), RetCount::Fixed(1)).ok();
                                 }
                                 let val = state.to_string(-1)?;
                                 state.pop(1);

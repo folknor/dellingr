@@ -5,6 +5,70 @@
 //! This encoding is 4x smaller than the previous enum-based representation
 //! (~16 bytes per instruction) and much more cache-friendly.
 
+/// Argument count for function calls.
+///
+/// Either a fixed count (0-254) or dynamic (calculated from vararg call base).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArgCount {
+    /// Fixed number of arguments (0-254).
+    Fixed(u8),
+    /// Dynamic: calculate from vararg_call_bases stack.
+    Dynamic,
+}
+
+impl ArgCount {
+    /// Encode to u8 for instruction storage. Dynamic maps to 255.
+    #[inline]
+    pub(crate) const fn to_u8(self) -> u8 {
+        match self {
+            ArgCount::Fixed(n) => n,
+            ArgCount::Dynamic => u8::MAX,
+        }
+    }
+
+    /// Decode from u8. 255 means Dynamic.
+    #[inline]
+    pub(crate) const fn from_u8(n: u8) -> Self {
+        if n == u8::MAX {
+            ArgCount::Dynamic
+        } else {
+            ArgCount::Fixed(n)
+        }
+    }
+}
+
+/// Return count for function calls and returns.
+///
+/// Either a fixed count (0-254) or all available values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RetCount {
+    /// Fixed number of return values (0-254).
+    Fixed(u8),
+    /// Return/expect all available values.
+    All,
+}
+
+impl RetCount {
+    /// Encode to u8 for instruction storage. All maps to 255.
+    #[inline]
+    pub(crate) const fn to_u8(self) -> u8 {
+        match self {
+            RetCount::Fixed(n) => n,
+            RetCount::All => u8::MAX,
+        }
+    }
+
+    /// Decode from u8. 255 means All.
+    #[inline]
+    pub(crate) const fn from_u8(n: u8) -> Self {
+        if n == u8::MAX {
+            RetCount::All
+        } else {
+            RetCount::Fixed(n)
+        }
+    }
+}
+
 /// A 32-bit encoded instruction.
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(transparent)]
@@ -191,7 +255,7 @@ impl Instr {
     pub(crate) const fn push_num(idx: u8) -> Self { Self::op_a(Self::OP_PUSH_NUM, idx) }
     pub(crate) const fn push_string(idx: u8) -> Self { Self::op_a(Self::OP_PUSH_STRING, idx) }
     pub(crate) const fn tfor_prep(slot: u8) -> Self { Self::op_a(Self::OP_TFOR_PREP, slot) }
-    pub(crate) const fn ret(n: u8) -> Self { Self::op_a(Self::OP_RETURN, n) }
+    pub(crate) const fn ret(n: RetCount) -> Self { Self::op_a(Self::OP_RETURN, n.to_u8()) }
     pub(crate) const fn close_upvalues(level: u8) -> Self { Self::op_a(Self::OP_CLOSE_UPVALUES, level) }
     pub(crate) const fn closure(idx: u8) -> Self { Self::op_a(Self::OP_CLOSURE, idx) }
     pub(crate) const fn vararg(n: u8) -> Self { Self::op_a(Self::OP_VARARG, n) }
@@ -203,7 +267,9 @@ impl Instr {
     pub(crate) const fn set_field(offset: u8, idx: u8) -> Self { Self::op_ab(Self::OP_SET_FIELD, offset, idx) }
     pub(crate) const fn init_field(offset: u8, idx: u8) -> Self { Self::op_ab(Self::OP_INIT_FIELD, offset, idx) }
     pub(crate) const fn tfor_call(slot: u8, num_vars: u8) -> Self { Self::op_ab(Self::OP_TFOR_CALL, slot, num_vars) }
-    pub(crate) const fn call(num_args: u8, num_rets: u8) -> Self { Self::op_ab(Self::OP_CALL, num_args, num_rets) }
+    pub(crate) const fn call(num_args: ArgCount, num_rets: RetCount) -> Self {
+        Self::op_ab(Self::OP_CALL, num_args.to_u8(), num_rets.to_u8())
+    }
 
     // Jump instructions (signed 16-bit offset)
     pub(crate) const fn jump(offset: i16) -> Self { Self::op_sbx(Self::OP_JUMP, offset) }
@@ -254,7 +320,7 @@ impl std::fmt::Debug for Instr {
             Self::OP_PUSH_NUM => write!(f, "PushNum({})", self.a()),
             Self::OP_PUSH_STRING => write!(f, "PushString({})", self.a()),
             Self::OP_TFOR_PREP => write!(f, "TForPrep({})", self.a()),
-            Self::OP_RETURN => write!(f, "Return({})", self.a()),
+            Self::OP_RETURN => write!(f, "Return({:?})", RetCount::from_u8(self.a())),
             Self::OP_CLOSE_UPVALUES => write!(f, "CloseUpvalues({})", self.a()),
             Self::OP_CLOSURE => write!(f, "Closure({})", self.a()),
             Self::OP_VARARG => write!(f, "Vararg({})", self.a()),
@@ -264,7 +330,7 @@ impl std::fmt::Debug for Instr {
             Self::OP_SET_FIELD => write!(f, "SetField({}, {})", self.a(), self.b()),
             Self::OP_INIT_FIELD => write!(f, "InitField({}, {})", self.a(), self.b()),
             Self::OP_TFOR_CALL => write!(f, "TForCall({}, {})", self.a(), self.b()),
-            Self::OP_CALL => write!(f, "Call({}, {})", self.a(), self.b()),
+            Self::OP_CALL => write!(f, "Call({:?}, {:?})", ArgCount::from_u8(self.a()), RetCount::from_u8(self.b())),
             Self::OP_JUMP => write!(f, "Jump({})", self.sbx()),
             Self::OP_BRANCH_FALSE => write!(f, "BranchFalse({})", self.sbx()),
             Self::OP_BRANCH_TRUE_KEEP => write!(f, "BranchTrueKeep({})", self.sbx()),

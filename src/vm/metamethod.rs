@@ -9,6 +9,7 @@ use super::lua_val::Val;
 use super::Result;
 use super::State;
 use crate::error::ErrorKind;
+use crate::instr::{ArgCount, RetCount};
 
 /// Maximum depth for metamethod chains (__index/__newindex).
 /// Prevents stack overflow from circular metamethod references.
@@ -80,7 +81,7 @@ impl State {
                     self.stack.push(Val::Obj(ptr));
                     self.stack.push(table_val);
                     self.stack.push(key);
-                    self.call(2, 1)?;
+                    self.call(ArgCount::Fixed(2), RetCount::Fixed(1))?;
                     Ok(())
                 } else {
                     self.push_nil();
@@ -93,7 +94,7 @@ impl State {
                 self.stack.push(Val::RustFn(f));
                 self.stack.push(table_val);
                 self.stack.push(key);
-                self.call(2, 1)?;
+                self.call(ArgCount::Fixed(2), RetCount::Fixed(1))?;
                 Ok(())
             }
             _ => {
@@ -182,7 +183,7 @@ impl State {
                     self.stack.push(table_val);
                     self.stack.push(key);
                     self.stack.push(val);
-                    self.call(3, 0)?;
+                    self.call(ArgCount::Fixed(3), RetCount::Fixed(0))?;
                     Ok(())
                 } else {
                     // Not a table or function, just do normal assignment
@@ -199,7 +200,7 @@ impl State {
                 self.stack.push(table_val);
                 self.stack.push(key);
                 self.stack.push(val);
-                self.call(3, 0)?;
+                self.call(ArgCount::Fixed(3), RetCount::Fixed(0))?;
                 Ok(())
             }
             _ => {

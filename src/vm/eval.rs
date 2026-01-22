@@ -9,6 +9,7 @@ use super::frame::Frame;
 use super::lua_val::Val;
 use super::object::{Closure, Markable, Upvalue, UpvalueRef};
 use super::{compiler, Chunk, Error, ErrorKind, Result, State, TypeError, MAX_CALL_DEPTH};
+use crate::instr::{ArgCount, RetCount};
 
 impl State {
     /// Calls a function.
@@ -24,17 +25,18 @@ impl State {
     /// results are pushed onto the stack in direct order (the first result is
     /// pushed first), so that after the call the last result is on the top of
     /// the stack.
-    pub fn call(&mut self, num_args: u8, num_ret_expected: u8) -> Result<()> {
-        // Handle vararg call: num_args == 255 means calculate from vararg_call_bases stack
-        let (idx, actual_num_args) = if num_args == u8::MAX {
-            let base = self
-                .vararg_call_bases
-                .pop()
-                .expect("Call with 255 args but no vararg_call_base set");
-            let actual = (self.stack.len() - base - 1) as u8;
-            (base, actual)
-        } else {
-            (self.stack.len() - num_args as usize - 1, num_args)
+    pub fn call(&mut self, num_args: ArgCount, num_ret_expected: RetCount) -> Result<()> {
+        // Handle vararg call: ArgCount::Dynamic means calculate from vararg_call_bases stack
+        let (idx, actual_num_args) = match num_args {
+            ArgCount::Dynamic => {
+                let base = self
+                    .vararg_call_bases
+                    .pop()
+                    .expect("Call with Dynamic args but no vararg_call_base set");
+                let actual = (self.stack.len() - base - 1) as u8;
+                (base, actual)
+            }
+            ArgCount::Fixed(n) => (self.stack.len() - n as usize - 1, n),
         };
         let func_val = self.stack.remove(idx);
         let num_ret_actual = if let Val::RustFn(f) = func_val {
@@ -74,7 +76,7 @@ impl State {
                         self.stack.insert(idx, func_val.clone());
                         self.stack.insert(idx, call_handler);
                         // Now call with actual_num_args + 1 (table is first arg)
-                        return self.call(actual_num_args + 1, num_ret_expected);
+                        return self.call(ArgCount::Fixed(actual_num_args + 1), num_ret_expected);
                     }
                 }
             }
@@ -82,9 +84,9 @@ impl State {
         } else {
             return Err(self.type_error(TypeError::FunctionCall(func_val.typ())));
         };
-        // 255 means "return all" - don't adjust the stack
-        if num_ret_expected != u8::MAX {
-            self.balance_stack(num_ret_expected as usize, num_ret_actual as usize);
+        // RetCount::All means "return all" - don't adjust the stack
+        if let RetCount::Fixed(expected) = num_ret_expected {
+            self.balance_stack(expected as usize, num_ret_actual as usize);
         }
         Ok(())
     }
@@ -197,15 +199,16 @@ impl State {
         }
 
         let mut frame = self.initialize_frame(closure, varargs);
-        let num_vals_returned = frame.eval(self)?;
+        let ret_count = frame.eval(self)?;
 
-        // Handle Return(255) which means "return all values on stack"
-        let actual_num_returned = if num_vals_returned == u8::MAX {
-            // Calculate how many values are above the frame's locals
-            let frame_base = self.stack_bottom + num_params as usize + num_locals as usize;
-            (self.stack.len() - frame_base) as u8
-        } else {
-            num_vals_returned
+        // Handle RetCount::All which means "return all values on stack"
+        let actual_num_returned = match ret_count {
+            RetCount::All => {
+                // Calculate how many values are above the frame's locals
+                let frame_base = self.stack_bottom + num_params as usize + num_locals as usize;
+                (self.stack.len() - frame_base) as u8
+            }
+            RetCount::Fixed(n) => n,
         };
 
         // Save return values from the top of the stack

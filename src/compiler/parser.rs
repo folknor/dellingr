@@ -10,6 +10,7 @@ use super::token::TokenType;
 use super::Chunk;
 use super::Instr;
 use super::Result;
+use crate::instr::{ArgCount, RetCount};
 use super::UpvalueDesc;
 
 use std::borrow::Borrow;
@@ -268,7 +269,7 @@ impl<'a> Parser<'a> {
         }
 
         self.parse_statements()?;
-        self.push(Instr::ret(0));
+        self.push(Instr::ret(RetCount::Fixed(0)));
 
         // Copy upvalues to chunk
         self.chunk.upvalues = self.upvalues.iter().map(|(_, desc)| *desc).collect();
@@ -376,7 +377,7 @@ impl<'a> Parser<'a> {
             match last_exp {
                 ExpDesc::Prefix(PrefixExp::FunctionCall(num_args)) => {
                     self.chunk.code.pop(); // Instr::pop() the Call(num_args, 1) instruction
-                    self.push(Instr::call(num_args, u8::MAX)); // Emit Call with "return all"
+                    self.push(Instr::call(ArgCount::Fixed(num_args), RetCount::All)); // Emit Call with "return all"
                     u8::MAX
                 }
                 ExpDesc::Vararg => {
@@ -390,7 +391,7 @@ impl<'a> Parser<'a> {
             0
         };
 
-        self.push(Instr::ret(n));
+        self.push(Instr::ret(RetCount::Fixed(n)));
         self.input.try_pop(TokenType::Semi)?;
         Ok(())
     }
@@ -426,7 +427,7 @@ impl<'a> Parser<'a> {
                 Err(self.err_unexpected(tok, TokenType::Assign))
             }
             PrefixExp::FunctionCall(num_args) => {
-                self.push(Instr::call(num_args, 0));
+                self.push(Instr::call(ArgCount::Fixed(num_args), RetCount::Fixed(0)));
                 Ok(())
             }
             PrefixExp::Place(first_place) => self.parse_assign(first_place),
@@ -451,7 +452,7 @@ impl<'a> Parser<'a> {
                     Some(instr) if instr.opcode() == Instr::OP_CALL => instr.a(),
                     i => unreachable!("PrefixExp::FunctionCall but last instruction was {:?}", i),
                 };
-                self.push(Instr::call(num_args, 1 + diff as u8));
+                self.push(Instr::call(ArgCount::Fixed(num_args), RetCount::Fixed(1 + diff as u8)));
             } else {
                 for _ in 0..diff {
                     self.push(Instr::push_nil());
@@ -500,7 +501,7 @@ impl<'a> Parser<'a> {
     fn eval_prefix_exp(&mut self, exp: &PrefixExp) {
         match exp {
             PrefixExp::FunctionCall(num_args) => {
-                self.push(Instr::call(*num_args, 1));
+                self.push(Instr::call(ArgCount::Fixed(*num_args), RetCount::Fixed(1)));
             }
             PrefixExp::Parenthesized => (),
             PrefixExp::Place(place) => {
@@ -656,7 +657,7 @@ impl<'a> Parser<'a> {
                 Ordering::Greater => {
                     if let ExpDesc::Prefix(PrefixExp::FunctionCall(num_args)) = last_exp {
                         self.chunk.code.pop(); // Instr::pop() the old 'Call' instruction
-                        self.push(Instr::call(num_args, 1 + num_names - num_rvalues));
+                        self.push(Instr::call(ArgCount::Fixed(num_args), RetCount::Fixed(1 + num_names - num_rvalues)));
                     } else if let ExpDesc::Vararg = last_exp {
                         self.chunk.code.pop(); // Instr::pop() the old 'Vararg(1)' instruction
                         self.push(Instr::vararg(1 + num_names - num_rvalues));
@@ -829,7 +830,7 @@ impl<'a> Parser<'a> {
                     Some(instr) if instr.opcode() == Instr::OP_CALL => instr.a(),
                     i => unreachable!("PrefixExp::FunctionCall but last instruction was {:?}", i),
                 };
-                self.push(Instr::call(num_args, 3 - num_exprs + 1));
+                self.push(Instr::call(ArgCount::Fixed(num_args), RetCount::Fixed(3 - num_exprs + 1)));
             } else {
                 // Push nils to make up the difference
                 for _ in num_exprs..3 {
@@ -1265,7 +1266,7 @@ impl<'a> Parser<'a> {
                             i
                         ),
                     };
-                    self.push(Instr::call(inner_num_args, u8::MAX)); // Return all values
+                    self.push(Instr::call(ArgCount::Fixed(inner_num_args), RetCount::All)); // Return all values
                     u8::MAX // Signal to VM to calculate arg count from call base
                 } else {
                     // No special handling needed, remove the Instr::mark_call_base()
@@ -1317,7 +1318,7 @@ impl<'a> Parser<'a> {
                             i
                         ),
                     };
-                    self.push(Instr::call(inner_num_args, u8::MAX)); // Return all values
+                    self.push(Instr::call(ArgCount::Fixed(inner_num_args), RetCount::All)); // Return all values
                     u8::MAX // Signal to VM to calculate arg count from call base
                 } else {
                     // No special handling needed, remove the Instr::mark_call_base()
@@ -1559,6 +1560,7 @@ mod tests {
     use super::parse_str;
     use super::Chunk;
     use super::Instr;
+    use crate::instr::{ArgCount, RetCount};
 
     fn check_it(input: &str, mut output: Chunk) {
         // Top-level chunks are always vararg functions
@@ -1570,7 +1572,7 @@ mod tests {
     fn test01() {
         let text = "x = 5 + 6";
         let out = Chunk {
-            code: vec![Instr::push_num(0), Instr::push_num(1), Instr::add(), Instr::set_global(0), Instr::ret(0)],
+            code: vec![Instr::push_num(0), Instr::push_num(1), Instr::add(), Instr::set_global(0), Instr::ret(RetCount::Fixed(0))],
             number_literals: vec![5.0, 6.0],
             string_literals: vec!["x".into()],
             ..Chunk::default()
@@ -1582,7 +1584,7 @@ mod tests {
     fn test02() {
         let text = "x = -5^2";
         let out = Chunk {
-            code: vec![Instr::push_num(0), Instr::push_num(1), Instr::pow(), Instr::negate(), Instr::set_global(0), Instr::ret(0)],
+            code: vec![Instr::push_num(0), Instr::push_num(1), Instr::pow(), Instr::negate(), Instr::set_global(0), Instr::ret(RetCount::Fixed(0))],
             number_literals: vec![5.0, 2.0],
             string_literals: vec!["x".into()],
             ..Chunk::default()
@@ -1601,7 +1603,7 @@ mod tests {
                 Instr::push_string(1),
                 Instr::concat(),
                 Instr::set_global(0),
-                Instr::ret(0),
+                Instr::ret(RetCount::Fixed(0)),
             ],
             number_literals: vec![5.0],
             string_literals: vec!["x".into(), "hi".into()],
@@ -1621,7 +1623,7 @@ mod tests {
                 Instr::add(),
                 Instr::concat(),
                 Instr::set_global(0),
-                Instr::ret(0),
+                Instr::ret(RetCount::Fixed(0)),
             ],
             number_literals: vec![1.0, 2.0, 3.0],
             string_literals: vec!["x".into()],
@@ -1634,7 +1636,7 @@ mod tests {
     fn test05() {
         let text = "x = 2^-3";
         let output = Chunk {
-            code: vec![Instr::push_num(0), Instr::push_num(1), Instr::negate(), Instr::pow(), Instr::set_global(0), Instr::ret(0)],
+            code: vec![Instr::push_num(0), Instr::push_num(1), Instr::negate(), Instr::pow(), Instr::set_global(0), Instr::ret(RetCount::Fixed(0))],
             number_literals: vec![2.0, 3.0],
             string_literals: vec!["x".into()],
             ..Chunk::default()
@@ -1646,7 +1648,7 @@ mod tests {
     fn test06() {
         let text = "x=  not not 1";
         let output = Chunk {
-            code: vec![Instr::push_num(0), Instr::not(), Instr::not(), Instr::set_global(0), Instr::ret(0)],
+            code: vec![Instr::push_num(0), Instr::not(), Instr::not(), Instr::set_global(0), Instr::ret(RetCount::Fixed(0))],
             number_literals: vec![1.0],
             string_literals: vec!["x".into()],
             ..Chunk::default()
@@ -1658,7 +1660,7 @@ mod tests {
     fn test07() {
         let text = "a = 5";
         let output = Chunk {
-            code: vec![Instr::push_num(0), Instr::set_global(0), Instr::ret(0)],
+            code: vec![Instr::push_num(0), Instr::set_global(0), Instr::ret(RetCount::Fixed(0))],
             number_literals: vec![5.0],
             string_literals: vec!["a".to_string()],
             ..Chunk::default()
@@ -1676,7 +1678,7 @@ mod tests {
                 Instr::pop(),
                 Instr::push_bool(false),
                 Instr::set_global(0),
-                Instr::ret(0),
+                Instr::ret(RetCount::Fixed(0)),
             ],
             string_literals: vec!["x".into()],
             ..Chunk::default()
@@ -1696,7 +1698,7 @@ mod tests {
             Instr::pop(),
             Instr::push_bool(true),
             Instr::set_global(0),
-            Instr::ret(0),
+            Instr::ret(RetCount::Fixed(0)),
         ];
         let output = Chunk {
             code,
@@ -1715,7 +1717,7 @@ mod tests {
             Instr::branch_false(2),
             Instr::push_num(0),
             Instr::set_global(0),
-            Instr::ret(0),
+            Instr::ret(RetCount::Fixed(0)),
         ];
         let chunk = Chunk {
             code,
@@ -1738,7 +1740,7 @@ mod tests {
             Instr::branch_false(2),
             Instr::push_num(1),
             Instr::set_global(1),
-            Instr::ret(0),
+            Instr::ret(RetCount::Fixed(0)),
         ];
         let chunk = Chunk {
             code,
@@ -1760,7 +1762,7 @@ mod tests {
             Instr::jump(2),
             Instr::push_num(1),
             Instr::set_global(0),
-            Instr::ret(0),
+            Instr::ret(RetCount::Fixed(0)),
         ];
         let chunk = Chunk {
             code,
@@ -1789,7 +1791,7 @@ mod tests {
             Instr::jump(2),
             Instr::push_num(4),
             Instr::set_global(0),
-            Instr::ret(0),
+            Instr::ret(RetCount::Fixed(0)),
         ];
         let chunk = Chunk {
             code,
@@ -1813,7 +1815,7 @@ mod tests {
             Instr::add(),
             Instr::set_global(0),
             Instr::jump(-9),
-            Instr::ret(0),
+            Instr::ret(RetCount::Fixed(0)),
         ];
         let chunk = Chunk {
             code,
@@ -1838,7 +1840,7 @@ mod tests {
             Instr::branch_false(-7),
             Instr::push_num(1),
             Instr::set_global(2),
-            Instr::ret(0),
+            Instr::ret(RetCount::Fixed(0)),
         ];
         let chunk = Chunk {
             code,
@@ -1853,7 +1855,7 @@ mod tests {
     #[test]
     fn test16() {
         let text = "local i i = 2";
-        let code = vec![Instr::push_nil(), Instr::set_local(0), Instr::push_num(0), Instr::set_local(0), Instr::ret(0)];
+        let code = vec![Instr::push_nil(), Instr::set_local(0), Instr::push_num(0), Instr::set_local(0), Instr::ret(RetCount::Fixed(0))];
         let chunk = Chunk {
             code,
             number_literals: vec![2.0],
@@ -1873,8 +1875,8 @@ mod tests {
             Instr::set_local(0),
             Instr::get_global(0),
             Instr::get_local(1),
-            Instr::call(1, 0),
-            Instr::ret(0),
+            Instr::call(ArgCount::Fixed(1), RetCount::Fixed(0)),
+            Instr::ret(RetCount::Fixed(0)),
         ];
         let chunk = Chunk {
             code,
@@ -1897,7 +1899,7 @@ mod tests {
             Instr::set_global(0),
             Instr::get_local(0),
             Instr::set_global(0),
-            Instr::ret(0),
+            Instr::ret(RetCount::Fixed(0)),
         ];
         let chunk = Chunk {
             code,
@@ -1918,7 +1920,7 @@ mod tests {
             Instr::set_global(0),
             Instr::get_global(1),
             Instr::set_global(0),
-            Instr::ret(0),
+            Instr::ret(RetCount::Fixed(0)),
         ];
         let chunk = Chunk {
             code,
@@ -1942,7 +1944,7 @@ mod tests {
             Instr::jump(2),
             Instr::get_local(0),
             Instr::set_global(0),
-            Instr::ret(0),
+            Instr::ret(RetCount::Fixed(0)),
         ];
         let chunk = Chunk {
             code,
@@ -1964,7 +1966,7 @@ mod tests {
             Instr::get_local(3),
             Instr::set_global(0),
             Instr::for_loop(0, -3),
-            Instr::ret(0),
+            Instr::ret(RetCount::Fixed(0)),
         ];
         let chunk = Chunk {
             code,
@@ -1979,7 +1981,7 @@ mod tests {
     #[test]
     fn test22() {
         let text = "a, b = 1";
-        let code = vec![Instr::push_num(0), Instr::push_nil(), Instr::set_global(1), Instr::set_global(0), Instr::ret(0)];
+        let code = vec![Instr::push_num(0), Instr::push_nil(), Instr::set_global(1), Instr::set_global(0), Instr::ret(RetCount::Fixed(0))];
         let chunk = Chunk {
             code,
             number_literals: vec![1.0],
@@ -1997,7 +1999,7 @@ mod tests {
             Instr::push_num(1),
             Instr::set_global(1),
             Instr::set_global(0),
-            Instr::ret(0),
+            Instr::ret(RetCount::Fixed(0)),
         ];
         let chunk = Chunk {
             code,
@@ -2018,7 +2020,7 @@ mod tests {
             Instr::pop(),
             Instr::set_global(1),
             Instr::set_global(0),
-            Instr::ret(0),
+            Instr::ret(RetCount::Fixed(0)),
         ];
         let chunk = Chunk {
             code,
@@ -2032,7 +2034,7 @@ mod tests {
     #[test]
     fn test25() {
         let text = "puts()";
-        let code = vec![Instr::get_global(0), Instr::call(0, 0), Instr::ret(0)];
+        let code = vec![Instr::get_global(0), Instr::call(ArgCount::Fixed(0), RetCount::Fixed(0)), Instr::ret(RetCount::Fixed(0))];
         let chunk = Chunk {
             code,
             string_literals: vec!["puts".to_string()],
@@ -2049,7 +2051,7 @@ mod tests {
             Instr::push_num(0),
             Instr::init_field(0, 1),
             Instr::set_global(0),
-            Instr::ret(0),
+            Instr::ret(RetCount::Fixed(0)),
         ];
         let chunk = Chunk {
             code,
@@ -2068,7 +2070,7 @@ mod tests {
             Instr::get_field(1),
             Instr::get_field(2),
             Instr::set_local(0),
-            Instr::ret(0),
+            Instr::ret(RetCount::Fixed(0)),
         ];
         let chunk = Chunk {
             code,
@@ -2082,10 +2084,10 @@ mod tests {
     #[test]
     fn test28() {
         let text = "x = function () end";
-        let code = vec![Instr::closure(0), Instr::set_global(0), Instr::ret(0)];
+        let code = vec![Instr::closure(0), Instr::set_global(0), Instr::ret(RetCount::Fixed(0))];
         let string_literals = vec!["x".into()];
         let nested = vec![Chunk {
-            code: vec![Instr::ret(0)],
+            code: vec![Instr::ret(RetCount::Fixed(0))],
             ..Chunk::default()
         }];
         let chunk = Chunk {
@@ -2101,13 +2103,13 @@ mod tests {
     fn test29() {
         let text = "x = function () local y = 7 end";
         let inner_chunk = Chunk {
-            code: vec![Instr::push_num(0), Instr::set_local(0), Instr::ret(0)],
+            code: vec![Instr::push_num(0), Instr::set_local(0), Instr::ret(RetCount::Fixed(0))],
             number_literals: vec![7.0],
             num_locals: 1,
             ..Chunk::default()
         };
         let outer_chunk = Chunk {
-            code: vec![Instr::closure(0), Instr::set_global(0), Instr::ret(0)],
+            code: vec![Instr::closure(0), Instr::set_global(0), Instr::ret(RetCount::Fixed(0))],
             string_literals: vec!["x".into()],
             nested: vec![inner_chunk],
             ..Chunk::default()
@@ -2124,13 +2126,13 @@ mod tests {
             print(y)
         end";
         let z = Chunk {
-            code: vec![Instr::push_num(0), Instr::set_local(0), Instr::ret(0)],
+            code: vec![Instr::push_num(0), Instr::set_local(0), Instr::ret(RetCount::Fixed(0))],
             number_literals: vec![21.0],
             num_locals: 1,
             ..Chunk::default()
         };
         let y = Chunk {
-            code: vec![Instr::ret(0)],
+            code: vec![Instr::ret(RetCount::Fixed(0))],
             ..Chunk::default()
         };
         let x = Chunk {
@@ -2139,8 +2141,8 @@ mod tests {
                 Instr::set_local(0),
                 Instr::get_global(0),
                 Instr::get_local(0),
-                Instr::call(1, 0),
-                Instr::ret(0),
+                Instr::call(ArgCount::Fixed(1), RetCount::Fixed(0)),
+                Instr::ret(RetCount::Fixed(0)),
             ],
             string_literals: vec!["print".into()],
             nested: vec![y],
@@ -2153,7 +2155,7 @@ mod tests {
                 Instr::set_global(0),
                 Instr::closure(1),
                 Instr::set_global(1),
-                Instr::ret(0),
+                Instr::ret(RetCount::Fixed(0)),
             ],
             nested: vec![z, x],
             string_literals: vec!["z".into(), "x".into()],
@@ -2165,7 +2167,7 @@ mod tests {
     #[test]
     fn test31() {
         let text = "local s = type(4)";
-        let code = vec![Instr::get_global(0), Instr::push_num(0), Instr::call(1, 1), Instr::set_local(0), Instr::ret(0)];
+        let code = vec![Instr::get_global(0), Instr::push_num(0), Instr::call(ArgCount::Fixed(1), RetCount::Fixed(1)), Instr::set_local(0), Instr::ret(RetCount::Fixed(0))];
         let chunk = Chunk {
             code,
             num_locals: 1,
@@ -2189,9 +2191,9 @@ mod tests {
             Instr::get_local(1),       // Get print
             Instr::get_local(0),       // Get type
             Instr::push_nil(),           // Push nil argument
-            Instr::call(1, u8::MAX),  // Call type(nil), return ALL values
-            Instr::call(u8::MAX, 0),  // Call print with dynamic arg count
-            Instr::ret(0),
+            Instr::call(ArgCount::Fixed(1), RetCount::All),  // Call type(nil), return ALL values
+            Instr::call(ArgCount::Dynamic, RetCount::Fixed(0)),  // Call print with dynamic arg count
+            Instr::ret(RetCount::Fixed(0)),
         ];
         let chunk = Chunk {
             code,
@@ -2230,8 +2232,8 @@ mod tests {
             Instr::close_upvalues(0), // close body-local b before jump back
             Instr::jump(-6),
             Instr::get_global(0),
-            Instr::call(0, 0),
-            Instr::ret(0),
+            Instr::call(ArgCount::Fixed(0), RetCount::Fixed(0)),
+            Instr::ret(RetCount::Fixed(0)),
         ];
         let chunk = Chunk {
             code,
