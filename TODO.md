@@ -310,3 +310,5 @@ add_fn!("broken", |state| {
 - [x] String comparison operators (`<`, `>`, `<=`, `>=`) for lexicographic ordering
 - [x] `rawequal(v1, v2)` - primitive equality without __eq metamethod
 - [x] `rawlen(v)` - length without __len metamethod
+- [x] Fix crash with empty patterns in string functions
+- [x] String escape sequences (`\n`, `\t`, `\r`, `\\`, `\"`, `\'`, `\0`, `\a`, `\b`, `\f`, `\v`)
