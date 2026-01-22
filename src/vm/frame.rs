@@ -85,6 +85,10 @@ impl Frame {
         self.chunk.number_literals[i as usize]
     }
 
+    /// How often to flush accumulated cost to the state.
+    /// Higher values reduce overhead but may overshoot budget more.
+    const COST_CHECK_INTERVAL: u64 = 64;
+
     /// Start evaluating instructions from the current position.
     ///
     /// Cost system: Most operations are free. Only arithmetic, table writes,
@@ -97,6 +101,20 @@ impl Frame {
     /// Costs 1: arithmetic (+, -, *, /, %, ^, unary -), table creation,
     /// table writes (including array initialization).
     pub(super) fn eval(&mut self, state: &mut State) -> Result<u8> {
+        // Batch cost checking: accumulate locally and flush periodically
+        let mut local_cost: u64 = 0;
+
+        /// Macro to accumulate cost and flush when threshold is reached
+        macro_rules! add_cost {
+            ($state:expr, $local:expr, $cost:expr) => {{
+                $local += $cost;
+                if $local >= Self::COST_CHECK_INTERVAL {
+                    $state.consume_cost($local)?;
+                    $local = 0;
+                }
+            }};
+        }
+
         loop {
             let inst = self.get_instr();
             if option_env!("LUA_DEBUG_VM").is_some() {
@@ -141,6 +159,10 @@ impl Frame {
                     state.vararg_call_base = Some(state.stack.len());
                 }
                 Instr::Return(n) => {
+                    // Flush any remaining accumulated cost before returning
+                    if local_cost > 0 {
+                        state.consume_cost(local_cost)?;
+                    }
                     return Ok(n);
                 }
                 Instr::Vararg(n) => {
@@ -218,57 +240,57 @@ impl Frame {
 
                 // Arithmetic costs 1
                 Instr::Add => {
-                    state.consume_cost(1)?;
+                    add_cost!(state, local_cost, 1);
                     state.eval_float_float(<f64 as ops::Add>::add)?;
                 }
                 Instr::Subtract => {
-                    state.consume_cost(1)?;
+                    add_cost!(state, local_cost, 1);
                     state.eval_float_float(<f64 as ops::Sub>::sub)?;
                 }
                 Instr::Multiply => {
-                    state.consume_cost(1)?;
+                    add_cost!(state, local_cost, 1);
                     state.eval_float_float(<f64 as ops::Mul>::mul)?;
                 }
                 Instr::Divide => {
-                    state.consume_cost(1)?;
+                    add_cost!(state, local_cost, 1);
                     state.eval_float_float(<f64 as ops::Div>::div)?;
                 }
                 Instr::Mod => {
-                    state.consume_cost(1)?;
+                    add_cost!(state, local_cost, 1);
                     state.eval_float_float(<f64 as ops::Rem>::rem)?;
                 }
                 Instr::Pow => {
-                    state.consume_cost(1)?;
+                    add_cost!(state, local_cost, 1);
                     state.eval_float_float(f64::powf)?;
                 }
 
                 // Unary negation costs 1
                 Instr::Negate => {
-                    state.consume_cost(1)?;
+                    add_cost!(state, local_cost, 1);
                     state.instr_negate()?;
                 }
 
                 // Table creation costs 1
                 Instr::NewTable => {
-                    state.consume_cost(1)?;
+                    add_cost!(state, local_cost, 1);
                     state.new_table();
                 }
 
                 // Table writes cost 1
                 Instr::InitField(offset, key_id) => {
-                    state.consume_cost(1)?;
+                    add_cost!(state, local_cost, 1);
                     state.instr_init_field(self, offset, key_id)?;
                 }
                 Instr::InitIndex(offset) => {
-                    state.consume_cost(1)?;
+                    add_cost!(state, local_cost, 1);
                     state.instr_init_index(offset)?;
                 }
                 Instr::SetField(offset, i) => {
-                    state.consume_cost(1)?;
+                    add_cost!(state, local_cost, 1);
                     state.instr_set_field(self, offset, i)?;
                 }
                 Instr::SetTable(offset) => {
-                    state.consume_cost(1)?;
+                    add_cost!(state, local_cost, 1);
                     state.instr_set_table(offset)?;
                 }
 
@@ -282,7 +304,7 @@ impl Frame {
                     } else {
                         n as u64
                     };
-                    state.consume_cost(count)?;
+                    add_cost!(state, local_cost, count);
                     state.instr_set_list(n)?;
                 }
             }

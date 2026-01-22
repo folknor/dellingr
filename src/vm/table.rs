@@ -1,3 +1,5 @@
+use std::cell::Cell;
+
 use indexmap::IndexMap;
 
 use super::object::ObjectPtr;
@@ -9,13 +11,37 @@ use super::Val;
 
 /// A Lua table using IndexMap to maintain insertion order.
 /// This ensures deterministic iteration order with `pairs()`.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(super) struct Table {
     map: IndexMap<Val, Val>,
     metatable: Option<ObjectPtr>,
+    /// Cached array length. None means cache is invalid and needs recomputation.
+    /// Invalidated when positive integer keys are inserted or removed.
+    /// Uses Cell for interior mutability so array_len() can cache on &self.
+    cached_array_len: Cell<Option<usize>>,
+}
+
+impl Default for Table {
+    fn default() -> Self {
+        Self {
+            map: IndexMap::default(),
+            metatable: None,
+            cached_array_len: Cell::new(None),
+        }
+    }
 }
 
 impl Table {
+    /// Check if a value is a positive integer (potential array index).
+    #[inline]
+    fn is_array_key(key: &Val) -> bool {
+        if let Val::Num(n) = key {
+            *n > 0.0 && n.is_finite() && *n == n.floor()
+        } else {
+            false
+        }
+    }
+
     pub(super) fn get(&self, key: &Val) -> Val {
         match key {
             Val::Nil => Val::Nil,
@@ -26,7 +52,18 @@ impl Table {
 
     /// Returns the "array length" of the table using standard Lua semantics.
     /// Counts consecutive integer keys starting from 1, stopping at the first nil.
+    /// Uses cached value when available for O(1) performance.
     pub(super) fn array_len(&self) -> usize {
+        if let Some(len) = self.cached_array_len.get() {
+            return len;
+        }
+        let len = self.compute_array_len();
+        self.cached_array_len.set(Some(len));
+        len
+    }
+
+    /// Computes array length without caching (for internal use).
+    fn compute_array_len(&self) -> usize {
         let mut len = 0;
         loop {
             let key = Val::Num((len + 1) as f64);
@@ -43,6 +80,10 @@ impl Table {
             Val::Nil => Err(Error::new(TypeError::TableKeyNil, 0, 0)),
             Val::Num(n) if n.is_nan() => Err(Error::new(TypeError::TableKeyNan, 0, 0)),
             _ => {
+                // Invalidate cache if this could affect array length
+                if Self::is_array_key(&key) {
+                    self.cached_array_len.set(None);
+                }
                 self.map.insert(key, value);
                 Ok(())
             }
@@ -63,6 +104,8 @@ impl Table {
         }
         // Insert the new value at pos
         self.map.insert(Val::Num(pos as f64), value);
+        // Update cache: new length is old length + 1
+        self.cached_array_len.set(Some(len + 1));
     }
 
     /// Removes and returns the value at the given array position, shifting elements down.
@@ -83,6 +126,8 @@ impl Table {
                 self.map.insert(curr_key, v);
             }
         }
+        // Update cache: new length is old length - 1
+        self.cached_array_len.set(Some(len - 1));
         removed
     }
 
@@ -105,10 +150,12 @@ impl Table {
         for i in 1..=old_len {
             self.map.shift_remove(&Val::Num(i as f64));
         }
-        // Insert new values
+        // Insert new values and update cache directly (we know the new length)
+        let new_len = values.len();
         for (i, v) in values.into_iter().enumerate() {
             self.map.insert(Val::Num((i + 1) as f64), v);
         }
+        self.cached_array_len.set(Some(new_len));
     }
 
     /// Returns the metatable of this table, if any.

@@ -135,34 +135,17 @@ Findings from expert code review (January 2026). Organized by priority.
 
 ### HIGH PRIORITY - Performance Optimizations
 
-- [ ] **Batch cost checking** (`frame.rs` `Frame::eval()`)
-  - Currently checks `cost_remaining <= 0` on every costed operation
-  - **Fix:** Accumulate cost locally, check every N ops (~64x reduction):
-  ```rust
-  let mut local_cost: u64 = 0;
-  const CHECK_INTERVAL: u64 = 64;
-  // In costed operations:
-  local_cost += 1;
-  if local_cost >= CHECK_INTERVAL {
-      state.consume_cost(local_cost)?;
-      local_cost = 0;
-  }
-  ```
+- [x] **Batch cost checking** (`frame.rs` `Frame::eval()`)
+  - Accumulated cost locally, flushed every 64 ops
+  - Reduces per-operation overhead by avoiding budget check on every costed op
 
 - [ ] **Replace GC linked list with arena** (`object.rs` `GcHeap` struct)
   - Linked list traversal is cache-hostile (each node is separate allocation)
   - **Fix:** Use contiguous `Vec<Option<WrappedObject>>` with free list
 
-- [ ] **Cache table `array_len`** (`table.rs` `Table::array_len()`)
-  - `array_len()` iterates from 1 until nil on every call
-  - **Fix:** Cache length in Table struct, invalidate on integer key insert:
-  ```rust
-  struct Table {
-      map: HashMap<Val, Val>,
-      metatable: Option<ObjectPtr>,
-      cached_array_len: usize,
-  }
-  ```
+- [x] **Cache table `array_len`** (`table.rs` `Table::array_len()`)
+  - Added `Cell<Option<usize>>` cache, invalidated on integer key changes
+  - `array_insert`/`array_remove`/`set_array` update cache directly with known length
 
 - [ ] **Fixed-width 32-bit instruction encoding** (`instr.rs` `Instr` enum)
   - Current instructions are ~16 bytes each (enum with isize variant)
