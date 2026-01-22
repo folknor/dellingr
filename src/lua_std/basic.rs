@@ -23,7 +23,7 @@ pub(crate) fn open_base(state: &mut State) {
             state.get_table(1)?;
             if state.to_boolean(-1) {
                 state.push_number(new_index);
-                state.replace(1); // Replaces the table with the index
+                state.replace(1)?; // Replaces the table with the index
                 Ok(2)
             } else {
                 state.set_top(0);
@@ -32,8 +32,8 @@ pub(crate) fn open_base(state: &mut State) {
             }
         });
         // Swap the table and function
-        state.push_value(1);
-        state.remove(1);
+        state.push_value(1)?;
+        state.remove(1)?;
         // Push the initial index
         state.push_number(0.0);
         Ok(3)
@@ -54,11 +54,11 @@ pub(crate) fn open_base(state: &mut State) {
         // Stack: [table, next_key, next_value?]
         if has_more {
             // Remove the table, return key and value
-            state.remove(1);
+            state.remove(1)?;
             Ok(2)
         } else {
             // Remove the table, return nil
-            state.remove(1);
+            state.remove(1)?;
             Ok(1)
         }
     });
@@ -69,11 +69,11 @@ pub(crate) fn open_base(state: &mut State) {
         state.set_top(1);
         // Return: next function, table, nil
         state.get_global("next");
-        state.push_value(1); // table
-        state.push_nil();    // initial key
+        state.push_value(1)?; // table
+        state.push_nil();     // initial key
         // Stack: [table, next, table, nil]
         // We need to return: [next, table, nil]
-        state.remove(1); // Remove original table
+        state.remove(1)?; // Remove original table
         Ok(3)
     });
 
@@ -116,7 +116,7 @@ pub(crate) fn open_base(state: &mut State) {
                 Ok(1)
             }
             LuaType::String => {
-                let s = state.to_string(1);
+                let s = state.to_string(1)?;
                 state.pop(state.get_top() as isize);
                 if let Ok(num) = s.parse::<f64>() {
                     state.push_number(num);
@@ -168,9 +168,9 @@ pub(crate) fn open_base(state: &mut State) {
     add("getmetatable", |state| {
         state.check_any(1)?;
         state.set_top(1);
-        state.get_metatable_of(1);
+        state.get_metatable_of(1)?;
         // Stack: [object, metatable_or_nil]
-        state.remove(1);
+        state.remove(1)?;
         Ok(1)
     });
 
@@ -194,11 +194,11 @@ pub(crate) fn open_base(state: &mut State) {
         state.set_top(2);
         // Stack: [table, key]
         // Use the raw table access (set_table_raw's counterpart)
-        state.push_value(2); // push key
+        state.push_value(2)?; // push key
         state.get_table_raw(1)?;
         // Stack: [table, key, value]
-        state.remove(1);
-        state.remove(1);
+        state.remove(1)?;
+        state.remove(1)?;
         Ok(1)
     });
 
@@ -212,8 +212,8 @@ pub(crate) fn open_base(state: &mut State) {
         state.set_top(3);
         // Stack: [table, key, value]
         // Swap key and value for set_table_raw which expects [table, value, key]
-        state.push_value(3); // push value
-        state.push_value(2); // push key
+        state.push_value(3)?; // push value
+        state.push_value(2)?; // push key
         state.set_table_raw(1)?;
         // Stack: [table, key, value]
         state.set_top(1);
@@ -228,7 +228,7 @@ pub(crate) fn open_base(state: &mut State) {
         let num_args = state.get_top();
 
         // Check if first arg is "#"
-        if state.typ(1) == LuaType::String && state.to_string(1) == "#" {
+        if state.typ(1) == LuaType::String && state.to_string(1)? == "#" {
             // Return count of remaining args
             state.set_top(0);
             state.push_number((num_args - 1) as f64);
@@ -242,7 +242,7 @@ pub(crate) fn open_base(state: &mut State) {
         if index <= 0 {
             // Negative or zero index: return all args (Lua behavior for negative is from end)
             // For simplicity, treat <= 0 as returning all
-            state.remove(1);
+            state.remove(1)?;
             return Ok((num_args - 1) as u8);
         }
 
@@ -262,7 +262,7 @@ pub(crate) fn open_base(state: &mut State) {
 
         // Remove args before start_pos
         for _ in 1..start_pos {
-            state.remove(1);
+            state.remove(1)?;
         }
 
         Ok(count as u8)
@@ -275,7 +275,7 @@ pub(crate) fn open_base(state: &mut State) {
     // __index: function(t, k) return globals[k] end
     state.push_rust_fn(|state| {
         state.check_any(2)?;
-        let key = state.to_string(2);
+        let key = state.to_string(2)?;
         state.set_top(0);
         state.get_global(&key);
         Ok(1)
@@ -287,8 +287,8 @@ pub(crate) fn open_base(state: &mut State) {
     state.push_rust_fn(|state| {
         state.check_any(2)?;
         state.check_any(3)?;
-        let key = state.to_string(2);
-        state.push_value(3);
+        let key = state.to_string(2)?;
+        state.push_value(3)?;
         state.set_global(&key);
         state.set_top(0);
         Ok(0)

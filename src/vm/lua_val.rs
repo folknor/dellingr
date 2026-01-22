@@ -114,7 +114,9 @@ impl Hash for Val {
             Bool(b) => b.hash(hasher),
             Obj(o) => o.hash(hasher),
             Num(n) => {
-                debug_assert!(!n.is_nan(), "Can't hash NaN");
+                // NaN breaks HashMap invariants (compares unequal to itself but may hash same)
+                // This must be a hard assert, not debug_assert, to prevent undefined behavior
+                assert!(!n.is_nan(), "Cannot use NaN as table key");
                 let mut bits = n.to_bits();
                 if bits == 1 << 63 {
                     bits = 0;

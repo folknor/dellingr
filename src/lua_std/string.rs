@@ -26,7 +26,7 @@ pub(crate) fn open_string(state: &mut State) {
         state.check_type(2, LuaType::Number)?;
         let num_args = state.get_top();
 
-        let s = state.to_string(1);
+        let s = state.to_string(1)?;
         let len = s.len() as isize;
 
         // Convert Lua 1-based index to 0-based, handling negatives
@@ -75,8 +75,8 @@ pub(crate) fn open_string(state: &mut State) {
         state.check_type(2, LuaType::String)?;
         let num_args = state.get_top();
 
-        let s = state.to_string(1);
-        let pattern = state.to_string(2);
+        let s = state.to_string(1)?;
+        let pattern = state.to_string(2)?;
 
         let init = if num_args >= 3 {
             state.check_type(3, LuaType::Number)?;
@@ -158,7 +158,7 @@ pub(crate) fn open_string(state: &mut State) {
     // Supports: %s, %d, %i, %f, %g, %x, %X, %o, %c, %%
     add_fn!("format", |state| {
         state.check_type(1, LuaType::String)?;
-        let fmt = state.to_string(1);
+        let fmt = state.to_string(1)?;
         let num_args = state.get_top();
 
         let mut result = String::new();
@@ -176,7 +176,7 @@ pub(crate) fn open_string(state: &mut State) {
                         's' => {
                             chars.next();
                             if arg_idx <= num_args {
-                                result.push_str(&state.to_string(arg_idx as isize));
+                                result.push_str(&state.to_string(arg_idx as isize)?);
                                 arg_idx += 1;
                             }
                         }
@@ -265,7 +265,7 @@ pub(crate) fn open_string(state: &mut State) {
                                 if arg_idx <= num_args {
                                     match conv {
                                         's' => {
-                                            let s = state.to_string(arg_idx as isize);
+                                            let s = state.to_string(arg_idx as isize)?;
                                             // For string, just append (ignore width for simplicity)
                                             result.push_str(&s);
                                         }
@@ -330,7 +330,7 @@ pub(crate) fn open_string(state: &mut State) {
     // string.len(s) - bonus, easy to add
     add_fn!("len", |state| {
         state.check_type(1, LuaType::String)?;
-        let s = state.to_string(1);
+        let s = state.to_string(1)?;
         state.set_top(0);
         state.push_number(s.len() as f64);
         Ok(1)
@@ -339,7 +339,7 @@ pub(crate) fn open_string(state: &mut State) {
     // string.upper(s) - bonus
     add_fn!("upper", |state| {
         state.check_type(1, LuaType::String)?;
-        let s = state.to_string(1);
+        let s = state.to_string(1)?;
         state.set_top(0);
         state.push_string(s.to_uppercase());
         Ok(1)
@@ -348,7 +348,7 @@ pub(crate) fn open_string(state: &mut State) {
     // string.lower(s) - bonus
     add_fn!("lower", |state| {
         state.check_type(1, LuaType::String)?;
-        let s = state.to_string(1);
+        let s = state.to_string(1)?;
         state.set_top(0);
         state.push_string(s.to_lowercase());
         Ok(1)
@@ -357,7 +357,7 @@ pub(crate) fn open_string(state: &mut State) {
     // string.reverse(s)
     add_fn!("reverse", |state| {
         state.check_type(1, LuaType::String)?;
-        let s = state.to_string(1);
+        let s = state.to_string(1)?;
         state.set_top(0);
         state.push_string(s.chars().rev().collect());
         Ok(1)
@@ -371,8 +371,8 @@ pub(crate) fn open_string(state: &mut State) {
         state.check_type(2, LuaType::String)?;
         let num_args = state.get_top();
 
-        let s = state.to_string(1);
-        let pattern = state.to_string(2);
+        let s = state.to_string(1)?;
+        let pattern = state.to_string(2)?;
 
         let init = if num_args >= 3 {
             state.check_type(3, LuaType::Number)?;
@@ -431,8 +431,8 @@ pub(crate) fn open_string(state: &mut State) {
         state.check_type(1, LuaType::String)?;
         state.check_type(2, LuaType::String)?;
 
-        let s = state.to_string(1);
-        let pattern = state.to_string(2);
+        let s = state.to_string(1)?;
+        let pattern = state.to_string(2)?;
 
         state.set_top(0);
 
@@ -456,12 +456,12 @@ pub(crate) fn open_string(state: &mut State) {
             // Get s, p, pos from state table
             state.push_string("s".to_string());
             state.get_table(1)?;
-            let s = state.to_string(-1);
+            let s = state.to_string(-1)?;
             state.pop(1);
 
             state.push_string("p".to_string());
             state.get_table(1)?;
-            let pattern = state.to_string(-1);
+            let pattern = state.to_string(-1)?;
             state.pop(1);
 
             state.push_string("pos".to_string());
@@ -518,10 +518,10 @@ pub(crate) fn open_string(state: &mut State) {
 
         // Stack: [state_table, iterator]
         // Need to return: [iterator, state_table, nil]
-        state.push_value(-2); // push state_table copy
-        state.remove(-3);     // remove original state_table
+        state.push_value(-2)?; // push state_table copy
+        state.remove(-3)?;     // remove original state_table
         // Stack: [iterator, state_table]
-        state.push_nil();     // initial control var
+        state.push_nil();      // initial control var
 
         Ok(3) // iterator, state_table, nil
     });
@@ -536,8 +536,8 @@ pub(crate) fn open_string(state: &mut State) {
         state.check_any(3)?;
         let num_args = state.get_top();
 
-        let s = state.to_string(1);
-        let pattern = state.to_string(2);
+        let s = state.to_string(1)?;
+        let pattern = state.to_string(2)?;
         let max_replacements = if num_args >= 4 {
             state.check_type(4, LuaType::Number)?;
             Some(state.to_number(4)? as usize)
@@ -571,7 +571,7 @@ pub(crate) fn open_string(state: &mut State) {
                         // Get replacement based on repl type
                         let replacement = match repl_type {
                             LuaType::String => {
-                                let repl = state.to_string(3);
+                                let repl = state.to_string(3)?;
                                 // Handle %0-%9 substitutions in replacement string
                                 let mut repl_result = String::new();
                                 let mut chars = repl.chars().peekable();
@@ -609,10 +609,10 @@ pub(crate) fn open_string(state: &mut State) {
                                     &captures[0]
                                 };
                                 // Look up key in table
-                                state.push_value(3); // push table
+                                state.push_value(3)?; // push table
                                 state.push_string(key.to_string());
                                 state.get_table(-2).ok();
-                                let val = state.to_string(-1);
+                                let val = state.to_string(-1)?;
                                 state.pop(2); // pop result and table
                                 if state.typ(-1) == LuaType::Nil {
                                     captures[0].to_string() // keep original if nil
@@ -622,7 +622,7 @@ pub(crate) fn open_string(state: &mut State) {
                             }
                             LuaType::Function => {
                                 // Call function with captures (or whole match)
-                                state.push_value(3); // push function
+                                state.push_value(3)?; // push function
                                 if captures.len() > 1 {
                                     for cap in captures.iter().skip(1) {
                                         state.push_string(cap.to_string());
@@ -632,7 +632,7 @@ pub(crate) fn open_string(state: &mut State) {
                                     state.push_string(captures[0].to_string());
                                     state.call(1, 1).ok();
                                 }
-                                let val = state.to_string(-1);
+                                let val = state.to_string(-1)?;
                                 state.pop(1);
                                 val
                             }

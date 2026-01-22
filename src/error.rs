@@ -18,6 +18,16 @@ pub enum ErrorKind {
     SyntaxError(SyntaxError),
     /// Script exceeded its cost budget
     BudgetExceeded { used: u64, budget: i64 },
+    /// Metamethod chain (__index/__newindex) exceeded maximum depth
+    MetamethodDepthExceeded { depth: u32 },
+    /// Invalid jump target (compiler bug or corrupt bytecode)
+    InvalidJump { ip: usize, offset: isize },
+    /// Call stack depth exceeded (too much recursion)
+    CallDepthExceeded { depth: u32 },
+    /// Stack size exceeded (too many values on stack)
+    StackOverflow { size: usize },
+    /// Invalid stack index
+    InvalidStackIndex { index: isize },
 }
 
 #[derive(Debug)]
@@ -119,6 +129,21 @@ impl fmt::Display for ErrorKind {
             TypeError(e) => e.fmt(f),
             BudgetExceeded { used, budget } => {
                 write!(f, "budget exceeded: used {} cost with budget of {}", used, budget)
+            }
+            MetamethodDepthExceeded { depth } => {
+                write!(f, "metamethod chain too deep (depth {})", depth)
+            }
+            InvalidJump { ip, offset } => {
+                write!(f, "invalid jump at ip {} with offset {}", ip, offset)
+            }
+            CallDepthExceeded { depth } => {
+                write!(f, "call stack overflow (depth {})", depth)
+            }
+            StackOverflow { size } => {
+                write!(f, "stack overflow ({} values)", size)
+            }
+            InvalidStackIndex { index } => {
+                write!(f, "invalid stack index {}", index)
             }
         }
     }

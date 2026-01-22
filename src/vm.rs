@@ -3,6 +3,7 @@
 
 mod frame;
 mod lua_val;
+mod metamethod;
 mod object;
 mod table;
 
@@ -52,7 +53,19 @@ pub struct State {
     cost_budget: i64,
     /// Total cost consumed (for reporting).
     cost_used: u64,
+    /// Current metamethod call depth (for __index/__newindex chains).
+    /// Prevents stack overflow from circular metamethod references.
+    metamethod_depth: u32,
+    /// Current function call depth. Prevents stack overflow from deep recursion.
+    call_depth: u32,
 }
+
+/// Maximum call depth to prevent stack overflow from deep recursion.
+/// Lua's default is 200, we use 1000 for a bit more headroom.
+const MAX_CALL_DEPTH: u32 = 1000;
+
+/// Maximum stack size (number of values) to prevent memory exhaustion.
+const MAX_STACK_SIZE: usize = 1_000_000;
 
 // Important note on how the stack is tracked:
 // A State uses a single stack for all local variables, temporary values,
@@ -100,6 +113,8 @@ impl State {
             cost_remaining: i64::MAX,
             cost_budget: i64::MAX,
             cost_used: 0,
+            metamethod_depth: 0,
+            call_depth: 0,
         }
     }
 
@@ -253,16 +268,26 @@ impl State {
     /// is, the function does nothing); if `n` is 0, the result is the empty
     /// string.
     pub fn concat(&mut self, n: usize) -> Result<()> {
-        assert!(n == 2, "Can only concatenate two at a time for now");
+        if n < 2 {
+            return Err(Error::without_location(ErrorKind::ArgError(
+                crate::error::ArgError {
+                    arg_number: 1,
+                    func_name: Some("concat".to_string()),
+                    expected: None,
+                    received: None,
+                },
+            )));
+        }
         self.concat_helper(n)
     }
 
     /// Copies the element at `from` into the valid index `to`, replacing the
     /// value at that position. Equivalent to Lua's `lua_copy`.
-    pub fn copy_val(&mut self, from: isize, to: isize) {
-        let val = self.at_index(from);
-        let to = self.convert_idx(to);
+    pub fn copy_val(&mut self, from: isize, to: isize) -> Result<()> {
+        let val = self.at_index(from)?;
+        let to = self.convert_idx(to)?;
         self.stack[to] = val;
+        Ok(())
     }
 
     /// Pushes onto the stack the value of the global `name`.
@@ -278,176 +303,17 @@ impl State {
     /// its place). As in Lua, this function may trigger a metamethod for the
     /// "index" event.
     pub fn get_table(&mut self, i: isize) -> Result<()> {
-        let idx = self.convert_idx(i);
+        let idx = self.convert_idx(i)?;
         assert!(idx != self.stack.len() - 1);
         let key = self.pop_val();
         self.get_table_with_key(idx, key)
-    }
-
-    /// Internal helper for table access with __index support.
-    fn get_table_with_key(&mut self, idx: usize, key: Val) -> Result<()> {
-        let table_val = &mut self.stack[idx].clone();
-        match table_val.as_table() {
-            Some(t) => {
-                let val = t.get(&key);
-                if matches!(val, Val::Nil) {
-                    // Check for __index metamethod
-                    if let Some(mt_ptr) = t.get_metatable() {
-                        let index_key = self.alloc_string("__index".to_string());
-                        if let Some(mt) = Val::Obj(mt_ptr).as_table() {
-                            let index_handler = mt.get(&index_key);
-                            if !matches!(index_handler, Val::Nil) {
-                                return self.handle_index_metamethod(index_handler, idx, key);
-                            }
-                        }
-                    }
-                }
-                self.stack.push(val);
-                Ok(())
-            }
-            None => Err(self.type_error(TypeError::TableIndex(self.stack[idx].typ()))),
-        }
-    }
-
-    /// Handle the __index metamethod which can be a table or a function.
-    fn handle_index_metamethod(&mut self, handler: Val, table_idx: usize, key: Val) -> Result<()> {
-        match handler {
-            Val::Obj(ptr) => {
-                if ptr.as_table_ref().is_some() {
-                    // __index is a table: look up key in that table
-                    self.stack.push(Val::Obj(ptr));
-                    let new_idx = self.stack.len() - 1;
-                    self.get_table_with_key(new_idx, key)?;
-                    // Stack: [... __index_table, result]
-                    // Remove the __index table, keep the result
-                    let val = self.pop_val();
-                    self.pop(1);
-                    self.stack.push(val);
-                    Ok(())
-                } else if ptr.as_lua_function().is_some() {
-                    // __index is a function: call it with (table, key)
-                    let table_val = self.stack[table_idx].clone();
-                    self.stack.push(Val::Obj(ptr));
-                    self.stack.push(table_val);
-                    self.stack.push(key);
-                    self.call(2, 1)?;
-                    Ok(())
-                } else {
-                    self.push_nil();
-                    Ok(())
-                }
-            }
-            Val::RustFn(f) => {
-                // __index is a Rust function: call it with (table, key)
-                let table_val = self.stack[table_idx].clone();
-                self.stack.push(Val::RustFn(f));
-                self.stack.push(table_val);
-                self.stack.push(key);
-                self.call(2, 1)?;
-                Ok(())
-            }
-            _ => {
-                self.push_nil();
-                Ok(())
-            }
-        }
-    }
-
-    /// Internal helper for table assignment with __newindex support.
-    /// The table should be at stack[idx]. Does not pop anything from the stack.
-    fn set_table_with_key(&mut self, idx: usize, key: Val, val: Val) -> Result<()> {
-        let table_val = &mut self.stack[idx].clone();
-        match table_val.as_table() {
-            Some(t) => {
-                // Check if key already exists - __newindex only triggers for new keys
-                let existing = t.get(&key);
-                if matches!(existing, Val::Nil) {
-                    // Check for __newindex metamethod
-                    if let Some(mt_ptr) = t.get_metatable() {
-                        let newindex_key = self.alloc_string("__newindex".to_string());
-                        if let Some(mt) = Val::Obj(mt_ptr).as_table() {
-                            let newindex_handler = mt.get(&newindex_key);
-                            if !matches!(newindex_handler, Val::Nil) {
-                                return self.handle_newindex_metamethod(
-                                    newindex_handler,
-                                    idx,
-                                    key,
-                                    val,
-                                );
-                            }
-                        }
-                    }
-                }
-                // No __newindex or key exists: do normal assignment
-                // Need to get the actual table from the stack since we cloned earlier
-                if let Some(t) = self.stack[idx].as_table() {
-                    t.insert(key, val)?;
-                }
-                Ok(())
-            }
-            None => Err(self.type_error(TypeError::TableIndex(self.stack[idx].typ()))),
-        }
-    }
-
-    /// Handle the __newindex metamethod which can be a table or a function.
-    fn handle_newindex_metamethod(
-        &mut self,
-        handler: Val,
-        table_idx: usize,
-        key: Val,
-        val: Val,
-    ) -> Result<()> {
-        match handler {
-            Val::Obj(ptr) => {
-                if ptr.as_table_ref().is_some() {
-                    // __newindex is a table: set the value in that table instead
-                    self.stack.push(Val::Obj(ptr));
-                    let new_idx = self.stack.len() - 1;
-                    self.set_table_with_key(new_idx, key, val)?;
-                    self.pop(1); // Remove the __newindex table
-                    Ok(())
-                } else if ptr.as_lua_function().is_some() {
-                    // __newindex is a function: call it with (table, key, value)
-                    let table_val = self.stack[table_idx].clone();
-                    self.stack.push(Val::Obj(ptr));
-                    self.stack.push(table_val);
-                    self.stack.push(key);
-                    self.stack.push(val);
-                    self.call(3, 0)?;
-                    Ok(())
-                } else {
-                    // Not a table or function, just do normal assignment
-                    if let Some(t) = self.stack[table_idx].as_table() {
-                        t.insert(key, val)?;
-                    }
-                    Ok(())
-                }
-            }
-            Val::RustFn(f) => {
-                // __newindex is a Rust function: call it with (table, key, value)
-                let table_val = self.stack[table_idx].clone();
-                self.stack.push(Val::RustFn(f));
-                self.stack.push(table_val);
-                self.stack.push(key);
-                self.stack.push(val);
-                self.call(3, 0)?;
-                Ok(())
-            }
-            _ => {
-                // Not callable, just do normal assignment
-                if let Some(t) = self.stack[table_idx].as_table() {
-                    t.insert(key, val)?;
-                }
-                Ok(())
-            }
-        }
     }
 
     /// Returns the next key-value pair from a table, for use with `pairs`.
     /// Takes the table index and pops the key from the stack.
     /// Pushes the next key and value onto the stack (or just nil if done).
     pub fn table_next(&mut self, table_idx: isize) -> Result<bool> {
-        let idx = self.convert_idx(table_idx);
+        let idx = self.convert_idx(table_idx)?;
         let key = self.pop_val();
         let table_val = &self.stack[idx];
         match table_val.as_table_ref() {
@@ -470,7 +336,7 @@ impl State {
     /// `t` is at the given index, `k` is at the top of the stack.
     /// Pops the key and pushes the result.
     pub fn get_table_raw(&mut self, i: isize) -> Result<()> {
-        let idx = self.convert_idx(i);
+        let idx = self.convert_idx(i)?;
         let key = self.pop_val();
         let table = &self.stack[idx];
         let typ = table.typ();
@@ -490,7 +356,7 @@ impl State {
     ///
     /// This function pops both the key and the value from the stack.
     pub fn set_table_raw(&mut self, i: isize) -> Result<()> {
-        let idx = self.convert_idx(i);
+        let idx = self.convert_idx(i)?;
         let key = self.pop_val();
         let val = self.pop_val();
         let table = &mut self.stack[idx];
@@ -513,10 +379,11 @@ impl State {
 
     /// Moves the top element into the given valid index, shifting up the
     /// elements above this index to open space.
-    pub fn insert(&mut self, index: isize) {
-        let idx = self.convert_idx(index);
+    pub fn insert(&mut self, index: isize) -> Result<()> {
+        let idx = self.convert_idx(index)?;
         let slice = &mut self.stack[idx..];
         slice.rotate_right(1);
+        Ok(())
     }
 
     /// Loads a string as a Lua chunk. This function uses `load` to load the
@@ -550,6 +417,18 @@ impl State {
         self.stack.push(Val::Bool(b));
     }
 
+    /// Check that we have room for `n` more values on the stack.
+    /// Returns an error if adding `n` values would exceed the stack limit.
+    fn check_stack_space(&self, n: usize) -> Result<()> {
+        let new_size = self.stack.len().saturating_add(n);
+        if new_size > MAX_STACK_SIZE {
+            return Err(Error::without_location(ErrorKind::StackOverflow {
+                size: new_size,
+            }));
+        }
+        Ok(())
+    }
+
     /// Pushes a `nil` value onto the stack.
     pub fn push_nil(&mut self) {
         self.stack.push(Val::Nil);
@@ -572,23 +451,25 @@ impl State {
     }
 
     /// Pushes a copy of the element at the given index onto the stack.
-    pub fn push_value(&mut self, i: isize) {
-        // TODO: figure out what lua does when index is invalid
-        let val = self.at_index(i);
+    pub fn push_value(&mut self, i: isize) -> Result<()> {
+        let val = self.at_index(i)?;
         self.stack.push(val);
+        Ok(())
     }
 
-    pub fn remove(&mut self, i: isize) {
-        let idx = self.convert_idx(i);
+    pub fn remove(&mut self, i: isize) -> Result<()> {
+        let idx = self.convert_idx(i)?;
         self.stack.remove(idx);
+        Ok(())
     }
 
     /// Pops a value from the stack, then replaces the value at the given index
     /// with that value.
-    pub fn replace(&mut self, i: isize) {
-        let idx = self.convert_idx(i);
+    pub fn replace(&mut self, i: isize) -> Result<()> {
+        let idx = self.convert_idx(i)?;
         let val = self.stack.pop().unwrap();
         self.stack[idx] = val;
+        Ok(())
     }
 
     /// Pops a value from the stack and sets it as the new value of global
@@ -628,29 +509,32 @@ impl State {
     }
 
     /// Returns whether the value at the given index is not `false` or `nil`.
+    /// Returns false if the index is invalid.
     pub fn to_boolean(&self, idx: isize) -> bool {
-        let val = self.at_index(idx);
-        val.truthy()
+        match self.at_index(idx) {
+            Ok(val) => val.truthy(),
+            Err(_) => false,
+        }
     }
 
     /// Attempts to convert the value at the given index to a number.
     pub fn to_number(&self, idx: isize) -> Result<f64> {
-        let i = self.convert_idx(idx);
+        let i = self.convert_idx(idx)?;
         let val = &self.stack[i];
         val.as_num()
             .ok_or_else(|| self.type_error(TypeError::Arithmetic(val.typ())))
     }
 
     /// Converts the value at the given index to a string.
-    pub fn to_string(&self, idx: isize) -> String {
-        let i = self.convert_idx(idx);
-        self.stack[i].to_string()
+    pub fn to_string(&self, idx: isize) -> Result<String> {
+        let i = self.convert_idx(idx)?;
+        Ok(self.stack[i].to_string())
     }
 
     /// Converts the value at the given index to a string, checking for __tostring metamethod.
     /// If the value is a table with a __tostring metamethod, calls it and returns the result.
     pub fn to_string_with_meta(&mut self, idx: isize) -> Result<String> {
-        let i = self.convert_idx(idx);
+        let i = self.convert_idx(idx)?;
         let val = self.stack[i].clone();
 
         // Check if it's a table with __tostring
@@ -676,13 +560,20 @@ impl State {
     }
 
     /// Returns the type of the value in the given acceptable index.
+    /// Returns Nil type if the index is invalid.
     pub fn typ(&self, idx: isize) -> LuaType {
-        self.at_index(idx).typ()
+        match self.at_index(idx) {
+            Ok(val) => val.typ(),
+            Err(_) => LuaType::Nil,
+        }
     }
 
     /// Returns the array length of the table at the given index.
     pub fn table_len(&self, idx: isize) -> usize {
-        let i = self.convert_idx(idx);
+        let i = match self.convert_idx(idx) {
+            Ok(i) => i,
+            Err(_) => return 0,
+        };
         let table_val = &self.stack[i];
         match table_val.as_table_ref() {
             Some(t) => t.array_len(),
@@ -693,8 +584,8 @@ impl State {
     /// Gets the metatable of the value at the given index.
     /// For tables, returns the table's metatable.
     /// For other types, returns nil (we don't support type metatables yet).
-    pub fn get_metatable_of(&mut self, idx: isize) {
-        let i = self.convert_idx(idx);
+    pub fn get_metatable_of(&mut self, idx: isize) -> Result<()> {
+        let i = self.convert_idx(idx)?;
         let val = &self.stack[i];
         match val.as_table_ref() {
             Some(t) => {
@@ -706,6 +597,7 @@ impl State {
             }
             None => self.push_nil(),
         }
+        Ok(())
     }
 
     /// Sets the metatable of the table at the given index.
@@ -713,7 +605,7 @@ impl State {
     /// Pops the metatable from the stack.
     pub fn set_metatable_of(&mut self, table_idx: isize) -> Result<()> {
         let mt_val = self.pop_val();
-        let idx = self.convert_idx(table_idx);
+        let idx = self.convert_idx(table_idx)?;
         let typ = self.stack[idx].typ();
 
         let mt = match &mt_val {
@@ -743,7 +635,7 @@ impl State {
     pub fn table_insert_at(&mut self, table_idx: isize) -> Result<()> {
         let value = self.pop_val();
         let pos = self.pop_val().as_num().unwrap_or(1.0) as usize;
-        let idx = self.convert_idx(table_idx);
+        let idx = self.convert_idx(table_idx)?;
         let typ = self.stack[idx].typ();
         match self.stack[idx].as_table() {
             Some(t) => {
@@ -757,7 +649,7 @@ impl State {
     /// Removes a value from a table at a position, shifting elements.
     /// Pushes the removed value onto the stack.
     pub fn table_remove_at(&mut self, table_idx: isize, pos: usize) -> Result<()> {
-        let idx = self.convert_idx(table_idx);
+        let idx = self.convert_idx(table_idx)?;
         let typ = self.stack[idx].typ();
         let removed = match self.stack[idx].as_table() {
             Some(t) => t.array_remove(pos),
@@ -770,7 +662,7 @@ impl State {
     /// Sorts the array portion of a table in place.
     /// If has_comp is true, uses the function at stack index 2 as comparator.
     pub fn table_sort(&mut self, table_idx: isize, has_comp: bool) -> Result<()> {
-        let idx = self.convert_idx(table_idx);
+        let idx = self.convert_idx(table_idx)?;
 
         // Get the array values
         let mut arr = {
@@ -788,7 +680,7 @@ impl State {
         if has_comp {
             // Use the comparator function at stack index 2
             // We need to do a stable sort with the comparator
-            let comp_idx = self.convert_idx(2);
+            let comp_idx = self.convert_idx(2)?;
 
             // Bubble sort to keep it simple (not efficient but works)
             let n = arr.len();
@@ -873,10 +765,10 @@ impl State {
         Val::Obj(obj)
     }
 
-    /// Get the value at the given index. Panics if out of bounds.
-    fn at_index(&self, idx: isize) -> Val {
-        let i = self.convert_idx(idx);
-        self.stack[i].clone()
+    /// Get the value at the given index. Returns error if out of bounds.
+    fn at_index(&self, idx: isize) -> Result<Val> {
+        let i = self.convert_idx(idx)?;
+        Ok(self.stack[i].clone())
     }
 
     /// Balances a stack after an operation that returns an indefinite number of
@@ -920,16 +812,18 @@ impl State {
     }
 
     /// Given a relative index, convert it to an absolute index to the stack.
-    fn convert_idx(&self, fake_idx: isize) -> usize {
+    fn convert_idx(&self, fake_idx: isize) -> Result<usize> {
         let stack_top = self.stack.len() as isize;
         let stack_bottom = self.stack_bottom as isize;
         let stack_len = stack_top - stack_bottom;
         if fake_idx > 0 && fake_idx <= stack_len {
-            (fake_idx - 1 + stack_bottom) as usize
+            Ok((fake_idx - 1 + stack_bottom) as usize)
         } else if fake_idx < 0 && fake_idx >= -stack_len {
-            (stack_top + fake_idx) as usize
+            Ok((stack_top + fake_idx) as usize)
         } else {
-            panic!("index out of bounds");
+            Err(Error::without_location(ErrorKind::InvalidStackIndex {
+                index: fake_idx,
+            }))
         }
     }
 
@@ -941,6 +835,21 @@ impl State {
     }
 
     fn eval_closure(&mut self, closure: Closure, num_args: u8) -> Result<u8> {
+        // Check call depth limit
+        if self.call_depth >= MAX_CALL_DEPTH {
+            return Err(Error::without_location(ErrorKind::CallDepthExceeded {
+                depth: self.call_depth,
+            }));
+        }
+        self.call_depth += 1;
+
+        let result = self.eval_closure_inner(closure, num_args);
+
+        self.call_depth -= 1;
+        result
+    }
+
+    fn eval_closure_inner(&mut self, closure: Closure, num_args: u8) -> Result<u8> {
         let old_stack_bottom = self.stack_bottom;
         self.stack_bottom = self.stack.len() - num_args as usize;
 
@@ -956,6 +865,14 @@ impl State {
         } else {
             Vec::new()
         };
+
+        // Check stack space for parameters and locals
+        let extra_params = if num_args < num_params {
+            (num_params - num_args) as usize
+        } else {
+            0
+        };
+        self.check_stack_space(extra_params + num_locals as usize)?;
 
         match num_args.cmp(&num_params) {
             Ordering::Less => {

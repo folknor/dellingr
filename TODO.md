@@ -48,6 +48,11 @@ These actions commit irreversible changes to the game world:
 ### Tooling
 - [ ] Cost analyzer: CLI tool that takes a Lua file and prints each statement with its cost annotated, so players can optimize their scripts
 
+### Cost System Gaps
+- [ ] String concatenation is free but allocates memory - consider charging based on output length
+- [ ] `SetList(0)` charges 1 regardless of actual element count - should charge after computing count
+- [ ] `table.sort` uses O(n²) bubble sort but only charges once
+
 ## Global Functions
 - [ ] `require(modname)` - module system, but we only allow to require files already loaded by us, we need to define this system properly with regards to mods and such
 
@@ -71,6 +76,189 @@ local f = function(...)
     print(...)  -- Works! All varargs are passed
 end
 ```
+
+## Code Review Findings
+
+Findings from expert code review (January 2026). Organized by priority.
+
+### HIGH PRIORITY - Correctness Issues
+
+- [x] **Unsound `Eq` implementation for Val** (`lua_val.rs` `impl Hash for Val`)
+  - f64 doesn't implement Eq, but Val does - this violates HashMap invariants
+  - Two NaN values compare unequal but may hash to same bucket
+  - `debug_assert!` in `Hash for Val` only fires in debug builds
+  - **Fixed:** Changed `debug_assert!` to `assert!` in release builds
+
+- [ ] **Non-deterministic table iteration** (`table.rs` `Table::next()`)
+  - `HashMap::iter()` order is not guaranteed
+  - `pairs(t)` returns elements in arbitrary order that can change between runs
+  - **Fix:** Use `IndexMap` or maintain insertion order separately if determinism matters
+
+- [x] **No metamethod recursion limit** (`vm.rs` `handle_index_metamethod`, `handle_newindex_metamethod`)
+  - `__index` and `__newindex` chains have no depth limit
+  - A table whose `__index` is itself causes stack overflow
+  - **Fixed:** Added `metamethod_depth` counter with MAX_METAMETHOD_DEPTH=200
+
+- [x] **Panic on invalid stack index** (`vm.rs` `convert_idx()`)
+  - `convert_idx()` panics on out-of-bounds, called from public API methods
+  - **Fixed:** Changed `convert_idx()` to return `Result<usize, Error>` with InvalidStackIndex error
+
+- [ ] **GC runs synchronously during allocation** (`object.rs` `GcHeap::new_obj_from_raw()`)
+  - GC pause time is O(n) where n is heap size
+  - Single `NewTable` could trigger full collection
+  - **Fix:** Consider incremental marking, pre-allocation pools, or expose `gc_step()` for host-controlled collection
+
+### MEDIUM PRIORITY - Correctness Issues
+
+- [x] **Integer overflow in jump** (`frame.rs` `Frame::jump()`)
+  - `wrapping_add` with negative offset cast to usize wraps incorrectly
+  - Negative offset larger than `ip` jumps to massive address
+  - **Fixed:** Changed to checked arithmetic with InvalidJump error
+
+- [x] **Infinite loop if for-step is 0** (`frame.rs` `check_numeric_for_condition()`)
+  - `check_numeric_for_condition` doesn't check for zero step
+  - Loop becomes infinite (condition always true, var never changes)
+  - **Fixed:** Added check for step == 0.0 that skips loop body
+
+- [x] **Panic in public `concat()` API** (`vm.rs` `State::concat()`)
+  - Uses `assert!(n == 2, ...)` instead of returning error
+  - **Fixed:** Returns proper ArgError for n < 2
+
+- [x] **No stack/call depth limits**
+  - Neither Rust stack (recursion) nor Lua stack (Vec growth) are bounded
+  - Malicious script could cause stack overflow or memory exhaustion
+  - **Fixed:** Added `call_depth` counter with MAX_CALL_DEPTH=1000 and stack size check with MAX_STACK_SIZE=1_000_000
+
+- [ ] **O(n²) upvalue closing** (`vm.rs` `State::close_upvalues()`)
+  - `Vec::remove(0)` is O(n), called in a loop
+  - **Fix:** Use `VecDeque` or reverse sort order and pop from end
+
+### HIGH PRIORITY - Performance Optimizations
+
+- [ ] **Batch cost checking** (`frame.rs` `Frame::eval()`)
+  - Currently checks `cost_remaining <= 0` on every costed operation
+  - **Fix:** Accumulate cost locally, check every N ops (~64x reduction):
+  ```rust
+  let mut local_cost: u64 = 0;
+  const CHECK_INTERVAL: u64 = 64;
+  // In costed operations:
+  local_cost += 1;
+  if local_cost >= CHECK_INTERVAL {
+      state.consume_cost(local_cost)?;
+      local_cost = 0;
+  }
+  ```
+
+- [ ] **Replace GC linked list with arena** (`object.rs` `GcHeap` struct)
+  - Linked list traversal is cache-hostile (each node is separate allocation)
+  - **Fix:** Use contiguous `Vec<Option<WrappedObject>>` with free list
+
+- [ ] **Cache table `array_len`** (`table.rs` `Table::array_len()`)
+  - `array_len()` iterates from 1 until nil on every call
+  - **Fix:** Cache length in Table struct, invalidate on integer key insert:
+  ```rust
+  struct Table {
+      map: HashMap<Val, Val>,
+      metatable: Option<ObjectPtr>,
+      cached_array_len: usize,
+  }
+  ```
+
+- [ ] **Fixed-width 32-bit instruction encoding** (`instr.rs` `Instr` enum)
+  - Current instructions are ~16 bytes each (enum with isize variant)
+  - 1000-instruction function = 16KB, may not fit L1 cache
+  - **Fix:** Use 32-bit encoding `[opcode:8][A:8][B:8][C:8]` (4x smaller)
+
+### MEDIUM PRIORITY - Performance Optimizations
+
+- [ ] **Add `#[inline(always)]` to hot paths**
+  - `State::instr_get_local()`, `State::instr_set_local()`, `State::pop_val()`
+  - `State::eval_float_float()`, `State::eval_float_bool()`
+  - `State::consume_cost()` (at minimum the fast path)
+
+- [ ] **Avoid cloning `Chunk` in closures** (`object.rs` `ObjectPtr::as_lua_function()`, `frame.rs` `get_nested_chunk()`)
+  - Every closure creation clones entire chunk including string literals
+  - **Fix:** Use `Rc<Chunk>` to share chunk data between instances
+
+- [ ] **Replace `Rc<RefCell<Upvalue>>` with arena** (`vm.rs` `State::find_or_create_upvalue()`)
+  - Three allocations per upvalue + atomic refcounting on every clone
+  - Lifetime is well-defined: closed when owning frame returns
+  - **Fix:** Arena-allocated pool with indices instead of Rc pointers
+
+- [ ] **Pre-size stack vector** (`vm.rs` `State::empty()`)
+  ```rust
+  stack: Vec::with_capacity(256),  // Typical function depth * locals
+  ```
+
+- [ ] **Small-table optimization** (`table.rs` `Table` struct)
+  - HashMap overhead is high for 1-4 entry tables
+  - **Fix:** Inline small arrays with linear scan:
+  ```rust
+  enum TableStorage {
+      Inline([(Val, Val); 4], u8),  // len field
+      Map(HashMap<Val, Val>),
+  }
+  ```
+
+- [ ] **String interning overhead** (`object.rs` `GcHeap::new_string()`)
+  - Every allocation goes through HashSet lookup
+  - `new_string` takes closure for marking (function call overhead)
+  - **Fix:** Dedicated string arena with inline hash buckets
+
+### LOW PRIORITY - Performance Optimizations
+
+- [ ] **NaN-boxing for Val** (`lua_val.rs` `Val` enum)
+  - Current Val is ~16-24 bytes, every stack op copies this
+  - **Fix:** Pack all values into 64-bit float with tag bits in NaN space
+
+- [ ] **Superinstructions for common patterns**
+  - `GetLocal` + `GetField` (method dispatch)
+  - `PushNum` + `Add` (constant arithmetic)
+  - `Call(1, 1)` (single-arg single-return calls)
+
+- [ ] **Pointer tagging for Val**
+  - If allocations are 8-byte aligned, use low bits for type tags
+
+- [ ] **Fixed-size array for well-known globals**
+  - `print`, `pairs`, `ipairs`, `type`, etc. accessed frequently
+  - String interning for global names enables pointer comparison
+
+- [ ] **Use `#[cfg(feature = "debug_vm")]` instead of `option_env!`** (`frame.rs` `Frame::eval()` debug print)
+  - Current debug print may pull in format machinery even when disabled
+
+### API Improvements
+
+- [ ] **Replace magic 255 values with proper types** (`vm.rs` `State::call()`, `instr.rs` `Instr::Return`)
+  - `num_args == 255`: vararg call base
+  - `num_ret_expected == 255`: return all
+  - `Return(255)`: return all
+  - **Fix:** Use `Option<u8>` or dedicated enum
+
+- [ ] **Expose GC control to host** (`object.rs` `GcHeap`)
+  - `gc_step()` for incremental collection
+  - `gc_collect()` for explicit full collection
+  - Allow hosts to run GC at known safe points
+
+### Code Organization
+
+- [ ] **Split `vm.rs` (~1300 lines)**
+  - Extract metamethod handling to `vm/metamethod.rs`
+  - Move table operations to standard library (currently duplicates logic)
+
+- [ ] **Improve test coverage**
+  - Metamethod edge cases
+  - Upvalue stress tests
+  - GC stress scenarios
+  - Error recovery paths
+
+### Positive Highlights (from review)
+
+- Clean architecture with good separation between compiler, VM, and stdlib
+- Cost system philosophy (control flow free, charge for work) is game-appropriate
+- Error handling structure is well-designed with good `From` implementations
+- Upvalue open/closed mechanism is textbook-correct
+- Unsafe surface is small and well-contained in `object.rs`
+- Lint configuration shows attention to code quality
 
 ## Won't Implement
 

@@ -1,7 +1,7 @@
 use std::ops;
 
 use super::super::compiler::UpvalueDesc;
-use super::super::error::TypeError;
+use super::super::error::{Error, ErrorKind, TypeError};
 use super::object::{Upvalue, UpvalueRef};
 use super::Chunk;
 use super::Instr;
@@ -49,8 +49,22 @@ impl Frame {
     }
 
     /// Jump forward/back by `offset` instructions.
-    fn jump(&mut self, offset: isize) {
-        self.ip = self.ip.wrapping_add(offset as usize);
+    fn jump(&mut self, offset: isize) -> Result<()> {
+        let new_ip = if offset >= 0 {
+            self.ip.checked_add(offset as usize)
+        } else {
+            self.ip.checked_sub((-offset) as usize)
+        };
+        match new_ip {
+            Some(ip) if ip <= self.chunk.code.len() => {
+                self.ip = ip;
+                Ok(())
+            }
+            _ => Err(Error::without_location(ErrorKind::InvalidJump {
+                ip: self.ip,
+                offset,
+            })),
+        }
     }
 
     /// Get the instruction at the instruction pointer, and advance the
@@ -103,10 +117,10 @@ impl Frame {
                     let len = state.stack.len();
                     state.stack.swap(len - 1, len - 2);
                 }
-                Instr::Jump(offset) => self.jump(offset),
-                Instr::BranchFalse(ofst) => state.instr_branch(self, false, ofst, false),
-                Instr::BranchFalseKeep(ofst) => state.instr_branch(self, false, ofst, true),
-                Instr::BranchTrueKeep(ofst) => state.instr_branch(self, true, ofst, true),
+                Instr::Jump(offset) => self.jump(offset)?,
+                Instr::BranchFalse(ofst) => state.instr_branch(self, false, ofst, false)?,
+                Instr::BranchFalseKeep(ofst) => state.instr_branch(self, false, ofst, true)?,
+                Instr::BranchTrueKeep(ofst) => state.instr_branch(self, true, ofst, true)?,
 
                 // Local variables
                 Instr::GetLocal(i) => state.instr_get_local(i),
@@ -185,7 +199,7 @@ impl Frame {
                 // Generic `for` loops - iteration is free
                 Instr::TForPrep(slot) => state.instr_tfor_prep(slot),
                 Instr::TForCall(slot, num_vars) => state.instr_tfor_call(slot, num_vars)?,
-                Instr::TForLoop(slot, offset) => state.instr_tfor_loop(self, slot, offset),
+                Instr::TForLoop(slot, offset) => state.instr_tfor_loop(self, slot, offset)?,
 
                 // Length operator is free
                 Instr::Length => state.instr_length()?,
@@ -280,15 +294,22 @@ impl Frame {
 impl State {
     /// Pop a value. If its truthiness matches `cond`, jump with `offset`.
     /// If `keep_cond`, then push the value back after jumping.
-    fn instr_branch(&mut self, frame: &mut Frame, cond: bool, offset: isize, keep_cond: bool) {
+    fn instr_branch(
+        &mut self,
+        frame: &mut Frame,
+        cond: bool,
+        offset: isize,
+        keep_cond: bool,
+    ) -> Result<()> {
         let val = self.pop_val();
         let truthy = val.truthy();
         if cond == truthy {
-            frame.jump(offset);
+            frame.jump(offset)?;
         }
         if keep_cond {
             self.stack.push(val);
         }
+        Ok(())
     }
 
     fn instr_closure(&mut self, frame: &mut Frame, i: u8) {
@@ -324,7 +345,7 @@ impl State {
                 local_slot += 1;
             }
         } else {
-            frame.jump(body_len);
+            frame.jump(body_len)?;
         }
         Ok(())
     }
@@ -338,7 +359,7 @@ impl State {
         if check_numeric_for_condition(var, limit, step) {
             self.stack[slot] = Val::Num(var);
             self.stack[slot + 3] = Val::Num(var);
-            frame.jump(offset);
+            frame.jump(offset)?;
         }
         Ok(())
     }
@@ -383,17 +404,23 @@ impl State {
     }
 
     /// TForLoop: If first loop variable is nil, jump. Otherwise update control var.
-    fn instr_tfor_loop(&mut self, frame: &mut Frame, local_slot: u8, offset: isize) {
+    fn instr_tfor_loop(
+        &mut self,
+        frame: &mut Frame,
+        local_slot: u8,
+        offset: isize,
+    ) -> Result<()> {
         let base = local_slot as usize + self.stack_bottom;
         let first_var = &self.stack[base + 3];
 
         if matches!(first_var, Val::Nil) {
             // Exit loop
-            frame.jump(offset);
+            frame.jump(offset)?;
         } else {
             // Update control variable with first loop variable
             self.stack[base + 2] = self.stack[base + 3].clone();
         }
+        Ok(())
     }
 
     fn instr_get_field(&mut self, frame: &mut Frame, field_id: u8) -> Result<()> {
@@ -673,11 +700,13 @@ impl State {
 }
 
 fn check_numeric_for_condition(var: f64, limit: f64, step: f64) -> bool {
-    if step > 0.0 {
-        var <= limit
-    } else if step <= 0.0 {
-        var >= limit
-    } else {
+    // Step of zero would cause infinite loop - skip the loop entirely
+    if step == 0.0 {
         false
+    } else if step > 0.0 {
+        var <= limit
+    } else {
+        // step < 0.0
+        var >= limit
     }
 }

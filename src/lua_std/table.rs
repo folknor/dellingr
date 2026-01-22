@@ -31,7 +31,7 @@ pub(crate) fn open_table(state: &mut State) {
             state.push_number((len + 1) as f64);
             // Stack: [t, value, pos]
             // Swap to get [t, pos, value]
-            state.insert(-2);
+            state.insert(-2)?;
             state.table_insert_at(1)?;
         } else if num_args >= 3 {
             // table.insert(t, pos, value)
@@ -63,7 +63,7 @@ pub(crate) fn open_table(state: &mut State) {
         // Stack: [t]
         state.table_remove_at(1, pos)?;
         // Stack: [t, removed_value]
-        state.remove(1); // Remove table, leave value
+        state.remove(1)?; // Remove table, leave value
         Ok(1)
     });
 
@@ -123,7 +123,7 @@ pub(crate) fn open_table(state: &mut State) {
         }
 
         // Stack: [t, list[i], list[i+1], ..., list[j]]
-        state.remove(1); // Remove table
+        state.remove(1)?; // Remove table
         Ok(count as u8)
     });
 
@@ -140,8 +140,8 @@ pub(crate) fn open_table(state: &mut State) {
 
         // Insert all arguments into the table
         for i in 1..=num_args {
-            state.push_value(i as isize); // push the argument
-            state.push_number(i as f64);  // push the index
+            state.push_value(i as isize)?; // push the argument
+            state.push_number(i as f64);   // push the index
             state.set_table_raw(table_idx)?;
         }
 
@@ -153,7 +153,7 @@ pub(crate) fn open_table(state: &mut State) {
         // Remove all original arguments, leave just the table
         // Table is at position (num_args + 1)
         for _ in 0..num_args {
-            state.remove(1);
+            state.remove(1)?;
         }
 
         Ok(1)
@@ -171,7 +171,7 @@ pub(crate) fn open_table(state: &mut State) {
 
         let sep = if num_args >= 2 {
             state.check_type(2, LuaType::String)?;
-            state.to_string(2)
+            state.to_string(2)?
         } else {
             String::new()
         };
@@ -205,7 +205,7 @@ pub(crate) fn open_table(state: &mut State) {
             }
             state.push_number(idx as f64);
             state.get_table(1)?;
-            result.push_str(&state.to_string(-1));
+            result.push_str(&state.to_string(-1)?);
             state.pop(1);
         }
 
@@ -251,9 +251,9 @@ pub(crate) fn open_table(state: &mut State) {
         }
 
         // Return destination table - push it first, then clear below it
-        state.push_value(dest_idx);
+        state.push_value(dest_idx)?;
         // Now move it to position 1 and clear rest
-        state.replace(1);
+        state.replace(1)?;
         state.set_top(1);
         Ok(1)
     });
