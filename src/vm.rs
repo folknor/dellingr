@@ -14,10 +14,12 @@ pub use lua_val::LuaType;
 pub use lua_val::RustFunc;
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use super::compiler;
 use super::error::Error;
 use super::error::ErrorKind;
+use super::error::StackFrame;
 use super::error::TypeError;
 use super::instr::Builtin;
 use super::Chunk;
@@ -27,6 +29,15 @@ use super::Result;
 use lua_val::Val;
 use object::{GcHeap, Markable, UpvaluePool, UpvalueRef};
 use table::Table;
+
+/// Information about an active function call, used for stack traces.
+#[derive(Clone)]
+pub(super) struct CallInfo {
+    /// The chunk being executed.
+    pub(super) chunk: Rc<Chunk>,
+    /// Current instruction pointer.
+    pub(super) ip: usize,
+}
 
 /// The main interface into the Lua VM.
 pub struct State {
@@ -66,6 +77,9 @@ pub struct State {
     pub(super) metamethod_depth: u32,
     /// Current function call depth. Prevents stack overflow from deep recursion.
     pub(super) call_depth: u32,
+    /// Call stack for generating stack traces on errors.
+    /// Each entry represents an active Lua function call.
+    pub(super) call_stack: Vec<CallInfo>,
 }
 
 /// Maximum call depth to prevent stack overflow from deep recursion.
@@ -122,6 +136,7 @@ impl State {
             cost_used: 0,
             metamethod_depth: 0,
             call_depth: 0,
+            call_stack: Vec::with_capacity(64), // Pre-size for call stack
         }
     }
 
@@ -277,6 +292,35 @@ impl State {
 
     pub(super) fn type_error(&self, e: TypeError) -> Error {
         self.error(ErrorKind::TypeError(e))
+    }
+
+    /// Build a stack trace from the current call stack and the active frame.
+    /// The frame represents the innermost (current) function where the error occurred.
+    #[allow(private_interfaces)]
+    pub(super) fn build_stack_trace(&self, current_frame: &frame::Frame) -> Vec<StackFrame> {
+        let mut trace = Vec::with_capacity(self.call_stack.len() + 1);
+
+        // First entry: the current frame where the error occurred
+        trace.push(current_frame.to_stack_frame());
+
+        // Add entries from call_stack (most recent first).
+        // Skip the last entry (current function) since we already have it from current_frame.
+        // The remaining entries are the callers, with ip pointing to their call sites.
+        for call_info in self.call_stack.iter().rev().skip(1) {
+            // Get line number from the ip (call site)
+            let line = if call_info.ip > 0 {
+                call_info.chunk.line_info.get(call_info.ip - 1).copied().unwrap_or(0)
+            } else {
+                call_info.chunk.line_info.first().copied().unwrap_or(0)
+            };
+            trace.push(StackFrame {
+                function_name: call_info.chunk.name.clone(),
+                source: call_info.chunk.source.clone(),
+                line,
+            });
+        }
+
+        trace
     }
 }
 

@@ -32,8 +32,17 @@ pub(super) struct Chunk {
     pub(super) is_vararg: bool,
     /// Optional function name (for debugging/analysis).
     pub(super) name: Option<String>,
+    /// Source name (file path or chunk identifier like "[string]").
+    pub(super) source: Option<String>,
+    /// Maps instruction index to source line number.
+    /// line_info[i] is the line number for code[i].
+    pub(super) line_info: Vec<u32>,
 }
 
 pub(super) fn parse_str(source: impl AsRef<str>) -> Result<Chunk> {
     parser::parse_str(source.as_ref())
+}
+
+pub(super) fn parse_str_named(source: impl AsRef<str>, source_name: Option<String>) -> Result<Chunk> {
+    parser::parse_str_named(source.as_ref(), source_name)
 }

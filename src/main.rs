@@ -80,7 +80,7 @@ fn main() {
         }
 
         let result = state
-            .load_string(&source)
+            .load_string_named(&source, Some(filename.clone()))
             .and_then(|()| state.call(ArgCount::Fixed(0), RetCount::Fixed(0)));
 
         println!("Cost used: {}", state.cost_used());

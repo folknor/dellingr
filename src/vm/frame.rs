@@ -2,7 +2,7 @@ use std::ops;
 use std::rc::Rc;
 
 use super::super::compiler::UpvalueDesc;
-use super::super::error::{Error, ErrorKind, TypeError};
+use super::super::error::{Error, ErrorKind, StackFrame, TypeError};
 use super::object::{Upvalue, UpvalueRef};
 use super::Chunk;
 use super::Instr;
@@ -47,6 +47,28 @@ impl Frame {
             upvalues,
             varargs,
             stack_bottom,
+        }
+    }
+
+    /// Get the chunk being executed.
+    #[allow(dead_code)]
+    pub(super) fn chunk(&self) -> &Rc<Chunk> {
+        &self.chunk
+    }
+
+    /// Get the current line number (1-indexed), or 0 if unknown.
+    pub(super) fn current_line(&self) -> u32 {
+        // ip points to the NEXT instruction, so use ip-1 for current
+        let idx = self.ip.saturating_sub(1);
+        self.chunk.line_info.get(idx).copied().unwrap_or(0)
+    }
+
+    /// Create a StackFrame for error reporting.
+    pub(super) fn to_stack_frame(&self) -> StackFrame {
+        StackFrame {
+            function_name: self.chunk.name.clone(),
+            source: self.chunk.source.clone(),
+            line: self.current_line(),
         }
     }
 
@@ -159,7 +181,13 @@ impl Frame {
 
                 // Functions (calls and returns are free)
                 Instr::OP_CLOSURE => state.instr_closure(self, inst.a()),
-                Instr::OP_CALL => state.call(ArgCount::from_u8(inst.a()), RetCount::from_u8(inst.b()))?,
+                Instr::OP_CALL => {
+                    // Update current CallInfo with the call site (ip-1 since we already advanced)
+                    if let Some(call_info) = state.call_stack.last_mut() {
+                        call_info.ip = self.ip;
+                    }
+                    state.call(ArgCount::from_u8(inst.a()), RetCount::from_u8(inst.b()))?
+                }
                 Instr::OP_MARK_CALL_BASE => {
                     let adjustment = inst.a() as usize;
                     state.vararg_call_bases.push(state.stack.len() - adjustment);

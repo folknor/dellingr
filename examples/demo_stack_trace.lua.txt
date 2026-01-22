@@ -1,0 +1,26 @@
+-- Test deep stack traces with various function types
+
+-- Local function
+local function inner()
+    local x = nil
+    x()  -- Error: calling nil
+end
+
+-- Another local function
+local function wrapper()
+    inner()
+end
+
+-- Global function
+function globalFunc()
+    wrapper()
+end
+
+-- Table with methods
+local obj = {}
+function obj.method()
+    globalFunc()
+end
+
+-- Start the call chain
+obj.method()

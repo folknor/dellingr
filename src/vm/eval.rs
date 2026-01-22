@@ -8,7 +8,7 @@ use std::cmp::Ordering;
 use super::frame::Frame;
 use super::lua_val::Val;
 use super::object::{Closure, Markable, Upvalue, UpvalueRef};
-use super::{compiler, Chunk, Error, ErrorKind, Result, State, TypeError, MAX_CALL_DEPTH};
+use super::{compiler, CallInfo, Chunk, Error, ErrorKind, Result, State, TypeError, MAX_CALL_DEPTH};
 use crate::instr::{ArgCount, RetCount};
 
 impl State {
@@ -94,7 +94,14 @@ impl State {
     /// Loads a string as a Lua chunk. This function uses `load` to load the
     /// chunk in the string `s`.
     pub fn load_string(&mut self, s: impl AsRef<str>) -> Result<()> {
-        let c = compiler::parse_str(s)?;
+        self.load_string_named(s, None)
+    }
+
+    /// Loads a string as a Lua chunk with an optional source name.
+    /// The source name is used in error messages and stack traces.
+    /// Use a filename for files, or something like "[fleet:123]" for dynamically loaded code.
+    pub fn load_string_named(&mut self, s: impl AsRef<str>, source_name: Option<String>) -> Result<()> {
+        let c = compiler::parse_str_named(s, source_name)?;
         self.push_chunk(c);
         Ok(())
     }
@@ -162,6 +169,12 @@ impl State {
         let num_locals = closure.chunk.num_locals;
         let is_vararg = closure.chunk.is_vararg;
 
+        // Push call info for stack traces
+        self.call_stack.push(CallInfo {
+            chunk: closure.chunk.clone(),
+            ip: 0,
+        });
+
         // Collect varargs if this is a vararg function
         let varargs = if is_vararg && num_args > num_params {
             let num_varargs = (num_args - num_params) as usize;
@@ -177,7 +190,10 @@ impl State {
         } else {
             0
         };
-        self.check_stack_space(extra_params + num_locals as usize)?;
+        if let Err(e) = self.check_stack_space(extra_params + num_locals as usize) {
+            self.call_stack.pop();
+            return Err(e);
+        }
 
         match num_args.cmp(&num_params) {
             Ordering::Less => {
@@ -199,7 +215,21 @@ impl State {
         }
 
         let mut frame = self.initialize_frame(closure, varargs);
-        let ret_count = frame.eval(self)?;
+        let ret_count = match frame.eval(self) {
+            Ok(count) => count,
+            Err(e) => {
+                // Only attach stack trace if error doesn't already have one
+                // (inner function calls may have already attached the trace)
+                let e = if e.stack_trace.is_empty() {
+                    let trace = self.build_stack_trace(&frame);
+                    e.with_stack_trace(trace)
+                } else {
+                    e
+                };
+                self.call_stack.pop();
+                return Err(e);
+            }
+        };
 
         // Handle RetCount::All which means "return all values on stack"
         let actual_num_returned = match ret_count {
@@ -224,6 +254,9 @@ impl State {
 
         // Push return values back onto the stack
         self.stack.extend(ret_vals);
+
+        // Pop call info
+        self.call_stack.pop();
 
         Ok(actual_num_returned)
     }

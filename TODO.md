@@ -246,6 +246,12 @@ Findings from expert code review (January 2026). Organized by priority.
   - Explain common mistakes (e.g., "table has no field 'x' - did you forget to initialize it?")
   - Test error messages with non-programmer users
 
+- [ ] **Host-controlled print output**
+  - Allow game engine to redirect `print()` to custom handler
+  - Include context: script name/ID, fleet ID, source location
+  - Enables per-fleet console output in game UI
+  - API: `State::set_print_handler(fn(context: &PrintContext, args: &[Val]))`
+
 ## Development Guidelines
 
 ### Error Handling in RustFunc

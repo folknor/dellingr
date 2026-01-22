@@ -4,11 +4,35 @@ use crate::LuaType;
 
 // Types
 
+/// A single frame in a stack trace.
+#[derive(Debug, Clone)]
+pub struct StackFrame {
+    /// Function name (if known).
+    pub function_name: Option<String>,
+    /// Source file or chunk name.
+    pub source: Option<String>,
+    /// Line number where the call occurred (1-indexed).
+    pub line: u32,
+}
+
+impl fmt::Display for StackFrame {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let source = self.source.as_deref().unwrap_or("[C]");
+        let func_desc = match &self.function_name {
+            Some(name) => format!("function '{}'", name),
+            None => "main chunk".to_string(),
+        };
+        write!(f, "{}:{}: in {}", source, self.line, func_desc)
+    }
+}
+
 #[derive(Debug)]
 pub struct Error {
     pub kind: ErrorKind,
     pub line_num: usize,
     pub column: usize,
+    /// Stack trace at the point of error (innermost frame first).
+    pub stack_trace: Vec<StackFrame>,
 }
 
 #[derive(Debug)]
@@ -75,11 +99,18 @@ impl Error {
             kind: kind.into(),
             line_num,
             column,
+            stack_trace: Vec::new(),
         }
     }
 
     pub fn without_location(kind: ErrorKind) -> Self {
         Error::new(kind, 0, 0)
+    }
+
+    /// Attach a stack trace to this error.
+    pub fn with_stack_trace(mut self, trace: Vec<StackFrame>) -> Self {
+        self.stack_trace = trace;
+        self
     }
 
     pub fn column(&self) -> usize {
@@ -118,7 +149,15 @@ impl SyntaxError {
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}: {}", self.line_num, self.column, self.kind)
+        write!(f, "{}:{}: {}", self.line_num, self.column, self.kind)?;
+        if !self.stack_trace.is_empty() {
+            writeln!(f)?;
+            writeln!(f, "stack traceback:")?;
+            for frame in &self.stack_trace {
+                writeln!(f, "\t{}", frame)?;
+            }
+        }
+        Ok(())
     }
 }
 

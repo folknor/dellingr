@@ -35,13 +35,22 @@ struct Parser<'a> {
     outer_locals: Vec<Vec<(String, i32)>>,
     /// Stack of upvalues from outer functions.
     outer_upvalues: Vec<Vec<(String, UpvalueDesc)>>,
+    /// Current line number for instruction emission.
+    current_line: u32,
 }
 
 /// Parses Lua source code into a `Chunk`.
 pub(super) fn parse_str(source: &str) -> Result<Chunk> {
+    parse_str_named(source, None)
+}
+
+/// Parses Lua source code into a `Chunk` with an optional source name.
+pub(super) fn parse_str_named(source: &str, source_name: Option<String>) -> Result<Chunk> {
+    let mut chunk = Chunk::default();
+    chunk.source = source_name;
     let parser = Parser {
         input: TokenStream::new(source),
-        chunk: Chunk::default(),
+        chunk,
         nest_level: 0,
         locals: Vec::new(),
         outer_chunks: Vec::new(),
@@ -49,6 +58,7 @@ pub(super) fn parse_str(source: &str) -> Result<Chunk> {
         upvalues: Vec::new(),
         outer_locals: Vec::new(),
         outer_upvalues: Vec::new(),
+        current_line: 1,
     };
     parser.parse_all()
 }
@@ -100,6 +110,7 @@ impl<'a> Parser<'a> {
     /// Returns the token if it matches, `Err` otherwise.
     fn expect(&mut self, expected: TokenType) -> Result<Token> {
         let token = self.input.next()?;
+        self.update_line(token.start);
         if token.typ == expected {
             Ok(token)
         } else {
@@ -196,9 +207,16 @@ impl<'a> Parser<'a> {
         self.nest_level -= 1;
     }
 
-    /// Adds an instruction to the output.
+    /// Adds an instruction to the output with line number tracking.
     fn push(&mut self, instr: Instr) {
         self.chunk.code.push(instr);
+        self.chunk.line_info.push(self.current_line);
+    }
+
+    /// Updates current line based on token position.
+    fn update_line(&mut self, pos: usize) {
+        let (line, _) = self.input.line_and_column(pos);
+        self.current_line = line as u32;
     }
 
     /// Called when entering a loop to track break statements.
@@ -250,8 +268,10 @@ impl<'a> Parser<'a> {
 
     /// Parses a `Chunk`.
     fn parse_chunk(&mut self, params: &[&str], is_vararg: bool) -> Result<Chunk> {
+        let source = self.chunk.source.clone();
         self.outer_chunks.push(self.chunk.clone());
         self.chunk = Chunk::default();
+        self.chunk.source = source;
         self.chunk.is_vararg = is_vararg;
 
         // Save and reset locals for the new chunk - each function has its own
@@ -1627,10 +1647,21 @@ mod tests {
     use super::Instr;
     use crate::instr::{ArgCount, Builtin, RetCount};
 
+    /// Recursively clear line_info from a chunk and its nested chunks.
+    fn clear_line_info(chunk: &mut Chunk) {
+        chunk.line_info.clear();
+        for nested in &mut chunk.nested {
+            clear_line_info(nested);
+        }
+    }
+
     fn check_it(input: &str, mut output: Chunk) {
         // Top-level chunks are always vararg functions
         output.is_vararg = true;
-        assert_eq!(parse_str(input).unwrap(), output);
+        let mut actual = parse_str(input).unwrap();
+        // Clear line_info for comparison (tests were written before line tracking existed)
+        clear_line_info(&mut actual);
+        assert_eq!(actual, output);
     }
 
     #[test]
@@ -2274,6 +2305,7 @@ mod tests {
                 kind: ErrorKind::SyntaxError(SyntaxError::LParenLineStart),
                 line_num,
                 column,
+                ..
             }) => {
                 assert_eq!(line_num, 2);
                 assert_eq!(column, 1);
