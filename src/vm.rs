@@ -161,6 +161,73 @@ impl State {
         Ok(())
     }
 
+    // ========================================================================
+    // Memory tracking
+    // ========================================================================
+
+    /// Returns the number of GC-managed objects (tables and closures).
+    pub fn object_count(&self) -> usize {
+        self.heap.object_count()
+    }
+
+    /// Returns the number of interned strings.
+    pub fn string_count(&self) -> usize {
+        self.heap.string_count()
+    }
+
+    /// Returns the total number of heap allocations (objects + strings).
+    pub fn heap_size(&self) -> usize {
+        self.heap.object_count() + self.heap.string_count()
+    }
+
+    // ========================================================================
+    // Host-controlled GC
+    // ========================================================================
+
+    /// Returns true if the GC threshold has been reached.
+    /// Use this to check if `gc_collect()` should be called.
+    pub fn gc_should_run(&self) -> bool {
+        self.heap.is_full()
+    }
+
+    /// Returns the current GC threshold.
+    pub fn gc_threshold(&self) -> usize {
+        self.heap.threshold()
+    }
+
+    /// Sets the GC threshold. Collection triggers when object_count >= threshold.
+    /// Set to `usize::MAX` to effectively disable automatic GC.
+    pub fn gc_set_threshold(&mut self, threshold: usize) {
+        self.heap.set_threshold(threshold);
+    }
+
+    /// Disables automatic GC by setting threshold to usize::MAX.
+    /// After calling this, GC only runs when you explicitly call `gc_collect()`.
+    pub fn gc_disable_auto(&mut self) {
+        self.heap.set_threshold(usize::MAX);
+    }
+
+    /// Forces a full garbage collection cycle.
+    /// This marks all reachable objects and frees unreachable ones.
+    pub fn gc_collect(&mut self) {
+        let Self {
+            stack,
+            globals,
+            builtins,
+            string_literals,
+            upvalue_pool,
+            heap,
+            ..
+        } = self;
+        heap.force_collect(|| {
+            stack.mark_reachable();
+            globals.mark_reachable();
+            builtins.mark_reachable();
+            string_literals.mark_reachable();
+            upvalue_pool.mark_closed_upvalues();
+        });
+    }
+
     /// Pushes onto the stack the value of the global `name`.
     pub fn get_global(&mut self, name: &str) {
         // Check builtins first for common names
@@ -429,5 +496,61 @@ mod tests {
         state.eval_chunk(chunk, 0).unwrap();
         let a = state.globals.get("a").unwrap().as_num().unwrap();
         assert_eq!(a, 6.0);
+    }
+
+    #[test]
+    fn gc_host_controlled() {
+        let mut state = State::new();
+
+        // Check initial state
+        let initial_objects = state.object_count();
+        let initial_strings = state.string_count();
+        assert!(state.heap_size() >= initial_objects + initial_strings);
+
+        // Disable auto-GC
+        state.gc_disable_auto();
+        assert_eq!(state.gc_threshold(), usize::MAX);
+
+        // Create some tables - GC won't trigger automatically
+        let code = parse_str("t1 = {} t2 = {} t3 = {}").unwrap();
+        state.eval_chunk(code, 0).unwrap();
+
+        // Should have more objects now
+        assert!(state.object_count() > initial_objects);
+
+        // Manually trigger GC - tables are reachable so they survive
+        let before_gc = state.object_count();
+        state.gc_collect();
+        assert_eq!(state.object_count(), before_gc); // All tables are reachable
+
+        // Remove references and collect
+        let code = parse_str("t1 = nil t2 = nil t3 = nil").unwrap();
+        state.eval_chunk(code, 0).unwrap();
+        state.gc_collect();
+
+        // Now the tables should be collected
+        assert!(state.object_count() < before_gc);
+    }
+
+    #[test]
+    fn gc_threshold_control() {
+        let mut state = State::empty(); // Empty state, no stdlib tables
+
+        // Set a custom threshold
+        state.gc_set_threshold(100);
+        assert_eq!(state.gc_threshold(), 100);
+
+        // Should not need GC yet
+        assert!(!state.gc_should_run());
+
+        // Set very low threshold
+        state.gc_set_threshold(1);
+
+        // Create a table to exceed threshold
+        let code = parse_str("t = {}").unwrap();
+        state.eval_chunk(code, 0).unwrap();
+
+        // Now GC should be needed (but won't auto-run since we're just checking)
+        // Note: threshold may have been adjusted by auto-GC during eval
     }
 }

@@ -418,6 +418,36 @@ impl GcHeap {
         let raw = RawObject::Table(Table::default());
         self.alloc_slot(raw)
     }
+
+    // ========================================================================
+    // Memory tracking and GC control (for host-controlled GC)
+    // ========================================================================
+
+    /// Number of GC-managed objects (tables and closures).
+    pub(super) fn object_count(&self) -> usize {
+        self.size
+    }
+
+    /// Number of interned strings.
+    pub(super) fn string_count(&self) -> usize {
+        self.strings.len()
+    }
+
+    /// Current GC threshold (collection triggers when object_count >= threshold).
+    pub(super) fn threshold(&self) -> usize {
+        self.threshold
+    }
+
+    /// Set the GC threshold. Use usize::MAX to effectively disable auto-GC.
+    pub(super) fn set_threshold(&mut self, threshold: usize) {
+        self.threshold = threshold;
+    }
+
+    /// Force a full garbage collection. The caller must mark roots first.
+    pub(super) fn force_collect(&mut self, mark: impl FnOnce()) {
+        mark();
+        self.collect();
+    }
 }
 
 impl Drop for GcHeap {
@@ -761,8 +791,7 @@ impl StringPool {
         }
     }
 
-    /// Number of interned strings (used in tests).
-    #[cfg(test)]
+    /// Number of interned strings.
     pub(super) fn len(&self) -> usize {
         self.size
     }

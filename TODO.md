@@ -81,10 +81,25 @@ Findings from expert code review (January 2026). Organized by priority.
   - `convert_idx()` panics on out-of-bounds, called from public API methods
   - **Fixed:** Changed `convert_idx()` to return `Result<usize, Error>` with InvalidStackIndex error
 
-- [ ] **GC runs synchronously during allocation** (`object.rs` `GcHeap::new_obj_from_raw()`)
+- [x] **Host-controlled GC** (`vm.rs` `State`)
   - GC pause time is O(n) where n is heap size
-  - Single `NewTable` could trigger full collection
-  - **Fix:** Consider incremental marking, pre-allocation pools, or expose `gc_step()` for host-controlled collection
+  - Single `NewTable` could trigger full collection mid-script
+  - **Fixed:** Added host-controlled GC API:
+    - `gc_disable_auto()` - sets threshold to usize::MAX, disabling auto-GC
+    - `gc_set_threshold(n)` - set custom threshold
+    - `gc_should_run()` - check if threshold exceeded
+    - `gc_collect()` - manually trigger full collection
+    - `object_count()`, `string_count()`, `heap_size()` - memory tracking
+  - fcomm2 can now control when GC runs (e.g., between ticks)
+  - Incremental marking not implemented - full collection still O(n)
+
+- [ ] **GC tuning needs real fleet data**
+  - Current threshold: starts at 20, doubles after each collection (`max(survivors * 2, 20)`)
+  - Triggers: `new_table()`, `new_lua_fn()`, `new_string()` (when not interned)
+  - Need data from real fleet scripts to tune:
+    - Initial threshold (currently 20 - probably too low?)
+    - Growth factor (currently 2x)
+  - **Blocked on:** Real fleet scripts running in fcomm2 to measure typical allocation patterns
 
 ### MEDIUM PRIORITY - Correctness Issues
 
@@ -174,13 +189,15 @@ Findings from expert code review (January 2026). Organized by priority.
   - **Analysis (Jan 2026):** Requires rewriting ~8-10 core files (lua_val.rs, frame.rs, eval.rs, metamethod.rs, table.rs, table_ops.rs, stack.rs). All pattern matching becomes bit extraction. RustFunc (function pointers) need special handling since they require 64 bits. High risk of subtle bugs in bit manipulation. GC marking must still correctly identify heap pointers.
   - **Recommendation:** Only pursue if profiling shows Val copying as a bottleneck
 
-- [ ] **Superinstructions for common patterns**
+- [ ] **Superinstructions for common patterns** - DEFERRED (need usage data)
   - `GetLocal` + `GetField` (method dispatch)
   - `PushNum` + `Add` (constant arithmetic)
   - `Call(1, 1)` (single-arg single-return calls)
+  - **Analysis (Jan 2026):** Test scripts aren't representative of real fleet scripts. Need actual game script corpus to identify which patterns are worth fusing. Premature optimization without data.
 
-- [ ] **Pointer tagging for Val**
+- [ ] **Pointer tagging for Val** - DEFERRED (needs NaN-boxing)
   - If allocations are 8-byte aligned, use low bits for type tags
+  - **Analysis (Jan 2026):** Pointer tagging alone doesn't help much. The issue is f64 and RustFunc both need all 64 bits, so Val can't shrink to 8 bytes without NaN-boxing. Tagging just the pointer variants while keeping a 16-byte enum doesn't provide meaningful benefit. Only worth pursuing as part of full NaN-boxing effort.
 
 - [x] **Fixed-size array for well-known globals**
   - `print`, `pairs`, `ipairs`, `type`, etc. accessed frequently via HashMap string lookup
