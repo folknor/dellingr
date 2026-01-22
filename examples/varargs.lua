@@ -109,4 +109,26 @@ end
 local r12 = caller(10, 20)
 print("Test 12 - Fixed + varargs in call: " .. tostring(r12 == 130))
 
+-- Test 13: Collect varargs into table with {...}
+local collect = function(...)
+    return {...}
+end
+local t13 = collect(1, 2, 3, 4, 5)
+print("Test 13 - {...} collect: " .. tostring(#t13 == 5 and t13[1] == 1 and t13[5] == 5))
+
+-- Test 14: {...} with mixed types
+local collect2 = function(...)
+    local t = {...}
+    return t[1], t[2], t[3]
+end
+local a14, b14, c14 = collect2("hello", 42, true)
+print("Test 14 - {...} mixed types: " .. tostring(a14 == "hello" and b14 == 42 and c14 == true))
+
+-- Test 15: {...} empty
+local collect3 = function(...)
+    return #{...}
+end
+local r15 = collect3()
+print("Test 15 - {...} empty: " .. tostring(r15 == 0))
+
 print("All vararg tests complete!")
