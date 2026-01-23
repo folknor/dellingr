@@ -39,7 +39,11 @@ impl State {
         if matches!(val, Val::Nil) {
             // Check for __index metamethod
             if let Some(mt_ptr) = mt_ptr {
+                // Protect key from GC during string allocation
+                self.stack.push(key);
                 let index_key = self.alloc_string("__index".to_string());
+                let key = self.pop_val();
+
                 let index_handler = self
                     .heap
                     .as_table_ref(mt_ptr)
@@ -145,7 +149,13 @@ impl State {
         if matches!(existing, Val::Nil) {
             // Check for __newindex metamethod
             if let Some(mt_ptr) = mt_ptr {
+                // Protect key and val from GC during string allocation by pushing clones
+                // (clones share the same underlying heap objects, so marking them marks originals)
+                self.stack.push(key.clone());
+                self.stack.push(val.clone());
                 let newindex_key = self.alloc_string("__newindex".to_string());
+                self.pop(2); // Discard protections
+
                 let newindex_handler = self
                     .heap
                     .as_table_ref(mt_ptr)
