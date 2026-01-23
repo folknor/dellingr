@@ -4,7 +4,7 @@
 //! including metamethod-aware operations.
 
 use super::lua_val::Val;
-use super::object::Markable;
+use super::mark_gc_roots;
 use super::{Result, State, TypeError};
 use crate::instr::{ArgCount, RetCount};
 
@@ -296,16 +296,7 @@ impl State {
             ..
         } = self;
         let obj = self.heap.new_table(|| {
-            stack.mark_reachable();
-            globals.mark_reachable();
-            builtins.mark_reachable();
-            string_literals.mark_reachable();
-            // Mark closed upvalues (open ones point to stack which is already marked)
-            for (_, uv_ref) in open_upvalues {
-                if let super::object::Upvalue::Closed(val) = upvalue_pool.get(*uv_ref) {
-                    val.mark_reachable();
-                }
-            }
+            mark_gc_roots(stack, globals, builtins, string_literals, upvalue_pool, open_upvalues)
         });
         Val::Obj(obj)
     }

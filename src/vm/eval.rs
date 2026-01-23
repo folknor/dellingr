@@ -7,7 +7,8 @@ use std::cmp::Ordering;
 
 use super::frame::Frame;
 use super::lua_val::Val;
-use super::object::{Closure, Markable, Upvalue, UpvalueRef};
+use super::mark_gc_roots;
+use super::object::{Closure, Upvalue, UpvalueRef};
 use super::{compiler, CallInfo, Chunk, Error, ErrorKind, Result, State, TypeError, MAX_CALL_DEPTH};
 use crate::instr::{ArgCount, RetCount};
 
@@ -311,16 +312,7 @@ impl State {
                     ..
                 } = self;
                 self.heap.new_string(s.into(), || {
-                    stack.mark_reachable();
-                    globals.mark_reachable();
-                    builtins.mark_reachable();
-                    string_literals.mark_reachable();
-                    // Mark closed upvalues (open ones point to stack which is already marked)
-                    for (_, uv_ref) in open_upvalues {
-                        if let Upvalue::Closed(val) = upvalue_pool.get(*uv_ref) {
-                            val.mark_reachable();
-                        }
-                    }
+                    mark_gc_roots(stack, globals, builtins, string_literals, upvalue_pool, open_upvalues)
                 })
             };
             self.string_literals.push(Val::Str(string_ptr));
@@ -349,16 +341,7 @@ impl State {
             ..
         } = self;
         let obj = self.heap.new_lua_fn(chunk, upvalues, || {
-            stack.mark_reachable();
-            globals.mark_reachable();
-            builtins.mark_reachable();
-            string_literals.mark_reachable();
-            // Mark closed upvalues (open ones point to stack which is already marked)
-            for (_, uv_ref) in open_upvalues {
-                if let Upvalue::Closed(val) = upvalue_pool.get(*uv_ref) {
-                    val.mark_reachable();
-                }
-            }
+            mark_gc_roots(stack, globals, builtins, string_literals, upvalue_pool, open_upvalues)
         });
         self.stack.push(Val::Obj(obj));
     }

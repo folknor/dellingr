@@ -28,8 +28,40 @@ use super::Instr;
 use super::Result;
 
 use lua_val::Val;
-use object::{GcHeap, Markable, UpvaluePool, UpvalueRef};
+use object::{GcHeap, Markable, Upvalue, UpvaluePool, UpvalueRef};
 use table::Table;
+
+/// Marks all GC roots. Called before garbage collection to identify reachable objects.
+///
+/// This function is the single source of truth for what constitutes a GC root.
+/// All allocation functions that may trigger GC must call this with the same set of roots.
+///
+/// # Arguments
+/// * `stack` - The VM stack containing local values and temporaries
+/// * `globals` - Global variables table
+/// * `builtins` - Fast-access array for builtin functions
+/// * `string_literals` - String constants from active frames
+/// * `upvalue_pool` - Pool of upvalues (closed upvalues contain values that need marking)
+/// * `open_upvalues` - Map of stack indices to upvalue refs (used to find closed upvalues)
+pub(super) fn mark_gc_roots(
+    stack: &[Val],
+    globals: &HashMap<String, Val>,
+    builtins: &[Val],
+    string_literals: &[Val],
+    upvalue_pool: &UpvaluePool,
+    open_upvalues: &[(usize, UpvalueRef)],
+) {
+    stack.mark_reachable();
+    globals.mark_reachable();
+    builtins.mark_reachable();
+    string_literals.mark_reachable();
+    // Mark closed upvalues (open ones point to stack which is already marked)
+    for (_, uv_ref) in open_upvalues {
+        if let Upvalue::Closed(val) = upvalue_pool.get(*uv_ref) {
+            val.mark_reachable();
+        }
+    }
+}
 
 /// Information about an active function call, used for stack traces.
 #[derive(Clone)]
@@ -404,16 +436,7 @@ impl State {
             ..
         } = self;
         let ptr = self.heap.new_string(s, || {
-            stack.mark_reachable();
-            globals.mark_reachable();
-            builtins.mark_reachable();
-            string_literals.mark_reachable();
-            // Mark closed upvalues (open ones point to stack which is already marked)
-            for (_, uv_ref) in open_upvalues {
-                if let object::Upvalue::Closed(val) = upvalue_pool.get(*uv_ref) {
-                    val.mark_reachable();
-                }
-            }
+            mark_gc_roots(stack, globals, builtins, string_literals, upvalue_pool, open_upvalues)
         });
         Val::Str(ptr)
     }
