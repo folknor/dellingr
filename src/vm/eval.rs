@@ -42,7 +42,27 @@ impl State {
         let num_ret_actual = if let Val::RustFn(f) = func_val {
             let old_stack_bottom = self.stack_bottom;
             self.stack_bottom = idx;
-            let num_ret_reported = f(self)?;
+
+            // IMPORTANT: We must restore stack_bottom on ALL exit paths, including errors.
+            // Previously, using `f(self)?` here caused a bug: if f() returned Err, the ?
+            // operator would propagate the error immediately, skipping the restoration of
+            // stack_bottom at the end of this block. This left stack_bottom pointing to
+            // `idx` instead of `old_stack_bottom`, corrupting all subsequent stack operations:
+            // - get_top() would return wrong values (often 0, thinking the stack is empty)
+            // - Stack index calculations would be wrong, causing InvalidStackIndex errors
+            // - In release builds, this led to segfaults from out-of-bounds memory access
+            //
+            // The fix: call f(self) without ?, handle the error explicitly to ensure
+            // stack_bottom is restored before propagating the error.
+            let result = f(self);
+            let num_ret_reported = match result {
+                Ok(n) => n,
+                Err(e) => {
+                    self.stack_bottom = old_stack_bottom;
+                    return Err(e);
+                }
+            };
+
             let num_ret_actual = self.get_top() as u8;
             match num_ret_reported.cmp(&num_ret_actual) {
                 Ordering::Greater => {
@@ -200,6 +220,8 @@ impl State {
             0
         };
         if let Err(e) = self.check_stack_space(extra_params + num_locals as usize) {
+            // Must restore stack_bottom before returning error (see comment in RustFn handling)
+            self.stack_bottom = old_stack_bottom;
             self.call_stack.pop();
             return Err(e);
         }
@@ -238,6 +260,8 @@ impl State {
                 } else {
                     e
                 };
+                // Must restore stack_bottom before returning error (see comment in RustFn handling)
+                self.stack_bottom = old_stack_bottom;
                 self.call_stack.pop();
                 return Err(e);
             }
