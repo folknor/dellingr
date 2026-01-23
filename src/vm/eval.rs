@@ -304,6 +304,7 @@ impl State {
                 let Self {
                     stack,
                     globals,
+                    builtins,
                     string_literals,
                     upvalue_pool,
                     open_upvalues,
@@ -312,8 +313,9 @@ impl State {
                 self.heap.new_string(s.into(), || {
                     stack.mark_reachable();
                     globals.mark_reachable();
+                    builtins.mark_reachable();
                     string_literals.mark_reachable();
-                    // Mark closed upvalues in case any are in open_upvalues list
+                    // Mark closed upvalues (open ones point to stack which is already marked)
                     for (_, uv_ref) in open_upvalues {
                         if let Upvalue::Closed(val) = upvalue_pool.get(*uv_ref) {
                             val.mark_reachable();
@@ -340,6 +342,7 @@ impl State {
         let Self {
             stack,
             globals,
+            builtins,
             string_literals,
             upvalue_pool,
             open_upvalues,
@@ -348,8 +351,9 @@ impl State {
         let obj = self.heap.new_lua_fn(chunk, upvalues, || {
             stack.mark_reachable();
             globals.mark_reachable();
+            builtins.mark_reachable();
             string_literals.mark_reachable();
-            // Mark closed upvalues in case any are in open_upvalues list
+            // Mark closed upvalues (open ones point to stack which is already marked)
             for (_, uv_ref) in open_upvalues {
                 if let Upvalue::Closed(val) = upvalue_pool.get(*uv_ref) {
                     val.mark_reachable();

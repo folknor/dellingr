@@ -325,8 +325,18 @@ impl GcHeap {
 
     /// Free a slot by index, adding it to the free list.
     fn free_slot(&mut self, idx: usize) {
+        debug_assert!(idx < self.capacity, "free_slot: index {} out of bounds (capacity {})", idx, self.capacity);
+
         let old_free_head = self.free_head;
         let slot = self.get_slot_mut(idx);
+
+        // Check for double-free: slot must be Occupied, not already Free
+        debug_assert!(
+            matches!(slot, Slot::Occupied(_)),
+            "free_slot: double-free detected at index {} (slot is already free)",
+            idx
+        );
+
         *slot = Slot::Free { next_free: old_free_head };
         self.free_head = idx as u32;
         self.size -= 1;
@@ -767,7 +777,14 @@ impl StringPool {
             };
 
             if should_free {
-                // Free the slot
+                // Free the slot - should_free is only true for Occupied slots,
+                // but add debug assertion to catch any logic errors
+                debug_assert!(
+                    matches!(self.get_slot(idx), StringSlot::Occupied(_)),
+                    "StringPool::collect: freeing already-free slot at index {}",
+                    idx
+                );
+
                 let old_free_head = self.free_head;
                 let slot = self.get_slot_mut(idx);
                 *slot = StringSlot::Free { next_free: old_free_head };

@@ -399,6 +399,8 @@ impl State {
             globals,
             builtins,
             string_literals,
+            upvalue_pool,
+            open_upvalues,
             ..
         } = self;
         let ptr = self.heap.new_string(s, || {
@@ -406,6 +408,12 @@ impl State {
             globals.mark_reachable();
             builtins.mark_reachable();
             string_literals.mark_reachable();
+            // Mark closed upvalues (open ones point to stack which is already marked)
+            for (_, uv_ref) in open_upvalues {
+                if let object::Upvalue::Closed(val) = upvalue_pool.get(*uv_ref) {
+                    val.mark_reachable();
+                }
+            }
         });
         Val::Str(ptr)
     }
