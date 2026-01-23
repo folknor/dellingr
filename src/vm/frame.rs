@@ -528,7 +528,7 @@ impl State {
                 self.stack.push(result);
             }
             Ok(())
-        } else if val.as_string().is_some() {
+        } else if val.as_string_ptr().is_some() {
             // String: look up method in the 'string' global table
             self.get_global("string");
             let string_lib_idx = self.stack.len() - 1;
@@ -657,8 +657,8 @@ impl State {
     fn instr_length(&mut self) -> Result<()> {
         let val = self.pop_val();
 
-        // Check for string first (no heap access needed)
-        if let Some(s) = val.as_string() {
+        // Check for string first
+        if let Some(s) = val.as_string(&self.heap) {
             let len = s.len();
             self.stack.push(Val::Num(len as f64));
             return Ok(());
@@ -729,7 +729,7 @@ impl State {
     fn instr_set_global(&mut self, frame: &Frame, string_num: u8) -> Result<()> {
         let s = self.get_string_constant(frame, string_num);
         let val = self.pop_val();
-        if let Some(s) = s.as_string() {
+        if let Some(s) = s.as_string(&self.heap) {
             self.globals.insert(s.into(), val);
             Ok(())
         } else {
@@ -827,7 +827,7 @@ impl State {
                 cmp == target
             }
             (Val::Str(s1), Val::Str(s2)) => {
-                let cmp = s1.as_str().cmp(s2.as_str());
+                let cmp = self.heap.get_string(*s1).cmp(self.heap.get_string(*s2));
                 cmp == target
             }
             _ => {

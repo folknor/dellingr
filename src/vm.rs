@@ -503,7 +503,7 @@ mod tests {
         };
         state.eval_chunk(input, 0).unwrap();
         let val = state.globals.get("key").unwrap();
-        assert_eq!("ab".to_string(), val.as_string().unwrap());
+        assert_eq!("ab".to_string(), val.as_string(&state.heap).unwrap());
     }
 
     #[test]

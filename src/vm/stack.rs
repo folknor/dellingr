@@ -151,7 +151,7 @@ impl State {
     /// Converts the value at the given index to a string.
     pub fn to_string(&self, idx: isize) -> Result<String> {
         let i = self.convert_idx(idx)?;
-        Ok(self.stack[i].to_string())
+        Ok(self.stack[i].to_string_with_heap(&self.heap))
     }
 
     /// Returns the type of the value in the given acceptable index.

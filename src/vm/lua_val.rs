@@ -38,9 +38,20 @@ impl Val {
         }
     }
 
-    pub(super) fn as_string(&self) -> Option<&str> {
+    /// Get this value as a string, if it is one.
+    /// Requires heap access since strings are stored in the GC heap.
+    pub(super) fn as_string<'a>(&self, heap: &'a GcHeap) -> Option<&'a str> {
         if let Str(s) = self {
-            Some(s.as_str())
+            Some(heap.get_string(*s))
+        } else {
+            None
+        }
+    }
+
+    /// Get the StringPtr if this is a string value.
+    pub(super) fn as_string_ptr(&self) -> Option<StringPtr> {
+        if let Str(s) = self {
+            Some(*s)
         } else {
             None
         }
@@ -104,6 +115,19 @@ impl Val {
             RustFn(_) => LuaType::Function,
             Str(_) => LuaType::String,
             Obj(_) => LuaType::Table, // Assume table for display purposes
+        }
+    }
+
+    /// Convert this value to a string representation.
+    /// Requires heap access to get string and object contents.
+    pub(super) fn to_string_with_heap(&self, heap: &GcHeap) -> String {
+        match self {
+            Nil => "nil".to_string(),
+            Bool(b) => b.to_string(),
+            Num(n) => n.to_string(),
+            RustFn(func) => format!("<function: {:p}>", func),
+            Obj(o) => format!("{}", o),
+            Str(s) => heap.get_string(*s).to_string(),
         }
     }
 }

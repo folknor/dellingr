@@ -240,6 +240,7 @@ impl State {
             }
         } else {
             // Default: sort by < operator (numbers first, then strings)
+            let heap = &self.heap;
             arr.sort_by(|a, b| {
                 match (a.as_num(), b.as_num()) {
                     (Some(na), Some(nb)) => na.partial_cmp(&nb).unwrap_or(std::cmp::Ordering::Equal),
@@ -247,7 +248,7 @@ impl State {
                     (None, Some(_)) => std::cmp::Ordering::Greater,
                     (None, None) => {
                         // Try string comparison
-                        match (a.as_string(), b.as_string()) {
+                        match (a.as_string(heap), b.as_string(heap)) {
                             (Some(sa), Some(sb)) => sa.cmp(sb),
                             _ => std::cmp::Ordering::Equal,
                         }
@@ -294,12 +295,12 @@ impl State {
                 self.stack.push(val);
                 self.call(ArgCount::Fixed(1), RetCount::Fixed(1))?;
                 let result = self.pop_val();
-                return Ok(result.to_string());
+                return Ok(result.to_string_with_heap(&self.heap));
             }
         }
 
         // No __tostring, use default
-        Ok(val.to_string())
+        Ok(val.to_string_with_heap(&self.heap))
     }
 
     /// Allocates a new table on the heap.

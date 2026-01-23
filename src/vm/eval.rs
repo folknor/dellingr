@@ -151,10 +151,11 @@ impl State {
     pub(super) fn concat_helper(&mut self, n: usize) -> Result<()> {
         let mut buffer = String::new();
         let idx = self.stack.len() - n;
-        let drain = self.stack.drain(idx..);
-        let mut abort = None;
-        for val in drain {
-            if let Some(s) = val.as_string() {
+        // Collect values first so we can access heap for strings
+        let values: Vec<Val> = self.stack.drain(idx..).collect();
+
+        for val in &values {
+            if let Some(s) = val.as_string(&self.heap) {
                 buffer.push_str(s);
             } else if let Some(num) = val.as_num() {
                 // Auto-convert numbers to strings (standard Lua behavior)
@@ -165,12 +166,8 @@ impl State {
                     buffer.push_str(&format!("{}", num));
                 }
             } else {
-                abort = Some(TypeError::Concat(val.typ_simple()));
-                break;
+                return Err(self.type_error(TypeError::Concat(val.typ_simple())));
             }
-        }
-        if let Some(e) = abort {
-            return Err(self.type_error(e));
         }
 
         let val = self.alloc_string(buffer);

@@ -131,9 +131,13 @@ pub(crate) struct WrappedObject {
 // ObjectPtr - Safe generational key
 // ============================================================================
 
-// Define our own key type for the slotmap
+// Define our own key types for the slotmap
 new_key_type! {
     pub struct ObjectKey;
+}
+
+new_key_type! {
+    pub struct StringKey;
 }
 
 /// A safe pointer to a GC-managed object.
@@ -224,6 +228,12 @@ impl GcHeap {
             RawObject::Table(t) => Some(t),
             _ => None,
         }
+    }
+
+    /// Get a string's content by its pointer.
+    /// Panics if the string was freed (use-after-free detection).
+    pub(super) fn get_string(&self, ptr: StringPtr) -> &str {
+        self.strings.get(ptr)
     }
 
     // ========================================================================
@@ -393,93 +403,47 @@ impl<K, V: Markable> Markable for HashMap<K, V> {
 }
 
 // ============================================================================
-// String Pool (unchanged except for mark method)
+// String Pool - SlotMap-based with generational indices for safety
 // ============================================================================
 
-const STRING_POOL_CHUNK_SIZE: usize = 64;
-const STRING_POOL_INITIAL_BUCKETS: usize = 64;
-
+/// Entry for an interned string.
 struct StringEntry {
     data: String,
     hash: u64,
     color: Cell<Color>,
 }
 
-enum StringSlot {
-    Occupied(StringEntry),
-    Free { next_free: u32 },
-}
-
-impl Default for StringSlot {
-    fn default() -> Self {
-        StringSlot::Free { next_free: u32::MAX }
-    }
-}
-
-struct StringChunk {
-    slots: Box<[StringSlot; STRING_POOL_CHUNK_SIZE]>,
-}
-
-impl StringChunk {
-    fn new() -> Self {
-        Self {
-            slots: Box::new(std::array::from_fn(|_| StringSlot::default())),
-        }
-    }
-}
-
-/// A pointer to an interned string.
+/// A safe pointer to an interned string.
+/// Uses slotmap's generational indices to prevent use-after-free:
+/// - Each key contains a generation number
+/// - When a slot is freed and reused, the generation increments
+/// - Accessing with an old key panics instead of causing memory corruption
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct StringPtr(std::ptr::NonNull<StringEntry>);
-
-impl StringPtr {
-    pub fn as_str(&self) -> &str {
-        unsafe { &self.0.as_ref().data }
-    }
-}
-
-impl std::ops::Deref for StringPtr {
-    type Target = str;
-    fn deref(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl std::borrow::Borrow<str> for StringPtr {
-    fn borrow(&self) -> &str {
-        self.as_str()
-    }
-}
+pub(crate) struct StringPtr(StringKey);
 
 impl fmt::Display for StringPtr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
+        // Without heap access, we can only show the key
+        write!(f, "string: {:?}", self.0)
     }
 }
 
+/// String pool using SlotMap for safe generational access.
+/// Provides string interning with use-after-free detection.
 pub(crate) struct StringPool {
-    chunks: Vec<StringChunk>,
-    free_head: u32,
-    size: usize,
-    capacity: usize,
-    buckets: Vec<u32>,
-    bucket_mask: usize,
+    /// SlotMap storing all interned strings.
+    strings: SlotMap<StringKey, StringEntry>,
 }
 
 impl StringPool {
     fn new() -> Self {
         Self {
-            chunks: Vec::new(),
-            free_head: u32::MAX,
-            size: 0,
-            capacity: 0,
-            buckets: vec![u32::MAX; STRING_POOL_INITIAL_BUCKETS],
-            bucket_mask: STRING_POOL_INITIAL_BUCKETS - 1,
+            strings: SlotMap::with_key(),
         }
     }
 
     pub(super) fn len(&self) -> usize {
-        self.size
+        self.strings.len()
     }
 
     pub(super) fn hash_string(s: &str) -> u64 {
@@ -489,152 +453,54 @@ impl StringPool {
         hasher.finish()
     }
 
-    fn get_slot(&self, idx: usize) -> &StringSlot {
-        let chunk_idx = idx / STRING_POOL_CHUNK_SIZE;
-        let slot_idx = idx % STRING_POOL_CHUNK_SIZE;
-        &self.chunks[chunk_idx].slots[slot_idx]
+    /// Get a string's content by its pointer.
+    /// Panics if the string was freed (use-after-free detection).
+    pub(super) fn get(&self, ptr: StringPtr) -> &str {
+        &self.strings.get(ptr.0)
+            .expect("Invalid StringPtr: string was freed (use-after-free detected)")
+            .data
     }
 
-    fn get_slot_mut(&mut self, idx: usize) -> &mut StringSlot {
-        let chunk_idx = idx / STRING_POOL_CHUNK_SIZE;
-        let slot_idx = idx % STRING_POOL_CHUNK_SIZE;
-        &mut self.chunks[chunk_idx].slots[slot_idx]
-    }
-
-    fn ensure_capacity(&mut self) {
-        if self.free_head != u32::MAX {
-            return;
-        }
-
-        let mut chunk = StringChunk::new();
-        let base = self.capacity;
-
-        for i in (0..STRING_POOL_CHUNK_SIZE).rev() {
-            chunk.slots[i] = StringSlot::Free { next_free: self.free_head };
-            self.free_head = (base + i) as u32;
-        }
-
-        self.chunks.push(chunk);
-        self.capacity += STRING_POOL_CHUNK_SIZE;
-    }
-
-    fn alloc_slot(&mut self, entry: StringEntry) -> (u32, StringPtr) {
-        self.ensure_capacity();
-
-        let idx = self.free_head as usize;
-        let slot = self.get_slot_mut(idx);
-
-        let next_free = match slot {
-            StringSlot::Free { next_free } => *next_free,
-            StringSlot::Occupied(_) => panic!("free_head points to occupied slot"),
-        };
-
-        *slot = StringSlot::Occupied(entry);
-        self.free_head = next_free;
-        self.size += 1;
-
-        let ptr = match self.get_slot(idx) {
-            StringSlot::Occupied(e) => StringPtr(std::ptr::NonNull::from(e)),
-            StringSlot::Free { .. } => unreachable!(),
-        };
-
-        (idx as u32, ptr)
-    }
-
-    fn free_slot(&mut self, idx: usize) {
-        let old_free_head = self.free_head;
-        let slot = self.get_slot_mut(idx);
-        *slot = StringSlot::Free { next_free: old_free_head };
-        self.free_head = idx as u32;
-        self.size -= 1;
-    }
-
+    /// Find an existing interned string by content and hash.
+    /// Uses linear scan - O(n) but safe and simple.
     pub(super) fn find_by_hash(&self, s: &str, hash: u64) -> Option<StringPtr> {
-        let bucket = (hash as usize) & self.bucket_mask;
-        let mut idx = self.buckets[bucket];
-
-        while idx != u32::MAX {
-            if let StringSlot::Occupied(entry) = self.get_slot(idx as usize) {
-                if entry.hash == hash && entry.data == s {
-                    return Some(StringPtr(std::ptr::NonNull::from(entry)));
-                }
-            }
-            idx = idx.wrapping_add(1);
-            if idx as usize >= self.capacity {
-                idx = 0;
-            }
-            if idx == self.buckets[bucket] {
-                break;
+        // Linear scan through all strings looking for a match
+        for (key, entry) in &self.strings {
+            if entry.hash == hash && entry.data == s {
+                return Some(StringPtr(key));
             }
         }
         None
     }
 
+    /// Insert a new string with precomputed hash.
     pub(super) fn insert_with_hash(&mut self, s: String, hash: u64) -> StringPtr {
-        if self.size * 2 >= self.buckets.len() {
-            self.rehash();
-        }
-
         let entry = StringEntry {
             data: s,
             hash,
             color: Cell::new(Color::Unmarked),
         };
-        let (idx, ptr) = self.alloc_slot(entry);
-
-        let bucket = (hash as usize) & self.bucket_mask;
-        if self.buckets[bucket] == u32::MAX {
-            self.buckets[bucket] = idx;
-        }
-
-        ptr
-    }
-
-    fn rehash(&mut self) {
-        let new_size = self.buckets.len() * 2;
-        self.buckets = vec![u32::MAX; new_size];
-        self.bucket_mask = new_size - 1;
-
-        for idx in 0..self.capacity {
-            if let StringSlot::Occupied(entry) = self.get_slot(idx) {
-                let bucket = (entry.hash as usize) & self.bucket_mask;
-                if self.buckets[bucket] == u32::MAX {
-                    self.buckets[bucket] = idx as u32;
-                }
-            }
-        }
+        StringPtr(self.strings.insert(entry))
     }
 
     /// Mark a string as reachable.
     pub(super) fn mark(&self, ptr: StringPtr) {
-        unsafe {
-            ptr.0.as_ref().color.set(Color::Reachable);
+        if let Some(entry) = self.strings.get(ptr.0) {
+            entry.color.set(Color::Reachable);
         }
     }
 
+    /// Collect unreachable strings.
     pub(super) fn collect(&mut self) {
-        for idx in 0..self.capacity {
-            let should_free = {
-                let slot = self.get_slot(idx);
-                match slot {
-                    StringSlot::Occupied(entry) => match entry.color.get() {
-                        Color::Reachable => {
-                            entry.color.set(Color::Unmarked);
-                            false
-                        }
-                        Color::Unmarked => true,
-                    },
-                    StringSlot::Free { .. } => false,
+        self.strings.retain(|_, entry| {
+            match entry.color.get() {
+                Color::Reachable => {
+                    entry.color.set(Color::Unmarked);
+                    true
                 }
-            };
-
-            if should_free {
-                self.free_slot(idx);
+                Color::Unmarked => false,
             }
-        }
-        // Note: We don't rehash here. Rehashing is only done in insert_with_hash
-        // when the load factor gets too high. Rehashing after every GC would
-        // cause exponential bucket growth since rehash() doubles the bucket array.
+        });
     }
 }
 
@@ -683,5 +549,46 @@ mod tests {
 
         // This should panic with use-after-free detection
         let _ = heap.as_table_ref(ptr);
+    }
+
+    #[test]
+    fn test_string_allocation() {
+        let mut heap = GcHeap::with_threshold(100);
+        let s1 = heap.alloc_string("hello".to_string());
+        let s2 = heap.alloc_string("world".to_string());
+        let s3 = heap.alloc_string("hello".to_string()); // Should return same ptr as s1 (interned)
+
+        assert_eq!(heap.get_string(s1), "hello");
+        assert_eq!(heap.get_string(s2), "world");
+        assert_eq!(s1, s3); // Same string should be interned
+        assert_eq!(heap.string_count(), 2);
+    }
+
+    #[test]
+    fn test_string_gc_collect() {
+        let mut heap = GcHeap::with_threshold(100);
+        let kept = heap.alloc_string("keep".to_string());
+        let _freed = heap.alloc_string("free".to_string());
+
+        // Mark only the first string
+        heap.mark_string(kept);
+        heap.collect();
+
+        // First string should survive
+        assert_eq!(heap.get_string(kept), "keep");
+        assert_eq!(heap.string_count(), 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "use-after-free")]
+    fn test_string_use_after_free_detection() {
+        let mut heap = GcHeap::with_threshold(100);
+        let ptr = heap.alloc_string("test".to_string());
+
+        // Don't mark it, then collect
+        heap.collect();
+
+        // This should panic with use-after-free detection
+        let _ = heap.get_string(ptr);
     }
 }
