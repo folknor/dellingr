@@ -346,6 +346,7 @@ impl<'a> Parser<'a> {
         let name = self.expect_identifier()?;
         match self.input.peek_type()? {
             TokenType::Dot => self.parse_fndecl_table(name),
+            TokenType::Colon => self.parse_fndecl_method(name),
             _ => self.parse_fndecl_basic(name),
         }
     }
@@ -396,6 +397,31 @@ impl<'a> Parser<'a> {
         // Parse the function params and body.
         self.parse_fndef_named(Some(full_name))?;
         self.push(Instr::set_field(0, last_field_id));
+        Ok(())
+    }
+
+    /// Parses a method declaration: `function table:method()`
+    /// This is sugar for `table.method = function(self, ...)`
+    fn parse_fndecl_method(&mut self, table_name: &'a str) -> Result<()> {
+        // Push the table onto the stack.
+        let table_instr = match self.parse_prefix_identifier(table_name)? {
+            PlaceExp::Local(i) => Instr::get_local(i),
+            PlaceExp::Upvalue(i) => Instr::get_upvalue(i),
+            PlaceExp::Global(i) => Instr::get_global(i),
+            PlaceExp::Builtin(b) => Instr::get_builtin(b),
+            _ => unreachable!("place expression was not a local, upvalue, or global variable"),
+        };
+        self.push(table_instr);
+
+        // Consume the colon and get the method name.
+        self.expect(TokenType::Colon)?;
+        let method_name = self.expect_identifier()?;
+        let full_name = format!("{}:{}", table_name, method_name);
+        let method_name_id = self.find_or_add_string(method_name)?;
+
+        // Parse the function params and body with implicit self.
+        self.parse_fndef_method(Some(full_name))?;
+        self.push(Instr::set_field(0, method_name_id));
         Ok(())
     }
 
@@ -1506,6 +1532,27 @@ impl<'a> Parser<'a> {
     /// Parses the parameters and body of a function definition with an optional name.
     fn parse_fndef_named(&mut self, name: Option<String>) -> Result<()> {
         let (params, is_vararg) = self.parse_params()?;
+        if self.chunk.nested.len() >= u8::MAX as usize {
+            return Err(self.error(SyntaxError::Complexity));
+        }
+
+        self.nest_level += 1;
+        let mut new_chunk = self.parse_chunk(&params, is_vararg)?;
+        new_chunk.name = name;
+        self.level_down();
+
+        self.chunk.nested.push(new_chunk);
+        self.push(Instr::closure(self.chunk.nested.len() as u8 - 1));
+        self.expect(TokenType::End)?;
+        Ok(())
+    }
+
+    /// Parses a method definition with implicit `self` parameter.
+    /// Used for `function table:method()` syntax.
+    fn parse_fndef_method(&mut self, name: Option<String>) -> Result<()> {
+        let (mut params, is_vararg) = self.parse_params()?;
+        // Prepend "self" to the parameter list
+        params.insert(0, "self");
         if self.chunk.nested.len() >= u8::MAX as usize {
             return Err(self.error(SyntaxError::Complexity));
         }
