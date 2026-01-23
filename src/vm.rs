@@ -37,6 +37,7 @@ use table::Table;
 /// All allocation functions that may trigger GC must call this with the same set of roots.
 ///
 /// # Arguments
+/// * `heap` - The GC heap (needed to access objects for recursive marking)
 /// * `stack` - The VM stack containing local values and temporaries
 /// * `globals` - Global variables table
 /// * `builtins` - Fast-access array for builtin functions
@@ -44,6 +45,7 @@ use table::Table;
 /// * `upvalue_pool` - Pool of upvalues (closed upvalues contain values that need marking)
 /// * `open_upvalues` - Map of stack indices to upvalue refs (used to find closed upvalues)
 pub(super) fn mark_gc_roots(
+    heap: &GcHeap,
     stack: &[Val],
     globals: &HashMap<String, Val>,
     builtins: &[Val],
@@ -51,14 +53,14 @@ pub(super) fn mark_gc_roots(
     upvalue_pool: &UpvaluePool,
     open_upvalues: &[(usize, UpvalueRef)],
 ) {
-    stack.mark_reachable();
-    globals.mark_reachable();
-    builtins.mark_reachable();
-    string_literals.mark_reachable();
+    stack.mark_reachable(heap);
+    globals.mark_reachable(heap);
+    builtins.mark_reachable(heap);
+    string_literals.mark_reachable(heap);
     // Mark closed upvalues (open ones point to stack which is already marked)
     for (_, uv_ref) in open_upvalues {
         if let Upvalue::Closed(val) = upvalue_pool.get(*uv_ref) {
-            val.mark_reachable();
+            val.mark_reachable(heap);
         }
     }
 }
@@ -137,16 +139,7 @@ const MAX_STACK_SIZE: usize = 1_000_000;
 // stack which belongs to the current frame. Note that Rust functions access
 // the stack using 1-based indexing, but Lua code uses 0-based indexing.
 
-impl Markable for State {
-    fn mark_reachable(&self) {
-        self.stack.mark_reachable();
-        self.globals.mark_reachable();
-        self.builtins.mark_reachable();
-        self.string_literals.mark_reachable();
-        // Mark all closed upvalues (open ones point to stack which is already marked)
-        self.upvalue_pool.mark_closed_upvalues();
-    }
-}
+// State marking is done through mark_gc_roots() which has direct heap access
 
 impl State {
     const GC_INITIAL_THRESHOLD: usize = 20;
@@ -350,22 +343,18 @@ impl State {
     /// Forces a full garbage collection cycle.
     /// This marks all reachable objects and frees unreachable ones.
     pub fn gc_collect(&mut self) {
-        let Self {
-            stack,
-            globals,
-            builtins,
-            string_literals,
-            upvalue_pool,
-            heap,
-            ..
-        } = self;
-        heap.force_collect(|| {
-            stack.mark_reachable();
-            globals.mark_reachable();
-            builtins.mark_reachable();
-            string_literals.mark_reachable();
-            upvalue_pool.mark_closed_upvalues();
-        });
+        // Mark all roots
+        mark_gc_roots(
+            &self.heap,
+            &self.stack,
+            &self.globals,
+            &self.builtins,
+            &self.string_literals,
+            &self.upvalue_pool,
+            &self.open_upvalues,
+        );
+        // Sweep unmarked objects
+        self.heap.collect();
     }
 
     // ========================================================================
@@ -426,18 +415,11 @@ impl State {
 
     /// Allocates a string on the heap.
     pub(super) fn alloc_string(&mut self, s: String) -> Val {
-        let Self {
-            stack,
-            globals,
-            builtins,
-            string_literals,
-            upvalue_pool,
-            open_upvalues,
-            ..
-        } = self;
-        let ptr = self.heap.new_string(s, || {
-            mark_gc_roots(stack, globals, builtins, string_literals, upvalue_pool, open_upvalues)
-        });
+        // Check if GC is needed before allocating
+        if self.heap.is_full() {
+            self.gc_collect();
+        }
+        let ptr = self.heap.alloc_string(s);
         Val::Str(ptr)
     }
 

@@ -19,27 +19,41 @@ pub(super) const MAX_METAMETHOD_DEPTH: u32 = 200;
 impl State {
     /// Internal helper for table access with __index support.
     pub(super) fn get_table_with_key(&mut self, idx: usize, key: Val) -> Result<()> {
-        let table_val = &mut self.stack[idx].clone();
-        match table_val.as_table() {
+        let table_val = self.stack[idx].clone();
+        let obj_ptr = table_val.as_object_ptr();
+
+        // Get the value and metatable pointer in one heap access
+        let (val, mt_ptr) = match obj_ptr.and_then(|ptr| self.heap.as_table_ref(ptr)) {
             Some(t) => {
                 let val = t.get(&key);
-                if matches!(val, Val::Nil) {
-                    // Check for __index metamethod
-                    if let Some(mt_ptr) = t.get_metatable() {
-                        let index_key = self.alloc_string("__index".to_string());
-                        if let Some(mt) = Val::Obj(mt_ptr).as_table() {
-                            let index_handler = mt.get(&index_key);
-                            if !matches!(index_handler, Val::Nil) {
-                                return self.handle_index_metamethod(index_handler, idx, key);
-                            }
-                        }
-                    }
-                }
-                self.stack.push(val);
-                Ok(())
+                let mt_ptr = t.get_metatable();
+                (val, mt_ptr)
             }
-            None => Err(self.type_error(super::TypeError::TableIndex(self.stack[idx].typ()))),
+            None => {
+                return Err(self.type_error(super::TypeError::TableIndex(
+                    self.stack[idx].typ_simple(),
+                )));
+            }
+        };
+
+        if matches!(val, Val::Nil) {
+            // Check for __index metamethod
+            if let Some(mt_ptr) = mt_ptr {
+                let index_key = self.alloc_string("__index".to_string());
+                let index_handler = self
+                    .heap
+                    .as_table_ref(mt_ptr)
+                    .map(|mt| mt.get(&index_key))
+                    .unwrap_or(Val::Nil);
+
+                if !matches!(index_handler, Val::Nil) {
+                    return self.handle_index_metamethod(index_handler, idx, key);
+                }
+            }
         }
+
+        self.stack.push(val);
+        Ok(())
     }
 
     /// Handle the __index metamethod which can be a table or a function.
@@ -64,7 +78,11 @@ impl State {
     ) -> Result<()> {
         match handler {
             Val::Obj(ptr) => {
-                if ptr.as_table_ref().is_some() {
+                // Check if it's a table or function
+                let is_table = self.heap.as_table_ref(ptr).is_some();
+                let is_function = self.heap.as_lua_function(ptr).is_some();
+
+                if is_table {
                     // __index is a table: look up key in that table
                     self.stack.push(Val::Obj(ptr));
                     let new_idx = self.stack.len() - 1;
@@ -75,7 +93,7 @@ impl State {
                     self.pop(1);
                     self.stack.push(val);
                     Ok(())
-                } else if ptr.as_lua_function().is_some() {
+                } else if is_function {
                     // __index is a function: call it with (table, key)
                     let table_val = self.stack[table_idx].clone();
                     self.stack.push(Val::Obj(ptr));
@@ -107,37 +125,46 @@ impl State {
     /// Internal helper for table assignment with __newindex support.
     /// The table should be at stack[idx]. Does not pop anything from the stack.
     pub(super) fn set_table_with_key(&mut self, idx: usize, key: Val, val: Val) -> Result<()> {
-        let table_val = &mut self.stack[idx].clone();
-        match table_val.as_table() {
+        let table_val = self.stack[idx].clone();
+        let obj_ptr = table_val.as_object_ptr();
+
+        // Get existing value and metatable pointer in one heap access
+        let (existing, mt_ptr) = match obj_ptr.and_then(|ptr| self.heap.as_table_ref(ptr)) {
             Some(t) => {
-                // Check if key already exists - __newindex only triggers for new keys
                 let existing = t.get(&key);
-                if matches!(existing, Val::Nil) {
-                    // Check for __newindex metamethod
-                    if let Some(mt_ptr) = t.get_metatable() {
-                        let newindex_key = self.alloc_string("__newindex".to_string());
-                        if let Some(mt) = Val::Obj(mt_ptr).as_table() {
-                            let newindex_handler = mt.get(&newindex_key);
-                            if !matches!(newindex_handler, Val::Nil) {
-                                return self.handle_newindex_metamethod(
-                                    newindex_handler,
-                                    idx,
-                                    key,
-                                    val,
-                                );
-                            }
-                        }
-                    }
-                }
-                // No __newindex or key exists: do normal assignment
-                // Need to get the actual table from the stack since we cloned earlier
-                if let Some(t) = self.stack[idx].as_table() {
-                    t.insert(key, val)?;
-                }
-                Ok(())
+                let mt_ptr = t.get_metatable();
+                (existing, mt_ptr)
             }
-            None => Err(self.type_error(super::TypeError::TableIndex(self.stack[idx].typ()))),
+            None => {
+                return Err(self.type_error(super::TypeError::TableIndex(
+                    self.stack[idx].typ_simple(),
+                )));
+            }
+        };
+
+        if matches!(existing, Val::Nil) {
+            // Check for __newindex metamethod
+            if let Some(mt_ptr) = mt_ptr {
+                let newindex_key = self.alloc_string("__newindex".to_string());
+                let newindex_handler = self
+                    .heap
+                    .as_table_ref(mt_ptr)
+                    .map(|mt| mt.get(&newindex_key))
+                    .unwrap_or(Val::Nil);
+
+                if !matches!(newindex_handler, Val::Nil) {
+                    return self.handle_newindex_metamethod(newindex_handler, idx, key, val);
+                }
+            }
         }
+
+        // No __newindex or key exists: do normal assignment
+        if let Some(ptr) = obj_ptr {
+            if let Some(t) = self.heap.as_table(ptr) {
+                t.insert(key, val)?;
+            }
+        }
+        Ok(())
     }
 
     /// Handle the __newindex metamethod which can be a table or a function.
@@ -169,14 +196,18 @@ impl State {
     ) -> Result<()> {
         match handler {
             Val::Obj(ptr) => {
-                if ptr.as_table_ref().is_some() {
+                // Check if it's a table or function
+                let is_table = self.heap.as_table_ref(ptr).is_some();
+                let is_function = self.heap.as_lua_function(ptr).is_some();
+
+                if is_table {
                     // __newindex is a table: set the value in that table instead
                     self.stack.push(Val::Obj(ptr));
                     let new_idx = self.stack.len() - 1;
                     self.set_table_with_key(new_idx, key, val)?;
                     self.pop(1); // Remove the __newindex table
                     Ok(())
-                } else if ptr.as_lua_function().is_some() {
+                } else if is_function {
                     // __newindex is a function: call it with (table, key, value)
                     let table_val = self.stack[table_idx].clone();
                     self.stack.push(Val::Obj(ptr));
@@ -187,7 +218,8 @@ impl State {
                     Ok(())
                 } else {
                     // Not a table or function, just do normal assignment
-                    if let Some(t) = self.stack[table_idx].as_table() {
+                    let obj_ptr = self.stack[table_idx].as_object_ptr();
+                    if let Some(t) = obj_ptr.and_then(|ptr| self.heap.as_table(ptr)) {
                         t.insert(key, val)?;
                     }
                     Ok(())
@@ -205,7 +237,8 @@ impl State {
             }
             _ => {
                 // Not callable, just do normal assignment
-                if let Some(t) = self.stack[table_idx].as_table() {
+                let obj_ptr = self.stack[table_idx].as_object_ptr();
+                if let Some(t) = obj_ptr.and_then(|ptr| self.heap.as_table(ptr)) {
                     t.insert(key, val)?;
                 }
                 Ok(())

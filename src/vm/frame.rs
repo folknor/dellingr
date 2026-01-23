@@ -6,7 +6,6 @@ use super::super::error::{Error, ErrorKind, StackFrame, TypeError};
 use super::object::{Upvalue, UpvalueRef};
 use super::Chunk;
 use super::Instr;
-use super::LuaType;
 use super::Result;
 use super::State;
 use super::Val;
@@ -502,7 +501,12 @@ impl State {
         let val = self.pop_val();
         let key = self.get_string_constant(frame, field_id);
 
-        if val.as_table_ref().is_some() {
+        // Check what type we have
+        let is_table = val.as_object_ptr()
+            .and_then(|ptr| self.heap.as_table_ref(ptr))
+            .is_some();
+
+        if is_table {
             // Table: use get_table_with_key for metamethod support
             self.stack.push(val);
             let table_idx = self.stack.len() - 1;
@@ -535,7 +539,7 @@ impl State {
             self.stack.push(result);
             Ok(())
         } else {
-            Err(self.type_error(TypeError::TableIndex(val.typ())))
+            Err(self.type_error(TypeError::TableIndex(val.typ_simple())))
         }
     }
 
@@ -595,8 +599,11 @@ impl State {
         let key = self.pop_val();
         // Table is now on top of the stack
         let tbl_val = self.stack.last().unwrap();
-        if tbl_val.as_table_ref().is_none() {
-            let typ = tbl_val.typ();
+        let is_table = tbl_val.as_object_ptr()
+            .and_then(|ptr| self.heap.as_table_ref(ptr))
+            .is_some();
+        if !is_table {
+            let typ = tbl_val.typ_simple();
             self.pop_val();
             return Err(self.type_error(TypeError::TableIndex(typ)));
         }
@@ -612,16 +619,19 @@ impl State {
     fn instr_init_field(&mut self, frame: &Frame, negative_offset: u8, key_id: u8) -> Result<()> {
         let val = self.pop_val();
         let positive_offset = self.stack.len() - negative_offset as usize - 1;
-        let mut tbl_value = self.stack[positive_offset].clone();
-        if let Some(tbl) = tbl_value.as_table() {
-            let key = self.get_string_constant(frame, key_id);
-            tbl.insert(key, val)?;
-            Ok(())
-        } else {
-            Err(self.error(ErrorKind::InternalError(format!(
+        let key = self.get_string_constant(frame, key_id);
+        let obj_ptr = self.stack[positive_offset].as_object_ptr();
+        let typ = self.stack[positive_offset].typ_simple();
+
+        match obj_ptr.and_then(|ptr| self.heap.as_table(ptr)) {
+            Some(tbl) => {
+                tbl.insert(key, val)?;
+                Ok(())
+            }
+            None => Err(self.error(ErrorKind::InternalError(format!(
                 "InitField: expected table, got {}",
-                tbl_value.typ()
-            ))))
+                typ
+            )))),
         }
     }
 
@@ -629,9 +639,10 @@ impl State {
         let val = self.pop_val();
         let key = self.pop_val();
         let positive_offset = self.stack.len() - negative_offset as usize - 1;
-        let tbl_typ = self.stack[positive_offset].typ();
-        let tbl = &mut self.stack[positive_offset];
-        match tbl.as_table() {
+        let tbl_typ = self.stack[positive_offset].typ_simple();
+        let obj_ptr = self.stack[positive_offset].as_object_ptr();
+
+        match obj_ptr.and_then(|ptr| self.heap.as_table(ptr)) {
             Some(tbl) => {
                 tbl.insert(key, val)?;
                 Ok(())
@@ -645,36 +656,46 @@ impl State {
 
     fn instr_length(&mut self) -> Result<()> {
         let val = self.pop_val();
-        match val.typ() {
-            LuaType::String => {
-                let s = val.as_string().unwrap();
-                let len = s.len();
-                self.stack.push(Val::Num(len as f64));
-                Ok(())
-            }
-            LuaType::Table => {
-                let tbl = val.as_table_ref().unwrap();
+
+        // Check for string first (no heap access needed)
+        if let Some(s) = val.as_string() {
+            let len = s.len();
+            self.stack.push(Val::Num(len as f64));
+            return Ok(());
+        }
+
+        // Check for table
+        let obj_ptr = val.as_object_ptr();
+        if let Some(ptr) = obj_ptr {
+            if let Some(tbl) = self.heap.as_table_ref(ptr) {
+                // Get metatable pointer (Copy, so borrow ends here)
+                let mt_ptr = tbl.get_metatable();
+                let len = tbl.array_len();
+                // Borrow of tbl ends here
+
                 // Check for __len metamethod
-                if let Some(mt_ptr) = tbl.get_metatable() {
+                if let Some(mt_ptr) = mt_ptr {
                     let len_key = self.alloc_string("__len".to_string());
-                    if let Some(mt) = Val::Obj(mt_ptr).as_table() {
-                        let len_handler = mt.get(&len_key);
-                        if !matches!(len_handler, Val::Nil) {
-                            // Call __len(table)
-                            self.stack.push(len_handler);
-                            self.stack.push(val);
-                            self.call(ArgCount::Fixed(1), RetCount::Fixed(1))?;
-                            return Ok(());
-                        }
+                    let len_handler = self.heap.as_table_ref(mt_ptr)
+                        .map(|mt| mt.get(&len_key))
+                        .unwrap_or(Val::Nil);
+
+                    if !matches!(len_handler, Val::Nil) {
+                        // Call __len(table)
+                        self.stack.push(len_handler);
+                        self.stack.push(val);
+                        self.call(ArgCount::Fixed(1), RetCount::Fixed(1))?;
+                        return Ok(());
                     }
                 }
+
                 // No __len, use default array_len
-                let len = tbl.array_len();
                 self.stack.push(Val::Num(len as f64));
-                Ok(())
+                return Ok(());
             }
-            typ => Err(self.type_error(TypeError::Length(typ))),
         }
+
+        Err(self.type_error(TypeError::Length(val.typ_simple())))
     }
 
     fn instr_negate(&mut self) -> Result<()> {
@@ -692,8 +713,11 @@ impl State {
         let val = self.pop_val();
         let idx = self.stack.len() - stack_offset as usize - 1;
         let tbl_val = &self.stack[idx];
-        if tbl_val.as_table_ref().is_none() {
-            let typ = tbl_val.typ();
+        let is_table = tbl_val.as_object_ptr()
+            .and_then(|ptr| self.heap.as_table_ref(ptr))
+            .is_some();
+        if !is_table {
+            let typ = tbl_val.typ_simple();
             return Err(self.type_error(TypeError::TableIndex(typ)));
         }
         let key = self.get_string_constant(frame, field_id);
@@ -711,7 +735,7 @@ impl State {
         } else {
             Err(self.error(ErrorKind::InternalError(format!(
                 "SetGlobal: expected string constant, got {}",
-                s.typ()
+                s.typ_simple()
             ))))
         }
     }
@@ -723,7 +747,10 @@ impl State {
             // Find the table - it's the first table value scanning from the bottom of current frame
             let mut table_idx = None;
             for i in self.stack_bottom..self.stack.len() {
-                if self.stack[i].as_table_ref().is_some() {
+                let is_table = self.stack[i].as_object_ptr()
+                    .and_then(|ptr| self.heap.as_table_ref(ptr))
+                    .is_some();
+                if is_table {
                     table_idx = Some(i);
                     break;
                 }
@@ -740,20 +767,24 @@ impl State {
         } else {
             self.stack.split_off(self.stack.len() - count as usize)
         };
-        let mut tbl_value = self.pop_val();
-        if let Some(tbl) = tbl_value.as_table() {
-            let counter = 1..;
-            for (i, val) in counter.zip(values) {
-                let key = Val::Num(i as f64);
-                tbl.insert(key, val)?;
+        let tbl_value = self.pop_val();
+        let obj_ptr = tbl_value.as_object_ptr();
+        let typ = tbl_value.typ_simple();
+
+        match obj_ptr.and_then(|ptr| self.heap.as_table(ptr)) {
+            Some(tbl) => {
+                let counter = 1..;
+                for (i, val) in counter.zip(values) {
+                    let key = Val::Num(i as f64);
+                    tbl.insert(key, val)?;
+                }
+                self.stack.push(tbl_value);
+                Ok(())
             }
-            self.stack.push(tbl_value);
-            Ok(())
-        } else {
-            Err(self.error(ErrorKind::InternalError(format!(
+            None => Err(self.error(ErrorKind::InternalError(format!(
                 "SetList: expected table, got {}",
-                tbl_value.typ()
-            ))))
+                typ
+            )))),
         }
     }
 
@@ -769,8 +800,11 @@ impl State {
         let index = self.stack.len() - offset as usize - 2;
         let key = self.stack.remove(index + 1); // Remove the key first (it's after the table)
         let tbl_val = &self.stack[index];
-        if tbl_val.as_table_ref().is_none() {
-            let typ = tbl_val.typ();
+        let is_table = tbl_val.as_object_ptr()
+            .and_then(|ptr| self.heap.as_table_ref(ptr))
+            .is_some();
+        if !is_table {
+            let typ = tbl_val.typ_simple();
             return Err(self.type_error(TypeError::TableIndex(typ)));
         }
         self.set_table_with_key(index, key, val)?;
@@ -798,7 +832,7 @@ impl State {
             }
             _ => {
                 // Type mismatch - error
-                return Err(self.error(ErrorKind::TypeError(TypeError::Comparison(v1.typ(), v2.typ()))));
+                return Err(self.error(ErrorKind::TypeError(TypeError::Comparison(v1.typ_simple(), v2.typ_simple()))));
             }
         };
 
@@ -823,7 +857,7 @@ impl State {
     fn pop_num(&mut self) -> Result<f64> {
         let val = self.pop_val();
         val.as_num()
-            .ok_or_else(|| self.type_error(TypeError::Arithmetic(val.typ())))
+            .ok_or_else(|| self.type_error(TypeError::Arithmetic(val.typ_simple())))
     }
 }
 

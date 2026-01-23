@@ -145,7 +145,7 @@ impl State {
         let i = self.convert_idx(idx)?;
         let val = &self.stack[i];
         val.as_num()
-            .ok_or_else(|| self.type_error(super::TypeError::Arithmetic(val.typ())))
+            .ok_or_else(|| self.type_error(super::TypeError::Arithmetic(val.typ_simple())))
     }
 
     /// Converts the value at the given index to a string.
@@ -156,9 +156,11 @@ impl State {
 
     /// Returns the type of the value in the given acceptable index.
     /// Returns Nil type if the index is invalid.
+    /// Note: For objects (tables/functions), this returns the correct type
+    /// by looking up the object in the heap.
     pub fn typ(&self, idx: isize) -> super::LuaType {
         match self.at_index(idx) {
-            Ok(val) => val.typ(),
+            Ok(val) => val.typ(&self.heap),
             Err(_) => super::LuaType::Nil,
         }
     }

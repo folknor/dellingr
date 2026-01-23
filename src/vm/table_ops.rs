@@ -4,7 +4,6 @@
 //! including metamethod-aware operations.
 
 use super::lua_val::Val;
-use super::mark_gc_roots;
 use super::{Result, State, TypeError};
 use crate::instr::{ArgCount, RetCount};
 
@@ -34,9 +33,12 @@ impl State {
     pub fn get_table_raw(&mut self, i: isize) -> Result<()> {
         let idx = self.convert_idx(i)?;
         let key = self.pop_val();
-        let table = &self.stack[idx];
-        let typ = table.typ();
-        match table.as_table_ref() {
+
+        // Get the ObjectPtr and type for error reporting
+        let obj_ptr = self.stack[idx].as_object_ptr();
+        let typ = self.stack[idx].typ_simple();
+
+        match obj_ptr.and_then(|ptr| self.heap.as_table_ref(ptr)) {
             Some(t) => {
                 let val = t.get(&key);
                 self.stack.push(val);
@@ -55,9 +57,12 @@ impl State {
         let idx = self.convert_idx(i)?;
         let key = self.pop_val();
         let val = self.pop_val();
-        let table = &mut self.stack[idx];
-        let typ = table.typ();
-        match table.as_table() {
+
+        // Get the ObjectPtr and type for error reporting
+        let obj_ptr = self.stack[idx].as_object_ptr();
+        let typ = self.stack[idx].typ_simple();
+
+        match obj_ptr.and_then(|ptr| self.heap.as_table(ptr)) {
             Some(t) => {
                 t.insert(key, val)?;
                 Ok(())
@@ -72,8 +77,11 @@ impl State {
     pub fn table_next(&mut self, table_idx: isize) -> Result<bool> {
         let idx = self.convert_idx(table_idx)?;
         let key = self.pop_val();
-        let table_val = &self.stack[idx];
-        match table_val.as_table_ref() {
+
+        let obj_ptr = self.stack[idx].as_object_ptr();
+        let typ = self.stack[idx].typ_simple();
+
+        match obj_ptr.and_then(|ptr| self.heap.as_table_ref(ptr)) {
             Some(t) => {
                 let (next_key, next_val) = t.next(&key);
                 if matches!(next_key, Val::Nil) {
@@ -85,7 +93,7 @@ impl State {
                     Ok(true)
                 }
             }
-            None => Err(self.type_error(TypeError::TableIndex(table_val.typ()))),
+            None => Err(self.type_error(TypeError::TableIndex(typ))),
         }
     }
 
@@ -95,11 +103,11 @@ impl State {
             Ok(i) => i,
             Err(_) => return 0,
         };
-        let table_val = &self.stack[i];
-        match table_val.as_table_ref() {
-            Some(t) => t.array_len(),
-            None => 0,
-        }
+        self.stack[i]
+            .as_object_ptr()
+            .and_then(|ptr| self.heap.as_table_ref(ptr))
+            .map(|t| t.array_len())
+            .unwrap_or(0)
     }
 
     /// Gets the metatable of the value at the given index.
@@ -107,15 +115,14 @@ impl State {
     /// For other types, returns nil (we don't support type metatables yet).
     pub fn get_metatable_of(&mut self, idx: isize) -> Result<()> {
         let i = self.convert_idx(idx)?;
-        let val = &self.stack[i];
-        match val.as_table_ref() {
-            Some(t) => {
-                if let Some(mt) = t.get_metatable() {
-                    self.stack.push(Val::Obj(mt));
-                } else {
-                    self.push_nil();
-                }
-            }
+
+        let metatable = self.stack[i]
+            .as_object_ptr()
+            .and_then(|ptr| self.heap.as_table_ref(ptr))
+            .and_then(|t| t.get_metatable());
+
+        match metatable {
+            Some(mt) => self.stack.push(Val::Obj(mt)),
             None => self.push_nil(),
         }
         Ok(())
@@ -127,21 +134,21 @@ impl State {
     pub fn set_metatable_of(&mut self, table_idx: isize) -> Result<()> {
         let mt_val = self.pop_val();
         let idx = self.convert_idx(table_idx)?;
-        let typ = self.stack[idx].typ();
+        let typ = self.stack[idx].typ_simple();
 
         let mt = match &mt_val {
             Val::Nil => None,
             Val::Obj(ptr) => {
-                if ptr.as_table_ref().is_some() {
+                if self.heap.as_table_ref(*ptr).is_some() {
                     Some(*ptr)
                 } else {
-                    return Err(self.type_error(TypeError::TableIndex(mt_val.typ())));
+                    return Err(self.type_error(TypeError::TableIndex(mt_val.typ_simple())));
                 }
             }
-            _ => return Err(self.type_error(TypeError::TableIndex(mt_val.typ()))),
+            _ => return Err(self.type_error(TypeError::TableIndex(mt_val.typ_simple()))),
         };
 
-        match self.stack[idx].as_table() {
+        match self.stack[idx].as_object_ptr().and_then(|ptr| self.heap.as_table(ptr)) {
             Some(t) => {
                 t.set_metatable(mt);
                 Ok(())
@@ -157,8 +164,10 @@ impl State {
         let value = self.pop_val();
         let pos = self.pop_val().as_num().unwrap_or(1.0) as usize;
         let idx = self.convert_idx(table_idx)?;
-        let typ = self.stack[idx].typ();
-        match self.stack[idx].as_table() {
+        let obj_ptr = self.stack[idx].as_object_ptr();
+        let typ = self.stack[idx].typ_simple();
+
+        match obj_ptr.and_then(|ptr| self.heap.as_table(ptr)) {
             Some(t) => {
                 t.array_insert(pos, value);
                 Ok(())
@@ -171,8 +180,10 @@ impl State {
     /// Pushes the removed value onto the stack.
     pub fn table_remove_at(&mut self, table_idx: isize, pos: usize) -> Result<()> {
         let idx = self.convert_idx(table_idx)?;
-        let typ = self.stack[idx].typ();
-        let removed = match self.stack[idx].as_table() {
+        let obj_ptr = self.stack[idx].as_object_ptr();
+        let typ = self.stack[idx].typ_simple();
+
+        let removed = match obj_ptr.and_then(|ptr| self.heap.as_table(ptr)) {
             Some(t) => t.array_remove(pos),
             None => return Err(self.type_error(TypeError::TableIndex(typ))),
         };
@@ -186,12 +197,12 @@ impl State {
         let idx = self.convert_idx(table_idx)?;
 
         // Get the array values
-        let mut arr = {
-            let table_val = &self.stack[idx];
-            match table_val.as_table_ref() {
-                Some(t) => t.get_array(),
-                None => return Err(self.type_error(TypeError::TableIndex(table_val.typ()))),
-            }
+        let obj_ptr = self.stack[idx].as_object_ptr();
+        let typ = self.stack[idx].typ_simple();
+
+        let mut arr = match obj_ptr.and_then(|ptr| self.heap.as_table_ref(ptr)) {
+            Some(t) => t.get_array(),
+            None => return Err(self.type_error(TypeError::TableIndex(typ))),
         };
 
         if arr.is_empty() {
@@ -245,9 +256,10 @@ impl State {
             });
         }
 
-        // Put sorted array back
-        let typ = self.stack[idx].typ();
-        match self.stack[idx].as_table() {
+        // Put sorted array back - need to look up the table again since we may have
+        // mutated self during comparator calls
+        let obj_ptr = self.stack[idx].as_object_ptr();
+        match obj_ptr.and_then(|ptr| self.heap.as_table(ptr)) {
             Some(t) => {
                 t.set_array(arr);
                 Ok(())
@@ -263,20 +275,26 @@ impl State {
         let val = self.stack[i].clone();
 
         // Check if it's a table with __tostring
-        if let Some(t) = val.as_table_ref() {
-            if let Some(mt_ptr) = t.get_metatable() {
-                let tostring_key = self.alloc_string("__tostring".to_string());
-                if let Some(mt) = Val::Obj(mt_ptr).as_table() {
-                    let tostring_handler = mt.get(&tostring_key);
-                    if !matches!(tostring_handler, Val::Nil) {
-                        // Call the __tostring metamethod
-                        self.stack.push(tostring_handler);
-                        self.stack.push(val);
-                        self.call(ArgCount::Fixed(1), RetCount::Fixed(1))?;
-                        let result = self.pop_val();
-                        return Ok(result.to_string());
-                    }
-                }
+        let metatable_ptr = val
+            .as_object_ptr()
+            .and_then(|ptr| self.heap.as_table_ref(ptr))
+            .and_then(|t| t.get_metatable());
+
+        if let Some(mt_ptr) = metatable_ptr {
+            let tostring_key = self.alloc_string("__tostring".to_string());
+            let tostring_handler = self
+                .heap
+                .as_table_ref(mt_ptr)
+                .map(|mt| mt.get(&tostring_key))
+                .unwrap_or(Val::Nil);
+
+            if !matches!(tostring_handler, Val::Nil) {
+                // Call the __tostring metamethod
+                self.stack.push(tostring_handler);
+                self.stack.push(val);
+                self.call(ArgCount::Fixed(1), RetCount::Fixed(1))?;
+                let result = self.pop_val();
+                return Ok(result.to_string());
             }
         }
 
@@ -286,18 +304,11 @@ impl State {
 
     /// Allocates a new table on the heap.
     pub(super) fn alloc_table(&mut self) -> Val {
-        let Self {
-            stack,
-            globals,
-            builtins,
-            string_literals,
-            upvalue_pool,
-            open_upvalues,
-            ..
-        } = self;
-        let obj = self.heap.new_table(|| {
-            mark_gc_roots(stack, globals, builtins, string_literals, upvalue_pool, open_upvalues)
-        });
+        // Check if GC is needed before allocating
+        if self.heap.is_full() {
+            self.gc_collect();
+        }
+        let obj = self.heap.alloc_table();
         Val::Obj(obj)
     }
 }

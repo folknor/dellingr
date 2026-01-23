@@ -1,5 +1,4 @@
-use super::object::{Closure, ObjectPtr, StringPtr};
-use super::Markable;
+use super::object::{Closure, GcHeap, ObjectPtr, StringPtr};
 use super::Result;
 use super::State;
 use super::Table;
@@ -22,9 +21,11 @@ pub(crate) enum Val {
 use Val::*;
 
 impl Val {
-    pub(super) fn as_lua_function(&self) -> Option<Closure> {
+    /// Get this value as a Lua function (closure), if it is one.
+    /// Requires heap access since the function data is stored in the GC heap.
+    pub(super) fn as_lua_function(&self, heap: &GcHeap) -> Option<Closure> {
         if let Obj(o) = self {
-            o.as_lua_function()
+            heap.as_lua_function(*o)
         } else {
             None
         }
@@ -45,17 +46,31 @@ impl Val {
         }
     }
 
-    pub(super) fn as_table(&mut self) -> Option<&mut Table> {
+    /// Get the ObjectPtr if this is an object, without checking what kind.
+    /// Use heap.as_table() or heap.as_lua_function() to check the actual type.
+    pub(super) fn as_object_ptr(&self) -> Option<ObjectPtr> {
         if let Obj(o) = self {
-            o.as_table()
+            Some(*o)
         } else {
             None
         }
     }
 
-    pub(super) fn as_table_ref(&self) -> Option<&Table> {
+    /// Get this value as a mutable table reference.
+    /// Requires heap access since the table is stored in the GC heap.
+    pub(super) fn as_table<'a>(&self, heap: &'a mut GcHeap) -> Option<&'a mut Table> {
         if let Obj(o) = self {
-            o.as_table_ref()
+            heap.as_table(*o)
+        } else {
+            None
+        }
+    }
+
+    /// Get this value as an immutable table reference.
+    /// Requires heap access since the table is stored in the GC heap.
+    pub(super) fn as_table_ref<'a>(&self, heap: &'a GcHeap) -> Option<&'a Table> {
+        if let Obj(o) = self {
+            heap.as_table_ref(*o)
         } else {
             None
         }
@@ -66,14 +81,29 @@ impl Val {
     }
 
     /// Returns the value's type.
-    pub(super) fn typ(&self) -> LuaType {
+    /// Requires heap access to determine if an Object is a Table or Function.
+    pub(super) fn typ(&self, heap: &GcHeap) -> LuaType {
         match self {
             Nil => LuaType::Nil,
             Bool(_) => LuaType::Boolean,
             Num(_) => LuaType::Number,
             RustFn(_) => LuaType::Function,
             Str(_) => LuaType::String,
-            Obj(o) => o.typ(),
+            Obj(o) => o.typ(heap),
+        }
+    }
+
+    /// Returns the value's type for non-object types.
+    /// For objects, this is unsafe to call - use typ() with heap access instead.
+    /// This is useful for error messages where we already know it's not an object.
+    pub(super) fn typ_simple(&self) -> LuaType {
+        match self {
+            Nil => LuaType::Nil,
+            Bool(_) => LuaType::Boolean,
+            Num(_) => LuaType::Number,
+            RustFn(_) => LuaType::Function,
+            Str(_) => LuaType::String,
+            Obj(_) => LuaType::Table, // Assume table for display purposes
         }
     }
 }
@@ -144,21 +174,14 @@ impl PartialEq for Val {
                 x == y
             }
             (Obj(a), Obj(b)) => a == b,
-            (Str(a), Str(b)) => StringPtr::eq_physical(a, b),
+            // String pointer equality works because strings are interned
+            (Str(a), Str(b)) => a == b,
             _ => false,
         }
     }
 }
 
-impl Markable for Val {
-    fn mark_reachable(&self) {
-        match self {
-            Obj(o) => o.mark_reachable(),
-            Str(s) => s.mark_reachable(),
-            _ => (),
-        }
-    }
-}
+// Markable impl for Val is in object.rs
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum LuaType {

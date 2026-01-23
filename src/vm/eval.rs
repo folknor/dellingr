@@ -7,7 +7,6 @@ use std::cmp::Ordering;
 
 use super::frame::Frame;
 use super::lua_val::Val;
-use super::mark_gc_roots;
 use super::object::{Closure, Upvalue, UpvalueRef};
 use super::{compiler, CallInfo, Chunk, Error, ErrorKind, Result, State, TypeError, MAX_CALL_DEPTH};
 use crate::instr::{ArgCount, RetCount};
@@ -82,28 +81,31 @@ impl State {
             }
             self.stack_bottom = old_stack_bottom;
             num_ret_reported
-        } else if let Some(closure) = func_val.as_lua_function() {
+        } else if let Some(closure) = func_val.as_lua_function(&self.heap) {
             self.eval_closure(closure, actual_num_args)?
-        } else if let Some(t) = func_val.as_table_ref() {
-            // Check for __call metamethod
-            if let Some(mt_ptr) = t.get_metatable() {
+        } else {
+            // Check for __call metamethod on tables
+            let metatable_ptr = func_val.as_object_ptr()
+                .and_then(|ptr| self.heap.as_table_ref(ptr))
+                .and_then(|t| t.get_metatable());
+
+            if let Some(mt_ptr) = metatable_ptr {
                 let call_key = self.alloc_string("__call".to_string());
-                if let Some(mt) = Val::Obj(mt_ptr).as_table() {
-                    let call_handler = mt.get(&call_key);
-                    if !matches!(call_handler, Val::Nil) {
-                        // Insert the table as first argument and call the handler
-                        // Stack is currently: [arg1, arg2, ..., argN]
-                        // We need: [handler, table, arg1, arg2, ..., argN]
-                        self.stack.insert(idx, func_val.clone());
-                        self.stack.insert(idx, call_handler);
-                        // Now call with actual_num_args + 1 (table is first arg)
-                        return self.call(ArgCount::Fixed(actual_num_args + 1), num_ret_expected);
-                    }
+                let call_handler = self.heap.as_table_ref(mt_ptr)
+                    .map(|mt| mt.get(&call_key))
+                    .unwrap_or(Val::Nil);
+
+                if !matches!(call_handler, Val::Nil) {
+                    // Insert the table as first argument and call the handler
+                    // Stack is currently: [arg1, arg2, ..., argN]
+                    // We need: [handler, table, arg1, arg2, ..., argN]
+                    self.stack.insert(idx, func_val.clone());
+                    self.stack.insert(idx, call_handler);
+                    // Now call with actual_num_args + 1 (table is first arg)
+                    return self.call(ArgCount::Fixed(actual_num_args + 1), num_ret_expected);
                 }
             }
-            return Err(self.type_error(TypeError::FunctionCall(func_val.typ())));
-        } else {
-            return Err(self.type_error(TypeError::FunctionCall(func_val.typ())));
+            return Err(self.type_error(TypeError::FunctionCall(func_val.typ(&self.heap))));
         };
         // RetCount::All means "return all" - don't adjust the stack
         if let RetCount::Fixed(expected) = num_ret_expected {
@@ -163,7 +165,7 @@ impl State {
                     buffer.push_str(&format!("{}", num));
                 }
             } else {
-                abort = Some(TypeError::Concat(val.typ()));
+                abort = Some(TypeError::Concat(val.typ_simple()));
                 break;
             }
         }
@@ -301,20 +303,11 @@ impl State {
     pub(super) fn initialize_frame(&mut self, closure: Closure, varargs: Vec<Val>) -> Frame {
         let string_literal_start = self.string_literals.len();
         for s in &closure.chunk.string_literals {
-            let string_ptr = {
-                let Self {
-                    stack,
-                    globals,
-                    builtins,
-                    string_literals,
-                    upvalue_pool,
-                    open_upvalues,
-                    ..
-                } = self;
-                self.heap.new_string(s.into(), || {
-                    mark_gc_roots(stack, globals, builtins, string_literals, upvalue_pool, open_upvalues)
-                })
-            };
+            // Check if GC is needed before allocating
+            if self.heap.is_full() {
+                self.gc_collect();
+            }
+            let string_ptr = self.heap.alloc_string(s.into());
             self.string_literals.push(Val::Str(string_ptr));
         }
         Frame::new(
@@ -331,18 +324,11 @@ impl State {
     }
 
     pub(super) fn push_closure(&mut self, chunk: Chunk, upvalues: Vec<UpvalueRef>) {
-        let Self {
-            stack,
-            globals,
-            builtins,
-            string_literals,
-            upvalue_pool,
-            open_upvalues,
-            ..
-        } = self;
-        let obj = self.heap.new_lua_fn(chunk, upvalues, || {
-            mark_gc_roots(stack, globals, builtins, string_literals, upvalue_pool, open_upvalues)
-        });
+        // Check if GC is needed before allocating
+        if self.heap.is_full() {
+            self.gc_collect();
+        }
+        let obj = self.heap.alloc_lua_fn(chunk, upvalues);
         self.stack.push(Val::Obj(obj));
     }
 
