@@ -1,4 +1,5 @@
 -- Test math library
+-- DIFF: number_format - Rust formats floats differently (precision, trailing zeros)
 
 print("=== Testing math library ===")
 

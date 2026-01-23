@@ -1,6 +1,7 @@
 -- Extended Lua feature test
 -- Tests features not covered in feature_test.lua
 -- Will error on first failure
+-- DIFF: semicolon_syntax - lua5.4 rejects semicolons in some places we allow
 
 local function test(name, condition)
     if condition then

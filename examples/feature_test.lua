@@ -1,6 +1,7 @@
 -- Comprehensive Lua feature test
 -- Tests standard Lua features to find what's missing in our VM
 -- Will error on first failure - run repeatedly to find all issues
+-- DIFF: unpack_global - we provide global unpack (like lua5.2), lua5.4 only has table.unpack
 
 local function test(name, condition)
     if condition then

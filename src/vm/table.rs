@@ -168,13 +168,18 @@ impl Table {
 
     /// Ensure storage is Map (for operations that need IndexMap's shift_remove).
     fn ensure_map(&mut self) {
-        if let TableStorage::Inline { mut entries, len } = std::mem::take(&mut self.storage) {
-            let mut map = IndexMap::with_capacity(len as usize);
-            for i in 0..(len as usize) {
-                let (k, v) = std::mem::take(&mut entries[i]);
-                map.insert(k, v);
+        // Only convert if currently Inline
+        if matches!(self.storage, TableStorage::Inline { .. }) {
+            if let TableStorage::Inline { mut entries, len } =
+                std::mem::take(&mut self.storage)
+            {
+                let mut map = IndexMap::with_capacity(len as usize);
+                for i in 0..(len as usize) {
+                    let (k, v) = std::mem::take(&mut entries[i]);
+                    map.insert(k, v);
+                }
+                self.storage = TableStorage::Map(map);
             }
-            self.storage = TableStorage::Map(map);
         }
     }
 

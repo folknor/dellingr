@@ -1,5 +1,6 @@
 -- Edge Case Tests
 -- Tests for various edge cases and correct Lua semantics
+-- DIFF: nan_format - Rust formats NaN differently than Lua
 
 print("=== Edge Case Tests ===")
 print("")
