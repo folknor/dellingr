@@ -100,7 +100,7 @@ pub(super) struct Closure {
 }
 
 /// The raw object data managed by GC.
-pub(crate) enum RawObject {
+pub(super) enum RawObject {
     LuaFn(Box<Closure>),
     Table(Table),
 }
@@ -122,9 +122,9 @@ pub(crate) enum Color {
 }
 
 /// A GC-managed object with its metadata.
-pub(crate) struct WrappedObject {
-    pub(crate) raw: RawObject,
-    pub(crate) color: Cell<Color>,
+pub(super) struct WrappedObject {
+    pub(super) raw: RawObject,
+    pub(super) color: Cell<Color>,
 }
 
 // ============================================================================
@@ -195,14 +195,14 @@ impl GcHeap {
     /// Get a reference to the wrapped object.
     /// Panics if the key is invalid (use-after-free detection).
     #[inline]
-    pub(crate) fn get(&self, ptr: ObjectPtr) -> &WrappedObject {
+    pub(super) fn get(&self, ptr: ObjectPtr) -> &WrappedObject {
         self.objects.get(ptr.0).expect("Invalid ObjectPtr: object was freed (use-after-free detected)")
     }
 
     /// Get a mutable reference to the wrapped object.
     /// Panics if the key is invalid (use-after-free detection).
     #[inline]
-    pub(crate) fn get_mut(&mut self, ptr: ObjectPtr) -> &mut WrappedObject {
+    pub(super) fn get_mut(&mut self, ptr: ObjectPtr) -> &mut WrappedObject {
         self.objects.get_mut(ptr.0).expect("Invalid ObjectPtr: object was freed (use-after-free detected)")
     }
 

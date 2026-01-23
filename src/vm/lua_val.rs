@@ -1,7 +1,6 @@
 use super::object::{Closure, GcHeap, ObjectPtr, StringPtr};
 use super::Result;
 use super::State;
-use super::Table;
 
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -62,26 +61,6 @@ impl Val {
     pub(super) fn as_object_ptr(&self) -> Option<ObjectPtr> {
         if let Obj(o) = self {
             Some(*o)
-        } else {
-            None
-        }
-    }
-
-    /// Get this value as a mutable table reference.
-    /// Requires heap access since the table is stored in the GC heap.
-    pub(super) fn as_table<'a>(&self, heap: &'a mut GcHeap) -> Option<&'a mut Table> {
-        if let Obj(o) = self {
-            heap.as_table(*o)
-        } else {
-            None
-        }
-    }
-
-    /// Get this value as an immutable table reference.
-    /// Requires heap access since the table is stored in the GC heap.
-    pub(super) fn as_table_ref<'a>(&self, heap: &'a GcHeap) -> Option<&'a Table> {
-        if let Obj(o) = self {
-            heap.as_table_ref(*o)
         } else {
             None
         }
