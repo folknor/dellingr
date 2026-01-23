@@ -114,11 +114,17 @@ impl State {
     }
 
     /// Pops a value from the stack, then replaces the value at the given index
-    /// with that value.
+    /// with that value. If the index points to the top element (e.g., -1),
+    /// this is equivalent to a simple pop since we'd be replacing the popped
+    /// value with itself.
     pub fn replace(&mut self, i: isize) -> Result<()> {
         let idx = self.convert_idx(i)?;
         let val = self.stack.pop().unwrap();
-        self.stack[idx] = val;
+        // If idx pointed to the top element (which we just popped), skip the assignment
+        // This handles replace(-1) correctly without panicking
+        if idx < self.stack.len() {
+            self.stack[idx] = val;
+        }
         Ok(())
     }
 
