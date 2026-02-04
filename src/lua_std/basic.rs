@@ -93,6 +93,16 @@ pub(crate) fn open_base(state: &mut State) {
         Ok(0)
     });
 
+    // Raises an error with the given message.
+    add("error", |state| {
+        let message = if state.get_top() >= 1 {
+            state.to_string_with_meta(1)?
+        } else {
+            "(error raised with no message)".to_string()
+        };
+        Err(state.error(ErrorKind::InternalError(message)))
+    });
+
     // Returns the type of its only argument, coded as a string.
     add("type", |state| {
         state.check_any(1)?;
