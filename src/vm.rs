@@ -413,6 +413,42 @@ impl State {
         self.globals.insert(name.to_string(), val);
     }
 
+    /// Execute a function with a restricted global environment.
+    /// Only globals in the whitelist are accessible during execution.
+    /// The original environment is restored after the function completes (or errors).
+    pub fn with_restricted_env<F, R>(&mut self, whitelist: &[&str], f: F) -> R
+    where
+        F: FnOnce(&mut Self) -> R,
+    {
+        // Build restricted environment
+        let mut restricted_globals = HashMap::new();
+        let mut restricted_builtins: [Val; Builtin::COUNT] = std::array::from_fn(|_| Val::Nil);
+
+        for name in whitelist {
+            // Copy from builtins if it's a well-known name
+            if let Some(slot) = Builtin::from_name(name) {
+                restricted_builtins[slot as usize] = self.builtins[slot as usize].clone();
+            }
+            // Also copy from globals HashMap
+            if let Some(val) = self.globals.get(*name) {
+                restricted_globals.insert((*name).to_string(), val.clone());
+            }
+        }
+
+        // Swap to restricted environment
+        let saved_globals = std::mem::replace(&mut self.globals, restricted_globals);
+        let saved_builtins = std::mem::replace(&mut self.builtins, restricted_builtins);
+
+        // Execute the function
+        let result = f(self);
+
+        // Restore original environment
+        self.globals = saved_globals;
+        self.builtins = saved_builtins;
+
+        result
+    }
+
     /// Allocates a string on the heap.
     pub(super) fn alloc_string(&mut self, s: String) -> Val {
         // Check if GC is needed before allocating
