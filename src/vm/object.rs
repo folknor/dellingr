@@ -284,12 +284,13 @@ impl GcHeap {
     }
 
     /// Mark an object as reachable. Call this for all root objects.
-    pub(super) fn mark(&self, ptr: ObjectPtr) {
+    /// The upvalue_pool is needed to mark closed upvalues referenced by closures.
+    pub(super) fn mark(&self, ptr: ObjectPtr, upvalue_pool: &UpvaluePool) {
         if let Some(obj) = self.objects.get(ptr.0) {
             if obj.color.get() == Color::Unmarked {
                 obj.color.set(Color::Reachable);
                 // Recursively mark objects referenced by this object
-                self.mark_children(obj);
+                self.mark_children(obj, upvalue_pool);
             }
         }
     }
@@ -300,13 +301,18 @@ impl GcHeap {
     }
 
     /// Mark objects referenced by this object.
-    fn mark_children(&self, obj: &WrappedObject) {
+    fn mark_children(&self, obj: &WrappedObject, upvalue_pool: &UpvaluePool) {
         match &obj.raw {
-            RawObject::LuaFn(_) => {
-                // Upvalues are marked separately through the upvalue pool
+            RawObject::LuaFn(closure) => {
+                // Mark values stored in closed upvalues
+                for uv_ref in &closure.upvalues {
+                    if let Upvalue::Closed(val) = upvalue_pool.get(*uv_ref) {
+                        val.mark_reachable(self, upvalue_pool);
+                    }
+                }
             }
             RawObject::Table(tbl) => {
-                tbl.mark_values(self);
+                tbl.mark_values(self, upvalue_pool);
             }
         }
     }
@@ -373,13 +379,13 @@ impl GcHeap {
 /// An item is `Markable` if it can be marked as reachable given heap access.
 pub(super) trait Markable {
     /// Mark this item and the references it contains as reachable.
-    fn mark_reachable(&self, heap: &GcHeap);
+    fn mark_reachable(&self, heap: &GcHeap, upvalue_pool: &UpvaluePool);
 }
 
 impl Markable for Val {
-    fn mark_reachable(&self, heap: &GcHeap) {
+    fn mark_reachable(&self, heap: &GcHeap, upvalue_pool: &UpvaluePool) {
         match self {
-            Val::Obj(ptr) => heap.mark(*ptr),
+            Val::Obj(ptr) => heap.mark(*ptr, upvalue_pool),
             Val::Str(ptr) => heap.mark_string(*ptr),
             _ => (),
         }
@@ -387,17 +393,17 @@ impl Markable for Val {
 }
 
 impl<T: Markable> Markable for [T] {
-    fn mark_reachable(&self, heap: &GcHeap) {
+    fn mark_reachable(&self, heap: &GcHeap, upvalue_pool: &UpvaluePool) {
         for val in self {
-            val.mark_reachable(heap);
+            val.mark_reachable(heap, upvalue_pool);
         }
     }
 }
 
 impl<K, V: Markable> Markable for HashMap<K, V> {
-    fn mark_reachable(&self, heap: &GcHeap) {
+    fn mark_reachable(&self, heap: &GcHeap, upvalue_pool: &UpvaluePool) {
         for val in self.values() {
-            val.mark_reachable(heap);
+            val.mark_reachable(heap, upvalue_pool);
         }
     }
 }

@@ -2,7 +2,7 @@ use std::cell::Cell;
 
 use indexmap::IndexMap;
 
-use super::object::{GcHeap, Markable, ObjectPtr};
+use super::object::{GcHeap, Markable, ObjectPtr, UpvaluePool};
 use super::Error;
 use super::Result;
 use super::TypeError;
@@ -344,23 +344,23 @@ impl Table {
 impl Table {
     /// Mark all values contained in this table as reachable.
     /// Called by the GC during the mark phase.
-    pub(super) fn mark_values(&self, heap: &GcHeap) {
+    pub(super) fn mark_values(&self, heap: &GcHeap, upvalue_pool: &UpvaluePool) {
         match &self.storage {
             TableStorage::Inline { entries, len } => {
                 for i in 0..(*len as usize) {
-                    entries[i].0.mark_reachable(heap);
-                    entries[i].1.mark_reachable(heap);
+                    entries[i].0.mark_reachable(heap, upvalue_pool);
+                    entries[i].1.mark_reachable(heap, upvalue_pool);
                 }
             }
             TableStorage::Map(map) => {
                 for (k, v) in map {
-                    k.mark_reachable(heap);
-                    v.mark_reachable(heap);
+                    k.mark_reachable(heap, upvalue_pool);
+                    v.mark_reachable(heap, upvalue_pool);
                 }
             }
         }
         if let Some(mt) = &self.metatable {
-            heap.mark(*mt);
+            heap.mark(*mt, upvalue_pool);
         }
     }
 }

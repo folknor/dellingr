@@ -28,7 +28,7 @@ use super::Instr;
 use super::Result;
 
 use lua_val::Val;
-use object::{GcHeap, Markable, Upvalue, UpvaluePool, UpvalueRef};
+use object::{GcHeap, Markable, UpvaluePool, UpvalueRef};
 use table::Table;
 
 /// Marks all GC roots. Called before garbage collection to identify reachable objects.
@@ -51,18 +51,16 @@ pub(super) fn mark_gc_roots(
     builtins: &[Val],
     string_literals: &[Val],
     upvalue_pool: &UpvaluePool,
-    open_upvalues: &[(usize, UpvalueRef)],
+    _open_upvalues: &[(usize, UpvalueRef)],
 ) {
-    stack.mark_reachable(heap);
-    globals.mark_reachable(heap);
-    builtins.mark_reachable(heap);
-    string_literals.mark_reachable(heap);
-    // Mark closed upvalues (open ones point to stack which is already marked)
-    for (_, uv_ref) in open_upvalues {
-        if let Upvalue::Closed(val) = upvalue_pool.get(*uv_ref) {
-            val.mark_reachable(heap);
-        }
-    }
+    // Mark all roots - closed upvalues are now marked transitively when
+    // marking LuaFn closures that reference them
+    stack.mark_reachable(heap, upvalue_pool);
+    globals.mark_reachable(heap, upvalue_pool);
+    builtins.mark_reachable(heap, upvalue_pool);
+    string_literals.mark_reachable(heap, upvalue_pool);
+    // Note: open upvalues point to stack (already marked), closed upvalues
+    // are marked transitively through the closures that reference them
 }
 
 /// Information about an active function call, used for stack traces.
