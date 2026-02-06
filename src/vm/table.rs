@@ -78,12 +78,12 @@ impl Table {
                 TableStorage::Inline { entries, len } => {
                     for i in 0..(*len as usize) {
                         if &entries[i].0 == key {
-                            return entries[i].1.clone();
+                            return entries[i].1;
                         }
                     }
                     Val::Nil
                 }
-                TableStorage::Map(map) => map.get(key).cloned().unwrap_or_default(),
+                TableStorage::Map(map) => map.get(key).copied().unwrap_or_default(),
             },
         }
     }
@@ -169,8 +169,8 @@ impl Table {
     /// Ensure storage is Map (for operations that need IndexMap's shift_remove).
     fn ensure_map(&mut self) {
         // Only convert if currently Inline
-        if matches!(self.storage, TableStorage::Inline { .. }) {
-            if let TableStorage::Inline { mut entries, len } =
+        if matches!(self.storage, TableStorage::Inline { .. })
+            && let TableStorage::Inline { mut entries, len } =
                 std::mem::take(&mut self.storage)
             {
                 let mut map = IndexMap::with_capacity(len as usize);
@@ -180,7 +180,6 @@ impl Table {
                 }
                 self.storage = TableStorage::Map(map);
             }
-        }
     }
 
     /// Remove a key and return its value (if any).
@@ -304,14 +303,14 @@ impl Table {
                 if matches!(key, Val::Nil) {
                     // Return the first key-value pair
                     if *len > 0 {
-                        return (entries[0].0.clone(), entries[0].1.clone());
+                        return (entries[0].0, entries[0].1);
                     }
                 } else {
                     // Find the key, then return the next one
                     for i in 0..(*len as usize) {
                         if &entries[i].0 == key {
                             if i + 1 < *len as usize {
-                                return (entries[i + 1].0.clone(), entries[i + 1].1.clone());
+                                return (entries[i + 1].0, entries[i + 1].1);
                             }
                             break;
                         }
@@ -322,14 +321,14 @@ impl Table {
                 if matches!(key, Val::Nil) {
                     // Return the first key-value pair
                     if let Some((k, v)) = map.iter().next() {
-                        return (k.clone(), v.clone());
+                        return (*k, *v);
                     }
                 } else {
                     // Find the key, then return the next one
                     let mut found = false;
                     for (k, v) in map {
                         if found {
-                            return (k.clone(), v.clone());
+                            return (*k, *v);
                         }
                         if k == key {
                             found = true;

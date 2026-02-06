@@ -19,7 +19,7 @@ impl fmt::Display for StackFrame {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let source = self.source.as_deref().unwrap_or("[C]");
         let func_desc = match &self.function_name {
-            Some(name) => format!("function '{}'", name),
+            Some(name) => format!("function '{name}'"),
             None => "main chunk".to_string(),
         };
         write!(f, "{}:{}: in {}", source, self.line, func_desc)
@@ -158,7 +158,7 @@ impl fmt::Display for Error {
             writeln!(f)?;
             writeln!(f, "stack traceback:")?;
             for frame in &self.stack_trace {
-                writeln!(f, "\t{}", frame)?;
+                writeln!(f, "\t{frame}")?;
             }
         }
         Ok(())
@@ -173,25 +173,25 @@ impl fmt::Display for ErrorKind {
             SyntaxError(e) => e.fmt(f),
             TypeError(e) => e.fmt(f),
             BudgetExceeded { used, budget } => {
-                write!(f, "budget exceeded: used {} cost with budget of {}", used, budget)
+                write!(f, "budget exceeded: used {used} cost with budget of {budget}")
             }
             MetamethodDepthExceeded { depth } => {
-                write!(f, "metamethod chain too deep (depth {})", depth)
+                write!(f, "metamethod chain too deep (depth {depth})")
             }
             InvalidJump { ip, offset } => {
-                write!(f, "internal error: invalid jump (instruction {}, offset {})", ip, offset)
+                write!(f, "internal error: invalid jump (instruction {ip}, offset {offset})")
             }
             CallDepthExceeded { depth } => {
-                write!(f, "call stack overflow (depth {})", depth)
+                write!(f, "call stack overflow (depth {depth})")
             }
             StackOverflow { size } => {
-                write!(f, "stack overflow ({} values)", size)
+                write!(f, "stack overflow ({size} values)")
             }
             InvalidStackIndex { index } => {
-                write!(f, "internal error: invalid stack index ({})", index)
+                write!(f, "internal error: invalid stack index ({index})")
             }
             InternalError(msg) => {
-                write!(f, "internal error: {}", msg)
+                write!(f, "internal error: {msg}")
             }
         }
     }
@@ -204,8 +204,8 @@ impl fmt::Display for ArgError {
             None => "<anonymous>",
         };
         let extra = match (&self.expected, &self.received) {
-            (Some(expected), Some(got)) => format!("{} expected, got {}", expected, got),
-            (Some(expected), None) => format!("{} expected, got no value", expected),
+            (Some(expected), Some(got)) => format!("{expected} expected, got {got}"),
+            (Some(expected), None) => format!("{expected} expected, got no value"),
             (None, _) => "value expected".into(),
         };
 
@@ -232,7 +232,7 @@ impl fmt::Display for SyntaxError {
             TooManyTableFields => write!(f, "too many fields in table constructor (limit 255)"),
             UnclosedString => write!(f, "unfinished string"),
             UnexpectedEof => write!(f, "unexpected <eof>"),
-            UnexpectedTok(msg) => write!(f, "{}", msg),
+            UnexpectedTok(msg) => write!(f, "{msg}"),
             LParenLineStart => write!(f, "ambiguous function call"),
         }
     }
@@ -242,12 +242,12 @@ impl fmt::Display for TypeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use TypeError::*;
         match self {
-            Arithmetic(typ) => write!(f, "attempt to perform arithmetic on a {} value", typ),
-            Comparison(type1, type2) => write!(f, "attempt to compare {} with {}", type1, type2),
-            Concat(typ) => write!(f, "attempt to concatenate a {} value", typ),
-            FunctionCall(typ) => write!(f, "attempt to call a {} value", typ),
-            Length(typ) => write!(f, "attempt to get length of a {} value", typ),
-            TableIndex(typ) => write!(f, "attempt to index a {} value", typ),
+            Arithmetic(typ) => write!(f, "attempt to perform arithmetic on a {typ} value"),
+            Comparison(type1, type2) => write!(f, "attempt to compare {type1} with {type2}"),
+            Concat(typ) => write!(f, "attempt to concatenate a {typ} value"),
+            FunctionCall(typ) => write!(f, "attempt to call a {typ} value"),
+            Length(typ) => write!(f, "attempt to get length of a {typ} value"),
+            TableIndex(typ) => write!(f, "attempt to index a {typ} value"),
             TableKeyNan => write!(f, "table index was NaN"),
             TableKeyNil => write!(f, "table index was nil"),
         }

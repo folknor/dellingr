@@ -49,6 +49,6 @@ impl State {
 
     /// Opens all standard Lua libraries.
     pub fn open_libs(&mut self) {
-        lua_std::open_libs(self)
+        lua_std::open_libs(self);
     }
 }

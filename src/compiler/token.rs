@@ -1,7 +1,7 @@
 use std::ops::Range;
 
 /// A lexical unit in the source code.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct Token {
     pub(super) typ: TokenType,
     pub(super) start: usize,

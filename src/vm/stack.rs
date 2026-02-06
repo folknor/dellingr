@@ -22,7 +22,7 @@ impl State {
     pub fn set_top(&mut self, i: isize) {
         match i.cmp(&0) {
             Ordering::Less => {
-                panic!("negative not supported yet ({})", i);
+                panic!("negative not supported yet ({i})");
             }
             Ordering::Equal => {
                 self.stack.truncate(self.stack_bottom);
@@ -49,8 +49,7 @@ impl State {
     pub fn pop(&mut self, n: isize) {
         assert!(
             n <= self.get_top() as isize,
-            "Tried to pop too many elements ({})",
-            n
+            "Tried to pop too many elements ({n})"
         );
         for _ in 0..n {
             self.pop_val();
@@ -184,7 +183,7 @@ impl State {
     /// Get the value at the given index. Returns error if out of bounds.
     pub(super) fn at_index(&self, idx: isize) -> Result<Val> {
         let i = self.convert_idx(idx)?;
-        Ok(self.stack[i].clone())
+        Ok(self.stack[i])
     }
 
     /// Given a relative index, convert it to an absolute index to the stack.

@@ -150,7 +150,7 @@ impl Frame {
                     state.pop_val();
                 }
                 Instr::OP_DUP => {
-                    let val = state.stack.last().unwrap().clone();
+                    let val = *state.stack.last().unwrap();
                     state.stack.push(val);
                 }
                 Instr::OP_SWAP => {
@@ -185,7 +185,7 @@ impl Frame {
                     if let Some(call_info) = state.call_stack.last_mut() {
                         call_info.ip = self.ip;
                     }
-                    state.call(ArgCount::from_u8(inst.a()), RetCount::from_u8(inst.b()))?
+                    state.call(ArgCount::from_u8(inst.a()), RetCount::from_u8(inst.b()))?;
                 }
                 Instr::OP_MARK_CALL_BASE => {
                     let adjustment = inst.a() as usize;
@@ -209,14 +209,14 @@ impl Frame {
                     if n == u8::MAX {
                         // Push all varargs
                         for val in &self.varargs {
-                            state.stack.push(val.clone());
+                            state.stack.push(*val);
                         }
                     } else {
                         // Push exactly n values, padding with nil if needed
                         let n = n as usize;
                         for i in 0..n {
                             if i < self.varargs.len() {
-                                state.stack.push(self.varargs[i].clone());
+                                state.stack.push(self.varargs[i]);
                             } else {
                                 state.push_nil();
                             }
@@ -390,7 +390,7 @@ impl State {
                 }
                 UpvalueDesc::Upvalue(idx) => {
                     // Share an upvalue from the current frame's upvalues
-                    frame.upvalues[*idx as usize].clone()
+                    frame.upvalues[*idx as usize]
                 }
             };
             captured_upvalues.push(uv_ref);
@@ -448,9 +448,9 @@ impl State {
     fn instr_tfor_call(&mut self, local_slot: u8, num_vars: u8) -> Result<()> {
         let base = local_slot as usize + self.stack_bottom;
         // Push iterator function, state, and control onto stack for call
-        let iterator = self.stack[base].clone();
-        let state = self.stack[base + 1].clone();
-        let control = self.stack[base + 2].clone();
+        let iterator = self.stack[base];
+        let state = self.stack[base + 1];
+        let control = self.stack[base + 2];
 
         self.stack.push(iterator);
         self.stack.push(state);
@@ -462,7 +462,7 @@ impl State {
         // Move results from stack to loop variable slots (base + 3, base + 4, ...)
         let results_start = self.stack.len() - num_vars as usize;
         for i in 0..num_vars as usize {
-            self.stack[base + 3 + i] = self.stack[results_start + i].clone();
+            self.stack[base + 3 + i] = self.stack[results_start + i];
         }
         // Pop the results from stack
         self.stack.truncate(results_start);
@@ -485,7 +485,7 @@ impl State {
             frame.jump(offset)?;
         } else {
             // Update control variable with first loop variable
-            self.stack[base + 2] = self.stack[base + 3].clone();
+            self.stack[base + 2] = self.stack[base + 3];
         }
         Ok(())
     }
@@ -504,7 +504,7 @@ impl State {
             // Table: use get_table_with_key for metamethod support
             self.stack.push(val);
             let table_idx = self.stack.len() - 1;
-            self.get_table_with_key(table_idx, key.clone())?;
+            self.get_table_with_key(table_idx, key)?;
             // Stack now: [... table, result]
             let result = self.pop_val();
             self.pop_val(); // Remove table
@@ -545,7 +545,7 @@ impl State {
     /// Fast path for getting well-known builtin globals.
     #[inline(always)]
     fn instr_get_builtin(&mut self, slot: u8) {
-        let val = self.builtins[slot as usize].clone();
+        let val = self.builtins[slot as usize];
         self.stack.push(val);
     }
 
@@ -553,7 +553,7 @@ impl State {
     #[inline(always)]
     fn instr_set_builtin(&mut self, slot: u8) {
         let val = self.pop_val();
-        self.builtins[slot as usize] = val.clone();
+        self.builtins[slot as usize] = val;
         // Also update globals for _G compatibility
         if let Some(builtin) = crate::instr::Builtin::from_u8(slot) {
             self.globals.insert(builtin.name().to_string(), val);
@@ -563,15 +563,15 @@ impl State {
     #[inline(always)]
     fn instr_get_local(&mut self, local_num: u8) {
         let i = local_num as usize + self.stack_bottom;
-        let val = self.stack[i].clone();
+        let val = self.stack[i];
         self.stack.push(val);
     }
 
     fn instr_get_upvalue(&mut self, frame: &Frame, upvalue_num: u8) {
         let uv_ref = frame.upvalues[upvalue_num as usize];
         let val = match self.upvalue_pool.get(uv_ref) {
-            Upvalue::Open(stack_idx) => self.stack[*stack_idx].clone(),
-            Upvalue::Closed(v) => v.clone(),
+            Upvalue::Open(stack_idx) => self.stack[*stack_idx],
+            Upvalue::Closed(v) => *v,
         };
         self.stack.push(val);
     }
@@ -623,8 +623,7 @@ impl State {
                 Ok(())
             }
             None => Err(self.error(ErrorKind::InternalError(format!(
-                "InitField: expected table, got {}",
-                typ
+                "InitField: expected table, got {typ}"
             )))),
         }
     }
@@ -642,8 +641,7 @@ impl State {
                 Ok(())
             }
             None => Err(self.error(ErrorKind::InternalError(format!(
-                "InitIndex: expected table, got {}",
-                tbl_typ
+                "InitIndex: expected table, got {tbl_typ}"
             )))),
         }
     }
@@ -660,8 +658,8 @@ impl State {
 
         // Check for table
         let obj_ptr = val.as_object_ptr();
-        if let Some(ptr) = obj_ptr {
-            if let Some(tbl) = self.heap.as_table_ref(ptr) {
+        if let Some(ptr) = obj_ptr
+            && let Some(tbl) = self.heap.as_table_ref(ptr) {
                 // Get metatable pointer (Copy, so borrow ends here)
                 let mt_ptr = tbl.get_metatable();
                 let len = tbl.array_len();
@@ -687,7 +685,6 @@ impl State {
                 self.stack.push(Val::Num(len as f64));
                 return Ok(());
             }
-        }
 
         Err(self.type_error(TypeError::Length(val.typ_simple())))
     }
@@ -777,8 +774,7 @@ impl State {
                 Ok(n_elements)
             }
             None => Err(self.error(ErrorKind::InternalError(format!(
-                "SetList: expected table, got {}",
-                typ
+                "SetList: expected table, got {typ}"
             )))),
         }
     }
@@ -846,7 +842,7 @@ impl State {
     fn get_string_constant(&self, frame: &Frame, i: u8) -> Val {
         // self.string_literals[i as usize].clone()
         let index = frame.string_literal_start + i as usize;
-        self.string_literals[index].clone()
+        self.string_literals[index]
     }
 
     fn pop_num(&mut self) -> Result<f64> {

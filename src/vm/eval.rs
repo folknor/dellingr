@@ -87,7 +87,7 @@ impl State {
             // Check for __call metamethod on tables
             let metatable_ptr = func_val.as_object_ptr()
                 .and_then(|ptr| self.heap.as_table_ref(ptr))
-                .and_then(|t| t.get_metatable());
+                .and_then(super::table::Table::get_metatable);
 
             if let Some(mt_ptr) = metatable_ptr {
                 let call_key = self.alloc_string("__call".to_string());
@@ -99,7 +99,7 @@ impl State {
                     // Insert the table as first argument and call the handler
                     // Stack is currently: [arg1, arg2, ..., argN]
                     // We need: [handler, table, arg1, arg2, ..., argN]
-                    self.stack.insert(idx, func_val.clone());
+                    self.stack.insert(idx, func_val);
                     self.stack.insert(idx, call_handler);
                     // Now call with actual_num_args + 1 (table is first arg)
                     return self.call(ArgCount::Fixed(actual_num_args + 1), num_ret_expected);
@@ -163,7 +163,7 @@ impl State {
                 if num.fract() == 0.0 && num.abs() < 1e15 {
                     buffer.push_str(&format!("{}", num as i64));
                 } else {
-                    buffer.push_str(&format!("{}", num));
+                    buffer.push_str(&format!("{num}"));
                 }
             } else {
                 return Err(self.type_error(TypeError::Concat(val.typ_simple())));
@@ -360,7 +360,7 @@ impl State {
                 break;
             }
             let (_, uv_ref) = self.open_upvalues.pop().unwrap();
-            let val = self.stack[idx].clone();
+            let val = self.stack[idx];
             *self.upvalue_pool.get_mut(uv_ref) = Upvalue::Closed(val);
         }
     }

@@ -394,9 +394,9 @@ impl State {
     pub fn get_global(&mut self, name: &str) {
         // Check builtins first for common names
         let val = if let Some(slot) = Builtin::from_name(name) {
-            self.builtins[slot as usize].clone()
+            self.builtins[slot as usize]
         } else {
-            self.globals.get(name).cloned().unwrap_or_default()
+            self.globals.get(name).copied().unwrap_or_default()
         };
         self.stack.push(val);
     }
@@ -407,7 +407,7 @@ impl State {
         let val = self.pop_val();
         // Update builtins array if this is a well-known name
         if let Some(slot) = Builtin::from_name(name) {
-            self.builtins[slot as usize] = val.clone();
+            self.builtins[slot as usize] = val;
         }
         self.globals.insert(name.to_string(), val);
     }
@@ -426,11 +426,11 @@ impl State {
         for name in whitelist {
             // Copy from builtins if it's a well-known name
             if let Some(slot) = Builtin::from_name(name) {
-                restricted_builtins[slot as usize] = self.builtins[slot as usize].clone();
+                restricted_builtins[slot as usize] = self.builtins[slot as usize];
             }
             // Also copy from globals
             if let Some(val) = self.globals.get(*name) {
-                restricted_globals.insert((*name).to_string(), val.clone());
+                restricted_globals.insert((*name).to_string(), *val);
             }
         }
 

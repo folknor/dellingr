@@ -39,7 +39,7 @@ pub trait HostCallbacks {
     /// * `message` - The formatted message (all arguments joined with tabs)
     fn on_print(&mut self, _source: Option<&str>, _line: u32, message: &str) {
         // Default: print to stdout (for CLI usage)
-        println!("{}", message);
+        println!("{message}");
     }
 
     /// Called when an error occurs during script execution.

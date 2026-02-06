@@ -202,7 +202,7 @@ pub(crate) fn open_string(state: &mut State) {
                             chars.next();
                             if arg_idx <= num_args {
                                 if let Ok(n) = state.to_number(arg_idx as isize) {
-                                    result.push_str(&format!("{:.6}", n));
+                                    result.push_str(&format!("{n:.6}"));
                                 }
                                 arg_idx += 1;
                             }
@@ -211,7 +211,7 @@ pub(crate) fn open_string(state: &mut State) {
                             chars.next();
                             if arg_idx <= num_args {
                                 if let Ok(n) = state.to_number(arg_idx as isize) {
-                                    result.push_str(&format!("{}", n));
+                                    result.push_str(&format!("{n}"));
                                 }
                                 arg_idx += 1;
                             }
@@ -246,11 +246,10 @@ pub(crate) fn open_string(state: &mut State) {
                         'c' => {
                             chars.next();
                             if arg_idx <= num_args {
-                                if let Ok(n) = state.to_number(arg_idx as isize) {
-                                    if let Some(ch) = char::from_u32(n as u32) {
+                                if let Ok(n) = state.to_number(arg_idx as isize)
+                                    && let Some(ch) = char::from_u32(n as u32) {
                                         result.push(ch);
                                     }
-                                }
                                 arg_idx += 1;
                             }
                         }
@@ -282,7 +281,7 @@ pub(crate) fn open_string(state: &mut State) {
                                             if let Ok(n) = state.to_number(arg_idx as isize) {
                                                 // Parse width from spec
                                                 let width_str: String = spec[1..spec.len()-1].chars()
-                                                    .filter(|c| c.is_ascii_digit())
+                                                    .filter(char::is_ascii_digit)
                                                     .collect();
                                                 let width: usize = width_str.parse().unwrap_or(0);
                                                 let zero_pad = spec.contains('0');
@@ -300,12 +299,12 @@ pub(crate) fn open_string(state: &mut State) {
                                                 // Parse precision
                                                 if let Some(dot_pos) = spec.find('.') {
                                                     let prec_str: String = spec[dot_pos+1..spec.len()-1].chars()
-                                                        .take_while(|c| c.is_ascii_digit())
+                                                        .take_while(char::is_ascii_digit)
                                                         .collect();
                                                     let prec: usize = prec_str.parse().unwrap_or(6);
-                                                    result.push_str(&format!("{:.prec$}", n, prec = prec));
+                                                    result.push_str(&format!("{n:.prec$}"));
                                                 } else {
-                                                    result.push_str(&format!("{:.6}", n));
+                                                    result.push_str(&format!("{n:.6}"));
                                                 }
                                             }
                                         }
@@ -609,11 +608,10 @@ pub(crate) fn open_string(state: &mut State) {
                 let mut count = 0usize;
 
                 while pos < s.len() {
-                    if let Some(max) = max_replacements {
-                        if count >= max {
+                    if let Some(max) = max_replacements
+                        && count >= max {
                             break;
                         }
-                    }
 
                     let search_str = &s[pos..];
                     if m.matches(search_str) {
@@ -640,9 +638,9 @@ pub(crate) fn open_string(state: &mut State) {
                                                 let idx = next.to_digit(10).unwrap() as usize;
                                                 chars.next();
                                                 if idx == 0 {
-                                                    repl_result.push_str(&captures[0]);
+                                                    repl_result.push_str(captures[0]);
                                                 } else if idx < captures.len() {
-                                                    repl_result.push_str(&captures[idx]);
+                                                    repl_result.push_str(captures[idx]);
                                                 }
                                             } else {
                                                 repl_result.push(c);

@@ -103,7 +103,7 @@ impl<'a> Parser<'a> {
         } else {
             let got = self.describe_token(&token);
             let exp = Self::describe_token_type(expected);
-            SyntaxError::UnexpectedTok(format!("'{}' expected near {}", exp, got))
+            SyntaxError::UnexpectedTok(format!("'{exp}' expected near {got}"))
         };
         self.error_at(error_kind, token.start)
     }
@@ -114,7 +114,7 @@ impl<'a> Parser<'a> {
             TokenType::Identifier | TokenType::LiteralNumber | TokenType::LiteralHexNumber
             | TokenType::LiteralString => {
                 let text = self.input.substring(token.start..token.start + token.len as usize);
-                format!("'{}'", text)
+                format!("'{text}'")
             }
             TokenType::EndOfFile => "<eof>".to_string(),
             other => format!("'{}'", Self::describe_token_type(other)),
@@ -363,7 +363,7 @@ impl<'a> Parser<'a> {
 
             match self.input.peek_type()? {
                 TokenType::Identifier | TokenType::LParen | TokenType::LParenLineStart => {
-                    self.parse_assign_or_call()?
+                    self.parse_assign_or_call()?;
                 }
                 TokenType::If => self.parse_if()?,
                 TokenType::While => self.parse_while()?,
@@ -463,7 +463,7 @@ impl<'a> Parser<'a> {
         // Consume the colon and get the method name.
         self.expect(TokenType::Colon)?;
         let method_name = self.expect_identifier()?;
-        let full_name = format!("{}:{}", table_name, method_name);
+        let full_name = format!("{table_name}:{method_name}");
         let method_name_id = self.find_or_add_string(method_name)?;
 
         // Parse the function params and body with implicit self.
@@ -731,14 +731,13 @@ impl<'a> Parser<'a> {
             }
 
             // Recurse further up if needed
-            if grandparent_idx > 0 {
-                if let Some(gp_upvalue_idx) = self.create_parent_upvalue(name, grandparent_idx) {
+            if grandparent_idx > 0
+                && let Some(gp_upvalue_idx) = self.create_parent_upvalue(name, grandparent_idx) {
                     // Grandparent now has this as an upvalue, so parent can capture it
                     let upvalue_idx = self.outer_upvalues[parent_idx].len() as u8;
                     self.outer_upvalues[parent_idx].push((name.to_string(), UpvalueDesc::Upvalue(gp_upvalue_idx)));
                     return Some(upvalue_idx);
                 }
-            }
         }
 
         None
@@ -753,7 +752,7 @@ impl<'a> Parser<'a> {
 
     /// Parses a `local` declaration.
     fn parse_locals(&mut self) -> Result<()> {
-        self.input.next().unwrap(); // `local` keyword
+        self.input.next()?; // `local` keyword
 
         // Check for `local function name(...) ... end`
         if self.input.check_type(TokenType::Function)? {
@@ -1500,14 +1499,18 @@ impl<'a> Parser<'a> {
             TokenType::LCurly => self.parse_table()?,
             TokenType::LiteralNumber => {
                 let text = self.get_text(tok);
-                let number = text.parse().unwrap();
+                let number: f64 = text
+                    .parse()
+                    .map_err(|_| self.error_at(SyntaxError::BadNumber, tok.start))?;
                 let idx = self.find_or_add_number(number)?;
                 self.push(Instr::push_num(idx));
             }
             TokenType::LiteralHexNumber => {
                 // Cut off the "0x"
                 let text = &self.get_text(tok)[2..];
-                let number = u128::from_str_radix(text, 16).unwrap() as f64;
+                let number = u128::from_str_radix(text, 16)
+                    .map_err(|_| self.error_at(SyntaxError::BadNumber, tok.start))?
+                    as f64;
                 let idx = self.find_or_add_number(number)?;
                 self.push(Instr::push_num(idx));
             }
@@ -1658,14 +1661,14 @@ impl<'a> Parser<'a> {
     fn parse_table_entry(&mut self, counter: u8) -> Result<(u8, bool)> {
         match self.input.peek_type()? {
             TokenType::Identifier => {
-                let index = self.expect_identifier_id().unwrap();
+                let index = self.expect_identifier_id()?;
                 self.expect(TokenType::Assign)?;
                 self.parse_expr()?;
                 self.push(Instr::init_field(counter, index));
                 Ok((counter, false))
             }
             TokenType::LSquare => {
-                self.input.next().unwrap();
+                self.input.next()?;
                 self.parse_expr()?;
                 self.expect(TokenType::RSquare)?;
                 self.expect(TokenType::Assign)?;
@@ -1675,7 +1678,7 @@ impl<'a> Parser<'a> {
             }
             TokenType::DotDotDot => {
                 // {...} syntax - collect all varargs into the table
-                self.input.next().unwrap();
+                self.input.next()?;
                 if !self.chunk.is_vararg {
                     return Err(self.error(SyntaxError::UnexpectedTok(
                         "cannot use '...' outside a vararg function".to_string(),

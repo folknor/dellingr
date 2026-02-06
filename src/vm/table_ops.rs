@@ -106,7 +106,7 @@ impl State {
         self.stack[i]
             .as_object_ptr()
             .and_then(|ptr| self.heap.as_table_ref(ptr))
-            .map(|t| t.array_len())
+            .map(super::table::Table::array_len)
             .unwrap_or(0)
     }
 
@@ -119,7 +119,7 @@ impl State {
         let metatable = self.stack[i]
             .as_object_ptr()
             .and_then(|ptr| self.heap.as_table_ref(ptr))
-            .and_then(|t| t.get_metatable());
+            .and_then(super::table::Table::get_metatable);
 
         match metatable {
             Some(mt) => self.stack.push(Val::Obj(mt)),
@@ -222,14 +222,14 @@ impl State {
             for i in 0..n {
                 for j in 0..n - 1 - i {
                     // Call comp(arr[j], arr[j+1])
-                    let a = arr[j].clone();
-                    let b = arr[j + 1].clone();
+                    let a = arr[j];
+                    let b = arr[j + 1];
 
                     // Push comp function
-                    self.stack.push(self.stack[comp_idx].clone());
+                    self.stack.push(self.stack[comp_idx]);
                     // Push args
-                    self.stack.push(a.clone());
-                    self.stack.push(b.clone());
+                    self.stack.push(a);
+                    self.stack.push(b);
                     // Call
                     self.call(ArgCount::Fixed(2), RetCount::Fixed(1))?;
                     // Get result
@@ -276,13 +276,13 @@ impl State {
     /// If the value is a table with a __tostring metamethod, calls it and returns the result.
     pub fn to_string_with_meta(&mut self, idx: isize) -> Result<String> {
         let i = self.convert_idx(idx)?;
-        let val = self.stack[i].clone();
+        let val = self.stack[i];
 
         // Check if it's a table with __tostring
         let metatable_ptr = val
             .as_object_ptr()
             .and_then(|ptr| self.heap.as_table_ref(ptr))
-            .and_then(|t| t.get_metatable());
+            .and_then(super::table::Table::get_metatable);
 
         if let Some(mt_ptr) = metatable_ptr {
             let tostring_key = self.alloc_string("__tostring".to_string());

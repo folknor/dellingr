@@ -7,7 +7,7 @@ use std::hash::{Hash, Hasher};
 
 pub type RustFunc = fn(&mut State) -> Result<u8>;
 
-#[derive(Clone, Default)]
+#[derive(Clone, Copy, Default)]
 pub(crate) enum Val {
     #[default]
     Nil,
@@ -99,14 +99,14 @@ impl Val {
 
     /// Convert this value to a string representation.
     /// Requires heap access to get string and object contents.
-    pub(super) fn to_string_with_heap(&self, heap: &GcHeap) -> String {
+    pub(super) fn to_string_with_heap(self, heap: &GcHeap) -> String {
         match self {
             Nil => "nil".to_string(),
             Bool(b) => b.to_string(),
             Num(n) => n.to_string(),
-            RustFn(func) => format!("<function: {:p}>", func),
-            Obj(o) => format!("{}", o),
-            Str(s) => heap.get_string(*s).to_string(),
+            RustFn(func) => format!("<function: {func:p}>"),
+            Obj(o) => format!("{o}"),
+            Str(s) => heap.get_string(s).to_string(),
         }
     }
 }
@@ -117,7 +117,7 @@ impl fmt::Debug for Val {
             Nil => write!(f, "nil"),
             Bool(b) => b.fmt(f),
             Num(n) => n.fmt(f),
-            RustFn(func) => write!(f, "<function: {:p}>", func),
+            RustFn(func) => write!(f, "<function: {func:p}>"),
             Obj(o) => o.fmt(f),
             Str(s) => s.fmt(f),
         }
@@ -132,7 +132,7 @@ impl fmt::Display for Val {
             Num(n) => n.fmt(f),
             Obj(o) => o.fmt(f),
             Str(s) => s.fmt(f),
-            RustFn(func) => write!(f, "<function: {:p}>", func),
+            RustFn(func) => write!(f, "<function: {func:p}>"),
         }
     }
 }

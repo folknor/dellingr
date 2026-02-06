@@ -69,7 +69,7 @@ impl<'a> TokenStream<'a> {
     /// returned as `Some`. Otherwise, returns `None`.
     pub(super) fn try_pop(&mut self, expected_type: TokenType) -> Result<Option<Token>> {
         if self.check_type(expected_type)? {
-            Ok(Some(self.next().unwrap()))
+            Ok(Some(self.next()?))
         } else {
             Ok(None)
         }
@@ -291,7 +291,7 @@ impl<'a> Lexer<'a> {
                 '~' => NotEqual,
                 '<' => LessEqual,
                 '>' => GreaterEqual,
-                _ => panic!("peek_equals was called with first_char = {}", first_char),
+                _ => panic!("peek_equals was called with first_char = {first_char}"),
             };
             Ok(typ)
         } else {
@@ -300,7 +300,7 @@ impl<'a> Lexer<'a> {
                 '<' => Ok(Less),
                 '>' => Ok(Greater),
                 '~' => Err(self.error(SyntaxError::InvalidCharacter(first_char))),
-                _ => panic!("peek_equals was called with first_char = {}", first_char),
+                _ => panic!("peek_equals was called with first_char = {first_char}"),
             }
         }
     }
@@ -384,11 +384,10 @@ impl<'a> Lexer<'a> {
     fn lex_exponent(&mut self, _tok_start: usize) -> Result<()> {
         if self.try_next('E') || self.try_next('e') {
             // The exponent might have a sign.
-            if let Some(c) = self.peek_char() {
-                if c == '+' || c == '-' {
+            if let Some(c) = self.peek_char()
+                && (c == '+' || c == '-') {
                     self.next_char();
                 }
-            }
 
             self.lex_digits();
         }

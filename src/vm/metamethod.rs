@@ -19,7 +19,7 @@ pub(super) const MAX_METAMETHOD_DEPTH: u32 = 200;
 impl State {
     /// Internal helper for table access with __index support.
     pub(super) fn get_table_with_key(&mut self, idx: usize, key: Val) -> Result<()> {
-        let table_val = self.stack[idx].clone();
+        let table_val = self.stack[idx];
         let obj_ptr = table_val.as_object_ptr();
 
         // Get the value and metatable pointer in one heap access
@@ -99,7 +99,7 @@ impl State {
                     Ok(())
                 } else if is_function {
                     // __index is a function: call it with (table, key)
-                    let table_val = self.stack[table_idx].clone();
+                    let table_val = self.stack[table_idx];
                     self.stack.push(Val::Obj(ptr));
                     self.stack.push(table_val);
                     self.stack.push(key);
@@ -111,7 +111,7 @@ impl State {
             }
             Val::RustFn(f) => {
                 // __index is a Rust function: call it with (table, key)
-                let table_val = self.stack[table_idx].clone();
+                let table_val = self.stack[table_idx];
                 self.stack.push(Val::RustFn(f));
                 self.stack.push(table_val);
                 self.stack.push(key);
@@ -127,7 +127,7 @@ impl State {
     /// Internal helper for table assignment with __newindex support.
     /// The table should be at stack[idx]. Does not pop anything from the stack.
     pub(super) fn set_table_with_key(&mut self, idx: usize, key: Val, val: Val) -> Result<()> {
-        let table_val = self.stack[idx].clone();
+        let table_val = self.stack[idx];
         let obj_ptr = table_val.as_object_ptr();
 
         // Get existing value and metatable pointer in one heap access
@@ -149,8 +149,8 @@ impl State {
             if let Some(mt_ptr) = mt_ptr {
                 // Protect key and val from GC during string allocation by pushing clones
                 // (clones share the same underlying heap objects, so marking them marks originals)
-                self.stack.push(key.clone());
-                self.stack.push(val.clone());
+                self.stack.push(key);
+                self.stack.push(val);
                 let newindex_key = self.alloc_string("__newindex".to_string());
                 self.pop(2); // Discard protections
 
@@ -167,11 +167,10 @@ impl State {
         }
 
         // No __newindex or key exists: do normal assignment
-        if let Some(ptr) = obj_ptr {
-            if let Some(t) = self.heap.as_table(ptr) {
+        if let Some(ptr) = obj_ptr
+            && let Some(t) = self.heap.as_table(ptr) {
                 t.insert(key, val)?;
             }
-        }
         Ok(())
     }
 
@@ -217,7 +216,7 @@ impl State {
                     Ok(())
                 } else if is_function {
                     // __newindex is a function: call it with (table, key, value)
-                    let table_val = self.stack[table_idx].clone();
+                    let table_val = self.stack[table_idx];
                     self.stack.push(Val::Obj(ptr));
                     self.stack.push(table_val);
                     self.stack.push(key);
@@ -230,7 +229,7 @@ impl State {
             }
             Val::RustFn(f) => {
                 // __newindex is a Rust function: call it with (table, key, value)
-                let table_val = self.stack[table_idx].clone();
+                let table_val = self.stack[table_idx];
                 self.stack.push(Val::RustFn(f));
                 self.stack.push(table_val);
                 self.stack.push(key);

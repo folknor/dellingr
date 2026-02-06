@@ -286,13 +286,12 @@ impl GcHeap {
     /// Mark an object as reachable. Call this for all root objects.
     /// The upvalue_pool is needed to mark closed upvalues referenced by closures.
     pub(super) fn mark(&self, ptr: ObjectPtr, upvalue_pool: &UpvaluePool) {
-        if let Some(obj) = self.objects.get(ptr.0) {
-            if obj.color.get() == Color::Unmarked {
+        if let Some(obj) = self.objects.get(ptr.0)
+            && obj.color.get() == Color::Unmarked {
                 obj.color.set(Color::Reachable);
                 // Recursively mark objects referenced by this object
                 self.mark_children(obj, upvalue_pool);
             }
-        }
     }
 
     /// Mark a string as reachable.
