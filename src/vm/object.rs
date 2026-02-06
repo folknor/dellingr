@@ -536,7 +536,8 @@ mod tests {
         let _freed = heap.alloc_table();
 
         // Mark only the first table
-        heap.mark(kept);
+        let pool = UpvaluePool::new();
+        heap.mark(kept, &pool);
         heap.collect();
 
         // First table should survive, second should be freed

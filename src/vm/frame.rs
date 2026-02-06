@@ -340,16 +340,8 @@ impl Frame {
                 // Array initialization: cost per element
                 Instr::OP_SET_LIST => {
                     let n = inst.a();
-                    let count = if n == 0 {
-                        // SetList(0) means "use all values above table"
-                        // We'll charge based on actual count after operation
-                        // For now, just charge 1 for the operation
-                        1
-                    } else {
-                        n as u64
-                    };
-                    add_cost!(state, local_cost, count);
-                    state.instr_set_list(n)?;
+                    let count = state.instr_set_list(n)?;
+                    add_cost!(state, local_cost, count as u64);
                 }
 
                 // Unknown opcode
@@ -740,7 +732,7 @@ impl State {
         }
     }
 
-    fn instr_set_list(&mut self, count: u8) -> Result<()> {
+    fn instr_set_list(&mut self, count: u8) -> Result<usize> {
         // Find the table on the stack (it's below the values)
         // count=0 means "use all values above the table"
         let values = if count == 0 {
@@ -773,13 +765,14 @@ impl State {
 
         match obj_ptr.and_then(|ptr| self.heap.as_table(ptr)) {
             Some(tbl) => {
+                let n_elements = values.len();
                 let counter = 1..;
                 for (i, val) in counter.zip(values) {
                     let key = Val::Num(i as f64);
                     tbl.insert(key, val)?;
                 }
                 self.stack.push(tbl_value);
-                Ok(())
+                Ok(n_elements)
             }
             None => Err(self.error(ErrorKind::InternalError(format!(
                 "SetList: expected table, got {}",

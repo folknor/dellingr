@@ -193,7 +193,8 @@ impl State {
 
     /// Sorts the array portion of a table in place.
     /// If has_comp is true, uses the function at stack index 2 as comparator.
-    pub fn table_sort(&mut self, table_idx: isize, has_comp: bool) -> Result<()> {
+    /// Sort a table's array portion. Returns the array length for cost charging.
+    pub fn table_sort(&mut self, table_idx: isize, has_comp: bool) -> Result<usize> {
         let idx = self.convert_idx(table_idx)?;
 
         // Get the array values
@@ -206,8 +207,9 @@ impl State {
         };
 
         if arr.is_empty() {
-            return Ok(());
+            return Ok(0);
         }
+        let n = arr.len();
 
         if has_comp {
             // Use the comparator function at stack index 2
@@ -215,7 +217,6 @@ impl State {
             let comp_idx = self.convert_idx(2)?;
 
             // Bubble sort to keep it simple (not efficient but works)
-            let n = arr.len();
             for i in 0..n {
                 for j in 0..n - 1 - i {
                     // Call comp(arr[j], arr[j+1])
@@ -263,7 +264,7 @@ impl State {
         match obj_ptr.and_then(|ptr| self.heap.as_table(ptr)) {
             Some(t) => {
                 t.set_array(arr);
-                Ok(())
+                Ok(n)
             }
             None => Err(self.type_error(TypeError::TableIndex(typ))),
         }

@@ -67,11 +67,10 @@ pub(crate) fn open_table(state: &mut State) {
         Ok(1)
     });
 
-    // table.sort(t [, comp]) - costs 1
+    // table.sort(t [, comp]) - costs n (array length)
     // Sorts the array portion of t in place.
     // comp is an optional comparison function.
     add_fn!("sort", |state| {
-        state.consume_cost(1)?;
         state.check_type(1, LuaType::Table)?;
         let num_args = state.get_top();
         let has_comp = num_args >= 2;
@@ -80,7 +79,8 @@ pub(crate) fn open_table(state: &mut State) {
             state.check_type(2, LuaType::Function)?;
         }
 
-        state.table_sort(1, has_comp)?;
+        let n = state.table_sort(1, has_comp)?;
+        state.consume_cost(n.max(1) as u64)?;
         state.set_top(0);
         Ok(0)
     });
