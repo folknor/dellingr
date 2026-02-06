@@ -666,12 +666,17 @@ pub(crate) fn open_string(state: &mut State) {
                                 // Look up key in table
                                 state.push_value(3)?; // push table
                                 state.push_string(key.to_string());
-                                state.get_table(-2).ok();
-                                let val = state.to_string(-1)?;
-                                state.pop(2); // pop result and table
-                                if state.typ(-1) == LuaType::Nil {
-                                    captures[0].to_string() // keep original if nil
+                                state.get_table(-2)?;
+                                // Stack: [..., table, result]
+                                // If result is nil or false, keep the original match
+                                let keep_original = state.typ(-1) == LuaType::Nil
+                                    || (state.typ(-1) == LuaType::Boolean && !state.to_boolean(-1));
+                                if keep_original {
+                                    state.pop(2); // pop result and table
+                                    captures[0].to_string()
                                 } else {
+                                    let val = state.to_string(-1)?;
+                                    state.pop(2); // pop result and table
                                     val
                                 }
                             }
@@ -682,14 +687,22 @@ pub(crate) fn open_string(state: &mut State) {
                                     for cap in captures.iter().skip(1) {
                                         state.push_string(cap.to_string());
                                     }
-                                    state.call(ArgCount::Fixed((captures.len() - 1) as u8), RetCount::Fixed(1)).ok();
+                                    state.call(ArgCount::Fixed((captures.len() - 1) as u8), RetCount::Fixed(1))?;
                                 } else {
                                     state.push_string(captures[0].to_string());
-                                    state.call(ArgCount::Fixed(1), RetCount::Fixed(1)).ok();
+                                    state.call(ArgCount::Fixed(1), RetCount::Fixed(1))?;
                                 }
-                                let val = state.to_string(-1)?;
-                                state.pop(1);
-                                val
+                                // If result is nil or false, keep the original match
+                                let keep_original = state.typ(-1) == LuaType::Nil
+                                    || (state.typ(-1) == LuaType::Boolean && !state.to_boolean(-1));
+                                if keep_original {
+                                    state.pop(1);
+                                    captures[0].to_string()
+                                } else {
+                                    let val = state.to_string(-1)?;
+                                    state.pop(1);
+                                    val
+                                }
                             }
                             _ => captures[0].to_string(), // Keep original for other types
                         };

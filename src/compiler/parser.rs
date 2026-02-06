@@ -295,11 +295,14 @@ impl<'a> Parser<'a> {
         self.chunk.upvalues = self.upvalues.iter().map(|(_, desc)| *desc).collect();
 
         let tmp_chunk = self.chunk.clone();
-        self.chunk = self.outer_chunks.pop().unwrap();
+        self.chunk = self.outer_chunks.pop()
+            .ok_or_else(|| self.error_at(ErrorKind::InternalError("compiler: outer chunk stack empty".into()), 0))?;
 
         // Restore outer locals and upvalues
-        self.locals = self.outer_locals.pop().unwrap();
-        self.upvalues = self.outer_upvalues.pop().unwrap();
+        self.locals = self.outer_locals.pop()
+            .ok_or_else(|| self.error_at(ErrorKind::InternalError("compiler: outer locals stack empty".into()), 0))?;
+        self.upvalues = self.outer_upvalues.pop()
+            .ok_or_else(|| self.error_at(ErrorKind::InternalError("compiler: outer upvalues stack empty".into()), 0))?;
 
         #[cfg(feature = "debug_parser")]
         println!("Compiled chunk: {:#?}", &tmp_chunk);

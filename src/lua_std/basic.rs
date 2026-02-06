@@ -17,7 +17,7 @@ pub(crate) fn open_base(state: &mut State) {
             state.check_type(1, LuaType::Table)?;
             state.check_type(2, LuaType::Number)?;
             state.set_top(2);
-            let old_index = state.to_number(2).unwrap();
+            let old_index = state.to_number(2)?;
             let new_index = old_index + 1.0;
             state.pop(1); // pop the old number
             state.push_number(new_index);

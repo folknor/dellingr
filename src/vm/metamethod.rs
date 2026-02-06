@@ -106,8 +106,7 @@ impl State {
                     self.call(ArgCount::Fixed(2), RetCount::Fixed(1))?;
                     Ok(())
                 } else {
-                    self.push_nil();
-                    Ok(())
+                    Err(self.type_error(super::TypeError::TableIndex(Val::Obj(ptr).typ_simple())))
                 }
             }
             Val::RustFn(f) => {
@@ -120,8 +119,7 @@ impl State {
                 Ok(())
             }
             _ => {
-                self.push_nil();
-                Ok(())
+                Err(self.type_error(super::TypeError::TableIndex(handler.typ_simple())))
             }
         }
     }
@@ -227,12 +225,7 @@ impl State {
                     self.call(ArgCount::Fixed(3), RetCount::Fixed(0))?;
                     Ok(())
                 } else {
-                    // Not a table or function, just do normal assignment
-                    let obj_ptr = self.stack[table_idx].as_object_ptr();
-                    if let Some(t) = obj_ptr.and_then(|ptr| self.heap.as_table(ptr)) {
-                        t.insert(key, val)?;
-                    }
-                    Ok(())
+                    Err(self.type_error(super::TypeError::TableIndex(Val::Obj(ptr).typ_simple())))
                 }
             }
             Val::RustFn(f) => {
@@ -246,12 +239,7 @@ impl State {
                 Ok(())
             }
             _ => {
-                // Not callable, just do normal assignment
-                let obj_ptr = self.stack[table_idx].as_object_ptr();
-                if let Some(t) = obj_ptr.and_then(|ptr| self.heap.as_table(ptr)) {
-                    t.insert(key, val)?;
-                }
-                Ok(())
+                Err(self.type_error(super::TypeError::TableIndex(handler.typ_simple())))
             }
         }
     }

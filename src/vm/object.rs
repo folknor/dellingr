@@ -9,7 +9,7 @@
 //! preventing use-after-free bugs.
 
 use std::cell::Cell;
-use std::collections::HashMap;
+use indexmap::IndexMap;
 use std::fmt;
 use std::hash::Hash;
 use std::rc::Rc;
@@ -400,7 +400,7 @@ impl<T: Markable> Markable for [T] {
     }
 }
 
-impl<K, V: Markable> Markable for HashMap<K, V> {
+impl<K, V: Markable> Markable for IndexMap<K, V> {
     fn mark_reachable(&self, heap: &GcHeap, upvalue_pool: &UpvaluePool) {
         for val in self.values() {
             val.mark_reachable(heap, upvalue_pool);

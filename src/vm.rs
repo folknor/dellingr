@@ -13,7 +13,7 @@ mod table_ops;
 pub use lua_val::LuaType;
 pub use lua_val::RustFunc;
 
-use std::collections::HashMap;
+use indexmap::IndexMap;
 use std::rc::Rc;
 
 use super::compiler;
@@ -47,7 +47,7 @@ use table::Table;
 pub(super) fn mark_gc_roots(
     heap: &GcHeap,
     stack: &[Val],
-    globals: &HashMap<String, Val>,
+    globals: &IndexMap<String, Val>,
     builtins: &[Val],
     string_literals: &[Val],
     upvalue_pool: &UpvaluePool,
@@ -74,10 +74,11 @@ pub(super) struct CallInfo {
 
 /// The main interface into the Lua VM.
 pub struct State {
-    /// The global environment. This may be changed to an actual Table in the future.
-    pub(super) globals: HashMap<String, Val>,
+    /// The global environment. Uses IndexMap for deterministic iteration order
+    /// (GC marking, restrict_globals). May be changed to an actual Table in the future.
+    pub(super) globals: IndexMap<String, Val>,
     /// Fast array for well-known builtin globals (print, pairs, type, etc.).
-    /// Indexed by Builtin enum. Avoids HashMap lookup for common globals.
+    /// Indexed by Builtin enum. Avoids IndexMap lookup for common globals.
     pub(super) builtins: [Val; Builtin::COUNT],
     /// The main stack which stores values.
     pub(super) stack: Vec<Val>,
@@ -177,7 +178,7 @@ impl State {
     /// Creates an empty state with custom callbacks.
     fn empty_with_callbacks(callbacks: Box<dyn HostCallbacks>) -> Self {
         Self {
-            globals: HashMap::new(),
+            globals: IndexMap::new(),
             builtins: std::array::from_fn(|_| Val::Nil),
             stack: Vec::with_capacity(256), // Pre-size for typical function depth * locals
             stack_bottom: 0,
@@ -419,7 +420,7 @@ impl State {
         F: FnOnce(&mut Self) -> R,
     {
         // Build restricted environment
-        let mut restricted_globals = HashMap::new();
+        let mut restricted_globals = IndexMap::new();
         let mut restricted_builtins: [Val; Builtin::COUNT] = std::array::from_fn(|_| Val::Nil);
 
         for name in whitelist {
@@ -427,7 +428,7 @@ impl State {
             if let Some(slot) = Builtin::from_name(name) {
                 restricted_builtins[slot as usize] = self.builtins[slot as usize].clone();
             }
-            // Also copy from globals HashMap
+            // Also copy from globals
             if let Some(val) = self.globals.get(*name) {
                 restricted_globals.insert((*name).to_string(), val.clone());
             }

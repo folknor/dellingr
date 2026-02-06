@@ -399,10 +399,12 @@ impl State {
     }
 
     fn instr_for_prep(&mut self, frame: &mut Frame, local: u8, body_len: i16) -> Result<()> {
-        // These slots should only be assigned to during this function.
-        let step = self.pop_val().as_num().unwrap();
-        let end = self.pop_val().as_num().unwrap();
-        let start = self.pop_val().as_num().unwrap();
+        let step_val = self.pop_val();
+        let end_val = self.pop_val();
+        let start_val = self.pop_val();
+        let step = step_val.as_num().ok_or_else(|| self.type_error(TypeError::Arithmetic(step_val.typ_simple())))?;
+        let end = end_val.as_num().ok_or_else(|| self.type_error(TypeError::Arithmetic(end_val.typ_simple())))?;
+        let start = start_val.as_num().ok_or_else(|| self.type_error(TypeError::Arithmetic(start_val.typ_simple())))?;
         if check_numeric_for_condition(start, end, step) {
             let mut local_slot = local as usize + self.stack_bottom;
             for &n in &[start, end, step, start] {
@@ -417,9 +419,9 @@ impl State {
 
     fn instr_for_loop(&mut self, frame: &mut Frame, local_slot: u8, offset: i16) -> Result<()> {
         let slot = local_slot as usize + self.stack_bottom;
-        let mut var = self.stack[slot].as_num().unwrap();
-        let limit = self.stack[slot + 1].as_num().unwrap();
-        let step = self.stack[slot + 2].as_num().unwrap();
+        let mut var = self.stack[slot].as_num().ok_or_else(|| self.type_error(TypeError::Arithmetic(self.stack[slot].typ_simple())))?;
+        let limit = self.stack[slot + 1].as_num().ok_or_else(|| self.type_error(TypeError::Arithmetic(self.stack[slot + 1].typ_simple())))?;
+        let step = self.stack[slot + 2].as_num().ok_or_else(|| self.type_error(TypeError::Arithmetic(self.stack[slot + 2].typ_simple())))?;
         var += step;
         if check_numeric_for_condition(var, limit, step) {
             self.stack[slot] = Val::Num(var);
@@ -552,7 +554,7 @@ impl State {
     fn instr_set_builtin(&mut self, slot: u8) {
         let val = self.pop_val();
         self.builtins[slot as usize] = val.clone();
-        // Also update the HashMap for _G compatibility
+        // Also update globals for _G compatibility
         if let Some(builtin) = crate::instr::Builtin::from_u8(slot) {
             self.globals.insert(builtin.name().to_string(), val);
         }
