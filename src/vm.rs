@@ -14,6 +14,7 @@ pub use lua_val::LuaType;
 pub use lua_val::RustFunc;
 
 use indexmap::IndexMap;
+use rand::SeedableRng;
 use std::rc::Rc;
 
 use super::compiler;
@@ -122,6 +123,9 @@ pub struct State {
     /// User-defined data that RustFuncs can access.
     /// Use `set_user_data<T>()` and `user_data<T>()` to store/retrieve.
     user_data: Option<Box<dyn std::any::Any>>,
+    /// Seeded RNG for deterministic math.random(). Defaults to seed 0.
+    /// Use `set_rng_seed()` to set a specific seed for replay.
+    pub(super) rng: rand::rngs::StdRng,
 }
 
 /// Maximum call depth to prevent stack overflow from deep recursion.
@@ -196,7 +200,13 @@ impl State {
             callbacks,
             current_source: None,
             user_data: None,
+            rng: rand::rngs::StdRng::seed_from_u64(0),
         }
+    }
+
+    /// Sets the RNG seed for deterministic math.random() behavior.
+    pub fn set_rng_seed(&mut self, seed: u64) {
+        self.rng = rand::rngs::StdRng::seed_from_u64(seed);
     }
 
     /// Sets the cost budget for this VM.

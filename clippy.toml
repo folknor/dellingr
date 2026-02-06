@@ -1,3 +1,13 @@
 disallowed-methods = [
     { path = "core::result::Result::ok", reason = "Silently discards errors. Use `?` to propagate, or handle the error explicitly." },
+    { path = "rand::rng", reason = "Unseeded RNG breaks determinism. Use State.rng (seeded StdRng) instead." },
+    { path = "rand::thread_rng", reason = "Unseeded RNG breaks determinism. Use State.rng (seeded StdRng) instead." },
+]
+
+# Determinism: ban non-deterministic collections
+disallowed-types = [
+    { path = "std::collections::HashMap", reason = "Non-deterministic iteration order. Use IndexMap or BTreeMap instead." },
+    { path = "std::collections::HashSet", reason = "Non-deterministic iteration order. Use BTreeSet instead." },
+    { path = "std::collections::hash_map::HashMap", reason = "Non-deterministic iteration order. Use IndexMap or BTreeMap instead." },
+    { path = "std::collections::hash_set::HashSet", reason = "Non-deterministic iteration order. Use BTreeSet instead." },
 ]

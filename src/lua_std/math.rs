@@ -150,12 +150,11 @@ pub(crate) fn open_math(state: &mut State) {
     add_fn!("random", |state| {
         state.consume_cost(1)?;
         let num_args = state.get_top();
-        let mut rng = rand::thread_rng();
 
         let result = match num_args {
             0 => {
                 // math.random() - returns [0, 1)
-                rng.r#gen::<f64>()
+                state.rng.r#gen::<f64>()
             }
             1 => {
                 // math.random(n) - returns integer in [1, n]
@@ -166,7 +165,7 @@ pub(crate) fn open_math(state: &mut State) {
                     state.push_nil();
                     return Ok(1);
                 }
-                rng.gen_range(1..=n) as f64
+                state.rng.gen_range(1..=n) as f64
             }
             _ => {
                 // math.random(m, n) - returns integer in [m, n]
@@ -179,7 +178,7 @@ pub(crate) fn open_math(state: &mut State) {
                     state.push_nil();
                     return Ok(1);
                 }
-                rng.gen_range(m..=n) as f64
+                state.rng.gen_range(m..=n) as f64
             }
         };
 
