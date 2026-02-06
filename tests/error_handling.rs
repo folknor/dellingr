@@ -206,3 +206,213 @@ fn call_depth_exceeded_error() {
         err
     );
 }
+
+// -- Table operation tests --
+
+#[test]
+fn table_insert_append() {
+    let val = run_number(
+        r#"
+        local t = {1, 2, 3}
+        table.insert(t, 4)
+        return #t
+    "#,
+    );
+    assert_eq!(val, 4.0);
+}
+
+#[test]
+fn table_insert_at_position() {
+    let val = run_number(
+        r#"
+        local t = {1, 2, 3}
+        table.insert(t, 2, 99)
+        return t[2]
+    "#,
+    );
+    assert_eq!(val, 99.0);
+}
+
+#[test]
+fn table_remove_basic() {
+    let val = run_number(
+        r#"
+        local t = {10, 20, 30}
+        local removed = table.remove(t, 2)
+        return removed
+    "#,
+    );
+    assert_eq!(val, 20.0);
+}
+
+#[test]
+fn table_sort_basic() {
+    let val = run_number(
+        r#"
+        local t = {3, 1, 2}
+        table.sort(t)
+        return t[1] * 100 + t[2] * 10 + t[3]
+    "#,
+    );
+    assert_eq!(val, 123.0);
+}
+
+#[test]
+fn table_sort_with_comparator() {
+    let val = run_number(
+        r#"
+        local t = {1, 2, 3}
+        table.sort(t, function(a, b) return a > b end)
+        return t[1] * 100 + t[2] * 10 + t[3]
+    "#,
+    );
+    assert_eq!(val, 321.0);
+}
+
+#[test]
+fn table_concat_basic() {
+    let mut state = State::new();
+    state
+        .load_string(r#"return table.concat({1, 2, 3}, ", ")"#)
+        .unwrap();
+    state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(1))
+        .unwrap();
+    assert_eq!(state.to_string(-1).unwrap(), "1, 2, 3");
+}
+
+#[test]
+fn table_unpack_basic() {
+    let val = run_number(
+        r#"
+        local a, b, c = table.unpack({10, 20, 30})
+        return a + b + c
+    "#,
+    );
+    assert_eq!(val, 60.0);
+}
+
+// -- Error message quality tests --
+
+/// Helper: tries to load+call Lua code and returns the error, panicking if it succeeds.
+/// Uses RetCount::Void since we only care about the error.
+fn expect_load_or_run_error(code: &str) -> lua::error::Error {
+    let mut state = State::new();
+    match state.load_string(code) {
+        Err(e) => return e,
+        Ok(()) => {}
+    }
+    let result = state.call(ArgCount::Fixed(0), RetCount::Fixed(0));
+    result.expect_err(&format!("Expected error from: {}", code))
+}
+
+#[test]
+fn error_msg_unexpected_token_includes_context() {
+    // Using 'end' where an expression is expected
+    let err = expect_load_or_run_error("local x = end");
+    let msg = format!("{}", err);
+    assert!(
+        msg.contains("expected") || msg.contains("near"),
+        "Error should describe what was expected, got: {}",
+        msg
+    );
+}
+
+#[test]
+fn error_msg_vararg_outside_vararg_function() {
+    // '...' inside a non-vararg function should error
+    let err = expect_load_or_run_error("local function f() return ... end");
+    let msg = format!("{}", err);
+    assert!(
+        msg.contains("vararg"),
+        "Error should mention vararg, got: {}",
+        msg
+    );
+}
+
+#[test]
+fn error_msg_vararg_in_table_outside_vararg_function() {
+    let err = expect_load_or_run_error("local function f() return {...} end");
+    let msg = format!("{}", err);
+    assert!(
+        msg.contains("vararg"),
+        "Error should mention vararg, got: {}",
+        msg
+    );
+}
+
+#[test]
+fn error_msg_missing_end_keyword() {
+    let err = expect_load_or_run_error("if true then local x = 1");
+    let msg = format!("{}", err);
+    // Should get unexpected EOF (missing 'end')
+    assert!(
+        msg.contains("<eof>") || msg.contains("expected"),
+        "Error should mention <eof> or expected, got: {}",
+        msg
+    );
+}
+
+#[test]
+fn error_msg_type_error_arithmetic() {
+    let err = expect_error("local x = 'hello' + 1");
+    let msg = format!("{}", err);
+    assert!(
+        msg.contains("arithmetic") && msg.contains("string"),
+        "Arithmetic type error should mention 'arithmetic' and 'string', got: {}",
+        msg
+    );
+}
+
+#[test]
+fn error_msg_type_error_call() {
+    let err = expect_error("local x = 5\nx()");
+    let msg = format!("{}", err);
+    assert!(
+        msg.contains("call") && msg.contains("number"),
+        "Call type error should mention 'call' and 'number', got: {}",
+        msg
+    );
+}
+
+#[test]
+fn error_msg_type_error_index() {
+    let err = expect_error("local x = 5\nlocal y = x.foo");
+    let msg = format!("{}", err);
+    assert!(
+        msg.contains("index") && msg.contains("number"),
+        "Index type error should mention 'index' and 'number', got: {}",
+        msg
+    );
+}
+
+#[test]
+fn error_msg_budget_exceeded_shows_amounts() {
+    let mut state = State::new();
+    state.set_cost_budget(10);
+    state
+        .load_string("local s = 0\nfor i = 1, 10000 do s = s + i end")
+        .unwrap();
+    let err = state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+        .expect_err("Expected budget error");
+    let msg = format!("{}", err);
+    assert!(
+        msg.contains("budget") && msg.contains("10"),
+        "Budget error should show budget amount, got: {}",
+        msg
+    );
+}
+
+#[test]
+fn error_msg_call_depth_shows_overflow() {
+    let err = expect_error(
+        "local function r(n) return r(n+1) end\nr(0)",
+    );
+    let msg = format!("{}", err);
+    assert!(
+        msg.contains("call stack overflow") || msg.contains("depth"),
+        "Call depth error should mention overflow/depth, got: {}",
+        msg
+    );
+}

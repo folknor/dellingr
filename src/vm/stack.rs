@@ -58,9 +58,10 @@ impl State {
     }
 
     /// Pop a value from the stack (internal helper).
+    /// Panics if stack is empty — this indicates a VM bug, not a user error.
     #[inline(always)]
     pub(super) fn pop_val(&mut self) -> Val {
-        self.stack.pop().unwrap()
+        self.stack.pop().expect("VM bug: pop from empty stack")
     }
 
     /// Pushes a `nil` value onto the stack.
@@ -119,7 +120,7 @@ impl State {
     /// value with itself.
     pub fn replace(&mut self, i: isize) -> Result<()> {
         let idx = self.convert_idx(i)?;
-        let val = self.stack.pop().unwrap();
+        let val = self.stack.pop().expect("VM bug: pop from empty stack in replace()");
         // If idx pointed to the top element (which we just popped), skip the assignment
         // This handles replace(-1) correctly without panicking
         if idx < self.stack.len() {

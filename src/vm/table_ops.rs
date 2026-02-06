@@ -162,7 +162,9 @@ impl State {
     /// The pos and value are popped from the stack.
     pub fn table_insert_at(&mut self, table_idx: isize) -> Result<()> {
         let value = self.pop_val();
-        let pos = self.pop_val().as_num().unwrap_or(1.0) as usize;
+        let pos_val = self.pop_val();
+        let pos = pos_val.as_num()
+            .ok_or_else(|| self.type_error(TypeError::Arithmetic(pos_val.typ_simple())))? as usize;
         let idx = self.convert_idx(table_idx)?;
         let obj_ptr = self.stack[idx].as_object_ptr();
         let typ = self.stack[idx].typ_simple();

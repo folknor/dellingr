@@ -279,7 +279,8 @@ impl Table {
         let new_len = values.len();
         for (i, v) in values.into_iter().enumerate() {
             // Use insert which handles both storage types
-            let _ = self.insert(Val::Num((i + 1) as f64), v);
+            self.insert(Val::Num((i + 1) as f64), v)
+                .expect("set_array: integer key insert cannot fail");
         }
         self.cached_array_len.set(Some(new_len));
     }

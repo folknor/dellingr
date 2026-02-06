@@ -68,14 +68,18 @@ pub struct ArgError {
 pub enum SyntaxError {
     BadNumber,
     BreakOutsideLoop,
-    Complexity,
     InvalidCharacter(char),
+    TooManyExpressions,
     TooManyLocals,
+    TooManyNestedFunctions,
     TooManyNumbers,
     TooManyStrings,
+    TooManyTableFields,
     UnclosedString,
     UnexpectedEof,
-    UnexpectedTok,
+    /// Unexpected token. The String contains a description like "'...' outside vararg function"
+    /// or "'<token>' near '<context>'".
+    UnexpectedTok(String),
     LParenLineStart,
 }
 
@@ -175,7 +179,7 @@ impl fmt::Display for ErrorKind {
                 write!(f, "metamethod chain too deep (depth {})", depth)
             }
             InvalidJump { ip, offset } => {
-                write!(f, "invalid jump at ip {} with offset {}", ip, offset)
+                write!(f, "internal error: invalid jump (instruction {}, offset {})", ip, offset)
             }
             CallDepthExceeded { depth } => {
                 write!(f, "call stack overflow (depth {})", depth)
@@ -184,7 +188,7 @@ impl fmt::Display for ErrorKind {
                 write!(f, "stack overflow ({} values)", size)
             }
             InvalidStackIndex { index } => {
-                write!(f, "invalid stack index {}", index)
+                write!(f, "internal error: invalid stack index ({})", index)
             }
             InternalError(msg) => {
                 write!(f, "internal error: {}", msg)
@@ -197,7 +201,7 @@ impl fmt::Display for ArgError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let func_name = match &self.func_name {
             Some(s) => s.as_str(),
-            None => "?",
+            None => "<anonymous>",
         };
         let extra = match (&self.expected, &self.received) {
             (Some(expected), Some(got)) => format!("{} expected, got {}", expected, got),
@@ -219,14 +223,16 @@ impl fmt::Display for SyntaxError {
         match self {
             BadNumber => write!(f, "malformed number"),
             BreakOutsideLoop => write!(f, "<break> at line 1 not inside a loop"),
-            Complexity => write!(f, "complexity"),
-            InvalidCharacter(c) => write!(f, "invalid character {c}"),
+            InvalidCharacter(c) => write!(f, "invalid character '{c}'"),
+            TooManyExpressions => write!(f, "too many expressions in a single list (limit 255)"),
             TooManyLocals => write!(f, "too many local variables"),
+            TooManyNestedFunctions => write!(f, "too many nested functions (limit 255)"),
             TooManyNumbers => write!(f, "too many literal numbers"),
             TooManyStrings => write!(f, "too many literal strings"),
+            TooManyTableFields => write!(f, "too many fields in table constructor (limit 255)"),
             UnclosedString => write!(f, "unfinished string"),
             UnexpectedEof => write!(f, "unexpected <eof>"),
-            UnexpectedTok => write!(f, "syntax error"),
+            UnexpectedTok(msg) => write!(f, "{}", msg),
             LParenLineStart => write!(f, "ambiguous function call"),
         }
     }

@@ -97,13 +97,57 @@ impl<'a> Parser<'a> {
 
     /// Constructs an error for when a specific `TokenType` was expected but not found.
     #[must_use]
-    fn err_unexpected(&self, token: Token, _expected: TokenType) -> Error {
+    fn err_unexpected(&self, token: Token, expected: TokenType) -> Error {
         let error_kind = if token.typ == TokenType::EndOfFile {
             SyntaxError::UnexpectedEof
         } else {
-            SyntaxError::UnexpectedTok
+            let got = self.describe_token(&token);
+            let exp = Self::describe_token_type(expected);
+            SyntaxError::UnexpectedTok(format!("'{}' expected near {}", exp, got))
         };
         self.error_at(error_kind, token.start)
+    }
+
+    /// Returns a human-readable description of the given token.
+    fn describe_token(&self, token: &Token) -> String {
+        match token.typ {
+            TokenType::Identifier | TokenType::LiteralNumber | TokenType::LiteralHexNumber
+            | TokenType::LiteralString => {
+                let text = self.input.substring(token.start..token.start + token.len as usize);
+                format!("'{}'", text)
+            }
+            TokenType::EndOfFile => "<eof>".to_string(),
+            other => format!("'{}'", Self::describe_token_type(other)),
+        }
+    }
+
+    /// Returns the display name for a TokenType.
+    fn describe_token_type(typ: TokenType) -> &'static str {
+        match typ {
+            TokenType::And => "and", TokenType::Break => "break", TokenType::Do => "do",
+            TokenType::Else => "else", TokenType::ElseIf => "elseif", TokenType::End => "end",
+            TokenType::False => "false", TokenType::For => "for", TokenType::Function => "function",
+            TokenType::If => "if", TokenType::In => "in", TokenType::Local => "local",
+            TokenType::Nil => "nil", TokenType::Not => "not", TokenType::Or => "or",
+            TokenType::Repeat => "repeat", TokenType::Return => "return", TokenType::Then => "then",
+            TokenType::True => "true", TokenType::Until => "until", TokenType::While => "while",
+            TokenType::Plus => "+", TokenType::Minus => "-", TokenType::Star => "*",
+            TokenType::Slash => "/", TokenType::Mod => "%", TokenType::Caret => "^",
+            TokenType::Hash => "#",
+            TokenType::Equal => "==", TokenType::NotEqual => "~=",
+            TokenType::LessEqual => "<=", TokenType::GreaterEqual => ">=",
+            TokenType::Less => "<", TokenType::Greater => ">",
+            TokenType::LParen | TokenType::LParenLineStart => "(", TokenType::RParen => ")",
+            TokenType::LCurly => "{", TokenType::RCurly => "}",
+            TokenType::LSquare => "[", TokenType::RSquare => "]",
+            TokenType::Semi => ";", TokenType::Colon => ":", TokenType::Comma => ",",
+            TokenType::Dot => ".", TokenType::DotDot => "..", TokenType::DotDotDot => "...",
+            TokenType::Assign => "=",
+            TokenType::Identifier => "<name>",
+            TokenType::LiteralNumber | TokenType::LiteralHexNumber => "<number>",
+            TokenType::LiteralString => "<string>",
+            TokenType::EndOfFile => "<eof>",
+        }
     }
 
     /// Pulls a token off the input and checks it against `expected`.
@@ -1138,7 +1182,7 @@ impl<'a> Parser<'a> {
         let mut num_expressions = 1;
         while let Some(token) = self.input.try_pop(TokenType::Comma)? {
             if num_expressions == u8::MAX {
-                return Err(self.error_at(SyntaxError::Complexity, token.start));
+                return Err(self.error_at(SyntaxError::TooManyExpressions, token.start));
             }
             last_exp_desc = self.parse_expr()?;
             num_expressions += 1;
@@ -1479,7 +1523,9 @@ impl<'a> Parser<'a> {
             TokenType::DotDotDot => {
                 // Check if we're in a vararg function
                 if !self.chunk.is_vararg {
-                    return Err(self.error(SyntaxError::UnexpectedTok));
+                    return Err(self.error(SyntaxError::UnexpectedTok(
+                        "cannot use '...' outside a vararg function".to_string(),
+                    )));
                 }
                 // Default: push 1 value (will be adjusted if in tail position)
                 self.push(Instr::vararg(1));
@@ -1536,7 +1582,7 @@ impl<'a> Parser<'a> {
     fn parse_fndef_named(&mut self, name: Option<String>) -> Result<()> {
         let (params, is_vararg) = self.parse_params()?;
         if self.chunk.nested.len() >= u8::MAX as usize {
-            return Err(self.error(SyntaxError::Complexity));
+            return Err(self.error(SyntaxError::TooManyNestedFunctions));
         }
 
         self.nest_level += 1;
@@ -1557,7 +1603,7 @@ impl<'a> Parser<'a> {
         // Prepend "self" to the parameter list
         params.insert(0, "self");
         if self.chunk.nested.len() >= u8::MAX as usize {
-            return Err(self.error(SyntaxError::Complexity));
+            return Err(self.error(SyntaxError::TooManyNestedFunctions));
         }
 
         self.nest_level += 1;
@@ -1631,7 +1677,9 @@ impl<'a> Parser<'a> {
                 // {...} syntax - collect all varargs into the table
                 self.input.next().unwrap();
                 if !self.chunk.is_vararg {
-                    return Err(self.error(SyntaxError::UnexpectedTok));
+                    return Err(self.error(SyntaxError::UnexpectedTok(
+                        "cannot use '...' outside a vararg function".to_string(),
+                    )));
                 }
                 // Push all varargs onto stack
                 self.push(Instr::vararg(u8::MAX));
@@ -1640,7 +1688,7 @@ impl<'a> Parser<'a> {
             }
             _ => {
                 if counter == u8::MAX {
-                    return Err(self.error(SyntaxError::Complexity));
+                    return Err(self.error(SyntaxError::TooManyTableFields));
                 }
                 self.parse_expr()?;
                 Ok((counter + 1, false))
