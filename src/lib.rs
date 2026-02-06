@@ -49,6 +49,10 @@
 #![deny(clippy::ok_expect)]
 #![deny(clippy::too_many_arguments)]
 #![deny(clippy::large_enum_variant)]
+#![deny(clippy::match_same_arms)]
+#![deny(clippy::redundant_else)]
+#![deny(clippy::unnested_or_patterns)]
+#![deny(clippy::map_unwrap_or)]
 
 mod compiler;
 mod host;

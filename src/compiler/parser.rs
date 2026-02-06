@@ -205,7 +205,7 @@ impl<'a> Parser<'a> {
                 if let Some(&next) = chars.peek() {
                     chars.next();
                     match next {
-                        'n' => result.push('\n'),
+                        'n' | '\n' => result.push('\n'), // \n escape or literal escaped newline
                         't' => result.push('\t'),
                         'r' => result.push('\r'),
                         '\\' => result.push('\\'),
@@ -216,7 +216,6 @@ impl<'a> Parser<'a> {
                         'b' => result.push('\x08'), // backspace
                         'f' => result.push('\x0C'), // form feed
                         'v' => result.push('\x0B'), // vertical tab
-                        '\n' => result.push('\n'),  // escaped newline continues string
                         _ => {
                             // Unknown escape, keep as-is
                             result.push('\\');
@@ -1390,7 +1389,7 @@ impl<'a> Parser<'a> {
                 // Adjustment: if we've already pushed the table/receiver (FieldAccess or TableIndex),
                 // subtract 1 from the base since the function will replace what's already there
                 let adjustment = match &base_expr {
-                    PrefixExp::Place(PlaceExp::FieldAccess(_)) | PrefixExp::Place(PlaceExp::TableIndex) => 1,
+                    PrefixExp::Place(PlaceExp::FieldAccess(_) | PlaceExp::TableIndex) => 1,
                     _ => 0,
                 };
                 let mark_idx = self.chunk.code.len();
@@ -1431,7 +1430,7 @@ impl<'a> Parser<'a> {
                 // Always mark call base - needed when last arg is vararg or function call
                 // Same adjustment logic as function calls
                 let adjustment = match &base_expr {
-                    PrefixExp::Place(PlaceExp::FieldAccess(_)) | PrefixExp::Place(PlaceExp::TableIndex) => 1,
+                    PrefixExp::Place(PlaceExp::FieldAccess(_) | PlaceExp::TableIndex) => 1,
                     _ => 0,
                 };
                 let mark_idx = self.chunk.code.len();
@@ -1638,11 +1637,10 @@ impl<'a> Parser<'a> {
                 self.input.next()?;
                 if self.input.check_type(TokenType::RCurly)? {
                     break;
-                } else {
-                    let (new_i, is_vararg) = self.parse_table_entry(i)?;
-                    i = new_i;
-                    has_vararg = has_vararg || is_vararg;
                 }
+                let (new_i, is_vararg) = self.parse_table_entry(i)?;
+                i = new_i;
+                has_vararg = has_vararg || is_vararg;
             }
             self.expect(TokenType::RCurly)?;
 

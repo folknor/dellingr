@@ -165,9 +165,8 @@ pub(crate) fn open_base(state: &mut State) {
             if let LuaType::Nil = state.typ(-1) {
                 state.pop(1);
                 break;
-            } else {
-                i += 1.0;
             }
+            i += 1.0;
         }
         Ok(i as u8 - 1)
     });

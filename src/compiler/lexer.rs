@@ -139,14 +139,13 @@ impl<'a> Lexer<'a> {
                 '-' => {
                     if self.try_next('-') {
                         return self.comment();
-                    } else {
-                        Minus
                     }
+                    Minus
                 }
 
                 '\'' | '\"' => self.lex_string(first_char, tok_start)?,
                 '[' => {
-                    if let Some('=') | Some('[') = self.peek_char() {
+                    if let Some('=' | '[') = self.peek_char() {
                         panic!("Long strings are not supported yet.");
                     } else {
                         LSquare

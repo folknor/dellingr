@@ -669,8 +669,7 @@ impl State {
                 if let Some(mt_ptr) = mt_ptr {
                     let len_key = self.alloc_string("__len".to_string());
                     let len_handler = self.heap.as_table_ref(mt_ptr)
-                        .map(|mt| mt.get(&len_key))
-                        .unwrap_or(Val::Nil);
+                        .map_or(Val::Nil, |mt| mt.get(&len_key));
 
                     if !matches!(len_handler, Val::Nil) {
                         // Call __len(table)

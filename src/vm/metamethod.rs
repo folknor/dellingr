@@ -47,8 +47,7 @@ impl State {
                 let index_handler = self
                     .heap
                     .as_table_ref(mt_ptr)
-                    .map(|mt| mt.get(&index_key))
-                    .unwrap_or(Val::Nil);
+                    .map_or(Val::Nil, |mt| mt.get(&index_key));
 
                 if !matches!(index_handler, Val::Nil) {
                     return self.handle_index_metamethod(index_handler, idx, key);
@@ -157,8 +156,7 @@ impl State {
                 let newindex_handler = self
                     .heap
                     .as_table_ref(mt_ptr)
-                    .map(|mt| mt.get(&newindex_key))
-                    .unwrap_or(Val::Nil);
+                    .map_or(Val::Nil, |mt| mt.get(&newindex_key));
 
                 if !matches!(newindex_handler, Val::Nil) {
                     return self.handle_newindex_metamethod(newindex_handler, idx, key, val);

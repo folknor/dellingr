@@ -106,8 +106,7 @@ impl State {
         self.stack[i]
             .as_object_ptr()
             .and_then(|ptr| self.heap.as_table_ref(ptr))
-            .map(super::table::Table::array_len)
-            .unwrap_or(0)
+            .map_or(0, super::table::Table::array_len)
     }
 
     /// Gets the metatable of the value at the given index.
@@ -289,8 +288,7 @@ impl State {
             let tostring_handler = self
                 .heap
                 .as_table_ref(mt_ptr)
-                .map(|mt| mt.get(&tostring_key))
-                .unwrap_or(Val::Nil);
+                .map_or(Val::Nil, |mt| mt.get(&tostring_key));
 
             if !matches!(tostring_handler, Val::Nil) {
                 // Call the __tostring metamethod

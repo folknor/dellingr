@@ -92,8 +92,7 @@ impl State {
             if let Some(mt_ptr) = metatable_ptr {
                 let call_key = self.alloc_string("__call".to_string());
                 let call_handler = self.heap.as_table_ref(mt_ptr)
-                    .map(|mt| mt.get(&call_key))
-                    .unwrap_or(Val::Nil);
+                    .map_or(Val::Nil, |mt| mt.get(&call_key));
 
                 if !matches!(call_handler, Val::Nil) {
                     // Insert the table as first argument and call the handler
