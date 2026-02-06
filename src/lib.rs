@@ -25,6 +25,7 @@
 #![warn(unreachable_pub)]
 #![warn(unused)]
 #![warn(variant_size_differences)]
+#![deny(clippy::disallowed_methods)]
 
 mod compiler;
 mod host;

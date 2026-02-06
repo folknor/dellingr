@@ -1,0 +1,3 @@
+disallowed-methods = [
+    { path = "core::result::Result::ok", reason = "Silently discards errors. Use `?` to propagate, or handle the error explicitly." },
+]

@@ -18,7 +18,13 @@ fn main() {
             "--limit" | "-l" => {
                 i += 1;
                 if i < args.len() {
-                    limit = args[i].parse().ok();
+                    limit = match args[i].parse() {
+                        Ok(n) => Some(n),
+                        Err(_) => {
+                            eprintln!("Warning: invalid --limit value '{}', ignoring", args[i]);
+                            None
+                        }
+                    };
                 }
             }
             "--analyze" | "-a" => {
