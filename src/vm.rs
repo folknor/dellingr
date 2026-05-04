@@ -354,6 +354,7 @@ impl State {
 
     /// Forces a full garbage collection cycle.
     /// This marks all reachable objects and frees unreachable ones.
+    #[hotpath::measure]
     pub fn gc_collect(&mut self) {
         // Mark all roots
         mark_gc_roots(

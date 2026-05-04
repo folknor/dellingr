@@ -43,6 +43,7 @@ pub(super) fn parse_str(source: impl AsRef<str>) -> Result<Chunk> {
     parser::parse_str(source.as_ref())
 }
 
+#[hotpath::measure]
 pub(super) fn parse_str_named(
     source: impl AsRef<str>,
     source_name: Option<String>,
