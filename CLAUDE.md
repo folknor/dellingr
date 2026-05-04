@@ -145,6 +145,7 @@ Do not use your Memory functionality. Do not read, write, or update memories. Do
 
 ### git commit rules
 
+- Always run `cargo fmt` before a commit.
 - Never commit markdown changes alone. Bundle them with upcoming code commits.
 - When committing other changes: always tag along markdown files if dirty.
 - Write substantive engineering-focused commit messages.

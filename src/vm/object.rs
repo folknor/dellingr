@@ -236,7 +236,7 @@ impl GcHeap {
 
     /// Get a string's content by its pointer.
     /// Panics if the string was freed (use-after-free detection).
-    pub(super) fn get_string(&self, ptr: StringPtr) -> &str {
+    pub(super) fn get_string(&self, ptr: StringPtr) -> &[u8] {
         self.strings.get(ptr)
     }
 
@@ -272,12 +272,12 @@ impl GcHeap {
 
     /// Allocate or intern a string.
     /// Note: Caller must check is_full() and run GC if needed before calling.
-    pub(super) fn alloc_string(&mut self, s: String) -> StringPtr {
-        let hash = StringPool::hash_string(&s);
-        if let Some(ptr) = self.strings.find_by_hash(&s, hash) {
+    pub(super) fn alloc_string(&mut self, bytes: &[u8]) -> StringPtr {
+        let hash = StringPool::hash_string(bytes);
+        if let Some(ptr) = self.strings.find_by_hash(bytes, hash) {
             return ptr;
         }
-        self.strings.insert_with_hash(s, hash)
+        self.strings.insert_with_hash(bytes.into(), hash)
     }
 
     // ========================================================================
@@ -419,7 +419,7 @@ impl<K, V: Markable> Markable for IndexMap<K, V> {
 
 /// Entry for an interned string.
 struct StringEntry {
-    data: String,
+    data: Box<[u8]>,
     hash: u64,
     color: Cell<Color>,
 }
@@ -457,16 +457,16 @@ impl StringPool {
         self.strings.len()
     }
 
-    pub(super) fn hash_string(s: &str) -> u64 {
+    pub(super) fn hash_string(bytes: &[u8]) -> u64 {
         use std::hash::Hasher;
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        s.hash(&mut hasher);
+        bytes.hash(&mut hasher);
         hasher.finish()
     }
 
     /// Get a string's content by its pointer.
     /// Panics if the string was freed (use-after-free detection).
-    pub(super) fn get(&self, ptr: StringPtr) -> &str {
+    pub(super) fn get(&self, ptr: StringPtr) -> &[u8] {
         &self
             .strings
             .get(ptr.0)
@@ -476,10 +476,10 @@ impl StringPool {
 
     /// Find an existing interned string by content and hash.
     /// Uses linear scan - O(n) but safe and simple.
-    pub(super) fn find_by_hash(&self, s: &str, hash: u64) -> Option<StringPtr> {
+    pub(super) fn find_by_hash(&self, bytes: &[u8], hash: u64) -> Option<StringPtr> {
         // Linear scan through all strings looking for a match
         for (key, entry) in &self.strings {
-            if entry.hash == hash && entry.data == s {
+            if entry.hash == hash && entry.data.as_ref() == bytes {
                 return Some(StringPtr(key));
             }
         }
@@ -487,9 +487,9 @@ impl StringPool {
     }
 
     /// Insert a new string with precomputed hash.
-    pub(super) fn insert_with_hash(&mut self, s: String, hash: u64) -> StringPtr {
+    pub(super) fn insert_with_hash(&mut self, bytes: Box<[u8]>, hash: u64) -> StringPtr {
         let entry = StringEntry {
-            data: s,
+            data: bytes,
             hash,
             color: Cell::new(Color::Unmarked),
         };
@@ -566,12 +566,12 @@ mod tests {
     #[test]
     fn test_string_allocation() {
         let mut heap = GcHeap::with_threshold(100);
-        let s1 = heap.alloc_string("hello".to_string());
-        let s2 = heap.alloc_string("world".to_string());
-        let s3 = heap.alloc_string("hello".to_string()); // Should return same ptr as s1 (interned)
+        let s1 = heap.alloc_string(b"hello");
+        let s2 = heap.alloc_string(b"world");
+        let s3 = heap.alloc_string(b"hello"); // Should return same ptr as s1 (interned)
 
-        assert_eq!(heap.get_string(s1), "hello");
-        assert_eq!(heap.get_string(s2), "world");
+        assert_eq!(heap.get_string(s1), b"hello");
+        assert_eq!(heap.get_string(s2), b"world");
         assert_eq!(s1, s3); // Same string should be interned
         assert_eq!(heap.string_count(), 2);
     }
@@ -579,15 +579,15 @@ mod tests {
     #[test]
     fn test_string_gc_collect() {
         let mut heap = GcHeap::with_threshold(100);
-        let kept = heap.alloc_string("keep".to_string());
-        let _freed = heap.alloc_string("free".to_string());
+        let kept = heap.alloc_string(b"keep");
+        let _freed = heap.alloc_string(b"free");
 
         // Mark only the first string
         heap.mark_string(kept);
         heap.collect();
 
         // First string should survive
-        assert_eq!(heap.get_string(kept), "keep");
+        assert_eq!(heap.get_string(kept), b"keep");
         assert_eq!(heap.string_count(), 1);
     }
 
@@ -595,7 +595,7 @@ mod tests {
     #[should_panic(expected = "use-after-free")]
     fn test_string_use_after_free_detection() {
         let mut heap = GcHeap::with_threshold(100);
-        let ptr = heap.alloc_string("test".to_string());
+        let ptr = heap.alloc_string(b"test");
 
         // Don't mark it, then collect
         heap.collect();

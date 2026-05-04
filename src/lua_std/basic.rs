@@ -145,9 +145,15 @@ pub(crate) fn open_base(state: &mut State) {
     // Converts any value to its string representation.
     add("tostring", |state| {
         state.check_any(1)?;
-        let s = state.to_string_with_meta(1)?;
-        state.pop(state.get_top() as isize);
-        state.push_string(s);
+        if state.typ(1) == LuaType::String {
+            let bytes = state.to_bytes(1)?.to_vec();
+            state.pop(state.get_top() as isize);
+            state.push_bytes(bytes);
+        } else {
+            let s = state.to_string_with_meta(1)?;
+            state.pop(state.get_top() as isize);
+            state.push_string(s);
+        }
         Ok(1)
     });
 
@@ -245,10 +251,7 @@ pub(crate) fn open_base(state: &mut State) {
         state.check_any(1)?;
         let typ = state.typ(1);
         let len = match typ {
-            LuaType::String => {
-                let s = state.to_string(1)?;
-                s.len()
-            }
+            LuaType::String => state.to_bytes(1)?.len(),
             LuaType::Table => state.table_len(1),
             _ => {
                 let e = ArgError {
@@ -273,7 +276,7 @@ pub(crate) fn open_base(state: &mut State) {
         let num_args = state.get_top();
 
         // Check if first arg is "#"
-        if state.typ(1) == LuaType::String && state.to_string(1)? == "#" {
+        if state.typ(1) == LuaType::String && state.to_bytes(1)? == b"#" {
             // Return count of remaining args
             state.set_top(0);
             state.push_number((num_args - 1) as f64);
@@ -325,7 +328,7 @@ pub(crate) fn open_base(state: &mut State) {
         state.get_global(&key);
         Ok(1)
     });
-    state.push_string("__index".to_string());
+    state.push_string("__index");
     state
         .set_table_raw(-3)
         .expect("_G metatable __index assignment cannot fail");
@@ -340,7 +343,7 @@ pub(crate) fn open_base(state: &mut State) {
         state.set_top(0);
         Ok(0)
     });
-    state.push_string("__newindex".to_string());
+    state.push_string("__newindex");
     state
         .set_table_raw(-3)
         .expect("_G metatable __newindex assignment cannot fail");

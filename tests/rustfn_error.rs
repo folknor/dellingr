@@ -156,10 +156,10 @@ fn rustfn_table_field_called_inside_dynamic_arg_sees_only_its_arguments() {
         assert_eq!(state.to_string(2).unwrap(), "l");
         assert_eq!(state.to_string(3).unwrap(), "L");
         state.set_top(0);
-        state.push_string("ok".to_string());
+        state.push_string("ok");
         Ok(1)
     });
-    state.push_string("arg_probe".to_string());
+    state.push_string("arg_probe");
     state.set_table_raw(-3).unwrap();
     state.pop(1);
 

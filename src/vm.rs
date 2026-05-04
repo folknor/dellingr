@@ -457,12 +457,12 @@ impl State {
     }
 
     /// Allocates a string on the heap.
-    pub(super) fn alloc_string(&mut self, s: String) -> Val {
+    pub(super) fn alloc_string(&mut self, bytes: impl AsRef<[u8]>) -> Val {
         // Check if GC is needed before allocating
         if self.heap.is_full() {
             self.gc_collect();
         }
-        let ptr = self.heap.alloc_string(s);
+        let ptr = self.heap.alloc_string(bytes.as_ref());
         Val::Str(ptr)
     }
 
@@ -546,12 +546,12 @@ mod tests {
                 Instr::set_global(0),
                 Instr::ret(RetCount::Fixed(0)),
             ],
-            string_literals: vec!["key".to_string(), "a".to_string(), "b".to_string()],
+            string_literals: vec!["key".into(), "a".into(), "b".into()],
             ..Chunk::default()
         };
         state.eval_chunk(input, 0).unwrap();
         let val = state.globals.get("key").unwrap();
-        assert_eq!("ab".to_string(), val.as_string(&state.heap).unwrap());
+        assert_eq!(val.as_string(&state.heap), Some(&b"ab"[..]));
     }
 
     #[test]
@@ -566,7 +566,7 @@ mod tests {
                 Instr::ret(RetCount::Fixed(0)),
             ],
             number_literals: vec![2.5],
-            string_literals: vec!["a".to_string()],
+            string_literals: vec!["a".into()],
             ..Chunk::default()
         };
         state.eval_chunk(input, 0).unwrap();
@@ -585,7 +585,7 @@ mod tests {
                 Instr::set_global(0),
                 Instr::ret(RetCount::Fixed(0)),
             ],
-            string_literals: vec!["key".to_string()],
+            string_literals: vec!["key".into()],
             ..Chunk::default()
         };
         state.eval_chunk(input, 0).unwrap();
@@ -605,7 +605,7 @@ mod tests {
         let chunk = Chunk {
             code,
             number_literals: vec![5.0],
-            string_literals: vec!["a".to_string()],
+            string_literals: vec!["a".into()],
             ..Chunk::default()
         };
         state.eval_chunk(chunk, 0).unwrap();
@@ -627,7 +627,7 @@ mod tests {
         let chunk = Chunk {
             code,
             number_literals: vec![2.0],
-            string_literals: vec!["a".to_string()],
+            string_literals: vec!["a".into()],
             ..Chunk::default()
         };
         state.eval_chunk(chunk, 0).unwrap();
@@ -653,7 +653,7 @@ mod tests {
         let chunk = Chunk {
             code,
             number_literals: vec![1.0, 10.0, 0.0],
-            string_literals: vec!["a".to_string()],
+            string_literals: vec!["a".into()],
             ..Chunk::default()
         };
         let mut state = State::new();
@@ -686,7 +686,7 @@ mod tests {
         let chunk = Chunk {
             code,
             number_literals: vec![1.0, 10.0, 1.0],
-            string_literals: vec!["x".to_string()],
+            string_literals: vec!["x".into()],
             num_locals: 1,
             ..Chunk::default()
         };
@@ -713,7 +713,7 @@ mod tests {
         let chunk = Chunk {
             code,
             number_literals: vec![6.0, 2.0],
-            string_literals: vec!["a".to_string()],
+            string_literals: vec!["a".into()],
             num_locals: 4,
             ..Chunk::default()
         };

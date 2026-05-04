@@ -264,7 +264,7 @@ fn closure_in_table_survives_gc() {
 
     // Check "answer"
     state.get_global("get");
-    state.push_string("answer".to_string());
+    state.push_string("answer");
     state.call(ArgCount::Fixed(1), RetCount::Fixed(1)).unwrap();
     assert_eq!(state.to_number(-1).unwrap(), 42.0);
     state.pop(1);
@@ -273,7 +273,7 @@ fn closure_in_table_survives_gc() {
 
     // Check "pi"
     state.get_global("get");
-    state.push_string("pi".to_string());
+    state.push_string("pi");
     state.call(ArgCount::Fixed(1), RetCount::Fixed(1)).unwrap();
     let pi = state.to_number(-1).unwrap();
     assert!((pi - std::f64::consts::PI).abs() < 0.0001);

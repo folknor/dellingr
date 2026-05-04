@@ -308,14 +308,14 @@ pub(crate) fn open_math(state: &mut State) {
 
     // math.pi (constant)
     state.push_number(PI);
-    state.push_string("pi".to_string());
+    state.push_string("pi");
     state
         .set_table_raw(-3)
         .expect("math.pi assignment cannot fail");
 
     // math.huge (infinity constant)
     state.push_number(f64::INFINITY);
-    state.push_string("huge".to_string());
+    state.push_string("huge");
     state
         .set_table_raw(-3)
         .expect("math.huge assignment cannot fail");

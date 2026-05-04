@@ -1,5 +1,6 @@
 use std::ops;
 use std::rc::Rc;
+use std::str;
 
 use super::super::compiler::UpvalueDesc;
 use super::super::error::{Error, ErrorKind, StackFrame, TypeError};
@@ -551,7 +552,11 @@ impl State {
 
     fn instr_get_global(&mut self, frame: &Frame, string_num: u8) {
         let s = &frame.chunk.string_literals[string_num as usize];
-        self.get_global(s);
+        if let Ok(name) = str::from_utf8(s) {
+            self.get_global(name);
+        } else {
+            self.stack.push(Val::Nil);
+        }
     }
 
     /// Fast path for getting well-known builtin globals.
@@ -684,7 +689,7 @@ impl State {
 
             // Check for __len metamethod
             if let Some(mt_ptr) = mt_ptr {
-                let len_key = self.alloc_string("__len".to_string());
+                let len_key = self.alloc_string("__len");
                 let len_handler = self
                     .heap
                     .as_table_ref(mt_ptr)
@@ -740,7 +745,12 @@ impl State {
         let s = self.get_string_constant(frame, string_num);
         let val = self.pop_val();
         if let Some(s) = s.as_string(&self.heap) {
-            self.globals.insert(s.into(), val);
+            let name = str::from_utf8(s).map_err(|_| {
+                self.error(ErrorKind::InternalError(
+                    "compiler emitted non-UTF-8 global name".to_string(),
+                ))
+            })?;
+            self.globals.insert(name.into(), val);
             Ok(())
         } else {
             Err(self.error(ErrorKind::InternalError(format!(

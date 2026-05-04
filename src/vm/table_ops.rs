@@ -285,7 +285,7 @@ impl State {
             .and_then(super::table::Table::get_metatable);
 
         if let Some(mt_ptr) = metatable_ptr {
-            let tostring_key = self.alloc_string("__tostring".to_string());
+            let tostring_key = self.alloc_string("__tostring");
             let tostring_handler = self
                 .heap
                 .as_table_ref(mt_ptr)

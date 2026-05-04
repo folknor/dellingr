@@ -1,13 +1,14 @@
 //! Lua's String Library
 
-use crate::LuaType;
-use crate::Result;
-use crate::State;
+use std::io::Write;
+
+use crate::error::ErrorKind;
 use crate::instr::{ArgCount, RetCount};
 use crate::patterns::LuaPattern;
+use crate::{LuaType, Result, State};
 
-fn is_plain_lua_pattern(pattern: &str) -> bool {
-    !pattern.bytes().any(|b| {
+fn is_plain_lua_pattern(pattern: &[u8]) -> bool {
+    !pattern.iter().any(|b| {
         matches!(
             b,
             b'^' | b'$' | b'(' | b')' | b'%' | b'.' | b'[' | b']' | b'*' | b'+' | b'-' | b'?'
@@ -15,38 +16,89 @@ fn is_plain_lua_pattern(pattern: &str) -> bool {
     })
 }
 
-fn gsub_replacement(state: &mut State, repl_type: &LuaType, captures: &[&str]) -> Result<String> {
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() {
+        Some(0)
+    } else {
+        haystack
+            .windows(needle.len())
+            .position(|candidate| candidate == needle)
+    }
+}
+
+fn lua_start_index(len: usize, idx: isize) -> usize {
+    if idx >= 0 {
+        (idx - 1).max(0) as usize
+    } else {
+        (len as isize + idx).max(0) as usize
+    }
+}
+
+fn lua_end_index(len: usize, idx: isize) -> usize {
+    if idx >= 0 {
+        (idx as usize).min(len)
+    } else {
+        (len as isize + idx + 1).max(0) as usize
+    }
+}
+
+fn push_captures(state: &mut State, bytes: &[u8], pattern: &LuaPattern<'_>) -> u8 {
+    let n = pattern.num_matches();
+    if n > 1 {
+        for i in 1..n {
+            state.push_bytes(&bytes[pattern.capture(i)]);
+        }
+        (n - 1) as u8
+    } else {
+        state.push_bytes(&bytes[pattern.capture(0)]);
+        1
+    }
+}
+
+fn capture_slices<'a>(bytes: &'a [u8], pattern: &LuaPattern<'_>) -> Vec<&'a [u8]> {
+    (0..pattern.num_matches())
+        .map(|i| &bytes[pattern.capture(i)])
+        .collect()
+}
+
+fn write_format(state: &State, result: &mut Vec<u8>, args: std::fmt::Arguments<'_>) -> Result<()> {
+    result
+        .write_fmt(args)
+        .map_err(|err| state.error(ErrorKind::InternalError(err.to_string())))
+}
+
+fn gsub_replacement(state: &mut State, repl_type: &LuaType, captures: &[&[u8]]) -> Result<Vec<u8>> {
     match repl_type {
         LuaType::String => {
-            let repl = state.to_string(3)?;
-            let mut repl_result = String::new();
-            let mut chars = repl.chars().peekable();
-            while let Some(c) = chars.next() {
-                if c == '%' {
-                    if let Some(&next) = chars.peek() {
-                        if next == '%' {
-                            repl_result.push('%');
-                            chars.next();
-                        } else if next.is_ascii_digit() {
-                            let idx = next.to_digit(10).expect("ASCII digit has a decimal value")
-                                as usize;
-                            chars.next();
-                            if idx == 0 {
-                                repl_result.push_str(captures[0]);
-                            } else if idx < captures.len() {
-                                repl_result.push_str(captures[idx]);
-                            }
-                        } else {
-                            repl_result.push(c);
+            let repl = state.to_bytes(3)?;
+            let mut out = Vec::with_capacity(repl.len());
+            let mut i = 0usize;
+
+            while i < repl.len() {
+                if repl[i] == b'%' && i + 1 < repl.len() {
+                    let next = repl[i + 1];
+                    if next == b'%' {
+                        out.push(b'%');
+                        i += 2;
+                    } else if next.is_ascii_digit() {
+                        let idx = (next - b'0') as usize;
+                        if idx == 0 {
+                            out.extend_from_slice(captures[0]);
+                        } else if idx < captures.len() {
+                            out.extend_from_slice(captures[idx]);
                         }
+                        i += 2;
                     } else {
-                        repl_result.push(c);
+                        out.push(b'%');
+                        i += 1;
                     }
                 } else {
-                    repl_result.push(c);
+                    out.push(repl[i]);
+                    i += 1;
                 }
             }
-            Ok(repl_result)
+
+            Ok(out)
         }
         LuaType::Table => {
             let key = if captures.len() > 1 {
@@ -55,15 +107,15 @@ fn gsub_replacement(state: &mut State, repl_type: &LuaType, captures: &[&str]) -
                 captures[0]
             };
             state.push_value(3)?;
-            state.push_string(key.to_string());
+            state.push_bytes(key);
             state.get_table(-2)?;
             let keep_original = state.typ(-1) == LuaType::Nil
                 || (state.typ(-1) == LuaType::Boolean && !state.to_boolean(-1));
             if keep_original {
                 state.pop(2);
-                Ok(captures[0].to_string())
+                Ok(captures[0].to_vec())
             } else {
-                let val = state.to_string(-1)?;
+                let val = state.to_lua_bytes(-1)?.into_owned();
                 state.pop(2);
                 Ok(val)
             }
@@ -71,29 +123,29 @@ fn gsub_replacement(state: &mut State, repl_type: &LuaType, captures: &[&str]) -
         LuaType::Function => {
             state.push_value(3)?;
             if captures.len() > 1 {
-                for cap in captures.iter().skip(1) {
-                    state.push_string((*cap).to_string());
+                for cap in &captures[1..] {
+                    state.push_bytes(*cap);
                 }
                 state.call(
                     ArgCount::Fixed((captures.len() - 1) as u8),
                     RetCount::Fixed(1),
                 )?;
             } else {
-                state.push_string(captures[0].to_string());
+                state.push_bytes(captures[0]);
                 state.call(ArgCount::Fixed(1), RetCount::Fixed(1))?;
             }
             let keep_original = state.typ(-1) == LuaType::Nil
                 || (state.typ(-1) == LuaType::Boolean && !state.to_boolean(-1));
             if keep_original {
                 state.pop(1);
-                Ok(captures[0].to_string())
+                Ok(captures[0].to_vec())
             } else {
-                let val = state.to_string(-1)?;
+                let val = state.to_lua_bytes(-1)?.into_owned();
                 state.pop(1);
                 Ok(val)
             }
         }
-        _ => Ok(captures[0].to_string()),
+        _ => Ok(captures[0].to_vec()),
     }
 }
 
@@ -105,113 +157,75 @@ pub(crate) fn open_string(state: &mut State) {
     macro_rules! add_fn {
         ($name:expr, $func:expr) => {
             state.push_rust_fn($func);
-            state.push_string($name.to_string());
-            state.set_table_raw(-3).unwrap();
+            state.push_string($name);
+            state
+                .set_table_raw(-3)
+                .expect("string library registration cannot fail");
         };
     }
 
     // string.sub(s, i [, j])
-    // Returns the substring from position i to j (inclusive).
-    // Negative indices count from the end (-1 is the last character).
-    // j defaults to -1 (end of string).
     add_fn!("sub", |state| {
         state.check_type(1, LuaType::String)?;
         state.check_type(2, LuaType::Number)?;
         let num_args = state.get_top();
 
-        let s = state.to_string(1)?;
-        let len = s.len() as isize;
-
-        // Convert Lua 1-based index to 0-based, handling negatives
+        let s = state.to_bytes(1)?.to_vec();
+        let len = s.len();
         let i = state.to_number(2)? as isize;
         let j = if num_args >= 3 {
             state.check_type(3, LuaType::Number)?;
             state.to_number(3)? as isize
         } else {
-            -1 // default to end
+            -1
         };
 
-        // Lua index conversion: 1-based, negative counts from end
-        let start = if i >= 0 {
-            (i - 1).max(0) as usize
-        } else {
-            (len + i).max(0) as usize
-        };
-
-        let end = if j >= 0 {
-            (j as usize).min(len as usize)
-        } else {
-            (len + j + 1).max(0) as usize
-        };
+        let start = lua_start_index(len, i);
+        let end = lua_end_index(len, j);
 
         state.set_top(0);
-
-        if start >= end || start >= len as usize {
-            state.push_string(String::new());
+        if start >= end || start >= len {
+            state.push_bytes(b"");
         } else {
-            // Handle UTF-8 safely by working with bytes
-            let bytes = s.as_bytes();
-            let end = end.min(bytes.len());
-            let result = String::from_utf8_lossy(&bytes[start..end]).to_string();
-            state.push_string(result);
+            state.push_bytes(&s[start..end]);
         }
-
         Ok(1)
     });
 
     // string.find(s, pattern [, init [, plain]])
-    // Looks for the first match of pattern in string s.
-    // Returns start, end indices (1-based) or nil if not found.
-    // If plain is true, does plain text matching (no patterns).
     add_fn!("find", |state| {
         state.check_type(1, LuaType::String)?;
         state.check_type(2, LuaType::String)?;
         let num_args = state.get_top();
 
-        let s = state.to_string(1)?;
-        let pattern = state.to_string(2)?;
-
+        let s = state.to_bytes(1)?.to_vec();
+        let pattern = state.to_bytes(2)?.to_vec();
         let init = if num_args >= 3 {
             state.check_type(3, LuaType::Number)?;
-            let i = state.to_number(3)? as isize;
-            if i >= 0 {
-                (i - 1).max(0) as usize
-            } else {
-                (s.len() as isize + i).max(0) as usize
-            }
+            lua_start_index(s.len(), state.to_number(3)? as isize)
         } else {
             0
         };
-
-        let plain = if num_args >= 4 {
-            state.to_boolean(4)
-        } else {
-            false
-        };
+        let plain = num_args >= 4 && state.to_boolean(4);
 
         state.set_top(0);
 
-        // Handle empty pattern - matches at position init+1 with zero length
         if pattern.is_empty() {
             let start = init + 1;
             state.push_number(start as f64);
-            state.push_number(init as f64); // end is start-1 for empty match
+            state.push_number(init as f64);
             return Ok(2);
         }
 
-        let search_str = if init > 0 && init < s.len() {
-            &s[init..]
-        } else if init >= s.len() {
+        if init >= s.len() {
             state.push_nil();
             return Ok(1);
-        } else {
-            &s[..]
-        };
+        }
+        let search = &s[init..];
 
         if plain {
-            // Plain text search
-            if let Some(pos) = search_str.find(&pattern) {
-                let start = init + pos + 1; // Convert to 1-based
+            if let Some(pos) = find_subslice(search, &pattern) {
+                let start = init + pos + 1;
                 let end = start + pattern.len() - 1;
                 state.push_number(start as f64);
                 state.push_number(end as f64);
@@ -221,36 +235,26 @@ pub(crate) fn open_string(state: &mut State) {
                 Ok(1)
             }
         } else {
-            // Pattern search using lua-patterns
-            match LuaPattern::new_try(&pattern) {
-                Ok(mut m) => {
-                    if m.matches(search_str) {
-                        let range = m.range();
-                        let start = init + range.start + 1; // Convert to 1-based
-                        let end = init + range.end;
-                        state.push_number(start as f64);
-                        state.push_number(end as f64);
+            match LuaPattern::from_bytes_try(&pattern) {
+                Ok(mut matcher) => {
+                    if matcher.matches_bytes(search) {
+                        let range = matcher.range();
+                        state.push_number((init + range.start + 1) as f64);
+                        state.push_number((init + range.end) as f64);
 
-                        // Also return captures if any
-                        let captures = m.captures(search_str);
-                        // captures[0] is full match, captures[1..] are capture groups
-                        for cap in captures.iter().skip(1) {
-                            state.push_string(cap.to_string());
+                        let n = matcher.num_matches();
+                        if n > 1 {
+                            for i in 1..n {
+                                state.push_bytes(&search[matcher.capture(i)]);
+                            }
                         }
-
-                        let extra_captures = if captures.len() > 1 {
-                            captures.len() - 1
-                        } else {
-                            0
-                        };
-                        Ok(2 + extra_captures as u8)
+                        Ok(2 + n.saturating_sub(1) as u8)
                     } else {
                         state.push_nil();
                         Ok(1)
                     }
                 }
                 Err(_) => {
-                    // Invalid pattern, return nil
                     state.push_nil();
                     Ok(1)
                 }
@@ -259,286 +263,257 @@ pub(crate) fn open_string(state: &mut State) {
     });
 
     // string.format(formatstring, ...)
-    // Returns a formatted string following printf conventions.
-    // Supports: %s, %d, %i, %f, %g, %x, %X, %o, %c, %%
     add_fn!("format", |state| {
         state.check_type(1, LuaType::String)?;
-        let fmt = state.to_string(1)?;
+        let fmt = state.to_bytes(1)?.to_vec();
         let num_args = state.get_top();
 
-        let mut result = String::new();
+        let mut result = Vec::new();
         let mut arg_idx = 2usize;
-        let mut chars = fmt.chars().peekable();
+        let mut i = 0usize;
 
-        while let Some(c) = chars.next() {
-            if c == '%' {
-                if let Some(&next) = chars.peek() {
-                    match next {
-                        '%' => {
-                            result.push('%');
-                            chars.next();
-                        }
-                        's' => {
-                            chars.next();
-                            if arg_idx <= num_args {
-                                result.push_str(&state.to_string(arg_idx as isize)?);
-                                arg_idx += 1;
-                            }
-                        }
-                        'd' | 'i' => {
-                            chars.next();
-                            if arg_idx <= num_args {
-                                if let Ok(n) = state.to_number(arg_idx as isize) {
-                                    result.push_str(&format!("{}", n as i64));
-                                }
-                                arg_idx += 1;
-                            }
-                        }
-                        'f' => {
-                            chars.next();
-                            if arg_idx <= num_args {
-                                if let Ok(n) = state.to_number(arg_idx as isize) {
-                                    result.push_str(&format!("{n:.6}"));
-                                }
-                                arg_idx += 1;
-                            }
-                        }
-                        'g' => {
-                            chars.next();
-                            if arg_idx <= num_args {
-                                if let Ok(n) = state.to_number(arg_idx as isize) {
-                                    result.push_str(&format!("{n}"));
-                                }
-                                arg_idx += 1;
-                            }
-                        }
-                        'x' => {
-                            chars.next();
-                            if arg_idx <= num_args {
-                                if let Ok(n) = state.to_number(arg_idx as isize) {
-                                    result.push_str(&format!("{:x}", n as i64));
-                                }
-                                arg_idx += 1;
-                            }
-                        }
-                        'X' => {
-                            chars.next();
-                            if arg_idx <= num_args {
-                                if let Ok(n) = state.to_number(arg_idx as isize) {
-                                    result.push_str(&format!("{:X}", n as i64));
-                                }
-                                arg_idx += 1;
-                            }
-                        }
-                        'o' => {
-                            chars.next();
-                            if arg_idx <= num_args {
-                                if let Ok(n) = state.to_number(arg_idx as isize) {
-                                    result.push_str(&format!("{:o}", n as i64));
-                                }
-                                arg_idx += 1;
-                            }
-                        }
-                        'c' => {
-                            chars.next();
-                            if arg_idx <= num_args {
-                                if let Ok(n) = state.to_number(arg_idx as isize)
-                                    && let Some(ch) = char::from_u32(n as u32)
-                                {
-                                    result.push(ch);
-                                }
-                                arg_idx += 1;
-                            }
-                        }
-                        // Handle width/precision specifiers like %5d, %.2f, %05d
-                        '0'..='9' | '.' | '-' | '+' | ' ' => {
-                            let mut spec = String::from("%");
-                            // Collect the format specifier
-                            while let Some(&ch) = chars.peek() {
-                                if ch.is_ascii_digit()
-                                    || ch == '.'
-                                    || ch == '-'
-                                    || ch == '+'
-                                    || ch == ' '
-                                {
-                                    spec.push(ch);
-                                    chars.next();
-                                } else {
-                                    break;
-                                }
-                            }
-                            // Get the conversion character
-                            if let Some(&conv) = chars.peek() {
-                                spec.push(conv);
-                                chars.next();
+        while i < fmt.len() {
+            if fmt[i] != b'%' {
+                result.push(fmt[i]);
+                i += 1;
+                continue;
+            }
 
-                                if arg_idx <= num_args {
-                                    match conv {
-                                        's' => {
-                                            let s = state.to_string(arg_idx as isize)?;
-                                            // For string, just append (ignore width for simplicity)
-                                            result.push_str(&s);
-                                        }
-                                        'd' | 'i' => {
-                                            if let Ok(n) = state.to_number(arg_idx as isize) {
-                                                // Parse width from spec
-                                                let width_str: String = spec[1..spec.len() - 1]
-                                                    .chars()
-                                                    .filter(char::is_ascii_digit)
-                                                    .collect();
-                                                let width: usize = width_str.parse().unwrap_or(0);
-                                                let zero_pad = spec.contains('0');
-                                                if zero_pad && width > 0 {
-                                                    result.push_str(&format!(
-                                                        "{:0>width$}",
-                                                        n as i64,
-                                                        width = width
-                                                    ));
-                                                } else if width > 0 {
-                                                    result.push_str(&format!(
-                                                        "{:>width$}",
-                                                        n as i64,
-                                                        width = width
-                                                    ));
-                                                } else {
-                                                    result.push_str(&format!("{}", n as i64));
-                                                }
-                                            }
-                                        }
-                                        'f' => {
-                                            if let Ok(n) = state.to_number(arg_idx as isize) {
-                                                // Parse precision
-                                                if let Some(dot_pos) = spec.find('.') {
-                                                    let prec_str: String = spec
-                                                        [dot_pos + 1..spec.len() - 1]
-                                                        .chars()
-                                                        .take_while(char::is_ascii_digit)
-                                                        .collect();
-                                                    let prec: usize = prec_str.parse().unwrap_or(6);
-                                                    result.push_str(&format!("{n:.prec$}"));
-                                                } else {
-                                                    result.push_str(&format!("{n:.6}"));
-                                                }
-                                            }
-                                        }
-                                        _ => {
-                                            // Unknown, just output as-is
-                                            result.push_str(&spec);
-                                        }
-                                    }
-                                    arg_idx += 1;
-                                }
-                            }
-                        }
-                        _ => {
-                            // Unknown format, output as-is
-                            result.push('%');
-                        }
-                    }
-                } else {
-                    result.push('%');
+            if i + 1 >= fmt.len() {
+                result.push(b'%');
+                break;
+            }
+
+            let next = fmt[i + 1];
+            match next {
+                b'%' => {
+                    result.push(b'%');
+                    i += 2;
                 }
-            } else {
-                result.push(c);
+                b's' => {
+                    if arg_idx <= num_args {
+                        result.extend_from_slice(state.to_lua_bytes(arg_idx as isize)?.as_ref());
+                        arg_idx += 1;
+                    }
+                    i += 2;
+                }
+                b'd' | b'i' => {
+                    if arg_idx <= num_args {
+                        if let Ok(n) = state.to_number(arg_idx as isize) {
+                            write_format(state, &mut result, format_args!("{}", n as i64))?;
+                        }
+                        arg_idx += 1;
+                    }
+                    i += 2;
+                }
+                b'f' => {
+                    if arg_idx <= num_args {
+                        if let Ok(n) = state.to_number(arg_idx as isize) {
+                            write_format(state, &mut result, format_args!("{n:.6}"))?;
+                        }
+                        arg_idx += 1;
+                    }
+                    i += 2;
+                }
+                b'g' => {
+                    if arg_idx <= num_args {
+                        if let Ok(n) = state.to_number(arg_idx as isize) {
+                            write_format(state, &mut result, format_args!("{n}"))?;
+                        }
+                        arg_idx += 1;
+                    }
+                    i += 2;
+                }
+                b'x' => {
+                    if arg_idx <= num_args {
+                        if let Ok(n) = state.to_number(arg_idx as isize) {
+                            write_format(state, &mut result, format_args!("{:x}", n as i64))?;
+                        }
+                        arg_idx += 1;
+                    }
+                    i += 2;
+                }
+                b'X' => {
+                    if arg_idx <= num_args {
+                        if let Ok(n) = state.to_number(arg_idx as isize) {
+                            write_format(state, &mut result, format_args!("{:X}", n as i64))?;
+                        }
+                        arg_idx += 1;
+                    }
+                    i += 2;
+                }
+                b'o' => {
+                    if arg_idx <= num_args {
+                        if let Ok(n) = state.to_number(arg_idx as isize) {
+                            write_format(state, &mut result, format_args!("{:o}", n as i64))?;
+                        }
+                        arg_idx += 1;
+                    }
+                    i += 2;
+                }
+                b'c' => {
+                    if arg_idx <= num_args {
+                        if let Ok(n) = state.to_number(arg_idx as isize) {
+                            result.push(n as u8);
+                        }
+                        arg_idx += 1;
+                    }
+                    i += 2;
+                }
+                b'0'..=b'9' | b'.' | b'-' | b'+' | b' ' => {
+                    let spec_start = i;
+                    i += 1;
+                    while i < fmt.len() && matches!(fmt[i], b'0'..=b'9' | b'.' | b'-' | b'+' | b' ')
+                    {
+                        i += 1;
+                    }
+                    if i >= fmt.len() {
+                        result.extend_from_slice(&fmt[spec_start..]);
+                        break;
+                    }
+
+                    let conv = fmt[i];
+                    let spec = &fmt[spec_start..=i];
+                    if arg_idx <= num_args {
+                        match conv {
+                            b's' => {
+                                result.extend_from_slice(
+                                    state.to_lua_bytes(arg_idx as isize)?.as_ref(),
+                                );
+                            }
+                            b'd' | b'i' => {
+                                if let Ok(n) = state.to_number(arg_idx as isize) {
+                                    let width = spec[1..spec.len() - 1]
+                                        .iter()
+                                        .filter(|b| b.is_ascii_digit())
+                                        .fold(0usize, |acc, b| acc * 10 + (b - b'0') as usize);
+                                    let zero_pad = spec.contains(&b'0');
+                                    if zero_pad && width > 0 {
+                                        write_format(
+                                            state,
+                                            &mut result,
+                                            format_args!("{:0>width$}", n as i64, width = width),
+                                        )?;
+                                    } else if width > 0 {
+                                        write_format(
+                                            state,
+                                            &mut result,
+                                            format_args!("{:>width$}", n as i64, width = width),
+                                        )?;
+                                    } else {
+                                        write_format(
+                                            state,
+                                            &mut result,
+                                            format_args!("{}", n as i64),
+                                        )?;
+                                    }
+                                }
+                            }
+                            b'f' => {
+                                if let Ok(n) = state.to_number(arg_idx as isize) {
+                                    if let Some(dot_pos) = spec.iter().position(|b| *b == b'.') {
+                                        let precision = spec[dot_pos + 1..spec.len() - 1]
+                                            .iter()
+                                            .take_while(|b| b.is_ascii_digit())
+                                            .fold(0usize, |acc, b| acc * 10 + (*b - b'0') as usize);
+                                        write_format(
+                                            state,
+                                            &mut result,
+                                            format_args!("{n:.precision$}"),
+                                        )?;
+                                    } else {
+                                        write_format(state, &mut result, format_args!("{n:.6}"))?;
+                                    }
+                                }
+                            }
+                            _ => result.extend_from_slice(spec),
+                        }
+                        arg_idx += 1;
+                    }
+                    i += 1;
+                }
+                _ => {
+                    result.push(b'%');
+                    i += 1;
+                }
             }
         }
 
         state.set_top(0);
-        state.push_string(result);
+        state.push_bytes(result);
         Ok(1)
     });
 
-    // string.len(s) - bonus, easy to add
+    // string.len(s)
     add_fn!("len", |state| {
         state.check_type(1, LuaType::String)?;
-        let s = state.to_string(1)?;
+        let len = state.to_bytes(1)?.len();
         state.set_top(0);
-        state.push_number(s.len() as f64);
+        state.push_number(len as f64);
         Ok(1)
     });
 
-    // string.upper(s) - bonus
+    // string.upper(s)
     add_fn!("upper", |state| {
         state.check_type(1, LuaType::String)?;
-        let s = state.to_string(1)?;
+        let mut s = state.to_bytes(1)?.to_vec();
+        s.make_ascii_uppercase();
         state.set_top(0);
-        state.push_string(s.to_uppercase());
+        state.push_bytes(s);
         Ok(1)
     });
 
-    // string.lower(s) - bonus
+    // string.lower(s)
     add_fn!("lower", |state| {
         state.check_type(1, LuaType::String)?;
-        let s = state.to_string(1)?;
+        let mut s = state.to_bytes(1)?.to_vec();
+        s.make_ascii_lowercase();
         state.set_top(0);
-        state.push_string(s.to_lowercase());
+        state.push_bytes(s);
         Ok(1)
     });
 
     // string.reverse(s)
     add_fn!("reverse", |state| {
         state.check_type(1, LuaType::String)?;
-        let s = state.to_string(1)?;
+        let mut s = state.to_bytes(1)?.to_vec();
+        s.reverse();
         state.set_top(0);
-        state.push_string(s.chars().rev().collect());
+        state.push_bytes(s);
         Ok(1)
     });
 
     // string.match(s, pattern [, init])
-    // Returns the captures from the first match of pattern in s.
-    // If no captures, returns the whole match. Returns nil if no match.
     add_fn!("match", |state| {
         state.check_type(1, LuaType::String)?;
         state.check_type(2, LuaType::String)?;
         let num_args = state.get_top();
 
-        let s = state.to_string(1)?;
-        let pattern = state.to_string(2)?;
-
+        let s = state.to_bytes(1)?.to_vec();
+        let pattern = state.to_bytes(2)?.to_vec();
         let init = if num_args >= 3 {
             state.check_type(3, LuaType::Number)?;
-            let i = state.to_number(3)? as isize;
-            if i >= 0 {
-                (i - 1).max(0) as usize
-            } else {
-                (s.len() as isize + i).max(0) as usize
-            }
+            lua_start_index(s.len(), state.to_number(3)? as isize)
         } else {
             0
         };
 
         state.set_top(0);
 
-        // Handle empty pattern - returns empty string
         if pattern.is_empty() {
-            state.push_string(String::new());
+            state.push_bytes(b"");
+            return Ok(1);
+        }
+        if init >= s.len() {
+            state.push_nil();
             return Ok(1);
         }
 
-        let search_str = if init > 0 && init < s.len() {
-            &s[init..]
-        } else if init >= s.len() {
-            state.push_nil();
-            return Ok(1);
-        } else {
-            &s[..]
-        };
-
-        match LuaPattern::new_try(&pattern) {
-            Ok(mut m) => {
-                if m.matches(search_str) {
-                    let captures = m.captures(search_str);
-                    if captures.len() > 1 {
-                        // Has capture groups - return them (skip full match at index 0)
-                        for cap in captures.iter().skip(1) {
-                            state.push_string(cap.to_string());
-                        }
-                        Ok((captures.len() - 1) as u8)
-                    } else {
-                        // No capture groups - return the full match
-                        state.push_string(captures[0].to_string());
-                        Ok(1)
-                    }
+        let search = &s[init..];
+        match LuaPattern::from_bytes_try(&pattern) {
+            Ok(mut matcher) => {
+                if matcher.matches_bytes(search) {
+                    Ok(push_captures(state, search, &matcher))
                 } else {
                     state.push_nil();
                     Ok(1)
@@ -552,27 +527,22 @@ pub(crate) fn open_string(state: &mut State) {
     });
 
     // string.gmatch(s, pattern)
-    // Returns an iterator function that returns successive matches.
-    // For generic for loop: returns iterator, state_table, nil
     add_fn!("gmatch", |state| {
         state.check_type(1, LuaType::String)?;
         state.check_type(2, LuaType::String)?;
 
-        let s = state.to_string(1)?;
-        let pattern = state.to_string(2)?;
-
+        let s = state.to_bytes(1)?.to_vec();
+        let pattern = state.to_bytes(2)?.to_vec();
         state.set_top(0);
 
-        // Handle empty pattern - return iterator that yields empty string once
         if pattern.is_empty() {
-            // Return a simple iterator that returns empty string once then nil
             state.new_table();
-            state.push_boolean(false); // done flag
-            state.push_string("done".to_string());
+            state.push_boolean(false);
+            state.push_string("done");
             state.set_table_raw(-3)?;
 
             state.push_rust_fn(|state| {
-                state.push_string("done".to_string());
+                state.push_string("done");
                 state.get_table(1)?;
                 if state.to_boolean(-1) {
                     state.set_top(0);
@@ -580,12 +550,11 @@ pub(crate) fn open_string(state: &mut State) {
                     return Ok(1);
                 }
                 state.pop(1);
-                // Mark as done
                 state.push_boolean(true);
-                state.push_string("done".to_string());
+                state.push_string("done");
                 state.set_table_raw(1)?;
                 state.set_top(0);
-                state.push_string(String::new());
+                state.push_bytes(b"");
                 Ok(1)
             });
 
@@ -595,35 +564,31 @@ pub(crate) fn open_string(state: &mut State) {
             return Ok(3);
         }
 
-        // Create a state table: { s = string, p = pattern, pos = 0 }
         state.new_table();
-        state.push_string(s);
-        state.push_string("s".to_string());
+        state.push_bytes(&s);
+        state.push_string("s");
         state.set_table_raw(-3)?;
-        state.push_string(pattern);
-        state.push_string("p".to_string());
+        state.push_bytes(&pattern);
+        state.push_string("p");
         state.set_table_raw(-3)?;
         state.push_number(0.0);
-        state.push_string("pos".to_string());
+        state.push_string("pos");
         state.set_table_raw(-3)?;
 
-        // Push the iterator function
         state.push_rust_fn(|state| {
-            // Stack: [state_table, control_var (ignored)]
             state.check_type(1, LuaType::Table)?;
 
-            // Get s, p, pos from state table
-            state.push_string("s".to_string());
+            state.push_string("s");
             state.get_table(1)?;
-            let s = state.to_string(-1)?;
+            let s = state.to_bytes(-1)?.to_vec();
             state.pop(1);
 
-            state.push_string("p".to_string());
+            state.push_string("p");
             state.get_table(1)?;
-            let pattern = state.to_string(-1)?;
+            let pattern = state.to_bytes(-1)?.to_vec();
             state.pop(1);
 
-            state.push_string("pos".to_string());
+            state.push_string("pos");
             state.get_table(1)?;
             let pos = state.to_number(-1).unwrap_or(0.0) as usize;
             state.pop(1);
@@ -634,33 +599,18 @@ pub(crate) fn open_string(state: &mut State) {
                 return Ok(1);
             }
 
-            let search_str = &s[pos..];
-
-            match LuaPattern::new_try(&pattern) {
-                Ok(mut m) => {
-                    if m.matches(search_str) {
-                        let range = m.range();
-                        let captures = m.captures(search_str);
-
-                        // Update position in state table for next iteration
+            let search = &s[pos..];
+            match LuaPattern::from_bytes_try(&pattern) {
+                Ok(mut matcher) => {
+                    if matcher.matches_bytes(search) {
+                        let range = matcher.range();
                         let new_pos = pos + range.end.max(1);
                         state.push_number(new_pos as f64);
-                        state.push_string("pos".to_string());
+                        state.push_string("pos");
                         state.set_table_raw(1)?;
 
                         state.set_top(0);
-
-                        if captures.len() > 1 {
-                            // Has capture groups
-                            for cap in captures.iter().skip(1) {
-                                state.push_string(cap.to_string());
-                            }
-                            Ok((captures.len() - 1) as u8)
-                        } else {
-                            // No captures - return full match
-                            state.push_string(captures[0].to_string());
-                            Ok(1)
-                        }
+                        Ok(push_captures(state, search, &matcher))
                     } else {
                         state.set_top(0);
                         state.push_nil();
@@ -675,125 +625,117 @@ pub(crate) fn open_string(state: &mut State) {
             }
         });
 
-        // Stack: [state_table, iterator]
-        // Need to return: [iterator, state_table, nil]
-        state.push_value(-2)?; // push state_table copy
-        state.remove(-3)?; // remove original state_table
-        // Stack: [iterator, state_table]
-        state.push_nil(); // initial control var
-
-        Ok(3) // iterator, state_table, nil
+        state.push_value(-2)?;
+        state.remove(-3)?;
+        state.push_nil();
+        Ok(3)
     });
 
     // string.gsub(s, pattern, repl [, n])
-    // Returns a copy of s with up to n occurrences of pattern replaced by repl.
-    // repl can be a string, table, or function.
-    // Also returns the total number of matches as a second result.
     add_fn!("gsub", |state| {
         state.check_type(1, LuaType::String)?;
         state.check_type(2, LuaType::String)?;
         state.check_any(3)?;
         let num_args = state.get_top();
 
-        let s = state.to_string(1)?;
-        let pattern = state.to_string(2)?;
+        let s = state.to_bytes(1)?.to_vec();
+        let pattern = state.to_bytes(2)?.to_vec();
         let max_replacements = if num_args >= 4 {
             state.check_type(4, LuaType::Number)?;
-            Some(state.to_number(4)? as usize)
+            let n = state.to_number(4)? as isize;
+            Some(if n <= 0 { 0 } else { n as usize })
         } else {
             None
         };
-
         let repl_type = state.typ(3);
 
-        // Handle empty pattern - no replacement, return original string
         if pattern.is_empty() {
             state.set_top(0);
-            state.push_string(s);
+            state.push_bytes(s);
             state.push_number(0.0);
             return Ok(2);
         }
 
         if is_plain_lua_pattern(&pattern) {
-            let mut result = String::new();
+            let mut result = Vec::with_capacity(s.len());
             let mut pos = 0usize;
             let mut count = 0usize;
 
             while pos < s.len() {
-                if let Some(max) = max_replacements
-                    && count >= max
-                {
+                if max_replacements.is_some_and(|max| count >= max) {
                     break;
                 }
 
-                let search_str = &s[pos..];
-                let Some(match_start) = search_str.find(&pattern) else {
+                let search = &s[pos..];
+                let Some(match_start) = find_subslice(search, &pattern) else {
                     break;
                 };
 
                 let start = pos + match_start;
                 let end = start + pattern.len();
-                result.push_str(&s[pos..start]);
+                result.extend_from_slice(&s[pos..start]);
 
                 let captures = [&s[start..end]];
-                let replacement = gsub_replacement(state, &repl_type, &captures)?;
-                result.push_str(&replacement);
+                result.extend(gsub_replacement(state, &repl_type, &captures)?);
 
                 pos = end;
                 count += 1;
             }
 
-            result.push_str(&s[pos..]);
-
+            result.extend_from_slice(&s[pos..]);
             state.set_top(0);
-            state.push_string(result);
+            state.push_bytes(result);
             state.push_number(count as f64);
             return Ok(2);
         }
 
-        match LuaPattern::new_try(&pattern) {
-            Ok(mut m) => {
-                let mut result = String::new();
+        match LuaPattern::from_bytes_try(&pattern) {
+            Ok(mut matcher) => {
+                let mut result = Vec::with_capacity(s.len());
                 let mut pos = 0usize;
                 let mut count = 0usize;
 
-                while pos < s.len() {
-                    if let Some(max) = max_replacements
-                        && count >= max
-                    {
+                while pos <= s.len() {
+                    if max_replacements.is_some_and(|max| count >= max) {
                         break;
                     }
 
-                    let search_str = &s[pos..];
-                    if m.matches(search_str) {
-                        let range = m.range();
-                        let captures = m.captures(search_str);
-
-                        // Append text before match
-                        result.push_str(&s[pos..pos + range.start]);
-
-                        // Get replacement based on repl type
-                        let replacement = gsub_replacement(state, &repl_type, &captures)?;
-
-                        result.push_str(&replacement);
-                        pos += range.end.max(1); // Advance at least 1
-                        count += 1;
-                    } else {
+                    let search = &s[pos..];
+                    if !matcher.matches_bytes(search) {
                         break;
+                    }
+
+                    let range = matcher.range();
+                    result.extend_from_slice(&s[pos..pos + range.start]);
+                    let captures = capture_slices(search, &matcher);
+                    result.extend(gsub_replacement(state, &repl_type, &captures)?);
+                    count += 1;
+
+                    if range.start == range.end {
+                        let next_pos = pos + range.end;
+                        if next_pos < s.len() {
+                            result.push(s[next_pos]);
+                            pos = next_pos + 1;
+                        } else {
+                            pos = s.len() + 1;
+                        }
+                    } else {
+                        pos += range.end;
                     }
                 }
 
-                // Append remaining text
-                result.push_str(&s[pos..]);
+                if pos <= s.len() {
+                    result.extend_from_slice(&s[pos..]);
+                }
 
                 state.set_top(0);
-                state.push_string(result);
+                state.push_bytes(result);
                 state.push_number(count as f64);
                 Ok(2)
             }
             Err(_) => {
                 state.set_top(0);
-                state.push_string(s);
+                state.push_bytes(s);
                 state.push_number(0.0);
                 Ok(2)
             }

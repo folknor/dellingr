@@ -302,6 +302,11 @@ impl<'a> LuaPattern<'a> {
         }
     }
 
+    /// Number of captures from the most recent successful match, including the full match.
+    pub fn num_matches(&self) -> usize {
+        self.n_match
+    }
+
     /// Get the 'first' capture of the match
     ///
     /// If there are no matches, this is the same as `range`,

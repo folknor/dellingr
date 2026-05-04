@@ -3,6 +3,7 @@
 //! This module contains methods for pushing, popping, and manipulating
 //! values on the VM stack.
 
+use std::borrow::Cow;
 use std::cmp::Ordering;
 
 use super::lua_val::{RustFunc, Val};
@@ -78,9 +79,15 @@ impl State {
         self.stack.push(Val::Bool(b));
     }
 
-    /// Pushes the given string onto the stack.
-    pub fn push_string(&mut self, s: String) {
-        let val = self.alloc_string(s);
+    /// Pushes the given UTF-8 string onto the stack.
+    pub fn push_string(&mut self, s: impl AsRef<str>) {
+        let val = self.alloc_string(s.as_ref().as_bytes());
+        self.stack.push(val);
+    }
+
+    /// Pushes the given raw Lua string bytes onto the stack.
+    pub fn push_bytes(&mut self, bytes: impl AsRef<[u8]>) {
+        let val = self.alloc_string(bytes.as_ref());
         self.stack.push(val);
     }
 
@@ -157,10 +164,30 @@ impl State {
             .ok_or_else(|| self.type_error(super::TypeError::Arithmetic(val.typ_simple())))
     }
 
-    /// Converts the value at the given index to a string.
+    /// Converts the value at the given index to a UTF-8 string.
+    /// Lua strings with invalid UTF-8 bytes are converted lossily.
     pub fn to_string(&self, idx: isize) -> Result<String> {
         let i = self.convert_idx(idx)?;
         Ok(self.stack[i].to_string_with_heap(&self.heap))
+    }
+
+    /// Returns exact Lua string bytes at the given index.
+    pub fn to_bytes(&self, idx: isize) -> Result<&[u8]> {
+        let i = self.convert_idx(idx)?;
+        let val = &self.stack[i];
+        val.as_string(&self.heap).ok_or_else(|| {
+            Error::without_location(ErrorKind::ArgError(crate::error::ArgError {
+                arg_number: idx,
+                func_name: None,
+                expected: Some(super::LuaType::String),
+                received: Some(val.typ(&self.heap)),
+            }))
+        })
+    }
+
+    pub(crate) fn to_lua_bytes(&self, idx: isize) -> Result<Cow<'_, [u8]>> {
+        let i = self.convert_idx(idx)?;
+        Ok(self.stack[i].to_bytes_with_heap(&self.heap))
     }
 
     /// Returns the type of the value in the given acceptable index.

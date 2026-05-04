@@ -41,7 +41,7 @@ impl State {
             if let Some(mt_ptr) = mt_ptr {
                 // Protect key from GC during string allocation
                 self.stack.push(key);
-                let index_key = self.alloc_string("__index".to_string());
+                let index_key = self.alloc_string("__index");
                 let key = self.pop_val();
 
                 let index_handler = self
@@ -148,7 +148,7 @@ impl State {
                 // (clones share the same underlying heap objects, so marking them marks originals)
                 self.stack.push(key);
                 self.stack.push(val);
-                let newindex_key = self.alloc_string("__newindex".to_string());
+                let newindex_key = self.alloc_string("__newindex");
                 self.pop(2); // Discard protections
 
                 let newindex_handler = self

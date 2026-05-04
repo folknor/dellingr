@@ -211,8 +211,28 @@ impl<'a> Parser<'a> {
 
     /// Stores a literal string and returns its index.
     fn find_or_add_string(&mut self, string: &str) -> Result<u8> {
-        find_or_add(&mut self.chunk.string_literals, string)
-            .ok_or_else(|| self.error(SyntaxError::TooManyStrings))
+        self.find_or_add_string_bytes(string.as_bytes())
+    }
+
+    /// Stores literal string bytes and returns its index.
+    fn find_or_add_string_bytes(&mut self, bytes: &[u8]) -> Result<u8> {
+        match self
+            .chunk
+            .string_literals
+            .iter()
+            .position(|existing| existing.as_slice() == bytes)
+        {
+            Some(i) => Ok(i as u8),
+            None => {
+                let i = self.chunk.string_literals.len();
+                if i == u8::MAX as usize {
+                    Err(self.error(SyntaxError::TooManyStrings))
+                } else {
+                    self.chunk.string_literals.push(bytes.to_vec());
+                    Ok(i as u8)
+                }
+            }
+        }
     }
 
     /// Stores a literal number and returns its index.
@@ -221,9 +241,9 @@ impl<'a> Parser<'a> {
             .ok_or_else(|| self.error(SyntaxError::TooManyNumbers))
     }
 
-    /// Converts a literal string's offsets into a real String, processing escape sequences.
+    /// Converts a literal string's offsets into Lua string bytes, processing escape sequences.
     #[must_use]
-    fn get_literal_string_contents(&self, tok: Token) -> String {
+    fn get_literal_string_contents(&self, tok: Token) -> Vec<u8> {
         // Chop off the quotes
         let Token { start, len, typ } = tok;
         assert_eq!(typ, TokenType::LiteralString);
@@ -232,35 +252,35 @@ impl<'a> Parser<'a> {
         let raw = self.input.substring(range);
 
         // Process escape sequences
-        let mut result = String::with_capacity(raw.len());
+        let mut result = Vec::with_capacity(raw.len());
         let mut chars = raw.chars().peekable();
         while let Some(c) = chars.next() {
             if c == '\\' {
                 if let Some(&next) = chars.peek() {
                     chars.next();
                     match next {
-                        'n' | '\n' => result.push('\n'), // \n escape or literal escaped newline
-                        't' => result.push('\t'),
-                        'r' => result.push('\r'),
-                        '\\' => result.push('\\'),
-                        '"' => result.push('"'),
-                        '\'' => result.push('\''),
-                        '0' => result.push('\0'),
-                        'a' => result.push('\x07'), // bell
-                        'b' => result.push('\x08'), // backspace
-                        'f' => result.push('\x0C'), // form feed
-                        'v' => result.push('\x0B'), // vertical tab
+                        'n' | '\n' => result.push(b'\n'), // \n escape or literal escaped newline
+                        't' => result.push(b'\t'),
+                        'r' => result.push(b'\r'),
+                        '\\' => result.push(b'\\'),
+                        '"' => result.push(b'"'),
+                        '\'' => result.push(b'\''),
+                        '0' => result.push(b'\0'),
+                        'a' => result.push(b'\x07'), // bell
+                        'b' => result.push(b'\x08'), // backspace
+                        'f' => result.push(b'\x0C'), // form feed
+                        'v' => result.push(b'\x0B'), // vertical tab
                         _ => {
                             // Unknown escape, keep as-is
-                            result.push('\\');
-                            result.push(next);
+                            result.push(b'\\');
+                            push_char_bytes(&mut result, next);
                         }
                     }
                 } else {
-                    result.push('\\');
+                    result.push(b'\\');
                 }
             } else {
-                result.push(c);
+                push_char_bytes(&mut result, c);
             }
         }
         result
@@ -1575,7 +1595,7 @@ impl<'a> Parser<'a> {
             }
             TokenType::LiteralString => {
                 let text = self.get_literal_string_contents(tok);
-                let idx = self.find_or_add_string(&text)?;
+                let idx = self.find_or_add_string_bytes(&text)?;
                 self.push(Instr::push_string(idx));
             }
             TokenType::Function => self.parse_fndef()?,
@@ -1783,6 +1803,11 @@ fn find_last_local(locals: &[(String, i32)], name: &str) -> Option<usize> {
     None
 }
 
+fn push_char_bytes(out: &mut Vec<u8>, c: char) {
+    let mut buf = [0; 4];
+    out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+}
+
 /// Returns the index of an entry in the literals list, adding it if it does not exist.
 fn find_or_add<T, E>(queue: &mut Vec<T>, x: &E) -> Option<u8>
 where
@@ -1951,7 +1976,7 @@ mod tests {
                 Instr::ret(RetCount::Fixed(0)),
             ],
             number_literals: vec![5.0],
-            string_literals: vec!["a".to_string()],
+            string_literals: vec!["a".into()],
             ..Chunk::default()
         };
         check_it(text, output);
@@ -2011,7 +2036,7 @@ mod tests {
         let chunk = Chunk {
             code,
             number_literals: vec![5.0],
-            string_literals: vec!["a".to_string()],
+            string_literals: vec!["a".into()],
             ..Chunk::default()
         };
         check_it(text, chunk);
@@ -2034,7 +2059,7 @@ mod tests {
         let chunk = Chunk {
             code,
             number_literals: vec![5.0, 4.0],
-            string_literals: vec!["a".to_string(), "b".to_string()],
+            string_literals: vec!["a".into(), "b".into()],
             ..Chunk::default()
         };
         check_it(text, chunk);
@@ -2056,7 +2081,7 @@ mod tests {
         let chunk = Chunk {
             code,
             number_literals: vec![5.0, 4.0],
-            string_literals: vec!["a".to_string()],
+            string_literals: vec!["a".into()],
             ..Chunk::default()
         };
         check_it(text, chunk);
@@ -2085,7 +2110,7 @@ mod tests {
         let chunk = Chunk {
             code,
             number_literals: vec![5.0, 6.0, 7.0, 3.0, 4.0],
-            string_literals: vec!["a".to_string()],
+            string_literals: vec!["a".into()],
             ..Chunk::default()
         };
         check_it(text, chunk);
@@ -2109,7 +2134,7 @@ mod tests {
         let chunk = Chunk {
             code,
             number_literals: vec![10.0, 1.0],
-            string_literals: vec!["a".to_string()],
+            string_literals: vec!["a".into()],
             ..Chunk::default()
         };
         check_it(text, chunk);
@@ -2285,7 +2310,7 @@ mod tests {
         let chunk = Chunk {
             code,
             number_literals: vec![1.0],
-            string_literals: vec!["a".to_string(), "b".to_string()],
+            string_literals: vec!["a".into(), "b".into()],
             ..Chunk::default()
         };
         check_it(text, chunk);
@@ -2304,7 +2329,7 @@ mod tests {
         let chunk = Chunk {
             code,
             number_literals: vec![1.0, 2.0],
-            string_literals: vec!["a".to_string(), "b".to_string()],
+            string_literals: vec!["a".into(), "b".into()],
             ..Chunk::default()
         };
         check_it(text, chunk);
@@ -2325,7 +2350,7 @@ mod tests {
         let chunk = Chunk {
             code,
             number_literals: vec![1.0, 2.0, 3.0],
-            string_literals: vec!["a".to_string(), "b".to_string()],
+            string_literals: vec!["a".into(), "b".into()],
             ..Chunk::default()
         };
         check_it(text, chunk);
@@ -2341,7 +2366,7 @@ mod tests {
         ];
         let chunk = Chunk {
             code,
-            string_literals: vec!["puts".to_string()],
+            string_literals: vec!["puts".into()],
             ..Chunk::default()
         };
         check_it(text, chunk);
@@ -2378,7 +2403,7 @@ mod tests {
         ];
         let chunk = Chunk {
             code,
-            string_literals: vec!["t".to_string(), "x".to_string(), "y".to_string()],
+            string_literals: vec!["t".into(), "x".into(), "y".into()],
             num_locals: 1,
             ..Chunk::default()
         };
@@ -2563,7 +2588,7 @@ mod tests {
         let chunk = Chunk {
             code,
             num_locals: 1,
-            string_literals: vec!["b".to_string()],
+            string_literals: vec!["b".into()],
             ..Chunk::default()
         };
         check_it(text, chunk);

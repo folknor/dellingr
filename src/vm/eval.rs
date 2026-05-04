@@ -94,7 +94,7 @@ impl State {
                 .and_then(super::table::Table::get_metatable);
 
             if let Some(mt_ptr) = metatable_ptr {
-                let call_key = self.alloc_string("__call".to_string());
+                let call_key = self.alloc_string("__call");
                 let call_handler = self
                     .heap
                     .as_table_ref(mt_ptr)
@@ -158,28 +158,28 @@ impl State {
     }
 
     pub(super) fn concat_helper(&mut self, n: usize) -> Result<()> {
-        let mut buffer = String::new();
+        let mut buffer = Vec::new();
         let idx = self.stack.len() - n;
         // Collect values first so we can access heap for strings
         let values: Vec<Val> = self.stack.drain(idx..).collect();
 
         for val in &values {
             if let Some(s) = val.as_string(&self.heap) {
-                buffer.push_str(s);
+                buffer.extend_from_slice(s);
             } else if let Some(num) = val.as_num() {
                 // Auto-convert numbers to strings (standard Lua behavior)
                 // Format integers without decimal point, floats with
                 if num.fract() == 0.0 && num.abs() < 1e15 {
-                    buffer.push_str(&format!("{}", num as i64));
+                    buffer.extend_from_slice(format!("{}", num as i64).as_bytes());
                 } else {
-                    buffer.push_str(&format!("{num}"));
+                    buffer.extend_from_slice(format!("{num}").as_bytes());
                 }
             } else {
                 return Err(self.type_error(TypeError::Concat(val.typ_simple())));
             }
         }
 
-        let val = self.alloc_string(buffer);
+        let val = self.alloc_string(&buffer);
         self.stack.push(val);
         Ok(())
     }
@@ -313,7 +313,7 @@ impl State {
             if self.heap.is_full() {
                 self.gc_collect();
             }
-            let string_ptr = self.heap.alloc_string(s.into());
+            let string_ptr = self.heap.alloc_string(s);
             self.string_literals.push(Val::Str(string_ptr));
         }
         Frame::new(

@@ -2,6 +2,7 @@ use super::Result;
 use super::State;
 use super::object::{Closure, GcHeap, ObjectPtr, StringPtr};
 
+use std::borrow::Cow;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 
@@ -37,9 +38,9 @@ impl Val {
         }
     }
 
-    /// Get this value as a string, if it is one.
+    /// Get this value as Lua string bytes, if it is a string.
     /// Requires heap access since strings are stored in the GC heap.
-    pub(super) fn as_string<'a>(&self, heap: &'a GcHeap) -> Option<&'a str> {
+    pub(super) fn as_string<'a>(&self, heap: &'a GcHeap) -> Option<&'a [u8]> {
         if let Str(s) = self {
             Some(heap.get_string(*s))
         } else {
@@ -98,7 +99,19 @@ impl Val {
             Num(n) => n.to_string(),
             RustFn(func) => format!("<function: {func:p}>"),
             Obj(o) => format!("{o}"),
-            Str(s) => heap.get_string(s).to_string(),
+            Str(s) => String::from_utf8_lossy(heap.get_string(s)).into_owned(),
+        }
+    }
+
+    pub(super) fn to_bytes_with_heap(self, heap: &GcHeap) -> Cow<'_, [u8]> {
+        match self {
+            Nil => Cow::Borrowed(b"nil"),
+            Bool(false) => Cow::Borrowed(b"false"),
+            Bool(true) => Cow::Borrowed(b"true"),
+            Num(n) => Cow::Owned(n.to_string().into_bytes()),
+            RustFn(func) => Cow::Owned(format!("<function: {func:p}>").into_bytes()),
+            Obj(o) => Cow::Owned(format!("{o}").into_bytes()),
+            Str(s) => Cow::Borrowed(heap.get_string(s)),
         }
     }
 }

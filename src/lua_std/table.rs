@@ -147,7 +147,7 @@ pub(crate) fn open_table(state: &mut State) {
 
         // Add the "n" field
         state.push_number(num_args as f64);
-        state.push_string("n".to_string());
+        state.push_string("n");
         state.set_table_raw(table_idx)?;
 
         // Remove all original arguments, leave just the table
@@ -171,9 +171,9 @@ pub(crate) fn open_table(state: &mut State) {
 
         let sep = if num_args >= 2 {
             state.check_type(2, LuaType::String)?;
-            state.to_string(2)?
+            state.to_bytes(2)?.to_vec()
         } else {
-            String::new()
+            Vec::new()
         };
 
         let i = if num_args >= 3 {
@@ -194,23 +194,23 @@ pub(crate) fn open_table(state: &mut State) {
 
         if i > j || len == 0 {
             state.set_top(0);
-            state.push_string(String::new());
+            state.push_bytes(b"");
             return Ok(1);
         }
 
-        let mut result = String::new();
+        let mut result = Vec::new();
         for idx in i..=j {
             if idx > i {
-                result.push_str(&sep);
+                result.extend_from_slice(&sep);
             }
             state.push_number(idx as f64);
             state.get_table(1)?;
-            result.push_str(&state.to_string(-1)?);
+            result.extend_from_slice(state.to_lua_bytes(-1)?.as_ref());
             state.pop(1);
         }
 
         state.set_top(0);
-        state.push_string(result);
+        state.push_bytes(result);
         Ok(1)
     });
 

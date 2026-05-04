@@ -22,7 +22,7 @@ pub(super) enum UpvalueDesc {
 pub(super) struct Chunk {
     pub(super) code: Vec<Instr>,
     pub(super) number_literals: Vec<f64>,
-    pub(super) string_literals: Vec<String>,
+    pub(super) string_literals: Vec<Vec<u8>>,
     pub(super) num_params: u8,
     pub(super) num_locals: u8,
     pub(super) nested: Vec<Chunk>,
