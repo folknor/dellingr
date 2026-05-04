@@ -115,7 +115,7 @@ fn gsub_replacement(state: &mut State, repl_type: &LuaType, captures: &[&[u8]]) 
                 state.pop(2);
                 Ok(captures[0].to_vec())
             } else {
-                let val = state.to_lua_bytes(-1)?.into_owned();
+                let val = state.to_bytes_coerce(-1)?.into_owned();
                 state.pop(2);
                 Ok(val)
             }
@@ -140,7 +140,7 @@ fn gsub_replacement(state: &mut State, repl_type: &LuaType, captures: &[&[u8]]) 
                 state.pop(1);
                 Ok(captures[0].to_vec())
             } else {
-                let val = state.to_lua_bytes(-1)?.into_owned();
+                let val = state.to_bytes_coerce(-1)?.into_owned();
                 state.pop(1);
                 Ok(val)
             }
@@ -292,7 +292,7 @@ pub(crate) fn open_string(state: &mut State) {
                 }
                 b's' => {
                     if arg_idx <= num_args {
-                        result.extend_from_slice(state.to_lua_bytes(arg_idx as isize)?.as_ref());
+                        result.extend_from_slice(state.to_bytes_coerce(arg_idx as isize)?.as_ref());
                         arg_idx += 1;
                     }
                     i += 2;
@@ -378,7 +378,7 @@ pub(crate) fn open_string(state: &mut State) {
                         match conv {
                             b's' => {
                                 result.extend_from_slice(
-                                    state.to_lua_bytes(arg_idx as isize)?.as_ref(),
+                                    state.to_bytes_coerce(arg_idx as isize)?.as_ref(),
                                 );
                             }
                             b'd' | b'i' => {

@@ -185,7 +185,8 @@ impl State {
         })
     }
 
-    pub(crate) fn to_lua_bytes(&self, idx: isize) -> Result<Cow<'_, [u8]>> {
+    /// Converts any Lua value to bytes using Lua's default string coercion rules.
+    pub(crate) fn to_bytes_coerce(&self, idx: isize) -> Result<Cow<'_, [u8]>> {
         let i = self.convert_idx(idx)?;
         Ok(self.stack[i].to_bytes_with_heap(&self.heap))
     }

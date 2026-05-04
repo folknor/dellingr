@@ -205,7 +205,7 @@ pub(crate) fn open_table(state: &mut State) {
             }
             state.push_number(idx as f64);
             state.get_table(1)?;
-            result.extend_from_slice(state.to_lua_bytes(-1)?.as_ref());
+            result.extend_from_slice(state.to_bytes_coerce(-1)?.as_ref());
             state.pop(1);
         }
 

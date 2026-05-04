@@ -175,7 +175,7 @@ impl Frame {
                 Instr::OP_SET_UPVALUE => state.instr_set_upvalue(self, inst.a()),
 
                 // Globals
-                Instr::OP_GET_GLOBAL => state.instr_get_global(self, inst.a()),
+                Instr::OP_GET_GLOBAL => state.instr_get_global(self, inst.a())?,
                 Instr::OP_SET_GLOBAL => state.instr_set_global(self, inst.a())?,
 
                 // Builtins (fast path for well-known globals)
@@ -550,13 +550,15 @@ impl State {
         }
     }
 
-    fn instr_get_global(&mut self, frame: &Frame, string_num: u8) {
+    fn instr_get_global(&mut self, frame: &Frame, string_num: u8) -> Result<()> {
         let s = &frame.chunk.string_literals[string_num as usize];
-        if let Ok(name) = str::from_utf8(s) {
-            self.get_global(name);
-        } else {
-            self.stack.push(Val::Nil);
-        }
+        let name = str::from_utf8(s).map_err(|_| {
+            self.error(ErrorKind::InternalError(
+                "compiler emitted non-UTF-8 global name".to_string(),
+            ))
+        })?;
+        self.get_global(name);
+        Ok(())
     }
 
     /// Fast path for getting well-known builtin globals.
