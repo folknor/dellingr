@@ -5,9 +5,9 @@
 //! - A key is accessed but doesn't exist in the table (__index)
 //! - A new key is being assigned to the table (__newindex)
 
-use super::lua_val::Val;
 use super::Result;
 use super::State;
+use super::lua_val::Val;
 use crate::error::ErrorKind;
 use crate::instr::{ArgCount, RetCount};
 
@@ -30,9 +30,9 @@ impl State {
                 (val, mt_ptr)
             }
             None => {
-                return Err(self.type_error(super::TypeError::TableIndex(
-                    self.stack[idx].typ_simple(),
-                )));
+                return Err(
+                    self.type_error(super::TypeError::TableIndex(self.stack[idx].typ_simple()))
+                );
             }
         };
 
@@ -117,9 +117,7 @@ impl State {
                 self.call(ArgCount::Fixed(2), RetCount::Fixed(1))?;
                 Ok(())
             }
-            _ => {
-                Err(self.type_error(super::TypeError::TableIndex(handler.typ_simple())))
-            }
+            _ => Err(self.type_error(super::TypeError::TableIndex(handler.typ_simple()))),
         }
     }
 
@@ -137,9 +135,9 @@ impl State {
                 (existing, mt_ptr)
             }
             None => {
-                return Err(self.type_error(super::TypeError::TableIndex(
-                    self.stack[idx].typ_simple(),
-                )));
+                return Err(
+                    self.type_error(super::TypeError::TableIndex(self.stack[idx].typ_simple()))
+                );
             }
         };
 
@@ -166,9 +164,10 @@ impl State {
 
         // No __newindex or key exists: do normal assignment
         if let Some(ptr) = obj_ptr
-            && let Some(t) = self.heap.as_table(ptr) {
-                t.insert(key, val)?;
-            }
+            && let Some(t) = self.heap.as_table(ptr)
+        {
+            t.insert(key, val)?;
+        }
         Ok(())
     }
 
@@ -235,9 +234,7 @@ impl State {
                 self.call(ArgCount::Fixed(3), RetCount::Fixed(0))?;
                 Ok(())
             }
-            _ => {
-                Err(self.type_error(super::TypeError::TableIndex(handler.typ_simple())))
-            }
+            _ => Err(self.type_error(super::TypeError::TableIndex(handler.typ_simple()))),
         }
     }
 }

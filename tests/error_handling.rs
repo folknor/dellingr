@@ -246,6 +246,32 @@ fn table_remove_basic() {
 }
 
 #[test]
+fn table_nil_assignment_deletes_key() {
+    let val = run_number(
+        r#"
+        local t = {a = 1, b = 2}
+        t.a = nil
+
+        if rawget(t, "a") ~= nil then
+            return -1
+        end
+
+        local count = 0
+        local saw_a = 0
+        for k, v in pairs(t) do
+            count = count + 1
+            if k == "a" then
+                saw_a = saw_a + 1
+            end
+        end
+
+        return count * 10 + saw_a
+    "#,
+    );
+    assert_eq!(val, 10.0);
+}
+
+#[test]
 fn table_sort_basic() {
     let val = run_number(
         r#"
@@ -275,9 +301,7 @@ fn table_concat_basic() {
     state
         .load_string(r#"return table.concat({1, 2, 3}, ", ")"#)
         .unwrap();
-    state
-        .call(ArgCount::Fixed(0), RetCount::Fixed(1))
-        .unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
     assert_eq!(state.to_string(-1).unwrap(), "1, 2, 3");
 }
 
@@ -298,9 +322,8 @@ fn table_unpack_basic() {
 /// Uses RetCount::Void since we only care about the error.
 fn expect_load_or_run_error(code: &str) -> dellingr::error::Error {
     let mut state = State::new();
-    match state.load_string(code) {
-        Err(e) => return e,
-        Ok(()) => {}
+    if let Err(e) = state.load_string(code) {
+        return e;
     }
     let result = state.call(ArgCount::Fixed(0), RetCount::Fixed(0));
     result.expect_err(&format!("Expected error from: {}", code))
@@ -406,9 +429,7 @@ fn error_msg_budget_exceeded_shows_amounts() {
 
 #[test]
 fn error_msg_call_depth_shows_overflow() {
-    let err = expect_error(
-        "local function r(n) return r(n+1) end\nr(0)",
-    );
+    let err = expect_error("local function r(n) return r(n+1) end\nr(0)");
     let msg = format!("{}", err);
     assert!(
         msg.contains("call stack overflow") || msg.contains("depth"),

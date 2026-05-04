@@ -1,3 +1,7 @@
+use super::Chunk;
+use super::Instr;
+use super::Result;
+use super::UpvalueDesc;
 use super::error::Error;
 use super::error::ErrorKind;
 use super::error::SyntaxError;
@@ -7,11 +11,7 @@ use super::exp_desc::PrefixExp;
 use super::lexer::TokenStream;
 use super::token::Token;
 use super::token::TokenType;
-use super::Chunk;
-use super::Instr;
-use super::Result;
 use crate::instr::{ArgCount, Builtin, RetCount};
-use super::UpvalueDesc;
 
 use std::borrow::Borrow;
 use std::cmp::Ordering;
@@ -46,8 +46,10 @@ pub(super) fn parse_str(source: &str) -> Result<Chunk> {
 
 /// Parses Lua source code into a `Chunk` with an optional source name.
 pub(super) fn parse_str_named(source: &str, source_name: Option<String>) -> Result<Chunk> {
-    let mut chunk = Chunk::default();
-    chunk.source = source_name;
+    let chunk = Chunk {
+        source: source_name,
+        ..Default::default()
+    };
     let parser = Parser {
         input: TokenStream::new(source),
         chunk,
@@ -111,9 +113,13 @@ impl<'a> Parser<'a> {
     /// Returns a human-readable description of the given token.
     fn describe_token(&self, token: &Token) -> String {
         match token.typ {
-            TokenType::Identifier | TokenType::LiteralNumber | TokenType::LiteralHexNumber
+            TokenType::Identifier
+            | TokenType::LiteralNumber
+            | TokenType::LiteralHexNumber
             | TokenType::LiteralString => {
-                let text = self.input.substring(token.start..token.start + token.len as usize);
+                let text = self
+                    .input
+                    .substring(token.start..token.start + token.len as usize);
                 format!("'{text}'")
             }
             TokenType::EndOfFile => "<eof>".to_string(),
@@ -124,24 +130,52 @@ impl<'a> Parser<'a> {
     /// Returns the display name for a TokenType.
     fn describe_token_type(typ: TokenType) -> &'static str {
         match typ {
-            TokenType::And => "and", TokenType::Break => "break", TokenType::Do => "do",
-            TokenType::Else => "else", TokenType::ElseIf => "elseif", TokenType::End => "end",
-            TokenType::False => "false", TokenType::For => "for", TokenType::Function => "function",
-            TokenType::If => "if", TokenType::In => "in", TokenType::Local => "local",
-            TokenType::Nil => "nil", TokenType::Not => "not", TokenType::Or => "or",
-            TokenType::Repeat => "repeat", TokenType::Return => "return", TokenType::Then => "then",
-            TokenType::True => "true", TokenType::Until => "until", TokenType::While => "while",
-            TokenType::Plus => "+", TokenType::Minus => "-", TokenType::Star => "*",
-            TokenType::Slash => "/", TokenType::Mod => "%", TokenType::Caret => "^",
+            TokenType::And => "and",
+            TokenType::Break => "break",
+            TokenType::Do => "do",
+            TokenType::Else => "else",
+            TokenType::ElseIf => "elseif",
+            TokenType::End => "end",
+            TokenType::False => "false",
+            TokenType::For => "for",
+            TokenType::Function => "function",
+            TokenType::If => "if",
+            TokenType::In => "in",
+            TokenType::Local => "local",
+            TokenType::Nil => "nil",
+            TokenType::Not => "not",
+            TokenType::Or => "or",
+            TokenType::Repeat => "repeat",
+            TokenType::Return => "return",
+            TokenType::Then => "then",
+            TokenType::True => "true",
+            TokenType::Until => "until",
+            TokenType::While => "while",
+            TokenType::Plus => "+",
+            TokenType::Minus => "-",
+            TokenType::Star => "*",
+            TokenType::Slash => "/",
+            TokenType::Mod => "%",
+            TokenType::Caret => "^",
             TokenType::Hash => "#",
-            TokenType::Equal => "==", TokenType::NotEqual => "~=",
-            TokenType::LessEqual => "<=", TokenType::GreaterEqual => ">=",
-            TokenType::Less => "<", TokenType::Greater => ">",
-            TokenType::LParen | TokenType::LParenLineStart => "(", TokenType::RParen => ")",
-            TokenType::LCurly => "{", TokenType::RCurly => "}",
-            TokenType::LSquare => "[", TokenType::RSquare => "]",
-            TokenType::Semi => ";", TokenType::Colon => ":", TokenType::Comma => ",",
-            TokenType::Dot => ".", TokenType::DotDot => "..", TokenType::DotDotDot => "...",
+            TokenType::Equal => "==",
+            TokenType::NotEqual => "~=",
+            TokenType::LessEqual => "<=",
+            TokenType::GreaterEqual => ">=",
+            TokenType::Less => "<",
+            TokenType::Greater => ">",
+            TokenType::LParen | TokenType::LParenLineStart => "(",
+            TokenType::RParen => ")",
+            TokenType::LCurly => "{",
+            TokenType::RCurly => "}",
+            TokenType::LSquare => "[",
+            TokenType::RSquare => "]",
+            TokenType::Semi => ";",
+            TokenType::Colon => ":",
+            TokenType::Comma => ",",
+            TokenType::Dot => ".",
+            TokenType::DotDot => "..",
+            TokenType::DotDotDot => "...",
             TokenType::Assign => "=",
             TokenType::Identifier => "<name>",
             TokenType::LiteralNumber | TokenType::LiteralHexNumber => "<number>",
@@ -270,7 +304,10 @@ impl<'a> Parser<'a> {
     /// Called when exiting a loop. Patches all break jumps to jump to the
     /// current instruction position (the instruction after the loop).
     fn exit_loop(&mut self) {
-        let breaks = self.loop_breaks.pop().expect("exit_loop called without enter_loop");
+        let breaks = self
+            .loop_breaks
+            .pop()
+            .expect("exit_loop called without enter_loop");
         let loop_end = self.chunk.code.len();
         for break_idx in breaks {
             // The break instruction is a Jump with placeholder offset.
@@ -338,17 +375,29 @@ impl<'a> Parser<'a> {
         self.chunk.upvalues = self.upvalues.iter().map(|(_, desc)| *desc).collect();
 
         let tmp_chunk = self.chunk.clone();
-        self.chunk = self.outer_chunks.pop()
-            .ok_or_else(|| self.error_at(ErrorKind::InternalError("compiler: outer chunk stack empty".into()), 0))?;
+        self.chunk = self.outer_chunks.pop().ok_or_else(|| {
+            self.error_at(
+                ErrorKind::InternalError("compiler: outer chunk stack empty".into()),
+                0,
+            )
+        })?;
 
         // Restore outer locals and upvalues
-        self.locals = self.outer_locals.pop()
-            .ok_or_else(|| self.error_at(ErrorKind::InternalError("compiler: outer locals stack empty".into()), 0))?;
-        self.upvalues = self.outer_upvalues.pop()
-            .ok_or_else(|| self.error_at(ErrorKind::InternalError("compiler: outer upvalues stack empty".into()), 0))?;
+        self.locals = self.outer_locals.pop().ok_or_else(|| {
+            self.error_at(
+                ErrorKind::InternalError("compiler: outer locals stack empty".into()),
+                0,
+            )
+        })?;
+        self.upvalues = self.outer_upvalues.pop().ok_or_else(|| {
+            self.error_at(
+                ErrorKind::InternalError("compiler: outer upvalues stack empty".into()),
+                0,
+            )
+        })?;
 
         #[cfg(feature = "debug_parser")]
-        println!("Compiled chunk: {:#?}", &tmp_chunk);
+        println!("Compiled chunk: {tmp_chunk:#?}");
 
         Ok(tmp_chunk)
     }
@@ -558,7 +607,10 @@ impl<'a> Parser<'a> {
                     Some(instr) if instr.opcode() == Instr::OP_CALL => instr.a(),
                     i => unreachable!("PrefixExp::FunctionCall but last instruction was {:?}", i),
                 };
-                self.push(Instr::call(ArgCount::Fixed(num_args), RetCount::Fixed(1 + diff as u8)));
+                self.push(Instr::call(
+                    ArgCount::Fixed(num_args),
+                    RetCount::Fixed(1 + diff as u8),
+                ));
             } else {
                 for _ in 0..diff {
                     self.push(Instr::push_nil());
@@ -716,7 +768,8 @@ impl<'a> Parser<'a> {
             if let Some(local_idx) = find_last_local(grandparent_locals, name) {
                 // Found in grandparent's locals - parent captures as Local
                 let upvalue_idx = self.outer_upvalues[parent_idx].len() as u8;
-                self.outer_upvalues[parent_idx].push((name.to_string(), UpvalueDesc::Local(local_idx as u8)));
+                self.outer_upvalues[parent_idx]
+                    .push((name.to_string(), UpvalueDesc::Local(local_idx as u8)));
                 return Some(upvalue_idx);
             }
 
@@ -725,18 +778,21 @@ impl<'a> Parser<'a> {
             if let Some(gp_upvalue_idx) = grandparent_upvalues.iter().position(|(n, _)| n == name) {
                 // Found in grandparent's upvalues - parent captures as Upvalue
                 let upvalue_idx = self.outer_upvalues[parent_idx].len() as u8;
-                self.outer_upvalues[parent_idx].push((name.to_string(), UpvalueDesc::Upvalue(gp_upvalue_idx as u8)));
+                self.outer_upvalues[parent_idx]
+                    .push((name.to_string(), UpvalueDesc::Upvalue(gp_upvalue_idx as u8)));
                 return Some(upvalue_idx);
             }
 
             // Recurse further up if needed
             if grandparent_idx > 0
-                && let Some(gp_upvalue_idx) = self.create_parent_upvalue(name, grandparent_idx) {
-                    // Grandparent now has this as an upvalue, so parent can capture it
-                    let upvalue_idx = self.outer_upvalues[parent_idx].len() as u8;
-                    self.outer_upvalues[parent_idx].push((name.to_string(), UpvalueDesc::Upvalue(gp_upvalue_idx)));
-                    return Some(upvalue_idx);
-                }
+                && let Some(gp_upvalue_idx) = self.create_parent_upvalue(name, grandparent_idx)
+            {
+                // Grandparent now has this as an upvalue, so parent can capture it
+                let upvalue_idx = self.outer_upvalues[parent_idx].len() as u8;
+                self.outer_upvalues[parent_idx]
+                    .push((name.to_string(), UpvalueDesc::Upvalue(gp_upvalue_idx)));
+                return Some(upvalue_idx);
+            }
         }
 
         None
@@ -775,7 +831,10 @@ impl<'a> Parser<'a> {
                 Ordering::Greater => {
                     if let ExpDesc::Prefix(PrefixExp::FunctionCall(num_args)) = last_exp {
                         self.chunk.code.pop(); // Instr::pop() the old 'Call' instruction
-                        self.push(Instr::call(ArgCount::Fixed(num_args), RetCount::Fixed(1 + num_names - num_rvalues)));
+                        self.push(Instr::call(
+                            ArgCount::Fixed(num_args),
+                            RetCount::Fixed(1 + num_names - num_rvalues),
+                        ));
                     } else if let ExpDesc::Vararg = last_exp {
                         self.chunk.code.pop(); // Instr::pop() the old 'Vararg(1)' instruction
                         self.push(Instr::vararg(1 + num_names - num_rvalues));
@@ -969,7 +1028,10 @@ impl<'a> Parser<'a> {
                     Some(instr) if instr.opcode() == Instr::OP_CALL => instr.a(),
                     i => unreachable!("PrefixExp::FunctionCall but last instruction was {:?}", i),
                 };
-                self.push(Instr::call(ArgCount::Fixed(num_args), RetCount::Fixed(3 - num_exprs + 1)));
+                self.push(Instr::call(
+                    ArgCount::Fixed(num_args),
+                    RetCount::Fixed(3 - num_exprs + 1),
+                ));
             } else {
                 // Push nils to make up the difference
                 for _ in num_exprs..3 {
@@ -1406,10 +1468,9 @@ impl<'a> Parser<'a> {
                     // Last argument is a function call - adjust it to return all values
                     let inner_num_args = match self.chunk.code.pop() {
                         Some(instr) if instr.opcode() == Instr::OP_CALL => instr.a(),
-                        i => unreachable!(
-                            "PrefixExp::FunctionCall but last instruction was {:?}",
-                            i
-                        ),
+                        i => {
+                            unreachable!("PrefixExp::FunctionCall but last instruction was {:?}", i)
+                        }
                     };
                     self.push(Instr::call(ArgCount::Fixed(inner_num_args), RetCount::All)); // Return all values
                     u8::MAX // Signal to VM to calculate arg count from call base
@@ -1463,10 +1524,9 @@ impl<'a> Parser<'a> {
                     // Last argument is a function call - adjust it to return all values
                     let inner_num_args = match self.chunk.code.pop() {
                         Some(instr) if instr.opcode() == Instr::OP_CALL => instr.a(),
-                        i => unreachable!(
-                            "PrefixExp::FunctionCall but last instruction was {:?}",
-                            i
-                        ),
+                        i => {
+                            unreachable!("PrefixExp::FunctionCall but last instruction was {:?}", i)
+                        }
                     };
                     self.push(Instr::call(ArgCount::Fixed(inner_num_args), RetCount::All)); // Return all values
                     u8::MAX // Signal to VM to calculate arg count from call base
@@ -1745,9 +1805,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::parse_str;
     use super::Chunk;
     use super::Instr;
+    use super::parse_str;
     use crate::instr::{ArgCount, Builtin, RetCount};
 
     /// Recursively clear line_info from a chunk and its nested chunks.
@@ -1771,7 +1831,13 @@ mod tests {
     fn test01() {
         let text = "x = 5 + 6";
         let out = Chunk {
-            code: vec![Instr::push_num(0), Instr::push_num(1), Instr::add(), Instr::set_global(0), Instr::ret(RetCount::Fixed(0))],
+            code: vec![
+                Instr::push_num(0),
+                Instr::push_num(1),
+                Instr::add(),
+                Instr::set_global(0),
+                Instr::ret(RetCount::Fixed(0)),
+            ],
             number_literals: vec![5.0, 6.0],
             string_literals: vec!["x".into()],
             ..Chunk::default()
@@ -1783,7 +1849,14 @@ mod tests {
     fn test02() {
         let text = "x = -5^2";
         let out = Chunk {
-            code: vec![Instr::push_num(0), Instr::push_num(1), Instr::pow(), Instr::negate(), Instr::set_global(0), Instr::ret(RetCount::Fixed(0))],
+            code: vec![
+                Instr::push_num(0),
+                Instr::push_num(1),
+                Instr::pow(),
+                Instr::negate(),
+                Instr::set_global(0),
+                Instr::ret(RetCount::Fixed(0)),
+            ],
             number_literals: vec![5.0, 2.0],
             string_literals: vec!["x".into()],
             ..Chunk::default()
@@ -1835,7 +1908,14 @@ mod tests {
     fn test05() {
         let text = "x = 2^-3";
         let output = Chunk {
-            code: vec![Instr::push_num(0), Instr::push_num(1), Instr::negate(), Instr::pow(), Instr::set_global(0), Instr::ret(RetCount::Fixed(0))],
+            code: vec![
+                Instr::push_num(0),
+                Instr::push_num(1),
+                Instr::negate(),
+                Instr::pow(),
+                Instr::set_global(0),
+                Instr::ret(RetCount::Fixed(0)),
+            ],
             number_literals: vec![2.0, 3.0],
             string_literals: vec!["x".into()],
             ..Chunk::default()
@@ -1847,7 +1927,13 @@ mod tests {
     fn test06() {
         let text = "x=  not not 1";
         let output = Chunk {
-            code: vec![Instr::push_num(0), Instr::not(), Instr::not(), Instr::set_global(0), Instr::ret(RetCount::Fixed(0))],
+            code: vec![
+                Instr::push_num(0),
+                Instr::not(),
+                Instr::not(),
+                Instr::set_global(0),
+                Instr::ret(RetCount::Fixed(0)),
+            ],
             number_literals: vec![1.0],
             string_literals: vec!["x".into()],
             ..Chunk::default()
@@ -1859,7 +1945,11 @@ mod tests {
     fn test07() {
         let text = "a = 5";
         let output = Chunk {
-            code: vec![Instr::push_num(0), Instr::set_global(0), Instr::ret(RetCount::Fixed(0))],
+            code: vec![
+                Instr::push_num(0),
+                Instr::set_global(0),
+                Instr::ret(RetCount::Fixed(0)),
+            ],
             number_literals: vec![5.0],
             string_literals: vec!["a".to_string()],
             ..Chunk::default()
@@ -2054,7 +2144,13 @@ mod tests {
     #[test]
     fn test16() {
         let text = "local i i = 2";
-        let code = vec![Instr::push_nil(), Instr::set_local(0), Instr::push_num(0), Instr::set_local(0), Instr::ret(RetCount::Fixed(0))];
+        let code = vec![
+            Instr::push_nil(),
+            Instr::set_local(0),
+            Instr::push_num(0),
+            Instr::set_local(0),
+            Instr::ret(RetCount::Fixed(0)),
+        ];
         let chunk = Chunk {
             code,
             number_literals: vec![2.0],
@@ -2179,7 +2275,13 @@ mod tests {
     #[test]
     fn test22() {
         let text = "a, b = 1";
-        let code = vec![Instr::push_num(0), Instr::push_nil(), Instr::set_global(1), Instr::set_global(0), Instr::ret(RetCount::Fixed(0))];
+        let code = vec![
+            Instr::push_num(0),
+            Instr::push_nil(),
+            Instr::set_global(1),
+            Instr::set_global(0),
+            Instr::ret(RetCount::Fixed(0)),
+        ];
         let chunk = Chunk {
             code,
             number_literals: vec![1.0],
@@ -2232,7 +2334,11 @@ mod tests {
     #[test]
     fn test25() {
         let text = "puts()";
-        let code = vec![Instr::get_global(0), Instr::call(ArgCount::Fixed(0), RetCount::Fixed(0)), Instr::ret(RetCount::Fixed(0))];
+        let code = vec![
+            Instr::get_global(0),
+            Instr::call(ArgCount::Fixed(0), RetCount::Fixed(0)),
+            Instr::ret(RetCount::Fixed(0)),
+        ];
         let chunk = Chunk {
             code,
             string_literals: vec!["puts".to_string()],
@@ -2282,7 +2388,11 @@ mod tests {
     #[test]
     fn test28() {
         let text = "x = function () end";
-        let code = vec![Instr::closure(0), Instr::set_global(0), Instr::ret(RetCount::Fixed(0))];
+        let code = vec![
+            Instr::closure(0),
+            Instr::set_global(0),
+            Instr::ret(RetCount::Fixed(0)),
+        ];
         let string_literals = vec!["x".into()];
         let nested = vec![Chunk {
             code: vec![Instr::ret(RetCount::Fixed(0))],
@@ -2301,13 +2411,21 @@ mod tests {
     fn test29() {
         let text = "x = function () local y = 7 end";
         let inner_chunk = Chunk {
-            code: vec![Instr::push_num(0), Instr::set_local(0), Instr::ret(RetCount::Fixed(0))],
+            code: vec![
+                Instr::push_num(0),
+                Instr::set_local(0),
+                Instr::ret(RetCount::Fixed(0)),
+            ],
             number_literals: vec![7.0],
             num_locals: 1,
             ..Chunk::default()
         };
         let outer_chunk = Chunk {
-            code: vec![Instr::closure(0), Instr::set_global(0), Instr::ret(RetCount::Fixed(0))],
+            code: vec![
+                Instr::closure(0),
+                Instr::set_global(0),
+                Instr::ret(RetCount::Fixed(0)),
+            ],
             string_literals: vec!["x".into()],
             nested: vec![inner_chunk],
             ..Chunk::default()
@@ -2324,7 +2442,11 @@ mod tests {
             print(y)
         end";
         let z = Chunk {
-            code: vec![Instr::push_num(0), Instr::set_local(0), Instr::ret(RetCount::Fixed(0))],
+            code: vec![
+                Instr::push_num(0),
+                Instr::set_local(0),
+                Instr::ret(RetCount::Fixed(0)),
+            ],
             number_literals: vec![21.0],
             num_locals: 1,
             ..Chunk::default()
@@ -2364,7 +2486,13 @@ mod tests {
     #[test]
     fn test31() {
         let text = "local s = type(4)";
-        let code = vec![Instr::get_builtin(Builtin::Type), Instr::push_num(0), Instr::call(ArgCount::Fixed(1), RetCount::Fixed(1)), Instr::set_local(0), Instr::ret(RetCount::Fixed(0))];
+        let code = vec![
+            Instr::get_builtin(Builtin::Type),
+            Instr::push_num(0),
+            Instr::call(ArgCount::Fixed(1), RetCount::Fixed(1)),
+            Instr::set_local(0),
+            Instr::ret(RetCount::Fixed(0)),
+        ];
         let chunk = Chunk {
             code,
             num_locals: 1,
@@ -2383,12 +2511,12 @@ mod tests {
             Instr::push_nil(),
             Instr::set_local(1),
             Instr::set_local(0),
-            Instr::mark_call_base(0),      // Mark stack position before function (no adjustment, not a field access)
-            Instr::get_local(1),       // Get print
-            Instr::get_local(0),       // Get type
-            Instr::push_nil(),           // Push nil argument
-            Instr::call(ArgCount::Fixed(1), RetCount::All),  // Call type(nil), return ALL values
-            Instr::call(ArgCount::Dynamic, RetCount::Fixed(0)),  // Call print with dynamic arg count
+            Instr::mark_call_base(0), // Mark stack position before function (no adjustment, not a field access)
+            Instr::get_local(1),      // Get print
+            Instr::get_local(0),      // Get type
+            Instr::push_nil(),        // Push nil argument
+            Instr::call(ArgCount::Fixed(1), RetCount::All), // Call type(nil), return ALL values
+            Instr::call(ArgCount::Dynamic, RetCount::Fixed(0)), // Call print with dynamic arg count
             Instr::ret(RetCount::Fixed(0)),
         ];
         let chunk = Chunk {

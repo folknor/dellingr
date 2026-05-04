@@ -2,11 +2,11 @@ use std::cell::Cell;
 
 use indexmap::IndexMap;
 
-use super::object::{GcHeap, Markable, ObjectPtr, UpvaluePool};
 use super::Error;
 use super::Result;
 use super::TypeError;
 use super::Val;
+use super::object::{GcHeap, Markable, ObjectPtr, UpvaluePool};
 
 /// Maximum number of entries for inline storage.
 /// Tables with more entries promote to IndexMap.
@@ -62,6 +62,7 @@ impl Default for Table {
 impl Table {
     /// Check if a value is a positive integer (potential array index).
     #[inline]
+    #[allow(clippy::float_cmp)]
     fn is_array_key(key: &Val) -> bool {
         if let Val::Num(n) = key {
             *n > 0.0 && n.is_finite() && *n == n.floor()
@@ -76,9 +77,9 @@ impl Table {
             Val::Num(n) if n.is_nan() => Val::Nil,
             _ => match &self.storage {
                 TableStorage::Inline { entries, len } => {
-                    for i in 0..(*len as usize) {
-                        if &entries[i].0 == key {
-                            return entries[i].1;
+                    for (entry_key, entry_value) in entries.iter().take(*len as usize) {
+                        if entry_key == key {
+                            return *entry_value;
                         }
                     }
                     Val::Nil
@@ -121,6 +122,12 @@ impl Table {
             _ => {}
         }
 
+        // In Lua, assigning nil deletes the key rather than storing a nil value.
+        if matches!(value, Val::Nil) {
+            self.remove(&key);
+            return Ok(());
+        }
+
         // Invalidate cache if this could affect array length
         if Self::is_array_key(&key) {
             self.cached_array_len.set(None);
@@ -129,9 +136,9 @@ impl Table {
         match &mut self.storage {
             TableStorage::Inline { entries, len } => {
                 // Check if key already exists (update in place)
-                for i in 0..(*len as usize) {
-                    if entries[i].0 == key {
-                        entries[i].1 = value;
+                for (entry_key, entry_value) in entries.iter_mut().take(*len as usize) {
+                    if *entry_key == key {
+                        *entry_value = value;
                         return Ok(());
                     }
                 }
@@ -157,8 +164,8 @@ impl Table {
         let old_storage = std::mem::take(&mut self.storage);
         if let TableStorage::Inline { mut entries, len } = old_storage {
             let mut map = IndexMap::with_capacity(INLINE_CAPACITY + 1);
-            for i in 0..(len as usize) {
-                let (k, v) = std::mem::take(&mut entries[i]);
+            for entry in entries.iter_mut().take(len as usize) {
+                let (k, v) = std::mem::take(entry);
                 map.insert(k, v);
             }
             map.insert(new_key, new_value);
@@ -170,20 +177,23 @@ impl Table {
     fn ensure_map(&mut self) {
         // Only convert if currently Inline
         if matches!(self.storage, TableStorage::Inline { .. })
-            && let TableStorage::Inline { mut entries, len } =
-                std::mem::take(&mut self.storage)
-            {
-                let mut map = IndexMap::with_capacity(len as usize);
-                for i in 0..(len as usize) {
-                    let (k, v) = std::mem::take(&mut entries[i]);
-                    map.insert(k, v);
-                }
-                self.storage = TableStorage::Map(map);
+            && let TableStorage::Inline { mut entries, len } = std::mem::take(&mut self.storage)
+        {
+            let mut map = IndexMap::with_capacity(len as usize);
+            for entry in entries.iter_mut().take(len as usize) {
+                let (k, v) = std::mem::take(entry);
+                map.insert(k, v);
             }
+            self.storage = TableStorage::Map(map);
+        }
     }
 
     /// Remove a key and return its value (if any).
     fn remove(&mut self, key: &Val) -> Option<Val> {
+        if Self::is_array_key(key) {
+            self.cached_array_len.set(None);
+        }
+
         match &mut self.storage {
             TableStorage::Inline { entries, len } => {
                 for i in 0..(*len as usize) {
@@ -207,6 +217,7 @@ impl Table {
     /// Position should be 1-based (Lua-style).
     pub(super) fn array_insert(&mut self, pos: usize, value: Val) {
         let len = self.array_len();
+        let value_is_nil = matches!(value, Val::Nil);
         // For shift operations, ensure we're using Map storage
         self.ensure_map();
         if let TableStorage::Map(map) = &mut self.storage {
@@ -218,11 +229,14 @@ impl Table {
                     map.insert(next_key, v);
                 }
             }
-            // Insert the new value at pos
-            map.insert(Val::Num(pos as f64), value);
         }
-        // Update cache: new length is old length + 1
-        self.cached_array_len.set(Some(len + 1));
+        self.insert(Val::Num(pos as f64), value)
+            .expect("array_insert: integer key insert cannot fail");
+        if value_is_nil {
+            self.cached_array_len.set(None);
+        } else {
+            self.cached_array_len.set(Some(len + 1));
+        }
     }
 
     /// Removes and returns the value at the given array position, shifting elements down.
@@ -347,9 +361,9 @@ impl Table {
     pub(super) fn mark_values(&self, heap: &GcHeap, upvalue_pool: &UpvaluePool) {
         match &self.storage {
             TableStorage::Inline { entries, len } => {
-                for i in 0..(*len as usize) {
-                    entries[i].0.mark_reachable(heap, upvalue_pool);
-                    entries[i].1.mark_reachable(heap, upvalue_pool);
+                for (key, value) in entries.iter().take(*len as usize) {
+                    key.mark_reachable(heap, upvalue_pool);
+                    value.mark_reachable(heap, upvalue_pool);
                 }
             }
             TableStorage::Map(map) => {

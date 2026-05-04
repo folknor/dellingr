@@ -14,7 +14,7 @@
 //!
 //! impl HostCallbacks for FleetCallbacks {
 //!     fn on_print(&mut self, source: Option<&str>, line: u32, message: &str) {
-//!         self.output.push(format!("[{}:{}] {}", 
+//!         self.output.push(format!("[{}:{}] {}",
 //!             source.unwrap_or("?"), line, message));
 //!     }
 //! }

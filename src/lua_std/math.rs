@@ -1,9 +1,9 @@
 //! Lua's Math Library
 
-use crate::error::{ArgError, ErrorKind};
 use crate::LuaType;
 use crate::State;
-use rand::Rng;
+use crate::error::{ArgError, ErrorKind};
+use rand::RngExt;
 use std::f64::consts::PI;
 
 pub(crate) fn open_math(state: &mut State) {
@@ -154,7 +154,7 @@ pub(crate) fn open_math(state: &mut State) {
         let result = match num_args {
             0 => {
                 // math.random() - returns [0, 1)
-                state.rng.r#gen::<f64>()
+                state.rng.random::<f64>()
             }
             1 => {
                 // math.random(n) - returns integer in [1, n]
@@ -165,7 +165,7 @@ pub(crate) fn open_math(state: &mut State) {
                     state.push_nil();
                     return Ok(1);
                 }
-                state.rng.gen_range(1..=n) as f64
+                state.rng.random_range(1..=n) as f64
             }
             _ => {
                 // math.random(m, n) - returns integer in [m, n]
@@ -178,7 +178,7 @@ pub(crate) fn open_math(state: &mut State) {
                     state.push_nil();
                     return Ok(1);
                 }
-                state.rng.gen_range(m..=n) as f64
+                state.rng.random_range(m..=n) as f64
             }
         };
 
@@ -309,12 +309,16 @@ pub(crate) fn open_math(state: &mut State) {
     // math.pi (constant)
     state.push_number(PI);
     state.push_string("pi".to_string());
-    state.set_table_raw(-3).unwrap();
+    state
+        .set_table_raw(-3)
+        .expect("math.pi assignment cannot fail");
 
     // math.huge (infinity constant)
     state.push_number(f64::INFINITY);
     state.push_string("huge".to_string());
-    state.set_table_raw(-3).unwrap();
+    state
+        .set_table_raw(-3)
+        .expect("math.huge assignment cannot fail");
 
     // Set the math table as a global
     state.set_global("math");

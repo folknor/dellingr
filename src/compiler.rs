@@ -5,9 +5,9 @@ mod lexer;
 mod parser;
 mod token;
 
-use super::error;
 use super::Instr;
 use super::Result;
+use super::error;
 
 /// Describes where an upvalue comes from when creating a closure.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -43,6 +43,9 @@ pub(super) fn parse_str(source: impl AsRef<str>) -> Result<Chunk> {
     parser::parse_str(source.as_ref())
 }
 
-pub(super) fn parse_str_named(source: impl AsRef<str>, source_name: Option<String>) -> Result<Chunk> {
+pub(super) fn parse_str_named(
+    source: impl AsRef<str>,
+    source_name: Option<String>,
+) -> Result<Chunk> {
     parser::parse_str_named(source.as_ref(), source_name)
 }

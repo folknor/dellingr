@@ -1,9 +1,101 @@
 //! Lua's String Library
 
-use crate::instr::{ArgCount, RetCount};
 use crate::LuaType;
+use crate::Result;
 use crate::State;
+use crate::instr::{ArgCount, RetCount};
 use lua_patterns::LuaPattern;
+
+fn is_plain_lua_pattern(pattern: &str) -> bool {
+    !pattern.bytes().any(|b| {
+        matches!(
+            b,
+            b'^' | b'$' | b'(' | b')' | b'%' | b'.' | b'[' | b']' | b'*' | b'+' | b'-' | b'?'
+        )
+    })
+}
+
+fn gsub_replacement(state: &mut State, repl_type: &LuaType, captures: &[&str]) -> Result<String> {
+    match repl_type {
+        LuaType::String => {
+            let repl = state.to_string(3)?;
+            let mut repl_result = String::new();
+            let mut chars = repl.chars().peekable();
+            while let Some(c) = chars.next() {
+                if c == '%' {
+                    if let Some(&next) = chars.peek() {
+                        if next == '%' {
+                            repl_result.push('%');
+                            chars.next();
+                        } else if next.is_ascii_digit() {
+                            let idx = next.to_digit(10).expect("ASCII digit has a decimal value")
+                                as usize;
+                            chars.next();
+                            if idx == 0 {
+                                repl_result.push_str(captures[0]);
+                            } else if idx < captures.len() {
+                                repl_result.push_str(captures[idx]);
+                            }
+                        } else {
+                            repl_result.push(c);
+                        }
+                    } else {
+                        repl_result.push(c);
+                    }
+                } else {
+                    repl_result.push(c);
+                }
+            }
+            Ok(repl_result)
+        }
+        LuaType::Table => {
+            let key = if captures.len() > 1 {
+                captures[1]
+            } else {
+                captures[0]
+            };
+            state.push_value(3)?;
+            state.push_string(key.to_string());
+            state.get_table(-2)?;
+            let keep_original = state.typ(-1) == LuaType::Nil
+                || (state.typ(-1) == LuaType::Boolean && !state.to_boolean(-1));
+            if keep_original {
+                state.pop(2);
+                Ok(captures[0].to_string())
+            } else {
+                let val = state.to_string(-1)?;
+                state.pop(2);
+                Ok(val)
+            }
+        }
+        LuaType::Function => {
+            state.push_value(3)?;
+            if captures.len() > 1 {
+                for cap in captures.iter().skip(1) {
+                    state.push_string((*cap).to_string());
+                }
+                state.call(
+                    ArgCount::Fixed((captures.len() - 1) as u8),
+                    RetCount::Fixed(1),
+                )?;
+            } else {
+                state.push_string(captures[0].to_string());
+                state.call(ArgCount::Fixed(1), RetCount::Fixed(1))?;
+            }
+            let keep_original = state.typ(-1) == LuaType::Nil
+                || (state.typ(-1) == LuaType::Boolean && !state.to_boolean(-1));
+            if keep_original {
+                state.pop(1);
+                Ok(captures[0].to_string())
+            } else {
+                let val = state.to_string(-1)?;
+                state.pop(1);
+                Ok(val)
+            }
+        }
+        _ => Ok(captures[0].to_string()),
+    }
+}
 
 pub(crate) fn open_string(state: &mut State) {
     // Create the string table
@@ -103,7 +195,7 @@ pub(crate) fn open_string(state: &mut State) {
         if pattern.is_empty() {
             let start = init + 1;
             state.push_number(start as f64);
-            state.push_number(init as f64);  // end is start-1 for empty match
+            state.push_number(init as f64); // end is start-1 for empty match
             return Ok(2);
         }
 
@@ -146,7 +238,11 @@ pub(crate) fn open_string(state: &mut State) {
                             state.push_string(cap.to_string());
                         }
 
-                        let extra_captures = if captures.len() > 1 { captures.len() - 1 } else { 0 };
+                        let extra_captures = if captures.len() > 1 {
+                            captures.len() - 1
+                        } else {
+                            0
+                        };
                         Ok(2 + extra_captures as u8)
                     } else {
                         state.push_nil();
@@ -247,9 +343,10 @@ pub(crate) fn open_string(state: &mut State) {
                             chars.next();
                             if arg_idx <= num_args {
                                 if let Ok(n) = state.to_number(arg_idx as isize)
-                                    && let Some(ch) = char::from_u32(n as u32) {
-                                        result.push(ch);
-                                    }
+                                    && let Some(ch) = char::from_u32(n as u32)
+                                {
+                                    result.push(ch);
+                                }
                                 arg_idx += 1;
                             }
                         }
@@ -258,7 +355,12 @@ pub(crate) fn open_string(state: &mut State) {
                             let mut spec = String::from("%");
                             // Collect the format specifier
                             while let Some(&ch) = chars.peek() {
-                                if ch.is_ascii_digit() || ch == '.' || ch == '-' || ch == '+' || ch == ' ' {
+                                if ch.is_ascii_digit()
+                                    || ch == '.'
+                                    || ch == '-'
+                                    || ch == '+'
+                                    || ch == ' '
+                                {
                                     spec.push(ch);
                                     chars.next();
                                 } else {
@@ -280,15 +382,24 @@ pub(crate) fn open_string(state: &mut State) {
                                         'd' | 'i' => {
                                             if let Ok(n) = state.to_number(arg_idx as isize) {
                                                 // Parse width from spec
-                                                let width_str: String = spec[1..spec.len()-1].chars()
+                                                let width_str: String = spec[1..spec.len() - 1]
+                                                    .chars()
                                                     .filter(char::is_ascii_digit)
                                                     .collect();
                                                 let width: usize = width_str.parse().unwrap_or(0);
                                                 let zero_pad = spec.contains('0');
                                                 if zero_pad && width > 0 {
-                                                    result.push_str(&format!("{:0>width$}", n as i64, width = width));
+                                                    result.push_str(&format!(
+                                                        "{:0>width$}",
+                                                        n as i64,
+                                                        width = width
+                                                    ));
                                                 } else if width > 0 {
-                                                    result.push_str(&format!("{:>width$}", n as i64, width = width));
+                                                    result.push_str(&format!(
+                                                        "{:>width$}",
+                                                        n as i64,
+                                                        width = width
+                                                    ));
                                                 } else {
                                                     result.push_str(&format!("{}", n as i64));
                                                 }
@@ -298,7 +409,9 @@ pub(crate) fn open_string(state: &mut State) {
                                             if let Ok(n) = state.to_number(arg_idx as isize) {
                                                 // Parse precision
                                                 if let Some(dot_pos) = spec.find('.') {
-                                                    let prec_str: String = spec[dot_pos+1..spec.len()-1].chars()
+                                                    let prec_str: String = spec
+                                                        [dot_pos + 1..spec.len() - 1]
+                                                        .chars()
                                                         .take_while(char::is_ascii_digit)
                                                         .collect();
                                                     let prec: usize = prec_str.parse().unwrap_or(6);
@@ -454,9 +567,9 @@ pub(crate) fn open_string(state: &mut State) {
         if pattern.is_empty() {
             // Return a simple iterator that returns empty string once then nil
             state.new_table();
-            state.push_boolean(false);  // done flag
+            state.push_boolean(false); // done flag
             state.push_string("done".to_string());
-            state.set_table_raw(-3).unwrap();
+            state.set_table_raw(-3)?;
 
             state.push_rust_fn(|state| {
                 state.push_string("done".to_string());
@@ -470,7 +583,7 @@ pub(crate) fn open_string(state: &mut State) {
                 // Mark as done
                 state.push_boolean(true);
                 state.push_string("done".to_string());
-                state.set_table_raw(1).unwrap();
+                state.set_table_raw(1)?;
                 state.set_top(0);
                 state.push_string(String::new());
                 Ok(1)
@@ -486,13 +599,13 @@ pub(crate) fn open_string(state: &mut State) {
         state.new_table();
         state.push_string(s);
         state.push_string("s".to_string());
-        state.set_table_raw(-3).unwrap();
+        state.set_table_raw(-3)?;
         state.push_string(pattern);
         state.push_string("p".to_string());
-        state.set_table_raw(-3).unwrap();
+        state.set_table_raw(-3)?;
         state.push_number(0.0);
         state.push_string("pos".to_string());
-        state.set_table_raw(-3).unwrap();
+        state.set_table_raw(-3)?;
 
         // Push the iterator function
         state.push_rust_fn(|state| {
@@ -533,7 +646,7 @@ pub(crate) fn open_string(state: &mut State) {
                         let new_pos = pos + range.end.max(1);
                         state.push_number(new_pos as f64);
                         state.push_string("pos".to_string());
-                        state.set_table_raw(1).unwrap();
+                        state.set_table_raw(1)?;
 
                         state.set_top(0);
 
@@ -565,9 +678,9 @@ pub(crate) fn open_string(state: &mut State) {
         // Stack: [state_table, iterator]
         // Need to return: [iterator, state_table, nil]
         state.push_value(-2)?; // push state_table copy
-        state.remove(-3)?;     // remove original state_table
+        state.remove(-3)?; // remove original state_table
         // Stack: [iterator, state_table]
-        state.push_nil();      // initial control var
+        state.push_nil(); // initial control var
 
         Ok(3) // iterator, state_table, nil
     });
@@ -601,6 +714,43 @@ pub(crate) fn open_string(state: &mut State) {
             return Ok(2);
         }
 
+        if is_plain_lua_pattern(&pattern) {
+            let mut result = String::new();
+            let mut pos = 0usize;
+            let mut count = 0usize;
+
+            while pos < s.len() {
+                if let Some(max) = max_replacements
+                    && count >= max
+                {
+                    break;
+                }
+
+                let search_str = &s[pos..];
+                let Some(match_start) = search_str.find(&pattern) else {
+                    break;
+                };
+
+                let start = pos + match_start;
+                let end = start + pattern.len();
+                result.push_str(&s[pos..start]);
+
+                let captures = [&s[start..end]];
+                let replacement = gsub_replacement(state, &repl_type, &captures)?;
+                result.push_str(&replacement);
+
+                pos = end;
+                count += 1;
+            }
+
+            result.push_str(&s[pos..]);
+
+            state.set_top(0);
+            state.push_string(result);
+            state.push_number(count as f64);
+            return Ok(2);
+        }
+
         match LuaPattern::new_try(&pattern) {
             Ok(mut m) => {
                 let mut result = String::new();
@@ -609,9 +759,10 @@ pub(crate) fn open_string(state: &mut State) {
 
                 while pos < s.len() {
                     if let Some(max) = max_replacements
-                        && count >= max {
-                            break;
-                        }
+                        && count >= max
+                    {
+                        break;
+                    }
 
                     let search_str = &s[pos..];
                     if m.matches(search_str) {
@@ -622,88 +773,7 @@ pub(crate) fn open_string(state: &mut State) {
                         result.push_str(&s[pos..pos + range.start]);
 
                         // Get replacement based on repl type
-                        let replacement = match repl_type {
-                            LuaType::String => {
-                                let repl = state.to_string(3)?;
-                                // Handle %0-%9 substitutions in replacement string
-                                let mut repl_result = String::new();
-                                let mut chars = repl.chars().peekable();
-                                while let Some(c) = chars.next() {
-                                    if c == '%' {
-                                        if let Some(&next) = chars.peek() {
-                                            if next == '%' {
-                                                repl_result.push('%');
-                                                chars.next();
-                                            } else if next.is_ascii_digit() {
-                                                let idx = next.to_digit(10).unwrap() as usize;
-                                                chars.next();
-                                                if idx == 0 {
-                                                    repl_result.push_str(captures[0]);
-                                                } else if idx < captures.len() {
-                                                    repl_result.push_str(captures[idx]);
-                                                }
-                                            } else {
-                                                repl_result.push(c);
-                                            }
-                                        } else {
-                                            repl_result.push(c);
-                                        }
-                                    } else {
-                                        repl_result.push(c);
-                                    }
-                                }
-                                repl_result
-                            }
-                            LuaType::Table => {
-                                // Use first capture (or whole match) as key
-                                let key = if captures.len() > 1 {
-                                    &captures[1]
-                                } else {
-                                    &captures[0]
-                                };
-                                // Look up key in table
-                                state.push_value(3)?; // push table
-                                state.push_string(key.to_string());
-                                state.get_table(-2)?;
-                                // Stack: [..., table, result]
-                                // If result is nil or false, keep the original match
-                                let keep_original = state.typ(-1) == LuaType::Nil
-                                    || (state.typ(-1) == LuaType::Boolean && !state.to_boolean(-1));
-                                if keep_original {
-                                    state.pop(2); // pop result and table
-                                    captures[0].to_string()
-                                } else {
-                                    let val = state.to_string(-1)?;
-                                    state.pop(2); // pop result and table
-                                    val
-                                }
-                            }
-                            LuaType::Function => {
-                                // Call function with captures (or whole match)
-                                state.push_value(3)?; // push function
-                                if captures.len() > 1 {
-                                    for cap in captures.iter().skip(1) {
-                                        state.push_string(cap.to_string());
-                                    }
-                                    state.call(ArgCount::Fixed((captures.len() - 1) as u8), RetCount::Fixed(1))?;
-                                } else {
-                                    state.push_string(captures[0].to_string());
-                                    state.call(ArgCount::Fixed(1), RetCount::Fixed(1))?;
-                                }
-                                // If result is nil or false, keep the original match
-                                let keep_original = state.typ(-1) == LuaType::Nil
-                                    || (state.typ(-1) == LuaType::Boolean && !state.to_boolean(-1));
-                                if keep_original {
-                                    state.pop(1);
-                                    captures[0].to_string()
-                                } else {
-                                    let val = state.to_string(-1)?;
-                                    state.pop(1);
-                                    val
-                                }
-                            }
-                            _ => captures[0].to_string(), // Keep original for other types
-                        };
+                        let replacement = gsub_replacement(state, &repl_type, &captures)?;
 
                         result.push_str(&replacement);
                         pos += range.end.max(1); // Advance at least 1

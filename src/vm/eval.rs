@@ -4,11 +4,14 @@
 //! and managing the call stack.
 
 use std::cmp::Ordering;
+use std::rc::Rc;
 
 use super::frame::Frame;
 use super::lua_val::Val;
 use super::object::{Closure, Upvalue, UpvalueRef};
-use super::{compiler, CallInfo, Chunk, Error, ErrorKind, Result, State, TypeError, MAX_CALL_DEPTH};
+use super::{
+    CallInfo, Chunk, Error, ErrorKind, MAX_CALL_DEPTH, Result, State, TypeError, compiler,
+};
 use crate::instr::{ArgCount, RetCount};
 
 impl State {
@@ -85,13 +88,16 @@ impl State {
             self.eval_closure(closure, actual_num_args)?
         } else {
             // Check for __call metamethod on tables
-            let metatable_ptr = func_val.as_object_ptr()
+            let metatable_ptr = func_val
+                .as_object_ptr()
                 .and_then(|ptr| self.heap.as_table_ref(ptr))
                 .and_then(super::table::Table::get_metatable);
 
             if let Some(mt_ptr) = metatable_ptr {
                 let call_key = self.alloc_string("__call".to_string());
-                let call_handler = self.heap.as_table_ref(mt_ptr)
+                let call_handler = self
+                    .heap
+                    .as_table_ref(mt_ptr)
                     .map_or(Val::Nil, |mt| mt.get(&call_key));
 
                 if !matches!(call_handler, Val::Nil) {
@@ -122,7 +128,11 @@ impl State {
     /// Loads a string as a Lua chunk with an optional source name.
     /// The source name is used in error messages and stack traces.
     /// Use a filename for files, or something like "[fleet:123]" for dynamically loaded code.
-    pub fn load_string_named(&mut self, s: impl AsRef<str>, source_name: Option<String>) -> Result<()> {
+    pub fn load_string_named(
+        &mut self,
+        s: impl AsRef<str>,
+        source_name: Option<String>,
+    ) -> Result<()> {
         self.current_source = source_name.clone();
         let c = compiler::parse_str_named(s, source_name)?;
         self.push_chunk(c);
@@ -199,7 +209,7 @@ impl State {
 
         // Push call info for stack traces
         self.call_stack.push(CallInfo {
-            chunk: closure.chunk.clone(),
+            chunk: Rc::clone(&closure.chunk),
             ip: 0,
         });
 
@@ -358,7 +368,10 @@ impl State {
             if idx < level {
                 break;
             }
-            let (_, uv_ref) = self.open_upvalues.pop().unwrap();
+            let (_, uv_ref) = self
+                .open_upvalues
+                .pop()
+                .expect("open upvalue existed after checking last element");
             let val = self.stack[idx];
             *self.upvalue_pool.get_mut(uv_ref) = Upvalue::Closed(val);
         }

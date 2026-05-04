@@ -24,18 +24,14 @@ fn closure_captured_table_survives_gc() {
     "#,
         )
         .unwrap();
-    state
-        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
-        .unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
 
     // Force GC - the captured table should survive
     state.gc_collect();
 
     // Call the closure - should still work
     state.get_global("test_fn");
-    state
-        .call(ArgCount::Fixed(0), RetCount::Fixed(1))
-        .unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
 
     let result = state.to_number(-1).unwrap();
     assert_eq!(result, 42.0, "Captured table value should survive GC");
@@ -62,18 +58,14 @@ fn closure_survives_multiple_gc_cycles() {
     "#,
         )
         .unwrap();
-    state
-        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
-        .unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
 
     // Call and GC multiple times
     for expected in 1..=5 {
         state.gc_collect();
 
         state.get_global("counter");
-        state
-            .call(ArgCount::Fixed(0), RetCount::Fixed(1))
-            .unwrap();
+        state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
 
         let result = state.to_number(-1).unwrap();
         assert_eq!(
@@ -108,16 +100,12 @@ fn nested_closures_survive_gc() {
     "#,
         )
         .unwrap();
-    state
-        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
-        .unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
 
     state.gc_collect();
 
     state.get_global("nested_fn");
-    state
-        .call(ArgCount::Fixed(0), RetCount::Fixed(1))
-        .unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
 
     let result = state.to_number(-1).unwrap();
     assert_eq!(result, 30.0, "Nested closure should access both upvalues");
@@ -148,9 +136,7 @@ fn metatable_as_upvalue_survives_gc() {
     "#,
         )
         .unwrap();
-    state
-        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
-        .unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
 
     // Force GC - mt should survive because create_object closure references it
     state.gc_collect();
@@ -158,18 +144,12 @@ fn metatable_as_upvalue_survives_gc() {
     // Create an object using the closure
     state.get_global("create_object");
     state.push_number(99.0);
-    state
-        .call(ArgCount::Fixed(1), RetCount::Fixed(1))
-        .unwrap();
+    state.call(ArgCount::Fixed(1), RetCount::Fixed(1)).unwrap();
     state.set_global("obj");
 
     // Access via metatable method
-    state
-        .load_string("return obj:get_value()")
-        .unwrap();
-    state
-        .call(ArgCount::Fixed(0), RetCount::Fixed(1))
-        .unwrap();
+    state.load_string("return obj:get_value()").unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
 
     let result = state.to_number(-1).unwrap();
     assert_eq!(result, 99.0, "Metatable method should work after GC");
@@ -197,9 +177,7 @@ fn unreferenced_closure_is_collected() {
     "#,
         )
         .unwrap();
-    state
-        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
-        .unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
 
     let size_after_create = state.heap_size();
     assert!(
@@ -241,16 +219,12 @@ fn closure_with_mixed_upvalues() {
     "#,
         )
         .unwrap();
-    state
-        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
-        .unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
 
     state.gc_collect();
 
     state.get_global("mixed_fn");
-    state
-        .call(ArgCount::Fixed(0), RetCount::Fixed(4))
-        .unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(4)).unwrap();
 
     assert_eq!(state.to_number(-4).unwrap(), 42.0);
     assert_eq!(state.to_string(-3).unwrap(), "hello");
@@ -284,18 +258,14 @@ fn closure_in_table_survives_gc() {
     "#,
         )
         .unwrap();
-    state
-        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
-        .unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
 
     state.gc_collect();
 
     // Check "answer"
     state.get_global("get");
     state.push_string("answer".to_string());
-    state
-        .call(ArgCount::Fixed(1), RetCount::Fixed(1))
-        .unwrap();
+    state.call(ArgCount::Fixed(1), RetCount::Fixed(1)).unwrap();
     assert_eq!(state.to_number(-1).unwrap(), 42.0);
     state.pop(1);
 
@@ -304,11 +274,9 @@ fn closure_in_table_survives_gc() {
     // Check "pi"
     state.get_global("get");
     state.push_string("pi".to_string());
-    state
-        .call(ArgCount::Fixed(1), RetCount::Fixed(1))
-        .unwrap();
+    state.call(ArgCount::Fixed(1), RetCount::Fixed(1)).unwrap();
     let pi = state.to_number(-1).unwrap();
-    assert!((pi - 3.14159).abs() < 0.0001);
+    assert!((pi - std::f64::consts::PI).abs() < 0.0001);
     state.pop(1);
 }
 
@@ -333,22 +301,22 @@ fn many_closures_shared_upvalue() {
     "#,
         )
         .unwrap();
-    state
-        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
-        .unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
 
     state.gc_collect();
 
     // Call each closure, all should increment the same shared table
     for i in 1..=10 {
         state
-            .load_string(&format!("return closures[{}]()", i))
+            .load_string(format!("return closures[{}]()", i))
             .unwrap();
-        state
-            .call(ArgCount::Fixed(0), RetCount::Fixed(1))
-            .unwrap();
+        state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
         let result = state.to_number(-1).unwrap();
-        assert_eq!(result, i as f64, "Shared upvalue should be incremented to {}", i);
+        assert_eq!(
+            result, i as f64,
+            "Shared upvalue should be incremented to {}",
+            i
+        );
         state.pop(1);
 
         // GC between calls

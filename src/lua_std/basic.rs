@@ -1,8 +1,8 @@
 //! Lua's Standard Library
 
-use crate::error::{ArgError, ErrorKind};
 use crate::LuaType;
 use crate::State;
+use crate::error::{ArgError, ErrorKind};
 
 pub(crate) fn open_base(state: &mut State) {
     let mut add = |name, func| {
@@ -72,7 +72,7 @@ pub(crate) fn open_base(state: &mut State) {
         // Return: next function, table, nil
         state.get_global("next");
         state.push_value(1)?; // table
-        state.push_nil();     // initial key
+        state.push_nil(); // initial key
         // Stack: [table, next, table, nil]
         // We need to return: [next, table, nil]
         state.remove(1)?; // Remove original table
@@ -119,7 +119,7 @@ pub(crate) fn open_base(state: &mut State) {
         let typ = state.typ(1);
         match typ {
             LuaType::Number => {
-                let num = state.to_number(1).unwrap();
+                let num = state.to_number(1)?;
                 state.pop(state.get_top() as isize);
                 state.push_number(num);
                 Ok(1)
@@ -326,7 +326,9 @@ pub(crate) fn open_base(state: &mut State) {
         Ok(1)
     });
     state.push_string("__index".to_string());
-    state.set_table_raw(-3).unwrap();
+    state
+        .set_table_raw(-3)
+        .expect("_G metatable __index assignment cannot fail");
 
     // __newindex: function(t, k, v) globals[k] = v end
     state.push_rust_fn(|state| {
@@ -339,8 +341,12 @@ pub(crate) fn open_base(state: &mut State) {
         Ok(0)
     });
     state.push_string("__newindex".to_string());
-    state.set_table_raw(-3).unwrap();
+    state
+        .set_table_raw(-3)
+        .expect("_G metatable __newindex assignment cannot fail");
 
-    state.set_metatable_of(1).unwrap();
+    state
+        .set_metatable_of(1)
+        .expect("_G metatable installation cannot fail");
     state.set_global("_G");
 }

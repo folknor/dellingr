@@ -3,12 +3,12 @@ use std::rc::Rc;
 
 use super::super::compiler::UpvalueDesc;
 use super::super::error::{Error, ErrorKind, StackFrame, TypeError};
-use super::object::{Upvalue, UpvalueRef};
 use super::Chunk;
 use super::Instr;
 use super::Result;
 use super::State;
 use super::Val;
+use super::object::{Upvalue, UpvalueRef};
 use crate::instr::{ArgCount, RetCount};
 
 /// A `Frame` represents a single stack-frame of a Lua function.
@@ -141,7 +141,7 @@ impl Frame {
         loop {
             let inst = self.get_instr();
             #[cfg(feature = "debug_vm")]
-            println!("{:?}", inst);
+            println!("{inst:?}");
             match inst.opcode() {
                 // === FREE OPERATIONS (cost 0) ===
 
@@ -150,7 +150,10 @@ impl Frame {
                     state.pop_val();
                 }
                 Instr::OP_DUP => {
-                    let val = *state.stack.last().unwrap();
+                    let val = *state
+                        .stack
+                        .last()
+                        .expect("Dup instruction requires a stack value");
                     state.stack.push(val);
                 }
                 Instr::OP_SWAP => {
@@ -252,8 +255,8 @@ impl Frame {
                 // Supports both number and string comparisons
                 Instr::OP_LESS => state.eval_compare(std::cmp::Ordering::Less, false)?,
                 Instr::OP_GREATER => state.eval_compare(std::cmp::Ordering::Greater, false)?,
-                Instr::OP_LESS_EQUAL => state.eval_compare(std::cmp::Ordering::Greater, true)?,  // <= is !>
-                Instr::OP_GREATER_EQUAL => state.eval_compare(std::cmp::Ordering::Less, true)?,  // >= is !<
+                Instr::OP_LESS_EQUAL => state.eval_compare(std::cmp::Ordering::Greater, true)?, // <= is !>
+                Instr::OP_GREATER_EQUAL => state.eval_compare(std::cmp::Ordering::Less, true)?, // >= is !<
 
                 // `for` loops - control flow is free
                 Instr::OP_FOR_LOOP => state.instr_for_loop(self, inst.a(), inst.sbx())?,
@@ -346,9 +349,10 @@ impl Frame {
 
                 // Unknown opcode
                 _ => {
-                    return Err(Error::without_location(ErrorKind::InternalError(
-                        format!("unknown opcode: {}", inst.opcode())
-                    )));
+                    return Err(Error::without_location(ErrorKind::InternalError(format!(
+                        "unknown opcode: {}",
+                        inst.opcode()
+                    ))));
                 }
             }
         }
@@ -402,14 +406,20 @@ impl State {
         let step_val = self.pop_val();
         let end_val = self.pop_val();
         let start_val = self.pop_val();
-        let step = step_val.as_num().ok_or_else(|| self.type_error(TypeError::Arithmetic(step_val.typ_simple())))?;
-        let end = end_val.as_num().ok_or_else(|| self.type_error(TypeError::Arithmetic(end_val.typ_simple())))?;
-        let start = start_val.as_num().ok_or_else(|| self.type_error(TypeError::Arithmetic(start_val.typ_simple())))?;
+        let step = step_val
+            .as_num()
+            .ok_or_else(|| self.type_error(TypeError::Arithmetic(step_val.typ_simple())))?;
+        let end = end_val
+            .as_num()
+            .ok_or_else(|| self.type_error(TypeError::Arithmetic(end_val.typ_simple())))?;
+        let start = start_val
+            .as_num()
+            .ok_or_else(|| self.type_error(TypeError::Arithmetic(start_val.typ_simple())))?;
         if check_numeric_for_condition(start, end, step) {
-            let mut local_slot = local as usize + self.stack_bottom;
-            for &n in &[start, end, step, start] {
+            for (local_slot, n) in
+                (local as usize + self.stack_bottom..).zip([start, end, step, start])
+            {
                 self.stack[local_slot] = Val::Num(n);
-                local_slot += 1;
             }
         } else {
             frame.jump(body_len)?;
@@ -419,9 +429,15 @@ impl State {
 
     fn instr_for_loop(&mut self, frame: &mut Frame, local_slot: u8, offset: i16) -> Result<()> {
         let slot = local_slot as usize + self.stack_bottom;
-        let mut var = self.stack[slot].as_num().ok_or_else(|| self.type_error(TypeError::Arithmetic(self.stack[slot].typ_simple())))?;
-        let limit = self.stack[slot + 1].as_num().ok_or_else(|| self.type_error(TypeError::Arithmetic(self.stack[slot + 1].typ_simple())))?;
-        let step = self.stack[slot + 2].as_num().ok_or_else(|| self.type_error(TypeError::Arithmetic(self.stack[slot + 2].typ_simple())))?;
+        let mut var = self.stack[slot]
+            .as_num()
+            .ok_or_else(|| self.type_error(TypeError::Arithmetic(self.stack[slot].typ_simple())))?;
+        let limit = self.stack[slot + 1].as_num().ok_or_else(|| {
+            self.type_error(TypeError::Arithmetic(self.stack[slot + 1].typ_simple()))
+        })?;
+        let step = self.stack[slot + 2].as_num().ok_or_else(|| {
+            self.type_error(TypeError::Arithmetic(self.stack[slot + 2].typ_simple()))
+        })?;
         var += step;
         if check_numeric_for_condition(var, limit, step) {
             self.stack[slot] = Val::Num(var);
@@ -471,12 +487,7 @@ impl State {
     }
 
     /// TForLoop: If first loop variable is nil, jump. Otherwise update control var.
-    fn instr_tfor_loop(
-        &mut self,
-        frame: &mut Frame,
-        local_slot: u8,
-        offset: i16,
-    ) -> Result<()> {
+    fn instr_tfor_loop(&mut self, frame: &mut Frame, local_slot: u8, offset: i16) -> Result<()> {
         let base = local_slot as usize + self.stack_bottom;
         let first_var = &self.stack[base + 3];
 
@@ -496,7 +507,8 @@ impl State {
         let key = self.get_string_constant(frame, field_id);
 
         // Check what type we have
-        let is_table = val.as_object_ptr()
+        let is_table = val
+            .as_object_ptr()
             .and_then(|ptr| self.heap.as_table_ref(ptr))
             .is_some();
 
@@ -592,8 +604,12 @@ impl State {
     fn instr_get_table(&mut self) -> Result<()> {
         let key = self.pop_val();
         // Table is now on top of the stack
-        let tbl_val = self.stack.last().unwrap();
-        let is_table = tbl_val.as_object_ptr()
+        let tbl_val = self
+            .stack
+            .last()
+            .expect("GetTable instruction requires a table below the key");
+        let is_table = tbl_val
+            .as_object_ptr()
             .and_then(|ptr| self.heap.as_table_ref(ptr))
             .is_some();
         if !is_table {
@@ -659,31 +675,34 @@ impl State {
         // Check for table
         let obj_ptr = val.as_object_ptr();
         if let Some(ptr) = obj_ptr
-            && let Some(tbl) = self.heap.as_table_ref(ptr) {
-                // Get metatable pointer (Copy, so borrow ends here)
-                let mt_ptr = tbl.get_metatable();
-                let len = tbl.array_len();
-                // Borrow of tbl ends here
+            && let Some(tbl) = self.heap.as_table_ref(ptr)
+        {
+            // Get metatable pointer (Copy, so borrow ends here)
+            let mt_ptr = tbl.get_metatable();
+            let len = tbl.array_len();
+            // Borrow of tbl ends here
 
-                // Check for __len metamethod
-                if let Some(mt_ptr) = mt_ptr {
-                    let len_key = self.alloc_string("__len".to_string());
-                    let len_handler = self.heap.as_table_ref(mt_ptr)
-                        .map_or(Val::Nil, |mt| mt.get(&len_key));
+            // Check for __len metamethod
+            if let Some(mt_ptr) = mt_ptr {
+                let len_key = self.alloc_string("__len".to_string());
+                let len_handler = self
+                    .heap
+                    .as_table_ref(mt_ptr)
+                    .map_or(Val::Nil, |mt| mt.get(&len_key));
 
-                    if !matches!(len_handler, Val::Nil) {
-                        // Call __len(table)
-                        self.stack.push(len_handler);
-                        self.stack.push(val);
-                        self.call(ArgCount::Fixed(1), RetCount::Fixed(1))?;
-                        return Ok(());
-                    }
+                if !matches!(len_handler, Val::Nil) {
+                    // Call __len(table)
+                    self.stack.push(len_handler);
+                    self.stack.push(val);
+                    self.call(ArgCount::Fixed(1), RetCount::Fixed(1))?;
+                    return Ok(());
                 }
-
-                // No __len, use default array_len
-                self.stack.push(Val::Num(len as f64));
-                return Ok(());
             }
+
+            // No __len, use default array_len
+            self.stack.push(Val::Num(len as f64));
+            return Ok(());
+        }
 
         Err(self.type_error(TypeError::Length(val.typ_simple())))
     }
@@ -703,7 +722,8 @@ impl State {
         let val = self.pop_val();
         let idx = self.stack.len() - stack_offset as usize - 1;
         let tbl_val = &self.stack[idx];
-        let is_table = tbl_val.as_object_ptr()
+        let is_table = tbl_val
+            .as_object_ptr()
             .and_then(|ptr| self.heap.as_table_ref(ptr))
             .is_some();
         if !is_table {
@@ -737,7 +757,8 @@ impl State {
             // Find the table - it's the first table value scanning from the bottom of current frame
             let mut table_idx = None;
             for i in self.stack_bottom..self.stack.len() {
-                let is_table = self.stack[i].as_object_ptr()
+                let is_table = self.stack[i]
+                    .as_object_ptr()
                     .and_then(|ptr| self.heap.as_table_ref(ptr))
                     .is_some();
                 if is_table {
@@ -790,7 +811,8 @@ impl State {
         let index = self.stack.len() - offset as usize - 2;
         let key = self.stack.remove(index + 1); // Remove the key first (it's after the table)
         let tbl_val = &self.stack[index];
-        let is_table = tbl_val.as_object_ptr()
+        let is_table = tbl_val
+            .as_object_ptr()
             .and_then(|ptr| self.heap.as_table_ref(ptr))
             .is_some();
         if !is_table {
@@ -822,11 +844,15 @@ impl State {
             }
             _ => {
                 // Type mismatch - error
-                return Err(self.error(ErrorKind::TypeError(TypeError::Comparison(v1.typ_simple(), v2.typ_simple()))));
+                return Err(self.error(ErrorKind::TypeError(TypeError::Comparison(
+                    v1.typ_simple(),
+                    v2.typ_simple(),
+                ))));
             }
         };
 
-        self.stack.push(Val::Bool(if negate { !result } else { result }));
+        self.stack
+            .push(Val::Bool(if negate { !result } else { result }));
         Ok(())
     }
 

@@ -1,11 +1,11 @@
 //! More functions on State.
 
-use crate::error::ArgError;
-use crate::error::ErrorKind;
-use crate::lua_std;
 use crate::LuaType;
 use crate::Result;
 use crate::State;
+use crate::error::ArgError;
+use crate::error::ErrorKind;
+use crate::lua_std;
 
 impl State {
     pub fn check_any(&mut self, arg_number: isize) -> Result<()> {

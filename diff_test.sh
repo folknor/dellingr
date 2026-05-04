@@ -7,7 +7,7 @@
 # Build first
 cargo build --release 2>/dev/null
 
-OUR_LUA="./target/release/lua"
+OUR_LUA="./target/release/dellingr"
 LUA52="lua5.2"
 LUA54="lua5.4"
 

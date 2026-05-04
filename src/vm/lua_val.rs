@@ -1,6 +1,6 @@
-use super::object::{Closure, GcHeap, ObjectPtr, StringPtr};
 use super::Result;
 use super::State;
+use super::object::{Closure, GcHeap, ObjectPtr, StringPtr};
 
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -49,21 +49,13 @@ impl Val {
 
     /// Get the StringPtr if this is a string value.
     pub(super) fn as_string_ptr(&self) -> Option<StringPtr> {
-        if let Str(s) = self {
-            Some(*s)
-        } else {
-            None
-        }
+        if let Str(s) = self { Some(*s) } else { None }
     }
 
     /// Get the ObjectPtr if this is an object, without checking what kind.
     /// Use heap.as_table() or heap.as_lua_function() to check the actual type.
     pub(super) fn as_object_ptr(&self) -> Option<ObjectPtr> {
-        if let Obj(o) = self {
-            Some(*o)
-        } else {
-            None
-        }
+        if let Obj(o) = self { Some(*o) } else { None }
     }
 
     pub(super) fn truthy(&self) -> bool {
@@ -155,11 +147,11 @@ impl Hash for Val {
                     bits = 0;
                 }
                 bits.hash(hasher);
-            },
+            }
             RustFn(func) => {
                 let f: *const RustFunc = func;
                 f.hash(hasher);
-            },
+            }
             Str(s) => s.hash(hasher),
         }
     }

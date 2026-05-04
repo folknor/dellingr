@@ -23,7 +23,10 @@ fn gsub_function_error_is_propagated() {
         )
         .unwrap();
     let result = state.call(ArgCount::Fixed(0), RetCount::Fixed(2));
-    assert!(result.is_err(), "gsub should propagate replacement function errors");
+    assert!(
+        result.is_err(),
+        "gsub should propagate replacement function errors"
+    );
 }
 
 #[test]
@@ -43,7 +46,10 @@ fn gsub_function_budget_error_is_propagated() {
         )
         .unwrap();
     let result = state.call(ArgCount::Fixed(0), RetCount::Fixed(2));
-    assert!(result.is_err(), "gsub should propagate budget exceeded errors");
+    assert!(
+        result.is_err(),
+        "gsub should propagate budget exceeded errors"
+    );
     let err = result.unwrap_err();
     assert!(
         matches!(err.kind, ErrorKind::BudgetExceeded { .. }),
@@ -89,11 +95,12 @@ fn gsub_function_nil_keeps_original() {
     "#,
         )
         .unwrap();
-    state
-        .call(ArgCount::Fixed(0), RetCount::Fixed(2))
-        .unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(2)).unwrap();
     let result = state.to_string(-2).unwrap();
-    assert_eq!(result, "hello WORLD", "nil return should keep original match");
+    assert_eq!(
+        result, "hello WORLD",
+        "nil return should keep original match"
+    );
 }
 
 #[test]
@@ -109,9 +116,7 @@ fn gsub_function_false_keeps_original() {
     "#,
         )
         .unwrap();
-    state
-        .call(ArgCount::Fixed(0), RetCount::Fixed(2))
-        .unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(2)).unwrap();
     let result = state.to_string(-2).unwrap();
     assert_eq!(
         result, "hello WORLD",
@@ -131,9 +136,7 @@ fn gsub_table_nil_keeps_original() {
     "#,
         )
         .unwrap();
-    state
-        .call(ArgCount::Fixed(0), RetCount::Fixed(2))
-        .unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(2)).unwrap();
     let result = state.to_string(-2).unwrap();
     assert_eq!(
         result, "hello WORLD",
@@ -152,9 +155,7 @@ fn gsub_table_false_keeps_original() {
     "#,
         )
         .unwrap();
-    state
-        .call(ArgCount::Fixed(0), RetCount::Fixed(2))
-        .unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(2)).unwrap();
     let result = state.to_string(-2).unwrap();
     assert_eq!(
         result, "hello WORLD",
@@ -176,9 +177,7 @@ fn gsub_function_replacement_works() {
     "#,
         )
         .unwrap();
-    state
-        .call(ArgCount::Fixed(0), RetCount::Fixed(2))
-        .unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(2)).unwrap();
     let result = state.to_string(-2).unwrap();
     let count = state.to_number(-1).unwrap();
     assert_eq!(result, "HELLO WORLD");
@@ -196,9 +195,7 @@ fn gsub_table_replacement_works() {
     "#,
         )
         .unwrap();
-    state
-        .call(ArgCount::Fixed(0), RetCount::Fixed(2))
-        .unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(2)).unwrap();
     let result = state.to_string(-2).unwrap();
     let count = state.to_number(-1).unwrap();
     assert_eq!(result, "HI EARTH");
@@ -211,13 +208,62 @@ fn gsub_string_replacement_works() {
     state
         .load_string(r#"return string.gsub("hello world", "world", "earth")"#)
         .unwrap();
-    state
-        .call(ArgCount::Fixed(0), RetCount::Fixed(2))
-        .unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(2)).unwrap();
     let result = state.to_string(-2).unwrap();
     let count = state.to_number(-1).unwrap();
     assert_eq!(result, "hello earth");
     assert_eq!(count, 1.0);
+}
+
+#[test]
+fn gsub_string_replacement_replaces_all_matches() {
+    let mut state = State::new();
+    state
+        .load_string(
+            r#"
+        local result, count = string.gsub("hello", "l", "L")
+        return result, count
+    "#,
+        )
+        .unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(2)).unwrap();
+    let result = state.to_string(-2).unwrap();
+    let count = state.to_number(-1).unwrap();
+    assert_eq!(result, "heLLo");
+    assert_eq!(count, 2.0);
+}
+
+#[test]
+fn gsub_string_replacement_inside_dynamic_argument() {
+    let mut state = State::new();
+    state
+        .load_string_named(
+            r#"
+        local function test(name, condition)
+            if condition then
+                print("[PASS] " .. name)
+            else
+                print("[FAIL] " .. name)
+                error("Test failed: " .. name)
+            end
+        end
+
+        local a1,a2,a3,a4,a5,a6,a7,a8,a9,a10,a11,a12,a13,a14,a15,a16,a17,a18,a19,a20
+
+        test("pattern captures", (function()
+            local a, b = string.match("hello world", "(%a+) (%a+)")
+            return a == "hello" and b == "world"
+        end)())
+
+        test("pattern gsub count", (function()
+            local result, count = string.gsub("hello", "l", "L")
+            return result == "heLLo" and count == 2
+        end)())
+    "#,
+            Some("dynamic-gsub.lua".to_string()),
+        )
+        .unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
 }
 
 #[test]
@@ -232,9 +278,7 @@ fn gsub_with_captures_function() {
     "#,
         )
         .unwrap();
-    state
-        .call(ArgCount::Fixed(0), RetCount::Fixed(2))
-        .unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(2)).unwrap();
     let result = state.to_string(-2).unwrap();
     assert_eq!(result, "20+30=50");
 }

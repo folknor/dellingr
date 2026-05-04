@@ -141,7 +141,7 @@ pub(crate) fn open_table(state: &mut State) {
         // Insert all arguments into the table
         for i in 1..=num_args {
             state.push_value(i as isize)?; // push the argument
-            state.push_number(i as f64);   // push the index
+            state.push_number(i as f64); // push the index
             state.set_table_raw(table_idx)?;
         }
 

@@ -2,7 +2,7 @@ use std::env::args;
 use std::fs;
 use std::process::exit;
 
-use dellingr::{analyze_cost, ArgCount, RetCount, State};
+use dellingr::{ArgCount, RetCount, State, analyze_cost};
 
 fn main() {
     let args: Vec<String> = args().collect();

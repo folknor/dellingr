@@ -8,13 +8,13 @@
 //! Each ObjectPtr contains a generation that is validated on access,
 //! preventing use-after-free bugs.
 
-use std::cell::Cell;
 use indexmap::IndexMap;
+use std::cell::Cell;
 use std::fmt;
 use std::hash::Hash;
 use std::rc::Rc;
 
-use slotmap::{new_key_type, SlotMap};
+use slotmap::{SlotMap, new_key_type};
 
 use super::Chunk;
 use super::LuaType;
@@ -196,14 +196,18 @@ impl GcHeap {
     /// Panics if the key is invalid (use-after-free detection).
     #[inline]
     pub(super) fn get(&self, ptr: ObjectPtr) -> &WrappedObject {
-        self.objects.get(ptr.0).expect("Invalid ObjectPtr: object was freed (use-after-free detected)")
+        self.objects
+            .get(ptr.0)
+            .expect("Invalid ObjectPtr: object was freed (use-after-free detected)")
     }
 
     /// Get a mutable reference to the wrapped object.
     /// Panics if the key is invalid (use-after-free detection).
     #[inline]
     pub(super) fn get_mut(&mut self, ptr: ObjectPtr) -> &mut WrappedObject {
-        self.objects.get_mut(ptr.0).expect("Invalid ObjectPtr: object was freed (use-after-free detected)")
+        self.objects
+            .get_mut(ptr.0)
+            .expect("Invalid ObjectPtr: object was freed (use-after-free detected)")
     }
 
     /// Get the object as a Lua function (closure), if it is one.
@@ -243,7 +247,10 @@ impl GcHeap {
     /// Allocate a new Lua function.
     /// Note: Caller must check is_full() and run GC if needed before calling.
     pub(super) fn alloc_lua_fn(&mut self, chunk: Chunk, upvalues: Vec<UpvalueRef>) -> ObjectPtr {
-        let closure = Closure { chunk: Rc::new(chunk), upvalues };
+        let closure = Closure {
+            chunk: Rc::new(chunk),
+            upvalues,
+        };
         let raw = RawObject::LuaFn(Box::new(closure));
         let wrapped = WrappedObject {
             raw,
@@ -287,11 +294,12 @@ impl GcHeap {
     /// The upvalue_pool is needed to mark closed upvalues referenced by closures.
     pub(super) fn mark(&self, ptr: ObjectPtr, upvalue_pool: &UpvaluePool) {
         if let Some(obj) = self.objects.get(ptr.0)
-            && obj.color.get() == Color::Unmarked {
-                obj.color.set(Color::Reachable);
-                // Recursively mark objects referenced by this object
-                self.mark_children(obj, upvalue_pool);
-            }
+            && obj.color.get() == Color::Unmarked
+        {
+            obj.color.set(Color::Reachable);
+            // Recursively mark objects referenced by this object
+            self.mark_children(obj, upvalue_pool);
+        }
     }
 
     /// Mark a string as reachable.
@@ -326,14 +334,12 @@ impl GcHeap {
         }
 
         // Sweep phase: remove unmarked objects
-        self.objects.retain(|_, obj| {
-            match obj.color.get() {
-                Color::Reachable => {
-                    obj.color.set(Color::Unmarked);
-                    true
-                }
-                Color::Unmarked => false,
+        self.objects.retain(|_, obj| match obj.color.get() {
+            Color::Reachable => {
+                obj.color.set(Color::Unmarked);
+                true
             }
+            Color::Unmarked => false,
         });
 
         // String collection
@@ -461,7 +467,9 @@ impl StringPool {
     /// Get a string's content by its pointer.
     /// Panics if the string was freed (use-after-free detection).
     pub(super) fn get(&self, ptr: StringPtr) -> &str {
-        &self.strings.get(ptr.0)
+        &self
+            .strings
+            .get(ptr.0)
             .expect("Invalid StringPtr: string was freed (use-after-free detected)")
             .data
     }
@@ -497,14 +505,12 @@ impl StringPool {
 
     /// Collect unreachable strings.
     pub(super) fn collect(&mut self) {
-        self.strings.retain(|_, entry| {
-            match entry.color.get() {
-                Color::Reachable => {
-                    entry.color.set(Color::Unmarked);
-                    true
-                }
-                Color::Unmarked => false,
+        self.strings.retain(|_, entry| match entry.color.get() {
+            Color::Reachable => {
+                entry.color.set(Color::Unmarked);
+                true
             }
+            Color::Unmarked => false,
         });
     }
 }

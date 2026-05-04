@@ -6,7 +6,7 @@
 use std::cmp::Ordering;
 
 use super::lua_val::{RustFunc, Val};
-use super::{Error, ErrorKind, Result, State, MAX_STACK_SIZE};
+use super::{Error, ErrorKind, MAX_STACK_SIZE, Result, State};
 
 impl State {
     /// Returns the index of the top element in the stack. Because indices start
@@ -57,7 +57,7 @@ impl State {
     }
 
     /// Pop a value from the stack (internal helper).
-    /// Panics if stack is empty — this indicates a VM bug, not a user error.
+    /// Panics if stack is empty - this indicates a VM bug, not a user error.
     #[inline(always)]
     pub(super) fn pop_val(&mut self) -> Val {
         self.stack.pop().expect("VM bug: pop from empty stack")
@@ -119,7 +119,10 @@ impl State {
     /// value with itself.
     pub fn replace(&mut self, i: isize) -> Result<()> {
         let idx = self.convert_idx(i)?;
-        let val = self.stack.pop().expect("VM bug: pop from empty stack in replace()");
+        let val = self
+            .stack
+            .pop()
+            .expect("VM bug: pop from empty stack in replace()");
         // If idx pointed to the top element (which we just popped), skip the assignment
         // This handles replace(-1) correctly without panicking
         if idx < self.stack.len() {

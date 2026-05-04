@@ -47,12 +47,19 @@
 #![deny(clippy::let_underscore_must_use)]
 #![deny(clippy::unwrap_in_result)]
 #![deny(clippy::ok_expect)]
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
 #![deny(clippy::too_many_arguments)]
 #![deny(clippy::large_enum_variant)]
+#![deny(clippy::clone_on_ref_ptr)]
+#![cfg_attr(not(test), deny(clippy::float_cmp))]
 #![deny(clippy::match_same_arms)]
 #![deny(clippy::redundant_else)]
 #![deny(clippy::unnested_or_patterns)]
 #![deny(clippy::map_unwrap_or)]
+#![deny(clippy::await_holding_lock)]
+#![deny(clippy::await_holding_refcell_ref)]
+#![deny(clippy::dbg_macro)]
+#![deny(clippy::todo)]
 
 mod compiler;
 mod host;
@@ -113,8 +120,12 @@ impl ScopeCost {
             scope.instructions += 1;
             match inst.opcode() {
                 // Arithmetic (cost 1 each)
-                Instr::OP_ADD | Instr::OP_SUBTRACT | Instr::OP_MULTIPLY |
-                Instr::OP_DIVIDE | Instr::OP_POW | Instr::OP_MOD => {
+                Instr::OP_ADD
+                | Instr::OP_SUBTRACT
+                | Instr::OP_MULTIPLY
+                | Instr::OP_DIVIDE
+                | Instr::OP_POW
+                | Instr::OP_MOD => {
                     scope.arithmetic_ops += 1;
                     scope.own_cost += 1;
                 }
@@ -129,8 +140,10 @@ impl ScopeCost {
                     scope.own_cost += 1;
                 }
                 // Table writes (cost 1 each)
-                Instr::OP_INIT_FIELD | Instr::OP_INIT_INDEX |
-                Instr::OP_SET_FIELD | Instr::OP_SET_TABLE => {
+                Instr::OP_INIT_FIELD
+                | Instr::OP_INIT_INDEX
+                | Instr::OP_SET_FIELD
+                | Instr::OP_SET_TABLE => {
                     scope.table_writes += 1;
                     scope.own_cost += 1;
                 }
@@ -180,8 +193,11 @@ impl ScopeCost {
         if self.nested.is_empty() {
             writeln!(f, "{}{}: cost {}", pad, self.name, self.own_cost)?;
         } else {
-            writeln!(f, "{}{}: cost {} (own) / {} (total)",
-                     pad, self.name, self.own_cost, self.total_cost)?;
+            writeln!(
+                f,
+                "{}{}: cost {} (own) / {} (total)",
+                pad, self.name, self.own_cost, self.total_cost
+            )?;
         }
 
         // Breakdown if there's any cost
@@ -272,19 +288,31 @@ impl std::fmt::Display for CostAnalysis {
         writeln!(f)?;
         writeln!(f, "--- Costed Operations ---")?;
         if totals.arithmetic_ops > 0 {
-            writeln!(f, "  Arithmetic (+,-,*,/,%,^): {} ops", totals.arithmetic_ops)?;
+            writeln!(
+                f,
+                "  Arithmetic (+,-,*,/,%,^): {} ops",
+                totals.arithmetic_ops
+            )?;
         }
         if totals.negations > 0 {
             writeln!(f, "  Unary negation (-):       {} ops", totals.negations)?;
         }
         if totals.table_creations > 0 {
-            writeln!(f, "  Table creation {{}}:        {} ops", totals.table_creations)?;
+            writeln!(
+                f,
+                "  Table creation {{}}:        {} ops",
+                totals.table_creations
+            )?;
         }
         if totals.table_writes > 0 {
             writeln!(f, "  Table writes (t[k]=v):    {} ops", totals.table_writes)?;
         }
         if totals.array_elements > 0 {
-            writeln!(f, "  Array elements:           {} elements", totals.array_elements)?;
+            writeln!(
+                f,
+                "  Array elements:           {} elements",
+                totals.array_elements
+            )?;
         }
         writeln!(f)?;
         writeln!(f, "--- Statistics ---")?;

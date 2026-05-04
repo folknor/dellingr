@@ -1,10 +1,10 @@
 //! This module contains functions which can tokenize a string input.
 
+use super::Result;
 use super::error::Error;
 use super::error::SyntaxError;
 use super::token::Token;
 use super::token::TokenType::{self, *};
-use super::Result;
 
 use std::iter::Peekable;
 use std::slice::SliceIndex;
@@ -52,7 +52,10 @@ impl<'a> TokenStream<'a> {
         if self.lookahead.is_none() {
             self.lookahead = Some(self.lexer.next_token()?);
         }
-        Ok(self.lookahead.as_ref().unwrap())
+        Ok(self
+            .lookahead
+            .as_ref()
+            .expect("lexer lookahead is populated before returning"))
     }
 
     /// Returns the type of the next token.
@@ -180,11 +183,9 @@ impl<'a> Lexer<'a> {
                 // Multi-line comment: skip until ]]
                 loop {
                     match self.next_char() {
-                        Some(']') => {
-                            if self.peek_char() == Some(']') {
-                                self.next_char(); // consume second ']'
-                                return self.next_token();
-                            }
+                        Some(']') if self.peek_char() == Some(']') => {
+                            self.next_char(); // consume second ']'
+                            return self.next_token();
                         }
                         None => return Ok(self.end_of_file()),
                         _ => {}
@@ -384,9 +385,10 @@ impl<'a> Lexer<'a> {
         if self.try_next('E') || self.try_next('e') {
             // The exponent might have a sign.
             if let Some(c) = self.peek_char()
-                && (c == '+' || c == '-') {
-                    self.next_char();
-                }
+                && (c == '+' || c == '-')
+            {
+                self.next_char();
+            }
 
             self.lex_digits();
         }
@@ -424,7 +426,11 @@ impl<'a> Lexer<'a> {
             }
         }
         let line_num = self.linebreaks.len() - 1;
-        let column = pos - self.linebreaks.last().unwrap();
+        let column = pos
+            - self
+                .linebreaks
+                .last()
+                .expect("lexer always stores the first line start");
         (line_num + 1, column + 1)
     }
 

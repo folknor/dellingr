@@ -89,4 +89,15 @@ local t18 = {1, 2, 3, 4, 5}
 table.move(t18, 1, 3, 4)  -- copy elements 1-3 to positions 4-6
 print("Test 18 - table.move same: " .. tostring(t18[4] == 1 and t18[5] == 2 and t18[6] == 3))
 
+-- Test 19: assigning nil deletes keys
+local t19 = {a = 1, b = 2}
+t19.a = nil
+local t19_count = 0
+local t19_saw_a = false
+for k, v in pairs(t19) do
+    t19_count = t19_count + 1
+    if k == "a" then t19_saw_a = true end
+end
+print("Test 19 - nil assignment deletes key: " .. tostring(rawget(t19, "a") == nil and t19_count == 1 and not t19_saw_a))
+
 print("All table library tests complete!")

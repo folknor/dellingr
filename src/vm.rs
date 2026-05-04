@@ -17,6 +17,9 @@ use indexmap::IndexMap;
 use rand::SeedableRng;
 use std::rc::Rc;
 
+use super::Chunk;
+use super::Instr;
+use super::Result;
 use super::compiler;
 use super::error::Error;
 use super::error::ErrorKind;
@@ -24,9 +27,6 @@ use super::error::StackFrame;
 use super::error::TypeError;
 use super::host::{DefaultCallbacks, HostCallbacks};
 use super::instr::Builtin;
-use super::Chunk;
-use super::Instr;
-use super::Result;
 
 use lua_val::Val;
 use object::{GcHeap, Markable, UpvaluePool, UpvalueRef};
@@ -299,7 +299,10 @@ impl State {
     }
 
     /// Replace the host callbacks with new ones, returning the old callbacks.
-    pub fn replace_callbacks(&mut self, callbacks: Box<dyn HostCallbacks>) -> Box<dyn HostCallbacks> {
+    pub fn replace_callbacks(
+        &mut self,
+        callbacks: Box<dyn HostCallbacks>,
+    ) -> Box<dyn HostCallbacks> {
         std::mem::replace(&mut self.callbacks, callbacks)
     }
 
@@ -377,12 +380,7 @@ impl State {
         let line = self
             .call_stack
             .last()
-            .and_then(|info| {
-                info.chunk
-                    .line_info
-                    .get(info.ip.saturating_sub(1))
-                    .copied()
-            })
+            .and_then(|info| info.chunk.line_info.get(info.ip.saturating_sub(1)).copied())
             .unwrap_or(0);
 
         let source = self.current_source.as_deref();
@@ -494,7 +492,12 @@ impl State {
         for call_info in self.call_stack.iter().rev().skip(1) {
             // Get line number from the ip (call site)
             let line = if call_info.ip > 0 {
-                call_info.chunk.line_info.get(call_info.ip - 1).copied().unwrap_or(0)
+                call_info
+                    .chunk
+                    .line_info
+                    .get(call_info.ip - 1)
+                    .copied()
+                    .unwrap_or(0)
             } else {
                 call_info.chunk.line_info.first().copied().unwrap_or(0)
             };
@@ -517,11 +520,11 @@ impl Default for State {
 
 #[cfg(test)]
 mod tests {
-    use super::compiler::parse_str;
-    use super::lua_val::Val;
-    use super::State;
     use super::Chunk;
     use super::Instr;
+    use super::State;
+    use super::compiler::parse_str;
+    use super::lua_val::Val;
     use crate::instr::RetCount;
 
     #[test]
@@ -555,7 +558,13 @@ mod tests {
     fn vm_test04() {
         let mut state = State::new();
         let input = Chunk {
-            code: vec![Instr::push_num(0), Instr::push_num(0), Instr::equal(), Instr::set_global(0), Instr::ret(RetCount::Fixed(0))],
+            code: vec![
+                Instr::push_num(0),
+                Instr::push_num(0),
+                Instr::equal(),
+                Instr::set_global(0),
+                Instr::ret(RetCount::Fixed(0)),
+            ],
             number_literals: vec![2.5],
             string_literals: vec!["a".to_string()],
             ..Chunk::default()
@@ -720,7 +729,7 @@ mod tests {
             for i = 1, 3 do
                 a = a + i
             end";
-        let chunk = parse_str(&text).unwrap();
+        let chunk = parse_str(text).unwrap();
         let mut state = State::new();
         state.eval_chunk(chunk, 0).unwrap();
         let a = state.globals.get("a").unwrap().as_num().unwrap();

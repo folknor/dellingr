@@ -173,7 +173,7 @@ impl Builtin {
     pub const fn from_u8(n: u8) -> Option<Self> {
         if n < Self::COUNT as u8 {
             // SAFETY: n is in range and repr(u8) ensures valid transmute
-            Some(unsafe { std::mem::transmute(n) })
+            Some(unsafe { std::mem::transmute::<u8, Self>(n) })
         } else {
             None
         }
@@ -332,70 +332,176 @@ impl Instr {
 // Convenient constructors for each instruction type
 impl Instr {
     // No operands
-    pub(crate) const fn pop() -> Self { Self::op(Self::OP_POP) }
-    pub(crate) const fn dup() -> Self { Self::op(Self::OP_DUP) }
-    pub(crate) const fn swap() -> Self { Self::op(Self::OP_SWAP) }
-    pub(crate) const fn new_table() -> Self { Self::op(Self::OP_NEW_TABLE) }
-    pub(crate) const fn get_table() -> Self { Self::op(Self::OP_GET_TABLE) }
-    pub(crate) const fn add() -> Self { Self::op(Self::OP_ADD) }
-    pub(crate) const fn subtract() -> Self { Self::op(Self::OP_SUBTRACT) }
-    pub(crate) const fn multiply() -> Self { Self::op(Self::OP_MULTIPLY) }
-    pub(crate) const fn divide() -> Self { Self::op(Self::OP_DIVIDE) }
-    pub(crate) const fn pow() -> Self { Self::op(Self::OP_POW) }
-    pub(crate) const fn modulo() -> Self { Self::op(Self::OP_MOD) }
-    pub(crate) const fn concat() -> Self { Self::op(Self::OP_CONCAT) }
-    pub(crate) const fn less() -> Self { Self::op(Self::OP_LESS) }
-    pub(crate) const fn less_equal() -> Self { Self::op(Self::OP_LESS_EQUAL) }
-    pub(crate) const fn greater() -> Self { Self::op(Self::OP_GREATER) }
-    pub(crate) const fn greater_equal() -> Self { Self::op(Self::OP_GREATER_EQUAL) }
-    pub(crate) const fn equal() -> Self { Self::op(Self::OP_EQUAL) }
-    pub(crate) const fn not_equal() -> Self { Self::op(Self::OP_NOT_EQUAL) }
-    pub(crate) const fn not() -> Self { Self::op(Self::OP_NOT) }
-    pub(crate) const fn length() -> Self { Self::op(Self::OP_LENGTH) }
-    pub(crate) const fn negate() -> Self { Self::op(Self::OP_NEGATE) }
-    pub(crate) const fn mark_call_base(adjustment: u8) -> Self { Self::op_a(Self::OP_MARK_CALL_BASE, adjustment) }
-    pub(crate) const fn push_nil() -> Self { Self::op(Self::OP_PUSH_NIL) }
+    pub(crate) const fn pop() -> Self {
+        Self::op(Self::OP_POP)
+    }
+    pub(crate) const fn dup() -> Self {
+        Self::op(Self::OP_DUP)
+    }
+    pub(crate) const fn swap() -> Self {
+        Self::op(Self::OP_SWAP)
+    }
+    pub(crate) const fn new_table() -> Self {
+        Self::op(Self::OP_NEW_TABLE)
+    }
+    pub(crate) const fn get_table() -> Self {
+        Self::op(Self::OP_GET_TABLE)
+    }
+    pub(crate) const fn add() -> Self {
+        Self::op(Self::OP_ADD)
+    }
+    pub(crate) const fn subtract() -> Self {
+        Self::op(Self::OP_SUBTRACT)
+    }
+    pub(crate) const fn multiply() -> Self {
+        Self::op(Self::OP_MULTIPLY)
+    }
+    pub(crate) const fn divide() -> Self {
+        Self::op(Self::OP_DIVIDE)
+    }
+    pub(crate) const fn pow() -> Self {
+        Self::op(Self::OP_POW)
+    }
+    pub(crate) const fn modulo() -> Self {
+        Self::op(Self::OP_MOD)
+    }
+    pub(crate) const fn concat() -> Self {
+        Self::op(Self::OP_CONCAT)
+    }
+    pub(crate) const fn less() -> Self {
+        Self::op(Self::OP_LESS)
+    }
+    pub(crate) const fn less_equal() -> Self {
+        Self::op(Self::OP_LESS_EQUAL)
+    }
+    pub(crate) const fn greater() -> Self {
+        Self::op(Self::OP_GREATER)
+    }
+    pub(crate) const fn greater_equal() -> Self {
+        Self::op(Self::OP_GREATER_EQUAL)
+    }
+    pub(crate) const fn equal() -> Self {
+        Self::op(Self::OP_EQUAL)
+    }
+    pub(crate) const fn not_equal() -> Self {
+        Self::op(Self::OP_NOT_EQUAL)
+    }
+    pub(crate) const fn not() -> Self {
+        Self::op(Self::OP_NOT)
+    }
+    pub(crate) const fn length() -> Self {
+        Self::op(Self::OP_LENGTH)
+    }
+    pub(crate) const fn negate() -> Self {
+        Self::op(Self::OP_NEGATE)
+    }
+    pub(crate) const fn mark_call_base(adjustment: u8) -> Self {
+        Self::op_a(Self::OP_MARK_CALL_BASE, adjustment)
+    }
+    pub(crate) const fn push_nil() -> Self {
+        Self::op(Self::OP_PUSH_NIL)
+    }
 
     // One u8 operand
-    pub(crate) const fn get_global(idx: u8) -> Self { Self::op_a(Self::OP_GET_GLOBAL, idx) }
-    pub(crate) const fn set_global(idx: u8) -> Self { Self::op_a(Self::OP_SET_GLOBAL, idx) }
-    pub(crate) const fn get_local(slot: u8) -> Self { Self::op_a(Self::OP_GET_LOCAL, slot) }
-    pub(crate) const fn set_local(slot: u8) -> Self { Self::op_a(Self::OP_SET_LOCAL, slot) }
-    pub(crate) const fn get_upvalue(idx: u8) -> Self { Self::op_a(Self::OP_GET_UPVALUE, idx) }
-    pub(crate) const fn set_upvalue(idx: u8) -> Self { Self::op_a(Self::OP_SET_UPVALUE, idx) }
-    pub(crate) const fn get_field(idx: u8) -> Self { Self::op_a(Self::OP_GET_FIELD, idx) }
-    pub(crate) const fn init_index(offset: u8) -> Self { Self::op_a(Self::OP_INIT_INDEX, offset) }
-    pub(crate) const fn push_num(idx: u8) -> Self { Self::op_a(Self::OP_PUSH_NUM, idx) }
-    pub(crate) const fn push_string(idx: u8) -> Self { Self::op_a(Self::OP_PUSH_STRING, idx) }
-    pub(crate) const fn tfor_prep(slot: u8) -> Self { Self::op_a(Self::OP_TFOR_PREP, slot) }
-    pub(crate) const fn ret(n: RetCount) -> Self { Self::op_a(Self::OP_RETURN, n.to_u8()) }
-    pub(crate) const fn close_upvalues(level: u8) -> Self { Self::op_a(Self::OP_CLOSE_UPVALUES, level) }
-    pub(crate) const fn closure(idx: u8) -> Self { Self::op_a(Self::OP_CLOSURE, idx) }
-    pub(crate) const fn vararg(n: u8) -> Self { Self::op_a(Self::OP_VARARG, n) }
-    pub(crate) const fn set_list(count: u8) -> Self { Self::op_a(Self::OP_SET_LIST, count) }
-    pub(crate) const fn set_table(offset: u8) -> Self { Self::op_a(Self::OP_SET_TABLE, offset) }
-    pub(crate) const fn push_bool(b: bool) -> Self { Self::op_a(Self::OP_PUSH_BOOL, b as u8) }
-    pub(crate) const fn get_builtin(slot: Builtin) -> Self { Self::op_a(Self::OP_GET_BUILTIN, slot.to_u8()) }
-    pub(crate) const fn set_builtin(slot: Builtin) -> Self { Self::op_a(Self::OP_SET_BUILTIN, slot.to_u8()) }
+    pub(crate) const fn get_global(idx: u8) -> Self {
+        Self::op_a(Self::OP_GET_GLOBAL, idx)
+    }
+    pub(crate) const fn set_global(idx: u8) -> Self {
+        Self::op_a(Self::OP_SET_GLOBAL, idx)
+    }
+    pub(crate) const fn get_local(slot: u8) -> Self {
+        Self::op_a(Self::OP_GET_LOCAL, slot)
+    }
+    pub(crate) const fn set_local(slot: u8) -> Self {
+        Self::op_a(Self::OP_SET_LOCAL, slot)
+    }
+    pub(crate) const fn get_upvalue(idx: u8) -> Self {
+        Self::op_a(Self::OP_GET_UPVALUE, idx)
+    }
+    pub(crate) const fn set_upvalue(idx: u8) -> Self {
+        Self::op_a(Self::OP_SET_UPVALUE, idx)
+    }
+    pub(crate) const fn get_field(idx: u8) -> Self {
+        Self::op_a(Self::OP_GET_FIELD, idx)
+    }
+    pub(crate) const fn init_index(offset: u8) -> Self {
+        Self::op_a(Self::OP_INIT_INDEX, offset)
+    }
+    pub(crate) const fn push_num(idx: u8) -> Self {
+        Self::op_a(Self::OP_PUSH_NUM, idx)
+    }
+    pub(crate) const fn push_string(idx: u8) -> Self {
+        Self::op_a(Self::OP_PUSH_STRING, idx)
+    }
+    pub(crate) const fn tfor_prep(slot: u8) -> Self {
+        Self::op_a(Self::OP_TFOR_PREP, slot)
+    }
+    pub(crate) const fn ret(n: RetCount) -> Self {
+        Self::op_a(Self::OP_RETURN, n.to_u8())
+    }
+    pub(crate) const fn close_upvalues(level: u8) -> Self {
+        Self::op_a(Self::OP_CLOSE_UPVALUES, level)
+    }
+    pub(crate) const fn closure(idx: u8) -> Self {
+        Self::op_a(Self::OP_CLOSURE, idx)
+    }
+    pub(crate) const fn vararg(n: u8) -> Self {
+        Self::op_a(Self::OP_VARARG, n)
+    }
+    pub(crate) const fn set_list(count: u8) -> Self {
+        Self::op_a(Self::OP_SET_LIST, count)
+    }
+    pub(crate) const fn set_table(offset: u8) -> Self {
+        Self::op_a(Self::OP_SET_TABLE, offset)
+    }
+    pub(crate) const fn push_bool(b: bool) -> Self {
+        Self::op_a(Self::OP_PUSH_BOOL, b as u8)
+    }
+    pub(crate) const fn get_builtin(slot: Builtin) -> Self {
+        Self::op_a(Self::OP_GET_BUILTIN, slot.to_u8())
+    }
+    pub(crate) const fn set_builtin(slot: Builtin) -> Self {
+        Self::op_a(Self::OP_SET_BUILTIN, slot.to_u8())
+    }
 
     // Two u8 operands
-    pub(crate) const fn set_field(offset: u8, idx: u8) -> Self { Self::op_ab(Self::OP_SET_FIELD, offset, idx) }
-    pub(crate) const fn init_field(offset: u8, idx: u8) -> Self { Self::op_ab(Self::OP_INIT_FIELD, offset, idx) }
-    pub(crate) const fn tfor_call(slot: u8, num_vars: u8) -> Self { Self::op_ab(Self::OP_TFOR_CALL, slot, num_vars) }
+    pub(crate) const fn set_field(offset: u8, idx: u8) -> Self {
+        Self::op_ab(Self::OP_SET_FIELD, offset, idx)
+    }
+    pub(crate) const fn init_field(offset: u8, idx: u8) -> Self {
+        Self::op_ab(Self::OP_INIT_FIELD, offset, idx)
+    }
+    pub(crate) const fn tfor_call(slot: u8, num_vars: u8) -> Self {
+        Self::op_ab(Self::OP_TFOR_CALL, slot, num_vars)
+    }
     pub(crate) const fn call(num_args: ArgCount, num_rets: RetCount) -> Self {
         Self::op_ab(Self::OP_CALL, num_args.to_u8(), num_rets.to_u8())
     }
 
     // Jump instructions (signed 16-bit offset)
-    pub(crate) const fn jump(offset: i16) -> Self { Self::op_sbx(Self::OP_JUMP, offset) }
-    pub(crate) const fn branch_false(offset: i16) -> Self { Self::op_sbx(Self::OP_BRANCH_FALSE, offset) }
-    pub(crate) const fn branch_true_keep(offset: i16) -> Self { Self::op_sbx(Self::OP_BRANCH_TRUE_KEEP, offset) }
-    pub(crate) const fn branch_false_keep(offset: i16) -> Self { Self::op_sbx(Self::OP_BRANCH_FALSE_KEEP, offset) }
+    pub(crate) const fn jump(offset: i16) -> Self {
+        Self::op_sbx(Self::OP_JUMP, offset)
+    }
+    pub(crate) const fn branch_false(offset: i16) -> Self {
+        Self::op_sbx(Self::OP_BRANCH_FALSE, offset)
+    }
+    pub(crate) const fn branch_true_keep(offset: i16) -> Self {
+        Self::op_sbx(Self::OP_BRANCH_TRUE_KEEP, offset)
+    }
+    pub(crate) const fn branch_false_keep(offset: i16) -> Self {
+        Self::op_sbx(Self::OP_BRANCH_FALSE_KEEP, offset)
+    }
 
     // u8 + signed 16-bit offset
-    pub(crate) const fn for_prep(slot: u8, offset: i16) -> Self { Self::op_a_sbx(Self::OP_FOR_PREP, slot, offset) }
-    pub(crate) const fn for_loop(slot: u8, offset: i16) -> Self { Self::op_a_sbx(Self::OP_FOR_LOOP, slot, offset) }
-    pub(crate) const fn tfor_loop(slot: u8, offset: i16) -> Self { Self::op_a_sbx(Self::OP_TFOR_LOOP, slot, offset) }
+    pub(crate) const fn for_prep(slot: u8, offset: i16) -> Self {
+        Self::op_a_sbx(Self::OP_FOR_PREP, slot, offset)
+    }
+    pub(crate) const fn for_loop(slot: u8, offset: i16) -> Self {
+        Self::op_a_sbx(Self::OP_FOR_LOOP, slot, offset)
+    }
+    pub(crate) const fn tfor_loop(slot: u8, offset: i16) -> Self {
+        Self::op_a_sbx(Self::OP_TFOR_LOOP, slot, offset)
+    }
 }
 
 impl std::fmt::Debug for Instr {
@@ -447,7 +553,12 @@ impl std::fmt::Debug for Instr {
             Self::OP_SET_FIELD => write!(f, "SetField({}, {})", self.a(), self.b()),
             Self::OP_INIT_FIELD => write!(f, "InitField({}, {})", self.a(), self.b()),
             Self::OP_TFOR_CALL => write!(f, "TForCall({}, {})", self.a(), self.b()),
-            Self::OP_CALL => write!(f, "Call({:?}, {:?})", ArgCount::from_u8(self.a()), RetCount::from_u8(self.b())),
+            Self::OP_CALL => write!(
+                f,
+                "Call({:?}, {:?})",
+                ArgCount::from_u8(self.a()),
+                RetCount::from_u8(self.b())
+            ),
             Self::OP_JUMP => write!(f, "Jump({})", self.sbx()),
             Self::OP_BRANCH_FALSE => write!(f, "BranchFalse({})", self.sbx()),
             Self::OP_BRANCH_TRUE_KEEP => write!(f, "BranchTrueKeep({})", self.sbx()),

@@ -41,17 +41,31 @@ pub enum ErrorKind {
     ArgError(ArgError),
     SyntaxError(SyntaxError),
     /// Script exceeded its cost budget
-    BudgetExceeded { used: u64, budget: i64 },
+    BudgetExceeded {
+        used: u64,
+        budget: i64,
+    },
     /// Metamethod chain (__index/__newindex) exceeded maximum depth
-    MetamethodDepthExceeded { depth: u32 },
+    MetamethodDepthExceeded {
+        depth: u32,
+    },
     /// Invalid jump target (compiler bug or corrupt bytecode)
-    InvalidJump { ip: usize, offset: isize },
+    InvalidJump {
+        ip: usize,
+        offset: isize,
+    },
     /// Call stack depth exceeded (too much recursion)
-    CallDepthExceeded { depth: u32 },
+    CallDepthExceeded {
+        depth: u32,
+    },
     /// Stack size exceeded (too many values on stack)
-    StackOverflow { size: usize },
+    StackOverflow {
+        size: usize,
+    },
     /// Invalid stack index
-    InvalidStackIndex { index: isize },
+    InvalidStackIndex {
+        index: isize,
+    },
     /// Internal error (corrupt bytecode or VM bug)
     InternalError(String),
 }
@@ -173,13 +187,19 @@ impl fmt::Display for ErrorKind {
             SyntaxError(e) => e.fmt(f),
             TypeError(e) => e.fmt(f),
             BudgetExceeded { used, budget } => {
-                write!(f, "budget exceeded: used {used} cost with budget of {budget}")
+                write!(
+                    f,
+                    "budget exceeded: used {used} cost with budget of {budget}"
+                )
             }
             MetamethodDepthExceeded { depth } => {
                 write!(f, "metamethod chain too deep (depth {depth})")
             }
             InvalidJump { ip, offset } => {
-                write!(f, "internal error: invalid jump (instruction {ip}, offset {offset})")
+                write!(
+                    f,
+                    "internal error: invalid jump (instruction {ip}, offset {offset})"
+                )
             }
             CallDepthExceeded { depth } => {
                 write!(f, "call stack overflow (depth {depth})")

@@ -1,7 +1,7 @@
 disallowed-methods = [
     { path = "core::result::Result::ok", reason = "Silently discards errors. Use `?` to propagate, or handle the error explicitly." },
-    { path = "rand::rng", reason = "Unseeded RNG breaks determinism. Use State.rng (seeded StdRng) instead." },
-    { path = "rand::thread_rng", reason = "Unseeded RNG breaks determinism. Use State.rng (seeded StdRng) instead." },
+    { path = "rand::rng", reason = "Unseeded RNG breaks determinism. Use State.rng (seeded StdRng) instead.", allow-invalid = true },
+    { path = "rand::thread_rng", reason = "Unseeded RNG breaks determinism. Use State.rng (seeded StdRng) instead.", allow-invalid = true },
 ]
 
 # Determinism: ban non-deterministic collections

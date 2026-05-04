@@ -135,19 +135,16 @@ impl State {
         let idx = self.convert_idx(table_idx)?;
         let typ = self.stack[idx].typ_simple();
 
-        let mt = match &mt_val {
+        let mt = match mt_val {
             Val::Nil => None,
-            Val::Obj(ptr) => {
-                if self.heap.as_table_ref(*ptr).is_some() {
-                    Some(*ptr)
-                } else {
-                    return Err(self.type_error(TypeError::TableIndex(mt_val.typ_simple())));
-                }
-            }
-            _ => return Err(self.type_error(TypeError::TableIndex(mt_val.typ_simple()))),
+            Val::Obj(ptr) if self.heap.as_table_ref(ptr).is_some() => Some(ptr),
+            other => return Err(self.type_error(TypeError::TableIndex(other.typ_simple()))),
         };
 
-        match self.stack[idx].as_object_ptr().and_then(|ptr| self.heap.as_table(ptr)) {
+        match self.stack[idx]
+            .as_object_ptr()
+            .and_then(|ptr| self.heap.as_table(ptr))
+        {
             Some(t) => {
                 t.set_metatable(mt);
                 Ok(())
@@ -162,8 +159,10 @@ impl State {
     pub fn table_insert_at(&mut self, table_idx: isize) -> Result<()> {
         let value = self.pop_val();
         let pos_val = self.pop_val();
-        let pos = pos_val.as_num()
-            .ok_or_else(|| self.type_error(TypeError::Arithmetic(pos_val.typ_simple())))? as usize;
+        let pos = pos_val
+            .as_num()
+            .ok_or_else(|| self.type_error(TypeError::Arithmetic(pos_val.typ_simple())))?
+            as usize;
         let idx = self.convert_idx(table_idx)?;
         let obj_ptr = self.stack[idx].as_object_ptr();
         let typ = self.stack[idx].typ_simple();
@@ -245,7 +244,9 @@ impl State {
             let heap = &self.heap;
             arr.sort_by(|a, b| {
                 match (a.as_num(), b.as_num()) {
-                    (Some(na), Some(nb)) => na.partial_cmp(&nb).unwrap_or(std::cmp::Ordering::Equal),
+                    (Some(na), Some(nb)) => {
+                        na.partial_cmp(&nb).unwrap_or(std::cmp::Ordering::Equal)
+                    }
                     (Some(_), None) => std::cmp::Ordering::Less,
                     (None, Some(_)) => std::cmp::Ordering::Greater,
                     (None, None) => {
