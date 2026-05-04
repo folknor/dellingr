@@ -12,7 +12,7 @@ fn run_number(code: &str) -> f64 {
     state.load_string(code).unwrap();
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(1))
-        .unwrap_or_else(|e| panic!("Error running: {}\n{}", code, e));
+        .unwrap_or_else(|e| panic!("Error running: {code}\n{e}"));
     state.to_number(-1).unwrap()
 }
 
@@ -21,7 +21,7 @@ fn expect_error(code: &str) -> dellingr::error::Error {
     let mut state = State::new();
     state.load_string(code).unwrap();
     let result = state.call(ArgCount::Fixed(0), RetCount::Fixed(0));
-    result.expect_err(&format!("Expected error from: {}", code))
+    result.expect_err(&format!("Expected error from: {code}"))
 }
 
 // -- Numeric for-loop tests --
@@ -119,11 +119,10 @@ fn ipairs_stops_at_nil() {
 #[test]
 fn error_function_produces_error() {
     let err = expect_error("error('user error message')");
-    let msg = format!("{}", err);
+    let msg = format!("{err}");
     assert!(
         msg.contains("user error message"),
-        "Error should contain user message, got: {}",
-        msg
+        "Error should contain user message, got: {msg}"
     );
 }
 
@@ -132,8 +131,7 @@ fn type_error_on_arithmetic() {
     let err = expect_error("local x = 'hello' + 1");
     assert!(
         matches!(err.kind, ErrorKind::TypeError(_)),
-        "Expected TypeError, got: {}",
-        err
+        "Expected TypeError, got: {err}"
     );
 }
 
@@ -142,8 +140,7 @@ fn type_error_on_call() {
     let err = expect_error("local x = 5\nx()");
     assert!(
         matches!(err.kind, ErrorKind::TypeError(_)),
-        "Expected TypeError, got: {}",
-        err
+        "Expected TypeError, got: {err}"
     );
 }
 
@@ -152,8 +149,7 @@ fn type_error_on_index() {
     let err = expect_error("local x = 5\nlocal y = x.foo");
     assert!(
         matches!(err.kind, ErrorKind::TypeError(_)),
-        "Expected TypeError, got: {}",
-        err
+        "Expected TypeError, got: {err}"
     );
 }
 
@@ -162,8 +158,7 @@ fn type_error_on_table_key_nil() {
     let err = expect_error("local t = {}\nt[nil] = 1");
     assert!(
         matches!(err.kind, ErrorKind::TypeError(_)),
-        "Expected TypeError, got: {}",
-        err
+        "Expected TypeError, got: {err}"
     );
 }
 
@@ -185,8 +180,7 @@ fn budget_exceeded_error() {
     let err = result.expect_err("Expected budget error");
     assert!(
         matches!(err.kind, ErrorKind::BudgetExceeded { .. }),
-        "Expected BudgetExceeded, got: {}",
-        err
+        "Expected BudgetExceeded, got: {err}"
     );
 }
 
@@ -202,8 +196,7 @@ fn call_depth_exceeded_error() {
     );
     assert!(
         matches!(err.kind, ErrorKind::CallDepthExceeded { .. }),
-        "Expected CallDepthExceeded, got: {}",
-        err
+        "Expected CallDepthExceeded, got: {err}"
     );
 }
 
@@ -326,18 +319,17 @@ fn expect_load_or_run_error(code: &str) -> dellingr::error::Error {
         return e;
     }
     let result = state.call(ArgCount::Fixed(0), RetCount::Fixed(0));
-    result.expect_err(&format!("Expected error from: {}", code))
+    result.expect_err(&format!("Expected error from: {code}"))
 }
 
 #[test]
 fn error_msg_unexpected_token_includes_context() {
     // Using 'end' where an expression is expected
     let err = expect_load_or_run_error("local x = end");
-    let msg = format!("{}", err);
+    let msg = format!("{err}");
     assert!(
         msg.contains("expected") || msg.contains("near"),
-        "Error should describe what was expected, got: {}",
-        msg
+        "Error should describe what was expected, got: {msg}"
     );
 }
 
@@ -345,67 +337,61 @@ fn error_msg_unexpected_token_includes_context() {
 fn error_msg_vararg_outside_vararg_function() {
     // '...' inside a non-vararg function should error
     let err = expect_load_or_run_error("local function f() return ... end");
-    let msg = format!("{}", err);
+    let msg = format!("{err}");
     assert!(
         msg.contains("vararg"),
-        "Error should mention vararg, got: {}",
-        msg
+        "Error should mention vararg, got: {msg}"
     );
 }
 
 #[test]
 fn error_msg_vararg_in_table_outside_vararg_function() {
     let err = expect_load_or_run_error("local function f() return {...} end");
-    let msg = format!("{}", err);
+    let msg = format!("{err}");
     assert!(
         msg.contains("vararg"),
-        "Error should mention vararg, got: {}",
-        msg
+        "Error should mention vararg, got: {msg}"
     );
 }
 
 #[test]
 fn error_msg_missing_end_keyword() {
     let err = expect_load_or_run_error("if true then local x = 1");
-    let msg = format!("{}", err);
+    let msg = format!("{err}");
     // Should get unexpected EOF (missing 'end')
     assert!(
         msg.contains("<eof>") || msg.contains("expected"),
-        "Error should mention <eof> or expected, got: {}",
-        msg
+        "Error should mention <eof> or expected, got: {msg}"
     );
 }
 
 #[test]
 fn error_msg_type_error_arithmetic() {
     let err = expect_error("local x = 'hello' + 1");
-    let msg = format!("{}", err);
+    let msg = format!("{err}");
     assert!(
         msg.contains("arithmetic") && msg.contains("string"),
-        "Arithmetic type error should mention 'arithmetic' and 'string', got: {}",
-        msg
+        "Arithmetic type error should mention 'arithmetic' and 'string', got: {msg}"
     );
 }
 
 #[test]
 fn error_msg_type_error_call() {
     let err = expect_error("local x = 5\nx()");
-    let msg = format!("{}", err);
+    let msg = format!("{err}");
     assert!(
         msg.contains("call") && msg.contains("number"),
-        "Call type error should mention 'call' and 'number', got: {}",
-        msg
+        "Call type error should mention 'call' and 'number', got: {msg}"
     );
 }
 
 #[test]
 fn error_msg_type_error_index() {
     let err = expect_error("local x = 5\nlocal y = x.foo");
-    let msg = format!("{}", err);
+    let msg = format!("{err}");
     assert!(
         msg.contains("index") && msg.contains("number"),
-        "Index type error should mention 'index' and 'number', got: {}",
-        msg
+        "Index type error should mention 'index' and 'number', got: {msg}"
     );
 }
 
@@ -419,21 +405,19 @@ fn error_msg_budget_exceeded_shows_amounts() {
     let err = state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect_err("Expected budget error");
-    let msg = format!("{}", err);
+    let msg = format!("{err}");
     assert!(
         msg.contains("budget") && msg.contains("10"),
-        "Budget error should show budget amount, got: {}",
-        msg
+        "Budget error should show budget amount, got: {msg}"
     );
 }
 
 #[test]
 fn error_msg_call_depth_shows_overflow() {
     let err = expect_error("local function r(n) return r(n+1) end\nr(0)");
-    let msg = format!("{}", err);
+    let msg = format!("{err}");
     assert!(
         msg.contains("call stack overflow") || msg.contains("depth"),
-        "Call depth error should mention overflow/depth, got: {}",
-        msg
+        "Call depth error should mention overflow/depth, got: {msg}"
     );
 }

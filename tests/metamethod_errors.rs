@@ -12,7 +12,7 @@ fn run_number(code: &str) -> f64 {
     state.load_string(code).unwrap();
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(1))
-        .unwrap_or_else(|e| panic!("Error running: {}\n{}", code, e));
+        .unwrap_or_else(|e| panic!("Error running: {code}\n{e}"));
     state.to_number(-1).unwrap()
 }
 
@@ -21,7 +21,7 @@ fn expect_error(code: &str) -> dellingr::error::Error {
     let mut state = State::new();
     state.load_string(code).unwrap();
     let result = state.call(ArgCount::Fixed(0), RetCount::Fixed(0));
-    result.expect_err(&format!("Expected error from: {}", code))
+    result.expect_err(&format!("Expected error from: {code}"))
 }
 
 /// Helper: runs and expects success with no return value.
@@ -30,7 +30,7 @@ fn expect_ok(code: &str) {
     state.load_string(code).unwrap();
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
-        .unwrap_or_else(|e| panic!("Error running: {}\n{}", code, e));
+        .unwrap_or_else(|e| panic!("Error running: {code}\n{e}"));
 }
 
 // -- __index: valid usage --
@@ -89,8 +89,7 @@ fn index_number_handler_errors() {
     );
     assert!(
         matches!(err.kind, ErrorKind::TypeError(_)),
-        "Expected TypeError for number __index, got: {}",
-        err
+        "Expected TypeError for number __index, got: {err}"
     );
 }
 
@@ -104,8 +103,7 @@ fn index_string_handler_errors() {
     );
     assert!(
         matches!(err.kind, ErrorKind::TypeError(_)),
-        "Expected TypeError for string __index, got: {}",
-        err
+        "Expected TypeError for string __index, got: {err}"
     );
 }
 
@@ -119,8 +117,7 @@ fn index_boolean_handler_errors() {
     );
     assert!(
         matches!(err.kind, ErrorKind::TypeError(_)),
-        "Expected TypeError for boolean __index, got: {}",
-        err
+        "Expected TypeError for boolean __index, got: {err}"
     );
 }
 
@@ -184,8 +181,7 @@ fn newindex_number_handler_errors() {
     );
     assert!(
         matches!(err.kind, ErrorKind::TypeError(_)),
-        "Expected TypeError for number __newindex, got: {}",
-        err
+        "Expected TypeError for number __newindex, got: {err}"
     );
 }
 
@@ -199,8 +195,7 @@ fn newindex_string_handler_errors() {
     );
     assert!(
         matches!(err.kind, ErrorKind::TypeError(_)),
-        "Expected TypeError for string __newindex, got: {}",
-        err
+        "Expected TypeError for string __newindex, got: {err}"
     );
 }
 
@@ -214,8 +209,7 @@ fn newindex_boolean_handler_errors() {
     );
     assert!(
         matches!(err.kind, ErrorKind::TypeError(_)),
-        "Expected TypeError for boolean __newindex, got: {}",
-        err
+        "Expected TypeError for boolean __newindex, got: {err}"
     );
 }
 
@@ -232,8 +226,7 @@ fn metamethod_depth_exceeded() {
     );
     assert!(
         matches!(err.kind, ErrorKind::MetamethodDepthExceeded { .. }),
-        "Expected MetamethodDepthExceeded, got: {}",
-        err
+        "Expected MetamethodDepthExceeded, got: {err}"
     );
 }
 
@@ -251,10 +244,9 @@ fn index_function_error_propagates() {
         return t.x
     "#,
     );
-    let msg = format!("{}", err);
+    let msg = format!("{err}");
     assert!(
         msg.contains("index error"),
-        "Error should propagate from __index function, got: {}",
-        msg
+        "Error should propagate from __index function, got: {msg}"
     );
 }

@@ -36,7 +36,7 @@ fn run_all_examples() {
         .collect();
 
     // Sort for consistent ordering
-    files.sort_by_key(|entry| entry.path());
+    files.sort_by_key(std::fs::DirEntry::path);
 
     assert!(
         !files.is_empty(),
@@ -49,7 +49,7 @@ fn run_all_examples() {
         let path = entry.path();
         let filename = path.file_name().unwrap().to_string_lossy();
 
-        println!("Running: {}", filename);
+        println!("Running: {filename}");
 
         let output = Command::new("cargo")
             .args(["run", "--quiet", "--", path.to_str().unwrap()])
@@ -71,8 +71,7 @@ fn run_all_examples() {
             // Check for "false" in output which indicates a test failure
             if stdout.contains(": false") {
                 failures.push(format!(
-                    "{}: test assertion failed\noutput: {}",
-                    filename, stdout
+                    "{filename}: test assertion failed\noutput: {stdout}"
                 ));
             }
         }

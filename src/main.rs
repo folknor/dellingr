@@ -43,7 +43,7 @@ fn main() {
                 filename = Some(arg.to_string());
             }
             other => {
-                eprintln!("Unknown option: {}", other);
+                eprintln!("Unknown option: {other}");
                 exit(1);
             }
         }
@@ -61,7 +61,7 @@ fn main() {
     let source = match fs::read_to_string(&filename) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("Error reading {}: {}", filename, e);
+            eprintln!("Error reading {filename}: {e}");
             exit(1);
         }
     };
@@ -70,10 +70,10 @@ fn main() {
         // Static cost analysis mode
         match analyze_cost(&source) {
             Ok(analysis) => {
-                println!("{}", analysis);
+                println!("{analysis}");
             }
             Err(e) => {
-                eprintln!("Parse error: {}", e);
+                eprintln!("Parse error: {e}");
                 exit(1);
             }
         }
@@ -92,7 +92,7 @@ fn main() {
         println!("Cost used: {}", state.cost_used());
 
         if let Err(e) = result {
-            eprintln!("Error: {}", e);
+            eprintln!("Error: {e}");
             exit(1);
         }
     }

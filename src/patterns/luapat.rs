@@ -5,14 +5,14 @@ use core::result;
 
 use super::errors::*;
 
-pub const LUA_MAXCAPTURES: usize = 32;
+pub(super) const LUA_MAXCAPTURES: usize = 32;
 /* maximum recursion depth for 'match' */
 const MAXCCALLS: usize = 200;
 
 const L_ESC: u8 = b'%';
 
 fn add(p: CPtr, count: usize) -> CPtr {
-    unsafe { p.offset(count as isize) }
+    unsafe { p.add(count) }
 }
 
 fn sub(p: CPtr, count: usize) -> CPtr {
@@ -33,7 +33,7 @@ fn diff(p1: CPtr, p2: CPtr) -> usize {
 }
 
 #[derive(Copy, Clone)]
-pub struct LuaMatch {
+pub(super) struct LuaMatch {
     pub start: usize,
     pub end: usize,
 }
@@ -47,10 +47,7 @@ enum CapLen {
 
 impl CapLen {
     fn is_unfinished(&self) -> bool {
-        match *self {
-            CapLen::Unfinished => true,
-            _ => false,
-        }
+        matches!(*self, CapLen::Unfinished)
     }
 
     fn size(&self) -> Result<usize> {
@@ -126,7 +123,9 @@ impl MatchState {
         Ok(match ch {
             L_ESC => {
                 if next_p == self.p_end {
-                    return Err(PatternError::MalformedPattern("ends with '%'"));
+                    return Err(PatternError::MalformedPattern(
+                        MalformedPattern::EndsWithPercent,
+                    ));
                 }
                 next(next_p)
             }
@@ -136,7 +135,9 @@ impl MatchState {
                 }
                 while at(next_p) != b']' {
                     if next_p == self.p_end {
-                        return Err(PatternError::MalformedPattern("missing ']'"));
+                        return Err(PatternError::MalformedPattern(
+                            MalformedPattern::MissingBracket,
+                        ));
                     }
                     let ch = at(next_p);
                     next_p = next(next_p);
@@ -202,7 +203,7 @@ fn matchbracketclass(c: u8, p: CPtr, ec: CPtr) -> bool {
         }
         p = next(p);
     }
-    return !sig;
+    !sig
 }
 
 impl MatchState {
@@ -222,7 +223,9 @@ impl MatchState {
 
     fn matchbalance(&self, s: CPtr, p: CPtr) -> Result<CPtr> {
         if p >= sub(self.p_end, 1) {
-            return Err(PatternError::MalformedPattern("missing arguments to '%b'"));
+            return Err(PatternError::MalformedPattern(
+                MalformedPattern::MissingBalancedArguments,
+            ));
         }
         if at(s) != at(p) {
             return Ok(null());
@@ -367,7 +370,7 @@ impl MatchState {
                         p = add(p, 2);
                         if at(p) != b'[' {
                             return Err(PatternError::MalformedPattern(
-                                "missing '[' after '%f' in pattern",
+                                MalformedPattern::MissingFrontierBracket,
                             ));
                         }
                         let ep = self.classend(p)?; /* points to what is next */
@@ -409,10 +412,9 @@ impl MatchState {
             if epc == b'*' || epc == b'?' || epc == b'-' {
                 /* accept empty? */
                 return self.patt_match(s, next(ep));
-            } else {
-                /* '+' or no suffix */
-                s = null(); /* fail */
             }
+            /* '+' or no suffix */
+            s = null(); /* fail */
         } else {
             /* matched once */
             match epc {
@@ -456,7 +458,7 @@ impl MatchState {
                 mm[0].end = diff(e, s);
                 Ok(())
             } else {
-                return Err(PatternError::InvalidCaptureIndex(None));
+                Err(PatternError::InvalidCaptureIndex(None))
             }
         } else {
             let init = self.capture[i].init;
@@ -488,7 +490,7 @@ impl MatchState {
         Ok(nlevels) /* number of strings pushed */
     }
 
-    pub fn str_match_check(&mut self, p: CPtr) -> Result<()> {
+    pub(crate) fn str_match_check(&mut self, p: CPtr) -> Result<()> {
         let mut level_stack = [0; LUA_MAXCAPTURES];
         let mut stack_idx = 0;
         let mut p = p;
@@ -504,7 +506,7 @@ impl MatchState {
                             p = next(p);
                             if p >= self.p_end {
                                 return Err(PatternError::MalformedPattern(
-                                    "missing arguments to '%b'",
+                                    MalformedPattern::MissingBalancedArguments,
                                 ));
                             }
                         }
@@ -512,7 +514,7 @@ impl MatchState {
                             p = next(p);
                             if at(p) != b'[' {
                                 return Err(PatternError::MalformedPattern(
-                                    "missing '[' after '%f' in pattern",
+                                    MalformedPattern::MissingFrontierBracket,
                                 ));
                             }
                             p = sub(p, 1); // so we see [...]
@@ -534,7 +536,9 @@ impl MatchState {
                 b'[' => {
                     while at(p) != b']' {
                         if p == self.p_end {
-                            return Err(PatternError::MalformedPattern("missing ']'"));
+                            return Err(PatternError::MalformedPattern(
+                                MalformedPattern::MissingBracket,
+                            ));
                         }
                         if at(p) == L_ESC && p < self.p_end {
                             p = next(p);
@@ -573,7 +577,7 @@ impl MatchState {
     }
 }
 
-pub fn str_match(s: &[u8], p: &[u8], mm: &mut [LuaMatch]) -> Result<usize> {
+pub(super) fn str_match(s: &[u8], p: &[u8], mm: &mut [LuaMatch]) -> Result<usize> {
     let mut lp = p.len();
     let mut p = p.as_ptr();
     let ls = s.len();
@@ -601,7 +605,7 @@ pub fn str_match(s: &[u8], p: &[u8], mm: &mut [LuaMatch]) -> Result<usize> {
     Ok(0)
 }
 
-pub fn str_check(p: &[u8]) -> Result<()> {
+pub(super) fn str_check(p: &[u8]) -> Result<()> {
     let mut lp = p.len();
     let mut p = p.as_ptr();
     let anchor = at(p) == b'^';
@@ -611,7 +615,9 @@ pub fn str_check(p: &[u8]) -> Result<()> {
     }
     let mut ms = MatchState::new(null(), null(), add(p, lp));
     if at(sub(ms.p_end, 1)) == b'%' {
-        return Err(PatternError::MalformedPattern("ends with '%'"));
+        return Err(PatternError::MalformedPattern(
+            MalformedPattern::EndsWithPercent,
+        ));
     }
     ms.str_match_check(p)?;
     Ok(())

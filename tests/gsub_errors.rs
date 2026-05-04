@@ -53,8 +53,7 @@ fn gsub_function_budget_error_is_propagated() {
     let err = result.unwrap_err();
     assert!(
         matches!(err.kind, ErrorKind::BudgetExceeded { .. }),
-        "Expected BudgetExceeded, got: {}",
-        err
+        "Expected BudgetExceeded, got: {err}"
     );
 }
 

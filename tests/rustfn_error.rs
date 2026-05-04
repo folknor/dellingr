@@ -23,7 +23,7 @@ fn rustfn_error_corrupts_stack_bottom() {
     state.push_number(2.0);
 
     let top_before = state.get_top();
-    println!("Stack top before call: {}", top_before);
+    println!("Stack top before call: {top_before}");
     assert_eq!(top_before, 2, "Should have 2 values on stack");
 
     // Call the error function - this should fail
@@ -34,7 +34,7 @@ fn rustfn_error_corrupts_stack_bottom() {
     println!("Got expected error: {:?}", result.unwrap_err());
 
     let top_after = state.get_top();
-    println!("Stack top after error: {}", top_after);
+    println!("Stack top after error: {top_after}");
 
     // THE BUG: stack_bottom is corrupted, so get_top() returns wrong value
     // We pushed 2 values before the call, so top should still be 2.
@@ -42,8 +42,7 @@ fn rustfn_error_corrupts_stack_bottom() {
     // This might return a huge number (unsigned underflow) or a wrong small number.
     assert_eq!(
         top_before, top_after,
-        "Stack top changed after error! Before: {}, After: {}. stack_bottom likely corrupted.",
-        top_before, top_after
+        "Stack top changed after error! Before: {top_before}, After: {top_after}. stack_bottom likely corrupted."
     );
 }
 
@@ -65,14 +64,15 @@ fn stack_operations_after_rustfn_error() {
 
     // Call the error function
     state.get_global("error_fn");
-    let _ = state.call(ArgCount::Fixed(0), RetCount::Fixed(0));
+    let result = state.call(ArgCount::Fixed(0), RetCount::Fixed(0));
+    assert!(result.is_err(), "Expected error from rust fn");
 
     // Try to read the value we pushed - should be 42.0
     // If stack_bottom is corrupted, this will either:
     // - Return wrong value
     // - Panic (debug) / segfault (release) due to bad index
     let val = state.to_number(-1).expect("Stack value should be readable");
-    println!("Value at top of stack: {:?}", val);
+    println!("Value at top of stack: {val:?}");
     assert_eq!(val, 42.0, "Stack value should still be 42.0");
 }
 
@@ -95,16 +95,14 @@ fn multiple_rustfn_errors() {
         let top_before = state.get_top();
 
         state.get_global("error_fn");
-        let _ = state.call(ArgCount::Fixed(0), RetCount::Fixed(0));
+        let result = state.call(ArgCount::Fixed(0), RetCount::Fixed(0));
+        assert!(result.is_err(), "Expected error from rust fn");
 
         let top_after = state.get_top();
-        println!(
-            "Iteration {}: top before={}, after={}",
-            i, top_before, top_after
-        );
+        println!("Iteration {i}: top before={top_before}, after={top_after}");
 
         // Each iteration should leave stack unchanged
-        assert_eq!(top_before, top_after, "Stack corrupted on iteration {}", i);
+        assert_eq!(top_before, top_after, "Stack corrupted on iteration {i}");
     }
 }
 

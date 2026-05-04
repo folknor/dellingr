@@ -2,10 +2,10 @@ use core::fmt;
 
 /// Error type returned by _try methods
 #[derive(PartialEq, Debug)]
-pub enum PatternError {
+pub(crate) enum PatternError {
     InvalidPatternCapture,
     InvalidCaptureIndex(Option<i8>),
-    MalformedPattern(&'static str),
+    MalformedPattern(MalformedPattern),
     TooManyCaptures,
     MatchDepthExceeded,
     UnfinishedCapture,
@@ -13,15 +13,37 @@ pub enum PatternError {
     NoCaptureLength,
 }
 
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) enum MalformedPattern {
+    EndsWithPercent,
+    MissingBalancedArguments,
+    MissingBracket,
+    MissingFrontierBracket,
+}
+
+impl MalformedPattern {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::EndsWithPercent => "ends with '%'",
+            Self::MissingBalancedArguments => "missing arguments to '%b'",
+            Self::MissingBracket => "missing ']'",
+            Self::MissingFrontierBracket => "missing '[' after '%f' in pattern",
+        }
+    }
+}
+
 impl fmt::Display for PatternError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidPatternCapture => write!(f, "invalid pattern capture"),
             Self::InvalidCaptureIndex(None) => write!(f, "invalid capture index"),
             Self::InvalidCaptureIndex(Some(idx)) => {
                 write!(f, "invalid capture index %{}", (*idx as usize) + 1)
             }
-            Self::MalformedPattern(what) => write!(f, "malformed pattern ({})", what),
+            Self::MalformedPattern(what) => {
+                let what = what.as_str();
+                write!(f, "malformed pattern ({what})")
+            }
             Self::TooManyCaptures => write!(f, "too many captures"),
             Self::MatchDepthExceeded => write!(f, "pattern too complex"),
             Self::UnfinishedCapture => write!(f, "unfinished capture"),
@@ -30,9 +52,3 @@ impl fmt::Display for PatternError {
         }
     }
 }
-
-#[cfg(feature = "std")]
-use std::error::Error;
-
-#[cfg(feature = "std")]
-impl Error for PatternError {}

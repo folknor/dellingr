@@ -70,8 +70,7 @@ fn closure_survives_multiple_gc_cycles() {
         let result = state.to_number(-1).unwrap();
         assert_eq!(
             result, expected as f64,
-            "Counter should be {} after GC cycle",
-            expected
+            "Counter should be {expected} after GC cycle"
         );
         state.pop(1);
     }
@@ -190,9 +189,7 @@ fn unreferenced_closure_is_collected() {
     let size_after_gc = state.heap_size();
     assert!(
         size_after_gc < size_after_create,
-        "GC should collect unreferenced closure and table. Before GC: {}, After: {}",
-        size_after_create,
-        size_after_gc
+        "GC should collect unreferenced closure and table. Before GC: {size_after_create}, After: {size_after_gc}"
     );
 }
 
@@ -308,14 +305,13 @@ fn many_closures_shared_upvalue() {
     // Call each closure, all should increment the same shared table
     for i in 1..=10 {
         state
-            .load_string(format!("return closures[{}]()", i))
+            .load_string(format!("return closures[{i}]()"))
             .unwrap();
         state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
         let result = state.to_number(-1).unwrap();
         assert_eq!(
             result, i as f64,
-            "Shared upvalue should be incremented to {}",
-            i
+            "Shared upvalue should be incremented to {i}"
         );
         state.pop(1);
 

@@ -14,14 +14,12 @@ fn differential_test() {
     let lua52_available = Command::new("lua5.2")
         .arg("-v")
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+        .is_ok_and(|o| o.status.success());
 
     let lua54_available = Command::new("lua5.4")
         .arg("-v")
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+        .is_ok_and(|o| o.status.success());
 
     if !lua52_available || !lua54_available {
         eprintln!("Skipping differential test: lua5.2 and/or lua5.4 not available");
@@ -38,15 +36,13 @@ fn differential_test() {
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     // Print the output for visibility in test results
-    println!("{}", stdout);
+    println!("{stdout}");
     if !stderr.is_empty() {
-        eprintln!("{}", stderr);
+        eprintln!("{stderr}");
     }
 
     assert!(
         output.status.success(),
-        "Differential test failed!\n\nstdout:\n{}\n\nstderr:\n{}",
-        stdout,
-        stderr
+        "Differential test failed!\n\nstdout:\n{stdout}\n\nstderr:\n{stderr}"
     );
 }
