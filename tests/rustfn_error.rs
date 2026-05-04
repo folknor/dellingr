@@ -1,16 +1,14 @@
-//! Test that demonstrates stack_bottom corruption when rust_fn returns error.
+//! Stack protocol regressions for failing Rust callbacks and dynamic calls.
 
 use dellingr::error::{Error, ErrorKind};
-use dellingr::{ArgCount, RetCount, State};
+use dellingr::{ArgCount, LuaType, RetCount, State};
 
-/// This test demonstrates that stack_bottom is not restored when a rust_fn returns an error.
-/// The bug: in vm/eval.rs call(), when RustFn returns Err, the ? operator propagates
-/// the error but skips the restoration of stack_bottom = old_stack_bottom.
+/// A zero-argument Rust function error should restore the caller's visible stack.
 #[test]
-fn rustfn_error_corrupts_stack_bottom() {
+fn rustfn_error_restores_stack_bottom() {
     let mut state = State::new();
 
-    // Register a rust function that returns an error
+    // Register a Rust function that returns an error.
     state.push_rust_fn(|_state| {
         Err(Error::without_location(ErrorKind::InternalError(
             "intentional error".to_string(),
@@ -18,28 +16,21 @@ fn rustfn_error_corrupts_stack_bottom() {
     });
     state.set_global("error_fn");
 
-    // Push some values to establish a stack state
+    // Push some values to establish a stack state.
     state.push_number(1.0);
     state.push_number(2.0);
 
     let top_before = state.get_top();
-    println!("Stack top before call: {top_before}");
     assert_eq!(top_before, 2, "Should have 2 values on stack");
 
-    // Call the error function - this should fail
+    // Call the error function - this should fail.
     state.get_global("error_fn");
     let result = state.call(ArgCount::Fixed(0), RetCount::Fixed(0));
 
     assert!(result.is_err(), "Expected error from rust fn");
-    println!("Got expected error: {:?}", result.unwrap_err());
 
     let top_after = state.get_top();
-    println!("Stack top after error: {top_after}");
 
-    // THE BUG: stack_bottom is corrupted, so get_top() returns wrong value
-    // We pushed 2 values before the call, so top should still be 2.
-    // But because stack_bottom wasn't restored, get_top() = stack.len() - corrupted_stack_bottom
-    // This might return a huge number (unsigned underflow) or a wrong small number.
     assert_eq!(
         top_before, top_after,
         "Stack top changed after error! Before: {top_before}, After: {top_after}. stack_bottom likely corrupted."
@@ -51,7 +42,7 @@ fn rustfn_error_corrupts_stack_bottom() {
 fn stack_operations_after_rustfn_error() {
     let mut state = State::new();
 
-    // Register a rust function that returns an error
+    // Register a Rust function that returns an error.
     state.push_rust_fn(|_state| {
         Err(Error::without_location(ErrorKind::InternalError(
             "intentional error".to_string(),
@@ -62,21 +53,113 @@ fn stack_operations_after_rustfn_error() {
     // Push a known value
     state.push_number(42.0);
 
-    // Call the error function
+    // Call the error function.
     state.get_global("error_fn");
     let result = state.call(ArgCount::Fixed(0), RetCount::Fixed(0));
     assert!(result.is_err(), "Expected error from rust fn");
 
-    // Try to read the value we pushed - should be 42.0
-    // If stack_bottom is corrupted, this will either:
-    // - Return wrong value
-    // - Panic (debug) / segfault (release) due to bad index
+    // Try to read the value we pushed - it should still be visible.
     let val = state.to_number(-1).expect("Stack value should be readable");
-    println!("Value at top of stack: {val:?}");
     assert_eq!(val, 42.0, "Stack value should still be 42.0");
 }
 
-/// Test multiple error calls to see if corruption accumulates
+#[test]
+fn rustfn_error_with_arguments_clears_call_frame() {
+    let mut state = State::new();
+
+    state.push_number(10.0);
+    state.push_string("host sentinel");
+    let top_before = state.get_top();
+
+    state.push_rust_fn(|state| {
+        assert_eq!(state.get_top(), 3);
+        assert_eq!(state.to_string(1).unwrap(), "alpha");
+        assert_eq!(state.to_number(2).unwrap(), 23.0);
+        assert_eq!(state.typ(3), LuaType::Boolean);
+        state.push_string("callback temporary");
+        Err(Error::without_location(ErrorKind::InternalError(
+            "argument callback failed".to_string(),
+        )))
+    });
+    state.push_string("alpha");
+    state.push_number(23.0);
+    state.push_boolean(true);
+
+    let result = state.call(ArgCount::Fixed(3), RetCount::Fixed(0));
+    assert!(result.is_err(), "Expected error from Rust callback");
+
+    assert_eq!(state.get_top(), top_before);
+    assert_eq!(state.to_number(1).unwrap(), 10.0);
+    assert_eq!(state.to_string(2).unwrap(), "host sentinel");
+}
+
+#[test]
+fn lua_error_clears_frame_above_host_stack() {
+    let mut state = State::new();
+
+    state.push_number(7.0);
+    state.push_string("host sentinel");
+    let top_before = state.get_top();
+
+    state
+        .load_string(
+            r#"
+            local function explode(a, b)
+                local values = a .. b
+                local function capture_values()
+                    return values
+                end
+                error("lua frame failed")
+            end
+
+            return explode("alpha", "beta")
+        "#,
+        )
+        .unwrap();
+
+    let err = state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+        .expect_err("expected Lua error");
+    assert!(format!("{err}").contains("lua frame failed"));
+
+    assert_eq!(state.get_top(), top_before);
+    assert_eq!(state.to_number(1).unwrap(), 7.0);
+    assert_eq!(state.to_string(2).unwrap(), "host sentinel");
+
+    state.load_string("return 99").unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
+    assert_eq!(state.get_top(), top_before + 1);
+    assert_eq!(state.to_number(-1).unwrap(), 99.0);
+}
+
+#[test]
+fn non_callable_dynamic_call_error_clears_call_frame() {
+    let mut state = State::new();
+
+    state.push_string("host sentinel");
+    let top_before = state.get_top();
+
+    state
+        .load_string(
+            r#"
+            local function many()
+                return "c", "d"
+            end
+
+            local not_a_function = 17
+            return not_a_function("a", "b", many())
+        "#,
+        )
+        .unwrap();
+
+    let result = state.call(ArgCount::Fixed(0), RetCount::Fixed(0));
+    assert!(result.is_err(), "Expected non-callable value error");
+
+    assert_eq!(state.get_top(), top_before);
+    assert_eq!(state.to_string(1).unwrap(), "host sentinel");
+}
+
+/// Repeated callback errors should not accumulate stack-bottom drift.
 #[test]
 fn multiple_rustfn_errors() {
     let mut state = State::new();
@@ -99,11 +182,63 @@ fn multiple_rustfn_errors() {
         assert!(result.is_err(), "Expected error from rust fn");
 
         let top_after = state.get_top();
-        println!("Iteration {i}: top before={top_before}, after={top_after}");
 
         // Each iteration should leave stack unchanged
         assert_eq!(top_before, top_after, "Stack corrupted on iteration {i}");
     }
+}
+
+#[test]
+fn nested_dynamic_callback_error_clears_all_call_frames() {
+    let mut state = State::new();
+
+    state.push_rust_fn(|state| {
+        assert_eq!(state.get_top(), 8);
+        assert_eq!(state.to_string(1).unwrap(), "inner");
+        assert_eq!(state.to_string(2).unwrap(), "m1");
+        assert_eq!(state.to_string(3).unwrap(), "m2");
+        assert_eq!(state.to_string(4).unwrap(), "outer");
+        assert_eq!(state.to_string(5).unwrap(), "m1");
+        assert_eq!(state.to_string(6).unwrap(), "m2");
+        assert_eq!(state.to_string(7).unwrap(), "a");
+        assert_eq!(state.to_string(8).unwrap(), "b");
+        state.push_string("callback temporary");
+        Err(Error::without_location(ErrorKind::InternalError(
+            "nested dynamic callback failed".to_string(),
+        )))
+    });
+    state.set_global("fail");
+
+    state.push_string("host sentinel");
+    let top_before = state.get_top();
+
+    state
+        .load_string(
+            r#"
+            local function many(...)
+                return "m1", "m2", ...
+            end
+
+            local function inner(...)
+                return fail("inner", many(...))
+            end
+
+            local function outer(...)
+                return inner("outer", many(...))
+            end
+
+            return outer("a", "b")
+        "#,
+        )
+        .unwrap();
+
+    let err = state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+        .expect_err("expected nested callback error");
+    assert!(format!("{err}").contains("nested dynamic callback failed"));
+
+    assert_eq!(state.get_top(), top_before);
+    assert_eq!(state.to_string(1).unwrap(), "host sentinel");
 }
 
 #[test]

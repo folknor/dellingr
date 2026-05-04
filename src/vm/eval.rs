@@ -61,6 +61,7 @@ impl State {
             let num_ret_reported = match result {
                 Ok(n) => n,
                 Err(e) => {
+                    self.stack.truncate(idx);
                     self.stack_bottom = old_stack_bottom;
                     return Err(e);
                 }
@@ -85,7 +86,13 @@ impl State {
             self.stack_bottom = old_stack_bottom;
             num_ret_reported
         } else if let Some(closure) = func_val.as_lua_function(&self.heap) {
-            self.eval_closure(closure, actual_num_args)?
+            match self.eval_closure(closure, actual_num_args) {
+                Ok(n) => n,
+                Err(e) => {
+                    self.stack.truncate(idx);
+                    return Err(e);
+                }
+            }
         } else {
             // Check for __call metamethod on tables
             let metatable_ptr = func_val
@@ -110,6 +117,7 @@ impl State {
                     return self.call(ArgCount::Fixed(actual_num_args + 1), num_ret_expected);
                 }
             }
+            self.stack.truncate(idx);
             return Err(self.type_error(TypeError::FunctionCall(func_val.typ(&self.heap))));
         };
         // RetCount::All means "return all" - don't adjust the stack
@@ -270,6 +278,8 @@ impl State {
                     e
                 };
                 // Must restore stack_bottom before returning error (see comment in RustFn handling)
+                self.close_upvalues(self.stack_bottom);
+                self.stack.truncate(self.stack_bottom);
                 self.stack_bottom = old_stack_bottom;
                 self.call_stack.pop();
                 return Err(e);
