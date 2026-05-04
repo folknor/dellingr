@@ -2,7 +2,7 @@ use std::env::args;
 use std::fs;
 use std::process::exit;
 
-use lua::{analyze_cost, ArgCount, RetCount, State};
+use dellingr::{analyze_cost, ArgCount, RetCount, State};
 
 fn main() {
     let args: Vec<String> = args().collect();
@@ -31,7 +31,7 @@ fn main() {
                 analyze = true;
             }
             "--help" | "-h" => {
-                println!("Usage: lua [OPTIONS] <file.lua>");
+                println!("Usage: dellingr [OPTIONS] <file.lua>");
                 println!();
                 println!("Options:");
                 println!("  -l, --limit N    Set cost budget limit");
@@ -53,7 +53,7 @@ fn main() {
     let filename = match filename {
         Some(f) => f,
         None => {
-            eprintln!("Usage: lua [--limit N] [--analyze] <file.lua>");
+            eprintln!("Usage: dellingr [--limit N] [--analyze] <file.lua>");
             exit(1);
         }
     };

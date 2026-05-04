@@ -3,8 +3,8 @@
 //! Verifies that invalid metamethod handlers produce errors instead of
 //! silently returning nil or falling back to raw assignment.
 
-use lua::error::ErrorKind;
-use lua::{ArgCount, RetCount, State};
+use dellingr::error::ErrorKind;
+use dellingr::{ArgCount, RetCount, State};
 
 /// Helper: runs Lua code that returns a number.
 fn run_number(code: &str) -> f64 {
@@ -17,7 +17,7 @@ fn run_number(code: &str) -> f64 {
 }
 
 /// Helper: runs a Lua string and returns the error.
-fn expect_error(code: &str) -> lua::error::Error {
+fn expect_error(code: &str) -> dellingr::error::Error {
     let mut state = State::new();
     state.load_string(code).unwrap();
     let result = state.call(ArgCount::Fixed(0), RetCount::Fixed(0));

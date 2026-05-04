@@ -5,8 +5,8 @@
 //! - Errors in table lookups via metamethods are propagated
 //! - nil/false results from functions and tables keep the original match
 
-use lua::error::ErrorKind;
-use lua::{ArgCount, RetCount, State};
+use dellingr::error::ErrorKind;
+use dellingr::{ArgCount, RetCount, State};
 
 // -- Error propagation tests --
 

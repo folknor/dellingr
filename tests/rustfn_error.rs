@@ -1,7 +1,7 @@
 //! Test that demonstrates stack_bottom corruption when rust_fn returns error.
 
-use lua::error::{Error, ErrorKind};
-use lua::{ArgCount, RetCount, State};
+use dellingr::error::{Error, ErrorKind};
+use dellingr::{ArgCount, RetCount, State};
 
 /// This test demonstrates that stack_bottom is not restored when a rust_fn returns an error.
 /// The bug: in vm/eval.rs call(), when RustFn returns Err, the ? operator propagates

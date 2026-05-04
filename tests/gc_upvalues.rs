@@ -4,7 +4,7 @@
 //! even after the original scope has ended and the upvalue has been "closed"
 //! (moved from the stack to the upvalue pool).
 
-use lua::{ArgCount, RetCount, State};
+use dellingr::{ArgCount, RetCount, State};
 
 /// Basic test: closure captures a table, table survives GC.
 #[test]

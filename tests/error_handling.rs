@@ -3,8 +3,8 @@
 //! These tests verify that the VM returns clean errors instead of panicking
 //! when it encounters unexpected types or corrupt state.
 
-use lua::error::ErrorKind;
-use lua::{ArgCount, RetCount, State};
+use dellingr::error::ErrorKind;
+use dellingr::{ArgCount, RetCount, State};
 
 /// Helper: runs Lua code that returns a number, checks the result.
 fn run_number(code: &str) -> f64 {
@@ -17,7 +17,7 @@ fn run_number(code: &str) -> f64 {
 }
 
 /// Helper: runs a Lua string and returns the error, panicking if it succeeds.
-fn expect_error(code: &str) -> lua::error::Error {
+fn expect_error(code: &str) -> dellingr::error::Error {
     let mut state = State::new();
     state.load_string(code).unwrap();
     let result = state.call(ArgCount::Fixed(0), RetCount::Fixed(0));
@@ -296,7 +296,7 @@ fn table_unpack_basic() {
 
 /// Helper: tries to load+call Lua code and returns the error, panicking if it succeeds.
 /// Uses RetCount::Void since we only care about the error.
-fn expect_load_or_run_error(code: &str) -> lua::error::Error {
+fn expect_load_or_run_error(code: &str) -> dellingr::error::Error {
     let mut state = State::new();
     match state.load_string(code) {
         Err(e) => return e,

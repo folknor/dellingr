@@ -1,7 +1,10 @@
 [package]
-name = "lua"
+name = "dellingr"
 version = "0.1.0"
 edition = "2024"
+description = "An embeddable, pure-Rust Lua VM with precise instruction-cost accounting"
+license = "MIT"
+repository = "https://github.com/folknor/dellingr"
 
 [features]
 debug_parser = []

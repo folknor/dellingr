@@ -9,7 +9,7 @@
 //! # Example
 //!
 //! ```
-//! use lua::{State, ArgCount, RetCount};
+//! use dellingr::{State, ArgCount, RetCount};
 //!
 //! let mut state = State::new();
 //! state.load_string("print('Hello!')").unwrap();
