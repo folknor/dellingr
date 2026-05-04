@@ -4,7 +4,7 @@ use crate::LuaType;
 use crate::Result;
 use crate::State;
 use crate::instr::{ArgCount, RetCount};
-use lua_patterns::LuaPattern;
+use crate::patterns::LuaPattern;
 
 fn is_plain_lua_pattern(pattern: &str) -> bool {
     !pattern.bytes().any(|b| {

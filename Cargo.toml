@@ -14,6 +14,5 @@ debug_gc = []
 
 [dependencies]
 rand = "0.10"
-lua-patterns = "0.4"
 indexmap = "2.0"
 slotmap = "1.1"

@@ -65,6 +65,8 @@ mod compiler;
 mod host;
 mod instr;
 mod lua_std;
+#[doc(hidden)]
+mod patterns;
 mod vm;
 mod vm_aux;
 
