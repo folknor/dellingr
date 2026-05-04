@@ -56,6 +56,10 @@ impl Frame {
         &self.chunk
     }
 
+    pub(super) fn string_literal_start(&self) -> usize {
+        self.string_literal_start
+    }
+
     /// Get the current line number (1-indexed), or 0 if unknown.
     pub(super) fn current_line(&self) -> u32 {
         // ip points to the NEXT instruction, so use ip-1 for current

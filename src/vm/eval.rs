@@ -86,7 +86,14 @@ impl State {
             self.stack_bottom = old_stack_bottom;
             num_ret_reported
         } else if let Some(closure) = func_val.as_lua_function(&self.heap) {
-            match self.eval_closure(closure, actual_num_args) {
+            self.active_call_roots.push(func_val);
+            let result = self.eval_closure(closure, actual_num_args);
+            let popped = self
+                .active_call_roots
+                .pop()
+                .expect("active call root missing after Lua call");
+            debug_assert!(popped == func_val);
+            match result {
                 Ok(n) => n,
                 Err(e) => {
                     self.stack.truncate(idx);
@@ -101,11 +108,17 @@ impl State {
                 .and_then(super::table::Table::get_metatable);
 
             if let Some(mt_ptr) = metatable_ptr {
+                self.active_call_roots.push(func_val);
                 let call_key = self.alloc_string("__call");
                 let call_handler = self
                     .heap
                     .as_table_ref(mt_ptr)
                     .map_or(Val::Nil, |mt| mt.get(&call_key));
+                let popped = self
+                    .active_call_roots
+                    .pop()
+                    .expect("active call root missing after __call lookup");
+                debug_assert!(popped == func_val);
 
                 if !matches!(call_handler, Val::Nil) {
                     // Insert the table as first argument and call the handler
@@ -263,6 +276,7 @@ impl State {
         }
 
         let mut frame = self.initialize_frame(closure, varargs);
+        let string_literal_start = frame.string_literal_start();
         let ret_count = match frame.eval(self) {
             Ok(count) => count,
             Err(e) => {
@@ -280,6 +294,7 @@ impl State {
                 // Must restore stack_bottom before returning error (see comment in RustFn handling)
                 self.close_upvalues(self.stack_bottom);
                 self.stack.truncate(self.stack_bottom);
+                self.string_literals.truncate(string_literal_start);
                 self.stack_bottom = old_stack_bottom;
                 self.call_stack.pop();
                 return Err(e);
@@ -305,6 +320,7 @@ impl State {
 
         // Clear the frame's stack space
         self.stack.truncate(self.stack_bottom);
+        self.string_literals.truncate(string_literal_start);
         self.stack_bottom = old_stack_bottom;
 
         // Push return values back onto the stack

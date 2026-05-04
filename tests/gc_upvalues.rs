@@ -6,6 +6,144 @@
 
 use dellingr::{ArgCount, RetCount, State};
 
+fn install_force_gc(state: &mut State) {
+    state.push_rust_fn(|state| {
+        state.gc_collect();
+        Ok(0)
+    });
+    state.set_global("force_gc");
+}
+
+fn install_force_next_gc(state: &mut State) {
+    state.push_rust_fn(|state| {
+        state.gc_set_threshold(1);
+        Ok(0)
+    });
+    state.set_global("force_next_gc");
+}
+
+#[test]
+fn active_frame_string_literal_survives_explicit_gc() {
+    let mut state = State::new();
+    state.gc_disable_auto();
+    install_force_gc(&mut state);
+
+    state
+        .load_string(
+            r#"
+        force_gc()
+        return "literal after gc"
+    "#,
+        )
+        .unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
+
+    assert_eq!(state.to_string(-1).unwrap(), "literal after gc");
+    state.pop(1);
+}
+
+#[test]
+fn string_literals_are_unrooted_after_frame_exits() {
+    let mut state = State::empty();
+    state.gc_disable_auto();
+
+    assert_eq!(state.string_count(), 0);
+    state
+        .load_string(
+            r#"
+        local temporary = "collect this literal after return"
+    "#,
+        )
+        .unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
+
+    assert!(state.string_count() > 0);
+    state.gc_collect();
+    assert_eq!(state.string_count(), 0);
+}
+
+#[test]
+fn open_upvalue_survives_gc_while_defining_frame_is_active() {
+    let mut state = State::new();
+    state.gc_disable_auto();
+    install_force_gc(&mut state);
+
+    state
+        .load_string(
+            r#"
+        local function outer()
+            local captured = {value = 55}
+            live = function()
+                return captured.value
+            end
+            force_gc()
+            return live()
+        end
+
+        return outer()
+    "#,
+        )
+        .unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
+
+    assert_eq!(state.to_number(-1).unwrap(), 55.0);
+    state.pop(1);
+}
+
+#[test]
+fn executing_returned_closure_roots_closed_upvalues_during_auto_gc() {
+    let mut state = State::empty();
+
+    state
+        .load_string(
+            r#"
+        local function make_closure()
+            local captured = {value = 42}
+            return function()
+                local trigger_gc = {}
+                return captured.value
+            end
+        end
+
+        return make_closure()()
+    "#,
+        )
+        .unwrap();
+    state.gc_set_threshold(1);
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
+
+    assert_eq!(state.to_number(-1).unwrap(), 42.0);
+    state.pop(1);
+}
+
+#[test]
+fn temporary_callable_table_survives_gc_during_call_metamethod_lookup() {
+    let mut state = State::new();
+    install_force_next_gc(&mut state);
+
+    state
+        .load_string(
+            r#"
+        local function make_callable()
+            local callable = setmetatable({ value = 73 }, {
+                __call = function(self)
+                    return self.value
+                end
+            })
+            force_next_gc()
+            return callable
+        end
+
+        return make_callable()()
+    "#,
+        )
+        .unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
+
+    assert_eq!(state.to_number(-1).unwrap(), 73.0);
+    state.pop(1);
+}
+
 /// Basic test: closure captures a table, table survives GC.
 #[test]
 fn closure_captured_table_survives_gc() {

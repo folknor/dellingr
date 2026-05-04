@@ -43,16 +43,16 @@ use table::Table;
 /// * `globals` - Global variables table
 /// * `builtins` - Fast-access array for builtin functions
 /// * `string_literals` - String constants from active frames
+/// * `active_call_roots` - Lua closures currently being executed
 /// * `upvalue_pool` - Pool of upvalues (closed upvalues contain values that need marking)
-/// * `open_upvalues` - Map of stack indices to upvalue refs (used to find closed upvalues)
 pub(super) fn mark_gc_roots(
     heap: &GcHeap,
     stack: &[Val],
     globals: &IndexMap<String, Val>,
     builtins: &[Val],
     string_literals: &[Val],
+    active_call_roots: &[Val],
     upvalue_pool: &UpvaluePool,
-    _open_upvalues: &[(usize, UpvalueRef)],
 ) {
     // Mark all roots - closed upvalues are now marked transitively when
     // marking LuaFn closures that reference them
@@ -60,6 +60,7 @@ pub(super) fn mark_gc_roots(
     globals.mark_reachable(heap, upvalue_pool);
     builtins.mark_reachable(heap, upvalue_pool);
     string_literals.mark_reachable(heap, upvalue_pool);
+    active_call_roots.mark_reachable(heap, upvalue_pool);
     // Note: open upvalues point to stack (already marked), closed upvalues
     // are marked transitively through the closures that reference them
 }
@@ -89,6 +90,8 @@ pub struct State {
     pub(super) heap: GcHeap,
     /// The string literals (as `Val`s) of every active `Frame`.
     pub(super) string_literals: Vec<Val>,
+    /// Lua closure objects removed from the visible stack while they execute.
+    pub(super) active_call_roots: Vec<Val>,
     /// Pool for upvalue storage. Avoids per-upvalue heap allocations.
     pub(super) upvalue_pool: UpvaluePool,
     /// Open upvalues currently pointing to stack slots.
@@ -188,6 +191,7 @@ impl State {
             stack_bottom: 0,
             heap: GcHeap::with_threshold(Self::GC_INITIAL_THRESHOLD),
             string_literals: Vec::with_capacity(64), // Pre-size for string literals
+            active_call_roots: Vec::with_capacity(64),
             upvalue_pool: UpvaluePool::new(),
             open_upvalues: Vec::new(),
             vararg_call_bases: Vec::new(),
@@ -363,8 +367,8 @@ impl State {
             &self.globals,
             &self.builtins,
             &self.string_literals,
+            &self.active_call_roots,
             &self.upvalue_pool,
-            &self.open_upvalues,
         );
         // Sweep unmarked objects
         self.heap.collect();
