@@ -624,26 +624,64 @@ impl State {
     fn instr_get_table(&mut self) -> Result<()> {
         let key = self.pop_val();
         // Table is now on top of the stack
-        let tbl_val = self
-            .stack
-            .last()
-            .expect("GetTable instruction requires a table below the key");
-        let is_table = tbl_val
-            .as_object_ptr()
-            .and_then(|ptr| self.heap.as_table_ref(ptr))
-            .is_some();
-        if !is_table {
-            let typ = tbl_val.typ_simple();
-            self.pop_val();
-            return Err(self.type_error(TypeError::TableIndex(typ)));
-        }
         let table_idx = self.stack.len() - 1;
+        let tbl_val = self.stack[table_idx];
+        let obj_ptr = tbl_val.as_object_ptr();
+        let (val, has_metatable) = match obj_ptr.and_then(|ptr| self.heap.as_table_ref(ptr)) {
+            Some(tbl) => {
+                let val = tbl.get(&key);
+                (val, tbl.get_metatable().is_some())
+            }
+            None => {
+                let typ = tbl_val.typ_simple();
+                self.pop_val();
+                return Err(self.type_error(TypeError::TableIndex(typ)));
+            }
+        };
+
+        if !has_metatable || !matches!(val, Val::Nil) {
+            self.stack[table_idx] = val;
+            return Ok(());
+        }
+
         self.get_table_with_key(table_idx, key)?;
         // Stack now: [... table, result]
         let result = self.pop_val();
-        self.pop_val(); // Remove table
-        self.stack.push(result);
+        self.stack[table_idx] = result;
         Ok(())
+    }
+
+    #[inline(always)]
+    fn remove_stack_pair(&mut self, first: usize) {
+        let second_after_pair = first + 2;
+        let len = self.stack.len();
+        if second_after_pair == len {
+            self.stack.truncate(first);
+        } else {
+            self.stack.copy_within(second_after_pair..len, first);
+            self.stack.truncate(len - 2);
+        }
+    }
+
+    #[inline(always)]
+    fn try_insert_table_direct(&mut self, table_idx: usize, key: Val, val: Val) -> Result<bool> {
+        let tbl_val = self.stack[table_idx];
+        match tbl_val
+            .as_object_ptr()
+            .and_then(|ptr| self.heap.as_table(ptr))
+        {
+            Some(tbl) => {
+                let can_insert_direct =
+                    tbl.get_metatable().is_none() || !matches!(tbl.get(&key), Val::Nil);
+                if can_insert_direct {
+                    tbl.insert(key, val)?;
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
+            }
+            None => Err(self.type_error(TypeError::TableIndex(tbl_val.typ_simple()))),
+        }
     }
 
     #[hotpath::measure]
@@ -841,18 +879,13 @@ impl State {
     fn instr_set_table(&mut self, offset: u8) -> Result<()> {
         let val = self.pop_val();
         let index = self.stack.len() - offset as usize - 2;
-        let key = self.stack.remove(index + 1); // Remove the key first (it's after the table)
-        let tbl_val = &self.stack[index];
-        let is_table = tbl_val
-            .as_object_ptr()
-            .and_then(|ptr| self.heap.as_table_ref(ptr))
-            .is_some();
-        if !is_table {
-            let typ = tbl_val.typ_simple();
-            return Err(self.type_error(TypeError::TableIndex(typ)));
+        let key = self.stack[index + 1];
+
+        if !self.try_insert_table_direct(index, key, val)? {
+            self.set_table_with_key(index, key, val)?;
         }
-        self.set_table_with_key(index, key, val)?;
-        self.stack.remove(index); // Remove the table
+
+        self.remove_stack_pair(index);
         Ok(())
     }
 

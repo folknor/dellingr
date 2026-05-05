@@ -4,7 +4,8 @@ project = "dellingr"
 # explicit dellingr module (when added) defines the recognized fields. The
 # hotpath bench harness lives at examples/hotpath.rs and accepts a positional
 # `<target>` arg that resolves to `hotpath/{target}.lua`. Targets currently
-# checked in: arithmetic, strings, tables. Add more by writing a new
+# checked in: arithmetic, calls, field_hits, ipairs_scan, numeric_index,
+# pairs_scan, strings, table_fill, tables. Add more by writing a new
 # `hotpath/{name}.lua` that defines a global `_bench()` function.
 
 [test]

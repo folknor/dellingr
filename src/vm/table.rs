@@ -373,15 +373,10 @@ impl Table {
                         return (*k, *v);
                     }
                 } else {
-                    // Find the key, then return the next one
-                    let mut found = false;
-                    for (k, v) in map {
-                        if found {
-                            return (*k, *v);
-                        }
-                        if k == key {
-                            found = true;
-                        }
+                    if let Some(index) = map.get_index_of(key)
+                        && let Some((k, v)) = map.get_index(index + 1)
+                    {
+                        return (*k, *v);
                     }
                 }
             }
