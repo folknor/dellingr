@@ -46,13 +46,13 @@ There's a few gotchas with the current instruction-cost accounting. For example,
 
 ## Status
 
-The public API (`State`, `HostCallbacks`, `RustFunc`, cost analysis) is
-**not yet stable**. Consume via git dependency until v0.1 lands on
-crates.io.
+v0.1.0 is on crates.io. The public API (`State`, `HostCallbacks`,
+`RustFunc`, cost analysis) is **pre-1.0 and not yet stable** -
+breaking changes may land in any 0.x bump until 1.0.
 
 ```toml
 [dependencies]
-dellingr = { git = "https://github.com/folknor/dellingr", branch = "main" }
+dellingr = "0.1"
 ```
 
 ## What it provides
