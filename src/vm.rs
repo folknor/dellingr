@@ -567,7 +567,7 @@ mod tests {
             code: vec![
                 Instr::push_string(1),
                 Instr::push_string(2),
-                Instr::concat(),
+                Instr::concat(2),
                 Instr::set_global(0),
                 Instr::ret(RetCount::Fixed(0)),
             ],

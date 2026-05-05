@@ -288,8 +288,10 @@ impl Frame {
                 Instr::OP_GET_FIELD => state.instr_get_field(self, inst.a(), inst.bx())?,
                 Instr::OP_GET_TABLE => state.instr_get_table()?,
 
-                // String concatenation is free
-                Instr::OP_CONCAT => state.concat_helper(2)?,
+                // String concatenation is free. Operand A is the chain
+                // length (>= 2). Chained `..` collapses into one OP_CONCAT
+                // so a long concat has only one intermediate allocation.
+                Instr::OP_CONCAT => state.concat_helper(inst.a() as usize)?,
 
                 // === COSTED OPERATIONS (cost 1) ===
 

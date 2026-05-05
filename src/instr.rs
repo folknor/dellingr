@@ -377,8 +377,8 @@ impl Instr {
     pub(crate) const fn modulo() -> Self {
         Self::op(Self::OP_MOD)
     }
-    pub(crate) const fn concat() -> Self {
-        Self::op(Self::OP_CONCAT)
+    pub(crate) const fn concat(n: u8) -> Self {
+        Self::op_a(Self::OP_CONCAT, n)
     }
     pub(crate) const fn less() -> Self {
         Self::op(Self::OP_LESS)

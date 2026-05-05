@@ -1342,14 +1342,21 @@ impl<'a> Parser<'a> {
     }
 
     /// Parses a string concatenation expression (`..`). Precedence 5.
+    /// Flattens chained `..` into a single OP_CONCAT(n) so `a .. b .. c`
+    /// emits one concat with three operands instead of two two-operand
+    /// concats with an intermediate string allocation between them.
     fn parse_concat(&mut self) -> Result<ExpDesc> {
         let mut exp_desc = self.parse_addition()?;
-        if self.input.try_pop(TokenType::DotDot)?.is_some() {
+        let mut count: u32 = 1;
+        while self.input.try_pop(TokenType::DotDot)?.is_some() {
             exp_desc = ExpDesc::Other;
-            self.parse_concat()?;
-            self.push(Instr::concat());
+            self.parse_addition()?;
+            count += 1;
         }
-
+        if count > 1 {
+            let n = u8::try_from(count).map_err(|_| self.error(SyntaxError::TooManyExpressions))?;
+            self.push(Instr::concat(n));
+        }
         Ok(exp_desc)
     }
 
@@ -1910,7 +1917,7 @@ mod tests {
                 Instr::push_bool(true),
                 Instr::add(),
                 Instr::push_string(1),
-                Instr::concat(),
+                Instr::concat(2),
                 Instr::set_global(0),
                 Instr::ret(RetCount::Fixed(0)),
             ],
@@ -1930,12 +1937,31 @@ mod tests {
                 Instr::push_num(1),
                 Instr::push_num(2),
                 Instr::add(),
-                Instr::concat(),
+                Instr::concat(2),
                 Instr::set_global(0),
                 Instr::ret(RetCount::Fixed(0)),
             ],
             number_literals: vec![1.0, 2.0, 3.0],
             string_literals: vec!["x".into()],
+            ..Chunk::default()
+        };
+        check_it(text, output);
+    }
+
+    #[test]
+    fn concat_chain_emits_single_n_ary_concat() {
+        let text = r#"x = "a" .. "b" .. "c" .. "d""#;
+        let output = Chunk {
+            code: vec![
+                Instr::push_string(1),
+                Instr::push_string(2),
+                Instr::push_string(3),
+                Instr::push_string(4),
+                Instr::concat(4),
+                Instr::set_global(0),
+                Instr::ret(RetCount::Fixed(0)),
+            ],
+            string_literals: vec!["x".into(), "a".into(), "b".into(), "c".into(), "d".into()],
             ..Chunk::default()
         };
         check_it(text, output);
