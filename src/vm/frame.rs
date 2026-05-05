@@ -5,7 +5,7 @@ use std::str;
 use super::super::compiler::UpvalueDesc;
 use super::super::compiler::{
     FieldLookupCacheEntry, FieldLookupCacheSlot, GlobalLookupCacheEntry, GlobalLookupCacheSlot,
-    MethodLookupCacheEntry, SetFieldLookupCacheSlot,
+    MethodLookupCacheEntry, SetFieldLookupCacheSlot, StringMethodCacheEntry,
 };
 use super::super::error::{Error, ErrorKind, StackFrame, TypeError};
 use super::Chunk;
@@ -694,13 +694,37 @@ impl State {
                 Ok(())
             }
         } else if val.as_string_ptr().is_some() {
-            // String: look up method in the 'string' global table
+            // String: look up method in the 'string' global table.
+            // IC fast path: if the cached entry's lib version matches and the
+            // key is still at the cached index, return the cached value.
+            if let Some(cache) = cache
+                && let Some(method) = self.get_cached_string_method(key, cache)
+            {
+                self.stack.push(method);
+                return Ok(());
+            }
+
             self.get_global("string");
             let string_lib_idx = self.stack.len() - 1;
             self.get_table_with_key(string_lib_idx, key)?;
             // Stack now: [... string_lib, result]
             let result = self.pop_val();
-            self.pop_val(); // Remove string_lib
+            let string_lib = self.pop_val();
+
+            // Populate cache when the resolution was a direct hit on the
+            // string lib (skip when __index resolved it elsewhere).
+            if let Some(cache) = cache
+                && let Some(lib_ptr) = string_lib.as_object_ptr()
+                && let Some(tbl) = self.heap.as_table_ref(lib_ptr)
+                && let Some((index, _)) = tbl.get_with_index(&key)
+            {
+                cache.set_string_method(StringMethodCacheEntry {
+                    string_lib: lib_ptr,
+                    version: tbl.version(),
+                    index,
+                });
+            }
+
             self.stack.push(result);
             Ok(())
         } else {
@@ -732,6 +756,29 @@ impl State {
         }
 
         Some((None, tbl.get_metatable().is_some()))
+    }
+
+    #[inline(always)]
+    fn get_cached_string_method(&self, key: Val, cache: &FieldLookupCacheSlot) -> Option<Val> {
+        let entry = cache.get_string_method()?;
+        let tbl = self.heap.as_table_ref(entry.string_lib)?;
+        let version = tbl.version();
+        if entry.version == version {
+            return tbl.get_index(entry.index).map(|(_, val)| val);
+        }
+        // Slow validation: re-read the key at the cached index. If still
+        // the same method name, refresh the entry's version and use it.
+        let (cached_key, cached_val) = tbl.get_index(entry.index)?;
+        if cached_key == key {
+            cache.set_string_method(StringMethodCacheEntry {
+                string_lib: entry.string_lib,
+                version,
+                index: entry.index,
+            });
+            Some(cached_val)
+        } else {
+            None
+        }
     }
 
     #[inline(always)]

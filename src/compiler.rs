@@ -72,10 +72,22 @@ pub(super) struct MethodLookupCacheEntry {
     pub(super) method_index: Option<usize>,
 }
 
+/// Cache for `s:method()` style calls where the receiver is a string and
+/// the method is resolved through the `string` global library. Stores the
+/// library's table identity, its version at lookup time, and the method's
+/// index in that library.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct StringMethodCacheEntry {
+    pub(super) string_lib: ObjectPtr,
+    pub(super) version: u64,
+    pub(super) index: usize,
+}
+
 #[derive(Debug, Default)]
 pub(super) struct FieldLookupCacheSlot {
     field_entry: Cell<Option<FieldLookupCacheEntry>>,
     method_entry: Cell<Option<MethodLookupCacheEntry>>,
+    string_method_entry: Cell<Option<StringMethodCacheEntry>>,
 }
 
 impl FieldLookupCacheSlot {
@@ -93,6 +105,14 @@ impl FieldLookupCacheSlot {
 
     pub(super) fn set_method(&self, entry: MethodLookupCacheEntry) {
         self.method_entry.set(Some(entry));
+    }
+
+    pub(super) fn get_string_method(&self) -> Option<StringMethodCacheEntry> {
+        self.string_method_entry.get()
+    }
+
+    pub(super) fn set_string_method(&self, entry: StringMethodCacheEntry) {
+        self.string_method_entry.set(Some(entry));
     }
 }
 
