@@ -450,12 +450,20 @@ impl fmt::Display for StringPtr {
 pub(crate) struct StringPool {
     /// SlotMap storing all interned strings.
     strings: SlotMap<StringKey, StringEntry>,
+    /// Hash -> bucket of StringKeys for O(1) interner lookup.
+    /// Multiple keys per bucket only on hash collision; the typical bucket
+    /// holds a single key. Iterated only during GC sweep, never during a
+    /// program-visible operation, so non-deterministic IndexMap iteration
+    /// order would not affect program output - but we still use IndexMap
+    /// over HashMap to keep determinism honest across hosts.
+    hash_index: IndexMap<u64, Vec<StringKey>>,
 }
 
 impl StringPool {
     fn new() -> Self {
         Self {
             strings: SlotMap::with_key(),
+            hash_index: IndexMap::new(),
         }
     }
 
@@ -481,19 +489,21 @@ impl StringPool {
     }
 
     /// Find an existing interned string by content and hash.
-    /// Uses linear scan - O(n) but safe and simple.
+    /// O(1) via hash_index; only scans within a hash bucket on collision.
     #[hotpath::measure]
     pub(super) fn find_by_hash(&self, bytes: &[u8], hash: u64) -> Option<StringPtr> {
-        // Linear scan through all strings looking for a match
-        for (key, entry) in &self.strings {
-            if entry.hash == hash && entry.data.as_ref() == bytes {
-                return Some(StringPtr(key));
+        let bucket = self.hash_index.get(&hash)?;
+        for key in bucket {
+            if let Some(entry) = self.strings.get(*key)
+                && entry.data.as_ref() == bytes
+            {
+                return Some(StringPtr(*key));
             }
         }
         None
     }
 
-    /// Insert a new string with precomputed hash.
+    /// Insert a new string with precomputed hash. Updates the hash index.
     #[hotpath::measure]
     pub(super) fn insert_with_hash(&mut self, bytes: Box<[u8]>, hash: u64) -> StringPtr {
         let entry = StringEntry {
@@ -501,7 +511,9 @@ impl StringPool {
             hash,
             color: Cell::new(Color::Unmarked),
         };
-        StringPtr(self.strings.insert(entry))
+        let key = self.strings.insert(entry);
+        self.hash_index.entry(hash).or_default().push(key);
+        StringPtr(key)
     }
 
     /// Mark a string as reachable.
@@ -514,13 +526,26 @@ impl StringPool {
     /// Collect unreachable strings.
     #[hotpath::measure(label = "object::string_pool_collect")]
     pub(super) fn collect(&mut self) {
-        self.strings.retain(|_, entry| match entry.color.get() {
+        let mut removed: Vec<(StringKey, u64)> = Vec::new();
+        self.strings.retain(|key, entry| match entry.color.get() {
             Color::Reachable => {
                 entry.color.set(Color::Unmarked);
                 true
             }
-            Color::Unmarked => false,
+            Color::Unmarked => {
+                removed.push((key, entry.hash));
+                false
+            }
         });
+        // Drop dead keys from hash_index buckets, and drop empty buckets.
+        for (key, hash) in removed {
+            if let Some(bucket) = self.hash_index.get_mut(&hash) {
+                bucket.retain(|k| *k != key);
+                if bucket.is_empty() {
+                    self.hash_index.shift_remove(&hash);
+                }
+            }
+        }
     }
 }
 
