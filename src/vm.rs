@@ -489,6 +489,8 @@ impl State {
         Val::Str(ptr)
     }
 
+    /// Construct an [`Error`] of the given kind with source position
+    /// drawn from the current frame (placeholder until line tracking lands).
     pub fn error(&self, kind: ErrorKind) -> Error {
         // TODO actually find position
         let pos = 0;

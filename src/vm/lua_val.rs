@@ -6,6 +6,11 @@ use std::borrow::Cow;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 
+/// Signature for a host-provided Rust function callable from Lua.
+///
+/// The function reads its arguments from the [`State`]'s stack (1-based
+/// indexing for host calls), pushes any return values, and returns the
+/// number of return values (or an error).
 pub type RustFunc = fn(&mut State) -> Result<u8>;
 
 #[derive(Clone, Copy, Default)]
@@ -191,17 +196,25 @@ impl PartialEq for Val {
 
 // Markable impl for Val is in object.rs
 
+/// The runtime type of a Lua value, as exposed to host code via [`State`].
 #[derive(Debug, Eq, PartialEq)]
 pub enum LuaType {
+    /// `nil`
     Nil,
+    /// `true` or `false`
     Boolean,
+    /// IEEE-754 double-precision number
     Number,
+    /// Interned UTF-8 string (or arbitrary byte string)
     String,
+    /// Mutable Lua table (array + hash, with optional metatable)
     Table,
+    /// Lua closure or host-provided [`RustFunc`]
     Function,
 }
 
 impl LuaType {
+    /// Lowercase name used by Lua's `type()` builtin and in error messages.
     pub fn as_str(&self) -> &'static str {
         use LuaType::*;
         match self {

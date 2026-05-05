@@ -8,6 +8,9 @@ use crate::error::ErrorKind;
 use crate::lua_std;
 
 impl State {
+    /// Verify that the host call has at least `arg_number` arguments on the
+    /// stack. Returns an [`ArgError`] if not. Argument indices are 1-based;
+    /// negative values count from the top of the stack.
     pub fn check_any(&mut self, arg_number: isize) -> Result<()> {
         assert!(arg_number != 0);
         if self.get_top() < arg_number.unsigned_abs() {
@@ -23,6 +26,9 @@ impl State {
         }
     }
 
+    /// Verify that argument `arg_number` is of the given Lua type. Returns
+    /// an [`ArgError`] if missing or of the wrong type. Argument indices are
+    /// 1-based; negative values count from the top of the stack.
     pub fn check_type(&mut self, arg_number: isize, expected_type: LuaType) -> Result<()> {
         assert!(arg_number != 0);
         if self.get_top() < arg_number.unsigned_abs() {

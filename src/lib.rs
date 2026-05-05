@@ -18,6 +18,7 @@
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used))]
 #![cfg_attr(not(test), deny(clippy::float_cmp))]
+#![warn(missing_docs)]
 
 mod compiler;
 mod host;
@@ -28,10 +29,11 @@ mod patterns;
 mod vm;
 mod vm_aux;
 
+/// Error types returned by the VM and parser. Surfaced through [`Result`].
 pub mod error;
 
 pub use host::{DefaultCallbacks, HostCallbacks};
-pub use instr::{ArgCount, Builtin, RetCount};
+pub use instr::{ArgCount, RetCount};
 pub use vm::LuaType;
 pub use vm::RustFunc;
 pub use vm::State;
@@ -57,7 +59,7 @@ pub struct ScopeCost {
     pub negations: u64,
     /// Number of table creations ({})
     pub table_creations: u64,
-    /// Number of table field writes (t.x = v, t[k] = v)
+    /// Number of table field writes (`t.x = v`, `t[k] = v`)
     pub table_writes: u64,
     /// Number of array elements initialized
     pub array_elements: u64,

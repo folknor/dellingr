@@ -75,7 +75,7 @@ impl RetCount {
 /// Using a fixed array eliminates string hashing and comparison overhead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
-pub enum Builtin {
+pub(crate) enum Builtin {
     // Common functions
     Print = 0,
     Type = 1,
@@ -105,11 +105,11 @@ pub enum Builtin {
 
 impl Builtin {
     /// Total number of builtin slots.
-    pub const COUNT: usize = 19;
+    pub(crate) const COUNT: usize = 19;
 
     /// Try to convert a global name to a Builtin slot.
     #[inline]
-    pub const fn from_name(name: &str) -> Option<Self> {
+    pub(crate) const fn from_name(name: &str) -> Option<Self> {
         // Use a const-compatible match on bytes
         let bytes = name.as_bytes();
         match bytes {
@@ -138,7 +138,7 @@ impl Builtin {
 
     /// Get the name of this builtin.
     #[inline]
-    pub const fn name(self) -> &'static str {
+    pub(crate) const fn name(self) -> &'static str {
         match self {
             Builtin::Print => "print",
             Builtin::Type => "type",
@@ -164,13 +164,13 @@ impl Builtin {
 
     /// Convert to u8 for instruction encoding.
     #[inline]
-    pub const fn to_u8(self) -> u8 {
+    pub(crate) const fn to_u8(self) -> u8 {
         self as u8
     }
 
     /// Convert from u8. Returns None if out of range.
     #[inline]
-    pub const fn from_u8(n: u8) -> Option<Self> {
+    pub(crate) const fn from_u8(n: u8) -> Option<Self> {
         if n < Self::COUNT as u8 {
             // SAFETY: n is in range and repr(u8) ensures valid transmute
             Some(unsafe { std::mem::transmute::<u8, Self>(n) })

@@ -149,7 +149,7 @@ impl State {
 
     /// Loads a string as a Lua chunk with an optional source name.
     /// The source name is used in error messages and stack traces.
-    /// Use a filename for files, or something like "[fleet:123]" for dynamically loaded code.
+    /// Use a filename for files, or something like `"[fleet:123]"` for dynamically loaded code.
     #[hotpath::measure]
     pub fn load_string_named(
         &mut self,

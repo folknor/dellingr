@@ -34,7 +34,7 @@ pub trait HostCallbacks {
     /// Called when Lua's `print()` function is executed.
     ///
     /// # Arguments
-    /// * `source` - The source file/chunk name (e.g., "main.lua" or "[fleet:123]")
+    /// * `source` - The source file/chunk name (e.g., `"main.lua"` or `"[fleet:123]"`)
     /// * `line` - The current line number (0 if unknown)
     /// * `message` - The formatted message (all arguments joined with tabs)
     fn on_print(&mut self, _source: Option<&str>, _line: u32, message: &str) {
