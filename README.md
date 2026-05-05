@@ -2,7 +2,18 @@
 
 An embeddable, deterministic, pure-Rust Lua VM with precise per-opcode instruction-cost accounting. No FFI, no system Lua dependency.
 
-It's also - at the moment - extremely slow. We'll work on that. That said, dellingr is fast enough for continous bounded execution of a few kilobytes of Lua code to allow a game to run at several thousand FPS.
+It's slower than reference Lua, but not dramatically so: roughly 2-4x behind lua5.4 / 5.5 on most workloads, ~2x on `pairs` iteration, and ~8x on string-heavy code. LuaJIT is its own world - 18-30x faster than us on tight loops, much less on alloc/string-heavy code. dellingr is fast enough for continuous bounded execution of a few kilobytes of Lua code to let a game run at several thousand FPS.
+
+Run `./bench.sh` to reproduce on your own host. Sample run on AMD Ryzen 9 5900X / Linux 7.0 / commit `bd24832`:
+
+| bench                    | dellingr | vs lua5.5 | vs lua5.4 | vs lua5.2 | vs luajit |
+|--------------------------|---------:|----------:|----------:|----------:|----------:|
+| `numerics/arithmetic`    |    104ms |     3.96x |     3.87x |     2.85x |    23.33x |
+| `iter/pairs`             |     97ms |     2.30x |     2.18x |     2.11x |    18.18x |
+| `tables/fill`            |    107ms |     4.23x |     3.51x |     2.63x |     7.23x |
+| `strings/mixed`          |     99ms |     7.79x |     8.56x |     5.65x |     8.45x |
+| `fields/same_obj_read`   |    113ms |     3.99x |     4.35x |     2.50x |    30.34x |
+| `benchmark` (multi)      |    173ms |     4.18x |     4.05x |     2.80x |    23.74x |
 
 Built with LLMs. See [LLM.md](LLM.md).
 

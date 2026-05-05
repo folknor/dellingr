@@ -110,7 +110,7 @@ examples/alloc/            # closure, short_tables
 examples/strings/          # mixed
 ```
 
-Each bench script is also a standalone-runnable test: top-level setup + a `_bench()` function + an outer loop that calls `_bench()` enough times for hyperfine resolution and prints `<name>: true`. This lets one file serve three masters: the hotpath harness (calls `_bench` directly for parse/cold/warm phasing), `tests/run_examples.rs` (executes the standalone runner, asserts no `: false`), and `bench-vs-lua.sh` (hyperfine timings vs reference Lua 5.2/5.4).
+Each bench script is also a standalone-runnable test: top-level setup + a `_bench()` function + an outer loop that calls `_bench()` enough times for hyperfine resolution and prints `<name>: true`. This lets one file serve three masters: the hotpath harness (calls `_bench` directly for parse/cold/warm phasing), `tests/run_examples.rs` (executes the standalone runner, asserts no `: false`), and `bench.sh` (hyperfine timings vs reference Lua 5.2/5.4/5.5 + LuaJIT).
 
 The harness measures four phases on one State and emits KV pairs to stderr: `parse_us`, `cold_call_us`, `warm_avg_us` (averaged over 20 iterations), plus the dellingr-specific `cost_used` per phase and the derived `cost_per_us`. Cost is deterministic across hosts; wall time is the noisy metric. `setup_*` and `final_*` heap/object counts bracket GC pressure.
 
@@ -163,6 +163,7 @@ Do not use your Memory functionality. Do not read, write, or update memories. Do
 
 ### Bash rules
 
+- Each Bash invocation runs exactly one command. To run several, send multiple Bash calls (in parallel when independent). This subsumes `&&`, `;`, `|`, and multi-line scripts in one Bash call.
 - Never use `sed`, `find`, `awk`, `head`, `tail`, or complex bash commands.
 - Never chain commands with `&&`.
 - Never chain commands with `;`.

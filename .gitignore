@@ -11,3 +11,5 @@
 Thumbs.db
 
 target
+
+.bench-results.json
