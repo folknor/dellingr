@@ -5,6 +5,7 @@ use std::str;
 use super::super::compiler::UpvalueDesc;
 use super::super::compiler::{
     FieldLookupCacheEntry, FieldLookupCacheSlot, GlobalLookupCacheEntry, GlobalLookupCacheSlot,
+    MethodLookupCacheEntry,
 };
 use super::super::error::{Error, ErrorKind, StackFrame, TypeError};
 use super::Chunk;
@@ -659,12 +660,10 @@ impl State {
         let val = self.pop_val();
         let key = self.get_string_constant(frame, field_id);
 
+        let cache = frame.chunk.field_lookup_cache.get(cache_idx as usize);
+
         if let Some(ptr) = val.as_object_ptr()
-            && let Some((direct, has_metatable)) = self.get_table_field_direct(
-                ptr,
-                key,
-                frame.chunk.field_lookup_cache.get(cache_idx as usize),
-            )
+            && let Some((direct, has_metatable)) = self.get_table_field_direct(ptr, key, cache)
         {
             if let Some(result) = direct {
                 self.stack.push(result);
@@ -673,6 +672,11 @@ impl State {
 
             if !has_metatable {
                 return self.push_table_library_field(key);
+            }
+
+            if let Some(result) = self.get_index_table_field_direct(val, ptr, key, cache) {
+                self.stack.push(result);
+                return Ok(());
             }
 
             self.stack.push(val);
@@ -716,7 +720,7 @@ impl State {
         let tbl = self.heap.as_table_ref(ptr)?;
         if let Some((index, val)) = tbl.get_with_index(&key) {
             if let Some(cache) = cache {
-                cache.set(FieldLookupCacheEntry {
+                cache.set_field(FieldLookupCacheEntry {
                     table: ptr,
                     table_version: tbl.version(),
                     index,
@@ -735,7 +739,7 @@ impl State {
         key: Val,
         cache: &FieldLookupCacheSlot,
     ) -> Option<Val> {
-        let entry = cache.get()?;
+        let entry = cache.get_field()?;
         if entry.table != ptr {
             return None;
         }
@@ -746,7 +750,7 @@ impl State {
         }
         let (cached_key, cached_val) = tbl.get_index(entry.index)?;
         if cached_key == key {
-            cache.set(FieldLookupCacheEntry {
+            cache.set_field(FieldLookupCacheEntry {
                 table: ptr,
                 table_version,
                 index: entry.index,
@@ -755,6 +759,153 @@ impl State {
         } else {
             None
         }
+    }
+
+    #[inline(always)]
+    fn get_index_table_field_direct(
+        &mut self,
+        receiver: Val,
+        ptr: ObjectPtr,
+        key: Val,
+        cache: Option<&FieldLookupCacheSlot>,
+    ) -> Option<Val> {
+        if cache
+            .and_then(FieldLookupCacheSlot::get_method)
+            .is_some_and(|entry| entry.method_index.is_none())
+        {
+            return None;
+        }
+
+        if let Some(cached) =
+            cache.and_then(|cache| self.get_cached_index_table_field(ptr, key, cache))
+        {
+            return cached;
+        }
+
+        let index_key = self.protected_index_key(receiver, key);
+        let receiver_table = self.heap.as_table_ref(ptr)?;
+        let receiver_metatable = receiver_table.get_metatable()?;
+        let metatable = self.heap.as_table_ref(receiver_metatable)?;
+        let (index_field_index, index_handler) = metatable.get_with_index(&index_key)?;
+        let Some(index_table) = index_handler.as_object_ptr() else {
+            if let Some(cache) = cache {
+                cache.set_method(MethodLookupCacheEntry {
+                    receiver_metatable,
+                    index_key,
+                    index_field_index,
+                    index_handler,
+                    method_table_version: 0,
+                    method_index: None,
+                });
+            }
+            return None;
+        };
+        let Some(method_table) = self.heap.as_table_ref(index_table) else {
+            if let Some(cache) = cache {
+                cache.set_method(MethodLookupCacheEntry {
+                    receiver_metatable,
+                    index_key,
+                    index_field_index,
+                    index_handler,
+                    method_table_version: 0,
+                    method_index: None,
+                });
+            }
+            return None;
+        };
+        let method_table_version = method_table.version();
+        let Some((method_index, method)) = method_table.get_with_index(&key) else {
+            if let Some(cache) = cache {
+                cache.set_method(MethodLookupCacheEntry {
+                    receiver_metatable,
+                    index_key,
+                    index_field_index,
+                    index_handler,
+                    method_table_version,
+                    method_index: None,
+                });
+            }
+            return None;
+        };
+
+        if let Some(cache) = cache {
+            cache.set_method(MethodLookupCacheEntry {
+                receiver_metatable,
+                index_key,
+                index_field_index,
+                index_handler,
+                method_table_version,
+                method_index: Some(method_index),
+            });
+        }
+
+        Some(method)
+    }
+
+    #[inline(always)]
+    fn get_cached_index_table_field(
+        &self,
+        ptr: ObjectPtr,
+        key: Val,
+        cache: &FieldLookupCacheSlot,
+    ) -> Option<Option<Val>> {
+        let entry = cache.get_method()?;
+
+        let receiver_table = self.heap.as_table_ref(ptr)?;
+        if receiver_table.get_metatable() != Some(entry.receiver_metatable) {
+            return None;
+        }
+
+        let metatable = self.heap.as_table_ref(entry.receiver_metatable)?;
+        let (index_key, index_handler) = metatable.get_index(entry.index_field_index)?;
+        if index_key != entry.index_key || index_handler != entry.index_handler {
+            return None;
+        }
+
+        let Some(index_table) = entry.index_handler.as_object_ptr() else {
+            return Some(None);
+        };
+        let Some(method_table) = self.heap.as_table_ref(index_table) else {
+            return Some(None);
+        };
+        let method_table_version = method_table.version();
+        let Some(method_index) = entry.method_index else {
+            return if entry.method_table_version == method_table_version {
+                Some(None)
+            } else {
+                None
+            };
+        };
+
+        if entry.method_table_version == method_table_version {
+            return method_table
+                .get_index(method_index)
+                .map(|(_, val)| Some(val));
+        }
+
+        let (cached_key, method) = method_table.get_index(method_index)?;
+        if cached_key == key {
+            cache.set_method(MethodLookupCacheEntry {
+                receiver_metatable: entry.receiver_metatable,
+                index_key: entry.index_key,
+                index_field_index: entry.index_field_index,
+                index_handler: entry.index_handler,
+                method_table_version,
+                method_index: Some(method_index),
+            });
+            Some(Some(method))
+        } else {
+            None
+        }
+    }
+
+    #[inline(always)]
+    fn protected_index_key(&mut self, receiver: Val, key: Val) -> Val {
+        self.stack.push(receiver);
+        self.stack.push(key);
+        let index_key = self.alloc_string("__index");
+        self.pop(2);
+        index_key
     }
 
     #[inline(always)]

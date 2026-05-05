@@ -114,6 +114,72 @@ fn field_cache_does_not_cache_index_metamethod_result() {
     assert_eq!(val, 3.0);
 }
 
+#[test]
+fn method_cache_revalidates_index_table_method_update() {
+    let val = run_number(
+        r#"
+        local methods = {}
+        function methods:f()
+            return 1
+        end
+
+        local t = setmetatable({}, { __index = methods })
+        local first = t:f()
+
+        function methods:f()
+            return 2
+        end
+
+        local second = t:f()
+        return first * 10 + second
+    "#,
+    );
+    assert_eq!(val, 12.0);
+}
+
+#[test]
+fn method_cache_revalidates_index_table_reassignment() {
+    let val = run_number(
+        r#"
+        local methods_a = {}
+        local methods_b = {}
+        function methods_a:f()
+            return 1
+        end
+        function methods_b:f()
+            return 2
+        end
+
+        local mt = { __index = methods_a }
+        local t = setmetatable({}, mt)
+        local first = t:f()
+        mt.__index = methods_b
+        local second = t:f()
+        return first * 10 + second
+    "#,
+    );
+    assert_eq!(val, 12.0);
+}
+
+#[test]
+fn method_cache_does_not_cache_index_function_result() {
+    let val = run_number(
+        r#"
+        local calls = 0
+        local t = setmetatable({}, {
+            __index = function(self, key)
+                calls = calls + 1
+                return function()
+                    return calls
+                end
+            end
+        })
+        return t:f() + t:f()
+    "#,
+    );
+    assert_eq!(val, 3.0);
+}
+
 // -- __index: invalid handlers should error --
 
 #[test]

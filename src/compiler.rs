@@ -10,7 +10,7 @@ use std::cell::Cell;
 use super::Instr;
 use super::Result;
 use super::error;
-use super::vm::ObjectPtr;
+use super::vm::{ObjectPtr, Val};
 
 /// Describes where an upvalue comes from when creating a closure.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -62,18 +62,37 @@ pub(super) struct FieldLookupCacheEntry {
     pub(super) index: usize,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct MethodLookupCacheEntry {
+    pub(super) receiver_metatable: ObjectPtr,
+    pub(super) index_key: Val,
+    pub(super) index_field_index: usize,
+    pub(super) index_handler: Val,
+    pub(super) method_table_version: u64,
+    pub(super) method_index: Option<usize>,
+}
+
 #[derive(Debug, Default)]
 pub(super) struct FieldLookupCacheSlot {
-    entry: Cell<Option<FieldLookupCacheEntry>>,
+    field_entry: Cell<Option<FieldLookupCacheEntry>>,
+    method_entry: Cell<Option<MethodLookupCacheEntry>>,
 }
 
 impl FieldLookupCacheSlot {
-    pub(super) fn get(&self) -> Option<FieldLookupCacheEntry> {
-        self.entry.get()
+    pub(super) fn get_field(&self) -> Option<FieldLookupCacheEntry> {
+        self.field_entry.get()
     }
 
-    pub(super) fn set(&self, entry: FieldLookupCacheEntry) {
-        self.entry.set(Some(entry));
+    pub(super) fn set_field(&self, entry: FieldLookupCacheEntry) {
+        self.field_entry.set(Some(entry));
+    }
+
+    pub(super) fn get_method(&self) -> Option<MethodLookupCacheEntry> {
+        self.method_entry.get()
+    }
+
+    pub(super) fn set_method(&self, entry: MethodLookupCacheEntry) {
+        self.method_entry.set(Some(entry));
     }
 }
 
