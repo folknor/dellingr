@@ -37,3 +37,6 @@ function _bench()
     -- Touch the prebuilt keys to keep them rooted.
     return total + #s + #joined + #keys[500]
 end
+
+for i = 1, 300 do _bench() end
+print("strings/mixed: true")

@@ -1,6 +1,6 @@
 -- Hypothesis: obj:method() desugars to a field lookup + call. Without
 -- inline caching, every call hits the table's hash bucket. Compare with
--- a cached-method version (method_cached.lua).
+-- a cached-method version (calls/method_cached.lua).
 
 local Counter = {}
 Counter.__index = Counter
@@ -24,3 +24,6 @@ function _bench()
     end
     return c.count
 end
+
+for i = 1, 500 do _bench() end
+print("calls/method: true")

@@ -1,7 +1,7 @@
 //! Integration tests that run all Lua example files.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[test]
@@ -20,23 +20,30 @@ fn run_feature_test_extended_in_process() {
         .unwrap();
 }
 
-/// Run all .lua files in the examples directory and check they complete without errors.
+fn collect_lua_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let entries = fs::read_dir(dir).expect("Failed to read directory");
+    for entry in entries {
+        let entry = entry.expect("Failed to read directory entry");
+        let path = entry.path();
+        if path.is_dir() {
+            collect_lua_files(&path, out);
+        } else if path.extension().is_some_and(|ext| ext == "lua") {
+            out.push(path);
+        }
+    }
+}
+
+/// Run all .lua files in the examples directory (recursively) and check they
+/// complete without errors.
 #[test]
 fn run_all_examples() {
     let examples_dir = Path::new("examples");
 
     assert!(examples_dir.exists(), "examples directory not found");
 
-    let mut files: Vec<_> = fs::read_dir(examples_dir)
-        .expect("Failed to read examples directory")
-        .collect::<std::io::Result<Vec<_>>>()
-        .expect("Failed to read example directory entry")
-        .into_iter()
-        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "lua"))
-        .collect();
-
-    // Sort for consistent ordering
-    files.sort_by_key(std::fs::DirEntry::path);
+    let mut files: Vec<PathBuf> = Vec::new();
+    collect_lua_files(examples_dir, &mut files);
+    files.sort();
 
     assert!(
         !files.is_empty(),
@@ -45,11 +52,10 @@ fn run_all_examples() {
 
     let mut failures = Vec::new();
 
-    for entry in &files {
-        let path = entry.path();
-        let filename = path.file_name().unwrap().to_string_lossy();
+    for path in &files {
+        let display = path.strip_prefix("examples").unwrap_or(path).display();
 
-        println!("Running: {filename}");
+        println!("Running: {display}");
 
         let output = Command::new("cargo")
             .args(["run", "--quiet", "--", path.to_str().unwrap()])
@@ -61,7 +67,7 @@ fn run_all_examples() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             failures.push(format!(
                 "{}: exit code {:?}\nstdout: {}\nstderr: {}",
-                filename,
+                display,
                 output.status.code(),
                 stdout,
                 stderr
@@ -71,7 +77,7 @@ fn run_all_examples() {
             // Check for "false" in output which indicates a test failure
             if stdout.contains(": false") {
                 failures.push(format!(
-                    "{filename}: test assertion failed\noutput: {stdout}"
+                    "{display}: test assertion failed\noutput: {stdout}"
                 ));
             }
         }

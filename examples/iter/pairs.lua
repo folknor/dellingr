@@ -14,3 +14,6 @@ function _bench()
     end
     return sum
 end
+
+for i = 1, 600 do _bench() end
+print("iter/pairs: true")

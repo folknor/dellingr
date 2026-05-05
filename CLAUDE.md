@@ -97,29 +97,31 @@ Compilation pipeline: source to `compiler::parse_str` to bytecode `Chunk` to exe
 
 ## Hotpath benchmarks
 
-`examples/hotpath.rs` is a single Rust harness. It takes one positional arg (the target name) and loads `hotpath/{target}.lua`, which must define a global `_bench()` function. Layout:
+`examples/hotpath.rs` is a single Rust harness. It takes one positional arg (a target path like `fields/same_obj_read`) and loads `examples/{target}.lua`, which must define a global `_bench()` function. Bench scripts live in subdirectories of `examples/` alongside correctness tests:
 
 ```
-examples/hotpath.rs    # harness (parse / cold call / warm calls)
-hotpath/
-  arithmetic.lua       # tight numeric loop, no allocation
-  strings.lua          # string interning, concat, table.concat
-  tables.lua           # array + hash fills, ipairs/pairs iteration
-brokkr.toml            # project = "dellingr" + [dellingr] target list
+examples/hotpath.rs        # harness (parse / cold call / warm calls)
+examples/numerics/         # arithmetic
+examples/calls/            # global, local, method, vararg, fixedarg, ...
+examples/fields/           # same_obj_read, same_obj_write, polymorphic, ...
+examples/iter/             # pairs, ipairs
+examples/tables/           # fill, mixed, numeric_index
+examples/alloc/            # closure, short_tables
+examples/strings/          # mixed
 ```
 
-The harness measures four phases on one State and emits KV pairs to stderr for brokkr to capture: `parse_us`, `cold_call_us`, `warm_avg_us` (averaged over 20 iterations), plus the dellingr-specific `cost_used` per phase and the derived `cost_per_us`. Cost is deterministic across hosts; wall time is the noisy metric. `setup_*` and `final_*` heap/object counts bracket GC pressure.
+Each bench script is also a standalone-runnable test: top-level setup + a `_bench()` function + an outer loop that calls `_bench()` enough times for hyperfine resolution and prints `<name>: true`. This lets one file serve three masters: the hotpath harness (calls `_bench` directly for parse/cold/warm phasing), `tests/run_examples.rs` (executes the standalone runner, asserts no `: false`), and `bench-vs-lua.sh` (hyperfine timings vs reference Lua 5.2/5.4).
+
+The harness measures four phases on one State and emits KV pairs to stderr: `parse_us`, `cold_call_us`, `warm_avg_us` (averaged over 20 iterations), plus the dellingr-specific `cost_used` per phase and the derived `cost_per_us`. Cost is deterministic across hosts; wall time is the noisy metric. `setup_*` and `final_*` heap/object counts bracket GC pressure.
 
 Two internal hot paths carry `#[hotpath::measure]`: `compiler::parse_str_named` (one full parse) and `vm::State::gc_collect` (one mark+sweep). Both are non-recursive entry points. The annotation is a no-op when the `hotpath` cargo feature is off. **Don't add `#[hotpath::measure]` to `eval_closure` or any function that recurses through the bytecode dispatch loop**: each level adds enough stack-frame bloat to abort the `call_depth_exceeded_error` test (which intentionally recurses to `MAX_CALL_DEPTH = 1000`).
 
-To add a new target: write `hotpath/{name}.lua` defining `_bench()`, and add `name` to the `targets` array in `brokkr.toml`. No Rust changes needed.
+To add a new target: write `examples/{category}/{name}.lua` defining `_bench()` and a standalone runner footer. No Rust changes, no manifest updates.
 
 ```sh
-cargo run --release --example hotpath --features hotpath -- arithmetic
-cargo run --release --example hotpath --features hotpath-alloc -- tables
+cargo run --release --example hotpath --features hotpath -- fields/same_obj_read
+cargo run --release --example hotpath --features hotpath-alloc -- tables/fill
 ```
-
-The `hotpath/` directory is **not** part of the test surface - `tests/run_examples.rs` only walks `examples/*.lua`. Bench scripts don't need to print `: false`-free output and shouldn't print at all.
 
 ## Project conventions worth knowing
 
@@ -127,6 +129,7 @@ The `hotpath/` directory is **not** part of the test surface - `tests/run_exampl
 - The CLI prints `Cost used: N` after each run; `diff_test.sh` filters this line out before comparing.
 - The crate was lifted out of a game project (originally extracted from `fcomm2`); some doc comments still mention `FleetCallbacks` etc. as illustrative examples.
 - `target/` is a symlink to a shared cargo cache.
+- `OPTIMIZATIONS.md` is a working backlog of forward-looking optimization ideas (rejected, deferred, hypothetical). Items get deleted as they ship or stop being worth tracking. Not a discrepancy doc.
 
 ## Multi-Agent Orchestration
 

@@ -1,5 +1,6 @@
--- Table field read kernel.
--- Prebuilds nested records once, then repeatedly reads array slots and fields.
+-- Polymorphic field-read kernel.
+-- Iterates a fresh table at each step, so per-callsite IC never hits.
+-- Measures the steady-state polymorphic miss path.
 
 local items = {}
 for i = 1, 5000 do
@@ -14,3 +15,6 @@ function _bench()
     end
     return sum
 end
+
+for i = 1, 300 do _bench() end
+print("fields/polymorphic: true")

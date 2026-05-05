@@ -1,7 +1,8 @@
 #![allow(clippy::unwrap_used)]
 //! Hotpath profiling harness for dellingr.
 //!
-//! Loads `hotpath/{target}.lua`, which must define a global `_bench` function.
+//! Loads `examples/{target}.lua`, which must define a global `_bench` function.
+//! The `target` may include subdirectories (e.g. `calls/global`).
 //! Phases measured separately:
 //!   - `parse_us`         time spent in `load_string_named` (parser + codegen)
 //!   - `cold_call_us`     first invocation of `_bench` after chunk setup
@@ -11,10 +12,8 @@
 //! Determinism: dellingr's cost counter (`cost_used`) is reported alongside
 //! wall time; cost-per-microsecond is the stable cross-host metric.
 //!
-//! Run via brokkr (once dellingr support lands):
-//!     brokkr hotpath --target arithmetic
 //! Run standalone:
-//!     cargo run --release --example hotpath --features hotpath -- arithmetic
+//!     cargo run --release --example hotpath --features hotpath -- numerics/arithmetic
 
 use std::env;
 use std::fs;
@@ -25,7 +24,7 @@ use std::time::Instant;
 use dellingr::{ArgCount, RetCount, State};
 
 const WARM_ITERATIONS: u32 = 20;
-const DEFAULT_TARGET: &str = "arithmetic";
+const DEFAULT_TARGET: &str = "numerics/arithmetic";
 
 fn main() {
     let _guard = hotpath::HotpathGuardBuilder::new("dellingr::hotpath")
@@ -37,7 +36,7 @@ fn main() {
         .nth(1)
         .unwrap_or_else(|| DEFAULT_TARGET.to_string());
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let script_path = manifest_dir.join("hotpath").join(format!("{target}.lua"));
+    let script_path = manifest_dir.join("examples").join(format!("{target}.lua"));
 
     let source = match fs::read_to_string(&script_path) {
         Ok(s) => s,
@@ -47,7 +46,7 @@ fn main() {
         }
     };
 
-    let chunk_name = format!("@hotpath/{target}.lua");
+    let chunk_name = format!("@examples/{target}.lua");
     let mut state = State::new();
 
     // Phase 1: parse + codegen.

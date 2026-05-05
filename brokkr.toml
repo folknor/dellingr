@@ -1,16 +1,4 @@
 project = "dellingr"
 
-# The dellingr-specific [dellingr] section is intentionally empty: brokkr's
-# explicit dellingr module (when added) defines the recognized fields. The
-# hotpath bench harness lives at examples/hotpath.rs and accepts a positional
-# `<target>` arg that resolves to `hotpath/{target}.lua`. Targets currently
-# checked in: arithmetic, calls, closure_alloc, field_hits, fixedarg_call,
-# global_calls, ipairs_scan, local_calls, method_cached, method_chain,
-# method_dispatch, numeric_index, pairs_scan, same_object_cached,
-# same_object_fields, same_object_writes, short_tables, strings,
-# table_fill, tables, vararg_call. Add more by writing a new
-# `hotpath/{name}.lua` that defines
-# a global `_bench()` function.
-
 [test]
 default_package = "dellingr"

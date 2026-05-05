@@ -32,8 +32,9 @@ expected_diff=0
 echo "=== Differential Testing: our VM vs lua5.2 vs lua5.4 ==="
 echo ""
 
-for f in examples/*.lua; do
-    name=$(basename "$f")
+shopt -s globstar nullglob
+for f in examples/**/*.lua; do
+    name=$(realpath --relative-to=examples "$f")
 
     # Skip files that use features not in standard Lua or are stress tests
     case "$name" in

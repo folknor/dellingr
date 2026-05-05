@@ -1,5 +1,5 @@
 -- Numeric indexing kernel.
--- Same dense array shape as ipairs_scan, but traversed with a numeric for loop.
+-- Same dense array shape as iter/ipairs.lua, but traversed with a numeric for loop.
 
 local arr = {}
 for i = 1, 10000 do
@@ -13,3 +13,6 @@ function _bench()
     end
     return sum
 end
+
+for i = 1, 250 do _bench() end
+print("tables/numeric_index: true")

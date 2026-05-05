@@ -17,3 +17,6 @@ function _bench()
     end
     return sum
 end
+
+for i = 1, 35 do _bench() end
+print("calls/general: true")

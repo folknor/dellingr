@@ -17,3 +17,6 @@ function _bench()
     end
     return total
 end
+
+for i = 1, 600 do _bench() end
+print("calls/vararg: true")

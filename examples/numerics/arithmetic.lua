@@ -14,3 +14,7 @@ function _bench()
     end
     return sum + fib(20)
 end
+
+-- Standalone: iterate enough for hyperfine resolution.
+for i = 1, 30 do _bench() end
+print("arithmetic: true")

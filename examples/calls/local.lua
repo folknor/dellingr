@@ -1,6 +1,6 @@
--- Sibling of global_calls.lua: same loop, but the function is bound to a
+-- Sibling of calls/global.lua: same loop, but the function is bound to a
 -- local up front so each call skips the globals lookup. The delta vs
--- global_calls.lua is the cost of per-call global resolution.
+-- calls/global.lua is the cost of per-call global resolution.
 
 local function add_one(x)
     return x + 1
@@ -14,3 +14,6 @@ function _bench()
     end
     return sum
 end
+
+for i = 1, 1500 do _bench() end
+print("calls/local: true")

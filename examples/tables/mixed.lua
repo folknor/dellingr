@@ -34,3 +34,6 @@ function _bench()
 
     return arr_sum + hash_sum
 end
+
+for i = 1, 130 do _bench() end
+print("tables/mixed: true")

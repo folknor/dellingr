@@ -19,3 +19,6 @@ function _bench()
 
     return arr[8000] + hash[keys[3000]]
 end
+
+for i = 1, 130 do _bench() end
+print("tables/fill: true")

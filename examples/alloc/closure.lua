@@ -13,3 +13,6 @@ function _bench()
     end
     return total
 end
+
+for i = 1, 1000 do _bench() end
+print("alloc/closure: true")

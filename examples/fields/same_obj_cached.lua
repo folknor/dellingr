@@ -1,4 +1,4 @@
--- Sibling of same_object_fields.lua: same arithmetic, but the six fields
+-- Sibling of fields/same_obj_read.lua: same arithmetic, but the six fields
 -- are pre-loaded into locals once. The delta isolates per-call-site
 -- field-lookup overhead.
 
@@ -25,3 +25,6 @@ function _bench()
     end
     return sum
 end
+
+for i = 1, 2500 do _bench() end
+print("fields/same_obj_cached: true")

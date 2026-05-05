@@ -1,4 +1,4 @@
--- Sibling of method_dispatch.lua: caches the bound function once and
+-- Sibling of calls/method.lua: caches the bound function once and
 -- calls it as a plain function. Removes per-iteration field lookup and
 -- the colon-method dispatch.
 
@@ -25,3 +25,6 @@ function _bench()
     end
     return c.count
 end
+
+for i = 1, 700 do _bench() end
+print("calls/method_cached: true")

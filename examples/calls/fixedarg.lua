@@ -1,4 +1,4 @@
--- Sibling of vararg_call.lua: equivalent total work but with fixed
+-- Sibling of vararg.lua: equivalent total work but with fixed
 -- arity, isolating the vararg dispatch overhead.
 
 local function sum_four(a, b, c, d)
@@ -12,3 +12,6 @@ function _bench()
     end
     return total
 end
+
+for i = 1, 2500 do _bench() end
+print("calls/fixedarg: true")
