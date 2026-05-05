@@ -75,25 +75,6 @@ we hit a floor below that, this is the natural next step.
 
 ## IC extensions (same shape as existing ICs)
 
-### String method dispatch IC
-
-What: cache the resolved value of `s:method()` calls at the call site,
-where `s` is a string and `method` is looked up in the `string` global
-library.
-
-Sketch: extend `FieldLookupCacheSlot` with a third entry type for the
-string-receiver path. Cache (key, string_lib_table_version, index_in_lib).
-Validates by checking the `string` global is still the same table and the
-key is still at the cached index.
-
-Why deferred: not currently in any hot bench. The two field-IC entries
-already cover the OOP common case; this would help string-heavy code
-(parsing, formatting) that hasn't been measured.
-
-Signal that would promote it: writing a string-heavy bench (mix of
-`s:sub()`, `s:find()`, `s:len()`) and finding it dominated by the
-`string` lib lookup rather than the work itself.
-
 ### Table-library fallback IC
 
 What: when `tbl:insert(...)`, `tbl:concat(...)` etc. fall through from
@@ -125,25 +106,6 @@ that genuinely have no resolvable method.
 
 Signal: a workload that mutates index tables to add methods after first
 access, where this miss path becomes hot. Vanishingly rare in practice.
-
-### SET_FIELD slow-path cache repopulation after fresh insert
-
-What: after `instr_set_field`'s slow path succeeds with no `__newindex`
-firing (the simple "insert a new key into a plain table" case), the key
-now exists at a known index. Populate the cache with that index so the
-next access is a fast hit.
-
-Sketch: after `set_table_with_key` returns, do one `get_with_index(&key)`
-to locate the freshly-inserted entry, then populate the cache slot.
-
-Why deferred: kept commit 7 narrow. The current behavior pays the slow
-path twice for a fresh insert (first insert via slow path, second access
-via `try_set_field_direct` which finds the key now exists and populates).
-Cache lands on the second access, not the first.
-
-Signal: a workload with high churn of "insert + hot-update" patterns
-where the second-access delay matters. Hard to construct; probably
-marginal.
 
 ### GET_FIELD slow-path cache repopulation after `__index` resolution
 

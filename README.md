@@ -9,18 +9,19 @@
 
 An embeddable, deterministic, pure-Rust Lua VM with precise per-opcode instruction-cost accounting. No FFI, no system Lua dependency.
 
-It's slower than reference Lua, but not dramatically so: roughly 2-4x behind lua5.4 / 5.5 on most workloads, ~2x on `pairs` iteration, and ~8x on string-heavy code. LuaJIT is its own world - 18-30x faster than us on tight loops, much less on alloc/string-heavy code. dellingr is fast enough for continuous bounded execution of a few kilobytes of Lua code to let a game run at several thousand FPS.
+It's slower than reference Lua, but not dramatically so: roughly 2-4x behind lua5.4 / 5.5 on most workloads and ~2x on `pairs` iteration / pattern matching. LuaJIT is its own world - 18-30x faster than us on tight loops where its tracing JIT shines, much less on alloc/string/pattern work where we get within 3-4x. dellingr is fast enough for continuous bounded execution of a few kilobytes of Lua code to let a game run at several thousand FPS.
 
-Run `./bench.sh` to reproduce on your own host. Sample run on AMD Ryzen 9 5900X / Linux 7.0 / commit `bd24832`:
+Run `./bench.sh` to reproduce on your own host. Sample run on AMD Ryzen 9 5900X / Linux 7.0:
 
 | bench                    | dellingr | vs lua5.5 | vs lua5.4 | vs lua5.2 | vs luajit |
 |--------------------------|---------:|----------:|----------:|----------:|----------:|
-| `numerics/arithmetic`    |    104ms |     3.96x |     3.87x |     2.85x |    23.33x |
-| `iter/pairs`             |     97ms |     2.30x |     2.18x |     2.11x |    18.18x |
-| `tables/fill`            |    107ms |     4.23x |     3.51x |     2.63x |     7.23x |
-| `strings/mixed`          |     99ms |     7.79x |     8.56x |     5.65x |     8.45x |
-| `fields/same_obj_read`   |    113ms |     3.99x |     4.35x |     2.50x |    30.34x |
-| `benchmark` (multi)      |    173ms |     4.18x |     4.05x |     2.80x |    23.74x |
+| `numerics/arithmetic`    |    102ms |     3.89x |     3.91x |     2.77x |    22.92x |
+| `iter/pairs`             |     91ms |     2.10x |     1.96x |     1.92x |    16.35x |
+| `strings/patterns`       |     30ms |     1.69x |     1.65x |     1.61x |     2.53x |
+| `tables/fill`            |    108ms |     4.13x |     3.42x |     2.63x |     7.22x |
+| `strings/mixed`          |     43ms |     3.32x |     3.65x |     2.40x |     3.57x |
+| `fields/same_obj_read`   |    120ms |     4.08x |     4.42x |     2.58x |    31.34x |
+| `benchmark` (multi)      |    172ms |     4.07x |     3.97x |     2.75x |    23.44x |
 
 Built with LLMs. See [LLM.md](LLM.md).
 
