@@ -428,11 +428,15 @@ impl State {
     }
 
     pub(super) fn set_global_value(&mut self, name: &str, val: Val) {
+        self.set_global_value_owned(name.to_string(), val);
+    }
+
+    pub(super) fn set_global_value_owned(&mut self, name: String, val: Val) {
         // Update builtins array if this is a well-known name
-        if let Some(slot) = Builtin::from_name(name) {
+        if let Some(slot) = Builtin::from_name(&name) {
             self.builtins[slot as usize] = val;
         }
-        self.globals.insert(name.to_string(), val);
+        self.globals.insert(name, val);
     }
 
     /// Execute a function with a restricted global environment.

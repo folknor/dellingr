@@ -182,7 +182,7 @@ impl Frame {
                 Instr::OP_SET_UPVALUE => state.instr_set_upvalue(self, inst.a()),
 
                 // Globals
-                Instr::OP_GET_GLOBAL => state.instr_get_global(self, inst.a())?,
+                Instr::OP_GET_GLOBAL => state.instr_get_global(self, inst.a(), inst.bx())?,
                 Instr::OP_SET_GLOBAL => state.instr_set_global(self, inst.a())?,
 
                 // Builtins (fast path for well-known globals)
@@ -700,9 +700,9 @@ impl State {
         }
     }
 
-    fn instr_get_global(&mut self, frame: &Frame, string_num: u8) -> Result<()> {
+    fn instr_get_global(&mut self, frame: &Frame, string_num: u8, cache_idx: u16) -> Result<()> {
         let s = &frame.chunk.string_literals[string_num as usize];
-        let cache = frame.chunk.global_lookup_cache.get(string_num as usize);
+        let cache = frame.chunk.global_lookup_cache.get(cache_idx as usize);
         if let Some(val) = cache.and_then(|cache| self.get_cached_global(cache)) {
             self.stack.push(val);
             return Ok(());
@@ -978,7 +978,7 @@ impl State {
                 ))
             })?;
             let name = name.to_owned();
-            self.set_global_value(&name, val);
+            self.set_global_value_owned(name, val);
             Ok(())
         } else {
             Err(self.error(ErrorKind::InternalError(format!(

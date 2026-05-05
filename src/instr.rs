@@ -290,6 +290,12 @@ impl Instr {
         Instr((opcode as u32) << 24 | (a as u32) << 16 | (sbx as u16 as u32))
     }
 
+    /// Create an instruction with one u8 and one u16 operand (A, Bx).
+    #[inline]
+    pub(crate) const fn op_a_bx(opcode: u8, a: u8, bx: u16) -> Self {
+        Instr((opcode as u32) << 24 | (a as u32) << 16 | bx as u32)
+    }
+
     /// Get the opcode.
     #[inline]
     pub(crate) const fn opcode(self) -> u8 {
@@ -313,6 +319,12 @@ impl Instr {
     #[allow(dead_code)]
     pub(crate) const fn c(self) -> u8 {
         self.0 as u8
+    }
+
+    /// Get the unsigned 16-bit Bx operand.
+    #[inline]
+    pub(crate) const fn bx(self) -> u16 {
+        self.0 as u16
     }
 
     /// Get the signed 16-bit offset (sBx).
@@ -405,6 +417,9 @@ impl Instr {
     // One u8 operand
     pub(crate) const fn get_global(idx: u8) -> Self {
         Self::op_a(Self::OP_GET_GLOBAL, idx)
+    }
+    pub(crate) const fn get_global_cached(idx: u8, cache_idx: u16) -> Self {
+        Self::op_a_bx(Self::OP_GET_GLOBAL, idx, cache_idx)
     }
     pub(crate) const fn set_global(idx: u8) -> Self {
         Self::op_a(Self::OP_SET_GLOBAL, idx)

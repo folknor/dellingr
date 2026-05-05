@@ -78,7 +78,30 @@ pub(super) struct Chunk {
 
 impl Chunk {
     fn initialize_runtime_caches(&mut self) {
-        self.global_lookup_cache = (0..self.string_literals.len())
+        let mut cache_indices = vec![None; self.string_literals.len()];
+        let mut cache_len = 0usize;
+
+        for inst in &mut self.code {
+            if inst.opcode() == Instr::OP_GET_GLOBAL {
+                let string_idx = inst.a() as usize;
+                let Some(cache_idx) = cache_indices.get_mut(string_idx) else {
+                    continue;
+                };
+                let cache_idx = match *cache_idx {
+                    Some(cache_idx) => cache_idx,
+                    None => {
+                        let next_idx =
+                            u16::try_from(cache_len).expect("too many global lookup cache slots");
+                        *cache_idx = Some(next_idx);
+                        cache_len += 1;
+                        next_idx
+                    }
+                };
+                *inst = Instr::get_global_cached(inst.a(), cache_idx);
+            }
+        }
+
+        self.global_lookup_cache = (0..cache_len)
             .map(|_| GlobalLookupCacheSlot::default())
             .collect();
         for nested in &mut self.nested {
@@ -102,4 +125,34 @@ pub(super) fn parse_str_named(
     let mut chunk = parser::parse_str_named(source.as_ref(), source_name)?;
     chunk.initialize_runtime_caches();
     Ok(chunk)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn global_lookup_cache_tracks_distinct_get_global_names_only() {
+        let chunk = parse_str(
+            r#"
+            local literal = "not a global"
+            local t = { field = literal }
+            foo = foo + foo
+            bar = bar
+            "#,
+        )
+        .unwrap();
+
+        let get_globals: Vec<_> = chunk
+            .code
+            .iter()
+            .filter(|inst| inst.opcode() == Instr::OP_GET_GLOBAL)
+            .collect();
+
+        assert_eq!(get_globals.len(), 3);
+        assert_eq!(chunk.global_lookup_cache.len(), 2);
+        assert!(chunk.string_literals.len() > chunk.global_lookup_cache.len());
+        assert_eq!(get_globals[0].bx(), get_globals[1].bx());
+        assert_ne!(get_globals[0].bx(), get_globals[2].bx());
+    }
 }
