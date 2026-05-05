@@ -20,15 +20,15 @@ hotpath = ["hotpath/hotpath"]
 hotpath-alloc = ["hotpath/hotpath", "hotpath/hotpath-alloc"]
 
 [lints.rust]
-future_incompatible = "warn"
-non_ascii_idents = "warn"
-rust_2018_idioms = "warn"
-single_use_lifetimes = "warn"
-trivial_casts = "warn"
-trivial_numeric_casts = "warn"
-unreachable_pub = "warn"
-unused = "warn"
-variant_size_differences = "warn"
+future_incompatible = "deny"
+non_ascii_idents = "deny"
+rust_2018_idioms = "deny"
+single_use_lifetimes = "deny"
+trivial_casts = "deny"
+trivial_numeric_casts = "deny"
+unreachable_pub = "deny"
+unused = "deny"
+variant_size_differences = "deny"
 
 [lints.clippy]
 disallowed_methods = "deny"

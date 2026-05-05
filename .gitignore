@@ -13,3 +13,4 @@ Thumbs.db
 target
 
 .bench-results.json
+.diff_test_*.out

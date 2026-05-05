@@ -36,7 +36,7 @@ cargo run --release -- --limit 100000 path/to/script.lua  # run with a cost budg
 Differential testing against reference Lua:
 
 ```sh
-./diff_test.sh                # compares examples/ output against lua5.2 and lua5.4 (must be on PATH)
+./diff_test.sh                # diff vs lua5.2 / lua5.4 (must be on PATH); prints "ok" on success or "FAIL: <path>" per failing script
 ./test_limited.sh <cmd>       # run <cmd> with a 2GB virtual-memory cap (for stress tests)
 ```
 
