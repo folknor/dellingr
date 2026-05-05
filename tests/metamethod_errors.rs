@@ -77,6 +77,43 @@ fn index_existing_key_no_metamethod() {
     assert_eq!(val, 10.0);
 }
 
+#[test]
+fn field_cache_revalidates_after_table_mutation() {
+    let val = run_number(
+        r#"
+        local t = { a = 1, b = 2, c = 3 }
+        local function read_b()
+            return t.b
+        end
+
+        local first = read_b()
+        t.a = nil
+        local second = read_b()
+        t.b = 7
+        local third = read_b()
+        return first * 100 + second * 10 + third
+    "#,
+    );
+    assert_eq!(val, 227.0);
+}
+
+#[test]
+fn field_cache_does_not_cache_index_metamethod_result() {
+    let val = run_number(
+        r#"
+        local calls = 0
+        local t = setmetatable({}, {
+            __index = function(self, key)
+                calls = calls + 1
+                return calls
+            end
+        })
+        return t.x + t.x
+    "#,
+    );
+    assert_eq!(val, 3.0);
+}
+
 // -- __index: invalid handlers should error --
 
 #[test]

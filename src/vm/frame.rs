@@ -3,7 +3,9 @@ use std::rc::Rc;
 use std::str;
 
 use super::super::compiler::UpvalueDesc;
-use super::super::compiler::{GlobalLookupCacheEntry, GlobalLookupCacheSlot};
+use super::super::compiler::{
+    FieldLookupCacheEntry, FieldLookupCacheSlot, GlobalLookupCacheEntry, GlobalLookupCacheSlot,
+};
 use super::super::error::{Error, ErrorKind, StackFrame, TypeError};
 use super::Chunk;
 use super::Instr;
@@ -11,7 +13,7 @@ use super::Result;
 use super::State;
 use super::Val;
 use super::lua_val::RustFunc;
-use super::object::{Upvalue, UpvalueRef};
+use super::object::{ObjectPtr, Upvalue, UpvalueRef};
 use crate::instr::{ArgCount, RetCount};
 use crate::lua_std::{base_ipairs_iter, base_next};
 
@@ -282,7 +284,7 @@ impl Frame {
                 Instr::OP_NOT => state.instr_not(),
 
                 // Table reads are free
-                Instr::OP_GET_FIELD => state.instr_get_field(self, inst.a())?,
+                Instr::OP_GET_FIELD => state.instr_get_field(self, inst.a(), inst.bx())?,
                 Instr::OP_GET_TABLE => state.instr_get_table()?,
 
                 // String concatenation is free
@@ -652,39 +654,39 @@ impl State {
     }
 
     #[hotpath::measure]
-    fn instr_get_field(&mut self, frame: &mut Frame, field_id: u8) -> Result<()> {
+    fn instr_get_field(&mut self, frame: &mut Frame, field_id: u8, cache_idx: u16) -> Result<()> {
         // Pop value, handle both tables and strings
         let val = self.pop_val();
         let key = self.get_string_constant(frame, field_id);
 
-        // Check what type we have
-        let is_table = val
-            .as_object_ptr()
-            .and_then(|ptr| self.heap.as_table_ref(ptr))
-            .is_some();
+        if let Some(ptr) = val.as_object_ptr()
+            && let Some((direct, has_metatable)) = self.get_table_field_direct(
+                ptr,
+                key,
+                frame.chunk.field_lookup_cache.get(cache_idx as usize),
+            )
+        {
+            if let Some(result) = direct {
+                self.stack.push(result);
+                return Ok(());
+            }
 
-        if is_table {
-            // Table: use get_table_with_key for metamethod support
+            if !has_metatable {
+                return self.push_table_library_field(key);
+            }
+
             self.stack.push(val);
             let table_idx = self.stack.len() - 1;
             self.get_table_with_key(table_idx, key)?;
-            // Stack now: [... table, result]
             let result = self.pop_val();
-            self.pop_val(); // Remove table
+            self.pop_val();
 
-            // If result is nil, fall back to the 'table' global library
-            // This enables tbl:insert(), tbl:concat() etc.
             if matches!(result, Val::Nil) {
-                self.get_global("table");
-                let table_lib_idx = self.stack.len() - 1;
-                self.get_table_with_key(table_lib_idx, key)?;
-                let lib_result = self.pop_val();
-                self.pop_val(); // Remove table_lib
-                self.stack.push(lib_result);
+                self.push_table_library_field(key)
             } else {
                 self.stack.push(result);
+                Ok(())
             }
-            Ok(())
         } else if val.as_string_ptr().is_some() {
             // String: look up method in the 'string' global table
             self.get_global("string");
@@ -698,6 +700,72 @@ impl State {
         } else {
             Err(self.type_error(TypeError::TableIndex(val.typ_simple())))
         }
+    }
+
+    #[inline(always)]
+    fn get_table_field_direct(
+        &self,
+        ptr: ObjectPtr,
+        key: Val,
+        cache: Option<&FieldLookupCacheSlot>,
+    ) -> Option<(Option<Val>, bool)> {
+        if let Some(val) = cache.and_then(|cache| self.get_cached_field(ptr, key, cache)) {
+            return Some((Some(val), false));
+        }
+
+        let tbl = self.heap.as_table_ref(ptr)?;
+        if let Some((index, val)) = tbl.get_with_index(&key) {
+            if let Some(cache) = cache {
+                cache.set(FieldLookupCacheEntry {
+                    table: ptr,
+                    table_version: tbl.version(),
+                    index,
+                });
+            }
+            return Some((Some(val), tbl.get_metatable().is_some()));
+        }
+
+        Some((None, tbl.get_metatable().is_some()))
+    }
+
+    #[inline(always)]
+    fn get_cached_field(
+        &self,
+        ptr: ObjectPtr,
+        key: Val,
+        cache: &FieldLookupCacheSlot,
+    ) -> Option<Val> {
+        let entry = cache.get()?;
+        if entry.table != ptr {
+            return None;
+        }
+        let tbl = self.heap.as_table_ref(ptr)?;
+        let table_version = tbl.version();
+        if entry.table_version == table_version {
+            return tbl.get_index(entry.index).map(|(_, val)| val);
+        }
+        let (cached_key, cached_val) = tbl.get_index(entry.index)?;
+        if cached_key == key {
+            cache.set(FieldLookupCacheEntry {
+                table: ptr,
+                table_version,
+                index: entry.index,
+            });
+            Some(cached_val)
+        } else {
+            None
+        }
+    }
+
+    #[inline(always)]
+    fn push_table_library_field(&mut self, key: Val) -> Result<()> {
+        self.get_global("table");
+        let table_lib_idx = self.stack.len() - 1;
+        self.get_table_with_key(table_lib_idx, key)?;
+        let result = self.pop_val();
+        self.pop_val();
+        self.stack.push(result);
+        Ok(())
     }
 
     fn instr_get_global(&mut self, frame: &Frame, string_num: u8, cache_idx: u16) -> Result<()> {

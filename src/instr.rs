@@ -439,6 +439,9 @@ impl Instr {
     pub(crate) const fn get_field(idx: u8) -> Self {
         Self::op_a(Self::OP_GET_FIELD, idx)
     }
+    pub(crate) const fn get_field_cached(idx: u8, cache_idx: u16) -> Self {
+        Self::op_a_bx(Self::OP_GET_FIELD, idx, cache_idx)
+    }
     pub(crate) const fn init_index(offset: u8) -> Self {
         Self::op_a(Self::OP_INIT_INDEX, offset)
     }

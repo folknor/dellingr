@@ -10,6 +10,7 @@ use std::cell::Cell;
 use super::Instr;
 use super::Result;
 use super::error;
+use super::vm::ObjectPtr;
 
 /// Describes where an upvalue comes from when creating a closure.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -54,12 +55,48 @@ impl PartialEq for GlobalLookupCacheSlot {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct FieldLookupCacheEntry {
+    pub(super) table: ObjectPtr,
+    pub(super) table_version: u64,
+    pub(super) index: usize,
+}
+
+#[derive(Debug, Default)]
+pub(super) struct FieldLookupCacheSlot {
+    entry: Cell<Option<FieldLookupCacheEntry>>,
+}
+
+impl FieldLookupCacheSlot {
+    pub(super) fn get(&self) -> Option<FieldLookupCacheEntry> {
+        self.entry.get()
+    }
+
+    pub(super) fn set(&self, entry: FieldLookupCacheEntry) {
+        self.entry.set(Some(entry));
+    }
+}
+
+impl Clone for FieldLookupCacheSlot {
+    fn clone(&self) -> Self {
+        // Runtime lookup caches are State-specific, so cloned chunks start cold.
+        Self::default()
+    }
+}
+
+impl PartialEq for FieldLookupCacheSlot {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct Chunk {
     pub(super) code: Vec<Instr>,
     pub(super) number_literals: Vec<f64>,
     pub(super) string_literals: Vec<Vec<u8>>,
     pub(super) global_lookup_cache: Vec<GlobalLookupCacheSlot>,
+    pub(super) field_lookup_cache: Vec<FieldLookupCacheSlot>,
     pub(super) num_params: u8,
     pub(super) num_locals: u8,
     pub(super) nested: Vec<Chunk>,
@@ -78,31 +115,44 @@ pub(super) struct Chunk {
 
 impl Chunk {
     fn initialize_runtime_caches(&mut self) {
-        let mut cache_indices = vec![None; self.string_literals.len()];
-        let mut cache_len = 0usize;
+        let mut global_cache_indices = vec![None; self.string_literals.len()];
+        let mut global_cache_len = 0usize;
+        let mut field_cache_len = 0usize;
 
         for inst in &mut self.code {
-            if inst.opcode() == Instr::OP_GET_GLOBAL {
-                let string_idx = inst.a() as usize;
-                let Some(cache_idx) = cache_indices.get_mut(string_idx) else {
-                    continue;
-                };
-                let cache_idx = match *cache_idx {
-                    Some(cache_idx) => cache_idx,
-                    None => {
-                        let next_idx =
-                            u16::try_from(cache_len).expect("too many global lookup cache slots");
-                        *cache_idx = Some(next_idx);
-                        cache_len += 1;
-                        next_idx
-                    }
-                };
-                *inst = Instr::get_global_cached(inst.a(), cache_idx);
+            match inst.opcode() {
+                Instr::OP_GET_GLOBAL => {
+                    let string_idx = inst.a() as usize;
+                    let Some(cache_idx) = global_cache_indices.get_mut(string_idx) else {
+                        continue;
+                    };
+                    let cache_idx = match *cache_idx {
+                        Some(cache_idx) => cache_idx,
+                        None => {
+                            let next_idx = u16::try_from(global_cache_len)
+                                .expect("too many global lookup cache slots");
+                            *cache_idx = Some(next_idx);
+                            global_cache_len += 1;
+                            next_idx
+                        }
+                    };
+                    *inst = Instr::get_global_cached(inst.a(), cache_idx);
+                }
+                Instr::OP_GET_FIELD => {
+                    let cache_idx =
+                        u16::try_from(field_cache_len).expect("too many field lookup cache slots");
+                    field_cache_len += 1;
+                    *inst = Instr::get_field_cached(inst.a(), cache_idx);
+                }
+                _ => {}
             }
         }
 
-        self.global_lookup_cache = (0..cache_len)
+        self.global_lookup_cache = (0..global_cache_len)
             .map(|_| GlobalLookupCacheSlot::default())
+            .collect();
+        self.field_lookup_cache = (0..field_cache_len)
+            .map(|_| FieldLookupCacheSlot::default())
             .collect();
         for nested in &mut self.nested {
             nested.initialize_runtime_caches();
@@ -128,7 +178,7 @@ pub(super) fn parse_str_named(
 }
 
 #[cfg(test)]
-mod tests {
+mod runtime_cache_tests {
     use super::*;
 
     #[test]
@@ -154,5 +204,28 @@ mod tests {
         assert!(chunk.string_literals.len() > chunk.global_lookup_cache.len());
         assert_eq!(get_globals[0].bx(), get_globals[1].bx());
         assert_ne!(get_globals[0].bx(), get_globals[2].bx());
+    }
+
+    #[test]
+    fn field_lookup_cache_tracks_get_field_call_sites() {
+        let chunk = parse_str(
+            r#"
+            local t = { x = 1, y = 2 }
+            return t.x + t.x + t.y
+            "#,
+        )
+        .unwrap();
+
+        let get_fields: Vec<_> = chunk
+            .code
+            .iter()
+            .filter(|inst| inst.opcode() == Instr::OP_GET_FIELD)
+            .collect();
+
+        assert_eq!(get_fields.len(), 3);
+        assert_eq!(chunk.field_lookup_cache.len(), 3);
+        assert_eq!(get_fields[0].bx(), 0);
+        assert_eq!(get_fields[1].bx(), 1);
+        assert_eq!(get_fields[2].bx(), 2);
     }
 }

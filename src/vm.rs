@@ -28,7 +28,8 @@ use super::error::TypeError;
 use super::host::{DefaultCallbacks, HostCallbacks};
 use super::instr::Builtin;
 
-use lua_val::Val;
+pub(super) use lua_val::Val;
+pub(super) use object::ObjectPtr;
 use object::{GcHeap, Markable, UpvaluePool, UpvalueRef};
 use table::Table;
 

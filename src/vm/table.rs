@@ -43,6 +43,8 @@ impl Default for TableStorage {
 pub(super) struct Table {
     storage: TableStorage,
     metatable: Option<ObjectPtr>,
+    /// Shape version for key/index stability. Value updates do not bump this.
+    version: Cell<u64>,
     /// Cached array length. None means cache is invalid and needs recomputation.
     /// Invalidated when positive integer keys are inserted or removed.
     /// Uses Cell for interior mutability so array_len() can cache on &self.
@@ -54,6 +56,7 @@ impl Default for Table {
         Self {
             storage: TableStorage::default(),
             metatable: None,
+            version: Cell::new(0),
             cached_array_len: Cell::new(None),
         }
     }
@@ -69,6 +72,16 @@ impl Table {
         } else {
             false
         }
+    }
+
+    #[inline]
+    pub(super) fn version(&self) -> u64 {
+        self.version.get()
+    }
+
+    #[inline]
+    fn bump_version(&self) {
+        self.version.set(self.version.get().wrapping_add(1));
     }
 
     #[hotpath::measure]
@@ -87,6 +100,45 @@ impl Table {
                 }
                 TableStorage::Map(map) => map.get(key).copied().unwrap_or_default(),
             },
+        }
+    }
+
+    #[inline]
+    pub(super) fn get_with_index(&self, key: &Val) -> Option<(usize, Val)> {
+        match key {
+            Val::Nil => None,
+            Val::Num(n) if n.is_nan() => None,
+            _ => match &self.storage {
+                TableStorage::Inline { entries, len } => {
+                    for (idx, (entry_key, entry_value)) in
+                        entries.iter().take(*len as usize).enumerate()
+                    {
+                        if entry_key == key {
+                            return Some((idx, *entry_value));
+                        }
+                    }
+                    None
+                }
+                TableStorage::Map(map) => {
+                    let idx = map.get_index_of(key)?;
+                    let (_, value) = map.get_index(idx)?;
+                    Some((idx, *value))
+                }
+            },
+        }
+    }
+
+    #[inline]
+    pub(super) fn get_index(&self, index: usize) -> Option<(Val, Val)> {
+        match &self.storage {
+            TableStorage::Inline { entries, len } => {
+                if index < *len as usize {
+                    Some(entries[index])
+                } else {
+                    None
+                }
+            }
+            TableStorage::Map(map) => map.get_index(index).map(|(key, value)| (*key, *value)),
         }
     }
 
@@ -174,13 +226,17 @@ impl Table {
                     // Still have room in inline storage
                     entries[*len as usize] = (key, value);
                     *len += 1;
+                    self.bump_version();
                 } else {
                     // Need to promote to Map
                     self.promote_to_map(key, value);
+                    self.bump_version();
                 }
             }
             TableStorage::Map(map) => {
-                map.insert(key, value);
+                if map.insert(key, value).is_none() {
+                    self.bump_version();
+                }
             }
         }
         Ok(())
@@ -234,12 +290,19 @@ impl Table {
                             entries[j] = std::mem::take(&mut entries[j + 1]);
                         }
                         *len -= 1;
+                        self.bump_version();
                         return Some(removed);
                     }
                 }
                 None
             }
-            TableStorage::Map(map) => map.shift_remove(key),
+            TableStorage::Map(map) => {
+                let removed = map.shift_remove(key);
+                if removed.is_some() {
+                    self.bump_version();
+                }
+                removed
+            }
         }
     }
 
@@ -261,6 +324,7 @@ impl Table {
                 }
             }
         }
+        self.bump_version();
         self.insert(Val::Num(pos as f64), value)
             .expect("array_insert: integer key insert cannot fail");
         if value_is_nil {
@@ -296,6 +360,7 @@ impl Table {
         } else {
             Val::Nil
         };
+        self.bump_version();
         // Update cache: new length is old length - 1
         self.cached_array_len.set(Some(len - 1));
         removed
