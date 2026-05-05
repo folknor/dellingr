@@ -142,6 +142,39 @@ impl Table {
         }
     }
 
+    /// Update the value at a specific entry index. Returns true on success.
+    ///
+    /// This is a hot-path helper for the OP_SET_FIELD inline cache: when a
+    /// callsite has already verified that a key lives at a known index, the
+    /// IC writes the new value through this method without re-doing the key
+    /// lookup. Caller must ensure the value is non-nil (assigning nil is
+    /// remove-semantics and must go through the slow path) and that the
+    /// entry at `index` corresponds to the intended key (typically verified
+    /// by table_version match or get_index key compare). Does not bump
+    /// version (value-only change preserves (key, index) bindings) and does
+    /// not invalidate cached_array_len (presence of any key unchanged).
+    #[inline]
+    pub(super) fn set_at_index(&mut self, index: usize, value: Val) -> bool {
+        match &mut self.storage {
+            TableStorage::Inline { entries, len } => {
+                if index < *len as usize {
+                    entries[index].1 = value;
+                    true
+                } else {
+                    false
+                }
+            }
+            TableStorage::Map(map) => {
+                if let Some((_, v)) = map.get_index_mut(index) {
+                    *v = value;
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
     /// Returns a "border" of the table per the Lua `#` operator.
     /// A border is any non-negative integer N where `t[N]` is non-nil (or N == 0)
     /// and `t[N+1]` is nil. For a sequence (no nil holes) this is the length.

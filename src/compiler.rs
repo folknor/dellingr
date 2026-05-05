@@ -109,6 +109,34 @@ impl PartialEq for FieldLookupCacheSlot {
     }
 }
 
+#[derive(Debug, Default)]
+pub(super) struct SetFieldLookupCacheSlot {
+    entry: Cell<Option<FieldLookupCacheEntry>>,
+}
+
+impl SetFieldLookupCacheSlot {
+    pub(super) fn get(&self) -> Option<FieldLookupCacheEntry> {
+        self.entry.get()
+    }
+
+    pub(super) fn set(&self, entry: FieldLookupCacheEntry) {
+        self.entry.set(Some(entry));
+    }
+}
+
+impl Clone for SetFieldLookupCacheSlot {
+    fn clone(&self) -> Self {
+        // Runtime lookup caches are State-specific, so cloned chunks start cold.
+        Self::default()
+    }
+}
+
+impl PartialEq for SetFieldLookupCacheSlot {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct Chunk {
     pub(super) code: Vec<Instr>,
@@ -116,6 +144,7 @@ pub(super) struct Chunk {
     pub(super) string_literals: Vec<Vec<u8>>,
     pub(super) global_lookup_cache: Vec<GlobalLookupCacheSlot>,
     pub(super) field_lookup_cache: Vec<FieldLookupCacheSlot>,
+    pub(super) set_field_lookup_cache: Vec<SetFieldLookupCacheSlot>,
     pub(super) num_params: u8,
     pub(super) num_locals: u8,
     pub(super) nested: Vec<Chunk>,
@@ -137,6 +166,7 @@ impl Chunk {
         let mut global_cache_indices = vec![None; self.string_literals.len()];
         let mut global_cache_len = 0usize;
         let mut field_cache_len = 0usize;
+        let mut set_field_cache_len = 0usize;
 
         for inst in &mut self.code {
             match inst.opcode() {
@@ -163,6 +193,12 @@ impl Chunk {
                     field_cache_len += 1;
                     *inst = Instr::get_field_cached(inst.a(), cache_idx);
                 }
+                Instr::OP_SET_FIELD => {
+                    let cache_idx = u8::try_from(set_field_cache_len)
+                        .expect("too many set-field lookup cache slots");
+                    set_field_cache_len += 1;
+                    *inst = Instr::set_field_cached(inst.a(), inst.b(), cache_idx);
+                }
                 _ => {}
             }
         }
@@ -172,6 +208,9 @@ impl Chunk {
             .collect();
         self.field_lookup_cache = (0..field_cache_len)
             .map(|_| FieldLookupCacheSlot::default())
+            .collect();
+        self.set_field_lookup_cache = (0..set_field_cache_len)
+            .map(|_| SetFieldLookupCacheSlot::default())
             .collect();
         for nested in &mut self.nested {
             nested.initialize_runtime_caches();
@@ -246,5 +285,30 @@ mod runtime_cache_tests {
         assert_eq!(get_fields[0].bx(), 0);
         assert_eq!(get_fields[1].bx(), 1);
         assert_eq!(get_fields[2].bx(), 2);
+    }
+
+    #[test]
+    fn set_field_lookup_cache_tracks_set_field_call_sites() {
+        let chunk = parse_str(
+            r#"
+            local t = { x = 0, y = 0 }
+            t.x = 1
+            t.x = 2
+            t.y = 3
+            "#,
+        )
+        .unwrap();
+
+        let set_fields: Vec<_> = chunk
+            .code
+            .iter()
+            .filter(|inst| inst.opcode() == Instr::OP_SET_FIELD)
+            .collect();
+
+        assert_eq!(set_fields.len(), 3);
+        assert_eq!(chunk.set_field_lookup_cache.len(), 3);
+        assert_eq!(set_fields[0].c(), 0);
+        assert_eq!(set_fields[1].c(), 1);
+        assert_eq!(set_fields[2].c(), 2);
     }
 }

@@ -7,8 +7,9 @@ project = "dellingr"
 # checked in: arithmetic, calls, closure_alloc, field_hits, fixedarg_call,
 # global_calls, ipairs_scan, local_calls, method_cached, method_chain,
 # method_dispatch, numeric_index, pairs_scan, same_object_cached,
-# same_object_fields, short_tables, strings, table_fill, tables,
-# vararg_call. Add more by writing a new `hotpath/{name}.lua` that defines
+# same_object_fields, same_object_writes, short_tables, strings,
+# table_fill, tables, vararg_call. Add more by writing a new
+# `hotpath/{name}.lua` that defines
 # a global `_bench()` function.
 
 [test]

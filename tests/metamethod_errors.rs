@@ -115,6 +115,77 @@ fn field_cache_does_not_cache_index_metamethod_result() {
 }
 
 #[test]
+fn set_field_cache_value_update_takes_fast_path() {
+    let val = run_number(
+        r#"
+        local t = { count = 0 }
+        for i = 1, 100 do
+            t.count = t.count + 1
+        end
+        return t.count
+    "#,
+    );
+    assert_eq!(val, 100.0);
+}
+
+#[test]
+fn set_field_cache_revalidates_after_remove() {
+    let val = run_number(
+        r#"
+        local t = { a = 1, b = 2, c = 3 }
+        local function set_b(v)
+            t.b = v
+        end
+
+        set_b(20)
+        local first = t.b
+        t.a = nil
+        set_b(200)
+        local second = t.b
+        return first * 1000 + second
+    "#,
+    );
+    assert_eq!(val, 20200.0);
+}
+
+#[test]
+fn set_field_cache_does_not_skip_newindex_for_new_key() {
+    let val = run_number(
+        r#"
+        local backing = {}
+        local hits = 0
+        local t = setmetatable({}, {
+            __newindex = function(_, k, v)
+                hits = hits + 1
+                rawset(backing, k, v)
+            end
+        })
+        for i = 1, 5 do
+            t.x = i
+        end
+        return hits * 100 + backing.x
+    "#,
+    );
+    assert_eq!(val, 505.0);
+}
+
+#[test]
+fn set_field_cache_handles_assigning_nil_as_delete() {
+    let val = run_number(
+        r#"
+        local t = { x = 1, y = 2, z = 3 }
+        t.y = nil
+        local count = 0
+        for _ in pairs(t) do
+            count = count + 1
+        end
+        return count
+    "#,
+    );
+    assert_eq!(val, 2.0);
+}
+
+#[test]
 fn method_cache_revalidates_index_table_method_update() {
     let val = run_number(
         r#"

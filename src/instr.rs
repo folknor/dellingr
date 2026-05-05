@@ -486,6 +486,9 @@ impl Instr {
     pub(crate) const fn set_field(offset: u8, idx: u8) -> Self {
         Self::op_ab(Self::OP_SET_FIELD, offset, idx)
     }
+    pub(crate) const fn set_field_cached(offset: u8, idx: u8, cache_idx: u8) -> Self {
+        Self::op_abc(Self::OP_SET_FIELD, offset, idx, cache_idx)
+    }
     pub(crate) const fn init_field(offset: u8, idx: u8) -> Self {
         Self::op_ab(Self::OP_INIT_FIELD, offset, idx)
     }

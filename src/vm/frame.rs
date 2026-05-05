@@ -5,7 +5,7 @@ use std::str;
 use super::super::compiler::UpvalueDesc;
 use super::super::compiler::{
     FieldLookupCacheEntry, FieldLookupCacheSlot, GlobalLookupCacheEntry, GlobalLookupCacheSlot,
-    MethodLookupCacheEntry,
+    MethodLookupCacheEntry, SetFieldLookupCacheSlot,
 };
 use super::super::error::{Error, ErrorKind, StackFrame, TypeError};
 use super::Chunk;
@@ -344,7 +344,7 @@ impl Frame {
                 }
                 Instr::OP_SET_FIELD => {
                     add_cost!(state, local_cost, 1);
-                    state.instr_set_field(self, inst.a(), inst.b())?;
+                    state.instr_set_field(self, inst.a(), inst.b(), inst.c())?;
                 }
                 Instr::OP_SET_TABLE => {
                     add_cost!(state, local_cost, 1);
@@ -1169,9 +1169,33 @@ impl State {
     }
 
     #[hotpath::measure]
-    fn instr_set_field(&mut self, frame: &Frame, stack_offset: u8, field_id: u8) -> Result<()> {
+    fn instr_set_field(
+        &mut self,
+        frame: &Frame,
+        stack_offset: u8,
+        field_id: u8,
+        cache_idx: u8,
+    ) -> Result<()> {
         let val = self.pop_val();
         let idx = self.stack.len() - stack_offset as usize - 1;
+        let key = self.get_string_constant(frame, field_id);
+        let cache = frame.chunk.set_field_lookup_cache.get(cache_idx as usize);
+
+        if !matches!(val, Val::Nil)
+            && let Some(ptr) = self.stack[idx].as_object_ptr()
+        {
+            if let Some(cache) = cache
+                && self.try_set_field_cached(ptr, key, val, cache)
+            {
+                self.stack.remove(idx);
+                return Ok(());
+            }
+            if self.try_set_field_direct(ptr, key, val, cache) {
+                self.stack.remove(idx);
+                return Ok(());
+            }
+        }
+
         let tbl_val = &self.stack[idx];
         let is_table = tbl_val
             .as_object_ptr()
@@ -1181,10 +1205,90 @@ impl State {
             let typ = tbl_val.typ_simple();
             return Err(self.type_error(TypeError::TableIndex(typ)));
         }
-        let key = self.get_string_constant(frame, field_id);
         self.set_table_with_key(idx, key, val)?;
         self.stack.remove(idx);
         Ok(())
+    }
+
+    #[inline(always)]
+    fn try_set_field_cached(
+        &mut self,
+        ptr: ObjectPtr,
+        key: Val,
+        val: Val,
+        cache: &SetFieldLookupCacheSlot,
+    ) -> bool {
+        let entry = match cache.get() {
+            Some(e) => e,
+            None => return false,
+        };
+        if entry.table != ptr {
+            return false;
+        }
+        let (target_index, current_version, needs_refresh) = {
+            let Some(tbl) = self.heap.as_table_ref(ptr) else {
+                return false;
+            };
+            let current_version = tbl.version();
+            if entry.table_version == current_version {
+                (entry.index, current_version, false)
+            } else {
+                let Some((cached_key, _)) = tbl.get_index(entry.index) else {
+                    return false;
+                };
+                if cached_key != key {
+                    return false;
+                }
+                (entry.index, current_version, true)
+            }
+        };
+
+        let Some(tbl) = self.heap.as_table(ptr) else {
+            return false;
+        };
+        let did_set = tbl.set_at_index(target_index, val);
+        if did_set && needs_refresh {
+            cache.set(FieldLookupCacheEntry {
+                table: ptr,
+                table_version: current_version,
+                index: target_index,
+            });
+        }
+        did_set
+    }
+
+    #[inline(always)]
+    fn try_set_field_direct(
+        &mut self,
+        ptr: ObjectPtr,
+        key: Val,
+        val: Val,
+        cache: Option<&SetFieldLookupCacheSlot>,
+    ) -> bool {
+        let (index, table_version) = {
+            let Some(tbl) = self.heap.as_table_ref(ptr) else {
+                return false;
+            };
+            let Some((index, _)) = tbl.get_with_index(&key) else {
+                return false;
+            };
+            (index, tbl.version())
+        };
+
+        let Some(tbl) = self.heap.as_table(ptr) else {
+            return false;
+        };
+        if !tbl.set_at_index(index, val) {
+            return false;
+        }
+        if let Some(cache) = cache {
+            cache.set(FieldLookupCacheEntry {
+                table: ptr,
+                table_version,
+                index,
+            });
+        }
+        true
     }
 
     fn instr_set_global(&mut self, frame: &Frame, string_num: u8) -> Result<()> {
