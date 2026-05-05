@@ -39,6 +39,7 @@ pub(super) struct Chunk {
     pub(super) line_info: Vec<u32>,
 }
 
+#[hotpath::measure]
 pub(super) fn parse_str(source: impl AsRef<str>) -> Result<Chunk> {
     parser::parse_str(source.as_ref())
 }

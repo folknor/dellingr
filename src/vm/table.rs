@@ -71,6 +71,7 @@ impl Table {
         }
     }
 
+    #[hotpath::measure]
     pub(super) fn get(&self, key: &Val) -> Val {
         match key {
             Val::Nil => Val::Nil,
@@ -89,9 +90,13 @@ impl Table {
         }
     }
 
-    /// Returns the "array length" of the table using standard Lua semantics.
-    /// Counts consecutive integer keys starting from 1, stopping at the first nil.
+    /// Returns a "border" of the table per the Lua `#` operator.
+    /// A border is any non-negative integer N where `t[N]` is non-nil (or N == 0)
+    /// and `t[N+1]` is nil. For a sequence (no nil holes) this is the length.
+    /// For non-sequences any border is valid; the result is deterministic for
+    /// a given table state but may change after inserts/removes.
     /// Uses cached value when available for O(1) performance.
+    #[hotpath::measure]
     pub(super) fn array_len(&self) -> usize {
         if let Some(len) = self.cached_array_len.get() {
             return len;
@@ -101,20 +106,42 @@ impl Table {
         len
     }
 
-    /// Computes array length without caching (for internal use).
+    /// Computes a border via exponential doubling + binary search, matching
+    /// reference Lua's `luaH_getn`. O(log N) lookups for a dense table of
+    /// length N, vs O(N) for a linear scan.
+    #[hotpath::measure]
     fn compute_array_len(&self) -> usize {
-        let mut len = 0;
-        loop {
-            let key = Val::Num((len + 1) as f64);
-            let val = self.get(&key);
-            if matches!(val, Val::Nil) {
-                break;
-            }
-            len += 1;
+        // t[1] nil: 0 is a border.
+        if matches!(self.get(&Val::Num(1.0)), Val::Nil) {
+            return 0;
         }
-        len
+        // Doubling: find hi such that t[hi] is nil. Invariant: t[lo] non-nil.
+        let mut lo: usize = 1;
+        let mut hi: usize = 2;
+        while !matches!(self.get(&Val::Num(hi as f64)), Val::Nil) {
+            lo = hi;
+            if hi > usize::MAX / 2 {
+                // Pathologically large dense table; fall back to linear scan.
+                while !matches!(self.get(&Val::Num((lo + 1) as f64)), Val::Nil) {
+                    lo += 1;
+                }
+                return lo;
+            }
+            hi *= 2;
+        }
+        // Binary search [lo, hi): t[lo] non-nil, t[hi] nil.
+        while hi - lo > 1 {
+            let mid = lo + (hi - lo) / 2;
+            if matches!(self.get(&Val::Num(mid as f64)), Val::Nil) {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        lo
     }
 
+    #[hotpath::measure]
     pub(super) fn insert(&mut self, key: Val, value: Val) -> Result<()> {
         match &key {
             Val::Nil => return Err(Error::new(TypeError::TableKeyNil, 0, 0)),
@@ -160,6 +187,7 @@ impl Table {
     }
 
     /// Promote from inline storage to IndexMap, adding the new key-value pair.
+    #[hotpath::measure]
     fn promote_to_map(&mut self, new_key: Val, new_value: Val) {
         let old_storage = std::mem::take(&mut self.storage);
         if let TableStorage::Inline { mut entries, len } = old_storage {
@@ -174,6 +202,7 @@ impl Table {
     }
 
     /// Ensure storage is Map (for operations that need IndexMap's shift_remove).
+    #[hotpath::measure]
     fn ensure_map(&mut self) {
         // Only convert if currently Inline
         if matches!(self.storage, TableStorage::Inline { .. })
@@ -189,6 +218,7 @@ impl Table {
     }
 
     /// Remove a key and return its value (if any).
+    #[hotpath::measure]
     fn remove(&mut self, key: &Val) -> Option<Val> {
         if Self::is_array_key(key) {
             self.cached_array_len.set(None);
@@ -215,6 +245,7 @@ impl Table {
 
     /// Inserts a value at the given array position, shifting elements up.
     /// Position should be 1-based (Lua-style).
+    #[hotpath::measure]
     pub(super) fn array_insert(&mut self, pos: usize, value: Val) {
         let len = self.array_len();
         let value_is_nil = matches!(value, Val::Nil);
@@ -241,6 +272,7 @@ impl Table {
 
     /// Removes and returns the value at the given array position, shifting elements down.
     /// Position should be 1-based (Lua-style).
+    #[hotpath::measure]
     pub(super) fn array_remove(&mut self, pos: usize) -> Val {
         let len = self.array_len();
         if pos > len || pos == 0 {
@@ -271,6 +303,7 @@ impl Table {
 
     /// Returns the array portion of the table as a Vec for sorting.
     /// Array indices are 1-based in Lua.
+    #[hotpath::measure]
     pub(super) fn get_array(&self) -> Vec<Val> {
         let len = self.array_len();
         (1..=len)
@@ -282,6 +315,7 @@ impl Table {
     }
 
     /// Replaces the array portion of the table with the given values.
+    #[hotpath::measure]
     pub(super) fn set_array(&mut self, values: Vec<Val>) {
         // First remove old array elements
         let old_len = self.array_len();
@@ -311,6 +345,7 @@ impl Table {
     /// Returns the next key-value pair after the given key.
     /// If key is nil, returns the first key-value pair.
     /// Returns (nil, nil) when there are no more pairs.
+    #[hotpath::measure]
     pub(super) fn next(&self, key: &Val) -> (Val, Val) {
         match &self.storage {
             TableStorage::Inline { entries, len } => {
@@ -358,6 +393,7 @@ impl Table {
 impl Table {
     /// Mark all values contained in this table as reachable.
     /// Called by the GC during the mark phase.
+    #[hotpath::measure]
     pub(super) fn mark_values(&self, heap: &GcHeap, upvalue_pool: &UpvaluePool) {
         match &self.storage {
             TableStorage::Inline { entries, len } => {
@@ -376,5 +412,119 @@ impl Table {
         if let Some(mt) = &self.metatable {
             heap.mark(*mt, upvalue_pool);
         }
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn n(x: usize) -> Val {
+        Val::Num(x as f64)
+    }
+
+    fn fill(t: &mut Table, range: std::ops::RangeInclusive<usize>) {
+        for i in range {
+            t.insert(n(i), Val::Bool(true)).unwrap();
+        }
+    }
+
+    fn is_border(t: &Table, len: usize) -> bool {
+        let after = matches!(t.get(&n(len + 1)), Val::Nil);
+        let here = len == 0 || !matches!(t.get(&n(len)), Val::Nil);
+        here && after
+    }
+
+    #[test]
+    fn empty_table_has_border_zero() {
+        let t = Table::default();
+        assert_eq!(t.compute_array_len(), 0);
+    }
+
+    #[test]
+    fn dense_inline_returns_exact_length() {
+        // INLINE_CAPACITY entries, no holes.
+        let mut t = Table::default();
+        fill(&mut t, 1..=INLINE_CAPACITY);
+        assert_eq!(t.compute_array_len(), INLINE_CAPACITY);
+    }
+
+    #[test]
+    fn dense_map_returns_exact_length() {
+        let mut t = Table::default();
+        fill(&mut t, 1..=500);
+        assert_eq!(t.compute_array_len(), 500);
+    }
+
+    #[test]
+    fn cache_invalidated_on_insert() {
+        let mut t = Table::default();
+        fill(&mut t, 1..=10);
+        assert_eq!(t.array_len(), 10);
+        // Add an out-of-range key; current invalidation policy clears the cache.
+        t.insert(n(20), Val::Bool(true)).unwrap();
+        // Length is still a valid border (either 10 or 20).
+        let len = t.array_len();
+        assert!(is_border(&t, len), "len={len} is not a border");
+    }
+
+    #[test]
+    fn dense_with_single_hole_returns_a_border() {
+        // 1..=1000 with hole at 500. Borders are 499 and 1000.
+        // Reference Lua 5.2/5.4 both return 1000 here.
+        let mut t = Table::default();
+        fill(&mut t, 1..=1000);
+        t.insert(n(500), Val::Nil).unwrap();
+        let len = t.compute_array_len();
+        assert!(len == 499 || len == 1000, "len={len} is not a valid border");
+        assert_eq!(len, 1000, "binary-search algorithm overshoots holes");
+    }
+
+    #[test]
+    fn two_dense_runs_returns_a_border() {
+        // 1..=3 dense, gap at 4, 5..=7 dense. Borders: 0, 3, 7.
+        let mut t = Table::default();
+        fill(&mut t, 1..=3);
+        fill(&mut t, 5..=7);
+        let len = t.compute_array_len();
+        assert!(is_border(&t, len), "len={len} is not a border");
+    }
+
+    #[test]
+    fn nil_at_one_returns_zero() {
+        let mut t = Table::default();
+        t.insert(n(2), Val::Bool(true)).unwrap();
+        t.insert(n(3), Val::Bool(true)).unwrap();
+        // t[1] is nil; the only valid border below 2 is 0.
+        assert_eq!(t.compute_array_len(), 0);
+    }
+
+    #[test]
+    fn single_element_returns_one() {
+        let mut t = Table::default();
+        t.insert(n(1), Val::Bool(true)).unwrap();
+        assert_eq!(t.compute_array_len(), 1);
+    }
+
+    #[test]
+    fn power_of_two_boundary() {
+        // 1..=8 dense (the doubling search lands exactly on hi=16 → t[16] nil → bisect).
+        let mut t = Table::default();
+        fill(&mut t, 1..=8);
+        assert_eq!(t.compute_array_len(), 8);
+    }
+
+    #[test]
+    fn cache_returns_consistent_value() {
+        let mut t = Table::default();
+        fill(&mut t, 1..=64);
+        let first = t.array_len();
+        let second = t.array_len();
+        assert_eq!(first, second);
+        assert_eq!(first, 64);
     }
 }

@@ -48,6 +48,7 @@ impl State {
     }
 
     /// Opens all standard Lua libraries.
+    #[hotpath::measure]
     pub fn open_libs(&mut self) {
         lua_std::open_libs(self);
     }

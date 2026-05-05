@@ -246,6 +246,7 @@ impl GcHeap {
 
     /// Allocate a new Lua function.
     /// Note: Caller must check is_full() and run GC if needed before calling.
+    #[hotpath::measure]
     pub(super) fn alloc_lua_fn(&mut self, chunk: Chunk, upvalues: Vec<UpvalueRef>) -> ObjectPtr {
         let closure = Closure {
             chunk: Rc::new(chunk),
@@ -261,6 +262,7 @@ impl GcHeap {
 
     /// Allocate a new table.
     /// Note: Caller must check is_full() and run GC if needed before calling.
+    #[hotpath::measure]
     pub(super) fn alloc_table(&mut self) -> ObjectPtr {
         let raw = RawObject::Table(Table::default());
         let wrapped = WrappedObject {
@@ -272,6 +274,7 @@ impl GcHeap {
 
     /// Allocate or intern a string.
     /// Note: Caller must check is_full() and run GC if needed before calling.
+    #[hotpath::measure]
     pub(super) fn alloc_string(&mut self, bytes: &[u8]) -> StringPtr {
         let hash = StringPool::hash_string(bytes);
         if let Some(ptr) = self.strings.find_by_hash(bytes, hash) {
@@ -292,6 +295,7 @@ impl GcHeap {
 
     /// Mark an object as reachable. Call this for all root objects.
     /// The upvalue_pool is needed to mark closed upvalues referenced by closures.
+    #[hotpath::measure]
     pub(super) fn mark(&self, ptr: ObjectPtr, upvalue_pool: &UpvaluePool) {
         if let Some(obj) = self.objects.get(ptr.0)
             && obj.color.get() == Color::Unmarked
@@ -308,6 +312,7 @@ impl GcHeap {
     }
 
     /// Mark objects referenced by this object.
+    #[hotpath::measure]
     fn mark_children(&self, obj: &WrappedObject, upvalue_pool: &UpvaluePool) {
         match &obj.raw {
             RawObject::LuaFn(closure) => {
@@ -326,6 +331,7 @@ impl GcHeap {
 
     /// Run the garbage collector sweep phase.
     /// Call this after marking all roots.
+    #[hotpath::measure(label = "object::heap_collect")]
     pub(super) fn collect(&mut self) {
         #[cfg(feature = "debug_gc")]
         {
@@ -476,6 +482,7 @@ impl StringPool {
 
     /// Find an existing interned string by content and hash.
     /// Uses linear scan - O(n) but safe and simple.
+    #[hotpath::measure]
     pub(super) fn find_by_hash(&self, bytes: &[u8], hash: u64) -> Option<StringPtr> {
         // Linear scan through all strings looking for a match
         for (key, entry) in &self.strings {
@@ -487,6 +494,7 @@ impl StringPool {
     }
 
     /// Insert a new string with precomputed hash.
+    #[hotpath::measure]
     pub(super) fn insert_with_hash(&mut self, bytes: Box<[u8]>, hash: u64) -> StringPtr {
         let entry = StringEntry {
             data: bytes,
@@ -504,6 +512,7 @@ impl StringPool {
     }
 
     /// Collect unreachable strings.
+    #[hotpath::measure(label = "object::string_pool_collect")]
     pub(super) fn collect(&mut self) {
         self.strings.retain(|_, entry| match entry.color.get() {
             Color::Reachable => {

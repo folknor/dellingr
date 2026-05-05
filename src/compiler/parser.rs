@@ -45,6 +45,7 @@ pub(super) fn parse_str(source: &str) -> Result<Chunk> {
 }
 
 /// Parses Lua source code into a `Chunk` with an optional source name.
+#[hotpath::measure]
 pub(super) fn parse_str_named(source: &str, source_name: Option<String>) -> Result<Chunk> {
     let chunk = Chunk {
         source: source_name,
@@ -354,6 +355,7 @@ impl<'a> Parser<'a> {
     // Actual parsing
 
     /// The main entry point for the parser. This parses the entire input.
+    #[hotpath::measure]
     fn parse_all(mut self) -> Result<Chunk> {
         // The top-level chunk is a vararg function (can receive command-line args)
         let c = self.parse_chunk(&[], true)?;
@@ -367,6 +369,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Parses a `Chunk`.
+    #[hotpath::measure]
     fn parse_chunk(&mut self, params: &[&str], is_vararg: bool) -> Result<Chunk> {
         let source = self.chunk.source.clone();
         self.outer_chunks.push(self.chunk.clone());
@@ -423,6 +426,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Parses 0 or more statements, possibly separated by semicolons.
+    #[hotpath::measure]
     fn parse_statements(&mut self) -> Result<()> {
         loop {
             // Update line number at start of each statement for accurate error reporting
@@ -1256,6 +1260,7 @@ impl<'a> Parser<'a> {
     /// Parses a comma-separated list of expressions. Trailing and leading
     /// commas are not allowed. Returns how many expressions were parsed and
     /// a descriptor of the last expression.
+    #[hotpath::measure]
     fn parse_explist(&mut self) -> Result<(u8, ExpDesc)> {
         // An explist has to have at least one expression.
         let mut last_exp_desc = self.parse_expr()?;
@@ -1272,6 +1277,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Parses a single expression.
+    #[hotpath::measure]
     fn parse_expr(&mut self) -> Result<ExpDesc> {
         self.parse_or()
     }
@@ -1426,6 +1432,7 @@ impl<'a> Parser<'a> {
     /// Parses a `prefix expression`. Prefix expressions are the expressions
     /// which can appear on the left side of a function call, table index, or
     /// field access.
+    #[hotpath::measure]
     fn parse_prefix_exp(&mut self) -> Result<PrefixExp> {
         let tok = self.input.next()?;
         let prefix = match tok.typ {
@@ -1448,6 +1455,7 @@ impl<'a> Parser<'a> {
 
     /// Attempts to parse an extension to a prefix expression: a field access,
     /// table index, or function/method call.
+    #[hotpath::measure]
     fn parse_prefix_extension(&mut self, base_expr: PrefixExp) -> Result<PrefixExp> {
         match self.input.peek_type()? {
             TokenType::Dot => {
@@ -1572,6 +1580,7 @@ impl<'a> Parser<'a> {
     /// * A function definition
     /// * One of the keywords `nil`, `false` or `true
     /// * A table constructor
+    #[hotpath::measure]
     fn parse_expr_base(&mut self) -> Result<ExpDesc> {
         let tok = self.input.next()?;
         match tok.typ {
@@ -1700,6 +1709,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Parses a table constructor.
+    #[hotpath::measure]
     fn parse_table(&mut self) -> Result<()> {
         self.push(Instr::new_table());
         // Skip any leading separators (handles {;} and {,})
@@ -1736,6 +1746,7 @@ impl<'a> Parser<'a> {
 
     /// Parses a table entry.
     /// Returns (new_counter, is_vararg) where is_vararg indicates if this entry was `...`
+    #[hotpath::measure]
     fn parse_table_entry(&mut self, counter: u8) -> Result<(u8, bool)> {
         match self.input.peek_type()? {
             TokenType::Identifier => {
@@ -1778,6 +1789,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Parses a function call. Returns the number of arguments.
+    #[hotpath::measure]
     fn parse_call(&mut self) -> Result<(u8, ExpDesc)> {
         let tup = if self.input.check_type(TokenType::RParen)? {
             (0, ExpDesc::Other)

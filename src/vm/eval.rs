@@ -142,6 +142,7 @@ impl State {
 
     /// Loads a string as a Lua chunk. This function uses `load` to load the
     /// chunk in the string `s`.
+    #[hotpath::measure]
     pub fn load_string(&mut self, s: impl AsRef<str>) -> Result<()> {
         self.load_string_named(s, None)
     }
@@ -149,6 +150,7 @@ impl State {
     /// Loads a string as a Lua chunk with an optional source name.
     /// The source name is used in error messages and stack traces.
     /// Use a filename for files, or something like "[fleet:123]" for dynamically loaded code.
+    #[hotpath::measure]
     pub fn load_string_named(
         &mut self,
         s: impl AsRef<str>,
@@ -178,6 +180,7 @@ impl State {
         self.concat_helper(n)
     }
 
+    #[hotpath::measure]
     pub(super) fn concat_helper(&mut self, n: usize) -> Result<()> {
         let mut buffer = Vec::new();
         let idx = self.stack.len() - n;
@@ -332,6 +335,7 @@ impl State {
         Ok(actual_num_returned)
     }
 
+    #[hotpath::measure]
     pub(super) fn initialize_frame(&mut self, closure: Closure, varargs: Vec<Val>) -> Frame {
         let string_literal_start = self.string_literals.len();
         for s in &closure.chunk.string_literals {
@@ -355,6 +359,7 @@ impl State {
         self.push_closure(chunk, Vec::new());
     }
 
+    #[hotpath::measure]
     pub(super) fn push_closure(&mut self, chunk: Chunk, upvalues: Vec<UpvalueRef>) {
         // Check if GC is needed before allocating
         if self.heap.is_full() {
@@ -365,6 +370,7 @@ impl State {
     }
 
     /// Find an existing open upvalue for the given stack index, or create a new one.
+    #[hotpath::measure]
     pub(super) fn find_or_create_upvalue(&mut self, stack_idx: usize) -> UpvalueRef {
         // Check if we already have an open upvalue for this stack slot
         for (idx, uv_ref) in &self.open_upvalues {
@@ -387,6 +393,7 @@ impl State {
     /// Close all open upvalues at or above the given stack level.
     /// This is called when a function returns to capture the values from the stack
     /// before they are popped.
+    #[hotpath::measure]
     pub(crate) fn close_upvalues(&mut self, level: usize) {
         // Upvalues are sorted ascending by stack index, so highest indices are at the end.
         // We close highest first (they go out of scope first), popping from end in O(1).

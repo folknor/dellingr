@@ -9,6 +9,7 @@ use crate::instr::{ArgCount, RetCount};
 
 impl State {
     /// Creates a new empty table and pushes it onto the stack.
+    #[hotpath::measure]
     pub fn new_table(&mut self) {
         let val = self.alloc_table();
         self.stack.push(val);
@@ -20,6 +21,7 @@ impl State {
     /// This function pops the key from the stack (putting the resulting value in
     /// its place). As in Lua, this function may trigger a metamethod for the
     /// "index" event.
+    #[hotpath::measure]
     pub fn get_table(&mut self, i: isize) -> Result<()> {
         let idx = self.convert_idx(i)?;
         assert!(idx != self.stack.len() - 1);
@@ -30,6 +32,7 @@ impl State {
     /// Gets `t[k]` without invoking metamethods.
     /// `t` is at the given index, `k` is at the top of the stack.
     /// Pops the key and pushes the result.
+    #[hotpath::measure]
     pub fn get_table_raw(&mut self, i: isize) -> Result<()> {
         let idx = self.convert_idx(i)?;
         let key = self.pop_val();
@@ -53,6 +56,7 @@ impl State {
     /// is the value at the top of the stack.
     ///
     /// This function pops both the key and the value from the stack.
+    #[hotpath::measure]
     pub fn set_table_raw(&mut self, i: isize) -> Result<()> {
         let idx = self.convert_idx(i)?;
         let key = self.pop_val();
@@ -74,6 +78,7 @@ impl State {
     /// Returns the next key-value pair from a table, for use with `pairs`.
     /// Takes the table index and pops the key from the stack.
     /// Pushes the next key and value onto the stack (or just nil if done).
+    #[hotpath::measure]
     pub fn table_next(&mut self, table_idx: isize) -> Result<bool> {
         let idx = self.convert_idx(table_idx)?;
         let key = self.pop_val();
@@ -98,6 +103,7 @@ impl State {
     }
 
     /// Returns the array length of the table at the given index.
+    #[hotpath::measure]
     pub fn table_len(&self, idx: isize) -> usize {
         let i = match self.convert_idx(idx) {
             Ok(i) => i,
@@ -112,6 +118,7 @@ impl State {
     /// Gets the metatable of the value at the given index.
     /// For tables, returns the table's metatable.
     /// For other types, returns nil (we don't support type metatables yet).
+    #[hotpath::measure]
     pub fn get_metatable_of(&mut self, idx: isize) -> Result<()> {
         let i = self.convert_idx(idx)?;
 
@@ -130,6 +137,7 @@ impl State {
     /// Sets the metatable of the table at the given index.
     /// The metatable should be at the top of the stack (or nil to remove).
     /// Pops the metatable from the stack.
+    #[hotpath::measure]
     pub fn set_metatable_of(&mut self, table_idx: isize) -> Result<()> {
         let mt_val = self.pop_val();
         let idx = self.convert_idx(table_idx)?;
@@ -156,6 +164,7 @@ impl State {
     /// Inserts a value into a table at a position, shifting elements.
     /// Stack: [t, pos, value] -> []
     /// The pos and value are popped from the stack.
+    #[hotpath::measure]
     pub fn table_insert_at(&mut self, table_idx: isize) -> Result<()> {
         let value = self.pop_val();
         let pos_val = self.pop_val();
@@ -178,6 +187,7 @@ impl State {
 
     /// Removes a value from a table at a position, shifting elements.
     /// Pushes the removed value onto the stack.
+    #[hotpath::measure]
     pub fn table_remove_at(&mut self, table_idx: isize, pos: usize) -> Result<()> {
         let idx = self.convert_idx(table_idx)?;
         let obj_ptr = self.stack[idx].as_object_ptr();
@@ -194,6 +204,7 @@ impl State {
     /// Sorts the array portion of a table in place.
     /// If has_comp is true, uses the function at stack index 2 as comparator.
     /// Sort a table's array portion. Returns the array length for cost charging.
+    #[hotpath::measure]
     pub fn table_sort(&mut self, table_idx: isize, has_comp: bool) -> Result<usize> {
         let idx = self.convert_idx(table_idx)?;
 
@@ -274,6 +285,7 @@ impl State {
 
     /// Converts the value at the given index to a string, checking for __tostring metamethod.
     /// If the value is a table with a __tostring metamethod, calls it and returns the result.
+    #[hotpath::measure]
     pub fn to_string_with_meta(&mut self, idx: isize) -> Result<String> {
         let i = self.convert_idx(idx)?;
         let val = self.stack[i];
@@ -306,6 +318,7 @@ impl State {
     }
 
     /// Allocates a new table on the heap.
+    #[hotpath::measure]
     pub(super) fn alloc_table(&mut self) -> Val {
         // Check if GC is needed before allocating
         if self.heap.is_full() {

@@ -40,6 +40,7 @@ impl<'a> TokenStream<'a> {
     }
 
     /// Returns the next `Token`.
+    #[hotpath::measure]
     pub(super) fn next(&mut self) -> Result<Token> {
         match self.lookahead.take() {
             Some(token) => Ok(token),
@@ -48,6 +49,7 @@ impl<'a> TokenStream<'a> {
     }
 
     /// Returns the next `Token`, without popping it from the stream.
+    #[hotpath::measure]
     pub(super) fn peek(&mut self) -> Result<&Token> {
         if self.lookahead.is_none() {
             self.lookahead = Some(self.lexer.next_token()?);
@@ -114,6 +116,7 @@ impl<'a> Lexer<'a> {
     }
 
     /// Returns the next `Token`.
+    #[hotpath::measure]
     pub(super) fn next_token(&mut self) -> Result<Token> {
         let starts_line = self.consume_whitespace();
         let tok_start = self.pos;

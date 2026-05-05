@@ -368,6 +368,7 @@ impl Frame {
 impl State {
     /// Pop a value. If its truthiness matches `cond`, jump with `offset`.
     /// If `keep_cond`, then push the value back after jumping.
+    #[hotpath::measure]
     fn instr_branch(
         &mut self,
         frame: &mut Frame,
@@ -386,6 +387,7 @@ impl State {
         Ok(())
     }
 
+    #[hotpath::measure]
     fn instr_closure(&mut self, frame: &mut Frame, i: u8) {
         let chunk = frame.get_nested_chunk(i);
         // Capture upvalues based on the chunk's upvalue descriptors
@@ -407,6 +409,7 @@ impl State {
         self.push_closure(chunk, captured_upvalues);
     }
 
+    #[hotpath::measure]
     fn instr_for_prep(&mut self, frame: &mut Frame, local: u8, body_len: i16) -> Result<()> {
         let step_val = self.pop_val();
         let end_val = self.pop_val();
@@ -432,6 +435,7 @@ impl State {
         Ok(())
     }
 
+    #[hotpath::measure]
     fn instr_for_loop(&mut self, frame: &mut Frame, local_slot: u8, offset: i16) -> Result<()> {
         let slot = local_slot as usize + self.stack_bottom;
         let mut var = self.stack[slot]
@@ -453,6 +457,7 @@ impl State {
     }
 
     /// TForPrep: Pop 3 values (iterator, state, control) and store in locals.
+    #[hotpath::measure]
     fn instr_tfor_prep(&mut self, local_slot: u8) {
         let base = local_slot as usize + self.stack_bottom;
         // Pop in reverse order: control, state, iterator
@@ -466,6 +471,7 @@ impl State {
     }
 
     /// TForCall: Call iterator(state, control), store results in loop variable slots.
+    #[hotpath::measure]
     fn instr_tfor_call(&mut self, local_slot: u8, num_vars: u8) -> Result<()> {
         let base = local_slot as usize + self.stack_bottom;
         // Push iterator function, state, and control onto stack for call
@@ -492,6 +498,7 @@ impl State {
     }
 
     /// TForLoop: If first loop variable is nil, jump. Otherwise update control var.
+    #[hotpath::measure]
     fn instr_tfor_loop(&mut self, frame: &mut Frame, local_slot: u8, offset: i16) -> Result<()> {
         let base = local_slot as usize + self.stack_bottom;
         let first_var = &self.stack[base + 3];
@@ -506,6 +513,7 @@ impl State {
         Ok(())
     }
 
+    #[hotpath::measure]
     fn instr_get_field(&mut self, frame: &mut Frame, field_id: u8) -> Result<()> {
         // Pop value, handle both tables and strings
         let val = self.pop_val();
@@ -612,6 +620,7 @@ impl State {
         }
     }
 
+    #[hotpath::measure]
     fn instr_get_table(&mut self) -> Result<()> {
         let key = self.pop_val();
         // Table is now on top of the stack
@@ -637,6 +646,7 @@ impl State {
         Ok(())
     }
 
+    #[hotpath::measure]
     fn instr_init_field(&mut self, frame: &Frame, negative_offset: u8, key_id: u8) -> Result<()> {
         let val = self.pop_val();
         let positive_offset = self.stack.len() - negative_offset as usize - 1;
@@ -655,6 +665,7 @@ impl State {
         }
     }
 
+    #[hotpath::measure]
     fn instr_init_index(&mut self, negative_offset: u8) -> Result<()> {
         let val = self.pop_val();
         let key = self.pop_val();
@@ -673,6 +684,7 @@ impl State {
         }
     }
 
+    #[hotpath::measure]
     fn instr_length(&mut self) -> Result<()> {
         let val = self.pop_val();
 
@@ -718,6 +730,7 @@ impl State {
         Err(self.type_error(TypeError::Length(val.typ_simple())))
     }
 
+    #[hotpath::measure]
     fn instr_negate(&mut self) -> Result<()> {
         let n = self.pop_num()?;
         self.stack.push(Val::Num(-n));
@@ -729,6 +742,7 @@ impl State {
         self.stack.push(Val::Bool(!b));
     }
 
+    #[hotpath::measure]
     fn instr_set_field(&mut self, frame: &Frame, stack_offset: u8, field_id: u8) -> Result<()> {
         let val = self.pop_val();
         let idx = self.stack.len() - stack_offset as usize - 1;
@@ -766,6 +780,7 @@ impl State {
         }
     }
 
+    #[hotpath::measure]
     fn instr_set_list(&mut self, count: u8) -> Result<usize> {
         // Find the table on the stack (it's below the values)
         // count=0 means "use all values above the table"
@@ -822,6 +837,7 @@ impl State {
         self.stack[i] = val;
     }
 
+    #[hotpath::measure]
     fn instr_set_table(&mut self, offset: u8) -> Result<()> {
         let val = self.pop_val();
         let index = self.stack.len() - offset as usize - 2;
@@ -845,6 +861,7 @@ impl State {
     /// Compare two values (numbers or strings).
     /// `target` is the ordering we're checking for.
     /// `negate` inverts the result (for <= and >=).
+    #[hotpath::measure]
     fn eval_compare(&mut self, target: std::cmp::Ordering, negate: bool) -> Result<()> {
         let v2 = self.pop_val();
         let v1 = self.pop_val();
@@ -873,6 +890,7 @@ impl State {
     }
 
     #[inline(always)]
+    #[hotpath::measure]
     fn eval_float_float(&mut self, f: impl Fn(f64, f64) -> f64) -> Result<()> {
         let n2 = self.pop_num()?;
         let n1 = self.pop_num()?;

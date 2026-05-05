@@ -45,6 +45,7 @@ use table::Table;
 /// * `string_literals` - String constants from active frames
 /// * `active_call_roots` - Lua closures currently being executed
 /// * `upvalue_pool` - Pool of upvalues (closed upvalues contain values that need marking)
+#[hotpath::measure]
 pub(super) fn mark_gc_roots(
     heap: &GcHeap,
     stack: &[Val],
@@ -404,6 +405,7 @@ impl State {
     }
 
     /// Pushes onto the stack the value of the global `name`.
+    #[hotpath::measure]
     pub fn get_global(&mut self, name: &str) {
         // Check builtins first for common names
         let val = if let Some(slot) = Builtin::from_name(name) {
@@ -416,6 +418,7 @@ impl State {
 
     /// Instr::pop()s a value from the stack and sets it as the new value of global
     /// `name`.
+    #[hotpath::measure]
     pub fn set_global(&mut self, name: &str) {
         let val = self.pop_val();
         // Update builtins array if this is a well-known name
@@ -462,6 +465,7 @@ impl State {
     }
 
     /// Allocates a string on the heap.
+    #[hotpath::measure]
     pub(super) fn alloc_string(&mut self, bytes: impl AsRef<[u8]>) -> Val {
         // Check if GC is needed before allocating
         if self.heap.is_full() {
