@@ -1206,6 +1206,26 @@ impl State {
             return Err(self.type_error(TypeError::TableIndex(typ)));
         }
         self.set_table_with_key(idx, key, val)?;
+
+        // Populate the cache after the slow path: if the key now lives
+        // in the receiver (either inserted directly, or written via
+        // __newindex doing rawset), the next set is a fast hit. If the
+        // key still isn't on the receiver (e.g. __newindex routed the
+        // value elsewhere, or val == Nil deleted), get_with_index
+        // returns None and we leave the cache cold so __newindex (or the
+        // delete path) keeps firing as Lua semantics require.
+        if let Some(cache) = cache
+            && let Some(ptr) = self.stack[idx].as_object_ptr()
+            && let Some(tbl) = self.heap.as_table_ref(ptr)
+            && let Some((index, _)) = tbl.get_with_index(&key)
+        {
+            cache.set(FieldLookupCacheEntry {
+                table: ptr,
+                table_version: tbl.version(),
+                index,
+            });
+        }
+
         self.stack.remove(idx);
         Ok(())
     }
