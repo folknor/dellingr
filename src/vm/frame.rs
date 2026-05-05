@@ -9,8 +9,10 @@ use super::Instr;
 use super::Result;
 use super::State;
 use super::Val;
+use super::lua_val::RustFunc;
 use super::object::{Upvalue, UpvalueRef};
 use crate::instr::{ArgCount, RetCount};
+use crate::lua_std::{base_ipairs_iter, base_next};
 
 /// A `Frame` represents a single stack-frame of a Lua function.
 pub(super) struct Frame {
@@ -479,6 +481,22 @@ impl State {
         let state = self.stack[base + 1];
         let control = self.stack[base + 2];
 
+        if let Val::RustFn(f) = iterator {
+            let base_next_fn: RustFunc = base_next;
+            let base_ipairs_iter_fn: RustFunc = base_ipairs_iter;
+            if std::ptr::fn_addr_eq(f, base_next_fn)
+                && self.instr_tfor_call_next(base, state, control, num_vars)
+            {
+                return Ok(());
+            }
+            if std::ptr::fn_addr_eq(f, base_ipairs_iter_fn)
+                && self.instr_tfor_call_ipairs(base, state, control, num_vars)
+            {
+                return Ok(());
+            }
+            return self.instr_tfor_call_rust_fn(f, base, state, control, num_vars);
+        }
+
         self.stack.push(iterator);
         self.stack.push(state);
         self.stack.push(control);
@@ -492,6 +510,125 @@ impl State {
             self.stack[base + 3 + i] = self.stack[results_start + i];
         }
         // Pop the results from stack
+        self.stack.truncate(results_start);
+
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn write_tfor_results(&mut self, base: usize, num_vars: u8, first: Val, second: Option<Val>) {
+        for i in 0..num_vars as usize {
+            self.stack[base + 3 + i] = match i {
+                0 => first,
+                1 => second.unwrap_or(Val::Nil),
+                _ => Val::Nil,
+            };
+        }
+    }
+
+    fn instr_tfor_call_next(
+        &mut self,
+        base: usize,
+        state: Val,
+        control: Val,
+        num_vars: u8,
+    ) -> bool {
+        let Some(tbl) = state
+            .as_object_ptr()
+            .and_then(|ptr| self.heap.as_table_ref(ptr))
+        else {
+            return false;
+        };
+
+        let (next_key, next_val) = tbl.next(&control);
+        if matches!(next_key, Val::Nil) {
+            self.write_tfor_results(base, num_vars, Val::Nil, None);
+        } else {
+            self.write_tfor_results(base, num_vars, next_key, Some(next_val));
+        }
+        true
+    }
+
+    fn instr_tfor_call_ipairs(
+        &mut self,
+        base: usize,
+        state: Val,
+        control: Val,
+        num_vars: u8,
+    ) -> bool {
+        let Some(old_index) = control.as_num() else {
+            return false;
+        };
+        let Some(tbl) = state
+            .as_object_ptr()
+            .and_then(|ptr| self.heap.as_table_ref(ptr))
+        else {
+            return false;
+        };
+
+        let new_index = old_index + 1.0;
+        let key = Val::Num(new_index);
+        let val = tbl.get(&key);
+        if matches!(val, Val::Nil) && tbl.get_metatable().is_some() {
+            return false;
+        }
+
+        if matches!(val, Val::Nil) {
+            self.write_tfor_results(base, num_vars, Val::Nil, None);
+        } else {
+            self.write_tfor_results(base, num_vars, key, Some(val));
+        }
+        true
+    }
+
+    fn instr_tfor_call_rust_fn(
+        &mut self,
+        f: RustFunc,
+        base: usize,
+        state: Val,
+        control: Val,
+        num_vars: u8,
+    ) -> Result<()> {
+        let old_stack_bottom = self.stack_bottom;
+        let call_base = self.stack.len();
+
+        self.stack.push(state);
+        self.stack.push(control);
+        self.stack_bottom = call_base;
+
+        let result = f(self);
+        let num_ret_reported = match result {
+            Ok(n) => n,
+            Err(e) => {
+                self.stack.truncate(call_base);
+                self.stack_bottom = old_stack_bottom;
+                return Err(e);
+            }
+        };
+
+        let num_ret_actual = self.get_top() as u8;
+        match num_ret_reported.cmp(&num_ret_actual) {
+            std::cmp::Ordering::Greater => {
+                for _ in num_ret_actual..num_ret_reported {
+                    self.push_nil();
+                }
+            }
+            std::cmp::Ordering::Less => {
+                let slc = &mut self.stack[self.stack_bottom..];
+                slc.rotate_right(num_ret_reported as usize);
+                let new_len =
+                    self.stack.len() - num_ret_actual as usize + num_ret_reported as usize;
+                self.stack.truncate(new_len);
+            }
+            std::cmp::Ordering::Equal => (),
+        }
+        self.stack_bottom = old_stack_bottom;
+
+        self.balance_stack(num_vars as usize, num_ret_reported as usize);
+        let results_start = self.stack.len() - num_vars as usize;
+        for i in 0..num_vars as usize {
+            self.stack[base + 3 + i] = self.stack[results_start + i];
+        }
         self.stack.truncate(results_start);
 
         Ok(())

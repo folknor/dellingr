@@ -5,7 +5,7 @@ mod math;
 mod string;
 mod table;
 
-pub(crate) use basic::open_base;
+pub(crate) use basic::{base_ipairs_iter, base_next, open_base};
 
 use crate::State;
 

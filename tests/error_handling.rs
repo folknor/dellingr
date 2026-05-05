@@ -114,6 +114,26 @@ fn ipairs_stops_at_nil() {
     assert_eq!(count, 2.0);
 }
 
+#[test]
+fn ipairs_uses_index_metamethod_for_holes() {
+    let sum = run_number(
+        r#"
+        local t = setmetatable({10}, {
+            __index = function(self, key)
+                if key == 2 then return 20 end
+                return nil
+            end
+        })
+        local sum = 0
+        for i, v in ipairs(t) do
+            sum = sum + v
+        end
+        return sum
+    "#,
+    );
+    assert_eq!(sum, 30.0);
+}
+
 // -- Error type tests --
 
 #[test]

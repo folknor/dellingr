@@ -1,8 +1,80 @@
 //! Lua's Standard Library
 
 use crate::LuaType;
+use crate::Result;
 use crate::State;
 use crate::error::{ArgError, ErrorKind};
+
+pub(crate) fn base_ipairs(state: &mut State) -> Result<u8> {
+    state.check_type(1, LuaType::Table)?;
+    state.set_top(1);
+    state.push_rust_fn(base_ipairs_iter);
+    // Swap the table and function
+    state.push_value(1)?;
+    state.remove(1)?;
+    // Push the initial index
+    state.push_number(0.0);
+    Ok(3)
+}
+
+pub(crate) fn base_ipairs_iter(state: &mut State) -> Result<u8> {
+    state.check_type(1, LuaType::Table)?;
+    state.check_type(2, LuaType::Number)?;
+    state.set_top(2);
+    let old_index = state.to_number(2)?;
+    let new_index = old_index + 1.0;
+    state.pop(1); // pop the old number
+    state.push_number(new_index);
+    state.get_table(1)?;
+    // ipairs stops only on nil, not on false
+    if state.typ(-1) != LuaType::Nil {
+        state.push_number(new_index);
+        state.replace(1)?; // Replaces the table with the index
+        Ok(2)
+    } else {
+        state.set_top(0);
+        state.push_nil();
+        Ok(1)
+    }
+}
+
+// next(table, key) - Returns the next key-value pair after key, or nil if done.
+// If key is nil, returns the first key-value pair.
+pub(crate) fn base_next(state: &mut State) -> Result<u8> {
+    state.check_type(1, LuaType::Table)?;
+    // If no key given, use nil
+    if state.get_top() < 2 {
+        state.push_nil();
+    }
+    state.set_top(2);
+    // Stack: [table, key]
+    // table_next pops key and pushes (next_key, next_value) or just nil
+    let has_more = state.table_next(1)?;
+    // Stack: [table, next_key, next_value?]
+    if has_more {
+        // Remove the table, return key and value
+        state.remove(1)?;
+        Ok(2)
+    } else {
+        // Remove the table, return nil
+        state.remove(1)?;
+        Ok(1)
+    }
+}
+
+// pairs(table) - Returns next, table, nil for use with generic for.
+pub(crate) fn base_pairs(state: &mut State) -> Result<u8> {
+    state.check_type(1, LuaType::Table)?;
+    state.set_top(1);
+    // Return: next function, table, nil
+    state.get_global("next");
+    state.push_value(1)?; // table
+    state.push_nil(); // initial key
+    // Stack: [table, next, table, nil]
+    // We need to return: [next, table, nil]
+    state.remove(1)?; // Remove original table
+    Ok(3)
+}
 
 pub(crate) fn open_base(state: &mut State) {
     let mut add = |name, func| {
@@ -10,74 +82,9 @@ pub(crate) fn open_base(state: &mut State) {
         state.set_global(name);
     };
 
-    add("ipairs", |state| {
-        state.check_type(1, LuaType::Table)?;
-        state.set_top(1);
-        state.push_rust_fn(|state| {
-            state.check_type(1, LuaType::Table)?;
-            state.check_type(2, LuaType::Number)?;
-            state.set_top(2);
-            let old_index = state.to_number(2)?;
-            let new_index = old_index + 1.0;
-            state.pop(1); // pop the old number
-            state.push_number(new_index);
-            state.get_table(1)?;
-            // ipairs stops only on nil, not on false
-            if state.typ(-1) != LuaType::Nil {
-                state.push_number(new_index);
-                state.replace(1)?; // Replaces the table with the index
-                Ok(2)
-            } else {
-                state.set_top(0);
-                state.push_nil();
-                Ok(1)
-            }
-        });
-        // Swap the table and function
-        state.push_value(1)?;
-        state.remove(1)?;
-        // Push the initial index
-        state.push_number(0.0);
-        Ok(3)
-    });
-
-    // next(table, key) - Returns the next key-value pair after key, or nil if done.
-    // If key is nil, returns the first key-value pair.
-    add("next", |state| {
-        state.check_type(1, LuaType::Table)?;
-        // If no key given, use nil
-        if state.get_top() < 2 {
-            state.push_nil();
-        }
-        state.set_top(2);
-        // Stack: [table, key]
-        // table_next pops key and pushes (next_key, next_value) or just nil
-        let has_more = state.table_next(1)?;
-        // Stack: [table, next_key, next_value?]
-        if has_more {
-            // Remove the table, return key and value
-            state.remove(1)?;
-            Ok(2)
-        } else {
-            // Remove the table, return nil
-            state.remove(1)?;
-            Ok(1)
-        }
-    });
-
-    // pairs(table) - Returns next, table, nil for use with generic for.
-    add("pairs", |state| {
-        state.check_type(1, LuaType::Table)?;
-        state.set_top(1);
-        // Return: next function, table, nil
-        state.get_global("next");
-        state.push_value(1)?; // table
-        state.push_nil(); // initial key
-        // Stack: [table, next, table, nil]
-        // We need to return: [next, table, nil]
-        state.remove(1)?; // Remove original table
-        Ok(3)
-    });
+    add("ipairs", base_ipairs);
+    add("next", base_next);
+    add("pairs", base_pairs);
 
     // Receives any number of arguments, and prints their values to `stdout`.
     // Output is routed through host callbacks, allowing the game engine to
