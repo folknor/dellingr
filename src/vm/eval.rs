@@ -182,27 +182,37 @@ impl State {
 
     #[hotpath::measure]
     pub(super) fn concat_helper(&mut self, n: usize) -> Result<()> {
-        let mut buffer = Vec::new();
         let idx = self.stack.len() - n;
-        // Collect values first so we can access heap for strings
-        let values: Vec<Val> = self.stack.drain(idx..).collect();
 
-        for val in &values {
+        // First pass: type-check and compute the total byte length so we
+        // can size the buffer exactly. Numbers get a 32-byte upper bound.
+        let mut total_len = 0;
+        for val in &self.stack[idx..] {
             if let Some(s) = val.as_string(&self.heap) {
-                buffer.extend_from_slice(s);
-            } else if let Some(num) = val.as_num() {
-                // Auto-convert numbers to strings (standard Lua behavior)
-                // Format integers without decimal point, floats with
-                if num.fract() == 0.0 && num.abs() < 1e15 {
-                    buffer.extend_from_slice(format!("{}", num as i64).as_bytes());
-                } else {
-                    buffer.extend_from_slice(format!("{num}").as_bytes());
-                }
+                total_len += s.len();
+            } else if val.as_num().is_some() {
+                total_len += 32;
             } else {
                 return Err(self.type_error(TypeError::Concat(val.typ_simple())));
             }
         }
 
+        let mut buffer = Vec::with_capacity(total_len);
+        for val in &self.stack[idx..] {
+            if let Some(s) = val.as_string(&self.heap) {
+                buffer.extend_from_slice(s);
+            } else if let Some(num) = val.as_num() {
+                // Auto-convert numbers to strings (standard Lua behavior).
+                // Format integers without decimal point, floats with.
+                if num.fract() == 0.0 && num.abs() < 1e15 {
+                    buffer.extend_from_slice(format!("{}", num as i64).as_bytes());
+                } else {
+                    buffer.extend_from_slice(format!("{num}").as_bytes());
+                }
+            }
+        }
+
+        self.stack.truncate(idx);
         let val = self.alloc_string(&buffer);
         self.stack.push(val);
         Ok(())
