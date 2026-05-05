@@ -130,6 +130,7 @@ cargo run --release --example hotpath --features hotpath-alloc -- tables/fill
 - The crate was lifted out of a game project (originally extracted from `fcomm2`); some doc comments still mention `FleetCallbacks` etc. as illustrative examples.
 - `target/` is a symlink to a shared cargo cache.
 - `OPTIMIZATIONS.md` is a working backlog of forward-looking optimization ideas (rejected, deferred, hypothetical). Items get deleted as they ship or stop being worth tracking. Not a discrepancy doc.
+- `TODO.md` is the matching backlog for non-perf forward-looking ideas (features, refactors, ergonomic gaps). Same conventions: working list, items deleted as they land.
 
 ## Multi-Agent Orchestration
 

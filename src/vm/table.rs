@@ -254,22 +254,22 @@ impl Table {
                         return Ok(());
                     }
                 }
-                // Key doesn't exist - need to add it
+                // Key doesn't exist - need to add it. New keys are appended
+                // (either at index `len` in Inline, or at the end of the
+                // IndexMap after promotion). Existing entries don't move, so
+                // their indices remain stable - no version bump needed.
                 if (*len as usize) < INLINE_CAPACITY {
-                    // Still have room in inline storage
                     entries[*len as usize] = (key, value);
                     *len += 1;
-                    self.bump_version();
                 } else {
-                    // Need to promote to Map
                     self.promote_to_map(key, value);
-                    self.bump_version();
                 }
             }
             TableStorage::Map(map) => {
-                if map.insert(key, value).is_none() {
-                    self.bump_version();
-                }
+                // IndexMap appends new keys at the end - existing indices are
+                // preserved, so no version bump is needed for the new-key
+                // case. Existing-key updates never bumped.
+                map.insert(key, value);
             }
         }
         Ok(())
