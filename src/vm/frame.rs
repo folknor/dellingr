@@ -3,6 +3,7 @@ use std::rc::Rc;
 use std::str;
 
 use super::super::compiler::UpvalueDesc;
+use super::super::compiler::{GlobalLookupCacheEntry, GlobalLookupCacheSlot};
 use super::super::error::{Error, ErrorKind, StackFrame, TypeError};
 use super::Chunk;
 use super::Instr;
@@ -701,13 +702,44 @@ impl State {
 
     fn instr_get_global(&mut self, frame: &Frame, string_num: u8) -> Result<()> {
         let s = &frame.chunk.string_literals[string_num as usize];
+        let cache = frame.chunk.global_lookup_cache.get(string_num as usize);
+        if let Some(val) = cache.and_then(|cache| self.get_cached_global(cache)) {
+            self.stack.push(val);
+            return Ok(());
+        }
+
         let name = str::from_utf8(s).map_err(|_| {
             self.error(ErrorKind::InternalError(
                 "compiler emitted non-UTF-8 global name".to_string(),
             ))
         })?;
-        self.get_global(name);
+        let val = if let Some(slot) = crate::instr::Builtin::from_name(name) {
+            self.builtins[slot as usize]
+        } else if let Some(index) = self.globals.get_index_of(name) {
+            if let Some(cache) = cache {
+                cache.set(GlobalLookupCacheEntry {
+                    globals_version: self.globals_version,
+                    index,
+                });
+            }
+            self.globals
+                .get_index(index)
+                .map(|(_, val)| *val)
+                .unwrap_or_default()
+        } else {
+            Val::Nil
+        };
+        self.stack.push(val);
         Ok(())
+    }
+
+    #[inline(always)]
+    fn get_cached_global(&self, cache: &GlobalLookupCacheSlot) -> Option<Val> {
+        let entry = cache.get()?;
+        if entry.globals_version != self.globals_version {
+            return None;
+        }
+        self.globals.get_index(entry.index).map(|(_, val)| *val)
     }
 
     /// Fast path for getting well-known builtin globals.
@@ -945,7 +977,8 @@ impl State {
                     "compiler emitted non-UTF-8 global name".to_string(),
                 ))
             })?;
-            self.globals.insert(name.into(), val);
+            let name = name.to_owned();
+            self.set_global_value(&name, val);
             Ok(())
         } else {
             Err(self.error(ErrorKind::InternalError(format!(

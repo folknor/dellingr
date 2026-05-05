@@ -83,6 +83,8 @@ pub struct State {
     /// Fast array for well-known builtin globals (print, pairs, type, etc.).
     /// Indexed by Builtin enum. Avoids IndexMap lookup for common globals.
     pub(super) builtins: [Val; Builtin::COUNT],
+    /// Bumped when the whole global environment is swapped.
+    pub(super) globals_version: u64,
     /// The main stack which stores values.
     pub(super) stack: Vec<Val>,
     /// The bottom index of the current frame in the stack.
@@ -188,6 +190,7 @@ impl State {
         Self {
             globals: IndexMap::new(),
             builtins: std::array::from_fn(|_| Val::Nil),
+            globals_version: 0,
             stack: Vec::with_capacity(256), // Pre-size for typical function depth * locals
             stack_bottom: 0,
             heap: GcHeap::with_threshold(Self::GC_INITIAL_THRESHOLD),
@@ -421,6 +424,10 @@ impl State {
     #[hotpath::measure]
     pub fn set_global(&mut self, name: &str) {
         let val = self.pop_val();
+        self.set_global_value(name, val);
+    }
+
+    pub(super) fn set_global_value(&mut self, name: &str, val: Val) {
         // Update builtins array if this is a well-known name
         if let Some(slot) = Builtin::from_name(name) {
             self.builtins[slot as usize] = val;
@@ -453,6 +460,7 @@ impl State {
         // Swap to restricted environment
         let saved_globals = std::mem::replace(&mut self.globals, restricted_globals);
         let saved_builtins = std::mem::replace(&mut self.builtins, restricted_builtins);
+        self.globals_version = self.globals_version.wrapping_add(1);
 
         // Execute the function
         let result = f(self);
@@ -460,6 +468,7 @@ impl State {
         // Restore original environment
         self.globals = saved_globals;
         self.builtins = saved_builtins;
+        self.globals_version = self.globals_version.wrapping_add(1);
 
         result
     }

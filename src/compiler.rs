@@ -5,6 +5,8 @@ mod lexer;
 mod parser;
 mod token;
 
+use std::cell::Cell;
+
 use super::Instr;
 use super::Result;
 use super::error;
@@ -18,11 +20,46 @@ pub(super) enum UpvalueDesc {
     Upvalue(u8),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct GlobalLookupCacheEntry {
+    pub(super) globals_version: u64,
+    pub(super) index: usize,
+}
+
+#[derive(Debug, Default)]
+pub(super) struct GlobalLookupCacheSlot {
+    entry: Cell<Option<GlobalLookupCacheEntry>>,
+}
+
+impl GlobalLookupCacheSlot {
+    pub(super) fn get(&self) -> Option<GlobalLookupCacheEntry> {
+        self.entry.get()
+    }
+
+    pub(super) fn set(&self, entry: GlobalLookupCacheEntry) {
+        self.entry.set(Some(entry));
+    }
+}
+
+impl Clone for GlobalLookupCacheSlot {
+    fn clone(&self) -> Self {
+        // Runtime lookup caches are State-specific, so cloned chunks start cold.
+        Self::default()
+    }
+}
+
+impl PartialEq for GlobalLookupCacheSlot {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct Chunk {
     pub(super) code: Vec<Instr>,
     pub(super) number_literals: Vec<f64>,
     pub(super) string_literals: Vec<Vec<u8>>,
+    pub(super) global_lookup_cache: Vec<GlobalLookupCacheSlot>,
     pub(super) num_params: u8,
     pub(super) num_locals: u8,
     pub(super) nested: Vec<Chunk>,
@@ -39,9 +76,22 @@ pub(super) struct Chunk {
     pub(super) line_info: Vec<u32>,
 }
 
+impl Chunk {
+    fn initialize_runtime_caches(&mut self) {
+        self.global_lookup_cache = (0..self.string_literals.len())
+            .map(|_| GlobalLookupCacheSlot::default())
+            .collect();
+        for nested in &mut self.nested {
+            nested.initialize_runtime_caches();
+        }
+    }
+}
+
 #[hotpath::measure]
 pub(super) fn parse_str(source: impl AsRef<str>) -> Result<Chunk> {
-    parser::parse_str(source.as_ref())
+    let mut chunk = parser::parse_str(source.as_ref())?;
+    chunk.initialize_runtime_caches();
+    Ok(chunk)
 }
 
 #[hotpath::measure]
@@ -49,5 +99,7 @@ pub(super) fn parse_str_named(
     source: impl AsRef<str>,
     source_name: Option<String>,
 ) -> Result<Chunk> {
-    parser::parse_str_named(source.as_ref(), source_name)
+    let mut chunk = parser::parse_str_named(source.as_ref(), source_name)?;
+    chunk.initialize_runtime_caches();
+    Ok(chunk)
 }

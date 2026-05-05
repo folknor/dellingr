@@ -433,6 +433,41 @@ fn error_msg_budget_exceeded_shows_amounts() {
 }
 
 #[test]
+fn global_lookup_cache_respects_restricted_env() {
+    let mut state = State::new();
+    state
+        .load_string(
+            r#"
+            x = 1
+            function read_x()
+                if x == nil then return 2 end
+                return x
+            end
+        "#,
+        )
+        .unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
+
+    state.get_global("read_x");
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
+    assert_eq!(state.to_number(-1).unwrap(), 1.0);
+    state.pop(1);
+
+    let restricted = state.with_restricted_env(&["read_x"], |state| {
+        state.get_global("read_x");
+        state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
+        let result = state.to_number(-1).unwrap();
+        state.pop(1);
+        result
+    });
+    assert_eq!(restricted, 2.0);
+
+    state.get_global("read_x");
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
+    assert_eq!(state.to_number(-1).unwrap(), 1.0);
+}
+
+#[test]
 fn error_msg_call_depth_shows_overflow() {
     let err = expect_error("local function r(n) return r(n+1) end\nr(0)");
     let msg = format!("{err}");
