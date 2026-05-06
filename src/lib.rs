@@ -34,6 +34,7 @@ pub mod error;
 
 pub use host::{DefaultCallbacks, HostCallbacks};
 pub use instr::{ArgCount, RetCount};
+pub use vm::Anchor;
 pub use vm::LuaType;
 pub use vm::RustFunc;
 pub use vm::State;

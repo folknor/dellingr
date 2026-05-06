@@ -1,6 +1,7 @@
 //! This module provides the `State` struct, which handles the primary
 //! components of the VM.
 
+mod anchor;
 mod eval;
 mod frame;
 mod lua_val;
@@ -10,6 +11,7 @@ mod stack;
 mod table;
 mod table_ops;
 
+pub use anchor::Anchor;
 pub use lua_val::LuaType;
 pub use lua_val::RustFunc;
 
@@ -27,7 +29,9 @@ use super::error::ErrorKind;
 use super::error::StackFrame;
 use super::error::TypeError;
 use super::host::{DefaultCallbacks, HostCallbacks};
-use super::instr::Builtin;
+use super::instr::{ArgCount, Builtin, RetCount};
+
+use anchor::Registry;
 
 pub(super) use lua_val::Val;
 pub(super) use object::ObjectPtr;
@@ -48,6 +52,10 @@ use table::Table;
 /// * `active_call_roots` - Lua closures currently being executed
 /// * `upvalue_pool` - Pool of upvalues (closed upvalues contain values that need marking)
 #[hotpath::measure]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "single-call-site GC marking entry point; bundling into a struct adds boilerplate without clarifying anything"
+)]
 pub(super) fn mark_gc_roots(
     heap: &GcHeap,
     stack: &[Val],
@@ -56,6 +64,7 @@ pub(super) fn mark_gc_roots(
     string_literals: &[Val],
     active_call_roots: &[Val],
     upvalue_pool: &UpvaluePool,
+    registry: &Registry,
 ) {
     // Mark all roots - closed upvalues are now marked transitively when
     // marking LuaFn closures that reference them
@@ -64,6 +73,7 @@ pub(super) fn mark_gc_roots(
     builtins.mark_reachable(heap, upvalue_pool);
     string_literals.mark_reachable(heap, upvalue_pool);
     active_call_roots.mark_reachable(heap, upvalue_pool);
+    registry.mark_reachable(heap, upvalue_pool);
     // Note: open upvalues point to stack (already marked), closed upvalues
     // are marked transitively through the closures that reference them
 }
@@ -134,6 +144,11 @@ pub struct State {
     /// Seeded RNG for deterministic math.random(). Defaults to seed 0.
     /// Use `set_rng_seed()` to set a specific seed for replay.
     pub(super) rng: rand::rngs::StdRng,
+    /// Registry of values retained from Rust via `Anchor` handles. Acts as
+    /// an additional GC root set; participates in `mark_gc_roots`. Carries
+    /// the State's process-unique `state_id` so cross-State misuse of an
+    /// `Anchor` is caught.
+    pub(super) registry: Registry,
 }
 
 /// Maximum call depth to prevent stack overflow from deep recursion.
@@ -189,6 +204,7 @@ impl State {
 
     /// Creates an empty state with custom callbacks.
     pub(crate) fn empty_with_callbacks(callbacks: Box<dyn HostCallbacks + Send>) -> Self {
+        let state_id = anchor::next_state_id();
         Self {
             globals: IndexMap::new(),
             builtins: std::array::from_fn(|_| Val::Nil),
@@ -211,6 +227,7 @@ impl State {
             current_source: None,
             user_data: None,
             rng: rand::rngs::StdRng::seed_from_u64(0),
+            registry: Registry::new(state_id),
         }
     }
 
@@ -300,6 +317,131 @@ impl State {
     }
 
     // ========================================================================
+    // Anchor registry: retain Lua values from Rust without polluting globals
+    // ========================================================================
+
+    /// Pop the top of stack and store it in this State's registry. Returns a
+    /// `Copy` `Anchor` handle the embedder can store and use later to push
+    /// or call the value.
+    ///
+    /// Errors with `ErrorKind::AnchorNil` if the popped value is `nil`
+    /// (use `Option<Anchor>` for an absent-value sentinel; nil carries no
+    /// GC weight and has no use case for a stable handle).
+    pub fn anchor(&mut self) -> Result<Anchor> {
+        // Surface "stack empty" as an embedder error rather than the
+        // VM-bug panic in pop_val.
+        let val = self.at_index(-1)?;
+        self.pop_val();
+        if matches!(val, Val::Nil) {
+            return Err(Error::without_location(ErrorKind::AnchorNil));
+        }
+        Ok(self.registry.insert(val))
+    }
+
+    /// Like `anchor`, but reads the value at `idx` without popping. The
+    /// stack is left untouched on both success and error.
+    pub fn anchor_at(&mut self, idx: isize) -> Result<Anchor> {
+        let val = self.at_index(idx)?;
+        if matches!(val, Val::Nil) {
+            return Err(Error::without_location(ErrorKind::AnchorNil));
+        }
+        Ok(self.registry.insert(val))
+    }
+
+    /// Like `anchor`, but additionally requires the value to be a function
+    /// (Lua closure or `RustFunc`). Use this when you want the type error
+    /// at registration time rather than at the first `call_anchor`.
+    ///
+    /// This is strict: tables with `__call` are rejected. To anchor a
+    /// callable table, use `anchor` and let the existing dispatch handle
+    /// `__call` at call time.
+    pub fn anchor_function(&mut self) -> Result<Anchor> {
+        let val = self.at_index(-1)?;
+        let typ = val.typ(&self.heap);
+        if typ != LuaType::Function {
+            self.pop_val();
+            return Err(self.type_error(TypeError::FunctionCall(typ)));
+        }
+        self.pop_val();
+        Ok(self.registry.insert(val))
+    }
+
+    /// Like `anchor_at`, but additionally requires the value to be a
+    /// function. See `anchor_function` for the strictness note.
+    pub fn anchor_function_at(&mut self, idx: isize) -> Result<Anchor> {
+        let val = self.at_index(idx)?;
+        let typ = val.typ(&self.heap);
+        if typ != LuaType::Function {
+            return Err(self.type_error(TypeError::FunctionCall(typ)));
+        }
+        Ok(self.registry.insert(val))
+    }
+
+    /// Push the anchored value onto the stack. Errors with
+    /// `ErrorKind::InvalidAnchor` if the handle is stale, released, or
+    /// belongs to a different `State`.
+    pub fn push_anchor(&mut self, a: Anchor) -> Result<()> {
+        match self.registry.get(a) {
+            Some(val) => {
+                self.stack.push(val);
+                Ok(())
+            }
+            None => Err(Error::without_location(ErrorKind::InvalidAnchor)),
+        }
+    }
+
+    /// Push the anchored value and call it. Convenience over
+    /// `push_anchor` + `call`. Cost charges through the existing dispatch
+    /// path; `anchor` and `release_anchor` themselves charge nothing.
+    pub fn call_anchor(&mut self, a: Anchor, args: ArgCount, rets: RetCount) -> Result<()> {
+        // The function must be pushed BEFORE the args are arranged on the
+        // stack by the caller. Embedder protocol: push args, then
+        // call_anchor (which inserts the function below the args).
+        // Implementation: push the function on top, then rotate it under
+        // the args.
+        let val = match self.registry.get(a) {
+            Some(val) => val,
+            None => return Err(Error::without_location(ErrorKind::InvalidAnchor)),
+        };
+        let n_args = match args {
+            ArgCount::Fixed(n) => n as usize,
+            ArgCount::Dynamic => {
+                // For dynamic arg count, the call infrastructure expects
+                // the args already arranged with a base marker. Don't try
+                // to re-shuffle; just push the fn and defer to call.
+                self.stack.push(val);
+                return self.call(args, rets);
+            }
+        };
+        // Insert the fn below the n_args topmost values.
+        let insert_at = self.stack.len().checked_sub(n_args).ok_or_else(|| {
+            Error::without_location(ErrorKind::InvalidStackIndex {
+                index: -(n_args as isize) - 1,
+            })
+        })?;
+        self.stack.insert(insert_at, val);
+        self.call(args, rets)
+    }
+
+    /// Release an anchor. Returns `true` if the handle was live and the
+    /// value was freed; `false` for stale, already-released, or
+    /// wrong-State handles. Idempotent: never errors, never panics.
+    pub fn release_anchor(&mut self, a: Anchor) -> bool {
+        self.registry.remove(a)
+    }
+
+    /// Returns the type of an anchored value. `None` if the handle is
+    /// not live in this State.
+    pub fn anchor_type(&self, a: Anchor) -> Option<LuaType> {
+        self.registry.get(a).map(|val| val.typ(&self.heap))
+    }
+
+    /// Number of live anchors. For embedder leak diagnostics.
+    pub fn anchor_count(&self) -> usize {
+        self.registry.len()
+    }
+
+    // ========================================================================
     // Callbacks
     // ========================================================================
 
@@ -377,6 +519,7 @@ impl State {
             &self.string_literals,
             &self.active_call_roots,
             &self.upvalue_pool,
+            &self.registry,
         );
         // Sweep unmarked objects
         self.heap.collect();

@@ -8,6 +8,20 @@ All notable changes to dellingr are documented here. The format follows
 
 ### Added
 
+- `Anchor` retainable-value handle plus a per-`State` registry. Embedders
+  can hold Lua values across host calls without polluting globals or
+  using `with_restricted_env`-incompatible workarounds.
+  - `State::anchor` / `State::anchor_at` - capture a `Val` from the stack.
+  - `State::anchor_function` / `State::anchor_function_at` - same, with
+    `LuaType::Function` enforcement at registration time.
+  - `State::push_anchor` / `State::call_anchor` - push or push-and-call.
+  - `State::release_anchor` - returns `bool` (was-live), idempotent on
+    stale or wrong-`State` handles.
+  - `State::anchor_type` / `State::anchor_count` - inspection helpers.
+  - `Anchor` is `Copy + Send + Sync + 'static` (12 bytes); cross-`State`
+    misuse returns `ErrorKind::InvalidAnchor` rather than aliasing into
+    the wrong heap.
+  - Backed by `slotmap::SlotMap` so generations catch use-after-release.
 - `Engine` factory type (`Send + Sync`) for compiling Lua source into
   reusable `Program` handles and creating `State` instances.
   `Engine::compile`, `Engine::compile_named`, `Engine::analyze_cost`,

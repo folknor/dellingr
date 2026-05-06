@@ -265,6 +265,57 @@ less than constructor pre-sizing is unmeasured for dellingr; the two
 are complementary (cold/first-touch vs. warm/steady-state), not
 substitutes.
 
+### Move stdlib install from per-State to per-Engine
+
+What: today `State::with_callbacks` -> `open_libs` re-runs the
+standard library install on every new `State`, allocating each
+RustFn entry into the `globals: IndexMap<String, Val>`. With the
+`Engine` layer in place, the stdlib install can happen once on
+`Engine::new` and `Engine::new_state` can clone the prepared
+globals into the new State.
+
+Sketch: `Engine` carries a frozen `stdlib_globals: IndexMap<String,
+Val>` and a frozen `stdlib_builtins: [Val; Builtin::COUNT]` populated
+once at construction. `new_state` clones both into the State.
+Watch out: stdlib `Val`s currently include `Val::Str(StringPtr)` for
+some entries, which are tied to one specific `StringPool`. Either
+the stdlib stops baking string pointers (use `&'static [u8]` and
+intern lazily on first use), or the Engine carries a shared
+string pool that new States inherit.
+
+Why deferred: not on the hot path. State construction is amortized
+across however long the State lives; even at "one State per request
+worker", the install cost is microseconds per request. The bigger
+win would be at "one State per request" granularity, which isn't
+the recommended embedding model.
+
+Signal that would promote it: a profile showing State construction
+dominating request-path latency, or a real "one State per request"
+embedder asking.
+
+### Pool runtime cache Vecs across Closures
+
+What: `RuntimeCaches::new` allocates three `Vec`s (global,
+field, set_field) per `Closure`. For workloads that churn closures
+(e.g. tight loops calling functions that themselves construct
+closures), this triples the allocation pressure on `alloc_lua_fn`
+compared to pre-split.
+
+Sketch: pool the cache Vecs in `State` with a free-list keyed by
+size class (or per `Bytecode` identity). On closure construction,
+pop a recycled Vec; on closure GC, push it back. Same template as
+`UpvaluePool` (`src/vm/object.rs:54-69`).
+
+Why deferred: `examples/alloc/closure.lua` runs at 77ms / 2.05x
+lua5.5 post-split, which is in the same band as pre-split numbers
+in the README - the regression we feared didn't materialize. The
+allocator is already amortizing well enough.
+
+Signal that would promote it: a workload where `alloc/closure`
+shows real regression vs reference Lua, or a profile where
+`RuntimeCaches::new` allocations show up in the heap-pressure
+top.
+
 ---
 
 ## IC extensions (same shape as existing ICs)

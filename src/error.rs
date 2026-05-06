@@ -84,6 +84,14 @@ pub enum ErrorKind {
         /// The bad index, as supplied by the caller.
         index: isize,
     },
+    /// Anchor handle is stale (released, generation mismatch) or belongs
+    /// to a different `State`. Operations that need a live value return
+    /// this rather than aliasing into the wrong slot.
+    InvalidAnchor,
+    /// Attempted to anchor `nil`. `nil` carries no GC weight and has no
+    /// use case for a stable handle; embedders that need an "absent" value
+    /// should use `Option<Anchor>`.
+    AnchorNil,
     /// Internal error (corrupt bytecode or VM bug). The string is a
     /// human-readable description; report these as bugs.
     InternalError(String),
@@ -267,6 +275,15 @@ impl fmt::Display for ErrorKind {
             }
             InvalidStackIndex { index } => {
                 write!(f, "internal error: invalid stack index ({index})")
+            }
+            InvalidAnchor => {
+                write!(
+                    f,
+                    "invalid anchor (released, stale generation, or wrong State)"
+                )
+            }
+            AnchorNil => {
+                write!(f, "cannot anchor nil")
             }
             InternalError(msg) => {
                 write!(f, "internal error: {msg}")
