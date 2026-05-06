@@ -6,6 +6,49 @@ All notable changes to dellingr are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `Engine` factory type (`Send + Sync`) for compiling Lua source into
+  reusable `Program` handles and creating `State` instances.
+  `Engine::compile`, `Engine::compile_named`, `Engine::analyze_cost`,
+  `Engine::new_state`, `Engine::new_state_with_callbacks`. Compile once
+  on the engine, load into many states.
+- `Program(Arc<Bytecode>)` - clonable, `Send + Sync`, shareable across
+  states. Carries the immutable compiled bytecode without per-state
+  runtime caches.
+- `State::load(&Program)` - load a compiled program onto a state's
+  stack as a callable closure. Pairs with the existing
+  `State::call(...)`.
+- Compile-time `assert_send::<State>()` witness in the crate root so
+  the property cannot silently regress.
+
+### Changed (breaking)
+
+- `State` is now `Send`. Embedders can move a `State` across threads
+  (e.g. into a tokio task, or behind `Mutex<State>` shared via `Arc`
+  across worker threads). `State` is intentionally NOT `Sync` -
+  cost-budgeted dispatch only has well-defined semantics under
+  exclusive access; use `Mutex<State>` at the embedder boundary.
+- `HostCallbacks: Send`. Implementors that previously held `Rc` or
+  `RefCell` must switch to `Arc` / `Mutex` (or drop them - most
+  callbacks don't need shared interior state).
+- `State::with_callbacks` / `State::replace_callbacks` now take
+  `Box<dyn HostCallbacks + Send>`.
+- `State::set_user_data<T: Send + 'static>` (and `user_data` /
+  `user_data_mut`) - the user-data slot is now
+  `Box<dyn Any + Send>`. The doc example switches from
+  `Rc<RefCell<...>>` to `Arc<Mutex<...>>`.
+
+### Internal
+
+- Split the previous `Chunk` type into immutable `Bytecode`
+  (instructions, literal pools, cache-slot counts) and per-`Closure`
+  `RuntimeCaches` (the `Cell`-backed lookup vectors). `Closure` and
+  `Frame` now hold `Arc<Bytecode>` plus `Arc<RuntimeCaches>`. The
+  cache topology is unchanged on the dispatch hot path - one indexed
+  `Vec` read per cache slot - and the cache contents are still shared
+  across recursive frames on the same closure.
+
 ### Performance
 
 - String-heavy workloads run roughly 2x faster across the board. The

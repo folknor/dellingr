@@ -30,7 +30,9 @@ else
         examples/iter/pairs.lua
         examples/tables/fill.lua
         examples/strings/mixed.lua
+        examples/strings/patterns.lua
         examples/fields/same_obj_read.lua
+        examples/alloc/closure.lua
     )
 fi
 

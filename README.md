@@ -15,13 +15,14 @@ Run `./bench.sh` to reproduce on your own host. Sample run on AMD Ryzen 9 5900X 
 
 | bench                    | dellingr | vs lua5.5 | vs lua5.4 | vs lua5.2 | vs luajit |
 |--------------------------|---------:|----------:|----------:|----------:|----------:|
-| `numerics/arithmetic`    |    102ms |     3.89x |     3.91x |     2.77x |    22.92x |
-| `iter/pairs`             |     91ms |     2.10x |     1.96x |     1.92x |    16.35x |
-| `strings/patterns`       |     30ms |     1.69x |     1.65x |     1.61x |     2.53x |
-| `tables/fill`            |    108ms |     4.13x |     3.42x |     2.63x |     7.22x |
-| `strings/mixed`          |     43ms |     3.32x |     3.65x |     2.40x |     3.57x |
-| `fields/same_obj_read`   |    120ms |     4.08x |     4.42x |     2.58x |    31.34x |
-| `benchmark` (multi)      |    172ms |     4.07x |     3.97x |     2.75x |    23.44x |
+| `numerics/arithmetic`    |    101ms |     3.93x |     3.99x |     2.80x |    23.17x |
+| `iter/pairs`             |     88ms |     2.14x |     2.02x |     1.97x |    16.32x |
+| `strings/patterns`       |     30ms |     1.70x |     1.67x |     1.62x |     2.55x |
+| `tables/fill`            |     99ms |     3.90x |     3.28x |     2.43x |     6.72x |
+| `strings/mixed`          |     38ms |     2.93x |     3.19x |     2.09x |     3.12x |
+| `fields/same_obj_read`   |    115ms |     3.96x |     4.33x |     2.51x |    30.52x |
+| `alloc/closure`          |     77ms |     2.05x |     1.99x |     1.67x |     2.55x |
+| `benchmark` (multi)      |    168ms |     4.00x |     3.97x |     2.74x |    23.35x |
 
 Built with LLMs. See [LLM.md](LLM.md).
 
@@ -58,11 +59,19 @@ dellingr = "0.1"
 
 ## What it provides
 
-- `State` - VM instance with cost-bounded execution.
-- `HostCallbacks` trait - embedders redirect `print`, hook errors, etc.
+- `Engine` (`Send + Sync`) - factory for compiling source into `Program`s
+  and creating `State`s. One `Engine` per app, shared via `Arc`.
+- `Program` (`Send + Sync + Clone`) - compiled bytecode handle. Compile
+  once on the engine, load into many states with `state.load(&program)`.
+- `State` (`Send`) - VM instance with cost-bounded execution. Movable
+  across threads; pair with `Mutex<State>` if you need to share one.
+- `HostCallbacks` trait (`: Send`) - embedders redirect `print`, hook
+  errors, etc.
 - `RustFunc` - expose Rust functions to Lua scripts.
-- `analyze_cost` - static worst-case instruction count for a script.
-- Per-state user-data attachment for hanging embedder context off the VM.
+- `analyze_cost` (or `engine.analyze_cost(&program)`) - static worst-case
+  instruction count for a script.
+- Per-state user-data (`Send + 'static`) for hanging embedder context off
+  the VM.
 
 ## Standalone CLI
 
