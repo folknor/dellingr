@@ -12,12 +12,13 @@ use indexmap::IndexMap;
 use std::cell::Cell;
 use std::fmt;
 use std::hash::Hash;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use slotmap::{SlotMap, new_key_type};
 
-use super::Chunk;
+use super::Bytecode;
 use super::LuaType;
+use super::RuntimeCaches;
 use super::Table;
 use super::Val;
 
@@ -93,9 +94,16 @@ impl UpvaluePool {
 // ============================================================================
 
 /// A Lua closure: a function with captured upvalues.
+///
+/// `bytecode` is the immutable, `Arc`-shareable compiled code. `caches` are
+/// the per-execution lookup caches; they share an `Arc` between this closure
+/// and any frames currently executing it (recursive calls all see each
+/// other's cache writes through the shared `Arc`). Both Arcs are cheap to
+/// clone since they only refcount.
 #[derive(Clone, Debug)]
 pub(super) struct Closure {
-    pub(super) chunk: Rc<Chunk>,
+    pub(super) bytecode: Arc<Bytecode>,
+    pub(super) caches: Arc<RuntimeCaches>,
     pub(super) upvalues: Vec<UpvalueRef>,
 }
 
@@ -247,9 +255,15 @@ impl GcHeap {
     /// Allocate a new Lua function.
     /// Note: Caller must check is_full() and run GC if needed before calling.
     #[hotpath::measure]
-    pub(super) fn alloc_lua_fn(&mut self, chunk: Chunk, upvalues: Vec<UpvalueRef>) -> ObjectPtr {
+    pub(super) fn alloc_lua_fn(
+        &mut self,
+        bytecode: Arc<Bytecode>,
+        upvalues: Vec<UpvalueRef>,
+    ) -> ObjectPtr {
+        let caches = Arc::new(RuntimeCaches::new(&bytecode));
         let closure = Closure {
-            chunk: Rc::new(chunk),
+            bytecode,
+            caches,
             upvalues,
         };
         let raw = RawObject::LuaFn(Box::new(closure));

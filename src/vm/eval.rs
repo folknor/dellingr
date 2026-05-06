@@ -4,13 +4,13 @@
 //! and managing the call stack.
 
 use std::cmp::Ordering;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use super::frame::Frame;
 use super::lua_val::Val;
 use super::object::{Closure, Upvalue, UpvalueRef};
 use super::{
-    CallInfo, Chunk, Error, ErrorKind, MAX_CALL_DEPTH, Result, State, TypeError, compiler,
+    Bytecode, CallInfo, Error, ErrorKind, MAX_CALL_DEPTH, Result, State, TypeError, compiler,
 };
 use crate::instr::{ArgCount, RetCount};
 
@@ -157,8 +157,8 @@ impl State {
         source_name: Option<String>,
     ) -> Result<()> {
         self.current_source = source_name.clone();
-        let c = compiler::parse_str_named(s, source_name)?;
-        self.push_chunk(c);
+        let bytecode = compiler::parse_str_named(s, source_name)?;
+        self.push_chunk(Arc::new(bytecode));
         Ok(())
     }
 
@@ -237,13 +237,13 @@ impl State {
         let old_stack_bottom = self.stack_bottom;
         self.stack_bottom = self.stack.len() - num_args as usize;
 
-        let num_params = closure.chunk.num_params;
-        let num_locals = closure.chunk.num_locals;
-        let is_vararg = closure.chunk.is_vararg;
+        let num_params = closure.bytecode.num_params;
+        let num_locals = closure.bytecode.num_locals;
+        let is_vararg = closure.bytecode.is_vararg;
 
         // Push call info for stack traces
         self.call_stack.push(CallInfo {
-            chunk: Rc::clone(&closure.chunk),
+            bytecode: Arc::clone(&closure.bytecode),
             ip: 0,
         });
 
@@ -348,7 +348,7 @@ impl State {
     #[hotpath::measure]
     pub(super) fn initialize_frame(&mut self, closure: Closure, varargs: Vec<Val>) -> Frame {
         let string_literal_start = self.string_literals.len();
-        for s in &closure.chunk.string_literals {
+        for s in &closure.bytecode.string_literals {
             // Check if GC is needed before allocating
             if self.heap.is_full() {
                 self.gc_collect();
@@ -357,7 +357,8 @@ impl State {
             self.string_literals.push(Val::Str(string_ptr));
         }
         Frame::new(
-            closure.chunk,
+            closure.bytecode,
+            closure.caches,
             closure.upvalues,
             varargs,
             string_literal_start,
@@ -365,17 +366,17 @@ impl State {
         )
     }
 
-    pub(super) fn push_chunk(&mut self, chunk: Chunk) {
-        self.push_closure(chunk, Vec::new());
+    pub(crate) fn push_chunk(&mut self, bytecode: Arc<Bytecode>) {
+        self.push_closure(bytecode, Vec::new());
     }
 
     #[hotpath::measure]
-    pub(super) fn push_closure(&mut self, chunk: Chunk, upvalues: Vec<UpvalueRef>) {
+    pub(super) fn push_closure(&mut self, bytecode: Arc<Bytecode>, upvalues: Vec<UpvalueRef>) {
         // Check if GC is needed before allocating
         if self.heap.is_full() {
             self.gc_collect();
         }
-        let obj = self.heap.alloc_lua_fn(chunk, upvalues);
+        let obj = self.heap.alloc_lua_fn(bytecode, upvalues);
         self.stack.push(Val::Obj(obj));
     }
 
@@ -420,11 +421,14 @@ impl State {
         }
     }
 
-    /// Helper for tests: evaluate a chunk with no upvalues.
+    /// Helper for tests: evaluate a bytecode with no upvalues.
     #[cfg(test)]
-    pub(super) fn eval_chunk(&mut self, chunk: Chunk, num_args: u8) -> Result<u8> {
+    pub(super) fn eval_chunk(&mut self, bytecode: Bytecode, num_args: u8) -> Result<u8> {
+        let bytecode = Arc::new(bytecode);
+        let caches = Arc::new(super::RuntimeCaches::new(&bytecode));
         let closure = Closure {
-            chunk: std::rc::Rc::new(chunk),
+            bytecode,
+            caches,
             upvalues: Vec::new(),
         };
         self.eval_closure(closure, num_args)

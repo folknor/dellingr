@@ -1,14 +1,14 @@
 use std::ops;
-use std::rc::Rc;
 use std::str;
+use std::sync::Arc;
 
 use super::super::compiler::UpvalueDesc;
 use super::super::compiler::{
     FieldLookupCacheEntry, FieldLookupCacheSlot, GlobalLookupCacheEntry, GlobalLookupCacheSlot,
-    MethodLookupCacheEntry, SetFieldLookupCacheSlot, StringMethodCacheEntry,
+    MethodLookupCacheEntry, RuntimeCaches, SetFieldLookupCacheSlot, StringMethodCacheEntry,
 };
 use super::super::error::{Error, ErrorKind, StackFrame, TypeError};
-use super::Chunk;
+use super::Bytecode;
 use super::Instr;
 use super::Result;
 use super::State;
@@ -20,8 +20,11 @@ use crate::lua_std::{base_ipairs_iter, base_next};
 
 /// A `Frame` represents a single stack-frame of a Lua function.
 pub(super) struct Frame {
-    /// The chunk being executed (shared via Rc to avoid cloning)
-    chunk: Rc<Chunk>,
+    /// The bytecode being executed (shared via Arc; cheap to clone, immutable).
+    bytecode: Arc<Bytecode>,
+    /// Per-execution lookup caches, shared with the owning `Closure` and any
+    /// other active frames on the same closure (recursive calls).
+    pub(super) caches: Arc<RuntimeCaches>,
     /// The index of the next (not current) instruction
     ip: usize,
     /// Offset into `State.string_literals` where this chunk's literals are
@@ -39,7 +42,8 @@ impl Frame {
     /// Create a new Frame.
     #[must_use]
     pub(super) fn new(
-        chunk: Rc<Chunk>,
+        bytecode: Arc<Bytecode>,
+        caches: Arc<RuntimeCaches>,
         upvalues: Vec<UpvalueRef>,
         varargs: Vec<Val>,
         string_literal_start: usize,
@@ -47,7 +51,8 @@ impl Frame {
     ) -> Self {
         let ip = 0;
         Self {
-            chunk,
+            bytecode,
+            caches,
             ip,
             string_literal_start,
             upvalues,
@@ -56,10 +61,10 @@ impl Frame {
         }
     }
 
-    /// Get the chunk being executed.
+    /// Get the bytecode being executed.
     #[allow(dead_code)]
-    pub(super) fn chunk(&self) -> &Rc<Chunk> {
-        &self.chunk
+    pub(super) fn bytecode(&self) -> &Arc<Bytecode> {
+        &self.bytecode
     }
 
     pub(super) fn string_literal_start(&self) -> usize {
@@ -70,14 +75,14 @@ impl Frame {
     pub(super) fn current_line(&self) -> u32 {
         // ip points to the NEXT instruction, so use ip-1 for current
         let idx = self.ip.saturating_sub(1);
-        self.chunk.line_info.get(idx).copied().unwrap_or(0)
+        self.bytecode.line_info.get(idx).copied().unwrap_or(0)
     }
 
     /// Create a StackFrame for error reporting.
     pub(super) fn to_stack_frame(&self) -> StackFrame {
         StackFrame {
-            function_name: self.chunk.name.clone(),
-            source: self.chunk.source.clone(),
+            function_name: self.bytecode.name.clone(),
+            source: self.bytecode.source.clone(),
             line: self.current_line(),
         }
     }
@@ -90,7 +95,7 @@ impl Frame {
             self.ip.checked_sub((-offset) as usize)
         };
         match new_ip {
-            Some(ip) if ip <= self.chunk.code.len() => {
+            Some(ip) if ip <= self.bytecode.code.len() => {
                 self.ip = ip;
                 Ok(())
             }
@@ -104,19 +109,19 @@ impl Frame {
     /// Get the instruction at the instruction pointer, and advance the
     /// instruction pointer accordingly.
     fn get_instr(&mut self) -> Instr {
-        let i = self.chunk.code[self.ip];
+        let i = self.bytecode.code[self.ip];
         self.ip += 1;
         i
     }
 
     #[must_use]
-    fn get_nested_chunk(&mut self, i: u8) -> Chunk {
-        self.chunk.nested[i as usize].clone()
+    fn get_nested_bytecode(&mut self, i: u8) -> Arc<Bytecode> {
+        Arc::clone(&self.bytecode.nested[i as usize])
     }
 
     #[must_use]
     fn get_number_constant(&self, i: u8) -> f64 {
-        self.chunk.number_literals[i as usize]
+        self.bytecode.number_literals[i as usize]
     }
 
     /// How often to flush accumulated cost to the state.
@@ -397,10 +402,10 @@ impl State {
 
     #[hotpath::measure]
     fn instr_closure(&mut self, frame: &mut Frame, i: u8) {
-        let chunk = frame.get_nested_chunk(i);
-        // Capture upvalues based on the chunk's upvalue descriptors
-        let mut captured_upvalues = Vec::with_capacity(chunk.upvalues.len());
-        for desc in &chunk.upvalues {
+        let bytecode = frame.get_nested_bytecode(i);
+        // Capture upvalues based on the bytecode's upvalue descriptors
+        let mut captured_upvalues = Vec::with_capacity(bytecode.upvalues.len());
+        for desc in &bytecode.upvalues {
             let uv_ref = match desc {
                 UpvalueDesc::Local(idx) => {
                     // Capture a local variable from the current frame's stack
@@ -414,7 +419,7 @@ impl State {
             };
             captured_upvalues.push(uv_ref);
         }
-        self.push_closure(chunk, captured_upvalues);
+        self.push_closure(bytecode, captured_upvalues);
     }
 
     #[hotpath::measure]
@@ -662,7 +667,7 @@ impl State {
         let val = self.pop_val();
         let key = self.get_string_constant(frame, field_id);
 
-        let cache = frame.chunk.field_lookup_cache.get(cache_idx as usize);
+        let cache = frame.caches.field_lookup.get(cache_idx as usize);
 
         if let Some(ptr) = val.as_object_ptr()
             && let Some((direct, has_metatable)) = self.get_table_field_direct(ptr, key, cache)
@@ -969,8 +974,8 @@ impl State {
     }
 
     fn instr_get_global(&mut self, frame: &Frame, string_num: u8, cache_idx: u16) -> Result<()> {
-        let s = &frame.chunk.string_literals[string_num as usize];
-        let cache = frame.chunk.global_lookup_cache.get(cache_idx as usize);
+        let s = &frame.bytecode.string_literals[string_num as usize];
+        let cache = frame.caches.global_lookup.get(cache_idx as usize);
         if let Some(val) = cache.and_then(|cache| self.get_cached_global(cache)) {
             self.stack.push(val);
             return Ok(());
@@ -1228,7 +1233,7 @@ impl State {
         let val = self.pop_val();
         let idx = self.stack.len() - stack_offset as usize - 1;
         let key = self.get_string_constant(frame, field_id);
-        let cache = frame.chunk.set_field_lookup_cache.get(cache_idx as usize);
+        let cache = frame.caches.set_field_lookup.get(cache_idx as usize);
 
         if !matches!(val, Val::Nil)
             && let Some(ptr) = self.stack[idx].as_object_ptr()

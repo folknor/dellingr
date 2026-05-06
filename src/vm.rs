@@ -15,12 +15,13 @@ pub use lua_val::RustFunc;
 
 use indexmap::IndexMap;
 use rand::SeedableRng;
-use std::rc::Rc;
+use std::sync::Arc;
 
-use super::Chunk;
 use super::Instr;
 use super::Result;
 use super::compiler;
+use super::compiler::Bytecode;
+use super::compiler::RuntimeCaches;
 use super::error::Error;
 use super::error::ErrorKind;
 use super::error::StackFrame;
@@ -70,8 +71,8 @@ pub(super) fn mark_gc_roots(
 /// Information about an active function call, used for stack traces.
 #[derive(Clone)]
 pub(super) struct CallInfo {
-    /// The chunk being executed.
-    pub(super) chunk: Rc<Chunk>,
+    /// The bytecode being executed.
+    pub(super) bytecode: Arc<Bytecode>,
     /// Current instruction pointer.
     pub(super) ip: usize,
 }
@@ -123,13 +124,13 @@ pub struct State {
     /// Each entry represents an active Lua function call.
     pub(super) call_stack: Vec<CallInfo>,
     /// Host callbacks for print output, error handling, etc.
-    pub(super) callbacks: Box<dyn HostCallbacks>,
+    pub(super) callbacks: Box<dyn HostCallbacks + Send>,
     /// Current source name (for callback context).
     /// Updated when loading a new chunk.
     pub(super) current_source: Option<String>,
     /// User-defined data that RustFuncs can access.
     /// Use `set_user_data<T>()` and `user_data<T>()` to store/retrieve.
-    user_data: Option<Box<dyn std::any::Any>>,
+    user_data: Option<Box<dyn std::any::Any + Send>>,
     /// Seeded RNG for deterministic math.random(). Defaults to seed 0.
     /// Use `set_rng_seed()` to set a specific seed for replay.
     pub(super) rng: rand::rngs::StdRng,
@@ -173,7 +174,7 @@ impl State {
     ///
     /// let mut state = State::with_callbacks(Box::new(MyCallbacks { output: vec![] }));
     /// ```
-    pub fn with_callbacks(callbacks: Box<dyn HostCallbacks>) -> Self {
+    pub fn with_callbacks(callbacks: Box<dyn HostCallbacks + Send>) -> Self {
         let mut me = Self::empty_with_callbacks(callbacks);
         me.open_libs();
         me
@@ -187,7 +188,7 @@ impl State {
     }
 
     /// Creates an empty state with custom callbacks.
-    fn empty_with_callbacks(callbacks: Box<dyn HostCallbacks>) -> Self {
+    pub(crate) fn empty_with_callbacks(callbacks: Box<dyn HostCallbacks + Send>) -> Self {
         Self {
             globals: IndexMap::new(),
             builtins: std::array::from_fn(|_| Val::Nil),
@@ -263,31 +264,33 @@ impl State {
     /// Store arbitrary user data that RustFuncs can access.
     ///
     /// Useful for passing context to Rust callbacks, like a command collector.
+    /// `T` must be `Send` because `State` is `Send`: any data the embedder
+    /// hands to the VM must be safe to move across threads with the State.
     ///
     /// # Example
     /// ```ignore
-    /// let collector = Rc::new(RefCell::new(CommandCollector::default()));
+    /// let collector = Arc::new(Mutex::new(CommandCollector::default()));
     /// state.set_user_data(collector.clone());
     ///
     /// state.push_rust_fn(|state| {
-    ///     let collector = state.user_data::<Rc<RefCell<CommandCollector>>>().unwrap();
-    ///     collector.borrow_mut().turn = Some(0.5);
+    ///     let collector = state.user_data::<Arc<Mutex<CommandCollector>>>().unwrap();
+    ///     collector.lock().unwrap().turn = Some(0.5);
     ///     Ok(0)
     /// });
     /// ```
-    pub fn set_user_data<T: 'static>(&mut self, data: T) {
+    pub fn set_user_data<T: Send + 'static>(&mut self, data: T) {
         self.user_data = Some(Box::new(data));
     }
 
     /// Get a reference to the stored user data.
     /// Returns None if no data is stored or if the type doesn't match.
-    pub fn user_data<T: 'static>(&self) -> Option<&T> {
+    pub fn user_data<T: Send + 'static>(&self) -> Option<&T> {
         self.user_data.as_ref()?.downcast_ref()
     }
 
     /// Get a mutable reference to the stored user data.
     /// Returns None if no data is stored or if the type doesn't match.
-    pub fn user_data_mut<T: 'static>(&mut self) -> Option<&mut T> {
+    pub fn user_data_mut<T: Send + 'static>(&mut self) -> Option<&mut T> {
         self.user_data.as_mut()?.downcast_mut()
     }
 
@@ -310,8 +313,8 @@ impl State {
     /// Replace the host callbacks with new ones, returning the old callbacks.
     pub fn replace_callbacks(
         &mut self,
-        callbacks: Box<dyn HostCallbacks>,
-    ) -> Box<dyn HostCallbacks> {
+        callbacks: Box<dyn HostCallbacks + Send>,
+    ) -> Box<dyn HostCallbacks + Send> {
         std::mem::replace(&mut self.callbacks, callbacks)
     }
 
@@ -390,7 +393,12 @@ impl State {
         let line = self
             .call_stack
             .last()
-            .and_then(|info| info.chunk.line_info.get(info.ip.saturating_sub(1)).copied())
+            .and_then(|info| {
+                info.bytecode
+                    .line_info
+                    .get(info.ip.saturating_sub(1))
+                    .copied()
+            })
             .unwrap_or(0);
 
         let source = self.current_source.as_deref();
@@ -518,17 +526,17 @@ impl State {
             // Get line number from the ip (call site)
             let line = if call_info.ip > 0 {
                 call_info
-                    .chunk
+                    .bytecode
                     .line_info
                     .get(call_info.ip - 1)
                     .copied()
                     .unwrap_or(0)
             } else {
-                call_info.chunk.line_info.first().copied().unwrap_or(0)
+                call_info.bytecode.line_info.first().copied().unwrap_or(0)
             };
             trace.push(StackFrame {
-                function_name: call_info.chunk.name.clone(),
-                source: call_info.chunk.source.clone(),
+                function_name: call_info.bytecode.name.clone(),
+                source: call_info.bytecode.source.clone(),
                 line,
             });
         }
@@ -545,7 +553,7 @@ impl Default for State {
 
 #[cfg(test)]
 mod tests {
-    use super::Chunk;
+    use super::Bytecode;
     use super::Instr;
     use super::State;
     use super::compiler::parse_str;
@@ -563,7 +571,7 @@ mod tests {
     #[test]
     fn vm_test02() {
         let mut state = State::new();
-        let input = Chunk {
+        let input = Bytecode {
             code: vec![
                 Instr::push_string(1),
                 Instr::push_string(2),
@@ -572,7 +580,7 @@ mod tests {
                 Instr::ret(RetCount::Fixed(0)),
             ],
             string_literals: vec!["key".into(), "a".into(), "b".into()],
-            ..Chunk::default()
+            ..Bytecode::default()
         };
         state.eval_chunk(input, 0).unwrap();
         let val = state.globals.get("key").unwrap();
@@ -582,7 +590,7 @@ mod tests {
     #[test]
     fn vm_test04() {
         let mut state = State::new();
-        let input = Chunk {
+        let input = Bytecode {
             code: vec![
                 Instr::push_num(0),
                 Instr::push_num(0),
@@ -592,7 +600,7 @@ mod tests {
             ],
             number_literals: vec![2.5],
             string_literals: vec!["a".into()],
-            ..Chunk::default()
+            ..Bytecode::default()
         };
         state.eval_chunk(input, 0).unwrap();
         assert_eq!(Val::Bool(true), *state.globals.get("a").unwrap());
@@ -601,7 +609,7 @@ mod tests {
     #[test]
     fn vm_test05() {
         let mut state = State::new();
-        let input = Chunk {
+        let input = Bytecode {
             code: vec![
                 Instr::push_bool(true),
                 Instr::branch_false_keep(2),
@@ -611,7 +619,7 @@ mod tests {
                 Instr::ret(RetCount::Fixed(0)),
             ],
             string_literals: vec!["key".into()],
-            ..Chunk::default()
+            ..Bytecode::default()
         };
         state.eval_chunk(input, 0).unwrap();
         assert_eq!(Val::Bool(false), *state.globals.get("key").unwrap());
@@ -627,11 +635,11 @@ mod tests {
             Instr::set_global(0),
             Instr::ret(RetCount::Fixed(0)),
         ];
-        let chunk = Chunk {
+        let chunk = Bytecode {
             code,
             number_literals: vec![5.0],
             string_literals: vec!["a".into()],
-            ..Chunk::default()
+            ..Bytecode::default()
         };
         state.eval_chunk(chunk, 0).unwrap();
         assert_eq!(Val::Num(5.0), *state.globals.get("a").unwrap());
@@ -649,11 +657,11 @@ mod tests {
             Instr::set_global(0),
             Instr::ret(RetCount::Fixed(0)),
         ];
-        let chunk = Chunk {
+        let chunk = Bytecode {
             code,
             number_literals: vec![2.0],
             string_literals: vec!["a".into()],
-            ..Chunk::default()
+            ..Bytecode::default()
         };
         state.eval_chunk(chunk, 0).unwrap();
         assert!(state.globals.get("a").is_none());
@@ -675,11 +683,11 @@ mod tests {
             Instr::jump(-9),
             Instr::ret(RetCount::Fixed(0)),
         ];
-        let chunk = Chunk {
+        let chunk = Bytecode {
             code,
             number_literals: vec![1.0, 10.0, 0.0],
             string_literals: vec!["a".into()],
-            ..Chunk::default()
+            ..Bytecode::default()
         };
         let mut state = State::new();
         state.eval_chunk(chunk, 0).unwrap();
@@ -708,12 +716,12 @@ mod tests {
             Instr::set_global(0),
             Instr::ret(RetCount::Fixed(0)),
         ];
-        let chunk = Chunk {
+        let chunk = Bytecode {
             code,
             number_literals: vec![1.0, 10.0, 1.0],
             string_literals: vec!["x".into()],
             num_locals: 1,
-            ..Chunk::default()
+            ..Bytecode::default()
         };
         let mut state = State::new();
         state.eval_chunk(chunk, 0).unwrap();
@@ -735,12 +743,12 @@ mod tests {
             Instr::for_loop(0, -3),
             Instr::ret(RetCount::Fixed(0)),
         ];
-        let chunk = Chunk {
+        let chunk = Bytecode {
             code,
             number_literals: vec![6.0, 2.0],
             string_literals: vec!["a".into()],
             num_locals: 4,
-            ..Chunk::default()
+            ..Bytecode::default()
         };
         let mut state = State::new();
         state.eval_chunk(chunk, 0).unwrap();

@@ -30,7 +30,10 @@ use crate::error::Error;
 ///
 /// Implement this trait to customize how the VM interacts with your application.
 /// The default implementation prints to stdout, suitable for CLI usage.
-pub trait HostCallbacks {
+///
+/// `Send` is required because `State` is `Send`; the host callbacks travel
+/// with the State and must be safe to move across threads.
+pub trait HostCallbacks: Send {
     /// Called when Lua's `print()` function is executed.
     ///
     /// # Arguments

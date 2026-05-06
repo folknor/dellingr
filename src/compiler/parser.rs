@@ -1,4 +1,6 @@
-use super::Chunk;
+use std::sync::Arc;
+
+use super::Bytecode;
 use super::Instr;
 use super::Result;
 use super::UpvalueDesc;
@@ -21,10 +23,10 @@ use std::cmp::Ordering;
 struct Parser<'a> {
     /// The input token stream.
     input: TokenStream<'a>,
-    chunk: Chunk,
+    chunk: Bytecode,
     nest_level: i32,
     locals: Vec<(String, i32)>,
-    outer_chunks: Vec<Chunk>,
+    outer_chunks: Vec<Bytecode>,
     /// Stack of break jump indices for each nested loop.
     /// Each entry is a list of instruction indices that need patching.
     loop_breaks: Vec<Vec<usize>>,
@@ -39,15 +41,15 @@ struct Parser<'a> {
     current_line: u32,
 }
 
-/// Parses Lua source code into a `Chunk`.
-pub(super) fn parse_str(source: &str) -> Result<Chunk> {
+/// Parses Lua source code into a `Bytecode`.
+pub(super) fn parse_str(source: &str) -> Result<Bytecode> {
     parse_str_named(source, None)
 }
 
-/// Parses Lua source code into a `Chunk` with an optional source name.
+/// Parses Lua source code into a `Bytecode` with an optional source name.
 #[hotpath::measure]
-pub(super) fn parse_str_named(source: &str, source_name: Option<String>) -> Result<Chunk> {
-    let chunk = Chunk {
+pub(super) fn parse_str_named(source: &str, source_name: Option<String>) -> Result<Bytecode> {
+    let chunk = Bytecode {
         source: source_name,
         ..Default::default()
     };
@@ -356,7 +358,7 @@ impl<'a> Parser<'a> {
 
     /// The main entry point for the parser. This parses the entire input.
     #[hotpath::measure]
-    fn parse_all(mut self) -> Result<Chunk> {
+    fn parse_all(mut self) -> Result<Bytecode> {
         // The top-level chunk is a vararg function (can receive command-line args)
         let c = self.parse_chunk(&[], true)?;
         let token = self.input.next()?;
@@ -368,12 +370,12 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Parses a `Chunk`.
+    /// Parses a `Bytecode`.
     #[hotpath::measure]
-    fn parse_chunk(&mut self, params: &[&str], is_vararg: bool) -> Result<Chunk> {
+    fn parse_chunk(&mut self, params: &[&str], is_vararg: bool) -> Result<Bytecode> {
         let source = self.chunk.source.clone();
         self.outer_chunks.push(self.chunk.clone());
-        self.chunk = Chunk::default();
+        self.chunk = Bytecode::default();
         self.chunk.source = source;
         self.chunk.is_vararg = is_vararg;
 
@@ -1688,7 +1690,7 @@ impl<'a> Parser<'a> {
         new_chunk.name = name;
         self.level_down();
 
-        self.chunk.nested.push(new_chunk);
+        self.chunk.nested.push(Arc::new(new_chunk));
         self.push(Instr::closure(self.chunk.nested.len() as u8 - 1));
         self.expect(TokenType::End)?;
         Ok(())
@@ -1709,7 +1711,7 @@ impl<'a> Parser<'a> {
         new_chunk.name = name;
         self.level_down();
 
-        self.chunk.nested.push(new_chunk);
+        self.chunk.nested.push(Arc::new(new_chunk));
         self.push(Instr::closure(self.chunk.nested.len() as u8 - 1));
         self.expect(TokenType::End)?;
         Ok(())
@@ -1849,20 +1851,23 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::Chunk;
+    use std::sync::Arc;
+
+    use super::Bytecode;
     use super::Instr;
     use super::parse_str;
     use crate::instr::{ArgCount, Builtin, RetCount};
 
     /// Recursively clear line_info from a chunk and its nested chunks.
-    fn clear_line_info(chunk: &mut Chunk) {
+    fn clear_line_info(chunk: &mut Bytecode) {
         chunk.line_info.clear();
         for nested in &mut chunk.nested {
-            clear_line_info(nested);
+            let inner = Arc::get_mut(nested).expect("test fixture should own its nested chunks");
+            clear_line_info(inner);
         }
     }
 
-    fn check_it(input: &str, mut output: Chunk) {
+    fn check_it(input: &str, mut output: Bytecode) {
         // Top-level chunks are always vararg functions
         output.is_vararg = true;
         let mut actual = parse_str(input).unwrap();
@@ -1874,7 +1879,7 @@ mod tests {
     #[test]
     fn test01() {
         let text = "x = 5 + 6";
-        let out = Chunk {
+        let out = Bytecode {
             code: vec![
                 Instr::push_num(0),
                 Instr::push_num(1),
@@ -1884,7 +1889,7 @@ mod tests {
             ],
             number_literals: vec![5.0, 6.0],
             string_literals: vec!["x".into()],
-            ..Chunk::default()
+            ..Bytecode::default()
         };
         check_it(text, out);
     }
@@ -1892,7 +1897,7 @@ mod tests {
     #[test]
     fn test02() {
         let text = "x = -5^2";
-        let out = Chunk {
+        let out = Bytecode {
             code: vec![
                 Instr::push_num(0),
                 Instr::push_num(1),
@@ -1903,7 +1908,7 @@ mod tests {
             ],
             number_literals: vec![5.0, 2.0],
             string_literals: vec!["x".into()],
-            ..Chunk::default()
+            ..Bytecode::default()
         };
         check_it(text, out);
     }
@@ -1911,7 +1916,7 @@ mod tests {
     #[test]
     fn test03() {
         let text = "x = 5 + true .. 'hi'";
-        let out = Chunk {
+        let out = Bytecode {
             code: vec![
                 Instr::push_num(0),
                 Instr::push_bool(true),
@@ -1923,7 +1928,7 @@ mod tests {
             ],
             number_literals: vec![5.0],
             string_literals: vec!["x".into(), "hi".into()],
-            ..Chunk::default()
+            ..Bytecode::default()
         };
         check_it(text, out);
     }
@@ -1931,7 +1936,7 @@ mod tests {
     #[test]
     fn test04() {
         let text = "x = 1 .. 2 + 3";
-        let output = Chunk {
+        let output = Bytecode {
             code: vec![
                 Instr::push_num(0),
                 Instr::push_num(1),
@@ -1943,7 +1948,7 @@ mod tests {
             ],
             number_literals: vec![1.0, 2.0, 3.0],
             string_literals: vec!["x".into()],
-            ..Chunk::default()
+            ..Bytecode::default()
         };
         check_it(text, output);
     }
@@ -1951,7 +1956,7 @@ mod tests {
     #[test]
     fn concat_chain_emits_single_n_ary_concat() {
         let text = r#"x = "a" .. "b" .. "c" .. "d""#;
-        let output = Chunk {
+        let output = Bytecode {
             code: vec![
                 Instr::push_string(1),
                 Instr::push_string(2),
@@ -1962,7 +1967,7 @@ mod tests {
                 Instr::ret(RetCount::Fixed(0)),
             ],
             string_literals: vec!["x".into(), "a".into(), "b".into(), "c".into(), "d".into()],
-            ..Chunk::default()
+            ..Bytecode::default()
         };
         check_it(text, output);
     }
@@ -1970,7 +1975,7 @@ mod tests {
     #[test]
     fn test05() {
         let text = "x = 2^-3";
-        let output = Chunk {
+        let output = Bytecode {
             code: vec![
                 Instr::push_num(0),
                 Instr::push_num(1),
@@ -1981,7 +1986,7 @@ mod tests {
             ],
             number_literals: vec![2.0, 3.0],
             string_literals: vec!["x".into()],
-            ..Chunk::default()
+            ..Bytecode::default()
         };
         check_it(text, output);
     }
@@ -1989,7 +1994,7 @@ mod tests {
     #[test]
     fn test06() {
         let text = "x=  not not 1";
-        let output = Chunk {
+        let output = Bytecode {
             code: vec![
                 Instr::push_num(0),
                 Instr::not(),
@@ -1999,7 +2004,7 @@ mod tests {
             ],
             number_literals: vec![1.0],
             string_literals: vec!["x".into()],
-            ..Chunk::default()
+            ..Bytecode::default()
         };
         check_it(text, output);
     }
@@ -2007,7 +2012,7 @@ mod tests {
     #[test]
     fn test07() {
         let text = "a = 5";
-        let output = Chunk {
+        let output = Bytecode {
             code: vec![
                 Instr::push_num(0),
                 Instr::set_global(0),
@@ -2015,7 +2020,7 @@ mod tests {
             ],
             number_literals: vec![5.0],
             string_literals: vec!["a".into()],
-            ..Chunk::default()
+            ..Bytecode::default()
         };
         check_it(text, output);
     }
@@ -2023,7 +2028,7 @@ mod tests {
     #[test]
     fn test08() {
         let text = "x = true and false";
-        let output = Chunk {
+        let output = Bytecode {
             code: vec![
                 Instr::push_bool(true),
                 Instr::branch_false_keep(2),
@@ -2033,7 +2038,7 @@ mod tests {
                 Instr::ret(RetCount::Fixed(0)),
             ],
             string_literals: vec!["x".into()],
-            ..Chunk::default()
+            ..Bytecode::default()
         };
         check_it(text, output);
     }
@@ -2052,11 +2057,11 @@ mod tests {
             Instr::set_global(0),
             Instr::ret(RetCount::Fixed(0)),
         ];
-        let output = Chunk {
+        let output = Bytecode {
             code,
             number_literals: vec![5.0],
             string_literals: vec!["x".into()],
-            ..Chunk::default()
+            ..Bytecode::default()
         };
         check_it(text, output);
     }
@@ -2071,11 +2076,11 @@ mod tests {
             Instr::set_global(0),
             Instr::ret(RetCount::Fixed(0)),
         ];
-        let chunk = Chunk {
+        let chunk = Bytecode {
             code,
             number_literals: vec![5.0],
             string_literals: vec!["a".into()],
-            ..Chunk::default()
+            ..Bytecode::default()
         };
         check_it(text, chunk);
     }
@@ -2094,11 +2099,11 @@ mod tests {
             Instr::set_global(1),
             Instr::ret(RetCount::Fixed(0)),
         ];
-        let chunk = Chunk {
+        let chunk = Bytecode {
             code,
             number_literals: vec![5.0, 4.0],
             string_literals: vec!["a".into(), "b".into()],
-            ..Chunk::default()
+            ..Bytecode::default()
         };
         check_it(text, chunk);
     }
@@ -2116,11 +2121,11 @@ mod tests {
             Instr::set_global(0),
             Instr::ret(RetCount::Fixed(0)),
         ];
-        let chunk = Chunk {
+        let chunk = Bytecode {
             code,
             number_literals: vec![5.0, 4.0],
             string_literals: vec!["a".into()],
-            ..Chunk::default()
+            ..Bytecode::default()
         };
         check_it(text, chunk);
     }
@@ -2145,11 +2150,11 @@ mod tests {
             Instr::set_global(0),
             Instr::ret(RetCount::Fixed(0)),
         ];
-        let chunk = Chunk {
+        let chunk = Bytecode {
             code,
             number_literals: vec![5.0, 6.0, 7.0, 3.0, 4.0],
             string_literals: vec!["a".into()],
-            ..Chunk::default()
+            ..Bytecode::default()
         };
         check_it(text, chunk);
     }
@@ -2169,11 +2174,11 @@ mod tests {
             Instr::jump(-9),
             Instr::ret(RetCount::Fixed(0)),
         ];
-        let chunk = Chunk {
+        let chunk = Bytecode {
             code,
             number_literals: vec![10.0, 1.0],
             string_literals: vec!["a".into()],
-            ..Chunk::default()
+            ..Bytecode::default()
         };
         check_it(text, chunk);
     }
@@ -2194,12 +2199,12 @@ mod tests {
             Instr::set_global(2),
             Instr::ret(RetCount::Fixed(0)),
         ];
-        let chunk = Chunk {
+        let chunk = Bytecode {
             code,
             number_literals: vec![5.0, 4.0],
             string_literals: vec!["a".into(), "b".into(), "y".into()],
             num_locals: 1,
-            ..Chunk::default()
+            ..Bytecode::default()
         };
         check_it(text, chunk);
     }
@@ -2214,11 +2219,11 @@ mod tests {
             Instr::set_local(0),
             Instr::ret(RetCount::Fixed(0)),
         ];
-        let chunk = Chunk {
+        let chunk = Bytecode {
             code,
             number_literals: vec![2.0],
             num_locals: 1,
-            ..Chunk::default()
+            ..Bytecode::default()
         };
         check_it(text, chunk);
     }
@@ -2236,10 +2241,10 @@ mod tests {
             Instr::call(ArgCount::Fixed(1), RetCount::Fixed(0)),
             Instr::ret(RetCount::Fixed(0)),
         ];
-        let chunk = Chunk {
+        let chunk = Bytecode {
             code,
             num_locals: 2,
-            ..Chunk::default()
+            ..Bytecode::default()
         };
         check_it(text, chunk);
     }
@@ -2258,11 +2263,11 @@ mod tests {
             Instr::set_global(0),
             Instr::ret(RetCount::Fixed(0)),
         ];
-        let chunk = Chunk {
+        let chunk = Bytecode {
             code,
             string_literals: vec!["x".into()],
             num_locals: 2,
-            ..Chunk::default()
+            ..Bytecode::default()
         };
         check_it(text, chunk);
     }
@@ -2279,11 +2284,11 @@ mod tests {
             Instr::set_global(0),
             Instr::ret(RetCount::Fixed(0)),
         ];
-        let chunk = Chunk {
+        let chunk = Bytecode {
             code,
             string_literals: vec!["x".into(), "i".into()],
             num_locals: 1,
-            ..Chunk::default()
+            ..Bytecode::default()
         };
         check_it(text, chunk);
     }
@@ -2303,11 +2308,11 @@ mod tests {
             Instr::set_global(0),
             Instr::ret(RetCount::Fixed(0)),
         ];
-        let chunk = Chunk {
+        let chunk = Bytecode {
             code,
             string_literals: vec!["x".into()],
             num_locals: 2,
-            ..Chunk::default()
+            ..Bytecode::default()
         };
         check_it(text, chunk);
     }
@@ -2325,12 +2330,12 @@ mod tests {
             Instr::for_loop(0, -3),
             Instr::ret(RetCount::Fixed(0)),
         ];
-        let chunk = Chunk {
+        let chunk = Bytecode {
             code,
             number_literals: vec![1.0, 5.0],
             string_literals: vec!["x".into()],
             num_locals: 4,
-            ..Chunk::default()
+            ..Bytecode::default()
         };
         check_it(text, chunk);
     }
@@ -2345,11 +2350,11 @@ mod tests {
             Instr::set_global(0),
             Instr::ret(RetCount::Fixed(0)),
         ];
-        let chunk = Chunk {
+        let chunk = Bytecode {
             code,
             number_literals: vec![1.0],
             string_literals: vec!["a".into(), "b".into()],
-            ..Chunk::default()
+            ..Bytecode::default()
         };
         check_it(text, chunk);
     }
@@ -2364,11 +2369,11 @@ mod tests {
             Instr::set_global(0),
             Instr::ret(RetCount::Fixed(0)),
         ];
-        let chunk = Chunk {
+        let chunk = Bytecode {
             code,
             number_literals: vec![1.0, 2.0],
             string_literals: vec!["a".into(), "b".into()],
-            ..Chunk::default()
+            ..Bytecode::default()
         };
         check_it(text, chunk);
     }
@@ -2385,11 +2390,11 @@ mod tests {
             Instr::set_global(0),
             Instr::ret(RetCount::Fixed(0)),
         ];
-        let chunk = Chunk {
+        let chunk = Bytecode {
             code,
             number_literals: vec![1.0, 2.0, 3.0],
             string_literals: vec!["a".into(), "b".into()],
-            ..Chunk::default()
+            ..Bytecode::default()
         };
         check_it(text, chunk);
     }
@@ -2402,10 +2407,10 @@ mod tests {
             Instr::call(ArgCount::Fixed(0), RetCount::Fixed(0)),
             Instr::ret(RetCount::Fixed(0)),
         ];
-        let chunk = Chunk {
+        let chunk = Bytecode {
             code,
             string_literals: vec!["puts".into()],
-            ..Chunk::default()
+            ..Bytecode::default()
         };
         check_it(text, chunk);
     }
@@ -2420,11 +2425,11 @@ mod tests {
             Instr::set_global(0),
             Instr::ret(RetCount::Fixed(0)),
         ];
-        let chunk = Chunk {
+        let chunk = Bytecode {
             code,
             number_literals: vec![5.0],
             string_literals: vec!["y".into(), "x".into()],
-            ..Chunk::default()
+            ..Bytecode::default()
         };
         check_it(text, chunk);
     }
@@ -2439,11 +2444,11 @@ mod tests {
             Instr::set_local(0),
             Instr::ret(RetCount::Fixed(0)),
         ];
-        let chunk = Chunk {
+        let chunk = Bytecode {
             code,
             string_literals: vec!["t".into(), "x".into(), "y".into()],
             num_locals: 1,
-            ..Chunk::default()
+            ..Bytecode::default()
         };
         check_it(text, chunk);
     }
@@ -2457,15 +2462,15 @@ mod tests {
             Instr::ret(RetCount::Fixed(0)),
         ];
         let string_literals = vec!["x".into()];
-        let nested = vec![Chunk {
+        let nested = vec![Arc::new(Bytecode {
             code: vec![Instr::ret(RetCount::Fixed(0))],
-            ..Chunk::default()
-        }];
-        let chunk = Chunk {
+            ..Bytecode::default()
+        })];
+        let chunk = Bytecode {
             code,
             string_literals,
             nested,
-            ..Chunk::default()
+            ..Bytecode::default()
         };
         check_it(text, chunk);
     }
@@ -2473,7 +2478,7 @@ mod tests {
     #[test]
     fn test29() {
         let text = "x = function () local y = 7 end";
-        let inner_chunk = Chunk {
+        let inner_chunk = Bytecode {
             code: vec![
                 Instr::push_num(0),
                 Instr::set_local(0),
@@ -2481,17 +2486,17 @@ mod tests {
             ],
             number_literals: vec![7.0],
             num_locals: 1,
-            ..Chunk::default()
+            ..Bytecode::default()
         };
-        let outer_chunk = Chunk {
+        let outer_chunk = Bytecode {
             code: vec![
                 Instr::closure(0),
                 Instr::set_global(0),
                 Instr::ret(RetCount::Fixed(0)),
             ],
             string_literals: vec!["x".into()],
-            nested: vec![inner_chunk],
-            ..Chunk::default()
+            nested: vec![Arc::new(inner_chunk)],
+            ..Bytecode::default()
         };
         check_it(text, outer_chunk);
     }
@@ -2504,7 +2509,7 @@ mod tests {
             local y = function () end
             print(y)
         end";
-        let z = Chunk {
+        let z = Bytecode {
             code: vec![
                 Instr::push_num(0),
                 Instr::set_local(0),
@@ -2512,13 +2517,13 @@ mod tests {
             ],
             number_literals: vec![21.0],
             num_locals: 1,
-            ..Chunk::default()
+            ..Bytecode::default()
         };
-        let y = Chunk {
+        let y = Bytecode {
             code: vec![Instr::ret(RetCount::Fixed(0))],
-            ..Chunk::default()
+            ..Bytecode::default()
         };
-        let x = Chunk {
+        let x = Bytecode {
             code: vec![
                 Instr::closure(0),
                 Instr::set_local(0),
@@ -2527,11 +2532,11 @@ mod tests {
                 Instr::call(ArgCount::Fixed(1), RetCount::Fixed(0)),
                 Instr::ret(RetCount::Fixed(0)),
             ],
-            nested: vec![y],
+            nested: vec![Arc::new(y)],
             num_locals: 1,
-            ..Chunk::default()
+            ..Bytecode::default()
         };
-        let outer_chunk = Chunk {
+        let outer_chunk = Bytecode {
             code: vec![
                 Instr::closure(0),
                 Instr::set_global(0),
@@ -2539,9 +2544,9 @@ mod tests {
                 Instr::set_global(1),
                 Instr::ret(RetCount::Fixed(0)),
             ],
-            nested: vec![z, x],
+            nested: vec![Arc::new(z), Arc::new(x)],
             string_literals: vec!["z".into(), "x".into()],
-            ..Chunk::default()
+            ..Bytecode::default()
         };
         check_it(text, outer_chunk);
     }
@@ -2556,11 +2561,11 @@ mod tests {
             Instr::set_local(0),
             Instr::ret(RetCount::Fixed(0)),
         ];
-        let chunk = Chunk {
+        let chunk = Bytecode {
             code,
             num_locals: 1,
             number_literals: vec![4.0],
-            ..Chunk::default()
+            ..Bytecode::default()
         };
         check_it(text, chunk);
     }
@@ -2582,10 +2587,10 @@ mod tests {
             Instr::call(ArgCount::Dynamic, RetCount::Fixed(0)), // Call print with dynamic arg count
             Instr::ret(RetCount::Fixed(0)),
         ];
-        let chunk = Chunk {
+        let chunk = Bytecode {
             code,
             num_locals: 2,
-            ..Chunk::default()
+            ..Bytecode::default()
         };
         check_it(text, chunk);
     }
@@ -2623,11 +2628,11 @@ mod tests {
             Instr::call(ArgCount::Fixed(0), RetCount::Fixed(0)),
             Instr::ret(RetCount::Fixed(0)),
         ];
-        let chunk = Chunk {
+        let chunk = Bytecode {
             code,
             num_locals: 1,
             string_literals: vec!["b".into()],
-            ..Chunk::default()
+            ..Bytecode::default()
         };
         check_it(text, chunk);
     }

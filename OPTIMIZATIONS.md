@@ -69,6 +69,29 @@ record-shape prediction (see "Compile-time table-shape prediction"
 below), which would make the runtime IC variant less load-bearing -
 but this is unsupported by dellingr's own benches today.
 
+Tried in 2026-05-06, reverted: dropping the early-exit on ptr mismatch
+in `get_cached_field` and falling through to key-at-index validation
+regressed both `same_obj_read` (+11% wall time) and `polymorphic` (+9%)
+even with the cross-receiver branch extracted to a `#[cold]`
+non-inlined fn. Two reasons it didn't pan out as written:
+
+1. Polymorphic record-shaped tables (`{id=…, value=…}`, ≤4 fields)
+   stay in `TableStorage::Inline`, whose slow path is already a
+   1-2-entry pointer-compare scan. Cross-receiver validation
+   (heap-deref + `get_index` + key cmp + `cache.set_field` write)
+   is more work than that, so it loses on Inline.
+2. Even with `#[cold]` extraction of the cross-receiver branch, the
+   extra control-flow edge in `get_cached_field` shifts LLVM's
+   inlining/register-allocation choices in the bytecode dispatch loop
+   enough to slow the same-ptr fast path. Couldn't get the hot path
+   to compile bit-exact-equal to the original.
+
+Promotion would need either (a) a real workload where polymorphic
+record-shape access is on Map-storage tables (>4 fields), where the
+slow path's hash lookup is expensive enough to amortize the extra
+work, or (b) a way to add the cross-receiver path without
+perturbing the same-ptr branch's codegen.
+
 ### Array part for dense integer keys
 
 What: a third `TableStorage` variant (`Array { values: Vec<Val> }`) for

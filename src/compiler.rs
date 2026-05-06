@@ -6,6 +6,7 @@ mod parser;
 mod token;
 
 use std::cell::Cell;
+use std::sync::Arc;
 
 use super::Instr;
 use super::Result;
@@ -157,17 +158,27 @@ impl PartialEq for SetFieldLookupCacheSlot {
     }
 }
 
+/// Compiled, immutable bytecode for a single Lua function (chunk).
+///
+/// `Bytecode` is `Send + Sync` and `Arc`-shareable: it holds no per-execution
+/// state, only the instructions, literal pools, and static metadata. The
+/// per-`State` lookup caches live on `RuntimeCaches`, which is allocated
+/// alongside each `Closure`.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub(super) struct Chunk {
+pub(crate) struct Bytecode {
     pub(super) code: Vec<Instr>,
     pub(super) number_literals: Vec<f64>,
     pub(super) string_literals: Vec<Vec<u8>>,
-    pub(super) global_lookup_cache: Vec<GlobalLookupCacheSlot>,
-    pub(super) field_lookup_cache: Vec<FieldLookupCacheSlot>,
-    pub(super) set_field_lookup_cache: Vec<SetFieldLookupCacheSlot>,
+    /// Number of slots in this function's global lookup cache.
+    /// Cache slot indices are baked into `OP_GET_GLOBAL_CACHED` instructions.
+    pub(super) global_cache_slots: u16,
+    /// Number of slots in this function's field lookup cache.
+    pub(super) field_cache_slots: u16,
+    /// Number of slots in this function's set-field lookup cache.
+    pub(super) set_field_cache_slots: u8,
     pub(super) num_params: u8,
     pub(super) num_locals: u8,
-    pub(super) nested: Vec<Chunk>,
+    pub(super) nested: Vec<Arc<Bytecode>>,
     /// Describes the upvalues this function captures.
     pub(super) upvalues: Vec<UpvalueDesc>,
     /// Whether this function accepts varargs (...).
@@ -181,8 +192,12 @@ pub(super) struct Chunk {
     pub(super) line_info: Vec<u32>,
 }
 
-impl Chunk {
-    fn initialize_runtime_caches(&mut self) {
+impl Bytecode {
+    /// Walk the instruction stream, rewrite cache-able opcodes with their
+    /// allocated slot index, and record per-cache slot counts on the
+    /// `Bytecode`. Recurses into nested functions. Each `Closure` allocates
+    /// its own `RuntimeCaches` sized from these counts.
+    fn assign_cache_slots(&mut self) {
         let mut global_cache_indices = vec![None; self.string_literals.len()];
         let mut global_cache_len = 0usize;
         let mut field_cache_len = 0usize;
@@ -223,36 +238,87 @@ impl Chunk {
             }
         }
 
-        self.global_lookup_cache = (0..global_cache_len)
-            .map(|_| GlobalLookupCacheSlot::default())
-            .collect();
-        self.field_lookup_cache = (0..field_cache_len)
-            .map(|_| FieldLookupCacheSlot::default())
-            .collect();
-        self.set_field_lookup_cache = (0..set_field_cache_len)
-            .map(|_| SetFieldLookupCacheSlot::default())
-            .collect();
-        for nested in &mut self.nested {
-            nested.initialize_runtime_caches();
+        self.global_cache_slots =
+            u16::try_from(global_cache_len).expect("too many global lookup cache slots");
+        self.field_cache_slots =
+            u16::try_from(field_cache_len).expect("too many field lookup cache slots");
+        self.set_field_cache_slots =
+            u8::try_from(set_field_cache_len).expect("too many set-field lookup cache slots");
+    }
+}
+
+/// Per-execution lookup caches owned by a `Closure`.
+///
+/// These are never shared across `State`s: cached `ObjectPtr` keys are only
+/// valid inside the heap of the State that wrote them, and version cells are
+/// keyed to that State's `globals_version` / table versions. Each `Closure`
+/// allocates its own caches sized from the immutable `Bytecode`.
+///
+/// The interior `Cell`s give cache writes a `&self`-only borrow shape, which
+/// matches the dispatch loop's invariants: simultaneous frames executing the
+/// same `Closure` (recursion) all see each other's writes through a shared
+/// `Arc<RuntimeCaches>`.
+#[derive(Debug, Default)]
+pub(crate) struct RuntimeCaches {
+    pub(super) global_lookup: Vec<GlobalLookupCacheSlot>,
+    pub(super) field_lookup: Vec<FieldLookupCacheSlot>,
+    pub(super) set_field_lookup: Vec<SetFieldLookupCacheSlot>,
+}
+
+// SAFETY: `RuntimeCaches` contains `Cell`s, which are `!Sync` in isolation.
+// We claim `Sync` because every access path goes through `&mut State`, and
+// `State` deliberately does not implement `Sync`. There is no way for two
+// threads to simultaneously hold a `&RuntimeCaches`: cross-thread sharing of
+// a `State` requires moving it (`Send`), at which point the destination
+// thread holds exclusive ownership. The Cells are therefore single-threaded
+// at runtime; the unsafe impl just acknowledges that the type system cannot
+// see that invariant on its own.
+unsafe impl Sync for RuntimeCaches {}
+
+impl RuntimeCaches {
+    pub(crate) fn new(bc: &Bytecode) -> Self {
+        Self {
+            global_lookup: (0..bc.global_cache_slots as usize)
+                .map(|_| GlobalLookupCacheSlot::default())
+                .collect(),
+            field_lookup: (0..bc.field_cache_slots as usize)
+                .map(|_| FieldLookupCacheSlot::default())
+                .collect(),
+            set_field_lookup: (0..bc.set_field_cache_slots as usize)
+                .map(|_| SetFieldLookupCacheSlot::default())
+                .collect(),
         }
     }
 }
 
 #[hotpath::measure]
-pub(super) fn parse_str(source: impl AsRef<str>) -> Result<Chunk> {
-    let mut chunk = parser::parse_str(source.as_ref())?;
-    chunk.initialize_runtime_caches();
-    Ok(chunk)
+pub(super) fn parse_str(source: impl AsRef<str>) -> Result<Bytecode> {
+    let mut bc = parser::parse_str(source.as_ref())?;
+    finalize(&mut bc);
+    Ok(bc)
 }
 
 #[hotpath::measure]
 pub(super) fn parse_str_named(
     source: impl AsRef<str>,
     source_name: Option<String>,
-) -> Result<Chunk> {
-    let mut chunk = parser::parse_str_named(source.as_ref(), source_name)?;
-    chunk.initialize_runtime_caches();
-    Ok(chunk)
+) -> Result<Bytecode> {
+    let mut bc = parser::parse_str_named(source.as_ref(), source_name)?;
+    finalize(&mut bc);
+    Ok(bc)
+}
+
+/// Walk a freshly-parsed `Bytecode` tree and assign cache slot indices to
+/// every nested function before it ships to the runtime.
+fn finalize(bc: &mut Bytecode) {
+    bc.assign_cache_slots();
+    for nested in &mut bc.nested {
+        // The parser produces nested `Arc<Bytecode>` with a refcount of 1, so
+        // we have unique access to mutate each one in place before it ships.
+        let inner =
+            Arc::get_mut(nested).expect("nested Bytecode should be uniquely owned during finalize");
+        finalize(inner);
+    }
 }
 
 #[cfg(test)]
@@ -261,7 +327,7 @@ mod runtime_cache_tests {
 
     #[test]
     fn global_lookup_cache_tracks_distinct_get_global_names_only() {
-        let chunk = parse_str(
+        let bc = parse_str(
             r#"
             local literal = "not a global"
             local t = { field = literal }
@@ -271,22 +337,22 @@ mod runtime_cache_tests {
         )
         .unwrap();
 
-        let get_globals: Vec<_> = chunk
+        let get_globals: Vec<_> = bc
             .code
             .iter()
             .filter(|inst| inst.opcode() == Instr::OP_GET_GLOBAL)
             .collect();
 
         assert_eq!(get_globals.len(), 3);
-        assert_eq!(chunk.global_lookup_cache.len(), 2);
-        assert!(chunk.string_literals.len() > chunk.global_lookup_cache.len());
+        assert_eq!(bc.global_cache_slots, 2);
+        assert!(bc.string_literals.len() > bc.global_cache_slots as usize);
         assert_eq!(get_globals[0].bx(), get_globals[1].bx());
         assert_ne!(get_globals[0].bx(), get_globals[2].bx());
     }
 
     #[test]
     fn field_lookup_cache_tracks_get_field_call_sites() {
-        let chunk = parse_str(
+        let bc = parse_str(
             r#"
             local t = { x = 1, y = 2 }
             return t.x + t.x + t.y
@@ -294,14 +360,14 @@ mod runtime_cache_tests {
         )
         .unwrap();
 
-        let get_fields: Vec<_> = chunk
+        let get_fields: Vec<_> = bc
             .code
             .iter()
             .filter(|inst| inst.opcode() == Instr::OP_GET_FIELD)
             .collect();
 
         assert_eq!(get_fields.len(), 3);
-        assert_eq!(chunk.field_lookup_cache.len(), 3);
+        assert_eq!(bc.field_cache_slots, 3);
         assert_eq!(get_fields[0].bx(), 0);
         assert_eq!(get_fields[1].bx(), 1);
         assert_eq!(get_fields[2].bx(), 2);
@@ -309,7 +375,7 @@ mod runtime_cache_tests {
 
     #[test]
     fn set_field_lookup_cache_tracks_set_field_call_sites() {
-        let chunk = parse_str(
+        let bc = parse_str(
             r#"
             local t = { x = 0, y = 0 }
             t.x = 1
@@ -319,14 +385,14 @@ mod runtime_cache_tests {
         )
         .unwrap();
 
-        let set_fields: Vec<_> = chunk
+        let set_fields: Vec<_> = bc
             .code
             .iter()
             .filter(|inst| inst.opcode() == Instr::OP_SET_FIELD)
             .collect();
 
         assert_eq!(set_fields.len(), 3);
-        assert_eq!(chunk.set_field_lookup_cache.len(), 3);
+        assert_eq!(bc.set_field_cache_slots, 3);
         assert_eq!(set_fields[0].c(), 0);
         assert_eq!(set_fields[1].c(), 1);
         assert_eq!(set_fields[2].c(), 2);

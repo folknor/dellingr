@@ -38,8 +38,20 @@ pub use vm::LuaType;
 pub use vm::RustFunc;
 pub use vm::State;
 
-use compiler::Chunk;
+use compiler::Bytecode;
 use instr::Instr;
+use std::sync::Arc;
+
+// Compile-time witness that `State` can be moved across threads. This is the
+// load-bearing property for sharing dellingr with multi-threaded async
+// runtimes (axum, tokio worker pools): embedders can hold a `Mutex<State>`
+// behind an `Arc` and dispatch calls from any worker. `State` is
+// deliberately NOT `Sync` - cost-budgeted dispatch and the bytecode cache
+// invariants only have well-defined semantics under exclusive access.
+const _: () = {
+    const fn assert_send<T: Send>() {}
+    assert_send::<State>();
+};
 
 /// Custom result type for evaluating Lua.
 pub type Result<T> = std::result::Result<T, error::Error>;
@@ -72,7 +84,7 @@ pub struct ScopeCost {
 }
 
 impl ScopeCost {
-    fn analyze_chunk(chunk: &Chunk, name: String) -> Self {
+    fn analyze_chunk(chunk: &Bytecode, name: String) -> Self {
         let mut scope = ScopeCost {
             name,
             ..Default::default()
@@ -292,8 +304,115 @@ impl std::fmt::Display for CostAnalysis {
 ///
 /// Returns a `CostAnalysis` with per-scope cost breakdown.
 /// The actual runtime cost depends on control flow and loop iterations.
+///
+/// For repeated analysis of the same source, prefer `Engine::compile` followed
+/// by `Engine::analyze_cost(&program)` so the parse is paid once.
 pub fn analyze_cost(source: &str) -> Result<CostAnalysis> {
-    let chunk = compiler::parse_str(source)?;
-    let root = ScopeCost::analyze_chunk(&chunk, "main".to_string());
+    let bc = compiler::parse_str(source)?;
+    let root = ScopeCost::analyze_chunk(&bc, "main".to_string());
     Ok(CostAnalysis { root })
+}
+
+/// A factory for compiling Lua source and creating new `State`s.
+///
+/// `Engine` is `Send + Sync`: a single instance can be shared across worker
+/// threads via `Arc`. Compile a `Program` once on the engine, then load it
+/// into per-thread (or per-request) `State`s.
+///
+/// ```ignore
+/// use std::sync::Arc;
+/// let engine = Arc::new(dellingr::Engine::new());
+/// let program = engine.compile("return 1 + 2").unwrap();
+///
+/// // On each worker thread:
+/// let mut state = engine.new_state();
+/// state.load(&program).unwrap();
+/// state.call(dellingr::ArgCount::Fixed(0), dellingr::RetCount::Fixed(1)).unwrap();
+/// ```
+#[derive(Debug)]
+pub struct Engine {
+    install_stdlib: bool,
+}
+
+impl Default for Engine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Engine {
+    /// Create an engine that installs the standard library on each new `State`.
+    pub fn new() -> Self {
+        Self {
+            install_stdlib: true,
+        }
+    }
+
+    /// Create an engine whose new `State`s start with empty global namespaces,
+    /// matching `lua_newstate` in the reference C API.
+    pub fn raw() -> Self {
+        Self {
+            install_stdlib: false,
+        }
+    }
+
+    /// Compile a Lua source string into an executable `Program`.
+    pub fn compile(&self, source: &str) -> Result<Program> {
+        let bc = compiler::parse_str(source)?;
+        Ok(Program(Arc::new(bc)))
+    }
+
+    /// Compile a Lua source string with a source name used in error messages
+    /// and stack traces (e.g. a filename or `"[fleet:123]"`).
+    pub fn compile_named(&self, source: &str, name: impl Into<String>) -> Result<Program> {
+        let bc = compiler::parse_str_named(source, Some(name.into()))?;
+        Ok(Program(Arc::new(bc)))
+    }
+
+    /// Statically analyze the cost of a compiled `Program`. No execution.
+    pub fn analyze_cost(&self, program: &Program) -> CostAnalysis {
+        let root = ScopeCost::analyze_chunk(&program.0, "main".to_string());
+        CostAnalysis { root }
+    }
+
+    /// Create a new `State` configured by this engine.
+    pub fn new_state(&self) -> State {
+        self.new_state_with_callbacks(Box::new(DefaultCallbacks))
+    }
+
+    /// Create a new `State` configured by this engine with custom callbacks.
+    pub fn new_state_with_callbacks(&self, callbacks: Box<dyn HostCallbacks + Send>) -> State {
+        if self.install_stdlib {
+            State::with_callbacks(callbacks)
+        } else {
+            State::empty_with_callbacks(callbacks)
+        }
+    }
+}
+
+/// A compiled, executable Lua program. Cheap to clone (refcounted) and safe
+/// to share across threads. Load with `State::load` to execute.
+#[derive(Clone, Debug)]
+pub struct Program(Arc<Bytecode>);
+
+impl Program {
+    /// Returns the optional source name attached at compile time.
+    pub fn source_name(&self) -> Option<&str> {
+        self.0.source.as_deref()
+    }
+}
+
+impl State {
+    /// Load a compiled `Program` onto this `State`'s stack as a callable
+    /// closure. Pair with `state.call(ArgCount::Fixed(0), ...)` to execute.
+    ///
+    /// The same `Program` can be loaded into many different `State`s and run
+    /// concurrently from different threads (each State holds its own caches
+    /// and heap; only the immutable bytecode is shared).
+    pub fn load(&mut self, program: &Program) -> Result<()> {
+        // Mirror load_string_named: track the source for callback context.
+        self.current_source = program.0.source.clone();
+        self.push_chunk(Arc::clone(&program.0));
+        Ok(())
+    }
 }
