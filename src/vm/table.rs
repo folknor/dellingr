@@ -98,7 +98,19 @@ impl Table {
                     }
                     Val::Nil
                 }
-                TableStorage::Map(map) => map.get(key).copied().unwrap_or_default(),
+                TableStorage::Map(map) => {
+                    if Self::is_array_key(key)
+                        && let Val::Num(n) = key
+                    {
+                        let idx = (*n as usize) - 1;
+                        if let Some((Val::Num(kn), v)) = map.get_index(idx)
+                            && kn.to_bits() == n.to_bits()
+                        {
+                            return *v;
+                        }
+                    }
+                    map.get(key).copied().unwrap_or_default()
+                }
             },
         }
     }

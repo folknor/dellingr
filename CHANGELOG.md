@@ -24,6 +24,13 @@ All notable changes to dellingr are documented here. The format follows
 - Table mutation no longer invalidates the field cache for unrelated
   inserts on the same table (only removes / shifts bump the table
   version, since insertions don't move existing entries' indices).
+- Numeric integer indexing is faster on hash-storage tables. For
+  positive finite integer keys, `Table::get` now tries `IndexMap`
+  position `n-1` directly, validates by bit-equality of the stored
+  key, and only falls back to the hash lookup on miss. On the
+  `tables/numeric_index` bench wall time dropped 112ms -> 73ms;
+  `tables/fill` 105ms -> 98ms; `tables/mixed` 102ms -> 89ms;
+  `fields/same_obj_read` is unchanged.
 
 ## [0.1.0] - 2026-05-05
 

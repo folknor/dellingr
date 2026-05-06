@@ -119,9 +119,17 @@ Two internal hot paths carry `#[hotpath::measure]`: `compiler::parse_str_named` 
 To add a new target: write `examples/{category}/{name}.lua` defining `_bench()` and a standalone runner footer. No Rust changes, no manifest updates.
 
 ```sh
-cargo run --release --example hotpath --features hotpath -- fields/same_obj_read
-cargo run --release --example hotpath --features hotpath-alloc -- tables/fill
+./hotbench.sh fields/same_obj_read           # KVs from harness + hyperfine wall time
+./hotbench.sh tables/fill --runs 20          # extra args pass through to hyperfine
+FEATURES=hotpath-alloc ./hotbench.sh tables/fill   # alloc tracking on the KV side
 ```
+
+`hotbench.sh` builds both the regular `dellingr` binary and the
+hotpath example, prints the harness's KV breakdown, and runs hyperfine
+on the script via the regular binary (the hotpath stats table at exit
+otherwise dominates wall time). Don't invoke the `cargo run --example
+hotpath` command manually - run it via the script so the timing path
+stays consistent.
 
 ## Project conventions worth knowing
 
