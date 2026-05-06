@@ -153,11 +153,11 @@ pub(crate) fn open_string(state: &mut State) {
     // Create the string table
     state.new_table();
 
-    // Helper to add a function to the table at stack index -1
+    // Helper to add a function to the table at stack index -1.
     macro_rules! add_fn {
         ($name:expr, $func:expr) => {
-            state.push_rust_fn($func);
             state.push_string($name);
+            state.push_rust_fn($func);
             state
                 .set_table_raw(-3)
                 .expect("string library registration cannot fail");
@@ -537,8 +537,8 @@ pub(crate) fn open_string(state: &mut State) {
 
         if pattern.is_empty() {
             state.new_table();
-            state.push_boolean(false);
             state.push_string("done");
+            state.push_boolean(false);
             state.set_table_raw(-3)?;
 
             state.push_rust_fn(|state| {
@@ -550,8 +550,8 @@ pub(crate) fn open_string(state: &mut State) {
                     return Ok(1);
                 }
                 state.pop(1);
-                state.push_boolean(true);
                 state.push_string("done");
+                state.push_boolean(true);
                 state.set_table_raw(1)?;
                 state.set_top(0);
                 state.push_bytes(b"");
@@ -565,14 +565,14 @@ pub(crate) fn open_string(state: &mut State) {
         }
 
         state.new_table();
-        state.push_bytes(&s);
         state.push_string("s");
+        state.push_bytes(&s);
         state.set_table_raw(-3)?;
-        state.push_bytes(&pattern);
         state.push_string("p");
+        state.push_bytes(&pattern);
         state.set_table_raw(-3)?;
-        state.push_number(0.0);
         state.push_string("pos");
+        state.push_number(0.0);
         state.set_table_raw(-3)?;
 
         state.push_rust_fn(|state| {
@@ -605,8 +605,8 @@ pub(crate) fn open_string(state: &mut State) {
                     if matcher.matches_bytes(search) {
                         let range = matcher.range();
                         let new_pos = pos + range.end.max(1);
-                        state.push_number(new_pos as f64);
                         state.push_string("pos");
+                        state.push_number(new_pos as f64);
                         state.set_table_raw(1)?;
 
                         state.set_top(0);

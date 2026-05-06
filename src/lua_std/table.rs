@@ -7,11 +7,11 @@ pub(crate) fn open_table(state: &mut State) {
     // Create the table table
     state.new_table();
 
-    // Helper to add a function to the table at stack index -1
+    // Helper to add a function to the table at stack index -1.
     macro_rules! add_fn {
         ($name:expr, $func:expr) => {
-            state.push_rust_fn($func);
             state.push_string($name.to_string());
+            state.push_rust_fn($func);
             state.set_table_raw(-3).unwrap();
         };
     }
@@ -140,14 +140,14 @@ pub(crate) fn open_table(state: &mut State) {
 
         // Insert all arguments into the table
         for i in 1..=num_args {
-            state.push_value(i as isize)?; // push the argument
-            state.push_number(i as f64); // push the index
+            state.push_number(i as f64); // push the index (key)
+            state.push_value(i as isize)?; // push the argument (value)
             state.set_table_raw(table_idx)?;
         }
 
         // Add the "n" field
-        state.push_number(num_args as f64);
         state.push_string("n");
+        state.push_number(num_args as f64);
         state.set_table_raw(table_idx)?;
 
         // Remove all original arguments, leave just the table
@@ -239,13 +239,11 @@ pub(crate) fn open_table(state: &mut State) {
                 let src_key = (f + i) as f64;
                 let dest_key = (t + i) as f64;
 
-                // Get a1[f+i]
+                // Set a2[t+i] = a1[f+i]
+                state.push_number(dest_key);
                 state.push_number(src_key);
                 state.get_table(1)?;
-                // Stack: [..., value]
-
-                // Set a2[t+i] = value
-                state.push_number(dest_key);
+                // Stack: [..., dest_key, value]
                 state.set_table_raw(dest_idx)?;
             }
         }

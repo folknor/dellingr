@@ -29,38 +29,6 @@ Signal that would promote it: a real embedder asking for non-uniform
 weights, or a benchmarking case where the uniform-cost model
 materially misrepresents the actual VM work.
 
-### Investigate `set_table_raw` argument order
-
-What: `State::set_table_raw(i)` (`src/vm/table_ops.rs:54-76`) pops
-`key = top, val = below_top` - the *opposite* of the reference Lua C
-API, where `lua_settable` / `lua_rawset` pop `val = top, key =
-below_top`. Callers in stdlib (`src/lua_std/math.rs:14-19`,
-`src/lua_std/basic.rs:235-238`) carry comments like "Swap key and
-value for set_table_raw which expects [table, value, key]" - so the
-reversal is known and worked around, not accidental at the call
-sites, but the original motivation isn't in the commit log.
-
-Find out:
-
-- Why was the order reversed? (Codegen convenience for table
-  constructors? Lexer/parser-side stack discipline? Just a port
-  bug that ossified?)
-- Are any internal callers actually easier with the reversed order?
-- What breaks if we flip it back to match `lua_rawset`?
-
-Then: either flip to match the C API (so the docs say "behaves like
-`lua_rawset`" without an asterisk, and the workaround comments
-disappear), or document the divergence prominently in the public API
-docs so embedders coming from the C API don't write a bug.
-
-Why deferred: pre-existing behavior, all current call sites
-work. But every new embedder who reads the C API docs and writes
-`push(key); push(val); set_table_raw(t)` writes a silent corruption
-bug. Worth resolving before 1.0.
-
-Signal that would promote it: an embedder hitting this footgun, or
-a 1.0 API audit pass.
-
 ### Typed `State<U>` for user-data
 
 What: replace today's `Box<dyn Any + Send>` user-data slot with a

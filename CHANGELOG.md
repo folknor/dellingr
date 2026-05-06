@@ -38,6 +38,14 @@ All notable changes to dellingr are documented here. The format follows
 
 ### Changed (breaking)
 
+- `State::set_table_raw` argument order now matches the reference Lua C
+  API (`lua_rawset`): the value is on top of the stack and the key is
+  below it. Previously the order was reversed (key on top, value below),
+  which silently corrupted tables for embedders coming from the C API.
+  The internal `rawset` Lua function loses its manual swap, and the
+  "Stack order: value first" comments in stdlib are gone. Embedders
+  writing `push(key); push(value); set_table_raw(t)` now match the C
+  API exactly.
 - `State` is now `Send`. Embedders can move a `State` across threads
   (e.g. into a tokio task, or behind `Mutex<State>` shared via `Arc`
   across worker threads). `State` is intentionally NOT `Sync` -

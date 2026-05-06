@@ -105,7 +105,7 @@ Each `State` carries `state_id: NonZeroU32`, allocated from a process-wide `Atom
 
 Why it matters: without this check, passing State A's anchor to State B would hit B's slotmap at the same slot with a probably-matching generation. Generations rule out *most* misuse but not all, and silent semantic-corruption is the worst class of bug to ship pre-1.0.
 
-The 32-bit width is enough — `AtomicU32` wraps after 4B State allocations, by which point any pre-existing anchor is long gone. Don't try to cram `state_id` into the `key` niche; the bits are better spent on generation.
+The 32-bit width is enough - `AtomicU32` wraps after 4B State allocations, by which point any pre-existing anchor is long gone. Don't try to cram `state_id` into the `key` niche; the bits are better spent on generation.
 
 ### Anchoring nil
 
@@ -200,4 +200,4 @@ Bench surface: nothing on the hot path. `mark_gc_roots` gets one extra `slotmap.
 - **`Anchor::EMPTY` sentinel for fixed-size handler tables.** `[Anchor; 64]` style. Skipped: `Option<Anchor>` is niche-optimized to the same size, and explicit `Option` is more idiomatic Rust. If a real embedder argues for it, revisit.
 - **Engine-level handle for `Program`-related objects.** `Program` is already `Arc<Bytecode>` and `Send + Sync`; not a registry concern.
 - **Deterministic `state_id` allocation.** Currently process-wide `AtomicU32`, fine for in-process use. If we ever ship a serialization story for `State` snapshots, `state_id` would need to be deterministic (e.g. a seed-derived value from `Engine`), but that's a 1.0-or-later concern.
-- **Stable serialization of `Anchor` bits** — currently in-process only (state_id is non-deterministic across hosts). Same family of concern as the `RustFunc`-by-pointer-address note in `TODO.md`.
+- **Stable serialization of `Anchor` bits** - currently in-process only (state_id is non-deterministic across hosts). Same family of concern as the `RustFunc`-by-pointer-address note in `TODO.md`.

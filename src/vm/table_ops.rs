@@ -55,12 +55,13 @@ impl State {
     /// valid index, `k` is the value at the top of the stack minus 1, and `v`
     /// is the value at the top of the stack.
     ///
-    /// This function pops both the key and the value from the stack.
+    /// This function pops both the key and the value from the stack. Matches
+    /// the reference Lua C API's `lua_rawset`.
     #[hotpath::measure]
     pub fn set_table_raw(&mut self, i: isize) -> Result<()> {
         let idx = self.convert_idx(i)?;
-        let key = self.pop_val();
         let val = self.pop_val();
+        let key = self.pop_val();
 
         // Get the ObjectPtr and type for error reporting
         let obj_ptr = self.stack[idx].as_object_ptr();

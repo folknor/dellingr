@@ -283,6 +283,7 @@ fn rustfn_table_field_called_inside_dynamic_arg_sees_only_its_arguments() {
     let mut state = State::new();
 
     state.get_global("string");
+    state.push_string("arg_probe");
     state.push_rust_fn(|state| {
         assert_eq!(state.get_top(), 3);
         assert_eq!(state.to_string(1).unwrap(), "hello");
@@ -292,7 +293,6 @@ fn rustfn_table_field_called_inside_dynamic_arg_sees_only_its_arguments() {
         state.push_string("ok");
         Ok(1)
     });
-    state.push_string("arg_probe");
     state.set_table_raw(-3).unwrap();
     state.pop(1);
 

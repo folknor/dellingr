@@ -10,12 +10,11 @@ pub(crate) fn open_math(state: &mut State) {
     // Create the math table
     state.new_table();
 
-    // Helper to add a function to the table at stack index -1
-    // Stack order: value first, then key (set_table_raw pops key, then value)
+    // Helper to add a function to the table at stack index -1.
     macro_rules! add_fn {
         ($name:expr, $func:expr) => {
-            state.push_rust_fn($func);
             state.push_string($name.to_string());
+            state.push_rust_fn($func);
             state.set_table_raw(-3).unwrap();
         };
     }
@@ -307,15 +306,15 @@ pub(crate) fn open_math(state: &mut State) {
     });
 
     // math.pi (constant)
-    state.push_number(PI);
     state.push_string("pi");
+    state.push_number(PI);
     state
         .set_table_raw(-3)
         .expect("math.pi assignment cannot fail");
 
     // math.huge (infinity constant)
-    state.push_number(f64::INFINITY);
     state.push_string("huge");
+    state.push_number(f64::INFINITY);
     state
         .set_table_raw(-3)
         .expect("math.huge assignment cannot fail");
