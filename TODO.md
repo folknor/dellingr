@@ -72,20 +72,6 @@ too. Add a regression test that `with_restricted_env` blocks a
 previously-warmed `t:method()` callsite that resolved through a
 global-lib `__index`.
 
-### HIGH: `next_state_id` wraps after 2^32 States
-
-(claude, commit 6837ccb)
-
-`src/vm/anchor.rs:30-40` uses `AtomicU32` for state IDs. After
-u32::MAX `State::new()` calls in one process, IDs recycle. A long-dead
-Anchor from a recycled-ID State A can match a current State B if B
-happens to have the same `(slot, generation)` pair; cross-State
-protection silently fails. SlotMap's generational keys still work
-within one State, so this only matters across a 2^32 wraparound, but
-long-running game servers / embedders are in reach.
-
-Fix: widen to `AtomicU64`.
-
 ### HIGH: `call_anchor(.., ArgCount::Dynamic, ..)` is unreachable from host code
 
 (claude, commit 6837ccb)

@@ -12,8 +12,8 @@
 //! registry uses generational keys, so use-after-release is also caught
 //! explicitly rather than silently aliasing a recycled slot.
 
-use std::num::{NonZeroU32, NonZeroU64};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::num::NonZeroU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use slotmap::{Key, KeyData, SlotMap, new_key_type};
 
@@ -25,24 +25,21 @@ new_key_type! {
 }
 
 /// Process-wide allocator for `state_id`s. Each `State` gets a unique
-/// `NonZeroU32` from this counter at construction; every `Anchor` carries
-/// its owning State's id so cross-State misuse is detected.
-static NEXT_STATE_ID: AtomicU32 = AtomicU32::new(1);
+/// `NonZeroU64` from this counter at construction; every `Anchor` carries
+/// its owning State's id so cross-State misuse is detected. A `u64`
+/// counter cannot wrap in any realistic process lifetime, so cross-State
+/// protection is guaranteed even for long-running embedders.
+static NEXT_STATE_ID: AtomicU64 = AtomicU64::new(1);
 
-pub(crate) fn next_state_id() -> NonZeroU32 {
-    loop {
-        let id = NEXT_STATE_ID.fetch_add(1, Ordering::Relaxed);
-        if let Some(nz) = NonZeroU32::new(id) {
-            return nz;
-        }
-        // Counter wrapped past zero; loop again.
-    }
+pub(crate) fn next_state_id() -> NonZeroU64 {
+    let id = NEXT_STATE_ID.fetch_add(1, Ordering::Relaxed);
+    NonZeroU64::new(id).expect("u64 state-id counter cannot wrap in a real process")
 }
 
 /// A retainable handle to a Lua value, valid until released.
 ///
-/// `Anchor` is `Copy + Send + Sync + 'static`, 12 bytes on 64-bit targets.
-/// `Option<Anchor>` is also 12 bytes via the `NonZero` niches.
+/// `Anchor` is `Copy + Send + Sync + 'static`, 16 bytes on 64-bit targets.
+/// `Option<Anchor>` is also 16 bytes via the `NonZero` niches.
 ///
 /// Anchors are bound to one `State`. Operations on a wrong-State anchor
 /// return [`ErrorKind::InvalidAnchor`](super::ErrorKind::InvalidAnchor)
@@ -53,14 +50,14 @@ pub(crate) fn next_state_id() -> NonZeroU32 {
 /// `Anchor`'s `Debug` output the same way you would a memory address.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Anchor {
-    state_id: NonZeroU32,
+    state_id: NonZeroU64,
     /// Slotmap `KeyData::as_ffi()` encoding of the (slot, generation) pair.
     /// `NonZero` because slotmap reserves zero for null keys.
     key: NonZeroU64,
 }
 
 impl Anchor {
-    fn new(state_id: NonZeroU32, key: AnchorKey) -> Self {
+    fn new(state_id: NonZeroU64, key: AnchorKey) -> Self {
         let ffi = key.data().as_ffi();
         let key = NonZeroU64::new(ffi).expect("real slotmap keys are never zero");
         Self { state_id, key }
@@ -78,12 +75,12 @@ impl Anchor {
 /// stale-handle detection for free, and slotmap iteration order is
 /// deterministic given identical insert/release history.
 pub(crate) struct Registry {
-    state_id: NonZeroU32,
+    state_id: NonZeroU64,
     slots: SlotMap<AnchorKey, Val>,
 }
 
 impl Registry {
-    pub(crate) fn new(state_id: NonZeroU32) -> Self {
+    pub(crate) fn new(state_id: NonZeroU64) -> Self {
         Self {
             state_id,
             slots: SlotMap::with_key(),
