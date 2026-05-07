@@ -32,18 +32,6 @@ bench under `examples/calls/`, or recover the old win via a per-State
 `IndexMap<*const Bytecode, Arc<RuntimeCaches>>` keyed off the Bytecode
 pointer.
 
-### LOW: SET_FIELD IC populate re-reads `stack[idx]` after `__newindex`
-
-(claude, commit 16175f5)
-
-`src/vm/frame.rs:1262-1284` re-reads `self.stack[idx]` after
-`set_table_with_key`, which may run an arbitrary user `__newindex`.
-Safe today (RustFn callbacks operate above stack_bottom; Lua
-`__newindex` doesn't touch the receiver slot), but it's an
-undocumented invariant on every future `__newindex`-callable path.
-Add a one-line comment plus a debug-only `assert_eq!` that
-`stack[idx]` is unchanged.
-
 ### Cleared on review
 
 Both reviewers explicitly checked and cleared:

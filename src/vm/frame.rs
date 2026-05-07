@@ -1279,16 +1279,30 @@ impl State {
             }
         }
 
-        let tbl_val = &self.stack[idx];
-        let is_table = tbl_val
+        let tbl_val = self.stack[idx];
+        let receiver_ptr = match tbl_val
             .as_object_ptr()
-            .and_then(|ptr| self.heap.as_table_ref(ptr))
-            .is_some();
-        if !is_table {
-            let typ = tbl_val.typ_simple();
-            return Err(self.type_error(TypeError::TableIndex(typ)));
-        }
+            .filter(|ptr| self.heap.as_table_ref(*ptr).is_some())
+        {
+            Some(ptr) => ptr,
+            None => {
+                let typ = tbl_val.typ_simple();
+                return Err(self.type_error(TypeError::TableIndex(typ)));
+            }
+        };
         self.set_table_with_key(idx, key, val)?;
+        // set_table_with_key may invoke a user `__newindex`, which is
+        // host code that could in principle reorganize the stack. No
+        // current path mutates `stack[idx]` mid-call (RustFn callbacks
+        // operate above stack_bottom; Lua __newindex doesn't touch the
+        // receiver slot), and the assert below guards against future
+        // regressions. We use the captured `receiver_ptr` for cache
+        // populate so the IC entry is correct even if a future change
+        // weakens that invariant.
+        debug_assert_eq!(
+            self.stack[idx], tbl_val,
+            "set_table_with_key must not mutate stack[idx]; SET_FIELD cache populate relies on the captured receiver pointer"
+        );
 
         // Populate the cache after the slow path: if the key now lives
         // in the receiver (either inserted directly, or written via
@@ -1298,12 +1312,11 @@ impl State {
         // returns None and we leave the cache cold so __newindex (or the
         // delete path) keeps firing as Lua semantics require.
         if let Some(cache) = cache
-            && let Some(ptr) = self.stack[idx].as_object_ptr()
-            && let Some(tbl) = self.heap.as_table_ref(ptr)
+            && let Some(tbl) = self.heap.as_table_ref(receiver_ptr)
             && let Some((index, _)) = tbl.get_with_index(&key)
         {
             cache.set(FieldLookupCacheEntry {
-                table: ptr,
+                table: receiver_ptr,
                 table_version: tbl.version(),
                 index,
             });
