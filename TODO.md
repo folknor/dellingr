@@ -72,23 +72,6 @@ too. Add a regression test that `with_restricted_env` blocks a
 previously-warmed `t:method()` callsite that resolved through a
 global-lib `__index`.
 
-### HIGH: `call_anchor(.., ArgCount::Dynamic, ..)` is unreachable from host code
-
-(claude, commit 6837ccb)
-
-`src/vm.rs:407-414`'s Dynamic branch falls through to
-`self.call(args, rets)`, which (`src/vm/eval.rs:34-40`) reads
-`vararg_call_bases.pop().expect(...)`. Nothing in the public host API
-populates that stack - only `OP_MARK_CALL_BASE` does. So a cold
-embedder call to `call_anchor(a, ArgCount::Dynamic, ...)` panics; if a
-base is set from prior bytecode, the math removes an arg and treats
-the function pointer as data.
-
-Fix: delete the Dynamic branch and have `call_anchor` reject
-`ArgCount::Dynamic` with `InternalError`. The "valid only inside a
-vararg expansion in bytecode" precondition contradicts `call_anchor`'s
-reason to exist.
-
 ### MEDIUM: RuntimeCaches no longer share across closures of the same Bytecode
 
 (claude, commit e0bef7b)

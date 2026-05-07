@@ -158,6 +158,17 @@ fn anchor_function_rejects_number() {
 }
 
 #[test]
+fn call_anchor_rejects_dynamic_arg_count() {
+    let mut state = State::new();
+    load_function(&mut state, "return function() return 1 end");
+    let a = state.anchor_function().unwrap();
+    let err = state
+        .call_anchor(a, ArgCount::Dynamic, RetCount::Fixed(0))
+        .expect_err("Dynamic args have no host-API call-base, must be rejected");
+    assert!(matches!(err.kind, ErrorKind::InternalError(_)));
+}
+
+#[test]
 fn anchored_closure_survives_gc_after_global_dropped() {
     let mut state = State::new();
     state.gc_disable_auto();

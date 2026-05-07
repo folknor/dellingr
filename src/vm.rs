@@ -406,11 +406,15 @@ impl State {
         let n_args = match args {
             ArgCount::Fixed(n) => n as usize,
             ArgCount::Dynamic => {
-                // For dynamic arg count, the call infrastructure expects
-                // the args already arranged with a base marker. Don't try
-                // to re-shuffle; just push the fn and defer to call.
-                self.stack.push(val);
-                return self.call(args, rets);
+                // ArgCount::Dynamic relies on a vararg_call_base pushed by
+                // OP_MARK_CALL_BASE inside bytecode; no public host API
+                // populates that stack, so a host-side call_anchor with
+                // Dynamic would either panic on the missing base or read
+                // a stale one set up by prior bytecode and corrupt the
+                // call. Reject it explicitly.
+                return Err(Error::without_location(ErrorKind::InternalError(
+                    "call_anchor does not support ArgCount::Dynamic; use ArgCount::Fixed".into(),
+                )));
             }
         };
         // Insert the fn below the n_args topmost values.
