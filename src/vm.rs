@@ -588,9 +588,15 @@ impl State {
     }
 
     pub(super) fn set_global_value_owned(&mut self, name: String, val: Val) {
-        // Update builtins array if this is a well-known name
+        // Update builtins array if this is a well-known name. Rebinding a
+        // builtin slot poisons inline caches that hold a direct ObjectPtr
+        // to the previous library table (string-method IC, method-lookup
+        // IC reaching the lib via __index), so bump globals_version to
+        // force re-resolution. User globals don't poison those ICs - the
+        // ICs only key on builtin slots - so the bump stays narrow.
         if let Some(slot) = Builtin::from_name(&name) {
             self.builtins[slot as usize] = val;
+            self.globals_version = self.globals_version.wrapping_add(1);
         }
         self.globals.insert(name, val);
     }

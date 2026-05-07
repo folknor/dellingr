@@ -26,6 +26,14 @@ All notable changes to dellingr are documented here. The format follows
   callbacks or user data must become `Arc` / `Mutex`.
   ([e0bef7b](https://github.com/folknor/dellingr/commit/e0bef7b))
 
+### Fixed
+
+- Method-dispatch inline caches no longer survive a `string` (or other
+  builtin) rebind or a `with_restricted_env` swap. The cached library
+  pointer used to bypass the new binding for the lifetime of the cached
+  closure - notably, a host could pre-warm a `s:method()` call site
+  outside the sandbox and the cached method would still resolve inside.
+
 ### Performance
 
 - String-heavy workloads ~2x faster: O(1) interner, chained `..` lowers

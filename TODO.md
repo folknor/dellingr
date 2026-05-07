@@ -12,66 +12,6 @@ Consolidated from two reviewer sessions (claude + codex) on 2026-05-07.
 Both reviewers ran read-only against the working tree; neither executed
 tests. Items below are ordered by what should block the release.
 
-### BLOCKER: string-method IC poisons sandbox and survives `string` rebind
-
-(both reviewers, commit 64b8640)
-
-`StringMethodCacheEntry` (`src/compiler.rs:80-85`) carries `string_lib`,
-`version`, `index` but no `globals_version`. The hit path
-(`src/vm/frame.rs:766-787`) trusts the cached `string_lib` ObjectPtr and
-never re-resolves the current `string` global. Three failure modes:
-
-**Reassignment.** `set_global_value_owned` (`src/vm.rs:582-592`)
-updates `builtins[Builtin::String]` and `globals["string"]` but does
-not bump `globals_version`. After `string = nil` or `string = newlib`,
-`s:method()` keeps returning results from the cached lib until the next
-GC. Repro:
-
-```lua
-local function f() return ("a"):upper() end
-local first = f()
-local old = string
-string = { upper = function(self) return "new" end }
-return first, f() -- expected "A", "new"; cache returns old upper
-```
-
-**Sandbox bypass (security regression).** `with_restricted_env`
-(`src/vm.rs:597-630`) replaces globals/builtins and bumps
-`globals_version`. The original `string` lib stays alive in
-`saved_builtins`, so a pre-warmed callsite resolves through the cached
-ObjectPtr and silently bypasses the restriction. Pre-64b8640 this was
-guarded because `s:method()` re-did `get_global("string")` on every
-call. This breaks the README's stated game-scripting / sandboxing use
-case.
-
-**Panic-after-GC.** If `string` is rebound, the original is dropped,
-and the host runs GC, the cached `ObjectPtr` becomes unrooted;
-`as_table_ref` hits the panic-on-stale path
-(`src/vm/object.rs:206`).
-
-Fix sketch: add `globals_version: u64` to `StringMethodCacheEntry`,
-mirror the check in `get_cached_global`
-(`src/vm/frame.rs:1009-1016`). Either bump `globals_version` in
-`set_global_value_owned` when the slot is `Builtin::String`, or have
-the IC re-fetch through `self.builtins[Builtin::String as usize]` and
-compare against `entry.string_lib`. Add regression tests for both
-`string` rebind and `with_restricted_env`.
-
-### BLOCKER: same family in MethodLookupCacheEntry when `__index` resolves to a global lib
-
-(claude, commit 64b8640)
-
-`get_cached_index_table_field` (`src/vm/frame.rs:899-954`) is well
-validated against metatable changes and value updates *for the
-receiver*, but the cached `index_handler` ObjectPtr can point at a
-global library reached via `mt.__index = string` (or similar). Same
-sandbox-bypass story as the previous item once the cache is warm.
-
-Whichever invalidation hook fixes the previous item should fire here
-too. Add a regression test that `with_restricted_env` blocks a
-previously-warmed `t:method()` callsite that resolved through a
-global-lib `__index`.
-
 ### MEDIUM: RuntimeCaches no longer share across closures of the same Bytecode
 
 (claude, commit e0bef7b)

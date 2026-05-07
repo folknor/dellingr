@@ -71,6 +71,11 @@ pub(super) struct MethodLookupCacheEntry {
     pub(super) index_handler: Val,
     pub(super) method_table_version: u64,
     pub(super) method_index: Option<usize>,
+    /// Snapshot of `State::globals_version` when the entry was populated.
+    /// Bumped on builtin rebind / `with_restricted_env` swap, so a cached
+    /// `index_handler` that resolved through a global library table
+    /// (e.g. `__index = string`) re-validates after the binding changes.
+    pub(super) globals_version: u64,
 }
 
 /// Cache for `s:method()` style calls where the receiver is a string and
@@ -82,6 +87,12 @@ pub(super) struct StringMethodCacheEntry {
     pub(super) string_lib: ObjectPtr,
     pub(super) version: u64,
     pub(super) index: usize,
+    /// Snapshot of `State::globals_version` when the entry was populated.
+    /// Bumped on `string` rebind / `with_restricted_env` swap, so the
+    /// cached `string_lib` ObjectPtr (which can stay reachable via
+    /// `saved_builtins` even after a sandbox swap) cannot resurrect the
+    /// pre-swap library through this fast path.
+    pub(super) globals_version: u64,
 }
 
 #[derive(Debug, Default)]

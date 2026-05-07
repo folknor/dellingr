@@ -727,6 +727,7 @@ impl State {
                     string_lib: lib_ptr,
                     version: tbl.version(),
                     index,
+                    globals_version: self.globals_version,
                 });
             }
 
@@ -766,6 +767,13 @@ impl State {
     #[inline(always)]
     fn get_cached_string_method(&self, key: Val, cache: &FieldLookupCacheSlot) -> Option<Val> {
         let entry = cache.get_string_method()?;
+        // Reject the cache when the global `string` binding has been
+        // rebound or swapped via with_restricted_env. Otherwise the
+        // cached `string_lib` ObjectPtr (which may stay alive in
+        // `saved_builtins`) silently bypasses the new binding.
+        if entry.globals_version != self.globals_version {
+            return None;
+        }
         let tbl = self.heap.as_table_ref(entry.string_lib)?;
         let version = tbl.version();
         if entry.version == version {
@@ -779,6 +787,7 @@ impl State {
                 string_lib: entry.string_lib,
                 version,
                 index: entry.index,
+                globals_version: self.globals_version,
             });
             Some(cached_val)
         } else {
@@ -850,6 +859,7 @@ impl State {
                     index_handler,
                     method_table_version: 0,
                     method_index: None,
+                    globals_version: self.globals_version,
                 });
             }
             return None;
@@ -863,6 +873,7 @@ impl State {
                     index_handler,
                     method_table_version: 0,
                     method_index: None,
+                    globals_version: self.globals_version,
                 });
             }
             return None;
@@ -877,6 +888,7 @@ impl State {
                     index_handler,
                     method_table_version,
                     method_index: None,
+                    globals_version: self.globals_version,
                 });
             }
             return None;
@@ -890,6 +902,7 @@ impl State {
                 index_handler,
                 method_table_version,
                 method_index: Some(method_index),
+                globals_version: self.globals_version,
             });
         }
 
@@ -904,6 +917,16 @@ impl State {
         cache: &FieldLookupCacheSlot,
     ) -> Option<Option<Val>> {
         let entry = cache.get_method()?;
+
+        // Reject the cache when a builtin global has been rebound or
+        // sandboxed via with_restricted_env. The cached `index_handler`
+        // can point at a global library table that was reachable via
+        // `mt.__index = string` (or similar) and stays alive across the
+        // swap, so without this check a pre-warmed callsite resurrects
+        // the pre-swap binding inside the sandbox.
+        if entry.globals_version != self.globals_version {
+            return None;
+        }
 
         let receiver_table = self.heap.as_table_ref(ptr)?;
         if receiver_table.get_metatable() != Some(entry.receiver_metatable) {
@@ -946,6 +969,7 @@ impl State {
                 index_handler: entry.index_handler,
                 method_table_version,
                 method_index: Some(method_index),
+                globals_version: self.globals_version,
             });
             Some(Some(method))
         } else {
@@ -1027,6 +1051,11 @@ impl State {
     fn instr_set_builtin(&mut self, slot: u8) {
         let val = self.pop_val();
         self.builtins[slot as usize] = val;
+        // Bump globals_version so ICs holding a direct ObjectPtr into a
+        // builtin library table (string-method IC, method-lookup IC
+        // reaching the lib via __index) re-resolve through the new
+        // binding instead of resurrecting the old one.
+        self.globals_version = self.globals_version.wrapping_add(1);
         // Also update globals for _G compatibility
         if let Some(builtin) = crate::instr::Builtin::from_u8(slot) {
             self.globals.insert(builtin.name().to_string(), val);
