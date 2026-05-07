@@ -48,13 +48,13 @@ There's a few gotchas with the current instruction-cost accounting. For example,
 
 ## Status
 
-v0.1.0 is on crates.io. The public API (`State`, `HostCallbacks`,
+v0.2.0 is on crates.io. The public API (`State`, `HostCallbacks`,
 `RustFunc`, cost analysis) is **pre-1.0 and not yet stable** -
 breaking changes may land in any 0.x bump until 1.0.
 
 ```toml
 [dependencies]
-dellingr = "0.1"
+dellingr = "0.2"
 ```
 
 ## What it provides
