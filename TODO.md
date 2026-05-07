@@ -12,26 +12,6 @@ Consolidated from two reviewer sessions (claude + codex) on 2026-05-07.
 Both reviewers ran read-only against the working tree; neither executed
 tests. Items below are ordered by what should block the release.
 
-### MEDIUM: RuntimeCaches no longer share across closures of the same Bytecode
-
-(claude, commit e0bef7b)
-
-`alloc_lua_fn` (`src/vm/object.rs:258-275`) allocates a fresh
-`Arc::new(RuntimeCaches::new(&bytecode))` per closure. Pre-split,
-`Rc<Chunk>` carried caches inline; cloning the Rc shared caches across
-all closures of a chunk. Recursion still shares (same Closure), but
-factory patterns regress:
-
-```lua
-local function mk() return function(t) return t.x end end
--- each call to mk() returns a new closure with cold caches
-```
-
-Not a correctness bug. Either accept the regression and pin it with a
-bench under `examples/calls/`, or recover the old win via a per-State
-`IndexMap<*const Bytecode, Arc<RuntimeCaches>>` keyed off the Bytecode
-pointer.
-
 ### Cleared on review
 
 Both reviewers explicitly checked and cleared:

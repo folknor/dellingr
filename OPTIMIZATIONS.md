@@ -11,6 +11,28 @@ Each entry: what, sketch, why-not-yet, signal that would change the calculus.
 
 ## Architectural
 
+### Share RuntimeCaches across closures of the same Bytecode
+
+What: today `alloc_lua_fn` (`src/vm/object.rs`) allocates a fresh
+`Arc::new(RuntimeCaches::new(&bytecode))` per closure, so factory
+patterns - `mk()` returning a new closure each call - pay cold-cache
+cost on every produced closure's first access. Pre-split (when
+`Rc<Chunk>` carried caches inline), all closures of the same chunk
+shared one cache. Recover that by keying caches off the `Bytecode`
+pointer in a per-State `IndexMap<*const Bytecode, Arc<RuntimeCaches>>`,
+so closure creation looks up an existing entry or installs one.
+
+Why deferred: adds `State` surface, a lookup per closure creation, and
+complicates GC of dead `Bytecode`s (the cache map needs to drop
+entries whose `Bytecode` is no longer referenced). The current cost is
+one `Arc` allocation per closure (not per call); recursion already
+shares (same `Closure`, same `Arc`).
+
+Signal that would promote it: `examples/calls/factory_closure.lua`
+drifting further from `calls/local` than today's gap, or a workload
+where per-closure cold caches dominate. The bench exists specifically
+to track this.
+
 ### Shape-based polymorphic field IC
 
 What: a per-callsite cache for `OP_GET_FIELD` keyed on (table_shape_id,
