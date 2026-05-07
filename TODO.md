@@ -32,16 +32,6 @@ bench under `examples/calls/`, or recover the old win via a per-State
 `IndexMap<*const Bytecode, Arc<RuntimeCaches>>` keyed off the Bytecode
 pointer.
 
-### LOW: `anchor()` consumes stack on Nil; `anchor_at()` does not
-
-(claude, commit 6837ccb)
-
-`src/vm.rs:330-339` (`anchor`): `pop_val()` runs before the
-`AnchorNil` check; Nil is consumed even on error.
-`src/vm.rs:343-349` (`anchor_at`): Nil case returns immediately, stack
-untouched. Each is consistent with its own doc, but the asymmetry is
-easy for embedders to misread. Pre-1.0 polish.
-
 ### LOW: SET_FIELD IC populate re-reads `stack[idx]` after `__newindex`
 
 (claude, commit 16175f5)

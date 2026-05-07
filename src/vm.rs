@@ -324,18 +324,22 @@ impl State {
     /// `Copy` `Anchor` handle the embedder can store and use later to push
     /// or call the value.
     ///
-    /// Errors with `ErrorKind::AnchorNil` if the popped value is `nil`
+    /// Errors with `ErrorKind::AnchorNil` if the top of stack is `nil`
     /// (use `Option<Anchor>` for an absent-value sentinel; nil carries no
-    /// GC weight and has no use case for a stable handle).
+    /// GC weight and has no use case for a stable handle). The stack is
+    /// only popped on success - errors leave it untouched.
     pub fn anchor(&mut self) -> Result<Anchor> {
         // Surface "stack empty" as an embedder error rather than the
-        // VM-bug panic in pop_val.
+        // VM-bug panic in pop_val. Validate before popping so the stack
+        // is untouched on error - matches `anchor_at` and the rest of
+        // the host API.
         let val = self.at_index(-1)?;
-        self.pop_val();
         if matches!(val, Val::Nil) {
             return Err(Error::without_location(ErrorKind::AnchorNil));
         }
-        Ok(self.registry.insert(val))
+        let anchor = self.registry.insert(val);
+        self.pop_val();
+        Ok(anchor)
     }
 
     /// Like `anchor`, but reads the value at `idx` without popping. The
@@ -359,11 +363,11 @@ impl State {
         let val = self.at_index(-1)?;
         let typ = val.typ(&self.heap);
         if typ != LuaType::Function {
-            self.pop_val();
             return Err(self.type_error(TypeError::FunctionCall(typ)));
         }
+        let anchor = self.registry.insert(val);
         self.pop_val();
-        Ok(self.registry.insert(val))
+        Ok(anchor)
     }
 
     /// Like `anchor_at`, but additionally requires the value to be a

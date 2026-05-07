@@ -158,6 +158,33 @@ fn anchor_function_rejects_number() {
 }
 
 #[test]
+fn anchor_does_not_pop_on_nil_error() {
+    let mut state = State::new();
+    state.push_number(7.0);
+    state.push_nil();
+    assert!(matches!(
+        state.anchor().unwrap_err().kind,
+        ErrorKind::AnchorNil,
+    ));
+    // Error path leaves the stack untouched, matching anchor_at.
+    assert_eq!(state.get_top(), 2);
+    state.pop(1);
+    assert_eq!(state.to_number(-1).unwrap(), 7.0);
+}
+
+#[test]
+fn anchor_function_does_not_pop_on_type_error() {
+    let mut state = State::new();
+    state.push_number(7.0);
+    state.push_number(1.0);
+    let err = state.anchor_function().unwrap_err();
+    assert!(matches!(err.kind, ErrorKind::TypeError(_)));
+    assert_eq!(state.get_top(), 2);
+    assert_eq!(state.to_number(-1).unwrap(), 1.0);
+    assert_eq!(state.to_number(-2).unwrap(), 7.0);
+}
+
+#[test]
 fn call_anchor_rejects_dynamic_arg_count() {
     let mut state = State::new();
     load_function(&mut state, "return function() return 1 end");
