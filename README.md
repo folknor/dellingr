@@ -1,13 +1,15 @@
 # dellingr
 
-<p align="center">
-  <a href="https://crates.io/crates/dellingr"><img src="https://img.shields.io/crates/v/dellingr" alt="crates.io"></a>
-  <a href="https://docs.rs/dellingr"><img src="https://img.shields.io/docsrs/dellingr" alt="docs.rs"></a>
-  <img src="https://img.shields.io/badge/rust-1.92+-orange?logo=rust" alt="MSRV 1.92">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License"></a>
-</p>
+<a href="https://crates.io/crates/dellingr"><img src="https://img.shields.io/crates/v/dellingr" alt="crates.io"></a>
+<a href="https://docs.rs/dellingr"><img src="https://img.shields.io/docsrs/dellingr" alt="docs.rs"></a>
+<img src="https://img.shields.io/badge/rust-1.92+-orange?logo=rust" alt="MSRV 1.92">
+<a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License"></a>
 
 An embeddable, deterministic, pure-Rust Lua VM with precise per-opcode instruction-cost accounting. No FFI, no system Lua dependency.
+
+Built with LLMs. See [LLM.md](LLM.md).
+
+## Performance
 
 It's slower than reference Lua, but not dramatically so: roughly 2-4x behind lua5.4 / 5.5 on most workloads and ~2x on `pairs` iteration / pattern matching. LuaJIT is its own world - 18-30x faster than us on tight loops where its tracing JIT shines, much less on alloc/string/pattern work where we get within 3-4x. dellingr is fast enough for continuous bounded execution of a few kilobytes of Lua code to let a game run at several thousand FPS.
 
@@ -24,8 +26,6 @@ Run `./bench.sh` to reproduce on your own host. Sample run on AMD Ryzen 9 5900X 
 | `alloc/closure`          |     77ms |     2.05x |     1.99x |     1.67x |     2.55x |
 | `benchmark` (multi)      |    168ms |     4.00x |     3.97x |     2.74x |    23.35x |
 
-Built with LLMs. See [LLM.md](LLM.md).
-
 ## Won't implement
 
 Designed for sandboxed embedding, not as a general-purpose Lua replacement. These Lua features are intentionally excluded:
@@ -40,7 +40,7 @@ Designed for sandboxed embedding, not as a general-purpose Lua replacement. Thes
 - Arithmetic/comparison/concat metamethods
 - Long strings (`[[...]]`, `[=[...]=]`)
 
-Some of them might be added later, but behind a feature gate if so. The lack of the features above make the VM much more suitable for embedded use. Especially in games where the Lua scripting might be exposed to users. In those cases, these 3 string methods - for example - could be used to work around restrictions the game wants to put on the user.
+Some of them might be added later (probably most of them behind a feature gate, if so). The lack of the features above make the VM much more suitable for embedded use. Especially in games where the Lua scripting might be exposed to users. In those cases, these 3 string methods - for example - could be used to work around restrictions the game wants to put on the user.
 
 ## Budget
 
@@ -48,8 +48,7 @@ There's a few gotchas with the current instruction-cost accounting. For example,
 
 ## Status
 
-v0.2.0 is on crates.io. The public API (`State`, `HostCallbacks`,
-`RustFunc`, cost analysis) is **pre-1.0 and not yet stable** -
+The public API is **pre-1.0 and not yet stable** -
 breaking changes may land in any 0.x bump until 1.0.
 
 ```toml
@@ -57,7 +56,7 @@ breaking changes may land in any 0.x bump until 1.0.
 dellingr = "0.2"
 ```
 
-## What it provides
+## Library usage/VM
 
 - `Engine` (`Send + Sync`) - factory for compiling source into `Program`s
   and creating `State`s. One `Engine` per app, shared via `Arc`.
@@ -89,6 +88,8 @@ cargo run --release -- --limit 100000 path/to/script.lua
 ## Acknowledgements
 
 Initially based on [cjneidhart/lua-in-rust](https://github.com/cjneidhart/lua-in-rust).
+
+`src/patterns` initially ripped from [mwerezak/lua-patterns](https://github.com/mwerezak/lua-patterns), which itself is a fork of [stevedonovan/lua-patterns](https://github.com/stevedonovan/lua-patterns).
 
 ## License
 
