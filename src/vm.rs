@@ -592,6 +592,10 @@ impl State {
         self.set_global_value(name, val);
     }
 
+    pub(crate) fn set_global_rust_fn(&mut self, name: &str, func: RustFunc) {
+        self.set_global_value(name, Val::RustFn(func));
+    }
+
     pub(super) fn set_global_value(&mut self, name: &str, val: Val) {
         self.set_global_value_owned(name.to_string(), val);
     }

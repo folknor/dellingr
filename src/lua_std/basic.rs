@@ -111,8 +111,7 @@ pub(crate) fn base_pairs(state: &mut State) -> Result<u8> {
 
 pub(crate) fn open_base(state: &mut State) {
     let mut add = |name, func| {
-        state.push_rust_fn(func);
-        state.set_global(name);
+        state.set_global_rust_fn(name, func);
     };
 
     add("ipairs", base_ipairs);

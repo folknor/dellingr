@@ -53,6 +53,9 @@ All notable changes to dellingr are documented here. The format follows
   matches, reducing per-match allocation churn.
 - `type`, `tonumber`, and already-string `tostring` avoid unnecessary
   Rust string allocations in common cases.
+- Base standard-library Rust functions install directly into the global
+  table instead of round-tripping through the Lua stack during fresh
+  `State` startup.
 
 ### Testing
 
@@ -76,6 +79,8 @@ All notable changes to dellingr are documented here. The format follows
 - `diff_test.sh` now uses process-unique temporary output files so
   parallel Rust differential buckets do not race on shared `.diff_test_*`
   paths.
+- The hotpath benchmark harness now reports `state_new_us`, making fresh
+  `State` startup cost visible alongside parse and call timings.
 
 ## [0.2.0] - 2026-05-07
 

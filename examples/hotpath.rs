@@ -4,6 +4,7 @@
 //! Loads `examples/{target}.lua`, which must define a global `_bench` function.
 //! The `target` may include subdirectories (e.g. `calls/global`).
 //! Phases measured separately:
+//!   - `state_new_us`     time spent creating a default `State`
 //!   - `parse_us`         time spent in `load_string_named` (parser + codegen)
 //!   - `cold_call_us`     first invocation of `_bench` after chunk setup
 //!   - `warm_avg_us`      average of subsequent invocations on the same State
@@ -46,10 +47,12 @@ fn main() {
         }
     };
 
-    let chunk_name = format!("@examples/{target}.lua");
+    let state_start = Instant::now();
     let mut state = State::new();
+    let state_new_us = state_start.elapsed().as_micros();
 
     // Phase 1: parse + codegen.
+    let chunk_name = format!("@examples/{target}.lua");
     let parse_start = Instant::now();
     if let Err(e) = state.load_string_named(&source, Some(chunk_name)) {
         eprintln!("Parse error in {}: {e}", script_path.display());
@@ -100,6 +103,7 @@ fn main() {
     let final_object_count = state.object_count();
 
     eprintln!("target={target}");
+    eprintln!("state_new_us={state_new_us}");
     eprintln!("parse_us={parse_us}");
     eprintln!("cold_call_us={cold_call_us}");
     eprintln!("cold_cost={cold_cost}");
