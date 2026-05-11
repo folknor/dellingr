@@ -630,6 +630,31 @@ fn unparenthesized_method_call_is_supported() {
 }
 
 #[test]
+fn table_constructor_accepts_identifier_array_entries() {
+    let result = run_number(
+        r#"
+        local x = 7
+        local t = {x, x + 1}
+        return t[1] * 10 + t[2]
+    "#,
+    );
+    assert_eq!(result, 78.0);
+}
+
+#[test]
+fn table_constructor_distinguishes_named_fields_from_identifiers() {
+    let result = run_number(
+        r#"
+        local x = 7
+        local src = { value = 5 }
+        local t = { x = 3, x, src.value }
+        return t.x * 100 + t[1] * 10 + t[2]
+    "#,
+    );
+    assert_eq!(result, 375.0);
+}
+
+#[test]
 fn error_msg_call_depth_shows_overflow() {
     let err = expect_error("local function r(n) return r(n+1) end\nr(0)");
     let msg = format!("{err}");

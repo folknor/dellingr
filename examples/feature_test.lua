@@ -89,6 +89,10 @@ print("\n--- Tables ---")
 local t1 = {1, 2, 3}
 test("table literal array", t1[1] == 1 and t1[2] == 2 and t1[3] == 3)
 
+local tableEntryValue = 42
+local t1b = {tableEntryValue, tableEntryValue + 1}
+test("table identifier array entries", t1b[1] == 42 and t1b[2] == 43)
+
 local t2 = {a = 1, b = 2}
 test("table literal keys", t2.a == 1 and t2["b"] == 2)
 

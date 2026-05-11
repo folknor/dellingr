@@ -27,6 +27,8 @@ All notable changes to dellingr are documented here. The format follows
   argument now compile instead of panicking in the parser.
 - `State::set_top` now accepts negative stack indices instead of
   panicking for otherwise valid relative-top operations.
+- Table constructors now accept identifier-starting array entries like
+  `{x}` and `{x.y}` instead of treating every identifier as `name =`.
 
 ### Performance
 

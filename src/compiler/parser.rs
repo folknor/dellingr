@@ -1751,7 +1751,7 @@ impl<'a> Parser<'a> {
     #[hotpath::measure]
     fn parse_table_entry(&mut self, counter: u8) -> Result<(u8, bool)> {
         match self.input.peek_type()? {
-            TokenType::Identifier => {
+            TokenType::Identifier if self.input.peek2_type()? == TokenType::Assign => {
                 let index = self.expect_identifier_id()?;
                 self.expect(TokenType::Assign)?;
                 self.parse_expr()?;
