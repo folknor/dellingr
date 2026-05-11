@@ -21,6 +21,8 @@ All notable changes to dellingr are documented here. The format follows
   matching the already-supported `table.unpack` behavior.
 - `table.concat` now rejects non-string and non-number elements instead
   of coercing every Lua value with display-string semantics.
+- `tonumber` now supports the optional base argument for bases 2 through
+  36, including signed strings and invalid-digit nil results.
 
 ### Performance
 

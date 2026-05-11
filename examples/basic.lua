@@ -21,6 +21,7 @@ end
 print(tonumber("42"))      -- 42
 print(tonumber("3.14"))    -- 3.14
 print(tonumber("hello"))   -- nil
+print(tonumber("ff", 16))  -- 255
 
 -- tostring tests
 print(tostring(123))       -- 123

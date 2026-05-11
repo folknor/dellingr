@@ -5,6 +5,39 @@ use crate::Result;
 use crate::State;
 use crate::error::{ArgError, ErrorKind};
 
+fn digit_value(byte: u8) -> Option<u32> {
+    match byte {
+        b'0'..=b'9' => Some((byte - b'0') as u32),
+        b'a'..=b'z' => Some((byte - b'a' + 10) as u32),
+        b'A'..=b'Z' => Some((byte - b'A' + 10) as u32),
+        _ => None,
+    }
+}
+
+fn parse_integer_with_base(bytes: &[u8], base: u32) -> Option<f64> {
+    let trimmed = bytes.trim_ascii();
+    let (negative, digits) = match trimmed {
+        [b'-', rest @ ..] => (true, rest),
+        [b'+', rest @ ..] => (false, rest),
+        _ => (false, trimmed),
+    };
+
+    if digits.is_empty() {
+        return None;
+    }
+
+    let mut value = 0.0;
+    for byte in digits {
+        let digit = digit_value(*byte)?;
+        if digit >= base {
+            return None;
+        }
+        value = value * f64::from(base) + f64::from(digit);
+    }
+
+    if negative { Some(-value) } else { Some(value) }
+}
+
 pub(crate) fn base_ipairs(state: &mut State) -> Result<u8> {
     state.check_type(1, LuaType::Table)?;
     state.set_top(1);
@@ -120,9 +153,39 @@ pub(crate) fn open_base(state: &mut State) {
         Ok(1)
     });
 
-    // Converts a string to a number, returns nil if invalid.
+    // Converts a value to a number, or a string in the given base to a number.
     add("tonumber", |state| {
         state.check_any(1)?;
+        let num_args = state.get_top();
+
+        if num_args >= 2 {
+            state.check_type(1, LuaType::String)?;
+            state.check_type(2, LuaType::Number)?;
+            let base_num = state.to_number(2)?;
+            let base = base_num as i64;
+            if !base_num.is_finite()
+                || (base_num - base as f64).abs() > f64::EPSILON
+                || !(2..=36).contains(&base)
+            {
+                let e = ArgError {
+                    arg_number: 2,
+                    func_name: Some("tonumber".to_string()),
+                    expected: Some(LuaType::Number),
+                    received: Some(LuaType::Number),
+                };
+                return Err(state.error(ErrorKind::ArgError(e)));
+            }
+
+            let num = parse_integer_with_base(state.to_bytes(1)?, base as u32);
+            state.pop(state.get_top() as isize);
+            if let Some(num) = num {
+                state.push_number(num);
+            } else {
+                state.push_nil();
+            }
+            return Ok(1);
+        }
+
         let typ = state.typ(1);
         match typ {
             LuaType::Number => {

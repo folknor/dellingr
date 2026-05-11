@@ -414,6 +414,47 @@ fn select_too_negative_index_errors() {
     );
 }
 
+#[test]
+fn tonumber_parses_base_argument() {
+    let val = run_number(
+        r#"
+        return tonumber("ff", 16) + tonumber("-10", 16) + tonumber("z", 36)
+    "#,
+    );
+    assert_eq!(val, 274.0);
+}
+
+#[test]
+fn tonumber_base_invalid_digit_returns_nil() {
+    let val = run_number(
+        r#"
+        if tonumber("102", 2) == nil then
+            return 1
+        end
+        return 0
+    "#,
+    );
+    assert_eq!(val, 1.0);
+}
+
+#[test]
+fn tonumber_base_out_of_range_errors() {
+    let err = expect_error(r#"return tonumber("10", 37)"#);
+    assert!(
+        matches!(err.kind, ErrorKind::ArgError(_)),
+        "Expected ArgError, got: {err}"
+    );
+}
+
+#[test]
+fn tonumber_base_requires_string_input() {
+    let err = expect_error(r#"return tonumber(10, 10)"#);
+    assert!(
+        matches!(err.kind, ErrorKind::ArgError(_)),
+        "Expected ArgError, got: {err}"
+    );
+}
+
 // -- Error message quality tests --
 
 /// Helper: tries to load+call Lua code and returns the error, panicking if it succeeds.

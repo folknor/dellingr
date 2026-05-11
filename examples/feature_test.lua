@@ -364,6 +364,7 @@ testvar123 = nil
 test("tonumber string", tonumber("42") == 42)
 test("tonumber float", tonumber("3.14") == 3.14)
 test("tonumber invalid", tonumber("abc") == nil)
+test("tonumber base", tonumber("ff", 16) == 255 and tonumber("-z", 36) == -35)
 
 test("tostring number", tostring(42) == "42")
 test("tostring bool", tostring(true) == "true")
