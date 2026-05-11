@@ -233,33 +233,42 @@ we hit a floor below that, this is the natural next step.
 This is two distinct work items that share a name; they have very
 different ROIs and should be considered separately.
 
-**(a) Pinned-shape constructor template.**
+**(a) Pinned-shape constructor template / direct record build.**
 
 Shipped first slice on 2026-05-11: table constructors with more than
 four statically visible fields now emit `NewTablePresized(n)`, which
 allocates map-backed storage at the final constructor size instead of
 starting inline and promoting after the fourth insert. This is not the
-full `DUPTABLE` shape-template design below, but it validates that
-constructor allocation growth is worth caring about:
+full record-build design below, but it validates that constructor
+allocation growth is worth caring about:
 `examples/alloc/record_tables.lua` moved from 345.6ms to 277.9ms
 against the pre-change binary on this host (~1.24x).
 
-Remaining idea: when a constructor is statically a sequence of named-key
-assignments (no computed keys, no `[expr] = …` entries, no spreads),
-emit a `DUPTABLE`-style opcode that allocates the table with keys
-pre-installed in their final positions. The current shipped path still
-emits per-field `INIT_FIELD`, so the remaining win is avoiding per-key
-hash insert/lookup work during construction, not avoiding map growth.
+Shipped second slice on 2026-05-11: pure named-field constructors with
+more than four unique keys now store a per-Chunk template of
+interned-string ids, allocate map storage with those keys pre-installed,
+and initialize values by pinned entry index. This avoids the repeated
+key lookup on each value write, while falling back to `NewTablePresized`
+for computed keys, array entries, vararg/spread entries, and duplicate
+named keys. The measured win over capacity-only was small and noisy on
+this host: `examples/alloc/record_tables.lua` moved from 264.4ms to
+258.4ms in the cleaner run (~1.02x), with an earlier run at ~1.05x.
+`examples/alloc/short_tables.lua` was effectively flat.
 
-Sketch: a per-Chunk template stores the key list as interned-string ids
-(not `Val` payloads, to avoid GC complications - see below). Runtime
-allocates `Table::with_pinned_shape(template_keys)` which prepopulates
-the IndexMap with `Nil` values at the template positions; subsequent
-SET-by-pinned-index overwrites in place.
+Remaining idea: a stronger `DUPTABLE`-style opcode would batch-fill a
+pure named-field constructor at the end instead of preinstalling nil
+placeholders and then overwriting by index. That would remove the
+per-field bytecode dispatch and avoid the placeholder writes, while a
+single table-build helper could replay normal `insert` semantics in
+source order for nil values and duplicate keys.
 
-Why deferred: requires a template section in bytecode plus a Table API
-for pre-installed string keys. The simpler capacity-only opcode already
-captured the first-order allocation-growth win.
+Why deferred: the current parser emits each field write immediately.
+Batch-filling means either delaying named-field writes while preserving
+fallback behavior for mixed constructors, or adding a more general
+builder instruction for values accumulated above the table on the VM
+stack. That is a larger bytecode/stack-shape change than the pinned
+write path, and the pinned path only proved a small remaining win after
+capacity pre-sizing.
 
 Caveat: if the template were to hold `Val::Str` or table objects
 directly, closure marking / chunk rooting would need extension to keep

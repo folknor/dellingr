@@ -343,11 +343,19 @@ impl Frame {
                     add_cost!(state, local_cost, 1);
                     state.new_table_with_capacity(inst.a() as usize);
                 }
+                Instr::OP_NEW_TABLE_TEMPLATE => {
+                    add_cost!(state, local_cost, 1);
+                    state.instr_new_table_template(self, inst.a())?;
+                }
 
                 // Table writes cost 1
                 Instr::OP_INIT_FIELD => {
                     add_cost!(state, local_cost, 1);
                     state.instr_init_field(self, inst.a(), inst.b())?;
+                }
+                Instr::OP_INIT_FIELD_PINNED => {
+                    add_cost!(state, local_cost, 1);
+                    state.instr_init_field_pinned(self, inst.a(), inst.b())?;
                 }
                 Instr::OP_INIT_INDEX => {
                     add_cost!(state, local_cost, 1);
@@ -1174,6 +1182,53 @@ impl State {
             }
             None => Err(self.error(ErrorKind::InternalError(format!(
                 "InitField: expected table, got {typ}"
+            )))),
+        }
+    }
+
+    fn instr_new_table_template(&mut self, frame: &Frame, template_id: u8) -> Result<()> {
+        let template = frame
+            .bytecode
+            .table_templates
+            .get(template_id as usize)
+            .ok_or_else(|| {
+                self.error(ErrorKind::InternalError(format!(
+                    "NewTableTemplate: invalid template {template_id}"
+                )))
+            })?;
+        self.new_table_with_template(template, frame.string_literal_start);
+        Ok(())
+    }
+
+    #[hotpath::measure]
+    fn instr_init_field_pinned(
+        &mut self,
+        frame: &Frame,
+        key_id: u8,
+        entry_index: u8,
+    ) -> Result<()> {
+        let val = self.pop_val();
+        let table_idx = self.stack.len() - 1;
+        let key = self.get_string_constant(frame, key_id);
+        let obj_ptr = self.stack[table_idx].as_object_ptr();
+        let typ = self.stack[table_idx].typ_simple();
+
+        match obj_ptr.and_then(|ptr| self.heap.as_table(ptr)) {
+            Some(tbl) => {
+                let entry_index = entry_index as usize;
+                let can_set_at_index = !matches!(val, Val::Nil)
+                    && tbl
+                        .get_index(entry_index)
+                        .is_some_and(|(existing_key, _)| existing_key == key);
+                if can_set_at_index {
+                    tbl.set_at_index(entry_index, val);
+                } else {
+                    tbl.insert(key, val)?;
+                }
+                Ok(())
+            }
+            None => Err(self.error(ErrorKind::InternalError(format!(
+                "InitFieldPinned: expected table, got {typ}"
             )))),
         }
     }

@@ -110,12 +110,15 @@ impl ScopeCost {
                     scope.own_cost += 1;
                 }
                 // Table creation (cost 1)
-                Instr::OP_NEW_TABLE | Instr::OP_NEW_TABLE_PRESIZED => {
+                Instr::OP_NEW_TABLE
+                | Instr::OP_NEW_TABLE_PRESIZED
+                | Instr::OP_NEW_TABLE_TEMPLATE => {
                     scope.table_creations += 1;
                     scope.own_cost += 1;
                 }
                 // Table writes (cost 1 each)
                 Instr::OP_INIT_FIELD
+                | Instr::OP_INIT_FIELD_PINNED
                 | Instr::OP_INIT_INDEX
                 | Instr::OP_SET_FIELD
                 | Instr::OP_SET_TABLE => {

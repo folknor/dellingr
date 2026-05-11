@@ -61,6 +61,9 @@ All notable changes to dellingr are documented here. The format follows
 - Table constructors with more than four static fields now emit
   `NewTablePresized`, allocating map-backed storage at the final
   constructor size instead of promoting after the inline table fills.
+- Larger pure named-field table constructors now use bytecode-level
+  key templates and pinned field initialization, reducing repeated
+  key lookup work while preserving nil-removal behavior.
 
 ### Testing
 
@@ -86,6 +89,8 @@ All notable changes to dellingr are documented here. The format follows
   paths.
 - The hotpath benchmark harness now reports `state_new_us`, making fresh
   `State` startup cost visible alongside parse and call timings.
+- Table constructor tests now cover templated nil-field removal and
+  duplicate named-field fallback behavior.
 
 ## [0.2.0] - 2026-05-07
 

@@ -76,6 +76,24 @@ impl Table {
         }
     }
 
+    pub(super) fn with_template_keys(
+        key_ids: &[u8],
+        string_literals: &[Val],
+        string_literal_start: usize,
+    ) -> Self {
+        let mut map = IndexMap::with_capacity(key_ids.len());
+        for key_id in key_ids {
+            let key = string_literals[string_literal_start + *key_id as usize];
+            map.insert(key, Val::Nil);
+        }
+        Self {
+            storage: TableStorage::Map(map),
+            metatable: None,
+            version: Cell::new(0),
+            cached_array_len: Cell::new(None),
+        }
+    }
+
     /// Check if a value is a positive integer (potential array index).
     #[inline]
     #[allow(clippy::float_cmp)]

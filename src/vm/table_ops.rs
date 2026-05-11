@@ -20,6 +20,18 @@ impl State {
         self.stack.push(val);
     }
 
+    pub(super) fn new_table_with_template(&mut self, key_ids: &[u8], string_literal_start: usize) {
+        if self.heap.is_full() {
+            self.gc_collect();
+        }
+        let obj = self.heap.alloc_table_with_template(
+            key_ids,
+            &self.string_literals,
+            string_literal_start,
+        );
+        self.stack.push(Val::Obj(obj));
+    }
+
     /// Pushes onto the stack the value `t[k]`, where `t` is the value at the given
     /// valid index and `k` is the value at the top of the stack.
     ///

@@ -212,6 +212,7 @@ impl Instr {
     pub(crate) const OP_MARK_CALL_BASE: u8 = 21;
     pub(crate) const OP_PUSH_NIL: u8 = 22;
     pub(crate) const OP_NEW_TABLE_PRESIZED: u8 = 23; // A=expected constructor fields
+    pub(crate) const OP_NEW_TABLE_TEMPLATE: u8 = 24; // A=table template index
 
     // One u8 operand (in A slot)
     pub(crate) const OP_GET_GLOBAL: u8 = 30;
@@ -240,6 +241,7 @@ impl Instr {
     pub(crate) const OP_INIT_FIELD: u8 = 51;
     pub(crate) const OP_TFOR_CALL: u8 = 52;
     pub(crate) const OP_CALL: u8 = 53;
+    pub(crate) const OP_INIT_FIELD_PINNED: u8 = 54;
 
     // Jump instructions (signed 16-bit offset in B+C slots)
     pub(crate) const OP_JUMP: u8 = 60;
@@ -359,6 +361,9 @@ impl Instr {
     }
     pub(crate) const fn new_table_presized(capacity: u8) -> Self {
         Self::op_a(Self::OP_NEW_TABLE_PRESIZED, capacity)
+    }
+    pub(crate) const fn new_table_template(idx: u8) -> Self {
+        Self::op_a(Self::OP_NEW_TABLE_TEMPLATE, idx)
     }
     pub(crate) const fn get_table() -> Self {
         Self::op(Self::OP_GET_TABLE)
@@ -496,6 +501,9 @@ impl Instr {
     pub(crate) const fn init_field(offset: u8, idx: u8) -> Self {
         Self::op_ab(Self::OP_INIT_FIELD, offset, idx)
     }
+    pub(crate) const fn init_field_pinned(key_idx: u8, entry_idx: u8) -> Self {
+        Self::op_ab(Self::OP_INIT_FIELD_PINNED, key_idx, entry_idx)
+    }
     pub(crate) const fn tfor_call(slot: u8, num_vars: u8) -> Self {
         Self::op_ab(Self::OP_TFOR_CALL, slot, num_vars)
     }
@@ -537,6 +545,7 @@ impl std::fmt::Debug for Instr {
             Self::OP_SWAP => write!(f, "Swap"),
             Self::OP_NEW_TABLE => write!(f, "NewTable"),
             Self::OP_NEW_TABLE_PRESIZED => write!(f, "NewTablePresized({})", self.a()),
+            Self::OP_NEW_TABLE_TEMPLATE => write!(f, "NewTableTemplate({})", self.a()),
             Self::OP_GET_TABLE => write!(f, "GetTable"),
             Self::OP_ADD => write!(f, "Add"),
             Self::OP_SUBTRACT => write!(f, "Subtract"),
@@ -578,6 +587,7 @@ impl std::fmt::Debug for Instr {
             Self::OP_SET_BUILTIN => write!(f, "SetBuiltin({:?})", Builtin::from_u8(self.a())),
             Self::OP_SET_FIELD => write!(f, "SetField({}, {})", self.a(), self.b()),
             Self::OP_INIT_FIELD => write!(f, "InitField({}, {})", self.a(), self.b()),
+            Self::OP_INIT_FIELD_PINNED => write!(f, "InitFieldPinned({}, {})", self.a(), self.b()),
             Self::OP_TFOR_CALL => write!(f, "TForCall({}, {})", self.a(), self.b()),
             Self::OP_CALL => write!(
                 f,

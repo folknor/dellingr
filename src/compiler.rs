@@ -180,6 +180,9 @@ pub(crate) struct Bytecode {
     pub(super) code: Vec<Instr>,
     pub(super) number_literals: Vec<f64>,
     pub(super) string_literals: Vec<Vec<u8>>,
+    /// Table constructor templates. Each entry stores string-literal indices
+    /// for a pure named-field constructor's keys, in insertion order.
+    pub(super) table_templates: Vec<Vec<u8>>,
     /// Number of slots in this function's global lookup cache.
     /// Cache slot indices are baked into `OP_GET_GLOBAL_CACHED` instructions.
     pub(super) global_cache_slots: u16,

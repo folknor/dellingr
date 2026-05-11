@@ -18,6 +18,9 @@ use crate::instr::{ArgCount, Builtin, RetCount};
 use std::borrow::Borrow;
 use std::cmp::Ordering;
 
+type TableTemplateField = (u8, usize);
+type ParsedTableEntry = (u8, bool, Option<TableTemplateField>);
+
 /// Tracks the current state, to make parsing easier.
 #[derive(Debug)]
 struct Parser<'a> {
@@ -39,6 +42,57 @@ struct Parser<'a> {
     outer_upvalues: Vec<Vec<(String, UpvalueDesc)>>,
     /// Current line number for instruction emission.
     current_line: u32,
+}
+
+#[derive(Debug)]
+struct TableTemplateCandidate {
+    pure_named: bool,
+    inline: [TableTemplateField; 4],
+    inline_len: u8,
+    fields: Option<Vec<TableTemplateField>>,
+}
+
+impl TableTemplateCandidate {
+    fn new() -> Self {
+        Self {
+            pure_named: true,
+            inline: [(0, 0); 4],
+            inline_len: 0,
+            fields: None,
+        }
+    }
+
+    fn push(&mut self, field: Option<TableTemplateField>) {
+        if !self.pure_named {
+            return;
+        }
+
+        let Some(field) = field else {
+            self.pure_named = false;
+            self.fields = None;
+            return;
+        };
+
+        if let Some(fields) = self.fields.as_mut() {
+            fields.push(field);
+        } else if (self.inline_len as usize) < self.inline.len() {
+            self.inline[self.inline_len as usize] = field;
+            self.inline_len += 1;
+        } else {
+            let mut fields = Vec::with_capacity(self.inline.len() + 1);
+            fields.extend_from_slice(&self.inline);
+            fields.push(field);
+            self.fields = Some(fields);
+        }
+    }
+
+    fn fields_for_template(&self, field_count: u8) -> Option<&[TableTemplateField]> {
+        if self.pure_named && field_count > self.inline.len() as u8 {
+            self.fields.as_deref()
+        } else {
+            None
+        }
+    }
 }
 
 /// Parses Lua source code into a `Bytecode`.
@@ -1734,23 +1788,30 @@ impl<'a> Parser<'a> {
             let mut i = 0;
             let mut field_count = 0u8;
             let mut has_vararg = false;
-            let (new_i, is_vararg) = self.parse_table_entry(i)?;
+            let mut template_candidate = TableTemplateCandidate::new();
+            let (new_i, is_vararg, named_field) = self.parse_table_entry(i)?;
             i = new_i;
             field_count = field_count.saturating_add(1);
             has_vararg = has_vararg || is_vararg;
+            template_candidate.push(named_field);
             while let TokenType::Comma | TokenType::Semi = self.input.peek_type()? {
                 self.input.next()?;
                 if self.input.check_type(TokenType::RCurly)? {
                     break;
                 }
-                let (new_i, is_vararg) = self.parse_table_entry(i)?;
+                let (new_i, is_vararg, named_field) = self.parse_table_entry(i)?;
                 i = new_i;
                 field_count = field_count.saturating_add(1);
                 has_vararg = has_vararg || is_vararg;
+                template_candidate.push(named_field);
             }
             self.expect(TokenType::RCurly)?;
 
-            if field_count > 4 {
+            if field_count > 4
+                && !template_candidate
+                    .fields_for_template(field_count)
+                    .is_some_and(|fields| self.try_use_table_template(table_instr_idx, fields))
+            {
                 self.chunk.code[table_instr_idx] = Instr::new_table_presized(field_count);
             }
 
@@ -1767,14 +1828,15 @@ impl<'a> Parser<'a> {
     /// Parses a table entry.
     /// Returns (new_counter, is_vararg) where is_vararg indicates if this entry was `...`
     #[hotpath::measure]
-    fn parse_table_entry(&mut self, counter: u8) -> Result<(u8, bool)> {
+    fn parse_table_entry(&mut self, counter: u8) -> Result<ParsedTableEntry> {
         match self.input.peek_type()? {
             TokenType::Identifier if self.input.peek2_type()? == TokenType::Assign => {
                 let index = self.expect_identifier_id()?;
                 self.expect(TokenType::Assign)?;
                 self.parse_expr()?;
+                let instr_idx = self.chunk.code.len();
                 self.push(Instr::init_field(counter, index));
-                Ok((counter, false))
+                Ok((counter, false, Some((index, instr_idx))))
             }
             TokenType::LSquare => {
                 self.input.next()?;
@@ -1783,7 +1845,7 @@ impl<'a> Parser<'a> {
                 self.expect(TokenType::Assign)?;
                 self.parse_expr()?;
                 self.push(Instr::init_index(counter));
-                Ok((counter, false))
+                Ok((counter, false, None))
             }
             TokenType::DotDotDot => {
                 // {...} syntax - collect all varargs into the table
@@ -1796,16 +1858,48 @@ impl<'a> Parser<'a> {
                 // Push all varargs onto stack
                 self.push(Instr::vararg(u8::MAX));
                 // Return special marker indicating vararg was used
-                Ok((counter, true))
+                Ok((counter, true, None))
             }
             _ => {
                 if counter == u8::MAX {
                     return Err(self.error(SyntaxError::TooManyTableFields));
                 }
                 self.parse_expr()?;
-                Ok((counter + 1, false))
+                Ok((counter + 1, false, None))
             }
         }
+    }
+
+    fn try_use_table_template(
+        &mut self,
+        table_instr_idx: usize,
+        fields: &[TableTemplateField],
+    ) -> bool {
+        if fields.is_empty() || self.chunk.table_templates.len() >= u8::MAX as usize {
+            return false;
+        }
+
+        let mut template = Vec::with_capacity(fields.len());
+        let mut field_indices = Vec::with_capacity(fields.len());
+        for (key_id, _) in fields {
+            if template.contains(key_id) {
+                return false;
+            }
+            let entry_idx = match u8::try_from(template.len()) {
+                Ok(entry_idx) => entry_idx,
+                Err(_) => return false,
+            };
+            template.push(*key_id);
+            field_indices.push(entry_idx);
+        }
+
+        let template_idx = self.chunk.table_templates.len() as u8;
+        self.chunk.table_templates.push(template);
+        self.chunk.code[table_instr_idx] = Instr::new_table_template(template_idx);
+        for ((key_id, instr_idx), entry_idx) in fields.iter().zip(field_indices) {
+            self.chunk.code[*instr_idx] = Instr::init_field_pinned(*key_id, entry_idx);
+        }
+        true
     }
 
     /// Parses a literal string and emits bytecode to push it.
@@ -2479,17 +2573,17 @@ mod tests {
     fn table_constructor_presizes_larger_literals() {
         let text = "y = {a = 1, b = 2, c = 3, d = 4, e = 5}";
         let code = vec![
-            Instr::new_table_presized(5),
+            Instr::new_table_template(0),
             Instr::push_num(0),
-            Instr::init_field(0, 1),
+            Instr::init_field_pinned(1, 0),
             Instr::push_num(1),
-            Instr::init_field(0, 2),
+            Instr::init_field_pinned(2, 1),
             Instr::push_num(2),
-            Instr::init_field(0, 3),
+            Instr::init_field_pinned(3, 2),
             Instr::push_num(3),
-            Instr::init_field(0, 4),
+            Instr::init_field_pinned(4, 3),
             Instr::push_num(4),
-            Instr::init_field(0, 5),
+            Instr::init_field_pinned(5, 4),
             Instr::set_global(0),
             Instr::ret(RetCount::Fixed(0)),
         ];
@@ -2503,6 +2597,69 @@ mod tests {
                 "c".into(),
                 "d".into(),
                 "e".into(),
+            ],
+            table_templates: vec![vec![1, 2, 3, 4, 5]],
+            ..Bytecode::default()
+        };
+        check_it(text, chunk);
+    }
+
+    #[test]
+    fn duplicate_table_constructor_keys_use_presized_table() {
+        let text = "y = {a = 1, b = 2, c = 3, d = 4, a = 5}";
+        let code = vec![
+            Instr::new_table_presized(5),
+            Instr::push_num(0),
+            Instr::init_field(0, 1),
+            Instr::push_num(1),
+            Instr::init_field(0, 2),
+            Instr::push_num(2),
+            Instr::init_field(0, 3),
+            Instr::push_num(3),
+            Instr::init_field(0, 4),
+            Instr::push_num(4),
+            Instr::init_field(0, 1),
+            Instr::set_global(0),
+            Instr::ret(RetCount::Fixed(0)),
+        ];
+        let chunk = Bytecode {
+            code,
+            number_literals: vec![1.0, 2.0, 3.0, 4.0, 5.0],
+            string_literals: vec!["y".into(), "a".into(), "b".into(), "c".into(), "d".into()],
+            ..Bytecode::default()
+        };
+        check_it(text, chunk);
+    }
+
+    #[test]
+    fn computed_table_constructor_keys_use_presized_table() {
+        let text = "y = {a = 1, b = 2, c = 3, d = 4, [k] = 5}";
+        let code = vec![
+            Instr::new_table_presized(5),
+            Instr::push_num(0),
+            Instr::init_field(0, 1),
+            Instr::push_num(1),
+            Instr::init_field(0, 2),
+            Instr::push_num(2),
+            Instr::init_field(0, 3),
+            Instr::push_num(3),
+            Instr::init_field(0, 4),
+            Instr::get_global(5),
+            Instr::push_num(4),
+            Instr::init_index(0),
+            Instr::set_global(0),
+            Instr::ret(RetCount::Fixed(0)),
+        ];
+        let chunk = Bytecode {
+            code,
+            number_literals: vec![1.0, 2.0, 3.0, 4.0, 5.0],
+            string_literals: vec![
+                "y".into(),
+                "a".into(),
+                "b".into(),
+                "c".into(),
+                "d".into(),
+                "k".into(),
             ],
             ..Bytecode::default()
         };

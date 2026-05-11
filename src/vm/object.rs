@@ -299,6 +299,24 @@ impl GcHeap {
         ObjectPtr(self.objects.insert(wrapped))
     }
 
+    pub(super) fn alloc_table_with_template(
+        &mut self,
+        key_ids: &[u8],
+        string_literals: &[Val],
+        string_literal_start: usize,
+    ) -> ObjectPtr {
+        let raw = RawObject::Table(Table::with_template_keys(
+            key_ids,
+            string_literals,
+            string_literal_start,
+        ));
+        let wrapped = WrappedObject {
+            raw,
+            color: Cell::new(Color::Unmarked),
+        };
+        ObjectPtr(self.objects.insert(wrapped))
+    }
+
     /// Allocate or intern a string.
     /// Note: Caller must check is_full() and run GC if needed before calling.
     #[hotpath::measure]
