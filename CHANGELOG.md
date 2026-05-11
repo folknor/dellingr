@@ -4,6 +4,33 @@ All notable changes to dellingr are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 [Semantic Versioning](https://semver.org/) once 1.0 lands.
 
+## Unreleased
+
+### Added
+
+- Added `examples/strings/literal_find.lua` to track literal
+  `string.find` performance through the examples and hotbench paths.
+
+### Fixed
+
+- `table.move` now handles overlapping same-table moves that shift the
+  source range to the right without clobbering unread values.
+- `select` now handles negative indices by counting from the end and
+  rejects zero or too-negative indices instead of returning all args.
+
+### Performance
+
+- `string.find` now uses the plain substring path for patterns with no
+  magic characters even when `plain` is omitted. The literal path also
+  avoids copying the subject and pattern before searching.
+
+### Testing
+
+- Split the Rust differential harness into smaller per-test buckets so
+  `brokkr check` stays under its 20s per-test timeout. `diff_test.sh`
+  now accepts explicit file or directory subsets while keeping its
+  default full example sweep.
+
 ## [0.2.0] - 2026-05-07
 
 ### Added

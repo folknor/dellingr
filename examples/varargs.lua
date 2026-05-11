@@ -131,4 +131,11 @@ end
 local r15 = collect3()
 print("Test 15 - {...} empty: " .. tostring(r15 == 0))
 
+-- Test 16: select with negative index counts from the end
+local function select_last_two(...)
+    return select(-2, ...)
+end
+local r16a, r16b, r16c = select_last_two("a", "b", "c")
+print("Test 16 - select negative: " .. tostring(r16a == "b" and r16b == "c" and r16c == nil))
+
 print("All vararg tests complete!")

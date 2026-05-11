@@ -288,18 +288,33 @@ pub(crate) fn open_base(state: &mut State) {
 
         // Otherwise, first arg should be a number
         state.check_type(1, LuaType::Number)?;
-        let index = state.to_number(1)? as isize;
+        let raw_index = state.to_number(1)? as isize;
+        let vararg_count = num_args - 1;
+        let index = if raw_index > 0 {
+            raw_index as usize
+        } else if raw_index < 0 {
+            let index = vararg_count as isize + raw_index + 1;
+            if index < 1 {
+                let e = ArgError {
+                    arg_number: 1,
+                    func_name: Some("select".to_string()),
+                    expected: Some(LuaType::Number),
+                    received: Some(LuaType::Number),
+                };
+                return Err(state.error(ErrorKind::ArgError(e)));
+            }
+            index as usize
+        } else {
+            let e = ArgError {
+                arg_number: 1,
+                func_name: Some("select".to_string()),
+                expected: Some(LuaType::Number),
+                received: Some(LuaType::Number),
+            };
+            return Err(state.error(ErrorKind::ArgError(e)));
+        };
 
-        if index <= 0 {
-            // Negative or zero index: return all args (Lua behavior for negative is from end)
-            // For simplicity, treat <= 0 as returning all
-            state.remove(1)?;
-            return Ok((num_args - 1) as u8);
-        }
-
-        let index = index as usize;
-
-        if index > num_args - 1 {
+        if index > vararg_count {
             // Index beyond args, return nothing
             state.set_top(0);
             return Ok(0);
@@ -309,7 +324,7 @@ pub(crate) fn open_base(state: &mut State) {
         // Stack: [index, arg1, arg2, ..., argN]
         // We want to return args starting from position (1 + index)
         let start_pos = 1 + index; // 1-based position in stack
-        let count = num_args - index;
+        let count = vararg_count - index + 1;
 
         // Remove args before start_pos
         for _ in 1..start_pos {

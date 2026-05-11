@@ -353,6 +353,38 @@ fn table_move_explicit_same_destination_copies_backwards() {
     assert_eq!(val, 11235.0);
 }
 
+#[test]
+fn select_negative_index_counts_from_end() {
+    let val = run_number(
+        r#"
+        local a, b, c = select(-2, "a", "b", "c")
+        if a == "b" and b == "c" and c == nil then
+            return 1
+        end
+        return 0
+    "#,
+    );
+    assert_eq!(val, 1.0);
+}
+
+#[test]
+fn select_zero_index_errors() {
+    let err = expect_error(r#"select(0, "a", "b")"#);
+    assert!(
+        matches!(err.kind, ErrorKind::ArgError(_)),
+        "Expected ArgError, got: {err}"
+    );
+}
+
+#[test]
+fn select_too_negative_index_errors() {
+    let err = expect_error(r#"select(-4, "a", "b", "c")"#);
+    assert!(
+        matches!(err.kind, ErrorKind::ArgError(_)),
+        "Expected ArgError, got: {err}"
+    );
+}
+
 // -- Error message quality tests --
 
 /// Helper: tries to load+call Lua code and returns the error, panicking if it succeeds.
