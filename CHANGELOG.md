@@ -10,6 +10,8 @@ All notable changes to dellingr are documented here. The format follows
 
 - Added `examples/strings/literal_find.lua` to track literal
   `string.find` performance through the examples and hotbench paths.
+- Added `examples/alloc/record_tables.lua` to track larger record-shaped
+  table constructor allocation and promotion costs.
 - Added a `--quiet` / `-q` CLI flag to suppress the `Cost used` summary
   for harnesses that run many short-lived scripts.
 
@@ -56,6 +58,9 @@ All notable changes to dellingr are documented here. The format follows
 - Base standard-library Rust functions install directly into the global
   table instead of round-tripping through the Lua stack during fresh
   `State` startup.
+- Table constructors with more than four static fields now emit
+  `NewTablePresized`, allocating map-backed storage at the final
+  constructor size instead of promoting after the inline table fills.
 
 ### Testing
 

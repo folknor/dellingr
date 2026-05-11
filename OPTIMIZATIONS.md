@@ -233,24 +233,33 @@ we hit a floor below that, this is the natural next step.
 This is two distinct work items that share a name; they have very
 different ROIs and should be considered separately.
 
-**(a) Pre-sized constructor (shippable in a small parser PR).**
+**(a) Pinned-shape constructor template.**
 
-What: when a constructor is statically a sequence of named-key
+Shipped first slice on 2026-05-11: table constructors with more than
+four statically visible fields now emit `NewTablePresized(n)`, which
+allocates map-backed storage at the final constructor size instead of
+starting inline and promoting after the fourth insert. This is not the
+full `DUPTABLE` shape-template design below, but it validates that
+constructor allocation growth is worth caring about:
+`examples/alloc/record_tables.lua` moved from 345.6ms to 277.9ms
+against the pre-change binary on this host (~1.24x).
+
+Remaining idea: when a constructor is statically a sequence of named-key
 assignments (no computed keys, no `[expr] = …` entries, no spreads),
-the parser emits a `DUPTABLE`-style opcode that allocates the table at
-exact final IndexMap capacity with the keys pre-installed in their
-final positions. The current parser emits `NEW_TABLE` followed by
-per-field `INIT_FIELD`, so the win is avoiding per-key inserts +
-hash-grow during construction.
+emit a `DUPTABLE`-style opcode that allocates the table with keys
+pre-installed in their final positions. The current shipped path still
+emits per-field `INIT_FIELD`, so the remaining win is avoiding per-key
+hash insert/lookup work during construction, not avoiding map growth.
 
-Sketch: a per-Chunk template stores the key list as interned-string
-ids (not `Val` payloads, to avoid GC complications - see below).
-Runtime allocates `Table::with_pinned_shape(template_keys)` which
-prepopulates the IndexMap with `Nil` values at the template positions;
-subsequent SET-by-pinned-index overwrites in place.
+Sketch: a per-Chunk template stores the key list as interned-string ids
+(not `Val` payloads, to avoid GC complications - see below). Runtime
+allocates `Table::with_pinned_shape(template_keys)` which prepopulates
+the IndexMap with `Nil` values at the template positions; subsequent
+SET-by-pinned-index overwrites in place.
 
-Why deferred: small but real change to bytecode + Table API. Hasn't
-been measured against current `NEW_TABLE` + `INIT_FIELD` cost.
+Why deferred: requires a template section in bytecode plus a Table API
+for pre-installed string keys. The simpler capacity-only opcode already
+captured the first-order allocation-growth win.
 
 Caveat: if the template were to hold `Val::Str` or table objects
 directly, closure marking / chunk rooting would need extension to keep

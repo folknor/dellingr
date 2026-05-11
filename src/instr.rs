@@ -211,6 +211,7 @@ impl Instr {
     pub(crate) const OP_NEGATE: u8 = 20;
     pub(crate) const OP_MARK_CALL_BASE: u8 = 21;
     pub(crate) const OP_PUSH_NIL: u8 = 22;
+    pub(crate) const OP_NEW_TABLE_PRESIZED: u8 = 23; // A=expected constructor fields
 
     // One u8 operand (in A slot)
     pub(crate) const OP_GET_GLOBAL: u8 = 30;
@@ -355,6 +356,9 @@ impl Instr {
     }
     pub(crate) const fn new_table() -> Self {
         Self::op(Self::OP_NEW_TABLE)
+    }
+    pub(crate) const fn new_table_presized(capacity: u8) -> Self {
+        Self::op_a(Self::OP_NEW_TABLE_PRESIZED, capacity)
     }
     pub(crate) const fn get_table() -> Self {
         Self::op(Self::OP_GET_TABLE)
@@ -532,6 +536,7 @@ impl std::fmt::Debug for Instr {
             Self::OP_DUP => write!(f, "Dup"),
             Self::OP_SWAP => write!(f, "Swap"),
             Self::OP_NEW_TABLE => write!(f, "NewTable"),
+            Self::OP_NEW_TABLE_PRESIZED => write!(f, "NewTablePresized({})", self.a()),
             Self::OP_GET_TABLE => write!(f, "GetTable"),
             Self::OP_ADD => write!(f, "Add"),
             Self::OP_SUBTRACT => write!(f, "Subtract"),

@@ -339,6 +339,10 @@ impl Frame {
                     add_cost!(state, local_cost, 1);
                     state.new_table();
                 }
+                Instr::OP_NEW_TABLE_PRESIZED => {
+                    add_cost!(state, local_cost, 1);
+                    state.new_table_with_capacity(inst.a() as usize);
+                }
 
                 // Table writes cost 1
                 Instr::OP_INIT_FIELD => {

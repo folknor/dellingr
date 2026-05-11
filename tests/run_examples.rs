@@ -167,6 +167,10 @@ fn run_examples_root_rest() {
 
 example_file_test!(run_example_alloc_closure, "examples/alloc/closure.lua");
 example_file_test!(
+    run_example_alloc_record_tables,
+    "examples/alloc/record_tables.lua"
+);
+example_file_test!(
     run_example_alloc_short_tables,
     "examples/alloc/short_tables.lua"
 );

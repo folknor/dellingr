@@ -1723,6 +1723,7 @@ impl<'a> Parser<'a> {
     /// Parses a table constructor.
     #[hotpath::measure]
     fn parse_table(&mut self) -> Result<()> {
+        let table_instr_idx = self.chunk.code.len();
         self.push(Instr::new_table());
         // Skip any leading separators (handles {;} and {,})
         while let TokenType::Comma | TokenType::Semi = self.input.peek_type()? {
@@ -1731,9 +1732,11 @@ impl<'a> Parser<'a> {
         if self.input.try_pop(TokenType::RCurly)?.is_none() {
             // i is the number of array-style entries.
             let mut i = 0;
+            let mut field_count = 0u8;
             let mut has_vararg = false;
             let (new_i, is_vararg) = self.parse_table_entry(i)?;
             i = new_i;
+            field_count = field_count.saturating_add(1);
             has_vararg = has_vararg || is_vararg;
             while let TokenType::Comma | TokenType::Semi = self.input.peek_type()? {
                 self.input.next()?;
@@ -1742,9 +1745,14 @@ impl<'a> Parser<'a> {
                 }
                 let (new_i, is_vararg) = self.parse_table_entry(i)?;
                 i = new_i;
+                field_count = field_count.saturating_add(1);
                 has_vararg = has_vararg || is_vararg;
             }
             self.expect(TokenType::RCurly)?;
+
+            if field_count > 4 {
+                self.chunk.code[table_instr_idx] = Instr::new_table_presized(field_count);
+            }
 
             if has_vararg {
                 // Use SetList(0) to indicate "use all values above table"
@@ -2462,6 +2470,40 @@ mod tests {
             code,
             number_literals: vec![5.0],
             string_literals: vec!["y".into(), "x".into()],
+            ..Bytecode::default()
+        };
+        check_it(text, chunk);
+    }
+
+    #[test]
+    fn table_constructor_presizes_larger_literals() {
+        let text = "y = {a = 1, b = 2, c = 3, d = 4, e = 5}";
+        let code = vec![
+            Instr::new_table_presized(5),
+            Instr::push_num(0),
+            Instr::init_field(0, 1),
+            Instr::push_num(1),
+            Instr::init_field(0, 2),
+            Instr::push_num(2),
+            Instr::init_field(0, 3),
+            Instr::push_num(3),
+            Instr::init_field(0, 4),
+            Instr::push_num(4),
+            Instr::init_field(0, 5),
+            Instr::set_global(0),
+            Instr::ret(RetCount::Fixed(0)),
+        ];
+        let chunk = Bytecode {
+            code,
+            number_literals: vec![1.0, 2.0, 3.0, 4.0, 5.0],
+            string_literals: vec![
+                "y".into(),
+                "a".into(),
+                "b".into(),
+                "c".into(),
+                "d".into(),
+                "e".into(),
+            ],
             ..Bytecode::default()
         };
         check_it(text, chunk);
