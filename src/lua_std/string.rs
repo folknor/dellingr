@@ -218,7 +218,7 @@ pub(crate) fn open_string(state: &mut State) {
                 let pattern = state.to_bytes(2)?;
 
                 if pattern.is_empty() {
-                    Some((init + 1, init))
+                    (init <= s.len()).then_some((init + 1, init))
                 } else if init >= s.len() {
                     None
                 } else {
@@ -517,6 +517,10 @@ pub(crate) fn open_string(state: &mut State) {
 
         state.set_top(0);
 
+        if init > s.len() {
+            state.push_nil();
+            return Ok(1);
+        }
         if pattern.is_empty() {
             state.push_bytes(b"");
             return Ok(1);
@@ -554,21 +558,32 @@ pub(crate) fn open_string(state: &mut State) {
 
         if pattern.is_empty() {
             state.new_table();
-            state.push_string("done");
-            state.push_boolean(false);
+            state.push_string("pos");
+            state.push_number(0.0);
+            state.set_table_raw(-3)?;
+            state.push_string("len");
+            state.push_number(s.len() as f64);
             state.set_table_raw(-3)?;
 
             state.push_rust_fn(|state| {
-                state.push_string("done");
+                state.push_string("pos");
                 state.get_table(1)?;
-                if state.to_boolean(-1) {
+                let pos = state.to_number(-1).unwrap_or(0.0) as usize;
+                state.pop(1);
+
+                state.push_string("len");
+                state.get_table(1)?;
+                let len = state.to_number(-1).unwrap_or(0.0) as usize;
+                state.pop(1);
+
+                if pos > len {
                     state.set_top(0);
                     state.push_nil();
                     return Ok(1);
                 }
-                state.pop(1);
-                state.push_string("done");
-                state.push_boolean(true);
+
+                state.push_string("pos");
+                state.push_number((pos + 1) as f64);
                 state.set_table_raw(1)?;
                 state.set_top(0);
                 state.push_bytes(b"");
@@ -667,9 +682,22 @@ pub(crate) fn open_string(state: &mut State) {
         let repl_type = state.typ(3);
 
         if pattern.is_empty() {
+            let mut result = Vec::with_capacity(s.len());
+            let mut count = 0usize;
+            for i in 0..=s.len() {
+                if max_replacements.is_none_or(|max| count < max) {
+                    let captures = [&s[i..i]];
+                    result.extend(gsub_replacement(state, &repl_type, &captures)?);
+                    count += 1;
+                }
+                if i < s.len() {
+                    result.push(s[i]);
+                }
+            }
+
             state.set_top(0);
-            state.push_bytes(s);
-            state.push_number(0.0);
+            state.push_bytes(result);
+            state.push_number(count as f64);
             return Ok(2);
         }
 

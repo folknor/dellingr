@@ -29,6 +29,8 @@ All notable changes to dellingr are documented here. The format follows
   panicking for otherwise valid relative-top operations.
 - Table constructors now accept identifier-starting array entries like
   `{x}` and `{x.y}` instead of treating every identifier as `name =`.
+- Empty string patterns now match Lua boundary behavior in `string.find`,
+  `string.match`, `string.gmatch`, and `string.gsub`.
 
 ### Performance
 

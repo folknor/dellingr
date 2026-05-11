@@ -71,6 +71,8 @@ test("string.find", i == 3 and j == 4)
 
 test("string.match", string.match("hello", "l+") == "ll")
 test("string.gsub", string.gsub("hello", "l", "L") == "heLLo")
+local empty_gsub_result, empty_gsub_count = string.gsub("abc", "", "-")
+test("string.gsub empty pattern", empty_gsub_result == "-a-b-c-" and empty_gsub_count == 4)
 
 local gmatch_count = 0
 for w in string.gmatch("hello world", "%w+") do
