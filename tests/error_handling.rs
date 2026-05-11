@@ -594,6 +594,42 @@ fn global_lookup_cache_respects_restricted_env() {
 }
 
 #[test]
+fn unparenthesized_string_call_is_supported() {
+    let result = run_number(
+        r#"
+        local function wrap(s) return s end
+        return wrap "a" .. "b" == "ab" and 1 or 0
+    "#,
+    );
+    assert_eq!(result, 1.0);
+}
+
+#[test]
+fn unparenthesized_table_call_is_supported() {
+    let result = run_number(
+        r#"
+        local function get(t) return t.value end
+        return get { value = 41 } + 1
+    "#,
+    );
+    assert_eq!(result, 42.0);
+}
+
+#[test]
+fn unparenthesized_method_call_is_supported() {
+    let result = run_number(
+        r#"
+        local obj = {
+            base = 9,
+            plus = function(self, t) return self.base + t.delta end
+        }
+        return obj:plus { delta = 4 }
+    "#,
+    );
+    assert_eq!(result, 13.0);
+}
+
+#[test]
 fn error_msg_call_depth_shows_overflow() {
     let err = expect_error("local function r(n) return r(n+1) end\nr(0)");
     let msg = format!("{err}");

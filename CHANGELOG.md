@@ -23,6 +23,8 @@ All notable changes to dellingr are documented here. The format follows
   of coercing every Lua value with display-string semantics.
 - `tonumber` now supports the optional base argument for bases 2 through
   36, including signed strings and invalid-digit nil results.
+- Unparenthesized Lua calls with a literal string or table constructor
+  argument now compile instead of panicking in the parser.
 
 ### Performance
 

@@ -403,6 +403,10 @@ test("chained method calls", chain.value == 6)
 
 test("string method syntax", ("hello"):upper() == "HELLO")
 
+local function unparen_echo(value) return value end
+test("unparenthesized string call", unparen_echo "hi" == "hi")
+test("unparenthesized table call", unparen_echo { value = 42 }.value == 42)
+
 local ma2, mb2 = 1, 2
 ma2, mb2 = mb2, ma2
 test("swap via multiple assignment", ma2 == 2 and mb2 == 1)

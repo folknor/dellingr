@@ -1483,7 +1483,7 @@ impl<'a> Parser<'a> {
                 let prefix = PlaceExp::TableIndex.into();
                 self.parse_prefix_extension(prefix)
             }
-            TokenType::LParen => {
+            TokenType::LParen | TokenType::LiteralString | TokenType::LCurly => {
                 // Always mark call base - needed when last arg is vararg or function call
                 // Adjustment: if we've already pushed the table/receiver (FieldAccess or TableIndex),
                 // subtract 1 from the base since the function will replace what's already there
@@ -1494,8 +1494,7 @@ impl<'a> Parser<'a> {
                 let mark_idx = self.chunk.code.len();
                 self.push(Instr::mark_call_base(adjustment));
                 self.eval_prefix_exp(&base_expr);
-                self.input.next()?;
-                let (num_args, last_exp) = self.parse_call()?;
+                let (num_args, last_exp) = self.parse_call_args()?;
                 // If last arg is vararg, adjust to pass all varargs
                 let num_args = if let ExpDesc::Vararg = last_exp {
                     self.chunk.code.pop(); // Instr::pop() Vararg(1)
@@ -1550,8 +1549,7 @@ impl<'a> Parser<'a> {
                 // Stack: [method, obj]
 
                 // Now parse the arguments
-                self.expect(TokenType::LParen)?;
-                let (num_args, last_exp) = self.parse_call()?;
+                let (num_args, last_exp) = self.parse_call_args()?;
                 // If last arg is vararg, adjust to pass all varargs
                 let num_args = if let ExpDesc::Vararg = last_exp {
                     self.chunk.code.pop(); // Instr::pop() Vararg(1)
@@ -1575,9 +1573,6 @@ impl<'a> Parser<'a> {
                 // Stack: [method, obj, arg1, arg2, ...]
                 let prefix = PrefixExp::FunctionCall(num_args);
                 self.parse_prefix_extension(prefix)
-            }
-            TokenType::LiteralString | TokenType::LCurly => {
-                panic!("Unparenthesized function calls unsupported")
             }
             _ => Ok(base_expr),
         }
@@ -1612,9 +1607,7 @@ impl<'a> Parser<'a> {
                 self.push(Instr::push_num(idx));
             }
             TokenType::LiteralString => {
-                let text = self.get_literal_string_contents(tok);
-                let idx = self.find_or_add_string_bytes(&text)?;
-                self.push(Instr::push_string(idx));
+                self.push_literal_string(tok)?;
             }
             TokenType::Function => self.parse_fndef()?,
             TokenType::Nil => self.push(Instr::push_nil()),
@@ -1797,9 +1790,39 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Parses a function call. Returns the number of arguments.
+    /// Parses a literal string and emits bytecode to push it.
+    fn push_literal_string(&mut self, tok: Token) -> Result<()> {
+        let text = self.get_literal_string_contents(tok);
+        let idx = self.find_or_add_string_bytes(&text)?;
+        self.push(Instr::push_string(idx));
+        Ok(())
+    }
+
+    /// Parses function-call args. Returns the number of arguments.
+    ///
+    /// Lua allows calls with parenthesized arguments, a single table constructor,
+    /// or a single literal string: `f(...)`, `f{...}`, and `f"..."`.
     #[hotpath::measure]
-    fn parse_call(&mut self) -> Result<(u8, ExpDesc)> {
+    fn parse_call_args(&mut self) -> Result<(u8, ExpDesc)> {
+        let tok = self.input.next()?;
+        match tok.typ {
+            TokenType::LParen => self.parse_parenthesized_call_args(),
+            TokenType::LiteralString => {
+                self.push_literal_string(tok)?;
+                Ok((1, ExpDesc::Other))
+            }
+            TokenType::LCurly => {
+                self.parse_table()?;
+                Ok((1, ExpDesc::Other))
+            }
+            _ => Err(self.err_unexpected(tok, TokenType::LParen)),
+        }
+    }
+
+    /// Parses parenthesized function-call args after the opening paren.
+    /// Returns the number of arguments.
+    #[hotpath::measure]
+    fn parse_parenthesized_call_args(&mut self) -> Result<(u8, ExpDesc)> {
         let tup = if self.input.check_type(TokenType::RParen)? {
             (0, ExpDesc::Other)
         } else {
