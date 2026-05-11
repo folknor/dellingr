@@ -46,17 +46,19 @@ fn run_example(path: &Path) -> std::process::Output {
         .join(format!("dellingr{}", std::env::consts::EXE_SUFFIX));
     if release_bin.exists() {
         Command::new(release_bin)
+            .arg("--quiet")
             .arg(path)
             .output()
             .expect("Failed to execute dellingr binary")
     } else if let Some(bin) = std::env::var_os("CARGO_BIN_EXE_dellingr") {
         Command::new(bin)
+            .arg("--quiet")
             .arg(path)
             .output()
             .expect("Failed to execute test dellingr binary")
     } else {
         Command::new("cargo")
-            .args(["run", "--quiet", "--", path.to_str().unwrap()])
+            .args(["run", "--quiet", "--", "--quiet", path.to_str().unwrap()])
             .output()
             .expect("Failed to execute cargo run")
     }

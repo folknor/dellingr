@@ -151,7 +151,7 @@ fn gsub_replacement(state: &mut State, repl_type: &LuaType, captures: &[&[u8]]) 
 
 pub(crate) fn open_string(state: &mut State) {
     // Create the string table
-    state.new_table();
+    state.new_table_with_capacity(10);
 
     // Helper to add a function to the table at stack index -1.
     macro_rules! add_fn {

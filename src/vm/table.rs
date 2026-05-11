@@ -63,6 +63,19 @@ impl Default for Table {
 }
 
 impl Table {
+    pub(super) fn with_capacity(capacity: usize) -> Self {
+        if capacity <= INLINE_CAPACITY {
+            Self::default()
+        } else {
+            Self {
+                storage: TableStorage::Map(IndexMap::with_capacity(capacity)),
+                metatable: None,
+                version: Cell::new(0),
+                cached_array_len: Cell::new(None),
+            }
+        }
+    }
+
     /// Check if a value is a positive integer (potential array index).
     #[inline]
     #[allow(clippy::float_cmp)]

@@ -83,6 +83,7 @@ The crate also ships a `dellingr` binary for running `.lua` files:
 cargo run --release -- path/to/script.lua
 cargo run --release -- --analyze path/to/script.lua
 cargo run --release -- --limit 100000 path/to/script.lua
+cargo run --release -- --quiet path/to/script.lua
 ```
 
 ## Acknowledgements

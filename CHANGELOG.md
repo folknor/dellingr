@@ -10,6 +10,8 @@ All notable changes to dellingr are documented here. The format follows
 
 - Added `examples/strings/literal_find.lua` to track literal
   `string.find` performance through the examples and hotbench paths.
+- Added a `--quiet` / `-q` CLI flag to suppress the `Cost used` summary
+  for harnesses that run many short-lived scripts.
 
 ### Fixed
 
@@ -41,6 +43,8 @@ All notable changes to dellingr are documented here. The format follows
   avoids copying the subject and pattern before searching.
 - `string.sub` no longer copies the full source string before slicing;
   it copies only the returned byte range.
+- Fresh `State` startup reserves the standard-library globals, string
+  pool, and large library table capacities up front.
 
 ### Testing
 
@@ -52,6 +56,15 @@ All notable changes to dellingr are documented here. The format follows
   `dellingr` binary and splits hotpath examples into per-file tests,
   avoiding repeated `cargo run` invocations and the same per-test
   timeout pressure.
+- The differential and recursive example harnesses now run `dellingr`
+  with `--quiet`, avoiding one extra output line and filter pass per
+  process.
+- Rust differential test buckets now build the release `dellingr`
+  binary once and reuse it, instead of invoking a release build from
+  every bucket.
+- Rust differential test buckets now rely on brokkr's per-test timeout
+  instead of wrapping every `dellingr`, `lua5.2`, and `lua5.4` process in
+  `timeout(1)`.
 
 ## [0.2.0] - 2026-05-07
 

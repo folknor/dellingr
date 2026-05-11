@@ -11,6 +11,7 @@ fn main() {
     let mut filename = None;
     let mut limit: Option<i64> = None;
     let mut analyze = false;
+    let mut quiet = false;
     let mut i = 1;
 
     while i < args.len() {
@@ -30,12 +31,16 @@ fn main() {
             "--analyze" | "-a" => {
                 analyze = true;
             }
+            "--quiet" | "-q" => {
+                quiet = true;
+            }
             "--help" | "-h" => {
                 println!("Usage: dellingr [OPTIONS] <file.lua>");
                 println!();
                 println!("Options:");
                 println!("  -l, --limit N    Set cost budget limit");
                 println!("  -a, --analyze    Analyze cost without executing");
+                println!("  -q, --quiet      Suppress cost summary output");
                 println!("  -h, --help       Show this help message");
                 exit(0);
             }
@@ -53,7 +58,7 @@ fn main() {
     let filename = match filename {
         Some(f) => f,
         None => {
-            eprintln!("Usage: dellingr [--limit N] [--analyze] <file.lua>");
+            eprintln!("Usage: dellingr [--limit N] [--analyze] [--quiet] <file.lua>");
             exit(1);
         }
     };
@@ -89,7 +94,9 @@ fn main() {
             .load_string_named(&source, Some(filename.clone()))
             .and_then(|()| state.call(ArgCount::Fixed(0), RetCount::Fixed(0)));
 
-        println!("Cost used: {}", state.cost_used());
+        if !quiet {
+            println!("Cost used: {}", state.cost_used());
+        }
 
         if let Err(e) = result {
             eprintln!("Error: {e}");

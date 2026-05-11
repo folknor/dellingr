@@ -7,14 +7,22 @@
 # tagged with `-- DIFF: <reason>` may differ from both and still pass.
 # Stress tests and benchmark.lua are skipped (long-running).
 #
+# Env:
+#   DELLINGR=/path/to/dellingr    use an already-built binary
+#   DELLINGR_SKIP_BUILD=1         do not run cargo build --release first
+#   DELLINGR_SKIP_TIMEOUT=1       do not wrap each VM in timeout(1)
+#
 # Output is intentionally terse: prints "ok" on success, or one
 # "FAIL: <path>" line per failing script. Exit 1 on any failure.
 
 set -u
 
-cargo build --release --quiet
+if [ "${DELLINGR_SKIP_BUILD:-0}" != "1" ]
+then
+    cargo build --release --quiet
+fi
 
-OUR_LUA="./target/release/dellingr"
+OUR_LUA="${DELLINGR:-./target/release/dellingr}"
 if [ ! -x "$OUR_LUA" ]
 then
     echo "FAIL: build"
@@ -22,10 +30,9 @@ then
 fi
 
 OUR_OUT=".diff_test_our.out"
-OUR_RAW=".diff_test_raw.out"
 LUA52_OUT=".diff_test_lua52.out"
 LUA54_OUT=".diff_test_lua54.out"
-trap "rm -f $OUR_OUT $OUR_RAW $LUA52_OUT $LUA54_OUT" EXIT
+trap "rm -f $OUR_OUT $LUA52_OUT $LUA54_OUT" EXIT
 
 shopt -s globstar nullglob
 if [ "$#" -gt 0 ]
@@ -52,6 +59,15 @@ else
 fi
 failures=()
 
+run_lua() {
+    if [ "${DELLINGR_SKIP_TIMEOUT:-0}" = "1" ]
+    then
+        "$@"
+    else
+        timeout 5s "$@"
+    fi
+}
+
 for f in "${scripts[@]}"
 do
     name=$(realpath --relative-to=examples "$f")
@@ -67,10 +83,9 @@ do
         has_diff=1
     fi
 
-    timeout 5s "$OUR_LUA" "$f" > "$OUR_RAW" 2>&1
-    grep -v "^Cost used:" "$OUR_RAW" > "$OUR_OUT"
-    timeout 5s lua5.2 "$f" > "$LUA52_OUT" 2>&1
-    timeout 5s lua5.4 "$f" > "$LUA54_OUT" 2>&1
+    run_lua "$OUR_LUA" --quiet "$f" > "$OUR_OUT" 2>&1
+    run_lua lua5.2 "$f" > "$LUA52_OUT" 2>&1
+    run_lua lua5.4 "$f" > "$LUA54_OUT" 2>&1
 
     if diff -q "$OUR_OUT" "$LUA54_OUT" > /dev/null 2>&1
     then

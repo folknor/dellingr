@@ -231,6 +231,11 @@ impl State {
         }
     }
 
+    pub(crate) fn reserve_stdlib_capacity(&mut self) {
+        self.globals.reserve(Builtin::COUNT + 4);
+        self.heap.reserve(8, 96);
+    }
+
     /// Sets the RNG seed for deterministic math.random() behavior.
     pub fn set_rng_seed(&mut self, seed: u64) {
         self.rng = rand::rngs::StdRng::seed_from_u64(seed);

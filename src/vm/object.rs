@@ -196,6 +196,11 @@ impl GcHeap {
         }
     }
 
+    pub(super) fn reserve(&mut self, additional_objects: usize, additional_strings: usize) {
+        self.objects.reserve(additional_objects);
+        self.strings.reserve(additional_strings);
+    }
+
     // ========================================================================
     // Object access - these replace ObjectPtr's self-dereferencing methods
     // ========================================================================
@@ -279,6 +284,15 @@ impl GcHeap {
     #[hotpath::measure]
     pub(super) fn alloc_table(&mut self) -> ObjectPtr {
         let raw = RawObject::Table(Table::default());
+        let wrapped = WrappedObject {
+            raw,
+            color: Cell::new(Color::Unmarked),
+        };
+        ObjectPtr(self.objects.insert(wrapped))
+    }
+
+    pub(super) fn alloc_table_with_capacity(&mut self, capacity: usize) -> ObjectPtr {
+        let raw = RawObject::Table(Table::with_capacity(capacity));
         let wrapped = WrappedObject {
             raw,
             color: Cell::new(Color::Unmarked),
@@ -479,6 +493,11 @@ impl StringPool {
             strings: SlotMap::with_key(),
             hash_index: IndexMap::new(),
         }
+    }
+
+    fn reserve(&mut self, additional: usize) {
+        self.strings.reserve(additional);
+        self.hash_index.reserve(additional);
     }
 
     pub(super) fn len(&self) -> usize {

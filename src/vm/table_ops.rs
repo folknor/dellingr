@@ -15,6 +15,11 @@ impl State {
         self.stack.push(val);
     }
 
+    pub(crate) fn new_table_with_capacity(&mut self, capacity: usize) {
+        let val = self.alloc_table_with_capacity(capacity);
+        self.stack.push(val);
+    }
+
     /// Pushes onto the stack the value `t[k]`, where `t` is the value at the given
     /// valid index and `k` is the value at the top of the stack.
     ///
@@ -326,6 +331,14 @@ impl State {
             self.gc_collect();
         }
         let obj = self.heap.alloc_table();
+        Val::Obj(obj)
+    }
+
+    pub(super) fn alloc_table_with_capacity(&mut self, capacity: usize) -> Val {
+        if self.heap.is_full() {
+            self.gc_collect();
+        }
+        let obj = self.heap.alloc_table_with_capacity(capacity);
         Val::Obj(obj)
     }
 }

@@ -6,6 +6,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
+
+static RELEASE_BUILD: OnceLock<Result<(), String>> = OnceLock::new();
 
 fn lua_versions_available() -> bool {
     let lua52_available = Command::new("lua5.2")
@@ -19,6 +22,29 @@ fn lua_versions_available() -> bool {
         .is_ok_and(|o| o.status.success());
 
     lua52_available && lua54_available
+}
+
+fn ensure_release_binary() {
+    let result = RELEASE_BUILD.get_or_init(|| {
+        let output = Command::new("cargo")
+            .args(["build", "--release", "--quiet"])
+            .output()
+            .map_err(|e| format!("failed to run cargo build --release: {e}"))?;
+
+        if output.status.success() {
+            Ok(())
+        } else {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Err(format!(
+                "cargo build --release failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+            ))
+        }
+    });
+
+    if let Err(err) = result {
+        panic!("{err}");
+    }
 }
 
 fn collect_examples(include: impl Fn(&Path) -> bool) -> Vec<PathBuf> {
@@ -68,7 +94,11 @@ fn run_differential_bucket(name: &str, examples: &[PathBuf]) {
         return;
     }
 
+    ensure_release_binary();
+
     let output = Command::new("./diff_test.sh")
+        .env("DELLINGR_SKIP_BUILD", "1")
+        .env("DELLINGR_SKIP_TIMEOUT", "1")
         .args(examples)
         .output()
         .expect("Failed to run diff_test.sh");

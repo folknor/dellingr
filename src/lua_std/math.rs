@@ -8,12 +8,12 @@ use std::f64::consts::PI;
 
 pub(crate) fn open_math(state: &mut State) {
     // Create the math table
-    state.new_table();
+    state.new_table_with_capacity(24);
 
     // Helper to add a function to the table at stack index -1.
     macro_rules! add_fn {
         ($name:expr, $func:expr) => {
-            state.push_string($name.to_string());
+            state.push_string($name);
             state.push_rust_fn($func);
             state.set_table_raw(-3).unwrap();
         };
