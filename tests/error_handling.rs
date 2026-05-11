@@ -330,6 +330,17 @@ fn table_unpack_basic() {
 }
 
 #[test]
+fn global_unpack_supports_range() {
+    let val = run_number(
+        r#"
+        local a, b, c = unpack({10, 20, 30, 40}, 2, 4)
+        return a + b + c
+    "#,
+    );
+    assert_eq!(val, 90.0);
+}
+
+#[test]
 fn table_move_overlapping_same_table_copies_backwards() {
     let val = run_number(
         r#"

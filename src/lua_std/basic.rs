@@ -164,24 +164,44 @@ pub(crate) fn open_base(state: &mut State) {
         Ok(1)
     });
 
-    // unpack(list)
+    // unpack(list [, i [, j]])
     //
-    // Returns list[1], list[2], ... list[#list]. The Lua version can take
-    // additional arguments to return only part of the list, but that isn't
-    // supported yet.
+    // Returns list[i], list[i+1], ..., list[j]. Defaults to 1..#list,
+    // matching Lua 5.2's global unpack.
     add("unpack", |state| {
         state.check_type(1, LuaType::Table)?;
-        let mut i = 1.0;
-        loop {
-            state.push_number(i);
-            state.get_table(1)?;
-            if let LuaType::Nil = state.typ(-1) {
-                state.pop(1);
-                break;
-            }
-            i += 1.0;
+        let num_args = state.get_top();
+        let len = state.table_len(1);
+
+        let i = if num_args >= 2 {
+            state.check_type(2, LuaType::Number)?;
+            state.to_number(2)? as usize
+        } else {
+            1
+        };
+
+        let j = if num_args >= 3 {
+            state.check_type(3, LuaType::Number)?;
+            state.to_number(3)? as usize
+        } else {
+            len
+        };
+
+        state.set_top(1);
+
+        if i > j {
+            state.set_top(0);
+            return Ok(0);
         }
-        Ok(i as u8 - 1)
+
+        let count = j - i + 1;
+        for idx in i..=j {
+            state.push_number(idx as f64);
+            state.get_table(1)?;
+        }
+
+        state.remove(1)?;
+        Ok(count as u8)
     });
 
     // getmetatable(object)

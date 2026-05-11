@@ -17,6 +17,8 @@ All notable changes to dellingr are documented here. The format follows
   source range to the right without clobbering unread values.
 - `select` now handles negative indices by counting from the end and
   rejects zero or too-negative indices instead of returning all args.
+- Global `unpack` now supports the optional `i, j` range arguments,
+  matching the already-supported `table.unpack` behavior.
 
 ### Performance
 

@@ -118,6 +118,9 @@ test("table.sort with comparator", t7[1] == 3)
 local a, b, c = table.unpack({1, 2, 3})
 test("table.unpack", a == 1 and b == 2 and c == 3)
 
+local ua, ub = unpack({1, 2, 3}, 2, 3)
+test("global unpack range", ua == 2 and ub == 3)
+
 local t8 = table.pack(1, 2, 3)
 test("table.pack", t8.n == 3 and t8[1] == 1)
 
