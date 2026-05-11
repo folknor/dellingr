@@ -19,6 +19,8 @@ All notable changes to dellingr are documented here. The format follows
   rejects zero or too-negative indices instead of returning all args.
 - Global `unpack` now supports the optional `i, j` range arguments,
   matching the already-supported `table.unpack` behavior.
+- `table.concat` now rejects non-string and non-number elements instead
+  of coercing every Lua value with display-string semantics.
 
 ### Performance
 

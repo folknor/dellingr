@@ -319,6 +319,24 @@ fn table_concat_basic() {
 }
 
 #[test]
+fn table_concat_rejects_boolean_elements() {
+    let err = expect_error(r#"return table.concat({true}, ",")"#);
+    assert!(
+        matches!(err.kind, ErrorKind::TypeError(_)),
+        "Expected TypeError, got: {err}"
+    );
+}
+
+#[test]
+fn table_concat_rejects_nil_elements_in_range() {
+    let err = expect_error(r#"return table.concat({1, nil, 3}, ",", 1, 3)"#);
+    assert!(
+        matches!(err.kind, ErrorKind::TypeError(_)),
+        "Expected TypeError, got: {err}"
+    );
+}
+
+#[test]
 fn table_unpack_basic() {
     let val = run_number(
         r#"

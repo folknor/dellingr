@@ -2,6 +2,7 @@
 
 use crate::LuaType;
 use crate::State;
+use crate::error::{ErrorKind, TypeError};
 
 pub(crate) fn open_table(state: &mut State) {
     // Create the table table
@@ -205,7 +206,13 @@ pub(crate) fn open_table(state: &mut State) {
             }
             state.push_number(idx as f64);
             state.get_table(1)?;
-            result.extend_from_slice(state.to_bytes_coerce(-1)?.as_ref());
+            let typ = state.typ(-1);
+            match typ {
+                LuaType::String | LuaType::Number => {
+                    result.extend_from_slice(state.to_bytes_coerce(-1)?.as_ref());
+                }
+                _ => return Err(state.error(ErrorKind::TypeError(TypeError::Concat(typ)))),
+            }
             state.pop(1);
         }
 
