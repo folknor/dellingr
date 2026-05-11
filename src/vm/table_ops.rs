@@ -3,6 +3,7 @@
 //! This module contains methods for creating and manipulating Lua tables,
 //! including metamethod-aware operations.
 
+use super::lua_val::RustFunc;
 use super::lua_val::Val;
 use super::{Result, State, TypeError};
 use crate::instr::{ArgCount, RetCount};
@@ -30,6 +31,44 @@ impl State {
             string_literal_start,
         );
         self.stack.push(Val::Obj(obj));
+    }
+
+    pub(crate) fn set_table_str_key_value(
+        &mut self,
+        table_idx: isize,
+        name: &str,
+        val: Val,
+    ) -> Result<()> {
+        let key = self.alloc_string(name);
+        let idx = self.convert_idx(table_idx)?;
+        let obj_ptr = self.stack[idx].as_object_ptr();
+        let typ = self.stack[idx].typ_simple();
+
+        match obj_ptr.and_then(|ptr| self.heap.as_table(ptr)) {
+            Some(t) => {
+                t.insert(key, val)?;
+                Ok(())
+            }
+            None => Err(self.type_error(TypeError::TableIndex(typ))),
+        }
+    }
+
+    pub(crate) fn set_table_str_key_rust_fn(
+        &mut self,
+        table_idx: isize,
+        name: &str,
+        func: RustFunc,
+    ) -> Result<()> {
+        self.set_table_str_key_value(table_idx, name, Val::RustFn(func))
+    }
+
+    pub(crate) fn set_table_str_key_number(
+        &mut self,
+        table_idx: isize,
+        name: &str,
+        num: f64,
+    ) -> Result<()> {
+        self.set_table_str_key_value(table_idx, name, Val::Num(num))
     }
 
     /// Pushes onto the stack the value `t[k]`, where `t` is the value at the given

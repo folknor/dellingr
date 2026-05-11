@@ -425,31 +425,27 @@ pub(crate) fn open_base(state: &mut State) {
     state.new_table(); // metatable
 
     // __index: function(t, k) return globals[k] end
-    state.push_string("__index");
-    state.push_rust_fn(|state| {
-        state.check_any(2)?;
-        let key = state.to_string(2)?;
-        state.set_top(0);
-        state.get_global(&key);
-        Ok(1)
-    });
     state
-        .set_table_raw(-3)
+        .set_table_str_key_rust_fn(-1, "__index", |state| {
+            state.check_any(2)?;
+            let key = state.to_string(2)?;
+            state.set_top(0);
+            state.get_global(&key);
+            Ok(1)
+        })
         .expect("_G metatable __index assignment cannot fail");
 
     // __newindex: function(t, k, v) globals[k] = v end
-    state.push_string("__newindex");
-    state.push_rust_fn(|state| {
-        state.check_any(2)?;
-        state.check_any(3)?;
-        let key = state.to_string(2)?;
-        state.push_value(3)?;
-        state.set_global(&key);
-        state.set_top(0);
-        Ok(0)
-    });
     state
-        .set_table_raw(-3)
+        .set_table_str_key_rust_fn(-1, "__newindex", |state| {
+            state.check_any(2)?;
+            state.check_any(3)?;
+            let key = state.to_string(2)?;
+            state.push_value(3)?;
+            state.set_global(&key);
+            state.set_top(0);
+            Ok(0)
+        })
         .expect("_G metatable __newindex assignment cannot fail");
 
     state

@@ -323,6 +323,14 @@ the stdlib stops baking string pointers (use `&'static [u8]` and
 intern lazily on first use), or the Engine carries a shared
 string pool that new States inherit.
 
+Shipped smaller step on 2026-05-11: stdlib globals and module tables now
+install Rust functions through direct `Val`/string-key insertion helpers
+instead of pushing key/function pairs through the Lua stack and calling
+the public table setters. This reduces the per-State setup work without
+changing the ownership model. The process-level `examples/comments.lua`
+signal is tiny and noisy on this host (roughly 495us to 487us in a
+200-run hyperfine sample), so this does not remove the per-Engine idea.
+
 Why deferred: not on the hot path. State construction is amortized
 across however long the State lives; even at "one State per request
 worker", the install cost is microseconds per request. The bigger

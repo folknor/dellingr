@@ -165,10 +165,8 @@ pub(crate) fn open_string(state: &mut State) {
     // Helper to add a function to the table at stack index -1.
     macro_rules! add_fn {
         ($name:expr, $func:expr) => {
-            state.push_string($name);
-            state.push_rust_fn($func);
             state
-                .set_table_raw(-3)
+                .set_table_str_key_rust_fn(-1, $name, $func)
                 .expect("string library registration cannot fail");
         };
     }

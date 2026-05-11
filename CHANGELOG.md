@@ -58,6 +58,9 @@ All notable changes to dellingr are documented here. The format follows
 - Base standard-library Rust functions install directly into the global
   table instead of round-tripping through the Lua stack during fresh
   `State` startup.
+- Standard-library module tables now register Rust functions and numeric
+  constants through a direct string-key table path instead of pushing
+  each key/value pair through the Lua stack.
 - Table constructors with more than four static fields now emit
   `NewTablePresized`, allocating map-backed storage at the final
   constructor size instead of promoting after the inline table fills.

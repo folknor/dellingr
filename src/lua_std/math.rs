@@ -13,9 +13,9 @@ pub(crate) fn open_math(state: &mut State) {
     // Helper to add a function to the table at stack index -1.
     macro_rules! add_fn {
         ($name:expr, $func:expr) => {
-            state.push_string($name);
-            state.push_rust_fn($func);
-            state.set_table_raw(-3).unwrap();
+            state
+                .set_table_str_key_rust_fn(-1, $name, $func)
+                .expect("math library registration cannot fail");
         };
     }
 
@@ -306,17 +306,13 @@ pub(crate) fn open_math(state: &mut State) {
     });
 
     // math.pi (constant)
-    state.push_string("pi");
-    state.push_number(PI);
     state
-        .set_table_raw(-3)
+        .set_table_str_key_number(-1, "pi", PI)
         .expect("math.pi assignment cannot fail");
 
     // math.huge (infinity constant)
-    state.push_string("huge");
-    state.push_number(f64::INFINITY);
     state
-        .set_table_raw(-3)
+        .set_table_str_key_number(-1, "huge", f64::INFINITY)
         .expect("math.huge assignment cannot fail");
 
     // Set the math table as a global
