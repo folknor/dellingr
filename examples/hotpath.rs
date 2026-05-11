@@ -22,7 +22,7 @@ use std::path::PathBuf;
 use std::process::exit;
 use std::time::Instant;
 
-use dellingr::{ArgCount, RetCount, State};
+use dellingr::{ArgCount, LuaType, RetCount, State};
 
 const WARM_ITERATIONS: u32 = 20;
 const DEFAULT_TARGET: &str = "numerics/arithmetic";
@@ -71,6 +71,22 @@ fn main() {
 
     // Phase 3: cold call - first invocation of `_bench`.
     state.get_global("_bench");
+    if state.typ(-1) == LuaType::Nil {
+        state.pop(1);
+        let final_heap_bytes = state.heap_size();
+        let final_object_count = state.object_count();
+
+        eprintln!("target={target}");
+        eprintln!("state_new_us={state_new_us}");
+        eprintln!("parse_us={parse_us}");
+        eprintln!("setup_cost={setup_cost}");
+        eprintln!("setup_heap_bytes={setup_heap_bytes}");
+        eprintln!("setup_object_count={setup_object_count}");
+        eprintln!("final_heap_bytes={final_heap_bytes}");
+        eprintln!("final_object_count={final_object_count}");
+        return;
+    }
+
     let cold_start = Instant::now();
     if let Err(e) = state.call(ArgCount::Fixed(0), RetCount::Fixed(0)) {
         eprintln!("Cold _bench call error in {}: {e}", script_path.display());

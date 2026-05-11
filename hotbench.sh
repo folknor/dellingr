@@ -54,7 +54,7 @@ fi
 
 echo "==== KVs ===="
 "$HOTPATH_BIN" "$TARGET" 2>&1 \
-    | grep -E '^(target|state_new_us|parse_us|cold_call_us|cold_cost|warm_iterations|warm_avg_us|warm_avg_cost|cost_per_us|setup_|final_)='
+    | grep -E '^(target|state_new_us|parse_us|cold_call_us|cold_cost|warm_iterations|warm_avg_us|warm_avg_cost|cost_per_us|setup_.*|final_.*)='
 
 echo ""
 echo "==== hyperfine ===="

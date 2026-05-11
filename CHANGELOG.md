@@ -94,6 +94,9 @@ All notable changes to dellingr are documented here. The format follows
   `State` startup cost visible alongside parse and call timings.
 - Table constructor tests now cover templated nil-field removal and
   duplicate named-field fallback behavior.
+- The hotpath benchmark harness now reports setup-only key/value output
+  for scripts without a `_bench` function, and `hotbench.sh` preserves
+  setup/final heap and object counters in its filtered output.
 
 ## [0.2.0] - 2026-05-07
 
