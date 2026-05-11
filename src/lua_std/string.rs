@@ -170,8 +170,7 @@ pub(crate) fn open_string(state: &mut State) {
         state.check_type(2, LuaType::Number)?;
         let num_args = state.get_top();
 
-        let s = state.to_bytes(1)?.to_vec();
-        let len = s.len();
+        let len = state.to_bytes(1)?.len();
         let i = state.to_number(2)? as isize;
         let j = if num_args >= 3 {
             state.check_type(3, LuaType::Number)?;
@@ -182,13 +181,14 @@ pub(crate) fn open_string(state: &mut State) {
 
         let start = lua_start_index(len, i);
         let end = lua_end_index(len, j);
+        let bytes = if start >= end || start >= len {
+            Vec::new()
+        } else {
+            state.to_bytes(1)?[start..end].to_vec()
+        };
 
         state.set_top(0);
-        if start >= end || start >= len {
-            state.push_bytes(b"");
-        } else {
-            state.push_bytes(&s[start..end]);
-        }
+        state.push_bytes(bytes);
         Ok(1)
     });
 

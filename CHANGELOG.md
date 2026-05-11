@@ -25,6 +25,8 @@ All notable changes to dellingr are documented here. The format follows
 - `string.find` now uses the plain substring path for patterns with no
   magic characters even when `plain` is omitted. The literal path also
   avoids copying the subject and pattern before searching.
+- `string.sub` no longer copies the full source string before slicing;
+  it copies only the returned byte range.
 
 ### Testing
 
@@ -32,6 +34,10 @@ All notable changes to dellingr are documented here. The format follows
   `brokkr check` stays under its 20s per-test timeout. `diff_test.sh`
   now accepts explicit file or directory subsets while keeping its
   default full example sweep.
+- The recursive example integration test now runs the already-built
+  `dellingr` binary and splits hotpath examples into per-file tests,
+  avoiding repeated `cargo run` invocations and the same per-test
+  timeout pressure.
 
 ## [0.2.0] - 2026-05-07
 
