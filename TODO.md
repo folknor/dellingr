@@ -83,27 +83,6 @@ Signal that would promote it: a profile showing user-data downcasts
 on the hot path, or a 1.0 API pass that lands a coherent generic
 story across `State` / `Engine` / `RustFunc` / stdlib.
 
-### Pin StringPool's hasher
-
-What: `StringPool::hash_string` (`src/vm/object.rs:474-479`) uses
-`std::collections::hash_map::DefaultHasher`, whose internal algorithm
-is documented as "not specified, subject to change." It's currently
-SipHash with a fixed key, so deterministic across hosts today, but a
-future stdlib release could silently change bucket order.
-
-Sketch: replace with an explicit hasher under our control -
-`siphasher` with a fixed key, `ahash` with a fixed seed, or `fnv`.
-The hasher is internal to string interning; bucket order isn't
-program-visible (interning compares by content, `src/vm/object.rs:494-503`),
-so the determinism contract holds today by accident, not by design.
-
-Why deferred: not load-bearing yet. The contract is preserved
-without us doing anything.
-
-Signal that would promote it: a stdlib release changing
-`DefaultHasher`'s algorithm, OR a future change that makes
-`StringPool` bucket iteration program-visible (e.g. a debug API).
-
 ### Stable `RustFunc` identity for serialization
 
 What: `RustFunc` `Val`s render and hash by function-pointer address

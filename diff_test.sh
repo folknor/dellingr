@@ -29,10 +29,16 @@ then
     exit 1
 fi
 
-OUR_OUT=".diff_test_our.out"
-LUA52_OUT=".diff_test_lua52.out"
-LUA54_OUT=".diff_test_lua54.out"
-trap "rm -f $OUR_OUT $LUA52_OUT $LUA54_OUT" EXIT
+OUR_OUT="$(mktemp "${TMPDIR:-/tmp}/dellingr-diff-our.XXXXXX")" || exit 1
+LUA52_OUT="$(mktemp "${TMPDIR:-/tmp}/dellingr-diff-lua52.XXXXXX")" || {
+    rm -f "$OUR_OUT"
+    exit 1
+}
+LUA54_OUT="$(mktemp "${TMPDIR:-/tmp}/dellingr-diff-lua54.XXXXXX")" || {
+    rm -f "$OUR_OUT" "$LUA52_OUT"
+    exit 1
+}
+trap 'rm -f "$OUR_OUT" "$LUA52_OUT" "$LUA54_OUT"' EXIT
 
 shopt -s globstar nullglob
 if [ "$#" -gt 0 ]

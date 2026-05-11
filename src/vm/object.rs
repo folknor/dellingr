@@ -11,7 +11,6 @@
 use indexmap::IndexMap;
 use std::cell::Cell;
 use std::fmt;
-use std::hash::Hash;
 use std::sync::Arc;
 
 use slotmap::{SlotMap, new_key_type};
@@ -505,10 +504,33 @@ impl StringPool {
     }
 
     pub(super) fn hash_string(bytes: &[u8]) -> u64 {
-        use std::hash::Hasher;
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        bytes.hash(&mut hasher);
-        hasher.finish()
+        const FX_HASH_MUL: u64 = 0x517cc1b727220a95;
+
+        #[inline]
+        fn mix(hash: u64, word: u64) -> u64 {
+            (hash.rotate_left(5) ^ word).wrapping_mul(FX_HASH_MUL)
+        }
+
+        let mut hash = bytes.len() as u64;
+        let mut chunks = bytes.chunks_exact(8);
+        for chunk in &mut chunks {
+            let word = u64::from_le_bytes(
+                chunk
+                    .try_into()
+                    .expect("chunks_exact(8) should only produce 8-byte chunks"),
+            );
+            hash = mix(hash, word);
+        }
+
+        let remainder = chunks.remainder();
+        let mut tail = 0u64;
+        for (i, byte) in remainder.iter().enumerate() {
+            tail |= u64::from(*byte) << (i * 8);
+        }
+        if !remainder.is_empty() {
+            hash = mix(hash, tail);
+        }
+        hash
     }
 
     /// Get a string's content by its pointer.
@@ -641,6 +663,12 @@ mod tests {
         assert_eq!(heap.get_string(s2), b"world");
         assert_eq!(s1, s3); // Same string should be interned
         assert_eq!(heap.string_count(), 2);
+    }
+
+    #[test]
+    fn test_string_hash_is_pinned() {
+        assert_eq!(StringPool::hash_string(b""), 0x0000000000000000);
+        assert_eq!(StringPool::hash_string(b"hello"), 0xd76e0ef553a10d68);
     }
 
     #[test]

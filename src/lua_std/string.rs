@@ -55,10 +55,13 @@ fn push_captures(state: &mut State, bytes: &[u8], pattern: &LuaPattern<'_>) -> u
     }
 }
 
-fn capture_slices<'a>(bytes: &'a [u8], pattern: &LuaPattern<'_>) -> Vec<&'a [u8]> {
-    (0..pattern.num_matches())
-        .map(|i| &bytes[pattern.capture(i)])
-        .collect()
+fn capture_slices_into<'a>(out: &mut Vec<&'a [u8]>, bytes: &'a [u8], pattern: &LuaPattern<'_>) {
+    let n = pattern.num_matches();
+    out.clear();
+    out.reserve(n);
+    for i in 0..n {
+        out.push(&bytes[pattern.capture(i)]);
+    }
 }
 
 fn write_format(state: &State, result: &mut Vec<u8>, args: std::fmt::Arguments<'_>) -> Result<()> {
@@ -67,38 +70,43 @@ fn write_format(state: &State, result: &mut Vec<u8>, args: std::fmt::Arguments<'
         .map_err(|err| state.error(ErrorKind::InternalError(err.to_string())))
 }
 
-fn gsub_replacement(state: &mut State, repl_type: &LuaType, captures: &[&[u8]]) -> Result<Vec<u8>> {
+fn append_string_replacement(out: &mut Vec<u8>, repl: &[u8], captures: &[&[u8]]) {
+    let mut i = 0usize;
+    while i < repl.len() {
+        if repl[i] == b'%' && i + 1 < repl.len() {
+            let next = repl[i + 1];
+            if next == b'%' {
+                out.push(b'%');
+                i += 2;
+            } else if next.is_ascii_digit() {
+                let idx = (next - b'0') as usize;
+                if idx == 0 {
+                    out.extend_from_slice(captures[0]);
+                } else if idx < captures.len() {
+                    out.extend_from_slice(captures[idx]);
+                }
+                i += 2;
+            } else {
+                out.push(b'%');
+                i += 1;
+            }
+        } else {
+            out.push(repl[i]);
+            i += 1;
+        }
+    }
+}
+
+fn append_gsub_replacement(
+    state: &mut State,
+    out: &mut Vec<u8>,
+    repl_type: &LuaType,
+    captures: &[&[u8]],
+) -> Result<()> {
     match repl_type {
         LuaType::String => {
             let repl = state.to_bytes(3)?;
-            let mut out = Vec::with_capacity(repl.len());
-            let mut i = 0usize;
-
-            while i < repl.len() {
-                if repl[i] == b'%' && i + 1 < repl.len() {
-                    let next = repl[i + 1];
-                    if next == b'%' {
-                        out.push(b'%');
-                        i += 2;
-                    } else if next.is_ascii_digit() {
-                        let idx = (next - b'0') as usize;
-                        if idx == 0 {
-                            out.extend_from_slice(captures[0]);
-                        } else if idx < captures.len() {
-                            out.extend_from_slice(captures[idx]);
-                        }
-                        i += 2;
-                    } else {
-                        out.push(b'%');
-                        i += 1;
-                    }
-                } else {
-                    out.push(repl[i]);
-                    i += 1;
-                }
-            }
-
-            Ok(out)
+            append_string_replacement(out, repl, captures);
         }
         LuaType::Table => {
             let key = if captures.len() > 1 {
@@ -113,11 +121,11 @@ fn gsub_replacement(state: &mut State, repl_type: &LuaType, captures: &[&[u8]]) 
                 || (state.typ(-1) == LuaType::Boolean && !state.to_boolean(-1));
             if keep_original {
                 state.pop(2);
-                Ok(captures[0].to_vec())
+                out.extend_from_slice(captures[0]);
             } else {
                 let val = state.to_bytes_coerce(-1)?.into_owned();
                 state.pop(2);
-                Ok(val)
+                out.extend_from_slice(&val);
             }
         }
         LuaType::Function => {
@@ -138,15 +146,16 @@ fn gsub_replacement(state: &mut State, repl_type: &LuaType, captures: &[&[u8]]) 
                 || (state.typ(-1) == LuaType::Boolean && !state.to_boolean(-1));
             if keep_original {
                 state.pop(1);
-                Ok(captures[0].to_vec())
+                out.extend_from_slice(captures[0]);
             } else {
                 let val = state.to_bytes_coerce(-1)?.into_owned();
                 state.pop(1);
-                Ok(val)
+                out.extend_from_slice(&val);
             }
         }
-        _ => Ok(captures[0].to_vec()),
+        _ => out.extend_from_slice(captures[0]),
     }
+    Ok(())
 }
 
 pub(crate) fn open_string(state: &mut State) {
@@ -687,7 +696,7 @@ pub(crate) fn open_string(state: &mut State) {
             for i in 0..=s.len() {
                 if max_replacements.is_none_or(|max| count < max) {
                     let captures = [&s[i..i]];
-                    result.extend(gsub_replacement(state, &repl_type, &captures)?);
+                    append_gsub_replacement(state, &mut result, &repl_type, &captures)?;
                     count += 1;
                 }
                 if i < s.len() {
@@ -721,7 +730,7 @@ pub(crate) fn open_string(state: &mut State) {
                 result.extend_from_slice(&s[pos..start]);
 
                 let captures = [&s[start..end]];
-                result.extend(gsub_replacement(state, &repl_type, &captures)?);
+                append_gsub_replacement(state, &mut result, &repl_type, &captures)?;
 
                 pos = end;
                 count += 1;
@@ -737,6 +746,7 @@ pub(crate) fn open_string(state: &mut State) {
         match LuaPattern::from_bytes_try(&pattern) {
             Ok(mut matcher) => {
                 let mut result = Vec::with_capacity(s.len());
+                let mut captures = Vec::new();
                 let mut pos = 0usize;
                 let mut count = 0usize;
 
@@ -752,8 +762,8 @@ pub(crate) fn open_string(state: &mut State) {
 
                     let range = matcher.range();
                     result.extend_from_slice(&s[pos..pos + range.start]);
-                    let captures = capture_slices(search, &matcher);
-                    result.extend(gsub_replacement(state, &repl_type, &captures)?);
+                    capture_slices_into(&mut captures, search, &matcher);
+                    append_gsub_replacement(state, &mut result, &repl_type, &captures)?;
                     count += 1;
 
                     if range.start == range.end {

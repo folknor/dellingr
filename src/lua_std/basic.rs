@@ -147,9 +147,8 @@ pub(crate) fn open_base(state: &mut State) {
     add("type", |state| {
         state.check_any(1)?;
         let typ = state.typ(1);
-        let type_str = typ.to_string();
-        state.pop(state.get_top() as isize);
-        state.push_string(type_str);
+        state.set_top(0);
+        state.push_string(typ.as_str());
         Ok(1)
     });
 
@@ -195,9 +194,16 @@ pub(crate) fn open_base(state: &mut State) {
                 Ok(1)
             }
             LuaType::String => {
-                let s = state.to_string(1)?;
-                state.pop(state.get_top() as isize);
-                if let Ok(num) = s.parse::<f64>() {
+                let parsed = match std::str::from_utf8(state.to_bytes(1)?) {
+                    Ok(s) => s.parse::<f64>(),
+                    Err(_) => {
+                        state.set_top(0);
+                        state.push_nil();
+                        return Ok(1);
+                    }
+                };
+                state.set_top(0);
+                if let Ok(num) = parsed {
                     state.push_number(num);
                 } else {
                     state.push_nil();
@@ -216,12 +222,10 @@ pub(crate) fn open_base(state: &mut State) {
     add("tostring", |state| {
         state.check_any(1)?;
         if state.typ(1) == LuaType::String {
-            let bytes = state.to_bytes(1)?.to_vec();
-            state.pop(state.get_top() as isize);
-            state.push_bytes(bytes);
+            state.set_top(1);
         } else {
             let s = state.to_string_with_meta(1)?;
-            state.pop(state.get_top() as isize);
+            state.set_top(0);
             state.push_string(s);
         }
         Ok(1)

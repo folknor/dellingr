@@ -45,6 +45,14 @@ All notable changes to dellingr are documented here. The format follows
   it copies only the returned byte range.
 - Fresh `State` startup reserves the standard-library globals, string
   pool, and large library table capacities up front.
+- String interning now uses an in-crate pinned chunked hash instead of
+  `DefaultHasher`, reducing short-string hashing overhead and removing
+  dependence on the standard library's unspecified hasher choice.
+- `string.gsub` string replacements now append directly into the output
+  buffer and patterned substitutions reuse capture storage across
+  matches, reducing per-match allocation churn.
+- `type`, `tonumber`, and already-string `tostring` avoid unnecessary
+  Rust string allocations in common cases.
 
 ### Testing
 
@@ -65,6 +73,9 @@ All notable changes to dellingr are documented here. The format follows
 - Rust differential test buckets now rely on brokkr's per-test timeout
   instead of wrapping every `dellingr`, `lua5.2`, and `lua5.4` process in
   `timeout(1)`.
+- `diff_test.sh` now uses process-unique temporary output files so
+  parallel Rust differential buckets do not race on shared `.diff_test_*`
+  paths.
 
 ## [0.2.0] - 2026-05-07
 
