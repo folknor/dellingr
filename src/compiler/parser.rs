@@ -515,9 +515,19 @@ impl<'a> Parser<'a> {
             last_field_id = self.find_or_add_string(last_field)?;
         }
 
-        // Parse the function params and body.
-        self.parse_fndef_named(Some(full_name))?;
-        self.push(Instr::set_field(0, last_field_id));
+        if self.input.try_pop(TokenType::Colon)?.is_some() {
+            self.push(Instr::get_field(last_field_id));
+            let method_name = self.expect_identifier()?;
+            full_name.push(':');
+            full_name.push_str(method_name);
+            let method_name_id = self.find_or_add_string(method_name)?;
+
+            self.parse_fndef_method(Some(full_name))?;
+            self.push(Instr::set_field(0, method_name_id));
+        } else {
+            self.parse_fndef_named(Some(full_name))?;
+            self.push(Instr::set_field(0, last_field_id));
+        }
         Ok(())
     }
 

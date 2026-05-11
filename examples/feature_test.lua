@@ -143,6 +143,10 @@ print("\n--- Functions ---")
 local function add(x, y) return x + y end
 test("local function", add(1, 2) == 3)
 
+local dottedDecl = { inner = { value = 5 } }
+function dottedDecl.inner:add(n) return self.value + n end
+test("dotted method declaration", dottedDecl.inner:add(7) == 12)
+
 local anon = function(x, y) return x + y end
 test("anonymous function", anon(1, 2) == 3)
 

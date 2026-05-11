@@ -31,6 +31,8 @@ All notable changes to dellingr are documented here. The format follows
   `{x}` and `{x.y}` instead of treating every identifier as `name =`.
 - Empty string patterns now match Lua boundary behavior in `string.find`,
   `string.match`, `string.gmatch`, and `string.gsub`.
+- Dotted method declarations like `function mod.sub:run()` now compile
+  and bind the method on the final receiver table.
 
 ### Performance
 

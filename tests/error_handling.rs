@@ -655,6 +655,20 @@ fn table_constructor_distinguishes_named_fields_from_identifiers() {
 }
 
 #[test]
+fn dotted_method_declaration_is_supported() {
+    let result = run_number(
+        r#"
+        local mod = { sub = { base = 5 } }
+        function mod.sub:add(x)
+            return self.base + x
+        end
+        return mod.sub:add(7)
+    "#,
+    );
+    assert_eq!(result, 12.0);
+}
+
+#[test]
 fn error_msg_call_depth_shows_overflow() {
     let err = expect_error("local function r(n) return r(n+1) end\nr(0)");
     let msg = format!("{err}");
