@@ -25,6 +25,8 @@ All notable changes to dellingr are documented here. The format follows
   36, including signed strings and invalid-digit nil results.
 - Unparenthesized Lua calls with a literal string or table constructor
   argument now compile instead of panicking in the parser.
+- `State::set_top` now accepts negative stack indices instead of
+  panicking for otherwise valid relative-top operations.
 
 ### Performance
 

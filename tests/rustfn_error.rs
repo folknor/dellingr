@@ -3,6 +3,25 @@
 use dellingr::error::{Error, ErrorKind};
 use dellingr::{ArgCount, LuaType, RetCount, State};
 
+#[test]
+fn set_top_accepts_negative_indices() {
+    let mut state = State::new();
+    state.push_number(1.0);
+    state.push_number(2.0);
+    state.push_number(3.0);
+
+    state.set_top(-1);
+    assert_eq!(state.get_top(), 3);
+    assert_eq!(state.to_number(-1).unwrap(), 3.0);
+
+    state.set_top(-2);
+    assert_eq!(state.get_top(), 2);
+    assert_eq!(state.to_number(-1).unwrap(), 2.0);
+
+    state.set_top(-3);
+    assert_eq!(state.get_top(), 0);
+}
+
 /// A zero-argument Rust function error should restore the caller's visible stack.
 #[test]
 fn rustfn_error_restores_stack_bottom() {

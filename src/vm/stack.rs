@@ -18,29 +18,28 @@ impl State {
     }
 
     /// Accepts any acceptable index, or 0, and sets the stack top to this index.
-    /// If the new top is larger than the old one, then the new elements are filled
-    /// with `nil`. If `index` is 0, then all stack elements are removed.
+    /// If the new top is larger than the old one, then the new elements are
+    /// filled with `nil`. If `index` is 0, then all visible stack elements are
+    /// removed. Negative indices are relative to the current top: `-1` keeps the
+    /// top unchanged, `-2` pops one value, and so on.
     pub fn set_top(&mut self, i: isize) {
-        match i.cmp(&0) {
+        let old_top = self.get_top();
+        let new_top = match i.cmp(&0) {
             Ordering::Less => {
-                panic!("negative not supported yet ({i})");
+                let target = old_top as isize + i + 1;
+                assert!(target >= 0, "Tried to set stack top below bottom ({i})");
+                target as usize
             }
-            Ordering::Equal => {
-                self.stack.truncate(self.stack_bottom);
-            }
+            Ordering::Equal => 0,
+            Ordering::Greater => i as usize,
+        };
+
+        match new_top.cmp(&old_top) {
+            Ordering::Less => self.pop((old_top - new_top) as isize),
+            Ordering::Equal => (),
             Ordering::Greater => {
-                let i = i as usize;
-                let old_top = self.get_top();
-                match i.cmp(&old_top) {
-                    Ordering::Less => {
-                        self.pop((old_top - i) as isize);
-                    }
-                    Ordering::Equal => (),
-                    Ordering::Greater => {
-                        for _ in old_top..i {
-                            self.push_nil();
-                        }
-                    }
+                for _ in old_top..new_top {
+                    self.push_nil();
                 }
             }
         }
