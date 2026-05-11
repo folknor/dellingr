@@ -329,6 +329,30 @@ fn table_unpack_basic() {
     assert_eq!(val, 60.0);
 }
 
+#[test]
+fn table_move_overlapping_same_table_copies_backwards() {
+    let val = run_number(
+        r#"
+        local t = {1, 2, 3, 4, 5}
+        table.move(t, 1, 3, 2)
+        return t[1] * 10000 + t[2] * 1000 + t[3] * 100 + t[4] * 10 + t[5]
+    "#,
+    );
+    assert_eq!(val, 11235.0);
+}
+
+#[test]
+fn table_move_explicit_same_destination_copies_backwards() {
+    let val = run_number(
+        r#"
+        local t = {1, 2, 3, 4, 5}
+        table.move(t, 1, 3, 2, t)
+        return t[1] * 10000 + t[2] * 1000 + t[3] * 100 + t[4] * 10 + t[5]
+    "#,
+    );
+    assert_eq!(val, 11235.0);
+}
+
 // -- Error message quality tests --
 
 /// Helper: tries to load+call Lua code and returns the error, panicking if it succeeds.

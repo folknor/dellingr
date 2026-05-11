@@ -28,9 +28,31 @@ LUA54_OUT=".diff_test_lua54.out"
 trap "rm -f $OUR_OUT $OUR_RAW $LUA52_OUT $LUA54_OUT" EXIT
 
 shopt -s globstar nullglob
+if [ "$#" -gt 0 ]
+then
+    scripts=()
+    for arg in "$@"
+    do
+        if [ -d "$arg" ]
+        then
+            for f in "$arg"/**/*.lua
+            do
+                scripts+=("$f")
+            done
+        elif [ -f "$arg" ]
+        then
+            scripts+=("$arg")
+        else
+            echo "FAIL: missing $arg"
+            exit 1
+        fi
+    done
+else
+    scripts=(examples/**/*.lua)
+fi
 failures=()
 
-for f in examples/**/*.lua
+for f in "${scripts[@]}"
 do
     name=$(realpath --relative-to=examples "$f")
     case "$name" in

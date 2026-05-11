@@ -232,19 +232,31 @@ pub(crate) fn open_table(state: &mut State) {
         let has_a2 = state.get_top() >= 5 && state.typ(5) == LuaType::Table;
         let dest_idx: isize = if has_a2 { 5 } else { 1 };
 
-        // Copy elements (if any)
+        // Copy elements (if any). Same-table moves that shift the range right
+        // must copy backwards so earlier writes do not clobber later reads.
         if f <= e {
             let count = e - f + 1;
-            for i in 0..count {
-                let src_key = (f + i) as f64;
-                let dest_key = (t + i) as f64;
+            let same_table = state.raw_equal(1, dest_idx);
+            if same_table && t > f {
+                for i in (0..count).rev() {
+                    let src_key = (f + i) as f64;
+                    let dest_key = (t + i) as f64;
 
-                // Set a2[t+i] = a1[f+i]
-                state.push_number(dest_key);
-                state.push_number(src_key);
-                state.get_table(1)?;
-                // Stack: [..., dest_key, value]
-                state.set_table_raw(dest_idx)?;
+                    state.push_number(dest_key);
+                    state.push_number(src_key);
+                    state.get_table(1)?;
+                    state.set_table_raw(dest_idx)?;
+                }
+            } else {
+                for i in 0..count {
+                    let src_key = (f + i) as f64;
+                    let dest_key = (t + i) as f64;
+
+                    state.push_number(dest_key);
+                    state.push_number(src_key);
+                    state.get_table(1)?;
+                    state.set_table_raw(dest_idx)?;
+                }
             }
         }
 

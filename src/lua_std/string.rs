@@ -17,12 +17,12 @@ fn is_plain_lua_pattern(pattern: &[u8]) -> bool {
 }
 
 fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.is_empty() {
-        Some(0)
-    } else {
-        haystack
+    match needle.len() {
+        0 => Some(0),
+        1 => haystack.iter().position(|b| *b == needle[0]),
+        _ => haystack
             .windows(needle.len())
-            .position(|candidate| candidate == needle)
+            .position(|candidate| candidate == needle),
     }
 }
 
@@ -198,35 +198,41 @@ pub(crate) fn open_string(state: &mut State) {
         state.check_type(2, LuaType::String)?;
         let num_args = state.get_top();
 
-        let s = state.to_bytes(1)?.to_vec();
-        let pattern = state.to_bytes(2)?.to_vec();
         let init = if num_args >= 3 {
             state.check_type(3, LuaType::Number)?;
-            lua_start_index(s.len(), state.to_number(3)? as isize)
+            let s_len = state.to_bytes(1)?.len();
+            lua_start_index(s_len, state.to_number(3)? as isize)
         } else {
             0
         };
         let plain = num_args >= 4 && state.to_boolean(4);
 
-        state.set_top(0);
+        let pattern_is_plain = {
+            let pattern = state.to_bytes(2)?;
+            plain || is_plain_lua_pattern(pattern)
+        };
 
-        if pattern.is_empty() {
-            let start = init + 1;
-            state.push_number(start as f64);
-            state.push_number(init as f64);
-            return Ok(2);
-        }
+        if pattern_is_plain {
+            let result = {
+                let s = state.to_bytes(1)?;
+                let pattern = state.to_bytes(2)?;
 
-        if init >= s.len() {
-            state.push_nil();
-            return Ok(1);
-        }
-        let search = &s[init..];
+                if pattern.is_empty() {
+                    Some((init + 1, init))
+                } else if init >= s.len() {
+                    None
+                } else {
+                    let search = &s[init..];
+                    find_subslice(search, pattern).map(|pos| {
+                        let start = init + pos + 1;
+                        let end = start + pattern.len() - 1;
+                        (start, end)
+                    })
+                }
+            };
 
-        if plain {
-            if let Some(pos) = find_subslice(search, &pattern) {
-                let start = init + pos + 1;
-                let end = start + pattern.len() - 1;
+            state.set_top(0);
+            if let Some((start, end)) = result {
                 state.push_number(start as f64);
                 state.push_number(end as f64);
                 Ok(2)
@@ -235,6 +241,17 @@ pub(crate) fn open_string(state: &mut State) {
                 Ok(1)
             }
         } else {
+            let s = state.to_bytes(1)?.to_vec();
+            let pattern = state.to_bytes(2)?.to_vec();
+
+            state.set_top(0);
+
+            if init >= s.len() {
+                state.push_nil();
+                return Ok(1);
+            }
+            let search = &s[init..];
+
             match LuaPattern::from_bytes_try(&pattern) {
                 Ok(mut matcher) => {
                     if matcher.matches_bytes(search) {

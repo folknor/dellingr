@@ -89,15 +89,20 @@ local t18 = {1, 2, 3, 4, 5}
 table.move(t18, 1, 3, 4)  -- copy elements 1-3 to positions 4-6
 print("Test 18 - table.move same: " .. tostring(t18[4] == 1 and t18[5] == 2 and t18[6] == 3))
 
--- Test 19: assigning nil deletes keys
-local t19 = {a = 1, b = 2}
-t19.a = nil
-local t19_count = 0
-local t19_saw_a = false
-for k, v in pairs(t19) do
-    t19_count = t19_count + 1
-    if k == "a" then t19_saw_a = true end
+-- Test 19: table.move overlapping within same table
+local t19 = {1, 2, 3, 4, 5}
+table.move(t19, 1, 3, 2)
+print("Test 19 - table.move overlap: " .. tostring(t19[1] == 1 and t19[2] == 1 and t19[3] == 2 and t19[4] == 3 and t19[5] == 5))
+
+-- Test 20: assigning nil deletes keys
+local t20 = {a = 1, b = 2}
+t20.a = nil
+local t20_count = 0
+local t20_saw_a = false
+for k, v in pairs(t20) do
+    t20_count = t20_count + 1
+    if k == "a" then t20_saw_a = true end
 end
-print("Test 19 - nil assignment deletes key: " .. tostring(rawget(t19, "a") == nil and t19_count == 1 and not t19_saw_a))
+print("Test 20 - nil assignment deletes key: " .. tostring(rawget(t20, "a") == nil and t20_count == 1 and not t20_saw_a))
 
 print("All table library tests complete!")
