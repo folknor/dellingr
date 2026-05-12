@@ -11,20 +11,22 @@ Built with LLMs. See [LLM.md](LLM.md).
 
 ## Performance
 
-It's slower than reference Lua, but not dramatically so: roughly 2-4x behind lua5.4 / 5.5 on most workloads and ~2x on `pairs` iteration / pattern matching. LuaJIT is its own world - 18-30x faster than us on tight loops where its tracing JIT shines, much less on alloc/string/pattern work where we get within 3-4x. dellingr is fast enough for continuous bounded execution of a few kilobytes of Lua code to let a game run at several thousand FPS.
+It's slower than reference Lua, but not dramatically so: roughly 1.6-3x behind lua5.2 on most workloads. LuaJIT is obviously in its own league. dellingr is fast enough for continuous bounded execution of a few kilobytes of Lua code to let a game run at several thousand FPS.
 
 Run `./bench.sh` to reproduce on your own host. Sample run on AMD Ryzen 9 5900X / Linux 7.0:
 
 | bench                    | dellingr | vs lua5.5 | vs lua5.4 | vs lua5.2 | vs luajit |
 |--------------------------|---------:|----------:|----------:|----------:|----------:|
+| `benchmark`              |    168ms |     4.00x |     3.97x |     2.74x |    23.35x |
 | `numerics/arithmetic`    |    101ms |     3.93x |     3.99x |     2.80x |    23.17x |
 | `iter/pairs`             |     88ms |     2.14x |     2.02x |     1.97x |    16.32x |
-| `strings/patterns`       |     30ms |     1.70x |     1.67x |     1.62x |     2.55x |
 | `tables/fill`            |     99ms |     3.90x |     3.28x |     2.43x |     6.72x |
 | `strings/mixed`          |     38ms |     2.93x |     3.19x |     2.09x |     3.12x |
+| `strings/patterns`       |     30ms |     1.70x |     1.67x |     1.62x |     2.55x |
 | `fields/same_obj_read`   |    115ms |     3.96x |     4.33x |     2.51x |    30.52x |
 | `alloc/closure`          |     77ms |     2.05x |     1.99x |     1.67x |     2.55x |
-| `benchmark` (multi)      |    168ms |     4.00x |     3.97x |     2.74x |    23.35x |
+
+Note that recorded results always track the latest git head and may not match the released version.
 
 ## Won't implement
 
@@ -48,8 +50,7 @@ There's a few gotchas with the current instruction-cost accounting. For example,
 
 ## Status
 
-The public API is **pre-1.0 and not yet stable** -
-breaking changes may land in any 0.x bump until 1.0.
+The public API is pre-1.0 and not yet stable. Breaking changes may land at any point.
 
 ```toml
 [dependencies]

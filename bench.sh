@@ -31,8 +31,10 @@ else
         examples/tables/fill.lua
         examples/strings/mixed.lua
         examples/strings/patterns.lua
+        examples/strings/literal_find.lua
         examples/fields/same_obj_read.lua
         examples/alloc/closure.lua
+        examples/alloc/record_tables.lua
     )
 fi
 
