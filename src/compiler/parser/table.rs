@@ -1,0 +1,189 @@
+use super::Instr;
+use super::Parser;
+use super::Result;
+use super::SyntaxError;
+use super::TokenType;
+
+type TableTemplateField = (u8, usize);
+type ParsedTableEntry = (u8, bool, Option<TableTemplateField>);
+
+#[derive(Debug)]
+struct TableTemplateCandidate {
+    pure_named: bool,
+    inline: [TableTemplateField; 4],
+    inline_len: u8,
+    fields: Option<Vec<TableTemplateField>>,
+}
+
+impl TableTemplateCandidate {
+    fn new() -> Self {
+        Self {
+            pure_named: true,
+            inline: [(0, 0); 4],
+            inline_len: 0,
+            fields: None,
+        }
+    }
+
+    fn push(&mut self, field: Option<TableTemplateField>) {
+        if !self.pure_named {
+            return;
+        }
+
+        let Some(field) = field else {
+            self.pure_named = false;
+            self.fields = None;
+            return;
+        };
+
+        if let Some(fields) = self.fields.as_mut() {
+            fields.push(field);
+        } else if (self.inline_len as usize) < self.inline.len() {
+            self.inline[self.inline_len as usize] = field;
+            self.inline_len += 1;
+        } else {
+            let mut fields = Vec::with_capacity(self.inline.len() + 1);
+            fields.extend_from_slice(&self.inline);
+            fields.push(field);
+            self.fields = Some(fields);
+        }
+    }
+
+    fn fields_for_template(&self, field_count: u8) -> Option<&[TableTemplateField]> {
+        if self.pure_named && field_count > self.inline.len() as u8 {
+            self.fields.as_deref()
+        } else {
+            None
+        }
+    }
+}
+
+impl Parser<'_> {
+    /// Parses a table constructor.
+    #[hotpath::measure]
+    pub(super) fn parse_table(&mut self) -> Result<()> {
+        let table_instr_idx = self.chunk.code.len();
+        self.push(Instr::new_table());
+        // Skip any leading separators (handles {;} and {,})
+        while let TokenType::Comma | TokenType::Semi = self.input.peek_type()? {
+            self.input.next()?;
+        }
+        if self.input.try_pop(TokenType::RCurly)?.is_none() {
+            // i is the number of array-style entries.
+            let mut i = 0;
+            let mut field_count = 0u8;
+            let mut has_vararg = false;
+            let mut template_candidate = TableTemplateCandidate::new();
+            let (new_i, is_vararg, named_field) = self.parse_table_entry(i)?;
+            i = new_i;
+            field_count = field_count.saturating_add(1);
+            has_vararg = has_vararg || is_vararg;
+            template_candidate.push(named_field);
+            while let TokenType::Comma | TokenType::Semi = self.input.peek_type()? {
+                self.input.next()?;
+                if self.input.check_type(TokenType::RCurly)? {
+                    break;
+                }
+                let (new_i, is_vararg, named_field) = self.parse_table_entry(i)?;
+                i = new_i;
+                field_count = field_count.saturating_add(1);
+                has_vararg = has_vararg || is_vararg;
+                template_candidate.push(named_field);
+            }
+            self.expect(TokenType::RCurly)?;
+
+            if field_count > 4
+                && !template_candidate
+                    .fields_for_template(field_count)
+                    .is_some_and(|fields| self.try_use_table_template(table_instr_idx, fields))
+            {
+                self.chunk.code[table_instr_idx] = Instr::new_table_presized(field_count);
+            }
+
+            if has_vararg {
+                // Use SetList(0) to indicate "use all values above table"
+                self.push(Instr::set_list(0));
+            } else if i > 0 {
+                self.push(Instr::set_list(i));
+            }
+        }
+        Ok(())
+    }
+
+    /// Parses a table entry.
+    /// Returns (new_counter, is_vararg) where is_vararg indicates if this entry was `...`
+    #[hotpath::measure]
+    fn parse_table_entry(&mut self, counter: u8) -> Result<ParsedTableEntry> {
+        match self.input.peek_type()? {
+            TokenType::Identifier if self.input.peek2_type()? == TokenType::Assign => {
+                let index = self.expect_identifier_id()?;
+                self.expect(TokenType::Assign)?;
+                self.parse_expr()?;
+                let instr_idx = self.chunk.code.len();
+                self.push(Instr::init_field(counter, index));
+                Ok((counter, false, Some((index, instr_idx))))
+            }
+            TokenType::LSquare => {
+                self.input.next()?;
+                self.parse_expr()?;
+                self.expect(TokenType::RSquare)?;
+                self.expect(TokenType::Assign)?;
+                self.parse_expr()?;
+                self.push(Instr::init_index(counter));
+                Ok((counter, false, None))
+            }
+            TokenType::DotDotDot => {
+                // {...} syntax - collect all varargs into the table
+                self.input.next()?;
+                if !self.chunk.is_vararg {
+                    return Err(self.error(SyntaxError::UnexpectedTok(
+                        "cannot use '...' outside a vararg function".to_string(),
+                    )));
+                }
+                // Push all varargs onto stack
+                self.push(Instr::vararg(u8::MAX));
+                // Return special marker indicating vararg was used
+                Ok((counter, true, None))
+            }
+            _ => {
+                if counter == u8::MAX {
+                    return Err(self.error(SyntaxError::TooManyTableFields));
+                }
+                self.parse_expr()?;
+                Ok((counter + 1, false, None))
+            }
+        }
+    }
+
+    fn try_use_table_template(
+        &mut self,
+        table_instr_idx: usize,
+        fields: &[TableTemplateField],
+    ) -> bool {
+        if fields.is_empty() || self.chunk.table_templates.len() >= u8::MAX as usize {
+            return false;
+        }
+
+        let mut template = Vec::with_capacity(fields.len());
+        let mut field_indices = Vec::with_capacity(fields.len());
+        for (key_id, _) in fields {
+            if template.contains(key_id) {
+                return false;
+            }
+            let entry_idx = match u8::try_from(template.len()) {
+                Ok(entry_idx) => entry_idx,
+                Err(_) => return false,
+            };
+            template.push(*key_id);
+            field_indices.push(entry_idx);
+        }
+
+        let template_idx = self.chunk.table_templates.len() as u8;
+        self.chunk.table_templates.push(template);
+        self.chunk.code[table_instr_idx] = Instr::new_table_template(template_idx);
+        for ((key_id, instr_idx), entry_idx) in fields.iter().zip(field_indices) {
+            self.chunk.code[*instr_idx] = Instr::init_field_pinned(*key_id, entry_idx);
+        }
+        true
+    }
+}
