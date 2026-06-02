@@ -111,6 +111,9 @@ pub(crate) fn base_pairs(state: &mut State) -> Result<u8> {
 
 pub(crate) fn open_base(state: &mut State) {
     let mut add = |name, func| {
+        #[cfg(feature = "snapshot")]
+        state.set_global_stdlib_rust_fn(name, name, func);
+        #[cfg(not(feature = "snapshot"))]
         state.set_global_rust_fn(name, func);
     };
 
@@ -425,31 +428,45 @@ pub(crate) fn open_base(state: &mut State) {
     state.new_table(); // metatable
 
     // __index: function(t, k) return globals[k] end
+    #[cfg(feature = "snapshot")]
     state
-        .set_table_str_key_rust_fn(-1, "__index", |state| {
-            state.check_any(2)?;
-            let key = state.to_string(2)?;
-            state.set_top(0);
-            state.get_global(&key);
-            Ok(1)
-        })
+        .set_table_str_key_named_rust_fn(-1, "__index", "_G.__index", global_env_index)
+        .expect("_G metatable __index assignment cannot fail");
+    #[cfg(not(feature = "snapshot"))]
+    state
+        .set_table_str_key_rust_fn(-1, "__index", global_env_index)
         .expect("_G metatable __index assignment cannot fail");
 
     // __newindex: function(t, k, v) globals[k] = v end
+    #[cfg(feature = "snapshot")]
     state
-        .set_table_str_key_rust_fn(-1, "__newindex", |state| {
-            state.check_any(2)?;
-            state.check_any(3)?;
-            let key = state.to_string(2)?;
-            state.push_value(3)?;
-            state.set_global(&key);
-            state.set_top(0);
-            Ok(0)
-        })
+        .set_table_str_key_named_rust_fn(-1, "__newindex", "_G.__newindex", global_env_newindex)
+        .expect("_G metatable __newindex assignment cannot fail");
+    #[cfg(not(feature = "snapshot"))]
+    state
+        .set_table_str_key_rust_fn(-1, "__newindex", global_env_newindex)
         .expect("_G metatable __newindex assignment cannot fail");
 
     state
         .set_metatable_of(1)
         .expect("_G metatable installation cannot fail");
     state.set_global("_G");
+}
+
+fn global_env_index(state: &mut State) -> Result<u8> {
+    state.check_any(2)?;
+    let key = state.to_string(2)?;
+    state.set_top(0);
+    state.get_global(&key);
+    Ok(1)
+}
+
+fn global_env_newindex(state: &mut State) -> Result<u8> {
+    state.check_any(2)?;
+    state.check_any(3)?;
+    let key = state.to_string(2)?;
+    state.push_value(3)?;
+    state.set_global(&key);
+    state.set_top(0);
+    Ok(0)
 }

@@ -15,7 +15,7 @@ use super::vm::{ObjectPtr, Val};
 
 /// Describes where an upvalue comes from when creating a closure.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(super) enum UpvalueDesc {
+pub(crate) enum UpvalueDesc {
     /// Capture a local variable from the immediately enclosing function.
     Local(u8),
     /// Capture an upvalue from the immediately enclosing function.
@@ -177,33 +177,33 @@ impl PartialEq for SetFieldLookupCacheSlot {
 /// alongside each `Closure`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Bytecode {
-    pub(super) code: Vec<Instr>,
-    pub(super) number_literals: Vec<f64>,
-    pub(super) string_literals: Vec<Vec<u8>>,
+    pub(crate) code: Vec<Instr>,
+    pub(crate) number_literals: Vec<f64>,
+    pub(crate) string_literals: Vec<Vec<u8>>,
     /// Table constructor templates. Each entry stores string-literal indices
     /// for a pure named-field constructor's keys, in insertion order.
-    pub(super) table_templates: Vec<Vec<u8>>,
+    pub(crate) table_templates: Vec<Vec<u8>>,
     /// Number of slots in this function's global lookup cache.
     /// Cache slot indices are baked into `OP_GET_GLOBAL_CACHED` instructions.
-    pub(super) global_cache_slots: u16,
+    pub(crate) global_cache_slots: u16,
     /// Number of slots in this function's field lookup cache.
-    pub(super) field_cache_slots: u16,
+    pub(crate) field_cache_slots: u16,
     /// Number of slots in this function's set-field lookup cache.
-    pub(super) set_field_cache_slots: u8,
-    pub(super) num_params: u8,
-    pub(super) num_locals: u8,
-    pub(super) nested: Vec<Arc<Bytecode>>,
+    pub(crate) set_field_cache_slots: u8,
+    pub(crate) num_params: u8,
+    pub(crate) num_locals: u8,
+    pub(crate) nested: Vec<Arc<Bytecode>>,
     /// Describes the upvalues this function captures.
-    pub(super) upvalues: Vec<UpvalueDesc>,
+    pub(crate) upvalues: Vec<UpvalueDesc>,
     /// Whether this function accepts varargs (...).
-    pub(super) is_vararg: bool,
+    pub(crate) is_vararg: bool,
     /// Optional function name (for debugging/analysis).
-    pub(super) name: Option<String>,
+    pub(crate) name: Option<String>,
     /// Source name (file path or chunk identifier like "[string]").
-    pub(super) source: Option<String>,
+    pub(crate) source: Option<String>,
     /// Maps instruction index to source line number.
     /// line_info[i] is the line number for code[i].
-    pub(super) line_info: Vec<u32>,
+    pub(crate) line_info: Vec<u32>,
 }
 
 impl Bytecode {

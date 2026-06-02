@@ -117,6 +117,11 @@ impl Registry {
     pub(crate) fn len(&self) -> usize {
         self.slots.len()
     }
+
+    #[cfg(feature = "snapshot")]
+    pub(crate) fn clear(&mut self) {
+        self.slots.clear();
+    }
 }
 
 impl Markable for Registry {

@@ -342,6 +342,13 @@ impl Instr {
     pub(crate) const fn raw(self) -> u32 {
         self.0
     }
+
+    /// Rebuild an instruction from its raw 32-bit encoding.
+    #[inline]
+    #[cfg(feature = "snapshot")]
+    pub(crate) const fn from_raw(raw: u32) -> Self {
+        Instr(raw)
+    }
 }
 
 // Convenient constructors for each instruction type

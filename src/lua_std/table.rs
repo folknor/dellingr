@@ -11,6 +11,11 @@ pub(crate) fn open_table(state: &mut State) {
     // Helper to add a function to the table at stack index -1.
     macro_rules! add_fn {
         ($name:expr, $func:expr) => {
+            #[cfg(feature = "snapshot")]
+            state
+                .set_table_str_key_named_rust_fn(-1, $name, concat!("table.", $name), $func)
+                .expect("table library registration cannot fail");
+            #[cfg(not(feature = "snapshot"))]
             state
                 .set_table_str_key_rust_fn(-1, $name, $func)
                 .expect("table library registration cannot fail");

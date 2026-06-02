@@ -1,4 +1,25 @@
 project = "dellingr"
 
+# `brokkr check` runs each [[check]] entry as its own (clippy + test) pass with
+# the named feature shape. We sweep both feature configurations because
+# `snapshot` guards real code behind `cfg(feature = "snapshot")` *and*
+# `cfg(not(feature = "snapshot"))` (stdlib Rust-fn registration, the `_G`
+# metatable install, RNG fn naming). A single `--all-features` pass only ever
+# compiles the `feature = ...` side, so the default consumer build - the one
+# that actually ships - would go unchecked without its own sweep.
+#
+#  - "default"    = no features. The downstream-consumer view; catches lints
+#                   and compile errors in the always-compiled and
+#                   `cfg(not(feature = "snapshot"))` code paths.
+#  - "snapshot" = the save/load subsystem enabled, covering save_state.rs,
+#                   the env/fn registry, and the integration + codec tests.
+
+[[check]]
+name = "default"
+
+[[check]]
+name = "snapshot"
+features = ["snapshot"]
+
 [test]
 default_package = "dellingr"

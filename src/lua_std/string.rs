@@ -165,6 +165,11 @@ pub(crate) fn open_string(state: &mut State) {
     // Helper to add a function to the table at stack index -1.
     macro_rules! add_fn {
         ($name:expr, $func:expr) => {
+            #[cfg(feature = "snapshot")]
+            state
+                .set_table_str_key_named_rust_fn(-1, $name, concat!("string.", $name), $func)
+                .expect("string library registration cannot fail");
+            #[cfg(not(feature = "snapshot"))]
             state
                 .set_table_str_key_rust_fn(-1, $name, $func)
                 .expect("string library registration cannot fail");
@@ -572,30 +577,7 @@ pub(crate) fn open_string(state: &mut State) {
             state.push_number(s.len() as f64);
             state.set_table_raw(-3)?;
 
-            state.push_rust_fn(|state| {
-                state.push_string("pos");
-                state.get_table(1)?;
-                let pos = state.to_number(-1).unwrap_or(0.0) as usize;
-                state.pop(1);
-
-                state.push_string("len");
-                state.get_table(1)?;
-                let len = state.to_number(-1).unwrap_or(0.0) as usize;
-                state.pop(1);
-
-                if pos > len {
-                    state.set_top(0);
-                    state.push_nil();
-                    return Ok(1);
-                }
-
-                state.push_string("pos");
-                state.push_number((pos + 1) as f64);
-                state.set_table_raw(1)?;
-                state.set_top(0);
-                state.push_bytes(b"");
-                Ok(1)
-            });
+            push_named_or_plain_rust_fn(state, "string.gmatch.empty_iter", gmatch_empty_iter)?;
 
             state.push_value(-2)?;
             state.remove(-3)?;
@@ -614,55 +596,7 @@ pub(crate) fn open_string(state: &mut State) {
         state.push_number(0.0);
         state.set_table_raw(-3)?;
 
-        state.push_rust_fn(|state| {
-            state.check_type(1, LuaType::Table)?;
-
-            state.push_string("s");
-            state.get_table(1)?;
-            let s = state.to_bytes(-1)?.to_vec();
-            state.pop(1);
-
-            state.push_string("p");
-            state.get_table(1)?;
-            let pattern = state.to_bytes(-1)?.to_vec();
-            state.pop(1);
-
-            state.push_string("pos");
-            state.get_table(1)?;
-            let pos = state.to_number(-1).unwrap_or(0.0) as usize;
-            state.pop(1);
-
-            if pos >= s.len() {
-                state.set_top(0);
-                state.push_nil();
-                return Ok(1);
-            }
-
-            let search = &s[pos..];
-            match LuaPattern::from_bytes_try(&pattern) {
-                Ok(mut matcher) => {
-                    if matcher.matches_bytes(search) {
-                        let range = matcher.range();
-                        let new_pos = pos + range.end.max(1);
-                        state.push_string("pos");
-                        state.push_number(new_pos as f64);
-                        state.set_table_raw(1)?;
-
-                        state.set_top(0);
-                        Ok(push_captures(state, search, &matcher))
-                    } else {
-                        state.set_top(0);
-                        state.push_nil();
-                        Ok(1)
-                    }
-                }
-                Err(_) => {
-                    state.set_top(0);
-                    state.push_nil();
-                    Ok(1)
-                }
-            }
-        });
+        push_named_or_plain_rust_fn(state, "string.gmatch.iter", gmatch_iter)?;
 
         state.push_value(-2)?;
         state.remove(-3)?;
@@ -797,4 +731,95 @@ pub(crate) fn open_string(state: &mut State) {
 
     // Set the string table as a global
     state.set_global("string");
+}
+
+fn push_named_or_plain_rust_fn(
+    state: &mut State,
+    #[cfg_attr(not(feature = "snapshot"), allow(unused_variables))] id: &str,
+    func: fn(&mut State) -> Result<u8>,
+) -> Result<()> {
+    #[cfg(feature = "snapshot")]
+    {
+        state.push_named_rust_fn(id, func)?;
+    }
+    #[cfg(not(feature = "snapshot"))]
+    {
+        state.push_rust_fn(func);
+    }
+    Ok(())
+}
+
+fn gmatch_empty_iter(state: &mut State) -> Result<u8> {
+    state.push_string("pos");
+    state.get_table(1)?;
+    let pos = state.to_number(-1).unwrap_or(0.0) as usize;
+    state.pop(1);
+
+    state.push_string("len");
+    state.get_table(1)?;
+    let len = state.to_number(-1).unwrap_or(0.0) as usize;
+    state.pop(1);
+
+    if pos > len {
+        state.set_top(0);
+        state.push_nil();
+        return Ok(1);
+    }
+
+    state.push_string("pos");
+    state.push_number((pos + 1) as f64);
+    state.set_table_raw(1)?;
+    state.set_top(0);
+    state.push_bytes(b"");
+    Ok(1)
+}
+
+fn gmatch_iter(state: &mut State) -> Result<u8> {
+    state.check_type(1, LuaType::Table)?;
+
+    state.push_string("s");
+    state.get_table(1)?;
+    let s = state.to_bytes(-1)?.to_vec();
+    state.pop(1);
+
+    state.push_string("p");
+    state.get_table(1)?;
+    let pattern = state.to_bytes(-1)?.to_vec();
+    state.pop(1);
+
+    state.push_string("pos");
+    state.get_table(1)?;
+    let pos = state.to_number(-1).unwrap_or(0.0) as usize;
+    state.pop(1);
+
+    if pos >= s.len() {
+        state.set_top(0);
+        state.push_nil();
+        return Ok(1);
+    }
+
+    let search = &s[pos..];
+    match LuaPattern::from_bytes_try(&pattern) {
+        Ok(mut matcher) => {
+            if matcher.matches_bytes(search) {
+                let range = matcher.range();
+                let new_pos = pos + range.end.max(1);
+                state.push_string("pos");
+                state.push_number(new_pos as f64);
+                state.set_table_raw(1)?;
+
+                state.set_top(0);
+                Ok(push_captures(state, search, &matcher))
+            } else {
+                state.set_top(0);
+                state.push_nil();
+                Ok(1)
+            }
+        }
+        Err(_) => {
+            state.set_top(0);
+            state.push_nil();
+            Ok(1)
+        }
+    }
 }

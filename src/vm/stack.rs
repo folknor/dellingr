@@ -95,6 +95,15 @@ impl State {
         self.stack.push(Val::RustFn(f));
     }
 
+    /// Register and push a Rust function with a stable save/load id.
+    #[cfg(feature = "snapshot")]
+    pub fn push_named_rust_fn(&mut self, id: &str, f: RustFunc) -> Result<()> {
+        self.register_rust_fn(id, f)
+            .map_err(|err| Error::without_location(ErrorKind::InternalError(err.to_string())))?;
+        self.push_rust_fn(f);
+        Ok(())
+    }
+
     /// Pushes a copy of the element at the given index onto the stack.
     pub fn push_value(&mut self, i: isize) -> Result<()> {
         let val = self.at_index(i)?;

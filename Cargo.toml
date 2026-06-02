@@ -18,6 +18,7 @@ debug_vm = []
 debug_gc = []
 hotpath = ["hotpath/hotpath"]
 hotpath-alloc = ["hotpath/hotpath", "hotpath/hotpath-alloc"]
+snapshot = []
 
 [lints.rust]
 future_incompatible = "deny"
@@ -65,7 +66,6 @@ dbg_macro = "deny"
 todo = "deny"
 
 [dependencies]
-rand = "0.10"
 indexmap = "2.0"
 slotmap = "1.1"
 hotpath = "0.15"

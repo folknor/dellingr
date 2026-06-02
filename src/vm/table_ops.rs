@@ -6,6 +6,8 @@
 use super::lua_val::RustFunc;
 use super::lua_val::Val;
 use super::{Result, State, TypeError};
+#[cfg(feature = "snapshot")]
+use crate::error::ErrorKind;
 use crate::instr::{ArgCount, RetCount};
 
 impl State {
@@ -53,12 +55,26 @@ impl State {
         }
     }
 
+    #[cfg(not(feature = "snapshot"))]
     pub(crate) fn set_table_str_key_rust_fn(
         &mut self,
         table_idx: isize,
         name: &str,
         func: RustFunc,
     ) -> Result<()> {
+        self.set_table_str_key_value(table_idx, name, Val::RustFn(func))
+    }
+
+    #[cfg(feature = "snapshot")]
+    pub(crate) fn set_table_str_key_named_rust_fn(
+        &mut self,
+        table_idx: isize,
+        name: &str,
+        id: &str,
+        func: RustFunc,
+    ) -> Result<()> {
+        self.register_rust_fn(id, func)
+            .map_err(|err| self.error(ErrorKind::InternalError(err.to_string())))?;
         self.set_table_str_key_value(table_idx, name, Val::RustFn(func))
     }
 

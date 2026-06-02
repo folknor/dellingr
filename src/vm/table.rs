@@ -185,6 +185,28 @@ impl Table {
         }
     }
 
+    #[cfg(feature = "snapshot")]
+    pub(super) fn entries(&self) -> Vec<(Val, Val)> {
+        match &self.storage {
+            TableStorage::Inline { entries, len } => {
+                entries.iter().take(*len as usize).copied().collect()
+            }
+            TableStorage::Map(map) => map.iter().map(|(key, value)| (*key, *value)).collect(),
+        }
+    }
+
+    #[cfg(feature = "snapshot")]
+    pub(super) fn clear_and_insert_entries(&mut self, entries: Vec<(Val, Val)>) -> Result<()> {
+        // Reset to a shell sized for the incoming entries, then re-insert in
+        // order so `pairs()` iteration order round-trips. with_capacity picks
+        // inline vs map storage from the count.
+        *self = Table::with_capacity(entries.len());
+        for (key, value) in entries {
+            self.insert(key, value)?;
+        }
+        Ok(())
+    }
+
     /// Update the value at a specific entry index. Returns true on success.
     ///
     /// This is a hot-path helper for the OP_SET_FIELD inline cache: when a

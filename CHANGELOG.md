@@ -4,6 +4,34 @@ All notable changes to dellingr are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 [Semantic Versioning](https://semver.org/) once 1.0 lands.
 
+## [Unreleased]
+
+### Added
+
+- Optional `snapshot` feature: `State::save_state()` / `State::load_state()`
+  snapshot and restore the persistent script world of a *quiescent* VM -
+  globals (including user shadows of builtin names), the reachable
+  table/closure/upvalue/string graph (cycles and shared upvalues preserved),
+  the RNG stream, and cost counters - through a small in-crate deterministic
+  binary codec (no `serde`/`bincode`/`postcard`). It is a data snapshot, not a
+  continuation: no call stack, program counter, coroutine, anchor, callback, or
+  host user-data handle survives a load. Reachable `RustFunc`s must be
+  registered with a stable id (`set_global_named_rust_fn`, `register_rust_fn`,
+  `push_named_rust_fn`; the stdlib registers its own), or the save fails fast
+  with `SaveError::UnregisteredFunction`. Saves are byte-stable and portable
+  across builds of the same binary that register the same ids. Environment
+  objects (`math`/`string`/`table`/`_G`) and stdlib functions are rebuilt on
+  load and referenced by token, so old saves see the current stdlib.
+
+### Changed
+
+- The VM RNG is now an in-crate SplitMix64 (`VmRng`) and the `rand` dependency
+  was dropped entirely. Its entire state is a single `u64`, which is what lets
+  the RNG round-trip exactly in a save. This changes the `math.random` stream
+  for *every* build, not just `snapshot` (acceptable pre-1.0; the project
+  owns its determinism baseline). The exact stream for a given seed is pinned
+  by a test so it cannot drift silently.
+
 ## [0.3.0] - 2026-05-12
 
 ### Added

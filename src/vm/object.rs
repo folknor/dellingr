@@ -39,11 +39,11 @@ pub(crate) enum Upvalue {
 pub(crate) struct UpvalueRef(u32);
 
 impl UpvalueRef {
-    fn new(idx: u32) -> Self {
+    pub(crate) fn new(idx: u32) -> Self {
         Self(idx)
     }
 
-    fn index(self) -> usize {
+    pub(crate) fn index(self) -> usize {
         self.0 as usize
     }
 }
@@ -73,6 +73,16 @@ impl UpvaluePool {
         let idx = self.slots.len() as u32;
         self.slots.push(upvalue);
         UpvalueRef::new(idx)
+    }
+
+    #[cfg(feature = "snapshot")]
+    pub(super) fn alloc_closed_nil(&mut self) -> UpvalueRef {
+        self.alloc(Upvalue::Closed(Val::Nil))
+    }
+
+    #[cfg(feature = "snapshot")]
+    pub(super) fn set_closed(&mut self, uv_ref: UpvalueRef, val: Val) {
+        self.slots[uv_ref.index()] = Upvalue::Closed(val);
     }
 
     /// Get immutable access to an upvalue.
@@ -152,7 +162,7 @@ new_key_type! {
 /// - Each key contains a generation number
 /// - When a slot is freed and reused, the generation increments
 /// - Accessing with an old key panics instead of causing memory corruption
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) struct ObjectPtr(pub(crate) ObjectKey);
 
 impl ObjectPtr {

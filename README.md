@@ -48,6 +48,20 @@ Some of them might be added later (probably most of them behind a feature gate, 
 
 There's a few gotchas with the current instruction-cost accounting. For example, `while true do end` is free, which means that a users Lua script could run forever. This is a known trade-off made in the full light of day - the main consumer of dellingr does not want to penalise the user (that is, subtract from their per-gametick budget) for structural semantics. Users should be encouraged to write more code, not less.
 
+## Save state
+
+The optional `snapshot` feature adds `State::save_state()` and
+`State::load_state(...)` for game saves, serialized through a small in-crate
+deterministic binary codec (no `serde`/`bincode`). This is a data snapshot of a
+quiescent VM: globals, reachable tables/closures/upvalues/strings, the
+deterministic RNG stream, and cost counters are persisted. It is not a
+continuation capture; no paused call stack, program counter, coroutine, anchor,
+callback, or host user-data handle survives a save/load. Hosts recreate
+callbacks and register the same named Rust functions during load setup - a
+reachable `RustFunc` must be registered with a stable id (e.g.
+`set_global_named_rust_fn`) or the save fails fast. The module doc on
+`src/vm/save_state.rs` covers the format and design.
+
 ## Status
 
 The public API is pre-1.0 and not yet stable. Breaking changes may land at any point.

@@ -10,6 +10,9 @@ mod frame;
 mod lua_val;
 mod metamethod;
 mod object;
+mod rng;
+#[cfg(feature = "snapshot")]
+mod save_state;
 mod stack;
 mod table;
 mod table_ops;
@@ -17,9 +20,12 @@ mod table_ops;
 pub use anchor::Anchor;
 pub use lua_val::LuaType;
 pub use lua_val::RustFunc;
+#[cfg(feature = "snapshot")]
+pub use save_state::{LoadError, SaveDiagnostics, SaveError, SaveState};
 
 use indexmap::IndexMap;
-use rand::SeedableRng;
+#[cfg(feature = "snapshot")]
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use super::Instr;
@@ -39,6 +45,7 @@ use anchor::Registry;
 pub(super) use lua_val::Val;
 pub(super) use object::ObjectPtr;
 use object::{GcHeap, Markable, UpvaluePool, UpvalueRef};
+use rng::VmRng;
 use table::Table;
 
 /// Marks all GC roots. Called before garbage collection to identify reachable objects.
@@ -146,12 +153,25 @@ pub struct State {
     user_data: Option<Box<dyn std::any::Any + Send>>,
     /// Seeded RNG for deterministic math.random(). Defaults to seed 0.
     /// Use `set_rng_seed()` to set a specific seed for replay.
-    pub(super) rng: rand::rngs::StdRng,
+    pub(super) rng: VmRng,
     /// Registry of values retained from Rust via `Anchor` handles. Acts as
     /// an additional GC root set; participates in `mark_gc_roots`. Carries
     /// the State's process-unique `state_id` so cross-State misuse of an
     /// `Anchor` is caught.
     pub(super) registry: Registry,
+    /// Stable ids for Rust functions that are allowed to survive save/load.
+    #[cfg(feature = "snapshot")]
+    pub(super) rust_fns_by_id: BTreeMap<String, RustFunc>,
+    /// Reverse address lookup for save-time Rust function naming.
+    #[cfg(feature = "snapshot")]
+    pub(super) rust_fn_ids_by_addr: BTreeMap<usize, String>,
+    /// Canonical environment objects (library tables, `_G`, and `_G`'s
+    /// metatable) captured once at construction, each mapped to its save token.
+    /// Keyed on the objects `open_libs` built, so user shadowing of a builtin
+    /// slot (`math = {}`) cannot make the save classifier mistake a user table
+    /// for an environment object. See `vm/save_state.rs`.
+    #[cfg(feature = "snapshot")]
+    pub(super) env_tokens: BTreeMap<ObjectPtr, String>,
 }
 
 /// Maximum call depth to prevent stack overflow from deep recursion.
@@ -195,7 +215,29 @@ impl State {
     pub fn with_callbacks(callbacks: Box<dyn HostCallbacks + Send>) -> Self {
         let mut me = Self::empty_with_callbacks(callbacks);
         me.open_libs();
+        #[cfg(feature = "snapshot")]
+        me.capture_env_tokens();
         me
+    }
+
+    /// Record the canonical environment objects right after `open_libs`, before
+    /// any user code can shadow a builtin slot. Both save (object -> token) and
+    /// load (token -> object) resolve through this snapshot.
+    #[cfg(feature = "snapshot")]
+    fn capture_env_tokens(&mut self) {
+        let mut map = BTreeMap::new();
+        for slot in [Builtin::Math, Builtin::String, Builtin::Table, Builtin::G] {
+            if let Val::Obj(ptr) = self.builtins[slot as usize] {
+                map.insert(ptr, slot.name().to_string());
+                if slot == Builtin::G
+                    && let Some(table) = self.heap.as_table_ref(ptr)
+                    && let Some(mt) = table.get_metatable()
+                {
+                    map.insert(mt, "_G.metatable".to_string());
+                }
+            }
+        }
+        self.env_tokens = map;
     }
 
     /// Creates a new state without opening any of the standard libs.
@@ -229,8 +271,14 @@ impl State {
             callbacks,
             current_source: None,
             user_data: None,
-            rng: rand::rngs::StdRng::seed_from_u64(0),
+            rng: VmRng::seed_from_u64(0),
             registry: Registry::new(state_id),
+            #[cfg(feature = "snapshot")]
+            rust_fns_by_id: BTreeMap::new(),
+            #[cfg(feature = "snapshot")]
+            rust_fn_ids_by_addr: BTreeMap::new(),
+            #[cfg(feature = "snapshot")]
+            env_tokens: BTreeMap::new(),
         }
     }
 
@@ -241,7 +289,7 @@ impl State {
 
     /// Sets the RNG seed for deterministic math.random() behavior.
     pub fn set_rng_seed(&mut self, seed: u64) {
-        self.rng = rand::rngs::StdRng::seed_from_u64(seed);
+        self.rng = VmRng::seed_from_u64(seed);
     }
 
     /// Sets the cost budget for this VM.
@@ -462,8 +510,68 @@ impl State {
         self.set_global_value(name, val);
     }
 
+    #[cfg(not(feature = "snapshot"))]
     pub(crate) fn set_global_rust_fn(&mut self, name: &str, func: RustFunc) {
         self.set_global_value(name, Val::RustFn(func));
+    }
+
+    /// Register a Rust function under a stable id and install it as a global.
+    ///
+    /// Save/load uses `id` to resolve reachable [`RustFunc`] values across
+    /// processes; ids should be stable strings owned by the embedder.
+    #[cfg(feature = "snapshot")]
+    pub fn set_global_named_rust_fn(
+        &mut self,
+        name: &str,
+        id: &str,
+        func: RustFunc,
+    ) -> std::result::Result<(), SaveError> {
+        self.register_rust_fn(id, func)?;
+        self.set_global_value(name, Val::RustFn(func));
+        Ok(())
+    }
+
+    #[cfg(feature = "snapshot")]
+    pub(crate) fn set_global_stdlib_rust_fn(&mut self, name: &str, id: &str, func: RustFunc) {
+        self.set_global_named_rust_fn(name, id, func)
+            .expect("stdlib Rust function registration cannot fail");
+    }
+
+    /// Register a Rust function id without installing the function anywhere.
+    ///
+    /// This is useful when the host pushes or stores the function manually but
+    /// still wants it to survive save/load if Lua makes it reachable.
+    #[cfg(feature = "snapshot")]
+    pub fn register_rust_fn(
+        &mut self,
+        id: &str,
+        func: RustFunc,
+    ) -> std::result::Result<(), save_state::SaveError> {
+        let addr = func as usize;
+        // The only genuine error is an id collision: one id bound to two
+        // different function addresses (an embedder bug). Re-registering the
+        // same id->fn pair is idempotent.
+        if let Some(existing_func) = self.rust_fns_by_id.get(id) {
+            if *existing_func as usize != addr {
+                return Err(save_state::SaveError::DuplicateFunctionRegistration {
+                    id: id.to_string(),
+                });
+            }
+            return Ok(());
+        }
+        self.rust_fns_by_id.insert(id.to_string(), func);
+        // Several ids may legitimately share one address: intentional aliasing,
+        // or identical-code folding collapsing distinct fns under release LTO.
+        // Both are behaviorally safe (same code), so we never error here; we
+        // keep the lexicographically-smallest id as the reverse name so saves
+        // stay deterministic regardless of registration order.
+        match self.rust_fn_ids_by_addr.get(&addr) {
+            Some(existing_id) if existing_id.as_str() <= id => {}
+            _ => {
+                self.rust_fn_ids_by_addr.insert(addr, id.to_string());
+            }
+        }
+        Ok(())
     }
 
     pub(super) fn set_global_value(&mut self, name: &str, val: Val) {
