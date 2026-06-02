@@ -25,6 +25,9 @@ All notable changes to dellingr are documented here. The format follows
 
 ### Changed
 
+- Bumped the `hotpath` profiling dependency (used by the `hotpath` feature and
+  the `examples/hotpath.rs` bench harness) from 0.15 to 0.16.1.
+
 - The VM RNG is now an in-crate SplitMix64 (`VmRng`) and the `rand` dependency
   was dropped entirely. Its entire state is a single `u64`, which is what lets
   the RNG round-trip exactly in a save. This changes the `math.random` stream

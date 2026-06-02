@@ -1,4 +1,4 @@
-## What this is
+# What this is
 
 `dellingr` is an embeddable, deterministic, pure-Rust Lua VM with per-opcode instruction-cost accounting. It is the script host for a game project; the README's "Won't implement" section is load-bearing - `pcall`/`xpcall`, coroutines, `io`/`os`/`debug`, `goto`, integer division, bitwise ops, long strings, `string.rep`/`byte`/`char`, and arithmetic/comparison/concat metamethods are deliberately absent. Don't add them without asking. Errors kill the callback by design.
 
@@ -126,6 +126,15 @@ on the script via the regular binary (the hotpath stats table at exit
 otherwise dominates wall time). Don't invoke the `cargo run --example
 hotpath` command manually - run it via the script so the timing path
 stays consistent.
+
+`research/bench_luars.sh` is a one-off comparison harness: same bench
+scripts and same hyperfine pass, but against [lua-rs](https://github.com/ianm199/lua-rs)
+(the only comparable pure-Rust Lua VM) anchored to C Lua 5.4 and the
+LuaJIT floor. It expects a `lua-rs` release binary built from a clone in
+`research/lua-rs/` (build command in the script header); `research/` is
+an untracked external checkout, not part of the crate. The README's
+`lua-rs` column comes from this script - its footnote pins the captured
+date and upstream commit, so refresh both together.
 
 ## Project conventions worth knowing
 

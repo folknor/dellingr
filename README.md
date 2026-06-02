@@ -15,16 +15,18 @@ It's slower than reference Lua, but not dramatically so: roughly 1.6-3x behind l
 
 Run `./bench.sh` to reproduce on your own host. Sample run on AMD Ryzen 9 5900X / Linux 7.0:
 
-| bench                    | dellingr | vs lua5.5 | vs lua5.4 | vs lua5.2 | vs luajit |
-|--------------------------|---------:|----------:|----------:|----------:|----------:|
-| `benchmark`              |    168ms |     4.00x |     3.97x |     2.74x |    23.35x |
-| `numerics/arithmetic`    |    101ms |     3.93x |     3.99x |     2.80x |    23.17x |
-| `iter/pairs`             |     88ms |     2.14x |     2.02x |     1.97x |    16.32x |
-| `tables/fill`            |     99ms |     3.90x |     3.28x |     2.43x |     6.72x |
-| `strings/mixed`          |     38ms |     2.93x |     3.19x |     2.09x |     3.12x |
-| `strings/patterns`       |     30ms |     1.70x |     1.67x |     1.62x |     2.55x |
-| `fields/same_obj_read`   |    115ms |     3.96x |     4.33x |     2.51x |    30.52x |
-| `alloc/closure`          |     77ms |     2.05x |     1.99x |     1.67x |     2.55x |
+| bench                    | dellingr |  lua-rs | vs lua5.5 | vs lua5.4 | vs lua5.2 | vs luajit |
+|--------------------------|---------:|--------:|----------:|----------:|----------:|----------:|
+| `benchmark`              |    168ms |   104ms |     4.00x |     3.97x |     2.74x |    23.35x |
+| `numerics/arithmetic`    |    101ms |    60ms |     3.93x |     3.99x |     2.80x |    23.17x |
+| `iter/pairs`             |     88ms |   169ms |     2.14x |     2.02x |     1.97x |    16.32x |
+| `tables/fill`            |     99ms |    64ms |     3.90x |     3.28x |     2.43x |     6.72x |
+| `strings/mixed`          |     38ms |    65ms |     2.93x |     3.19x |     2.09x |     3.12x |
+| `strings/patterns`       |     30ms |    22ms |     1.70x |     1.67x |     1.62x |     2.55x |
+| `fields/same_obj_read`   |    115ms |    61ms |     3.96x |     4.33x |     2.51x |    30.52x |
+| `alloc/closure`          |     77ms |   126ms |     2.05x |     1.99x |     1.67x |     2.55x |
+
+<sub>The `lua-rs` column was captured 2026-06-02 against [ianm199/lua-rs](https://github.com/ianm199/lua-rs) at commit [`98bd6bd`](https://github.com/ianm199/lua-rs/commit/98bd6bd).</sub>
 
 Note that recorded results always track the latest git head and may not match the released version.
 
