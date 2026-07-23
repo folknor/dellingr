@@ -540,17 +540,12 @@ impl StringPool {
         }
 
         let mut hash = bytes.len() as u64;
-        let mut chunks = bytes.chunks_exact(8);
-        for chunk in &mut chunks {
-            let word = u64::from_le_bytes(
-                chunk
-                    .try_into()
-                    .expect("chunks_exact(8) should only produce 8-byte chunks"),
-            );
+        let (chunks, remainder) = bytes.as_chunks::<8>();
+        for chunk in chunks {
+            let word = u64::from_le_bytes(*chunk);
             hash = mix(hash, word);
         }
 
-        let remainder = chunks.remainder();
         let mut tail = 0u64;
         for (i, byte) in remainder.iter().enumerate() {
             tail |= u64::from(*byte) << (i * 8);

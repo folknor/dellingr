@@ -1,3 +1,13 @@
+// hotpath through 0.14 installed CountingAllocator internally under
+// hotpath-alloc; from 0.16 onward it is a plain generic type the consumer must
+// declare as #[global_allocator] themselves - the crate no longer wires it up
+// on its own. Without this, hotpath-alloc builds fall back to the system
+// allocator and track_alloc/track_dealloc never fire, so every function
+// silently reports 0 bytes.
+#[cfg(feature = "hotpath-alloc")]
+#[global_allocator]
+static ALLOC: hotpath::CountingAllocator = hotpath::CountingAllocator::new();
+
 use std::env::args;
 use std::fs;
 use std::process::exit;

@@ -177,9 +177,8 @@ impl<'a> Lexer<'a> {
                 '[' => {
                     if let Some('=' | '[') = self.peek_char() {
                         panic!("Long strings are not supported yet.");
-                    } else {
-                        LSquare
                     }
+                    LSquare
                 }
 
                 '0'..='9' => self.lex_full_number(tok_start, first_char)?,

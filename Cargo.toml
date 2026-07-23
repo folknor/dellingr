@@ -2,7 +2,7 @@
 name = "dellingr"
 version = "0.3.0"
 edition = "2024"
-rust-version = "1.92"
+rust-version = "1.97"
 description = "An embeddable, pure-Rust Lua VM with precise instruction-cost accounting"
 license = "MIT"
 repository = "https://github.com/folknor/dellingr"
@@ -68,7 +68,7 @@ todo = "deny"
 [dependencies]
 indexmap = "2.0"
 slotmap = "1.1"
-hotpath = "0.16.1"
+hotpath = "0.21.1"
 
 [[example]]
 name = "hotpath"

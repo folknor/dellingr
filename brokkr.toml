@@ -23,3 +23,7 @@ features = ["snapshot"]
 
 [test]
 default_package = "dellingr"
+debug = true
+
+[gremlins]
+exclude = ["tests/string_bytes.rs"]
