@@ -301,6 +301,43 @@ fn gc_threshold_control() {
     // Note: threshold may have been adjusted by auto-GC during eval
 }
 
+#[test]
+fn string_allocations_drive_automatic_gc_threshold() {
+    let mut state = State::empty();
+    state.gc_set_threshold(20);
+
+    // Keep enough distinct strings rooted to reach the threshold.
+    for i in 0..20 {
+        state.push_string(format!("live-{i}"));
+    }
+
+    assert_eq!(state.object_count(), 0);
+    assert_eq!(state.string_count(), 20);
+    assert!(state.gc_should_run());
+
+    // This allocation must collect first. All 20 strings survive, so the
+    // adaptive threshold must include them and grow to 40.
+    state.push_string("trigger");
+
+    assert_eq!(state.string_count(), 21);
+    assert_eq!(state.gc_threshold(), 40);
+    assert!(!state.gc_should_run());
+
+    // Drop every live string, then verify string-only churn is collected
+    // automatically rather than growing without bound.
+    state.set_top(0);
+    for i in 0..1_000 {
+        state.push_string(format!("temporary-{i}"));
+        state.pop(1);
+    }
+
+    assert_eq!(state.object_count(), 0);
+    assert!(
+        state.string_count() <= state.gc_threshold(),
+        "temporary strings should have triggered automatic collection"
+    );
+}
+
 /// Test the callback pattern used by fcomm2:
 /// - Main chunk defines local functions and global callbacks that capture them
 /// - Main chunk finishes (upvalues should be closed)

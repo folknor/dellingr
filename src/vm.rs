@@ -410,25 +410,30 @@ impl State {
 
     /// Returns the total number of heap allocations (objects + strings).
     pub fn heap_size(&self) -> usize {
-        self.heap.object_count() + self.heap.string_count()
+        self.heap.allocation_count()
     }
 
     // ========================================================================
     // Host-controlled GC
     // ========================================================================
 
-    /// Returns true if the GC threshold has been reached.
-    /// Use this to check if `gc_collect()` should be called.
+    /// Returns true if `heap_size()` has reached the GC threshold.
+    /// The threshold counts objects plus distinct interned strings and is
+    /// checked before allocation.
     pub fn gc_should_run(&self) -> bool {
         self.heap.is_full()
     }
 
-    /// Returns the current GC threshold.
+    /// Returns the current GC threshold in total heap allocations (objects plus
+    /// distinct interned strings). Each collection recomputes it from survivors.
     pub fn gc_threshold(&self) -> usize {
         self.heap.threshold()
     }
 
-    /// Sets the GC threshold. Collection triggers when object_count >= threshold.
+    /// Sets the GC threshold in total heap allocations (objects plus distinct
+    /// interned strings). Collection triggers before allocation when
+    /// `heap_size() >= threshold`; each collection recomputes the threshold
+    /// from survivors.
     /// Set to `usize::MAX` to effectively disable automatic GC.
     pub fn gc_set_threshold(&mut self, threshold: usize) {
         self.heap.set_threshold(threshold);

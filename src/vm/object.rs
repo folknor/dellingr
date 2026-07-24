@@ -189,7 +189,8 @@ impl fmt::Display for ObjectPtr {
 pub(crate) struct GcHeap {
     /// SlotMap storing all GC-managed objects.
     objects: SlotMap<ObjectKey, WrappedObject>,
-    /// When the heap grows this large, run the GC.
+    /// When total heap allocations (objects plus distinct interned strings)
+    /// reach this threshold, run the GC.
     threshold: usize,
     /// Pool for interned strings.
     strings: StringPool,
@@ -345,7 +346,7 @@ impl GcHeap {
     /// Check if GC should run.
     #[must_use]
     pub(super) fn is_full(&self) -> bool {
-        self.objects.len() >= self.threshold
+        self.allocation_count() >= self.threshold
     }
 
     /// Mark an object as reachable. Call this for all root objects.
@@ -406,8 +407,8 @@ impl GcHeap {
         // String collection
         self.strings.collect();
 
-        // Dynamic threshold: double the surviving size (minimum 20)
-        self.threshold = (self.objects.len() * 2).max(20);
+        // Dynamic threshold: double the surviving allocation count (min 20).
+        self.threshold = self.allocation_count().saturating_mul(2).max(20);
 
         #[cfg(feature = "debug_gc")]
         println!("Final size: {}", self.objects.len());
@@ -425,6 +426,13 @@ impl GcHeap {
     /// Number of interned strings.
     pub(super) fn string_count(&self) -> usize {
         self.strings.len()
+    }
+
+    /// Total heap allocations counted toward the GC threshold: GC-managed
+    /// objects plus distinct interned strings.
+    #[inline]
+    pub(super) fn allocation_count(&self) -> usize {
+        self.objects.len().saturating_add(self.strings.len())
     }
 
     /// Current GC threshold.
