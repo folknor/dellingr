@@ -32,6 +32,13 @@ impl Parser<'_> {
     /// Parses a single expression.
     #[hotpath::measure]
     pub(super) fn parse_expr(&mut self) -> Result<ExpDesc> {
+        self.enter_syntax_level()?;
+        let result = self.parse_expr_inner();
+        self.exit_syntax_level();
+        result
+    }
+
+    fn parse_expr_inner(&mut self) -> Result<ExpDesc> {
         self.parse_or()
     }
 
@@ -156,6 +163,13 @@ impl Parser<'_> {
 
     /// Parses a unary expression (`not`, `#`, `-`). Precedence 2.
     fn parse_unary(&mut self) -> Result<ExpDesc> {
+        self.enter_syntax_level()?;
+        let result = self.parse_unary_inner();
+        self.exit_syntax_level();
+        result
+    }
+
+    fn parse_unary_inner(&mut self) -> Result<ExpDesc> {
         let instr = match self.input.peek_type()? {
             TokenType::Not => Instr::not(),
             TokenType::Hash => Instr::length(),
@@ -223,6 +237,13 @@ impl Parser<'_> {
     /// table index, or function/method call.
     #[hotpath::measure]
     fn parse_prefix_extension(&mut self, base_expr: PrefixExp) -> Result<PrefixExp> {
+        self.enter_syntax_level()?;
+        let result = self.parse_prefix_extension_inner(base_expr);
+        self.exit_syntax_level();
+        result
+    }
+
+    fn parse_prefix_extension_inner(&mut self, base_expr: PrefixExp) -> Result<PrefixExp> {
         match self.input.peek_type()? {
             TokenType::Dot => {
                 self.eval_prefix_exp(&base_expr);
@@ -254,22 +275,30 @@ impl Parser<'_> {
                 let (num_args, last_exp) = self.parse_call_args()?;
                 // If last arg is vararg, adjust to pass all varargs
                 let num_args = if let ExpDesc::Vararg = last_exp {
-                    self.chunk.code.pop(); // Instr::pop() Vararg(1)
-                    self.push(Instr::vararg(u8::MAX)); // Push all varargs
+                    self.replace_last_instr(Instr::vararg(u8::MAX)); // Push all varargs
                     u8::MAX // Signal to VM to calculate arg count from call base
                 } else if let ExpDesc::Prefix(PrefixExp::FunctionCall(_)) = last_exp {
                     // Last argument is a function call - adjust it to return all values
-                    let inner_num_args = match self.chunk.code.pop() {
-                        Some(instr) if instr.opcode() == Instr::OP_CALL => instr.a(),
-                        i => {
-                            unreachable!("PrefixExp::FunctionCall but last instruction was {:?}", i)
-                        }
+                    let old = *self
+                        .chunk
+                        .code
+                        .last()
+                        .expect("function call expression must end with a call instruction");
+                    let inner_num_args = match old.opcode() {
+                        Instr::OP_CALL => old.a(),
+                        _ => unreachable!(
+                            "PrefixExp::FunctionCall but last instruction was {:?}",
+                            old
+                        ),
                     };
-                    self.push(Instr::call(ArgCount::Fixed(inner_num_args), RetCount::All)); // Return all values
+                    self.replace_last_instr(Instr::call(
+                        ArgCount::Fixed(inner_num_args),
+                        RetCount::All,
+                    )); // Return all values
                     u8::MAX // Signal to VM to calculate arg count from call base
                 } else {
                     // No special handling needed, remove the Instr::mark_call_base()
-                    self.chunk.code.remove(mark_idx);
+                    self.remove_instr(mark_idx);
                     self.checked_fixed_arg_count(num_args as usize, 0)?
                 };
                 let prefix = PrefixExp::FunctionCall(num_args);
@@ -309,22 +338,30 @@ impl Parser<'_> {
                 let (num_args, last_exp) = self.parse_call_args()?;
                 // If last arg is vararg, adjust to pass all varargs
                 let num_args = if let ExpDesc::Vararg = last_exp {
-                    self.chunk.code.pop(); // Instr::pop() Vararg(1)
-                    self.push(Instr::vararg(u8::MAX)); // Push all varargs
+                    self.replace_last_instr(Instr::vararg(u8::MAX)); // Push all varargs
                     u8::MAX // Signal to VM to calculate arg count from call base
                 } else if let ExpDesc::Prefix(PrefixExp::FunctionCall(_)) = last_exp {
                     // Last argument is a function call - adjust it to return all values
-                    let inner_num_args = match self.chunk.code.pop() {
-                        Some(instr) if instr.opcode() == Instr::OP_CALL => instr.a(),
-                        i => {
-                            unreachable!("PrefixExp::FunctionCall but last instruction was {:?}", i)
-                        }
+                    let old = *self
+                        .chunk
+                        .code
+                        .last()
+                        .expect("function call expression must end with a call instruction");
+                    let inner_num_args = match old.opcode() {
+                        Instr::OP_CALL => old.a(),
+                        _ => unreachable!(
+                            "PrefixExp::FunctionCall but last instruction was {:?}",
+                            old
+                        ),
                     };
-                    self.push(Instr::call(ArgCount::Fixed(inner_num_args), RetCount::All)); // Return all values
+                    self.replace_last_instr(Instr::call(
+                        ArgCount::Fixed(inner_num_args),
+                        RetCount::All,
+                    )); // Return all values
                     u8::MAX // Signal to VM to calculate arg count from call base
                 } else {
                     // No special handling needed, remove the Instr::mark_call_base()
-                    self.chunk.code.remove(mark_idx);
+                    self.remove_instr(mark_idx);
                     self.checked_fixed_arg_count(num_args as usize, 1)?
                 };
                 // Stack: [method, obj, arg1, arg2, ...]

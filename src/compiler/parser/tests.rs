@@ -5,6 +5,7 @@ use super::Instr;
 use super::Parser;
 use super::TokenStream;
 use super::parse_str;
+use crate::State;
 use crate::error::{ErrorKind, SyntaxError};
 use crate::instr::{ArgCount, Builtin, RetCount};
 
@@ -15,6 +16,24 @@ fn clear_line_info(chunk: &mut Bytecode) {
         let inner = Arc::get_mut(nested).expect("test fixture should own its nested chunks");
         clear_line_info(inner);
     }
+}
+
+fn assert_line_info_matches_code_len(chunk: &Bytecode) {
+    assert_eq!(chunk.code.len(), chunk.line_info.len());
+    for nested in &chunk.nested {
+        assert_line_info_matches_code_len(nested);
+    }
+}
+
+fn assert_too_many_syntax_levels(source: &str) {
+    let err = parse_str(source).expect_err("source must exceed the syntax depth limit");
+    assert!(
+        matches!(
+            err.kind,
+            ErrorKind::SyntaxError(SyntaxError::TooManySyntaxLevels),
+        ),
+        "unexpected error: {err:?}"
+    );
 }
 
 fn check_it(input: &str, mut output: Bytecode) {
@@ -109,6 +128,7 @@ fn checked_jump_offset_accepts_i16_boundaries_only() {
         outer_locals: Vec::new(),
         outer_upvalues: Vec::new(),
         current_line: 1,
+        syntax_depth: 0,
     };
 
     assert_eq!(parser.checked_jump_offset(0, 32_768).unwrap(), i16::MAX);
@@ -1255,4 +1275,120 @@ fn local_tail_call_assignment_bytecode_is_unchanged() {
             Instr::ret(RetCount::Fixed(0)),
         ]
     );
+}
+
+#[test]
+fn line_info_matches_code_len() {
+    for source in [
+        "print(1)",
+        "local a, b = f()",
+        "a, b, c = f()",
+        "return f(1)",
+        "local function f(...) return f(...), ... end",
+        "t = {f()}",
+        "local function f(...) t = {...} end",
+        "obj:m(1)",
+        "obj:m(f())",
+    ] {
+        let chunk = parse_str(source).expect("line-info fixture must compile");
+        assert_line_info_matches_code_len(&chunk);
+    }
+}
+
+#[test]
+fn line_info_reports_correct_line() {
+    let mut state = State::new();
+    state
+        .load_string("function f() end\nf(); f(); f(); f(); f(); f(); f(); f(); f(); f()\nf(); f(); f(); f(); f(); f(); f(); f(); f(); f()\n\nlocal x = nil; x()")
+        .expect("line-info fixture must compile");
+    let err = state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+        .expect_err("calling nil must fail");
+    assert_eq!(
+        err.stack_trace
+            .first()
+            .expect("runtime error must carry a stack frame")
+            .line,
+        5
+    );
+}
+
+fn upvalue_program(grandparent_locals: usize, parent_locals: usize) -> String {
+    let grandparent = (0..grandparent_locals)
+        .map(|i| format!("a{i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let parent = (0..parent_locals)
+        .map(|i| format!("b{i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let references = (0..grandparent_locals)
+        .map(|i| format!("a{i}"))
+        .chain((0..parent_locals).map(|i| format!("b{i}")))
+        .collect::<Vec<_>>()
+        .join(" + ");
+    format!(
+        "local {grandparent}\nlocal function parent() local {parent}; return function() return {references} end end"
+    )
+}
+
+#[test]
+fn too_many_upvalues_errors() {
+    let err = parse_str(&upvalue_program(200, 60)).expect_err("260 upvalues must be rejected");
+    assert!(matches!(
+        err.kind,
+        ErrorKind::SyntaxError(SyntaxError::TooManyUpvalues)
+    ));
+    parse_str(&upvalue_program(200, 50)).expect("250 upvalues must remain supported");
+}
+
+#[test]
+fn syntax_depth_limit() {
+    let depth = 10_000;
+    assert_too_many_syntax_levels(&format!("{}1{}", "(".repeat(depth), ")".repeat(depth)));
+    assert_too_many_syntax_levels(&format!("{}{}", "do ".repeat(depth), "end ".repeat(depth)));
+    assert_too_many_syntax_levels(&format!("local x = {}1", "- ".repeat(depth)));
+    assert_too_many_syntax_levels(&format!(
+        "local x = {}1{}",
+        "{".repeat(depth),
+        "}".repeat(depth)
+    ));
+    assert_too_many_syntax_levels(&format!(
+        "if true then {}end",
+        "elseif true then ".repeat(depth)
+    ));
+    assert_too_many_syntax_levels(&format!("a{}", ".b".repeat(depth)));
+}
+
+#[test]
+fn syntax_depth_headroom() {
+    // This test is the empirical check that MAX_SYNTAX_DEPTH fits the stack a
+    // debug `cargo test` thread gets (2MB by default, not the 8MB main stack).
+    // It therefore has to exercise the *fattest* cycle, not the cheapest.
+    //
+    // Statement nesting costs only ~3 small native frames per depth tick, so on
+    // its own it proves very little.
+    let depth = 190;
+    parse_str(&format!("{}{}", "do ".repeat(depth), "end ".repeat(depth)))
+        .expect("statement nesting below the limit must compile");
+
+    // Nested parens are the worst case: each level descends through both the
+    // parse_expr and parse_unary wrappers plus the whole precedence ladder, so
+    // it burns ~13 native frames per level and charges 2 depth ticks. Two ticks
+    // per paren is why the effective paren limit is ~99 rather than 200; 95 is
+    // the deepest round number that still compiles.
+    let paren_depth = 95;
+    parse_str(&format!(
+        "local x = {}1{}",
+        "(".repeat(paren_depth),
+        ")".repeat(paren_depth)
+    ))
+    .expect("paren nesting below the limit must compile");
+
+    // elseif chains recurse on their own axis, bypassing parse_statements.
+    parse_str(&format!(
+        "if true then {}end",
+        "elseif true then ".repeat(depth)
+    ))
+    .expect("elseif chaining below the limit must compile");
 }

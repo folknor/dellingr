@@ -15,6 +15,8 @@ use crate::instr::{ArgCount, Builtin, RetCount};
 
 use std::borrow::Borrow;
 
+const MAX_SYNTAX_DEPTH: u32 = 200;
+
 mod expr;
 mod func;
 mod stmt;
@@ -41,6 +43,8 @@ struct Parser<'a> {
     outer_upvalues: Vec<Vec<(String, UpvalueDesc)>>,
     /// Current line number for instruction emission.
     current_line: u32,
+    /// Current nesting depth across recursive parser entry points.
+    syntax_depth: u32,
 }
 
 /// Tracks the break jumps and upvalue-close boundary for one loop.
@@ -73,6 +77,7 @@ pub(super) fn parse_str_named(source: &str, source_name: Option<String>) -> Resu
         outer_locals: Vec::new(),
         outer_upvalues: Vec::new(),
         current_line: 1,
+        syntax_depth: 0,
     };
     parser.parse_all()
 }
@@ -115,6 +120,18 @@ impl<'a> Parser<'a> {
             return Err(self.error(SyntaxError::TooManyArguments));
         }
         Ok(total as u8)
+    }
+
+    fn enter_syntax_level(&mut self) -> Result<()> {
+        if self.syntax_depth >= MAX_SYNTAX_DEPTH {
+            return Err(self.error(SyntaxError::TooManySyntaxLevels));
+        }
+        self.syntax_depth += 1;
+        Ok(())
+    }
+
+    fn exit_syntax_level(&mut self) {
+        self.syntax_depth -= 1;
     }
 
     fn checked_jump_offset(&self, from: usize, target: usize) -> Result<i16> {
@@ -388,6 +405,22 @@ impl<'a> Parser<'a> {
         self.chunk.line_info.push(self.current_line);
     }
 
+    /// Removes the instruction at `idx`, keeping line_info aligned.
+    fn remove_instr(&mut self, idx: usize) -> Instr {
+        self.chunk.line_info.remove(idx);
+        self.chunk.code.remove(idx)
+    }
+
+    /// Overwrites the last emitted instruction in place, returning the old one.
+    fn replace_last_instr(&mut self, instr: Instr) -> Instr {
+        let slot = self
+            .chunk
+            .code
+            .last_mut()
+            .expect("replace_last_instr requires a previously emitted instruction");
+        std::mem::replace(slot, instr)
+    }
+
     /// Updates current line based on token position.
     fn update_line(&mut self, pos: usize) {
         let (line, _) = self.input.line_and_column(pos);
@@ -515,6 +548,13 @@ impl<'a> Parser<'a> {
     /// Parses 0 or more statements, possibly separated by semicolons.
     #[hotpath::measure]
     fn parse_statements(&mut self) -> Result<()> {
+        self.enter_syntax_level()?;
+        let result = self.parse_statements_inner();
+        self.exit_syntax_level();
+        result
+    }
+
+    fn parse_statements_inner(&mut self) -> Result<()> {
         loop {
             // Update line number at start of each statement for accurate error reporting
             let stmt_start = self.input.peek()?.start;
@@ -579,7 +619,7 @@ impl<'a> Parser<'a> {
         }
 
         // Try to resolve as an upvalue from outer scopes
-        if let Some(i) = self.resolve_upvalue(name) {
+        if let Some(i) = self.resolve_upvalue(name)? {
             return Ok(PlaceExp::Upvalue(i));
         }
 

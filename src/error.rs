@@ -134,6 +134,10 @@ pub enum SyntaxError {
     TooManyExpressions,
     /// Function body has more locals than the VM accepts.
     TooManyLocals,
+    /// Function has more upvalues than the bytecode can encode.
+    TooManyUpvalues,
+    /// Source exceeds the parser's bounded syntax nesting depth.
+    TooManySyntaxLevels,
     /// A fixed-arity call uses the dynamic-argument sentinel.
     TooManyArguments,
     /// A control-flow target cannot be represented by a jump instruction.
@@ -342,6 +346,8 @@ impl fmt::Display for SyntaxError {
             LongStringUnsupported => write!(f, "long strings are not supported"),
             TooManyExpressions => write!(f, "too many expressions in a single list (limit 255)"),
             TooManyLocals => write!(f, "too many local variables"),
+            TooManyUpvalues => write!(f, "too many upvalues"),
+            TooManySyntaxLevels => write!(f, "chunk has too many syntax levels"),
             TooManyArguments => write!(f, "too many arguments in a fixed call (limit 254)"),
             JumpTooFar => write!(
                 f,

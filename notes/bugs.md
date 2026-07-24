@@ -81,83 +81,6 @@ print(string.format("%p", print) == string.format("%p", print))
   instability of fn addresses is irrelevant in-process; the snapshot concern
   stays tracked in TODO.md.
 
-### 7. Unbounded parser recursion: hostile source aborts the host process (A-A1)
-
-- **Locations:** `src/compiler/parser/expr.rs` (`parse_expr -> parse_or ->
-  ... -> parse_primary -> parse_prefix_exp -> parse_expr` via parens,
-  `parse_unary -> parse_unary`, `parse_pow -> parse_unary -> parse_pow`),
-  `stmt.rs:416-423` (`parse_statements -> parse_do`), `stmt.rs:503-547`
-  (`parse_if_arm -> parse_else_or_elseif`), `table.rs` (`parse_table ->
-  parse_table_entry -> parse_expr -> parse_table`).
-- **Cause:** `nest_level: i32` tracks scope depth but is never bounded.
-  Reference Lua rejects deep nesting with "chunk has too many syntax levels"
-  (LUAI_MAXCCALLS, ~200). dellingr instead exhausts the native stack: a Rust
-  stack overflow is an abort, killing the whole game process. Parser-side
-  sibling of the L17 lexer comment-recursion fix - the lexer got hardened,
-  the parser did not.
-- **Repro (do not run in-process without expecting an abort):** 200k nested
-  parens around `x`, or 200k of `do `, or 200k of `-` before a literal, or
-  200k nested `{`.
-- **Fix sketch:** a `syntax_depth: u32` on `Parser`, incremented in
-  `parse_expr`, `parse_statements`, `parse_table`, `parse_prefix_extension`
-  (recursive extension chains like `a.b.c.d...` also recurse), error
-  `SyntaxError::TooManySyntaxLevels` past ~200-500. Cheap, matches reference.
-
-### 8. Upvalue index truncation past 255: silent miscompile (A-A2)
-
-- **Locations:** `src/compiler/parser/upvalue.rs:101-105` (`add_upvalue`:
-  `self.upvalues.len() as u8`), `:7-12` (`find_upvalue`), `:69, 79, 90`
-  (`create_parent_upvalue`).
-- **Cause:** no cap on the per-function upvalue list, unlike `add_local`
-  (parser.rs:85-95, capped at 255) and reference Lua (MAXUPVAL 255, "too many
-  upvalues"). A function can legally reference more than 255 distinct outer
-  names (200 locals in grandparent + 60 in parent, inner function referencing
-  all 260): the 256th upvalue gets index 0 via `as u8` truncation and
-  `Instr::get_upvalue(0)` silently reads the wrong variable. No error, no
-  panic - a miscompiled program. `UpvalueDesc::Upvalue(idx)` is stored into
-  `Bytecode.upvalues` with the truncated index, so the closure capture list
-  itself is wrong and the snapshot codec faithfully persists the wrong
-  program.
-- **Repro sketch:** generated script - function A declares a1..a200, nested B
-  declares b1..b60, inner C returns `a1+...+a200+b1+...+b60`; C's 256th
-  captured name resolves to upvalue slot 0.
-- **Fix:** mirror `add_local` - new `SyntaxError::TooManyUpvalues` when a list
-  would exceed 255, in `add_upvalue` and both push sites in
-  `create_parent_upvalue`.
-
-### 9. `line_info` desyncs from `code`: wrong line numbers everywhere (A-A3)
-
-- **Locations:** `parser.rs:386-389` (`Parser::push` appends in lockstep);
-  desync sites: `expr.rs:272` and `expr.rs:327`
-  (`self.chunk.code.remove(mark_idx)` - executed for EVERY plain fixed-arg
-  call), plus pop-then-push adjustments leaving one stale extra entry each:
-  `expr.rs:257-268`, `expr.rs:312-323` (vararg / tail-call arg adjustment),
-  `stmt.rs:24-31` (return tail), `stmt.rs:371-388` (`adjust_multi_assign`).
-- **Cause:** every post-hoc rewrite of `code` ignores `line_info`;
-  `code.remove` leaves `line_info` one longer and misaligned for every
-  instruction at or after `mark_idx`. Consumers index by pc:
-  `vm/frame.rs:70` (`current_line`, stack traces), `vm.rs:488` (`host_print`
-  line), `compiler.rs:263` (`assign_cache_slots` error line), and
-  `save_state.rs` serializes the skewed vector. Skew accumulates one slot per
-  call site; in call-heavy scripts, error traces report lines earlier than
-  the actual error - the more code, the further off.
-- **Repro:**
-
-```lua
-local function f() return 1 end
-f() f() f() f() f() f() f() f() f() f()
-local boom = nil + 1   -- reference reports this line; dellingr's trace
-                       -- reports an earlier line (skew = ~10 slots)
-```
-
-  Or simply assert `bc.code.len() == bc.line_info.len()` after parsing
-  `print(1)` - it fails today.
-- **Fix options:** (a) route every code mutation through helpers that mirror
-  the edit into `line_info` (pop_instr / remove_instr); (b) the OP_NOP
-  restructure (optimizations.md #7), which removes `code.remove` entirely and
-  makes the invariant structural. Either way add a debug_assert of equal
-  lengths in `finalize`.
-
 ### 10. `load_state` performs zero bytecode validation; a forged save escalates to process panic (D-D2, hostile input)
 
 - **Locations:** `src/vm/save_state.rs:645-709`
@@ -1000,7 +923,7 @@ saturation all consistent with IEEE semantics and the C30/L16 tests.
 correctly (255 encodes back to Dynamic) - fragile-but-correct; a `from_u8`
 round-trip would read better. `code.remove(mark_idx)` index safety (jump
 offsets, break-jump indices, table-template indices, tail-call indices) all
-verified safe - only `line_info` is broken (#9). Repeat-until scoping (C29),
+verified safe. Repeat-until scoping (C29),
 close-upvalue emission at scope/break boundaries, multi-assign ordering,
 `...` restriction, method-call desugaring, escape decoding bounds: correct.
 `assign_cache_slots` bounds and deterministic slot assignment: correct.
@@ -1083,9 +1006,7 @@ glibc's.
 
 ## Orchestrator notes (carried from the corner reports)
 
-- #7, #8, #9, #17 deserve regression tests before/with any fix (#9 is
-  testable as a pure invariant: `code.len() == line_info.len()` recursively
-  after `finalize`).
+- #17 deserves a regression test before/with any fix.
 - The A-corner P2/P3 items (#18, #19, #40-#43) are diff-testable against
   lua5.2/lua5.4 with small scripts; the CR/VT cases need byte-level fixtures
   (careful with editors normalizing line endings).

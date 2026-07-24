@@ -21,13 +21,19 @@ impl<'a> Parser<'a> {
             // If the last expression is a function call or vararg, adjust to return all values
             match last_exp {
                 ExpDesc::Prefix(PrefixExp::FunctionCall(num_args)) => {
-                    self.chunk.code.pop(); // Instr::pop() the Call(num_args, 1) instruction
-                    self.push(Instr::call(ArgCount::Fixed(num_args), RetCount::All)); // Emit Call with "return all"
+                    let old = *self
+                        .chunk
+                        .code
+                        .last()
+                        .expect("tail function call must emit a call instruction");
+                    if old.opcode() != Instr::OP_CALL {
+                        unreachable!("tail function call but last instruction was {old:?}");
+                    }
+                    self.replace_last_instr(Instr::call(ArgCount::Fixed(num_args), RetCount::All)); // Emit Call with "return all"
                     u8::MAX
                 }
                 ExpDesc::Vararg => {
-                    self.chunk.code.pop(); // Instr::pop() the Vararg(1) instruction
-                    self.push(Instr::vararg(u8::MAX)); // Emit Vararg with "return all"
+                    self.replace_last_instr(Instr::vararg(u8::MAX)); // Emit Vararg with "return all"
                     u8::MAX
                 }
                 _ => n,
@@ -368,24 +374,22 @@ impl<'a> Parser<'a> {
         match last_exp {
             ExpDesc::Prefix(PrefixExp::FunctionCall(num_args)) if tail_needed > 1 => {
                 let tail_needed = self.checked_multi_assign_width(tail_needed)?;
-                let old = self.chunk.code.pop();
-                debug_assert!(
-                    matches!(old, Some(instr) if instr.opcode() == Instr::OP_CALL),
-                    "tail function call must end the emitted expression list"
-                );
-                self.push(Instr::call(
+                let old = self.replace_last_instr(Instr::call(
                     ArgCount::Fixed(*num_args),
                     RetCount::Fixed(tail_needed),
                 ));
+                debug_assert!(
+                    old.opcode() == Instr::OP_CALL,
+                    "tail function call must end the emitted expression list"
+                );
             }
             ExpDesc::Vararg if tail_needed > 1 => {
                 let tail_needed = self.checked_multi_assign_width(tail_needed)?;
-                let old = self.chunk.code.pop();
+                let old = self.replace_last_instr(Instr::vararg(tail_needed));
                 debug_assert!(
-                    matches!(old, Some(instr) if instr.opcode() == Instr::OP_VARARG),
+                    old.opcode() == Instr::OP_VARARG,
                     "tail vararg must end the emitted expression list"
                 );
-                self.push(Instr::vararg(tail_needed));
             }
             _ if num_targets > num_exprs => {
                 for _ in num_exprs..num_targets {
@@ -501,6 +505,13 @@ impl<'a> Parser<'a> {
     /// Parses an `if` or `elseif` block and any subsequent `elseif` or `else`
     /// blocks in the same chain.
     fn parse_if_arm(&mut self) -> Result<()> {
+        self.enter_syntax_level()?;
+        let result = self.parse_if_arm_inner();
+        self.exit_syntax_level();
+        result
+    }
+
+    fn parse_if_arm_inner(&mut self) -> Result<()> {
         self.input.next()?; // `if` or `elseif` keyword
         self.parse_expr()?;
         self.expect(TokenType::Then)?;

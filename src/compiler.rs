@@ -355,6 +355,11 @@ pub(super) fn parse_str_named(
 /// Walk a freshly-parsed `Bytecode` tree and assign cache slot indices to
 /// every nested function before it ships to the runtime.
 fn finalize(bc: &mut Bytecode) -> Result<()> {
+    debug_assert_eq!(
+        bc.code.len(),
+        bc.line_info.len(),
+        "line_info desynced from code"
+    );
     bc.assign_cache_slots()?;
     for nested in &mut bc.nested {
         // The parser produces nested `Arc<Bytecode>` with a refcount of 1, so

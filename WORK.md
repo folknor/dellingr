@@ -4,261 +4,302 @@ Current work item. Numbers refer to finding numbers in `notes/bugs.md`.
 
 ---
 
-## Targets #1, #2, #4, #25: values held outside the GC root set
+## Targets #7, #8, #9: parser and codegen hardening
 
-Four instances of one defect class. `vm::mark_gc_roots` (`src/vm.rs:69-89`) is
-documented as the single source of truth for reachability, and marks exactly:
-`stack`, `globals`, `builtins`, `string_literals`, `active_call_roots`,
-`upvalue_pool` (transitively), and `registry`. Each finding below holds a live
-`Val` somewhere that set cannot see, across an operation that can trigger
-`gc_collect`. The result is a swept-but-referenced object and a
-`"Invalid ObjectPtr: object was freed (use-after-free detected)"` panic - which
-kills the host process, violating the design rule that errors kill the callback
-rather than the host.
+Three independent defects that all live in `src/compiler/parser/`. Grouped so
+one build session touches those files once. They do not share a mechanism.
 
-They are one loop because they want one mechanism, and because `mark_gc_roots`
-should be edited once rather than three times.
+All three verified: #9 empirically (wrong line reported), #7 and #8 by reading.
 
-All four verified by reading.
+### #7 (High) - unbounded parser recursion aborts the host process
 
-### #1 (High) - `with_restricted_env` un-roots the saved environment
+The parser is recursive descent with no depth bound anywhere.
+`Parser::nest_level` (`parser.rs:30, 68, 89, 372, 382`) tracks *scope* depth
+for local-slot bookkeeping and is never compared against a limit; there is no
+`syntax_depth` equivalent.
 
-`src/vm.rs:611-654`. The function `std::mem::replace`s the real environment
-into Rust locals:
+Mutually recursive cycles that hostile source can drive arbitrarily deep:
 
-```rust
-let saved_globals = std::mem::replace(&mut self.globals, restricted_globals);
-let saved_builtins = std::mem::replace(&mut self.builtins, restricted_builtins);
-```
+- `parse_expr -> parse_or -> ... -> parse_primary -> parse_prefix_exp ->
+  parse_expr` via parentheses (`expr.rs`)
+- `parse_unary -> parse_unary`, `parse_pow -> parse_unary -> parse_pow`
+- `parse_statements -> parse_do` (`stmt.rs:416-423`)
+- `parse_if_arm -> parse_else_or_elseif` (`stmt.rs:503-547`)
+- `parse_table -> parse_table_entry -> parse_expr -> parse_table` (`table.rs`)
+- recursive prefix-extension chains (`a.b.c.d...`)
 
-While `f` runs, those locals are invisible to `mark_gc_roots`. Any allocation
-inside `f` can collect everything reachable only from the saved environment:
-the `math` / `string` / `table` library tables, the `_G` proxy and its
-metatable, and every non-whitelisted user global holding an object. After
-restore, `state.globals` / `state.builtins` hold dangling `ObjectPtr`s.
+Reference Lua rejects this with "chunk has too many syntax levels"
+(`LUAI_MAXCCALLS`, ~200). dellingr instead exhausts the native stack, and a
+Rust stack overflow is an abort - it cannot be caught or returned as a
+`SyntaxError`, so a hostile script kills the whole game process. This is the
+parser-side sibling of the lexer comment-recursion fix (L17): the lexer was
+hardened, the parser was not.
 
-The existing panic guard (`catch_unwind`, line 643) restores the environment on
-unwind, but restoring dangling pointers does not help: the "restored after the
-function completes (or errors)" guarantee is hollow whenever a GC ran inside
-`f`. There is no restricted-env-plus-GC coverage in `src/vm/tests.rs`.
+Hostile inputs: 200k nested `(`, 200k of `do `, 200k of `-` before a literal,
+200k nested `{`.
 
-Note this must nest - `with_restricted_env` can be called reentrantly.
+**Do not run these in-process while testing without expecting an abort.**
 
-### #2 (High) - frame varargs are not roots
+### #8 (High) - upvalue index truncation past 255 silently miscompiles
 
-`src/vm/eval.rs:309-316`:
+`src/compiler/parser/upvalue.rs`. Four sites cast a list length to `u8` with no
+cap:
 
 ```rust
-let varargs = if is_vararg && num_args > num_params {
-    let num_varargs = (num_args - num_params) as usize;
-    let vararg_start = self.stack.len() - num_varargs;
-    self.stack.drain(vararg_start..).collect()
-} else {
-    Vec::new()
-};
+fn add_upvalue(&mut self, name: &str, desc: UpvalueDesc) -> u8 {
+    let idx = self.upvalues.len() as u8;   // line 102
+    self.upvalues.push((name.to_string(), desc));
+    idx
+}
 ```
 
-The values are drained *off* the VM stack into a plain `Vec<Val>` that is moved
-into the `Frame` (`src/vm/frame.rs:29`), which is a Rust local, not part of
-`State`. Any allocation inside the frame - a table constructor, a concat, a
-closure, or the per-call literal interning in `initialize_frame` itself - can
-collect a value reachable only through `frame.varargs`. The later `OP_VARARG`
-(`frame.rs:229-247`) pushes the stale pointer.
+plus `create_parent_upvalue` at lines 69, 79 and 90
+(`self.outer_upvalues[parent_idx].len() as u8`).
 
-Existing tests likely miss this because benches pass numeric varargs, and
-`Val::Num` is not heap-managed.
+`add_local` (`parser.rs:85-95`) *is* capped at 255, and reference Lua caps at
+`MAXUPVAL` 255 with "too many upvalues". A function can legally reference more
+than 255 distinct outer names - 200 locals in a grandparent, 60 in the parent,
+an inner function referencing all 260 - and the 256th upvalue silently gets
+index 0. `Instr::get_upvalue(0)` then reads the wrong variable: no error, no
+panic, a miscompiled program.
 
-Repro:
+Worse, `UpvalueDesc::Upvalue(idx)` is stored into `Bytecode.upvalues` with the
+truncated index, so the closure capture list itself is wrong and the snapshot
+codec faithfully persists the wrong program.
 
-```lua
-local function f(...)
-  local junk
-  for i = 1, 200 do junk = {i} end
-  return ...
-end
-print(f({ "boom" }))
+### #9 (High) - `line_info` desyncs from `code`
+
+`Parser::push` (`parser.rs:385-389`) appends to `code` and `line_info` in
+lockstep, which is the only thing keeping them aligned:
+
+```rust
+fn push(&mut self, instr: Instr) {
+    self.chunk.code.push(instr);
+    self.chunk.line_info.push(self.current_line);
+}
 ```
 
-### #4 (High) - `#t` with `__len` drops the receiver across `alloc_string`
+Ten sites then mutate `code` directly and never touch `line_info`:
 
-`src/vm/eval_store.rs:139-184`. The operand is popped at line 141
-(`let val = self.pop_val()`), and the metatable path calls
-`self.alloc_string("__len")` at line 162. `alloc_string` (`vm.rs:656-665`) runs
-`gc_collect` whenever `heap.is_full()`. Between the pop and lines 170-171, where
-`len_handler` and `val` are pushed, neither the table nor its metatable is
-rooted - the metatable is reachable only through the table. If the operand was
-a temporary, both are collected and `self.heap.as_table_ref(mt_ptr)` panics; if
-the metatable survives, the `self.stack.push(val)` at 171 reinstates a dangling
-pointer that the `__len` body then dereferences.
+- `expr.rs:272` and `expr.rs:327` - `self.chunk.code.remove(mark_idx)`, which
+  runs for **every plain fixed-arg call**. This both shortens `code` and
+  misaligns every entry at or after `mark_idx`.
+- `expr.rs:257, 262, 312, 317` - pop-then-push adjustment for vararg and
+  tail-call argument counts, each leaving one stale extra entry.
+- `stmt.rs:24, 29` - return-tail adjustment.
+- `stmt.rs:371, 383` - `adjust_multi_assign`.
 
-The sibling paths already get this right: `src/vm/metamethod.rs:49-52, 170-173`
-push key/val around `alloc_string` precisely to protect them, and the `__call`
-path parks `func_val` in `active_call_roots`. This is the smallest of the four
-and may just be that same push/pop pattern.
+Consumers index `line_info` by pc: `vm/frame.rs:70` (`current_line`, stack
+traces), `vm.rs:488` (`host_print` line), `compiler.rs:263`
+(`assign_cache_slots` error line). `save_state.rs` serializes the skewed
+vector, so a snapshot persists the wrong line table.
 
-### #25 (Medium) - `table.sort` runs the comparator with the array detached
+Verified: a script whose only error is on line 5, preceded by 20 calls,
+reports line 4 in dellingr and line 5 in reference Lua 5.4. Skew accumulates,
+so call-heavy code drifts further.
 
-`src/vm/table_ops.rs:280-330`. `t.get_array()` at line 288 copies the array
-portion into a local `Vec<Val>`, and the comparator branch then calls arbitrary
-Lua code at line 321 in a loop while `arr` is reachable only from Rust. A
-comparator that clears the table and allocates enough to trigger GC gets the
-not-currently-passed elements collected; the next iteration pushes a dangling
-`Val` as a comparator argument, and the eventual `set_array` writes dangling
-pointers back into the table for a deferred panic.
+The invariant is also directly testable without running anything:
+`bc.code.len() == bc.line_info.len()` recursively after `finalize` fails today
+for something as small as `print(1)`.
 
-Repro:
-
-```lua
-local t = {}
-for i = 1, 20 do t[i] = { v = i } end
-table.sort(t, function(a, b)
-  for k in pairs(t) do t[k] = nil end
-  for i = 1, 200 do local _ = {} end
-  return a.v < b.v
-end)
-```
-
-### Reproduction status
-
-#2, #4 and #25 were each run against the debug binary and each aborted the
-process with `Invalid ObjectPtr: object was freed (use-after-free detected)` at
-`src/vm/object.rs:224`. #1 is host-API-only and was confirmed by reading.
-
-Nothing protects #1 indirectly: `env_tokens` is a weak classification map, not
-a marked root; inline caches are not roots; the registry covers only explicitly
-anchored values; and restoring the saved maps after a collection just restores
-invalid generational pointers.
+One correction to the above: the `host_print` line consumer is `vm.rs:503`
+(and `vm.rs:744-749`), not `vm.rs:488`.
 
 ---
 
 ## Agreed implementation plan
 
-One mechanism for all four. Generalize `active_call_roots` into a State-owned
-transient-root registry. **Do not** park these values on the visible VM stack -
-that would perturb `stack_bottom`-relative indexing and `get_top`.
+Land in order **#9, then #8, then #7**. #9 adds the `finalize` assertion and
+the invariant test that the other two then run under. All three are
+parser-local and error-path additive: every currently-accepted program still
+compiles to byte-identical bytecode, so the audited jump / break-jump /
+table-template / tail-call bookkeeping is untouched.
 
-### Structures
+### C. #9 - mirror `code` edits into `line_info`
+
+Chosen over the OP_NOP restructure (`optimizations.md` #7). Mirroring provably
+emits byte-identical bytecode because it only touches `line_info`; OP_NOP
+changes the instruction stream and would ripple into VM dispatch,
+`analyze_cost`, the save codec, and every recorded jump offset. OP_NOP stays a
+perf item, and these helpers make that later migration mechanical.
+
+Two helpers next to `Parser::push` in `src/compiler/parser.rs`:
 
 ```rust
-struct TransientRoots {
-    values: Vec<Val>,                          // active closures + scoped temporaries
-    suspended_envs: Vec<SuspendedEnvironment>,
+/// Removes the instruction at `idx`, keeping line_info aligned.
+fn remove_instr(&mut self, idx: usize) -> Instr {
+    self.chunk.line_info.remove(idx);
+    self.chunk.code.remove(idx)
 }
 
-struct SuspendedEnvironment {
-    globals: IndexMap<String, Val>,
-    builtins: [Val; Builtin::COUNT],
+/// Overwrites the last emitted instruction in place, returning the old one.
+/// line_info keeps the original line, which is what we want when rewriting a
+/// Call/Vararg ret-count in a tail position.
+fn replace_last_instr(&mut self, instr: Instr) -> Instr {
+    let slot = self
+        .chunk
+        .code
+        .last_mut()
+        .expect("replace_last_instr requires a previously emitted instruction");
+    std::mem::replace(slot, instr)
 }
 ```
 
-`State::active_call_roots` becomes `State::transient_roots`; the existing
-active-call push/pop sites (`src/vm/eval.rs:121, 124, 143, 150`) move to
-`transient_roots.values` unchanged. Suspended environments need their own shape
-only so the maps can be moved out and restored without flattening every global
-into a vector.
+Rewrite the ten structural sites:
 
-Implement `Markable` for both. `mark_gc_roots` then marks: stack, current
-globals, current builtins, string literals, the whole transient-root registry,
-and the registry anchors. The upvalue pool stays a parameter for transitive
-closure marking and does not become an independent root.
+- `expr.rs:272`, `expr.rs:327` -> `self.remove_instr(mark_idx)`.
+- `expr.rs:257`, `expr.rs:312`, `stmt.rs:29` -> `replace_last_instr(Instr::vararg(u8::MAX))`,
+  dropping the following `self.push`.
+- `expr.rs:262`, `expr.rs:317` -> read first
+  (`let old = *self.chunk.code.last().expect(...)`), keep the existing
+  `unreachable!` check on `old.opcode() == Instr::OP_CALL`, then
+  `replace_last_instr(Instr::call(ArgCount::Fixed(old.a()), RetCount::All))`.
+- `stmt.rs:24` -> same read-then-replace with
+  `Instr::call(ArgCount::Fixed(num_args), RetCount::All)`.
+- `stmt.rs:371`, `stmt.rs:383` (`adjust_multi_assign`) ->
+  `let old = self.replace_last_instr(...)`, keeping the existing
+  `debug_assert!` on `old`.
 
-Note `mark_gc_roots` has exactly one caller (`vm.rs:461`) and already carries a
-`too_many_arguments` allow; folding its parameters into `&State` while adding
-the new root set is in scope and makes "single source of truth" structural
-rather than aspirational.
+Converting the pop+push pairs into in-place rewrites is a side benefit: the
+rewritten instruction keeps its original line instead of being restamped with
+`current_line`.
 
-### Scoped helpers
+**Do not** touch the in-place rewrites that were already correct - they change
+no vector length and cannot desync: `patch_jump` (`parser.rs:131`), the ForPrep
+back-patch (`stmt.rs:266`), the table-constructor patches (`table.rs:110, 115,
+118, 125, 200, 202`), and `assign_cache_slots` (`compiler.rs:220`).
 
-Add internal `with_rooted_value` / `with_rooted_values`:
+Add as the first line of `finalize` (`src/compiler.rs:357`):
 
-1. record `transient_roots.values.len()` as a watermark,
-2. append the root copies,
-3. run the operation,
-4. truncate back to the watermark before returning,
-5. where Rust unwinding is in play, catch, truncate, `resume_unwind`.
+```rust
+debug_assert_eq!(bc.code.len(), bc.line_info.len(), "line_info desynced from code");
+```
 
-Watermarks make nesting naturally LIFO, so a comparator may recursively sort
-another table or call a vararg function without disturbing outer roots.
+`finalize` already recurses over `nested`, so this covers the whole tree.
 
-### Per-finding application
+### B. #8 - cap upvalues at 255
 
-- **#1**: move the displaced maps into `transient_roots.suspended_envs`
-  immediately after the `mem::replace`, and restore by popping. Nesting works
-  because the inner call restores `suspended[1]` and the outer later restores
-  `suspended[0]`. Must restore on normal return, on `Err`, and on unwind.
-- **#2**: leave `Frame::varargs` as it is; additionally copy the extra varargs
-  into `transient_roots.values` for the frame's lifetime. **The root operation
-  must live strictly inside the existing `is_vararg && num_args > num_params`
-  branch** - fixed-arity calls and vararg calls with no extras must gain no
-  push, no allocation, no watermark bookkeeping, and no cleanup branch.
-- **#4**: root the popped receiver around the `"__len"` allocation and the
-  metatable lookup. The root must be released before cost flushing and the
-  metamethod call, by which point the receiver is back on the VM stack.
-- **#25**: copy `arr` into `transient_roots.values` around comparator
-  execution and keep sorting the local `Vec`. Swapping within `arr` does not
-  change the rooted *set*, so one copy up front is sufficient. The extra copy
-  is acceptable in a function that is already an O(n^2) bubble sort.
+`src/error.rs`: add `SyntaxError::TooManyUpvalues`, Display `"too many upvalues"`.
 
-Also harden `set_table_str_key_value` (`src/vm/table_ops.rs:38`, recorded as
-C-E1) with `with_rooted_value` in the same patch. It is genuinely latent today
-- every caller passes `RustFn` or `Num` via `set_table_str_key_rust_fn`,
-`set_table_str_key_named_rust_fn`, or `set_table_str_key_number` - but the
-signature is a standing trap.
+`src/compiler/parser/upvalue.rs`:
 
-Do not wait for the interpreter-flattening rewrite (`optimizations.md` #2).
-This is a live host-panic defect, and the targeted roots are compatible with
-that rewrite: once frames are State-owned, the extra vararg roots just get
-deleted.
+- `add_upvalue` -> `Result<u8>`, erroring when
+  `self.upvalues.len() >= u8::MAX as usize`, exactly mirroring `add_local`.
+- `create_parent_upvalue` -> `Result<Option<u8>>`, checking the same bound
+  before each of the three pushes (lines 69-71, 79-81, 90-92).
+- `resolve_upvalue` / `resolve_upvalue_recursive` -> `Result<Option<u8>>`,
+  propagating with `?`.
+- Sole external caller `parse_prefix_identifier` (`parser.rs:582`) becomes
+  `if let Some(i) = self.resolve_upvalue(name)? {`.
 
-### Error and unwind paths
+Four push sites is the complete set. The other `as u8` casts in the file
+(`find_upvalue` line 11, `position(...)` lines 41 and 77, `Upvalue(...)` line
+81) cast *positions within* those lists and become safe automatically once
+length is capped; the local-index casts (lines 33, 71) are already covered by
+`add_local`'s cap.
 
-Every one of these must release its roots, or `validate_quiescent` will start
-failing after killed callbacks:
+### A. #7 - syntax depth guard
 
-- vararg roots: released after the existing frame stack / literal / call-info
-  cleanup,
-- sort roots: released before propagating a comparator error,
-- the `__len` root: released before cost flushing and metamethod invocation,
-- restricted environments: restored even when `f` returns `Err`.
+`src/error.rs`: add `SyntaxError::TooManySyntaxLevels`, Display
+`"chunk has too many syntax levels"` (reference Lua's wording). Leave
+`is_recoverable` matching only `UnexpectedEof`.
 
-Update `validate_quiescent` (`src/vm/save_state.rs:464`) to require
-`transient_roots.is_empty()`, and clear it during snapshot materialization
-alongside the other transient state (`save_state.rs:591`). That makes a leaked
-root visible instead of silent.
+`src/compiler/parser.rs`: `const MAX_SYNTAX_DEPTH: u32 = 200;`, a
+`syntax_depth: u32` field on `Parser` (init 0), and:
 
-### Tests
+```rust
+fn enter_syntax_level(&mut self) -> Result<()> {
+    if self.syntax_depth >= MAX_SYNTAX_DEPTH {
+        return Err(self.error(SyntaxError::TooManySyntaxLevels));
+    }
+    self.syntax_depth += 1;
+    Ok(())
+}
 
-These must force collection explicitly - via `gc_collect()` or by arming the
-threshold to the current heap size. Allocation churn alone is too indirect to
-pin these regressions.
+fn exit_syntax_level(&mut self) {
+    self.syntax_depth -= 1;
+}
+```
 
-In `src/vm/tests.rs`:
+**One counter, but it must be incremented at all five of these choke points.**
+Any subset misses a cycle:
 
-- `gc_preserves_nested_suspended_environments` - original global object, enter
-  an outer restriction creating an outer-only global object, enter a nested
-  restriction, `gc_collect()`, then verify the outer-only object after inner
-  restoration and the original object plus `math` after outer restoration.
-- `gc_preserves_frame_varargs` - a Rust `force_gc` builtin, then
-  `local function f(...) force_gc(); return ... end; return f({marker=42}).marker`.
-  The table must be a temporary passed directly, not a global or a caller local.
-- `length_receiver_survives_lookup_collection` - an `arm_gc` builtin setting
-  the threshold to `heap_size()`, a helper returning a temporary table, `#`
-  applied to that temporary. Assert the `__len` result *and* `!gc_should_run()`
-  afterwards, proving the armed allocation actually collected.
-- `table_sort_array_survives_comparator_collection` - object elements; the
-  comparator nils every entry and calls `force_gc()` on first invocation.
-- `set_table_str_key_value_roots_heap_value` - destination table on the stack,
-  a fresh source table held only in the Rust `val` local, arm the next string
-  allocation, call the helper, read the child back.
+1. `parse_expr` (`expr.rs:34`) - parens, table nesting, call-arg nesting.
+2. `parse_unary` (`expr.rs:158`) - `- - - -x`, `not not ...`, and
+   `parse_pow -> parse_unary`, which **bypass `parse_expr`**.
+3. `parse_prefix_extension` (`expr.rs:225`) - `.b.c.d...`, `[i][i]...`,
+   `f()()()`, `:m():m()`. Tail-recursive, and there is no TCO in debug builds.
+4. `parse_statements` (`parser.rs:517`) - `do`/`while`/`repeat`/`for`/nested
+   `if` bodies, and **function nesting**, since every
+   `parse_fndef_named -> parse_chunk -> parse_statements` passes through here.
+5. `parse_if_arm` (`stmt.rs:503`) - `elseif` chains, which **bypass both**
+   `parse_statements` and `parse_expr` on the chain axis.
 
-Strengthen `restricted_env_restored_after_panic`
-(`tests/error_handling.rs:826`) by forcing `gc_collect()` immediately before
-the deliberate panic and then verifying an object-valued non-whitelisted global
-after catching it.
+Shim pattern, with **no `?` between enter and exit** so the counter decrements
+on `Err` as well as `Ok`:
 
-In `tests/save_state.rs`, quiescence after each unwind path:
+```rust
+pub(super) fn parse_expr(&mut self) -> Result<ExpDesc> {
+    self.enter_syntax_level()?;
+    let result = self.parse_or();
+    self.exit_syntax_level();
+    result
+}
+```
 
-- error from a vararg frame with extra object arguments, then `save_state()`,
-- error from a `table.sort` comparator, then `save_state()`,
-- error returned from inside `with_restricted_env`, then `save_state()`,
-- `save_state()` while an environment is suspended must return `NotQuiescent`.
+Rename each existing body to `*_inner` and wrap. Keep existing
+`#[hotpath::measure]` attributes on the outer wrapper and add none elsewhere
+(AGENTS.md's recursion warning). A dirty counter cannot leak across parses -
+`parse_str_named` builds a fresh `Parser` per call - but the decrement is still
+required for within-parse correctness, or 300 *sequential* `do end` blocks
+would trip the limit.
+
+**Upvalue resolution needs no separate counter.** `create_parent_upvalue`
+(`upvalue.rs:62-98`) recurses once per level of function nesting, so its depth
+equals `outer_locals.len()`, already bounded by site 4 above. Each nesting
+level costs several `syntax_depth` ticks, so at limit 200 function nesting caps
+out around 50-65. It is amplification headroom, not a separate axis. (Note the
+#8 cap does not bound this - upvalue count and scope depth are independent.)
+
+**Limit 200**, matching `LUAI_MAXCCALLS` in spirit. The binding constraint is
+**not** the 8MB main stack: `cargo test` runs tests on threads with a 2MB
+default stack, and the debug gate runs there. Worst case is the paren cycle at
+roughly 4-6 native frames per tick; at a pessimistic 1KB/frame in debug, 200
+ticks is about 1.2MB, which fits 2MB with margin. Real code rarely exceeds ~50
+syntax levels. If the headroom test below ever overflows, lower the constant to
+128 rather than raising thread stack sizes.
+
+### D. Tests
+
+In `src/compiler/parser/tests.rs`:
+
+- `line_info_matches_code_len` - recursive helper asserting
+  `bc.code.len() == bc.line_info.len()` across all `nested`, over a corpus:
+  `print(1)` (the plain-call `remove` path), `local a, b = f()`,
+  `a, b, c = f()`, `return f(1)`, a vararg function using `f(...)` and
+  `return ...`, `t = {f()}`, `t = {...}`, `obj:m(1)`, `obj:m(f())`. **Fails
+  today on the first case.**
+- `line_info_reports_correct_line` - a script with ~20 calls before an error on
+  line 5; assert the reported line is 5. Today it reports 4.
+- `too_many_upvalues_errors` - generated: grandparent with 200 locals, parent
+  with 60, inner function referencing all 260; assert `TooManyUpvalues`. Plus a
+  positive test at ~250 upvalues that must still parse.
+- `syntax_depth_limit` - one generated input per cycle at depth 10_000 (safe
+  in-process once the guard exists, since the error fires at 200): nested `(`,
+  `do `, unary `-`, `{`, `elseif` chain, `.b` chain. Assert
+  `TooManySyntaxLevels` for each.
+- `syntax_depth_headroom` - legal scripts just under the limit must parse `Ok`.
+  This test *is* the empirical validation that the limit fits the 2MB
+  test-thread stack in debug, so it must exercise the **fattest** cycle, not the
+  cheapest: statement nesting costs only ~3 small native frames per tick, while
+  the paren cycle costs ~13. Include 190 nested `do ... end`, 190 `elseif`, and
+  95 nested parens.
+
+  Note parens charge **2 ticks per level** (they descend through both the
+  `parse_expr` and `parse_unary` wrappers), so the effective paren limit is ~99,
+  not 200, and a 190-paren fixture is rejected rather than accepted. That
+  divergence from reference Lua is accepted and documented in the README's
+  "Source limits" section; the alternative - charging on the recursion edge
+  inside `parse_unary_inner` and `parse_pow` instead of on every `parse_unary`
+  entry - is not worth churning the parser for input no legitimate script
+  produces.
