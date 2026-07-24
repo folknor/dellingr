@@ -625,15 +625,22 @@ impl State {
         let saved_builtins = std::mem::replace(&mut self.builtins, restricted_builtins);
         self.globals_version = self.globals_version.wrapping_add(1);
 
-        // Execute the function
-        let result = f(self);
+        // Execute the function under an unwind guard so a panic in `f` still
+        // restores the original environment before propagating (L11). Without
+        // this, an embedder that catches the panic and reuses the State would
+        // find it stuck in the restricted environment. (Under panic=abort
+        // catch_unwind never returns, but reuse is moot there.)
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self)));
 
-        // Restore original environment
+        // Restore original environment (on both normal return and unwind)
         self.globals = saved_globals;
         self.builtins = saved_builtins;
         self.globals_version = self.globals_version.wrapping_add(1);
 
-        result
+        match result {
+            Ok(r) => r,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
     }
 
     /// Allocates a string on the heap.

@@ -797,6 +797,29 @@ fn global_lookup_cache_respects_restricted_env() {
 }
 
 #[test]
+fn restricted_env_restored_after_panic() {
+    // A panic inside the closure must still restore the full environment (L11),
+    // so a caller that catches the panic can reuse the State. `math` is not in
+    // the whitelist, so it is nil during the closure but must be back after.
+    let mut state = State::new();
+
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {})); // silence the expected panic
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        state.with_restricted_env(&["print"], |_state| {
+            panic!("boom inside restricted env");
+        })
+    }));
+    std::panic::set_hook(prev_hook);
+    assert!(caught.is_err(), "the panic must propagate");
+
+    // Environment restored: a non-whitelisted global is available again.
+    state.get_global("math");
+    assert_eq!(state.typ(-1), LuaType::Table);
+    state.pop(1);
+}
+
+#[test]
 fn unparenthesized_string_call_is_supported() {
     let result = run_number(
         r#"
