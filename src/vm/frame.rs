@@ -339,6 +339,12 @@ impl Frame {
                     add_cost!(state, local_cost, 1);
                     state.instr_new_table_template(self, inst.a())?;
                 }
+                Instr::OP_NEW_TABLE_TRACKED => {
+                    add_cost!(state, local_cost, 1);
+                    let table_idx = state.stack.len();
+                    state.new_table_with_capacity(inst.a() as usize);
+                    state.table_constructor_bases.push(table_idx);
+                }
 
                 // Table writes cost 1
                 Instr::OP_INIT_FIELD => {

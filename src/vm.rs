@@ -127,6 +127,8 @@ pub struct State {
     /// Pushed by MarkCallBase, popped by Call(255, ...).
     /// Supports nested function calls where each level needs its own base.
     pub(super) vararg_call_bases: Vec<usize>,
+    /// Stack of constructor positions for dynamic SetList(0) operations.
+    pub(super) table_constructor_bases: Vec<usize>,
     /// Cost budget remaining. When this reaches 0 or below, operations with cost > 0
     /// will fail. The action that pushes you over budget completes before stopping.
     /// Uses i64 to allow going negative (the final action that exceeds budget completes).
@@ -262,6 +264,7 @@ impl State {
             upvalue_pool: UpvaluePool::new(),
             open_upvalues: Vec::new(),
             vararg_call_bases: Vec::new(),
+            table_constructor_bases: Vec::new(),
             cost_remaining: i64::MAX,
             cost_budget: i64::MAX,
             cost_used: 0,

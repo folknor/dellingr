@@ -213,6 +213,7 @@ impl Instr {
     pub(crate) const OP_PUSH_NIL: u8 = 22;
     pub(crate) const OP_NEW_TABLE_PRESIZED: u8 = 23; // A=expected constructor fields
     pub(crate) const OP_NEW_TABLE_TEMPLATE: u8 = 24; // A=table template index
+    pub(crate) const OP_NEW_TABLE_TRACKED: u8 = 25; // A=expected constructor fields
 
     // One u8 operand (in A slot)
     pub(crate) const OP_GET_GLOBAL: u8 = 30;
@@ -371,6 +372,9 @@ impl Instr {
     }
     pub(crate) const fn new_table_template(idx: u8) -> Self {
         Self::op_a(Self::OP_NEW_TABLE_TEMPLATE, idx)
+    }
+    pub(crate) const fn new_table_tracked(capacity: u8) -> Self {
+        Self::op_a(Self::OP_NEW_TABLE_TRACKED, capacity)
     }
     pub(crate) const fn get_table() -> Self {
         Self::op(Self::OP_GET_TABLE)
@@ -553,6 +557,7 @@ impl std::fmt::Debug for Instr {
             Self::OP_NEW_TABLE => write!(f, "NewTable"),
             Self::OP_NEW_TABLE_PRESIZED => write!(f, "NewTablePresized({})", self.a()),
             Self::OP_NEW_TABLE_TEMPLATE => write!(f, "NewTableTemplate({})", self.a()),
+            Self::OP_NEW_TABLE_TRACKED => write!(f, "NewTableTracked({})", self.a()),
             Self::OP_GET_TABLE => write!(f, "GetTable"),
             Self::OP_ADD => write!(f, "Add"),
             Self::OP_SUBTRACT => write!(f, "Subtract"),

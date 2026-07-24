@@ -381,26 +381,25 @@ impl State {
         // Find the table on the stack (it's below the values)
         // count=0 means "use all values above the table"
         let values = if count == 0 {
-            // Find the table - it's the first table value scanning from the bottom of current frame
-            let mut table_idx = None;
-            for i in self.stack_bottom..self.stack.len() {
-                let is_table = self.stack[i]
-                    .as_object_ptr()
-                    .and_then(|ptr| self.heap.as_table_ref(ptr))
-                    .is_some();
-                if is_table {
-                    table_idx = Some(i);
-                    break;
-                }
+            let table_idx = self.table_constructor_bases.pop().ok_or_else(|| {
+                self.error(ErrorKind::InternalError(
+                    "SetList(0): no constructor base".to_string(),
+                ))
+            })?;
+            if table_idx < self.stack_bottom || table_idx >= self.stack.len() {
+                return Err(self.error(ErrorKind::InternalError(
+                    "SetList(0): base out of frame".to_string(),
+                )));
             }
-            let table_idx = match table_idx {
-                Some(idx) => idx,
-                None => {
-                    return Err(self.error(ErrorKind::InternalError(
-                        "SetList(0): no table found on stack".to_string(),
-                    )));
-                }
-            };
+            let is_table = self.stack[table_idx]
+                .as_object_ptr()
+                .and_then(|ptr| self.heap.as_table_ref(ptr))
+                .is_some();
+            if !is_table {
+                return Err(self.error(ErrorKind::InternalError(
+                    "SetList(0): base is not a table".to_string(),
+                )));
+            }
             self.stack.split_off(table_idx + 1)
         } else {
             self.stack.split_off(self.stack.len() - count as usize)

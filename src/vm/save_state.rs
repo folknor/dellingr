@@ -454,6 +454,7 @@ impl State {
             && self.active_call_roots.is_empty()
             && self.open_upvalues.is_empty()
             && self.vararg_call_bases.is_empty()
+            && self.table_constructor_bases.is_empty()
             && self.call_stack.is_empty()
             && self.metamethod_depth == 0
             && self.call_depth == 0
@@ -576,6 +577,7 @@ fn materialize_payload(state: &mut State, payload: SavePayload) -> Result<(), Lo
     state.active_call_roots.clear();
     state.open_upvalues.clear();
     state.vararg_call_bases.clear();
+    state.table_constructor_bases.clear();
     state.call_stack.clear();
     state.metamethod_depth = 0;
     state.call_depth = 0;

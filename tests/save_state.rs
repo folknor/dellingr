@@ -97,6 +97,28 @@ fn saves_are_byte_stable() {
 }
 
 #[test]
+fn dynamic_table_constructor_round_trips_after_completion() {
+    let (mut original, _) = new_capture_state();
+    run(
+        &mut original,
+        r#"
+        function values()
+            return 2, 3, 5
+        end
+        t = {1, values()}
+    "#,
+    );
+    let save = original.save_state().unwrap();
+    let mut loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), |_| {}).unwrap();
+    run(&mut loaded, "a = #t; b = t[1] + t[2] + t[3] + t[4]");
+    loaded.get_global("a");
+    assert_eq!(loaded.to_number(-1).unwrap(), 4.0);
+    loaded.pop(1);
+    loaded.get_global("b");
+    assert_eq!(loaded.to_number(-1).unwrap(), 11.0);
+}
+
+#[test]
 fn rng_and_cost_continue_after_load() {
     let (mut control, control_lines) = new_capture_state();
     control.set_rng_seed(99);

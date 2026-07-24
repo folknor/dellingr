@@ -1,11 +1,21 @@
+use super::ArgCount;
+use super::ExpDesc;
 use super::Instr;
 use super::Parser;
+use super::PrefixExp;
 use super::Result;
+use super::RetCount;
 use super::SyntaxError;
 use super::TokenType;
 
 type TableTemplateField = (u8, usize);
-type ParsedTableEntry = (u8, bool, Option<TableTemplateField>);
+type ParsedTableEntry = (u8, Option<TableTail>, Option<TableTemplateField>);
+
+#[derive(Debug)]
+enum TableTail {
+    Call { instr_idx: usize },
+    Vararg { instr_idx: usize },
+}
 
 #[derive(Debug)]
 struct TableTemplateCandidate {
@@ -72,27 +82,39 @@ impl Parser<'_> {
             // i is the number of array-style entries.
             let mut i = 0;
             let mut field_count = 0u8;
-            let mut has_vararg = false;
             let mut template_candidate = TableTemplateCandidate::new();
-            let (new_i, is_vararg, named_field) = self.parse_table_entry(i)?;
-            i = new_i;
-            field_count = field_count.saturating_add(1);
-            has_vararg = has_vararg || is_vararg;
-            template_candidate.push(named_field);
-            while let TokenType::Comma | TokenType::Semi = self.input.peek_type()? {
-                self.input.next()?;
-                if self.input.check_type(TokenType::RCurly)? {
-                    break;
-                }
-                let (new_i, is_vararg, named_field) = self.parse_table_entry(i)?;
+            let last_tail = loop {
+                let (new_i, tail, named_field) = self.parse_table_entry(i)?;
                 i = new_i;
                 field_count = field_count.saturating_add(1);
-                has_vararg = has_vararg || is_vararg;
                 template_candidate.push(named_field);
-            }
+
+                if !matches!(self.input.peek_type()?, TokenType::Comma | TokenType::Semi) {
+                    break tail;
+                }
+                self.input.next()?;
+                if self.input.check_type(TokenType::RCurly)? {
+                    break tail;
+                }
+            };
             self.expect(TokenType::RCurly)?;
 
-            if field_count > 4
+            if let Some(tail) = last_tail.as_ref() {
+                match tail {
+                    TableTail::Call { instr_idx } => {
+                        let instr = self.chunk.code[*instr_idx];
+                        debug_assert_eq!(instr.opcode(), Instr::OP_CALL);
+                        self.chunk.code[*instr_idx] =
+                            Instr::call(ArgCount::from_u8(instr.a()), RetCount::All);
+                    }
+                    TableTail::Vararg { instr_idx } => {
+                        debug_assert_eq!(self.chunk.code[*instr_idx].opcode(), Instr::OP_VARARG);
+                        self.chunk.code[*instr_idx] = Instr::vararg(u8::MAX);
+                    }
+                }
+                self.chunk.code[table_instr_idx] = Instr::new_table_tracked(field_count);
+                self.push(Instr::set_list(0));
+            } else if field_count > 4
                 && !template_candidate
                     .fields_for_template(field_count)
                     .is_some_and(|fields| self.try_use_table_template(table_instr_idx, fields))
@@ -100,10 +122,7 @@ impl Parser<'_> {
                 self.chunk.code[table_instr_idx] = Instr::new_table_presized(field_count);
             }
 
-            if has_vararg {
-                // Use SetList(0) to indicate "use all values above table"
-                self.push(Instr::set_list(0));
-            } else if i > 0 {
+            if last_tail.is_none() && i > 0 {
                 self.push(Instr::set_list(i));
             }
         }
@@ -111,7 +130,7 @@ impl Parser<'_> {
     }
 
     /// Parses a table entry.
-    /// Returns (new_counter, is_vararg) where is_vararg indicates if this entry was `...`
+    /// Returns (new_counter, final multi-value tail candidate, template field).
     #[hotpath::measure]
     fn parse_table_entry(&mut self, counter: u8) -> Result<ParsedTableEntry> {
         match self.input.peek_type()? {
@@ -121,7 +140,7 @@ impl Parser<'_> {
                 self.parse_expr()?;
                 let instr_idx = self.chunk.code.len();
                 self.push(Instr::init_field(counter, index));
-                Ok((counter, false, Some((index, instr_idx))))
+                Ok((counter, None, Some((index, instr_idx))))
             }
             TokenType::LSquare => {
                 self.input.next()?;
@@ -130,27 +149,22 @@ impl Parser<'_> {
                 self.expect(TokenType::Assign)?;
                 self.parse_expr()?;
                 self.push(Instr::init_index(counter));
-                Ok((counter, false, None))
-            }
-            TokenType::DotDotDot => {
-                // {...} syntax - collect all varargs into the table
-                self.input.next()?;
-                if !self.chunk.is_vararg {
-                    return Err(self.error(SyntaxError::UnexpectedTok(
-                        "cannot use '...' outside a vararg function".to_string(),
-                    )));
-                }
-                // Push all varargs onto stack
-                self.push(Instr::vararg(u8::MAX));
-                // Return special marker indicating vararg was used
-                Ok((counter, true, None))
+                Ok((counter, None, None))
             }
             _ => {
                 if counter == u8::MAX {
                     return Err(self.error(SyntaxError::TooManyTableFields));
                 }
-                self.parse_expr()?;
-                Ok((counter + 1, false, None))
+                let expr = self.parse_expr()?;
+                let instr_idx = self.chunk.code.len() - 1;
+                let tail = match expr {
+                    ExpDesc::Prefix(PrefixExp::FunctionCall(_)) => {
+                        Some(TableTail::Call { instr_idx })
+                    }
+                    ExpDesc::Vararg => Some(TableTail::Vararg { instr_idx }),
+                    _ => None,
+                };
+                Ok((counter + 1, tail, None))
             }
         }
     }

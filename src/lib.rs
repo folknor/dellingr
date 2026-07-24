@@ -114,7 +114,8 @@ impl ScopeCost {
                 // Table creation (cost 1)
                 Instr::OP_NEW_TABLE
                 | Instr::OP_NEW_TABLE_PRESIZED
-                | Instr::OP_NEW_TABLE_TEMPLATE => {
+                | Instr::OP_NEW_TABLE_TEMPLATE
+                | Instr::OP_NEW_TABLE_TRACKED => {
                     scope.table_creations += 1;
                     scope.own_cost += 1;
                 }

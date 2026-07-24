@@ -708,6 +708,198 @@ fn computed_table_constructor_keys_use_presized_table() {
 }
 
 #[test]
+fn table_constructor_expands_only_final_bare_call_or_vararg() {
+    let final_call = parse_str("y = {7, f()}").unwrap();
+    assert!(
+        final_call
+            .code
+            .iter()
+            .any(|instr| instr == &Instr::new_table_tracked(2))
+    );
+    assert!(
+        final_call
+            .code
+            .iter()
+            .any(|instr| instr == &Instr::call(ArgCount::Fixed(0), RetCount::All))
+    );
+    assert!(
+        final_call
+            .code
+            .iter()
+            .any(|instr| instr == &Instr::set_list(0))
+    );
+
+    let non_final_call = parse_str("y = {f(), 7}").unwrap();
+    assert!(
+        non_final_call
+            .code
+            .iter()
+            .any(|instr| instr == &Instr::new_table())
+    );
+    assert!(
+        non_final_call
+            .code
+            .iter()
+            .any(|instr| instr == &Instr::call(ArgCount::Fixed(0), RetCount::Fixed(1)))
+    );
+    assert!(
+        non_final_call
+            .code
+            .iter()
+            .any(|instr| instr == &Instr::set_list(2))
+    );
+
+    let final_vararg = parse_str("y = {99, ...}").unwrap();
+    assert!(
+        final_vararg
+            .code
+            .iter()
+            .any(|instr| instr == &Instr::new_table_tracked(2))
+    );
+    assert!(
+        final_vararg
+            .code
+            .iter()
+            .any(|instr| instr == &Instr::vararg(u8::MAX))
+    );
+    assert!(
+        final_vararg
+            .code
+            .iter()
+            .any(|instr| instr == &Instr::set_list(0))
+    );
+
+    let non_final_vararg = parse_str("y = {..., 99}").unwrap();
+    assert!(
+        non_final_vararg
+            .code
+            .iter()
+            .any(|instr| instr == &Instr::vararg(1))
+    );
+    assert!(
+        non_final_vararg
+            .code
+            .iter()
+            .any(|instr| instr == &Instr::set_list(2))
+    );
+}
+
+#[test]
+fn table_constructor_keyed_final_field_prevents_expansion() {
+    let keyed_last = parse_str("y = {f(), k = 7}").unwrap();
+    assert!(
+        keyed_last
+            .code
+            .iter()
+            .any(|instr| instr == &Instr::new_table())
+    );
+    assert!(
+        keyed_last
+            .code
+            .iter()
+            .any(|instr| instr == &Instr::call(ArgCount::Fixed(0), RetCount::Fixed(1)))
+    );
+    assert!(
+        keyed_last
+            .code
+            .iter()
+            .any(|instr| instr == &Instr::set_list(1))
+    );
+
+    let call_last = parse_str("y = {k = 7, f()}").unwrap();
+    assert!(
+        call_last
+            .code
+            .iter()
+            .any(|instr| instr == &Instr::new_table_tracked(2))
+    );
+    assert!(
+        call_last
+            .code
+            .iter()
+            .any(|instr| instr == &Instr::call(ArgCount::Fixed(0), RetCount::All))
+    );
+
+    let dynamic_call = parse_str("y = {f(g())}").unwrap();
+    assert!(
+        dynamic_call
+            .code
+            .iter()
+            .any(|instr| { instr == &Instr::call(ArgCount::Dynamic, RetCount::All) })
+    );
+
+    let capacity = parse_str("y = {1, 2, 3, 4, f()}").unwrap();
+    assert!(
+        capacity
+            .code
+            .iter()
+            .any(|instr| instr == &Instr::new_table_tracked(5))
+    );
+}
+
+#[test]
+fn table_constructor_does_not_expand_non_bare_tails() {
+    // A parenthesized call is truncated to one value, so it is not a bare tail
+    // and must not be patched to multi-return or use a tracked constructor.
+    let paren_call = parse_str("y = {(f())}").unwrap();
+    assert!(
+        paren_call
+            .code
+            .iter()
+            .all(|instr| instr.opcode() != Instr::OP_NEW_TABLE_TRACKED)
+    );
+    assert!(
+        paren_call
+            .code
+            .iter()
+            .any(|instr| instr == &Instr::call(ArgCount::Fixed(0), RetCount::Fixed(1)))
+    );
+    assert!(
+        paren_call
+            .code
+            .iter()
+            .any(|instr| instr == &Instr::set_list(1))
+    );
+
+    // A field access ends in GetField, not a call/vararg tail.
+    let field_access = parse_str("y = {f().x}").unwrap();
+    assert!(
+        field_access
+            .code
+            .iter()
+            .all(|instr| instr.opcode() != Instr::OP_NEW_TABLE_TRACKED)
+    );
+    assert!(
+        field_access
+            .code
+            .iter()
+            .any(|instr| instr == &Instr::set_list(1))
+    );
+
+    // A parenthesized vararg is truncated to one value (the top-level chunk is
+    // vararg), so it stays Vararg(1) and does not expand.
+    let paren_vararg = parse_str("y = {(...)}").unwrap();
+    assert!(
+        paren_vararg
+            .code
+            .iter()
+            .all(|instr| instr.opcode() != Instr::OP_NEW_TABLE_TRACKED)
+    );
+    assert!(
+        paren_vararg
+            .code
+            .iter()
+            .any(|instr| instr == &Instr::vararg(1))
+    );
+    assert!(
+        paren_vararg
+            .code
+            .iter()
+            .any(|instr| instr == &Instr::set_list(1))
+    );
+}
+
+#[test]
 fn test27() {
     let text = "local x = t.x.y";
     let code = vec![

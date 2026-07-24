@@ -67,6 +67,14 @@ All notable changes to dellingr are documented here. The format follows
   `b` nil and `for x in ... do` failed on a nil iterator state. The three
   multi-value sites (assignment, local declaration, generic-`for`) now share
   one checked adjustment helper.
+- Table constructors follow Lua's multi-value rules: only the final list field
+  expands when it is a call or `...`, and every earlier call/vararg is fixed to
+  one value. Previously a final call was forced to one result (`#{7, f()}` was
+  2, now 4) and a non-final `...` expanded to all values (`{...,99}` now keeps
+  one vararg then `99`). Dynamic constructors use a new `NewTableTracked`
+  opcode that records the table's exact stack base, so `SetList` no longer
+  scans for the table by type - fixing crashes on nested dynamic constructors
+  (`{{...}}`) and on a constructor preceded by a table-valued local.
 
 ## [0.3.0] - 2026-05-12
 
