@@ -4,38 +4,6 @@ Forward-looking feature/refactor ideas. Not optimizations - those live in
 [OPTIMIZATIONS.md](OPTIMIZATIONS.md). This is a working backlog; entries
 get deleted as they ship or stop being worth tracking.
 
----
-
-## Pre-release bug-hunt findings (v0.1.0..HEAD)
-
-Consolidated from two reviewer sessions (claude + codex) on 2026-05-07.
-Both reviewers ran read-only against the working tree; neither executed
-tests. Items below are ordered by what should block the release.
-
-### Cleared on review
-
-Both reviewers explicitly checked and cleared:
-
-- Integer fast path on hash-storage tables (389545e): NaN, +0/-0,
-  fractions, infinities, underflow on `(*n as usize) - 1`, hash
-  collisions (bit-exact validation), saturating cast on huge integers.
-- String pool hash-indexed interner (3e10044): bucket iteration,
-  collision handling, GC sweep, deterministic interning order.
-- `OP_CONCAT(n)` collapse (7e85ac3): operand evaluation order,
-  type-error reporting (leftmost faulting operand), 255-operand bound,
-  buffer pre-sizing.
-- `set_table_raw` arg-order flip (eeeb4ad): all 18 in-tree callers
-  updated, both directions covered in tests.
-- `State: Send` refactor (e0bef7b): `Bytecode` immutable post-finalize
-  and `Send + Sync`; `RuntimeCaches`'s `unsafe impl Sync` sound under
-  the documented `!Sync`-on-State invariant.
-- Anchor GC root path (6837ccb): `Registry: Markable` wired into
-  `mark_gc_roots`, `gc_collect`, with tests.
-- Determinism: no new `HashMap` / `HashSet` / `rand::thread_rng`;
-  SlotMap and IndexMap iteration order preserved.
-
----
-
 ## Deferred forward-looking ideas
 
 ### Prune or index the `%p` identity map
