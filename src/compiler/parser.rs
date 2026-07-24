@@ -30,9 +30,8 @@ struct Parser<'a> {
     nest_level: i32,
     locals: Vec<(String, i32)>,
     outer_chunks: Vec<Bytecode>,
-    /// Stack of break jump indices for each nested loop.
-    /// Each entry is a list of instruction indices that need patching.
-    loop_breaks: Vec<Vec<usize>>,
+    /// Break-jump state for each nested loop.
+    loop_breaks: Vec<LoopContext>,
     /// Upvalues for the current function being compiled.
     /// Each entry is (name, descriptor).
     upvalues: Vec<(String, UpvalueDesc)>,
@@ -42,6 +41,13 @@ struct Parser<'a> {
     outer_upvalues: Vec<Vec<(String, UpvalueDesc)>>,
     /// Current line number for instruction emission.
     current_line: u32,
+}
+
+/// Tracks the break jumps and upvalue-close boundary for one loop.
+#[derive(Debug)]
+struct LoopContext {
+    close_slot: u8,
+    break_jumps: Vec<usize>,
 }
 
 /// Parses Lua source code into a `Bytecode`.
@@ -298,14 +304,19 @@ impl<'a> Parser<'a> {
         self.input.substring(token.range())
     }
 
-    /// Lowers the nesting level by one, discarding any locals from that block.
+    /// Lowers the nesting level by one, closing and discarding its locals.
     fn level_down(&mut self) {
+        let before = self.locals.len();
         while let Some((_, lvl)) = self.locals.last() {
             if *lvl == self.nest_level {
                 self.locals.pop();
             } else {
                 break;
             }
+        }
+        let block_base = self.locals.len();
+        if block_base < before {
+            self.push(Instr::close_upvalues(block_base as u8));
         }
         self.nest_level -= 1;
     }
@@ -323,19 +334,22 @@ impl<'a> Parser<'a> {
     }
 
     /// Called when entering a loop to track break statements.
-    fn enter_loop(&mut self) {
-        self.loop_breaks.push(Vec::new());
+    fn enter_loop(&mut self, close_slot: u8) {
+        self.loop_breaks.push(LoopContext {
+            close_slot,
+            break_jumps: Vec::new(),
+        });
     }
 
     /// Called when exiting a loop. Patches all break jumps to jump to the
     /// current instruction position (the instruction after the loop).
     fn exit_loop(&mut self) {
-        let breaks = self
+        let context = self
             .loop_breaks
             .pop()
             .expect("exit_loop called without enter_loop");
         let loop_end = self.chunk.code.len();
-        for break_idx in breaks {
+        for break_idx in context.break_jumps {
             // The break instruction is a Jump with placeholder offset.
             // Patch it to jump to the end of the loop.
             let offset = (loop_end - break_idx - 1) as i16;
@@ -345,10 +359,15 @@ impl<'a> Parser<'a> {
 
     /// Records a break statement. Returns an error if not inside a loop.
     fn add_break(&mut self) -> Result<()> {
-        if let Some(breaks) = self.loop_breaks.last_mut() {
-            // Record the index where we'll emit the Jump instruction
+        if let Some(close_slot) = self.loop_breaks.last().map(|context| context.close_slot) {
+            self.push(Instr::close_upvalues(close_slot));
+            // Record the index where we'll emit the Jump instruction.
             let idx = self.chunk.code.len();
-            breaks.push(idx);
+            self.loop_breaks
+                .last_mut()
+                .expect("loop context existed before emitting break close")
+                .break_jumps
+                .push(idx);
             // Emit a placeholder Jump that will be patched by exit_loop
             self.push(Instr::jump(0));
             Ok(())

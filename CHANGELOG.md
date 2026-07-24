@@ -35,6 +35,21 @@ All notable changes to dellingr are documented here. The format follows
   owns its determinism baseline). The exact stream for a given seed is pinned
   by a test so it cannot drift silently.
 
+### Fixed
+
+- Pattern backreferences (`%1`-`%9`) no longer hang or corrupt memory. The
+  compile-time pattern validator infinite-looped on any backreference (it
+  rewound onto the `%` instead of advancing past the digit), and the matcher
+  wrote candidate bytes *into* the earlier capture through a `*const`-to-`*mut`
+  cast instead of comparing them. Backreference matching now compares byte
+  ranges per Lua 5.2/5.4 semantics and never mutates the subject.
+- Closures now capture the correct upvalues at lexical-scope boundaries. The
+  compiler was omitting `CloseUpvalues` when leaving a `do`/`if` block, at each
+  `for`-loop iteration (numeric and generic), and on `break`, so a captured
+  local's stack slot could be reused and the closure would observe a later
+  value. Blocks close on exit, `for` loops close the visible loop variable(s)
+  each iteration, and `break` closes before jumping - matching Lua 5.2/5.4.
+
 ## [0.3.0] - 2026-05-12
 
 ### Added

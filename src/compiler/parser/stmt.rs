@@ -277,9 +277,6 @@ impl<'a> Parser<'a> {
         // The actual local is in a fourth slot, so that it can be reassigned to.
         self.add_local(name)?;
 
-        // Track locals count after loop variable (before body locals)
-        let body_locals_start = self.locals.len() as u8;
-
         // First, all 3 control expressions are evaluated.
         self.parse_expr()?;
         self.expect(TokenType::Comma)?;
@@ -294,15 +291,12 @@ impl<'a> Parser<'a> {
         self.push(Instr::for_prep(current_local_slot, -1));
 
         // body
-        self.enter_loop();
+        self.enter_loop(current_local_slot);
         self.parse_statements()?;
         self.expect(TokenType::End)?;
 
-        // Close upvalues for any locals declared inside the loop body.
-        // This ensures each iteration captures its own values.
-        if self.locals.len() as u8 > body_locals_start {
-            self.push(Instr::close_upvalues(body_locals_start));
-        }
+        // Close the visible loop variable and body locals before its slot is reused.
+        self.push(Instr::close_upvalues(current_local_slot + 3));
 
         let body_length = (self.chunk.code.len() - loop_start_instr_index) as i16;
         self.push(Instr::for_loop(current_local_slot, -body_length));
@@ -353,9 +347,6 @@ impl<'a> Parser<'a> {
             self.add_local(name)?;
         }
 
-        // Track locals count after loop variables (before body locals)
-        let body_locals_start = self.locals.len() as u8;
-
         // Evaluate the expression list (should produce iterator, state, initial)
         // We expect exactly 3 values
         let (num_exprs, last_exp) = self.parse_explist()?;
@@ -404,15 +395,12 @@ impl<'a> Parser<'a> {
         self.push(Instr::tfor_loop(base_slot, 0)); // placeholder offset
 
         // body
-        self.enter_loop();
+        self.enter_loop(base_slot);
         self.parse_statements()?;
         self.expect(TokenType::End)?;
 
-        // Close upvalues for any locals declared inside the loop body.
-        // This ensures each iteration captures its own values.
-        if self.locals.len() as u8 > body_locals_start {
-            self.push(Instr::close_upvalues(body_locals_start));
-        }
+        // Close the visible loop variables and body locals before their slots are reused.
+        self.push(Instr::close_upvalues(base_slot + 3));
 
         // Jump back to TForCall
         let body_end = self.chunk.code.len();
@@ -445,7 +433,7 @@ impl<'a> Parser<'a> {
         let body_locals_start = self.locals.len() as u8;
 
         let body_start = self.chunk.code.len() as i16;
-        self.enter_loop();
+        self.enter_loop(body_locals_start);
         self.parse_statements()?;
         self.expect(TokenType::Until)?;
         self.parse_expr()?;
@@ -483,7 +471,7 @@ impl<'a> Parser<'a> {
         // Track locals before body
         let body_locals_start = self.locals.len() as u8;
 
-        self.enter_loop();
+        self.enter_loop(body_locals_start);
         self.parse_statements()?;
         self.expect(TokenType::End)?;
 
@@ -521,14 +509,7 @@ impl<'a> Parser<'a> {
         self.push(Instr::branch_false(0));
 
         self.parse_statements()?;
-        let mut branch_target = self.chunk.code.len();
-
-        self.close_if_arm()?;
-        if self.chunk.code.len() > branch_target {
-            // If the size has changed, the first instruction added was a
-            // Jump, so we need to skip it.
-            branch_target += 1;
-        }
+        let branch_target = self.close_if_arm()?;
 
         let branch_offset = (branch_target - branch_instr_index - 1) as i16;
         self.chunk.code[branch_instr_index] = Instr::branch_false(branch_offset);
@@ -537,23 +518,24 @@ impl<'a> Parser<'a> {
 
     /// Parses the closing keyword of an `if` or `elseif` arms, and any arms
     /// that may follow.
-    fn close_if_arm(&mut self) -> Result<()> {
+    fn close_if_arm(&mut self) -> Result<usize> {
         self.level_down();
         match self.input.peek_type()? {
             TokenType::ElseIf => self.parse_else_or_elseif(true),
             TokenType::Else => self.parse_else_or_elseif(false),
             _ => {
                 self.expect(TokenType::End)?;
-                Ok(())
+                Ok(self.chunk.code.len())
             }
         }
     }
 
     /// Parses an `elseif` or `else` block, and handles the `Jump` instruction
     /// for the end of the preceding block.
-    fn parse_else_or_elseif(&mut self, elseif: bool) -> Result<()> {
+    fn parse_else_or_elseif(&mut self, elseif: bool) -> Result<usize> {
         let jump_instr_index = self.chunk.code.len();
         self.push(Instr::jump(0));
+        let next_arm_index = self.chunk.code.len();
         if elseif {
             self.parse_if_arm()?;
         } else {
@@ -562,7 +544,7 @@ impl<'a> Parser<'a> {
         let new_len = self.chunk.code.len();
         let jump_len = new_len - jump_instr_index - 1;
         self.chunk.code[jump_instr_index] = Instr::jump(jump_len as i16);
-        Ok(())
+        Ok(next_arm_index)
     }
 
     /// Parses an `else` block.
