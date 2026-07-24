@@ -65,9 +65,14 @@ pub type Result<T> = std::result::Result<T, error::Error>;
 pub struct ScopeCost {
     /// Name of this scope
     pub name: String,
-    /// Minimum cost of this scope alone (not including nested)
+    /// Static cost of this scope's own opcodes, each counted once at its
+    /// occurrence. Loop and branch bodies are counted a single time, so this is
+    /// neither a runtime lower nor upper bound - it is a structural estimate.
     pub own_cost: u64,
-    /// Total cost including all nested scopes
+    /// `own_cost` plus the `total_cost` of every nested function body, each
+    /// counted once regardless of whether (or how many times) it is actually
+    /// invoked. A structural estimate of all reachable code, not a runtime
+    /// prediction.
     pub total_cost: u64,
     /// Number of arithmetic operations (+, -, *, /, %, ^)
     pub arithmetic_ops: u64,
@@ -262,7 +267,7 @@ impl std::fmt::Display for CostAnalysis {
 
         writeln!(f, "=== Cost Analysis ===")?;
         writeln!(f)?;
-        writeln!(f, "Minimum cost (static): {}", totals.total_cost)?;
+        writeln!(f, "Static cost estimate: {}", totals.total_cost)?;
         writeln!(f)?;
         writeln!(f, "--- Costed Operations ---")?;
         if totals.arithmetic_ops > 0 {

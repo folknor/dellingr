@@ -50,6 +50,18 @@ Some of them might be added later (probably most of them behind a feature gate, 
 
 There's a few gotchas with the current instruction-cost accounting. For example, `while true do end` is free, which means that a users Lua script could run forever. This is a known trade-off made in the full light of day - the main consumer of dellingr does not want to penalise the user (that is, subtract from their per-gametick budget) for structural semantics. Users should be encouraged to write more code, not less.
 
+## Determinism
+
+Execution is deterministic: the same script and inputs produce the same result
+and the same cost on a given build. `math.random` draws from an in-crate seeded
+RNG (`set_rng_seed`), so it is bit-stable across platforms. The one caveat is
+`math`'s transcendental functions (`sin`, `cos`, `exp`, `log`, `pow`, `sqrt`,
+...), which delegate to the platform `f64`/libm implementation: results are
+deterministic per build+platform but the last ULP may differ across
+architectures or libm versions. Replays that must be bit-identical across
+heterogeneous hosts should avoid depending on exact transcendental results;
+arithmetic, comparisons, and `math.random` are bit-stable everywhere.
+
 ## Save state
 
 The optional `snapshot` feature adds `State::save_state()` and
@@ -87,8 +99,11 @@ dellingr = "0.2"
 - `HostCallbacks` trait (`: Send`) - embedders redirect `print`, hook
   errors, etc.
 - `RustFunc` - expose Rust functions to Lua scripts.
-- `analyze_cost` (or `engine.analyze_cost(&program)`) - static worst-case
-  instruction count for a script.
+- `analyze_cost` (or `engine.analyze_cost(&program)`) - static cost
+  estimate for a script: sums each costed opcode once across the main
+  chunk and every nested function body (counted once each, whether or not
+  invoked; loops/branches counted once), so it is neither a runtime lower
+  nor upper bound.
 - Per-state user-data (`Send + 'static`) for hanging embedder context off
   the VM.
 

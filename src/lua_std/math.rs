@@ -1,4 +1,14 @@
 //! Lua's Math Library
+//!
+//! Determinism contract (L5): `math.random` is fully deterministic - it draws
+//! from the in-crate seeded `VmRng`, so a fixed seed yields the same stream on
+//! every platform. The transcendental functions (`sin`, `cos`, `exp`, `log`,
+//! `pow`, `sqrt`, ...) delegate to the platform's `f64` / libm implementation.
+//! Their results are deterministic for a given build+platform, but the last
+//! ULP may differ across architectures or libm versions. Replays that must be
+//! bit-identical across heterogeneous hosts should therefore avoid relying on
+//! exact transcendental results (basic arithmetic, comparisons, and
+//! `math.random` are bit-stable everywhere).
 
 use crate::LuaType;
 use crate::State;

@@ -418,6 +418,10 @@ impl State {
         let payload = SaveBuilder::new(self).finish()?;
         let mut encoder = Encoder::new();
         encoder.write_magic_and_version();
+        // Diagnostic metadata only. FORMAT_VERSION (in the magic block) is the
+        // hard compatibility gate; this human-readable crate version records
+        // which build produced the snapshot for debugging and is intentionally
+        // not compared on load (L10).
         encoder.write_bytes(env!("CARGO_PKG_VERSION").as_bytes())?;
         payload.encode(&mut encoder)?;
         Ok(SaveState {
@@ -439,6 +443,10 @@ impl State {
     ) -> Result<State, LoadError> {
         let mut decoder = Decoder::new(bytes);
         decoder.read_magic_and_version()?;
+        // Read and discard the diagnostic crate-version string. Compatibility is
+        // enforced solely by FORMAT_VERSION in read_magic_and_version above; this
+        // string is metadata, not a compat gate, so it is deliberately not
+        // compared (L10).
         let _engine_version = decoder.read_bytes()?;
         let payload = SavePayload::decode(&mut decoder)?;
         decoder.finish()?;
