@@ -28,15 +28,22 @@ fn main() {
         match args[i].as_str() {
             "--limit" | "-l" => {
                 i += 1;
-                if i < args.len() {
-                    limit = match args[i].parse() {
-                        Ok(n) => Some(n),
-                        Err(_) => {
-                            eprintln!("Warning: invalid --limit value '{}', ignoring", args[i]);
-                            None
-                        }
-                    };
-                }
+                let value = match args.get(i) {
+                    Some(value) => value,
+                    None => {
+                        eprintln!("Error: --limit requires a value");
+                        exit(1);
+                    }
+                };
+                limit = match value.parse::<i64>() {
+                    Ok(n) => Some(n),
+                    Err(_) => {
+                        eprintln!(
+                            "Error: invalid --limit value '{value}': expected a signed 64-bit integer"
+                        );
+                        exit(1);
+                    }
+                };
             }
             "--analyze" | "-a" => {
                 analyze = true;

@@ -101,6 +101,17 @@ All notable changes to dellingr are documented here. The format follows
   raw bytes (`"\255" == "\xFF"`). An unsupported long string (`[[...]]`,
   `[=[...]=]`) now returns a `SyntaxError` instead of panicking across the
   compile boundary.
+- Cost budgets are now enforced at the exact operation boundary. Opcode costs
+  were batched and only checked every 64 units, so a script could run dozens of
+  costed operations past an exhausted budget; the batch now also flushes when it
+  would reach or cross the remaining budget, and pending cost is flushed before
+  any reentrant call (function calls, generic-`for` iterators, and
+  `__index`/`__newindex`/`__len` metamethods) so a callee cannot overshoot. A
+  dynamic `SetList` charges before it mutates. The static `analyze_cost` minimum
+  no longer overcounts an empty dynamic `SetList` (it contributes 0, not 1).
+- The CLI rejects an invalid or missing `--limit` value with an error and a
+  non-zero exit instead of silently running the script with no budget. Negative
+  and zero budgets are accepted and applied.
 
 ## [0.3.0] - 2026-05-12
 

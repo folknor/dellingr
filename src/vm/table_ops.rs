@@ -98,7 +98,8 @@ impl State {
         let idx = self.convert_idx(i)?;
         assert!(idx != self.stack.len() - 1);
         let key = self.pop_val();
-        self.get_table_with_key(idx, key)
+        let mut local_cost = 0;
+        self.get_table_with_key(idx, key, &mut local_cost)
     }
 
     /// Gets `t[k]` without invoking metamethods.

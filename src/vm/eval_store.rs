@@ -143,7 +143,7 @@ impl State {
     }
 
     #[hotpath::measure]
-    pub(super) fn instr_length(&mut self) -> Result<()> {
+    pub(super) fn instr_length(&mut self, local_cost: &mut u64) -> Result<()> {
         let val = self.pop_val();
 
         // Check for string first
@@ -175,6 +175,7 @@ impl State {
                     // Call __len(table)
                     self.stack.push(len_handler);
                     self.stack.push(val);
+                    Frame::flush_local_cost(self, local_cost)?;
                     self.call(ArgCount::Fixed(1), RetCount::Fixed(1))?;
                     return Ok(());
                 }
@@ -207,6 +208,7 @@ impl State {
         stack_offset: u8,
         field_id: u8,
         cache_idx: u8,
+        local_cost: &mut u64,
     ) -> Result<()> {
         let val = self.pop_val();
         let idx = self.stack.len() - stack_offset as usize - 1;
@@ -239,7 +241,7 @@ impl State {
                 return Err(self.type_error(TypeError::TableIndex(typ)));
             }
         };
-        self.set_table_with_key(idx, key, val)?;
+        self.set_table_with_key(idx, key, val, local_cost)?;
         // set_table_with_key may invoke a user `__newindex`, which is
         // host code that could in principle reorganize the stack. No
         // current path mutates `stack[idx]` mid-call (RustFn callbacks
@@ -377,7 +379,35 @@ impl State {
     }
 
     #[hotpath::measure]
-    pub(super) fn instr_set_list(&mut self, count: u8) -> Result<usize> {
+    pub(super) fn instr_set_list_count(&self, count: u8) -> Result<usize> {
+        if count != 0 {
+            return Ok(count as usize);
+        }
+
+        let table_idx = *self.table_constructor_bases.last().ok_or_else(|| {
+            self.error(ErrorKind::InternalError(
+                "SetList(0): no constructor base".to_string(),
+            ))
+        })?;
+        if table_idx < self.stack_bottom || table_idx >= self.stack.len() {
+            return Err(self.error(ErrorKind::InternalError(
+                "SetList(0): base out of frame".to_string(),
+            )));
+        }
+        let is_table = self.stack[table_idx]
+            .as_object_ptr()
+            .and_then(|ptr| self.heap.as_table_ref(ptr))
+            .is_some();
+        if !is_table {
+            return Err(self.error(ErrorKind::InternalError(
+                "SetList(0): base is not a table".to_string(),
+            )));
+        }
+        Ok(self.stack.len() - table_idx - 1)
+    }
+
+    #[hotpath::measure]
+    pub(super) fn instr_set_list(&mut self, count: u8) -> Result<()> {
         // Find the table on the stack (it's below the values)
         // count=0 means "use all values above the table"
         let values = if count == 0 {
@@ -410,14 +440,13 @@ impl State {
 
         match obj_ptr.and_then(|ptr| self.heap.as_table(ptr)) {
             Some(tbl) => {
-                let n_elements = values.len();
                 let counter = 1..;
                 for (i, val) in counter.zip(values) {
                     let key = Val::Num(i as f64);
                     tbl.insert(key, val)?;
                 }
                 self.stack.push(tbl_value);
-                Ok(n_elements)
+                Ok(())
             }
             None => Err(self.error(ErrorKind::InternalError(format!(
                 "SetList: expected table, got {typ}"
@@ -433,13 +462,13 @@ impl State {
     }
 
     #[hotpath::measure]
-    pub(super) fn instr_set_table(&mut self, offset: u8) -> Result<()> {
+    pub(super) fn instr_set_table(&mut self, offset: u8, local_cost: &mut u64) -> Result<()> {
         let val = self.pop_val();
         let index = self.stack.len() - offset as usize - 2;
         let key = self.stack[index + 1];
 
         if !self.try_insert_table_direct(index, key, val)? {
-            self.set_table_with_key(index, key, val)?;
+            self.set_table_with_key(index, key, val, local_cost)?;
         }
 
         self.remove_stack_pair(index);

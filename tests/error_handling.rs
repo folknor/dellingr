@@ -205,6 +205,52 @@ fn budget_exceeded_error() {
 }
 
 #[test]
+fn budget_stops_at_the_first_operation_after_exhaustion() {
+    for budget in [1, 63, 65] {
+        let mut state = State::new();
+        state.set_cost_budget(budget);
+        let increments = budget + 2;
+        state
+            .load_string(format!(
+                "x = 0\n{}",
+                "x = x + 1\n".repeat(increments as usize)
+            ))
+            .expect("test program should load");
+
+        let err = state
+            .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+            .expect_err("the operation after the exhausted budget must fail");
+        assert!(matches!(err.kind, ErrorKind::BudgetExceeded { .. }));
+
+        state.get_global("x");
+        assert_eq!(
+            state.to_number(-1).expect("x should be numeric"),
+            budget as f64
+        );
+        assert_eq!(state.cost_used(), budget as u64);
+        assert_eq!(state.cost_remaining(), budget - budget);
+    }
+}
+
+#[test]
+fn budget_flushes_pending_caller_cost_before_nested_call() {
+    let mut state = State::new();
+    state.set_cost_budget(1);
+    state
+        .load_string("x = 0\nlocal function f() x = x + 1 end\nx = x + 1\nf()\nx = x + 1")
+        .expect("test program should load");
+
+    let err = state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+        .expect_err("callee must observe the caller's pending cost");
+    assert!(matches!(err.kind, ErrorKind::BudgetExceeded { .. }));
+    state.get_global("x");
+    assert_eq!(state.to_number(-1).expect("x should be numeric"), 1.0);
+    assert_eq!(state.cost_used(), 1);
+    assert_eq!(state.cost_remaining(), 0);
+}
+
+#[test]
 fn call_depth_exceeded_error() {
     let err = expect_error(
         r#"

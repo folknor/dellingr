@@ -131,13 +131,9 @@ impl ScopeCost {
                 }
                 // Array initialization (cost = n elements)
                 Instr::OP_SET_LIST => {
-                    let n = inst.a();
-                    if n == 0 {
-                        scope.own_cost += 1;
-                    } else {
-                        scope.array_elements += n as u64;
-                        scope.own_cost += n as u64;
-                    }
+                    let n = u64::from(inst.a());
+                    scope.array_elements += n;
+                    scope.own_cost += n;
                 }
                 // Function calls
                 Instr::OP_CALL => {
@@ -319,6 +315,35 @@ pub fn analyze_cost(source: &str) -> Result<CostAnalysis> {
     let bc = compiler::parse_str(source)?;
     let root = ScopeCost::analyze_chunk(&bc, "main".to_string());
     Ok(CostAnalysis { root })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dynamic_set_list_has_zero_minimum_cost_when_empty() {
+        let analysis = analyze_cost("local function f(...) return {...} end\nf()")
+            .expect("variadic table constructor should parse");
+        let nested = &analysis.root.nested[0];
+
+        assert_eq!(nested.own_cost, 1);
+        assert_eq!(nested.array_elements, 0);
+        assert_eq!(analysis.root.total_cost, 1);
+
+        let mut state = State::new();
+        state
+            .load_string("local function f(...) return {...} end\nf()")
+            .expect("variadic table constructor should load");
+        state
+            .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+            .expect("no-argument variadic call should run");
+        assert_eq!(state.cost_used(), 1);
+
+        let fixed = analyze_cost("return {1, 2}").expect("fixed table constructor should parse");
+        assert_eq!(fixed.root.own_cost, 3);
+        assert_eq!(fixed.root.array_elements, 2);
+    }
 }
 
 /// A factory for compiling Lua source and creating new `State`s.

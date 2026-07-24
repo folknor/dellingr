@@ -18,6 +18,7 @@ impl State {
         frame: &mut Frame,
         field_id: u8,
         cache_idx: u16,
+        local_cost: &mut u64,
     ) -> Result<()> {
         // Pop value, handle both tables and strings
         let val = self.pop_val();
@@ -34,7 +35,7 @@ impl State {
             }
 
             if !has_metatable {
-                return self.push_table_library_field(key);
+                return self.push_table_library_field(key, local_cost);
             }
 
             if let Some(result) = self.get_index_table_field_direct(val, ptr, key, cache) {
@@ -44,12 +45,12 @@ impl State {
 
             self.stack.push(val);
             let table_idx = self.stack.len() - 1;
-            self.get_table_with_key(table_idx, key)?;
+            self.get_table_with_key(table_idx, key, local_cost)?;
             let result = self.pop_val();
             self.pop_val();
 
             if matches!(result, Val::Nil) {
-                self.push_table_library_field(key)
+                self.push_table_library_field(key, local_cost)
             } else {
                 self.stack.push(result);
                 Ok(())
@@ -67,7 +68,7 @@ impl State {
 
             self.get_global("string");
             let string_lib_idx = self.stack.len() - 1;
-            self.get_table_with_key(string_lib_idx, key)?;
+            self.get_table_with_key(string_lib_idx, key, local_cost)?;
             // Stack now: [... string_lib, result]
             let result = self.pop_val();
             let string_lib = self.pop_val();
@@ -347,10 +348,14 @@ impl State {
     }
 
     #[inline(always)]
-    pub(super) fn push_table_library_field(&mut self, key: Val) -> Result<()> {
+    pub(super) fn push_table_library_field(
+        &mut self,
+        key: Val,
+        local_cost: &mut u64,
+    ) -> Result<()> {
         self.get_global("table");
         let table_lib_idx = self.stack.len() - 1;
-        self.get_table_with_key(table_lib_idx, key)?;
+        self.get_table_with_key(table_lib_idx, key, local_cost)?;
         let result = self.pop_val();
         self.pop_val();
         self.stack.push(result);
@@ -457,7 +462,7 @@ impl State {
     }
 
     #[hotpath::measure]
-    pub(super) fn instr_get_table(&mut self) -> Result<()> {
+    pub(super) fn instr_get_table(&mut self, local_cost: &mut u64) -> Result<()> {
         let key = self.pop_val();
         // Table is now on top of the stack
         let table_idx = self.stack.len() - 1;
@@ -480,7 +485,7 @@ impl State {
             return Ok(());
         }
 
-        self.get_table_with_key(table_idx, key)?;
+        self.get_table_with_key(table_idx, key, local_cost)?;
         // Stack now: [... table, result]
         let result = self.pop_val();
         self.stack[table_idx] = result;

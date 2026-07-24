@@ -120,6 +120,14 @@ impl Frame {
     /// Higher values reduce overhead but may overshoot budget more.
     const COST_CHECK_INTERVAL: u64 = 64;
 
+    pub(super) fn flush_local_cost(state: &mut State, local_cost: &mut u64) -> Result<()> {
+        if *local_cost > 0 {
+            state.consume_cost(*local_cost)?;
+            *local_cost = 0;
+        }
+        Ok(())
+    }
+
     /// Start evaluating instructions from the current position.
     ///
     /// Cost system: Most operations are free. Only arithmetic, table writes,
@@ -138,10 +146,14 @@ impl Frame {
         /// Macro to accumulate cost and flush when threshold is reached
         macro_rules! add_cost {
             ($state:expr, $local:expr, $cost:expr) => {{
-                $local += $cost;
-                if $local >= Self::COST_CHECK_INTERVAL {
-                    $state.consume_cost($local)?;
+                let next = $local.saturating_add($cost);
+                if next >= Self::COST_CHECK_INTERVAL
+                    || $state.cost_remaining().saturating_sub_unsigned(next) <= 0
+                {
+                    $state.consume_cost(next)?;
                     $local = 0;
+                } else {
+                    $local = next;
                 }
             }};
         }
@@ -196,6 +208,7 @@ impl Frame {
                     if let Some(call_info) = state.call_stack.last_mut() {
                         call_info.ip = self.ip;
                     }
+                    Self::flush_local_cost(state, &mut local_cost)?;
                     state.call(ArgCount::from_u8(inst.a()), RetCount::from_u8(inst.b()))?;
                 }
                 Instr::OP_MARK_CALL_BASE => {
@@ -210,9 +223,7 @@ impl Frame {
                 }
                 Instr::OP_RETURN => {
                     // Flush any remaining accumulated cost before returning
-                    if local_cost > 0 {
-                        state.consume_cost(local_cost)?;
-                    }
+                    Self::flush_local_cost(state, &mut local_cost)?;
                     return Ok(RetCount::from_u8(inst.a()));
                 }
                 Instr::OP_VARARG => {
@@ -272,18 +283,23 @@ impl Frame {
 
                 // Generic `for` loops - iteration is free
                 Instr::OP_TFOR_PREP => state.instr_tfor_prep(inst.a()),
-                Instr::OP_TFOR_CALL => state.instr_tfor_call(inst.a(), inst.b())?,
+                Instr::OP_TFOR_CALL => {
+                    Self::flush_local_cost(state, &mut local_cost)?;
+                    state.instr_tfor_call(inst.a(), inst.b())?;
+                }
                 Instr::OP_TFOR_LOOP => state.instr_tfor_loop(self, inst.a(), inst.sbx())?,
 
                 // Length operator is free
-                Instr::OP_LENGTH => state.instr_length()?,
+                Instr::OP_LENGTH => state.instr_length(&mut local_cost)?,
 
                 // Logical not is free
                 Instr::OP_NOT => state.instr_not(),
 
                 // Table reads are free
-                Instr::OP_GET_FIELD => state.instr_get_field(self, inst.a(), inst.bx())?,
-                Instr::OP_GET_TABLE => state.instr_get_table()?,
+                Instr::OP_GET_FIELD => {
+                    state.instr_get_field(self, inst.a(), inst.bx(), &mut local_cost)?;
+                }
+                Instr::OP_GET_TABLE => state.instr_get_table(&mut local_cost)?,
 
                 // String concatenation is free. Operand A is the chain
                 // length (>= 2). Chained `..` collapses into one OP_CONCAT
@@ -361,18 +377,19 @@ impl Frame {
                 }
                 Instr::OP_SET_FIELD => {
                     add_cost!(state, local_cost, 1);
-                    state.instr_set_field(self, inst.a(), inst.b(), inst.c())?;
+                    state.instr_set_field(self, inst.a(), inst.b(), inst.c(), &mut local_cost)?;
                 }
                 Instr::OP_SET_TABLE => {
                     add_cost!(state, local_cost, 1);
-                    state.instr_set_table(inst.a())?;
+                    state.instr_set_table(inst.a(), &mut local_cost)?;
                 }
 
                 // Array initialization: cost per element
                 Instr::OP_SET_LIST => {
                     let n = inst.a();
-                    let count = state.instr_set_list(n)?;
+                    let count = state.instr_set_list_count(n)?;
                     add_cost!(state, local_cost, count as u64);
+                    state.instr_set_list(n)?;
                 }
 
                 // Unknown opcode

@@ -7,6 +7,7 @@
 
 use super::Result;
 use super::State;
+use super::frame::Frame;
 use super::lua_val::Val;
 use crate::error::ErrorKind;
 use crate::instr::{ArgCount, RetCount};
@@ -18,7 +19,12 @@ pub(super) const MAX_METAMETHOD_DEPTH: u32 = 200;
 
 impl State {
     /// Internal helper for table access with __index support.
-    pub(super) fn get_table_with_key(&mut self, idx: usize, key: Val) -> Result<()> {
+    pub(super) fn get_table_with_key(
+        &mut self,
+        idx: usize,
+        key: Val,
+        local_cost: &mut u64,
+    ) -> Result<()> {
         let table_val = self.stack[idx];
         let obj_ptr = table_val.as_object_ptr();
 
@@ -50,7 +56,7 @@ impl State {
                     .map_or(Val::Nil, |mt| mt.get(&index_key));
 
                 if !matches!(index_handler, Val::Nil) {
-                    return self.handle_index_metamethod(index_handler, idx, key);
+                    return self.handle_index_metamethod(index_handler, idx, key, local_cost);
                 }
             }
         }
@@ -60,7 +66,13 @@ impl State {
     }
 
     /// Handle the __index metamethod which can be a table or a function.
-    fn handle_index_metamethod(&mut self, handler: Val, table_idx: usize, key: Val) -> Result<()> {
+    fn handle_index_metamethod(
+        &mut self,
+        handler: Val,
+        table_idx: usize,
+        key: Val,
+        local_cost: &mut u64,
+    ) -> Result<()> {
         // Check metamethod depth to prevent infinite recursion
         if self.metamethod_depth >= MAX_METAMETHOD_DEPTH {
             return Err(self.error(ErrorKind::MetamethodDepthExceeded {
@@ -68,7 +80,7 @@ impl State {
             }));
         }
         self.metamethod_depth += 1;
-        let result = self.handle_index_metamethod_inner(handler, table_idx, key);
+        let result = self.handle_index_metamethod_inner(handler, table_idx, key, local_cost);
         self.metamethod_depth -= 1;
         result
     }
@@ -78,6 +90,7 @@ impl State {
         handler: Val,
         table_idx: usize,
         key: Val,
+        local_cost: &mut u64,
     ) -> Result<()> {
         match handler {
             Val::Obj(ptr) => {
@@ -89,7 +102,7 @@ impl State {
                     // __index is a table: look up key in that table
                     self.stack.push(Val::Obj(ptr));
                     let new_idx = self.stack.len() - 1;
-                    self.get_table_with_key(new_idx, key)?;
+                    self.get_table_with_key(new_idx, key, local_cost)?;
                     // Stack: [... __index_table, result]
                     // Remove the __index table, keep the result
                     let val = self.pop_val();
@@ -102,6 +115,7 @@ impl State {
                     self.stack.push(Val::Obj(ptr));
                     self.stack.push(table_val);
                     self.stack.push(key);
+                    Frame::flush_local_cost(self, local_cost)?;
                     self.call(ArgCount::Fixed(2), RetCount::Fixed(1))?;
                     Ok(())
                 } else {
@@ -114,6 +128,7 @@ impl State {
                 self.stack.push(Val::RustFn(f));
                 self.stack.push(table_val);
                 self.stack.push(key);
+                Frame::flush_local_cost(self, local_cost)?;
                 self.call(ArgCount::Fixed(2), RetCount::Fixed(1))?;
                 Ok(())
             }
@@ -123,7 +138,13 @@ impl State {
 
     /// Internal helper for table assignment with __newindex support.
     /// The table should be at stack[idx]. Does not pop anything from the stack.
-    pub(super) fn set_table_with_key(&mut self, idx: usize, key: Val, val: Val) -> Result<()> {
+    pub(super) fn set_table_with_key(
+        &mut self,
+        idx: usize,
+        key: Val,
+        val: Val,
+        local_cost: &mut u64,
+    ) -> Result<()> {
         let table_val = self.stack[idx];
         let obj_ptr = table_val.as_object_ptr();
 
@@ -157,7 +178,13 @@ impl State {
                     .map_or(Val::Nil, |mt| mt.get(&newindex_key));
 
                 if !matches!(newindex_handler, Val::Nil) {
-                    return self.handle_newindex_metamethod(newindex_handler, idx, key, val);
+                    return self.handle_newindex_metamethod(
+                        newindex_handler,
+                        idx,
+                        key,
+                        val,
+                        local_cost,
+                    );
                 }
             }
         }
@@ -178,6 +205,7 @@ impl State {
         table_idx: usize,
         key: Val,
         val: Val,
+        local_cost: &mut u64,
     ) -> Result<()> {
         // Check metamethod depth to prevent infinite recursion
         if self.metamethod_depth >= MAX_METAMETHOD_DEPTH {
@@ -186,7 +214,8 @@ impl State {
             }));
         }
         self.metamethod_depth += 1;
-        let result = self.handle_newindex_metamethod_inner(handler, table_idx, key, val);
+        let result =
+            self.handle_newindex_metamethod_inner(handler, table_idx, key, val, local_cost);
         self.metamethod_depth -= 1;
         result
     }
@@ -197,6 +226,7 @@ impl State {
         table_idx: usize,
         key: Val,
         val: Val,
+        local_cost: &mut u64,
     ) -> Result<()> {
         match handler {
             Val::Obj(ptr) => {
@@ -208,7 +238,7 @@ impl State {
                     // __newindex is a table: set the value in that table instead
                     self.stack.push(Val::Obj(ptr));
                     let new_idx = self.stack.len() - 1;
-                    self.set_table_with_key(new_idx, key, val)?;
+                    self.set_table_with_key(new_idx, key, val, local_cost)?;
                     self.pop(1); // Remove the __newindex table
                     Ok(())
                 } else if is_function {
@@ -218,6 +248,7 @@ impl State {
                     self.stack.push(table_val);
                     self.stack.push(key);
                     self.stack.push(val);
+                    Frame::flush_local_cost(self, local_cost)?;
                     self.call(ArgCount::Fixed(3), RetCount::Fixed(0))?;
                     Ok(())
                 } else {
@@ -231,6 +262,7 @@ impl State {
                 self.stack.push(table_val);
                 self.stack.push(key);
                 self.stack.push(val);
+                Frame::flush_local_cost(self, local_cost)?;
                 self.call(ArgCount::Fixed(3), RetCount::Fixed(0))?;
                 Ok(())
             }
