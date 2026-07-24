@@ -78,7 +78,7 @@ Compilation pipeline: source to `compiler::parse_str` to bytecode `Chunk` to exe
 
 **Stack indexing**: Rust callbacks (`RustFunc = fn(&mut State) -> Result<u8>`) use **1-based** indexing; Lua bytecode internally uses 0-based. `vm_aux.rs` and the lua_std modules show the 1-based pattern.
 
-**Standard library**: `src/lua_std/{basic,math,string,table}.rs`, opened by `lua_std::open_libs(state)` from `State::with_callbacks`. Every `open_*` function pushes builtin functions onto the stack and uses `set_global` / `set_table_raw` to install them. `_G` exists but is wired through a metatable that proxies to `state.globals` (see `basic.rs`); it is not a real table.
+**Standard library**: `src/lua_std/{basic,math,string,string_format,table}.rs`, opened by `lua_std::open_libs(state)` from `State::with_callbacks` (`string_format.rs` is the Lua 5.4 `string.format` engine, registered by `string.rs`). Every `open_*` function pushes builtin functions onto the stack and uses `set_global` / `set_table_raw` to install them. `_G` exists but is wired through a metatable that proxies to `state.globals` (see `basic.rs`); it is not a real table.
 
 **Cost model**: opcodes charge in `vm/eval.rs`'s dispatch; `analyze_cost` (`src/lib.rs`) walks bytecode statically and produces a `ScopeCost` tree (own + nested totals). The README's "Budget" section flags that structural ops like `while true do end` are intentionally free.
 

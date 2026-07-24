@@ -9,109 +9,171 @@ All notable changes to dellingr are documented here. The format follows
 ### Added
 
 - Optional `snapshot` feature: `State::save_state()` / `State::load_state()`
-  snapshot and restore the persistent script world of a *quiescent* VM -
-  globals (including user shadows of builtin names), the reachable
-  table/closure/upvalue/string graph (cycles and shared upvalues preserved),
-  the RNG stream, and cost counters - through a small in-crate deterministic
-  binary codec (no `serde`/`bincode`/`postcard`). It is a data snapshot, not a
-  continuation: no call stack, program counter, coroutine, anchor, callback, or
-  host user-data handle survives a load. Reachable `RustFunc`s must be
-  registered with a stable id (`set_global_named_rust_fn`, `register_rust_fn`,
-  `push_named_rust_fn`; the stdlib registers its own), or the save fails fast
-  with `SaveError::UnregisteredFunction`. Saves are byte-stable and portable
-  across builds of the same binary that register the same ids. Environment
-  objects (`math`/`string`/`table`/`_G`) and stdlib functions are rebuilt on
-  load and referenced by token, so old saves see the current stdlib.
+  snapshot and restore the persistent world of a *quiescent* VM - globals
+  (including shadows of builtins), the reachable table/closure/upvalue/string
+  graph (cycles and shared upvalues preserved), the RNG stream, and cost
+  counters - via an in-crate deterministic binary codec (no
+  `serde`/`bincode`/`postcard`). It is a data snapshot, not a continuation: no
+  call stack, PC, anchor, callback, or host user-data survives a load.
+  Reachable `RustFunc`s must carry a stable id (`set_global_named_rust_fn`,
+  `register_rust_fn`, `push_named_rust_fn`; the stdlib registers its own) or the
+  save fails fast with `SaveError::UnregisteredFunction`. Saves are byte-stable
+  and portable across builds sharing the same ids; environment objects
+  (`math`/`string`/`table`/`_G`) and stdlib functions are rebuilt on load and
+  referenced by token, so old saves see the current stdlib. A save records
+  whether the source had the standard environment, so a snapshot of
+  `State::empty()` round-trips as empty rather than merging in the stdlib on
+  load (`FORMAT_VERSION` is 2). Dynamic-call and table-constructor base stacks
+  unwind on a frame error, keeping the State quiescent so a host that catches
+  an error can still snapshot or reuse it.
 
 ### Changed
 
 - Bumped the `hotpath` profiling dependency (used by the `hotpath` feature and
-  the `examples/hotpath.rs` bench harness) from 0.15 to 0.16.1.
-
-- The VM RNG is now an in-crate SplitMix64 (`VmRng`) and the `rand` dependency
-  was dropped entirely. Its entire state is a single `u64`, which is what lets
-  the RNG round-trip exactly in a save. This changes the `math.random` stream
-  for *every* build, not just `snapshot` (acceptable pre-1.0; the project
-  owns its determinism baseline). The exact stream for a given seed is pinned
-  by a test so it cannot drift silently.
+  the `examples/hotpath.rs` bench harness) from 0.15 to 0.21.1.
+- The VM RNG is now an in-crate SplitMix64 (`VmRng`); the `rand` dependency was
+  dropped. Its state is a single `u64`, which is what lets it round-trip exactly
+  in a save. This shifts the `math.random` stream for *every* build, not just
+  `snapshot` (acceptable pre-1.0; the project owns its determinism baseline); a
+  test pins the exact stream per seed so it cannot drift silently.
+- The CLI's static-analysis line is relabeled `Minimum cost` to `Static cost
+  estimate`. `analyze_cost` sums every nested body once and counts each
+  loop/branch body once, so it is a structural estimate, not a runtime bound in
+  either direction; the old label (and the README's "static worst-case") were
+  both wrong.
 
 ### Fixed
 
 - Pattern backreferences (`%1`-`%9`) no longer hang or corrupt memory. The
-  compile-time pattern validator infinite-looped on any backreference (it
-  rewound onto the `%` instead of advancing past the digit), and the matcher
-  wrote candidate bytes *into* the earlier capture through a `*const`-to-`*mut`
-  cast instead of comparing them. Backreference matching now compares byte
-  ranges per Lua 5.2/5.4 semantics and never mutates the subject.
-- Closures now capture the correct upvalues at lexical-scope boundaries. The
-  compiler was omitting `CloseUpvalues` when leaving a `do`/`if` block, at each
-  `for`-loop iteration (numeric and generic), and on `break`, so a captured
-  local's stack slot could be reused and the closure would observe a later
-  value. Blocks close on exit, `for` loops close the visible loop variable(s)
-  each iteration, and `break` closes before jumping - matching Lua 5.2/5.4.
-- The compiler now rejects programs it cannot encode instead of emitting wrong
-  bytecode or panicking: more than 254 fixed call arguments (255 is the
-  dynamic-call sentinel), more than 255 function parameters, a control-flow
-  jump beyond the signed 16-bit range, and more than 255 field-assignment
-  sites in one function each raise a clear `SyntaxError`. `Frame::jump` now
-  accepts the full signed-16-bit backward range (`i16::MIN`).
-- `State::consume_cost` no longer wraps on very large host charges. It cast the
-  `u64` charge to `i64` before subtracting, so a charge above `i64::MAX` went
-  negative and *raised* the remaining budget (and `cost_used` could overflow).
-  It now uses saturating arithmetic: any charge, up to `u64::MAX`, drives the
-  budget toward exhaustion and never increases it.
-- A tail `...` is now expanded in non-local assignment (`a, b = ...`) and in
-  generic-`for` setup (`for x in ... do`), matching the existing behavior for a
-  tail function call and reference Lua. Previously only a tail call was
-  expanded and a tail vararg was truncated to one value, so `a, b = ...` left
-  `b` nil and `for x in ... do` failed on a nil iterator state. The three
-  multi-value sites (assignment, local declaration, generic-`for`) now share
-  one checked adjustment helper.
+  compile-time validator infinite-looped on any backreference (rewinding onto
+  the `%` instead of past the digit), and the matcher wrote candidate bytes
+  *into* the earlier capture through a `*const`-to-`*mut` cast. Matching now
+  compares byte ranges per Lua 5.2/5.4 and never mutates the subject.
+- Closures capture the correct upvalues at scope boundaries. The compiler
+  omitted `CloseUpvalues` when leaving a `do`/`if` block, at each `for`
+  iteration (numeric and generic), and on `break`, so a captured local's slot
+  could be reused and observed with a later value. Blocks now close on exit,
+  `for` loops close the loop variable(s) each iteration, and `break` closes
+  before jumping - matching Lua 5.2/5.4.
+- The compiler rejects programs it cannot encode instead of emitting wrong
+  bytecode or panicking: >254 fixed call arguments (255 is the dynamic-call
+  sentinel), >255 parameters, a jump beyond signed-16-bit range, and >255
+  field-assignment sites in one function each raise a `SyntaxError`.
+  `Frame::jump` now accepts the full signed-16-bit backward range (`i16::MIN`).
+- `State::consume_cost` no longer wraps on huge host charges. It cast the `u64`
+  charge to `i64` before subtracting, so a charge above `i64::MAX` went negative
+  and *raised* the budget (and `cost_used` could overflow). Saturating
+  arithmetic now drives any charge toward exhaustion, never up.
+- A tail `...` now expands in non-local assignment (`a, b = ...`) and
+  generic-`for` setup (`for x in ... do`), matching tail calls and reference
+  Lua. Previously only tail calls expanded and a tail vararg was truncated to
+  one value, leaving `b` nil and `for x in ... do` on a nil iterator. The three
+  multi-value sites (assignment, local declaration, generic-`for`) now share one
+  checked adjustment helper.
 - Table constructors follow Lua's multi-value rules: only the final list field
-  expands when it is a call or `...`, and every earlier call/vararg is fixed to
-  one value. Previously a final call was forced to one result (`#{7, f()}` was
-  2, now 4) and a non-final `...` expanded to all values (`{...,99}` now keeps
-  one vararg then `99`). Dynamic constructors use a new `NewTableTracked`
-  opcode that records the table's exact stack base, so `SetList` no longer
-  scans for the table by type - fixing crashes on nested dynamic constructors
-  (`{{...}}`) and on a constructor preceded by a table-valued local.
-- Lua-pattern result handling now matches reference Lua. Position captures
-  (`()`) return a 1-based integer instead of panicking or yielding an empty
-  string (`string.match("abc", "()")` is `1`). End-of-subject matches work:
-  `string.find("", "$")` is `1, 0` and `$`/`^$` match at the end of a string.
-  Malformed patterns and invalid `gsub` replacements now raise a runtime error
-  (via the new `ErrorKind::RuntimeError`) instead of being silently swallowed
-  to nil / unchanged input, and `%1` with no explicit captures expands to the
-  whole match. The matcher gained a `%z` class (matching NUL) and guards
-  against one-past-end reads in `%f`/`%b` (this also resolves lead L4).
-- Standard-library functions now validate their arguments like reference Lua.
-  `tonumber` parses the Lua number grammar (leading/trailing whitespace, `0x`
-  hex, hex floats) and rejects `nan`/`inf` and Rust-only spellings, and treats
-  a nil second argument as no base. `getmetatable`/`setmetatable` honor a
-  `__metatable` field (returning it, and refusing to replace a protected
-  metatable). `table.insert` rejects wrong arity, `table.move` rejects a
-  non-table destination, `math.random` errors on an empty interval (and on more
-  than two arguments), and `table.insert`/`table.remove` reject out-of-range and
-  non-integral positions. `pairs` uses the builtin `next` iterator, so
-  rebinding the global `next` no longer breaks it.
+  expands when a call or `...`; earlier calls/varargs fix to one value
+  (`#{7, f()}` was 2, now 4; `{...,99}` keeps one vararg then `99`). Dynamic
+  constructors use a new `NewTableTracked` opcode recording the table's exact
+  stack base, so `SetList` no longer scans by type - fixing crashes on nested
+  (`{{...}}`) and table-valued-local-preceded constructors.
+- Lua-pattern results match reference Lua. Position captures (`()`) return a
+  1-based integer instead of panicking or an empty string
+  (`string.match("abc", "()")` is `1`). End-of-subject matches work
+  (`string.find("", "$")` is `1, 0`; `$`/`^$` match at end). Malformed patterns
+  and invalid `gsub` replacements raise a runtime error (new
+  `ErrorKind::RuntimeError`) instead of being swallowed to nil/unchanged, `%1`
+  with no captures expands to the whole match, and the matcher gained a `%z`
+  class and one-past-end guards in `%f`/`%b` (also resolves lead L4).
+- Standard-library functions validate arguments like reference Lua. `tonumber`
+  parses the Lua number grammar (surrounding whitespace, `0x` hex, hex floats),
+  rejects `nan`/`inf` and Rust-only spellings, and treats a nil second arg as no
+  base. `getmetatable`/`setmetatable` honor `__metatable` (returning it,
+  refusing to replace a protected metatable). `table.insert` rejects wrong
+  arity, `table.move` a non-table destination, `math.random` an empty interval
+  or >2 args, and `table.insert`/`table.remove` out-of-range and non-integral
+  positions. `pairs` uses the builtin `next`, so rebinding global `next` no
+  longer breaks it.
 - String literals decode Lua 5.2's remaining escapes: decimal `\ddd` (1-3
-  digits, error above 255), hex `\xXX` (two hex digits), and the
-  whitespace-eating `\z` (including across newlines). An unknown escape is now
-  a syntax error rather than being kept literally, and numeric escapes produce
-  raw bytes (`"\255" == "\xFF"`). An unsupported long string (`[[...]]`,
-  `[=[...]=]`) now returns a `SyntaxError` instead of panicking across the
-  compile boundary.
-- Cost budgets are now enforced at the exact operation boundary. Opcode costs
-  were batched and only checked every 64 units, so a script could run dozens of
-  costed operations past an exhausted budget; the batch now also flushes when it
-  would reach or cross the remaining budget, and pending cost is flushed before
-  any reentrant call (function calls, generic-`for` iterators, and
-  `__index`/`__newindex`/`__len` metamethods) so a callee cannot overshoot. A
-  dynamic `SetList` charges before it mutates. The static `analyze_cost` minimum
-  no longer overcounts an empty dynamic `SetList` (it contributes 0, not 1).
-- The CLI rejects an invalid or missing `--limit` value with an error and a
-  non-zero exit instead of silently running the script with no budget. Negative
-  and zero budgets are accepted and applied.
+  digits, error above 255), hex `\xXX`, and whitespace-eating `\z` (across
+  newlines). Unknown escapes are now a syntax error rather than kept literally,
+  and numeric escapes produce raw bytes (`"\255" == "\xFF"`). Unsupported long
+  strings (`[[...]]`, `[=[...]=]`) return a `SyntaxError` instead of panicking.
+- Cost budgets are enforced at the exact operation boundary. Costs were batched
+  and checked every 64 units, letting a script run dozens of ops past an
+  exhausted budget; the batch now also flushes when it would reach or cross the
+  remaining budget, and pending cost flushes before any reentrant call (function
+  calls, generic-`for` iterators, `__index`/`__newindex`/`__len`) so a callee
+  cannot overshoot. Dynamic `SetList` charges before mutating, and
+  `analyze_cost` no longer overcounts an empty dynamic `SetList` (0, not 1).
+- The CLI rejects an invalid or missing `--limit` with an error and non-zero
+  exit instead of silently running with no budget; negative and zero budgets are
+  accepted and applied.
+- `tonumber` parses hex floats correctly at the extremes. An out-of-`i32`-range
+  binary exponent returned nil instead of inf/`+0.0`
+  (`tonumber("0x1p2147483648")`), and a long mantissa overflowed to inf and
+  scaled to NaN. Parsing now keeps 16 significant hex digits with a sticky bit,
+  rounds to nearest-even, handles subnormals directly, and saturates exponent
+  arithmetic (overflow to inf, underflow to `+0.0`, never NaN) - bit-exact
+  against lua5.2/5.4.
+- `string.gsub`/`string.gmatch` match reference Lua for anchors, replacements,
+  and closures. A leading `^` no longer re-anchors `gsub` to every remainder
+  (`gsub("aa", "^a", "X")` is `"Xa", 1`), and `gmatch` treats a leading `^` as a
+  literal caret. `gsub` validates the replacement type before matching (a
+  nil/boolean repl raises `bad argument #3`), a zero limit returns the input
+  without compiling the pattern, and a function/table result must be
+  string/number. `gmatch` returns a single self-contained closure, so storing
+  and calling the first return directly works.
+- Out-of-bounds reads in the compile-time pattern validator are fixed. `%b`,
+  `%f`, `[`-class, and trailing-`(` handling each read one past the pattern end
+  on inputs reachable straight from `find`/`match`/`gsub`/`gmatch`; every arm now
+  bounds-checks before dereferencing and reports Lua's malformed-pattern error.
+  Verified UB-free under Miri.
+- The lexer is hardened against long comment runs and bare `\r`. Consecutive
+  comment lines were parsed by tail recursion and could overflow the stack on a
+  long run; they now skip inline in a loop. A bare `\r` (old-Mac ending, or one
+  left after `\z`) now advances the line counter, fixing error and stack-trace
+  positions.
+- `table.sort` charges its cost before sorting, not after. At an exhausted
+  budget the comparator (with its side effects) and the in-place sort used to run
+  and only then fail; the charge now lands after the array copy and before any
+  comparator call or mutation. Empty sorts still cost 1.
+- Call boundaries enforce the 255 argument/result ceiling instead of silently
+  wrapping a `u8` count. `f(0, table.unpack(t255))` (256 args) arrived as 0 and
+  `return 0, table.unpack(t255)` (256 results) collapsed to zero; every dynamic
+  boundary now raises a clean Lua error. `unpack`/`table.unpack` reject a span
+  that would overflow the count (`table.unpack({}, 0, 1e300)`). Public
+  `State::call` returns `InvalidStackIndex`/`InternalError` instead of panicking
+  on malformed host input, leaving the stack untouched.
+- `on_error` now fires for a Rust function that fails when a host calls it
+  directly through `State::call` with no Lua frame on the stack. Previously the
+  identical failure reached from Lua notified but the host-direct path did not;
+  it now fires exactly once per error surfaced through `call()`.
+- `with_restricted_env` restores the original globals/builtins even if the
+  closure panics. The restore ran under `catch_unwind` and resumes the unwind, so
+  a caller that catches the panic and reuses the `State` no longer finds it stuck
+  in the restricted environment.
+- Interned strings count toward the GC threshold. Automatic GC compared only the
+  object count, so a string-only workload (concatenation, host `push_string`
+  loops) never tripped the trigger and the heap grew unbounded. A shared
+  allocation count (objects plus distinct interned strings) now drives both the
+  trigger and the post-collect threshold, preserving the ~2x-live-heap growth
+  policy.
+- `string.format` follows Lua 5.4's error contract and conversion set (new
+  `lua_std/string_format` module). Missing or wrong-typed arguments and unknown
+  conversions raise the exact reference payloads (`no value`, `number expected,
+  got string`, `invalid conversion '%y' to 'format'`, `invalid conversion
+  specification: '%100d'`, ...) instead of being silently skipped or passed
+  through literally. All 5.4 conversions are implemented - `%c %d %i %u %o %x
+  %X %e %E %f %g %G %a %A %s %q %p` - with per-conversion flag validation,
+  two-digit width/precision limits, and the 22-byte directive cap. Integer
+  conversions accept an f64 only when finite, integral, and exactly
+  representable in i64 (so `%u`/`%x` of -1 give the wrapped u64 forms), `%s`
+  honors `__tostring` byte-exactly and keeps embedded NUL when unmodified, and
+  `%q` emits 5.4's literal forms (numbers take the hex-float branch: `1.5` is
+  `0x1.8p+0`, NaN is `(0/0)`, inf is `1e9999`; dellingr's own lexer cannot yet
+  re-parse hex-float literals - recorded as C30). `%p` stays deterministic:
+  `(null)` for non-object values and a stable state-local id for
+  strings/tables/functions instead of a real address.
 
 ## [0.3.0] - 2026-05-12
 

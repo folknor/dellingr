@@ -38,6 +38,29 @@ Both reviewers explicitly checked and cleared:
 
 ## Deferred forward-looking ideas
 
+### Prune or index the `%p` identity map
+
+What: `string.format("%p")` assigns deterministic ids from
+`State.format_pointer_ids`, a `Vec<(Val, u64)>` probed by linear
+scan. Entries are never removed, so every distinct value ever
+formatted with `%p` keeps one entry for the State's lifetime (the
+Val is deliberately not a GC root, so the object itself still
+collects - only the entry lingers), and lookup cost grows linearly
+with distinct `%p` usage.
+
+Sketch: sweep the map during `gc_collect`, dropping entries whose
+Val no longer resolves in the heap (the slotmap generation makes
+dead entries detectable, and a dead Val can never be observed
+again, so dropping is safe and deterministic). Independently, the
+linear scan could become a deterministic keyed lookup.
+
+Why deferred: cost budgets bound per-callback abuse, `%p` is a
+niche conversion, and each entry is ~24 bytes. Only a long-lived
+State that formats many distinct objects would notice.
+
+Signal that would promote it: an embedder using `%p` for identity
+logging over a long game session, or a profile showing the scan.
+
 ### Configurable per-category cost weights
 
 What: let library consumers set their own cost per opcode category

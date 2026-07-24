@@ -3,6 +3,7 @@
 use crate::LuaType;
 use crate::State;
 use crate::error::{ErrorKind, TypeError};
+use crate::numeral::exact_i64;
 
 pub(crate) fn open_table(state: &mut State) {
     // Create the table table
@@ -314,15 +315,11 @@ pub(crate) fn open_table(state: &mut State) {
 /// for the caller's bounds check to report as "position out of bounds".
 fn table_position(state: &mut State, arg_number: isize, func_name: &str) -> crate::Result<i64> {
     let number = state.to_number(arg_number)?;
-    let minimum = i64::MIN as f64;
-    let maximum = f64::from_bits((i64::MAX as f64).to_bits() - 1);
-    let outside_i64 = number.total_cmp(&minimum).is_lt() || number.total_cmp(&maximum).is_gt();
-    if !number.is_finite() || outside_i64 || number.trunc().to_bits() != number.to_bits() {
-        return Err(state.error(ErrorKind::RuntimeError(format!(
+    exact_i64(number).ok_or_else(|| {
+        state.error(ErrorKind::RuntimeError(format!(
             "bad argument #{arg_number} to '{func_name}' (number has no integer representation)"
-        ))));
-    }
-    Ok(number as i64)
+        )))
+    })
 }
 
 fn position_out_of_bounds(state: &State, func_name: &str) -> crate::error::Error {

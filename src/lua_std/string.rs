@@ -1,6 +1,5 @@
 //! Lua's String Library
 
-use std::io::Write;
 use std::sync::{Arc, OnceLock};
 
 use crate::compiler;
@@ -79,12 +78,6 @@ fn push_captures(state: &mut State, bytes: &[u8], pattern: &LuaPattern<'_>, base
         push_capture_value(state, bytes, pattern.capture(0), base);
         1
     }
-}
-
-fn write_format(state: &State, result: &mut Vec<u8>, args: std::fmt::Arguments<'_>) -> Result<()> {
-    result
-        .write_fmt(args)
-        .map_err(|err| state.error(ErrorKind::InternalError(err.to_string())))
 }
 
 fn append_capture_bytes(out: &mut Vec<u8>, bytes: &[u8], capture: LuaCapture, base: usize) {
@@ -354,186 +347,7 @@ pub(crate) fn open_string(state: &mut State) {
     });
 
     // string.format(formatstring, ...)
-    add_fn!("format", |state| {
-        state.check_type(1, LuaType::String)?;
-        let fmt = state.to_bytes(1)?.to_vec();
-        let num_args = state.get_top();
-
-        let mut result = Vec::new();
-        let mut arg_idx = 2usize;
-        let mut i = 0usize;
-
-        while i < fmt.len() {
-            if fmt[i] != b'%' {
-                result.push(fmt[i]);
-                i += 1;
-                continue;
-            }
-
-            if i + 1 >= fmt.len() {
-                result.push(b'%');
-                break;
-            }
-
-            let next = fmt[i + 1];
-            match next {
-                b'%' => {
-                    result.push(b'%');
-                    i += 2;
-                }
-                b's' => {
-                    if arg_idx <= num_args {
-                        result.extend_from_slice(state.to_bytes_coerce(arg_idx as isize)?.as_ref());
-                        arg_idx += 1;
-                    }
-                    i += 2;
-                }
-                b'd' | b'i' => {
-                    if arg_idx <= num_args {
-                        if let Ok(n) = state.to_number(arg_idx as isize) {
-                            write_format(state, &mut result, format_args!("{}", n as i64))?;
-                        }
-                        arg_idx += 1;
-                    }
-                    i += 2;
-                }
-                b'f' => {
-                    if arg_idx <= num_args {
-                        if let Ok(n) = state.to_number(arg_idx as isize) {
-                            write_format(state, &mut result, format_args!("{n:.6}"))?;
-                        }
-                        arg_idx += 1;
-                    }
-                    i += 2;
-                }
-                b'g' => {
-                    if arg_idx <= num_args {
-                        if let Ok(n) = state.to_number(arg_idx as isize) {
-                            write_format(state, &mut result, format_args!("{n}"))?;
-                        }
-                        arg_idx += 1;
-                    }
-                    i += 2;
-                }
-                b'x' => {
-                    if arg_idx <= num_args {
-                        if let Ok(n) = state.to_number(arg_idx as isize) {
-                            write_format(state, &mut result, format_args!("{:x}", n as i64))?;
-                        }
-                        arg_idx += 1;
-                    }
-                    i += 2;
-                }
-                b'X' => {
-                    if arg_idx <= num_args {
-                        if let Ok(n) = state.to_number(arg_idx as isize) {
-                            write_format(state, &mut result, format_args!("{:X}", n as i64))?;
-                        }
-                        arg_idx += 1;
-                    }
-                    i += 2;
-                }
-                b'o' => {
-                    if arg_idx <= num_args {
-                        if let Ok(n) = state.to_number(arg_idx as isize) {
-                            write_format(state, &mut result, format_args!("{:o}", n as i64))?;
-                        }
-                        arg_idx += 1;
-                    }
-                    i += 2;
-                }
-                b'c' => {
-                    if arg_idx <= num_args {
-                        if let Ok(n) = state.to_number(arg_idx as isize) {
-                            result.push(n as u8);
-                        }
-                        arg_idx += 1;
-                    }
-                    i += 2;
-                }
-                b'0'..=b'9' | b'.' | b'-' | b'+' | b' ' => {
-                    let spec_start = i;
-                    i += 1;
-                    while i < fmt.len() && matches!(fmt[i], b'0'..=b'9' | b'.' | b'-' | b'+' | b' ')
-                    {
-                        i += 1;
-                    }
-                    if i >= fmt.len() {
-                        result.extend_from_slice(&fmt[spec_start..]);
-                        break;
-                    }
-
-                    let conv = fmt[i];
-                    let spec = &fmt[spec_start..=i];
-                    if arg_idx <= num_args {
-                        match conv {
-                            b's' => {
-                                result.extend_from_slice(
-                                    state.to_bytes_coerce(arg_idx as isize)?.as_ref(),
-                                );
-                            }
-                            b'd' | b'i' => {
-                                if let Ok(n) = state.to_number(arg_idx as isize) {
-                                    let width = spec[1..spec.len() - 1]
-                                        .iter()
-                                        .filter(|b| b.is_ascii_digit())
-                                        .fold(0usize, |acc, b| acc * 10 + (b - b'0') as usize);
-                                    let zero_pad = spec.contains(&b'0');
-                                    if zero_pad && width > 0 {
-                                        write_format(
-                                            state,
-                                            &mut result,
-                                            format_args!("{:0>width$}", n as i64, width = width),
-                                        )?;
-                                    } else if width > 0 {
-                                        write_format(
-                                            state,
-                                            &mut result,
-                                            format_args!("{:>width$}", n as i64, width = width),
-                                        )?;
-                                    } else {
-                                        write_format(
-                                            state,
-                                            &mut result,
-                                            format_args!("{}", n as i64),
-                                        )?;
-                                    }
-                                }
-                            }
-                            b'f' => {
-                                if let Ok(n) = state.to_number(arg_idx as isize) {
-                                    if let Some(dot_pos) = spec.iter().position(|b| *b == b'.') {
-                                        let precision = spec[dot_pos + 1..spec.len() - 1]
-                                            .iter()
-                                            .take_while(|b| b.is_ascii_digit())
-                                            .fold(0usize, |acc, b| acc * 10 + (*b - b'0') as usize);
-                                        write_format(
-                                            state,
-                                            &mut result,
-                                            format_args!("{n:.precision$}"),
-                                        )?;
-                                    } else {
-                                        write_format(state, &mut result, format_args!("{n:.6}"))?;
-                                    }
-                                }
-                            }
-                            _ => result.extend_from_slice(spec),
-                        }
-                        arg_idx += 1;
-                    }
-                    i += 1;
-                }
-                _ => {
-                    result.push(b'%');
-                    i += 1;
-                }
-            }
-        }
-
-        state.set_top(0);
-        state.push_bytes(result);
-        Ok(1)
-    });
+    add_fn!("format", super::string_format::format);
 
     // string.len(s)
     add_fn!("len", |state| {

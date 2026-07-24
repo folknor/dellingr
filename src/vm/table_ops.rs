@@ -6,7 +6,6 @@
 use super::lua_val::RustFunc;
 use super::lua_val::Val;
 use super::{Result, State, TypeError};
-#[cfg(feature = "snapshot")]
 use crate::error::ErrorKind;
 use crate::instr::{ArgCount, RetCount};
 
@@ -390,6 +389,59 @@ impl State {
 
         // No __tostring, use default
         Ok(val.to_string_with_heap(&self.heap))
+    }
+
+    /// Converts a value with `tostring` semantics while preserving arbitrary
+    /// bytes returned by a `__tostring` metamethod.
+    pub(crate) fn bytes_with_tostring_meta(&mut self, idx: isize) -> Result<Vec<u8>> {
+        let i = self.convert_idx(idx)?;
+        let val = self.stack[i];
+        let metatable_ptr = val
+            .as_object_ptr()
+            .and_then(|ptr| self.heap.as_table_ref(ptr))
+            .and_then(super::table::Table::get_metatable);
+
+        if let Some(mt_ptr) = metatable_ptr {
+            let tostring_key = self.alloc_string("__tostring");
+            let tostring_handler = self
+                .heap
+                .as_table_ref(mt_ptr)
+                .map_or(Val::Nil, |mt| mt.get(&tostring_key));
+
+            if !matches!(tostring_handler, Val::Nil) {
+                self.stack.push(tostring_handler);
+                self.stack.push(val);
+                self.call(ArgCount::Fixed(1), RetCount::Fixed(1))?;
+                let result = self.pop_val();
+                if matches!(
+                    result.typ(&self.heap),
+                    super::LuaType::String | super::LuaType::Number
+                ) {
+                    return Ok(result.to_bytes_with_heap(&self.heap).into_owned());
+                }
+                return Err(self.error(ErrorKind::RuntimeError(
+                    "'__tostring' must return a string".to_string(),
+                )));
+            }
+        }
+
+        Ok(val.to_bytes_with_heap(&self.heap).into_owned())
+    }
+
+    /// Returns a deterministic, state-local identity for pointer-like values.
+    pub(crate) fn format_pointer_id(&mut self, idx: isize) -> Result<u64> {
+        let val = self.at_index(idx)?;
+        if let Some((_, id)) = self
+            .format_pointer_ids
+            .iter()
+            .find(|(candidate, _)| *candidate == val)
+        {
+            return Ok(*id);
+        }
+        let id = self.next_format_pointer_id;
+        self.next_format_pointer_id = self.next_format_pointer_id.wrapping_add(1);
+        self.format_pointer_ids.push((val, id));
+        Ok(id)
     }
 
     /// Allocates a new table on the heap.

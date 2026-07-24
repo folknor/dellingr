@@ -1,5 +1,18 @@
 //! Lua numeral recognition shared by runtime-facing conversions.
 
+/// Returns an integer-valued finite `f64` when it lies inside the range whose
+/// endpoints can be checked exactly in an `f64`.
+pub(crate) fn exact_i64(number: f64) -> Option<i64> {
+    let minimum = i64::MIN as f64;
+    let maximum = f64::from_bits((i64::MAX as f64).to_bits() - 1);
+    let outside_i64 = number.total_cmp(&minimum).is_lt() || number.total_cmp(&maximum).is_gt();
+    if number.is_finite() && !outside_i64 && number.trunc().to_bits() == number.to_bits() {
+        Some(number as i64)
+    } else {
+        None
+    }
+}
+
 /// Converts a complete Lua numeral, allowing only Lua's ASCII whitespace.
 pub(crate) fn parse_lua_numeral(input: &[u8]) -> Option<f64> {
     let bytes = trim_lua_whitespace(input);

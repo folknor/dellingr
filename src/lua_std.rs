@@ -3,6 +3,7 @@
 mod basic;
 mod math;
 mod string;
+mod string_format;
 mod table;
 
 pub(crate) use basic::{base_ipairs_iter, base_next, open_base};

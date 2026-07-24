@@ -161,6 +161,11 @@ pub struct State {
     /// the State's process-unique `state_id` so cross-State misuse of an
     /// `Anchor` is caught.
     pub(super) registry: Registry,
+    /// Lazily assigned deterministic identities used by `string.format("%p")`.
+    /// These values deliberately are not GC roots; generational keys prevent a
+    /// later allocation from aliasing an identity belonging to a freed value.
+    pub(super) format_pointer_ids: Vec<(Val, u64)>,
+    pub(super) next_format_pointer_id: u64,
     /// Stable ids for Rust functions that are allowed to survive save/load.
     #[cfg(feature = "snapshot")]
     pub(super) rust_fns_by_id: BTreeMap<String, RustFunc>,
@@ -274,6 +279,8 @@ impl State {
             user_data: None,
             rng: VmRng::seed_from_u64(0),
             registry: Registry::new(state_id),
+            format_pointer_ids: Vec::new(),
+            next_format_pointer_id: 1,
             #[cfg(feature = "snapshot")]
             rust_fns_by_id: BTreeMap::new(),
             #[cfg(feature = "snapshot")]
