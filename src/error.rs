@@ -92,6 +92,8 @@ pub enum ErrorKind {
     /// use case for a stable handle; embedders that need an "absent" value
     /// should use `Option<Anchor>`.
     AnchorNil,
+    /// A runtime error raised by a library operation.
+    RuntimeError(String),
     /// Internal error (corrupt bytecode or VM bug). The string is a
     /// human-readable description; report these as bugs.
     InternalError(String),
@@ -291,6 +293,7 @@ impl fmt::Display for ErrorKind {
             AnchorNil => {
                 write!(f, "cannot anchor nil")
             }
+            RuntimeError(msg) => write!(f, "{msg}"),
             InternalError(msg) => {
                 write!(f, "internal error: {msg}")
             }

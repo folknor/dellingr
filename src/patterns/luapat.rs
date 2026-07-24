@@ -32,10 +32,14 @@ fn diff(p1: CPtr, p2: CPtr) -> usize {
     d as usize
 }
 
-#[derive(Copy, Clone)]
-pub(super) struct LuaMatch {
-    pub start: usize,
-    pub end: usize,
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) enum LuaCapture {
+    Bytes {
+        start: usize,
+        end: usize,
+    },
+    /// Zero-based byte offset within the subject passed to `str_match`.
+    Position(usize),
 }
 
 #[derive(Copy, Clone)]
@@ -164,6 +168,7 @@ fn match_class(ch: u8, class: u8) -> bool {
         b'u' => ch.is_ascii_uppercase(),
         b'w' => ch.is_ascii_alphanumeric(),
         b'x' => ch.is_ascii_hexdigit(),
+        b'z' => ch == b'\0',
         lc => return lc == ch,
     };
     if class.is_ascii_lowercase() {
@@ -227,7 +232,7 @@ impl MatchState {
                 MalformedPattern::MissingBalancedArguments,
             ));
         }
-        if at(s) != at(p) {
+        if s == self.src_end || at(s) != at(p) {
             return Ok(null());
         }
         // e.g. %b()
@@ -389,7 +394,9 @@ impl MatchState {
                             at(sub(s, 1))
                         };
                         let epl = sub(ep, 1);
-                        if !matchbracketclass(previous, p, epl) && matchbracketclass(at(s), p, epl)
+                        let current = if s == self.src_end { b'\0' } else { at(s) };
+                        if !matchbracketclass(previous, p, epl)
+                            && matchbracketclass(current, p, epl)
                         {
                             return self.patt_match(s, ep);
                         }
@@ -459,12 +466,14 @@ impl MatchState {
         Ok(s)
     }
 
-    fn push_onecapture(&mut self, i: usize, s: CPtr, e: CPtr, mm: &mut [LuaMatch]) -> Result<()> {
+    fn push_onecapture(&mut self, i: usize, s: CPtr, e: CPtr, mm: &mut [LuaCapture]) -> Result<()> {
         if i >= self.level {
             if i == 0 {
                 /* ms->level == 0, too */
-                mm[0].start = 0;
-                mm[0].end = diff(e, s);
+                mm[0] = LuaCapture::Bytes {
+                    start: 0,
+                    end: diff(e, s),
+                };
                 Ok(())
             } else {
                 Err(PatternError::InvalidCaptureIndex(None))
@@ -474,20 +483,22 @@ impl MatchState {
             match self.capture[i].len {
                 CapLen::Unfinished => Err(PatternError::UnfinishedCapture),
                 CapLen::Position => {
-                    mm[i].start = diff(init, next(self.src_init));
-                    mm[i].end = mm[i].start;
+                    mm[i] = LuaCapture::Position(diff(init, self.src_init));
                     Ok(())
                 }
                 CapLen::Len(l) => {
-                    mm[i].start = diff(init, self.src_init);
-                    mm[i].end = mm[i].start + l;
+                    let start = diff(init, self.src_init);
+                    mm[i] = LuaCapture::Bytes {
+                        start,
+                        end: start + l,
+                    };
                     Ok(())
                 }
             }
         }
     }
 
-    fn push_captures(&mut self, s: CPtr, e: CPtr, mm: &mut [LuaMatch]) -> Result<usize> {
+    fn push_captures(&mut self, s: CPtr, e: CPtr, mm: &mut [LuaCapture]) -> Result<usize> {
         let nlevels = if self.level == 0 && !s.is_null() {
             1
         } else {
@@ -539,7 +550,7 @@ impl MatchState {
                             }
                             p = next(p);
                         }
-                        _ => {}
+                        _ => p = next(p),
                     }
                 }
                 b'[' => {
@@ -586,7 +597,7 @@ impl MatchState {
     }
 }
 
-pub(super) fn str_match(s: &[u8], p: &[u8], mm: &mut [LuaMatch]) -> Result<usize> {
+pub(super) fn str_match(s: &[u8], p: &[u8], mm: &mut [LuaCapture]) -> Result<usize> {
     let mut lp = p.len();
     let mut p = p.as_ptr();
     let ls = s.len();
@@ -602,14 +613,16 @@ pub(super) fn str_match(s: &[u8], p: &[u8], mm: &mut [LuaMatch]) -> Result<usize
     loop {
         let res = ms.patt_match(s1, p)?;
         if !res.is_null() {
-            mm[0].start = diff(s1, s); /* start */
-            mm[0].end = diff(res, s); /* end */
+            mm[0] = LuaCapture::Bytes {
+                start: diff(s1, s),
+                end: diff(res, s),
+            };
             return Ok(ms.push_captures(null(), null(), &mut mm[1..])? + 1);
         }
-        s1 = next(s1);
-        if !(s1 < ms.src_end && !anchor) {
+        if anchor || s1 == ms.src_end {
             break;
         }
+        s1 = next(s1);
     }
     Ok(0)
 }

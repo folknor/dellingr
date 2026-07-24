@@ -75,6 +75,15 @@ All notable changes to dellingr are documented here. The format follows
   opcode that records the table's exact stack base, so `SetList` no longer
   scans for the table by type - fixing crashes on nested dynamic constructors
   (`{{...}}`) and on a constructor preceded by a table-valued local.
+- Lua-pattern result handling now matches reference Lua. Position captures
+  (`()`) return a 1-based integer instead of panicking or yielding an empty
+  string (`string.match("abc", "()")` is `1`). End-of-subject matches work:
+  `string.find("", "$")` is `1, 0` and `$`/`^$` match at the end of a string.
+  Malformed patterns and invalid `gsub` replacements now raise a runtime error
+  (via the new `ErrorKind::RuntimeError`) instead of being silently swallowed
+  to nil / unchanged input, and `%1` with no explicit captures expands to the
+  whole match. The matcher gained a `%z` class (matching NUL) and guards
+  against one-past-end reads in `%f`/`%b` (this also resolves lead L4).
 
 ## [0.3.0] - 2026-05-12
 

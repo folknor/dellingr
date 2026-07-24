@@ -281,3 +281,82 @@ fn gsub_with_captures_function() {
     let result = state.to_string(-2).unwrap();
     assert_eq!(result, "20+30=50");
 }
+
+fn assert_runtime_error(code: &str, expected: &str) {
+    let mut state = State::new();
+    state.load_string(code).unwrap();
+    let err = state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(2))
+        .unwrap_err();
+    assert!(
+        err.to_string().contains(expected),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn malformed_patterns_are_runtime_errors_in_all_wrappers() {
+    for code in [
+        r#"return string.find("abc", "[")"#,
+        r#"return string.match("abc", "[")"#,
+        r#"for _ in string.gmatch("abc", "[") do end"#,
+        r#"return string.gsub("abc", "[", "x")"#,
+    ] {
+        assert_runtime_error(code, "malformed pattern");
+    }
+}
+
+#[test]
+fn gsub_validates_replacement_grammar_only_for_actual_replacements() {
+    for replacement in ["%q", "%"] {
+        assert_runtime_error(
+            &format!(r#"return string.gsub("a", "a", "{replacement}")"#),
+            "invalid use of '%'",
+        );
+    }
+    assert_runtime_error(
+        r#"return string.gsub("a", "(a)", "%2")"#,
+        "invalid capture index",
+    );
+
+    // A bad replacement is not validated when there is no match or the
+    // substitution limit is zero. Bind each gsub's two results to locals so all
+    // four values survive (a non-final call in a return list is truncated to
+    // one value).
+    let mut state = State::new();
+    state
+        .load_string(
+            r#"
+            local s1, c1 = string.gsub("a", "b", "%q")
+            local s2, c2 = string.gsub("a", "a", "%q", 0)
+            return s1, c1, s2, c2
+            "#,
+        )
+        .unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(4)).unwrap();
+    assert_eq!(state.to_bytes(-4).unwrap(), b"a");
+    assert_eq!(state.to_number(-3).unwrap(), 0.0);
+    assert_eq!(state.to_bytes(-2).unwrap(), b"a");
+    assert_eq!(state.to_number(-1).unwrap(), 0.0);
+}
+
+#[test]
+fn gsub_position_captures_and_replacement_escapes() {
+    let mut state = State::new();
+    state
+        .load_string(
+            r#"
+            local a = string.gsub("ab", "()a", "<%0:%1:%%>")
+            local b = string.gsub("ab", "a", "<%1>")
+            local c = string.gsub("ab", "()(a)", function(pos, value) return pos .. value end)
+            local d = string.gsub("ab", "()(a)", {[1] = "table"})
+            return a, b, c, d
+            "#,
+        )
+        .unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(4)).unwrap();
+    assert_eq!(state.to_bytes(-4).unwrap(), b"<a:1:%>b");
+    assert_eq!(state.to_bytes(-3).unwrap(), b"<a>b");
+    assert_eq!(state.to_bytes(-2).unwrap(), b"1ab");
+    assert_eq!(state.to_bytes(-1).unwrap(), b"tableb");
+}

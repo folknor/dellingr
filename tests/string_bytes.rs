@@ -173,3 +173,69 @@ fn find_backreferences_compare_captures() {
     assert_eq!(state.to_number(-2).unwrap(), 3.0);
     assert_eq!(state.to_bytes(-1).unwrap(), b"a");
 }
+
+#[test]
+fn position_captures_are_numbers_in_all_string_wrappers() {
+    // gmatch is a stateful iterator in dellingr, so drive it with a for-loop to
+    // grab the first iteration's captures.
+    let mut state = State::new();
+    state
+        .load_string(
+            r#"
+        local fa, fb, fc, fd, fe = string.find("abc", "()(a)()")
+        local m1, m2, m3 = string.match("abc", "()(a)()")
+        local g1, g2, g3
+        for x, y, z in string.gmatch("abc", "()(a)()") do
+            g1, g2, g3 = x, y, z
+            break
+        end
+        return fa, fb, fc, fd, fe, m1, m2, m3, g1, g2, g3
+        "#,
+        )
+        .unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(11)).unwrap();
+
+    // find: start, end, then the () (a) () captures -> 1, 1, 1, "a", 2.
+    assert_eq!(state.to_number(-11).unwrap(), 1.0);
+    assert_eq!(state.to_number(-10).unwrap(), 1.0);
+    assert_eq!(state.to_number(-9).unwrap(), 1.0);
+    assert_eq!(state.to_bytes(-8).unwrap(), b"a");
+    assert_eq!(state.to_number(-7).unwrap(), 2.0);
+    // match and gmatch: the three captures -> 1, "a", 2.
+    assert_eq!(state.to_number(-6).unwrap(), 1.0);
+    assert_eq!(state.to_bytes(-5).unwrap(), b"a");
+    assert_eq!(state.to_number(-4).unwrap(), 2.0);
+    assert_eq!(state.to_number(-3).unwrap(), 1.0);
+    assert_eq!(state.to_bytes(-2).unwrap(), b"a");
+    assert_eq!(state.to_number(-1).unwrap(), 2.0);
+}
+
+#[test]
+fn position_captures_use_absolute_positions_after_init() {
+    let state = run_one(r#"return string.match("abc", "()", 3)"#);
+    assert_eq!(state.to_number(-1).unwrap(), 3.0);
+}
+
+#[test]
+fn end_position_patterns_match_once() {
+    let mut state = State::new();
+    state
+        .load_string(
+            r#"
+        local a, b = string.find("", "$")
+        local c = string.match("", "$")
+        local d, e = string.find("abc", "$", 4)
+        local n = 0
+        for _ in string.gmatch("abc", "$") do n = n + 1 end
+        return a, b, c, d, e, n
+        "#,
+        )
+        .unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(6)).unwrap();
+    assert_eq!(state.to_number(-6).unwrap(), 1.0);
+    assert_eq!(state.to_number(-5).unwrap(), 0.0);
+    assert_eq!(state.to_bytes(-4).unwrap(), b"");
+    assert_eq!(state.to_number(-3).unwrap(), 4.0);
+    assert_eq!(state.to_number(-2).unwrap(), 3.0);
+    assert_eq!(state.to_number(-1).unwrap(), 1.0);
+}
