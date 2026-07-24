@@ -41,18 +41,20 @@ impl State {
         name: &str,
         val: Val,
     ) -> Result<()> {
-        let key = self.alloc_string(name);
-        let idx = self.convert_idx(table_idx)?;
-        let obj_ptr = self.stack[idx].as_object_ptr();
-        let typ = self.stack[idx].typ_simple();
+        self.with_rooted_value(val, |state| {
+            let key = state.alloc_string(name);
+            let idx = state.convert_idx(table_idx)?;
+            let obj_ptr = state.stack[idx].as_object_ptr();
+            let typ = state.stack[idx].typ_simple();
 
-        match obj_ptr.and_then(|ptr| self.heap.as_table(ptr)) {
-            Some(t) => {
-                t.insert(key, val)?;
-                Ok(())
+            match obj_ptr.and_then(|ptr| state.heap.as_table(ptr)) {
+                Some(t) => {
+                    t.insert(key, val)?;
+                    Ok(())
+                }
+                None => Err(state.type_error(TypeError::TableIndex(typ))),
             }
-            None => Err(self.type_error(TypeError::TableIndex(typ))),
-        }
+        })
     }
 
     #[cfg(not(feature = "snapshot"))]
@@ -304,30 +306,27 @@ impl State {
             // Use the comparator function at stack index 2
             // We need to do a stable sort with the comparator
             let comp_idx = self.convert_idx(2)?;
+            let roots = arr.clone();
 
-            // Bubble sort to keep it simple (not efficient but works)
-            for i in 0..n {
-                for j in 0..n - 1 - i {
-                    // Call comp(arr[j], arr[j+1])
-                    let a = arr[j];
-                    let b = arr[j + 1];
+            self.with_rooted_values(&roots, |state| {
+                // Bubble sort to keep it simple (not efficient but works)
+                for i in 0..n {
+                    for j in 0..n - 1 - i {
+                        let a = arr[j];
+                        let b = arr[j + 1];
+                        state.stack.push(state.stack[comp_idx]);
+                        state.stack.push(a);
+                        state.stack.push(b);
+                        state.call(ArgCount::Fixed(2), RetCount::Fixed(1))?;
+                        let result = state.pop_val();
 
-                    // Push comp function
-                    self.stack.push(self.stack[comp_idx]);
-                    // Push args
-                    self.stack.push(a);
-                    self.stack.push(b);
-                    // Call
-                    self.call(ArgCount::Fixed(2), RetCount::Fixed(1))?;
-                    // Get result
-                    let result = self.pop_val();
-
-                    // If comp(a, b) is false, swap
-                    if !result.truthy() {
-                        arr.swap(j, j + 1);
+                        if !result.truthy() {
+                            arr.swap(j, j + 1);
+                        }
                     }
                 }
-            }
+                Ok(())
+            })?;
         } else {
             // Default: sort by < operator (numbers first, then strings)
             let heap = &self.heap;

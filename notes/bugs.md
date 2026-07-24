@@ -20,118 +20,6 @@ valid. Fix history lives in git.
 
 ## High severity
 
-### 1. `with_restricted_env` un-roots the saved environment; GC during the closure frees it, permanently poisoning the State (C-A2 + D-D1, two independent reports)
-
-- **Locations:** `src/vm.rs:614-654` (`with_restricted_env`), `src/vm.rs:69-89`
-  (`mark_gc_roots`), `src/vm/object.rs:221-234, 574-579` (the panicking
-  `expect`s).
-- **Cause:** the function moves the real `globals`/`builtins` into locals
-  (`saved_globals`, `saved_builtins` via `std::mem::replace`) and installs a
-  whitelist-only environment. While `f` runs, the swapped-out originals are
-  invisible to `mark_gc_roots` (which marks only stack, globals, builtins,
-  string_literals, active_call_roots, registry; `env_tokens` is not a root
-  either). Any allocation inside `f` (`alloc_string`, `push_closure`,
-  `initialize_frame`) can trigger `gc_collect` - `GC_INITIAL_THRESHOLD = 20`
-  plus the adaptive 2x threshold means real scripts hit it quickly - and every
-  object reachable only from the saved environment is swept: the
-  `math`/`string`/`table` library tables, the `_G` proxy and its metatable,
-  and every non-whitelisted user global that is an object. After restore,
-  `state.globals`/`state.builtins` hold dangling `ObjectPtr`s; the next access
-  (`math.floor(1)`) panics "Invalid ObjectPtr: object was freed
-  (use-after-free detected)".
-- The recently added panic-guard (L11) restores the environment on unwind, but
-  it restores dangling pointers; the "restored after the function completes
-  (or errors)" guarantee is hollow whenever a GC ran inside `f`. There is no
-  test coverage for restricted env + GC in `src/vm/tests.rs`.
-- **Repro (host API):**
-
-```rust
-use dellingr::{ArgCount, RetCount, State};
-let mut state = State::new();
-state.load_string("t = {1, 2, 3}").unwrap();
-state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
-
-state.with_restricted_env(&["print"], |s| {
-    // Enough churn to cross the GC threshold at least once.
-    s.load_string(
-        "local a = {} for i = 1, 200 do a[i] = 'x' .. i end print(a[1])",
-    ).unwrap();
-    s.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
-});
-
-// Any later touch of a collected env object panics:
-state.load_string("print(t[1], math.floor(1.5))").unwrap();
-state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap(); // panic
-```
-
-- **Fix sketch:** make the saved environment a root while swapped out, e.g. a
-  `State` field `suspended_env: Vec<(IndexMap<String, Val>, [Val; Builtin::COUNT])>`
-  (a Vec so nesting works) that `with_restricted_env` pushes/pops and
-  `mark_gc_roots` marks - keeps "single source of truth" honest. Prefer the
-  rooted-field variant over cloning the environment (O(1) vs O(globals)) or
-  suppressing GC during `f` (unbounded heap growth). Alternative (worse):
-  restore the GC threshold to `usize::MAX` during `f`, which merely defers
-  the problem to an explicit `gc_collect`.
-
-### 2. Frame varargs are not GC roots: script-reachable use-after-free panic (B-B2)
-
-- **Locations:** `src/vm/eval.rs:309-314` (varargs drained into the Frame),
-  `src/vm/frame.rs:29` (Frame field), `src/vm.rs:69-89` (`mark_gc_roots`),
-  `src/vm/frame.rs:229-247` (`OP_VARARG`), `src/vm/object.rs:221-234` (panic).
-- **Cause:** `eval_closure_inner` drains vararg arguments off the VM stack into
-  a plain `Vec<Val>` moved into the `Frame`, which is a Rust local - not part
-  of `State`. `mark_gc_roots` never sees it. Any allocation inside the frame
-  (table constructor, concat, closure creation, or the per-call literal
-  interning in `initialize_frame` itself, `eval.rs:424-443`) can collect a
-  heap value reachable only through `frame.varargs`; the later `OP_VARARG`
-  pushes the stale pointer and the next heap access panics - a script kills
-  the host process, violating "errors kill the callback, not the host". Tests
-  likely miss it because benches pass numeric varargs (`Val::Num` is not
-  heap-managed).
-- **Repro:**
-
-```lua
-local function f(...)
-  local junk
-  for i = 1, 200 do junk = {i} end   -- drive collections (threshold starts at 20)
-  return ...
-end
-print(f({ "boom" }))   -- expected: table printout; actual: Rust panic
-```
-
-- **Fix directions:** (a) make active frames' varargs visible to the root set
-  (the interpreter-flattening rewrite, optimizations.md #2, does this
-  structurally); (b) keep varargs on the VM stack below the frame like
-  reference Lua; (c) minimal targeted patch: a State-owned side stack
-  (`Vec<Vec<Val>>` pushed/popped around each frame) that `mark_gc_roots`
-  walks.
-
-### 4. `#t` with a `__len` metatable: receiver unrooted across `alloc_string` (C-A3)
-
-- **Locations:** `src/vm/eval_store.rs:146-190` (`instr_length`),
-  `src/vm.rs:657-665` (`alloc_string` runs `gc_collect` when `is_full`, even
-  if the string is already interned).
-- **Cause:** the operand is popped (`let val = self.pop_val()`), then the
-  metatable path calls `self.alloc_string("__len")` (line 168). Between the
-  pop and the metamethod call, neither the table nor its metatable is rooted
-  (the metatable is only reachable through the table). If the operand is a
-  temporary, GC collects both and `self.heap.as_table_ref(mt_ptr)` panics; if
-  the metatable survives, the later `self.stack.push(val)` reinstates a
-  dangling pointer that the `__len` body dereferences. The sibling paths get
-  this right: `metamethod.rs:49-52, 170-173` push key/val around
-  `alloc_string` exactly to protect them, and the `__call` path parks
-  `func_val` in `active_call_roots`.
-- **Repro sketch (hits when an allocation boundary lands on the `#`):**
-
-```lua
-for i = 1, 10000 do
-  local n = #setmetatable({}, { __len = function() return 0 end })
-end
-```
-
-- **Fix:** push `val` back on the stack before the `alloc_string`, pop after
-  (same pattern as `metamethod.rs`).
-
 ### 5. `Val` equality/hash for `RustFn` compares payload addresses, not function pointers (B-B1 + C-B1, two independent reports)
 
 - **Locations:** `src/vm/lua_val.rs:178-195` (PartialEq), `:153-176` /
@@ -612,33 +500,6 @@ for i = 1, 34 do s = s .. s end   -- 16 GB attempt, total charged cost ~34
   vocabulary), or a max-string-length cap. Decision belongs to the cost-model
   owner.
 
-### 25. `table.sort` comparator runs with the array detached from the root set (C-A4; also flagged by B)
-
-- **Location:** `src/vm/table_ops.rs:276-358`.
-- **Cause:** `table_sort` copies the array portion into a local `Vec<Val> arr`
-  (`t.get_array()`), then the comparator branch calls arbitrary Lua code
-  (`self.call(...)`) in a loop while `arr` is held only in Rust - not
-  reachable from `mark_gc_roots`. A comparator that removes elements from the
-  table and allocates enough to trigger GC gets the not-currently-passed
-  elements collected: the next bubble step pushes a dangling `Val` as a
-  comparator argument (heap access panics), and `set_array` at the end can
-  write dangling pointers back into the table (deferred use-after-free
-  panic).
-- **Repro:**
-
-```lua
-local t = {}
-for i = 1, 20 do t[i] = { v = i } end
-table.sort(t, function(a, b)
-  for k in pairs(t) do t[k] = nil end   -- drop the table's own references
-  for i = 1, 200 do local _ = {} end    -- churn until GC fires
-  return a.v < b.v
-end)
-```
-
-- **Fix:** sort in place (optimizations.md #12), or root the detached array
-  (park it on the VM stack, or an `active_call_roots`-style side vector).
-
 ### 26. `table.insert(t, pos, v)` reverses `pairs` order and is O(N^2) (C-B4)
 
 - **Location:** `src/vm/table.rs:410-433` (`Table::array_insert`).
@@ -1097,13 +958,6 @@ From B (B-B12, robustness notes):
 
 From C (latent hazards and nits):
 
-- C-E1: `set_table_str_key_value` (`src/vm/table_ops.rs:37-55`) interns
-  `name` (which can run GC) while the `val` parameter is held unrooted.
-  Every current caller passes `RustFn`/`Num` (verified in the lua_std
-  install paths), so not live today, but the signature invites a future
-  use-after-free: any caller passing a fresh `Val::Obj`/`Val::Str` loses it
-  if the intern triggers a collection. Either root `val` on the stack inside
-  the helper or document the invariant.
 - C-E2: `alloc_string` runs the `is_full` check and potential full
   collection even when the string is already interned - a hot loop touching
   only existing strings can pay a whole mark+sweep at the threshold boundary
@@ -1167,9 +1021,9 @@ every GET_GLOBAL/GET_FIELD/SET_FIELD with a real slot index, so plain
 constructors' implicit index 0 never reaches the runtime.
 `with_restricted_env` swaps are honored by all three IC families via
 `globals_version`, restore-under-panic via catch_unwind. `mark_gc_roots`
-otherwise sound for the execution core (active closures via
-`active_call_roots`, per-frame literals via `string_literals`, metamethod
-key/val protection pushes present) - #2 (varargs) is the one hole found.
+otherwise sound for the execution core (active closures and scoped temporaries
+via `transient_roots`, per-frame literals via `string_literals`, metamethod
+key/val protection pushes present).
 
 **C (data plane):** `StringPool.hash_index` uses IndexMap keyed by pinned
 FxHash values; iteration only during sweep; insertion-order semantics keep

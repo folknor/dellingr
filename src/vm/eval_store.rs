@@ -159,11 +159,13 @@ impl State {
 
             // Check for __len metamethod
             if let Some(mt_ptr) = mt_ptr {
-                let len_key = self.alloc_string("__len");
-                let len_handler = self
-                    .heap
-                    .as_table_ref(mt_ptr)
-                    .map_or(Val::Nil, |mt| mt.get(&len_key));
+                let len_handler = self.with_rooted_value(val, |state| {
+                    let len_key = state.alloc_string("__len");
+                    state
+                        .heap
+                        .as_table_ref(mt_ptr)
+                        .map_or(Val::Nil, |mt| mt.get(&len_key))
+                });
 
                 if !matches!(len_handler, Val::Nil) {
                     // Call __len(table)

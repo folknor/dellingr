@@ -118,10 +118,21 @@ impl State {
             self.stack_bottom = old_stack_bottom;
             num_ret_reported
         } else if let Some(closure) = func_val.as_lua_function(&self.heap) {
-            self.active_call_roots.push(func_val);
+            // Deliberately a manual push/pop rather than `with_rooted_value`.
+            // This is the recursive Lua-call path, and the helper's closure plus
+            // catch_unwind landing pad add enough per-level stack-frame bloat to
+            // abort `call_depth_exceeded_error`, which recurses to
+            // MAX_CALL_DEPTH = 1000 (the same constraint AGENTS.md records for
+            // #[hotpath::measure] on this path). A Rust panic unwinding through
+            // here therefore leaks this root - but it also leaves call_stack,
+            // string_literals, stack_bottom and the vararg bases inconsistent,
+            // none of which are unwound either. A State that has been unwound
+            // through must be discarded, not reused.
+            self.transient_roots.values.push(func_val);
             let result = self.eval_closure(closure, actual_num_args);
             let popped = self
-                .active_call_roots
+                .transient_roots
+                .values
                 .pop()
                 .expect("active call root missing after Lua call");
             debug_assert!(popped == func_val);
@@ -140,17 +151,13 @@ impl State {
                 .and_then(super::table::Table::get_metatable);
 
             if let Some(mt_ptr) = metatable_ptr {
-                self.active_call_roots.push(func_val);
-                let call_key = self.alloc_string("__call");
-                let call_handler = self
-                    .heap
-                    .as_table_ref(mt_ptr)
-                    .map_or(Val::Nil, |mt| mt.get(&call_key));
-                let popped = self
-                    .active_call_roots
-                    .pop()
-                    .expect("active call root missing after __call lookup");
-                debug_assert!(popped == func_val);
+                let call_handler = self.with_rooted_value(func_val, |state| {
+                    let call_key = state.alloc_string("__call");
+                    state
+                        .heap
+                        .as_table_ref(mt_ptr)
+                        .map_or(Val::Nil, |mt| mt.get(&call_key))
+                });
 
                 if !matches!(call_handler, Val::Nil) {
                     // Insert the table as first argument and call the handler
@@ -297,7 +304,6 @@ impl State {
         self.stack_bottom = self.stack.len() - num_args as usize;
 
         let num_params = closure.bytecode.num_params;
-        let num_locals = closure.bytecode.num_locals;
         let is_vararg = closure.bytecode.is_vararg;
 
         // Push call info for stack traces
@@ -306,15 +312,40 @@ impl State {
             ip: 0,
         });
 
-        // Collect varargs if this is a vararg function
-        let varargs = if is_vararg && num_args > num_params {
+        // Collect and root varargs only for a frame that has extra arguments.
+        // Calls without extra varargs intentionally avoid all root bookkeeping.
+        if is_vararg && num_args > num_params {
             let num_varargs = (num_args - num_params) as usize;
             let vararg_start = self.stack.len() - num_varargs;
-            self.stack.drain(vararg_start..).collect()
-        } else {
-            Vec::new()
-        };
+            let varargs: Vec<Val> = self.stack.drain(vararg_start..).collect();
+            // Root from the slice before moving `varargs` into the frame:
+            // with_rooted_values copies into transient_roots anyway, so cloning
+            // the Vec first would allocate twice per vararg call for nothing.
+            let watermark = self.transient_roots.values.len();
+            self.transient_roots.values.extend_from_slice(&varargs);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.eval_closure_frame(closure, old_stack_bottom, num_args, varargs)
+            }));
+            self.transient_roots.values.truncate(watermark);
+            return match result {
+                Ok(result) => result,
+                Err(payload) => std::panic::resume_unwind(payload),
+            };
+        }
 
+        self.eval_closure_frame(closure, old_stack_bottom, num_args, Vec::new())
+    }
+
+    fn eval_closure_frame(
+        &mut self,
+        closure: Closure,
+        old_stack_bottom: usize,
+        num_args: u8,
+        varargs: Vec<Val>,
+    ) -> Result<u8> {
+        let num_params = closure.bytecode.num_params;
+        let num_locals = closure.bytecode.num_locals;
+        let is_vararg = closure.bytecode.is_vararg;
         // Check stack space for parameters and locals
         let extra_params = if num_args < num_params {
             (num_params - num_args) as usize

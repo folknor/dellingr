@@ -177,6 +177,65 @@ fn state_is_quiescent_after_error_in_dynamic_call_args() {
 }
 
 #[test]
+fn state_is_quiescent_after_error_in_vararg_frame() {
+    let mut state = State::new();
+    state
+        .load_string(
+            r#"
+            local function f(...) return nil + 1 end
+            return f({ marker = 42 })
+        "#,
+        )
+        .unwrap();
+    state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+        .expect_err("vararg frame must error");
+    state
+        .save_state()
+        .expect("vararg roots must be released after an error");
+}
+
+#[test]
+fn state_is_quiescent_after_error_in_table_sort_comparator() {
+    let mut state = State::new();
+    state
+        .load_string(
+            r#"
+            local t = { { v = 2 }, { v = 1 } }
+            table.sort(t, function() return nil + 1 end)
+        "#,
+        )
+        .unwrap();
+    state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+        .expect_err("sort comparator must error");
+    state
+        .save_state()
+        .expect("sort roots must be released after an error");
+}
+
+#[test]
+fn state_is_quiescent_after_error_in_restricted_environment() {
+    let mut state = State::new();
+    let result = state.with_restricted_env(&[], |state| {
+        state.load_string("return nil + 1")?;
+        state.call(ArgCount::Fixed(0), RetCount::Fixed(0))
+    });
+    result.expect_err("restricted callback must error");
+    state
+        .save_state()
+        .expect("suspended environment must be restored after an error");
+}
+
+#[test]
+fn save_state_rejects_suspended_environment() {
+    let mut state = State::new();
+    state.with_restricted_env(&[], |state| {
+        assert!(matches!(state.save_state(), Err(SaveError::NotQuiescent)));
+    });
+}
+
+#[test]
 fn state_is_quiescent_after_error_in_table_constructor() {
     // Same guard for the table_constructor_bases stack: an error between
     // NewTableTracked and its SetList must not leak a base (L8).

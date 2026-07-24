@@ -5,6 +5,16 @@ use super::compiler::parse_str;
 use super::lua_val::Val;
 use crate::instr::RetCount;
 
+fn force_gc(state: &mut State) -> crate::Result<u8> {
+    state.gc_collect();
+    Ok(0)
+}
+
+fn arm_gc(state: &mut State) -> crate::Result<u8> {
+    state.gc_set_threshold(state.heap_size());
+    Ok(0)
+}
+
 #[test]
 fn consume_cost_saturates_large_host_charges() {
     for (cost, remaining) in [
@@ -297,6 +307,158 @@ fn gc_collect_preserves_disabled_auto_gc() {
     state.gc_collect();
     assert_ne!(state.gc_threshold(), usize::MAX);
     assert!(state.gc_threshold() >= 20);
+}
+
+#[test]
+fn gc_preserves_nested_suspended_environments() {
+    let mut state = State::new();
+    state.new_table();
+    let original = state.pop_val();
+    state.set_global_value("original", original);
+
+    state.with_restricted_env(&[], |state| {
+        state.new_table();
+        let outer = state.pop_val();
+        state.set_global_value("outer", outer);
+
+        state.with_restricted_env(&[], |state| {
+            state.gc_collect();
+        });
+
+        let outer = *state
+            .globals
+            .get("outer")
+            .expect("outer restricted value must be restored");
+        // Dereference through the heap. `as_object_ptr().is_some()` only
+        // inspects the Val variant, so a swept generational pointer still
+        // returns Some and the assertion could not fail.
+        assert!(
+            live_table(state, outer),
+            "outer restricted value was collected"
+        );
+    });
+
+    let original = *state
+        .globals
+        .get("original")
+        .expect("original value must be restored");
+    assert!(
+        live_table(&state, original),
+        "original global was collected"
+    );
+    let math = state.builtins[crate::instr::Builtin::Math as usize];
+    assert!(live_table(&state, math), "math library table was collected");
+}
+
+/// True only if `val` is a table that is still resolvable on the heap. Used by
+/// the GC-root tests, where checking the `Val` variant alone would pass against
+/// a dangling pointer.
+fn live_table(state: &State, val: Val) -> bool {
+    val.as_object_ptr()
+        .and_then(|ptr| state.heap.as_table_ref(ptr))
+        .is_some()
+}
+
+#[test]
+fn gc_preserves_frame_varargs() {
+    let mut state = State::new();
+    state.set_global_value("force_gc", Val::RustFn(force_gc));
+    let input = parse_str(
+        r#"
+        local function f(...)
+            force_gc()
+            return ...
+        end
+        return f({ marker = 42 }).marker
+        "#,
+    )
+    .expect("vararg script must parse");
+    state
+        .eval_chunk(input, 0)
+        .expect("vararg object must survive GC");
+    assert_eq!(state.to_number(-1).expect("return must be numeric"), 42.0);
+}
+
+#[test]
+fn length_receiver_survives_lookup_collection() {
+    let mut state = State::new();
+    state.set_global_value("arm_gc", Val::RustFn(arm_gc));
+    let input = parse_str(
+        r#"
+        local function make()
+            local t = {}
+            setmetatable(t, { __len = function() return 77 end })
+            arm_gc()
+            return t
+        end
+        return #make()
+        "#,
+    )
+    .expect("length script must parse");
+    state
+        .eval_chunk(input, 0)
+        .expect("length receiver must survive GC");
+    assert_eq!(state.to_number(-1).expect("return must be numeric"), 77.0);
+    assert!(
+        !state.gc_should_run(),
+        "armed allocation must have collected"
+    );
+}
+
+#[test]
+fn table_sort_array_survives_comparator_collection() {
+    let mut state = State::new();
+    state.set_global_value("force_gc", Val::RustFn(force_gc));
+    let input = parse_str(
+        r#"
+        local t = {}
+        for i = 1, 20 do t[i] = { v = 21 - i } end
+        local collected = false
+        table.sort(t, function(a, b)
+            if not collected then
+                collected = true
+                for k in pairs(t) do t[k] = nil end
+                force_gc()
+            end
+            return a.v < b.v
+        end)
+        return t[1].v, t[20].v
+        "#,
+    )
+    .expect("sort script must parse");
+    state
+        .eval_chunk(input, 0)
+        .expect("detached sort array must survive comparator GC");
+    assert_eq!(
+        state.to_number(-2).expect("first result must be numeric"),
+        1.0
+    );
+    assert_eq!(
+        state.to_number(-1).expect("last result must be numeric"),
+        20.0
+    );
+}
+
+#[test]
+fn set_table_str_key_value_roots_heap_value() {
+    let mut state = State::empty();
+    state.gc_disable_auto();
+    let child = state.alloc_table();
+    state.new_table();
+    state.gc_set_threshold(state.heap_size());
+
+    state
+        .set_table_str_key_value(1, "child", child)
+        .expect("setting rooted heap value must succeed");
+    state.push_string("child");
+    state.get_table_raw(1).expect("child lookup must succeed");
+    // Must dereference: if interning the key had collected the child, the
+    // stale pointer would still satisfy an `as_object_ptr().is_some()` check.
+    let stored = state.pop_val();
+    assert!(
+        live_table(&state, stored),
+        "child was collected while interning the key"
+    );
 }
 
 #[test]

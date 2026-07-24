@@ -4,239 +4,261 @@ Current work item. Numbers refer to finding numbers in `notes/bugs.md`.
 
 ---
 
-## Target #6: `t[k] = nil` during `pairs` traversal
+## Targets #1, #2, #4, #25: values held outside the GC root set
 
-### The bug
+Four instances of one defect class. `vm::mark_gc_roots` (`src/vm.rs:69-89`) is
+documented as the single source of truth for reachability, and marks exactly:
+`stack`, `globals`, `builtins`, `string_literals`, `active_call_roots`,
+`upvalue_pool` (transitively), and `registry`. Each finding below holds a live
+`Val` somewhere that set cannot see, across an operation that can trigger
+`gc_collect`. The result is a swept-but-referenced object and a
+`"Invalid ObjectPtr: object was freed (use-after-free detected)"` panic - which
+kills the host process, violating the design rule that errors kill the callback
+rather than the host.
 
-Reference Lua explicitly permits clearing the field you are currently sitting
-on during a traversal:
+They are one loop because they want one mechanism, and because `mark_gc_roots`
+should be edited once rather than three times.
 
-```lua
-local t = { a = 1, b = 2, c = 3, d = 4, e = 5 }
-for k in pairs(t) do t[k] = nil end
-print(next(t) == nil)   -- reference: true
+All four verified by reading.
+
+### #1 (High) - `with_restricted_env` un-roots the saved environment
+
+`src/vm.rs:611-654`. The function `std::mem::replace`s the real environment
+into Rust locals:
+
+```rust
+let saved_globals = std::mem::replace(&mut self.globals, restricted_globals);
+let saved_builtins = std::mem::replace(&mut self.builtins, restricted_builtins);
 ```
 
-This is the filter-in-place idiom and it is common in game scripts.
+While `f` runs, those locals are invisible to `mark_gc_roots`. Any allocation
+inside `f` can collect everything reachable only from the saved environment:
+the `math` / `string` / `table` library tables, the `_G` proxy and its
+metatable, and every non-whitelisted user global holding an object. After
+restore, `state.globals` / `state.builtins` hold dangling `ObjectPtr`s.
 
-dellingr physically removes the entry, so the control key the iterator carries
-no longer exists in the table:
+The existing panic guard (`catch_unwind`, line 643) restores the environment on
+unwind, but restoring dangling pointers does not help: the "restored after the
+function completes (or errors)" guarantee is hollow whenever a GC ran inside
+`f`. There is no restricted-env-plus-GC coverage in `src/vm/tests.rs`.
 
-- `Table::remove` (`src/vm/table.rs:381-412`), inline arm: shifts later entries
-  down over the hole and decrements `len` (lines 394-397).
-- Map arm: `IndexMap::shift_remove` (line 405), which likewise shifts every
-  later entry down.
+Note this must nest - `with_restricted_env` can be called reentrantly.
 
-Then `Table::next(&control)` cannot find the control key. **As of the previous
-commit** that returns `TableNext::InvalidKey`, and the loop dies with
-`invalid key to 'next'`. Before that commit it silently ended the loop early
-(leaving `b`..`e` in the table above). So the current failure is loud rather
-than silent, but the idiom is still broken, and it is now broken in a way that
-kills the callback.
+### #2 (High) - frame varargs are not roots
 
-### Why it is not just a `next` bug
+`src/vm/eval.rs:309-316`:
 
-The information `next` needs is destroyed by `remove` before `next` is ever
-called. Any fix has to change what removal leaves behind, or record where the
-removed key used to sit.
+```rust
+let varargs = if is_vararg && num_args > num_params {
+    let num_varargs = (num_args - num_params) as usize;
+    let vararg_start = self.stack.len() - num_varargs;
+    self.stack.drain(vararg_start..).collect()
+} else {
+    Vec::new()
+};
+```
 
-### Constraints that shape the fix
+The values are drained *off* the VM stack into a plain `Vec<Val>` that is moved
+into the `Frame` (`src/vm/frame.rs:29`), which is a Rust local, not part of
+`State`. Any allocation inside the frame - a table constructor, a concat, a
+closure, or the per-call literal interning in `initialize_frame` itself - can
+collect a value reachable only through `frame.varargs`. The later `OP_VARARG`
+(`frame.rs:229-247`) pushes the stale pointer.
 
-- **Determinism is a product requirement.** Iteration order is insertion order
-  today and must stay exactly that, including after removals and re-insertions.
-  Replays depend on it.
-- `Table::next`, `get`, and `insert` are all `#[hotpath::measure]`d and sit
-  under `pairs` / field access. The common path must not get slower.
-- `Table::version()` guards the inline caches in `eval_index.rs` (6 sites) and
-  `eval_store.rs` (3 sites). Anything that changes an existing entry's *index*
-  must bump the version, or those caches read the wrong slot.
-- `mark_values` (`table.rs:555+`) walks entries for GC. Anything retained
-  after removal must not silently keep dead objects reachable forever.
-- `array_len` / the border binary search (`table.rs:280-299`) call `get` and
-  treat `Val::Nil` as absent.
-- `array_insert` / `array_remove` build on `remove` and on index positions.
+Existing tests likely miss this because benches pass numeric varargs, and
+`Val::Num` is not heap-managed.
+
+Repro:
+
+```lua
+local function f(...)
+  local junk
+  for i = 1, 200 do junk = {i} end
+  return ...
+end
+print(f({ "boom" }))
+```
+
+### #4 (High) - `#t` with `__len` drops the receiver across `alloc_string`
+
+`src/vm/eval_store.rs:139-184`. The operand is popped at line 141
+(`let val = self.pop_val()`), and the metatable path calls
+`self.alloc_string("__len")` at line 162. `alloc_string` (`vm.rs:656-665`) runs
+`gc_collect` whenever `heap.is_full()`. Between the pop and lines 170-171, where
+`len_handler` and `val` are pushed, neither the table nor its metatable is
+rooted - the metatable is reachable only through the table. If the operand was
+a temporary, both are collected and `self.heap.as_table_ref(mt_ptr)` panics; if
+the metatable survives, the `self.stack.push(val)` at 171 reinstates a dangling
+pointer that the `__len` body then dereferences.
+
+The sibling paths already get this right: `src/vm/metamethod.rs:49-52, 170-173`
+push key/val around `alloc_string` precisely to protect them, and the `__call`
+path parks `func_val` in `active_call_roots`. This is the smallest of the four
+and may just be that same push/pop pattern.
+
+### #25 (Medium) - `table.sort` runs the comparator with the array detached
+
+`src/vm/table_ops.rs:280-330`. `t.get_array()` at line 288 copies the array
+portion into a local `Vec<Val>`, and the comparator branch then calls arbitrary
+Lua code at line 321 in a loop while `arr` is reachable only from Rust. A
+comparator that clears the table and allocates enough to trigger GC gets the
+not-currently-passed elements collected; the next iteration pushes a dangling
+`Val` as a comparator argument, and the eventual `set_array` writes dangling
+pointers back into the table for a deferred panic.
+
+Repro:
+
+```lua
+local t = {}
+for i = 1, 20 do t[i] = { v = i } end
+table.sort(t, function(a, b)
+  for k in pairs(t) do t[k] = nil end
+  for i = 1, 200 do local _ = {} end
+  return a.v < b.v
+end)
+```
+
+### Reproduction status
+
+#2, #4 and #25 were each run against the debug binary and each aborted the
+process with `Invalid ObjectPtr: object was freed (use-after-free detected)` at
+`src/vm/object.rs:224`. #1 is host-API-only and was confirmed by reading.
+
+Nothing protects #1 indirectly: `env_tokens` is a weak classification map, not
+a marked root; inline caches are not roots; the registry covers only explicitly
+anchored values; and restoring the saved maps after a collection just restores
+invalid generational pointers.
 
 ---
 
-## Agreed implementation plan: tombstones
+## Agreed implementation plan
 
-A removed-key memo was considered and rejected: it only ever fixes whichever
-key was removed last, and generalizing it to the full case requires retaining
-every removed key plus successor chains, which is a worse tombstone
-implementation that still pays for physical deletion.
+One mechanism for all four. Generalize `active_call_roots` into a State-owned
+transient-root registry. **Do not** park these values on the visible VM stack -
+that would perturb `stack_bottom`-relative indexing and `get_top`.
 
-### Representation
+### Structures
 
-`Val::Nil` in an occupied value slot means "logically absent". This needs no
-new `Val` variant, no bitmap, and no change to `TableStorage`: Lua tables never
-semantically store nil, `get` already returns a stored nil as absence, and
-templated constructors already prepopulate nil-valued entries (`table.rs:86`).
+```rust
+struct TransientRoots {
+    values: Vec<Val>,                          // active closures + scoped temporaries
+    suspended_envs: Vec<SuspendedEnvironment>,
+}
 
-- Add `dead_count: usize` to `Table`. Zero in `Default` and `with_capacity`.
-- In `with_template_keys`, initialize it to `key_ids.len()`: those reserved nil
-  slots start out logically absent.
-- `TableStorage` is unchanged.
-- `dead_count` lives on `Table`, not on `TableStorage`, so `promote_to_map` /
-  `ensure_map` do not need to carry it across a `mem::take` of `self.storage`.
+struct SuspendedEnvironment {
+    globals: IndexMap<String, Val>,
+    builtins: [Val; Builtin::COUNT],
+}
+```
 
-### Liveness contract on indexed accessors
+`State::active_call_roots` becomes `State::transient_roots`; the existing
+active-call push/pop sites (`src/vm/eval.rs:121, 124, 143, 150`) move to
+`transient_roots.values` unchanged. Suspended environments need their own shape
+only so the maps can be moved out and restored without flattening every global
+into a vector.
 
-This is what makes the "no version bump on removal" rule safe, so it is not
-optional. Every path that reaches an entry *by index* rather than by key must
-hide or refuse dead slots:
+Implement `Markable` for both. `mark_gc_roots` then marks: stack, current
+globals, current builtins, string literals, the whole transient-root registry,
+and the registry anchors. The upvalue pool stays a parameter for transitive
+closure marking and does not become an independent root.
 
-- `get_with_index` -> `None` for a dead value. Callers: `eval_index.rs`
-  (string-method cache population, direct field lookup, metatable `__index`
-  lookup, method-table lookup), `eval_store.rs` (SET_FIELD cache population,
-  direct-set lookup).
-- `get_index` -> `None` for a dead value. Callers: `eval_index.rs:141, 173,
-  298, 320`, `eval_store.rs:303`.
-- `set_at_index` -> return `false` if the target slot is dead. Callers:
-  `eval_store.rs:316` (version-matched cached write), `eval_store.rs:348`
-  (direct indexed write after key lookup). **Without this, a warm SET_FIELD
-  cache resurrects a deleted field in place.**
-- `entries` (snapshot-only, consumed by `save_state.rs:325`) -> emit live
-  entries only. Its `enumerate()` numbers the returned vector, not physical
-  slots, so nothing else in the codec changes. Load goes through
-  `clear_and_insert_entries`, which reinserts by key.
-- `mark_values` -> mark neither key nor value for a dead slot.
-- `next` -> the one deliberate exception. It must still *locate* a dead key
-  (that is the whole point) but must skip dead slots when producing a pair.
+Note `mark_gc_roots` has exactly one caller (`vm.rs:461`) and already carries a
+`too_many_arguments` allow; folding its parameters into `&State` while adding
+the new root set is in scope and makes "single source of truth" structural
+rather than aspirational.
 
-New `init_at_index(index, key, value) -> bool` for templated construction:
-validates the reserved key, leaves nil values dead, decrements `dead_count`
-when a non-nil value activates the slot. Its sole caller is
-`instr_init_field_pinned`, which today reaches for the cache-oriented
-`get_index` / `set_at_index` at `eval_store.rs:111, 114` and must be switched
-over. It is deliberately not available to caches or general writes.
+### Scoped helpers
 
-`get`, `array_len`, `compute_array_len`, `get_array`, `set_array`,
-`array_insert`, and `array_remove` are key-based and need no liveness logic;
-`get`'s numeric Map shortcut at `table.rs:144` already validates the physical
-key and returns nil for a dead value.
+Add internal `with_rooted_value` / `with_rooted_values`:
 
-### `remove`
+1. record `transient_roots.values.len()` as a watermark,
+2. append the root copies,
+3. run the operation,
+4. truncate back to the watermark before returning,
+5. where Rust unwinding is in play, catch, truncate, `resume_unwind`.
 
-- Locate the key as today.
-- If the value is already nil, return `None`.
-- Otherwise replace **only the value** with `Val::Nil`, increment `dead_count`,
-  return the previous value.
-- Do not shift entries. Do not bump `version`.
-- Keep the existing `cached_array_len` invalidation.
+Watermarks make nesting naturally LIFO, so a comparator may recursively sort
+another table or call a vararg function without disturbing outer roots.
 
-### `insert`
+### Per-finding application
 
-Nil assignment still routes to `remove`. Otherwise:
+- **#1**: move the displaced maps into `transient_roots.suspended_envs`
+  immediately after the `mem::replace`, and restore by popping. Nesting works
+  because the inner call restores `suspended[1]` and the outer later restores
+  `suspended[0]`. Must restore on normal return, on `Err`, and on unwind.
+- **#2**: leave `Frame::varargs` as it is; additionally copy the extra varargs
+  into `transient_roots.values` for the frame's lifetime. **The root operation
+  must live strictly inside the existing `is_vararg && num_args > num_params`
+  branch** - fixed-arity calls and vararg calls with no extras must gain no
+  push, no allocation, no watermark bookkeeping, and no cleanup branch.
+- **#4**: root the popped receiver around the `"__len"` allocation and the
+  metatable lookup. The root must be released before cost flushing and the
+  metamethod call, by which point the receiver is back on the VM stack.
+- **#25**: copy `arr` into `transient_roots.values` around comparator
+  execution and keep sorting the local `Vec`. Swapping within `arr` does not
+  change the rooted *set*, so one copy up front is sufficient. The extra copy
+  is acceptable in a function that is already an O(n^2) bubble sort.
 
-- `dead_count == 0`: exactly the current update/append path, same hash-probe
-  count. This is the hot path and must not regress.
-- Updating a **live** existing key: in place, no compaction, no bump.
-- Inserting a key that is **distinct from every tombstone**: append. Leave the
-  tombstones alone.
-- Reinserting a **tombstoned** key: `shift_remove` that one dead slot,
-  decrement `dead_count`, bump `version`, append at the back. O(1) when the
-  tombstone is already last; the O(N) shift lands here instead of on the
-  preceding removal.
-- Only when tombstones are dense - deterministic threshold
-  `dead_count >= live_count`, evaluated on a non-nil insertion - do a full
-  stable compaction, bump `version` once, then append.
-- Inline storage may compact whenever space or reinsertion needs it; the work
-  is bounded by 4 slots.
+Also harden `set_table_str_key_value` (`src/vm/table_ops.rs:38`, recorded as
+C-E1) with `with_rooted_value` in the same patch. It is genuinely latent today
+- every caller passes `RustFn` or `Num` via `set_table_str_key_rust_fn`,
+`set_table_str_key_named_rust_fn`, or `set_table_str_key_number` - but the
+signature is a standing trap.
 
-**Do not** revive a tombstone in place below the threshold. That is the one
-variant that breaks ordering. All three cases above must produce the same live
-insertion order as today's eager physical removal:
+Do not wait for the interpreter-flattening rewrite (`optimizations.md` #2).
+This is a live host-panic defect, and the targeted roots are compatible with
+that rewrite: once frames are State-owned, the extra vararg roots just get
+deleted.
 
-- Inline: `a, b, c` -> remove and reinsert `b` -> `a, c, b`.
-- Map: `a, b, c, d, e` -> remove and reinsert `c` -> `a, b, d, e, c`.
+### Error and unwind paths
 
-### `compact_dead(&mut self) -> bool`
+Every one of these must release its roots, or `validate_quiescent` will start
+failing after killed callbacks:
 
-- Inline: stable-pack live pairs toward index 0, clear the tail, update `len`.
-- Map: `retain` non-nil values (`IndexMap::retain` preserves relative order).
-- Reset `dead_count` to 0. Do not shrink Map capacity.
-- Returns whether it compacted.
-- **Does not bump `version` itself** - the caller does. Compaction moves live
-  entries' indices, so a caller that compacts without bumping corrupts every
-  index cache. Exactly one bump per compact-then-insert.
+- vararg roots: released after the existing frame stack / literal / call-info
+  cleanup,
+- sort roots: released before propagating a comparator error,
+- the `__len` root: released before cost flushing and metamethod invocation,
+- restricted environments: restored even when `f` returns `Err`.
 
-### Version policy
-
-- Removal: no bump. No live `(key, index)` binding moves, and the liveness
-  contract above means no cache can act on a dead slot.
-- Live value update: no bump (unchanged).
-- Append with no compaction: no bump (unchanged).
-- Compaction, or reinsertion of a tombstoned key: exactly one bump.
-- `array_insert` / `array_remove`: `compact_dead` first (no bump), then their
-  existing single structural bump.
-- Template initialization: no bump; reserved indices do not move.
-
-### Compaction timing
-
-Compaction is triggered only by script mutation history - never by GC or
-allocation pressure. GC-triggered compaction would make valid iteration depend
-on allocation timing, which breaks determinism. Do not compact in `gc_collect`.
-
-Inserting a previously absent field during traversal may compact and invalidate
-an old control key. That is acceptable: reference Lua already leaves
-add-during-traversal undefined. Pure deletion and value updates stay supported,
-which is the case this finding is about.
-
-Add `debug_assert_eq!(self.dead_count, 0)` to `promote_to_map` and
-`ensure_map`. Both should only ever be reached with no tombstones present
-(inline compacts its bounded 4 slots first, which may avoid promotion
-entirely; the array helpers compact before calling `ensure_map`).
-
-### `next`
-
-- Nil control: scan from slot 0 to the first **live** entry.
-- Non-nil control: may match a live or a dead key. Continue from its physical
-  slot, skipping consecutive dead entries.
-- A key that was never present stays `InvalidKey`. NaN stays `InvalidKey`.
+Update `validate_quiescent` (`src/vm/save_state.rs:464`) to require
+`transient_roots.is_empty()`, and clear it during snapshot materialization
+alongside the other transient state (`save_state.rs:591`). That makes a leaked
+root visible instead of silent.
 
 ### Tests
 
-`src/vm/table.rs` unit tests:
+These must force collection explicitly - via `gc_collect()` or by arming the
+threshold to the current heap size. Allocation churn alone is too indirect to
+pin these regressions.
 
-- Removed controls advance correctly, inline and map.
-- Multiple adjacent tombstones are skipped.
-- Never-present controls still `InvalidKey`.
-- Removal leaves `version` unchanged; compaction/reinsert bumps it exactly once.
-- `get_with_index` / `get_index` hide dead slots; `set_at_index` refuses to
-  resurrect one.
-- Reinserted keys move to the back, both storage modes.
+In `src/vm/tests.rs`:
 
-New `tests/table_iteration.rs`:
+- `gc_preserves_nested_suspended_environments` - original global object, enter
+  an outer restriction creating an outer-only global object, enter a nested
+  restriction, `gc_collect()`, then verify the outer-only object after inner
+  restoration and the original object plus `math` after outer restoration.
+- `gc_preserves_frame_varargs` - a Rust `force_gc` builtin, then
+  `local function f(...) force_gc(); return ... end; return f({marker=42}).marker`.
+  The table must be a temporary passed directly, not a global or a caller local.
+- `length_receiver_survives_lookup_collection` - an `arm_gc` builtin setting
+  the threshold to `heap_size()`, a helper returning a temporary table, `#`
+  applied to that temporary. Assert the `__len` result *and* `!gc_should_run()`
+  afterwards, proving the armed allocation actually collected.
+- `table_sort_array_survives_comparator_collection` - object elements; the
+  comparator nils every entry and calls `force_gc()` on first invocation.
+- `set_table_str_key_value_roots_heap_value` - destination table on the stack,
+  a fresh source table held only in the Rust `val` local, arm the next string
+  allocation, call the helper, read the child back.
 
-- The exact filter-in-place repro, for a <= 4-entry table and a > 4-entry table.
-- Delete the current key *and another key* before calling `next` - the case a
-  last-removal memo could not handle.
-- Exact insertion order after remove-then-reinsert.
-- Traversal with collectable table keys, forcing GC between the deletion and
-  the next iterator call.
+Strengthen `restricted_env_restored_after_panic`
+(`tests/error_handling.rs:826`) by forcing `gc_collect()` immediately before
+the deliberate panic and then verifying an object-valued non-whitelisted global
+after catching it.
 
-`tests/metamethod_errors.rs`:
+In `tests/save_state.rs`, quiescence after each unwind path:
 
-- Warm a read IC, delete the cached field, verify `__index` runs.
-- Warm a write IC, delete that field, verify a later assignment goes through
-  `__newindex` instead of reviving the dead slot.
-
-`tests/gc_upvalues.rs`:
-
-- Keep the containing table alive, tombstone object keys and object values,
-  force GC, assert the object count returns to baseline.
-
-`tests/save_state.rs`:
-
-- Save a table containing tombstones, reload, verify only live entries survive
-  and that reinsertion still appends at the back.
-
-Existing invalid-control tests in `tests/error_handling.rs` and templated-nil
-tests in `tests/table_constructors.rs` stay as regression coverage.
-
-### Validation
-
-`brokkr check`, then `./diff_test.sh`, then hotbench comparisons on
-`iter/pairs`, `fields/same_obj_read`, `fields/same_obj_write`, `tables/fill`.
-Expected profile: `get` unchanged, one predictable zero-tombstone branch in
-`insert` and `next`, slower scanning only after deletions.
+- error from a vararg frame with extra object arguments, then `save_state()`,
+- error from a `table.sort` comparator, then `save_state()`,
+- error returned from inside `with_restricted_env`, then `save_state()`,
+- `save_state()` while an environment is suspended must return `NotQuiescent`.

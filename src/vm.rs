@@ -48,42 +48,63 @@ use object::{GcHeap, Markable, UpvaluePool, UpvalueRef};
 use rng::VmRng;
 use table::Table;
 
+/// Values temporarily held outside the visible VM stack.
+pub(super) struct TransientRoots {
+    values: Vec<Val>,
+    suspended_envs: Vec<SuspendedEnvironment>,
+}
+
+impl TransientRoots {
+    #[cfg(feature = "snapshot")]
+    fn is_empty(&self) -> bool {
+        self.values.is_empty() && self.suspended_envs.is_empty()
+    }
+}
+
+struct SuspendedEnvironment {
+    globals: IndexMap<String, Val>,
+    builtins: [Val; Builtin::COUNT],
+}
+
+impl Markable for SuspendedEnvironment {
+    fn mark_reachable(&self, heap: &GcHeap, upvalue_pool: &UpvaluePool) {
+        self.globals.mark_reachable(heap, upvalue_pool);
+        self.builtins.mark_reachable(heap, upvalue_pool);
+    }
+}
+
+impl Markable for TransientRoots {
+    fn mark_reachable(&self, heap: &GcHeap, upvalue_pool: &UpvaluePool) {
+        self.values.mark_reachable(heap, upvalue_pool);
+        self.suspended_envs.mark_reachable(heap, upvalue_pool);
+    }
+}
+
 /// Marks all GC roots. Called before garbage collection to identify reachable objects.
 ///
 /// This function is the single source of truth for what constitutes a GC root.
 /// All allocation functions that may trigger GC must call this with the same set of roots.
 ///
-/// # Arguments
-/// * `heap` - The GC heap (needed to access objects for recursive marking)
-/// * `stack` - The VM stack containing local values and temporaries
-/// * `globals` - Global variables table
-/// * `builtins` - Fast-access array for builtin functions
-/// * `string_literals` - String constants from active frames
-/// * `active_call_roots` - Lua closures currently being executed
-/// * `upvalue_pool` - Pool of upvalues (closed upvalues contain values that need marking)
 #[hotpath::measure]
-#[allow(
-    clippy::too_many_arguments,
-    reason = "single-call-site GC marking entry point; bundling into a struct adds boilerplate without clarifying anything"
-)]
-pub(super) fn mark_gc_roots(
-    heap: &GcHeap,
-    stack: &[Val],
-    globals: &IndexMap<String, Val>,
-    builtins: &[Val],
-    string_literals: &[Val],
-    active_call_roots: &[Val],
-    upvalue_pool: &UpvaluePool,
-    registry: &Registry,
-) {
+pub(super) fn mark_gc_roots(state: &State) {
     // Mark all roots - closed upvalues are now marked transitively when
     // marking LuaFn closures that reference them
-    stack.mark_reachable(heap, upvalue_pool);
-    globals.mark_reachable(heap, upvalue_pool);
-    builtins.mark_reachable(heap, upvalue_pool);
-    string_literals.mark_reachable(heap, upvalue_pool);
-    active_call_roots.mark_reachable(heap, upvalue_pool);
-    registry.mark_reachable(heap, upvalue_pool);
+    state.stack.mark_reachable(&state.heap, &state.upvalue_pool);
+    state
+        .globals
+        .mark_reachable(&state.heap, &state.upvalue_pool);
+    state
+        .builtins
+        .mark_reachable(&state.heap, &state.upvalue_pool);
+    state
+        .string_literals
+        .mark_reachable(&state.heap, &state.upvalue_pool);
+    state
+        .transient_roots
+        .mark_reachable(&state.heap, &state.upvalue_pool);
+    state
+        .registry
+        .mark_reachable(&state.heap, &state.upvalue_pool);
     // Note: open upvalues point to stack (already marked), closed upvalues
     // are marked transitively through the closures that reference them
 }
@@ -116,7 +137,7 @@ pub struct State {
     /// The string literals (as `Val`s) of every active `Frame`.
     pub(super) string_literals: Vec<Val>,
     /// Lua closure objects removed from the visible stack while they execute.
-    pub(super) active_call_roots: Vec<Val>,
+    pub(super) transient_roots: TransientRoots,
     /// Pool for upvalue storage. Avoids per-upvalue heap allocations.
     pub(super) upvalue_pool: UpvaluePool,
     /// Open upvalues currently pointing to stack slots.
@@ -263,7 +284,10 @@ impl State {
             stack_bottom: 0,
             heap: GcHeap::with_threshold(Self::GC_INITIAL_THRESHOLD),
             string_literals: Vec::with_capacity(64), // Pre-size for string literals
-            active_call_roots: Vec::with_capacity(64),
+            transient_roots: TransientRoots {
+                values: Vec::with_capacity(64),
+                suspended_envs: Vec::new(),
+            },
             upvalue_pool: UpvaluePool::new(),
             open_upvalues: Vec::new(),
             vararg_call_bases: Vec::new(),
@@ -458,16 +482,7 @@ impl State {
     #[hotpath::measure]
     pub fn gc_collect(&mut self) {
         // Mark all roots
-        mark_gc_roots(
-            &self.heap,
-            &self.stack,
-            &self.globals,
-            &self.builtins,
-            &self.string_literals,
-            &self.active_call_roots,
-            &self.upvalue_pool,
-            &self.registry,
-        );
+        mark_gc_roots(self);
         // Sweep unmarked objects
         self.heap.collect();
     }
@@ -633,6 +648,12 @@ impl State {
         // Swap to restricted environment
         let saved_globals = std::mem::replace(&mut self.globals, restricted_globals);
         let saved_builtins = std::mem::replace(&mut self.builtins, restricted_builtins);
+        self.transient_roots
+            .suspended_envs
+            .push(SuspendedEnvironment {
+                globals: saved_globals,
+                builtins: saved_builtins,
+            });
         self.globals_version = self.globals_version.wrapping_add(1);
 
         // Execute the function under an unwind guard so a panic in `f` still
@@ -643,12 +664,38 @@ impl State {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self)));
 
         // Restore original environment (on both normal return and unwind)
-        self.globals = saved_globals;
-        self.builtins = saved_builtins;
+        let saved = self
+            .transient_roots
+            .suspended_envs
+            .pop()
+            .expect("suspended environment missing during restoration");
+        self.globals = saved.globals;
+        self.builtins = saved.builtins;
         self.globals_version = self.globals_version.wrapping_add(1);
 
         match result {
             Ok(r) => r,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
+
+    pub(super) fn with_rooted_value<F, R>(&mut self, value: Val, f: F) -> R
+    where
+        F: FnOnce(&mut Self) -> R,
+    {
+        self.with_rooted_values(&[value], f)
+    }
+
+    pub(super) fn with_rooted_values<F, R>(&mut self, values: &[Val], f: F) -> R
+    where
+        F: FnOnce(&mut Self) -> R,
+    {
+        let watermark = self.transient_roots.values.len();
+        self.transient_roots.values.extend_from_slice(values);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self)));
+        self.transient_roots.values.truncate(watermark);
+        match result {
+            Ok(result) => result,
             Err(payload) => std::panic::resume_unwind(payload),
         }
     }

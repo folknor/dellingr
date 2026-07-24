@@ -828,11 +828,14 @@ fn restricted_env_restored_after_panic() {
     // so a caller that catches the panic can reuse the State. `math` is not in
     // the whitelist, so it is nil during the closure but must be back after.
     let mut state = State::new();
+    state.new_table();
+    state.set_global("saved_object");
 
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {})); // silence the expected panic
     let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        state.with_restricted_env(&["print"], |_state| {
+        state.with_restricted_env(&["print"], |state| {
+            state.gc_collect();
             panic!("boom inside restricted env");
         })
     }));
@@ -841,6 +844,9 @@ fn restricted_env_restored_after_panic() {
 
     // Environment restored: a non-whitelisted global is available again.
     state.get_global("math");
+    assert_eq!(state.typ(-1), LuaType::Table);
+    state.pop(1);
+    state.get_global("saved_object");
     assert_eq!(state.typ(-1), LuaType::Table);
     state.pop(1);
 }

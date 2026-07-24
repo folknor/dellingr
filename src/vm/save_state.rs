@@ -465,7 +465,7 @@ impl State {
         if self.stack.is_empty()
             && self.stack_bottom == 0
             && self.string_literals.is_empty()
-            && self.active_call_roots.is_empty()
+            && self.transient_roots.is_empty()
             && self.open_upvalues.is_empty()
             && self.vararg_call_bases.is_empty()
             && self.table_constructor_bases.is_empty()
@@ -588,7 +588,8 @@ fn materialize_payload(state: &mut State, payload: SavePayload) -> Result<(), Lo
     state.stack.clear();
     state.stack_bottom = 0;
     state.string_literals.clear();
-    state.active_call_roots.clear();
+    state.transient_roots.values.clear();
+    state.transient_roots.suspended_envs.clear();
     state.open_upvalues.clear();
     state.vararg_call_bases.clear();
     state.table_constructor_bases.clear();
