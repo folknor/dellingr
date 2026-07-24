@@ -138,4 +138,47 @@ end
 local r16a, r16b, r16c = select_last_two("a", "b", "c")
 print("Test 16 - select negative: " .. tostring(r16a == "b" and r16b == "c" and r16c == nil))
 
+-- Test 17: Assignment expands only a tail vararg
+local a17, b17, c17, d17, e17
+local function assignment_tail(...)
+    a17, b17 = ...
+    c17, d17, e17 = ..., 99
+    return a17, b17, c17, d17, e17
+end
+local assignment_a17, assignment_b17, assignment_c17, assignment_d17, assignment_e17 = assignment_tail(11, 22)
+print("Test 17 - Assignment vararg tail: " .. tostring(
+    assignment_a17 == 11 and assignment_b17 == 22 and assignment_c17 == 11
+        and assignment_d17 == 99 and assignment_e17 == nil
+))
+
+-- Test 18: Generic-for expands a tail vararg into iterator, state, control
+local function count_to(state, control)
+    control = control + 1
+    if control <= state then
+        return control
+    end
+end
+local function generic_for_tail(...)
+    local sum = 0
+    for value in ... do
+        sum = sum + value
+    end
+    return sum
+end
+print("Test 18 - Generic-for vararg tail: " .. tostring(generic_for_tail(count_to, 3, 0) == 6))
+
+-- Test 19: More expressions than targets keeps the first values; a tail call
+-- is still evaluated (for side effects) but its results are discarded, not
+-- assigned. Covers non-local assignment, local declaration, and the 2-target
+-- case where the fixed prefix exactly fills the targets.
+local function ret10() return 10 end
+local function ret20() return 20 end
+local function ret30() return 30 end
+g19a = ret10(), ret20(), ret30()
+local d19 = ret10(), ret20(), ret30()
+local g19b, g19c = ret10(), ret20(), ret30()
+print("Test 19 - Shrink with tail call: " .. tostring(
+    g19a == 10 and d19 == 10 and g19b == 10 and g19c == 20
+))
+
 print("All vararg tests complete!")

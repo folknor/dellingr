@@ -60,6 +60,13 @@ All notable changes to dellingr are documented here. The format follows
   negative and *raised* the remaining budget (and `cost_used` could overflow).
   It now uses saturating arithmetic: any charge, up to `u64::MAX`, drives the
   budget toward exhaustion and never increases it.
+- A tail `...` is now expanded in non-local assignment (`a, b = ...`) and in
+  generic-`for` setup (`for x in ... do`), matching the existing behavior for a
+  tail function call and reference Lua. Previously only a tail call was
+  expanded and a tail vararg was truncated to one value, so `a, b = ...` left
+  `b` nil and `for x in ... do` failed on a nil iterator state. The three
+  multi-value sites (assignment, local declaration, generic-`for`) now share
+  one checked adjustment helper.
 
 ## [0.3.0] - 2026-05-12
 

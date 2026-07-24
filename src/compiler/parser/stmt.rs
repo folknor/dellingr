@@ -1,5 +1,3 @@
-use std::cmp::Ordering;
-
 use super::ArgCount;
 use super::ExpDesc;
 use super::Instr;
@@ -8,6 +6,7 @@ use super::PlaceExp;
 use super::PrefixExp;
 use super::Result;
 use super::RetCount;
+use super::SyntaxError;
 use super::TokenType;
 
 impl<'a> Parser<'a> {
@@ -88,31 +87,9 @@ impl<'a> Parser<'a> {
         }
 
         self.expect(TokenType::Assign)?;
-        let num_lvals = places.len() as isize;
         let (num_rvals, last_exp) = self.parse_explist()?;
-        let num_rvals = num_rvals as isize;
-        let diff = num_lvals - num_rvals;
-        if diff > 0 {
-            if let ExpDesc::Prefix(PrefixExp::FunctionCall(_)) = last_exp {
-                let num_args = match self.chunk.code.pop() {
-                    Some(instr) if instr.opcode() == Instr::OP_CALL => instr.a(),
-                    i => unreachable!("PrefixExp::FunctionCall but last instruction was {:?}", i),
-                };
-                self.push(Instr::call(
-                    ArgCount::Fixed(num_args),
-                    RetCount::Fixed(1 + diff as u8),
-                ));
-            } else {
-                for _ in 0..diff {
-                    self.push(Instr::push_nil());
-                }
-            }
-        } else {
-            // discard excess rvals
-            for _ in diff..0 {
-                self.push(Instr::pop());
-            }
-        }
+        let num_lvals = places.len();
+        self.adjust_multi_assign(num_lvals, usize::from(num_rvals), &last_exp)?;
 
         places.reverse();
         for (i, place_exp) in places.into_iter().enumerate() {
@@ -122,11 +99,13 @@ impl<'a> Parser<'a> {
                 PlaceExp::Global(i) => Instr::set_global(i),
                 PlaceExp::Builtin(b) => Instr::set_builtin(b),
                 PlaceExp::FieldAccess(literal_id) => {
-                    let stack_offset = num_lvals as u8 - i as u8 - 1;
+                    let stack_offset = u8::try_from(num_lvals - i - 1)
+                        .map_err(|_| self.error(SyntaxError::TooManyExpressions))?;
                     Instr::set_field(stack_offset, literal_id)
                 }
                 PlaceExp::TableIndex => {
-                    let stack_offset = num_lvals as u8 - i as u8 - 1;
+                    let stack_offset = u8::try_from(num_lvals - i - 1)
+                        .map_err(|_| self.error(SyntaxError::TooManyExpressions))?;
                     Instr::set_table(stack_offset)
                 }
             };
@@ -160,34 +139,11 @@ impl<'a> Parser<'a> {
 
         let names = self.parse_namelist()?;
 
-        let num_names = names.len() as u8;
+        let num_names = names.len();
         if self.input.try_pop(TokenType::Assign)?.is_some() {
             // Also perform the assignment
             let (num_rvalues, last_exp) = self.parse_explist()?;
-            match num_names.cmp(&num_rvalues) {
-                Ordering::Less => {
-                    for _ in num_names..num_rvalues {
-                        self.push(Instr::pop());
-                    }
-                }
-                Ordering::Greater => {
-                    if let ExpDesc::Prefix(PrefixExp::FunctionCall(num_args)) = last_exp {
-                        self.chunk.code.pop(); // Instr::pop() the old 'Call' instruction
-                        self.push(Instr::call(
-                            ArgCount::Fixed(num_args),
-                            RetCount::Fixed(1 + num_names - num_rvalues),
-                        ));
-                    } else if let ExpDesc::Vararg = last_exp {
-                        self.chunk.code.pop(); // Instr::pop() the old 'Vararg(1)' instruction
-                        self.push(Instr::vararg(1 + num_names - num_rvalues));
-                    } else {
-                        for _ in num_rvalues..num_names {
-                            self.push(Instr::push_nil());
-                        }
-                    }
-                }
-                Ordering::Equal => (),
-            }
+            self.adjust_multi_assign(num_names, usize::from(num_rvalues), &last_exp)?;
         } else {
             // They've only been declared, just set them all nil
             for _ in &names {
@@ -197,7 +153,11 @@ impl<'a> Parser<'a> {
 
         // Actually perform the assignment
         for i in (0..num_names).rev() {
-            self.push(Instr::set_local(i + old_local_count));
+            let slot = u8::try_from(i)
+                .map_err(|_| self.error(SyntaxError::TooManyLocals))?
+                .checked_add(old_local_count)
+                .ok_or_else(|| self.error(SyntaxError::TooManyLocals))?;
+            self.push(Instr::set_local(slot));
         }
 
         // Bring the new variables into scope. It is important they are not
@@ -343,7 +303,8 @@ impl<'a> Parser<'a> {
         self.add_local("")?; // control variable (slot 2)
 
         // Add the visible loop variables
-        let num_loop_vars = names.len() as u8;
+        let num_loop_vars =
+            u8::try_from(names.len()).map_err(|_| self.error(SyntaxError::TooManyLocals))?;
         for name in &names {
             self.add_local(name)?;
         }
@@ -352,32 +313,7 @@ impl<'a> Parser<'a> {
         // We expect exactly 3 values
         let (num_exprs, last_exp) = self.parse_explist()?;
 
-        // Adjust to exactly 3 values on stack
-        // If the last expression is a function call, we can adjust the Call
-        // instruction to return the right number of values
-        if num_exprs < 3 {
-            if let ExpDesc::Prefix(PrefixExp::FunctionCall(_)) = last_exp {
-                // Adjust the Call instruction to return enough values
-                let num_args = match self.chunk.code.pop() {
-                    Some(instr) if instr.opcode() == Instr::OP_CALL => instr.a(),
-                    i => unreachable!("PrefixExp::FunctionCall but last instruction was {:?}", i),
-                };
-                self.push(Instr::call(
-                    ArgCount::Fixed(num_args),
-                    RetCount::Fixed(3 - num_exprs + 1),
-                ));
-            } else {
-                // Push nils to make up the difference
-                for _ in num_exprs..3 {
-                    self.push(Instr::push_nil());
-                }
-            }
-        } else if num_exprs > 3 {
-            // Discard excess values
-            for _ in 3..num_exprs {
-                self.push(Instr::pop());
-            }
-        }
+        self.adjust_multi_assign(3, usize::from(num_exprs), &last_exp)?;
 
         self.expect(TokenType::Do)?;
 
@@ -414,6 +350,66 @@ impl<'a> Parser<'a> {
 
         self.exit_loop()?;
         Ok(())
+    }
+
+    /// Adjust an emitted expression list so exactly `num_targets` values are
+    /// left on the stack. A tail call or vararg can supply (or discard) the
+    /// required number of values; every other tail is padded or discarded.
+    fn adjust_multi_assign(
+        &mut self,
+        num_targets: usize,
+        num_exprs: usize,
+        last_exp: &ExpDesc,
+    ) -> Result<()> {
+        debug_assert!(num_exprs >= 1, "expression lists are never empty");
+        let fixed_prefix = num_exprs - 1;
+        let tail_needed = num_targets.saturating_sub(fixed_prefix);
+
+        match last_exp {
+            ExpDesc::Prefix(PrefixExp::FunctionCall(num_args)) if tail_needed > 1 => {
+                let tail_needed = self.checked_multi_assign_width(tail_needed)?;
+                let old = self.chunk.code.pop();
+                debug_assert!(
+                    matches!(old, Some(instr) if instr.opcode() == Instr::OP_CALL),
+                    "tail function call must end the emitted expression list"
+                );
+                self.push(Instr::call(
+                    ArgCount::Fixed(*num_args),
+                    RetCount::Fixed(tail_needed),
+                ));
+            }
+            ExpDesc::Vararg if tail_needed > 1 => {
+                let tail_needed = self.checked_multi_assign_width(tail_needed)?;
+                let old = self.chunk.code.pop();
+                debug_assert!(
+                    matches!(old, Some(instr) if instr.opcode() == Instr::OP_VARARG),
+                    "tail vararg must end the emitted expression list"
+                );
+                self.push(Instr::vararg(tail_needed));
+            }
+            _ if num_targets > num_exprs => {
+                for _ in num_exprs..num_targets {
+                    self.push(Instr::push_nil());
+                }
+            }
+            _ => {
+                for _ in num_targets..num_exprs {
+                    self.push(Instr::pop());
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Converts a fixed multi-assignment result width without allowing the
+    /// `255` dynamic/all-results sentinel into a fixed-width instruction.
+    fn checked_multi_assign_width(&self, width: usize) -> Result<u8> {
+        let width = u8::try_from(width).map_err(|_| self.error(SyntaxError::TooManyExpressions))?;
+        if width == u8::MAX {
+            return Err(self.error(SyntaxError::TooManyExpressions));
+        }
+        Ok(width)
     }
 
     /// Parses a `do ... end` statement.

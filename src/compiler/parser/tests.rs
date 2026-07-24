@@ -910,3 +910,86 @@ fn test34() {
     };
     check_it(text, chunk);
 }
+
+#[test]
+fn assignment_tail_vararg_expands_to_lvalue_count() {
+    let chunk = parse_str("f = function(...) a, b = ... end").unwrap();
+    let function = &chunk.nested[0];
+
+    assert_eq!(
+        function.code,
+        vec![
+            Instr::vararg(2),
+            Instr::set_global(1),
+            Instr::set_global(0),
+            Instr::ret(RetCount::Fixed(0)),
+        ]
+    );
+}
+
+#[test]
+fn generic_for_tail_vararg_expands_to_iterator_triple() {
+    let chunk = parse_str("f = function(...) for x in ... do end end").unwrap();
+    let function = &chunk.nested[0];
+
+    assert_eq!(
+        function
+            .code
+            .iter()
+            .filter(|instr| instr.opcode() == Instr::OP_VARARG)
+            .map(|instr| instr.a())
+            .collect::<Vec<_>>(),
+        vec![3]
+    );
+}
+
+#[test]
+fn non_final_vararg_stays_single_valued() {
+    let chunk = parse_str("f = function(...) a, b, c = ..., 99 end").unwrap();
+    let function = &chunk.nested[0];
+
+    assert_eq!(
+        function
+            .code
+            .iter()
+            .filter(|instr| instr.opcode() == Instr::OP_VARARG)
+            .map(|instr| instr.a())
+            .collect::<Vec<_>>(),
+        vec![1]
+    );
+}
+
+#[test]
+fn local_vararg_assignment_bytecode_is_unchanged() {
+    let chunk = parse_str("f = function(...) local a, b, c = ... end").unwrap();
+    let function = &chunk.nested[0];
+
+    assert_eq!(
+        function.code,
+        vec![
+            Instr::vararg(3),
+            Instr::set_local(2),
+            Instr::set_local(1),
+            Instr::set_local(0),
+            Instr::ret(RetCount::Fixed(0)),
+        ]
+    );
+}
+
+#[test]
+fn local_tail_call_assignment_bytecode_is_unchanged() {
+    let chunk = parse_str("f = function() local a, b, c = g() end").unwrap();
+    let function = &chunk.nested[0];
+
+    assert_eq!(
+        function.code,
+        vec![
+            Instr::get_global(0),
+            Instr::call(ArgCount::Fixed(0), RetCount::Fixed(3)),
+            Instr::set_local(2),
+            Instr::set_local(1),
+            Instr::set_local(0),
+            Instr::ret(RetCount::Fixed(0)),
+        ]
+    );
+}
