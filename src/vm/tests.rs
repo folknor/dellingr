@@ -280,6 +280,26 @@ fn gc_host_controlled() {
 }
 
 #[test]
+fn gc_collect_preserves_disabled_auto_gc() {
+    let mut state = State::new();
+    state.gc_disable_auto();
+
+    let code = parse_str("t1 = {} t2 = {} t3 = {}").unwrap();
+    state.eval_chunk(code, 0).unwrap();
+
+    // An explicit collection must not clobber the disabled-auto sentinel.
+    state.gc_collect();
+    assert_eq!(state.gc_threshold(), usize::MAX);
+    assert!(!state.gc_should_run());
+
+    // Re-enabling via a finite threshold restores adaptive recomputation.
+    state.gc_set_threshold(1);
+    state.gc_collect();
+    assert_ne!(state.gc_threshold(), usize::MAX);
+    assert!(state.gc_threshold() >= 20);
+}
+
+#[test]
 fn gc_threshold_control() {
     let mut state = State::empty(); // Empty state, no stdlib tables
 

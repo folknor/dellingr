@@ -158,6 +158,12 @@ All notable changes to dellingr are documented here. The format follows
   allocation count (objects plus distinct interned strings) now drives both the
   trigger and the post-collect threshold, preserving the ~2x-live-heap growth
   policy.
+- An explicit `gc_collect()` no longer re-enables automatic GC after
+  `gc_disable_auto()`. Every collection recomputed the threshold from the
+  surviving allocation count, clobbering the `usize::MAX` disable sentinel, so
+  a host that disabled automatic GC and then collected once was silently
+  opted back in. Collections now preserve the sentinel; setting a finite
+  threshold via `gc_set_threshold` restores adaptive recomputation.
 - `string.format` follows Lua 5.4's error contract and conversion set (new
   `lua_std/string_format` module). Missing or wrong-typed arguments and unknown
   conversions raise the exact reference payloads (`no value`, `number expected,

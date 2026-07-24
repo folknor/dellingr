@@ -408,7 +408,12 @@ impl GcHeap {
         self.strings.collect();
 
         // Dynamic threshold: double the surviving allocation count (min 20).
-        self.threshold = self.allocation_count().saturating_mul(2).max(20);
+        // A usize::MAX threshold is the auto-GC-disabled sentinel
+        // (gc_disable_auto / gc_set_threshold(usize::MAX)); preserve it so an
+        // explicit collect does not silently re-enable automatic GC.
+        if self.threshold != usize::MAX {
+            self.threshold = self.allocation_count().saturating_mul(2).max(20);
+        }
 
         #[cfg(feature = "debug_gc")]
         println!("Final size: {}", self.objects.len());

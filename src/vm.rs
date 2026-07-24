@@ -439,13 +439,16 @@ impl State {
     /// interned strings). Collection triggers before allocation when
     /// `heap_size() >= threshold`; each collection recomputes the threshold
     /// from survivors.
-    /// Set to `usize::MAX` to effectively disable automatic GC.
+    /// Set to `usize::MAX` to disable automatic GC: that value is a sentinel
+    /// that collections preserve instead of recomputing.
     pub fn gc_set_threshold(&mut self, threshold: usize) {
         self.heap.set_threshold(threshold);
     }
 
     /// Disables automatic GC by setting threshold to usize::MAX.
-    /// After calling this, GC only runs when you explicitly call `gc_collect()`.
+    /// After calling this, GC only runs when you explicitly call `gc_collect()`;
+    /// explicit collections keep automatic GC disabled. Re-enable it with
+    /// `gc_set_threshold`.
     pub fn gc_disable_auto(&mut self) {
         self.heap.set_threshold(usize::MAX);
     }
