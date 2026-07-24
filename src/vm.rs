@@ -217,8 +217,6 @@ impl State {
     pub fn with_callbacks(callbacks: Box<dyn HostCallbacks + Send>) -> Self {
         let mut me = Self::empty_with_callbacks(callbacks);
         me.open_libs();
-        #[cfg(feature = "snapshot")]
-        me.capture_env_tokens();
         me
     }
 
@@ -226,7 +224,7 @@ impl State {
     /// any user code can shadow a builtin slot. Both save (object -> token) and
     /// load (token -> object) resolve through this snapshot.
     #[cfg(feature = "snapshot")]
-    fn capture_env_tokens(&mut self) {
+    pub(crate) fn capture_env_tokens(&mut self) {
         let mut map = BTreeMap::new();
         for slot in [Builtin::Math, Builtin::String, Builtin::Table, Builtin::G] {
             if let Val::Obj(ptr) = self.builtins[slot as usize] {

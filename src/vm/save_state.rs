@@ -52,7 +52,7 @@ use crate::host::HostCallbacks;
 use crate::instr::Instr;
 
 const MAGIC: [u8; 4] = *b"DLGS";
-const FORMAT_VERSION: u16 = 1;
+const FORMAT_VERSION: u16 = 2;
 
 /// Bytes produced by [`State::save_state`] plus non-fatal save diagnostics.
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -197,6 +197,7 @@ enum SavedUpvalueDesc {
 
 #[derive(Clone, Debug, PartialEq)]
 struct SavePayload {
+    has_standard_environment: bool,
     rng_state: u64,
     cost_remaining: i64,
     cost_budget: i64,
@@ -259,6 +260,7 @@ impl<'a> SaveBuilder<'a> {
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(SavePayload {
+            has_standard_environment: !self.state.env_tokens.is_empty(),
             rng_state: self.state.rng.state(),
             cost_remaining: self.state.cost_remaining,
             cost_budget: self.state.cost_budget,
@@ -441,7 +443,11 @@ impl State {
         let payload = SavePayload::decode(&mut decoder)?;
         decoder.finish()?;
 
-        let mut state = State::with_callbacks(callbacks);
+        let mut state = if payload.has_standard_environment {
+            State::with_callbacks(callbacks)
+        } else {
+            State::empty_with_callbacks(callbacks)
+        };
         setup(&mut state);
         materialize_payload(&mut state, payload)?;
         Ok(state)
@@ -878,6 +884,7 @@ impl<'a> Decoder<'a> {
 
 impl SavePayload {
     fn encode(&self, out: &mut Encoder) -> Result<(), SaveError> {
+        out.write_u8(u8::from(self.has_standard_environment));
         out.write_u64(self.rng_state);
         out.write_i64(self.cost_remaining);
         out.write_i64(self.cost_budget);
@@ -895,6 +902,7 @@ impl SavePayload {
 
     fn decode(input: &mut Decoder<'_>) -> Result<Self, LoadError> {
         Ok(Self {
+            has_standard_environment: input.read_u8()? != 0,
             rng_state: input.read_u64()?,
             cost_remaining: input.read_i64()?,
             cost_budget: input.read_i64()?,

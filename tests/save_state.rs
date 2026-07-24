@@ -2,7 +2,9 @@
 
 use std::sync::{Arc, Mutex};
 
-use dellingr::{ArgCount, DefaultCallbacks, HostCallbacks, LoadError, RetCount, SaveError, State};
+use dellingr::{
+    ArgCount, DefaultCallbacks, HostCallbacks, LoadError, LuaType, RetCount, SaveError, State,
+};
 
 #[derive(Clone, Default)]
 struct Capture {
@@ -94,6 +96,40 @@ fn saves_are_byte_stable() {
     let first = state.save_state().unwrap();
     let second = state.save_state().unwrap();
     assert_eq!(first.bytes, second.bytes);
+}
+
+#[test]
+fn empty_state_round_trip_stays_empty() {
+    let state = State::empty();
+    let save = state.save_state().unwrap();
+    let mut loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), |_| {}).unwrap();
+
+    for name in [
+        "print",
+        "type",
+        "tonumber",
+        "tostring",
+        "pairs",
+        "ipairs",
+        "next",
+        "getmetatable",
+        "setmetatable",
+        "rawget",
+        "rawset",
+        "rawequal",
+        "rawlen",
+        "select",
+        "unpack",
+        "math",
+        "string",
+        "table",
+        "_G",
+        "error",
+    ] {
+        loaded.get_global(name);
+        assert_eq!(loaded.typ(-1), LuaType::Nil, "{name}");
+        loaded.pop(1);
+    }
 }
 
 #[test]

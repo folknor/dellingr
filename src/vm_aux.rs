@@ -57,5 +57,7 @@ impl State {
     #[hotpath::measure]
     pub fn open_libs(&mut self) {
         lua_std::open_libs(self);
+        #[cfg(feature = "snapshot")]
+        self.capture_env_tokens();
     }
 }
