@@ -108,6 +108,64 @@ fn empty_pattern_gmatch_visits_each_boundary() {
 }
 
 #[test]
+fn gmatch_treats_a_leading_caret_as_literal() {
+    let mut state = State::new();
+    state
+        .load_string(
+            r#"
+            local none = 0
+            for _ in string.gmatch("aaa", "^a") do none = none + 1 end
+            local found = {}
+            for x in string.gmatch("^a^a", "^a") do found[#found + 1] = x end
+            return none, #found, found[1], found[2]
+            "#,
+        )
+        .unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(4)).unwrap();
+    assert_eq!(state.to_number(-4).unwrap(), 0.0);
+    assert_eq!(state.to_number(-3).unwrap(), 2.0);
+    assert_eq!(state.to_bytes(-2).unwrap(), b"^a");
+    assert_eq!(state.to_bytes(-1).unwrap(), b"^a");
+}
+
+#[test]
+fn gmatch_returns_a_self_contained_closure() {
+    let mut state = State::new();
+    state
+        .load_string(
+            r#"
+            local f = string.gmatch("a b", "%w+")
+            return type(f), f(), f(), f()
+            "#,
+        )
+        .unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(4)).unwrap();
+    assert_eq!(state.to_bytes(-4).unwrap(), b"function");
+    assert_eq!(state.to_bytes(-3).unwrap(), b"a");
+    assert_eq!(state.to_bytes(-2).unwrap(), b"b");
+    assert_eq!(state.typ(-1), dellingr::LuaType::Nil);
+}
+
+#[test]
+fn gmatch_closures_keep_independent_state() {
+    let mut state = State::new();
+    state
+        .load_string(
+            r#"
+            local f = string.gmatch("ab", ".")
+            local g = string.gmatch("xy", ".")
+            return f(), g(), f(), g()
+            "#,
+        )
+        .unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(4)).unwrap();
+    assert_eq!(state.to_bytes(-4).unwrap(), b"a");
+    assert_eq!(state.to_bytes(-3).unwrap(), b"x");
+    assert_eq!(state.to_bytes(-2).unwrap(), b"b");
+    assert_eq!(state.to_bytes(-1).unwrap(), b"y");
+}
+
+#[test]
 fn sub_and_reverse_are_bytewise() {
     let state = run_one(
         r#"
@@ -176,8 +234,6 @@ fn find_backreferences_compare_captures() {
 
 #[test]
 fn position_captures_are_numbers_in_all_string_wrappers() {
-    // gmatch is a stateful iterator in dellingr, so drive it with a for-loop to
-    // grab the first iteration's captures.
     let mut state = State::new();
     state
         .load_string(

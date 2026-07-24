@@ -1,11 +1,30 @@
 //! Lua's String Library
 
 use std::io::Write;
+use std::sync::{Arc, OnceLock};
 
+use crate::compiler;
 use crate::error::ErrorKind;
 use crate::instr::{ArgCount, RetCount};
 use crate::patterns::{LuaCapture, LuaPattern};
 use crate::{LuaType, Result, State};
+
+const GMATCH_WRAPPER_SRC: &str = r#"local iter, state = ...
+return function()
+    return iter(state)
+end
+"#;
+
+static GMATCH_WRAPPER: OnceLock<Arc<crate::compiler::Bytecode>> = OnceLock::new();
+
+fn gmatch_wrapper() -> Arc<crate::compiler::Bytecode> {
+    Arc::clone(GMATCH_WRAPPER.get_or_init(|| {
+        Arc::new(
+            compiler::parse_str_named(GMATCH_WRAPPER_SRC, None)
+                .expect("the static gmatch wrapper source must compile"),
+        )
+    }))
+}
 
 fn is_plain_lua_pattern(pattern: &[u8]) -> bool {
     !pattern.iter().any(|b| {
@@ -133,9 +152,9 @@ fn append_gsub_replacement(
     base: usize,
 ) -> Result<()> {
     match repl_type {
-        LuaType::String => {
-            let repl = state.to_bytes(3)?;
-            append_string_replacement(state, out, repl, bytes, captures, base)?;
+        LuaType::String | LuaType::Number => {
+            let repl = state.to_bytes_coerce(3)?.into_owned();
+            append_string_replacement(state, out, &repl, bytes, captures, base)?;
         }
         LuaType::Table => {
             let key = if captures.len() > 1 {
@@ -152,6 +171,13 @@ fn append_gsub_replacement(
                 state.pop(2);
                 append_capture_bytes(out, bytes, captures[0], base);
             } else {
+                let t = state.typ(-1);
+                if !matches!(t, LuaType::String | LuaType::Number) {
+                    return Err(state.error(ErrorKind::RuntimeError(format!(
+                        "invalid replacement value (a {})",
+                        t.as_str()
+                    ))));
+                }
                 let val = state.to_bytes_coerce(-1)?.into_owned();
                 state.pop(2);
                 out.extend_from_slice(&val);
@@ -177,6 +203,13 @@ fn append_gsub_replacement(
                 state.pop(1);
                 append_capture_bytes(out, bytes, captures[0], base);
             } else {
+                let t = state.typ(-1);
+                if !matches!(t, LuaType::String | LuaType::Number) {
+                    return Err(state.error(ErrorKind::RuntimeError(format!(
+                        "invalid replacement value (a {})",
+                        t.as_str()
+                    ))));
+                }
                 let val = state.to_bytes_coerce(-1)?.into_owned();
                 state.pop(1);
                 out.extend_from_slice(&val);
@@ -587,6 +620,14 @@ pub(crate) fn open_string(state: &mut State) {
 
         let s = state.to_bytes(1)?.to_vec();
         let pattern = state.to_bytes(2)?.to_vec();
+        let pattern = if pattern.first() == Some(&b'^') {
+            let mut escaped = Vec::with_capacity(pattern.len() + 1);
+            escaped.extend_from_slice(b"%^");
+            escaped.extend_from_slice(&pattern[1..]);
+            escaped
+        } else {
+            pattern
+        };
         state.set_top(0);
 
         if pattern.is_empty() {
@@ -598,12 +639,7 @@ pub(crate) fn open_string(state: &mut State) {
             state.push_number(s.len() as f64);
             state.set_table_raw(-3)?;
 
-            push_named_or_plain_rust_fn(state, "string.gmatch.empty_iter", gmatch_empty_iter)?;
-
-            state.push_value(-2)?;
-            state.remove(-3)?;
-            state.push_nil();
-            return Ok(3);
+            return push_gmatch_wrapper(state, "string.gmatch.empty_iter", gmatch_empty_iter);
         }
 
         state.new_table();
@@ -617,12 +653,7 @@ pub(crate) fn open_string(state: &mut State) {
         state.push_number(0.0);
         state.set_table_raw(-3)?;
 
-        push_named_or_plain_rust_fn(state, "string.gmatch.iter", gmatch_iter)?;
-
-        state.push_value(-2)?;
-        state.remove(-3)?;
-        state.push_nil();
-        Ok(3)
+        push_gmatch_wrapper(state, "string.gmatch.iter", gmatch_iter)
     });
 
     // string.gsub(s, pattern, repl [, n])
@@ -642,6 +673,21 @@ pub(crate) fn open_string(state: &mut State) {
             None
         };
         let repl_type = state.typ(3);
+
+        if !matches!(
+            repl_type,
+            LuaType::String | LuaType::Number | LuaType::Function | LuaType::Table
+        ) {
+            return Err(state.error(ErrorKind::RuntimeError(
+                "bad argument #3 to 'gsub' (string/function/table expected)".into(),
+            )));
+        }
+        if max_replacements == Some(0) {
+            state.set_top(0);
+            state.push_bytes(s);
+            state.push_number(0.0);
+            return Ok(2);
+        }
 
         if pattern.is_empty() {
             let mut result = Vec::with_capacity(s.len());
@@ -705,6 +751,7 @@ pub(crate) fn open_string(state: &mut State) {
         let mut captures = Vec::new();
         let mut pos = 0usize;
         let mut count = 0usize;
+        let anchored = pattern.first() == Some(&b'^');
 
         while pos <= s.len() {
             if max_replacements.is_some_and(|max| count >= max) {
@@ -738,6 +785,9 @@ pub(crate) fn open_string(state: &mut State) {
             } else {
                 pos += range.end;
             }
+            if anchored {
+                break;
+            }
         }
 
         if pos <= s.len() {
@@ -749,6 +799,19 @@ pub(crate) fn open_string(state: &mut State) {
         state.push_number(count as f64);
         Ok(2)
     });
+
+    // Register the gmatch iterator functions up front so a persisted gmatch
+    // closure (which captures one of them as an upvalue) can be resolved on
+    // snapshot load, not only after gmatch has run once.
+    #[cfg(feature = "snapshot")]
+    {
+        state
+            .register_rust_fn("string.gmatch.iter", gmatch_iter)
+            .expect("gmatch iter id registration cannot conflict");
+        state
+            .register_rust_fn("string.gmatch.empty_iter", gmatch_empty_iter)
+            .expect("gmatch empty_iter id registration cannot conflict");
+    }
 
     // Set the string table as a global
     state.set_global("string");
@@ -768,6 +831,19 @@ fn push_named_or_plain_rust_fn(
         state.push_rust_fn(func);
     }
     Ok(())
+}
+
+fn push_gmatch_wrapper(
+    state: &mut State,
+    iter_id: &str,
+    iter: fn(&mut State) -> Result<u8>,
+) -> Result<u8> {
+    state.push_chunk(gmatch_wrapper());
+    push_named_or_plain_rust_fn(state, iter_id, iter)?;
+    state.push_value(1)?;
+    state.remove(1)?;
+    state.call(ArgCount::Fixed(2), RetCount::Fixed(1))?;
+    Ok(1)
 }
 
 fn gmatch_empty_iter(state: &mut State) -> Result<u8> {

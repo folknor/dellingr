@@ -215,6 +215,17 @@ fn gsub_string_replacement_works() {
 }
 
 #[test]
+fn gsub_number_replacement_is_coerced_to_a_string() {
+    let mut state = State::new();
+    state
+        .load_string(r#"return string.gsub("aba", "a", 12)"#)
+        .unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(2)).unwrap();
+    assert_eq!(state.to_bytes(-2).unwrap(), b"12b12");
+    assert_eq!(state.to_number(-1).unwrap(), 2.0);
+}
+
+#[test]
 fn gsub_string_replacement_replaces_all_matches() {
     let mut state = State::new();
     state
@@ -338,6 +349,74 @@ fn gsub_validates_replacement_grammar_only_for_actual_replacements() {
     assert_eq!(state.to_number(-3).unwrap(), 0.0);
     assert_eq!(state.to_bytes(-2).unwrap(), b"a");
     assert_eq!(state.to_number(-1).unwrap(), 0.0);
+}
+
+#[test]
+fn gsub_zero_limit_skips_pattern_and_replacement_validation() {
+    let mut state = State::new();
+    state
+        .load_string(
+            r#"
+            local s1, c1 = string.gsub("abc", "[", "x", 0)
+            local s2, c2 = string.gsub("a", "a", "%q", 0)
+            return s1, c1, s2, c2
+            "#,
+        )
+        .unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(4)).unwrap();
+    assert_eq!(state.to_bytes(-4).unwrap(), b"abc");
+    assert_eq!(state.to_number(-3).unwrap(), 0.0);
+    assert_eq!(state.to_bytes(-2).unwrap(), b"a");
+    assert_eq!(state.to_number(-1).unwrap(), 0.0);
+}
+
+#[test]
+fn gsub_rejects_invalid_replacement_types_before_matching() {
+    for code in [
+        r#"return string.gsub("abc", "z", false)"#,
+        r#"return string.gsub("abc", "z", nil)"#,
+        r#"return string.gsub("abc", "[", false, 0)"#,
+    ] {
+        assert_runtime_error(code, "bad argument #3 to 'gsub'");
+        assert_runtime_error(code, "string/function/table expected");
+    }
+}
+
+#[test]
+fn gsub_rejects_invalid_function_and_table_replacement_values() {
+    assert_runtime_error(
+        r#"return string.gsub("abc", "(b)", function() return true end)"#,
+        "invalid replacement value (a boolean)",
+    );
+    assert_runtime_error(
+        r#"return string.gsub("abc", "(b)", { b = {} })"#,
+        "invalid replacement value (a table)",
+    );
+}
+
+#[test]
+fn gsub_leading_caret_matches_only_at_subject_start() {
+    let mut state = State::new();
+    state
+        .load_string(
+            r#"
+            local a, ac = string.gsub("aa", "^a", "X")
+            local b, bc = string.gsub("ba", "^a", "X")
+            local c, cc = string.gsub("abc", "^", "X")
+            local d, dc = string.gsub("^a^a", "%^a", "X")
+            return a, ac, b, bc, c, cc, d, dc
+            "#,
+        )
+        .unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(8)).unwrap();
+    assert_eq!(state.to_bytes(-8).unwrap(), b"Xa");
+    assert_eq!(state.to_number(-7).unwrap(), 1.0);
+    assert_eq!(state.to_bytes(-6).unwrap(), b"ba");
+    assert_eq!(state.to_number(-5).unwrap(), 0.0);
+    assert_eq!(state.to_bytes(-4).unwrap(), b"Xabc");
+    assert_eq!(state.to_number(-3).unwrap(), 1.0);
+    assert_eq!(state.to_bytes(-2).unwrap(), b"XX");
+    assert_eq!(state.to_number(-1).unwrap(), 2.0);
 }
 
 #[test]

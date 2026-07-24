@@ -144,6 +144,48 @@ fn state_is_quiescent_after_error_in_table_constructor() {
 }
 
 #[test]
+fn gmatch_closure_survives_save_load() {
+    // A gmatch closure captures the (now library-open-registered) iterator Rust
+    // function as an upvalue; persisting and restoring it must resolve that id
+    // and resume iteration (L12 snapshot follow-up).
+    let mut state = State::new();
+    state
+        .load_string(
+            r#"
+            f = string.gmatch("a b c", "%w+")
+            return f()
+        "#,
+        )
+        .unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
+    assert_eq!(state.to_string(-1).unwrap(), "a");
+    state.pop(1);
+
+    let save = state.save_state().unwrap();
+    let mut loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), |_| {}).unwrap();
+
+    loaded.get_global("f");
+    loaded.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
+    assert_eq!(loaded.to_string(-1).unwrap(), "b");
+}
+
+#[test]
+fn empty_gmatch_closure_survives_save_load() {
+    // The empty-pattern gmatch path uses a different iterator id; it too must be
+    // registered at library-open so its closure restores.
+    let mut state = State::new();
+    state.load_string(r#"g = string.gmatch("ab", "")"#).unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
+
+    let save = state.save_state().unwrap();
+    let mut loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), |_| {}).unwrap();
+
+    loaded.get_global("g");
+    loaded.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
+    assert_eq!(loaded.to_string(-1).unwrap(), "");
+}
+
+#[test]
 fn empty_state_round_trip_stays_empty() {
     let state = State::empty();
     let save = state.save_state().unwrap();
