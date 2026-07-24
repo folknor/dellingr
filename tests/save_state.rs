@@ -688,6 +688,87 @@ fn deeply_nested_closures_round_trip() {
 }
 
 #[test]
+fn saved_outer_creates_new_nested_closures() {
+    let mut original = fresh();
+    run(
+        &mut original,
+        r#"
+        function outer(a)
+            return function(b)
+                return function(c)
+                    return function() return a + b + c end
+                end
+            end
+        end
+    "#,
+    );
+
+    let mut loaded = reload(&original);
+    run(&mut loaded, "result = outer(1)(20)(300)()");
+    assert_eq!(global_num(&mut loaded, "result"), 321.0);
+}
+
+#[test]
+fn upvalue_arena_entries_do_not_alias_during_save() {
+    let mut original = fresh();
+    run(
+        &mut original,
+        r#"
+        function make()
+            local v = 7
+            local holder
+            local function a() return holder end
+            local function b() return v end
+            holder = { b = b }
+            return a
+        end
+        root = make()
+    "#,
+    );
+
+    let mut loaded = reload(&original);
+    run(&mut loaded, "result = type(root())");
+    assert_eq!(global_str(&mut loaded, "result"), "table");
+}
+
+#[test]
+fn binary_string_literal_round_trips_through_save() {
+    let mut original = fresh();
+    run(
+        &mut original,
+        r#"
+        function f()
+            return "\255"
+        end
+    "#,
+    );
+
+    let mut loaded = reload(&original);
+    run(&mut loaded, "result = f()");
+    loaded.get_global("result");
+    assert_eq!(loaded.to_bytes(-1).unwrap(), [255]);
+    loaded.pop(1);
+}
+
+#[test]
+fn compiler_produced_save_resaves_byte_for_byte() {
+    let mut original = fresh();
+    run(
+        &mut original,
+        r#"
+        function outer(a)
+            return function(b) return a + b end
+        end
+        f = outer(40)
+        t = { answer = f(2), binary = "\255" }
+    "#,
+    );
+    let first = original.save_state().unwrap().bytes;
+    let loaded = State::load_state(&first, Box::new(DefaultCallbacks), |_| {}).unwrap();
+    assert_eq!(loaded.save_state().unwrap().bytes, first);
+}
+
+#[test]
 fn non_utf8_and_edge_values_round_trip() {
     let mut state = fresh();
 

@@ -15,7 +15,7 @@ use crate::instr::{ArgCount, Builtin, RetCount};
 
 use std::borrow::Borrow;
 
-const MAX_SYNTAX_DEPTH: u32 = 200;
+pub(crate) const MAX_SYNTAX_DEPTH: u32 = 200;
 
 mod expr;
 mod func;

@@ -339,14 +339,12 @@ impl Instr {
 
     /// Get the raw u32 value.
     #[inline]
-    #[allow(dead_code)]
     pub(crate) const fn raw(self) -> u32 {
         self.0
     }
 
     /// Rebuild an instruction from its raw 32-bit encoding.
     #[inline]
-    #[cfg(feature = "snapshot")]
     pub(crate) const fn from_raw(raw: u32) -> Self {
         Instr(raw)
     }

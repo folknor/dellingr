@@ -51,6 +51,8 @@ use crate::compiler::{Bytecode, UpvalueDesc};
 use crate::host::HostCallbacks;
 use crate::instr::Instr;
 
+mod verify;
+
 const MAGIC: [u8; 4] = *b"DLGS";
 const FORMAT_VERSION: u16 = 2;
 
@@ -106,6 +108,15 @@ pub enum LoadError {
     DecodeError(String),
     /// Arena indices or object graph contents were corrupt.
     CorruptArena,
+    /// A saved bytecode program violates VM structural invariants.
+    InvalidBytecode {
+        /// Saved bytecode arena id.
+        chunk: u32,
+        /// Bytecode index when the failure is instruction-specific.
+        instruction: Option<u32>,
+        /// Deterministic explanation for diagnostics.
+        reason: String,
+    },
 }
 
 impl fmt::Display for SaveError {
@@ -138,6 +149,17 @@ impl fmt::Display for LoadError {
             LoadError::UnknownEnvObject(id) => write!(f, "unknown saved environment object {id}"),
             LoadError::DecodeError(err) => write!(f, "save decode error: {err}"),
             LoadError::CorruptArena => write!(f, "corrupt save arena"),
+            LoadError::InvalidBytecode {
+                chunk,
+                instruction,
+                reason,
+            } => {
+                write!(f, "invalid bytecode chunk {chunk}")?;
+                if let Some(instruction) = instruction {
+                    write!(f, " at instruction {instruction}")?;
+                }
+                write!(f, ": {reason}")
+            }
         }
     }
 }
@@ -358,11 +380,15 @@ impl<'a> SaveBuilder<'a> {
         let id = u32::try_from(self.upvalues.len())
             .map_err(|_| SaveError::EncodeError("too many upvalues".to_string()))?;
         self.upvalue_ids.insert(key, id);
+        // As with bytecode, reserve the arena slot before recursively encoding
+        // the value. An upvalue can reach another closure and thus another
+        // upvalue before this one has been fully encoded.
+        self.upvalues.push(SavedVal::Nil);
         let saved = match self.state.upvalue_pool.get(uv_ref) {
             Upvalue::Closed(val) => self.encode_val(*val, path)?,
             Upvalue::Open(_) => return Err(SaveError::OpenUpvalueReachable),
         };
-        self.upvalues.push(saved);
+        self.upvalues[id as usize] = saved;
         Ok(id)
     }
 
@@ -375,11 +401,32 @@ impl<'a> SaveBuilder<'a> {
             .map_err(|_| SaveError::EncodeError("too many chunks".to_string()))?;
         self.bytecode_ids.insert(key, id);
 
+        // Reserve the arena slot before recursively encoding children. Nested
+        // ids are arena indices, so post-order insertion would alias ids when
+        // a parent and child are first seen in the same walk.
+        self.bytecode.push(SavedBytecode {
+            code: Vec::new(),
+            number_literals: Vec::new(),
+            string_literals: Vec::new(),
+            table_templates: Vec::new(),
+            global_cache_slots: 0,
+            field_cache_slots: 0,
+            set_field_cache_slots: 0,
+            num_params: 0,
+            num_locals: 0,
+            nested: Vec::new(),
+            upvalues: Vec::new(),
+            is_vararg: false,
+            name: None,
+            source: None,
+            line_info: Vec::new(),
+        });
+
         let mut nested = Vec::with_capacity(bc.nested.len());
         for child in &bc.nested {
             nested.push(self.encode_bytecode(child)?);
         }
-        self.bytecode.push(SavedBytecode {
+        self.bytecode[id as usize] = SavedBytecode {
             code: bc.code.iter().map(|inst| inst.raw()).collect(),
             number_literals: bc.number_literals.iter().map(|n| n.to_bits()).collect(),
             string_literals: bc.string_literals.clone(),
@@ -402,7 +449,7 @@ impl<'a> SaveBuilder<'a> {
             name: bc.name.clone(),
             source: bc.source.clone(),
             line_info: bc.line_info.clone(),
-        });
+        };
         Ok(id)
     }
 }
@@ -448,10 +495,10 @@ impl State {
         // string is metadata, not a compat gate, so it is deliberately not
         // compared (L10).
         let _engine_version = decoder.read_bytes()?;
-        let payload = SavePayload::decode(&mut decoder)?;
+        let payload = verify::verify_payload(SavePayload::decode(&mut decoder)?)?;
         decoder.finish()?;
 
-        let mut state = if payload.has_standard_environment {
+        let mut state = if payload.has_standard_environment() {
             State::with_callbacks(callbacks)
         } else {
             State::empty_with_callbacks(callbacks)
@@ -497,16 +544,20 @@ fn build_env_forward(state: &State) -> BTreeMap<String, ObjectPtr> {
         .collect()
 }
 
-fn materialize_payload(state: &mut State, payload: SavePayload) -> Result<(), LoadError> {
+fn materialize_payload(
+    state: &mut State,
+    payload: verify::VerifiedSavePayload,
+) -> Result<(), LoadError> {
     let env_forward = build_env_forward(state);
     let fn_forward = state.rust_fns_by_id.clone();
+
+    let bytecode = materialize_bytecode(&payload)?;
+    let payload = payload.into_inner();
 
     let mut strings = Vec::with_capacity(payload.strings.len());
     for bytes in &payload.strings {
         strings.push(state.heap.alloc_string(bytes));
     }
-
-    let bytecode = materialize_bytecode(&payload.bytecode)?;
 
     let mut upvalues = Vec::with_capacity(payload.upvalues.len());
     for _ in &payload.upvalues {
@@ -643,7 +694,10 @@ fn decode_val(saved: &SavedVal, ctx: &DecodeCtx<'_>) -> Result<Val, LoadError> {
     }
 }
 
-fn materialize_bytecode(saved: &[SavedBytecode]) -> Result<Vec<Arc<Bytecode>>, LoadError> {
+fn materialize_bytecode(
+    payload: &verify::VerifiedSavePayload,
+) -> Result<Vec<Arc<Bytecode>>, LoadError> {
+    let saved = payload.bytecode();
     let mut out: Vec<Option<Arc<Bytecode>>> = vec![None; saved.len()];
     let mut visiting = vec![false; saved.len()];
     for idx in 0..saved.len() {
@@ -1148,6 +1202,280 @@ mod tests {
             assert_eq!(decoded, value);
             dec.finish().expect("no trailing bytes");
         }};
+    }
+
+    fn valid_saved_bytecode() -> SavedBytecode {
+        SavedBytecode {
+            code: vec![Instr::ret(RetCount::Fixed(0)).raw()],
+            number_literals: Vec::new(),
+            string_literals: Vec::new(),
+            table_templates: Vec::new(),
+            global_cache_slots: 0,
+            field_cache_slots: 0,
+            set_field_cache_slots: 0,
+            num_params: 0,
+            num_locals: 0,
+            nested: Vec::new(),
+            upvalues: Vec::new(),
+            is_vararg: false,
+            name: None,
+            source: None,
+            line_info: vec![1],
+        }
+    }
+
+    fn load_bytecode(
+        bytecode: Vec<SavedBytecode>,
+        objects: Vec<SavedObject>,
+    ) -> Result<State, LoadError> {
+        let payload = SavePayload {
+            has_standard_environment: false,
+            rng_state: 0,
+            cost_remaining: 0,
+            cost_budget: 0,
+            cost_used: 0,
+            strings: Vec::new(),
+            bytecode,
+            upvalues: Vec::new(),
+            objects,
+            user_globals: Vec::new(),
+        };
+        let mut encoder = Encoder::new();
+        encoder.write_magic_and_version();
+        encoder
+            .write_bytes(env!("CARGO_PKG_VERSION").as_bytes())
+            .map_err(|error| LoadError::DecodeError(error.to_string()))?;
+        payload
+            .encode(&mut encoder)
+            .map_err(|error| LoadError::DecodeError(error.to_string()))?;
+        State::load_state(&encoder.finish(), Box::new(crate::DefaultCallbacks), |_| {})
+    }
+
+    fn rejected_bytecode(bytecode: Vec<SavedBytecode>, objects: Vec<SavedObject>) -> LoadError {
+        match load_bytecode(bytecode, objects) {
+            Ok(_) => panic!("fixture must be rejected"),
+            Err(error) => error,
+        }
+    }
+
+    fn assert_invalid(error: LoadError, chunk: u32, instruction: Option<u32>) {
+        let LoadError::InvalidBytecode {
+            chunk: actual_chunk,
+            instruction: actual_instruction,
+            reason,
+        } = error
+        else {
+            panic!("fixture must return InvalidBytecode");
+        };
+        assert_eq!(actual_chunk, chunk);
+        assert_eq!(actual_instruction, instruction);
+        drop(reason);
+    }
+
+    #[test]
+    fn verifier_rejects_instruction_and_cache_corruption() {
+        let mut empty = valid_saved_bytecode();
+        empty.code.clear();
+        assert!(matches!(
+            rejected_bytecode(vec![empty], Vec::new()),
+            LoadError::InvalidBytecode { .. }
+        ));
+
+        let mut no_return = valid_saved_bytecode();
+        no_return.code[0] = Instr::push_nil().raw();
+        assert!(matches!(
+            rejected_bytecode(vec![no_return], Vec::new()),
+            LoadError::InvalidBytecode { .. }
+        ));
+
+        let mut bad_jump = valid_saved_bytecode();
+        bad_jump.code.insert(0, Instr::jump(1).raw());
+        bad_jump.line_info.insert(0, 1);
+        assert!(matches!(
+            rejected_bytecode(vec![bad_jump], Vec::new()),
+            LoadError::InvalidBytecode { .. }
+        ));
+
+        let mut bad_literal = valid_saved_bytecode();
+        bad_literal.code.insert(0, Instr::push_num(0).raw());
+        bad_literal.line_info.insert(0, 1);
+        assert!(matches!(
+            rejected_bytecode(vec![bad_literal], Vec::new()),
+            LoadError::InvalidBytecode { .. }
+        ));
+
+        let mut bad_cache = valid_saved_bytecode();
+        bad_cache.string_literals.push(b"x".to_vec());
+        bad_cache
+            .code
+            .insert(0, Instr::get_global_cached(0, 1).raw());
+        bad_cache.line_info.insert(0, 1);
+        assert!(matches!(
+            rejected_bytecode(vec![bad_cache], Vec::new()),
+            LoadError::InvalidBytecode { .. }
+        ));
+    }
+
+    #[test]
+    fn verifier_rejects_bad_graphs_and_closure_captures() {
+        let mut missing_child = valid_saved_bytecode();
+        missing_child.nested.push(1);
+        assert_eq!(
+            rejected_bytecode(vec![missing_child], Vec::new()),
+            LoadError::CorruptArena
+        );
+
+        let mut cycle = valid_saved_bytecode();
+        cycle.nested.push(0);
+        assert!(matches!(
+            rejected_bytecode(vec![cycle], Vec::new()),
+            LoadError::InvalidBytecode { .. }
+        ));
+
+        let mut chunks = vec![valid_saved_bytecode(); 201];
+        for (idx, chunk) in chunks.iter_mut().take(200).enumerate() {
+            chunk.nested.push((idx + 1) as u32);
+        }
+        assert!(matches!(
+            rejected_bytecode(chunks, Vec::new()),
+            LoadError::InvalidBytecode { .. }
+        ));
+
+        let chunk = valid_saved_bytecode();
+        let object = SavedObject::Closure {
+            chunk: 0,
+            upvalues: vec![0],
+        };
+        assert!(matches!(
+            rejected_bytecode(vec![chunk], vec![object]),
+            LoadError::InvalidBytecode { .. }
+        ));
+
+        let mut boundary = vec![valid_saved_bytecode(); 200];
+        for (idx, chunk) in boundary.iter_mut().take(199).enumerate() {
+            chunk
+                .nested
+                .push(u32::try_from(idx + 1).expect("fixture id fits"));
+        }
+        assert!(load_bytecode(boundary, Vec::new()).is_ok());
+    }
+
+    #[test]
+    fn verifier_covers_each_operand_class_and_reports_its_location() {
+        let mut binary_literal = valid_saved_bytecode();
+        binary_literal.string_literals.push(vec![255]);
+        binary_literal.code.insert(0, Instr::push_string(0).raw());
+        binary_literal.line_info.insert(0, 1);
+        assert!(load_bytecode(vec![binary_literal], Vec::new()).is_ok());
+
+        let mut bad_global_name = valid_saved_bytecode();
+        bad_global_name.string_literals.push(vec![255]);
+        bad_global_name
+            .code
+            .insert(0, Instr::get_global_cached(0, 0).raw());
+        bad_global_name.global_cache_slots = 1;
+        bad_global_name.line_info.insert(0, 1);
+        assert_invalid(
+            rejected_bytecode(vec![bad_global_name], Vec::new()),
+            0,
+            Some(0),
+        );
+
+        let mut bad_builtin = valid_saved_bytecode();
+        bad_builtin
+            .code
+            .insert(0, Instr::op_a(Instr::OP_GET_BUILTIN, 255).raw());
+        bad_builtin.line_info.insert(0, 1);
+        assert_invalid(rejected_bytecode(vec![bad_builtin], Vec::new()), 0, Some(0));
+
+        let mut bad_template = valid_saved_bytecode();
+        bad_template
+            .code
+            .insert(0, Instr::new_table_template(0).raw());
+        bad_template.line_info.insert(0, 1);
+        assert_invalid(
+            rejected_bytecode(vec![bad_template], Vec::new()),
+            0,
+            Some(0),
+        );
+
+        let mut bad_template_key = valid_saved_bytecode();
+        bad_template_key.table_templates.push(vec![0]);
+        assert_invalid(
+            rejected_bytecode(vec![bad_template_key], Vec::new()),
+            0,
+            None,
+        );
+
+        let mut bad_local = valid_saved_bytecode();
+        bad_local.code.insert(0, Instr::get_local(0).raw());
+        bad_local.line_info.insert(0, 1);
+        assert_invalid(rejected_bytecode(vec![bad_local], Vec::new()), 0, Some(0));
+
+        let mut bad_upvalue = valid_saved_bytecode();
+        bad_upvalue.code.insert(0, Instr::get_upvalue(0).raw());
+        bad_upvalue.line_info.insert(0, 1);
+        assert_invalid(rejected_bytecode(vec![bad_upvalue], Vec::new()), 0, Some(0));
+
+        let mut bad_reserved = valid_saved_bytecode();
+        bad_reserved.code[0] = Instr::op_a(Instr::OP_PUSH_NIL, 1).raw();
+        assert_invalid(
+            rejected_bytecode(vec![bad_reserved], Vec::new()),
+            0,
+            Some(0),
+        );
+
+        let mut unknown = valid_saved_bytecode();
+        unknown.code[0] = Instr::op(255).raw();
+        assert_invalid(rejected_bytecode(vec![unknown], Vec::new()), 0, Some(0));
+    }
+
+    #[test]
+    fn verifier_covers_cache_metadata_nested_chunks_and_graph_cycles() {
+        let mut bad_cache_count = valid_saved_bytecode();
+        bad_cache_count.string_literals.push(b"x".to_vec());
+        bad_cache_count
+            .code
+            .insert(0, Instr::get_global_cached(0, 0).raw());
+        bad_cache_count.line_info.insert(0, 1);
+        assert_invalid(
+            rejected_bytecode(vec![bad_cache_count], Vec::new()),
+            0,
+            None,
+        );
+
+        let mut bad_line_info = valid_saved_bytecode();
+        bad_line_info.code.insert(0, Instr::push_nil().raw());
+        assert_invalid(rejected_bytecode(vec![bad_line_info], Vec::new()), 0, None);
+
+        let mut negative_jump = valid_saved_bytecode();
+        negative_jump.code.insert(0, Instr::jump(-2).raw());
+        negative_jump.line_info.insert(0, 1);
+        assert_invalid(
+            rejected_bytecode(vec![negative_jump], Vec::new()),
+            0,
+            Some(0),
+        );
+
+        let mut parent = valid_saved_bytecode();
+        parent.nested.push(1);
+        let mut child = valid_saved_bytecode();
+        child.upvalues.push(SavedUpvalueDesc::Local(0));
+        assert_invalid(rejected_bytecode(vec![parent, child], Vec::new()), 0, None);
+
+        let mut first = valid_saved_bytecode();
+        first.nested.push(1);
+        let mut second = valid_saved_bytecode();
+        second.nested.push(0);
+        assert_invalid(rejected_bytecode(vec![first, second], Vec::new()), 0, None);
+
+        let mut nested_bad_opcode = valid_saved_bytecode();
+        nested_bad_opcode.code[0] = Instr::op(255).raw();
+        assert_invalid(
+            rejected_bytecode(vec![valid_saved_bytecode(), nested_bad_opcode], Vec::new()),
+            1,
+            Some(0),
+        );
     }
 
     #[test]

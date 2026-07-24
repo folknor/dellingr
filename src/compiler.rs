@@ -4,6 +4,7 @@ mod exp_desc;
 mod lexer;
 mod parser;
 mod token;
+pub(crate) mod verify;
 
 use std::cell::Cell;
 use std::sync::Arc;
@@ -12,6 +13,9 @@ use super::Instr;
 use super::Result;
 use super::error;
 use super::vm::{ObjectPtr, Val};
+
+#[cfg(feature = "snapshot")]
+pub(crate) use parser::MAX_SYNTAX_DEPTH;
 
 /// Describes where an upvalue comes from when creating a closure.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -361,6 +365,12 @@ fn finalize(bc: &mut Bytecode) -> Result<()> {
         "line_info desynced from code"
     );
     bc.assign_cache_slots()?;
+    if let Err(error) = verify::validate_bytecode(bc) {
+        debug_assert!(
+            false,
+            "compiler emitted bytecode rejected by the snapshot verifier: {error:?}"
+        );
+    }
     for nested in &mut bc.nested {
         // The parser produces nested `Arc<Bytecode>` with a refcount of 1, so
         // we have unique access to mutate each one in place before it ships.

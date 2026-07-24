@@ -84,6 +84,11 @@ reachable `RustFunc` must be registered with a stable id (e.g.
 `set_global_named_rust_fn`) or the save fails fast. The module doc on
 `src/vm/save_state.rs` covers the format and design.
 
+Save files are user-editable input. Loading restores the saved cost counters,
+so hosts that load user-editable saves must call `set_cost_budget` after a
+successful load. Save authentication is required if tampering with future RNG
+outcomes matters.
+
 ## Status
 
 The public API is pre-1.0 and not yet stable. Breaking changes may land at any point.

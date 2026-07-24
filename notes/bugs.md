@@ -20,55 +20,6 @@ valid. Fix history lives in git.
 
 ## High severity
 
-### 10. `load_state` performs zero bytecode validation; a forged save escalates to process panic (D-D2, hostile input)
-
-- **Locations:** `src/vm/save_state.rs:645-709`
-  (`materialize_bytecode`/`build_bytecode`), `src/instr.rs:350`
-  (`Instr::from_raw`).
-- **Cause:** the codec is carefully bounds-checked (length caps, `read_exact`,
-  no over-reservation) but the semantic content is trusted; `Bytecode` is
-  rebuilt directly from attacker-controlled fields with no verifier. Game
-  saves are classic user-edited input, so this is reachable in the product's
-  own use case. Concrete panic vectors (all ordinary safe-Rust panics, not
-  UB, but they abort the host callback and are not catchable as `LoadError`):
-  - code that runs off the end (no `OP_RETURN`): `Frame::get_instr` indexes
-    `code[self.ip]` (`frame.rs:103-107`) - OOB panic.
-  - `OP_PUSH_NUM`/`OP_PUSH_STRING`/`OP_CLOSURE` with an index beyond
-    `number_literals`/`string_literals`/`nested` (`frame.rs:110-117`,
-    `eval_index.rs:371`) - OOB panic.
-  - `OP_GET_LOCAL`/`OP_SET_LOCAL` beyond the frame (`eval_index.rs:436-440`);
-    `OP_GET_UPVALUE n` with no upvalues (`eval_index.rs:443`) - OOB panic.
-  - `OP_GET_BUILTIN`/`OP_SET_BUILTIN` with slot >= `Builtin::COUNT` (19)
-    (`eval_index.rs:414-423`) - OOB panic.
-  - `OP_POP`/`OP_SWAP`/`OP_DUP` on an empty stack - `pop_val` expect / swap
-    OOB.
-  - forged `num_locals`/cache-slot counts inconsistent with cache-indexed
-    instructions.
-- Also forgeable as plain data: `cost_remaining`/`cost_budget`/`cost_used`
-  (a save-file editor grants itself infinite budget) and `rng_state`. Those
-  may be acceptable (saves are host-owned data), but the panic class is not,
-  given the decoder otherwise promises graceful `LoadError`s (`CorruptArena`,
-  `DecodeError`).
-- **Fix sketch:** a linear verifier pass over each `SavedBytecode` at load:
-  opcode in the known set, literal/nested/cache indices within declared
-  pools, jump targets within `0..=code.len()` (simple per-instruction static
-  check of `ip + sbx`; `Frame::jump` re-checks), code non-empty and
-  terminated, upvalue descriptor indices within parent ranges,
-  `num_locals`/`num_params` sane. Alternatively document loudly that save
-  bytes are trusted input (weaker; contradicts the decoder's hostile-input
-  posture).
-
-### 11. `build_bytecode` recursion is unbounded; a forged save aborts via native stack overflow (D-D3, hostile input)
-
-- **Location:** `src/vm/save_state.rs:657-709`.
-- **Cause:** recursion through `nested` chunk ids has cycle detection
-  (`visiting`) but no depth bound. A forged save can encode N chunks in a
-  linear parent-child chain (a few dozen bytes each), so a ~10 MB file yields
-  recursion hundreds of thousands of frames deep - native stack overflow,
-  cannot be caught or returned as `LoadError`. Legitimate saves are bounded
-  by compiler nesting limits, so an explicit depth cap (or an iterative
-  post-order worklist, optimizations.md #5) costs nothing for real data.
-
 ### 12. Pattern matcher: matchdepth consumed by tail calls and never reset between attempts (E-E1)
 
 - **Locations:** `src/patterns/luapat.rs:351` (decrement on entry); tail-style
@@ -898,8 +849,8 @@ stacks/counters; eval_closure watermarks (L8) keep the State quiescent after
 killed callbacks. Non-findings: anchored-only values not serialized is
 documented (`SaveDiagnostics::anchor_count`); `rust_fn_ids_by_addr`
 collapsing ICF-folded functions is safe (identical code, identical
-behavior); cost/rng values being host-forgeable is acceptable (saves are
-host-owned; the integrity problem is the panic class, #10).
+behavior); cost/rng values are host-forgeable, so hosts that load
+user-editable saves must reset the cost budget after loading.
 
 **E (stdlib/patterns):** `VmRng::random_range_i64` uses i128, no overflow
 from `math.random` extremes. RustFunc returning exactly 255 results does not
@@ -916,6 +867,28 @@ as static reading can tell. Rust's round-half-even float formatting matches
 glibc's.
 
 ---
+
+## Deferred hardening
+
+### 59. Saved bytecode stack discipline is not verified (phase 2)
+
+- **Locations:** `src/vm/eval.rs:235,407,434`, `eval_index.rs:436`,
+  `eval_store.rs:454`, and the bytecode dispatch paths for `DUP`, `SWAP`,
+  `MARK_CALL_BASE`, table initialization, field/table stores, numeric and
+  generic loop helpers, fixed `SET_LIST`, and `GET_TABLE`.
+- **Cause:** phase 1 validates bytecode structure, operands, cache layout, and
+  nesting, but deliberately does not perform abstract operand-stack dataflow
+  or marker-stack/CFG-join verification. Forged code can therefore still
+  underflow `pop_val`, `DUP`'s `.last().expect`, `SWAP`'s `len - 1`/`len - 2`,
+  `CONCAT A`'s `len - A`, fixed `RETURN n` while locating return values,
+  `RETURN RetCount::All`'s `stack.len() - frame_base`, direct local accesses,
+  loop-local ranges, a later `get_top()` call below `stack_bottom`, or open
+  upvalues after malformed code has popped frame slots.
+- **Fix sketch:** add the deferred stack-discipline verifier with abstract
+  stack heights, vararg-call and table-constructor marker stacks, dynamic
+  result counts, and agreement at CFG joins. It needs compiler-corpus proof
+  before it may reject saves. Finding #27 also blocks the full
+  no-abort-on-load guarantee because GC marking remains recursive.
 
 ## Orchestrator notes (carried from the corner reports)
 
