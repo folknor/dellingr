@@ -78,6 +78,52 @@ fn index_existing_key_no_metamethod() {
 }
 
 #[test]
+fn cached_fields_do_not_resurrect_after_deletion() {
+    // Each field callsite gets its own cache slot, so the access has to happen
+    // inside a function called both before and after the deletion. Two separate
+    // `t.x` expressions would never share a warm cache and would pass even if
+    // the tombstone were resurrected.
+    // Encodes both reads into one number so the warming read is checked too:
+    // 1 before the deletion, 9 (via __index) after.
+    assert_eq!(
+        run_number(
+            r#"
+            local t = setmetatable({ x = 1 }, { __index = function() return 9 end })
+            local function read() return t.x end
+            local warm = read()
+            t.x = nil
+            return warm * 100 + read()
+        "#
+        ),
+        109.0
+    );
+    // Same for the write cache: the warming assignment must be non-nil and go
+    // through the same callsite, so the IC records (key -> index) against a live
+    // slot. Removal does not bump the table version, so a `set_at_index` that
+    // failed to refuse dead slots would write straight through the tombstone and
+    // never reach __newindex.
+    // The warming write must land on the live field directly (leaving seen at 0
+    // and t.x at 5); only the post-deletion write should reach __newindex. The
+    // encoding keeps the intermediate state observable: 0 * 1000 + 5 * 100 + 7.
+    assert_eq!(
+        run_number(
+            r#"
+            local seen = 0
+            local t = setmetatable({ x = 1 }, { __newindex = function(_, _, v) seen = v end })
+            local function write(v) t.x = v end
+            write(5)
+            local warmed_seen = seen
+            local warmed_field = t.x
+            t.x = nil
+            write(7)
+            return warmed_seen * 1000 + warmed_field * 100 + seen
+        "#
+        ),
+        507.0
+    );
+}
+
+#[test]
 fn protected_metatables_hide_and_prevent_replacement() {
     let value = run_number(
         r#"

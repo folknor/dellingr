@@ -193,39 +193,6 @@ print(string.format("%p", print) == string.format("%p", print))
   instability of fn addresses is irrelevant in-process; the snapshot concern
   stays tracked in TODO.md.
 
-### 6. Removing the current key during `pairs` now raises `invalid key to 'next'` (C-B2)
-
-**Severity raised.** The `Table::next` fix (former #3 / #29) changed this from
-a silent early exit into a hard error: the removed control key is no longer
-found, so `next` reports it as invalid and the error kills the callback. That
-is the right direction (loud beats silently wrong), but it means a legal and
-common Lua idiom - filter-in-place - now fails noisily where it used to fail
-quietly.
-
-- **Locations:** `src/vm/table.rs:376-405` (`Table::remove` physically removes
-  via `shift_remove` / inline shift), `Table::next` (then can't find the
-  control key, returns `TableNext::InvalidKey`),
-  `src/vm/eval_control.rs:186-207` (fast path, declines and falls back to
-  `base_next`, which raises).
-- **Cause:** reference Lua explicitly permits clearing the field being
-  iterated (`t[k] = nil` inside a `pairs` loop). dellingr physically removes
-  the entry, so the control key the iterator carries no longer exists.
-  High-impact for game scripts (filter-in-place loops).
-- **Repro:**
-
-```lua
-local t = { a = 1, b = 2, c = 3, d = 4, e = 5 }
-for k in pairs(t) do t[k] = nil end
-print(next(t) == nil)   -- reference: true; dellingr: error "invalid key to 'next'"
-```
-
-- **Fix direction:** dead-key semantics - on remove, keep the key with a
-  hidden tombstone until a safe compaction point (insert of a colliding key,
-  explicit rebuild, or GC), with `get`/`insert`/`mark_values`/`pairs`
-  skipping tombstones; or have `next` fall back to a per-table "last removed
-  key -> successor index" memo (version-checked). Must stay deterministic and
-  preserve insertion order for untouched keys.
-
 ### 7. Unbounded parser recursion: hostile source aborts the host process (A-A1)
 
 - **Locations:** `src/compiler/parser/expr.rs` (`parse_expr -> parse_or ->

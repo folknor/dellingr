@@ -23,6 +23,23 @@ fn install_force_next_gc(state: &mut State) {
 }
 
 #[test]
+fn tombstoned_keys_and_values_are_not_gc_roots() {
+    let mut state = State::new();
+    state.gc_disable_auto();
+    state.load_string("t = {}").unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
+    state.gc_collect();
+    let baseline = state.object_count();
+
+    state
+        .load_string("local key = {}; local value = {}; t[key] = value; t[key] = nil")
+        .unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
+    state.gc_collect();
+    assert_eq!(state.object_count(), baseline);
+}
+
+#[test]
 fn active_frame_string_literal_survives_explicit_gc() {
     let mut state = State::new();
     state.gc_disable_auto();

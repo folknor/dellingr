@@ -82,6 +82,60 @@ fn round_trip_preserves_data_graph_and_env_references() {
 }
 
 #[test]
+fn tombstones_are_omitted_from_snapshots() {
+    // Compare the payload against a table that never held the deleted key.
+    // Round-trip behavior alone cannot detect a leaked `(b, nil)` entry: loading
+    // it would call insert(b, nil), which is remove-semantics on an absent key
+    // and gets discarded, so the observable result is identical either way.
+    //
+    // Compare lengths rather than full bytes. The two scripts execute different
+    // numbers of operations, so the serialized cost counters legitimately
+    // differ - but those fields are fixed-width, so only a leaked entry can
+    // change the payload size.
+    // Both storage modes must be covered. A 3-entry table is inline; only a
+    // table past INLINE_CAPACITY (4) reaches the IndexMap arm, and the two arms
+    // filter dead slots independently.
+    for (tombstoned, clean, expected_order) in [
+        (
+            "t = { a = 1, b = 2, c = 3 }; t.b = nil",
+            "t = { a = 1, c = 3 }",
+            "acb",
+        ),
+        (
+            "t = { a = 1, b = 2, c = 3, d = 4, e = 5, f = 6 }; t.b = nil",
+            "t = { a = 1, c = 3, d = 4, e = 5, f = 6 }",
+            "acdefb",
+        ),
+    ] {
+        let (mut with_tombstone, _) = new_capture_state();
+        run(&mut with_tombstone, tombstoned);
+        let tombstoned_bytes = with_tombstone.save_state().unwrap().bytes;
+
+        let (mut without_tombstone, _) = new_capture_state();
+        run(&mut without_tombstone, clean);
+        let clean_bytes = without_tombstone.save_state().unwrap().bytes;
+
+        assert_eq!(
+            tombstoned_bytes.len(),
+            clean_bytes.len(),
+            "a tombstoned entry leaked into the snapshot payload for: {tombstoned}"
+        );
+
+        // And the live entries still round-trip with insertion order intact,
+        // with a reinserted key landing at the back.
+        let mut loaded =
+            State::load_state(&tombstoned_bytes, Box::new(DefaultCallbacks), |_| {}).unwrap();
+        run(
+            &mut loaded,
+            "t.b = 4; order = ''; for k in pairs(t) do order = order .. k end",
+        );
+        loaded.get_global("order");
+        assert_eq!(loaded.to_string(-1).unwrap(), expected_order);
+        loaded.pop(1);
+    }
+}
+
+#[test]
 fn saves_are_byte_stable() {
     let (mut state, _) = new_capture_state();
     run(

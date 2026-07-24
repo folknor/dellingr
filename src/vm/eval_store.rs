@@ -106,13 +106,7 @@ impl State {
         match obj_ptr.and_then(|ptr| self.heap.as_table(ptr)) {
             Some(tbl) => {
                 let entry_index = entry_index as usize;
-                let can_set_at_index = !matches!(val, Val::Nil)
-                    && tbl
-                        .get_index(entry_index)
-                        .is_some_and(|(existing_key, _)| existing_key == key);
-                if can_set_at_index {
-                    tbl.set_at_index(entry_index, val);
-                } else {
+                if !tbl.init_at_index(entry_index, key, val) {
                     tbl.insert(key, val)?;
                 }
                 Ok(())

@@ -56,6 +56,8 @@ pub(super) struct Table {
     /// Invalidated when positive integer keys are inserted or removed.
     /// Uses Cell for interior mutability so array_len() can cache on &self.
     cached_array_len: Cell<Option<usize>>,
+    /// Number of occupied storage slots whose nil value makes them logically absent.
+    dead_count: usize,
 }
 
 impl Default for Table {
@@ -65,6 +67,7 @@ impl Default for Table {
             metatable: None,
             version: Cell::new(0),
             cached_array_len: Cell::new(None),
+            dead_count: 0,
         }
     }
 }
@@ -79,6 +82,7 @@ impl Table {
                 metatable: None,
                 version: Cell::new(0),
                 cached_array_len: Cell::new(None),
+                dead_count: 0,
             }
         }
     }
@@ -98,6 +102,7 @@ impl Table {
             metatable: None,
             version: Cell::new(0),
             cached_array_len: Cell::new(None),
+            dead_count: key_ids.len(),
         }
     }
 
@@ -164,7 +169,8 @@ impl Table {
                         entries.iter().take(*len as usize).enumerate()
                     {
                         if entry_key == key {
-                            return Some((idx, *entry_value));
+                            return (!matches!(entry_value, Val::Nil))
+                                .then_some((idx, *entry_value));
                         }
                     }
                     None
@@ -172,7 +178,7 @@ impl Table {
                 TableStorage::Map(map) => {
                     let idx = map.get_index_of(key)?;
                     let (_, value) = map.get_index(idx)?;
-                    Some((idx, *value))
+                    (!matches!(value, Val::Nil)).then_some((idx, *value))
                 }
             },
         }
@@ -183,22 +189,31 @@ impl Table {
         match &self.storage {
             TableStorage::Inline { entries, len } => {
                 if index < *len as usize {
-                    Some(entries[index])
+                    (!matches!(entries[index].1, Val::Nil)).then_some(entries[index])
                 } else {
                     None
                 }
             }
-            TableStorage::Map(map) => map.get_index(index).map(|(key, value)| (*key, *value)),
+            TableStorage::Map(map) => map
+                .get_index(index)
+                .and_then(|(key, value)| (!matches!(value, Val::Nil)).then_some((*key, *value))),
         }
     }
 
     #[cfg(feature = "snapshot")]
     pub(super) fn entries(&self) -> Vec<(Val, Val)> {
         match &self.storage {
-            TableStorage::Inline { entries, len } => {
-                entries.iter().take(*len as usize).copied().collect()
-            }
-            TableStorage::Map(map) => map.iter().map(|(key, value)| (*key, *value)).collect(),
+            TableStorage::Inline { entries, len } => entries
+                .iter()
+                .take(*len as usize)
+                .filter(|(_, value)| !matches!(value, Val::Nil))
+                .copied()
+                .collect(),
+            TableStorage::Map(map) => map
+                .iter()
+                .filter(|(_, value)| !matches!(value, Val::Nil))
+                .map(|(key, value)| (*key, *value))
+                .collect(),
         }
     }
 
@@ -229,7 +244,7 @@ impl Table {
     pub(super) fn set_at_index(&mut self, index: usize, value: Val) -> bool {
         match &mut self.storage {
             TableStorage::Inline { entries, len } => {
-                if index < *len as usize {
+                if index < *len as usize && !matches!(entries[index].1, Val::Nil) {
                     entries[index].1 = value;
                     true
                 } else {
@@ -237,14 +252,48 @@ impl Table {
                 }
             }
             TableStorage::Map(map) => {
-                if let Some((_, v)) = map.get_index_mut(index) {
+                let Some((_, v)) = map.get_index_mut(index) else {
+                    return false;
+                };
+                if matches!(*v, Val::Nil) {
+                    false
+                } else {
                     *v = value;
                     true
-                } else {
-                    false
                 }
             }
         }
+    }
+
+    /// Initializes a reserved template slot without exposing dead slots to caches.
+    pub(super) fn init_at_index(&mut self, index: usize, key: Val, value: Val) -> bool {
+        let activated = match &mut self.storage {
+            TableStorage::Inline { entries, len } if index < *len as usize => {
+                let (existing_key, existing_value) = &mut entries[index];
+                if *existing_key != key {
+                    return false;
+                }
+                let activated = matches!(*existing_value, Val::Nil) && !matches!(value, Val::Nil);
+                *existing_value = value;
+                activated
+            }
+            TableStorage::Map(map) => {
+                let Some((existing_key, existing_value)) = map.get_index_mut(index) else {
+                    return false;
+                };
+                if *existing_key != key {
+                    return false;
+                }
+                let activated = matches!(*existing_value, Val::Nil) && !matches!(value, Val::Nil);
+                *existing_value = value;
+                activated
+            }
+            TableStorage::Inline { .. } => return false,
+        };
+        if activated {
+            self.dead_count -= 1;
+        }
+        true
     }
 
     /// Returns a "border" of the table per the Lua `#` operator.
@@ -317,19 +366,102 @@ impl Table {
             self.cached_array_len.set(None);
         }
 
+        if self.dead_count == 0 {
+            return self.insert_without_tombstones(key, value);
+        }
+
         match &mut self.storage {
             TableStorage::Inline { entries, len } => {
-                // Check if key already exists (update in place)
+                if let Some(index) = entries
+                    .iter()
+                    .take(*len as usize)
+                    .position(|entry| entry.0 == key && !matches!(entry.1, Val::Nil))
+                {
+                    entries[index].1 = value;
+                    return Ok(());
+                }
+                if let Some(index) = entries
+                    .iter()
+                    .take(*len as usize)
+                    .position(|entry| entry.0 == key)
+                {
+                    for shift in index..*len as usize - 1 {
+                        entries[shift] = std::mem::take(&mut entries[shift + 1]);
+                    }
+                    *len -= 1;
+                    self.dead_count -= 1;
+                    self.bump_version();
+                } else if self.dead_count >= *len as usize - self.dead_count {
+                    if self.compact_dead() {
+                        self.bump_version();
+                    }
+                } else if *len as usize == INLINE_CAPACITY && self.compact_dead() {
+                    self.bump_version();
+                }
+                let TableStorage::Inline { entries, len } = &mut self.storage else {
+                    unreachable!("inline compaction cannot promote storage");
+                };
+                if (*len as usize) < INLINE_CAPACITY {
+                    entries[*len as usize] = (key, value);
+                    *len += 1;
+                } else {
+                    self.promote_to_map(key, value);
+                }
+            }
+            TableStorage::Map(_) => self.insert_into_map_with_tombstones(key, value),
+        }
+        Ok(())
+    }
+
+    fn insert_into_map_with_tombstones(&mut self, key: Val, value: Val) {
+        let index = match &self.storage {
+            TableStorage::Map(map) => map.get_index_of(&key),
+            TableStorage::Inline { .. } => unreachable!("map insertion requires map storage"),
+        };
+        if let Some(index) = index {
+            let was_live = match &mut self.storage {
+                TableStorage::Map(map) => {
+                    let (_, existing) = map
+                        .get_index_mut(index)
+                        .expect("IndexMap index returned by get_index_of must be valid");
+                    if !matches!(*existing, Val::Nil) {
+                        *existing = value;
+                        true
+                    } else {
+                        map.shift_remove_index(index);
+                        false
+                    }
+                }
+                TableStorage::Inline { .. } => unreachable!("map insertion requires map storage"),
+            };
+            if was_live {
+                return;
+            }
+            self.dead_count -= 1;
+            self.bump_version();
+        } else {
+            let live_count = match &self.storage {
+                TableStorage::Map(map) => map.len() - self.dead_count,
+                TableStorage::Inline { .. } => unreachable!("map insertion requires map storage"),
+            };
+            if self.dead_count >= live_count && self.compact_dead() {
+                self.bump_version();
+            }
+        }
+        if let TableStorage::Map(map) = &mut self.storage {
+            map.insert(key, value);
+        }
+    }
+
+    fn insert_without_tombstones(&mut self, key: Val, value: Val) -> Result<()> {
+        match &mut self.storage {
+            TableStorage::Inline { entries, len } => {
                 for (entry_key, entry_value) in entries.iter_mut().take(*len as usize) {
                     if *entry_key == key {
                         *entry_value = value;
                         return Ok(());
                     }
                 }
-                // Key doesn't exist - need to add it. New keys are appended
-                // (either at index `len` in Inline, or at the end of the
-                // IndexMap after promotion). Existing entries don't move, so
-                // their indices remain stable - no version bump needed.
                 if (*len as usize) < INLINE_CAPACITY {
                     entries[*len as usize] = (key, value);
                     *len += 1;
@@ -338,9 +470,6 @@ impl Table {
                 }
             }
             TableStorage::Map(map) => {
-                // IndexMap appends new keys at the end - existing indices are
-                // preserved, so no version bump is needed for the new-key
-                // case. Existing-key updates never bumped.
                 map.insert(key, value);
             }
         }
@@ -350,6 +479,7 @@ impl Table {
     /// Promote from inline storage to IndexMap, adding the new key-value pair.
     #[hotpath::measure]
     fn promote_to_map(&mut self, new_key: Val, new_value: Val) {
+        debug_assert_eq!(self.dead_count, 0);
         let old_storage = std::mem::take(&mut self.storage);
         if let TableStorage::Inline { mut entries, len } = old_storage {
             let mut map = IndexMap::with_capacity(INLINE_CAPACITY + 1);
@@ -365,6 +495,7 @@ impl Table {
     /// Ensure storage is Map (for operations that need IndexMap's shift_remove).
     #[hotpath::measure]
     fn ensure_map(&mut self) {
+        debug_assert_eq!(self.dead_count, 0);
         // Only convert if currently Inline
         if matches!(self.storage, TableStorage::Inline { .. })
             && let TableStorage::Inline { mut entries, len } = std::mem::take(&mut self.storage)
@@ -387,28 +518,57 @@ impl Table {
 
         match &mut self.storage {
             TableStorage::Inline { entries, len } => {
-                for i in 0..(*len as usize) {
-                    if &entries[i].0 == key {
-                        let removed = std::mem::take(&mut entries[i].1);
-                        // Shift remaining entries down
-                        for j in i..(*len as usize - 1) {
-                            entries[j] = std::mem::take(&mut entries[j + 1]);
+                for (entry_key, entry_value) in entries.iter_mut().take(*len as usize) {
+                    if entry_key == key {
+                        let removed = std::mem::replace(entry_value, Val::Nil);
+                        if !matches!(removed, Val::Nil) {
+                            self.dead_count += 1;
+                            return Some(removed);
                         }
-                        *len -= 1;
-                        self.bump_version();
-                        return Some(removed);
+                        return None;
                     }
                 }
                 None
             }
             TableStorage::Map(map) => {
-                let removed = map.shift_remove(key);
-                if removed.is_some() {
-                    self.bump_version();
+                let value = map.get_mut(key)?;
+                let removed = std::mem::replace(value, Val::Nil);
+                if matches!(removed, Val::Nil) {
+                    None
+                } else {
+                    self.dead_count += 1;
+                    Some(removed)
                 }
-                removed
             }
         }
+    }
+
+    /// Stably remove logically absent slots. The caller owns version changes.
+    fn compact_dead(&mut self) -> bool {
+        if self.dead_count == 0 {
+            return false;
+        }
+        match &mut self.storage {
+            TableStorage::Inline { entries, len } => {
+                let mut write = 0;
+                let mut packed: [(Val, Val); INLINE_CAPACITY] = Default::default();
+                let mut packed_slots = packed.iter_mut();
+                for entry in entries.iter_mut().take(*len as usize) {
+                    let entry = std::mem::take(entry);
+                    if !matches!(entry.1, Val::Nil) {
+                        *packed_slots
+                            .next()
+                            .expect("packed table must have room for every live entry") = entry;
+                        write += 1;
+                    }
+                }
+                *entries = packed;
+                *len = write as u8;
+            }
+            TableStorage::Map(map) => map.retain(|_, value| !matches!(value, Val::Nil)),
+        }
+        self.dead_count = 0;
+        true
     }
 
     /// Inserts a value at the given array position, shifting elements up.
@@ -417,6 +577,7 @@ impl Table {
     pub(super) fn array_insert(&mut self, pos: usize, value: Val) {
         let len = self.array_len();
         let value_is_nil = matches!(value, Val::Nil);
+        self.compact_dead();
         // For shift operations, ensure we're using Map storage
         self.ensure_map();
         if let TableStorage::Map(map) = &mut self.storage {
@@ -447,6 +608,7 @@ impl Table {
         if pos > len || pos == 0 {
             return Val::Nil;
         }
+        self.compact_dead();
         // For shift operations, ensure we're using Map storage
         self.ensure_map();
         let removed = if let TableStorage::Map(map) = &mut self.storage {
@@ -524,12 +686,11 @@ impl Table {
         match &self.storage {
             TableStorage::Inline { entries, len } => {
                 if matches!(key, Val::Nil) {
-                    // Return the first key-value pair
-                    if *len > 0 {
-                        TableNext::Pair(entries[0].0, entries[0].1)
-                    } else {
-                        TableNext::End
-                    }
+                    entries
+                        .iter()
+                        .take(*len as usize)
+                        .find(|(_, value)| !matches!(value, Val::Nil))
+                        .map_or(TableNext::End, |(k, v)| TableNext::Pair(*k, *v))
                 } else {
                     // Find the key, then return the next one
                     match entries
@@ -537,18 +698,19 @@ impl Table {
                         .take(*len as usize)
                         .position(|entry| &entry.0 == key)
                     {
-                        Some(index) if index + 1 < *len as usize => {
-                            TableNext::Pair(entries[index + 1].0, entries[index + 1].1)
-                        }
-                        Some(_) => TableNext::End,
+                        Some(index) => entries
+                            .iter()
+                            .take(*len as usize)
+                            .skip(index + 1)
+                            .find(|(_, value)| !matches!(value, Val::Nil))
+                            .map_or(TableNext::End, |(k, v)| TableNext::Pair(*k, *v)),
                         None => TableNext::InvalidKey,
                     }
                 }
             }
             TableStorage::Map(map) => {
                 if matches!(key, Val::Nil) {
-                    // Return the first key-value pair
-                    if let Some((k, v)) = map.iter().next() {
+                    if let Some((k, v)) = map.iter().find(|(_, value)| !matches!(value, Val::Nil)) {
                         TableNext::Pair(*k, *v)
                     } else {
                         TableNext::End
@@ -556,7 +718,11 @@ impl Table {
                 } else {
                     match map.get_index_of(key) {
                         Some(index) => {
-                            if let Some((k, v)) = map.get_index(index + 1) {
+                            if let Some((k, v)) = map
+                                .iter()
+                                .skip(index + 1)
+                                .find(|(_, value)| !matches!(value, Val::Nil))
+                            {
                                 TableNext::Pair(*k, *v)
                             } else {
                                 TableNext::End
@@ -578,14 +744,18 @@ impl Table {
         match &self.storage {
             TableStorage::Inline { entries, len } => {
                 for (key, value) in entries.iter().take(*len as usize) {
-                    key.mark_reachable(heap, upvalue_pool);
-                    value.mark_reachable(heap, upvalue_pool);
+                    if !matches!(value, Val::Nil) {
+                        key.mark_reachable(heap, upvalue_pool);
+                        value.mark_reachable(heap, upvalue_pool);
+                    }
                 }
             }
             TableStorage::Map(map) => {
                 for (k, v) in map {
-                    k.mark_reachable(heap, upvalue_pool);
-                    v.mark_reachable(heap, upvalue_pool);
+                    if !matches!(v, Val::Nil) {
+                        k.mark_reachable(heap, upvalue_pool);
+                        v.mark_reachable(heap, upvalue_pool);
+                    }
                 }
             }
         }
@@ -742,5 +912,59 @@ mod tests {
         assert!(matches!(t.next(&n(5)), TableNext::End));
         assert!(matches!(t.next(&n(6)), TableNext::InvalidKey));
         assert!(matches!(t.next(&Val::Num(f64::NAN)), TableNext::InvalidKey));
+    }
+
+    #[test]
+    fn tombstones_advance_iteration_and_hide_indexed_access() {
+        for count in [3, 6] {
+            let mut t = Table::default();
+            fill(&mut t, 1..=count);
+            assert_eq!(t.version(), 0);
+            assert_eq!(t.remove(&n(2)), Some(Val::Bool(true)));
+            assert_eq!(t.version(), 0);
+            assert!(matches!(t.next(&n(1)), TableNext::Pair(Val::Num(3.0), _)));
+            assert!(matches!(t.next(&n(2)), TableNext::Pair(Val::Num(3.0), _)));
+            assert!(matches!(t.next(&n(count + 1)), TableNext::InvalidKey));
+            assert_eq!(t.get_with_index(&n(2)), None);
+            assert_eq!(t.get_index(1), None);
+            assert!(!t.set_at_index(1, Val::Bool(false)));
+        }
+    }
+
+    #[test]
+    fn reinserted_tombstone_moves_to_back_and_bumps_once() {
+        for count in [3, 5] {
+            let mut t = Table::default();
+            fill(&mut t, 1..=count);
+            t.remove(&n(2));
+            t.insert(n(2), Val::Bool(false)).unwrap();
+            assert_eq!(t.version(), 1);
+            let mut control = Val::Nil;
+            let mut keys = Vec::new();
+            while let TableNext::Pair(key, _) = t.next(&control) {
+                keys.push(key);
+                control = key;
+            }
+            assert_eq!(
+                keys,
+                (1..=count)
+                    .filter(|key| *key != 2)
+                    .map(n)
+                    .chain(std::iter::once(n(2)))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn dense_tombstones_compact_once_before_append() {
+        let mut t = Table::default();
+        fill(&mut t, 1..=4);
+        t.remove(&n(2));
+        t.remove(&n(3));
+        assert!(matches!(t.next(&n(1)), TableNext::Pair(Val::Num(4.0), _)));
+        t.insert(n(5), Val::Bool(true)).unwrap();
+        assert_eq!(t.version(), 1);
+        assert!(matches!(t.next(&n(4)), TableNext::Pair(Val::Num(5.0), _)));
     }
 }
