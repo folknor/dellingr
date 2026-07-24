@@ -310,13 +310,22 @@ impl MatchState {
     fn match_capture(&mut self, s: CPtr, l: usize) -> Result<CPtr> {
         let l = self.check_capture(l)?;
         let len = self.capture[l].len.size()?;
-        if diff(self.src_end, s) >= len {
-            unsafe {
-                s.copy_to_nonoverlapping(self.capture[l].init as *mut u8, len);
-            }
-            return Ok(add(s, len));
+        if diff(self.src_end, s) < len {
+            return Ok(null());
         }
-        Ok(null())
+        if len == 0 {
+            return Ok(s);
+        }
+        // SAFETY: both ranges lie within the subject buffer - the guard above
+        // bounds the candidate range, and the capture range was bounded when the
+        // capture was closed. Comparison only; overlap is irrelevant.
+        let captured = unsafe { core::slice::from_raw_parts(self.capture[l].init, len) };
+        let candidate = unsafe { core::slice::from_raw_parts(s, len) };
+        if captured == candidate {
+            Ok(add(s, len))
+        } else {
+            Ok(null())
+        }
     }
 
     fn patt_match(&mut self, s: CPtr, p: CPtr) -> Result<CPtr> {
@@ -528,7 +537,7 @@ impl MatchState {
                             {
                                 return Err(PatternError::InvalidCaptureIndex(Some(l)));
                             }
-                            p = sub(p, 1);
+                            p = next(p);
                         }
                         _ => {}
                     }

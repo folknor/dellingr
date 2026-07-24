@@ -128,3 +128,48 @@ fn push_bytes_and_to_bytes_preserve_invalid_utf8() {
     assert_eq!(state.to_bytes(-1).unwrap(), &[0xff, b'a']);
     assert_eq!(state.to_string(-1).unwrap(), "�a");
 }
+
+#[test]
+fn match_backreferences_compare_captures() {
+    let mut state = State::new();
+    state
+        .load_string(
+            r#"
+            local mismatch = string.match("ab", "(a)%1")
+            local single = string.match("aa", "(a)%1")
+            local repeated = string.match("abcabc", "(abc)%1")
+            local empty = string.match("b", "^(a*)%1b$")
+            local short = string.match("abcab", "^(abc)%1$")
+            return mismatch, single, repeated, empty, short
+            "#,
+        )
+        .unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(5)).unwrap();
+
+    assert_eq!(state.typ(-5), dellingr::LuaType::Nil);
+    assert_eq!(state.to_bytes(-4).unwrap(), b"a");
+    assert_eq!(state.to_bytes(-3).unwrap(), b"abc");
+    assert_eq!(state.to_bytes(-2).unwrap(), b"");
+    assert_eq!(state.typ(-1), dellingr::LuaType::Nil);
+}
+
+#[test]
+fn find_backreferences_compare_captures() {
+    let mut state = State::new();
+    state
+        .load_string(
+            r#"
+            local mismatch_start, mismatch_end = string.find("ab", "(a)%1")
+            local start, finish, capture = string.find("zaaz", "(a)%1")
+            return mismatch_start, mismatch_end, start, finish, capture
+            "#,
+        )
+        .unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(5)).unwrap();
+
+    assert_eq!(state.typ(-5), dellingr::LuaType::Nil);
+    assert_eq!(state.typ(-4), dellingr::LuaType::Nil);
+    assert_eq!(state.to_number(-3).unwrap(), 2.0);
+    assert_eq!(state.to_number(-2).unwrap(), 3.0);
+    assert_eq!(state.to_bytes(-1).unwrap(), b"a");
+}
