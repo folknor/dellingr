@@ -99,6 +99,51 @@ fn saves_are_byte_stable() {
 }
 
 #[test]
+fn state_is_quiescent_after_error_in_dynamic_call_args() {
+    // An error while evaluating a dynamic call's arguments (after the base was
+    // marked, before the call ran) must not leave a stale vararg_call_base, or
+    // the State would fail quiescence validation and could not be snapshotted
+    // (L8).
+    let mut state = State::new();
+    state
+        .load_string(
+            r#"
+            local function f(...) return ... end
+            local function g() return nil + 1 end
+            return f(g())
+        "#,
+        )
+        .unwrap();
+    state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+        .expect_err("g() errors mid-call");
+    state
+        .save_state()
+        .expect("state must be quiescent after the killed callback");
+}
+
+#[test]
+fn state_is_quiescent_after_error_in_table_constructor() {
+    // Same guard for the table_constructor_bases stack: an error between
+    // NewTableTracked and its SetList must not leak a base (L8).
+    let mut state = State::new();
+    state
+        .load_string(
+            r#"
+            local function g() return nil + 1 end
+            return {g()}
+        "#,
+        )
+        .unwrap();
+    state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+        .expect_err("g() errors mid-constructor");
+    state
+        .save_state()
+        .expect("state must be quiescent after the killed callback");
+}
+
+#[test]
 fn empty_state_round_trip_stays_empty() {
     let state = State::empty();
     let save = state.save_state().unwrap();

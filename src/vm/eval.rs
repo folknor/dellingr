@@ -263,7 +263,22 @@ impl State {
         }
         self.call_depth += 1;
 
+        // Watermark the dynamic-call-base stacks on entry. A well-formed frame
+        // pushes and consumes these in balance, but an error between an
+        // OP_MARK_CALL_BASE and its Dynamic OP_CALL (or between NewTableTracked
+        // and its SetList) leaves a stale base behind. The per-frame error
+        // cleanup in eval_closure_inner does not touch these stacks, so truncate
+        // them here on any error so the State stays quiescent (reusable /
+        // snapshot-saveable) after a killed callback (L8).
+        let vararg_base_watermark = self.vararg_call_bases.len();
+        let table_base_watermark = self.table_constructor_bases.len();
+
         let result = self.eval_closure_inner(closure, num_args);
+
+        if result.is_err() {
+            self.vararg_call_bases.truncate(vararg_base_watermark);
+            self.table_constructor_bases.truncate(table_base_watermark);
+        }
 
         self.call_depth -= 1;
         result
