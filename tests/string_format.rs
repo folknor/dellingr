@@ -168,6 +168,10 @@ fn quoted_literals_cover_nil_and_reject_non_literals() {
 #[test]
 fn pointer_format_is_deterministic_and_identity_based() {
     assert_eq!(run_bytes(r#"return string.format("%p", nil)"#), b"(null)");
+    assert_eq!(
+        run_bytes(r#"return string.format("%p|%p|%p", print, print, type)"#),
+        b"0x1|0x1|0x2"
+    );
     let output = run_bytes(
         r#"
         local a, b = {}, {}

@@ -517,6 +517,30 @@ fn registered_host_function_reconnects_on_load() {
     assert_eq!(*lines.lock().unwrap(), vec!["42".to_string()]);
 }
 
+#[test]
+fn rust_function_save_id_is_independent_of_registration_order() {
+    fn host_fn(_state: &mut State) -> dellingr::Result<u8> {
+        Ok(0)
+    }
+
+    let mut first = State::new();
+    first.register_rust_fn("game.z", host_fn).unwrap();
+    first.register_rust_fn("game.a", host_fn).unwrap();
+    first.push_rust_fn(host_fn);
+    first.set_global("host_fn");
+
+    let mut second = State::new();
+    second.register_rust_fn("game.a", host_fn).unwrap();
+    second.register_rust_fn("game.z", host_fn).unwrap();
+    second.push_rust_fn(host_fn);
+    second.set_global("host_fn");
+
+    assert_eq!(
+        first.save_state().unwrap().bytes,
+        second.save_state().unwrap().bytes
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Helpers for reading back globals after a load.
 // ---------------------------------------------------------------------------

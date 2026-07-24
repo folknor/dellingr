@@ -70,16 +70,20 @@ internal-only: `State::call`'s public signature can stay.
 `Val` is currently 16 bytes (tag + f64). NaN-boxing (payloads in the NaN
 space of an f64: slotmap keys are 64-bit but their useful entropy fits
 48-51 bits with an index/generation split; RustFn would need a registry
-index rather than a raw pointer - which the #5/#23 fixes want anyway) halves
-stack/table/upvalue memory traffic and makes `stack: Vec<Val>` copies twice
-as dense. Full-rewrite class: touches every `match` on `Val`, but it is
-mechanical, determinism-neutral, and is the standard reason reference VMs
-beat tagged-enum interpreters on memory-bound workloads (`tables/fill`,
-`fields/*` are exactly the 3-4x-behind benches). Prerequisite: the
-RustFn-registry-id change (bugs.md #5), which is independently needed. If
-NaN-boxing is judged too invasive, a cheaper intermediate is boxing only
-`Table` storage entries more densely; but the full version is where the
-payoff is.
+index rather than a raw pointer) halves stack/table/upvalue memory traffic
+and makes `stack: Vec<Val>` copies twice as dense. Full-rewrite class:
+touches every `match` on `Val`, but it is mechanical, determinism-neutral,
+and is the standard reason reference VMs beat tagged-enum interpreters on
+memory-bound workloads (`tables/fill`, `fields/*` are exactly the
+3-4x-behind benches). If NaN-boxing is judged too invasive, a cheaper
+intermediate is boxing only `Table` storage entries more densely; but the
+full version is where the payoff is.
+
+Note the RustFn registry index is now a cost of this item rather than a
+shared prerequisite: `Val::RustFn` compares and hashes by function address
+and renders as a constant `<function>`, so nothing outside NaN-boxing needs
+an id. Squeezing a raw `fn` pointer into the NaN payload is the part that
+would force one.
 
 ### 4. Full rewrite of `src/patterns/luapat.rs` (E-O1; structurally fixes #12, #14, #33, #34, #56, and hosts the #16 cost hook)
 

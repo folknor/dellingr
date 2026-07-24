@@ -13,6 +13,8 @@ use std::hash::{Hash, Hasher};
 /// number of return values (or an error).
 pub type RustFunc = fn(&mut State) -> Result<u8>;
 
+const RUST_FN_DISPLAY: &str = "<function>";
+
 #[derive(Clone, Copy, Default)]
 pub(crate) enum Val {
     #[default]
@@ -102,7 +104,7 @@ impl Val {
             Nil => "nil".to_string(),
             Bool(b) => b.to_string(),
             Num(n) => n.to_string(),
-            RustFn(func) => format!("<function: {func:p}>"),
+            RustFn(_) => RUST_FN_DISPLAY.to_string(),
             Obj(o) => format!("{o}"),
             Str(s) => String::from_utf8_lossy(heap.get_string(s)).into_owned(),
         }
@@ -114,7 +116,7 @@ impl Val {
             Bool(false) => Cow::Borrowed(b"false"),
             Bool(true) => Cow::Borrowed(b"true"),
             Num(n) => Cow::Owned(n.to_string().into_bytes()),
-            RustFn(func) => Cow::Owned(format!("<function: {func:p}>").into_bytes()),
+            RustFn(_) => Cow::Borrowed(b"<function>"),
             Obj(o) => Cow::Owned(format!("{o}").into_bytes()),
             Str(s) => Cow::Borrowed(heap.get_string(s)),
         }
@@ -127,7 +129,7 @@ impl fmt::Debug for Val {
             Nil => write!(f, "nil"),
             Bool(b) => b.fmt(f),
             Num(n) => n.fmt(f),
-            RustFn(func) => write!(f, "<function: {func:p}>"),
+            RustFn(_) => f.write_str(RUST_FN_DISPLAY),
             Obj(o) => o.fmt(f),
             Str(s) => s.fmt(f),
         }
@@ -142,7 +144,7 @@ impl fmt::Display for Val {
             Num(n) => n.fmt(f),
             Obj(o) => o.fmt(f),
             Str(s) => s.fmt(f),
-            RustFn(func) => write!(f, "<function: {func:p}>"),
+            RustFn(_) => f.write_str(RUST_FN_DISPLAY),
         }
     }
 }
@@ -166,10 +168,7 @@ impl Hash for Val {
                 }
                 bits.hash(hasher);
             }
-            RustFn(func) => {
-                let f: *const RustFunc = func;
-                f.hash(hasher);
-            }
+            RustFn(func) => (*func as usize).hash(hasher),
             Str(s) => s.hash(hasher),
         }
     }
@@ -181,11 +180,7 @@ impl PartialEq for Val {
             (Nil, Nil) => true,
             (Bool(a), Bool(b)) => a == b,
             (Num(a), Num(b)) => a == b,
-            (RustFn(a), RustFn(b)) => {
-                let x: *const RustFunc = a;
-                let y: *const RustFunc = b;
-                x == y
-            }
+            (RustFn(a), RustFn(b)) => std::ptr::fn_addr_eq(*a, *b),
             (Obj(a), Obj(b)) => a == b,
             // String pointer equality works because strings are interned
             (Str(a), Str(b)) => a == b,
@@ -231,5 +226,64 @@ impl LuaType {
 impl fmt::Display for LuaType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.as_str().fmt(f)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Default)]
+    struct RecordingHasher(Vec<u8>);
+
+    impl Hasher for RecordingHasher {
+        fn finish(&self) -> u64 {
+            0
+        }
+
+        fn write(&mut self, bytes: &[u8]) {
+            self.0.extend_from_slice(bytes);
+        }
+    }
+
+    fn first_callback(_state: &mut State) -> Result<u8> {
+        Ok(0)
+    }
+
+    fn second_callback(state: &mut State) -> Result<u8> {
+        state.push_number(1.0);
+        Ok(1)
+    }
+
+    #[test]
+    fn rust_function_copies_compare_equal_and_hash_equal() {
+        let first = Val::RustFn(first_callback);
+        let second = Val::RustFn(first_callback);
+        assert_eq!(first, second);
+
+        let mut first_hash = RecordingHasher::default();
+        let mut second_hash = RecordingHasher::default();
+        first.hash(&mut first_hash);
+        second.hash(&mut second_hash);
+        assert_eq!(first_hash.0, second_hash.0);
+    }
+
+    #[test]
+    fn different_rust_functions_compare_unequal() {
+        assert_ne!(Val::RustFn(first_callback), Val::RustFn(second_callback));
+    }
+
+    #[test]
+    fn rust_function_rendering_is_consistent_and_allocation_free_for_bytes() {
+        let value = Val::RustFn(first_callback);
+        let state = State::empty();
+
+        assert_eq!(format!("{value:?}"), RUST_FN_DISPLAY);
+        assert_eq!(format!("{value}"), RUST_FN_DISPLAY);
+        assert_eq!(value.to_string_with_heap(&state.heap), RUST_FN_DISPLAY);
+        assert!(matches!(
+            value.to_bytes_with_heap(&state.heap),
+            Cow::Borrowed(b"<function>")
+        ));
     }
 }

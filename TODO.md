@@ -73,26 +73,3 @@ generic churn pre-1.0 unless a concrete embedder pushes on it.
 Signal that would promote it: a profile showing user-data downcasts
 on the hot path, or a 1.0 API pass that lands a coherent generic
 story across `State` / `Engine` / `RustFunc` / stdlib.
-
-### Stable `RustFunc` identity for serialization
-
-What: `RustFunc` `Val`s render and hash by function-pointer address
-(`src/vm/lua_val.rs:105, 169`). Function-pointer addresses aren't
-stable across builds or across hosts, so any feature that
-serializes a `Val` containing a `RustFn` (replay, snapshot,
-cross-process IPC) will fail byte-for-byte determinism even if
-nothing else has changed.
-
-Sketch: assign each registered RustFunc a stable ID at registration
-time (e.g. via a registry on `Engine`), and render / hash by ID.
-Embedders register their host functions through an `Engine` API
-that returns a `RustFunc` handle carrying both the fn pointer and
-the ID.
-
-Why deferred: dellingr doesn't ship a serialization story today.
-The pointer-address rendering is fine for in-process use; nothing
-observable depends on its stability.
-
-Signal that would promote it: someone wanting deterministic replay
-across hosts, or wanting to snapshot/restore VM state across
-process restarts.

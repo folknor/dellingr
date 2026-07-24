@@ -20,67 +20,6 @@ valid. Fix history lives in git.
 
 ## High severity
 
-### 5. `Val` equality/hash for `RustFn` compares payload addresses, not function pointers (B-B1 + C-B1, two independent reports)
-
-- **Locations:** `src/vm/lua_val.rs:178-195` (PartialEq), `:153-176` /
-  `:169-172` (Hash), `:130, 145` (Debug/Display), `:105` (`to_string_with_heap`).
-- **Cause:**
-
-```rust
-(RustFn(a), RustFn(b)) => {
-    let x: *const RustFunc = a;   // a: &RustFunc -> pointer to the fn-ptr
-    let y: *const RustFunc = b;   //                STORAGE inside the Val
-    x == y
-}
-```
-
-  `a`/`b` bind as `&RustFunc` (match ergonomics); coercing to
-  `*const RustFunc` yields the address of the payload slot inside each `Val`,
-  not the function's address. Two `Val`s holding the same function always
-  live at different addresses (OP_EQUAL pops both operands into separate
-  locals, `frame.rs:262-271`), so equality is effectively always false, and
-  `Hash` hashes the payload address - also nondeterministic across runs.
-- **Script-visible consequences:**
-  - `print == print` evaluates false (reference: true); same for
-    `local f = print; f == print`.
-  - `rawequal(print, print)` (`src/vm/stack.rs:215-220`) is false.
-  - Host functions are broken as table keys: `t[print] = 1; t[print]` is nil,
-    and repeated assignment appends duplicate entries (inline scan and
-    IndexMap probe both fail; probe hash differs from stored hash so Map
-    lookups always miss).
-  - `string.format("%p", fn)`: `format_pointer_id`
-    (`src/vm/table_ops.rs:432-445`) probes with `*candidate == val`, never
-    matches for RustFn, so every `%p` on the same host function mints a fresh
-    id - defeats the deterministic-identity feature (tables unaffected), and
-    is a leak-rate concern.
-  - The method-IC validation `index_handler != entry.index_handler`
-    (`eval_index.rs:299`) can never validate a cached `__index = <RustFn>`
-    handler, so those callsites permanently miss (perf symptom of same bug).
-- **Related inconsistency:** `Debug`/`Display` for `Val::RustFn` format
-  `func: &RustFunc` with `:p` (the reference's address = payload slot), while
-  `to_string_with_heap` (by value) prints the actual function address - so
-  `tostring(print)` and a debug-printed error context show different
-  "addresses" for the same value.
-- **Note:** TODO.md's "Stable RustFunc identity" entry describes this code as
-  hashing "by function-pointer address" - wrong; the bug is stronger than
-  what TODO tracks. It does not even do that.
-- **Repro:**
-
-```lua
-print(print == print)          -- dellingr: false, Lua: true
-local t = {}
-t[print] = 1
-print(t[print])                -- dellingr: nil, Lua: 1
-print(string.format("%p", print) == string.format("%p", print))
-                               -- dellingr: false (two fresh ids)
-```
-
-- **Fix:** compare/hash the function pointer value itself:
-  `std::ptr::fn_addr_eq(*a, *b)` (already used correctly in
-  `eval_control.rs:138-143`) and `(*func as usize).hash(hasher)`. Cross-build
-  instability of fn addresses is irrelevant in-process; the snapshot concern
-  stays tracked in TODO.md.
-
 ### 10. `load_state` performs zero bytecode validation; a forged save escalates to process panic (D-D2, hostile input)
 
 - **Locations:** `src/vm/save_state.rs:645-709`
@@ -381,23 +320,6 @@ print(-1 % (1/0))   -- dellingr: nan,  Lua: inf
   Not reachable from stdlib iterators; requires a host RustFunc used as a
   generic-for iterator.
 - **Fix:** mirror the `usize` comparison from `State::call`.
-
-### 23. `tostring(fn)` leaks ASLR-dependent addresses: cross-run output nondeterminism (B-B7 + C-C1, two independent reports)
-
-- **Locations:** `src/vm/lua_val.rs:105, 117`
-  (`to_string_with_heap`/`to_bytes_with_heap` render RustFn as
-  `<function: 0x...>` with the real function pointer).
-- **Cause:** under PIE/ASLR that address changes between runs of the same
-  binary, so `print(tostring(print))` differs across identical runs - and
-  scripts can branch on the string (`tostring(print):find("7")`), so this is
-  replay-visible, not cosmetic. Contradicts TODO.md's claim that "nothing
-  observable depends on its stability". Tables already solved this:
-  `ObjectPtr` Display prints the slotmap key (deterministic), and `%p` mints
-  deterministic ids. Lua closures are fine (slotmap key rendering is
-  history-deterministic).
-- **Fix:** route function rendering through `format_pointer_id`-style
-  deterministic ids (requires threading `&mut State` or pre-assigning ids at
-  registration; also fixes the #5 Debug/Display inconsistency).
 
 ### 24. `OP_CONCAT` is free: exponential memory growth at near-zero cost (B-B8 + C-D3, two independent reports; design-review flag)
 
@@ -811,15 +733,6 @@ there are none in a fresh State, so moving the clear earlier is free.)
 `Cargo.toml:5` says `rust-version = "1.97"`; README badge (line 5) and
 AGENTS.md both say 1.92. One is wrong. (README's `dellingr = "0.2"` snippet
 also trails the crate's 0.3.0, minor.)
-
-### 55. TODO.md "Stable RustFunc identity for serialization" is stale (D-D9)
-
-TODO.md:79-98 claims "dellingr doesn't ship a serialization story today" and
-proposes registration-time stable ids. The snapshot feature ships exactly
-this (`State::register_rust_fn`, `set_global_named_rust_fn`, dotted stdlib
-ids, save-side `rust_fn_ids_by_addr`). Per the backlog convention the entry
-should be deleted or rewritten to cover only the remaining sliver
-(pointer-address rendering in `Display`/hash of `Val` - see #5 and #23).
 
 ### 56. Empty pattern is UB one call site away (E-E14, hardening)
 

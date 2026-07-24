@@ -915,6 +915,45 @@ mod tests {
     }
 
     #[test]
+    fn rust_fn_key_reassignment_updates_in_place() {
+        // Proving "no duplicate entry" needs a storage-level assertion. From
+        // Lua, a stale duplicate is invisible: a `pairs` scan filtering on the
+        // updated value simply skips it, so the script-level test passes either
+        // way. Cover both storage arms - inline scans linearly with PartialEq,
+        // and Map probes with Hash, so only the second exercises Hash at all.
+        fn probe(_state: &mut crate::vm::State) -> crate::Result<u8> {
+            Ok(0)
+        }
+
+        for preset in [0, 5] {
+            let mut t = Table::default();
+            fill(&mut t, 1..=preset);
+            let before = (1..=preset).count();
+
+            let key = Val::RustFn(probe);
+            t.insert(key, Val::Num(1.0)).expect("first insert succeeds");
+            assert_eq!(t.get(&key), Val::Num(1.0));
+
+            t.insert(key, Val::Num(2.0))
+                .expect("second insert succeeds");
+            assert_eq!(t.get(&key), Val::Num(2.0));
+
+            // Exactly one entry was added across both inserts.
+            let mut entries = 0;
+            let mut control = Val::Nil;
+            while let TableNext::Pair(k, _) = t.next(&control) {
+                entries += 1;
+                control = k;
+            }
+            assert_eq!(
+                entries,
+                before + 1,
+                "reassigning a RustFn key appended a duplicate (preset {preset})"
+            );
+        }
+    }
+
+    #[test]
     fn tombstones_advance_iteration_and_hide_indexed_access() {
         for count in [3, 6] {
             let mut t = Table::default();
