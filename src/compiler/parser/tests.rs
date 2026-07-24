@@ -5,6 +5,7 @@ use super::Instr;
 use super::Parser;
 use super::TokenStream;
 use super::parse_str;
+use crate::error::{ErrorKind, SyntaxError};
 use crate::instr::{ArgCount, Builtin, RetCount};
 
 /// Recursively clear line_info from a chunk and its nested chunks.
@@ -23,6 +24,76 @@ fn check_it(input: &str, mut output: Bytecode) {
     // Clear line_info for comparison (tests were written before line tracking existed)
     clear_line_info(&mut actual);
     assert_eq!(actual, output);
+}
+
+fn literal_bytes(source: &str) -> Vec<u8> {
+    let chunk = parse_str(source).expect("test string literal should compile");
+    chunk
+        .string_literals
+        .into_iter()
+        .next()
+        .expect("test string literal should be present")
+}
+
+#[test]
+fn literal_string_decodes_decimal_and_hex_escapes_as_bytes() {
+    for (source, expected) in [
+        (r#"return "\0""#, vec![0]),
+        (r#"return "\1""#, vec![1]),
+        (r#"return "\12""#, vec![12]),
+        (r#"return "\065""#, vec![65]),
+        (r#"return "\1234""#, vec![123, b'4']),
+        (r#"return "\255""#, vec![255]),
+        (r#"return "\x00""#, vec![0]),
+        (r#"return "\x41""#, vec![65]),
+        (r#"return "\xFF""#, vec![255]),
+    ] {
+        assert_eq!(literal_bytes(source), expected, "{source}");
+    }
+}
+
+#[test]
+fn literal_string_decodes_z_and_named_escapes() {
+    assert_eq!(literal_bytes("return \"a\\z \t\n b\""), b"ab");
+    assert_eq!(
+        literal_bytes(r#"return "\n\t\r\\\"\'\a\b\f\v""#),
+        vec![b'\n', b'\t', b'\r', b'\\', b'\"', b'\'', 7, 8, 12, 11]
+    );
+    assert_eq!(literal_bytes("return \"a\\\nb\""), b"a\nb");
+}
+
+#[test]
+fn literal_string_escape_errors_use_the_backslash_position() {
+    for (source, expected) in [
+        (r#"return "\256""#, "decimal escape"),
+        (r#"return "\999""#, "decimal escape"),
+        (r#"return "\x""#, "hexadecimal escape"),
+        (r#"return "\x4""#, "hexadecimal escape"),
+        (r#"return "\x4G""#, "hexadecimal escape"),
+        (r#"return "\q""#, "invalid escape"),
+    ] {
+        let err = parse_str(source).expect_err("malformed escape must fail");
+        assert!(
+            matches!(
+                (&err.kind, expected),
+                (
+                    ErrorKind::SyntaxError(SyntaxError::DecimalEscapeTooLarge),
+                    "decimal escape"
+                ) | (
+                    ErrorKind::SyntaxError(SyntaxError::HexadecimalDigitExpected),
+                    "hexadecimal escape"
+                ) | (
+                    ErrorKind::SyntaxError(SyntaxError::InvalidEscapeSequence),
+                    "invalid escape"
+                )
+            ),
+            "unexpected error: {err}"
+        );
+        assert_eq!(
+            err.column,
+            source.find('\\').expect("source has escape") + 1
+        );
+    }
 }
 
 #[test]

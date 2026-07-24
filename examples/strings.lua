@@ -82,4 +82,12 @@ print("Test 25 - newline length: " .. tostring(#with_newline == 3))
 local with_tab = "a\tb"
 print("Test 26 - tab length: " .. tostring(#with_tab == 3))
 
+-- Test 27: Lua 5.2 decimal and hexadecimal string escapes
+print("Test 27 - decimal escape: " .. tostring(#"\065" == 1 and "\065" == "A"))
+print("Test 28 - hexadecimal escape: " .. tostring(#"\x41" == 1 and "\x41" == "A"))
+print("Test 29 - byte escapes: " .. tostring("\255" == "\xFF"))
+local z_joined = "left\z
+    right"
+print("Test 30 - z whitespace escape: " .. tostring(z_joined == "leftright"))
+
 print("All string library tests complete!")

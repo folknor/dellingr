@@ -277,48 +277,86 @@ impl<'a> Parser<'a> {
     }
 
     /// Converts a literal string's offsets into Lua string bytes, processing escape sequences.
-    #[must_use]
-    fn get_literal_string_contents(&self, tok: Token) -> Vec<u8> {
+    fn get_literal_string_contents(&self, tok: Token) -> Result<Vec<u8>> {
         // Chop off the quotes
         let Token { start, len, typ } = tok;
         assert_eq!(typ, TokenType::LiteralString);
         assert!(len >= 2);
         let range = (start + 1)..(start + len as usize - 1);
-        let raw = self.input.substring(range);
+        let raw = self.input.substring(range).as_bytes();
 
         // Process escape sequences
         let mut result = Vec::with_capacity(raw.len());
-        let mut chars = raw.chars().peekable();
-        while let Some(c) = chars.next() {
-            if c == '\\' {
-                if let Some(&next) = chars.peek() {
-                    chars.next();
-                    match next {
-                        'n' | '\n' => result.push(b'\n'), // \n escape or literal escaped newline
-                        't' => result.push(b'\t'),
-                        'r' => result.push(b'\r'),
-                        '\\' => result.push(b'\\'),
-                        '"' => result.push(b'"'),
-                        '\'' => result.push(b'\''),
-                        '0' => result.push(b'\0'),
-                        'a' => result.push(b'\x07'), // bell
-                        'b' => result.push(b'\x08'), // backspace
-                        'f' => result.push(b'\x0C'), // form feed
-                        'v' => result.push(b'\x0B'), // vertical tab
-                        _ => {
-                            // Unknown escape, keep as-is
-                            result.push(b'\\');
-                            push_char_bytes(&mut result, next);
+        let mut raw_offset = 0;
+        while raw_offset < raw.len() {
+            let byte = raw[raw_offset];
+            raw_offset += 1;
+            if byte == b'\\' {
+                let error_pos = start + 1 + raw_offset - 1;
+                let next = *raw
+                    .get(raw_offset)
+                    .ok_or_else(|| self.error_at(SyntaxError::InvalidEscapeSequence, error_pos))?;
+                raw_offset += 1;
+                match next {
+                    b'0'..=b'9' => {
+                        let mut value = u16::from(next - b'0');
+                        let mut digits = 1;
+                        while digits < 3 {
+                            let Some(&digit) = raw.get(raw_offset) else {
+                                break;
+                            };
+                            if !digit.is_ascii_digit() {
+                                break;
+                            }
+                            value = value * 10 + u16::from(digit - b'0');
+                            raw_offset += 1;
+                            digits += 1;
+                        }
+                        if value > 255 {
+                            return Err(
+                                self.error_at(SyntaxError::DecimalEscapeTooLarge, error_pos)
+                            );
+                        }
+                        result.push(value as u8);
+                    }
+                    b'x' => {
+                        let high = *raw.get(raw_offset).ok_or_else(|| {
+                            self.error_at(SyntaxError::HexadecimalDigitExpected, error_pos)
+                        })?;
+                        let low = *raw.get(raw_offset + 1).ok_or_else(|| {
+                            self.error_at(SyntaxError::HexadecimalDigitExpected, error_pos)
+                        })?;
+                        let high = hex_value(high).ok_or_else(|| {
+                            self.error_at(SyntaxError::HexadecimalDigitExpected, error_pos)
+                        })?;
+                        let low = hex_value(low).ok_or_else(|| {
+                            self.error_at(SyntaxError::HexadecimalDigitExpected, error_pos)
+                        })?;
+                        result.push(high * 16 + low);
+                        raw_offset += 2;
+                    }
+                    b'z' => {
+                        while raw.get(raw_offset).is_some_and(u8::is_ascii_whitespace) {
+                            raw_offset += 1;
                         }
                     }
-                } else {
-                    result.push(b'\\');
+                    b'n' | b'\n' => result.push(b'\n'), // \n escape or literal escaped newline
+                    b't' => result.push(b'\t'),
+                    b'r' => result.push(b'\r'),
+                    b'\\' => result.push(b'\\'),
+                    b'"' => result.push(b'"'),
+                    b'\'' => result.push(b'\''),
+                    b'a' => result.push(b'\x07'), // bell
+                    b'b' => result.push(b'\x08'), // backspace
+                    b'f' => result.push(b'\x0C'), // form feed
+                    b'v' => result.push(b'\x0B'), // vertical tab
+                    _ => return Err(self.error_at(SyntaxError::InvalidEscapeSequence, error_pos)),
                 }
             } else {
-                push_char_bytes(&mut result, c);
+                result.push(byte);
             }
         }
-        result
+        Ok(result)
     }
 
     /// Gets the original source code contained by a token.
@@ -557,7 +595,7 @@ impl<'a> Parser<'a> {
 
     /// Parses a literal string and emits bytecode to push it.
     fn push_literal_string(&mut self, tok: Token) -> Result<()> {
-        let text = self.get_literal_string_contents(tok);
+        let text = self.get_literal_string_contents(tok)?;
         let idx = self.find_or_add_string_bytes(&text)?;
         self.push(Instr::push_string(idx));
         Ok(())
@@ -612,9 +650,15 @@ fn find_last_local(locals: &[(String, i32)], name: &str) -> Option<usize> {
     None
 }
 
-fn push_char_bytes(out: &mut Vec<u8>, c: char) {
-    let mut buf = [0; 4];
-    out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+/// Converts one ASCII hexadecimal digit into its value.
+#[must_use]
+const fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 /// Returns the index of an entry in the literals list, adding it if it does not exist.

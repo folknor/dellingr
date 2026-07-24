@@ -122,6 +122,14 @@ pub enum SyntaxError {
     BreakOutsideLoop,
     /// Character not valid as part of any token.
     InvalidCharacter(char),
+    /// Escape sequence is not supported by Lua string literals.
+    InvalidEscapeSequence,
+    /// A hexadecimal string escape did not contain two hexadecimal digits.
+    HexadecimalDigitExpected,
+    /// A decimal string escape exceeds the byte range.
+    DecimalEscapeTooLarge,
+    /// Long bracketed strings are deliberately unsupported.
+    LongStringUnsupported,
     /// More expressions in a single source construct than the VM accepts.
     TooManyExpressions,
     /// Function body has more locals than the VM accepts.
@@ -328,6 +336,10 @@ impl fmt::Display for SyntaxError {
             BadNumber => write!(f, "malformed number"),
             BreakOutsideLoop => write!(f, "<break> at line 1 not inside a loop"),
             InvalidCharacter(c) => write!(f, "invalid character '{c}'"),
+            InvalidEscapeSequence => write!(f, "invalid escape sequence"),
+            HexadecimalDigitExpected => write!(f, "hexadecimal digit expected"),
+            DecimalEscapeTooLarge => write!(f, "decimal escape too large"),
+            LongStringUnsupported => write!(f, "long strings are not supported"),
             TooManyExpressions => write!(f, "too many expressions in a single list (limit 255)"),
             TooManyLocals => write!(f, "too many local variables"),
             TooManyArguments => write!(f, "too many arguments in a fixed call (limit 254)"),

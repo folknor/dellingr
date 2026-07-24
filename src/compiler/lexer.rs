@@ -176,7 +176,7 @@ impl<'a> Lexer<'a> {
                 '\'' | '\"' => self.lex_string(first_char, tok_start)?,
                 '[' => {
                     if let Some('=' | '[') = self.peek_char() {
-                        panic!("Long strings are not supported yet.");
+                        return Err(self.error_at(SyntaxError::LongStringUnsupported, tok_start));
                     }
                     LSquare
                 }
@@ -279,7 +279,13 @@ impl<'a> Lexer<'a> {
     /// Constructs an error of the given kind at the current position.
     #[must_use]
     fn error(&self, kind: SyntaxError) -> Error {
-        let (line_num, column) = self.line_and_col(self.pos);
+        self.error_at(kind, self.pos)
+    }
+
+    /// Constructs an error of the given kind at an explicit byte offset.
+    #[must_use]
+    fn error_at(&self, kind: SyntaxError, pos: usize) -> Error {
+        let (line_num, column) = self.line_and_col(pos);
         Error::new(kind, line_num, column)
     }
 
@@ -339,7 +345,9 @@ impl<'a> Lexer<'a> {
                 return Ok(LiteralString);
             } else if c == '\\' {
                 // Skip the escaped character - escape processing is done in the parser
-                self.next_char();
+                if self.next_char() == Some('z') {
+                    self.consume_whitespace();
+                }
             } else if c == '\n' {
                 return Err(self.error(SyntaxError::UnclosedString));
             }
@@ -654,5 +662,50 @@ mod tests {
         ];
         let linebreaks = &[0, 8, 43];
         check(input, tokens, linebreaks);
+    }
+
+    #[test]
+    fn string_escape_tokens_preserve_bounds_and_following_token() {
+        check_line(
+            r#""\065" next"#,
+            &[(LiteralString, 0, 6), (Identifier, 7, 4)],
+        );
+        check_line(
+            r#""\x41" next"#,
+            &[(LiteralString, 0, 6), (Identifier, 7, 4)],
+        );
+        check_line(
+            r#""a\z  b" next"#,
+            &[(LiteralString, 0, 8), (Identifier, 9, 4)],
+        );
+    }
+
+    #[test]
+    fn multiline_z_escape_stays_within_one_string_token() {
+        let input = "\"a\\z\n  b\" next";
+        check(
+            input,
+            &[(LiteralString, 0, 9), (Identifier, 10, 4)],
+            &[0, 5],
+        );
+    }
+
+    #[test]
+    fn long_strings_return_an_error_at_the_opening_bracket() {
+        for input in ["[[hello]]", "[=[x]=]", "[["] {
+            let err = Lexer::new(input)
+                .next_token()
+                .expect_err("long strings must not tokenize");
+            assert!(matches!(
+                err.kind,
+                crate::error::ErrorKind::SyntaxError(SyntaxError::LongStringUnsupported)
+            ));
+            assert_eq!((err.line_num, err.column), (1, 1));
+        }
+    }
+
+    #[test]
+    fn multiline_comments_remain_non_panicking() {
+        check_line("--[[comment]] next", &[(Identifier, 14, 4)]);
     }
 }

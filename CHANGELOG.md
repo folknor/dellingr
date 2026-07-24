@@ -94,6 +94,13 @@ All notable changes to dellingr are documented here. The format follows
   than two arguments), and `table.insert`/`table.remove` reject out-of-range and
   non-integral positions. `pairs` uses the builtin `next` iterator, so
   rebinding the global `next` no longer breaks it.
+- String literals decode Lua 5.2's remaining escapes: decimal `\ddd` (1-3
+  digits, error above 255), hex `\xXX` (two hex digits), and the
+  whitespace-eating `\z` (including across newlines). An unknown escape is now
+  a syntax error rather than being kept literally, and numeric escapes produce
+  raw bytes (`"\255" == "\xFF"`). An unsupported long string (`[[...]]`,
+  `[=[...]=]`) now returns a `SyntaxError` instead of panicking across the
+  compile boundary.
 
 ## [0.3.0] - 2026-05-12
 
