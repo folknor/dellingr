@@ -136,7 +136,13 @@ pub(crate) fn open_table(state: &mut State) {
             return Ok(0);
         }
 
-        let count = j - i + 1;
+        // j >= i here (the i > j case returned above), so the span cannot
+        // underflow. Bound it BEFORE the `+ 1` so a huge j (e.g. from 1e300)
+        // cannot overflow the count and slip past the ceiling check.
+        let span = j - i;
+        if span >= 255 {
+            return Err(state.error(ErrorKind::RuntimeError("too many results to unpack".into())));
+        }
         for idx in i..=j {
             state.push_number(idx as f64);
             state.get_table(1)?;
@@ -144,6 +150,7 @@ pub(crate) fn open_table(state: &mut State) {
 
         // Stack: [t, list[i], list[i+1], ..., list[j]]
         state.remove(1)?; // Remove table
+        let count = span + 1;
         Ok(count as u8)
     });
 

@@ -4,7 +4,7 @@
 //! when it encounters unexpected types or corrupt state.
 
 use dellingr::error::ErrorKind;
-use dellingr::{ArgCount, RetCount, State};
+use dellingr::{ArgCount, LuaType, RetCount, State};
 
 /// Helper: runs Lua code that returns a number, checks the result.
 fn run_number(code: &str) -> f64 {
@@ -22,6 +22,35 @@ fn expect_error(code: &str) -> dellingr::error::Error {
     state.load_string(code).unwrap();
     let result = state.call(ArgCount::Fixed(0), RetCount::Fixed(0));
     result.expect_err(&format!("Expected error from: {code}"))
+}
+
+#[test]
+fn call_rejects_missing_fixed_arguments_without_panicking() {
+    let mut state = State::new();
+    state.push_rust_fn(|_state| Ok(0));
+
+    let err = state
+        .call(ArgCount::Fixed(1), RetCount::Fixed(0))
+        .expect_err("missing fixed argument must return an error");
+    assert!(matches!(
+        err.kind,
+        ErrorKind::InvalidStackIndex { index: -2 }
+    ));
+    assert_eq!(state.get_top(), 1);
+    assert_eq!(state.typ(-1), LuaType::Function);
+}
+
+#[test]
+fn public_call_rejects_dynamic_without_base_without_panicking() {
+    let mut state = State::new();
+    state.push_rust_fn(|_state| Ok(0));
+
+    let err = state
+        .call(ArgCount::Dynamic, RetCount::Fixed(0))
+        .expect_err("host Dynamic call without a base must return an error");
+    assert!(matches!(err.kind, ErrorKind::InternalError(_)));
+    assert_eq!(state.get_top(), 1);
+    assert_eq!(state.typ(-1), LuaType::Function);
 }
 
 // -- Numeric for-loop tests --

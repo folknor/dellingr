@@ -28,18 +28,42 @@ impl State {
     /// results are pushed onto the stack in direct order (the first result is
     /// pushed first), so that after the call the last result is on the top of
     /// the stack.
+    ///
+    /// # Errors
+    ///
+    /// A fixed call with insufficient stack values returns `InvalidStackIndex`.
+    /// Dynamic calls are bytecode-internal and return an error if used by a
+    /// host. Argument and result counts are limited to 255.
     pub fn call(&mut self, num_args: ArgCount, num_ret_expected: RetCount) -> Result<()> {
         // Handle vararg call: ArgCount::Dynamic means calculate from vararg_call_bases stack
         let (idx, actual_num_args) = match num_args {
             ArgCount::Dynamic => {
-                let base = self
-                    .vararg_call_bases
-                    .pop()
-                    .expect("Call with Dynamic args but no vararg_call_base set");
-                let actual = (self.stack.len() - base - 1) as u8;
+                let base = self.vararg_call_bases.pop().ok_or_else(|| {
+                    self.error(ErrorKind::InternalError(
+                        "call with Dynamic args but no vararg_call_base set".into(),
+                    ))
+                })?;
+                let actual_len = self.stack.len().checked_sub(base + 1).ok_or_else(|| {
+                    self.error(ErrorKind::InternalError(
+                        "dynamic call base is outside the active stack".into(),
+                    ))
+                })?;
+                let actual = u8::try_from(actual_len).map_err(|_| {
+                    self.error(ErrorKind::RuntimeError(
+                        "too many arguments (limit 255)".into(),
+                    ))
+                })?;
                 (base, actual)
             }
-            ArgCount::Fixed(n) => (self.stack.len() - n as usize - 1, n),
+            ArgCount::Fixed(n) => {
+                let required = usize::from(n) + 1;
+                let offset = self.get_top().checked_sub(required).ok_or_else(|| {
+                    self.error(ErrorKind::InvalidStackIndex {
+                        index: -isize::from(n) - 1,
+                    })
+                })?;
+                (self.stack_bottom + offset, n)
+            }
         };
         let func_val = self.stack.remove(idx);
         let num_ret_actual = if let Val::RustFn(f) = func_val {
@@ -67,18 +91,18 @@ impl State {
                 }
             };
 
-            let num_ret_actual = self.get_top() as u8;
-            match num_ret_reported.cmp(&num_ret_actual) {
+            let num_ret_actual = self.get_top();
+            let reported = usize::from(num_ret_reported);
+            match reported.cmp(&num_ret_actual) {
                 Ordering::Greater => {
-                    for _ in num_ret_actual..num_ret_reported {
+                    for _ in num_ret_actual..reported {
                         self.push_nil();
                     }
                 }
                 Ordering::Less => {
                     let slc = &mut self.stack[self.stack_bottom..];
-                    slc.rotate_right(num_ret_reported as usize);
-                    let new_len =
-                        self.stack.len() - num_ret_actual as usize + num_ret_reported as usize;
+                    slc.rotate_right(reported);
+                    let new_len = self.stack.len() - num_ret_actual + reported;
                     self.stack.truncate(new_len);
                 }
                 Ordering::Equal => (),
@@ -124,10 +148,22 @@ impl State {
                     // Insert the table as first argument and call the handler
                     // Stack is currently: [arg1, arg2, ..., argN]
                     // We need: [handler, table, arg1, arg2, ..., argN]
+                    let combined = match actual_num_args.checked_add(1) {
+                        Some(c) => c,
+                        None => {
+                            // Match the other call error paths: clear the frame
+                            // (the callable was already removed above) so a direct
+                            // host call does not leave the arguments visible.
+                            self.stack.truncate(idx);
+                            return Err(self.error(ErrorKind::RuntimeError(
+                                "too many arguments (limit 255)".into(),
+                            )));
+                        }
+                    };
                     self.stack.insert(idx, func_val);
                     self.stack.insert(idx, call_handler);
                     // Now call with actual_num_args + 1 (table is first arg)
-                    return self.call(ArgCount::Fixed(actual_num_args + 1), num_ret_expected);
+                    return self.call(ArgCount::Fixed(combined), num_ret_expected);
                 }
             }
             self.stack.truncate(idx);
@@ -319,7 +355,24 @@ impl State {
             RetCount::All => {
                 // Calculate how many values are above the frame's locals
                 let frame_base = self.stack_bottom + num_params as usize + num_locals as usize;
-                (self.stack.len() - frame_base) as u8
+                let count = self.stack.len() - frame_base;
+                match u8::try_from(count) {
+                    Ok(n) => n,
+                    Err(_) => {
+                        let e = self.error(ErrorKind::RuntimeError(
+                            "too many results (limit 255)".into(),
+                        ));
+                        let trace = self.build_stack_trace(&frame);
+                        let e = e.with_stack_trace(trace);
+                        self.host_error(&e);
+                        self.close_upvalues(self.stack_bottom);
+                        self.stack.truncate(self.stack_bottom);
+                        self.string_literals.truncate(string_literal_start);
+                        self.stack_bottom = old_stack_bottom;
+                        self.call_stack.pop();
+                        return Err(e);
+                    }
+                }
             }
             RetCount::Fixed(n) => n,
         };
