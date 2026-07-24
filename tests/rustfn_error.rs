@@ -1,7 +1,53 @@
 //! Stack protocol regressions for failing Rust callbacks and dynamic calls.
 
+use std::sync::{Arc, Mutex};
+
 use dellingr::error::{Error, ErrorKind};
-use dellingr::{ArgCount, LuaType, RetCount, State};
+use dellingr::{ArgCount, HostCallbacks, LuaType, RetCount, State};
+
+/// Records how many times `on_error` fires.
+#[derive(Clone)]
+struct ErrorCounter(Arc<Mutex<usize>>);
+
+impl HostCallbacks for ErrorCounter {
+    fn on_error(&mut self, _source: Option<&str>, _error: &Error) {
+        *self.0.lock().expect("error counter mutex") += 1;
+    }
+}
+
+fn boom_fn(_state: &mut State) -> dellingr::Result<u8> {
+    Err(Error::without_location(ErrorKind::InternalError(
+        "boom".to_string(),
+    )))
+}
+
+#[test]
+fn host_direct_rustfn_error_notifies_on_error_once() {
+    // A Rust function that fails when the host calls it directly (no Lua frame)
+    // must still notify on_error, consistently with the Lua-reached case (L6).
+    let counter = Arc::new(Mutex::new(0));
+    let mut state = State::with_callbacks(Box::new(ErrorCounter(Arc::clone(&counter))));
+    state.push_rust_fn(boom_fn);
+    state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+        .expect_err("rust fn errors");
+    assert_eq!(*counter.lock().unwrap(), 1);
+}
+
+#[test]
+fn lua_reached_rustfn_error_notifies_on_error_once() {
+    // The same failure reached through Lua must fire on_error exactly once, not
+    // twice (the Lua frame notifies; State::call must not also notify) (L6).
+    let counter = Arc::new(Mutex::new(0));
+    let mut state = State::with_callbacks(Box::new(ErrorCounter(Arc::clone(&counter))));
+    state.push_rust_fn(boom_fn);
+    state.set_global("boom");
+    state.load_string("return boom()").unwrap();
+    state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+        .expect_err("lua-reached rust fn errors");
+    assert_eq!(*counter.lock().unwrap(), 1, "must not double-notify");
+}
 
 #[test]
 fn set_top_accepts_negative_indices() {

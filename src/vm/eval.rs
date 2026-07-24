@@ -87,6 +87,14 @@ impl State {
                 Err(e) => {
                     self.stack.truncate(idx);
                     self.stack_bottom = old_stack_bottom;
+                    // Notify the host of a Rust-function failure it reached
+                    // directly (no Lua frame on the stack). When call_depth > 0
+                    // an enclosing Lua frame will fire on_error as the error
+                    // unwinds; a non-empty stack trace means it already did. This
+                    // guard keeps on_error firing exactly once per error (L6).
+                    if self.call_depth == 0 && e.stack_trace.is_empty() {
+                        self.host_error(&e);
+                    }
                     return Err(e);
                 }
             };
