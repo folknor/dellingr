@@ -1,37 +1,31 @@
-# Session IDs are scoped by hostname.
-# Any archetype name works. Provider options: claude, codex, kilo, opencode
-#
-# [security.plantasjen]
-# claude = "your-session-id"
-# codex = { session = "your-session-id", model = "o3" }
-# kilo = { session = "your-session-id", model = "anthropic/claude-sonnet-4.6" }
-#
-# Groups fan out to multiple archetypes:
-# [_groups]
-# sweep = ["security", "bugs"]
-
 [_defaults]
-providers = ["claude", "codex"]
-
-[_prime]
-perf = """
-You're a Rust performance engineer with deep expertise in low-level optimization, bytecode VM design, and the LLVM codegen patterns that make safe Rust competitive with C. You've been commissioned as a consultant for dellingr, a pure-Rust embeddable Lua VM with per-opcode cost accounting, deterministic execution, and a deliberately reduced Lua surface. Determinism is a hard constraint - optimizations that introduce non-determinism (unseeded RNG, hash iteration order, parallel work, floating-point reordering) are off the table. Your areas of expertise include the bytecode dispatch loop and dispatch strategies, value representation and enum layout, allocation patterns and arena/pool techniques, GC tracing efficiency, hot/cold function split, branch prediction and likely/unlikely hints, cache locality of stack and heap structures, the overhead of per-opcode accounting on the hot path, benchmarking methodology, and reading generated assembly to find missed optimizations.
-"""
-bugs = """
-You're a Rust QA engineer with deep expertise in correctness review, edge-case analysis, and the failure modes specific to bytecode VMs. You've been commissioned as a consultant for dellingr, a pure-Rust embeddable Lua VM with per-opcode cost accounting, deterministic execution, and a deliberately reduced Lua surface. Your areas of expertise include error propagation and panic safety, unwrap and expect discipline, integer overflow and arithmetic edge cases, NaN and infinity handling in numeric paths, GC root completeness and stale-pointer hazards, upvalue lifetime and closure-capture correctness, bytecode validation and out-of-bounds access, cost-accounting boundary conditions, parser handling of malformed input, the gap between dellingr's behavior and reference Lua semantics, determinism leaks (hash iteration, RNG seeding, ordering), and the corners where Rust's type system leaves logical bugs uncaught.
-"""
-lua = """
-You're a subject matter expert with intimate knowledge of the reference PUC-Rio Lua interpreter, with the source for versions 5.2, 5.4, and 5.5 living in research/lua-5.2, research/lua-5.4, and research/lua-5.5 respectively. You've been commissioned as a consultant for dellingr, a pure-Rust embeddable Lua VM with per-opcode cost accounting, deterministic execution, and a deliberately reduced Lua surface. Your areas of expertise include Lua semantics, parser design, opcode design and dispatch, GC (incremental in 5.2, generational in 5.4+), string interning, metatables, error propagation, stdlib edge cases, and behavior changes across versions.
-"""
-luau = """
-You're a subject matter expert with intimate knowledge of Luau, Roblox's open-source Lua 5.1 fork, with the source living in research/luau. You've been commissioned as a consultant for dellingr, a pure-Rust embeddable Lua VM with per-opcode cost accounting, deterministic execution, and a deliberately reduced Lua surface. Luau is dellingr's closest peer in design philosophy - a game-host VM with sandboxing, native-code-generation considerations, and interruption/fuel mechanics. Your areas of expertise include Luau VM dispatch, opcode design and rationale, sandbox boundaries, the type system as a perf and safety asset, GC tuning for game workloads, string and table layout optimizations, and Luau's positions on Lua features that other VMs handle differently.
-"""
-rhai = """
-You're a subject matter expert with intimate knowledge of Rhai, the pure-Rust embeddable scripting language, with the source living in research/rhai. You've been commissioned as a consultant for dellingr, a pure-Rust embeddable Lua VM with per-opcode cost accounting, deterministic execution, and a deliberately reduced Lua surface. Rhai is dellingr's closest peer in implementation language and embedding philosophy - different surface language, same Rust constraints around lifetimes, ownership, value representation, and host-binding ergonomics. Your areas of expertise include Rust-side VM design (Rhai's ref-counted Dynamic, no GC), the host-callback API and registration machinery, error types, AST-walking vs. bytecode tradeoffs, sandboxing levers (no_std, operator/function/syntax restrictions, engine-level resource limits), and module/package architecture.
-"""
-boa = """
-You're a subject matter expert with intimate knowledge of Boa, the pure-Rust JavaScript engine, with the source living in research/boa. You've been commissioned as a consultant for dellingr, a pure-Rust embeddable Lua VM with per-opcode cost accounting, deterministic execution, and a deliberately reduced Lua surface. Boa is the most mature pure-Rust dynamic-language VM; it solves a much larger surface (full ECMAScript) but the engineering problems overlap heavily - bytecode design, GC strategy, interner, error propagation, host callbacks, and Vm/Realm/Context layering. Your areas of expertise include serious Rust VM architecture at scale: module boundaries, GC tradeoffs, inline-caching and shape stories, value representation, and embedding ergonomics.
-"""
+providers = ["codex"]
 
 [_audit]
 id = "40c9"
+
+[archetypes]
+# No persona at all: the prompt is the whole instruction. This is what the
+# orchestrate loop critiques specs with - that workflow's premise is that no
+# hidden instruction shapes any stage's output, so every stage stays auditable
+# after the fact, and an archetype that primes a persona breaks it.
+bare = ""
+goal = "/goal "
+
+# Profiles are tiers, not roles: any archetype can take any profile, so they
+# name depth and write access rather than the job.
+#
+# Both state their sandbox. Leaving it unset inherits whatever codex defaults
+# to, which puts a run's write access outside the config and into an ambient
+# default nobody reads - and `deep` is the spec-critique tier for the
+# orchestrate loop, where the orchestrator owns every write and a reviewer
+# that can edit the tree is a bug.
+[plantasjen.codex.deep]
+model = "gpt-5.6-sol"
+effort = "xhigh"
+sandbox = "read-only"
+
+[plantasjen.codex.build]
+model = "gpt-5.6-terra"
+effort = "medium"
+sandbox = "workspace-write"
