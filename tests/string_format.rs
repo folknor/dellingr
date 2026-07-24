@@ -135,6 +135,28 @@ fn byte_strings_remain_byte_exact() {
 }
 
 #[test]
+fn quoted_floats_round_trip_through_the_parser() {
+    // C30: %q emits numbers as hex floats; the lexer accepts that syntax, so
+    // dellingr can re-parse its own %q output to the identical value.
+    for source in ["1.5", "-0.25", "3.141592653589793", "1e-300", "0.1", "1024"] {
+        let quoted = run_bytes(&format!(r#"return string.format("%q", {source})"#));
+        let literal = String::from_utf8(quoted).expect("numeric %q output is ASCII");
+        let check = format!("return ({literal}) == ({source})");
+        let mut state = State::new();
+        state
+            .load_string(&check)
+            .expect("numeric %q output must re-parse");
+        state
+            .call(ArgCount::Fixed(0), RetCount::Fixed(1))
+            .expect("round-trip comparison executes");
+        assert!(
+            state.to_boolean(-1),
+            "%q of {source} did not round-trip: {literal}"
+        );
+    }
+}
+
+#[test]
 fn quoted_literals_cover_nil_and_reject_non_literals() {
     assert_eq!(run_bytes(r#"return string.format("%q", nil)"#), b"nil");
     expect_runtime_error(

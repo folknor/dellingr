@@ -371,17 +371,32 @@ impl<'a> Lexer<'a> {
     fn lex_full_number(&mut self, tok_start: usize, first_char: char) -> Result<TokenType> {
         // Check for hex values (both 0x and 0X)
         if first_char == '0' && (self.try_next('x') || self.try_next('X')) {
-            // Has to be at least one digit
-            match self.next_char() {
-                Some(c) if c.is_ascii_hexdigit() => (),
-                _ => return Err(self.error(SyntaxError::BadNumber)),
-            };
-            // Read the rest of the numbers
-            while let Some(c) = self.peek_char() {
-                if c.is_ascii_hexdigit() {
+            // Mantissa: hex digits with an optional fraction (Lua 5.2 hex
+            // floats, C30). At least one digit must appear on either side of
+            // the dot: `0x1.8`, `0x1.`, and `0x.8` are valid, `0x.` is not.
+            let mut mantissa_digits = self.lex_hex_digits();
+            if self.try_next('.') {
+                mantissa_digits += self.lex_hex_digits();
+            }
+            if mantissa_digits == 0 {
+                return Err(self.error(SyntaxError::BadNumber));
+            }
+
+            // Optional binary exponent: p/P, an optional sign, then at least
+            // one DECIMAL digit (`0x1p-2`, `0x1.8p+0`).
+            if self.try_next('p') || self.try_next('P') {
+                if let Some(c) = self.peek_char()
+                    && (c == '+' || c == '-')
+                {
                     self.next_char();
-                } else {
-                    break;
+                }
+                let mut exponent_digits = 0usize;
+                while self.peek_char().is_some_and(|c| c.is_ascii_digit()) {
+                    self.next_char();
+                    exponent_digits += 1;
+                }
+                if exponent_digits == 0 {
+                    return Err(self.error(SyntaxError::BadNumber));
                 }
             }
 
@@ -422,6 +437,16 @@ impl<'a> Lexer<'a> {
                 break;
             }
         }
+    }
+
+    /// Consumes an unbroken sequence of hex digits, returning how many.
+    fn lex_hex_digits(&mut self) -> usize {
+        let mut count = 0;
+        while self.peek_char().is_some_and(|c| c.is_ascii_hexdigit()) {
+            self.next_char();
+            count += 1;
+        }
+        count
     }
 
     /// Consumes the optional exponent part of a literal number, then checks
@@ -631,6 +656,32 @@ mod tests {
         let input = "0x5rad";
         let tokens = &[(LiteralHexNumber, 0, 3), (Identifier, 3, 3)];
         check_line(input, tokens);
+    }
+
+    #[test]
+    fn hex_float_literals_lex_as_one_token() {
+        // C30: fraction and binary-exponent forms are single hex tokens.
+        check_line("0x1.8p+0", &[(LiteralHexNumber, 0, 8)]);
+        check_line("0x1.8P-2", &[(LiteralHexNumber, 0, 8)]);
+        check_line("0x.8", &[(LiteralHexNumber, 0, 4)]);
+        check_line("0x1.", &[(LiteralHexNumber, 0, 4)]);
+        check_line("0x1p2", &[(LiteralHexNumber, 0, 5)]);
+    }
+
+    #[test]
+    fn malformed_hex_floats_are_rejected() {
+        // No mantissa digits, or a 'p' exponent without digits.
+        for input in ["0x.", "0xp1", "0x1p", "0x1p+", "0x1p-", "0x1p2f"] {
+            let mut lexer = Lexer::new(input);
+            let mut result = lexer.next_token();
+            while let Ok(token) = &result {
+                if token.typ == TokenType::EndOfFile {
+                    break;
+                }
+                result = lexer.next_token();
+            }
+            assert!(result.is_err(), "{input:?} must fail to lex");
+        }
     }
 
     #[test]

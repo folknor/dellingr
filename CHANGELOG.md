@@ -26,6 +26,12 @@ All notable changes to dellingr are documented here. The format follows
   load (`FORMAT_VERSION` is 2). Dynamic-call and table-constructor base stacks
   unwind on a frame error, keeping the State quiescent so a host that catches
   an error can still snapshot or reuse it.
+- The lexer accepts Lua 5.2 hex-float literals (`0x1.8p+0`, `0x.8`, `0x1p-2`),
+  so numeric `string.format("%q")` output is re-parseable by dellingr itself
+  (closing C30). Hex literals now convert through the shared numeral parser,
+  which also rounds oversized hex integers to the nearest f64 like reference
+  Lua instead of failing past `u128` range; malformed forms (`0x.`, `0x1p`,
+  `0x1p+`) are a syntax error.
 
 ### Changed
 
