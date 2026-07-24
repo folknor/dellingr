@@ -5,6 +5,7 @@
 
 use super::lua_val::RustFunc;
 use super::lua_val::Val;
+use super::table::TableNext;
 use super::{Result, State, TypeError};
 use crate::error::ErrorKind;
 use crate::instr::{ArgCount, RetCount};
@@ -160,17 +161,20 @@ impl State {
         let typ = self.stack[idx].typ_simple();
 
         match obj_ptr.and_then(|ptr| self.heap.as_table_ref(ptr)) {
-            Some(t) => {
-                let (next_key, next_val) = t.next(&key);
-                if matches!(next_key, Val::Nil) {
-                    self.stack.push(Val::Nil);
-                    Ok(false)
-                } else {
+            Some(t) => match t.next(&key) {
+                TableNext::Pair(next_key, next_val) => {
                     self.stack.push(next_key);
                     self.stack.push(next_val);
                     Ok(true)
                 }
-            }
+                TableNext::End => {
+                    self.stack.push(Val::Nil);
+                    Ok(false)
+                }
+                TableNext::InvalidKey => {
+                    Err(self.error(ErrorKind::RuntimeError("invalid key to 'next'".into())))
+                }
+            },
             None => Err(self.type_error(TypeError::TableIndex(typ))),
         }
     }

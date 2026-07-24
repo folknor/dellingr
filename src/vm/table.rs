@@ -27,6 +27,13 @@ enum TableStorage {
     Map(IndexMap<Val, Val>),
 }
 
+/// The result of advancing a table iterator.
+pub(super) enum TableNext {
+    Pair(Val, Val),
+    End,
+    InvalidKey,
+}
+
 impl Default for TableStorage {
     fn default() -> Self {
         TableStorage::Inline {
@@ -506,26 +513,35 @@ impl Table {
     }
 
     /// Returns the next key-value pair after the given key.
-    /// If key is nil, returns the first key-value pair.
-    /// Returns (nil, nil) when there are no more pairs.
+    /// If key is nil, returns the first key-value pair. Distinguishes the end
+    /// of iteration from an invalid control key.
     #[hotpath::measure]
-    pub(super) fn next(&self, key: &Val) -> (Val, Val) {
+    pub(super) fn next(&self, key: &Val) -> TableNext {
+        if matches!(key, Val::Num(n) if n.is_nan()) {
+            return TableNext::InvalidKey;
+        }
+
         match &self.storage {
             TableStorage::Inline { entries, len } => {
                 if matches!(key, Val::Nil) {
                     // Return the first key-value pair
                     if *len > 0 {
-                        return (entries[0].0, entries[0].1);
+                        TableNext::Pair(entries[0].0, entries[0].1)
+                    } else {
+                        TableNext::End
                     }
                 } else {
                     // Find the key, then return the next one
-                    for i in 0..(*len as usize) {
-                        if &entries[i].0 == key {
-                            if i + 1 < *len as usize {
-                                return (entries[i + 1].0, entries[i + 1].1);
-                            }
-                            break;
+                    match entries
+                        .iter()
+                        .take(*len as usize)
+                        .position(|entry| &entry.0 == key)
+                    {
+                        Some(index) if index + 1 < *len as usize => {
+                            TableNext::Pair(entries[index + 1].0, entries[index + 1].1)
                         }
+                        Some(_) => TableNext::End,
+                        None => TableNext::InvalidKey,
                     }
                 }
             }
@@ -533,18 +549,24 @@ impl Table {
                 if matches!(key, Val::Nil) {
                     // Return the first key-value pair
                     if let Some((k, v)) = map.iter().next() {
-                        return (*k, *v);
+                        TableNext::Pair(*k, *v)
+                    } else {
+                        TableNext::End
                     }
                 } else {
-                    if let Some(index) = map.get_index_of(key)
-                        && let Some((k, v)) = map.get_index(index + 1)
-                    {
-                        return (*k, *v);
+                    match map.get_index_of(key) {
+                        Some(index) => {
+                            if let Some((k, v)) = map.get_index(index + 1) {
+                                TableNext::Pair(*k, *v)
+                            } else {
+                                TableNext::End
+                            }
+                        }
+                        None => TableNext::InvalidKey,
                     }
                 }
             }
         }
-        (Val::Nil, Val::Nil)
     }
 }
 
@@ -684,5 +706,41 @@ mod tests {
         let second = t.array_len();
         assert_eq!(first, second);
         assert_eq!(first, 64);
+    }
+
+    #[test]
+    fn next_distinguishes_end_from_invalid_key_inline() {
+        let mut t = Table::default();
+        fill(&mut t, 1..=3);
+
+        assert!(matches!(
+            t.next(&Val::Nil),
+            TableNext::Pair(Val::Num(1.0), Val::Bool(true))
+        ));
+        assert!(matches!(
+            t.next(&n(2)),
+            TableNext::Pair(Val::Num(3.0), Val::Bool(true))
+        ));
+        assert!(matches!(t.next(&n(3)), TableNext::End));
+        assert!(matches!(t.next(&n(4)), TableNext::InvalidKey));
+        assert!(matches!(t.next(&Val::Num(f64::NAN)), TableNext::InvalidKey));
+    }
+
+    #[test]
+    fn next_distinguishes_end_from_invalid_key_map() {
+        let mut t = Table::default();
+        fill(&mut t, 1..=5);
+
+        assert!(matches!(
+            t.next(&Val::Nil),
+            TableNext::Pair(Val::Num(1.0), Val::Bool(true))
+        ));
+        assert!(matches!(
+            t.next(&n(3)),
+            TableNext::Pair(Val::Num(4.0), Val::Bool(true))
+        ));
+        assert!(matches!(t.next(&n(5)), TableNext::End));
+        assert!(matches!(t.next(&n(6)), TableNext::InvalidKey));
+        assert!(matches!(t.next(&Val::Num(f64::NAN)), TableNext::InvalidKey));
     }
 }

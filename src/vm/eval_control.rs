@@ -197,11 +197,14 @@ impl State {
             return false;
         };
 
-        let (next_key, next_val) = tbl.next(&control);
-        if matches!(next_key, Val::Nil) {
-            self.write_tfor_results(base, num_vars, Val::Nil, None);
-        } else {
-            self.write_tfor_results(base, num_vars, next_key, Some(next_val));
+        match tbl.next(&control) {
+            super::table::TableNext::Pair(next_key, next_val) => {
+                self.write_tfor_results(base, num_vars, next_key, Some(next_val));
+            }
+            super::table::TableNext::End => {
+                self.write_tfor_results(base, num_vars, Val::Nil, None);
+            }
+            super::table::TableNext::InvalidKey => return false,
         }
         true
     }

@@ -12,6 +12,10 @@ that as a confidence signal, not a verification.
 Structural fixes for several of these live in [optimizations.md](optimizations.md);
 cross-references below use its item numbers.
 
+Numbering is stable: fixed items are deleted outright and their numbers are
+never reused, so gaps in the sequence are expected and cross-references stay
+valid. Fix history lives in git.
+
 ---
 
 ## High severity
@@ -102,32 +106,6 @@ print(f({ "boom" }))   -- expected: table printout; actual: Rust panic
   (`Vec<Vec<Val>>` pushed/popped around each frame) that `mark_gc_roots`
   walks.
 
-### 3. `next(t, 0/0)` panics the process via the NaN hash assert (B-B4 + C-A1, two independent reports)
-
-- **Locations:** `src/vm/lua_val.rs:162` (`Hash for Val`:
-  `assert!(!n.is_nan(), ...)`, hard assert, fires in release),
-  `src/vm/table.rs:512-548` (`Table::next`, no NaN guard),
-  `src/lua_std/basic.rs:77` (`next` builtin), `src/vm/table_ops.rs:155-176`
-  (`State::table_next`), `src/vm/eval_control.rs:186-207`
-  (`instr_tfor_call_next` fast path).
-- **Cause:** `Table::get`/`get_with_index`/`insert` all guard NaN keys at
-  entry (`table.rs:122, 152, 298`) but `Table::next` does not; on Map storage
-  it calls `map.get_index_of(key)`, which hashes the key and trips the
-  assert. Inline storage (<= 4 entries) survives via linear `PartialEq` scan
-  (NaN compares unequal, returns nil - itself a soft divergence, see #29).
-  Reference Lua raises "invalid key to 'next'".
-- **Repro:**
-
-```lua
-local t = {}
-for i = 1, 10 do t[i] = i end   -- force Map storage
-for k in next, t, 0/0 do end    -- dellingr: panic; Lua: error
--- or directly: next(t, 0/0)
-```
-
-- **Fix:** NaN-guard (and arguably a missing-key error, see #29) at the top of
-  `Table::next` or in `table_next`, raising a proper Lua error.
-
 ### 4. `#t` with a `__len` metatable: receiver unrooted across `alloc_string` (C-A3)
 
 - **Locations:** `src/vm/eval_store.rs:146-190` (`instr_length`),
@@ -215,22 +193,30 @@ print(string.format("%p", print) == string.format("%p", print))
   instability of fn addresses is irrelevant in-process; the snapshot concern
   stays tracked in TODO.md.
 
-### 6. Removing the current key during `pairs` terminates iteration early (C-B2)
+### 6. Removing the current key during `pairs` now raises `invalid key to 'next'` (C-B2)
+
+**Severity raised.** The `Table::next` fix (former #3 / #29) changed this from
+a silent early exit into a hard error: the removed control key is no longer
+found, so `next` reports it as invalid and the error kills the callback. That
+is the right direction (loud beats silently wrong), but it means a legal and
+common Lua idiom - filter-in-place - now fails noisily where it used to fail
+quietly.
 
 - **Locations:** `src/vm/table.rs:376-405` (`Table::remove` physically removes
-  via `shift_remove` / inline shift), `src/vm/table.rs:512-548`
-  (`Table::next` then can't find the control key, returns `(nil, nil)`),
-  `src/vm/eval_control.rs:186-207` (fast path).
+  via `shift_remove` / inline shift), `Table::next` (then can't find the
+  control key, returns `TableNext::InvalidKey`),
+  `src/vm/eval_control.rs:186-207` (fast path, declines and falls back to
+  `base_next`, which raises).
 - **Cause:** reference Lua explicitly permits clearing the field being
-  iterated (`t[k] = nil` inside a `pairs` loop). In dellingr the loop ends
-  after the first deletion. High-impact for game scripts (filter-in-place
-  loops).
+  iterated (`t[k] = nil` inside a `pairs` loop). dellingr physically removes
+  the entry, so the control key the iterator carries no longer exists.
+  High-impact for game scripts (filter-in-place loops).
 - **Repro:**
 
 ```lua
 local t = { a = 1, b = 2, c = 3, d = 4, e = 5 }
 for k in pairs(t) do t[k] = nil end
-print(next(t) == nil)   -- reference: true; dellingr: false (b..e survive)
+print(next(t) == nil)   -- reference: true; dellingr: error "invalid key to 'next'"
 ```
 
 - **Fix direction:** dead-key semantics - on remove, keep the key with a
@@ -749,16 +735,6 @@ for i = 1, 500000 do t = { t } end   -- cost ~2/iteration; auto-GC fires
   shape (see #27), so with auto-GC enabled the same chain usually aborts
   inside `gc_collect` even before the save is attempted. Both should move to
   an explicit worklist together (optimizations.md #5).
-
-### 29. `next(t, k)` with a key not present in the table silently ends iteration (B-B9 + C-B6, two independent reports)
-
-- **Location:** `src/vm/table.rs:512-548` (both storage arms return
-  `(nil, nil)` when the key isn't found).
-- **Cause:** reference Lua raises "invalid key to 'next'"; dellingr's return
-  is indistinguishable from end-of-iteration. Affects `next()` directly and
-  the `instr_tfor_call_next` fast path (a mutation-during-traversal bug in
-  user script terminates silently instead of erroring); it also masks #6.
-  Low priority; same function as the #3 fix.
 
 ### 30. User mutations inside environment tables are silently dropped by save/load (D-D5, round-trip fidelity)
 

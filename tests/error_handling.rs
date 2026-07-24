@@ -24,6 +24,14 @@ fn expect_error(code: &str) -> dellingr::error::Error {
     result.expect_err(&format!("Expected error from: {code}"))
 }
 
+fn assert_invalid_next_key(code: &str) {
+    let err = expect_error(code);
+    match err.kind {
+        ErrorKind::RuntimeError(message) => assert_eq!(message, "invalid key to 'next'"),
+        kind => panic!("Expected invalid next key runtime error, got: {kind:?}"),
+    }
+}
+
 #[test]
 fn call_rejects_missing_fixed_arguments_without_panicking() {
     let mut state = State::new();
@@ -352,6 +360,24 @@ fn pairs_uses_builtin_next_after_rebinding() {
     "#,
     );
     assert_eq!(value, 14.0);
+}
+
+#[test]
+fn next_rejects_invalid_controls() {
+    for table in ["{1, 2, 3}", "{1, 2, 3, 4, 5}"] {
+        assert_invalid_next_key(&format!("local t = {table}; next(t, 99)"));
+        assert_invalid_next_key(&format!("local t = {table}; next(t, 0 / 0)"));
+    }
+}
+
+#[test]
+fn generic_for_next_rejects_invalid_controls() {
+    for table in ["{1, 2, 3}", "{1, 2, 3, 4, 5}"] {
+        assert_invalid_next_key(&format!("local t = {table}; for _ in next, t, 99 do end"));
+        assert_invalid_next_key(&format!(
+            "local t = {table}; for _ in next, t, 0 / 0 do end"
+        ));
+    }
 }
 
 #[test]
