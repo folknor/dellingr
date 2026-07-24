@@ -99,8 +99,9 @@ pub(crate) fn open_table(state: &mut State) {
             state.check_type(2, LuaType::Function)?;
         }
 
-        let n = state.table_sort(1, has_comp)?;
-        state.consume_cost(n.max(1) as u64)?;
+        // Cost is charged inside table_sort BEFORE the comparator runs / the
+        // table is mutated (L18), so an exhausted budget blocks the sort.
+        state.table_sort(1, has_comp)?;
         state.set_top(0);
         Ok(0)
     });

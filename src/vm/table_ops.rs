@@ -286,10 +286,16 @@ impl State {
             None => return Err(self.type_error(TypeError::TableIndex(typ))),
         };
 
+        // Charge cost BEFORE running the comparator or mutating the table, so an
+        // exhausted budget blocks the sort rather than letting it complete and
+        // only then failing the charge (L18). `arr` is a detached copy here, so
+        // nothing has been mutated yet. Empty sorts still cost 1.
+        let n = arr.len();
+        self.consume_cost(n.max(1) as u64)?;
+
         if arr.is_empty() {
             return Ok(0);
         }
-        let n = arr.len();
 
         if has_comp {
             // Use the comparator function at stack index 2

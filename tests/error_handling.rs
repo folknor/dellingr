@@ -490,6 +490,28 @@ fn table_sort_with_comparator() {
 }
 
 #[test]
+fn table_sort_charges_before_mutating() {
+    // At an exhausted budget the sort must be blocked BEFORE it mutates the
+    // table or runs the comparator (L18). table_sort charges its cost up front,
+    // so with budget 0 it errors instead of sorting.
+    let mut state = State::new();
+    state.load_string("return {3, 1, 2}").unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
+
+    state.set_cost_budget(0);
+    let err = state
+        .table_sort(1, false)
+        .expect_err("exhausted budget must block the sort");
+    assert!(matches!(err.kind, ErrorKind::BudgetExceeded { .. }));
+
+    // Restore budget and confirm the table is untouched: still {3, 1, 2}.
+    state.set_cost_budget(i64::MAX);
+    state.push_number(1.0);
+    state.get_table(1).unwrap();
+    assert_eq!(state.to_number(-1).unwrap(), 3.0);
+}
+
+#[test]
 fn table_concat_basic() {
     let mut state = State::new();
     state
