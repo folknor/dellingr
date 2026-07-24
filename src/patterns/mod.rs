@@ -102,6 +102,36 @@ mod tests {
                 b"frodo (1) (2(3)%2)%1".as_slice(),
                 PatternError::InvalidCaptureIndex(Some(1)),
             ),
+            // L14: bounds/argument checks in the validator.
+            (
+                b"%b".as_slice(),
+                PatternError::MalformedPattern(MalformedPattern::MissingBalancedArguments),
+            ),
+            (
+                b"%bx".as_slice(),
+                PatternError::MalformedPattern(MalformedPattern::MissingBalancedArguments),
+            ),
+            (
+                b"%f".as_slice(),
+                PatternError::MalformedPattern(MalformedPattern::MissingFrontierBracket),
+            ),
+            (
+                b"%fx".as_slice(),
+                PatternError::MalformedPattern(MalformedPattern::MissingFrontierBracket),
+            ),
+            (
+                b"%f[".as_slice(),
+                PatternError::MalformedPattern(MalformedPattern::MissingBracket),
+            ),
+            (
+                b"[".as_slice(),
+                PatternError::MalformedPattern(MalformedPattern::MissingBracket),
+            ),
+            (
+                b"[a".as_slice(),
+                PatternError::MalformedPattern(MalformedPattern::MissingBracket),
+            ),
+            (b"(".as_slice(), PatternError::UnfinishedCapture),
         ];
 
         for (pattern, expected) in bad {
@@ -130,6 +160,14 @@ mod tests {
         let mut anchored = LuaPattern::from_bytes_try(b"^$").unwrap();
         assert!(anchored.matches_bytes(b"").unwrap());
         assert_eq!(anchored.range(), 0..0);
+    }
+
+    #[test]
+    fn validator_skips_both_balance_delimiters() {
+        // L14: `%b((` is valid - both `(` are balance delimiters, not captures.
+        let mut pattern = LuaPattern::from_bytes_try(b"%b((").unwrap();
+        assert!(pattern.matches_bytes(b"((").unwrap());
+        assert_eq!(pattern.range(), 0..2);
     }
 
     #[test]

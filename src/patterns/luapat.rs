@@ -523,21 +523,35 @@ impl MatchState {
                     let c = at(p);
                     match c {
                         b'b' => {
-                            p = next(p);
+                            // `%b` needs TWO delimiter bytes (e.g. `%b()`). Skip
+                            // both so `%b((` is accepted and neither delimiter is
+                            // re-parsed as a capture (L14). p enters pointing at
+                            // 'b'.
+                            p = next(p); // first delimiter
                             if p >= self.p_end {
                                 return Err(PatternError::MalformedPattern(
                                     MalformedPattern::MissingBalancedArguments,
                                 ));
                             }
+                            p = next(p); // second delimiter
+                            if p >= self.p_end {
+                                return Err(PatternError::MalformedPattern(
+                                    MalformedPattern::MissingBalancedArguments,
+                                ));
+                            }
+                            p = next(p); // past the `%bxy` item
                         }
                         b'f' => {
+                            // p enters pointing at 'f'. Bounds-check before the
+                            // deref so `%f` / `%fx` at the pattern end do not read
+                            // one past the end (L14). Leave p at '[' for the outer
+                            // loop to validate the class.
                             p = next(p);
-                            if at(p) != b'[' {
+                            if p >= self.p_end || at(p) != b'[' {
                                 return Err(PatternError::MalformedPattern(
                                     MalformedPattern::MissingFrontierBracket,
                                 ));
                             }
-                            p = sub(p, 1); // so we see [...]
                         }
                         b'0'..=b'9' => {
                             let l = (c as i8) - (b'1' as i8);
@@ -554,20 +568,37 @@ impl MatchState {
                     }
                 }
                 b'[' => {
-                    while at(p) != b']' {
-                        if p == self.p_end {
+                    // Scan to the closing ']'. Bounds-check before every deref so
+                    // an unterminated class (`[`, `[a`, a trailing escape) is
+                    // rejected without reading past the pattern end (L14). The
+                    // first ']' closes the class (preserving the matcher's
+                    // classend semantics).
+                    loop {
+                        if p >= self.p_end {
                             return Err(PatternError::MalformedPattern(
                                 MalformedPattern::MissingBracket,
                             ));
                         }
-                        if at(p) == L_ESC && p < self.p_end {
-                            p = next(p);
+                        if at(p) == b']' {
+                            break;
+                        }
+                        if at(p) == L_ESC {
+                            p = next(p); // skip the escaped byte (e.g. `%]`)
+                            if p >= self.p_end {
+                                return Err(PatternError::MalformedPattern(
+                                    MalformedPattern::MissingBracket,
+                                ));
+                            }
                         }
                         p = next(p);
                     }
+                    // p points at ']'; the outer loop consumes it.
                 }
                 b'(' => {
-                    if at(p) != b')' {
+                    // p enters pointing just past '('. A pattern ending in '('
+                    // leaves p == p_end, so bounds-check before the deref (L14);
+                    // treat it as an (unfinished) open capture.
+                    if p >= self.p_end || at(p) != b')' {
                         // not a position capture
                         level_stack[stack_idx] = self.level;
                         stack_idx += 1;
