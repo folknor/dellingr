@@ -158,6 +158,12 @@ All notable changes to dellingr are documented here. The format follows
   allocation count (objects plus distinct interned strings) now drives both the
   trigger and the post-collect threshold, preserving the ~2x-live-heap growth
   policy.
+- Character classes close like reference Lua: at least one class byte is
+  consumed before `]` can end the class. `[]]` is now a class containing `]`
+  (it matched nothing before), `[^]]` matches any byte except `]`, and `[]` /
+  `[^]` raise "malformed pattern (missing ']')" instead of parsing as an empty,
+  never-matching class. Both the compile-time validator and the matcher's
+  `classend` switched to the reference do-while together.
 - An explicit `gc_collect()` no longer re-enables automatic GC after
   `gc_disable_auto()`. Every collection recomputed the threshold from the
   surviving allocation count, clobbering the `usize::MAX` disable sentinel, so

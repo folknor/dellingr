@@ -141,6 +141,36 @@ mod tests {
     }
 
     #[test]
+    fn class_close_follows_reference_do_while() {
+        // C29: at least one class byte is consumed before ']' can close the
+        // class, so `[]]` is a class containing ']'.
+        let mut literal_bracket = LuaPattern::from_bytes_try(b"[]]").unwrap();
+        assert!(literal_bracket.matches_bytes(b"]").unwrap());
+        assert_eq!(literal_bracket.range(), 0..1);
+        assert!(!literal_bracket.matches_bytes(b"x").unwrap());
+
+        // `[^]]` is "any byte except ']'".
+        let mut complement = LuaPattern::from_bytes_try(b"[^]]").unwrap();
+        assert!(complement.matches_bytes(b"x").unwrap());
+        assert!(!complement.matches_bytes(b"]").unwrap());
+
+        // An escaped `%]` is a class byte too, and does not close the class.
+        let mut escaped = LuaPattern::from_bytes_try(b"[%]]").unwrap();
+        assert!(escaped.matches_bytes(b"]").unwrap());
+
+        // `[]` and `[^]` never close, matching reference "malformed pattern
+        // (missing ']')" instead of parsing as an empty class.
+        for pattern in [b"[]".as_slice(), b"[^]".as_slice(), b"[%]".as_slice()] {
+            assert!(matches!(
+                LuaPattern::from_bytes_try(pattern),
+                Err(PatternError::MalformedPattern(
+                    MalformedPattern::MissingBracket
+                ))
+            ));
+        }
+    }
+
+    #[test]
     fn position_captures_are_typed() {
         let mut pattern = LuaPattern::from_bytes_try(b"()(a)()").unwrap();
         assert!(pattern.matches_bytes(b"abc").unwrap());

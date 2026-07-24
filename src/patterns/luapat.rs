@@ -134,10 +134,14 @@ impl MatchState {
                 next(next_p)
             }
             b'[' => {
-                if at(next_p) == b'^' {
+                if next_p < self.p_end && at(next_p) == b'^' {
                     next_p = next(next_p);
                 }
-                while at(next_p) != b']' {
+                // Reference Lua consumes at least one class byte before
+                // accepting ']' (a do-while), so `[]` is malformed and `[]]`
+                // is a class containing ']' (C29). Bounds-check before every
+                // deref; keep in sync with the `[` arm in `str_match_check`.
+                loop {
                     if next_p == self.p_end {
                         return Err(PatternError::MalformedPattern(
                             MalformedPattern::MissingBracket,
@@ -145,8 +149,16 @@ impl MatchState {
                     }
                     let ch = at(next_p);
                     next_p = next(next_p);
-                    if ch == L_ESC && p < self.p_end {
+                    if ch == L_ESC && next_p < self.p_end {
                         next_p = next(next_p); /* skip escapes (e.g. `%]') */
+                    }
+                    if next_p == self.p_end {
+                        return Err(PatternError::MalformedPattern(
+                            MalformedPattern::MissingBracket,
+                        ));
+                    }
+                    if at(next_p) == b']' {
+                        break;
                     }
                 }
                 next(next_p)
@@ -568,12 +580,27 @@ impl MatchState {
                     }
                 }
                 b'[' => {
-                    // Scan to the closing ']'. Bounds-check before every deref so
-                    // an unterminated class (`[`, `[a`, a trailing escape) is
-                    // rejected without reading past the pattern end (L14). The
-                    // first ']' closes the class (preserving the matcher's
-                    // classend semantics).
+                    // Scan to the closing ']'. Reference Lua consumes at least
+                    // one class byte before accepting ']' (a do-while), so `[]`
+                    // is malformed and `[]]` is a class containing ']' (C29).
+                    // Bounds-check before every deref so an unterminated class
+                    // (`[`, `[a`, a trailing escape) is rejected without
+                    // reading past the pattern end (L14). Keep in sync with
+                    // `classend`.
+                    if p < self.p_end && at(p) == b'^' {
+                        p = next(p);
+                    }
                     loop {
+                        if p >= self.p_end {
+                            return Err(PatternError::MalformedPattern(
+                                MalformedPattern::MissingBracket,
+                            ));
+                        }
+                        let ch = at(p);
+                        p = next(p);
+                        if ch == L_ESC && p < self.p_end {
+                            p = next(p); // skip the escaped byte (e.g. `%]`)
+                        }
                         if p >= self.p_end {
                             return Err(PatternError::MalformedPattern(
                                 MalformedPattern::MissingBracket,
@@ -582,15 +609,6 @@ impl MatchState {
                         if at(p) == b']' {
                             break;
                         }
-                        if at(p) == L_ESC {
-                            p = next(p); // skip the escaped byte (e.g. `%]`)
-                            if p >= self.p_end {
-                                return Err(PatternError::MalformedPattern(
-                                    MalformedPattern::MissingBracket,
-                                ));
-                            }
-                        }
-                        p = next(p);
                     }
                     // p points at ']'; the outer loop consumes it.
                 }
