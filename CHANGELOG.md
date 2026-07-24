@@ -55,6 +55,11 @@ All notable changes to dellingr are documented here. The format follows
   jump beyond the signed 16-bit range, and more than 255 field-assignment
   sites in one function each raise a clear `SyntaxError`. `Frame::jump` now
   accepts the full signed-16-bit backward range (`i16::MIN`).
+- `State::consume_cost` no longer wraps on very large host charges. It cast the
+  `u64` charge to `i64` before subtracting, so a charge above `i64::MAX` went
+  negative and *raised* the remaining budget (and `cost_used` could overflow).
+  It now uses saturating arithmetic: any charge, up to `u64::MAX`, drives the
+  budget toward exhaustion and never increases it.
 
 ## [0.3.0] - 2026-05-12
 

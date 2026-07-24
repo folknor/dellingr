@@ -6,6 +6,37 @@ use super::lua_val::Val;
 use crate::instr::RetCount;
 
 #[test]
+fn consume_cost_saturates_large_host_charges() {
+    for (cost, remaining) in [
+        (i64::MAX as u64, 0),
+        (i64::MAX as u64 + 1, -1),
+        (u64::MAX, i64::MIN),
+    ] {
+        let mut state = State::new();
+        state.set_cost_budget(i64::MAX);
+        state
+            .consume_cost(cost)
+            .expect("first charge may cross the budget");
+        assert_eq!(state.cost_remaining(), remaining);
+        assert_eq!(state.cost_used(), cost);
+    }
+
+    let mut state = State::new();
+    state.set_cost_budget(1);
+    state
+        .consume_cost(u64::MAX)
+        .expect("first charge may cross the budget");
+    assert!(state.consume_cost(1).is_err());
+
+    state.cost_used = u64::MAX - 1;
+    state.cost_remaining = i64::MAX;
+    state
+        .consume_cost(2)
+        .expect("saturating used-cost charge should succeed");
+    assert_eq!(state.cost_used(), u64::MAX);
+}
+
+#[test]
 fn vm_test01() {
     let mut state = State::new();
     let input = parse_str("a = 1").unwrap();

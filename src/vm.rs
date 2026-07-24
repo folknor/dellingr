@@ -325,8 +325,8 @@ impl State {
                 budget: self.cost_budget,
             }));
         }
-        self.cost_remaining -= cost as i64;
-        self.cost_used += cost;
+        self.cost_remaining = self.cost_remaining.saturating_sub_unsigned(cost);
+        self.cost_used = self.cost_used.saturating_add(cost);
         Ok(())
     }
 
