@@ -164,24 +164,29 @@ pub(crate) fn open_math(state: &mut State) {
                 state.check_type(1, LuaType::Number)?;
                 let n = state.to_number(1)? as i64;
                 if n < 1 {
-                    state.set_top(0);
-                    state.push_nil();
-                    return Ok(1);
+                    return Err(state.error(ErrorKind::RuntimeError(
+                        "bad argument #1 to 'random' (interval is empty)".to_string(),
+                    )));
                 }
                 state.rng.random_range_i64(1, n) as f64
             }
-            _ => {
+            2 => {
                 // math.random(m, n) - returns integer in [m, n]
                 state.check_type(1, LuaType::Number)?;
                 state.check_type(2, LuaType::Number)?;
                 let m = state.to_number(1)? as i64;
                 let n = state.to_number(2)? as i64;
                 if m > n {
-                    state.set_top(0);
-                    state.push_nil();
-                    return Ok(1);
+                    return Err(state.error(ErrorKind::RuntimeError(
+                        "bad argument #1 to 'random' (interval is empty)".to_string(),
+                    )));
                 }
                 state.rng.random_range_i64(m, n) as f64
+            }
+            _ => {
+                return Err(state.error(ErrorKind::RuntimeError(
+                    "wrong number of arguments to 'random'".to_string(),
+                )));
             }
         };
 

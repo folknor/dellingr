@@ -84,6 +84,16 @@ All notable changes to dellingr are documented here. The format follows
   to nil / unchanged input, and `%1` with no explicit captures expands to the
   whole match. The matcher gained a `%z` class (matching NUL) and guards
   against one-past-end reads in `%f`/`%b` (this also resolves lead L4).
+- Standard-library functions now validate their arguments like reference Lua.
+  `tonumber` parses the Lua number grammar (leading/trailing whitespace, `0x`
+  hex, hex floats) and rejects `nan`/`inf` and Rust-only spellings, and treats
+  a nil second argument as no base. `getmetatable`/`setmetatable` honor a
+  `__metatable` field (returning it, and refusing to replace a protected
+  metatable). `table.insert` rejects wrong arity, `table.move` rejects a
+  non-table destination, `math.random` errors on an empty interval (and on more
+  than two arguments), and `table.insert`/`table.remove` reject out-of-range and
+  non-integral positions. `pairs` uses the builtin `next` iterator, so
+  rebinding the global `next` no longer breaks it.
 
 ## [0.3.0] - 2026-05-12
 

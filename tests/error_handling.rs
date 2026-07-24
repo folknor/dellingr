@@ -247,6 +247,112 @@ fn table_insert_at_position() {
 }
 
 #[test]
+fn tonumber_uses_lua_numeral_grammar() {
+    let value = run_number(
+        r#"
+        local a = tonumber(" \t+42\n")
+        local b = tonumber(".5e1")
+        local c = tonumber("0x10")
+        local d = tonumber("-0X1.8p+1")
+        local e = tonumber("10", nil)
+        if tonumber("nan") ~= nil or tonumber("NaN") ~= nil or tonumber("inf") ~= nil
+            or tonumber("1_0") ~= nil or tonumber("0b10") ~= nil or tonumber("1e") ~= nil then
+            return -1
+        end
+        return a + b + c + d + e
+    "#,
+    );
+    assert_eq!(value, 70.0);
+}
+
+#[test]
+fn pairs_uses_builtin_next_after_rebinding() {
+    let value = run_number(
+        r#"
+        next = 42
+        local sum = 0
+        for _, value in pairs({ a = 2, b = 3 }) do sum = sum + value end
+        for _, value in ipairs({ 4, 5 }) do sum = sum + value end
+        return sum
+    "#,
+    );
+    assert_eq!(value, 14.0);
+}
+
+#[test]
+fn table_position_boundaries_and_integer_errors() {
+    let value = run_number(
+        r#"
+        local t = {10, 20}
+        table.insert(t, 3, 30)
+        local no_op = table.remove(t, 4) == nil
+        local empty = {}
+        local e0 = table.remove(empty, 0) == nil
+        local e1 = table.remove(empty, 1) == nil
+        return #t * 100 + t[3] + (no_op and 1 or 0) + (e0 and 2 or 0) + (e1 and 4 or 0)
+    "#,
+    );
+    assert_eq!(value, 337.0);
+    for code in [
+        "table.insert({}, 0, 1)",
+        "table.insert({}, 1.5, 1)",
+        "table.insert({}, 0 / 0, 1)",
+        "table.remove({1}, 1e100)",
+        "table.remove({}, 2)",
+    ] {
+        let err = expect_error(code);
+        assert!(
+            matches!(err.kind, ErrorKind::RuntimeError(_)),
+            "{code}: {err}"
+        );
+    }
+    // A negative position is a valid integer that is simply out of range: it
+    // must report "position out of bounds", not "no integer representation".
+    for code in ["table.insert({1}, -1, 9)", "table.remove({1}, -1)"] {
+        let err = expect_error(code);
+        assert!(
+            err.to_string().contains("position out of bounds"),
+            "{code}: {err}"
+        );
+    }
+}
+
+#[test]
+fn table_insert_move_and_random_validate_before_mutation() {
+    for code in ["table.insert({})", "table.insert({}, 1, 2, 3)"] {
+        let err = expect_error(code);
+        assert!(
+            matches!(err.kind, ErrorKind::RuntimeError(_)),
+            "{code}: {err}"
+        );
+    }
+    let err = expect_error("local t = {7}; table.move(t, 1, 1, 2, 42)");
+    assert!(matches!(err.kind, ErrorKind::ArgError(_)), "{err}");
+    for code in [
+        "math.random(0)",
+        "math.random(2, 1)",
+        "math.random(1, 2, 3)",
+    ] {
+        let err = expect_error(code);
+        assert!(
+            matches!(err.kind, ErrorKind::RuntimeError(_)),
+            "{code}: {err}"
+        );
+    }
+    let mut first = State::new();
+    let mut second = State::new();
+    first.set_rng_seed(99);
+    second.set_rng_seed(99);
+    for state in [&mut first, &mut second] {
+        state
+            .load_string("return math.random() + math.random(1, 10)")
+            .unwrap();
+        state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
+    }
+    assert_eq!(first.to_number(-1).unwrap(), second.to_number(-1).unwrap());
+}
+
+#[test]
 fn table_remove_basic() {
     let val = run_number(
         r#"

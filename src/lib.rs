@@ -24,6 +24,7 @@ mod compiler;
 mod host;
 mod instr;
 mod lua_std;
+mod numeral;
 #[doc(hidden)]
 mod patterns;
 mod vm;

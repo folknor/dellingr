@@ -235,16 +235,11 @@ impl State {
     }
 
     /// Inserts a value into a table at a position, shifting elements.
-    /// Stack: [t, pos, value] -> []
-    /// The pos and value are popped from the stack.
+    /// Stack: [t, value] -> []
+    /// The value is popped from the stack. `pos` has been validated by table.insert.
     #[hotpath::measure]
-    pub fn table_insert_at(&mut self, table_idx: isize) -> Result<()> {
+    pub fn table_insert_at(&mut self, table_idx: isize, pos: usize) -> Result<()> {
         let value = self.pop_val();
-        let pos_val = self.pop_val();
-        let pos = pos_val
-            .as_num()
-            .ok_or_else(|| self.type_error(TypeError::Arithmetic(pos_val.typ_simple())))?
-            as usize;
         let idx = self.convert_idx(table_idx)?;
         let obj_ptr = self.stack[idx].as_object_ptr();
         let typ = self.stack[idx].typ_simple();

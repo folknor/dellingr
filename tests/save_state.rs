@@ -97,6 +97,23 @@ fn saves_are_byte_stable() {
 }
 
 #[test]
+fn pairs_iterator_round_trips_after_next_rebinding() {
+    let (mut state, _) = new_capture_state();
+    run(
+        &mut state,
+        "iter, iter_state, iter_key = pairs({ a = 7 })\nnext = 42",
+    );
+    let save = state.save_state().unwrap();
+    let mut loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), |_| {}).unwrap();
+    loaded
+        .load_string("for key, value in iter, iter_state, iter_key do result = value end")
+        .unwrap();
+    loaded.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
+    loaded.get_global("result");
+    assert_eq!(loaded.to_number(-1).unwrap(), 7.0);
+}
+
+#[test]
 fn dynamic_table_constructor_round_trips_after_completion() {
     let (mut original, _) = new_capture_state();
     run(

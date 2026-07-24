@@ -4,6 +4,7 @@ use crate::LuaType;
 use crate::Result;
 use crate::State;
 use crate::error::{ArgError, ErrorKind};
+use crate::numeral::parse_lua_numeral;
 
 fn digit_value(byte: u8) -> Option<u32> {
     match byte {
@@ -100,7 +101,7 @@ pub(crate) fn base_pairs(state: &mut State) -> Result<u8> {
     state.check_type(1, LuaType::Table)?;
     state.set_top(1);
     // Return: next function, table, nil
-    state.get_global("next");
+    state.push_rust_fn(base_next);
     state.push_value(1)?; // table
     state.push_nil(); // initial key
     // Stack: [table, next, table, nil]
@@ -159,7 +160,7 @@ pub(crate) fn open_base(state: &mut State) {
         state.check_any(1)?;
         let num_args = state.get_top();
 
-        if num_args >= 2 {
+        if num_args >= 2 && state.typ(2) != LuaType::Nil {
             state.check_type(1, LuaType::String)?;
             state.check_type(2, LuaType::Number)?;
             let base_num = state.to_number(2)?;
@@ -196,16 +197,9 @@ pub(crate) fn open_base(state: &mut State) {
                 Ok(1)
             }
             LuaType::String => {
-                let parsed = match std::str::from_utf8(state.to_bytes(1)?) {
-                    Ok(s) => s.parse::<f64>(),
-                    Err(_) => {
-                        state.set_top(0);
-                        state.push_nil();
-                        return Ok(1);
-                    }
-                };
+                let parsed = parse_lua_numeral(state.to_bytes(1)?);
                 state.set_top(0);
-                if let Ok(num) = parsed {
+                if let Some(num) = parsed {
                     state.push_number(num);
                 } else {
                     state.push_nil();
@@ -278,7 +272,7 @@ pub(crate) fn open_base(state: &mut State) {
     add("getmetatable", |state| {
         state.check_any(1)?;
         state.set_top(1);
-        state.get_metatable_of(1)?;
+        raw_metafield(state, 1)?;
         // Stack: [object, metatable_or_nil]
         state.remove(1)?;
         Ok(1)
@@ -289,7 +283,19 @@ pub(crate) fn open_base(state: &mut State) {
     // Returns the table.
     add("setmetatable", |state| {
         state.check_type(1, LuaType::Table)?;
+        state.check_any(2)?;
+        if !matches!(state.typ(2), LuaType::Table | LuaType::Nil) {
+            return Err(arg_type_error(state, 2, "setmetatable", LuaType::Table));
+        }
+        // Ignore any extra arguments (Lua does) so set_metatable_of below reads
+        // the replacement metatable, not a trailing argument.
         state.set_top(2);
+        if raw_metafield(state, 1)? {
+            return Err(state.error(ErrorKind::RuntimeError(
+                "cannot change a protected metatable".to_string(),
+            )));
+        }
+        state.pop(1);
         // Stack: [table, metatable]
         state.set_metatable_of(1)?;
         // Stack: [table]
@@ -451,6 +457,39 @@ pub(crate) fn open_base(state: &mut State) {
         .set_metatable_of(1)
         .expect("_G metatable installation cannot fail");
     state.set_global("_G");
+}
+
+/// Pushes the raw metatable when unprotected, otherwise its `__metatable` value.
+fn raw_metafield(state: &mut State, idx: isize) -> Result<bool> {
+    state.get_metatable_of(idx)?;
+    if state.typ(-1) == LuaType::Nil {
+        return Ok(false);
+    }
+    state.push_value(-1)?;
+    state.push_string("__metatable");
+    state.get_table_raw(-2)?;
+    if state.typ(-1) != LuaType::Nil {
+        state.remove(-2)?;
+        state.remove(-2)?;
+        Ok(true)
+    } else {
+        state.pop(2);
+        Ok(false)
+    }
+}
+
+fn arg_type_error(
+    state: &State,
+    arg_number: isize,
+    func_name: &str,
+    expected: LuaType,
+) -> crate::error::Error {
+    state.error(ErrorKind::ArgError(ArgError {
+        arg_number,
+        func_name: Some(func_name.to_string()),
+        expected: Some(expected),
+        received: Some(state.typ(arg_number)),
+    }))
 }
 
 fn global_env_index(state: &mut State) -> Result<u8> {

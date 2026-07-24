@@ -33,17 +33,20 @@ pub(crate) fn open_table(state: &mut State) {
         if num_args == 2 {
             // table.insert(t, value) - append at end
             let len = state.table_len(1);
-            // Stack: [t, value]
-            state.push_number((len + 1) as f64);
-            // Stack: [t, value, pos]
-            // Swap to get [t, pos, value]
-            state.insert(-2)?;
-            state.table_insert_at(1)?;
-        } else if num_args >= 3 {
+            state.table_insert_at(1, len + 1)?;
+        } else if num_args == 3 {
             // table.insert(t, pos, value)
             state.check_type(2, LuaType::Number)?;
-            // Stack: [t, pos, value]
-            state.table_insert_at(1)?;
+            let pos = table_position(state, 2, "insert")?;
+            let len = state.table_len(1) as i64;
+            if !(1..=len + 1).contains(&pos) {
+                return Err(position_out_of_bounds(state, "insert"));
+            }
+            state.table_insert_at(1, pos as usize)?;
+        } else {
+            return Err(state.error(ErrorKind::RuntimeError(
+                "wrong number of arguments to 'insert'".to_string(),
+            )));
         }
 
         state.set_top(0);
@@ -58,11 +61,22 @@ pub(crate) fn open_table(state: &mut State) {
         state.check_type(1, LuaType::Table)?;
         let num_args = state.get_top();
 
-        let pos = if num_args >= 2 {
+        let len = state.table_len(1);
+        let len_i = len as i64;
+        let pos = if num_args >= 2 && state.typ(2) != LuaType::Nil {
             state.check_type(2, LuaType::Number)?;
-            state.to_number(2)? as usize
+            let pos = table_position(state, 2, "remove")?;
+            let valid = if len == 0 {
+                pos == 0 || pos == 1
+            } else {
+                (1..=len_i + 1).contains(&pos)
+            };
+            if !valid {
+                return Err(position_out_of_bounds(state, "remove"));
+            }
+            pos as usize
         } else {
-            state.table_len(1)
+            len
         };
 
         state.set_top(1);
@@ -241,7 +255,10 @@ pub(crate) fn open_table(state: &mut State) {
         let t = state.to_number(4)? as isize;
 
         // Determine destination table (a2 or a1)
-        let has_a2 = state.get_top() >= 5 && state.typ(5) == LuaType::Table;
+        let has_a2 = state.get_top() >= 5 && state.typ(5) != LuaType::Nil;
+        if has_a2 {
+            state.check_type(5, LuaType::Table)?;
+        }
         let dest_idx: isize = if has_a2 { 5 } else { 1 };
 
         // Copy elements (if any). Same-table moves that shift the range right
@@ -282,4 +299,26 @@ pub(crate) fn open_table(state: &mut State) {
 
     // Set the table table as a global
     state.set_global("table");
+}
+
+/// Validates that argument `arg_number` is an integer-valued number and returns
+/// it as `i64`. A negative or out-of-range value is a valid integer and is left
+/// for the caller's bounds check to report as "position out of bounds".
+fn table_position(state: &mut State, arg_number: isize, func_name: &str) -> crate::Result<i64> {
+    let number = state.to_number(arg_number)?;
+    let minimum = i64::MIN as f64;
+    let maximum = f64::from_bits((i64::MAX as f64).to_bits() - 1);
+    let outside_i64 = number.total_cmp(&minimum).is_lt() || number.total_cmp(&maximum).is_gt();
+    if !number.is_finite() || outside_i64 || number.trunc().to_bits() != number.to_bits() {
+        return Err(state.error(ErrorKind::RuntimeError(format!(
+            "bad argument #{arg_number} to '{func_name}' (number has no integer representation)"
+        ))));
+    }
+    Ok(number as i64)
+}
+
+fn position_out_of_bounds(state: &State, func_name: &str) -> crate::error::Error {
+    state.error(ErrorKind::RuntimeError(format!(
+        "bad argument #2 to '{func_name}' (position out of bounds)"
+    )))
 }

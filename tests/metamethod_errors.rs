@@ -78,6 +78,51 @@ fn index_existing_key_no_metamethod() {
 }
 
 #[test]
+fn protected_metatables_hide_and_prevent_replacement() {
+    let value = run_number(
+        r#"
+        local t = setmetatable({}, { __metatable = false })
+        return getmetatable(t) == false and 1 or 0
+    "#,
+    );
+    assert_eq!(value, 1.0);
+    let err =
+        expect_error("local t = setmetatable({}, { __metatable = 'locked' }); setmetatable(t, {})");
+    assert!(
+        matches!(&err.kind, ErrorKind::RuntimeError(message) if message == "cannot change a protected metatable")
+    );
+}
+
+#[test]
+fn setmetatable_ignores_extra_arguments() {
+    // A trailing argument must be ignored (Lua does), so the replacement
+    // metatable is the one installed - not the extra value.
+    let value = run_number(
+        r#"
+        local mt = {}
+        local t = setmetatable({}, mt, 42)
+        return getmetatable(t) == mt and 1 or 0
+    "#,
+    );
+    assert_eq!(value, 1.0);
+}
+
+#[test]
+fn unprotected_metatables_remain_visible_and_replaceable() {
+    let value = run_number(
+        r#"
+        local mt = { __metatable = nil }
+        local t = setmetatable({}, mt)
+        local visible = getmetatable(t) == mt
+        local replacement = {}
+        setmetatable(t, replacement)
+        return visible and getmetatable(t) == replacement and 1 or 0
+    "#,
+    );
+    assert_eq!(value, 1.0);
+}
+
+#[test]
 fn field_cache_revalidates_after_table_mutation() {
     let val = run_number(
         r#"
