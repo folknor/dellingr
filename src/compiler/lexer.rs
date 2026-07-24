@@ -142,9 +142,15 @@ impl<'a> Lexer<'a> {
     /// Returns the next `Token`.
     #[hotpath::measure]
     pub(super) fn next_token(&mut self) -> Result<Token> {
-        let starts_line = self.consume_whitespace();
-        let tok_start = self.pos;
-        if let Some(first_char) = self.next_char() {
+        // Loop rather than recurse on comments: a comment skips its body and
+        // continues the loop, so a long run of consecutive comments cannot
+        // exhaust the stack the way tail-recursing into `next_token` did (L17).
+        loop {
+            let starts_line = self.consume_whitespace();
+            let tok_start = self.pos;
+            let Some(first_char) = self.next_char() else {
+                return Ok(self.end_of_file());
+            };
             let tok_type = match first_char {
                 '+' => Plus,
                 '*' => Star,
@@ -168,7 +174,8 @@ impl<'a> Lexer<'a> {
 
                 '-' => {
                     if self.try_next('-') {
-                        return self.comment();
+                        self.skip_comment();
+                        continue;
                     }
                     Minus
                 }
@@ -188,19 +195,19 @@ impl<'a> Lexer<'a> {
                 _ => return Err(self.error(SyntaxError::InvalidCharacter(first_char))),
             };
             let len = (self.pos - tok_start) as u32;
-            let token = Token {
+            return Ok(Token {
                 typ: tok_type,
                 start: tok_start,
                 len,
-            };
-            Ok(token)
-        } else {
-            Ok(self.end_of_file())
+            });
         }
     }
 
-    /// Skips over the characters in a comment.
-    fn comment(&mut self) -> Result<Token> {
+    /// Skips over the characters in a comment body. The enclosing `next_token`
+    /// loop re-scans afterward; on EOF mid-comment the next iteration returns
+    /// the EOF token. Iterative (no recursion) so consecutive comments are
+    /// stack-safe (L17).
+    fn skip_comment(&mut self) {
         // Check for multi-line comment: --[[ ... ]]
         if self.peek_char() == Some('[') {
             self.next_char(); // consume '['
@@ -211,22 +218,21 @@ impl<'a> Lexer<'a> {
                     match self.next_char() {
                         Some(']') if self.peek_char() == Some(']') => {
                             self.next_char(); // consume second ']'
-                            return self.next_token();
+                            return;
                         }
-                        None => return Ok(self.end_of_file()),
+                        None => return,
                         _ => {}
                     }
                 }
             }
             // Single '[' after '--' is just a regular comment, fall through
         }
-        // Single-line comment: skip until newline
+        // Single-line comment: skip until newline (consumed) or EOF
         while let Some(c) = self.next_char() {
             if c == '\n' {
-                return self.next_token();
+                return;
             }
         }
-        Ok(self.end_of_file())
     }
 
     /// Peeks the next character.
@@ -240,8 +246,13 @@ impl<'a> Lexer<'a> {
         match self.iter.next() {
             Some((pos, c)) => {
                 self.pos = pos + c.len_utf8();
-                if c == '\n' {
-                    self.linebreaks.push(self.pos);
+                // Track line starts. A bare '\r' (old-Mac newline, or one
+                // skipped after a string '\z') also begins a new line; '\r\n'
+                // is counted once, via its '\n' (L17).
+                match c {
+                    '\n' => self.linebreaks.push(self.pos),
+                    '\r' if self.peek_char() != Some('\n') => self.linebreaks.push(self.pos),
+                    _ => {}
                 }
                 Some(c)
             }
@@ -585,6 +596,34 @@ mod tests {
             (RCurly, 10, 1),
         ];
         check_line(input, tokens);
+    }
+
+    #[test]
+    fn consecutive_comments_are_stack_safe() {
+        // A long run of comments used to tail-recurse through next_token and
+        // could overflow the stack (L17). It must lex to the trailing token
+        // iteratively.
+        let mut src = String::new();
+        for _ in 0..100_000 {
+            src.push_str("-- comment\n");
+        }
+        src.push('x');
+        let mut lexer = Lexer::new(&src);
+        assert_eq!(lexer.next_token().unwrap().typ, TokenType::Identifier);
+        assert_eq!(lexer.next_token().unwrap().typ, TokenType::EndOfFile);
+    }
+
+    #[test]
+    fn bare_cr_counts_as_newline() {
+        // "a\rb": a bare '\r' begins a new line, so a linebreak is recorded at
+        // position 2 (L17).
+        check("a\rb", &[(Identifier, 0, 1), (Identifier, 2, 1)], &[0, 2]);
+    }
+
+    #[test]
+    fn crlf_counts_once() {
+        // "a\r\nb": '\r\n' is a single newline, counted via its '\n' at pos 3.
+        check("a\r\nb", &[(Identifier, 0, 1), (Identifier, 3, 1)], &[0, 3]);
     }
 
     #[test]

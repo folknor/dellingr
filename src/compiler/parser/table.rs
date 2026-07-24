@@ -74,7 +74,10 @@ impl Parser<'_> {
     pub(super) fn parse_table(&mut self) -> Result<()> {
         let table_instr_idx = self.chunk.code.len();
         self.push(Instr::new_table());
-        // Skip any leading separators (handles {;} and {,})
+        // Skip any leading separators (handles {;} and {,}). This is an
+        // INTENTIONAL divergence from Lua 5.2/5.4, which reject a leading or
+        // lone separator; see examples/feature_test_extended.lua (tagged
+        // `-- DIFF: semicolon_syntax`). Not a bug (lead L3).
         while let TokenType::Comma | TokenType::Semi = self.input.peek_type()? {
             self.input.next()?;
         }
