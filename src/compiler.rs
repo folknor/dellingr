@@ -211,13 +211,13 @@ impl Bytecode {
     /// allocated slot index, and record per-cache slot counts on the
     /// `Bytecode`. Recurses into nested functions. Each `Closure` allocates
     /// its own `RuntimeCaches` sized from these counts.
-    fn assign_cache_slots(&mut self) {
+    fn assign_cache_slots(&mut self) -> Result<()> {
         let mut global_cache_indices = vec![None; self.string_literals.len()];
         let mut global_cache_len = 0usize;
         let mut field_cache_len = 0usize;
         let mut set_field_cache_len = 0usize;
 
-        for inst in &mut self.code {
+        for (pc, inst) in self.code.iter_mut().enumerate() {
             match inst.opcode() {
                 Instr::OP_GET_GLOBAL => {
                     let string_idx = inst.a() as usize;
@@ -227,8 +227,15 @@ impl Bytecode {
                     let cache_idx = match *cache_idx {
                         Some(cache_idx) => cache_idx,
                         None => {
-                            let next_idx = u16::try_from(global_cache_len)
-                                .expect("too many global lookup cache slots");
+                            let next_idx = u16::try_from(global_cache_len).map_err(|_| {
+                                error::Error::new(
+                                    error::ErrorKind::InternalError(
+                                        "too many global lookup cache slots".into(),
+                                    ),
+                                    0,
+                                    0,
+                                )
+                            })?;
                             *cache_idx = Some(next_idx);
                             global_cache_len += 1;
                             next_idx
@@ -237,14 +244,27 @@ impl Bytecode {
                     *inst = Instr::get_global_cached(inst.a(), cache_idx);
                 }
                 Instr::OP_GET_FIELD => {
-                    let cache_idx =
-                        u16::try_from(field_cache_len).expect("too many field lookup cache slots");
+                    let cache_idx = u16::try_from(field_cache_len).map_err(|_| {
+                        error::Error::new(
+                            error::ErrorKind::InternalError(
+                                "too many field lookup cache slots".into(),
+                            ),
+                            0,
+                            0,
+                        )
+                    })?;
                     field_cache_len += 1;
                     *inst = Instr::get_field_cached(inst.a(), cache_idx);
                 }
                 Instr::OP_SET_FIELD => {
-                    let cache_idx = u8::try_from(set_field_cache_len)
-                        .expect("too many set-field lookup cache slots");
+                    if set_field_cache_len == u8::MAX as usize {
+                        return Err(error::Error::new(
+                            error::SyntaxError::TooManyFieldAssignments,
+                            self.line_info.get(pc).copied().unwrap_or(0) as usize,
+                            0,
+                        ));
+                    }
+                    let cache_idx = set_field_cache_len as u8;
                     set_field_cache_len += 1;
                     *inst = Instr::set_field_cached(inst.a(), inst.b(), cache_idx);
                 }
@@ -252,12 +272,22 @@ impl Bytecode {
             }
         }
 
-        self.global_cache_slots =
-            u16::try_from(global_cache_len).expect("too many global lookup cache slots");
-        self.field_cache_slots =
-            u16::try_from(field_cache_len).expect("too many field lookup cache slots");
-        self.set_field_cache_slots =
-            u8::try_from(set_field_cache_len).expect("too many set-field lookup cache slots");
+        self.global_cache_slots = u16::try_from(global_cache_len).map_err(|_| {
+            error::Error::new(
+                error::ErrorKind::InternalError("too many global lookup cache slots".into()),
+                0,
+                0,
+            )
+        })?;
+        self.field_cache_slots = u16::try_from(field_cache_len).map_err(|_| {
+            error::Error::new(
+                error::ErrorKind::InternalError("too many field lookup cache slots".into()),
+                0,
+                0,
+            )
+        })?;
+        self.set_field_cache_slots = set_field_cache_len as u8;
+        Ok(())
     }
 }
 
@@ -308,7 +338,7 @@ impl RuntimeCaches {
 #[hotpath::measure]
 pub(super) fn parse_str(source: impl AsRef<str>) -> Result<Bytecode> {
     let mut bc = parser::parse_str(source.as_ref())?;
-    finalize(&mut bc);
+    finalize(&mut bc)?;
     Ok(bc)
 }
 
@@ -318,21 +348,22 @@ pub(super) fn parse_str_named(
     source_name: Option<String>,
 ) -> Result<Bytecode> {
     let mut bc = parser::parse_str_named(source.as_ref(), source_name)?;
-    finalize(&mut bc);
+    finalize(&mut bc)?;
     Ok(bc)
 }
 
 /// Walk a freshly-parsed `Bytecode` tree and assign cache slot indices to
 /// every nested function before it ships to the runtime.
-fn finalize(bc: &mut Bytecode) {
-    bc.assign_cache_slots();
+fn finalize(bc: &mut Bytecode) -> Result<()> {
+    bc.assign_cache_slots()?;
     for nested in &mut bc.nested {
         // The parser produces nested `Arc<Bytecode>` with a refcount of 1, so
         // we have unique access to mutate each one in place before it ships.
         let inner =
             Arc::get_mut(nested).expect("nested Bytecode should be uniquely owned during finalize");
-        finalize(inner);
+        finalize(inner)?;
     }
+    Ok(())
 }
 
 #[cfg(test)]

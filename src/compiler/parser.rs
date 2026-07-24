@@ -109,6 +109,29 @@ impl<'a> Parser<'a> {
         Error::new(kind, line, column)
     }
 
+    fn checked_fixed_arg_count(&self, explicit: usize, implicit: usize) -> Result<u8> {
+        let total = explicit + implicit;
+        if total > 254 {
+            return Err(self.error(SyntaxError::TooManyArguments));
+        }
+        Ok(total as u8)
+    }
+
+    fn checked_jump_offset(&self, from: usize, target: usize) -> Result<i16> {
+        let delta = target as isize - (from as isize + 1);
+        i16::try_from(delta).map_err(|_| self.error(SyntaxError::JumpTooFar))
+    }
+
+    fn patch_jump(
+        &mut self,
+        from: usize,
+        target: usize,
+        constructor: impl FnOnce(i16) -> Instr,
+    ) -> Result<()> {
+        self.chunk.code[from] = constructor(self.checked_jump_offset(from, target)?);
+        Ok(())
+    }
+
     /// Constructs an error for when a specific `TokenType` was expected but not found.
     #[must_use]
     fn err_unexpected(&self, token: Token, expected: TokenType) -> Error {
@@ -343,7 +366,7 @@ impl<'a> Parser<'a> {
 
     /// Called when exiting a loop. Patches all break jumps to jump to the
     /// current instruction position (the instruction after the loop).
-    fn exit_loop(&mut self) {
+    fn exit_loop(&mut self) -> Result<()> {
         let context = self
             .loop_breaks
             .pop()
@@ -352,9 +375,9 @@ impl<'a> Parser<'a> {
         for break_idx in context.break_jumps {
             // The break instruction is a Jump with placeholder offset.
             // Patch it to jump to the end of the loop.
-            let offset = (loop_end - break_idx - 1) as i16;
-            self.chunk.code[break_idx] = Instr::jump(offset);
+            self.patch_jump(break_idx, loop_end, Instr::jump)?;
         }
+        Ok(())
     }
 
     /// Records a break statement. Returns an error if not inside a loop.
@@ -395,6 +418,8 @@ impl<'a> Parser<'a> {
     /// Parses a `Bytecode`.
     #[hotpath::measure]
     fn parse_chunk(&mut self, params: &[&str], is_vararg: bool) -> Result<Bytecode> {
+        let num_params =
+            u8::try_from(params.len()).map_err(|_| self.error(SyntaxError::TooManyLocals))?;
         let source = self.chunk.source.clone();
         self.outer_chunks.push(self.chunk.clone());
         self.chunk = Bytecode::default();
@@ -410,7 +435,7 @@ impl<'a> Parser<'a> {
         let saved_upvalues = std::mem::take(&mut self.upvalues);
         self.outer_upvalues.push(saved_upvalues);
 
-        self.chunk.num_params = params.len() as u8;
+        self.chunk.num_params = num_params;
         for &param in params {
             self.locals.push((param.into(), self.nest_level));
         }

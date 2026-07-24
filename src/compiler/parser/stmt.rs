@@ -298,13 +298,14 @@ impl<'a> Parser<'a> {
         // Close the visible loop variable and body locals before its slot is reused.
         self.push(Instr::close_upvalues(current_local_slot + 3));
 
-        let body_length = (self.chunk.code.len() - loop_start_instr_index) as i16;
+        let loop_end = self.chunk.code.len();
+        let body_length = self.checked_jump_offset(loop_start_instr_index, loop_end + 1)?;
         self.push(Instr::for_loop(current_local_slot, -body_length));
 
         // Correct the ForPrep instruction.
         self.chunk.code[loop_start_instr_index] = Instr::for_prep(current_local_slot, body_length);
 
-        self.exit_loop();
+        self.exit_loop()?;
         Ok(())
     }
 
@@ -404,13 +405,14 @@ impl<'a> Parser<'a> {
 
         // Jump back to TForCall
         let body_end = self.chunk.code.len();
-        self.push(Instr::jump(-((body_end + 1 - loop_start) as i16)));
+        self.push(Instr::jump(self.checked_jump_offset(body_end, loop_start)?));
 
         // Patch the TForLoop to jump past the body
-        let exit_offset = (self.chunk.code.len() - tforloop_index - 1) as i16;
-        self.chunk.code[tforloop_index] = Instr::tfor_loop(base_slot, exit_offset);
+        self.patch_jump(tforloop_index, self.chunk.code.len(), |offset| {
+            Instr::tfor_loop(base_slot, offset)
+        })?;
 
-        self.exit_loop();
+        self.exit_loop()?;
         Ok(())
     }
 
@@ -432,7 +434,7 @@ impl<'a> Parser<'a> {
         // Track locals before body
         let body_locals_start = self.locals.len() as u8;
 
-        let body_start = self.chunk.code.len() as i16;
+        let body_start = self.chunk.code.len();
         self.enter_loop(body_locals_start);
         self.parse_statements()?;
         self.expect(TokenType::Until)?;
@@ -444,9 +446,11 @@ impl<'a> Parser<'a> {
             self.push(Instr::close_upvalues(body_locals_start));
         }
 
-        let expr_end = self.chunk.code.len() as i16;
-        self.push(Instr::branch_false(body_start - (expr_end + 1)));
-        self.exit_loop();
+        let expr_end = self.chunk.code.len();
+        self.push(Instr::branch_false(
+            self.checked_jump_offset(expr_end, body_start)?,
+        ));
+        self.exit_loop()?;
         self.level_down();
         Ok(())
     }
@@ -481,12 +485,13 @@ impl<'a> Parser<'a> {
         }
 
         let body_end = self.chunk.code.len();
-        self.push(Instr::jump(-((body_end + 1 - condition_start) as i16)));
+        self.push(Instr::jump(
+            self.checked_jump_offset(body_end, condition_start)?,
+        ));
 
-        let body_len = body_end - test_position;
-        self.chunk.code[test_position] = Instr::branch_false(body_len as i16);
+        self.patch_jump(test_position, self.chunk.code.len(), Instr::branch_false)?;
 
-        self.exit_loop();
+        self.exit_loop()?;
         self.level_down();
 
         Ok(())
@@ -511,8 +516,7 @@ impl<'a> Parser<'a> {
         self.parse_statements()?;
         let branch_target = self.close_if_arm()?;
 
-        let branch_offset = (branch_target - branch_instr_index - 1) as i16;
-        self.chunk.code[branch_instr_index] = Instr::branch_false(branch_offset);
+        self.patch_jump(branch_instr_index, branch_target, Instr::branch_false)?;
         Ok(())
     }
 
@@ -542,8 +546,7 @@ impl<'a> Parser<'a> {
             self.parse_else()?;
         }
         let new_len = self.chunk.code.len();
-        let jump_len = new_len - jump_instr_index - 1;
-        self.chunk.code[jump_instr_index] = Instr::jump(jump_len as i16);
+        self.patch_jump(jump_instr_index, new_len, Instr::jump)?;
         Ok(next_arm_index)
     }
 

@@ -84,7 +84,7 @@ impl Frame {
         let new_ip = if offset >= 0 {
             self.ip.checked_add(offset as usize)
         } else {
-            self.ip.checked_sub((-offset) as usize)
+            self.ip.checked_sub(offset.unsigned_abs() as usize)
         };
         match new_ip {
             Some(ip) if ip <= self.bytecode.code.len() => {
@@ -378,5 +378,26 @@ impl Frame {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn jump_accepts_i16_minimum_offset() {
+        let bytecode = Arc::new(Bytecode {
+            code: vec![Instr::ret(RetCount::Fixed(0)); i16::MIN.unsigned_abs() as usize],
+            ..Bytecode::default()
+        });
+        let caches = Arc::new(RuntimeCaches::new(&bytecode));
+        let mut frame = Frame::new(bytecode, caches, Vec::new(), Vec::new(), 0, 0);
+        frame.ip = i16::MIN.unsigned_abs() as usize;
+
+        frame
+            .jump(i16::MIN)
+            .expect("minimum offset should be valid");
+        assert_eq!(frame.ip, 0);
     }
 }

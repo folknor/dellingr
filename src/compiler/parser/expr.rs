@@ -46,8 +46,11 @@ impl Parser<'_> {
             // If we don't short-circuit, pop the left-hand expression
             self.push(Instr::pop());
             self.parse_and()?;
-            let branch_offset = (self.chunk.code.len() - branch_instr_index - 1) as i16;
-            self.chunk.code[branch_instr_index] = Instr::branch_true_keep(branch_offset);
+            self.patch_jump(
+                branch_instr_index,
+                self.chunk.code.len(),
+                Instr::branch_true_keep,
+            )?;
         }
 
         Ok(exp_desc)
@@ -64,8 +67,11 @@ impl Parser<'_> {
             // If we don't short-circuit, pop the left-hand expression
             self.push(Instr::pop());
             self.parse_comparison()?;
-            let branch_offset = (self.chunk.code.len() - branch_instr_index - 1) as i16;
-            self.chunk.code[branch_instr_index] = Instr::branch_false_keep(branch_offset);
+            self.patch_jump(
+                branch_instr_index,
+                self.chunk.code.len(),
+                Instr::branch_false_keep,
+            )?;
         }
 
         Ok(exp_desc)
@@ -264,7 +270,7 @@ impl Parser<'_> {
                 } else {
                     // No special handling needed, remove the Instr::mark_call_base()
                     self.chunk.code.remove(mark_idx);
-                    num_args
+                    self.checked_fixed_arg_count(num_args as usize, 0)?
                 };
                 let prefix = PrefixExp::FunctionCall(num_args);
                 self.parse_prefix_extension(prefix)
@@ -319,7 +325,7 @@ impl Parser<'_> {
                 } else {
                     // No special handling needed, remove the Instr::mark_call_base()
                     self.chunk.code.remove(mark_idx);
-                    num_args + 1 // +1 for implicit self argument
+                    self.checked_fixed_arg_count(num_args as usize, 1)?
                 };
                 // Stack: [method, obj, arg1, arg2, ...]
                 let prefix = PrefixExp::FunctionCall(num_args);

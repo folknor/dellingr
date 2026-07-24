@@ -49,6 +49,12 @@ All notable changes to dellingr are documented here. The format follows
   local's stack slot could be reused and the closure would observe a later
   value. Blocks close on exit, `for` loops close the visible loop variable(s)
   each iteration, and `break` closes before jumping - matching Lua 5.2/5.4.
+- The compiler now rejects programs it cannot encode instead of emitting wrong
+  bytecode or panicking: more than 254 fixed call arguments (255 is the
+  dynamic-call sentinel), more than 255 function parameters, a control-flow
+  jump beyond the signed 16-bit range, and more than 255 field-assignment
+  sites in one function each raise a clear `SyntaxError`. `Frame::jump` now
+  accepts the full signed-16-bit backward range (`i16::MIN`).
 
 ## [0.3.0] - 2026-05-12
 

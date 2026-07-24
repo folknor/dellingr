@@ -2,6 +2,8 @@ use std::sync::Arc;
 
 use super::Bytecode;
 use super::Instr;
+use super::Parser;
+use super::TokenStream;
 use super::parse_str;
 use crate::instr::{ArgCount, Builtin, RetCount};
 
@@ -21,6 +23,27 @@ fn check_it(input: &str, mut output: Bytecode) {
     // Clear line_info for comparison (tests were written before line tracking existed)
     clear_line_info(&mut actual);
     assert_eq!(actual, output);
+}
+
+#[test]
+fn checked_jump_offset_accepts_i16_boundaries_only() {
+    let parser = Parser {
+        input: TokenStream::new(""),
+        chunk: Bytecode::default(),
+        nest_level: 0,
+        locals: Vec::new(),
+        outer_chunks: Vec::new(),
+        loop_breaks: Vec::new(),
+        upvalues: Vec::new(),
+        outer_locals: Vec::new(),
+        outer_upvalues: Vec::new(),
+        current_line: 1,
+    };
+
+    assert_eq!(parser.checked_jump_offset(0, 32_768).unwrap(), i16::MAX);
+    assert!(parser.checked_jump_offset(0, 32_769).is_err());
+    assert_eq!(parser.checked_jump_offset(32_767, 0).unwrap(), i16::MIN);
+    assert!(parser.checked_jump_offset(32_768, 0).is_err());
 }
 
 #[test]

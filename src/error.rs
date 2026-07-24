@@ -124,6 +124,12 @@ pub enum SyntaxError {
     TooManyExpressions,
     /// Function body has more locals than the VM accepts.
     TooManyLocals,
+    /// A fixed-arity call uses the dynamic-argument sentinel.
+    TooManyArguments,
+    /// A control-flow target cannot be represented by a jump instruction.
+    JumpTooFar,
+    /// A function has more set-field sites than its runtime cache can encode.
+    TooManyFieldAssignments,
     /// Source nests function definitions deeper than the VM accepts.
     TooManyNestedFunctions,
     /// More numeric literals in a chunk than the literal pool accepts.
@@ -321,6 +327,14 @@ impl fmt::Display for SyntaxError {
             InvalidCharacter(c) => write!(f, "invalid character '{c}'"),
             TooManyExpressions => write!(f, "too many expressions in a single list (limit 255)"),
             TooManyLocals => write!(f, "too many local variables"),
+            TooManyArguments => write!(f, "too many arguments in a fixed call (limit 254)"),
+            JumpTooFar => write!(
+                f,
+                "control-flow jump is too far (exceeds signed 16-bit range)"
+            ),
+            TooManyFieldAssignments => {
+                write!(f, "too many field assignments in a function (limit 255)")
+            }
             TooManyNestedFunctions => write!(f, "too many nested functions (limit 255)"),
             TooManyNumbers => write!(f, "too many literal numbers"),
             TooManyStrings => write!(f, "too many literal strings"),
