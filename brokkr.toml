@@ -27,3 +27,16 @@ debug = true
 
 [gremlins]
 exclude = ["tests/string_bytes.rs"]
+
+# Differential gate: run every examples/**/*.lua through dellingr and reference
+# Lua 5.2/5.4 and require the output to match (see diff_gate.sh - debug build,
+# so the gate is cheap on every check). diff_gate.sh prints "ok" on success or
+# "FAIL: <path>" per divergent script, so an exact last-line match on "ok" is
+# the pass condition. Reference Lua is a required dev dependency; a host without
+# it fails this loudly rather than skipping.
+[[script_check]]
+name = "diff-lua"
+command = "bash diff_gate.sh"
+expect = "ok"
+match = "last-line"
+stream = "stdout"
