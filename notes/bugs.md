@@ -128,20 +128,6 @@ local function id(s) return s end
 
 ## Medium severity
 
-### 22. `instr_tfor_call_rust_fn` truncates the result count with `as u8` (B-B6, host-API only)
-
-- **Location:** `src/vm/eval_control.rs:266`
-  (`let num_ret_actual = self.get_top() as u8;`).
-- **Cause:** if a host-provided iterator RustFunc leaves more than 255 values
-  on its frame, the cast wraps (256 -> 0), the `Greater` arm pushes spurious
-  nils, and the subsequent `results_start`/`truncate` bookkeeping leaves
-  hundreds of stray values on the stack inside the loop frame - silent stack
-  corruption instead of the "too many results" error. The sibling path in
-  `State::call` (`src/vm/eval.rs:102-117`) does this correctly in `usize`.
-  Not reachable from stdlib iterators; requires a host RustFunc used as a
-  generic-for iterator.
-- **Fix:** mirror the `usize` comparison from `State::call`.
-
 ### 24. `OP_CONCAT` is free: exponential memory growth at near-zero cost (B-B8 + C-D3, two independent reports; design-review flag)
 
 - **Locations:** `src/vm/frame.rs:304-307` (charges nothing),
@@ -206,28 +192,65 @@ but each call pushes that many extra nils (`vm/eval.rs:346`) and consumes
 stack headroom. Fix: track `num_locals = max(num_locals, locals.len() -
 num_params)`.
 
-### 46. Stack-trace line staleness for non-OP_CALL invocations (B-B11)
+### 63. A multi-line call is attributed to its closing line, not its opening line (found 2026-07-25, verified by execution)
 
-Only `OP_CALL` refreshes `call_info.ip` (`src/vm/frame.rs:206-213`). Calls
-made by `OP_TFOR_CALL`, `__index`/`__newindex`/`__len`/`__tostring`
-metamethod dispatch, and `table.sort` comparators leave the caller's
-`CallInfo.ip` pointing at the previous `OP_CALL`, so error tracebacks report
-the wrong caller line for errors raised inside iterators and metamethods.
-Fix: refresh `ip` in those dispatch sites too (or derive it from the live
-`Frame` at trace-build time).
+Not from the original audit. Found while adding traceback tests for #46.
 
-### 47. `set_top` growth bypasses `MAX_STACK_SIZE`; assert-vs-Result inconsistency in the stack API (D-D7 + B-B12)
+- **Repro:**
 
-`src/vm/stack.rs:25-57`. `set_top(i)` with a large positive `i` pushes nils
-in a loop with no `check_stack_space`, so a host (or buggy RustFunc) can
-request `set_top(isize::MAX)` and OOM the process, bypassing the documented
-1M-value cap enforced everywhere else. Also inconsistent error contract on
-the same surface: `set_top` and `pop` `assert!` (panic) on misuse while
-`insert`, `remove`, `replace`, `push_value` return
-`ErrorKind::InvalidStackIndex`. Given error paths must leave State
-consistent and reusable, the panicking forms are the odd ones out. Suggest
-`check_stack_space` in the growth arm and converting the asserts to
-`InvalidStackIndex` errors pre-1.0.
+```lua
+local value = {2, 1}
+table.sort(value, function()
+  error('boom')
+end)
+```
+
+Reference reports the main-chunk frame at line **2**, where the call begins:
+
+```
+.plans/isolate.lua:3: boom
+	.plans/isolate.lua:3: in function <.plans/isolate.lua:2>
+	[C]: in function 'table.sort'
+	.plans/isolate.lua:2: in main chunk
+```
+
+dellingr reports line **4**, where the call closes.
+
+- **Cause:** `line_info` maps a bytecode index to whatever line was current when
+  the instruction was emitted, and `OP_CALL` is emitted after the argument list
+  is parsed - so a call whose arguments span lines takes the last one. Single
+  line calls are unaffected, which is why every other traceback case agrees
+  with reference.
+- **Severity:** low, and cosmetic-but-user-visible: it misreports the call site
+  in tracebacks and in the `chunk:line:` prefix for errors raised inside a
+  multi-line call.
+- **Fix:** record the line at the start of the call expression and emit
+  `OP_CALL` with that, rather than with the line current at emission time.
+  Interacts with optimizations.md #7, which already wants to stop using
+  `code.remove` in call emission - the same code path.
+- **Pinned:** `tests/error_handling.rs` asserts the current line 4 with a
+  comment, so fixing this shows up as a deliberate test change.
+
+### 62. Public push methods do not enforce `MAX_STACK_SIZE` (found 2026-07-25, from the loop-17 review)
+
+Not from the original audit. Surfaced while fixing #47, and deliberately left
+out of that loop's scope.
+
+- **Location:** `src/vm/stack.rs:65` onwards - `push_nil`, `push_number`,
+  `push_bytes` and the other public push methods append to `self.stack`
+  directly with no `check_stack_space`. The cap is applied mainly when
+  preparing Lua frames (`src/vm/eval.rs:363`).
+- **Cause:** `MAX_STACK_SIZE = 1_000_000` is described as a global limit, but a
+  host `RustFunc` pushing in a loop never meets it. #47 closed the
+  bulk-allocation hazard in `set_top`, which could allocate a million values in
+  one call; this is the slower drip through the same gap.
+- **Severity:** low. Requires host code, not script code, and a host that
+  wants to exhaust memory has easier ways. It is a documentation-versus-code
+  mismatch as much as a defect.
+- **Fix:** a host-wide stack-cap audit deciding, per method, whether the cap
+  applies - which means choosing whether the push methods become fallible, a
+  second public API break after #47. Worth doing deliberately in one pass
+  rather than piecemeal.
 
 ### 54. MSRV / version doc mismatches (D-D8)
 

@@ -347,7 +347,11 @@ impl State {
         self.stack.push(receiver);
         self.stack.push(key);
         let index_key = self.alloc_string("__index");
-        self.pop(2);
+        // Internal invariant, not host input: exactly the two values pushed
+        // above are removed, so this uses the panicking form rather than the
+        // now-fallible public `pop`.
+        self.pop_val();
+        self.pop_val();
         index_key
     }
 

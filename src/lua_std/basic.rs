@@ -45,7 +45,7 @@ fn base_unpack_values(state: &mut State) -> Result<u8> {
 
 pub(crate) fn base_ipairs(state: &mut State) -> Result<u8> {
     state.check_type(1, LuaType::Table)?;
-    state.set_top(1);
+    state.set_top(1)?;
     state.push_rust_fn(base_ipairs_iter);
     // Swap the table and function
     state.push_value(1)?;
@@ -58,10 +58,10 @@ pub(crate) fn base_ipairs(state: &mut State) -> Result<u8> {
 pub(crate) fn base_ipairs_iter(state: &mut State) -> Result<u8> {
     state.check_type(1, LuaType::Table)?;
     state.check_type(2, LuaType::Number)?;
-    state.set_top(2);
+    state.set_top(2)?;
     let old_index = state.to_number(2)?;
     let new_index = old_index + 1.0;
-    state.pop(1); // pop the old number
+    state.pop(1)?; // pop the old number
     state.push_number(new_index);
     state.get_table(1)?;
     // ipairs stops only on nil, not on false
@@ -70,7 +70,7 @@ pub(crate) fn base_ipairs_iter(state: &mut State) -> Result<u8> {
         state.replace(1)?; // Replaces the table with the index
         Ok(2)
     } else {
-        state.set_top(0);
+        state.set_top(0)?;
         state.push_nil();
         Ok(1)
     }
@@ -84,7 +84,7 @@ pub(crate) fn base_next(state: &mut State) -> Result<u8> {
     if state.get_top() < 2 {
         state.push_nil();
     }
-    state.set_top(2);
+    state.set_top(2)?;
     // Stack: [table, key]
     // table_next pops key and pushes (next_key, next_value) or just nil
     let has_more = state.table_next(1)?;
@@ -103,7 +103,7 @@ pub(crate) fn base_next(state: &mut State) -> Result<u8> {
 // pairs(table) - Returns next, table, nil for use with generic for.
 pub(crate) fn base_pairs(state: &mut State) -> Result<u8> {
     state.check_type(1, LuaType::Table)?;
-    state.set_top(1);
+    state.set_top(1)?;
     // Return: next function, table, nil
     state.push_rust_fn(base_next);
     state.push_value(1)?; // table
@@ -154,7 +154,7 @@ pub(crate) fn open_base(state: &mut State) {
     add("type", |state| {
         state.check_any(1)?;
         let typ = state.typ(1);
-        state.set_top(0);
+        state.set_top(0)?;
         state.push_string(typ.as_str());
         Ok(1)
     });
@@ -181,7 +181,7 @@ pub(crate) fn open_base(state: &mut State) {
             }
 
             let num = parse_integer_with_base(state.to_bytes(1)?, base as u32);
-            state.pop(state.get_top() as isize);
+            state.pop(state.get_top() as isize)?;
             if let Some(num) = num {
                 state.push_number(num);
             } else {
@@ -194,13 +194,13 @@ pub(crate) fn open_base(state: &mut State) {
         match typ {
             LuaType::Number => {
                 let num = state.to_number(1)?;
-                state.pop(state.get_top() as isize);
+                state.pop(state.get_top() as isize)?;
                 state.push_number(num);
                 Ok(1)
             }
             LuaType::String => {
                 let parsed = parse_lua_numeral(state.to_bytes(1)?);
-                state.set_top(0);
+                state.set_top(0)?;
                 if let Some(num) = parsed {
                     state.push_number(num);
                 } else {
@@ -209,7 +209,7 @@ pub(crate) fn open_base(state: &mut State) {
                 Ok(1)
             }
             _ => {
-                state.pop(state.get_top() as isize);
+                state.pop(state.get_top() as isize)?;
                 state.push_nil();
                 Ok(1)
             }
@@ -220,10 +220,10 @@ pub(crate) fn open_base(state: &mut State) {
     add("tostring", |state| {
         state.check_any(1)?;
         if state.typ(1) == LuaType::String {
-            state.set_top(1);
+            state.set_top(1)?;
         } else {
             let s = state.to_string_with_meta(1)?;
-            state.set_top(0);
+            state.set_top(0)?;
             state.push_string(s);
         }
         Ok(1)
@@ -239,7 +239,7 @@ pub(crate) fn open_base(state: &mut State) {
     // Returns the metatable of the given table, or nil if it doesn't have one.
     add("getmetatable", |state| {
         state.check_any(1)?;
-        state.set_top(1);
+        state.set_top(1)?;
         raw_metafield(state, 1)?;
         // Stack: [object, metatable_or_nil]
         state.remove(1)?;
@@ -257,13 +257,13 @@ pub(crate) fn open_base(state: &mut State) {
         }
         // Ignore any extra arguments (Lua does) so set_metatable_of below reads
         // the replacement metatable, not a trailing argument.
-        state.set_top(2);
+        state.set_top(2)?;
         if raw_metafield(state, 1)? {
             return Err(state.error(ErrorKind::RuntimeError(
                 "cannot change a protected metatable".to_string(),
             )));
         }
-        state.pop(1);
+        state.pop(1)?;
         // Stack: [table, metatable]
         state.set_metatable_of(1)?;
         // Stack: [table]
@@ -275,7 +275,7 @@ pub(crate) fn open_base(state: &mut State) {
     add("rawget", |state| {
         state.check_type(1, LuaType::Table)?;
         state.check_any(2)?;
-        state.set_top(2);
+        state.set_top(2)?;
         // Stack: [table, key]
         // Use the raw table access (set_table_raw's counterpart)
         state.push_value(2)?; // push key
@@ -293,7 +293,7 @@ pub(crate) fn open_base(state: &mut State) {
         state.check_type(1, LuaType::Table)?;
         state.check_any(2)?;
         state.check_any(3)?;
-        state.set_top(3);
+        state.set_top(3)?;
         // Stack: [table, key, value] - exactly what set_table_raw expects.
         state.set_table_raw(1)?;
         // Stack: [table]
@@ -306,7 +306,7 @@ pub(crate) fn open_base(state: &mut State) {
         state.check_any(1)?;
         state.check_any(2)?;
         let equal = state.raw_equal(1, 2);
-        state.set_top(0);
+        state.set_top(0)?;
         state.push_boolean(equal);
         Ok(1)
     });
@@ -329,7 +329,7 @@ pub(crate) fn open_base(state: &mut State) {
                 return Err(state.error(ErrorKind::ArgError(e)));
             }
         };
-        state.set_top(0);
+        state.set_top(0)?;
         state.push_number(len as f64);
         Ok(1)
     });
@@ -344,7 +344,7 @@ pub(crate) fn open_base(state: &mut State) {
         // Check if first arg is "#"
         if state.typ(1) == LuaType::String && state.to_bytes(1)? == b"#" {
             // Return count of remaining args
-            state.set_top(0);
+            state.set_top(0)?;
             state.push_number((num_args - 1) as f64);
             return Ok(1);
         }
@@ -379,7 +379,7 @@ pub(crate) fn open_base(state: &mut State) {
 
         if index > vararg_count {
             // Index beyond args, return nothing
-            state.set_top(0);
+            state.set_top(0)?;
             return Ok(0);
         }
 
@@ -445,7 +445,7 @@ fn raw_metafield(state: &mut State, idx: isize) -> Result<bool> {
         state.remove(-2)?;
         Ok(true)
     } else {
-        state.pop(2);
+        state.pop(2)?;
         Ok(false)
     }
 }
@@ -467,7 +467,7 @@ fn arg_type_error(
 fn global_env_index(state: &mut State) -> Result<u8> {
     state.check_any(2)?;
     let key = state.to_string(2)?;
-    state.set_top(0);
+    state.set_top(0)?;
     state.get_global(&key);
     Ok(1)
 }
@@ -478,6 +478,6 @@ fn global_env_newindex(state: &mut State) -> Result<u8> {
     let key = state.to_string(2)?;
     state.push_value(3)?;
     state.set_global(&key);
-    state.set_top(0);
+    state.set_top(0)?;
     Ok(0)
 }

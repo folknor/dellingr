@@ -38,7 +38,7 @@ pub(crate) fn open_math(state: &mut State) {
         state.consume_cost(1)?;
         state.check_type(1, LuaType::Number)?;
         let x = state.to_number(1)?;
-        state.set_top(0);
+        state.set_top(0)?;
         state.push_number(x.sin());
         Ok(1)
     });
@@ -48,7 +48,7 @@ pub(crate) fn open_math(state: &mut State) {
         state.consume_cost(1)?;
         state.check_type(1, LuaType::Number)?;
         let x = state.to_number(1)?;
-        state.set_top(0);
+        state.set_top(0)?;
         state.push_number(x.cos());
         Ok(1)
     });
@@ -60,7 +60,7 @@ pub(crate) fn open_math(state: &mut State) {
         state.check_type(2, LuaType::Number)?;
         let y = state.to_number(1)?;
         let x = state.to_number(2)?;
-        state.set_top(0);
+        state.set_top(0)?;
         state.push_number(y.atan2(x));
         Ok(1)
     });
@@ -70,7 +70,7 @@ pub(crate) fn open_math(state: &mut State) {
         state.consume_cost(1)?;
         state.check_type(1, LuaType::Number)?;
         let x = state.to_number(1)?;
-        state.set_top(0);
+        state.set_top(0)?;
         state.push_number(x.sqrt());
         Ok(1)
     });
@@ -80,7 +80,7 @@ pub(crate) fn open_math(state: &mut State) {
         state.consume_cost(1)?;
         state.check_type(1, LuaType::Number)?;
         let x = state.to_number(1)?;
-        state.set_top(0);
+        state.set_top(0)?;
         state.push_number(x.abs());
         Ok(1)
     });
@@ -107,7 +107,7 @@ pub(crate) fn open_math(state: &mut State) {
                 result = v;
             }
         }
-        state.set_top(0);
+        state.set_top(0)?;
         state.push_number(result);
         Ok(1)
     });
@@ -134,7 +134,7 @@ pub(crate) fn open_math(state: &mut State) {
                 result = v;
             }
         }
-        state.set_top(0);
+        state.set_top(0)?;
         state.push_number(result);
         Ok(1)
     });
@@ -144,7 +144,7 @@ pub(crate) fn open_math(state: &mut State) {
         state.consume_cost(1)?;
         state.check_type(1, LuaType::Number)?;
         let x = state.to_number(1)?;
-        state.set_top(0);
+        state.set_top(0)?;
         state.push_number(x.floor());
         Ok(1)
     });
@@ -154,7 +154,7 @@ pub(crate) fn open_math(state: &mut State) {
         state.consume_cost(1)?;
         state.check_type(1, LuaType::Number)?;
         let x = state.to_number(1)?;
-        state.set_top(0);
+        state.set_top(0)?;
         state.push_number(x.ceil());
         Ok(1)
     });
@@ -200,7 +200,7 @@ pub(crate) fn open_math(state: &mut State) {
             }
         };
 
-        state.set_top(0);
+        state.set_top(0)?;
         state.push_number(result);
         Ok(1)
     });
@@ -210,7 +210,7 @@ pub(crate) fn open_math(state: &mut State) {
         state.consume_cost(1)?;
         state.check_type(1, LuaType::Number)?;
         let x = state.to_number(1)?;
-        state.set_top(0);
+        state.set_top(0)?;
         state.push_number(x.tan());
         Ok(1)
     });
@@ -220,7 +220,7 @@ pub(crate) fn open_math(state: &mut State) {
         state.consume_cost(1)?;
         state.check_type(1, LuaType::Number)?;
         let x = state.to_number(1)?;
-        state.set_top(0);
+        state.set_top(0)?;
         state.push_number(x.acos());
         Ok(1)
     });
@@ -230,7 +230,7 @@ pub(crate) fn open_math(state: &mut State) {
         state.consume_cost(1)?;
         state.check_type(1, LuaType::Number)?;
         let x = state.to_number(1)?;
-        state.set_top(0);
+        state.set_top(0)?;
         state.push_number(x.asin());
         Ok(1)
     });
@@ -249,7 +249,7 @@ pub(crate) fn open_math(state: &mut State) {
         } else {
             y.atan()
         };
-        state.set_top(0);
+        state.set_top(0)?;
         state.push_number(result);
         Ok(1)
     });
@@ -259,7 +259,7 @@ pub(crate) fn open_math(state: &mut State) {
         state.consume_cost(1)?;
         state.check_type(1, LuaType::Number)?;
         let x = state.to_number(1)?;
-        state.set_top(0);
+        state.set_top(0)?;
         state.push_number(x.to_degrees());
         Ok(1)
     });
@@ -269,7 +269,7 @@ pub(crate) fn open_math(state: &mut State) {
         state.consume_cost(1)?;
         state.check_type(1, LuaType::Number)?;
         let x = state.to_number(1)?;
-        state.set_top(0);
+        state.set_top(0)?;
         state.push_number(x.to_radians());
         Ok(1)
     });
@@ -279,7 +279,7 @@ pub(crate) fn open_math(state: &mut State) {
         state.consume_cost(1)?;
         state.check_type(1, LuaType::Number)?;
         let x = state.to_number(1)?;
-        state.set_top(0);
+        state.set_top(0)?;
         state.push_number(x.exp());
         Ok(1)
     });
@@ -296,7 +296,7 @@ pub(crate) fn open_math(state: &mut State) {
         } else {
             x.ln()
         };
-        state.set_top(0);
+        state.set_top(0)?;
         state.push_number(result);
         Ok(1)
     });
@@ -308,7 +308,7 @@ pub(crate) fn open_math(state: &mut State) {
         state.check_type(2, LuaType::Number)?;
         let x = state.to_number(1)?;
         let y = state.to_number(2)?;
-        state.set_top(0);
+        state.set_top(0)?;
         state.push_number(x % y);
         Ok(1)
     });
@@ -324,7 +324,7 @@ pub(crate) fn open_math(state: &mut State) {
         } else {
             x - integral
         };
-        state.set_top(0);
+        state.set_top(0)?;
         state.push_number(integral);
         state.push_number(fractional);
         Ok(2)

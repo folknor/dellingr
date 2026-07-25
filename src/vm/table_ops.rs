@@ -135,6 +135,14 @@ impl State {
     #[hotpath::measure]
     pub fn set_table_raw(&mut self, i: isize) -> Result<()> {
         let idx = self.convert_idx(i)?;
+        // Both operands must sit ABOVE the table, so that popping them leaves
+        // the table itself in place for the lookup below. A host calling this
+        // with too few visible values is a mistake, not a VM bug, so it must
+        // produce an error rather than reach the panicking `pop_val` - or pop
+        // the table and then index off the end of the stack.
+        if self.stack.len() < idx + 3 {
+            return Err(self.error(ErrorKind::InvalidStackIndex { index: -2 }));
+        }
         let val = self.pop_val();
         let key = self.pop_val();
 
@@ -218,8 +226,15 @@ impl State {
     /// Pops the metatable from the stack.
     #[hotpath::measure]
     pub fn set_metatable_of(&mut self, table_idx: isize) -> Result<()> {
-        let mt_val = self.pop_val();
+        // Validate before popping, so a bad table index or an empty stack leaves
+        // the stack untouched instead of consuming a value or panicking in
+        // `pop_val`.
         let idx = self.convert_idx(table_idx)?;
+        // The metatable must sit above the table, for the same reason.
+        if self.stack.len() < idx + 2 {
+            return Err(self.error(ErrorKind::InvalidStackIndex { index: -1 }));
+        }
+        let mt_val = self.pop_val();
         let typ = self.stack[idx].typ(&self.heap);
 
         let mt = match mt_val {

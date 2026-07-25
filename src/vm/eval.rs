@@ -381,7 +381,7 @@ impl State {
             }
             Ordering::Greater => {
                 if !is_vararg {
-                    self.pop((num_args - num_params) as isize);
+                    self.pop((num_args - num_params) as isize)?;
                 }
                 // If is_vararg, we already collected the extra args above
             }

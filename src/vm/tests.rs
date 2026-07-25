@@ -518,10 +518,10 @@ fn string_allocations_drive_automatic_gc_threshold() {
 
     // Drop every live string, then verify string-only churn is collected
     // automatically rather than growing without bound.
-    state.set_top(0);
+    state.set_top(0).unwrap();
     for i in 0..1_000 {
         state.push_string(format!("temporary-{i}"));
-        state.pop(1);
+        state.pop(1).unwrap();
     }
 
     assert_eq!(state.object_count(), 0);
@@ -596,7 +596,7 @@ fn callback_pattern_mutable_upvalue() {
         state.get_global("tick");
         state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
         let result = state.to_number(-1).unwrap();
-        state.pop(1);
+        state.pop(1).unwrap();
         assert_eq!(result, expected as f64);
     }
 }

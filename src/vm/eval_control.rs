@@ -266,18 +266,18 @@ impl State {
             }
         };
 
-        let num_ret_actual = self.get_top() as u8;
-        match num_ret_reported.cmp(&num_ret_actual) {
+        let num_ret_actual = self.get_top();
+        let reported = usize::from(num_ret_reported);
+        match reported.cmp(&num_ret_actual) {
             std::cmp::Ordering::Greater => {
-                for _ in num_ret_actual..num_ret_reported {
+                for _ in num_ret_actual..reported {
                     self.push_nil();
                 }
             }
             std::cmp::Ordering::Less => {
                 let slc = &mut self.stack[self.stack_bottom..];
-                slc.rotate_right(num_ret_reported as usize);
-                let new_len =
-                    self.stack.len() - num_ret_actual as usize + num_ret_reported as usize;
+                slc.rotate_right(reported);
+                let new_len = self.stack.len() - num_ret_actual + reported;
                 self.stack.truncate(new_len);
             }
             std::cmp::Ordering::Equal => (),

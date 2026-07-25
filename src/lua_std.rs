@@ -52,9 +52,9 @@ pub(super) fn unpack_values(state: &mut State) -> Result<u8> {
         len
     };
 
-    state.set_top(1);
+    state.set_top(1)?;
     if i > j {
-        state.set_top(0);
+        state.set_top(0)?;
         return Ok(0);
     }
     let span = j

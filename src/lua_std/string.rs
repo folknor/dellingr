@@ -159,7 +159,7 @@ fn append_gsub_replacement(
             let keep_original = state.typ(-1) == LuaType::Nil
                 || (state.typ(-1) == LuaType::Boolean && !state.to_boolean(-1));
             if keep_original {
-                state.pop(2);
+                state.pop(2)?;
                 append_capture_bytes(out, bytes, captures[0]);
             } else {
                 let t = state.typ(-1);
@@ -170,7 +170,7 @@ fn append_gsub_replacement(
                     ))));
                 }
                 let val = state.bytes_coerce(-1)?;
-                state.pop(2);
+                state.pop(2)?;
                 out.extend_from_slice(&val);
             }
         }
@@ -191,7 +191,7 @@ fn append_gsub_replacement(
             let keep_original = state.typ(-1) == LuaType::Nil
                 || (state.typ(-1) == LuaType::Boolean && !state.to_boolean(-1));
             if keep_original {
-                state.pop(1);
+                state.pop(1)?;
                 append_capture_bytes(out, bytes, captures[0]);
             } else {
                 let t = state.typ(-1);
@@ -202,7 +202,7 @@ fn append_gsub_replacement(
                     ))));
                 }
                 let val = state.bytes_coerce(-1)?;
-                state.pop(1);
+                state.pop(1)?;
                 out.extend_from_slice(&val);
             }
         }
@@ -249,7 +249,7 @@ pub(crate) fn open_string(state: &mut State) {
             state.to_bytes(1)?[start..end].to_vec()
         };
 
-        state.set_top(0);
+        state.set_top(0)?;
         state.push_bytes(bytes);
         Ok(1)
     });
@@ -292,7 +292,7 @@ pub(crate) fn open_string(state: &mut State) {
                 }
             };
 
-            state.set_top(0);
+            state.set_top(0)?;
             if let Some((start, end)) = result {
                 state.push_number(start as f64);
                 state.push_number(end as f64);
@@ -305,7 +305,7 @@ pub(crate) fn open_string(state: &mut State) {
             let s = state.to_bytes(1)?.to_vec();
             let pattern = state.to_bytes(2)?.to_vec();
 
-            state.set_top(0);
+            state.set_top(0)?;
 
             if init > s.len() {
                 state.push_nil();
@@ -345,7 +345,7 @@ pub(crate) fn open_string(state: &mut State) {
     add_fn!("len", |state| {
         state.check_type(1, LuaType::String)?;
         let len = state.to_bytes(1)?.len();
-        state.set_top(0);
+        state.set_top(0)?;
         state.push_number(len as f64);
         Ok(1)
     });
@@ -355,7 +355,7 @@ pub(crate) fn open_string(state: &mut State) {
         state.check_type(1, LuaType::String)?;
         let mut s = state.to_bytes(1)?.to_vec();
         s.make_ascii_uppercase();
-        state.set_top(0);
+        state.set_top(0)?;
         state.push_bytes(s);
         Ok(1)
     });
@@ -365,7 +365,7 @@ pub(crate) fn open_string(state: &mut State) {
         state.check_type(1, LuaType::String)?;
         let mut s = state.to_bytes(1)?.to_vec();
         s.make_ascii_lowercase();
-        state.set_top(0);
+        state.set_top(0)?;
         state.push_bytes(s);
         Ok(1)
     });
@@ -375,7 +375,7 @@ pub(crate) fn open_string(state: &mut State) {
         state.check_type(1, LuaType::String)?;
         let mut s = state.to_bytes(1)?.to_vec();
         s.reverse();
-        state.set_top(0);
+        state.set_top(0)?;
         state.push_bytes(s);
         Ok(1)
     });
@@ -392,7 +392,7 @@ pub(crate) fn open_string(state: &mut State) {
             0
         };
 
-        state.set_top(0);
+        state.set_top(0)?;
 
         if init > s.len() {
             state.push_nil();
@@ -430,7 +430,7 @@ pub(crate) fn open_string(state: &mut State) {
         } else {
             pattern
         };
-        state.set_top(0);
+        state.set_top(0)?;
 
         if pattern.is_empty() {
             state.new_table();
@@ -482,7 +482,7 @@ pub(crate) fn open_string(state: &mut State) {
             )));
         }
         if max_replacements == Some(0) {
-            state.set_top(0);
+            state.set_top(0)?;
             state.push_bytes(s);
             state.push_number(0.0);
             return Ok(2);
@@ -502,7 +502,7 @@ pub(crate) fn open_string(state: &mut State) {
                 }
             }
 
-            state.set_top(0);
+            state.set_top(0)?;
             state.push_bytes(result);
             state.push_number(count as f64);
             return Ok(2);
@@ -535,7 +535,7 @@ pub(crate) fn open_string(state: &mut State) {
             }
 
             result.extend_from_slice(&s[pos..]);
-            state.set_top(0);
+            state.set_top(0)?;
             state.push_bytes(result);
             state.push_number(count as f64);
             return Ok(2);
@@ -589,7 +589,7 @@ pub(crate) fn open_string(state: &mut State) {
             result.extend_from_slice(&s[pos..]);
         }
 
-        state.set_top(0);
+        state.set_top(0)?;
         state.push_bytes(result);
         state.push_number(count as f64);
         Ok(2)
@@ -645,15 +645,15 @@ fn gmatch_empty_iter(state: &mut State) -> Result<u8> {
     state.push_string("pos");
     state.get_table(1)?;
     let pos = state.to_number(-1).unwrap_or(0.0) as usize;
-    state.pop(1);
+    state.pop(1)?;
 
     state.push_string("len");
     state.get_table(1)?;
     let len = state.to_number(-1).unwrap_or(0.0) as usize;
-    state.pop(1);
+    state.pop(1)?;
 
     if pos > len {
-        state.set_top(0);
+        state.set_top(0)?;
         state.push_nil();
         return Ok(1);
     }
@@ -661,7 +661,7 @@ fn gmatch_empty_iter(state: &mut State) -> Result<u8> {
     state.push_string("pos");
     state.push_number((pos + 1) as f64);
     state.set_table_raw(1)?;
-    state.set_top(0);
+    state.set_top(0)?;
     state.push_bytes(b"");
     Ok(1)
 }
@@ -672,20 +672,20 @@ fn gmatch_iter(state: &mut State) -> Result<u8> {
     state.push_string("s");
     state.get_table(1)?;
     let s = state.to_bytes(-1)?.to_vec();
-    state.pop(1);
+    state.pop(1)?;
 
     state.push_string("p");
     state.get_table(1)?;
     let pattern = state.to_bytes(-1)?.to_vec();
-    state.pop(1);
+    state.pop(1)?;
 
     state.push_string("pos");
     state.get_table(1)?;
     let pos = state.to_number(-1).unwrap_or(0.0) as usize;
-    state.pop(1);
+    state.pop(1)?;
 
     if pos > s.len() {
-        state.set_top(0);
+        state.set_top(0)?;
         state.push_nil();
         return Ok(1);
     }
@@ -702,10 +702,10 @@ fn gmatch_iter(state: &mut State) -> Result<u8> {
         state.push_number(new_pos as f64);
         state.set_table_raw(1)?;
 
-        state.set_top(0);
+        state.set_top(0)?;
         Ok(push_captures(state, &s, &matcher))
     } else {
-        state.set_top(0);
+        state.set_top(0)?;
         state.push_nil();
         Ok(1)
     }

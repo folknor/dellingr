@@ -40,6 +40,61 @@ fn assert_pattern_runtime_error(code: &str, message: &str) {
     }
 }
 
+fn assert_trace_lines(code: &str, innermost: u32, caller: u32) {
+    let mut state = State::new();
+    state
+        .load_string_named(code, Some("trace".to_string()))
+        .unwrap();
+    let error = state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+        .expect_err("trace program must fail");
+    assert_eq!(error.stack_trace[0].line, innermost);
+    assert_eq!(error.stack_trace[1].line, caller);
+    let rendered = format!("{error}");
+    assert!(rendered.contains(&format!("trace:{innermost}:")));
+    assert!(rendered.contains(&format!("trace:{caller}:")));
+}
+
+#[test]
+fn traceback_call_sites_cover_non_call_dispatch_and_host_calls() {
+    assert_trace_lines(
+        "local function iter()\n  error('boom')\nend\nfor value in iter do end",
+        2,
+        4,
+    );
+    assert_trace_lines(
+        "local value = setmetatable({}, {\n  __index = function()\n    error('boom')\n  end,\n})\nlocal result = value.field",
+        3,
+        6,
+    );
+    assert_trace_lines(
+        "local value = setmetatable({}, {\n  __newindex = function()\n    error('boom')\n  end,\n})\nvalue.field = 1",
+        3,
+        6,
+    );
+    assert_trace_lines(
+        "local value = setmetatable({}, {\n  __len = function()\n    error('boom')\n  end,\n})\nlocal result = #value",
+        3,
+        6,
+    );
+    // Regression coverage only: `table.sort` is entered through OP_CALL, so its
+    // caller line was already refreshed before this loop. The caller line is 4
+    // rather than 2 because a call spanning several lines is attributed to the
+    // line where it closes, not where it begins - reference reports 2 here.
+    // That is finding #63, a compiler line-attribution divergence, not a
+    // traceback-refresh one; pinned here so fixing #63 shows up as a change.
+    assert_trace_lines(
+        "local value = {2, 1}\ntable.sort(value, function()\n  error('boom')\nend)",
+        3,
+        4,
+    );
+    assert_trace_lines(
+        "local value = setmetatable({}, {\n  __tostring = function()\n    error('boom')\n  end,\n})\nlocal result = tostring(value)",
+        3,
+        6,
+    );
+}
+
 #[test]
 fn malformed_pattern_capture_errors_are_runtime_errors() {
     assert_pattern_runtime_error(r#"string.match("aa", "(a)%0")"#, "invalid capture index %0");
@@ -698,7 +753,7 @@ fn table_sort_default_rejects_incomparable_values_without_mutation() {
     state.push_number(1.0);
     state.get_table(1).unwrap();
     assert_eq!(state.to_number(-1).unwrap(), 1.0);
-    state.pop(1);
+    state.pop(1).unwrap();
     state.push_number(2.0);
     state.get_table(1).unwrap();
     assert_eq!(state.to_string(-1).unwrap(), "a");
@@ -918,9 +973,9 @@ fn table_move_rejects_overflow_ranges_before_mutating() {
                 state.to_number(-1).expect("table value is numeric"),
                 expected
             );
-            state.pop(1);
+            state.pop(1).unwrap();
         }
-        state.pop(1);
+        state.pop(1).unwrap();
     }
 }
 
@@ -953,7 +1008,7 @@ fn table_after_budgeted_move(budget: i64) -> (dellingr::error::Error, Vec<f64>) 
         state.push_number(index as f64);
         state.get_table(-2).expect("table read succeeds");
         values.push(state.to_number(-1).expect("table value is numeric"));
-        state.pop(1);
+        state.pop(1).unwrap();
     }
     (error, values)
 }
@@ -1185,13 +1240,13 @@ fn global_lookup_cache_respects_restricted_env() {
     state.get_global("read_x");
     state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
     assert_eq!(state.to_number(-1).unwrap(), 1.0);
-    state.pop(1);
+    state.pop(1).unwrap();
 
     let restricted = state.with_restricted_env(&["read_x"], |state| {
         state.get_global("read_x");
         state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
         let result = state.to_number(-1).unwrap();
-        state.pop(1);
+        state.pop(1).unwrap();
         result
     });
     assert_eq!(restricted, 2.0);
@@ -1224,10 +1279,10 @@ fn restricted_env_restored_after_panic() {
     // Environment restored: a non-whitelisted global is available again.
     state.get_global("math");
     assert_eq!(state.typ(-1), LuaType::Table);
-    state.pop(1);
+    state.pop(1).unwrap();
     state.get_global("saved_object");
     assert_eq!(state.typ(-1), LuaType::Table);
-    state.pop(1);
+    state.pop(1).unwrap();
 }
 
 #[test]

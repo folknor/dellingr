@@ -79,6 +79,15 @@ impl Frame {
         self.bytecode.line_info.get(idx).copied().unwrap_or(0)
     }
 
+    /// Record the instruction currently dispatching a call into the active
+    /// call-stack entry, so outer traceback frames name the right call site.
+    #[inline]
+    fn record_call_site(&self, state: &mut State) {
+        if let Some(call_info) = state.call_stack.last_mut() {
+            call_info.ip = self.ip;
+        }
+    }
+
     /// Create a StackFrame for error reporting.
     pub(super) fn to_stack_frame(&self) -> StackFrame {
         StackFrame {
@@ -213,10 +222,7 @@ impl Frame {
                 // Functions (calls and returns are free)
                 Instr::OP_CLOSURE => state.instr_closure(self, inst.a()),
                 Instr::OP_CALL => {
-                    // Update current CallInfo with the call site (ip-1 since we already advanced)
-                    if let Some(call_info) = state.call_stack.last_mut() {
-                        call_info.ip = self.ip;
-                    }
+                    self.record_call_site(state);
                     Self::flush_local_cost(state, &mut local_cost)?;
                     state.call(ArgCount::from_u8(inst.a()), RetCount::from_u8(inst.b()))?;
                 }
@@ -293,22 +299,30 @@ impl Frame {
                 // Generic `for` loops - iteration is free
                 Instr::OP_TFOR_PREP => state.instr_tfor_prep(inst.a()),
                 Instr::OP_TFOR_CALL => {
+                    self.record_call_site(state);
                     Self::flush_local_cost(state, &mut local_cost)?;
                     state.instr_tfor_call(inst.a(), inst.b())?;
                 }
                 Instr::OP_TFOR_LOOP => state.instr_tfor_loop(self, inst.a(), inst.sbx())?,
 
                 // Length operator is free
-                Instr::OP_LENGTH => state.instr_length(&mut local_cost)?,
+                Instr::OP_LENGTH => {
+                    self.record_call_site(state);
+                    state.instr_length(&mut local_cost)?;
+                }
 
                 // Logical not is free
                 Instr::OP_NOT => state.instr_not(),
 
                 // Table reads are free
                 Instr::OP_GET_FIELD => {
+                    self.record_call_site(state);
                     state.instr_get_field(self, inst.a(), inst.bx(), &mut local_cost)?;
                 }
-                Instr::OP_GET_TABLE => state.instr_get_table(&mut local_cost)?,
+                Instr::OP_GET_TABLE => {
+                    self.record_call_site(state);
+                    state.instr_get_table(&mut local_cost)?;
+                }
 
                 // String concatenation is free. Operand A is the chain
                 // length (>= 2). Chained `..` collapses into one OP_CONCAT
@@ -383,10 +397,12 @@ impl Frame {
                     state.instr_init_index(inst.a())?;
                 }
                 Instr::OP_SET_FIELD => {
+                    self.record_call_site(state);
                     add_cost!(state, local_cost, 1);
                     state.instr_set_field(self, inst.a(), inst.b(), inst.c(), &mut local_cost)?;
                 }
                 Instr::OP_SET_TABLE => {
+                    self.record_call_site(state);
                     add_cost!(state, local_cost, 1);
                     state.instr_set_table(inst.a(), &mut local_cost)?;
                 }

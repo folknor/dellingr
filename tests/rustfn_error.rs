@@ -56,16 +56,82 @@ fn set_top_accepts_negative_indices() {
     state.push_number(2.0);
     state.push_number(3.0);
 
-    state.set_top(-1);
+    state.set_top(-1).unwrap();
     assert_eq!(state.get_top(), 3);
     assert_eq!(state.to_number(-1).unwrap(), 3.0);
 
-    state.set_top(-2);
+    state.set_top(-2).unwrap();
     assert_eq!(state.get_top(), 2);
     assert_eq!(state.to_number(-1).unwrap(), 2.0);
 
-    state.set_top(-3);
+    state.set_top(-3).unwrap();
     assert_eq!(state.get_top(), 0);
+}
+
+#[test]
+fn fallible_stack_operations_leave_the_stack_unchanged_on_error() {
+    let mut state = State::new();
+    state.push_number(1.0);
+    state.push_number(2.0);
+    let top = state.get_top();
+
+    for result in [
+        state.set_top(isize::MAX),
+        state.set_top(-4),
+        state.pop(3),
+        state.pop(-1),
+    ] {
+        assert!(result.is_err());
+        assert_eq!(state.get_top(), top);
+        assert_eq!(state.to_number(1).unwrap(), 1.0);
+        assert_eq!(state.to_number(2).unwrap(), 2.0);
+    }
+}
+
+#[test]
+fn table_mutators_reject_missing_operands_without_panicking() {
+    // These pop their operands, so a host calling them with too few visible
+    // values must get an error rather than reach the panicking `pop_val`.
+    let mut state = State::new();
+    state.new_table();
+    // set_table_raw needs a key and a value; only one is present.
+    state.push_number(1.0);
+    let top = state.get_top();
+    assert!(state.set_table_raw(1).is_err());
+    assert_eq!(state.get_top(), top);
+
+    // set_metatable_of needs a metatable; the stack is empty above the table.
+    let mut state = State::new();
+    state.new_table();
+    let top = state.get_top();
+    assert!(state.set_metatable_of(1).is_err());
+    assert_eq!(state.get_top(), top);
+}
+
+fn iterator_with_256_visible_values(state: &mut State) -> dellingr::Result<u8> {
+    for _ in 0..253 {
+        state.push_nil();
+    }
+    state.push_number(42.0);
+    Ok(1)
+}
+
+#[test]
+fn generic_for_rust_iterator_keeps_its_topmost_reported_result() {
+    let mut state = State::new();
+    state.push_rust_fn(iterator_with_256_visible_values);
+    state.set_global("overfull_iter");
+    state
+        .load_string("for value in overfull_iter do return value end")
+        .unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
+    assert_eq!(state.get_top(), 1);
+    assert_eq!(state.to_number(1).unwrap(), 42.0);
+
+    state.pop(1).unwrap();
+    state.load_string("return 7").unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
+    assert_eq!(state.to_number(1).unwrap(), 7.0);
 }
 
 /// A zero-argument Rust function error should restore the caller's visible stack.
@@ -316,7 +382,7 @@ fn rustfn_called_inside_dynamic_arg_sees_only_its_arguments() {
         assert_eq!(state.to_string(2).unwrap(), "b");
         assert_eq!(state.to_string(3).unwrap(), "c");
         assert_eq!(state.typ(3), dellingr::LuaType::String);
-        state.set_top(0);
+        state.set_top(0).unwrap();
         state.push_number(top);
         Ok(1)
     });
@@ -354,12 +420,12 @@ fn rustfn_table_field_called_inside_dynamic_arg_sees_only_its_arguments() {
         assert_eq!(state.to_string(1).unwrap(), "hello");
         assert_eq!(state.to_string(2).unwrap(), "l");
         assert_eq!(state.to_string(3).unwrap(), "L");
-        state.set_top(0);
+        state.set_top(0).unwrap();
         state.push_string("ok");
         Ok(1)
     });
     state.set_table_raw(-3).unwrap();
-    state.pop(1);
+    state.pop(1).unwrap();
 
     state
         .load_string(

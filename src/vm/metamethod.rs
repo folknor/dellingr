@@ -106,7 +106,7 @@ impl State {
                     // Stack: [... __index_table, result]
                     // Remove the __index table, keep the result
                     let val = self.pop_val();
-                    self.pop(1);
+                    self.pop(1)?;
                     self.stack.push(val);
                     Ok(())
                 } else if is_function {
@@ -172,7 +172,7 @@ impl State {
                 self.stack.push(key);
                 self.stack.push(val);
                 let newindex_key = self.alloc_string("__newindex");
-                self.pop(2); // Discard protections
+                self.pop(2)?; // Discard protections
 
                 let newindex_handler = self
                     .heap
@@ -241,7 +241,7 @@ impl State {
                     self.stack.push(Val::Obj(ptr));
                     let new_idx = self.stack.len() - 1;
                     self.set_table_with_key(new_idx, key, val, local_cost)?;
-                    self.pop(1); // Remove the __newindex table
+                    self.pop(1)?; // Remove the __newindex table
                     Ok(())
                 } else if is_function {
                     // __newindex is a function: call it with (table, key, value)

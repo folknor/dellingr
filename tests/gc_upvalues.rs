@@ -56,7 +56,7 @@ fn active_frame_string_literal_survives_explicit_gc() {
     state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
 
     assert_eq!(state.to_string(-1).unwrap(), "literal after gc");
-    state.pop(1);
+    state.pop(1).unwrap();
 }
 
 #[test]
@@ -104,7 +104,7 @@ fn open_upvalue_survives_gc_while_defining_frame_is_active() {
     state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
 
     assert_eq!(state.to_number(-1).unwrap(), 55.0);
-    state.pop(1);
+    state.pop(1).unwrap();
 }
 
 #[test]
@@ -130,7 +130,7 @@ fn executing_returned_closure_roots_closed_upvalues_during_auto_gc() {
     state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
 
     assert_eq!(state.to_number(-1).unwrap(), 42.0);
-    state.pop(1);
+    state.pop(1).unwrap();
 }
 
 #[test]
@@ -158,7 +158,7 @@ fn temporary_callable_table_survives_gc_during_call_metamethod_lookup() {
     state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
 
     assert_eq!(state.to_number(-1).unwrap(), 73.0);
-    state.pop(1);
+    state.pop(1).unwrap();
 }
 
 /// Basic test: closure captures a table, table survives GC.
@@ -190,7 +190,7 @@ fn closure_captured_table_survives_gc() {
 
     let result = state.to_number(-1).unwrap();
     assert_eq!(result, 42.0, "Captured table value should survive GC");
-    state.pop(1);
+    state.pop(1).unwrap();
 }
 
 /// Test multiple GC cycles with closure holding table.
@@ -227,7 +227,7 @@ fn closure_survives_multiple_gc_cycles() {
             result, expected as f64,
             "Counter should be {expected} after GC cycle"
         );
-        state.pop(1);
+        state.pop(1).unwrap();
     }
 }
 
@@ -263,7 +263,7 @@ fn nested_closures_survive_gc() {
 
     let result = state.to_number(-1).unwrap();
     assert_eq!(result, 30.0, "Nested closure should access both upvalues");
-    state.pop(1);
+    state.pop(1).unwrap();
 }
 
 /// Test metatable stored as upvalue (the original bug case).
@@ -307,7 +307,7 @@ fn metatable_as_upvalue_survives_gc() {
 
     let result = state.to_number(-1).unwrap();
     assert_eq!(result, 99.0, "Metatable method should work after GC");
-    state.pop(1);
+    state.pop(1).unwrap();
 }
 
 /// Test that unreferenced closures ARE collected.
@@ -382,7 +382,7 @@ fn closure_with_mixed_upvalues() {
     assert_eq!(state.to_string(-3).unwrap(), "hello");
     assert_eq!(state.to_number(-2).unwrap(), 1.0);
     assert_eq!(state.to_string(-1).unwrap(), "inner");
-    state.pop(4);
+    state.pop(4).unwrap();
 }
 
 /// Test closure stored in a table survives GC.
@@ -419,7 +419,7 @@ fn closure_in_table_survives_gc() {
     state.push_string("answer");
     state.call(ArgCount::Fixed(1), RetCount::Fixed(1)).unwrap();
     assert_eq!(state.to_number(-1).unwrap(), 42.0);
-    state.pop(1);
+    state.pop(1).unwrap();
 
     state.gc_collect();
 
@@ -429,7 +429,7 @@ fn closure_in_table_survives_gc() {
     state.call(ArgCount::Fixed(1), RetCount::Fixed(1)).unwrap();
     let pi = state.to_number(-1).unwrap();
     assert!((pi - std::f64::consts::PI).abs() < 0.0001);
-    state.pop(1);
+    state.pop(1).unwrap();
 }
 
 /// Stress test: many closures with shared upvalue.
@@ -468,7 +468,7 @@ fn many_closures_shared_upvalue() {
             result, i as f64,
             "Shared upvalue should be incremented to {i}"
         );
-        state.pop(1);
+        state.pop(1).unwrap();
 
         // GC between calls
         state.gc_collect();
@@ -480,7 +480,7 @@ fn run_number(source: &str) -> f64 {
     state.load_string(source).unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
     let result = state.to_number(-1).unwrap();
-    state.pop(1);
+    state.pop(1).unwrap();
     result
 }
 

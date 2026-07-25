@@ -149,7 +149,7 @@ fn tombstones_are_omitted_from_snapshots() {
         );
         loaded.get_global("order");
         assert_eq!(loaded.to_string(-1).unwrap(), expected_order);
-        loaded.pop(1);
+        loaded.pop(1).unwrap();
     }
 }
 
@@ -290,7 +290,7 @@ fn gmatch_closure_survives_save_load() {
         .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
     assert_eq!(state.to_string(-1).unwrap(), "a");
-    state.pop(1);
+    state.pop(1).unwrap();
 
     let save = state.save_state().unwrap();
     let mut loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), |_| {}).unwrap();
@@ -346,7 +346,7 @@ fn empty_state_round_trip_stays_empty() {
     ] {
         loaded.get_global(name);
         assert_eq!(loaded.typ(-1), LuaType::Nil, "{name}");
-        loaded.pop(1);
+        loaded.pop(1).unwrap();
     }
 }
 
@@ -384,7 +384,7 @@ fn dynamic_table_constructor_round_trips_after_completion() {
     run(&mut loaded, "a = #t; b = t[1] + t[2] + t[3] + t[4]");
     loaded.get_global("a");
     assert_eq!(loaded.to_number(-1).unwrap(), 4.0);
-    loaded.pop(1);
+    loaded.pop(1).unwrap();
     loaded.get_global("b");
     assert_eq!(loaded.to_number(-1).unwrap(), 11.0);
 }
@@ -469,7 +469,7 @@ fn configured_budget_remains_enforced_after_load() {
             loaded.to_number(-1).expect("table value is numeric"),
             expected
         );
-        loaded.pop(1);
+        loaded.pop(1).unwrap();
     }
 }
 
@@ -652,7 +652,7 @@ fn setup_anchor_survives_load_final_gc() {
         .push_anchor(setup_anchor.expect("setup produced anchor"))
         .unwrap();
     assert_eq!(loaded.to_number(-1).unwrap(), 42.0);
-    loaded.pop(1);
+    loaded.pop(1).unwrap();
 }
 
 #[test]
@@ -786,14 +786,14 @@ fn reload(state: &State) -> State {
 fn global_num(state: &mut State, name: &str) -> f64 {
     state.get_global(name);
     let n = state.to_number(-1).unwrap();
-    state.pop(1);
+    state.pop(1).unwrap();
     n
 }
 
 fn global_str(state: &mut State, name: &str) -> String {
     state.get_global(name);
     let s = state.to_string_with_meta(-1).unwrap();
-    state.pop(1);
+    state.pop(1).unwrap();
     s
 }
 
@@ -976,7 +976,7 @@ fn binary_string_literal_round_trips_through_save() {
     run(&mut loaded, "result = f()");
     loaded.get_global("result");
     assert_eq!(loaded.to_bytes(-1).unwrap(), [255]);
-    loaded.pop(1);
+    loaded.pop(1).unwrap();
 }
 
 #[test]
@@ -1019,15 +1019,15 @@ fn non_utf8_and_edge_values_round_trip() {
 
     loaded.get_global("binval");
     assert_eq!(loaded.to_bytes(-1).unwrap(), [0u8, 159, 146, 150, 255]);
-    loaded.pop(1);
+    loaded.pop(1).unwrap();
 
     loaded.get_global("negzero");
     assert_eq!(loaded.to_number(-1).unwrap().to_bits(), (-0.0f64).to_bits());
-    loaded.pop(1);
+    loaded.pop(1).unwrap();
 
     loaded.get_global("nan");
     assert!(loaded.to_number(-1).unwrap().is_nan());
-    loaded.pop(1);
+    loaded.pop(1).unwrap();
 
     loaded.get_global("bt");
     loaded.push_bytes([0xff, 0x00, 0xfe]);

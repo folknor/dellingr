@@ -59,7 +59,7 @@ fn string_method_cache_survives_gc_after_string_rebind() {
     // Warm the string-method IC at the call site inside `warm`.
     state.get_global("warm");
     state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
-    state.pop(1);
+    state.pop(1).unwrap();
 
     // Rebind `string` in Lua and drop the local reference.
     state.get_global("rebind_and_drop");
@@ -95,7 +95,7 @@ fn string_method_cache_blocked_by_with_restricted_env() {
     state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
     let warm = state.to_string(-1).unwrap();
     assert_eq!(warm, "HI");
-    state.pop(1);
+    state.pop(1).unwrap();
 
     // Inside the sandbox, whitelist the entry-point function but NOT
     // `string`. With the fix, the IC's globals_version mismatch forces

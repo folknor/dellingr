@@ -168,7 +168,7 @@ fn anchor_does_not_pop_on_nil_error() {
     ));
     // Error path leaves the stack untouched, matching anchor_at.
     assert_eq!(state.get_top(), 2);
-    state.pop(1);
+    state.pop(1).unwrap();
     assert_eq!(state.to_number(-1).unwrap(), 7.0);
 }
 
@@ -262,7 +262,7 @@ fn anchor_invisible_to_with_restricted_env() {
     state.with_restricted_env(&[], |state| {
         state.push_anchor(a).unwrap();
         assert_eq!(state.to_number(-1).unwrap(), 1234.0);
-        state.pop(1);
+        state.pop(1).unwrap();
     });
 
     // And still valid outside.
@@ -308,14 +308,14 @@ fn determinism_two_states_same_sequence_same_output() {
             .call_anchor(f, ArgCount::Fixed(1), RetCount::Fixed(1))
             .unwrap();
         let r1 = state.to_number(-1).unwrap();
-        state.pop(1);
+        state.pop(1).unwrap();
 
         state.push_number(5.0);
         state
             .call_anchor(g, ArgCount::Fixed(1), RetCount::Fixed(1))
             .unwrap();
         let r2 = state.to_number(-1).unwrap();
-        state.pop(1);
+        state.pop(1).unwrap();
 
         assert!(state.release_anchor(f));
         assert!(state.release_anchor(g));
@@ -327,7 +327,7 @@ fn determinism_two_states_same_sequence_same_output() {
             .call_anchor(h, ArgCount::Fixed(1), RetCount::Fixed(1))
             .unwrap();
         let r3 = state.to_number(-1).unwrap();
-        state.pop(1);
+        state.pop(1).unwrap();
 
         format!("{r1},{r2},{r3}")
     }

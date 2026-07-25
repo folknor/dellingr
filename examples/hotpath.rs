@@ -72,7 +72,9 @@ fn main() {
     // Phase 3: cold call - first invocation of `_bench`.
     state.get_global("_bench");
     if state.typ(-1) == LuaType::Nil {
-        state.pop(1);
+        state
+            .pop(1)
+            .expect("_bench function lookup leaves one stack value");
         let final_heap_bytes = state.heap_size();
         let final_object_count = state.object_count();
 

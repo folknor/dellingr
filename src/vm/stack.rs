@@ -21,38 +21,59 @@ impl State {
     /// filled with `nil`. If `index` is 0, then all visible stack elements are
     /// removed. Negative indices are relative to the current top: `-1` keeps the
     /// top unchanged, `-2` pops one value, and so on.
-    pub fn set_top(&mut self, i: isize) {
+    ///
+    /// Returns [`ErrorKind::InvalidStackIndex`] for an index below the stack
+    /// bottom, or [`ErrorKind::StackOverflow`] if growth exceeds the stack cap.
+    pub fn set_top(&mut self, i: isize) -> Result<()> {
         let old_top = self.get_top();
         let new_top = match i.cmp(&0) {
+            // Compute in signed space. `old_top + i` may be negative while
+            // `old_top + i + 1` is still a valid top - set_top(-3) with two
+            // values means "empty" - so an unsigned intermediate would reject
+            // legal calls.
             Ordering::Less => {
-                let target = old_top as isize + i + 1;
-                assert!(target >= 0, "Tried to set stack top below bottom ({i})");
-                target as usize
+                let top = isize::try_from(old_top)
+                    .map_err(|_| self.error(ErrorKind::InvalidStackIndex { index: i }))?;
+                top.checked_add(i)
+                    .and_then(|target| target.checked_add(1))
+                    .filter(|target| *target >= 0)
+                    .map(|target| target as usize)
+                    .ok_or_else(|| self.error(ErrorKind::InvalidStackIndex { index: i }))?
             }
             Ordering::Equal => 0,
-            Ordering::Greater => i as usize,
+            Ordering::Greater => usize::try_from(i)
+                .map_err(|_| self.error(ErrorKind::InvalidStackIndex { index: i }))?,
         };
 
         match new_top.cmp(&old_top) {
-            Ordering::Less => self.pop((old_top - new_top) as isize),
+            Ordering::Less => self.pop((old_top - new_top) as isize)?,
             Ordering::Equal => (),
             Ordering::Greater => {
+                self.check_stack_space(new_top - old_top)?;
                 for _ in old_top..new_top {
                     self.push_nil();
                 }
             }
         }
+        Ok(())
     }
 
     /// Pops `n` elements from the stack.
-    pub fn pop(&mut self, n: isize) {
-        assert!(
-            n <= self.get_top() as isize,
-            "Tried to pop too many elements ({n})"
-        );
+    ///
+    /// Returns [`ErrorKind::InvalidStackIndex`] when `n` is negative or exceeds
+    /// the visible stack size.
+    pub fn pop(&mut self, n: isize) -> Result<()> {
+        let n = usize::try_from(n)
+            .map_err(|_| self.error(ErrorKind::InvalidStackIndex { index: n }))?;
+        if n > self.get_top() {
+            return Err(self.error(ErrorKind::InvalidStackIndex {
+                index: isize::try_from(n).unwrap_or(isize::MAX),
+            }));
+        }
         for _ in 0..n {
             self.pop_val();
         }
+        Ok(())
     }
 
     /// Pop a value from the stack (internal helper).

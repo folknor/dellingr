@@ -106,7 +106,7 @@ fn parameter_limit_includes_method_self() {
         1.0
     );
     assert_eq!(state.typ(-1), dellingr::LuaType::Nil);
-    state.pop(2);
+    state.pop(2).unwrap();
 
     let too_many = (0..256)
         .map(|i| format!("p{i}"))

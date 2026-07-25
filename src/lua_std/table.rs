@@ -54,7 +54,7 @@ pub(crate) fn open_table(state: &mut State) {
             )));
         }
 
-        state.set_top(0);
+        state.set_top(0)?;
         Ok(0)
     });
 
@@ -81,7 +81,7 @@ pub(crate) fn open_table(state: &mut State) {
             len
         };
 
-        state.set_top(1);
+        state.set_top(1)?;
         // Stack: [t]
         state.table_remove_at(1, pos)?;
         // Stack: [t, removed_value]
@@ -99,7 +99,7 @@ pub(crate) fn open_table(state: &mut State) {
         // Cost is charged inside table_sort BEFORE the comparator runs / the
         // table is mutated (L18), so an exhausted budget blocks the sort.
         state.table_sort(1, has_comp)?;
-        state.set_top(0);
+        state.set_top(0)?;
         Ok(0)
     });
 
@@ -166,10 +166,10 @@ pub(crate) fn open_table(state: &mut State) {
             len
         };
 
-        state.set_top(1);
+        state.set_top(1)?;
 
         if i > j {
-            state.set_top(0);
+            state.set_top(0)?;
             state.push_bytes(b"");
             return Ok(1);
         }
@@ -188,10 +188,10 @@ pub(crate) fn open_table(state: &mut State) {
                 }
                 _ => return Err(state.error(ErrorKind::TypeError(TypeError::Concat(typ)))),
             }
-            state.pop(1);
+            state.pop(1)?;
         }
 
-        state.set_top(0);
+        state.set_top(0)?;
         state.push_bytes(result);
         Ok(1)
     });
@@ -301,7 +301,7 @@ pub(crate) fn open_table(state: &mut State) {
         state.push_value(dest_idx)?;
         // Now move it to position 1 and clear rest
         state.replace(1)?;
-        state.set_top(1);
+        state.set_top(1)?;
         Ok(1)
     });
 
