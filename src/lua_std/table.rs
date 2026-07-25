@@ -249,19 +249,18 @@ pub(crate) fn open_table(state: &mut State) {
         Ok(1)
     });
 
-    // table.move(a1, f, e, t [, a2]) - costs 1
+    // table.move(a1, f, e, t [, a2]) - costs one per copied element
     // Moves elements from table a1 to table a2 (or a1 if not given).
     // Copies a1[f..e] to a2[t..t+(e-f)]. Returns a2.
     add_fn!("move", |state| {
-        state.consume_cost(1)?;
         state.check_type(1, LuaType::Table)?;
         state.check_type(2, LuaType::Number)?;
         state.check_type(3, LuaType::Number)?;
         state.check_type(4, LuaType::Number)?;
 
-        let f = state.to_number(2)? as isize;
-        let e = state.to_number(3)? as isize;
-        let t = state.to_number(4)? as isize;
+        let f = table_position(state, 2, "move")?;
+        let e = table_position(state, 3, "move")?;
+        let t = table_position(state, 4, "move")?;
 
         // Determine destination table (a2 or a1)
         let has_a2 = state.get_top() >= 5 && state.typ(5) != LuaType::Nil;
@@ -270,11 +269,67 @@ pub(crate) fn open_table(state: &mut State) {
         }
         let dest_idx: isize = if has_a2 { 5 } else { 1 };
 
+        let count = if f <= e {
+            // These are Lua's reference guards. Besides matching its error
+            // behavior, they prove the count and destination key arithmetic
+            // below cannot overflow.
+            if !(f > 0 || e < i64::MAX + f) {
+                return Err(
+                    state.error(ErrorKind::RuntimeError("too many elements to move".into()))
+                );
+            }
+            let count = e - f + 1;
+            if t > i64::MAX - count + 1 {
+                return Err(state.error(ErrorKind::RuntimeError("destination wrap around".into())));
+            }
+            count
+        } else {
+            0
+        };
+
         // Copy elements (if any). Same-table moves that shift the range right
         // must copy backwards so earlier writes do not clobber later reads.
-        if f <= e {
-            let count = e - f + 1;
-            let same_table = state.raw_equal(1, dest_idx);
+        let same_table = count > 0 && state.raw_equal(1, dest_idx);
+        if count == 0 {
+            if !state.cost_meter().consume(1) {
+                return Err(state.budget_exceeded_error());
+            }
+        } else if state.cost_budget_configured {
+            // A configured budget charges immediately before each lookup/write
+            // pair, so exhaustion leaves a deterministic partial mutation.
+            if same_table && t > f {
+                for i in (0..count).rev() {
+                    if !state.cost_meter().consume(1) {
+                        return Err(state.budget_exceeded_error());
+                    }
+                    let src_key = (f + i) as f64;
+                    let dest_key = (t + i) as f64;
+
+                    state.push_number(dest_key);
+                    state.push_number(src_key);
+                    state.get_table(1)?;
+                    state.set_table_raw(dest_idx)?;
+                }
+            } else {
+                for i in 0..count {
+                    if !state.cost_meter().consume(1) {
+                        return Err(state.budget_exceeded_error());
+                    }
+                    let src_key = (f + i) as f64;
+                    let dest_key = (t + i) as f64;
+
+                    state.push_number(dest_key);
+                    state.push_number(src_key);
+                    state.get_table(1)?;
+                    state.set_table_raw(dest_idx)?;
+                }
+            }
+        } else {
+            // Without a configured limit, reserve the complete deterministic
+            // cost once and keep the hot copy loops free of budget checks.
+            if !state.cost_meter().consume(count as u64) {
+                return Err(state.budget_exceeded_error());
+            }
             if same_table && t > f {
                 for i in (0..count).rev() {
                     let src_key = (f + i) as f64;

@@ -430,6 +430,49 @@ fn rng_and_cost_continue_after_load() {
 }
 
 #[test]
+fn configured_budget_remains_enforced_after_load() {
+    let mut original = State::new();
+    run(&mut original, "t = {1, 2, 3, 4, 5}");
+    original.set_cost_budget(2);
+    let save = original.save_state().expect("state saves");
+
+    let mut loaded =
+        State::load_state(&save.bytes, Box::new(DefaultCallbacks), |_| {}).expect("state loads");
+    assert_eq!(loaded.cost_remaining(), 2);
+
+    // Invoke the native function directly so the saved two units are consumed
+    // by table.move itself rather than by bytecode dispatch before the call.
+    loaded.get_global("table");
+    loaded.push_bytes("move");
+    loaded.get_table(-2).expect("table.move lookup succeeds");
+    loaded.remove(-2).expect("table table is removed");
+    loaded.get_global("t");
+    loaded.push_number(1.0);
+    loaded.push_number(5.0);
+    loaded.push_number(2.0);
+    let error = loaded
+        .call(ArgCount::Fixed(4), RetCount::Fixed(1))
+        .expect_err("restored configured budget stops table.move");
+
+    assert!(matches!(
+        error.kind,
+        dellingr::error::ErrorKind::BudgetExceeded { .. }
+    ));
+    assert_eq!(loaded.cost_remaining(), 0);
+
+    loaded.get_global("t");
+    for (index, expected) in [1.0, 2.0, 3.0, 4.0, 4.0, 5.0].into_iter().enumerate() {
+        loaded.push_number((index + 1) as f64);
+        loaded.get_table(-2).expect("table read succeeds");
+        assert_eq!(
+            loaded.to_number(-1).expect("table value is numeric"),
+            expected
+        );
+        loaded.pop(1);
+    }
+}
+
+#[test]
 fn unregistered_reachable_rust_function_fails_save() {
     fn host_fn(_state: &mut State) -> dellingr::Result<u8> {
         Ok(0)

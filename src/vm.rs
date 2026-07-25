@@ -33,6 +33,7 @@ use super::Result;
 use super::compiler;
 use super::compiler::Bytecode;
 use super::compiler::RuntimeCaches;
+use super::cost_meter::CostMeter;
 use super::error::Error;
 use super::error::ErrorKind;
 use super::error::StackFrame;
@@ -146,6 +147,8 @@ pub struct State {
     pub(super) cost_remaining: i64,
     /// The original cost budget (for error reporting).
     pub(super) cost_budget: i64,
+    /// Whether the host explicitly configured a cost budget.
+    pub(super) cost_budget_configured: bool,
     /// Total cost consumed (for reporting).
     pub(super) cost_used: u64,
     /// Current metamethod call depth (for __index/__newindex chains).
@@ -284,6 +287,7 @@ impl State {
             table_constructor_bases: Vec::new(),
             cost_remaining: i64::MAX,
             cost_budget: i64::MAX,
+            cost_budget_configured: false,
             cost_used: 0,
             metamethod_depth: 0,
             call_depth: 0,
@@ -320,6 +324,7 @@ impl State {
     pub fn set_cost_budget(&mut self, budget: i64) {
         self.cost_budget = budget;
         self.cost_remaining = budget;
+        self.cost_budget_configured = true;
         self.cost_used = 0;
     }
 
@@ -350,6 +355,22 @@ impl State {
         self.cost_remaining = self.cost_remaining.saturating_sub_unsigned(cost);
         self.cost_used = self.cost_used.saturating_add(cost);
         Ok(())
+    }
+
+    /// Returns a meter for runtime work that does not need VM state.
+    pub(crate) fn cost_meter(&mut self) -> CostMeter<'_> {
+        if self.cost_budget_configured {
+            CostMeter::finite_budget(&mut self.cost_remaining, &mut self.cost_used)
+        } else {
+            CostMeter::count_only(&mut self.cost_used)
+        }
+    }
+
+    pub(crate) fn budget_exceeded_error(&self) -> Error {
+        self.error(ErrorKind::BudgetExceeded {
+            used: self.cost_used,
+            budget: self.cost_budget,
+        })
     }
 
     // ========================================================================

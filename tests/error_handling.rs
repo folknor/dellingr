@@ -626,6 +626,159 @@ fn table_move_explicit_same_destination_copies_backwards() {
 }
 
 #[test]
+fn table_move_overlapping_same_table_copies_forwards() {
+    let val = run_number(
+        r#"
+        local t = {1, 2, 3, 4, 5}
+        table.move(t, 2, 4, 1)
+        return t[1] * 10000 + t[2] * 1000 + t[3] * 100 + t[4] * 10 + t[5]
+    "#,
+    );
+    assert_eq!(val, 23445.0);
+}
+
+#[test]
+fn table_move_costs_empty_and_each_moved_element() {
+    for (code, expected_cost) in [
+        ("return table.move({}, 1, 0, 1)", 2),
+        ("return table.move({}, 1, 1, 1)", 2),
+        ("return table.move({}, 1, 3, 1)", 4),
+    ] {
+        let mut state = State::new();
+        state
+            .load_string(code)
+            .expect("table.move program compiles");
+        state
+            .call(ArgCount::Fixed(0), RetCount::Fixed(1))
+            .expect("table.move program runs");
+        assert_eq!(state.cost_used(), expected_cost, "{code}");
+    }
+
+    let mut state = State::new();
+    state.set_cost_budget(0);
+    // Call the native function directly so bytecode dispatch cannot consume
+    // the exhausted budget before table.move reaches its empty-range charge.
+    state.get_global("table");
+    state.push_bytes("move");
+    state.get_table(-2).expect("table.move lookup succeeds");
+    state.remove(-2).expect("table table is removed");
+    state.new_table();
+    state.push_number(2.0);
+    state.push_number(1.0);
+    state.push_number(1.0);
+    let error = state
+        .call(ArgCount::Fixed(4), RetCount::Fixed(1))
+        .expect_err("empty table.move must charge a configured exhausted budget");
+    assert!(matches!(error.kind, ErrorKind::BudgetExceeded { .. }));
+}
+
+#[test]
+fn table_move_rejects_overflow_ranges_before_mutating() {
+    let mut state = State::new();
+    state
+        .load_string("t = {10, 20, 30}")
+        .expect("setup compiles");
+    state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+        .expect("setup runs");
+
+    for (code, message) in [
+        (
+            "table.move(t, -1024, 9223372036854774784, 1)",
+            "too many elements to move",
+        ),
+        (
+            "table.move(t, 1, 2000, 9223372036854774784)",
+            "destination wrap around",
+        ),
+    ] {
+        state.load_string(code).expect("overflow program compiles");
+        let err = state
+            .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+            .expect_err("overflow range must fail cleanly");
+        assert!(matches!(err.kind, ErrorKind::RuntimeError(ref got) if got == message));
+
+        state.get_global("t");
+        for (index, expected) in [10.0, 20.0, 30.0].into_iter().enumerate() {
+            state.push_number((index + 1) as f64);
+            state.get_table(-2).expect("table read succeeds");
+            assert_eq!(
+                state.to_number(-1).expect("table value is numeric"),
+                expected
+            );
+            state.pop(1);
+        }
+        state.pop(1);
+    }
+}
+
+#[test]
+fn table_move_rejects_out_of_range_numbers_cleanly() {
+    let error = expect_error("table.move({}, -1e300, 1e300, 1)");
+    assert!(matches!(error.kind, ErrorKind::RuntimeError(ref message)
+        if message == "bad argument #2 to 'move' (number has no integer representation)"));
+}
+
+fn table_after_budgeted_move(budget: i64) -> (dellingr::error::Error, Vec<f64>) {
+    let mut state = State::new();
+    state
+        .load_string("t = {1, 2, 3, 4, 5}")
+        .expect("setup compiles");
+    state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+        .expect("setup runs");
+    state.set_cost_budget(budget);
+    state
+        .load_string("table.move(t, 1, 4, 2)")
+        .expect("move program compiles");
+    let error = state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+        .expect_err("limited move must stop at the exhausted budget");
+
+    state.get_global("t");
+    let mut values = Vec::new();
+    for index in 1..=5 {
+        state.push_number(index as f64);
+        state.get_table(-2).expect("table read succeeds");
+        values.push(state.to_number(-1).expect("table value is numeric"));
+        state.pop(1);
+    }
+    (error, values)
+}
+
+#[test]
+fn table_move_budget_zero_does_not_mutate() {
+    let (error, values) = table_after_budgeted_move(0);
+    assert!(matches!(error.kind, ErrorKind::BudgetExceeded { .. }));
+    assert_eq!(values, [1.0, 2.0, 3.0, 4.0, 5.0]);
+}
+
+#[test]
+fn table_move_budget_partial_mutation_is_deterministic() {
+    let first = table_after_budgeted_move(2);
+    let second = table_after_budgeted_move(2);
+    assert!(matches!(first.0.kind, ErrorKind::BudgetExceeded { .. }));
+    assert!(matches!(second.0.kind, ErrorKind::BudgetExceeded { .. }));
+    assert_eq!(first.1, [1.0, 2.0, 3.0, 3.0, 4.0]);
+    assert_eq!(first.1, second.1);
+}
+
+#[test]
+fn table_move_cost_is_deterministic_across_fresh_states() {
+    let run = || {
+        let mut state = State::new();
+        state
+            .load_string("local t = {1, 2, 3}; table.move(t, 1, 3, 4)")
+            .expect("program compiles");
+        state
+            .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+            .expect("program runs");
+        state.cost_used()
+    };
+    assert_eq!(run(), run());
+}
+
+#[test]
 fn select_negative_index_counts_from_end() {
     let val = run_number(
         r#"

@@ -21,6 +21,7 @@
 #![warn(missing_docs)]
 
 mod compiler;
+mod cost_meter;
 mod host;
 mod instr;
 mod lua_std;

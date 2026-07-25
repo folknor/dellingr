@@ -54,7 +54,7 @@ use crate::instr::Instr;
 mod verify;
 
 const MAGIC: [u8; 4] = *b"DLGS";
-const FORMAT_VERSION: u16 = 2;
+const FORMAT_VERSION: u16 = 3;
 
 /// Bytes produced by [`State::save_state`] plus non-fatal save diagnostics.
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -223,6 +223,7 @@ struct SavePayload {
     rng_state: u64,
     cost_remaining: i64,
     cost_budget: i64,
+    cost_budget_configured: bool,
     cost_used: u64,
     strings: Vec<Vec<u8>>,
     bytecode: Vec<SavedBytecode>,
@@ -348,6 +349,7 @@ impl<'a> SaveBuilder<'a> {
             rng_state: self.state.rng.state(),
             cost_remaining: self.state.cost_remaining,
             cost_budget: self.state.cost_budget,
+            cost_budget_configured: self.state.cost_budget_configured,
             cost_used: self.state.cost_used,
             strings: self.strings,
             bytecode: self.bytecode,
@@ -911,6 +913,7 @@ fn materialize_payload(
     state.rng = VmRng::from_state(payload.rng_state);
     state.cost_remaining = payload.cost_remaining;
     state.cost_budget = payload.cost_budget;
+    state.cost_budget_configured = payload.cost_budget_configured;
     state.cost_used = payload.cost_used;
     state.stack.clear();
     state.stack_bottom = 0;
@@ -1227,6 +1230,7 @@ impl SavePayload {
         out.write_u64(self.rng_state);
         out.write_i64(self.cost_remaining);
         out.write_i64(self.cost_budget);
+        out.write_bool(self.cost_budget_configured);
         out.write_u64(self.cost_used);
         write_vec(out, &self.strings, |out, bytes| out.write_bytes(bytes))?;
         write_vec(out, &self.bytecode, |out, item| item.encode(out))?;
@@ -1245,6 +1249,7 @@ impl SavePayload {
             rng_state: input.read_u64()?,
             cost_remaining: input.read_i64()?,
             cost_budget: input.read_i64()?,
+            cost_budget_configured: input.read_bool()?,
             cost_used: input.read_u64()?,
             strings: read_vec(input, Decoder::read_bytes)?,
             bytecode: read_vec(input, SavedBytecode::decode)?,
@@ -1509,6 +1514,7 @@ mod tests {
             rng_state: 0,
             cost_remaining: 0,
             cost_budget: 0,
+            cost_budget_configured: false,
             cost_used: 0,
             strings: Vec::new(),
             bytecode,

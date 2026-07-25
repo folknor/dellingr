@@ -53,31 +53,6 @@ print(s:find("a%d"))      -- reference: nil; dellingr: error "pattern too comple
   `matchdepth = MAXCCALLS; level = 0` at the top of each `str_match` attempt.
   The luapat rewrite (optimizations.md #4) fixes this structurally.
 
-### 15. `table.move`: unbounded uncharged work (budget bypass) and integer overflow (C-D1 + E-E12, two independent reports)
-
-- **Location:** `src/lua_std/table.rs:255-307`.
-- **Cause:** charges a flat 1, then loops `count = e - f + 1` times doing
-  `get_table` + `set_table_raw` (both free) regardless of table contents (nil
-  reads/writes still iterate); the range comes straight from script arguments
-  and is not bounded by table size. No allocation is needed (reads of an
-  empty table, writes of nil are removals), so memory caps do not save the
-  tick budget - this defeats the cost budget, which is the product feature.
-  Additionally `e - f + 1` with saturated extremes
-  (`table.move(t, -1e300, 1e300, 1)` gives `f = isize::MIN`,
-  `e = isize::MAX`) overflows `isize`: panic in debug builds, silent wrap in
-  release. Reference guards with "too many elements to move"
-  (`f > 0 || e < LUA_MAXINTEGER + f`).
-- **Repro:**
-
-```lua
-table.move({}, 1, 2^30, 1)   -- ~10^9 table ops, cost charged: 1
-table.move({}, 1, 1e15, 2)   -- host hang for cost 1
-```
-
-- **Fix:** charge `count.max(1)` up front, exactly like `table_sort` does (its
-  L18 comment is the template), add the reference overflow argcheck, and
-  consider clamping `e` to a sane bound.
-
 ### 16. Cost-model gap: pattern matching and string byte-work are entirely uncharged (E-E13; table.concat also C-D2)
 
 - **Locations:** no `consume_cost` anywhere in `src/lua_std/string.rs`,
@@ -96,11 +71,55 @@ table.move({}, 1, 1e15, 2)   -- host hang for cost 1
     arbitrarily large byte vector for cost 1.
   (`table.insert`/`remove` charging 1 for O(n) is already acknowledged in
   OPTIMIZATIONS.md; the string/pattern side is not tracked anywhere.)
-- **Fix sketch:** thread a charge hook into the matcher (charge per
-  `patt_match` invocation or per K `singlematch` steps against
-  `State.cost_remaining`), and charge length-proportional cost in
-  `gsub`/`sub`/`upper`/`lower`/`reverse`/`format`/`concat` before doing the
-  work (cost contract: charge BEFORE the side effect).
+- **Measured:** a script doing ~200k `table.move` operations plus 200 `gsub`
+  passes over a 65536-byte string reports `Cost used: 2` under `--limit 100000`.
+  The `table.move` half is fixed; the string half still costs zero.
+- **Status: fully specified, deliberately not implemented.** This is a
+  **breaking cost-model change**, not a bug fix - adding charges can only
+  increase measured cost, and there is no conversion formula because the
+  increase depends on string lengths, output expansion, match success,
+  captures, and backtracking shape. Every embedder must re-measure their tick
+  budgets before adopting it. That is a release decision, so it is staged
+  separately rather than folded into the `table.move` fix.
+- **Infrastructure already landed:** the neutral `CostMeter` exists outside
+  `vm` and is usable by the matcher without exposing `State`, and
+  `cost_budget_configured` is persisted, so this is ready to implement.
+- **Fix plan (agreed, from the loop-9 review):**
+  - Unit is one per deterministic logical work item: one table element visited,
+    one byte processed or emitted, one matcher primitive. No hardware-inspired
+    divisor - existing costs are already semantic (table construction is one
+    per element, `table.sort` is `n`, not `n log n`). Per operation,
+    `cost = max(1, sum of work units)`.
+  - Matcher charge points, threaded via `CostMeter`: every `patt_match`
+    entry/continuation, every `singlematch`, every pattern byte inspected
+    locating or testing a bracket class, every subject byte inspected by `%b`,
+    every byte compared by a backreference, every literal-search comparison.
+    Pattern validation reserves `pattern.len()` up front. Do **not** batch as
+    one-per-K: that makes the stopping boundary depend on K and lets a
+    pathological matcher overshoot by K.
+  - Per function: `len` free; `sub` returned bytes; `upper`/`lower`/`reverse`
+    input length; `find`/`match` pattern length + steps + materialized result
+    bytes; `gmatch` validation at creation then steps + captures per iteration;
+    `gsub` pattern + search work + replacement bytes examined + emitted bytes;
+    `format` format bytes scanned + output bytes; `table.concat` elements
+    visited + output bytes including separators. Both sides for constructors -
+    a no-match `gsub` charges once to scan and once to copy.
+  - Output buffers charge before mutating, since `gsub`/`format`/`concat`
+    output size is unknown at entry. Matcher work must be committed before a
+    `gsub` replacement function re-enters Lua.
+  - Needs `MatchError::{Pattern, Budget}` so exhaustion surfaces as
+    `ErrorKind::BudgetExceeded` rather than being flattened into the existing
+    pattern `RuntimeError`.
+  - Export a `COST_MODEL_VERSION`; release as the next pre-1.0 breaking minor.
+    Do **not** feature-gate a legacy mode - the old behaviour is the hole, and
+    compile-time modes fragment contractual costs. Validate the cost-model
+    version in snapshots so old-unit counters cannot silently continue.
+  - `analyze_cost` stays numerically unchanged (it cannot resolve data lengths,
+    or even prove a call reaches the stdlib, since globals are mutable). Its
+    docs and the CLI output should say so explicitly. Pin with a test:
+    `analyze_cost("return string.upper('abcd')") == 0` while execution costs 4.
+- **Related:** `OP_CONCAT` being free is separate (#24) and should not be
+  folded in - though while it stands, a large subject remains cheap to build.
 
 ---
 

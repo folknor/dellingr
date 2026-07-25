@@ -4,248 +4,272 @@ Current work item. Numbers refer to finding numbers in `notes/bugs.md`.
 
 ---
 
-## Targets #13, #14, #34, #35, #56: local pattern-matcher defects
+## Targets #15, #16: work that is done but never charged
 
-Five defects in `src/patterns/`, all local rather than structural. Grouped
-because they touch one file and one test surface.
+Per-opcode instruction-cost accounting is dellingr's reason to exist - the
+README's pitch is bounded execution for a game tick. These two findings are
+holes in that budget large enough to drive a script through.
 
-**Deliberately excluded from this loop:** #12 (matchdepth consumed by tail
-calls) and #33 (`%f` loses left context because the stdlib re-slices the
-subject). Both need the `str_match` rework - an `init` offset plus converting
-tail continuations into a loop - which is most of the `optimizations.md` #4
-rewrite. Doing them here would turn five small, individually verifiable fixes
-into one large one.
-
-All four testable findings verified by running against reference Lua 5.4.
-
-### #14 (High) - script-reachable panic on 32 captures
-
-**Verified:**
+**Verified together.** This script, run with `--limit 100000`:
 
 ```lua
-("x"):match("()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()")
+local t = {}
+table.move(t, 1, 200000, 1)          -- 200k table ops
+
+local s = "x"
+for i = 1, 16 do s = s .. s end      -- 65536-byte string
+for i = 1, 200 do
+  local _ = s:gsub("x", "y")         -- 200 passes over 65 KB
+end
 ```
 
-gives `panicked at src/patterns/luapat.rs:498:21: index out of bounds: the len
-is 31 but the index is 31`. A Lua script panics the host process rather than
-raising a Lua error.
+reports **`Cost used: 2`**. Hundreds of megabytes of real work, charged two.
 
-- `src/patterns/mod.rs:18` sizes `matches: [LuaCapture; 32]`, and `:669`
-  stores the whole match at `mm[0]` with captures going into `mm[1..]`, so only
-  31 capture slots exist.
-- `start_capture` (`luapat.rs:300-302`) lets `level` reach exactly 32
-  (`LUA_MAXCAPTURES`), and `push_captures` then writes `mm[1..][31]`.
-- The validator's `()` branch (`luapat.rs:628-630`) just advances `p` without
-  counting, so a pattern of 32 position captures passes `str_check`.
+### #15 (High) - `table.move` is unbounded and uncharged, and overflows
 
-Fix: size the results array `LUA_MAXCAPTURES + 1`, and make the validator count
-position captures. The latter also fixes #34a.
+`src/lua_std/table.rs:255-307`. Charges a flat 1, then loops `e - f + 1` times
+doing `get_table` + `set_table_raw`, both free. The range comes straight from
+script arguments and is **not bounded by table size**, so nil reads and nil
+writes still iterate. No allocation is required, so memory limits do not help
+either - `table.move({}, 1, 2^30, 1)` is ~10^9 table operations for cost 1.
 
-### #13 (High) - every pattern ending in `%%` is rejected
+Separately, `e - f + 1` overflows `isize` at saturated extremes:
+`table.move(t, -1e300, 1e300, 1)` gives `f = isize::MIN`, `e = isize::MAX`.
+Panic in debug, silent wrap in release. Reference guards this with
+"too many elements to move" (`f > 0 || e < LUA_MAXINTEGER + f`).
 
-**Verified:** `("50%"):gsub("%%", " percent")` raises
-`malformed pattern (ends with '%')`; reference returns `50 percent  1`. Same
-for `("100%"):match("%d+%%")`, which reference answers `100%`.
+`table_sort` already does the right thing here - it charges `n.max(1)` **before**
+running the comparator, with a comment explaining the contract. That is the
+template.
 
-`str_check` (`luapat.rs:688`) inspects only the final byte:
+### #16 (High) - pattern matching and string byte-work are entirely uncharged
 
-```rust
-if at(sub(ms.p_end, 1)) == b'%' { return Err(... EndsWithPercent) }
-```
+There is no `consume_cost` anywhere in `src/lua_std/string.rs`,
+`src/lua_std/string_format.rs`, or `src/patterns/`. Consequences:
 
-so it cannot distinguish a dangling `%` from the two-byte escape `%%`. The
-runtime matcher's `classend` handles `%%` correctly - only this eager
-pre-check misfires. The pre-check exists because `str_match_check`'s `L_ESC`
-arm (`:534`, `let c = at(p)`) has no bounds check of its own and would read
-past the end on a genuinely trailing `%`.
+- A script builds a large string with ~17 concat ops by repeated doubling,
+  then every `gsub` / `find` / `match` / `upper` / `format("%s")` does O(n) or
+  worse for ~0 charge, in a loop. That is the measurement above.
+- Backtracking patterns are superpolynomial in *time* while the depth cap only
+  bounds *recursion*: `"a*a*a*a*b"` against a long non-matching run of `a`s
+  does O(n^k) `singlematch` work inside `max_expand` for one free call.
+- `table.concat(t)` does `len` lookups and builds an arbitrarily large byte
+  vector for cost 1 (this half is also C-D2).
 
-Fix: check trailing-percent *parity*, or add the bounds check inside the loop
-and drop the pre-check entirely. The second is tidier if it does not cost
-anything.
+`table.insert`/`remove` charging 1 for O(n) is already acknowledged in
+`notes/optimizations.md`; the string and pattern side is tracked nowhere.
 
-### #34 (Medium) - validator capture-count divergences
+### The cost contract
 
-a. Position captures are not counted (`luapat.rs:628-630`), so backreference
-   validation is wrong when a position capture precedes a real one.
-   **Verified:** `("aa"):match("()(a)%2")` raises `invalid capture index %2`;
-   reference returns `1  a`.
-
-b. Off-by-one ceiling: the validator increments `level` then rejects
-   `level >= 32` (`:623-627`), permitting only 31 captures, while
-   `start_capture` (`:302`) and reference both allow exactly 32. A pattern with
-   32 ordinary captures is spuriously rejected as "too many captures".
-
-Note (a) and #14 share a root cause and must be fixed consistently: after
-counting position captures, the ceiling has to be right or valid patterns start
-being rejected.
-
-### #35 (Medium) - escaped uppercase non-class letters match the wrong character
-
-`match_class` (`luapat.rs:171-191`) lowercases the class byte before the
-literal-comparison fallback:
-
-```rust
-let res = match class.to_ascii_lowercase() { ... lc => return lc == ch };
-```
-
-Reference compares the original byte in the default case (`return (cl == c)`).
-
-**Verified, and it is fully inverted:**
-
-| pattern | subject | dellingr | reference |
-|---|---|---|---|
-| `%E` | `"E"` | nil | `E` |
-| `%E` | `"e"` | `e` | nil |
-| `%K` | `"K"` | nil | `K` |
-| `[%N]` | `"N"` | nil | `N` |
-
-Affects `%B %E %F %H %I %J %K %M %N %O %Q %R %T %V %Y` - the uppercase letters
-whose lowercase is not a class letter - both bare and inside `[...]`. Naive
-"escape every character" pattern-quoting helpers emit exactly these.
-
-### #56 (Low, hardening) - empty pattern is one call site from an OOB read
-
-`str_check` (`luapat.rs:681`) and `str_match` (`:655`) do `at(p)` on the first
-pattern byte unconditionally. With an empty pattern that reads out of bounds
-through a dangling pointer. Every current stdlib call site guards empty
-patterns first, so it is not live - but the invariant is implicit and
-undocumented, and this module is a raw-pointer transliteration of C where that
-is exactly the kind of assumption that rots.
-
-Fix: an explicit empty guard in `LuaPattern::from_bytes_try` / `str_match`.
-
-### Found during review, not in the original audit
-
-**A second script-reachable panic: `%0`.** Verified:
-`("aa"):match("(a)%0")` gives
-`panicked at src/patterns/errors.rs:41:56: attempt to add with overflow`.
-`InvalidCaptureIndex(Some(-1))` is cast to `usize` before adding one. Release
-happens to wrap and print `%0`, so this is debug-only in effect but wrong in
-both.
-
-**`%s` does not match vertical tab.** Verified against reference:
-
-| expression | dellingr | reference 5.4 |
-|---|---|---|
-| `("\11"):match("%s")` | nil | matches |
-| `("\11"):match("%S")` | matches | nil |
-| `("\12"):match("%s")` | matches | matches |
-
-`match_class` uses Rust's `is_ascii_whitespace`, which excludes 0x0B; C's
-`isspace` includes it. Form feed (0x0C) is in both, so VT is the only
-divergent byte. This is the same root cause as finding #42 (the lexer's
-`consume_whitespace`), and `src/compiler/numeral.rs`'s `is_lua_whitespace`
-already has the correct set.
-
-Note the review initially concluded the remaining predicates agreed with
-reference; that was checked and is wrong for `%s`/`%S` specifically.
+From `table_sort`'s existing comment and the L18 convention: **charge before
+the side effect**, so an exhausted budget blocks the work rather than letting
+it complete and only then failing. `cost_remaining` is `i64` precisely so the
+operation that crosses the boundary completes and the *next* costed op fails.
 
 ---
 
-## Agreed implementation plan
+## Agreed plan - staged, this commit is stage 1 only
 
-### Capture ceiling - get this exactly right
+Fixing #16 changes what every string operation costs. There is no conversion
+formula: the increase depends on string lengths, output expansion, match
+success, captures and backtracking shape. That makes it a **cost-model version
+bump**, not a bug fix - embedders must re-measure their tick budgets, and
+snapshots persist cost counters so the save format is implicated too.
 
-`LUA_MAXCAPTURES` stays **32**. It counts entries in `MatchState.capture`, and
-both ordinary and position captures consume one. Reference's `start_capture`
-rejects only when `level >= 32`, so capture 32 is valid and 33 is rejected.
+So it is staged, and this commit is stage 1:
 
-dellingr's wrapper additionally stores the whole match at `matches[0]` with
-explicit captures in `matches[1..=32]`, so it needs **33 slots**:
+- **Stage 1 (this commit):** `table.move` correctness and charging, plus the
+  neutral cost-meter infrastructure that stage 2 needs. `table.move`
+  undercharging is a plain bug - it already charged, just not proportionally.
+- **Stage 2 (separate commit):** string, pattern, `format` and `concat`
+  charging. This is the breaking half and is isolated so it can be held back or
+  reverted before a release without disturbing stage 1.
 
-```text
-LUA_MAXCAPTURES = 32
-LUA_MAXMATCHES  = LUA_MAXCAPTURES + 1
-```
+### Stage 1: `table.move`
 
-Counting must use the same pre-increment rule as the runtime: reject when
-`level >= LUA_MAXCAPTURES`, otherwise write capture `level` and increment.
-**Never increment then test `>=`** - that is #34b.
+Arguments parse as exact `i64` via the existing `exact_i64` conversion, so
+non-integral and out-of-range arguments fail cleanly rather than saturating
+through `as isize`. Apply **both** reference guards, before any mutation or
+charge:
 
-Make `str_match` take `&mut [LuaCapture; LUA_MAXMATCHES]` so the capacity is
-compile-time enforced rather than a comment.
+- source span: "too many elements to move";
+- destination end: "destination wrap around".
 
-### `src/patterns/luapat.rs`
+Reference does both up front (`ltablib.c`'s `tmove`), and doing so is what
+removes the `e - f + 1` overflow: today `table.move(t, -1e300, 1e300, 1)` gives
+`f = isize::MIN`, `e = isize::MAX` and panics in debug, silently wraps in
+release and returns without moving anything.
 
-- `match_class`: compare the **original** `class` byte in the default arm
-  (`_ => return class == ch`), fixing #35.
-- `match_class`: `b's'` must include vertical tab. Use the same set as
-  `numeral.rs`'s `is_lua_whitespace` rather than `is_ascii_whitespace`.
-- `str_match_check`:
-  - bounds-check the `L_ESC` byte before dereferencing (this is what lets the
-    eager pre-check go);
-  - count **both** position and ordinary captures;
-  - check capacity before indexing `capture` or `level_stack`;
-  - allow the 31 -> 32 transition;
-  - mark position captures `Position` immediately;
-  - mark closed ordinary captures `Len(0)` - currently mis-tagged `Position`
-    at `:637`, behaviour-neutral today because validation only tests
-    "unfinished", but wrong;
-  - return `InvalidPatternCapture` for an unmatched `)`, matching reference's
-    "invalid pattern capture" rather than "no open capture".
-- `str_check`: delete the final-byte `%` pre-check (#13). It only bought an
-  O(1) rejection, masked the unsafe validator dereference, and gave worse
-  diagnostics for things like an unterminated bracket ending in `%`. Runtime
-  `classend` already does its own dangling-escape check, and the new bounds
-  check runs during one-time validation, not matching.
-- `str_check` / `str_match`: explicit empty-pattern handling (#56). An empty
-  pattern matches `0..0` and returns one internal match.
-- `match_capture`: `CapLen::Position` must yield `Ok(null())` - no match -
-  rather than `NoCaptureLength`. Reference accepts `()%1` as a valid pattern
-  that simply does not match, and fixing #34a would otherwise turn it into an
-  error.
-- `capture_to_close`: cast before subtracting (`self.level as isize - 1`).
-  Validation currently prevents level zero reaching it, but the subtraction
-  order is a latent panic.
-- Drop `CapLen::size` once unused.
+Charging:
 
-### `src/patterns/mod.rs`
+- **With an active finite budget:** charge one unit immediately before each
+  source-lookup/destination-write pair, and stop before the first element whose
+  charge finds the budget exhausted. A single up-front `consume_cost(count)` is
+  *not* sufficient, because `consume_cost`'s contract lets an operation that
+  starts with positive budget cross it and still complete - so a billion-unit
+  charge would still run a billion iterations once.
+- **Without a configured budget:** one `count.max(1)` charge before the loop,
+  keeping the current tight loop and paying no per-element overhead.
 
-Size `LuaPattern.matches` and its initializer with `LUA_MAXMATCHES`. **Do not**
-touch `push_captures` in `lua_std/string.rs` - its `n - 1` correctly keeps the
-whole-match bookkeeping slot internal.
+A budget failure can therefore leave a partially moved table. That follows from
+treating each element as a costed operation, and errors already kill the
+callback. Both the forward and backward overlap paths must charge in their
+actual copy order, so partial results stay deterministic.
 
-### `src/patterns/errors.rs`
+### Stage 1: cost-meter infrastructure
 
-Format capture indices in signed space (`i16::from(idx) + 1`), fixing the `%0`
-overflow panic. Remove `NoCaptureLength` and `NoOpenCapture` once their
-replacements are in place.
+- A count-only meter for the default/no-limit path.
+- A finite-budget meter borrowing only `remaining` and `used`, with saturating
+  counters matching `State::consume_cost`.
+- A private flag recording whether a real budget was configured. **Do not infer
+  this from `i64::MAX`** after earlier charges have already moved the counter.
 
-### Out of scope
+Defined outside `vm` so stage 2 can pass it into the matcher without the
+matcher ever seeing `State`.
 
-The validator has no counterpart in `lstrlib.c` - it is an eager dellingr
-layer, and it will keep rejecting malformed suffixes that reference might never
-execute (`"a%"` against `"b"`). Do not broaden this into removing it. #12 and
-#33 stay out.
+### Stage 2 (recorded here, not implemented in this commit)
 
-### Tests
+Unit: one per deterministic logical work item - one table element visited, one
+byte processed or emitted, one matcher primitive. No hardware-inspired divisor;
+existing costs are already semantic rather than cycle-calibrated (table
+construction is one per element, `table.sort` is `n`, not `n log n`). Per
+operation, `cost = max(1, sum of work units)`.
 
-`src/patterns/mod.rs` unit tests:
+Charge points in the matcher, threaded via the meter: every `patt_match`
+entry/continuation, every `singlematch`, every pattern byte inspected locating
+or testing a bracket class, every subject byte inspected by `%b`, every byte
+compared by a backreference, every literal-search comparison. Pattern
+validation reserves `pattern.len()` up front. **Do not** batch as one-per-K -
+that makes the stopping boundary depend on K and lets a pathological matcher
+overshoot by K.
 
-- `%%`, `%d+%%`, `%%%%`, while keeping the dangling-`%` rejection;
-- `()(a)%2` returning `Position(0)` and `"a"`;
-- exactly 32 position captures, exactly 32 ordinary captures, and a mixed 32;
-- 33 of each returning `TooManyCaptures` **without indexing arrays**;
-- every affected uppercase byte in `BEFHIJKMNOQRTVY`, bare and bracketed;
-- vertical tab against `%s` and `%S`, plus form feed as the control;
-- empty pattern matching `0..0` on empty and non-empty subjects;
-- `()%1` returning no match rather than an error;
-- `%0` formatting exactly as `invalid capture index %0`.
+Per-function contractual work:
 
-`tests/string_bytes.rs`: public-API regressions calling `string.match` with 32
-position captures and 32 ordinary captures, verifying all 32 Lua results. This
-is the host-panic regression that matters most.
+| Operation | Work |
+|---|---|
+| `string.len` | free, O(1) |
+| `string.sub` | returned bytes |
+| `string.upper/lower/reverse` | input length |
+| `string.find` | pattern length + comparisons/steps + returned capture bytes |
+| `string.match` | pattern length + steps + materialized result bytes |
+| `string.gmatch` create | pattern validation length |
+| each `gmatch` step | steps + materialized capture bytes |
+| `string.gsub` | pattern + search work + replacement bytes examined + emitted bytes + captures materialized for callbacks |
+| `string.format` | format bytes scanned + output bytes |
+| `table.concat` | elements visited + output bytes including separators |
 
-`tests/error_handling.rs`: `%0` and unmatched-`)` producing clean
-`RuntimeError`s with reference-compatible messages.
+Both sides for constructors: a no-match `gsub` charges once to scan and once to
+copy. Output buffers charge before mutating, since `gsub`/`format`/`concat`
+output size is unknown at entry. Matcher work must be committed before a `gsub`
+replacement function re-enters Lua.
 
-Extend `examples/pattern_result_handling.lua` with #13, #34a, #35, the VT case,
-and the 32-capture boundary, so the differential gate covers them against both
-Lua 5.2 and 5.4 automatically.
+Matcher failures need `MatchError::{Pattern, Budget}` so budget exhaustion
+surfaces as `ErrorKind::BudgetExceeded` rather than being flattened into the
+existing pattern `RuntimeError`.
 
-### Regression to watch
+Staging for stage 2: export a `COST_MODEL_VERSION`, release as the next pre-1.0
+breaking minor, do **not** feature-gate a legacy mode (the old behaviour is the
+hole, and compile-time modes fragment contractual costs), and bump/validate the
+cost-model version in snapshots so old-unit counters cannot silently continue.
 
-`src/patterns/mod.rs:211` (`runtime_match_errors_are_not_swallowed`, 201
-literal `a`s) enshrines the #12 divergence as expected. Its pattern is
-non-empty, capture-free and escape-free, so nothing here should touch it - but
-run it explicitly and flag it if the outcome changes.
+`analyze_cost` stays numerically unchanged - it cannot resolve data lengths or
+even prove a call reaches the stdlib, since globals are mutable. Its docs and
+the CLI output should say explicitly that it covers only statically knowable
+bytecode charges and excludes runtime data-dependent native work. Pin that with
+a test: `analyze_cost("return string.upper('abcd')") == 0` while execution
+costs 4.
+
+### Stage 1 tests
+
+- `table.move` cost for empty, one-element and many-element ranges.
+- Both overlap directions.
+- Source-span overflow and destination wrap-around rejected with the reference
+  messages, before any mutation.
+- Budget zero performs no mutation at all.
+- Budget 2 leaves a deterministic partial move, identical across runs.
+- Extreme arguments (`-1e300`/`1e300`) produce a clean error in both debug and
+  release rather than a panic or a silent no-op.
+- Two fresh states running the same script report identical cost.
+
+---
+
+## Review findings to fix
+
+Both range guards, the per-element stop-before-work charging, deterministic
+partial mutation in both overlap directions, the explicit flag never being
+inferred from `i64::MAX`, and `CostMeter`'s usability without `State` all
+verified correct. Three defects remain.
+
+### 1. Restored configured budgets silently become unconfigured
+
+`save_state.rs:911` restores `cost_remaining`, `cost_budget` and `cost_used`,
+but **not** `cost_budget_configured`. A fresh `State` starts with the flag
+false, so after `load_state` a `table.move` takes the `CountOnly` path and
+bypasses the remaining budget entirely.
+
+Concretely: restore with two units remaining, move five elements - all five
+complete, `cost_used` grows, and `cost_remaining` is still two. Restore with
+*zero* remaining and the move still runs; only some later opcode notices.
+
+`set_cost_budget` afterwards is not a workaround, because it resets usage and
+remaining budget rather than continuing the persisted one.
+
+I told the build session to defer this as a snapshot-format change. That was
+wrong: it changes observable enforcement and breaks continuation of an
+embedder's persisted budget, which is the guarantee the whole cost model
+exists to provide. **Persist and restore the configured mode in stage 1**, with
+whatever format version handling that requires.
+
+### 2. Empty moves evade a configured budget
+
+`table.rs:290`: the `count.max(1)` charge happens only on the no-budget path.
+With a configured budget an empty range enters neither copy loop and so charges
+**zero**, even when the budget is already exhausted.
+
+So `table.move(t, 2, 1, 1)` now succeeds against a zero budget, where the old
+flat-1 charge would have failed before doing anything. That is a regression the
+existing empty-range cost test misses, because it only exercises an
+unconfigured state.
+
+Charge the `max(1)` minimum on both paths, and extend the test to cover a
+configured budget.
+
+### 3. The no-budget loop still branches per element
+
+`table.rs:303` and `table.rs:316` keep an `if finite_budget` inside every
+iteration, on the path that is supposed to be the tight budget-free loop. An
+optimizer may unswitch it, but the implementation should not depend on that.
+Hoist the branch: separate budgeted and unbudgeted loop variants.
+
+### Superseded questions
+
+1. What is the right charging model for the pattern matcher? Per `patt_match`
+   invocation is the obvious hook, but backtracking means invocations are the
+   thing that explodes, so that may be exactly right - or it may be so
+   fine-grained that it costs more than the match. Per K `singlematch` steps is
+   the alternative. Whichever, it needs to be charged against
+   `State.cost_remaining` from inside `src/patterns/`, which currently has no
+   access to `State` at all. How should that thread through without dragging
+   the VM into the matcher?
+2. What is the unit? Existing charges are per-opcode integers. Is one unit per
+   byte scanned right, or should string work be charged at some ratio to
+   opcode cost? Getting the ratio wrong makes previously-fine scripts start
+   failing their budget, which is a compatibility break for the embedder. Say
+   what the ratio should be and why.
+3. Which string functions need length-proportional charges, and charged on
+   input length, output length, or both? `gsub` can produce output far larger
+   than its input.
+4. For #15, is clamping `e` to something sane the right call in addition to
+   the reference overflow check, or does the charge alone make it safe? If a
+   script is charged 10^9 it will exhaust any real budget immediately, which
+   might make clamping unnecessary.
+5. **Does this break existing scripts?** This is the part I care about most.
+   Adding charges where there were none can only *increase* measured cost, so
+   any embedder currently running close to their budget will start failing.
+   `analyze_cost` is also documented as "neither a lower nor an upper bound",
+   but its relationship to runtime cost changes here. What is the migration
+   story, and should any of this be feature-gated or staged?
+
+Read `src/lua_std/string.rs`, `src/lua_std/table.rs`, `src/lua_std/string_format.rs`,
+`src/patterns/`, `State::consume_cost` in `src/vm.rs`, and `analyze_cost` in
+`src/lib.rs`.
