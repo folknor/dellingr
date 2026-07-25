@@ -3,7 +3,7 @@
 use crate::LuaType;
 use crate::Result;
 use crate::State;
-use crate::error::{ArgError, ErrorKind};
+use crate::error::{ArgError, ErrorKind, PrefixLocation};
 use crate::numeral::parse_lua_numeral;
 
 fn digit_value(byte: u8) -> Option<u32> {
@@ -161,7 +161,26 @@ pub(crate) fn open_base(state: &mut State) {
         } else {
             "(error raised with no message)".to_string()
         };
-        Err(state.error(ErrorKind::ScriptError(message)))
+        let prefix_location = if state.get_top() < 2 {
+            PrefixLocation::Current
+        } else {
+            state.check_type(2, LuaType::Number)?;
+            let level = state.to_number(2)?;
+            if !level.is_finite() || level.fract() != 0.0 {
+                return Err(state.error(ErrorKind::RuntimeError(
+                    "bad argument #2 to 'error' (number has no integer representation)".into(),
+                )));
+            }
+            if level <= 0.0 {
+                PrefixLocation::Suppressed
+            } else {
+                PrefixLocation::TraceFrame((level as u32).saturating_sub(1))
+            }
+        };
+        Err(state.error(ErrorKind::ScriptError {
+            message,
+            prefix: prefix_location,
+        }))
     });
 
     // Returns the type of its only argument, coded as a string.
@@ -480,18 +499,29 @@ fn arg_type_error(
 
 fn global_env_index(state: &mut State) -> Result<u8> {
     state.check_any(2)?;
-    let key = state.to_string(2)?;
-    state.set_top(0)?;
-    state.get_global(&key);
+    if state.typ(2) == LuaType::String {
+        let key = state.to_string(2)?;
+        state.set_top(0)?;
+        state.get_global(&key);
+    } else {
+        state.push_value(2)?;
+        state.get_table_raw(1)?;
+    }
     Ok(1)
 }
 
 fn global_env_newindex(state: &mut State) -> Result<u8> {
     state.check_any(2)?;
     state.check_any(3)?;
-    let key = state.to_string(2)?;
-    state.push_value(3)?;
-    state.set_global(&key);
+    if state.typ(2) == LuaType::String {
+        let key = state.to_string(2)?;
+        state.push_value(3)?;
+        state.set_global(&key);
+    } else {
+        state.push_value(2)?;
+        state.push_value(3)?;
+        state.set_table_raw(1)?;
+    }
     state.set_top(0)?;
     Ok(0)
 }

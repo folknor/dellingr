@@ -4,177 +4,176 @@ Current work item. Numbers refer to finding numbers in `notes/bugs.md`.
 
 ---
 
-## Target #24: `OP_CONCAT` allocates without bound at zero cost
+## Targets #54 and #58: version docs and the assorted-divergence list
 
-**Verified.** This script builds a 1 MB string and reports `Cost used: 0`, and
-still completes under `--limit 100`:
+Mostly small. The value of this loop is **measurement**: #58 is a list of
+unverified claims, and two of them are already disproved below. Do not
+implement a claim without checking it first.
 
-```lua
-local s = "x"
-for _ = 1, 20 do s = s .. s end   -- length 1048576, cost 0
-```
+### #54 - version and MSRV mismatches
 
-Twenty more iterations is a terabyte attempt. `OP_CONCAT` charges nothing
-(`src/vm/frame.rs:304-307`) while `concat_helper` does O(total bytes) of work
-and allocation (`src/vm/eval.rs:228-263`), and the surrounding `while`/`for`
-loop is deliberately free.
+- `Cargo.toml:5` says `rust-version = "1.97"`.
+- README badge (line 5) and `AGENTS.md:41` both say **1.92**.
+- README's usage snippet says `dellingr = "0.2"`; the crate is **0.3.0**
+  (`Cargo.toml:3`).
 
-The README's Budget section concedes structural freebies, but that argument is
-about *time* spent on control flow. Unbounded *allocation* is a different
-failure domain: the host process is OOM-killed rather than idling through a
-tick budget. A game host cannot defend against this by setting a smaller cost
-budget, because the cost is zero at any budget.
+One MSRV figure is wrong. The local toolchain is 1.99.0-nightly, which does not
+settle it. Determine the true minimum - the crate uses edition 2024 and
+let-chains, which constrain it - and make all three agree.
 
-### The scope question this loop has to answer first
+### #58 - measured, with two claims disproved
 
-There are two candidate fixes and they are **not** equivalent:
+| claim | measured |
+|---|---|
+| `math.random(m, n)` with `m > n` reports arg `#1`, reference says `#2` | **Invalid.** 5.4 says `#1`; only 5.2 says `#2`. dellingr says `#1` and so matches 5.4. |
+| `string.format("%u")` accepted, but 5.4 removed `%u` | **Invalid.** Both 5.2 and 5.4 accept `%u` and print `42`. |
+| `math.log(x, base)` is always `ln/ln` | **Real.** `math.log(1000, 10)` is `2.9999999999999996` here, `3.0` in reference. Note `math.log(8, 2)` is already exactly `3` in both, so only some bases diverge. |
+| String library rejects number arguments | **Real.** `string.len(42)` errors here; both references return `2`. Same for `string.sub(123, 1)`. |
 
-1. **Charge concat per output byte.** This is a cost-model change: it makes
-   existing scripts measure differently, with no conversion formula. That is
-   exactly what #16 covers and #16 is deliberately deferred as a release
-   decision. Doing it here would smuggle a breaking cost change into a bug fix.
-2. **Cap the maximum string length.** This is a *resource limit*, like
-   `MAX_STACK_SIZE = 1_000_000` or `MAX_CALL_DEPTH = 1000`. It changes no
-   measured cost for any script that stays under the cap, and turns the OOM
-   into a clean catchable error.
+Still to verify (do not assume):
 
-**Option 2 is the one this loop should take**, unless the reviewer can show it
-does not actually close the hole. Option 1 stays with #16.
+- `string.format("%p")` printing `(null)` where glibc prints `(nil)`.
+- `_G` proxy stringifying keys, so `_G[1]` aliases `_G["1"]`.
+- `Frame::jump` (`frame.rs:83-99`) accepting `ip == code.len()`, where the next
+  `get_instr` would panic on the out-of-bounds fetch. Unreachable from
+  compiler-emitted bytecode since every chunk ends with `OP_RETURN`, but the
+  bound should be `<` for defence in depth - and **saved bytecode is
+  attacker-controlled**, so confirm whether the snapshot verifier already
+  rejects a jump to `code.len()` or whether this is reachable that way.
+- Numeric `for` with step 0 skipping the loop (`eval_control.rs:316-326`):
+  matches 5.2 for ascending ranges, diverges from 5.2's infinite loop for
+  descending ones and from 5.4's `'for' step is zero` error.
+- Arithmetic not coercing numeric strings (`"10" + 1` errors; reference gives
+  11), while concat *does* coerce numbers to strings.
+- `error(msg, level)` ignoring `level`. The position-prefix half is already
+  fixed, so errors render `chunk:line: message`; what remains is that
+  `error(msg, 2)` cannot blame the caller and `error(msg, 0)` cannot suppress
+  the prefix.
+
+### The judgement this loop has to make
+
+Each surviving item is either **a bug to fix** or **a deliberate design choice
+to document**. Sort them explicitly; do not fix everything reflexively and do
+not document away a real divergence.
+
+The project has a stated "Won't implement" list, and strictness that reads as
+deliberate belongs there rather than in a bug tracker. But "it is currently
+like this" is not the same as "it was decided". Where the code reads as an
+accident, treat it as a bug.
 
 ### Constraints
 
-- **Do not change what any existing script costs.** If a script's `Cost used`
-  changes, the fix is out of scope.
-- Errors must leave the State consistent and reusable, and the failure has to
-  be a normal error, not a panic or an abort.
-- Determinism: the cap must be a fixed constant, not memory-pressure sensitive.
+- Determinism unaffected; charge nothing new (#16).
 - `unwrap_used` denied outside `#[cfg(test)]`; clippy denies warnings.
+- Any behaviour change needs an `examples/*.lua` case or a Rust test.
+- Changing string-library coercion affects a lot of call sites - if adopted, it
+  must be systematic, not per-function.
 
 ---
 
 ## Agreed implementation plan
 
-The reviewer independently agreed with the scope decision: a fixed length cap
-is a resource limit like `MAX_CALL_DEPTH`, adds no charge, and leaves every
-below-cap script's `Cost used` byte-identical. Per-byte charging stays with
-#16.
+**A third claim is invalid.** `%p` printing `(null)` is *correct*: 5.4
+explicitly substitutes `(null)` for a null pointer, and 5.2 rejects `%p`
+outright. `string_format.rs` already declares 5.4 compatibility. No change, no
+documentation needed.
 
-**Qualification to keep honest:** a per-string cap closes #24, it is *not* a
-total-memory quota. Many below-cap strings still add up. A total-heap or
-snapshot-size quota is a separate resource dimension and needs its own
-constant - do not let this silently become one.
+So of #58's original E-list, three claims were wrong: `math.random`'s argument
+number, `%u` removal, and `%p`.
 
-### The limit
+### Fix
 
-```rust
-pub const MAX_STRING_BYTES: usize = 16 * 1024 * 1024;
-```
+**Version metadata.** The real source floor is **1.88** - let-chains
+(`error.rs:272`) and `slice::as_chunks` (`object.rs:576`), both stabilized
+there, with let-chains needing edition 2024. Nothing in the locked dependency
+tree requires 1.97; that manifest change arrived alongside the `hotpath` bump
+and did not follow from it. Set `rust-version = "1.92"` (the conservative
+supported figure already in README and AGENTS.md) and change the README
+dependency snippet to `dellingr = "0.3"`. Only nightly 1.99 is installed here,
+so **do not add a build gate that cannot run** - note the need for a real 1.92
+check instead.
 
-Inclusive: `MAX_STRING_BYTES` succeeds, `+1` fails. Sixteen times the
-demonstrated 1 MiB script, bounds construction peaks to tens of MiB even when
-the producer buffer and interned copy coexist, stops exponential concat at
-32 MiB instead of a terabyte, and is fixed across hosts so replay stays
-deterministic. **One limit for every Lua string and every temporary intended to
-become one** - concat, format and gsub do not get different limits.
+**`math.log` base 10 only.** dellingr calls `x.log(base)` unconditionally
+(`math.rs:287`). 5.2 uses `log10` for base 10; 5.4 adds `log2` for base 2. Use
+`log10()` when `base == 10.0` so `math.log(1000,10)` is exactly 3.
 
-### Two layers, because interning alone is too late
+**Leave base 2 alone.** It is a genuine 5.2/5.4 split: `math.log(3,2)` gives
+`1.5849625007211563` in 5.2 *and dellingr*, `1.5849625007211561` in 5.4.
+Changing it trades 5.2 compatibility for 5.4. Record the choice.
 
-1. Every string admitted to the interner satisfies the cap - the final funnel
-   is `GcHeap::alloc_string` (`object.rs:326`), which already hashes every byte
-   (`567`), so one O(1) branch before GC/hash/copy is negligible.
-2. **Expanding producers check before growing their buffer.** Checking only at
-   intern time is too late: the dangerous `Vec` already exists.
+**String-library number coercion, wholesale.** Every operand starts with an
+exact `LuaType::String` check (`string.rs:242`, `267`, `354`); both references
+use `luaL_checklstring`, which accepts numbers and rejects booleans, tables and
+functions. The current split is accidental - concat already coerces numbers
+(`eval.rs:237`) and `string.format` already accepts a numeric format string
+(`string_format.rs:50`). Add **one** shared string-or-number helper and apply
+it to every subject and pattern operand in `sub`, `find`, `len`, `upper`,
+`lower`, `reverse`, `match`, `gmatch`, `gsub`.
 
-Add a shared checked-growth helper doing `checked_add` against the cap before
-any `reserve` / `extend_from_slice` / `push` / `resize`.
+**Do not call `bytes_coerce` without a type gate** - its default conversion
+accepts more than strings and numbers (`table_ops.rs:457`).
 
-### Producers that must enforce it
+**`_G` key identity.** `_G[1]` currently aliases `_G["1"]` because non-string
+keys go through `to_string`. Keep string keys routed through `State::globals`,
+but store non-string keys raw in the proxy table in `global_env_index` /
+`global_env_newindex`. `_G` is already captured as an environment object
+(`vm.rs:296`) and environment deltas preserve typed keys (`save_state.rs:457`),
+so snapshot round-tripping should hold - test it.
 
-| path | required work |
-|---|---|
-| `..` | fold into the existing first length pass (`eval.rs:238-266`). **`total_len +=` at `240` can itself overflow** - use checked arithmetic. Reject before the stack truncation at `266`. |
-| `table.concat` | checked append inside the loop (`table.rs:177`) |
-| `string.format` | outer output (`string_format.rs:68`) plus a preflight for `%q`, which builds an expanded temporary first (`775`) |
-| `string.gsub` | all three branches (`string.rs:491`, `511`, `544`) - replacements, captures, function returns and the unchanged tail |
-| `gmatch` | the leading-`^` rewrite produces `pattern.len() + 1` (`string.rs:423`) |
-| `print` | assembles every argument into one `String` (`basic.rs:129`); 255 near-cap arguments request gigabytes. Cap the assembled message. |
-| host `push_bytes` / `push_string` | **must become fallible** (`stack.rs:101`), or a host can inject an over-cap string and invalidate every non-expansion argument |
-| compiled literals | `find_or_add_string_bytes` (`parser.rs:279`) and escaped-literal decoding, which reserves the raw source length (`306`); frame creation bypasses `State::alloc_string` and calls the heap directly (`eval.rs:471`) |
+**`Frame::jump` bound.** `jump` permits `ip == code.len()` (`frame.rs:100`)
+while the next fetch indexes directly (`119`). **Not reachable through a forged
+snapshot** - the verifier requires targets strictly less than `code_len`
+(`compiler/verify.rs:412`), snapshot loading verifies before materialization,
+and there is already a fixture proving rejection (`save_state.rs:1939`). Change
+`<=` to `<` as defence in depth and add a direct unit test; do not describe it
+as a security fix.
 
-Non-expanding operations - `sub`, `upper`, `lower`, `reverse`, capture results -
-need no producer check once the admission invariant holds; the backstop covers
-them.
+**`error(msg, level)`.** Both references honour it: 0 suppresses the prefix,
+N selects the caller N-1 frames up. Parse optional argument 2 defaulting to 1
+(`basic.rs:157`), carry a prefix-location policy on the error, and leave the
+full traceback unchanged - `Display` currently always takes
+`stack_trace.first()` (`error.rs:265`) while the trace already holds the
+current frame followed by its callers (`vm.rs:818`). Test default, 0, 1, 2,
+out-of-range and a non-integer level.
 
-### Error shape
+### Document, do not change
 
-Dedicated variant, not `RuntimeError`:
+**Zero-step numeric `for`** - README "Compatibility divergences" (new section).
+dellingr skips both directions; 5.2 skips ascending but loops forever
+descending; 5.4 errors. The code explicitly skips to avoid an infinite loop
+(`eval_control.rs:319`), so this is a semantic policy, not an omission.
 
-```rust
-ErrorKind::StringSizeExceeded { size: usize, limit: usize }
-```
+**Numeric-string arithmetic** - README "Won't implement", as: *implicit
+string-to-number coercion in arithmetic and numeric control expressions*.
+Arithmetic funnels through strict `as_num()` (`eval_store.rs:507`), unary
+negation likewise (`190`), and numeric `for` too (`eval_control.rs:62`). That
+breadth reads as deliberate VM policy, unlike the isolated string-library
+mismatch above - which is why the two are sorted differently.
 
-rendering `string size 16777217 exceeds limit 16777216`. `RuntimeError` would
-force hosts to parse text to recognise a resource-limit termination, and every
-other resource failure already has its own variant (`BudgetExceeded`,
-`CallDepthExceeded`, `StackOverflow`). Report the first invalid size; an
-arithmetic overflow reports `usize::MAX`. Add the matching
-`LoadError::StringSizeExceeded`.
-
-Not recoverable inside Lua - `pcall` is deliberately absent - but catchable by
-the host through `Result`. Rejection must happen before any mutation, so the
-State stays reusable and the host-visible stack is unchanged.
-
-### Snapshots
-
-The load path enforces nothing today: strings decode through unrestricted
-`read_bytes` (`save_state.rs:1472`, used at `1521` and `1739`), materialization
-bypasses `State::alloc_string` (`1008`), and bytecode literals restore without
-validation (`1285`). Apply **exactly the same inclusive boundary** at load, on
-both `payload.strings` and every saved bytecode `string_literal`, rejecting
-before copying. Do **not** apply it to whole snapshots or to metadata such as
-source names and registered function ids. The wire format is unchanged, but a
-v5 snapshot holding an oversized string now fails to load - document that.
-
-### Tests
-
-The 1 MiB repro still succeeds under `--limit 100` with `Cost used: 0`; exactly
-16 MiB succeeds and 16 MiB + 1 returns the dedicated error; every producer in
-the table above; `string.sub` of a cap-sized string; a failed operation leaves
-the State reusable and the host stack unchanged; **existing below-cap costs are
-byte-identical**; snapshot round trip at exactly the cap succeeds while forged
-cap-plus-one runtime and bytecode strings fail before materialization.
-
-**Public API break:** `push_bytes` and `push_string` return `Result<()>`. This
-is the third in the run, after `State::to_string` taking `&mut self` and
-`set_top`/`pop` becoming fallible. Note it lands adjacent to #62, which wants
-the same methods to enforce `MAX_STACK_SIZE` - that fix gets cheaper once these
-are already fallible.
+Also record the base-2 `math.log` 5.2/5.4 split in the same divergences
+section.
 
 ### Superseded open questions
 
-1. **Is a length cap sufficient?** Concat is not the only way to build a large
-   string. Enumerate every path that can produce an arbitrarily large string
-   or byte buffer - `..`, `table.concat`, `string.format`, `gsub` output,
-   `string.sub`, host `push_bytes` - and say which must enforce the cap for it
-   to be a real defence rather than a speed bump. `string.rep` is absent, which
-   removes the obvious one.
-2. **What is the right limit, and is it one constant or several?** Reference
-   Lua has no equivalent, so this is a product decision: pick a number that no
-   plausible game script reaches but that bounds memory usefully, and justify
-   it. Consider that the VM already allows a 1M-value stack.
-3. **Where is the check cheapest?** Ideally one place that every large-string
-   producer already funnels through - is there such a point (`alloc_string`, or
-   the interner), or does each site need its own check? Measure or argue the
-   cost on the hot path, since concat of short strings is common.
-4. **Error shape.** Which `ErrorKind`? `RuntimeError` seems right, but check
-   whether a dedicated variant is warranted so hosts can distinguish "script
-   asked for too much memory" from other runtime faults - the same reasoning
-   that produced `ScriptError` in the taxonomy loop.
-5. **Does the cap interact with snapshots?** A saved state could contain a
-   string at or near the cap, and a load must not reject a state the running VM
-   accepted. Confirm the load path agrees with the runtime limit.
+1. **What is the true MSRV?** Edition 2024 and let-chains set a floor. Which of
+   1.92 / 1.97 is right, and does anything in the crate actually require the
+   higher one?
+2. **String-library number coercion.** Reference coerces numbers to strings
+   throughout the string library. Should dellingr adopt that wholesale, or is
+   the strictness deliberate and belongs on the "Won't implement" list?
+   Consider that concat already coerces numbers, so the current split is
+   internally inconsistent. Which way does that inconsistency argue?
+3. **`math.log` base special-casing.** 5.4 special-cases bases 2 and 10 to
+   return exact results. Is matching that worth it given the README's
+   transcendental caveat, and does it affect determinism across hosts?
+4. **`for` step 0 and numeric-string arithmetic.** Bug or documented decision?
+   Argue each. If documented, say exactly where - README "Won't implement" or a
+   divergence-notes section.
+5. **`Frame::jump`.** Is `ip == code.len()` reachable through a forged
+   snapshot, given the bytecode verifier? If so this is a reachable panic and
+   not merely defence in depth.
 
-Read `src/vm/frame.rs` (`OP_CONCAT` dispatch), `src/vm/eval.rs`
-(`concat_helper`), `src/vm.rs` (`alloc_string`, the existing MAX_* constants),
-`src/lua_std/table.rs` (`table.concat`), `src/lua_std/string.rs`, and
-`src/vm/object.rs` (the string interner).
+Read `Cargo.toml`, `README.md`, `AGENTS.md`, `src/lua_std/math.rs`,
+`src/lua_std/string.rs`, `src/lua_std/string_format.rs`, `src/vm/frame.rs`
+(`jump`), `src/vm/eval_control.rs` (numeric for), `src/vm/eval_store.rs`
+(arithmetic coercion), and `src/compiler/verify.rs`.

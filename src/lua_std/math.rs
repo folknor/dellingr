@@ -292,7 +292,13 @@ pub(crate) fn open_math(state: &mut State) {
         let result = if state.get_top() >= 2 {
             state.check_type(2, LuaType::Number)?;
             let base = state.to_number(2)?;
-            x.log(base)
+            // Reference special-cases base 10 with log10, which makes
+            // math.log(1000, 10) exactly 3 rather than 2.9999999999999996.
+            // An exact comparison is what is wanted here: only the literal
+            // base 10 takes that path, as in reference.
+            #[allow(clippy::float_cmp)]
+            let is_base_ten = base == 10.0;
+            if is_base_ten { x.log10() } else { x.log(base) }
         } else {
             x.ln()
         };

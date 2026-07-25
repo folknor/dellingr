@@ -40,6 +40,23 @@ fn deep_global_chain_saves_and_loads_iteratively() {
     );
 }
 
+#[test]
+fn global_environment_preserves_non_string_key_identity_across_save_load() {
+    let mut state = State::new();
+    run(&mut state, "_G[1] = 'number'; _G['1'] = 'string'");
+    let save = state.save_state().expect("state saves");
+    let mut loaded =
+        State::load_state(&save.bytes, Box::new(DefaultCallbacks), |_| {}).expect("state loads");
+    loaded
+        .load_string("return _G[1], _G['1']")
+        .expect("query compiles");
+    loaded
+        .call(ArgCount::Fixed(0), RetCount::Fixed(2))
+        .expect("query runs");
+    assert_eq!(loaded.to_string(-2).unwrap(), "number");
+    assert_eq!(loaded.to_string(-1).unwrap(), "string");
+}
+
 fn new_capture_state() -> (State, Arc<Mutex<Vec<String>>>) {
     let callbacks = Capture::default();
     let lines = Arc::clone(&callbacks.lines);

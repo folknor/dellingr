@@ -3,7 +3,7 @@
 use std::sync::{Arc, OnceLock};
 
 use crate::compiler;
-use crate::error::ErrorKind;
+use crate::error::{ArgError, ErrorKind};
 use crate::instr::{ArgCount, RetCount};
 use crate::patterns::{LuaCapture, LuaPattern};
 use crate::{LuaType, Result, State};
@@ -57,6 +57,21 @@ fn lua_end_index(len: usize, idx: isize) -> usize {
         (idx as usize).min(len)
     } else {
         (len as isize + idx + 1).max(0) as usize
+    }
+}
+
+/// Lua's string-library arguments accept strings and numbers, but no other
+/// values. Keep the type gate separate from `bytes_coerce`, whose general
+/// conversion rules are intentionally broader.
+fn string_or_number_bytes(state: &mut State, idx: isize) -> Result<Vec<u8>> {
+    match state.typ(idx) {
+        LuaType::String | LuaType::Number => state.bytes_coerce(idx),
+        received => Err(state.error(ErrorKind::ArgError(ArgError {
+            arg_number: idx,
+            func_name: None,
+            expected: Some(LuaType::String),
+            received: Some(received),
+        }))),
     }
 }
 
@@ -241,9 +256,9 @@ pub(crate) fn open_string(state: &mut State) {
 
     // string.sub(s, i [, j])
     add_fn!("sub", |state| {
-        state.check_type(1, LuaType::String)?;
         state.check_type(2, LuaType::Number)?;
-        let len = state.to_bytes(1)?.len();
+        let subject = string_or_number_bytes(state, 1)?;
+        let len = subject.len();
         let i = state.to_number(2)? as isize;
         let j = if state.check_optional_type(3, LuaType::Number)? {
             state.to_number(3)? as isize
@@ -256,7 +271,7 @@ pub(crate) fn open_string(state: &mut State) {
         let bytes = if start >= end || start >= len {
             Vec::new()
         } else {
-            state.to_bytes(1)?[start..end].to_vec()
+            subject[start..end].to_vec()
         };
 
         state.set_top(0)?;
@@ -266,35 +281,28 @@ pub(crate) fn open_string(state: &mut State) {
 
     // string.find(s, pattern [, init [, plain]])
     add_fn!("find", |state| {
-        state.check_type(1, LuaType::String)?;
-        state.check_type(2, LuaType::String)?;
+        let subject = string_or_number_bytes(state, 1)?;
+        let pattern = string_or_number_bytes(state, 2)?;
         let num_args = state.get_top();
 
         let init = if state.check_optional_type(3, LuaType::Number)? {
-            let s_len = state.to_bytes(1)?.len();
-            lua_start_index(s_len, state.to_number(3)? as isize)
+            lua_start_index(subject.len(), state.to_number(3)? as isize)
         } else {
             0
         };
         let plain = num_args >= 4 && state.to_boolean(4);
 
-        let pattern_is_plain = {
-            let pattern = state.to_bytes(2)?;
-            plain || is_plain_lua_pattern(pattern)
-        };
+        let pattern_is_plain = { plain || is_plain_lua_pattern(&pattern) };
 
         if pattern_is_plain {
             let result = {
-                let s = state.to_bytes(1)?;
-                let pattern = state.to_bytes(2)?;
-
                 if pattern.is_empty() {
-                    (init <= s.len()).then_some((init + 1, init))
-                } else if init >= s.len() {
+                    (init <= subject.len()).then_some((init + 1, init))
+                } else if init >= subject.len() {
                     None
                 } else {
-                    let search = &s[init..];
-                    find_subslice(search, pattern).map(|pos| {
+                    let search = &subject[init..];
+                    find_subslice(search, &pattern).map(|pos| {
                         let start = init + pos + 1;
                         let end = start + pattern.len() - 1;
                         (start, end)
@@ -312,8 +320,7 @@ pub(crate) fn open_string(state: &mut State) {
                 Ok(1)
             }
         } else {
-            let s = state.to_bytes(1)?.to_vec();
-            let pattern = state.to_bytes(2)?.to_vec();
+            let s = subject;
 
             state.set_top(0)?;
 
@@ -353,8 +360,7 @@ pub(crate) fn open_string(state: &mut State) {
 
     // string.len(s)
     add_fn!("len", |state| {
-        state.check_type(1, LuaType::String)?;
-        let len = state.to_bytes(1)?.len();
+        let len = string_or_number_bytes(state, 1)?.len();
         state.set_top(0)?;
         state.push_number(len as f64);
         Ok(1)
@@ -362,8 +368,7 @@ pub(crate) fn open_string(state: &mut State) {
 
     // string.upper(s)
     add_fn!("upper", |state| {
-        state.check_type(1, LuaType::String)?;
-        let mut s = state.to_bytes(1)?.to_vec();
+        let mut s = string_or_number_bytes(state, 1)?;
         s.make_ascii_uppercase();
         state.set_top(0)?;
         state.push_bytes(s)?;
@@ -372,8 +377,7 @@ pub(crate) fn open_string(state: &mut State) {
 
     // string.lower(s)
     add_fn!("lower", |state| {
-        state.check_type(1, LuaType::String)?;
-        let mut s = state.to_bytes(1)?.to_vec();
+        let mut s = string_or_number_bytes(state, 1)?;
         s.make_ascii_lowercase();
         state.set_top(0)?;
         state.push_bytes(s)?;
@@ -382,8 +386,7 @@ pub(crate) fn open_string(state: &mut State) {
 
     // string.reverse(s)
     add_fn!("reverse", |state| {
-        state.check_type(1, LuaType::String)?;
-        let mut s = state.to_bytes(1)?.to_vec();
+        let mut s = string_or_number_bytes(state, 1)?;
         s.reverse();
         state.set_top(0)?;
         state.push_bytes(s)?;
@@ -392,10 +395,8 @@ pub(crate) fn open_string(state: &mut State) {
 
     // string.match(s, pattern [, init])
     add_fn!("match", |state| {
-        state.check_type(1, LuaType::String)?;
-        state.check_type(2, LuaType::String)?;
-        let s = state.to_bytes(1)?.to_vec();
-        let pattern = state.to_bytes(2)?.to_vec();
+        let s = string_or_number_bytes(state, 1)?;
+        let pattern = string_or_number_bytes(state, 2)?;
         let init = if state.check_optional_type(3, LuaType::Number)? {
             lua_start_index(s.len(), state.to_number(3)? as isize)
         } else {
@@ -427,11 +428,8 @@ pub(crate) fn open_string(state: &mut State) {
 
     // string.gmatch(s, pattern)
     add_fn!("gmatch", |state| {
-        state.check_type(1, LuaType::String)?;
-        state.check_type(2, LuaType::String)?;
-
-        let s = state.to_bytes(1)?.to_vec();
-        let pattern = state.to_bytes(2)?.to_vec();
+        let s = string_or_number_bytes(state, 1)?;
+        let pattern = string_or_number_bytes(state, 2)?;
         let pattern = if pattern.first() == Some(&b'^') {
             let escaped_len = crate::vm::checked_string_growth(pattern.len(), 1)?;
             let mut escaped = Vec::with_capacity(escaped_len);
@@ -471,11 +469,9 @@ pub(crate) fn open_string(state: &mut State) {
 
     // string.gsub(s, pattern, repl [, n])
     add_fn!("gsub", |state| {
-        state.check_type(1, LuaType::String)?;
-        state.check_type(2, LuaType::String)?;
         state.check_any(3)?;
-        let s = state.to_bytes(1)?.to_vec();
-        let pattern = state.to_bytes(2)?.to_vec();
+        let s = string_or_number_bytes(state, 1)?;
+        let pattern = string_or_number_bytes(state, 2)?;
         let max_replacements = if state.check_optional_type(4, LuaType::Number)? {
             let n = state.to_number(4)? as isize;
             Some(if n <= 0 { 0 } else { n as usize })

@@ -8,6 +8,26 @@ fn run_one(code: &str) -> State {
 }
 
 #[test]
+fn string_library_coerces_number_subjects_and_patterns() {
+    let state = run_one(
+        r#"
+        local found = string.find(12345, 34)
+        local iter = string.gmatch(121, 1)
+        local first = iter()
+        local replaced = string.gsub(121, 1, "x")
+        return string.sub(123, 2) .. ":" .. string.len(42) .. ":"
+            .. string.upper(12) .. ":" .. string.lower(12) .. ":"
+            .. string.reverse(123) .. ":" .. found .. ":"
+            .. string.match(123, 23) .. ":" .. first .. ":" .. replaced
+        "#,
+    );
+
+    // Verified against Lua 5.4, which prints the same string for this
+    // expression. Note gsub("121", "1", "x") is "x2x": both 1s are replaced.
+    assert_eq!(state.to_bytes(-1).unwrap(), b"23:2:12:12:321:3:23:1:x2x");
+}
+
+#[test]
 fn gsub_dot_matches_utf8_bytes() {
     let mut state = State::new();
     state

@@ -42,6 +42,7 @@ Designed for sandboxed embedding, not as a general-purpose Lua replacement. Thes
 - `goto`/labels - simplifies VM, prevents obfuscated control flow
 - `string.rep`, `string.byte`, `string.char`
 - Arithmetic/comparison/concat metamethods
+- Implicit string-to-number coercion in arithmetic and numeric control expressions
 - Long strings (`[[...]]`, `[=[...]=]`)
 
 Some of them might be added later (probably most of them behind a feature gate, if so). The lack of the features above make the VM much more suitable for embedded use. Especially in games where the Lua scripting might be exposed to users. In those cases, these 3 string methods - for example - could be used to work around restrictions the game wants to put on the user.
@@ -57,6 +58,12 @@ Per-function ceilings, all reported as syntax errors rather than silently trunca
 ## Budget
 
 There's a few gotchas with the current instruction-cost accounting. For example, `while true do end` is free, which means that a users Lua script could run forever. This is a known trade-off made in the full light of day - the main consumer of dellingr does not want to penalise the user (that is, subtract from their per-gametick budget) for structural semantics. Users should be encouraged to write more code, not less.
+
+## Compatibility divergences
+
+Numeric `for` loops with a zero step skip their body in both directions. Lua 5.2 skips an ascending range but loops forever for a descending one; Lua 5.4 raises an error. dellingr deliberately skips the loop to avoid the unbounded execution case.
+
+`math.log(x, 2)` follows Lua 5.2's general-base calculation. This differs in the last bit from Lua 5.4 for some inputs (for example, `math.log(3, 2)`).
 
 ## Determinism
 
@@ -100,10 +107,12 @@ RNG outcomes matters.
 ## Status
 
 The public API is pre-1.0 and not yet stable. Breaking changes may land at any point.
+The declared MSRV is Rust 1.92; release validation should include a real 1.92
+toolchain check.
 
 ```toml
 [dependencies]
-dellingr = "0.2"
+dellingr = "0.3"
 ```
 
 ## Library usage/VM

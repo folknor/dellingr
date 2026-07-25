@@ -267,6 +267,33 @@ fn error_function_produces_error() {
 }
 
 #[test]
+fn error_level_selects_or_suppresses_only_the_prefix() {
+    let default = expect_error("error('boom')");
+    assert!(format!("{default}").starts_with("1:0: boom"));
+
+    let zero = expect_error("error('boom', 0)");
+    assert!(format!("{zero}").starts_with("boom\nstack traceback:"));
+
+    let one = expect_error("error('boom', 1)");
+    assert!(format!("{one}").starts_with("1:0: boom"));
+
+    let two = expect_error("local function f() error('boom', 2) end\nf()");
+    assert_eq!(two.stack_trace.len(), 2);
+    assert!(format!("{two}").starts_with("2:0: boom"));
+
+    let out_of_range = expect_error("error('boom', 99)");
+    assert!(format!("{out_of_range}").starts_with("boom\nstack traceback:"));
+
+    let non_integer = expect_error("error('boom', 1.5)");
+    assert!(format!("{non_integer}").contains("number has no integer representation"));
+}
+
+#[test]
+fn math_log_base_ten_uses_the_exact_base_ten_path() {
+    assert_eq!(run_number("return math.log(1000, 10)"), 3.0);
+}
+
+#[test]
 fn type_error_on_arithmetic() {
     let err = expect_error("local x = 'hello' + 1");
     assert!(

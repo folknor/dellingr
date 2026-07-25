@@ -153,85 +153,6 @@ out of that loop's scope.
   second public API break after #47. Worth doing deliberately in one pass
   rather than piecemeal.
 
-### 54. MSRV / version doc mismatches (D-D8)
-
-`Cargo.toml:5` says `rust-version = "1.97"`; README badge (line 5) and
-AGENTS.md both say 1.92. One is wrong. (README's `dellingr = "0.2"` snippet
-also trails the crate's 0.3.0, minor.)
-
-### 58. Assorted minor divergences and design-confirmation notes
-
-From E (E-E16, all confirmed at code level, cosmetic-to-small):
-
-- `math.random(m, n)` with `m > n` reports "bad argument #1"; reference says
-  `#2`.
-- `math.log(x, base)` is always `ln/ln`; 5.4 special-cases base 2/10
-  (`log(8,2)` is exactly 3.0 there, ~3.0000000000000004-class noise here).
-  Within dellingr's control despite the README transcendental caveat.
-- String library rejects number arguments where reference coerces
-  (`string.len(42)`, `string.sub(123, 1)` error). One systematic decision
-  should be recorded either way.
-- `error()` ignores the level argument. The position prefix half of this item
-  is fixed - errors now render `chunk:line: message` from the frame they
-  surfaced in - but `level` is still unimplemented, so `error(msg, 2)` cannot
-  blame the caller and `error(msg, 0)` cannot suppress the prefix (arguably
-  deliberate without pcall).
-- `string.format("%u")` accepted; Lua 5.4 removed `%u`. Harmless leniency,
-  but the module claims the 5.4 contract - decide deliberately.
-- `string.format("%p")` prints `(null)` for non-collectable values;
-  glibc-based reference prints `(nil)`. `%p` output is inherently divergent;
-  diff-test cosmetics only.
-- `_G` proxy stringifies keys (`_G[1]` aliases `_G["1"]`; non-string keys go
-  through `to_string`), unlike reference's real table. Inherent to the proxy
-  design; recorded so it is a decision, not an accident.
-
-From B (B-B12, robustness notes):
-
-- `Frame::jump` (`frame.rs:83-99`) accepts `ip == code.len()`; the next
-  `get_instr` would panic on the OOB fetch. Unreachable with
-  compiler-emitted bytecode (every chunk ends with OP_RETURN), but the bound
-  should be `<` for defense in depth.
-- Numeric `for` with step 0 skips the loop (`eval_control.rs:316-326`).
-  Matches 5.2 for ascending ranges, silently diverges from 5.2's infinite
-  loop for descending ranges and from 5.4's "'for' step is zero" error.
-  Looks deliberate - worth one line in README's divergence notes if so.
-- Arithmetic does not coerce numeric strings (`"10" + 1` is a type error;
-  reference yields 11; `eval_float_float`/`pop_num`,
-  `eval_store.rs:511-530`). Concat DOES coerce numbers to strings. If the
-  strictness is deliberate (it reads that way), it belongs on the README
-  "Won't implement" list; today it's an undocumented divergence in an
-  implemented feature area.
-
-From C (latent hazards and nits):
-
-- C-E2: `alloc_string` runs the `is_full` check and potential full
-  collection even when the string is already interned - a hot loop touching
-  only existing strings can pay a whole mark+sweep at the threshold boundary
-  with zero reclaimable garbage; threshold then doubles. Amortized-fine;
-  noted to preempt "GC runs with nothing to collect" confusion in profiles.
-- C-E3: upvalue pool never frees slots (documented). A closed upvalue whose
-  closure died retains a stale `Val` forever; never marked, never read again
-  (refs only flow from closures) - a bounded leak, not a safety issue. But
-  see optimizations.md #21: the "VMs have short lifetimes" justification
-  contradicts the long-lived-State story the snapshot feature implies.
-- C-E4: `call_anchor`'s `insert_at` check only guards against underflowing
-  the whole stack, not against inserting below `stack_bottom`; a host that
-  lies about `args` can corrupt a caller frame's slots. Suggest
-  `checked_sub` against `get_top()` instead of `stack.len()`.
-- C-F1: `t.foo` on a table without the field falls back to the `table`
-  library (`instr_get_field` -> `push_table_library_field`,
-  `eval_index.rs:37-39, 350-363`), so `({}).insert == table.insert`.
-  Deliberate, but note the asymmetry: `t["insert"]` via `OP_GET_TABLE` does
-  NOT fall back, so `t.insert ~= t["insert"]`. Worth one README line if it
-  is contract; also a perf drag (optimizations.md #10).
-- C-F2: `_G` proxying, `pairs(_G)` iterating the near-empty proxy, and
-  globals never physically removed (nil stored instead) are consistent with
-  the documented design; index-based global ICs stay valid because `globals`
-  is append-only and existing-key inserts keep indices.
-
-From D (CLI nits): multiple filename args - last silently wins; negative
-`--limit` accepted and immediately exhausts. Both arguably fine.
-
 ---
 
 ## Coverage with no finding (merged from all five corners)
@@ -363,3 +284,17 @@ glibc's.
 - B ordered findings most-severe-first without labels; severities shown here
   for B items are the consolidator's placement of B's ordering, not new
   adjudication.
+- **Claims that measurement disproved.** Recorded so nobody re-derives them.
+  All were code-read against the wrong reference version or simply wrong; the
+  audit said up front that nothing in it had been executed.
+  - #57's two `tonumber` claims (deleted in an earlier session).
+  - `math.random(m, n)` with `m > n`: dellingr reports argument `#1`, which is
+    what **5.4** reports. Only 5.2 says `#2`. "Fixing" this would introduce a
+    divergence.
+  - `string.format("%u")`: not removed in 5.4. Both 5.2 and 5.4 accept it.
+  - `string.format("%p")` printing `(null)`: correct. 5.4 substitutes `(null)`
+    for a null pointer, and 5.2 rejects `%p` entirely.
+- **Deliberate divergences are documented in README**, not tracked here:
+  zero-step numeric `for` (skips, where 5.2 loops forever descending and 5.4
+  errors), no implicit string-to-number coercion in arithmetic or numeric
+  control expressions, and `math.log` base 2 following 5.2 rather than 5.4.

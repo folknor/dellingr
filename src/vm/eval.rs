@@ -364,7 +364,8 @@ impl State {
     /// how parser errors survive with their own line and column.
     fn locate_in_frame(error: Error, frame: &Frame) -> Error {
         if error.line_num == 0 {
-            Error::new(error.kind, frame.current_line() as usize, error.column)
+            let column = error.column;
+            error.with_location(frame.current_line() as usize, column)
         } else {
             error
         }

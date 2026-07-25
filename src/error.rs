@@ -40,6 +40,28 @@ pub struct Error {
     pub stack_trace: Vec<StackFrame>,
 }
 
+/// Which source location an error renders as its `chunk:line:` prefix.
+///
+/// Set by `error(msg, level)`: level 1 (the default) blames the frame that
+/// raised the error, level 0 suppresses the prefix, and level N blames N-1
+/// frames further up the traceback.
+#[derive(Debug, Clone, Copy)]
+pub enum PrefixLocation {
+    /// Blame the frame where the error surfaced. The default.
+    Current,
+    /// Render no `chunk:line:` prefix at all, as `error(msg, 0)` does.
+    Suppressed,
+    /// Blame this index into the stack trace, counting from the innermost
+    /// frame. An index past the end renders no prefix.
+    ///
+    /// `u32` rather than `usize` so `PrefixLocation` stays 8 bytes and
+    /// `ScriptError` stays within `ErrorKind`'s existing largest variant.
+    /// Widening `ErrorKind` widens every `Result<_, Error>` held across the
+    /// Lua call recursion, which runs 1000 frames deep and overflows the
+    /// debug-build stack - `call_depth_exceeded_error` catches exactly that.
+    TraceFrame(u32),
+}
+
 /// Top-level error categories. See the type-specific enums (e.g.
 /// [`TypeError`], [`SyntaxError`], [`ArgError`]) for finer-grained variants.
 #[derive(Debug)]
@@ -106,7 +128,18 @@ pub enum ErrorKind {
     RuntimeError(String),
     /// An error explicitly raised by script code through `error()`. Hosts can
     /// use this to tell deliberate script termination from a VM-detected fault.
-    ScriptError(String),
+    ///
+    /// The prefix location lives here rather than on [`Error`] deliberately:
+    /// only `error()` can set it, and `Error` is returned by value through
+    /// every level of the Lua call recursion, so widening it costs stack on a
+    /// path that already runs to `MAX_CALL_DEPTH`. `ErrorKind` is sized by its
+    /// largest variant, which this is not.
+    ScriptError {
+        /// The message the script passed to `error()`.
+        message: String,
+        /// Which frame supplies the rendered `chunk:line:` prefix.
+        prefix: PrefixLocation,
+    },
     /// Internal error (corrupt bytecode or VM bug). The string is a
     /// human-readable description; report these as bugs.
     InternalError(String),
@@ -222,6 +255,12 @@ impl Error {
         self
     }
 
+    pub(crate) fn with_location(mut self, line_num: usize, column: usize) -> Self {
+        self.line_num = line_num;
+        self.column = column;
+        self
+    }
+
     /// 1-based column number where the error surfaced (0 if unknown).
     pub fn column(&self) -> usize {
         self.column
@@ -269,13 +308,31 @@ impl fmt::Display for Error {
         // together two unrelated locations: a host `RustFunc` may return an
         // `Error` carrying its own line, which says nothing about the Lua chunk
         // whose name is about to be printed next to it.
-        if let Some(frame) = self.stack_trace.first()
-            && let Some(source) = frame.source.as_deref()
-            && frame.line != 0
-        {
-            write!(f, "{source}:{}: {}", frame.line, self.kind)?;
+        let prefix_location = match &self.kind {
+            ErrorKind::ScriptError { prefix, .. } => *prefix,
+            _ => PrefixLocation::Current,
+        };
+        let prefix_frame = match prefix_location {
+            PrefixLocation::Current => self.stack_trace.first(),
+            PrefixLocation::Suppressed => None,
+            PrefixLocation::TraceFrame(index) => self.stack_trace.get(index as usize),
+        };
+        let suppress_prefix = matches!(prefix_location, PrefixLocation::Suppressed)
+            || matches!(prefix_location, PrefixLocation::TraceFrame(_)) && prefix_frame.is_none();
+        // The line always comes from the selected frame, whether or not that
+        // frame knows its source name. Falling back to `self.line_num` when the
+        // source is absent would report the innermost line under an
+        // `error(msg, 2)` that deliberately selected a caller.
+        if suppress_prefix {
+            write!(f, "{}", self.kind)?;
         } else {
-            write!(f, "{}:{}: {}", self.line_num, self.column, self.kind)?;
+            match prefix_frame.filter(|frame| frame.line != 0) {
+                Some(frame) => match frame.source.as_deref() {
+                    Some(source) => write!(f, "{source}:{}: {}", frame.line, self.kind)?,
+                    None => write!(f, "{}:{}: {}", frame.line, self.column, self.kind)?,
+                },
+                None => write!(f, "{}:{}: {}", self.line_num, self.column, self.kind)?,
+            }
         }
         if !self.stack_trace.is_empty() {
             writeln!(f)?;
@@ -335,7 +392,7 @@ impl fmt::Display for ErrorKind {
             // identically, exactly as reference does. The variants are distinct
             // so hosts can tell deliberate script termination from a VM-detected
             // fault, which is not a rendering difference.
-            RuntimeError(msg) | ScriptError(msg) => write!(f, "{msg}"),
+            RuntimeError(msg) | ScriptError { message: msg, .. } => write!(f, "{msg}"),
             InternalError(msg) => {
                 write!(f, "internal error: {msg}")
             }

@@ -105,7 +105,7 @@ impl Frame {
             self.ip.checked_sub(offset.unsigned_abs() as usize)
         };
         match new_ip {
-            Some(ip) if ip <= self.bytecode.code.len() => {
+            Some(ip) if ip < self.bytecode.code.len() => {
                 self.ip = ip;
                 Ok(())
             }
@@ -462,5 +462,21 @@ mod tests {
             .jump(i16::MIN)
             .expect("minimum offset should be valid");
         assert_eq!(frame.ip, 0);
+    }
+
+    #[test]
+    fn jump_rejects_end_of_bytecode() {
+        let bytecode = Arc::new(Bytecode {
+            code: vec![Instr::ret(RetCount::Fixed(0))],
+            ..Bytecode::default()
+        });
+        let caches = Arc::new(RuntimeCaches::new(&bytecode));
+        let mut frame = Frame::new(bytecode, caches, Vec::new(), Vec::new(), 0, 0);
+
+        let error = frame.jump(1).expect_err("jump to end must be rejected");
+        assert!(matches!(
+            error.kind,
+            ErrorKind::InvalidJump { ip: 0, offset: 1 }
+        ));
     }
 }
