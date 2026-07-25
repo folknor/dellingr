@@ -19,6 +19,79 @@
 - Use the 3-pass audit structure: domain-specific verification, then cross-cutting reconciliation (does the new instruction actually dispatch? is the new builtin actually installed by `open_libs`?), then editorial normalization.
 - Any discrepancies doc should contain only current gaps, not historical records. Remove resolved items entirely.
 
+## 'brokkr' benchmarking
+
+Dev tool at `~/Programs/brokkr`, invoked as `brokkr` from the project root
+(reads `./brokkr.toml`). Besides `check`/`test`, it owns dellingr's
+benchmarking. Workloads are the content-addressed `[dellingr.workloads.*]`
+registrations in brokkr.toml (seconds-scale scripts in `bench/`, harness =
+`examples/hotpath.rs` - see AGENTS.md "Hotpath benchmarks" for that layer).
+Editing a registered script requires updating its xxh128 in brokkr.toml;
+brokkr refuses on hash drift, naming the registration to re-register.
+
+```
+brokkr dellingr --lua <W>                    # run once, print timing, store nothing
+brokkr dellingr --lua <W> --bench            # 3 runs, store in DB + sidecar
+brokkr dellingr --lua <W> --hotpath          # function-level timing (hotpath feature)
+brokkr dellingr --lua <W> --alloc            # allocation tracking (hotpath-alloc)
+brokkr dellingr --lua <W> --bench --commit <ref>   # baseline an old commit
+```
+
+- `--bench N` runs N times, stores best (default 3); the sidecar stores
+  EVERY iteration (`brokkr sidecar <uuid> --run N|all`).
+- `--bench` trusts walls; `--hotpath`/`--alloc` walls are distorted by
+  instrumentation - read their distributions (call counts, % of total),
+  never their absolute times.
+- `--commit <ref>` builds the harness at the old commit in brokkr's own
+  persistent worktree (own CARGO_TARGET_DIR; `brokkr clean --worktrees`),
+  but loads the workload file from the CURRENT tree, hash-checked - the
+  baseline varies the VM and holds the workload fixed.
+- Requires a clean git tree (except `*.md` and `.brokkr/results.db`);
+  `--force` runs anyway but stores no results row. `brokkr sidecar dirty`
+  reaches the latest forced/failed run's sidecar data.
+
+Querying results (`.brokkr/results.db`):
+
+- `brokkr results` - last 20. `brokkr results <uuid>` - one result, with
+  per-iteration walls. **When the walls disagree, never read the row as a
+  single number** - iteration 1 slow then 2/3 fast is a cold page cache.
+- `brokkr results [--commit X] [--compare A B] [--command CMD] [--mode M]
+  [--grep STR] [--grep-v STR] [-n N] [--top N]` - SQLite queries.
+  `--grep`/`--grep-v` match `cli_args`+`brokkr_args`, repeatable;
+  `--grep-v` is how you select the arm of an A/B distinguished only by an
+  absent flag.
+- `brokkr sidecar <uuid> [--human]` - per-phase summary (PARSE / SETUP /
+  COLD / WARM segments with RSS, faults, core split). Read this before
+  calling any delta a regression: SETUP is the script's standalone footer,
+  WARM is the verdict phase.
+- `brokkr sidecar <uuid> --durations [--human]` - START/END span timings;
+  repeated spans collapse to count/total/min/avg/max. The WARM_BLOCK
+  collapsed row's min/max IS the within-process spread - the per-run
+  health check.
+- `--counters` (harness heap/object brackets), `--markers`, `--samples`,
+  `--stat FIELD` (compose with `--phase`/`--range`/`--where`) also exist.
+  `--stalls` is inert for dellingr (single-threaded, no `*_wait_ns`
+  counters).
+- `brokkr sidecar --compare <A> <B>` - phase-aligned delta; annotates host
+  differences (memory/governor/kernel) between the runs. Check those
+  first.
+
+### Benchmarking rules
+
+- **Never run benchmark or profiling commands in parallel.** One at a
+  time, wait for completion.
+- **Interleave matched A/B cells.** `--bench N` is best-of-N within one
+  cell and cannot cancel drift between cells. Alternate cells, compare
+  medians, check sign consistency across pairs.
+- **A same-day matched pair beats any historical number.** When they
+  disagree, retire the historical figure.
+- Launch-to-launch wall noise is the dominant band for a CPU-bound VM
+  (sibling projects measured ~7% on byte-identical binaries; dellingr's
+  own band is not yet characterized). Treat small single-digit-% wall
+  deltas as noise until it is; the five-launch same-binary control is
+  cheap - run it before trusting a small delta.
+- Performance numbers in markdown must include commit hash and hostname.
+
 ## Rules
 
 ### General rules
@@ -45,8 +118,8 @@ Do not use your Memory functionality. Do not read, write, or update memories. Do
 ### git commit rules
 
 - Always run `brokkr fmt` before a commit.
-- Never commit markdown changes alone. Bundle them with upcoming code commits.
-- When committing other changes: always tag along markdown files if dirty.
+- Never commit markdown changes and/or `.brokkr/results.db` alone. Bundle them with upcoming code commits.
+- When committing other changes: always tag along markdown files and `.brokkr/results.db` if dirty. (`sidecar.db` stays out of git - way too large - which is why `.gitignore` un-ignores only `results.db` from `.brokkr/`.)
 - Write substantive engineering-focused commit messages.
 - Has `Cargo.lock` changed? Commit it.
 - Never `git push` unless the user explicitly asks. Stop after the commit.
