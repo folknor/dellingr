@@ -344,6 +344,96 @@ fn table_insert_at_position() {
 }
 
 #[test]
+fn table_insert_rotation_preserves_order_across_storage_shapes() {
+    // Each case walks `pairs` and builds "key=value key=value ..." over the
+    // WHOLE table, so an element lost, duplicated or left in the wrong slot
+    // anywhere in the middle fails - checking only the ends would not catch the
+    // rotation carrying a value twice.
+    let check = |code: &str, expected: &str| {
+        let matched = run_number(&format!(
+            r#"
+            local t = {code}
+            local parts = {{}}
+            for key, value in pairs(t) do
+                parts[#parts + 1] = key .. "=" .. tostring(value)
+            end
+            return table.concat(parts, " ") == "{expected}" and 1 or 0
+        "#
+        ));
+        assert_eq!(matched, 1.0, "expected {expected} from {code}");
+    };
+
+    // Inline storage: four entries or fewer.
+    check("{10, 20, 30} table.insert(t, 1, 99)", "1=99 2=10 3=20 4=30");
+    // Map storage: promotion happens at the fifth entry.
+    check(
+        "{10, 20, 30, 40, 50} table.insert(t, 1, 99)",
+        "1=99 2=10 3=20 4=30 5=40 6=50",
+    );
+    // Tombstoned slot, compacted before the rotation runs.
+    check(
+        "{10, 20, 30, 40, 50} t[5] = nil table.insert(t, 2, 99)",
+        "1=10 2=99 3=20 4=30 5=40",
+    );
+    // Inserting in the middle rather than at either end.
+    check(
+        "{10, 20, 30, 40} table.insert(t, 3, 99)",
+        "1=10 2=20 3=99 4=30 5=40",
+    );
+    // Appending through the positional form.
+    check("{10, 20, 30} table.insert(t, 4, 99)", "1=10 2=20 3=30 4=99");
+}
+
+#[test]
+fn table_sort_comparator_error_leaves_every_slot_untouched() {
+    // The sort permutes a detached copy and only writes back on success, so a
+    // comparator that fails part-way through must leave every original slot as
+    // it was - not a partially sorted prefix.
+    let mut state = State::new();
+    state
+        .load_string(
+            r#"
+            t = {5, 3, 1, 4, 2}
+            local n = 0
+            table.sort(t, function(a, b)
+                n = n + 1
+                if n == 3 then error("stop") end
+                return a < b
+            end)
+        "#,
+        )
+        .unwrap();
+    state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+        .expect_err("comparator error must propagate out of table.sort");
+
+    state
+        .load_string(
+            r#"
+            local parts = {}
+            for i = 1, 5 do parts[#parts + 1] = tostring(t[i]) end
+            return table.concat(parts, ",")
+        "#,
+        )
+        .unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
+    assert_eq!(state.to_bytes(-1).unwrap(), b"5,3,1,4,2");
+}
+
+#[test]
+fn table_insert_sparse_array_does_not_cache_a_non_border() {
+    let value = run_number(
+        r#"
+        local t = {1, 2, 3}
+        t[5] = 5
+        table.insert(t, 1, 99)
+        return #t * 100 + t[4] * 10 + t[5]
+    "#,
+    );
+    assert_eq!(value, 535.0);
+}
+
+#[test]
 fn table_insert_nil_position_is_required() {
     let err = expect_error("table.insert({}, nil, 9)");
     let ErrorKind::ArgError(arg) = err.kind else {
@@ -571,6 +661,84 @@ fn table_sort_with_comparator() {
     "#,
     );
     assert_eq!(val, 321.0);
+}
+
+#[test]
+fn table_sort_default_rejects_incomparable_values_without_mutation() {
+    for (code, expected) in [
+        (
+            "return table.sort({1, 'a', 2})",
+            "attempt to compare string with number",
+        ),
+        (
+            "return table.sort({{}, {}})",
+            "attempt to compare two table values",
+        ),
+        (
+            "return table.sort({true, false})",
+            "attempt to compare two boolean values",
+        ),
+    ] {
+        let err = expect_error(code);
+        let ErrorKind::TypeError(kind) = err.kind else {
+            panic!("expected comparison type error: {err}");
+        };
+        assert_eq!(kind.to_string(), expected);
+    }
+
+    let singleton = run_number("local t = {true}; table.sort(t); return #t");
+    assert_eq!(singleton, 1.0);
+
+    let mut state = State::new();
+    state.load_string("return {1, 'a', 2}").unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
+    state
+        .table_sort(1, false)
+        .expect_err("mixed default sort must fail");
+    state.push_number(1.0);
+    state.get_table(1).unwrap();
+    assert_eq!(state.to_number(-1).unwrap(), 1.0);
+    state.pop(1);
+    state.push_number(2.0);
+    state.get_table(1).unwrap();
+    assert_eq!(state.to_string(-1).unwrap(), "a");
+}
+
+#[test]
+fn table_sort_heap_comparator_is_bounded_and_reentrant() {
+    let calls = run_number(
+        r#"
+        local t, calls = {}, 0
+        for i = 64, 1, -1 do t[#t + 1] = i end
+        table.sort(t, function(a, b) calls = calls + 1; return a < b end)
+        return calls
+    "#,
+    );
+    assert!(calls < 1_024.0, "heap sort made too many calls: {calls}");
+
+    let value = run_number(
+        r#"
+        local t = {3, 1, 2}
+        local other = {2, 1}
+        table.sort(t, function(a, b)
+            t.marker = 42
+            table.sort(other)
+            return a < b
+        end)
+        return t[1] * 100 + t[3] + t.marker + other[1]
+    "#,
+    );
+    assert_eq!(value, 146.0);
+}
+
+#[test]
+fn table_sort_inconsistent_comparator_terminates_deterministically() {
+    let code = r#"
+        local t, calls = {1, 2, 3, 4, 5}, 0
+        table.sort(t, function(a, b) calls = calls + 1; return true end)
+        return calls * 100000 + t[1] * 10000 + t[2] * 1000 + t[3] * 100 + t[4] * 10 + t[5]
+    "#;
+    assert_eq!(run_number(code), run_number(code));
 }
 
 #[test]

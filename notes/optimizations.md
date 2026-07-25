@@ -171,36 +171,6 @@ variant in method-call position, where the sugar is actually used. Note the
 tracked "Table-library fallback IC" entry in /OPTIMIZATIONS.md optimizes the
 HIT case; this kills the much more common MISS case and is simpler.
 
-### 11. Rewrite `array_insert`/`array_remove` as value rotation (C-O1; fixes #26)
-
-Instead of `shift_remove(key i)` + re-insert (O(N^2), order-scrambling),
-rotate VALUES across the existing dense key range: the keys `pos..=len` stay
-at their current indices; only their values move by one. Sketch: resolve the
-index of each integer key once (`get_index_of`), then walk the dense prefix
-with `set_at_index`, ending with one real insert/remove at the boundary key.
-O(N) with no rehashing, preserves insertion order exactly (reference-Lua
-iteration order for sequences), and the shifted count is available to charge.
-Independent of and much cheaper than the tracked "Array part for dense
-integer keys" storage split; remains worthwhile even if that lands later.
-
-### 12. Replace `table_sort` wholesale (C-O2; fixes #25, #32, #48)
-
-Sort in place over the table's dense prefix (or over a rooted scratch region
-on the VM stack) with a deterministic O(N log N) algorithm:
-
-- comparator path: bottom-up merge sort (stable, deterministic comparison
-  sequence, no recursion) calling the Lua comparator; charge
-  `n*ceil(log2 n)` or charge per comparison as they happen.
-- default path: same algorithm with a fallible primitive comparator that
-  errors on mixed/incomparable types (#48).
-
-Sorting in place (values re-read from the table between comparator calls,
-or scratch rooted) removes the detached-Vec GC hazard (#25) without a new
-root mechanism. Reference Lua's introsort comparison order is not observable
-to conforming comparators, so algorithm choice is free as long as it is
-deterministic; document that comparator side effects observe a different
-(but fixed) comparison sequence than C Lua.
-
 ### 13. Version-validated cursor for `pairs` (C-O4)
 
 `instr_tfor_call_next` (eval_control.rs:186) calls `Table::next(&control)`,

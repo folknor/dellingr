@@ -302,50 +302,38 @@ impl State {
             return Ok(0);
         }
 
-        if has_comp {
-            // Use the comparator function at stack index 2
-            // We need to do a stable sort with the comparator
-            let comp_idx = self.convert_idx(2)?;
-            let roots = arr.clone();
+        let comp_idx = has_comp.then(|| self.convert_idx(2)).transpose()?;
 
-            self.with_rooted_values(&roots, |state| {
-                // Bubble sort to keep it simple (not efficient but works)
-                for i in 0..n {
-                    for j in 0..n - 1 - i {
-                        let a = arr[j];
-                        let b = arr[j + 1];
-                        state.stack.push(state.stack[comp_idx]);
-                        state.stack.push(a);
-                        state.stack.push(b);
-                        state.call(ArgCount::Fixed(2), RetCount::Fixed(1))?;
-                        let result = state.pop_val();
+        // Heap sort remains bounded and deterministic even when a Lua
+        // comparator is inconsistent. Unlike reference quicksort, it does not
+        // diagnose that incidental invalid-order case.
+        let sort = |state: &mut Self, arr: &mut Vec<Val>| -> Result<()> {
+            for root in (0..n / 2).rev() {
+                state.table_sort_sift_down(arr, root, n, comp_idx)?;
+            }
+            for end in (1..n).rev() {
+                arr.swap(0, end);
+                state.table_sort_sift_down(arr, 0, end, comp_idx)?;
+            }
+            arr.reverse();
+            Ok(())
+        };
 
-                        if !result.truthy() {
-                            arr.swap(j, j + 1);
-                        }
-                    }
-                }
-                Ok(())
-            })?;
-        } else {
-            // Default: sort by < operator (numbers first, then strings)
-            let heap = &self.heap;
-            arr.sort_by(|a, b| {
-                match (a.as_num(), b.as_num()) {
-                    (Some(na), Some(nb)) => {
-                        na.partial_cmp(&nb).unwrap_or(std::cmp::Ordering::Equal)
-                    }
-                    (Some(_), None) => std::cmp::Ordering::Less,
-                    (None, Some(_)) => std::cmp::Ordering::Greater,
-                    (None, None) => {
-                        // Try string comparison
-                        match (a.as_string(heap), b.as_string(heap)) {
-                            (Some(sa), Some(sb)) => sa.cmp(sb),
-                            _ => std::cmp::Ordering::Equal,
-                        }
-                    }
-                }
-            });
+        match comp_idx {
+            // A comparator can re-enter Lua and force a collection, and `arr` is
+            // a detached `Vec<Val>` that GC cannot see, so the whole array has
+            // to stay rooted for the entire sort - not just the pair being
+            // compared. `src/vm/tests.rs` covers a comparator that clears the
+            // source table before collecting.
+            Some(_) => {
+                let roots = arr.clone();
+                self.with_rooted_values(&roots, |state| sort(state, &mut arr))?;
+            }
+            // The default comparison only reads numbers and already-interned
+            // string bytes: it cannot call Lua, allocate, or trigger GC, and the
+            // source table holds every element until writeback. Rooting here
+            // would just copy the array twice more for nothing.
+            None => sort(self, &mut arr)?,
         }
 
         // Put sorted array back - need to look up the table again since we may have
@@ -357,6 +345,53 @@ impl State {
                 Ok(n)
             }
             None => Err(self.type_error(TypeError::TableIndex(typ))),
+        }
+    }
+
+    fn table_sort_sift_down(
+        &mut self,
+        arr: &mut [Val],
+        mut root: usize,
+        end: usize,
+        comp_idx: Option<usize>,
+    ) -> Result<()> {
+        loop {
+            let left = root * 2 + 1;
+            if left >= end {
+                return Ok(());
+            }
+            let mut smallest = root;
+            if self.table_sort_less(arr[left], arr[smallest], comp_idx)? {
+                smallest = left;
+            }
+            let right = left + 1;
+            if right < end && self.table_sort_less(arr[right], arr[smallest], comp_idx)? {
+                smallest = right;
+            }
+            if smallest == root {
+                return Ok(());
+            }
+            arr.swap(root, smallest);
+            root = smallest;
+        }
+    }
+
+    fn table_sort_less(&mut self, a: Val, b: Val, comp_idx: Option<usize>) -> Result<bool> {
+        if let Some(comp_idx) = comp_idx {
+            self.stack.push(self.stack[comp_idx]);
+            self.stack.push(a);
+            self.stack.push(b);
+            self.call(ArgCount::Fixed(2), RetCount::Fixed(1))?;
+            return Ok(self.pop_val().truthy());
+        }
+
+        match (a, b) {
+            (Val::Num(a), Val::Num(b)) => Ok(a < b),
+            (Val::Str(a), Val::Str(b)) => Ok(self.heap.get_string(a) < self.heap.get_string(b)),
+            (a, b) => Err(self.error(ErrorKind::TypeError(TypeError::Comparison(
+                a.typ(&self.heap),
+                b.typ(&self.heap),
+            )))),
         }
     }
 

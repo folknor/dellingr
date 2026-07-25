@@ -373,6 +373,9 @@ impl fmt::Display for TypeError {
         use TypeError::*;
         match self {
             Arithmetic(typ) => write!(f, "attempt to perform arithmetic on a {typ} value"),
+            Comparison(type1, type2) if type1 == type2 => {
+                write!(f, "attempt to compare two {type1} values")
+            }
             Comparison(type1, type2) => write!(f, "attempt to compare {type1} with {type2}"),
             Concat(typ) => write!(f, "attempt to concatenate a {typ} value"),
             FunctionCall(typ) => write!(f, "attempt to call a {typ} value"),

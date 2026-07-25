@@ -578,22 +578,18 @@ impl Table {
         let len = self.array_len();
         let value_is_nil = matches!(value, Val::Nil);
         self.compact_dead();
-        // For shift operations, ensure we're using Map storage
-        self.ensure_map();
-        if let TableStorage::Map(map) = &mut self.storage {
-            // Shift elements from len down to pos up by one
-            for i in (pos..=len).rev() {
-                let key = Val::Num(i as f64);
-                let next_key = Val::Num((i + 1) as f64);
-                if let Some(v) = map.shift_remove(&key) {
-                    map.insert(next_key, v);
-                }
-            }
+        let mut carry = value;
+        for key in pos..=len {
+            let key = Val::Num(key as f64);
+            let old = self.get(&key);
+            self.insert(key, carry)
+                .expect("array_insert: integer key insert cannot fail");
+            carry = old;
         }
-        self.bump_version();
-        self.insert(Val::Num(pos as f64), value)
+        self.insert(Val::Num((len + 1) as f64), carry)
             .expect("array_insert: integer key insert cannot fail");
-        if value_is_nil {
+        self.bump_version();
+        if value_is_nil || !matches!(self.get(&Val::Num((len + 2) as f64)), Val::Nil) {
             self.cached_array_len.set(None);
         } else {
             self.cached_array_len.set(Some(len + 1));

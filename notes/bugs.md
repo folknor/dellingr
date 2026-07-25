@@ -165,35 +165,6 @@ for i = 1, 34 do s = s .. s end   -- 16 GB attempt, total charged cost ~34
   vocabulary), or a max-string-length cap. Decision belongs to the cost-model
   owner.
 
-### 26. `table.insert(t, pos, v)` reverses `pairs` order and is O(N^2) (C-B4)
-
-- **Location:** `src/vm/table.rs:410-433` (`Table::array_insert`).
-- **Cause:** shifts by `shift_remove(key i)` + `insert(key i+1)` from high to
-  low; each re-insert appends at the END of the IndexMap, so shifted keys end
-  up in reverse order, followed by the newly inserted key. (`array_remove`
-  happens to preserve order because its forward loop re-appends in ascending
-  key order.) Also O(N^2): each `shift_remove` is O(tail) in IndexMap, and
-  there are O(N) of them - a single `table.insert(t, 1, v)` on a 50k-element
-  table is ~10^9 memmoves for cost 1 (extends the OPTIMIZATIONS.md
-  "O(N) shifts charged as 1" entry, which understates it).
-- **Repro:**
-
-```lua
-local t = { 10, 20, 30 }
-table.insert(t, 1, 99)
-for k, v in pairs(t) do print(k, v) end
--- reference 5.2/5.4: 1 99 / 2 10 / 3 20 / 4 30
--- dellingr:          4 30 / 3 20 / 2 10 / 1 99
-```
-
-- **Related cache nit:** for a non-sequence (`t = {1,2,3, [5]=5}`, border 3),
-  `array_insert` unconditionally sets `cached_array_len = len + 1 = 4`, but
-  after the shift `t[5]` is non-nil so 4 is not a border; `#t` returns a
-  non-border value until invalidated. Safest: only trust `Some(len + 1)` when
-  `get(len + 2)` is nil, else `set(None)`.
-- **Fix:** value-rotation rewrite (optimizations.md #11) fixes order and cost
-  together; charge the shifted count (as `table_sort` does).
-
 ### 30. User mutations inside environment tables are silently dropped by save/load (D-D5, round-trip fidelity)
 
 - **Location:** `src/vm/save_state.rs:303-310`.
@@ -231,15 +202,6 @@ for k, v in pairs(t) do print(k, v) end
   are reachable in the payload (dead entries can be dropped - consistent with
   the TODO.md pruning sketch), or document that `%p` identities are
   per-process and never comparable across a load.
-
-### 32. `table.sort` with a comparator does O(N^2) comparator calls charged N (C-D5)
-
-- **Location:** `src/vm/table_ops.rs:304-326`.
-- **Cause:** bubble sort always runs the full N(N-1)/2 rounds (no early-exit
-  swap flag; each round re-calls even when sorted). The comparator call is
-  free by design and a trivial `return a < b` body charges ~0, so
-  `table.sort` on 10k elements is ~5*10^7 full call-machinery round trips for
-  cost 10^4. Fix via the sort rewrite (optimizations.md #12).
 
 ---
 
@@ -303,17 +265,6 @@ the same surface: `set_top` and `pop` `assert!` (panic) on misuse while
 consistent and reusable, the panicking forms are the odd ones out. Suggest
 `check_stack_space` in the growth arm and converting the asserts to
 `InvalidStackIndex` errors pre-1.0.
-
-### 48. Default `table.sort` silently orders mixed/incomparable types (C-B5)
-
-`src/vm/table_ops.rs:328-346`: without a comparator, numbers sort before
-strings and anything else compares `Equal`. Reference raises "attempt to
-compare number with string" (and errors on tables/booleans).
-`table.sort({ 1, "a", 2 })` succeeds in dellingr; `table.sort({ {}, {} })`
-is a no-op "sorted". Since "errors kill the callback" is the product stance,
-silently succeeding is the divergence. Fix inside the comparator closure:
-return a type error (needs `sort_by` restructured to a fallible sort or a
-pre-scan; folds into optimizations.md #12).
 
 ### 49. `print`/`tostring` accept a non-string `__tostring` result (C-B7)
 
