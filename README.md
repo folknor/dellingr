@@ -76,9 +76,14 @@ The optional `snapshot` feature adds `State::save_state()` and
 `State::load_state(...)` for game saves, serialized through a small in-crate
 deterministic binary codec (no `serde`/`bincode`). This is a data snapshot of a
 quiescent VM: globals, reachable tables/closures/upvalues/strings, the
-deterministic RNG stream, and cost counters are persisted. It is not a
+deterministic RNG stream, cost counters, and the object identities behind
+`tostring`/`%p` are persisted. Changes you make to the standard library tables
+themselves - `math.myconst = 42`, `string.trim = f`, or deleting a stock entry -
+are persisted as a delta against the pristine environment and replayed on load,
+so extending a library table does not silently lose data. It is not a
 continuation capture; no paused call stack, program counter, coroutine, anchor,
-callback, or host user-data handle survives a save/load. Hosts recreate
+callback, or host user-data handle survives a save/load. Anchors created inside
+the load setup closure do survive it. Hosts recreate
 callbacks and register the same named Rust functions during load setup - a
 reachable `RustFunc` must be registered with a stable id (e.g.
 `set_global_named_rust_fn`) or the save fails fast. The module doc on

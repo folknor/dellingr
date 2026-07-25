@@ -1,5 +1,6 @@
 #![cfg(feature = "snapshot")]
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use dellingr::{
@@ -503,6 +504,174 @@ fn anchor_count_is_diagnostic_not_persisted() {
     assert_eq!(loaded.anchor_count(), 0);
 
     assert!(state.release_anchor(anchor));
+}
+
+#[test]
+fn environment_deltas_preserve_mutations_cycles_order_and_metatables() {
+    let mut original = fresh();
+    run(
+        &mut original,
+        r#"
+        local user = { nested = { value = 42 } }
+        math.floor = function(_) return user.nested.value end
+        math.ceil = nil
+        math.user = user
+        user.back = math
+        math.first = 1
+        math.second = 2
+        math.first = nil
+        math.first = 3
+        setmetatable(math, user)
+    "#,
+    );
+    let mut loaded = reload(&original);
+    run(
+        &mut loaded,
+        r#"
+        floor_value = math.floor(9)
+        deleted = math.ceil == nil and 1 or 0
+        cycle = math.user.back == math and 1 or 0
+        meta = getmetatable(math) == math.user and 1 or 0
+        order = ""
+        for key in pairs(math) do
+            if key == "second" or key == "first" then order = order .. key .. "," end
+        end
+    "#,
+    );
+    assert_eq!(global_num(&mut loaded, "floor_value"), 42.0);
+    assert_eq!(global_num(&mut loaded, "deleted"), 1.0);
+    assert_eq!(global_num(&mut loaded, "cycle"), 1.0);
+    assert_eq!(global_num(&mut loaded, "meta"), 1.0);
+    assert_eq!(global_str(&mut loaded, "order"), "second,first,");
+    // A loaded state remains quiescent and can be saved immediately.
+    loaded.save_state().expect("loaded state resaves");
+}
+
+#[test]
+fn pointer_identities_and_counter_survive_save_load() {
+    let mut original = fresh();
+    run(
+        &mut original,
+        "t = {}; s = 'reachable'; saved_identity = tostring(t); saved_percent_p = string.format('%p', t); saved_string_p = string.format('%p', s); saved_rust_fn_p = string.format('%p', print); saved_env_child_p = string.format('%p', getmetatable(_G)); dead = {}; tostring(dead); dead = nil",
+    );
+    let mut loaded = reload(&original);
+    run(
+        &mut loaded,
+        "loaded_identity = tostring(t); loaded_percent_p = string.format('%p', t); loaded_string_p = string.format('%p', s); loaded_rust_fn_p = string.format('%p', print); loaded_env_child_p = string.format('%p', getmetatable(_G)); later = {}; later_identity = tostring(later)",
+    );
+    assert_eq!(
+        global_str(&mut loaded, "loaded_identity"),
+        global_str(&mut loaded, "saved_identity")
+    );
+    assert_eq!(
+        global_str(&mut loaded, "loaded_percent_p"),
+        global_str(&mut loaded, "saved_percent_p")
+    );
+    assert_eq!(
+        global_str(&mut loaded, "loaded_string_p"),
+        global_str(&mut loaded, "saved_string_p")
+    );
+    assert_eq!(
+        global_str(&mut loaded, "loaded_rust_fn_p"),
+        global_str(&mut loaded, "saved_rust_fn_p")
+    );
+    assert_eq!(
+        global_str(&mut loaded, "loaded_env_child_p"),
+        global_str(&mut loaded, "saved_env_child_p")
+    );
+    // The collected object's id is intentionally not reused.
+    assert_eq!(global_str(&mut loaded, "later_identity"), "table: 0x6");
+}
+
+#[test]
+fn ordered_environment_replay_preserves_setup_additions_and_metatable() {
+    let mut original = fresh();
+    // Deleting and re-adding a STOCK key is what forces an explicit order
+    // vector: `floor` moves to the end of the live table, whereas plain
+    // delete/upsert replay would restore it in its original baseline position.
+    // Adding only new keys replays in order naturally and emits no vector, so
+    // it would not exercise this path at all.
+    run(&mut original, "math.floor = nil; math.floor = 7");
+    let save = original.save_state().expect("state saves");
+    let mut loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), |state| {
+        run(
+            state,
+            "math.future = 99; local mt = { setup = true }; setmetatable(math, mt)",
+        );
+    })
+    .expect("state loads with later environment additions");
+    run(
+        &mut loaded,
+        "floor = math.floor; future = math.future; setup_meta = getmetatable(math).setup and 1 or 0; order = ''; for key in pairs(math) do if key == 'floor' or key == 'future' then order = order .. key .. ',' end end",
+    );
+    assert_eq!(global_num(&mut loaded, "floor"), 7.0);
+    // A key the save never saw survives replay instead of failing the load.
+    assert_eq!(global_num(&mut loaded, "future"), 99.0);
+    // Rebuilding the entry list must not drop a metatable installed by setup.
+    assert_eq!(global_num(&mut loaded, "setup_meta"), 1.0);
+    // Saved keys keep their saved order; setup-only keys are appended after.
+    assert_eq!(global_str(&mut loaded, "order"), "floor,future,");
+}
+
+#[test]
+fn unordered_environment_replay_places_setup_additions_before_new_keys() {
+    // The counterpart to the test above: when replay reproduces the saved order
+    // naturally, no order vector is emitted and a setup-added key simply sits
+    // where it was inserted - ahead of keys the delta appends. Lua does not
+    // specify `pairs` order, so what is pinned here is only that saved keys keep
+    // their relative order and the setup addition survives.
+    let mut original = fresh();
+    run(
+        &mut original,
+        "math.first = 1; math.second = 2; math.first = nil; math.first = 3",
+    );
+    let save = original.save_state().expect("state saves");
+    let mut loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), |state| {
+        run(state, "math.future = 99");
+    })
+    .expect("state loads");
+    run(
+        &mut loaded,
+        "future = math.future; order = ''; for key in pairs(math) do if key == 'second' or key == 'first' or key == 'future' then order = order .. key .. ',' end end",
+    );
+    assert_eq!(global_num(&mut loaded, "future"), 99.0);
+    assert_eq!(global_str(&mut loaded, "order"), "future,second,first,");
+}
+
+#[test]
+fn setup_anchor_survives_load_final_gc() {
+    let original = fresh();
+    let save = original.save_state().expect("state saves");
+    let mut setup_anchor = None;
+    let mut loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), |state| {
+        state.push_number(42.0);
+        setup_anchor = Some(state.anchor().expect("setup anchor succeeds"));
+    })
+    .expect("state loads");
+    loaded
+        .push_anchor(setup_anchor.expect("setup produced anchor"))
+        .unwrap();
+    assert_eq!(loaded.to_number(-1).unwrap(), 42.0);
+    loaded.pop(1);
+}
+
+#[test]
+fn unsupported_versions_fail_before_setup() {
+    let state = fresh();
+    let save = state.save_state().expect("state saves");
+    for version in [3_u16, 5_u16] {
+        let mut bytes = save.bytes.clone();
+        bytes[4..6].copy_from_slice(&version.to_le_bytes());
+        let setup_ran = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&setup_ran);
+        assert!(matches!(
+            State::load_state(&bytes, Box::new(DefaultCallbacks), move |_| {
+                observed.store(true, Ordering::SeqCst);
+            }),
+            Err(LoadError::UnsupportedVersion)
+        ));
+        assert!(!setup_ran.load(Ordering::SeqCst));
+    }
 }
 
 #[test]

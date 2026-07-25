@@ -96,6 +96,28 @@ pub(super) fn mark_gc_roots(state: &State, worklist: &mut Vec<ObjectPtr>) {
     state.string_literals.mark_reachable(&state.heap, worklist);
     state.transient_roots.mark_reachable(&state.heap, worklist);
     state.registry.mark_reachable(&state.heap, worklist);
+    #[cfg(feature = "snapshot")]
+    {
+        // The canonical environment and its pristine baseline must survive even
+        // when user code currently reaches none of it: save/load diffs live
+        // against this snapshot.
+        // Must go through `GcHeap::mark`, which sets the object's color before
+        // queueing it. Pushing onto the worklist directly leaves the object
+        // Unmarked, so its children are traced but sweep still frees it - and a
+        // later save then dereferences a dangling canonical environment table.
+        for ptr in state.env_tokens.keys() {
+            state.heap.mark(*ptr, worklist);
+        }
+        for baseline in state.env_baselines.values() {
+            for (key, value) in &baseline.entries {
+                key.mark_reachable(&state.heap, worklist);
+                value.mark_reachable(&state.heap, worklist);
+            }
+            if let Some(metatable) = &baseline.metatable {
+                metatable.mark_reachable(&state.heap, worklist);
+            }
+        }
+    }
     // Note: open upvalues point to stack (already marked), closed upvalues
     // are marked transitively through the closures that reference them
 }
@@ -193,6 +215,16 @@ pub struct State {
     /// for an environment object. See `vm/save_state.rs`.
     #[cfg(feature = "snapshot")]
     pub(super) env_tokens: BTreeMap<ObjectPtr, String>,
+    /// Pristine ordered contents captured alongside `env_tokens`. These are
+    /// compared at save time so mutations of rebuilt library tables persist.
+    #[cfg(feature = "snapshot")]
+    pub(super) env_baselines: BTreeMap<ObjectPtr, EnvBaseline>,
+}
+
+#[cfg(feature = "snapshot")]
+pub(super) struct EnvBaseline {
+    pub(super) entries: Vec<(Val, Val)>,
+    pub(super) metatable: Option<Val>,
 }
 
 /// Maximum call depth to prevent stack overflow from deep recursion.
@@ -256,7 +288,24 @@ impl State {
                 }
             }
         }
+        let baselines = map
+            .keys()
+            .map(|ptr| {
+                let table = self
+                    .heap
+                    .as_table_ref(*ptr)
+                    .expect("canonical environment object is a table");
+                (
+                    *ptr,
+                    EnvBaseline {
+                        entries: table.entries(),
+                        metatable: table.get_metatable().map(Val::Obj),
+                    },
+                )
+            })
+            .collect();
         self.env_tokens = map;
+        self.env_baselines = baselines;
     }
 
     /// Creates a new state without opening any of the standard libs.
@@ -305,6 +354,8 @@ impl State {
             rust_fn_ids_by_addr: BTreeMap::new(),
             #[cfg(feature = "snapshot")]
             env_tokens: BTreeMap::new(),
+            #[cfg(feature = "snapshot")]
+            env_baselines: BTreeMap::new(),
         }
     }
 

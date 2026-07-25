@@ -4,200 +4,279 @@ Current work item. Numbers refer to finding numbers in `notes/bugs.md`.
 
 ---
 
-## Targets #49, #50, #51, #52, #61: error and `tostring` taxonomy
+## Targets #30, #31, #53: save/load fidelity
 
-Five small defects in how values are described to users, all in the same
-area. All verified by execution against Lua 5.4.
+Three snapshot defects. Unlike the previous loops these are **not** reference
+conformance issues - Lua has no snapshots - so "correct" means a loaded State
+behaves like the saved one. Verification is a round trip, not a diff against
+5.2/5.4.
 
-| case | dellingr | Lua 5.4 |
-|---|---|---|
-| `print(setmetatable({}, {__tostring=function() return {} end}))` | prints `object: ObjectKey(10v1)` | error `'__tostring' must return a string` |
-| `t = setmetatable({}, {__index="abc"}); type(t.upper)` | error `attempt to index a string value` | `function` |
-| `local f = function() end; f.x` | `attempt to index a table value` | `attempt to index a function value` |
-| `error("oops")` | `0:0: internal error: oops` | `input:1: oops` |
-| `tostring({})` | `object: ObjectKey(7v1)` | `table: 0x...` |
+All three verified by reading; each needs a round-trip repro written as part of
+the fix.
 
-### #49 (Low) - `print`/`tostring` accept a non-string `__tostring` result
+### #30 (Medium) - user mutations inside environment tables are silently dropped
 
-`to_string_with_meta` (`src/vm/table_ops.rs:398-430`) stringifies whatever
-`__tostring` returns. Its sibling `bytes_with_tostring_meta` (`434-467`)
-already gets this right, checking `String | Number` and otherwise raising
-`'__tostring' must return a string`.
+`src/vm/save_state.rs:412-419`. When the encoder meets an `ObjectPtr` present
+in `env_reverse` it emits an `EnvObj` token and **never walks the table's
+entries**:
 
-`print` and the `tostring` builtin use the permissive one
-(`lua_std/basic.rs:132, 223`). The fix is to fold `to_string_with_meta` onto
-`bytes_with_tostring_meta` so there is one code path and one behaviour, rather
-than duplicating the check.
+```rust
+Val::Obj(ptr) => {
+    if let Some(token) = self.env_reverse.get(&ptr) {
+        Ok(SavedVal::EnvObj(token.clone()))   // <- entries never visited
+    } else {
+        let id = self.object_id(ptr, path, &mut tasks)?;
+        Ok(SavedVal::Obj(id))
+    }
+}
+```
 
-### #50 (Low) - `__index` bottoming out in a string errors instead of chaining
+On load those tokens resolve against freshly rebuilt pristine libraries
+(`806-822`). So ordinary Lua idiom - extending a library table - vanishes:
 
-`handle_index_metamethod_inner` (`src/vm/metamethod.rs:88-137`) accepts only
-table / function / RustFn handlers. A string `__index` is legal in reference,
-where indexing simply re-dispatches on the string value.
+```lua
+math.myconst = 42
+string.trim = function(s) return s end
+table.helpers = { deep = "value" }
+```
 
-Note the interaction with the project's design: dellingr has no string
-metatable, but `t.foo` on a table *does* fall back to the `table` library
-(finding C-F1 in the coverage notes), and string values reach the string
-library through their own path. So "re-dispatch on the string" has to mean
-whatever `("abc").upper` already means in dellingr - confirm that before
-implementing, and if the two cannot be made consistent, say so rather than
-half-implementing it.
+Everything reachable *only* through such a table is dropped entirely. No
+`SaveError`, no diagnostic. The module doc only covers the reverse direction (a
+new build adding `math.foo`), and the README's snapshot section does not carve
+this out.
 
-The error message is doubly wrong today: it says "attempt to index a table
-value" (via `typ_simple`) for a *string* handler, which is #51.
+### #31 (Medium, now worse) - `%p` identity state is not persisted
 
-### #51 (Low) - error messages misreport every object as a table
+`format_pointer_ids` and `next_format_pointer_id` (`src/vm.rs:181-182`) appear
+nowhere in `save_state.rs`. After a load the counter restarts at 1.
 
-`Val::typ_simple` (`src/vm/lua_val.rs:89-98`) maps every `Obj` to
-`LuaType::Table` "for display purposes". So indexing a Lua function reports
-"attempt to index a table value".
+**Loop 15 raised the stakes.** `tostring` on any object now renders
+`table: 0x{id}` from this same registry, so this is no longer confined to
+scripts that call `%p`. A pre-save `tostring(t)` result stored in a saved
+global can be byte-identical to a *different* object's `tostring` after load,
+which breaks the uniqueness the deterministic ids exist to provide, and makes
+an uninterrupted run diverge from a save/load-interrupted one.
 
-The reason the shortcut exists is that `typ_simple` has no heap access. Every
-call site that feeds an error message needs auditing: those with a heap in
-scope should use `Val::typ(&heap)` instead. Loop 14 already did this for
-`TypeError::Comparison` in `table_sort`, so the pattern is established.
+### #53 (Low) - anchors created in the `load_state` setup closure are dead
 
-**Do not** simply delete `typ_simple` if some call site genuinely has no heap;
-in that case report the honest fallback rather than a confident wrong answer.
+`load_state` runs `setup(&mut state)` (`784`) and then `materialize_payload`
+(`785`), which ends with `state.registry.clear()` (`930`). A host that pushes a
+value and anchors it during setup gets a handle that is stale the moment
+`load_state` returns; later use returns `InvalidAnchor` with no error at
+creation time.
 
-### #52 (Low) - script `error()` raises `ErrorKind::InternalError`
-
-`src/lua_std/basic.rs:140-147` implements `error` with
-`ErrorKind::InternalError(message)`, but `src/error.rs:97-99` documents that
-variant as "corrupt bytecode or VM bug ... report these as bugs" and renders it
-`internal error: <msg>`.
-
-Two problems: an embedder filtering `InternalError` for crash reporting
-receives ordinary script errors, and the rendering diverges from reference.
-`RuntimeError`, or a dedicated `ScriptError` variant carrying the position
-prefix, is the right shape.
-
-### #61 (Medium) - `tostring` leaks a Rust `Debug` slotmap key
-
-`impl fmt::Display for ObjectPtr` (`src/vm/object.rs:175-181`) writes
-`object: {:?}` of the raw key because it has no heap access.
-`Val::to_string_with_heap` (`lua_val.rs:108`) and `to_bytes_with_heap` (`120`)
-both call it and both *do* have the heap.
-
-Two defects in one line: the type word is always `object` rather than
-`table`/`function`, and `ObjectKey(7v1)` exposes an internal representation.
-
-**Determinism constraint:** the replacement cannot be a real address. The
-digits are inherently divergent from reference and are not what matters; the
-type word and the absence of Rust syntax are.
+The clear exists to drop anchors inherited from `State::with_callbacks`. A
+freshly built State has none, so moving the clear earlier is free.
 
 ### Constraints
 
-- Determinism is a product requirement - no addresses, no unseeded entropy.
-- `unwrap_used` denied outside `#[cfg(test)]`; `HashMap`/`HashSet` banned;
-  clippy denies warnings, so no dead code.
-- Charge nothing new (#16 owns cost-model changes).
-- Errors must leave the State consistent and reusable.
+- **Determinism.** Save output must stay byte-identical for identical states -
+  the encoder relies on `BTreeMap`s, traversal order and insertion-ordered
+  globals. Any new persisted collection must preserve that.
+- **Format version.** `FORMAT_VERSION` strict equality is the compat gate.
+  Adding fields to `SavePayload` is a format break and the version must be
+  bumped; the previous session already moved v2 to v3, so old saves are
+  rejected rather than silently misread.
+- Decoder hardening still applies: reservations are capped by remaining input
+  so forged length prefixes cannot allocate unboundedly, and traversal is
+  iterative so a deep decoded graph cannot overflow the stack.
+- `validate_quiescent` must still hold after load.
+- Charge nothing new (#16).
 
 ---
 
 ## Agreed implementation plan
 
-Settled between the orchestrator and the deep reviewer. Two items grew beyond
-the original findings; both are justified below rather than assumed.
+Settled between the orchestrator and the deep reviewer.
 
-### 1. One metamethod-aware conversion path (#49)
+### #30 - persist and replay environment deltas
 
-Make `to_string_with_meta` delegate to `bytes_with_tostring_meta`, which
-already enforces `String | Number` and raises
-`'__tostring' must return a string`. One code path, one behaviour. This fixes
-`print` and `tostring` together (`basic.rs:132`, `219`).
+Approach (a). Failing or merely diagnosing would leave ordinary library
+extension unsavable, which contradicts the snapshot contract in
+`README.md:73`.
 
-### 2. Object rendering (#61)
+**Detection by `Table::version()` is not viable** - the version deliberately
+does not change on a value update (`table.rs:53`), so `math.floor = myfloor`
+would evade it. Diff against a captured baseline instead.
 
-Stop routing user-visible conversion through `ObjectPtr::Display`. Render as
-`table: 0x{id:x}` / `function: 0x{id:x}`, taking the type from
-`Val::typ(&heap)` and the digits from the **existing deterministic
-`format_pointer_id` registry** (`table_ops.rs:469`, `vm.rs:178`) that `%p`
-already uses.
+1. **Capture the baseline** in `capture_env_tokens` (`src/vm.rs`): the ordered
+   entries and metatable of each tokenized environment object. For the current
+   standard environment that is five objects and 41 entries (math 22, string
+   10, table 7, `_G` none directly, `_G`'s metatable 2).
+2. **Root it.** Add the canonical objects and baseline `Val`s to
+   `mark_gc_roots`. That function is the single source of truth for
+   reachability and must stay so.
+3. **Emit `SavedEnvDelta`** in lexical token order, containing:
+   - deleted pristine keys - mandatory, or `math.floor = nil` is resurrected
+     from the fresh library on load;
+   - added or replaced key/value pairs, with their new values;
+   - an optional final key order, only when delete/upsert replay would not
+     reproduce `pairs()` order (`Table::entries()` is insertion-ordered,
+     `table.rs:203`, and load deliberately rebuilds that order, `table.rs:220`);
+   - a tri-state metatable change: unchanged, cleared, or set.
 
-Not the slotmap bits: reference renders `tostring(t)` and `string.format("%p", t)`
-with the same digits, so a second identity scheme would be wrong on its own
-terms as well as divergent.
+   Deletions in baseline order, upserts and order keys in live insertion order,
+   so output stays byte-deterministic.
+4. Keys and values are `SavedVal`, so a delta value may itself be an `EnvObj`.
+   Schedule live delta values through the **existing iterative task walker**, so
+   graphs reachable only through an env table - and cycles like
+   `math.user = t; t.back = math` - land in the normal arenas without
+   recursion.
 
-**This changes the public API.** `State::to_string` (`stack.rs:175`) and
-`to_bytes_coerce` (`196`) become `&mut self`, because minting an id needs
-mutable access. Accepted deliberately: the crate is pre-1.0 and explicitly
-unstable, and the alternative is either preserving the leak or adding interior
-mutability purely for display. Call it out in the commit message.
+Cost when nothing was modified: four bytes (one empty-vector length), an O(E)
+scan of 41 entries, no traversal or value encoding.
 
-### 3. Shared string-index helper (#50)
+### #31 - persist pointer identities
 
-Add one slow-path helper that resolves any key against the current global
-`string` table, and call it from all three places:
+Persisting is the correct contract, not documenting them as per-process. These
+are logical deterministic State identities, observable as strings and storable
+by scripts; since loop 15 they back `tostring` for every table and closure, so
+a per-process contract would make an interrupted run observably differ from an
+uninterrupted one.
 
-- the existing direct field slow path (`eval_index.rs:58`),
-- generic string bracket indexing (`eval_index.rs:464`), which today rejects
-  strings as non-tables,
-- the `Val::Str` arm of `__index` chaining (`metamethod.rs:88`).
+Add to `SavePayload`: `next_format_pointer_id: u64` and
+`format_pointer_ids: Vec<(SavedVal, u64)>`.
 
-This is broader than finding #50 as written, and it is the *correct* scope:
-`("abc")[1]` currently errors but is `nil` in reference, because reference's
-string metatable points `__index` at the string table. Making the bracket path
-agree with the field path removes a real divergence rather than adding one.
+- **Persist only reachable entries.** The map is deliberately *not* a GC root
+  (`vm.rs:178`, absent from `mark_gc_roots`), so it can hold generational keys
+  for already-collected objects. Treating it as a serialization root would
+  change its lifetime contract and could try to encode stale values. Have
+  `SaveBuilder` track pointer-like values reached through globals, user objects
+  and referenced env tables, then filter the id vector against that set,
+  preserving each surviving pair's explicit id and original order.
+- **Save the exact counter regardless.** Ids are serialized explicitly, not
+  derived from vector position, so dropping dead entries renumbers nothing -
+  but if dead id 1 is dropped, the next object after load must still get 2, not
+  reuse 1.
 
-The no-string-metatable design is preserved - `getmetatable("abc")` stays nil.
-String `__newindex` remains invalid.
+### #53 - move the registry clear
 
-`tests/metamethod_errors.rs:361` currently asserts that a string `__index`
-handler *fails*; it must become a success test for `.upper`.
+Move `registry.clear()` from the end of `materialize_payload` to immediately
+after the fresh `State` is constructed, before `setup`. Free: both
+`with_callbacks` and `empty_with_callbacks` build an empty `Registry`
+(`vm.rs:270`, `anchor.rs:90`) and opening libraries creates no anchors.
 
-### 4. Heap-aware types everywhere (#51)
+Setup-created anchors must then **survive**, which is the point: the registry
+is a GC root (`vm.rs:98`), so the final `gc_collect` would otherwise free
+values held only by setup. Registry contents are not a quiescence violation
+(`save_state.rs:789`), and anchors still remain deliberately unpersisted.
 
-Replace all 36 `typ_simple` invocations with `typ(&heap)` and **delete
-`typ_simple`** - leaving it would be dead code, which the lint gate denies.
-Every site is inside a `State` method with `self.heap` or `state.heap` in
-scope:
+### Format version 4
 
-- `eval_store.rs`: 47, 62, 104, 125, 185, 236, 372, 435, 493, 494, 523 (11)
-- `table_ops.rs`: 48, 117, 143, 163, 223, 228, 251, 268, 287 (9)
-- `metamethod.rs`: 40, 122, 135, 160, 255, 269 (6)
-- `eval_control.rs`: 67, 70, 73, 96, 98, 101 (6)
-- `eval_index.rs`: 94, 477 (2)
-- `eval.rs`: 247 (1)
-- `stack.rs`: 172 (1)
+Bump `FORMAT_VERSION` 3 -> 4 (`save_state.rs:56`). Mandatory: `SavePayload` is
+positional and the reader gates on exact equality before reading anything else
+(`save_state.rs:1140`). **No fallback parsing for v3.**
 
-### 5. `ErrorKind::ScriptError(String)` (#52)
-
-`RuntimeError` is documented as "raised by a library operation" and
-`InternalError` as a VM bug (`error.rs:95`); a script's `error()` is neither,
-and hosts see `ErrorKind` through `Result` and `HostCallbacks`
-(`host.rs:48`). Add a distinct variant carrying only the message - position
-belongs to `Error`, not duplicated in the variant.
-
-Internal blast radius is small: the only exhaustive match is `Display`
-(`error.rs:268`); `is_recoverable` uses a non-exhaustive `if let` (`231`).
-`tests/string_format.rs:273` asserts `InternalError` and must become
-`ScriptError`.
-
-### 6. Real error positions instead of `0:0:`
-
-`State::error` unconditionally builds `(0, 0)` and carries a TODO
-(`vm.rs:729`), while the exact line already exists in `Frame::current_line`
-(`frame.rs:75`) and the same frame is in scope where the traceback is attached
-(`eval.rs:383`). Populate a missing `line_num` there, before the traceback, so
-named chunks render `input:1: oops` like reference. Parser errors keep their
-existing line/column rendering.
-
-This fixes the *default* position only. `error(msg, level)` - selecting a
-caller frame, and level 0 meaning "no position" - stays with #58.
+Decode every new collection through `read_vec` so the remaining-input
+reservation cap still defangs forged length prefixes (`save_state.rs:1454`).
+Extend payload verification to reject duplicate environment tokens, malformed
+delta modes, duplicate pointer values or ids, and invalid referenced values.
 
 ### Tests
 
-Invalid table and boolean `__tostring` results through **both** `print` and
-`tostring`, plus an accepted numeric result; string `__index` via dot and
-bracket keys; function-valued arithmetic, concat, length, comparison and index
-errors all naming `function`; `ScriptError` classification and named-source
-line rendering; `tostring` giving a stable repeated identity, the right type
-word, no `ObjectKey` substring, and digits agreeing with `%p`; and State reuse
-after each new error path.
+`tests/save_state.rs`: env additions containing nested data and closures; stock
+deletion and replacement; env-to-user-data cycles and `EnvObj` delta values;
+insertion order and env metatable changes; surviving pointer ids, next object
+id, and a dropped-id counter hole; control run vs save/load run agreeing on
+`tostring` and `%p`; an anchor created during load setup surviving the final
+GC; patched older *and* newer version words returning `UnsupportedVersion`
+before setup runs; and an immediate resave after load proving quiescence.
 
-Read `src/vm/table_ops.rs` (`to_string_with_meta`, `bytes_with_tostring_meta`,
-`format_pointer_id`), `src/vm/metamethod.rs`, `src/vm/eval_index.rs`,
-`src/vm/lua_val.rs`, `src/vm/object.rs`, `src/vm/stack.rs`, `src/vm/frame.rs`,
-`src/lua_std/basic.rs`, and `src/error.rs`.
+Add codec unit round trips for the new structures and extend the golden
+program to exercise an environment delta and a pointer id.
+
+**The golden fixture will need regenerating** (`tests/fixtures/save_golden.bin`)
+because the format changes. Do not attempt it - the orchestrator runs
+`brokkr test regenerate` after the build, since the ignored regeneration helper
+needs cargo.
+
+Read `src/vm/save_state.rs` (`SaveBuilder::encode`, `build_env_reverse`,
+`materialize_payload`, `load_state`, `SavePayload`, `verify_payload`),
+`src/vm.rs` (`capture_env_tokens`, the `format_pointer_ids` fields,
+`mark_gc_roots`), `src/vm/table.rs` (`version`, `entries`), and
+`tests/save_state.rs`.
+
+---
+
+## Review findings to fix
+
+The above is implemented and `brokkr check` passes. Review then found five
+defects. **Finding 1 is already fixed** by the orchestrator (`mark_gc_roots`
+now calls `GcHeap::mark` instead of pushing onto the worklist, so canonical
+environment objects are actually coloured and survive sweep). Fix the rest.
+
+### A. Reachable string and Rust-function `%p` identities are dropped
+
+`save_state.rs:358` filters the id list to `Val::Obj` only, and reachability
+tracking is updated only for objects (`529`); `verify.rs:245` then rejects
+anything but `Obj`/`EnvObj`. But `%p` assigns identities to **strings and all
+functions** too (`string_format.rs:348`), so:
+
+```lua
+s = "reachable"
+before = string.format("%p", s)
+```
+
+reloads with the right counter but no mapping for `s`, and formatting it again
+yields a different id - the exact divergence #31 exists to prevent.
+
+Persist identities for reachable strings and registered Rust functions as well,
+using the `SavedVal` forms those already have (`Str`, `Fn`). Widen the verifier
+to match. Extend the test, which currently covers only a table
+(`tests/save_state.rs:551`).
+
+Also close the related hole: an unchanged tokenized environment table's children
+are never traversed, so `_G.metatable`'s id survives only if some other
+serialized value happens to reference it directly.
+
+### B. Ordered replay rejects later library or setup additions
+
+Order replay copies only the saved keys (`save_state.rs:1043`) and then requires
+that count to equal the whole current table (`1054`), so any fresh-build or
+setup-added key that the old save never saw makes load fail with
+`CorruptArena`. Reproducible in a single build: save a state whose `math`
+mutations need an order vector, then add `math.future` in the load setup
+closure.
+
+Rebuild saved keys in saved order and **append current-only entries** in their
+existing order. The plan explicitly required preserving later additions.
+
+Second defect in the same path: `clear_and_insert_entries` replaces the whole
+`Table` and so clears its metatable (`table.rs:220`). If a later library or
+setup installed a metatable while the saved delta says `Unchanged`, ordered
+replay silently drops it before the `Unchanged` arm runs (`1061`).
+
+### C. Delta key verification is not runtime key equality
+
+`verify.rs:184` compares `SavedVal` representations, which is not the same as
+`Val` key equality:
+
+- two `SavedVal::Str` indices can reference identical bytes, and materialization
+  interns both to one string pointer (`save_state.rs:956`);
+- `+0.0` and `-0.0` have different saved bits but compare equal as `Val::Num`
+  (`lua_val.rs:141`).
+
+Such keys pass the ordered sets and then collapse to a single table key.
+Verification also currently permits nil and NaN keys, nil-valued upserts, order
+keys overlapping deletions, and order vectors missing upsert keys.
+
+Reject all of those. Compare keys by their **resolved** identity - resolve
+`Str` indices to bytes and normalise `Num` zero - not by encoded form.
+
+### D. Ordered replay is quadratic in attacker-controlled input
+
+Each decoded order key linearly scans all current entries
+(`save_state.rs:1046`), so a payload with N upserts and an N-key order vector
+passes the O(N log N) verifier and then does O(N^2) comparisons during
+materialization. Length prefixes cap allocation but not CPU.
+
+Build a lookup keyed by resolved key identity once, then place entries in a
+single pass. Note the orchestrator already converted the *verifier*'s duplicate
+checks from linear scans to `BTreeSet`s for this same reason, and derived `Ord`
+on `SavedVal` to allow it - reuse that where it helps.
+
+### Constraints unchanged
+
+Save output must stay byte-deterministic; `mark_gc_roots` remains the single
+source of truth; all decoding stays behind `read_vec`. Add regression tests for
+each of A-D, including the `math.future`-in-setup case for B.

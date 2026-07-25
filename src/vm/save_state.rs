@@ -44,7 +44,7 @@ use std::sync::Arc;
 use std::collections::BTreeMap;
 
 use super::lua_val::RustFunc;
-use super::object::{RawObject, Upvalue, UpvalueRef};
+use super::object::{GcHeap, RawObject, Upvalue, UpvalueRef};
 use super::rng::VmRng;
 use super::{ObjectPtr, State, Val};
 use crate::compiler::{Bytecode, UpvalueDesc};
@@ -54,7 +54,7 @@ use crate::instr::Instr;
 mod verify;
 
 const MAGIC: [u8; 4] = *b"DLGS";
-const FORMAT_VERSION: u16 = 3;
+const FORMAT_VERSION: u16 = 4;
 
 /// Bytes produced by [`State::save_state`] plus non-fatal save diagnostics.
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -166,7 +166,12 @@ impl fmt::Display for LoadError {
 
 impl std::error::Error for LoadError {}
 
-#[derive(Clone, Debug, PartialEq)]
+// `Ord` is derived so verification can detect duplicate keys with an ordered
+// set instead of a linear scan. Every payload is attacker-controlled and its
+// length is bounded only by the file size, so a quadratic check would make a
+// forged save expensive to reject. `Num` already holds raw bits, so there is no
+// float ordering hazard.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum SavedVal {
     Nil,
     Bool(bool),
@@ -230,6 +235,25 @@ struct SavePayload {
     upvalues: Vec<SavedVal>,
     objects: Vec<SavedObject>,
     user_globals: Vec<(Vec<u8>, SavedVal)>,
+    env_deltas: Vec<SavedEnvDelta>,
+    next_format_pointer_id: u64,
+    format_pointer_ids: Vec<(SavedVal, u64)>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct SavedEnvDelta {
+    token: String,
+    deleted: Vec<SavedVal>,
+    upserts: Vec<(SavedVal, SavedVal)>,
+    order: Option<Vec<SavedVal>>,
+    metatable: SavedMetatableDelta,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum SavedMetatableDelta {
+    Unchanged,
+    Cleared,
+    Set(SavedVal),
 }
 
 struct SaveBuilder<'a> {
@@ -245,6 +269,8 @@ struct SaveBuilder<'a> {
     object_ids: BTreeMap<ObjectPtr, u32>,
     roots: Vec<Option<SavedVal>>,
     breadcrumbs: Vec<Breadcrumb>,
+    reachable_pointer_values: BTreeMap<SavedVal, ()>,
+    expanded_environment_objects: BTreeMap<ObjectPtr, ()>,
 }
 
 #[derive(Clone, Copy)]
@@ -254,6 +280,7 @@ enum ValueDestination {
     TableValue { object: u32, entry: usize },
     Metatable { object: u32 },
     Upvalue(u32),
+    Discard,
 }
 enum EncodeTask {
     Value {
@@ -311,6 +338,8 @@ impl<'a> SaveBuilder<'a> {
             object_ids: BTreeMap::new(),
             roots: Vec::new(),
             breadcrumbs: Vec::new(),
+            reachable_pointer_values: BTreeMap::new(),
+            expanded_environment_objects: BTreeMap::new(),
         }
     }
 
@@ -325,6 +354,16 @@ impl<'a> SaveBuilder<'a> {
         for (name, val) in &self.state.globals {
             let saved = self.encode_root(*val, PathSegment::Global(name.clone()))?;
             user_globals.push((name.as_bytes().to_vec(), saved));
+        }
+        let env_deltas = self.encode_env_deltas()?;
+        let pointer_ids = self.state.format_pointer_ids.clone();
+        let mut format_pointer_ids = Vec::new();
+        for (val, id) in pointer_ids {
+            if let Some(saved) = self.saved_reachable_pointer_value(val)
+                && self.reachable_pointer_values.contains_key(&saved)
+            {
+                format_pointer_ids.push((saved, id));
+            }
         }
 
         let objects = self
@@ -356,7 +395,107 @@ impl<'a> SaveBuilder<'a> {
             upvalues,
             objects,
             user_globals,
+            env_deltas,
+            next_format_pointer_id: self.state.next_format_pointer_id,
+            format_pointer_ids,
         })
+    }
+
+    fn saved_reachable_pointer_value(&self, value: Val) -> Option<SavedVal> {
+        match value {
+            Val::Str(ptr) => self
+                .string_ids
+                .get(self.state.heap.get_string(ptr))
+                .copied()
+                .map(SavedVal::Str),
+            Val::RustFn(func) => self
+                .state
+                .rust_fn_ids_by_addr
+                .get(&(func as usize))
+                .cloned()
+                .map(SavedVal::Fn),
+            Val::Obj(ptr) => self
+                .env_reverse
+                .get(&ptr)
+                .cloned()
+                .map(SavedVal::EnvObj)
+                .or_else(|| self.object_ids.get(&ptr).copied().map(SavedVal::Obj)),
+            Val::Nil | Val::Bool(_) | Val::Num(_) => None,
+        }
+    }
+
+    fn encode_env_deltas(&mut self) -> Result<Vec<SavedEnvDelta>, SaveError> {
+        let mut canonical: BTreeMap<String, ObjectPtr> = BTreeMap::new();
+        for (ptr, token) in &self.state.env_tokens {
+            canonical.insert(token.clone(), *ptr);
+        }
+        let mut deltas = Vec::new();
+        for (token, ptr) in canonical {
+            let table = self.state.heap.as_table_ref(ptr).ok_or_else(|| {
+                SaveError::EncodeError("environment object is not a table".to_string())
+            })?;
+            let baseline = self.state.env_baselines.get(&ptr).ok_or_else(|| {
+                SaveError::EncodeError("missing environment baseline".to_string())
+            })?;
+            let live = table.entries();
+            let mut deleted = Vec::new();
+            for (key, _) in &baseline.entries {
+                if !live.iter().any(|(live_key, _)| live_key == key) {
+                    deleted.push(self.encode_root(*key, PathSegment::Global(token.clone()))?);
+                }
+            }
+            let mut upserts = Vec::new();
+            for (key, value) in &live {
+                match baseline
+                    .entries
+                    .iter()
+                    .find(|(base_key, _)| base_key == key)
+                {
+                    Some((_, base_value)) if base_value == value => {}
+                    _ => upserts.push((
+                        self.encode_root(*key, PathSegment::Global(token.clone()))?,
+                        self.encode_root(*value, PathSegment::Global(token.clone()))?,
+                    )),
+                }
+            }
+            let replayed_order: Vec<Val> = baseline
+                .entries
+                .iter()
+                .filter(|(key, _)| live.iter().any(|(live_key, _)| live_key == key))
+                .map(|(key, _)| *key)
+                .chain(live.iter().filter_map(|(key, _)| {
+                    (!baseline.entries.iter().any(|(base_key, _)| base_key == key)).then_some(*key)
+                }))
+                .collect();
+            let order = (replayed_order != live.iter().map(|(key, _)| *key).collect::<Vec<_>>())
+                .then(|| {
+                    live.iter()
+                        .map(|(key, _)| self.encode_root(*key, PathSegment::Global(token.clone())))
+                        .collect::<Result<Vec<_>, SaveError>>()
+                })
+                .transpose()?;
+            let metatable = match (baseline.metatable, table.get_metatable().map(Val::Obj)) {
+                (before, after) if before == after => SavedMetatableDelta::Unchanged,
+                (_, None) => SavedMetatableDelta::Cleared,
+                (_, Some(value)) => SavedMetatableDelta::Set(
+                    self.encode_root(value, PathSegment::Global(token.clone()))?,
+                ),
+            };
+            if !deleted.is_empty()
+                || !upserts.is_empty()
+                || order.is_some()
+                || !matches!(metatable, SavedMetatableDelta::Unchanged)
+            {
+                deltas.push(SavedEnvDelta {
+                    token,
+                    deleted,
+                    upserts,
+                    order,
+                    metatable,
+                });
+            }
+        }
+        Ok(deltas)
     }
 
     fn encode_root(&mut self, val: Val, segment: PathSegment) -> Result<SavedVal, SaveError> {
@@ -418,6 +557,36 @@ impl<'a> SaveBuilder<'a> {
                             }
                         }
                     }?;
+                    if matches!(val, Val::Str(_) | Val::RustFn(_) | Val::Obj(_)) {
+                        self.reachable_pointer_values.insert(saved.clone(), ());
+                    }
+                    if let Val::Obj(ptr) = val
+                        && self.env_reverse.contains_key(&ptr)
+                        && self.expanded_environment_objects.insert(ptr, ()).is_none()
+                    {
+                        let table = self.state.heap.as_table_ref(ptr).ok_or_else(|| {
+                            SaveError::EncodeError("environment object is not a table".to_string())
+                        })?;
+                        if let Some(metatable) = table.get_metatable() {
+                            tasks.push(EncodeTask::Value {
+                                val: Val::Obj(metatable),
+                                path: self.push_path(Some(path), PathSegment::Metatable),
+                                destination: ValueDestination::Discard,
+                            });
+                        }
+                        for (idx, (key, value)) in table.entries().into_iter().enumerate().rev() {
+                            tasks.push(EncodeTask::Value {
+                                val: value,
+                                path: self.push_path(Some(path), PathSegment::TableValue(idx)),
+                                destination: ValueDestination::Discard,
+                            });
+                            tasks.push(EncodeTask::Value {
+                                val: key,
+                                path: self.push_path(Some(path), PathSegment::TableKey(idx)),
+                                destination: ValueDestination::Discard,
+                            });
+                        }
+                    }
                     self.write_value(destination, saved)?;
                 }
                 EncodeTask::Object { ptr, id, path } => {
@@ -600,6 +769,7 @@ impl<'a> SaveBuilder<'a> {
                 };
                 *metatable = Some(Some(value));
             }
+            ValueDestination::Discard => {}
         }
         Ok(())
     }
@@ -781,6 +951,9 @@ impl State {
         } else {
             State::empty_with_callbacks(callbacks)
         };
+        // Drop any inherited anchors before setup; anchors created by setup are
+        // deliberately retained and participate in the final collection.
+        state.registry.clear();
         setup(&mut state);
         materialize_payload(&mut state, payload)?;
         Ok(state)
@@ -904,6 +1077,72 @@ fn materialize_payload(
         }
     }
 
+    for delta in &payload.env_deltas {
+        let ptr = *env_forward
+            .get(&delta.token)
+            .ok_or_else(|| LoadError::UnknownEnvObject(delta.token.clone()))?;
+        {
+            let table = state.heap.as_table(ptr).ok_or(LoadError::CorruptArena)?;
+            for key in &delta.deleted {
+                table
+                    .insert(decode_val(key, &ctx)?, Val::Nil)
+                    .map_err(|_| LoadError::CorruptArena)?;
+            }
+            for (key, value) in &delta.upserts {
+                table
+                    .insert(decode_val(key, &ctx)?, decode_val(value, &ctx)?)
+                    .map_err(|_| LoadError::CorruptArena)?;
+            }
+        }
+        if let Some(order) = &delta.order {
+            let (current, metatable) = {
+                let table = state.heap.as_table(ptr).ok_or(LoadError::CorruptArena)?;
+                (table.entries(), table.get_metatable())
+            };
+            let mut current_by_key = BTreeMap::new();
+            for (key, value) in current.iter().copied() {
+                current_by_key.insert(runtime_table_key(key, &state.heap)?, (key, value));
+            }
+            let mut ordered = Vec::with_capacity(current.len());
+            for key in order {
+                let key = decode_val(key, &ctx)?;
+                let Some((current_key, value)) =
+                    current_by_key.remove(&runtime_table_key(key, &state.heap)?)
+                else {
+                    return Err(LoadError::CorruptArena);
+                };
+                ordered.push((current_key, value));
+            }
+            // A newer library or load setup may have added entries unknown to
+            // the save. Preserve them after the saved order in their current
+            // insertion order.
+            for (key, value) in current {
+                if current_by_key
+                    .remove(&runtime_table_key(key, &state.heap)?)
+                    .is_some()
+                {
+                    ordered.push((key, value));
+                }
+            }
+            let table = state.heap.as_table(ptr).ok_or(LoadError::CorruptArena)?;
+            table
+                .clear_and_insert_entries(ordered)
+                .map_err(|_| LoadError::CorruptArena)?;
+            // Rebuilding entries replaces the table shell. An unchanged delta
+            // must retain a metatable that setup or a later library installed.
+            table.set_metatable(metatable);
+        }
+        let table = state.heap.as_table(ptr).ok_or(LoadError::CorruptArena)?;
+        match &delta.metatable {
+            SavedMetatableDelta::Unchanged => {}
+            SavedMetatableDelta::Cleared => table.set_metatable(None),
+            SavedMetatableDelta::Set(saved) => match decode_val(saved, &ctx)? {
+                Val::Obj(ptr) => table.set_metatable(Some(ptr)),
+                _ => return Err(LoadError::CorruptArena),
+            },
+        }
+    }
+
     for (name, saved) in payload.user_globals {
         let name = String::from_utf8(name)
             .map_err(|_| LoadError::DecodeError("global name is not UTF-8".to_string()))?;
@@ -915,6 +1154,12 @@ fn materialize_payload(
     state.cost_budget = payload.cost_budget;
     state.cost_budget_configured = payload.cost_budget_configured;
     state.cost_used = payload.cost_used;
+    state.next_format_pointer_id = payload.next_format_pointer_id;
+    state.format_pointer_ids = payload
+        .format_pointer_ids
+        .iter()
+        .map(|(saved, id)| Ok((decode_val(saved, &ctx)?, *id)))
+        .collect::<Result<Vec<_>, LoadError>>()?;
     state.stack.clear();
     state.stack_bottom = 0;
     state.string_literals.clear();
@@ -927,7 +1172,6 @@ fn materialize_payload(
     state.metamethod_depth = 0;
     state.call_depth = 0;
     state.current_source = None;
-    state.registry.clear();
     state.gc_collect();
     Ok(())
 }
@@ -945,6 +1189,30 @@ struct DecodeCtx<'a> {
     objects: &'a [ObjectPtr],
     env_forward: &'a BTreeMap<String, ObjectPtr>,
     fn_forward: &'a BTreeMap<String, RustFunc>,
+}
+
+#[derive(Eq, Ord, PartialEq, PartialOrd)]
+enum RuntimeTableKey {
+    Bool(bool),
+    Num(u64),
+    Str(Vec<u8>),
+    Obj(ObjectPtr),
+    RustFn(usize),
+}
+
+fn runtime_table_key(value: Val, heap: &GcHeap) -> Result<RuntimeTableKey, LoadError> {
+    match value {
+        Val::Bool(value) => Ok(RuntimeTableKey::Bool(value)),
+        Val::Num(value) if !value.is_nan() => Ok(RuntimeTableKey::Num(if value == 0.0 {
+            0
+        } else {
+            value.to_bits()
+        })),
+        Val::Str(ptr) => Ok(RuntimeTableKey::Str(heap.get_string(ptr).to_vec())),
+        Val::Obj(ptr) => Ok(RuntimeTableKey::Obj(ptr)),
+        Val::RustFn(func) => Ok(RuntimeTableKey::RustFn(func as usize)),
+        Val::Nil | Val::Num(_) => Err(LoadError::CorruptArena),
+    }
 }
 
 fn decode_val(saved: &SavedVal, ctx: &DecodeCtx<'_>) -> Result<Val, LoadError> {
@@ -1240,6 +1508,13 @@ impl SavePayload {
             out.write_bytes(name)?;
             val.encode(out)
         })?;
+        write_vec(out, &self.env_deltas, |out, delta| delta.encode(out))?;
+        out.write_u64(self.next_format_pointer_id);
+        write_vec(out, &self.format_pointer_ids, |out, (value, id)| {
+            value.encode(out)?;
+            out.write_u64(*id);
+            Ok(())
+        })?;
         Ok(())
     }
 
@@ -1258,7 +1533,71 @@ impl SavePayload {
             user_globals: read_vec(input, |input| {
                 Ok((input.read_bytes()?, SavedVal::decode(input)?))
             })?,
+            env_deltas: read_vec(input, SavedEnvDelta::decode)?,
+            next_format_pointer_id: input.read_u64()?,
+            format_pointer_ids: read_vec(input, |input| {
+                Ok((SavedVal::decode(input)?, input.read_u64()?))
+            })?,
         })
+    }
+}
+
+impl SavedEnvDelta {
+    fn encode(&self, out: &mut Encoder) -> Result<(), SaveError> {
+        out.write_string(&self.token)?;
+        write_vec(out, &self.deleted, |out, key| key.encode(out))?;
+        write_vec(out, &self.upserts, |out, (key, value)| {
+            key.encode(out)?;
+            value.encode(out)
+        })?;
+        match &self.order {
+            Some(order) => {
+                out.write_bool(true);
+                write_vec(out, order, |out, key| key.encode(out))?;
+            }
+            None => out.write_bool(false),
+        }
+        self.metatable.encode(out)
+    }
+
+    fn decode(input: &mut Decoder<'_>) -> Result<Self, LoadError> {
+        Ok(Self {
+            token: input.read_string()?,
+            deleted: read_vec(input, SavedVal::decode)?,
+            upserts: read_vec(input, |input| {
+                Ok((SavedVal::decode(input)?, SavedVal::decode(input)?))
+            })?,
+            order: input
+                .read_bool()?
+                .then(|| read_vec(input, SavedVal::decode))
+                .transpose()?,
+            metatable: SavedMetatableDelta::decode(input)?,
+        })
+    }
+}
+
+impl SavedMetatableDelta {
+    fn encode(&self, out: &mut Encoder) -> Result<(), SaveError> {
+        match self {
+            Self::Unchanged => out.write_u8(0),
+            Self::Cleared => out.write_u8(1),
+            Self::Set(value) => {
+                out.write_u8(2);
+                value.encode(out)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn decode(input: &mut Decoder<'_>) -> Result<Self, LoadError> {
+        match input.read_u8()? {
+            0 => Ok(Self::Unchanged),
+            1 => Ok(Self::Cleared),
+            2 => Ok(Self::Set(SavedVal::decode(input)?)),
+            _ => Err(LoadError::DecodeError(
+                "invalid environment metatable mode".to_string(),
+            )),
+        }
     }
 }
 
@@ -1521,6 +1860,9 @@ mod tests {
             upvalues: Vec::new(),
             objects,
             user_globals: Vec::new(),
+            env_deltas: Vec::new(),
+            next_format_pointer_id: 1,
+            format_pointer_ids: Vec::new(),
         };
         let mut encoder = Encoder::new();
         encoder.write_magic_and_version();
@@ -1813,6 +2155,21 @@ mod tests {
                 upvalues: vec![0, 1, 2],
             }
         );
+    }
+
+    #[test]
+    fn saved_environment_delta_and_pointer_ids_round_trip() {
+        roundtrip!(
+            SavedEnvDelta,
+            SavedEnvDelta {
+                token: "math".to_string(),
+                deleted: vec![SavedVal::Str(1)],
+                upserts: vec![(SavedVal::Str(2), SavedVal::Obj(3))],
+                order: Some(vec![SavedVal::Str(2)]),
+                metatable: SavedMetatableDelta::Set(SavedVal::EnvObj("table".to_string())),
+            }
+        );
+        roundtrip!(SavedMetatableDelta, SavedMetatableDelta::Cleared);
     }
 
     #[test]

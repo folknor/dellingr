@@ -166,44 +166,6 @@ for i = 1, 34 do s = s .. s end   -- 16 GB attempt, total charged cost ~34
   vocabulary), or a max-string-length cap. Decision belongs to the cost-model
   owner.
 
-### 30. User mutations inside environment tables are silently dropped by save/load (D-D5, round-trip fidelity)
-
-- **Location:** `src/vm/save_state.rs:303-310`.
-- **Cause:** when the walker meets an `ObjectPtr` present in `env_tokens` it
-  emits an `EnvObj` token and never walks the table's entries. So
-  `math.myconst = 42`, `string.trim = function(s) ... end`,
-  `table.foo = {...}` (ordinary Lua idiom - extending library tables) survive
-  in the live State but vanish on save/load: the tokens resolve to freshly
-  rebuilt pristine libraries. Values reachable ONLY through an env table
-  (that `table.foo` subtable) are dropped entirely, with no `SaveError` and
-  no diagnostic. README's snapshot section ("globals, reachable
-  tables/closures/upvalues/strings ... are persisted") does not carve this
-  out; the module doc only covers the reverse direction (new build adding
-  `math.foo`).
-- **Fix options:** (a) at save time, diff each env table against a
-  capture-time pristine snapshot (entry list captured alongside `env_tokens`)
-  and persist the delta, replayed on load after `open_libs`; (b) cheaper:
-  detect a modified env table (its `version()` differs from capture time, or
-  entry-count/name diff) and fail fast or surface it in `SaveDiagnostics`,
-  plus document the limitation. Doing nothing silently loses user state.
-
-### 31. `%p` identity state is not persisted; identities collide across save/load (D-D6)
-
-- **Locations:** `src/vm.rs:164-168` (`format_pointer_ids`,
-  `next_format_pointer_id`) absent from `SavePayload`
-  (`save_state.rs:198-210`).
-- **Cause:** after a load the counter restarts at 1 while strings produced by
-  `string.format("%p", x)` before the save can persist in saved globals. A
-  new object formatted after load can render byte-identical to a different
-  pre-save object's `%p` string, breaking the uniqueness the deterministic
-  `%p` ids exist to provide; an uninterrupted run diverges from a
-  save/load-interrupted run (replay-affecting if scripts branch on `%p`
-  output).
-- **Fix:** persist `next_format_pointer_id` and the id entries whose `Val`s
-  are reachable in the payload (dead entries can be dropped - consistent with
-  the TODO.md pruning sketch), or document that `%p` identities are
-  per-process and never comparable across a load.
-
 ---
 
 ## Low severity
@@ -266,17 +228,6 @@ the same surface: `set_top` and `pop` `assert!` (panic) on misuse while
 consistent and reusable, the panicking forms are the odd ones out. Suggest
 `check_stack_space` in the growth arm and converting the asserts to
 `InvalidStackIndex` errors pre-1.0.
-
-### 53. Anchors created inside the `load_state` setup closure are silently invalidated (D-D11)
-
-`src/vm/save_state.rs:599`: `materialize_payload` ends with
-`state.registry.clear()`, which runs AFTER the host's `setup` closure
-(`save_state.rs:459`). A host that pushes a value and anchors it during
-setup gets a handle that is stale the moment `load_state` returns, with no
-error (later use returns `InvalidAnchor`). Either run `registry.clear()`
-before `setup`, or document that setup-time anchors do not survive.
-(Clearing exists to drop anchors inherited from `State::with_callbacks`;
-there are none in a fresh State, so moving the clear earlier is free.)
 
 ### 54. MSRV / version doc mismatches (D-D8)
 

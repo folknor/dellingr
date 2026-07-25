@@ -47,6 +47,8 @@ const GOLDEN_PROGRAM: &str = r#"
     captured = make(2, 3)
 
     ordered = { 1, 2, 3, extra = "tail" }
+    math.golden_delta = { marker = "environment delta" }
+    golden_pointer = tostring(ordered)
 "#;
 
 fn golden_bytes() -> Vec<u8> {
