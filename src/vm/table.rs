@@ -6,7 +6,7 @@ use super::Error;
 use super::Result;
 use super::TypeError;
 use super::Val;
-use super::object::{GcHeap, Markable, ObjectPtr, UpvaluePool};
+use super::object::{GcHeap, Markable, ObjectPtr};
 
 /// Maximum number of entries for inline storage.
 /// Tables with more entries promote to IndexMap.
@@ -740,27 +740,27 @@ impl Table {
     /// Mark all values contained in this table as reachable.
     /// Called by the GC during the mark phase.
     #[hotpath::measure]
-    pub(super) fn mark_values(&self, heap: &GcHeap, upvalue_pool: &UpvaluePool) {
+    pub(super) fn mark_values(&self, heap: &GcHeap, worklist: &mut Vec<ObjectPtr>) {
         match &self.storage {
             TableStorage::Inline { entries, len } => {
                 for (key, value) in entries.iter().take(*len as usize) {
                     if !matches!(value, Val::Nil) {
-                        key.mark_reachable(heap, upvalue_pool);
-                        value.mark_reachable(heap, upvalue_pool);
+                        key.mark_reachable(heap, worklist);
+                        value.mark_reachable(heap, worklist);
                     }
                 }
             }
             TableStorage::Map(map) => {
                 for (k, v) in map {
                     if !matches!(v, Val::Nil) {
-                        k.mark_reachable(heap, upvalue_pool);
-                        v.mark_reachable(heap, upvalue_pool);
+                        k.mark_reachable(heap, worklist);
+                        v.mark_reachable(heap, worklist);
                     }
                 }
             }
         }
         if let Some(mt) = &self.metatable {
-            heap.mark(*mt, upvalue_pool);
+            heap.mark(*mt, worklist);
         }
     }
 }

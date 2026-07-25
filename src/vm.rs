@@ -67,16 +67,16 @@ struct SuspendedEnvironment {
 }
 
 impl Markable for SuspendedEnvironment {
-    fn mark_reachable(&self, heap: &GcHeap, upvalue_pool: &UpvaluePool) {
-        self.globals.mark_reachable(heap, upvalue_pool);
-        self.builtins.mark_reachable(heap, upvalue_pool);
+    fn mark_reachable(&self, heap: &GcHeap, worklist: &mut Vec<ObjectPtr>) {
+        self.globals.mark_reachable(heap, worklist);
+        self.builtins.mark_reachable(heap, worklist);
     }
 }
 
 impl Markable for TransientRoots {
-    fn mark_reachable(&self, heap: &GcHeap, upvalue_pool: &UpvaluePool) {
-        self.values.mark_reachable(heap, upvalue_pool);
-        self.suspended_envs.mark_reachable(heap, upvalue_pool);
+    fn mark_reachable(&self, heap: &GcHeap, worklist: &mut Vec<ObjectPtr>) {
+        self.values.mark_reachable(heap, worklist);
+        self.suspended_envs.mark_reachable(heap, worklist);
     }
 }
 
@@ -86,25 +86,15 @@ impl Markable for TransientRoots {
 /// All allocation functions that may trigger GC must call this with the same set of roots.
 ///
 #[hotpath::measure]
-pub(super) fn mark_gc_roots(state: &State) {
+pub(super) fn mark_gc_roots(state: &State, worklist: &mut Vec<ObjectPtr>) {
     // Mark all roots - closed upvalues are now marked transitively when
     // marking LuaFn closures that reference them
-    state.stack.mark_reachable(&state.heap, &state.upvalue_pool);
-    state
-        .globals
-        .mark_reachable(&state.heap, &state.upvalue_pool);
-    state
-        .builtins
-        .mark_reachable(&state.heap, &state.upvalue_pool);
-    state
-        .string_literals
-        .mark_reachable(&state.heap, &state.upvalue_pool);
-    state
-        .transient_roots
-        .mark_reachable(&state.heap, &state.upvalue_pool);
-    state
-        .registry
-        .mark_reachable(&state.heap, &state.upvalue_pool);
+    state.stack.mark_reachable(&state.heap, worklist);
+    state.globals.mark_reachable(&state.heap, worklist);
+    state.builtins.mark_reachable(&state.heap, worklist);
+    state.string_literals.mark_reachable(&state.heap, worklist);
+    state.transient_roots.mark_reachable(&state.heap, worklist);
+    state.registry.mark_reachable(&state.heap, worklist);
     // Note: open upvalues point to stack (already marked), closed upvalues
     // are marked transitively through the closures that reference them
 }
@@ -482,7 +472,11 @@ impl State {
     #[hotpath::measure]
     pub fn gc_collect(&mut self) {
         // Mark all roots
-        mark_gc_roots(self);
+        let mut worklist = self.heap.take_mark_worklist();
+        mark_gc_roots(self, &mut worklist);
+        self.heap
+            .drain_mark_worklist(&mut worklist, &self.upvalue_pool);
+        self.heap.restore_mark_worklist(worklist);
         // Sweep unmarked objects
         self.heap.collect();
     }

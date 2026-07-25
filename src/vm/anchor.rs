@@ -26,7 +26,7 @@ use super::RetCount;
 use super::State;
 use super::TypeError;
 use super::Val;
-use super::object::{GcHeap, Markable, UpvaluePool};
+use super::object::{GcHeap, Markable, ObjectPtr};
 
 new_key_type! {
     pub(crate) struct AnchorKey;
@@ -125,9 +125,9 @@ impl Registry {
 }
 
 impl Markable for Registry {
-    fn mark_reachable(&self, heap: &GcHeap, upvalue_pool: &UpvaluePool) {
+    fn mark_reachable(&self, heap: &GcHeap, worklist: &mut Vec<ObjectPtr>) {
         for val in self.slots.values() {
-            val.mark_reachable(heap, upvalue_pool);
+            val.mark_reachable(heap, worklist);
         }
     }
 }

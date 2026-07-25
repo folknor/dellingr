@@ -194,6 +194,8 @@ pub(crate) struct GcHeap {
     threshold: usize,
     /// Pool for interned strings.
     strings: StringPool,
+    /// Reused scratch space for the iterative GC mark phase.
+    mark_worklist: Vec<ObjectPtr>,
 }
 
 impl GcHeap {
@@ -203,6 +205,7 @@ impl GcHeap {
             objects: SlotMap::with_key(),
             threshold,
             strings: StringPool::new(),
+            mark_worklist: Vec::new(),
         }
     }
 
@@ -352,13 +355,33 @@ impl GcHeap {
     /// Mark an object as reachable. Call this for all root objects.
     /// The upvalue_pool is needed to mark closed upvalues referenced by closures.
     #[hotpath::measure]
-    pub(super) fn mark(&self, ptr: ObjectPtr, upvalue_pool: &UpvaluePool) {
+    pub(super) fn mark(&self, ptr: ObjectPtr, worklist: &mut Vec<ObjectPtr>) {
         if let Some(obj) = self.objects.get(ptr.0)
             && obj.color.get() == Color::Unmarked
         {
             obj.color.set(Color::Reachable);
-            // Recursively mark objects referenced by this object
-            self.mark_children(obj, upvalue_pool);
+            worklist.push(ptr);
+        }
+    }
+
+    pub(super) fn take_mark_worklist(&mut self) -> Vec<ObjectPtr> {
+        let mut worklist = std::mem::take(&mut self.mark_worklist);
+        worklist.clear();
+        worklist
+    }
+
+    pub(super) fn restore_mark_worklist(&mut self, mut worklist: Vec<ObjectPtr>) {
+        worklist.clear();
+        self.mark_worklist = worklist;
+    }
+
+    pub(super) fn drain_mark_worklist(
+        &self,
+        worklist: &mut Vec<ObjectPtr>,
+        upvalue_pool: &UpvaluePool,
+    ) {
+        while let Some(ptr) = worklist.pop() {
+            self.mark_children(self.get(ptr), upvalue_pool, worklist);
         }
     }
 
@@ -369,18 +392,23 @@ impl GcHeap {
 
     /// Mark objects referenced by this object.
     #[hotpath::measure]
-    fn mark_children(&self, obj: &WrappedObject, upvalue_pool: &UpvaluePool) {
+    fn mark_children(
+        &self,
+        obj: &WrappedObject,
+        upvalue_pool: &UpvaluePool,
+        worklist: &mut Vec<ObjectPtr>,
+    ) {
         match &obj.raw {
             RawObject::LuaFn(closure) => {
                 // Mark values stored in closed upvalues
                 for uv_ref in &closure.upvalues {
                     if let Upvalue::Closed(val) = upvalue_pool.get(*uv_ref) {
-                        val.mark_reachable(self, upvalue_pool);
+                        val.mark_reachable(self, worklist);
                     }
                 }
             }
             RawObject::Table(tbl) => {
-                tbl.mark_values(self, upvalue_pool);
+                tbl.mark_values(self, worklist);
             }
         }
     }
@@ -458,13 +486,13 @@ impl GcHeap {
 /// An item is `Markable` if it can be marked as reachable given heap access.
 pub(super) trait Markable {
     /// Mark this item and the references it contains as reachable.
-    fn mark_reachable(&self, heap: &GcHeap, upvalue_pool: &UpvaluePool);
+    fn mark_reachable(&self, heap: &GcHeap, worklist: &mut Vec<ObjectPtr>);
 }
 
 impl Markable for Val {
-    fn mark_reachable(&self, heap: &GcHeap, upvalue_pool: &UpvaluePool) {
+    fn mark_reachable(&self, heap: &GcHeap, worklist: &mut Vec<ObjectPtr>) {
         match self {
-            Val::Obj(ptr) => heap.mark(*ptr, upvalue_pool),
+            Val::Obj(ptr) => heap.mark(*ptr, worklist),
             Val::Str(ptr) => heap.mark_string(*ptr),
             _ => (),
         }
@@ -472,17 +500,17 @@ impl Markable for Val {
 }
 
 impl<T: Markable> Markable for [T] {
-    fn mark_reachable(&self, heap: &GcHeap, upvalue_pool: &UpvaluePool) {
+    fn mark_reachable(&self, heap: &GcHeap, worklist: &mut Vec<ObjectPtr>) {
         for val in self {
-            val.mark_reachable(heap, upvalue_pool);
+            val.mark_reachable(heap, worklist);
         }
     }
 }
 
 impl<K, V: Markable> Markable for IndexMap<K, V> {
-    fn mark_reachable(&self, heap: &GcHeap, upvalue_pool: &UpvaluePool) {
+    fn mark_reachable(&self, heap: &GcHeap, worklist: &mut Vec<ObjectPtr>) {
         for val in self.values() {
-            val.mark_reachable(heap, upvalue_pool);
+            val.mark_reachable(heap, worklist);
         }
     }
 }
@@ -666,13 +694,39 @@ mod tests {
         let _freed = heap.alloc_table();
 
         // Mark only the first table
-        let pool = UpvaluePool::new();
-        heap.mark(kept, &pool);
+        let mut worklist = heap.take_mark_worklist();
+        heap.mark(kept, &mut worklist);
+        heap.drain_mark_worklist(&mut worklist, &UpvaluePool::new());
+        heap.restore_mark_worklist(worklist);
         heap.collect();
 
         // First table should survive, second should be freed
         assert!(heap.as_table_ref(kept).is_some());
         assert_eq!(heap.object_count(), 1);
+    }
+
+    #[test]
+    fn deep_table_chain_marks_iteratively_and_reuses_the_empty_worklist() {
+        let mut heap = GcHeap::with_threshold(100);
+        let mut root = heap.alloc_table();
+        for _ in 0..100_000 {
+            let next = heap.alloc_table();
+            heap.as_table(next)
+                .expect("newly allocated object is a table")
+                .insert(Val::Num(1.0), Val::Obj(root))
+                .expect("table key is valid");
+            root = next;
+        }
+        for _ in 0..2 {
+            let mut worklist = heap.take_mark_worklist();
+            heap.mark(root, &mut worklist);
+            heap.drain_mark_worklist(&mut worklist, &UpvaluePool::new());
+            assert!(worklist.is_empty());
+            heap.restore_mark_worklist(worklist);
+            heap.collect();
+            assert_eq!(heap.object_count(), 100_001);
+            assert!(heap.mark_worklist.is_empty());
+        }
     }
 
     #[test]

@@ -16,6 +16,17 @@ fn arm_gc(state: &mut State) -> crate::Result<u8> {
 }
 
 #[test]
+fn auto_gc_marks_a_deep_lua_table_chain_iteratively() {
+    let mut state = State::new();
+    state
+        .load_string("t = {}\nfor i = 1, 100000 do t = { t } end\ndone = t ~= nil")
+        .expect("deep chain compiles");
+    state
+        .call(crate::instr::ArgCount::Fixed(0), RetCount::Fixed(0))
+        .expect("deep chain completes without overflowing the native stack");
+}
+
+#[test]
 fn consume_cost_saturates_large_host_charges() {
     for (cost, remaining) in [
         (i64::MAX as u64, 0),
