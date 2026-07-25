@@ -404,7 +404,10 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
             Instr::OP_CONCAT if a < 2 => {
                 return Err(err(Some(pc), "concat requires at least two values"));
             }
-            Instr::OP_MARK_CALL_BASE if a > 1 => {
+            // Always 1: the marker is emitted after the callee is evaluated, so
+            // the callee is the single value on top and the base is one slot
+            // below it. Anything else is corrupt.
+            Instr::OP_MARK_CALL_BASE if a != 1 => {
                 return Err(err(Some(pc), "call-base marker adjustment is invalid"));
             }
             _ => {}

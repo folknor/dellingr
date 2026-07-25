@@ -228,7 +228,23 @@ impl Frame {
                 }
                 Instr::OP_MARK_CALL_BASE => {
                     let adjustment = inst.a() as usize;
-                    state.vararg_call_bases.push(state.stack.len() - adjustment);
+                    // Validate against the CURRENT FRAME, not just against
+                    // usize underflow. Checking only `stack.len()` would let a
+                    // marker whose base lands below `stack_bottom` through
+                    // whenever the absolute stack happens to be deep enough,
+                    // and the dynamic-call path would then treat a caller-owned
+                    // slot as this call's callee.
+                    let base = state
+                        .stack
+                        .len()
+                        .checked_sub(adjustment)
+                        .filter(|base| *base >= state.stack_bottom)
+                        .ok_or_else(|| {
+                            state.error(ErrorKind::InternalError(
+                                "call-base marker is below the active frame".into(),
+                            ))
+                        })?;
+                    state.vararg_call_bases.push(base);
                 }
                 Instr::OP_CLOSE_UPVALUES => {
                     // Close upvalues for locals at or above the given slot

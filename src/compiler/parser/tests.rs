@@ -1190,11 +1190,14 @@ fn test32() {
         Instr::push_nil(),
         Instr::set_local(1),
         Instr::set_local(0),
-        Instr::mark_call_base(0), // Mark stack position before function (no adjustment, not a field access)
-        Instr::get_local(1),      // Get print
-        Instr::get_local(0),      // Get type
-        Instr::push_nil(),        // Push nil argument
-        Instr::call(ArgCount::Fixed(1), RetCount::All), // Call type(nil), return ALL values
+        // The callee is evaluated first, then the base is marked one slot
+        // below the top. Marking before evaluation required guessing how many
+        // values the callee expression had already left on the stack (#60).
+        Instr::get_local(1),                                // Get print
+        Instr::mark_call_base(1),                           // Mark the slot holding the callee
+        Instr::get_local(0),                                // Get type
+        Instr::push_nil(),                                  // Push nil argument
+        Instr::call(ArgCount::Fixed(1), RetCount::All),     // Call type(nil), return ALL values
         Instr::call(ArgCount::Dynamic, RetCount::Fixed(0)), // Call print with dynamic arg count
         Instr::ret(RetCount::Fixed(0)),
     ];

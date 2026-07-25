@@ -88,42 +88,6 @@ valid. Fix history lives in git.
 - **Related:** `OP_CONCAT` being free is separate (#24) and should not be
   folded in - though while it stands, a large subject remains cheap to build.
 
-### 60. Method call on a parenthesized receiver with a call argument dispatches the receiver (found 2026-07-25, verified by execution)
-
-Not from the original audit - found while verifying #12. **Verified against
-HEAD**, so it predates the matcher rewrite; both Lua 5.2 and 5.4 handle every
-form below.
-
-- **Repro:**
-
-```lua
-local function id(s) return s end
-("ab"):find(id("b"))                        -- error: attempt to call a string value
-({ f = function(self, x) return x end }):f(id("q"))  -- error: attempt to call a table value
-(id("ab")):find(id("b"))                    -- error: attempt to call a string value
-("a" .. "b"):find(id("b"))                  -- error: attempt to call a string value
-```
-
-- **Trigger:** a method call `(<expr>):m(...)` where the receiver is a
-  *parenthesized or constructor* primary expression **and** at least one
-  argument is itself a function call. Both conditions are required:
-  `("ab"):find("b")` (no call argument) and `s:find(id("b"))` (simple-name
-  receiver) are both correct, which is why this survived.
-- **Symptom:** the error names the *receiver's* type, so the VM calls the
-  receiver instead of the resolved method. A longer variant
-  (`rep("a",201):find(rep("a",201))`) instead surfaces
-  `internal error: dynamic call base is outside the active stack`, pointing at
-  the `vararg_call_bases` / `MARK_CALL_BASE` machinery rather than at method
-  lookup itself.
-- **Severity:** high. The idiom is ordinary Lua, it fails loudly rather than
-  silently. Note the `internal error` wording here is now accurate rather than
-  a taxonomy slip: since #52 landed, `InternalError` genuinely means a VM bug,
-  which is what this is.
-- **Not yet located.** Start at the method-call desugaring in the parser and
-  the call-base marking for dynamic argument counts; the front-end audit
-  explicitly cleared "method-call desugaring" and `mark_call_base` bounds, so
-  the interaction between the two is the untested seam.
-
 ---
 
 ## Medium severity

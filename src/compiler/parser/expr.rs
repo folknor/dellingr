@@ -265,16 +265,25 @@ impl Parser<'_> {
             TokenType::LParen | TokenType::LiteralString | TokenType::LCurly => {
                 let call_start = self.input.peek()?.start;
                 let (line, _) = self.input.line_and_column(call_start);
-                // Always mark call base - needed when last arg is vararg or function call
-                // Adjustment: if we've already pushed the table/receiver (FieldAccess or TableIndex),
-                // subtract 1 from the base since the function will replace what's already there
-                let adjustment = match &base_expr {
-                    PrefixExp::Place(PlaceExp::FieldAccess(_) | PlaceExp::TableIndex) => 1,
-                    _ => 0,
-                };
-                let mark_idx = self.chunk.code.len();
-                self.push(Instr::mark_call_base(adjustment));
+                // Evaluate the callee FIRST, then mark. The mark records where
+                // this call's frame begins, and after the callee is evaluated
+                // it is always exactly one value on top - whether it pushed
+                // itself (a name), was already there (a parenthesized
+                // expression or constructor), replaced its receiver (a field
+                // access), collapsed a receiver and key (an index), or is the
+                // single result of an inner call.
+                //
+                // Marking before evaluation instead required guessing how many
+                // values the callee expression had already left on the stack,
+                // which was wrong for every shape except a plain name and a
+                // field access, and is not even a fixed number for an inner
+                // call - the base then pointed at the receiver and the VM
+                // called that instead of the callee (#60).
                 self.eval_prefix_exp(&base_expr);
+                // Always mark call base - needed when last arg is vararg or a
+                // function call, both of which make the argument count dynamic.
+                let mark_idx = self.chunk.code.len();
+                self.push(Instr::mark_call_base(1));
                 let (num_args, last_exp) = self.parse_call_args()?;
                 // If last arg is vararg, adjust to pass all varargs
                 let num_args = if let ExpDesc::Vararg = last_exp {
@@ -314,16 +323,19 @@ impl Parser<'_> {
             TokenType::Colon => {
                 let call_start = self.input.peek()?.start;
                 let (line, _) = self.input.line_and_column(call_start);
-                // Method call: obj:method(args) becomes obj.method(obj, args)
-                // Always mark call base - needed when last arg is vararg or function call
-                // Same adjustment logic as function calls
-                let adjustment = match &base_expr {
-                    PrefixExp::Place(PlaceExp::FieldAccess(_) | PlaceExp::TableIndex) => 1,
-                    _ => 0,
-                };
-                let mark_idx = self.chunk.code.len();
-                self.push(Instr::mark_call_base(adjustment));
+                // Method call: obj:method(args) becomes obj.method(obj, args).
+                //
+                // Same ordering as a normal call: evaluate the receiver first,
+                // then mark, so the base always sits one slot below the top
+                // regardless of what shape the receiver expression had (#60).
+                // The dup/get_field/swap below leaves the resolved method in
+                // that marked slot with the receiver above it, which is exactly
+                // the [callee, args...] layout the call expects.
                 self.eval_prefix_exp(&base_expr);
+                // Always mark call base - needed when last arg is vararg or a
+                // function call, both of which make the argument count dynamic.
+                let mark_idx = self.chunk.code.len();
+                self.push(Instr::mark_call_base(1));
                 self.input.next()?; // consume ':'
                 let method_name = self.expect_identifier()?;
                 let name_idx = self.find_or_add_string(method_name)?;
