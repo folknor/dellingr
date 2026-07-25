@@ -259,52 +259,6 @@ print(("ab"):find("%f[%a]%a", 2))       -- reference: nil;    dellingr: 2 2
   offset and keep the full subject, like reference `prepstate`. Also deletes
   all the `base +` capture-offset arithmetic in string.rs.
 
-### 36. Explicit `nil` is rejected for optional stdlib arguments (E-E10)
-
-- **Cause:** reference `luaL_opt*` treats nil as "absent"; the prevailing
-  dellingr pattern `if num_args >= k { check_type(k, ...) }` errors on
-  explicit nil instead. Affected: `string.find` init (`string.rs:268` -
-  breaks the very common plain-find idiom `s:find(pat, nil, true)`),
-  `string.sub` j, `string.match` init, `string.gsub` n, `table.concat`
-  sep/i/j, `table.sort` comp, `table.unpack`/`unpack` i/j, `table.insert`
-  pos (3-arg form with nil pos errors differently than reference); `select`
-  is fine. Notably `tonumber` base and `table.remove` pos already do it
-  correctly (`state.typ(k) != LuaType::Nil` guard), so the codebase has the
-  right pattern applied inconsistently.
-- **Repro:**
-
-```lua
-print(("a.b"):find(".", nil, true))  -- reference: 1 1; dellingr: bad-argument error
-```
-
-- **Caveat from the auditor:** assumes `check_type(k, T)` errors on nil (very
-  high confidence from `ArgError` plumbing, but `vm_aux.rs` was not read).
-
-### 37. `table.concat`'s `len == 0` short-circuit ignores an explicit range; negative range values saturate (E-E8)
-
-- **Location:** `src/lua_std/table.rs:224`
-  (`if i > j || len == 0 { return "" }`).
-- **Cause:** reference only defaults `j` from `#t`; an explicit `i..j` range
-  is honored regardless of the border. Also: `i`/`j` (and `table.unpack`'s,
-  see #38) go through `as usize`, so negative values saturate to 0 instead of
-  addressing negative indices like reference does.
-- **Repro:**
-
-```lua
-local t = {}; t[2] = "x"
-print(table.concat(t, "", 2, 2))  -- reference: "x"; dellingr: ""
-```
-
-### 38. `unpack` / `table.unpack` truncate negative start indices to 0 (E-E9)
-
-- **Locations:** `src/lua_std/basic.rs:241`, `src/lua_std/table.rs:121`
-  (`state.to_number(2)? as usize` saturates negatives to 0).
-- **Cause:** `unpack(t, -2, 2)` returns 3 values `t[0],t[1],t[2]` instead of
-  reference's 5 values `t[-2]..t[2]` (wrong count AND wrong values). The
-  255-result cap itself is a deliberate protocol limit (verified: RustFunc
-  return counts are plain numbers in `vm/eval.rs:102-119`, no sentinel
-  collision at exactly 255).
-
 ---
 
 ## Low severity
@@ -435,15 +389,6 @@ there are none in a fresh State, so moving the clear earlier is free.)
 `Cargo.toml:5` says `rust-version = "1.97"`; README badge (line 5) and
 AGENTS.md both say 1.92. One is wrong. (README's `dellingr = "0.2"` snippet
 also trails the crate's 0.3.0, minor.)
-
-### 57. `tonumber` divergences (E-E15)
-
-`src/lua_std/basic.rs:18-40, 159-215`:
-
-- `+` sign accepted with an explicit base: `tonumber("+ff", 16)` -> 255;
-  reference -> nil (reference only skips `-`).
-- With a base, arg 1 must be a string type; reference coerces numbers:
-  `tonumber(10, 16)` -> 16 in reference, error in dellingr.
 
 ### 58. Assorted minor divergences and design-confirmation notes
 

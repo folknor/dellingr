@@ -99,11 +99,23 @@ fn unpack_rejects_oversized_range() {
 
 #[test]
 fn unpack_rejects_huge_range_without_overflow() {
-    // A huge explicit `j` must be rejected by the span bound, not overflow the
-    // count arithmetic (which would panic in debug and loop unbounded in release).
+    // A huge explicit endpoint must be rejected before range arithmetic.
     for code in [
         "return unpack({}, 0, 1e300)",
         "return table.unpack({}, 0, 1e300)",
+    ] {
+        expect_runtime_error(
+            code,
+            "bad argument #3 to 'unpack' (number has no integer representation)",
+        );
+    }
+}
+
+#[test]
+fn unpack_rejects_i64_span_overflow() {
+    for code in [
+        "return unpack({}, -9223372036854775808, 9223372036854774784)",
+        "return table.unpack({}, -9223372036854775808, 9223372036854774784)",
     ] {
         expect_runtime_error(code, "too many results to unpack");
     }

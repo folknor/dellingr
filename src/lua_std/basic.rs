@@ -39,6 +39,10 @@ fn parse_integer_with_base(bytes: &[u8], base: u32) -> Option<f64> {
     if negative { Some(-value) } else { Some(value) }
 }
 
+fn base_unpack_values(state: &mut State) -> Result<u8> {
+    super::unpack_values(state)
+}
+
 pub(crate) fn base_ipairs(state: &mut State) -> Result<u8> {
     state.check_type(1, LuaType::Table)?;
     state.set_top(1);
@@ -158,9 +162,7 @@ pub(crate) fn open_base(state: &mut State) {
     // Converts a value to a number, or a string in the given base to a number.
     add("tonumber", |state| {
         state.check_any(1)?;
-        let num_args = state.get_top();
-
-        if num_args >= 2 && state.typ(2) != LuaType::Nil {
+        if !state.is_none_or_nil(2) {
             state.check_type(1, LuaType::String)?;
             state.check_type(2, LuaType::Number)?;
             let base_num = state.to_number(2)?;
@@ -231,48 +233,7 @@ pub(crate) fn open_base(state: &mut State) {
     //
     // Returns list[i], list[i+1], ..., list[j]. Defaults to 1..#list,
     // matching Lua 5.2's global unpack.
-    add("unpack", |state| {
-        state.check_type(1, LuaType::Table)?;
-        let num_args = state.get_top();
-        let len = state.table_len(1);
-
-        let i = if num_args >= 2 {
-            state.check_type(2, LuaType::Number)?;
-            state.to_number(2)? as usize
-        } else {
-            1
-        };
-
-        let j = if num_args >= 3 {
-            state.check_type(3, LuaType::Number)?;
-            state.to_number(3)? as usize
-        } else {
-            len
-        };
-
-        state.set_top(1);
-
-        if i > j {
-            state.set_top(0);
-            return Ok(0);
-        }
-
-        // j >= i here (the i > j case returned above), so the span cannot
-        // underflow. Bound it BEFORE the `+ 1` so a huge j (e.g. from 1e300)
-        // cannot overflow the count and slip past the ceiling check.
-        let span = j - i;
-        if span >= 255 {
-            return Err(state.error(ErrorKind::RuntimeError("too many results to unpack".into())));
-        }
-        for idx in i..=j {
-            state.push_number(idx as f64);
-            state.get_table(1)?;
-        }
-        let count = span + 1;
-
-        state.remove(1)?;
-        Ok(count as u8)
-    });
+    add("unpack", base_unpack_values);
 
     // getmetatable(object)
     // Returns the metatable of the given table, or nil if it doesn't have one.

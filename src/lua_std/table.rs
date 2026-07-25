@@ -1,9 +1,13 @@
 //! Lua's Table Library
 
+use super::exact_integer_argument;
 use crate::LuaType;
 use crate::State;
 use crate::error::{ErrorKind, TypeError};
-use crate::numeral::exact_i64;
+
+fn table_unpack_values(state: &mut State) -> crate::Result<u8> {
+    super::unpack_values(state)
+}
 
 pub(crate) fn open_table(state: &mut State) {
     // Create the table table
@@ -38,7 +42,7 @@ pub(crate) fn open_table(state: &mut State) {
         } else if num_args == 3 {
             // table.insert(t, pos, value)
             state.check_type(2, LuaType::Number)?;
-            let pos = table_position(state, 2, "insert")?;
+            let pos = exact_integer_argument(state, 2, "insert")?;
             let len = state.table_len(1) as i64;
             if !(1..=len + 1).contains(&pos) {
                 return Err(position_out_of_bounds(state, "insert"));
@@ -60,13 +64,10 @@ pub(crate) fn open_table(state: &mut State) {
     add_fn!("remove", |state| {
         state.consume_cost(1)?;
         state.check_type(1, LuaType::Table)?;
-        let num_args = state.get_top();
-
         let len = state.table_len(1);
         let len_i = len as i64;
-        let pos = if num_args >= 2 && state.typ(2) != LuaType::Nil {
-            state.check_type(2, LuaType::Number)?;
-            let pos = table_position(state, 2, "remove")?;
+        let pos = if state.check_optional_type(2, LuaType::Number)? {
+            let pos = exact_integer_argument(state, 2, "remove")?;
             let valid = if len == 0 {
                 pos == 0 || pos == 1
             } else {
@@ -93,12 +94,7 @@ pub(crate) fn open_table(state: &mut State) {
     // comp is an optional comparison function.
     add_fn!("sort", |state| {
         state.check_type(1, LuaType::Table)?;
-        let num_args = state.get_top();
-        let has_comp = num_args >= 2;
-
-        if has_comp {
-            state.check_type(2, LuaType::Function)?;
-        }
+        let has_comp = state.check_optional_type(2, LuaType::Function)?;
 
         // Cost is charged inside table_sort BEFORE the comparator runs / the
         // table is mutated (L18), so an exhausted budget blocks the sort.
@@ -110,51 +106,7 @@ pub(crate) fn open_table(state: &mut State) {
     // table.unpack(list [, i [, j]])
     // Returns list[i], list[i+1], ..., list[j].
     // Default: i=1, j=#list
-    add_fn!("unpack", |state| {
-        state.check_type(1, LuaType::Table)?;
-        let num_args = state.get_top();
-
-        let len = state.table_len(1);
-
-        let i = if num_args >= 2 {
-            state.check_type(2, LuaType::Number)?;
-            state.to_number(2)? as usize
-        } else {
-            1
-        };
-
-        let j = if num_args >= 3 {
-            state.check_type(3, LuaType::Number)?;
-            state.to_number(3)? as usize
-        } else {
-            len
-        };
-
-        state.set_top(1);
-        // Stack: [t]
-
-        if i > j {
-            state.set_top(0);
-            return Ok(0);
-        }
-
-        // j >= i here (the i > j case returned above), so the span cannot
-        // underflow. Bound it BEFORE the `+ 1` so a huge j (e.g. from 1e300)
-        // cannot overflow the count and slip past the ceiling check.
-        let span = j - i;
-        if span >= 255 {
-            return Err(state.error(ErrorKind::RuntimeError("too many results to unpack".into())));
-        }
-        for idx in i..=j {
-            state.push_number(idx as f64);
-            state.get_table(1)?;
-        }
-
-        // Stack: [t, list[i], list[i+1], ..., list[j]]
-        state.remove(1)?; // Remove table
-        let count = span + 1;
-        Ok(count as u8)
-    });
+    add_fn!("unpack", table_unpack_values);
 
     // table.pack(...) - costs 1
     // Returns a new table with all arguments stored into keys 1, 2, etc.
@@ -194,34 +146,29 @@ pub(crate) fn open_table(state: &mut State) {
     add_fn!("concat", |state| {
         state.consume_cost(1)?;
         state.check_type(1, LuaType::Table)?;
-        let num_args = state.get_top();
+        let len = i64::try_from(state.table_len(1)).expect("table length fits in i64");
 
-        let len = state.table_len(1);
-
-        let sep = if num_args >= 2 {
-            state.check_type(2, LuaType::String)?;
+        let sep = if state.check_optional_type(2, LuaType::String)? {
             state.to_bytes(2)?.to_vec()
         } else {
             Vec::new()
         };
 
-        let i = if num_args >= 3 {
-            state.check_type(3, LuaType::Number)?;
-            state.to_number(3)? as usize
+        let i = if state.check_optional_type(3, LuaType::Number)? {
+            exact_integer_argument(state, 3, "concat")?
         } else {
             1
         };
 
-        let j = if num_args >= 4 {
-            state.check_type(4, LuaType::Number)?;
-            state.to_number(4)? as usize
+        let j = if state.check_optional_type(4, LuaType::Number)? {
+            exact_integer_argument(state, 4, "concat")?
         } else {
             len
         };
 
         state.set_top(1);
 
-        if i > j || len == 0 {
+        if i > j {
             state.set_top(0);
             state.push_bytes(b"");
             return Ok(1);
@@ -258,15 +205,12 @@ pub(crate) fn open_table(state: &mut State) {
         state.check_type(3, LuaType::Number)?;
         state.check_type(4, LuaType::Number)?;
 
-        let f = table_position(state, 2, "move")?;
-        let e = table_position(state, 3, "move")?;
-        let t = table_position(state, 4, "move")?;
+        let f = exact_integer_argument(state, 2, "move")?;
+        let e = exact_integer_argument(state, 3, "move")?;
+        let t = exact_integer_argument(state, 4, "move")?;
 
         // Determine destination table (a2 or a1)
-        let has_a2 = state.get_top() >= 5 && state.typ(5) != LuaType::Nil;
-        if has_a2 {
-            state.check_type(5, LuaType::Table)?;
-        }
+        let has_a2 = state.check_optional_type(5, LuaType::Table)?;
         let dest_idx: isize = if has_a2 { 5 } else { 1 };
 
         let count = if f <= e {
@@ -363,18 +307,6 @@ pub(crate) fn open_table(state: &mut State) {
 
     // Set the table table as a global
     state.set_global("table");
-}
-
-/// Validates that argument `arg_number` is an integer-valued number and returns
-/// it as `i64`. A negative or out-of-range value is a valid integer and is left
-/// for the caller's bounds check to report as "position out of bounds".
-fn table_position(state: &mut State, arg_number: isize, func_name: &str) -> crate::Result<i64> {
-    let number = state.to_number(arg_number)?;
-    exact_i64(number).ok_or_else(|| {
-        state.error(ErrorKind::RuntimeError(format!(
-            "bad argument #{arg_number} to '{func_name}' (number has no integer representation)"
-        )))
-    })
 }
 
 fn position_out_of_bounds(state: &State, func_name: &str) -> crate::error::Error {

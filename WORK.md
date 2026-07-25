@@ -4,264 +4,189 @@ Current work item. Numbers refer to finding numbers in `notes/bugs.md`.
 
 ---
 
-## Targets #18, #19, #40, #41, #42, #43: lexer and parser conformance
+## Targets #36, #37, #38: stdlib argument handling (and #57, which is invalid)
 
-Six small divergences, all in `src/compiler/lexer.rs` and
-`src/compiler/parser.rs`. Grouped because they share a file, a test surface,
-and a theme: dellingr's lexer accepts or rejects things reference Lua does not.
+Three small stdlib divergences, all about how optional and negative arguments
+are interpreted. Verified against **both** Lua 5.2 and 5.4, which agree on all
+three - so these are universal conformance bugs, not 5.4 tightenings.
 
-Two verified by running; the rest are byte-level or established by reading.
+### #57 is invalid - delete it, do not implement it
 
-### #40 (Low) - `break;` is rejected
+`notes/bugs.md` #57 claims two `tonumber` divergences. Both fail verification:
 
-**Verified:** `while true do break; end` gives `2:20: 'end' expected near ';'`.
-Reference parses it fine (it went on to fail at a later line). Valid in 5.1,
-5.2 and 5.4.
+| expression | dellingr | Lua 5.2 | Lua 5.4 |
+|---|---|---|---|
+| `tonumber("+ff", 16)` | 255 | 255 | 255 |
+| `tonumber(10, 16)` | error | 16 | error |
 
-`parser.rs:538-542`: after `break`, `parse_statements` exits without consuming
-an optional `;` - compare `parse_return` (`stmt.rs:40`), which does - and
-without allowing further statements. So `while true do break print(1) end` is
-also rejected, though that is valid dead code in reference.
+The first claim - that reference returns nil for a `+` sign with an explicit
+base - is simply wrong; all three agree on 255. The second is real but points
+the other way: dellingr matches **5.4** exactly, including the error message
+("bad argument #1 to 'tonumber' (string expected, got number)"), and only 5.2
+coerces. Since dellingr targets 5.4 semantics elsewhere, that is current
+behaviour rather than a defect.
 
-The trailing-semicolon case is the one real scripts hit. Minimal fix:
-`self.input.try_pop(TokenType::Semi)?;` after `add_break()`.
+The audit was explicit that nothing in it had been verified. This is the case
+where that mattered. Delete #57 and record why, so nobody re-derives it.
 
-### #41 (Low) - a numeral touching a letter is only rejected for hex digits
+### #36 (Medium) - explicit `nil` is rejected for optional arguments
 
-**Verified:** `print(3or 4)` prints `3` in dellingr; reference errors
-`malformed number near '3o'`.
+**Verified:** `("a.b"):find(".", nil, true)` raises
+`bad argument #3 to <anonymous> (number expected, got nil)`. Both references
+return `2`. That is the standard plain-find idiom, so this is the one most
+likely to bite real scripts.
 
-`lexer.rs` `lex_exponent:465-468` and the hex tail check at `403-405` reject a
-trailing letter only when `is_ascii_hexdigit()`. Reference rejects **any**
-alphanumeric touching a numeral. Same class: `1e5or 2`, and `0x5rad` which is
-already codified in `test_lexer07`.
+Reference `luaL_opt*` treats nil as "absent". The prevailing dellingr pattern
+is `if num_args >= k { check_type(k, ...) }`, which errors on an explicit nil
+instead. Affected: `string.find` init (`string.rs:268`), `string.sub` j,
+`string.match` init, `string.gsub` n, `table.concat` sep/i/j, `table.sort`
+comp, `table.unpack`/`unpack` i/j, and `table.insert` pos (its 3-arg form with
+a nil pos errors differently from reference). `select` is already fine.
 
-Fix: reject `is_ascii_alphanumeric()` (and `_`) immediately after a numeral.
+The codebase already has the right pattern applied inconsistently: `tonumber`
+base and `table.remove` pos both guard with `state.typ(k) != LuaType::Nil`.
 
-### #42 (Low) - vertical tab is not treated as whitespace
+### #37 (Medium) - `table.concat`'s empty short-circuit ignores an explicit range
 
-`lexer.rs consume_whitespace` (264-276) uses `is_ascii_whitespace`, which
-excludes VT (0x0B); C's `isspace` includes it. So reference accepts VT between
-tokens and after `\z`, and dellingr raises `InvalidCharacter`. The parser-side
-`\z` skip (`parser.rs:339`) has the same problem.
+**Verified:** with `t[2] = "x"` and nothing else, `table.concat(t, "", 2, 2)`
+returns `""` in dellingr and `"x"` in both references.
 
-This is the exact sibling of the pattern-matcher `%s` bug fixed in the previous
-loop, and `src/numeral.rs`'s `is_lua_whitespace` - now `pub(crate)` - already
-has the correct set. Reuse it in both places rather than adding a third
-definition.
+`src/lua_std/table.rs:224`: `if i > j || len == 0 { return "" }`. Reference
+only defaults `j` from `#t`; an explicit `i..j` range is honoured regardless of
+the border. Also, `i`/`j` go through `as usize`, so negative values saturate to
+0 rather than addressing negative indices.
 
-### #18 (Medium) - bare CR inside string literals
+### #38 (Medium) - `unpack` / `table.unpack` truncate negative start indices
 
-`lexer.rs` `lex_string` (353-368) rejects only `'\n'` inside a string, so
-`"a<CR>b"` compiles and embeds a raw 0x0D byte; reference treats both CR and LF
-as "unfinished string".
+**Verified:** `select("#", table.unpack({10, 20}, -2, 2))` gives 3 in dellingr
+and 5 in both references.
 
-`parser.rs` `get_literal_string_contents:343` maps escape `\<LF>` to `'\n'`,
-but `\<CR>` falls into the `_ =>` arm and errors `InvalidEscapeSequence`.
-Reference maps `\<CR>`, `\<CR><LF>` and `\<LF><CR>` all to a single `'\n'`;
-dellingr errors on the first and produces two bytes `\n\r` for the last.
+`src/lua_std/basic.rs:241` and `src/lua_std/table.rs:121` do
+`state.to_number(2)? as usize`, saturating negatives to 0. So `unpack(t, -2, 2)`
+returns `t[0], t[1], t[2]` instead of `t[-2]..t[2]` - wrong count *and* wrong
+values.
 
-Any script written or transferred with CR or CRLF line endings inside string
-literals diverges.
-
-Fix: treat `'\r'` like `'\n'` in `lex_string` for the unescaped case, and
-accept `\<CR>`, `\<CR><LF>`, `\<LF><CR>` as one `'\n'` in the escape decoder.
-
-### #19 (Medium) - `--[=[ ... ]=]` leveled long comments are misparsed
-
-`lexer.rs skip_comment` (210-236) recognises only `--[[`. A leveled opener
-`--[=[` falls through to the single-line branch, so only the first line is
-skipped and the comment **body is lexed as live source**. Reference skips the
-whole block.
-
-```lua
---[=[
-this line is a comment in reference Lua
-]=]
-print("ok")
-```
-
-Reference prints `ok`; dellingr tries to parse line 2 as code - usually a
-confusing syntax error, but if the body happens to be valid Lua it would
-execute.
-
-Given long *strings* already produce a dedicated `LongStringUnsupported` error
-at `[=` / `[[`, the consistent fix is to error on `--[=` too. Supporting levels
-in the comment skipper is the alternative - comments are not on the README's
-"Won't implement" list and `--[[` already works.
-
-Related, lower priority: an unfinished `--[[` at EOF is silently accepted
-(`skip_comment` returns on None, the lexer emits EOF); reference errors
-`unfinished long comment`.
-
-### #43 (Low) - the ambiguous-call check is keyed to LF only
-
-`consume_whitespace` sets `starts_line` only on `'\n'` (`lexer.rs:270`). A file
-with bare-CR line endings never produces `LParenLineStart`, so the deliberate
-"ambiguous function call" error silently does not fire: `f<CR>(g)` parses as a
-call while `f<LF>(g)` errors. After the L17 bare-CR line-counting fix this is
-the one remaining LF-only assumption in the lexer.
-
-Fix: set `ret = true` for the bare-CR branch too.
+The 255-result cap is a deliberate protocol limit and is not in question.
 
 ---
 
 ## Agreed implementation plan
 
-Two qualifications from review. **#41 is a Lua 5.4 tightening, not universal
-conformance** - 5.2 accepts `3or`. Take 5.4's behaviour, since rejecting glued
-tokens is safer, but document the 5.2 difference in the test. And **#43
-enforces dellingr's own ambiguity policy** rather than reference behaviour:
-both references accept `f<LF>(g)`. Fixing it makes the deliberate rejection
-consistent across line endings, which is the point.
+Two further audit corrections from review: `string.find(".", nil, true)`
+returns `2, 2`, not the `1, 1` bugs.md records; and **`table.insert` is not
+part of #36** - all three implementations reject `table.insert(t, nil, 9)` at
+argument 2, because the 3-arg form makes `pos` required. Drop it from the
+finding and leave the code alone.
 
-### Seventh bug, found during review
+Separately noted, out of scope: dellingr's arg errors say `<anonymous>` where
+reference names the function, because `check_type` sets `func_name: None`. That
+is systemic and cosmetic, not part of these findings.
 
-`skip_comment` terminates a short `--` comment only on LF. Verified: under CR
-line endings `-- comment<CR>print("ok")` is swallowed entirely by dellingr,
-while both references print `ok`. Same newline cleanup; include it.
+### The shared helper (#36)
 
-### #19 - support leveled long comments, do not error
+Two internal helpers in `src/vm_aux.rs`:
 
-Long comments are lexical trivia, not the deliberately omitted long-*string*
-value feature. Supporting them adds no value type, allocation facility, opcode
-or cost-model concern, and the lexer can scan them deterministically in linear
-time with no allocation. It also removes the genuinely dangerous current
-behaviour where apparently-commented code becomes executable. Long strings stay
-rejected; that boundary is unaffected.
+- `State::is_none_or_nil(arg_number) -> bool`
+- `State::check_optional_type(arg_number, expected) -> Result<bool>`
 
-Unfinished-long-comment diagnostics are deliberately **out of scope** - that
-needs an error-policy decision (`UnexpectedEof` versus a new variant) and
-closed leveled comments can be fixed independently.
+`check_optional_type` returns `false` for missing or nil, otherwise delegates
+to the existing `check_type` and returns `true`. **That delegation is
+load-bearing**: a wrong non-nil value must keep exactly the same `ArgError`,
+argument index, expected/received types and label.
 
-### #40 - allow statements after `break` too, not just the semicolon
+**Do not** add `opt_number` / `opt_string` style helpers yet - they would mix
+optionality with coercion and integer-conversion policy and risk changing
+non-nil behaviour, notably `table.concat`'s string-only separator.
 
-In `parse_statements_inner` (`parser.rs:566`), consume `break`, call
-`add_break()`, then continue the statement loop; the existing `Semi` arm
-already handles one or many semicolons. Following bytecode is emitted but
-unreachable, because `add_break()` already emitted an unconditional jump
-patched to the loop exit. Simpler and more consistent than special-casing one
-semicolon. `return` staying terminal is not a contradiction - it has separate
-grammar and lowering, and reference also accepts ordinary statements after
-`break`.
+Adopt at: `string.sub` arg 3; `string.find` arg 3; `string.match` arg 3;
+`string.gsub` arg 4; `table.sort` arg 2; `table.concat` args 2, 3, 4;
+`table.unpack` args 2, 3; global `unpack` args 2, 3. Also the two that already
+handle nil correctly by hand - `table.remove` arg 2 and `table.move` arg 5 - so
+the pattern is uniform. Use `is_none_or_nil` directly for `tonumber`, keeping
+its existing precedence where argument 1 is validated before argument 2.
 
-### `src/compiler/lexer.rs`
+`string.find`'s `plain` argument already works, since `to_boolean(nil)` is
+false.
 
-- Import `crate::numeral::is_lua_whitespace`.
-- `consume_whitespace`: use the Lua predicate instead of `is_ascii_whitespace`
-  (guard the char-to-byte conversion with `is_ascii()`), and set `starts_line`
-  for **either** CR or LF (#42, #43).
-- `next_char`: treat CRLF and LFCR each as one logical newline, deferring the
-  first member and recording the line start after the second.
-- `lex_string`: reject unescaped CR exactly like unescaped LF; after an escaped
-  physical CR or LF, consume an immediately following opposite newline byte so
-  CRLF and LFCR stay one escape token (#18).
-- `lex_full_number` and `lex_exponent`: reject a trailing ASCII alphanumeric or
-  `_` (#41).
-- `skip_comment`: after the first `[`, count consecutive `=` and recognise a
-  long comment only when another `[` follows; scan for `]`, the same count of
-  `=`, then `]`. A failed opener probe stays an ordinary single-line comment,
-  since the consumed characters are already comment text. Level-zero `--[[`
-  keeps working (#19). Also terminate short `--` comments on CR as well as LF
-  (the seventh bug).
-- Keep `[=[...]=]` long *strings* routed to `LongStringUnsupported`.
+Confirmed: `check_type` distinguishes missing from present, so an explicit nil
+becomes `received: Some(LuaType::Nil)` and errors. No affected function bypasses
+it.
 
-### `src/compiler/parser.rs`
+### Integer conversion (#37, #38)
 
-- `get_literal_string_contents`: use `is_lua_whitespace` for `\z`; separate the
-  named `\n` escape from physical escaped newlines; map escaped CR and LF both
-  to `b'\n'`; when the next byte forms CRLF or LFCR, advance past it so the
-  pair yields exactly one byte.
-- `parse_statements_inner`: drop the terminating `break Ok(())` from the
-  `TokenType::Break` arm.
+Generalize the existing `table_position` (`table.rs:368`) into a shared
+`exact_integer_argument(state, arg, function_name)` in `src/lua_std.rs`, built
+on `exact_i64` (`numeral.rs:5`), and reuse it from insert/remove/move, concat
+and both unpack paths.
 
-No change needed in `src/numeral.rs`.
+`unpack_values` (extract the duplicated global/table bodies into one private
+helper, keeping thin separate registration closures so the snapshot Rust-fn ids
+stay distinct and stable):
 
-### Testing strategy for the byte-level cases
+- keep `i` and `j` as `i64`;
+- return zero results when `i > j`;
+- `j.checked_sub(i)`, where overflow means "too many results to unpack";
+- reject spans >= 255, preserving the existing exact 255-result maximum;
+- only then iterate, converting keys to `f64`.
 
-**Use Rust string escapes in unit tests; do not put raw CR/VT bytes in checked
--in files.** The Rust source stays ordinary ASCII while the compiled test value
-holds the exact bytes:
+`table.concat`: keep signed `i64` endpoints and remove **only** `len == 0` from
+the empty-result condition. An inclusive signed range avoids negative
+truncation and needs no `j - i` arithmetic.
 
-```rust
-let cr_source = "return \"a\\\r\nb\"";
-let vt_source = "return \"a\\z\x0b b\"";
-```
+**No bound tied to `#t`.** Lua uses the border only to default `j`; explicit
+endpoints may address any numeric keys, negative or far past the border, and a
+missing element errors naturally. `table.concat`'s unbounded work is finding
+#16, deliberately staged, and its remedy is per-element/output-byte charging -
+**do not** fold that breaking cost-model change in here as a range clamp.
 
-Add `as_bytes()` assertions for `b'\r'`, `b'\n'` and `0x0b` where useful, so
-the fixture shape is itself pinned. Keep CR/VT cases out of `examples/`.
-`tests/string_bytes.rs` is **not** a precedent here - its gremlins exclusion is
-for literal Unicode test data, not line endings - and no new exclusion is
-needed.
-
-### Corpus impact
-
-No example relies on #19 or #41, but **`test_lexer07` (`lexer.rs:654`)
-explicitly asserts that `0x5rad` lexes as a hex token followed by an
-identifier**. It must be inverted, not preserved. `examples/comments.lua` uses
-only level-zero `--[[`. Occurrences like `"1_0"` in `tonumber` tests are inside
-Lua string literals and unaffected.
-
-What changes for previously-compiling source: #18 rejects bare-CR strings,
-newly accepts escaped CR/CRLF, and changes escaped-LFCR output; #19 can change
-behaviour where a "comment" body was being executed; #40 only *adds* accepted
-programs and leaves ordinary `break` bytecode unchanged; #41 rejects 5.2-style
-adjacency; #42 newly accepts VT and changes `\z` contents; #43 rejects bare-CR
-continuations dellingr previously accepted.
+Note `exact_i64` also rejects fractions, infinities, NaN and out-of-safe-range
+values. That matches 5.4; 5.2 accepts or truncates some, so those error cases
+belong in Rust tests rather than the universal differential example.
 
 ### Tests
 
-Lexer unit module:
+New `examples/stdlib_optional_args.lua`, **no `DIFF` marker** - all three
+findings are universal, so unlike the previous loop no 5.4-forcing trick is
+needed. Cover: all four string optional-nil cases; `table.concat`
+separator/start/end defaults; `table.sort(t, nil)`; both unpack endpoint
+defaults; a sparse explicit concat range outside `#t`; negative concat indices;
+negative unpack ranges.
 
-- `bare_cr_in_short_string_is_unclosed`
-- `vertical_tab_is_lua_whitespace`
-- `bare_cr_marks_lparen_as_line_start`
-- `leveled_long_comments_use_exact_matching_level` - levels 0, 1, 2 plus a
-  mismatched inner delimiter
-- `short_comment_ends_at_cr`
-- replace `test_lexer07` with `numeral_identifier_adjacency_is_malformed`
-  covering `3or`, `1e5or`, `3_name`, `0x5rad`, asserting `SyntaxError::BadNumber`
-- keep the existing valid hex-float tests
+For global `unpack`, use `local compat_unpack = unpack or table.unpack` so
+dellingr and 5.2 exercise the global while 5.4 produces identical output via
+`table.unpack`.
 
-`src/compiler/parser/tests.rs`:
+Rust tests: `optional_type_treats_missing_and_nil_as_absent`;
+`optional_type_preserves_non_nil_arg_error`; update
+`unpack_rejects_huge_range_without_overflow` (`tests/call_counts.rs:100`) for
+the exact-integer error; add `unpack_rejects_i64_span_overflow` using accepted
+near-`i64` endpoints so `checked_sub` itself is exercised; exact-integer
+rejection for fractional and out-of-range `table.concat` endpoints;
+`table_insert_nil_position_is_required`; extend
+`tonumber_uses_lua_numeral_grammar` with `tonumber("+ff", 16) == 255`; and a
+`tonumber(10, 16)` test asserting argument 1, expected string, received number.
 
-- `literal_string_normalizes_escaped_physical_newlines` - bare CR, CRLF, LFCR
-  all decoding to `b"a\nb"`
-- `literal_string_z_skips_vertical_tab` - assert `b"ab"`, not merely that it
-  compiles
-- `break_allows_semicolons_and_following_statements` - `break;`, repeated
-  semicolons, and a dead assignment after `break`
-- extend `test33` to assert the same `LParenLineStart` error and `(2, 1)`
-  location for LF, CR and CRLF
-
-Differential coverage:
-
-- extend `examples/comments.lua` with a leveled comment whose body would print
-  or mutate state if executed
-- extend `examples/loops.lua` with `break;` followed by a dead assignment, then
-  assert the assignment did not run
+Those last two pin #57's measurements so the invalid finding is not
+re-derived.
 
 ### Superseded questions
 
-1. For #19, error on `--[=` or support levels? Erroring is consistent with the
-   long-string decision, but a leveled comment is a much more ordinary thing to
-   find in real source than a leveled long string, and the current behaviour -
-   silently executing the comment body if it parses - is the worst of the three
-   options. Recommend one.
-2. #18, #42 and #43 all need byte-level fixtures containing raw CR and VT.
-   `notes/bugs.md` warns that editors normalise line endings. What is the
-   robust way to write these tests in this repo - build the source as a Rust
-   byte string in a unit test rather than an `examples/` file? Note
-   `tests/string_bytes.rs` is already excluded from the gremlins scan, which
-   suggests a precedent.
-3. Do any of these change what currently-valid programs compile to? #41 and #19
-   are both *accepts-more* divergences being tightened, so they can only reject
-   things that previously compiled. Is there anything in `examples/` or the
-   test corpus that relies on the current leniency?
-4. #40's second half - statements after `break` - is valid dead code in
-   reference. Worth fixing, or is rejecting it a defensible divergence to
-   document instead? I lean towards fixing the semicolon and documenting the
-   dead-code case, but say if that is inconsistent.
+1. For #36, what is the right shared helper? Doing it call-site by call-site
+   invites exactly the inconsistency that produced this bug - two functions
+   already do it correctly and the rest do not. Is there an `opt_*` family that
+   should exist in `vm_aux.rs` alongside `check_type`, and does adopting it
+   change any error message or argument index for the *non*-nil cases?
+2. `notes/bugs.md` flagged an unverified assumption behind #36: that
+   `check_type(k, T)` errors on nil. My repro confirms it does for
+   `string.find`. Confirm it holds for every listed function, since a couple
+   may already route through a different path.
+3. For #37 and #38, negative and out-of-range indices need care about
+   overflow when converted. What is the correct conversion - the `exact_i64`
+   helper the `table.move` fix now uses? And does honouring an explicit range
+   in `concat` need a bound on how far past the border it will read?
+4. Is `table.insert`'s 3-arg nil-pos case genuinely part of #36, or a different
+   bug? bugs.md says it "errors differently than reference", which is vaguer
+   than the rest.
 
-Read `src/compiler/lexer.rs`, `src/compiler/parser.rs`'s `parse_statements` and
-`get_literal_string_contents`, and `src/numeral.rs`'s `is_lua_whitespace`.
+Read `src/lua_std/string.rs`, `src/lua_std/table.rs`, `src/lua_std/basic.rs`,
+and `check_type` plus its neighbours in `src/vm/vm_aux.rs`.

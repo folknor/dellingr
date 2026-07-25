@@ -235,12 +235,9 @@ pub(crate) fn open_string(state: &mut State) {
     add_fn!("sub", |state| {
         state.check_type(1, LuaType::String)?;
         state.check_type(2, LuaType::Number)?;
-        let num_args = state.get_top();
-
         let len = state.to_bytes(1)?.len();
         let i = state.to_number(2)? as isize;
-        let j = if num_args >= 3 {
-            state.check_type(3, LuaType::Number)?;
+        let j = if state.check_optional_type(3, LuaType::Number)? {
             state.to_number(3)? as isize
         } else {
             -1
@@ -265,8 +262,7 @@ pub(crate) fn open_string(state: &mut State) {
         state.check_type(2, LuaType::String)?;
         let num_args = state.get_top();
 
-        let init = if num_args >= 3 {
-            state.check_type(3, LuaType::Number)?;
+        let init = if state.check_optional_type(3, LuaType::Number)? {
             let s_len = state.to_bytes(1)?.len();
             lua_start_index(s_len, state.to_number(3)? as isize)
         } else {
@@ -392,12 +388,9 @@ pub(crate) fn open_string(state: &mut State) {
     add_fn!("match", |state| {
         state.check_type(1, LuaType::String)?;
         state.check_type(2, LuaType::String)?;
-        let num_args = state.get_top();
-
         let s = state.to_bytes(1)?.to_vec();
         let pattern = state.to_bytes(2)?.to_vec();
-        let init = if num_args >= 3 {
-            state.check_type(3, LuaType::Number)?;
+        let init = if state.check_optional_type(3, LuaType::Number)? {
             lua_start_index(s.len(), state.to_number(3)? as isize)
         } else {
             0
@@ -475,12 +468,9 @@ pub(crate) fn open_string(state: &mut State) {
         state.check_type(1, LuaType::String)?;
         state.check_type(2, LuaType::String)?;
         state.check_any(3)?;
-        let num_args = state.get_top();
-
         let s = state.to_bytes(1)?.to_vec();
         let pattern = state.to_bytes(2)?.to_vec();
-        let max_replacements = if num_args >= 4 {
-            state.check_type(4, LuaType::Number)?;
+        let max_replacements = if state.check_optional_type(4, LuaType::Number)? {
             let n = state.to_number(4)? as isize;
             Some(if n <= 0 { 0 } else { n as usize })
         } else {

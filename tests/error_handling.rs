@@ -344,6 +344,38 @@ fn table_insert_at_position() {
 }
 
 #[test]
+fn table_insert_nil_position_is_required() {
+    let err = expect_error("table.insert({}, nil, 9)");
+    let ErrorKind::ArgError(arg) = err.kind else {
+        panic!("table.insert nil position must be an argument error: {err}");
+    };
+    assert_eq!(arg.arg_number, 2);
+    assert_eq!(arg.expected, Some(LuaType::Number));
+    assert_eq!(arg.received, Some(LuaType::Nil));
+}
+
+#[test]
+fn table_concat_rejects_non_integer_endpoints() {
+    for (code, argument) in [
+        ("return table.concat({}, '', 1.5)", 3),
+        ("return table.concat({}, '', 1, 1e300)", 4),
+    ] {
+        let err = expect_error(code);
+        match err.kind {
+            ErrorKind::RuntimeError(message) => {
+                assert_eq!(
+                    message,
+                    format!(
+                        "bad argument #{argument} to 'concat' (number has no integer representation)"
+                    )
+                );
+            }
+            kind => panic!("expected integer conversion error, got: {kind:?}"),
+        }
+    }
+}
+
+#[test]
 fn tonumber_uses_lua_numeral_grammar() {
     let value = run_number(
         r#"
@@ -352,14 +384,26 @@ fn tonumber_uses_lua_numeral_grammar() {
         local c = tonumber("0x10")
         local d = tonumber("-0X1.8p+1")
         local e = tonumber("10", nil)
+        local f = tonumber("+ff", 16)
         if tonumber("nan") ~= nil or tonumber("NaN") ~= nil or tonumber("inf") ~= nil
             or tonumber("1_0") ~= nil or tonumber("0b10") ~= nil or tonumber("1e") ~= nil then
             return -1
         end
-        return a + b + c + d + e
+        return a + b + c + d + e + f
     "#,
     );
-    assert_eq!(value, 70.0);
+    assert_eq!(value, 325.0);
+}
+
+#[test]
+fn tonumber_with_base_requires_a_string_first_argument() {
+    let err = expect_error("return tonumber(10, 16)");
+    let ErrorKind::ArgError(arg) = err.kind else {
+        panic!("tonumber number with base must be an argument error: {err}");
+    };
+    assert_eq!(arg.arg_number, 1);
+    assert_eq!(arg.expected, Some(LuaType::String));
+    assert_eq!(arg.received, Some(LuaType::Number));
 }
 
 #[test]
