@@ -17,6 +17,11 @@
 
 set -u
 
+# `examples/**/*.lua` and the default binary path are repo-relative, so anchor to
+# the repo root regardless of where this was invoked from. Any script paths
+# passed as arguments are therefore also interpreted relative to the repo root.
+cd "$(dirname "$0")/.." || exit 1
+
 if [ "${DELLINGR_SKIP_BUILD:-0}" != "1" ]
 then
     cargo build --release --quiet

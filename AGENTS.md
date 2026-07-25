@@ -26,15 +26,20 @@ Running scripts (the binary, not the test runner):
 cargo run --release -- path/to/script.lua             # run a script
 cargo run --release -- --analyze path/to/script.lua   # static cost analysis, no execution
 cargo run --release -- --limit 100000 path/to/script.lua  # run with a cost budget
-./run.sh script.lua                                    # cargo run --quiet wrapper
+brokkr run --quiet -- script.lua                      # forwards raw to cargo run
 ```
 
 Differential testing against reference Lua:
 
 ```sh
-./diff_test.sh                # diff vs lua5.2 / lua5.4 (must be on PATH); prints "ok" on success or "FAIL: <path>" per failing script
-./test_limited.sh <cmd>       # run <cmd> with a 2GB virtual-memory cap (for stress tests)
+./scripts/diff_test.sh        # diff vs lua5.2 / lua5.4 (must be on PATH); prints "ok" on success or "FAIL: <path>" per failing script
+./scripts/test_limited.sh <cmd>  # run <cmd> with a 2GB virtual-memory cap (for stress tests)
 ```
+
+Shell scripts live in `scripts/`. Each one anchors itself to the repo root, so
+they can be invoked from anywhere; `test_limited.sh` is the exception, since it
+is a transparent `exec` wrapper that should not move the caller's working
+directory.
 
 Debug-print feature flags: `--features debug_parser`, `debug_vm`, `debug_gc`.
 
@@ -99,7 +104,7 @@ value stack, not total host memory, and enforcing it charges no cost.
 
 - `tests/run_examples.rs` - runs every `examples/*.lua` via `cargo run` and fails on nonzero exit OR if the output contains the substring `: false`. Examples that print test results follow the convention `print("test name: " .. tostring(condition))`. Adding a new `examples/foo.lua` that prints `: false` will break this test.
 - `tests/error_handling.rs`, `gc_upvalues.rs`, `gsub_errors.rs`, `metamethod_errors.rs`, `rustfn_error.rs` - focused integration suites.
-- `tests/diff_test.rs` is a Rust harness; `diff_test.sh` is the differential shell script that compares output against `lua5.2` and `lua5.4`. Mark intentional divergences with a `-- DIFF: <reason>` comment in the example. `benchmark.lua`, `stress_*.lua`, and `upvalue_stress.lua` are skipped by the diff script.
+- `tests/diff_test.rs` is a Rust harness; `scripts/diff_test.sh` is the differential shell script that compares output against `lua5.2` and `lua5.4`. Mark intentional divergences with a `-- DIFF: <reason>` comment in the example. `benchmark.lua`, `stress_*.lua`, and `upvalue_stress.lua` are skipped by the diff script.
 - Unit tests live alongside their modules (e.g. `src/vm/object.rs` has GC tests).
 
 ## Hotpath benchmarks
@@ -137,7 +142,7 @@ surface. Note the parser caps a chunk at 255 nested functions, which bounds how
 many top-level definitions the generator can emit; size comes from making each
 function longer instead.
 
-Each bench script is also a standalone-runnable test: top-level setup + a `_bench()` function + an outer loop that calls `_bench()` enough times for hyperfine resolution and prints `<name>: true`. This lets one file serve three masters: the hotpath harness (calls `_bench` directly for parse/cold/warm phasing), `tests/run_examples.rs` (executes the standalone runner, asserts no `: false`), and `bench.sh` (hyperfine timings vs reference Lua 5.2/5.4/5.5 + LuaJIT).
+Each bench script is also a standalone-runnable test: top-level setup + a `_bench()` function + an outer loop that calls `_bench()` enough times for hyperfine resolution and prints `<name>: true`. This lets one file serve three masters: the hotpath harness (calls `_bench` directly for parse/cold/warm phasing), `tests/run_examples.rs` (executes the standalone runner, asserts no `: false`), and `scripts/bench.sh` (hyperfine timings vs reference Lua 5.2/5.4/5.5 + LuaJIT).
 
 The harness measures four phases on one State and emits KV pairs to stderr: `parse_us`, `cold_call_us`, `warm_avg_us` (averaged over 20 iterations), plus the dellingr-specific `cost_used` per phase and the derived `cost_per_us`. Cost is deterministic across hosts; wall time is the noisy metric. `setup_*` and `final_*` heap/object counts bracket GC pressure.
 
@@ -148,12 +153,12 @@ When adding annotations, verify the `hotpath` configuration still builds (`cargo
 To add a new target: write `examples/{category}/{name}.lua` defining `_bench()` and a standalone runner footer. No Rust changes, no manifest updates.
 
 ```sh
-./hotbench.sh fields/same_obj_read           # KVs from harness + hyperfine wall time
-./hotbench.sh tables/fill --runs 20          # extra args pass through to hyperfine
-FEATURES=hotpath-alloc ./hotbench.sh tables/fill   # alloc tracking on the KV side
+./scripts/hotbench.sh fields/same_obj_read           # KVs from harness + hyperfine wall time
+./scripts/hotbench.sh tables/fill --runs 20          # extra args pass through to hyperfine
+FEATURES=hotpath-alloc ./scripts/hotbench.sh tables/fill   # alloc tracking on the KV side
 ```
 
-`hotbench.sh` builds both the regular `dellingr` binary and the
+`scripts/hotbench.sh` builds both the regular `dellingr` binary and the
 hotpath example, prints the harness's KV breakdown, and runs hyperfine
 on the script via the regular binary (the hotpath stats table at exit
 otherwise dominates wall time). Don't invoke the `cargo run --example
@@ -172,7 +177,7 @@ date and upstream commit, so refresh both together.
 ## Project conventions worth knowing
 
 - Examples in `examples/` are part of the test surface - don't add throwaway scripts there. Use `hotpath/` for bench scripts (see above).
-- The CLI prints `Cost used: N` after each run; `diff_test.sh` filters this line out before comparing.
+- The CLI prints `Cost used: N` after each run; `scripts/diff_test.sh` filters this line out before comparing.
 - The crate was lifted out of a game project (originally extracted from `fcomm2`); some doc comments still mention `FleetCallbacks` etc. as illustrative examples.
 - `target/` is a symlink to a shared cargo cache.
 - `OPTIMIZATIONS.md` is a working backlog of forward-looking optimization ideas (rejected, deferred, hypothetical). Items get deleted as they ship or stop being worth tracking. Not a discrepancy doc.

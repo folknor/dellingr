@@ -2,9 +2,9 @@
 # Hotpath bench: phase KVs from the hotpath harness + hyperfine wall-time
 # from the regular dellingr binary on the same target's standalone runner.
 #
-# Usage: ./hotbench.sh <category/name> [hyperfine-args...]
-#   ./hotbench.sh tables/numeric_index
-#   ./hotbench.sh tables/numeric_index --runs 20
+# Usage: ./scripts/hotbench.sh <category/name> [hyperfine-args...]
+#   ./scripts/hotbench.sh tables/numeric_index
+#   ./scripts/hotbench.sh tables/numeric_index --runs 20
 #
 # Why two binaries:
 #   The hotpath feature instruments every traced fn and prints a stats
@@ -17,6 +17,10 @@
 #   FEATURES=hotpath  # KV side; switch to hotpath-alloc for alloc tracking
 
 set -u
+
+# Binary and example paths below are repo-relative, so anchor to the repo root
+# regardless of where this was invoked from.
+cd "$(dirname "$0")/.." || exit 1
 
 if [ $# -lt 1 ]
 then
@@ -52,9 +56,12 @@ then
     exit 1
 fi
 
-echo "==== KVs ===="
-"$HOTPATH_BIN" "$TARGET" 2>&1 \
-    | grep -E '^(target|state_new_us|parse_us|cold_call_us|cold_cost|warm_iterations|warm_avg_us|warm_avg_cost|cost_per_us|setup_.*|final_.*)='
+echo "==== harness output ===="
+# Everything the harness emits: the phase KVs on stderr, and the hotpath
+# crate's own per-function stats table (p50/p95/p99 over every
+# #[hotpath::measure] site) at exit. The per-function table is the reason the
+# annotations exist - do not filter it out.
+"$HOTPATH_BIN" "$TARGET" 2>&1
 
 echo ""
 echo "==== hyperfine ===="

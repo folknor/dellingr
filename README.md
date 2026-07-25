@@ -13,7 +13,7 @@ Built with LLMs. See [LLM.md](LLM.md).
 
 It's slower than reference Lua, but not dramatically so: roughly 1.6-3x behind lua5.2 on representative workloads. LuaJIT is obviously in its own league. dellingr is fast enough for continuous bounded execution of a few kilobytes of Lua code to let a game run at several thousand FPS.
 
-Run `./bench.sh` to reproduce on your own host. Sample run on AMD Ryzen 9 5900X / Linux 7.0:
+Run `./scripts/bench.sh` to reproduce on your own host. Sample run on AMD Ryzen 9 5900X / Linux 7.0:
 
 | bench                    | dellingr |  lua-rs | vs lua5.5 | vs lua5.4 | vs lua5.2 | vs luajit |
 |--------------------------|---------:|--------:|----------:|----------:|----------:|----------:|

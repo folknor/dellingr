@@ -15,10 +15,15 @@
 # "ok".
 set -u
 
+# The debug binary path is repo-relative, so anchor to the repo root regardless
+# of where this was invoked from (brokkr runs it from there, but the sibling
+# script lookup below should not depend on that).
+cd "$(dirname "$0")/.." || exit 1
+
 if ! cargo build --quiet
 then
     echo "FAIL: debug build"
     exit 1
 fi
 
-exec env DELLINGR=./target/debug/dellingr DELLINGR_SKIP_BUILD=1 ./diff_test.sh "$@"
+exec env DELLINGR=./target/debug/dellingr DELLINGR_SKIP_BUILD=1 ./scripts/diff_test.sh "$@"

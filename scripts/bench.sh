@@ -4,11 +4,15 @@
 # Builds dellingr release binary before running. Wraps hyperfine to extract
 # one-line summaries instead of dumping its full verbose tables.
 #
-# Usage: ./bench.sh                  # runs the curated default set
-#        ./bench.sh script1.lua ...  # runs the given scripts
-#        ./bench.sh --dry-run [...]  # validate inputs, don't run
+# Usage: ./scripts/bench.sh                  # runs the curated default set
+#        ./scripts/bench.sh script1.lua ...  # runs the given scripts
+#        ./scripts/bench.sh --dry-run [...]  # validate inputs, don't run
 
 set -u
+
+# Script paths below are repo-relative, so anchor to the repo root regardless of
+# where this was invoked from.
+cd "$(dirname "$0")/.." || exit 1
 
 DRY_RUN=0
 if [ "${1:-}" = "--dry-run" ]

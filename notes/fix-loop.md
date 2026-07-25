@@ -22,8 +22,9 @@ One loop:
 10. Update `notes/bugs.md`, run `brokkr fmt` + `brokkr check`, commit.
 
 `brokkr check` is the whole gate. Its `diff-lua` script_check runs
-`diff_gate.sh` at `stage = "post-test"`, so the differential comparison against
-reference Lua 5.2/5.4 is already covered - do not also run `./diff_test.sh`.
+`scripts/diff_gate.sh` at `stage = "post-test"`, so the differential comparison
+against reference Lua 5.2/5.4 is already covered - do not also run
+`./scripts/diff_test.sh`.
 
 Notes:
 

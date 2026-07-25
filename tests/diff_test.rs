@@ -75,7 +75,7 @@ fn collect_examples(include: impl Fn(&Path) -> bool) -> Vec<PathBuf> {
 fn should_skip(rel: &Path) -> bool {
     let rel = rel
         .to_str()
-        .expect("example paths should be valid UTF-8 for diff_test.sh");
+        .expect("example paths should be valid UTF-8 for scripts/diff_test.sh");
     rel == "benchmark.lua"
         || rel == "upvalue_stress.lua"
         || (rel.starts_with("stress_") && !rel.contains('/'))
@@ -96,12 +96,12 @@ fn run_differential_bucket(name: &str, examples: &[PathBuf]) {
 
     ensure_release_binary();
 
-    let output = Command::new("./diff_test.sh")
+    let output = Command::new("./scripts/diff_test.sh")
         .env("DELLINGR_SKIP_BUILD", "1")
         .env("DELLINGR_SKIP_TIMEOUT", "1")
         .args(examples)
         .output()
-        .expect("Failed to run diff_test.sh");
+        .expect("Failed to run scripts/diff_test.sh");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);

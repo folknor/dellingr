@@ -10,7 +10,7 @@
 
 - Each agent gets exclusive ownership of specific files. No two agents touch the same file.
 - Agents must read their target file FIRST. Do not replace existing code with placeholders or stub it out.
-- Agents must NOT run `brokkr check`, `brokkr test`, `cargo`, or `./diff_test.sh`. The orchestrator validates between agents.
+- Agents must NOT run `brokkr check`, `brokkr test`, `cargo`, or `./scripts/diff_test.sh`. The orchestrator validates between agents.
 - Include `CLAUDE.md` (and any other top-level docs they'll need, e.g. `LLM.md`) in every agent's required reading.
 
 **Audit protocol:**

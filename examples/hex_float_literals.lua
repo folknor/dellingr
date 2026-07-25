@@ -1,5 +1,5 @@
 -- Hex-float literals (C30): Lua 5.2's 0x mantissa/fraction/binary-exponent
--- grammar, checked against reference Lua by diff_test.sh.
+-- grammar, checked against reference Lua by scripts/diff_test.sh.
 
 print("hex integer: " .. tostring(0xA == 10))
 print("hex uppercase: " .. tostring(0XFF == 255))
