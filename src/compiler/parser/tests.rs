@@ -1361,6 +1361,15 @@ fn local_tail_call_assignment_bytecode_is_unchanged() {
 }
 
 #[test]
+fn parameterized_function_tracks_only_non_parameter_locals() {
+    let chunk = parse_str("function f(a, b) do local x end do local y end end").unwrap();
+    let function = &chunk.nested[0];
+
+    assert_eq!(function.num_params, 2);
+    assert_eq!(function.num_locals, 1);
+}
+
+#[test]
 fn line_info_matches_code_len() {
     for source in [
         "print(1)",

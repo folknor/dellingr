@@ -54,7 +54,7 @@ use crate::instr::Instr;
 mod verify;
 
 const MAGIC: [u8; 4] = *b"DLGS";
-const FORMAT_VERSION: u16 = 4;
+const FORMAT_VERSION: u16 = 5;
 
 /// Bytes produced by [`State::save_state`] plus non-fatal save diagnostics.
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -202,9 +202,9 @@ struct SavedBytecode {
     code: Vec<u32>,
     number_literals: Vec<u64>,
     string_literals: Vec<Vec<u8>>,
-    table_templates: Vec<Vec<u8>>,
-    global_cache_slots: u16,
-    field_cache_slots: u16,
+    table_templates: Vec<Vec<u16>>,
+    global_cache_slots: u8,
+    field_cache_slots: u8,
     set_field_cache_slots: u8,
     num_params: u8,
     num_locals: u8,
@@ -1710,11 +1710,14 @@ impl SavedBytecode {
         write_vec(out, &self.string_literals, |out, bytes| {
             out.write_bytes(bytes)
         })?;
-        write_vec(out, &self.table_templates, |out, bytes| {
-            out.write_bytes(bytes)
+        write_vec(out, &self.table_templates, |out, keys| {
+            write_vec(out, keys, |out, key| {
+                out.write_u16(*key);
+                Ok(())
+            })
         })?;
-        out.write_u16(self.global_cache_slots);
-        out.write_u16(self.field_cache_slots);
+        out.write_u8(self.global_cache_slots);
+        out.write_u8(self.field_cache_slots);
         out.write_u8(self.set_field_cache_slots);
         out.write_u8(self.num_params);
         out.write_u8(self.num_locals);
@@ -1738,9 +1741,9 @@ impl SavedBytecode {
             code: read_vec(input, Decoder::read_u32)?,
             number_literals: read_vec(input, Decoder::read_u64)?,
             string_literals: read_vec(input, Decoder::read_bytes)?,
-            table_templates: read_vec(input, Decoder::read_bytes)?,
-            global_cache_slots: input.read_u16()?,
-            field_cache_slots: input.read_u16()?,
+            table_templates: read_vec(input, |input| read_vec(input, Decoder::read_u16))?,
+            global_cache_slots: input.read_u8()?,
+            field_cache_slots: input.read_u8()?,
             set_field_cache_slots: input.read_u8()?,
             num_params: input.read_u8()?,
             num_locals: input.read_u8()?,
@@ -1938,6 +1941,28 @@ mod tests {
             rejected_bytecode(vec![bad_cache], Vec::new()),
             LoadError::InvalidBytecode { .. }
         ));
+
+        // Every opcode that names a string literal in Bx shares one verifier
+        // arm; forge an out-of-range id through each so a future edit cannot
+        // drop one of them from that arm unnoticed.
+        for forged in [
+            Instr::push_string(0),
+            Instr::init_field_pinned(0, 0),
+            Instr::set_field_at(0, 0),
+            Instr::init_field(0, 0),
+        ] {
+            let mut bad_string = valid_saved_bytecode();
+            bad_string.string_literals.clear();
+            bad_string.code.insert(0, forged.raw());
+            bad_string.line_info.insert(0, 1);
+            assert!(
+                matches!(
+                    rejected_bytecode(vec![bad_string], Vec::new()),
+                    LoadError::InvalidBytecode { .. }
+                ),
+                "{forged:?} with an out-of-range string id must be rejected"
+            );
+        }
     }
 
     #[test]
@@ -2024,7 +2049,7 @@ mod tests {
         );
 
         let mut bad_template_key = valid_saved_bytecode();
-        bad_template_key.table_templates.push(vec![0]);
+        bad_template_key.table_templates.push(vec![u16::MAX]);
         assert_invalid(
             rejected_bytecode(vec![bad_template_key], Vec::new()),
             0,

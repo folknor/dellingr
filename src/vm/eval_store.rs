@@ -53,7 +53,7 @@ impl State {
         &mut self,
         frame: &Frame,
         negative_offset: u8,
-        key_id: u8,
+        key_id: u16,
     ) -> Result<()> {
         let val = self.pop_val();
         let positive_offset = self.stack.len() - negative_offset as usize - 1;
@@ -94,7 +94,7 @@ impl State {
     pub(super) fn instr_init_field_pinned(
         &mut self,
         frame: &Frame,
-        key_id: u8,
+        key_id: u16,
         entry_index: u8,
     ) -> Result<()> {
         let val = self.pop_val();
@@ -202,7 +202,7 @@ impl State {
         &mut self,
         frame: &Frame,
         stack_offset: u8,
-        field_id: u8,
+        field_id: u16,
         cache_idx: u8,
         local_cost: &mut u64,
     ) -> Result<()> {
@@ -354,7 +354,7 @@ impl State {
         true
     }
 
-    pub(super) fn instr_set_global(&mut self, frame: &Frame, string_num: u8) -> Result<()> {
+    pub(super) fn instr_set_global(&mut self, frame: &Frame, string_num: u16) -> Result<()> {
         let s = self.get_string_constant(frame, string_num);
         let val = self.pop_val();
         if let Some(s) = s.as_string(&self.heap) {
@@ -403,7 +403,7 @@ impl State {
     }
 
     #[hotpath::measure]
-    pub(super) fn instr_set_list(&mut self, count: u8) -> Result<()> {
+    pub(super) fn instr_set_list(&mut self, count: u8, batch: u16) -> Result<()> {
         // Find the table on the stack (it's below the values)
         // count=0 means "use all values above the table"
         let values = if count == 0 {
@@ -436,7 +436,7 @@ impl State {
 
         match obj_ptr.and_then(|ptr| self.heap.as_table(ptr)) {
             Some(tbl) => {
-                let counter = 1..;
+                let counter = usize::from(batch) * usize::from(u8::MAX) + 1..;
                 for (i, val) in counter.zip(values) {
                     let key = Val::Num(i as f64);
                     tbl.insert(key, val)?;
@@ -511,7 +511,7 @@ impl State {
         Ok(())
     }
 
-    pub(super) fn get_string_constant(&self, frame: &Frame, i: u8) -> Val {
+    pub(super) fn get_string_constant(&self, frame: &Frame, i: u16) -> Val {
         // self.string_literals[i as usize].clone()
         let index = frame.string_literal_start() + i as usize;
         self.string_literals[index]

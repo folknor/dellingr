@@ -186,12 +186,12 @@ pub(crate) struct Bytecode {
     pub(crate) string_literals: Vec<Vec<u8>>,
     /// Table constructor templates. Each entry stores string-literal indices
     /// for a pure named-field constructor's keys, in insertion order.
-    pub(crate) table_templates: Vec<Vec<u8>>,
+    pub(crate) table_templates: Vec<Vec<u16>>,
     /// Number of slots in this function's global lookup cache.
-    /// Cache slot indices are baked into `OP_GET_GLOBAL_CACHED` instructions.
-    pub(crate) global_cache_slots: u16,
+    /// Cache slot indices are baked into `OP_GET_GLOBAL` instructions.
+    pub(crate) global_cache_slots: u8,
     /// Number of slots in this function's field lookup cache.
-    pub(crate) field_cache_slots: u16,
+    pub(crate) field_cache_slots: u8,
     /// Number of slots in this function's set-field lookup cache.
     pub(crate) set_field_cache_slots: u8,
     pub(crate) num_params: u8,
@@ -221,75 +221,56 @@ impl Bytecode {
         let mut field_cache_len = 0usize;
         let mut set_field_cache_len = 0usize;
 
-        for (pc, inst) in self.code.iter_mut().enumerate() {
+        for inst in &mut self.code {
             match inst.opcode() {
                 Instr::OP_GET_GLOBAL => {
-                    let string_idx = inst.a() as usize;
+                    let string_idx = inst.bx() as usize;
                     let Some(cache_idx) = global_cache_indices.get_mut(string_idx) else {
                         continue;
                     };
                     let cache_idx = match *cache_idx {
                         Some(cache_idx) => cache_idx,
                         None => {
-                            let next_idx = u16::try_from(global_cache_len).map_err(|_| {
-                                error::Error::new(
-                                    error::ErrorKind::InternalError(
-                                        "too many global lookup cache slots".into(),
-                                    ),
-                                    0,
-                                    0,
-                                )
-                            })?;
+                            let next_idx = if global_cache_len < u8::MAX as usize {
+                                global_cache_len as u8
+                            } else {
+                                u8::MAX
+                            };
                             *cache_idx = Some(next_idx);
-                            global_cache_len += 1;
+                            if next_idx != u8::MAX {
+                                global_cache_len += 1;
+                            }
                             next_idx
                         }
                     };
-                    *inst = Instr::get_global_cached(inst.a(), cache_idx);
+                    *inst = Instr::get_global_cached(inst.bx(), cache_idx);
                 }
                 Instr::OP_GET_FIELD => {
-                    let cache_idx = u16::try_from(field_cache_len).map_err(|_| {
-                        error::Error::new(
-                            error::ErrorKind::InternalError(
-                                "too many field lookup cache slots".into(),
-                            ),
-                            0,
-                            0,
-                        )
-                    })?;
-                    field_cache_len += 1;
-                    *inst = Instr::get_field_cached(inst.a(), cache_idx);
+                    let cache_idx = if field_cache_len < u8::MAX as usize {
+                        let cache_idx = field_cache_len as u8;
+                        field_cache_len += 1;
+                        cache_idx
+                    } else {
+                        u8::MAX
+                    };
+                    *inst = Instr::get_field_cached(inst.bx(), cache_idx);
                 }
-                Instr::OP_SET_FIELD => {
-                    if set_field_cache_len == u8::MAX as usize {
-                        return Err(error::Error::new(
-                            error::SyntaxError::TooManyFieldAssignments,
-                            self.line_info.get(pc).copied().unwrap_or(0) as usize,
-                            0,
-                        ));
-                    }
-                    let cache_idx = set_field_cache_len as u8;
-                    set_field_cache_len += 1;
-                    *inst = Instr::set_field_cached(inst.a(), inst.b(), cache_idx);
+                Instr::OP_SET_FIELD_AT if inst.a() == 0 => {
+                    let cache_idx = if set_field_cache_len < u8::MAX as usize {
+                        let cache_idx = set_field_cache_len as u8;
+                        set_field_cache_len += 1;
+                        cache_idx
+                    } else {
+                        u8::MAX
+                    };
+                    *inst = Instr::set_field_cached(inst.bx(), cache_idx);
                 }
                 _ => {}
             }
         }
 
-        self.global_cache_slots = u16::try_from(global_cache_len).map_err(|_| {
-            error::Error::new(
-                error::ErrorKind::InternalError("too many global lookup cache slots".into()),
-                0,
-                0,
-            )
-        })?;
-        self.field_cache_slots = u16::try_from(field_cache_len).map_err(|_| {
-            error::Error::new(
-                error::ErrorKind::InternalError("too many field lookup cache slots".into()),
-                0,
-                0,
-            )
-        })?;
+        self.global_cache_slots = global_cache_len as u8;
+        self.field_cache_slots = field_cache_len as u8;
         self.set_field_cache_slots = set_field_cache_len as u8;
         Ok(())
     }
@@ -406,8 +387,8 @@ mod runtime_cache_tests {
         assert_eq!(get_globals.len(), 3);
         assert_eq!(bc.global_cache_slots, 2);
         assert!(bc.string_literals.len() > bc.global_cache_slots as usize);
-        assert_eq!(get_globals[0].bx(), get_globals[1].bx());
-        assert_ne!(get_globals[0].bx(), get_globals[2].bx());
+        assert_eq!(get_globals[0].a(), get_globals[1].a());
+        assert_ne!(get_globals[0].a(), get_globals[2].a());
     }
 
     #[test]
@@ -428,9 +409,9 @@ mod runtime_cache_tests {
 
         assert_eq!(get_fields.len(), 3);
         assert_eq!(bc.field_cache_slots, 3);
-        assert_eq!(get_fields[0].bx(), 0);
-        assert_eq!(get_fields[1].bx(), 1);
-        assert_eq!(get_fields[2].bx(), 2);
+        assert_eq!(get_fields[0].a(), 0);
+        assert_eq!(get_fields[1].a(), 1);
+        assert_eq!(get_fields[2].a(), 2);
     }
 
     #[test]
@@ -453,8 +434,8 @@ mod runtime_cache_tests {
 
         assert_eq!(set_fields.len(), 3);
         assert_eq!(bc.set_field_cache_slots, 3);
-        assert_eq!(set_fields[0].c(), 0);
-        assert_eq!(set_fields[1].c(), 1);
-        assert_eq!(set_fields[2].c(), 2);
+        assert_eq!(set_fields[0].a(), 0);
+        assert_eq!(set_fields[1].a(), 1);
+        assert_eq!(set_fields[2].a(), 2);
     }
 }

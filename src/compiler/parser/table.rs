@@ -8,7 +8,7 @@ use super::RetCount;
 use super::SyntaxError;
 use super::TokenType;
 
-type TableTemplateField = (u8, usize);
+type TableTemplateField = (u16, usize);
 type ParsedTableEntry = (u8, Option<TableTail>, Option<TableTemplateField>);
 
 #[derive(Debug)]
@@ -84,9 +84,17 @@ impl Parser<'_> {
         if self.input.try_pop(TokenType::RCurly)?.is_none() {
             // i is the number of array-style entries.
             let mut i = 0;
+            let mut batch = 0u16;
             let mut field_count = 0u8;
             let mut template_candidate = TableTemplateCandidate::new();
             let last_tail = loop {
+                if i == u8::MAX {
+                    self.push(Instr::set_list_batch(i, batch));
+                    i = 0;
+                    batch = batch
+                        .checked_add(1)
+                        .ok_or_else(|| self.error(SyntaxError::TooManyTableFields))?;
+                }
                 let (new_i, tail, named_field) = self.parse_table_entry(i)?;
                 i = new_i;
                 field_count = field_count.saturating_add(1);
@@ -116,7 +124,7 @@ impl Parser<'_> {
                     }
                 }
                 self.chunk.code[table_instr_idx] = Instr::new_table_tracked(field_count);
-                self.push(Instr::set_list(0));
+                self.push(Instr::set_list_batch(0, batch));
             } else if field_count > 4
                 && !template_candidate
                     .fields_for_template(field_count)
@@ -126,7 +134,7 @@ impl Parser<'_> {
             }
 
             if last_tail.is_none() && i > 0 {
-                self.push(Instr::set_list(i));
+                self.push(Instr::set_list_batch(i, batch));
             }
         }
         Ok(())
@@ -155,9 +163,6 @@ impl Parser<'_> {
                 Ok((counter, None, None))
             }
             _ => {
-                if counter == u8::MAX {
-                    return Err(self.error(SyntaxError::TooManyTableFields));
-                }
                 let expr = self.parse_expr()?;
                 let instr_idx = self.chunk.code.len() - 1;
                 let tail = match expr {
@@ -184,6 +189,9 @@ impl Parser<'_> {
         let mut template = Vec::with_capacity(fields.len());
         let mut field_indices = Vec::with_capacity(fields.len());
         for (key_id, _) in fields {
+            if template.len() >= u8::MAX as usize {
+                return false;
+            }
             if template.contains(key_id) {
                 return false;
             }

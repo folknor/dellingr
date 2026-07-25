@@ -148,8 +148,6 @@ pub enum SyntaxError {
     TooManyArguments,
     /// A control-flow target cannot be represented by a jump instruction.
     JumpTooFar,
-    /// A function has more set-field sites than its runtime cache can encode.
-    TooManyFieldAssignments,
     /// Source nests function definitions deeper than the VM accepts.
     TooManyNestedFunctions,
     /// More numeric literals in a chunk than the literal pool accepts.
@@ -375,13 +373,10 @@ impl fmt::Display for SyntaxError {
                 f,
                 "control-flow jump is too far (exceeds signed 16-bit range)"
             ),
-            TooManyFieldAssignments => {
-                write!(f, "too many field assignments in a function (limit 255)")
-            }
             TooManyNestedFunctions => write!(f, "too many nested functions (limit 255)"),
             TooManyNumbers => write!(f, "too many literal numbers"),
             TooManyStrings => write!(f, "too many literal strings"),
-            TooManyTableFields => write!(f, "too many fields in table constructor (limit 255)"),
+            TooManyTableFields => write!(f, "too many fields in table constructor"),
             UnclosedString => write!(f, "unfinished string"),
             UnexpectedEof => write!(f, "unexpected <eof>"),
             UnexpectedTok(msg) => write!(f, "{msg}"),

@@ -119,8 +119,8 @@ rendering.
 ### 7. Stop using `Vec::remove` in call emission (A-O4; root-cause fix for #9)
 
 Every plain call does `code.remove(mark_idx)` (expr.rs:272, 327): O(n) tail
-shift per call, so call-heavy chunks are quadratic-ish in emission, and it
-is the root cause of the line_info desync. Options: (a) introduce OP_NOP and
+shift per call, so call-heavy chunks are quadratic-ish in emission. `remove_instr`
+keeps `line_info` aligned, so it is not a line-attribution bug. Options: (a) introduce OP_NOP and
 patch the mark in place (O(1), keeps line_info aligned; one extra cheap
 dispatch on calls that needed the mark removed - or strip nops in `finalize`
 with a jump-offset remap done once, correctly, in one place); (b)
@@ -242,14 +242,6 @@ dispatches plus stack traffic per iteration of every hot loop condition. A
 peephole in the parser (or in `finalize`) fusing comparison + branch into
 one opcode halves the dispatch on loop headers. Needs execution-corner
 cooperation for the new opcodes.
-
-### 19. Flush SET_LIST periodically to lift the 255-entry constructor cap (A-O8; lifts part of #44)
-
-Emit `set_list(k)` every k <= 255 pending array values and reset the counter
-(reference Lua flushes every 50). Removes the constructor limit with no
-encoding change and bounds constructor stack growth. Interleaved named
-fields keep working if the `init_field`/`init_index` offset tracks
-pending-only entries (it already does).
 
 ### 20. Skip CLOSE_UPVALUES in closure-free functions (A-O9)
 

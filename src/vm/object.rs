@@ -307,7 +307,7 @@ impl GcHeap {
 
     pub(super) fn alloc_table_with_template(
         &mut self,
-        key_ids: &[u8],
+        key_ids: &[u16],
         string_literals: &[Val],
         string_literal_start: usize,
     ) -> ObjectPtr {

@@ -77,16 +77,11 @@ fn traceback_call_sites_cover_non_call_dispatch_and_host_calls() {
         3,
         6,
     );
-    // Regression coverage only: `table.sort` is entered through OP_CALL, so its
-    // caller line was already refreshed before this loop. The caller line is 4
-    // rather than 2 because a call spanning several lines is attributed to the
-    // line where it closes, not where it begins - reference reports 2 here.
-    // That is finding #63, a compiler line-attribution divergence, not a
-    // traceback-refresh one; pinned here so fixing #63 shows up as a change.
+    // A call spanning several lines is attributed to its opening line.
     assert_trace_lines(
         "local value = {2, 1}\ntable.sort(value, function()\n  error('boom')\nend)",
         3,
-        4,
+        2,
     );
     assert_trace_lines(
         "local value = setmetatable({}, {\n  __tostring = function()\n    error('boom')\n  end,\n})\nlocal result = tostring(value)",

@@ -16,8 +16,8 @@ impl State {
     pub(super) fn instr_get_field(
         &mut self,
         frame: &mut Frame,
-        field_id: u8,
-        cache_idx: u16,
+        field_id: u16,
+        cache_idx: u8,
         local_cost: &mut u64,
     ) -> Result<()> {
         // Pop value, handle both tables and strings
@@ -373,8 +373,8 @@ impl State {
     pub(super) fn instr_get_global(
         &mut self,
         frame: &Frame,
-        string_num: u8,
-        cache_idx: u16,
+        string_num: u16,
+        cache_idx: u8,
     ) -> Result<()> {
         let s = &frame.bytecode().string_literals[string_num as usize];
         let cache = frame.caches.global_lookup.get(cache_idx as usize);

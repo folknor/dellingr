@@ -20,7 +20,8 @@ impl<'a> Parser<'a> {
             let (n, last_exp) = self.parse_explist()?;
             // If the last expression is a function call or vararg, adjust to return all values
             match last_exp {
-                ExpDesc::Prefix(PrefixExp::FunctionCall(num_args)) => {
+                ExpDesc::Prefix(PrefixExp::FunctionCall(call)) => {
+                    let num_args = call.num_args();
                     let old = *self
                         .chunk
                         .code
@@ -77,8 +78,12 @@ impl<'a> Parser<'a> {
                 let tok = self.input.next()?;
                 Err(self.err_unexpected(tok, TokenType::Assign))
             }
-            PrefixExp::FunctionCall(num_args) => {
-                self.push(Instr::call(ArgCount::Fixed(num_args), RetCount::Fixed(0)));
+            PrefixExp::FunctionCall(call) => {
+                let (num_args, line) = (call.num_args(), call.line());
+                self.push_at_line(
+                    Instr::call(ArgCount::Fixed(num_args), RetCount::Fixed(0)),
+                    line,
+                );
                 Ok(())
             }
             PrefixExp::Place(first_place) => self.parse_assign(first_place),
@@ -107,7 +112,7 @@ impl<'a> Parser<'a> {
                 PlaceExp::FieldAccess(literal_id) => {
                     let stack_offset = u8::try_from(num_lvals - i - 1)
                         .map_err(|_| self.error(SyntaxError::TooManyExpressions))?;
-                    Instr::set_field(stack_offset, literal_id)
+                    Instr::set_field_at(stack_offset, literal_id)
                 }
                 PlaceExp::TableIndex => {
                     let stack_offset = u8::try_from(num_lvals - i - 1)
@@ -387,10 +392,11 @@ impl<'a> Parser<'a> {
         let tail_needed = num_targets.saturating_sub(fixed_prefix);
 
         match last_exp {
-            ExpDesc::Prefix(PrefixExp::FunctionCall(num_args)) if tail_needed > 1 => {
+            ExpDesc::Prefix(PrefixExp::FunctionCall(call)) if tail_needed > 1 => {
+                let num_args = call.num_args();
                 let tail_needed = self.checked_multi_assign_width(tail_needed)?;
                 let old = self.replace_last_instr(Instr::call(
-                    ArgCount::Fixed(*num_args),
+                    ArgCount::Fixed(num_args),
                     RetCount::Fixed(tail_needed),
                 ));
                 debug_assert!(

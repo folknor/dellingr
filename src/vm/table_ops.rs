@@ -23,7 +23,7 @@ impl State {
         self.stack.push(val);
     }
 
-    pub(super) fn new_table_with_template(&mut self, key_ids: &[u8], string_literal_start: usize) {
+    pub(super) fn new_table_with_template(&mut self, key_ids: &[u16], string_literal_start: usize) {
         if self.heap.is_full() {
             self.gc_collect();
         }

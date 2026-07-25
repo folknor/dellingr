@@ -1,4 +1,5 @@
 use super::ArgCount;
+use super::CallSite;
 use super::ExpDesc;
 use super::Instr;
 use super::Parser;
@@ -262,6 +263,8 @@ impl Parser<'_> {
                 self.parse_prefix_extension(prefix)
             }
             TokenType::LParen | TokenType::LiteralString | TokenType::LCurly => {
+                let call_start = self.input.peek()?.start;
+                let (line, _) = self.input.line_and_column(call_start);
                 // Always mark call base - needed when last arg is vararg or function call
                 // Adjustment: if we've already pushed the table/receiver (FieldAccess or TableIndex),
                 // subtract 1 from the base since the function will replace what's already there
@@ -301,7 +304,7 @@ impl Parser<'_> {
                     self.remove_instr(mark_idx);
                     self.checked_fixed_arg_count(num_args as usize, 0)?
                 };
-                let prefix = PrefixExp::FunctionCall(num_args);
+                let prefix = PrefixExp::FunctionCall(CallSite::new(num_args, line as u32));
                 self.parse_prefix_extension(prefix)
             }
             TokenType::LParenLineStart => {
@@ -309,6 +312,8 @@ impl Parser<'_> {
                 Err(self.error_at(SyntaxError::LParenLineStart, pos))
             }
             TokenType::Colon => {
+                let call_start = self.input.peek()?.start;
+                let (line, _) = self.input.line_and_column(call_start);
                 // Method call: obj:method(args) becomes obj.method(obj, args)
                 // Always mark call base - needed when last arg is vararg or function call
                 // Same adjustment logic as function calls
@@ -365,7 +370,7 @@ impl Parser<'_> {
                     self.checked_fixed_arg_count(num_args as usize, 1)?
                 };
                 // Stack: [method, obj, arg1, arg2, ...]
-                let prefix = PrefixExp::FunctionCall(num_args);
+                let prefix = PrefixExp::FunctionCall(CallSite::new(num_args, line as u32));
                 self.parse_prefix_extension(prefix)
             }
             _ => Ok(base_expr),

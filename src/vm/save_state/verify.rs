@@ -35,13 +35,13 @@ impl BytecodeView for SavedBytecode {
     fn string_literals(&self) -> &[Vec<u8>] {
         &self.string_literals
     }
-    fn table_templates(&self) -> &[Vec<u8>] {
+    fn table_templates(&self) -> &[Vec<u16>] {
         &self.table_templates
     }
-    fn global_cache_slots(&self) -> u16 {
+    fn global_cache_slots(&self) -> u8 {
         self.global_cache_slots
     }
-    fn field_cache_slots(&self) -> u16 {
+    fn field_cache_slots(&self) -> u8 {
         self.field_cache_slots
     }
     fn set_field_cache_slots(&self) -> u8 {

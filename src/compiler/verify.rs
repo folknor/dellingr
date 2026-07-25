@@ -14,9 +14,9 @@ pub(crate) trait BytecodeView {
     fn raw_instruction(&self, pc: usize) -> u32;
     fn number_literals_len(&self) -> usize;
     fn string_literals(&self) -> &[Vec<u8>];
-    fn table_templates(&self) -> &[Vec<u8>];
-    fn global_cache_slots(&self) -> u16;
-    fn field_cache_slots(&self) -> u16;
+    fn table_templates(&self) -> &[Vec<u16>];
+    fn global_cache_slots(&self) -> u8;
+    fn field_cache_slots(&self) -> u8;
     fn set_field_cache_slots(&self) -> u8;
     fn num_params(&self) -> u8;
     fn num_locals(&self) -> u8;
@@ -39,13 +39,13 @@ impl BytecodeView for Bytecode {
     fn string_literals(&self) -> &[Vec<u8>] {
         &self.string_literals
     }
-    fn table_templates(&self) -> &[Vec<u8>] {
+    fn table_templates(&self) -> &[Vec<u16>] {
         &self.table_templates
     }
-    fn global_cache_slots(&self) -> u16 {
+    fn global_cache_slots(&self) -> u8 {
         self.global_cache_slots
     }
-    fn field_cache_slots(&self) -> u16 {
+    fn field_cache_slots(&self) -> u8 {
         self.field_cache_slots
     }
     fn set_field_cache_slots(&self) -> u8 {
@@ -80,7 +80,7 @@ fn err(pc: Option<usize>, reason: impl Into<String>) -> BytecodeValidationError 
 
 fn check_index(
     pc: usize,
-    value: u8,
+    value: u16,
     len: usize,
     what: &str,
 ) -> Result<(), BytecodeValidationError> {
@@ -161,6 +161,7 @@ fn known_opcode(opcode: u8) -> bool {
             | Instr::OP_TFOR_CALL
             | Instr::OP_CALL
             | Instr::OP_INIT_FIELD_PINNED
+            | Instr::OP_SET_FIELD_AT
             | Instr::OP_JUMP
             | Instr::OP_BRANCH_FALSE
             | Instr::OP_BRANCH_TRUE_KEEP
@@ -180,8 +181,6 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
         return Err(err(None, "line info length does not match code length"));
     }
     for (name, len) in [
-        ("number literal", view.number_literals_len()),
-        ("string literal", view.string_literals().len()),
         ("table template", view.table_templates().len()),
         ("nested chunk", view.nested_len()),
         ("upvalue descriptor", view.upvalues_len()),
@@ -189,6 +188,11 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
         if len > 255 {
             return Err(err(None, format!("too many {name}s")));
         }
+    }
+    if view.number_literals_len() > usize::from(u16::MAX) + 1
+        || view.string_literals().len() > usize::from(u16::MAX) + 1
+    {
+        return Err(err(None, "too many literals"));
     }
     if view
         .table_templates()
@@ -217,10 +221,10 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
         }
     }
     let slots = view.num_params() as usize + view.num_locals() as usize;
-    let mut global_slots = [None; 256];
-    let mut next_global_slot = 0u16;
-    let mut next_field_slot = 0u16;
-    let mut next_set_field_slot = 0u8;
+    let mut global_slots = vec![None; view.string_literals().len()];
+    let mut next_global_slot = 0u8;
+    let mut next_field_slot = 0u8;
+    let mut next_set_field_slot = 0usize;
     for pc in 0..code_len {
         let inst = Instr::from_raw(view.raw_instruction(pc));
         let op = inst.opcode();
@@ -230,24 +234,30 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
         let a = inst.a();
         let b = inst.b();
         let c = inst.c();
+        let bx = inst.bx();
         let reserved_zero = match op {
             // These forms use every operand byte.
             Instr::OP_GET_GLOBAL
             | Instr::OP_GET_FIELD
             | Instr::OP_SET_FIELD
+            | Instr::OP_SET_FIELD_AT
+            | Instr::OP_INIT_FIELD
+            | Instr::OP_INIT_FIELD_PINNED
+            | Instr::OP_SET_LIST
             | Instr::OP_FOR_PREP
             | Instr::OP_FOR_LOOP
             | Instr::OP_TFOR_LOOP => true,
-            // Jumps use B+C as a signed offset.
-            Instr::OP_JUMP
+            // Literal loads put the pool id in Bx and reserve A; jumps use B+C
+            // as a signed offset and likewise reserve A.
+            Instr::OP_PUSH_NUM
+            | Instr::OP_PUSH_STRING
+            | Instr::OP_SET_GLOBAL
+            | Instr::OP_JUMP
             | Instr::OP_BRANCH_FALSE
             | Instr::OP_BRANCH_TRUE_KEEP
             | Instr::OP_BRANCH_FALSE_KEEP => a == 0,
             // Two-byte forms reserve C.
-            Instr::OP_INIT_FIELD
-            | Instr::OP_TFOR_CALL
-            | Instr::OP_CALL
-            | Instr::OP_INIT_FIELD_PINNED => c == 0,
+            Instr::OP_TFOR_CALL | Instr::OP_CALL => c == 0,
             // All remaining known instructions are either operandless or use
             // only A, and therefore reserve B+C (and A for operandless ops).
             _ => {
@@ -288,28 +298,32 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
             ));
         }
         match op {
-            Instr::OP_PUSH_NUM => check_index(pc, a, view.number_literals_len(), "number literal")?,
-            Instr::OP_PUSH_STRING | Instr::OP_INIT_FIELD_PINNED => {
-                check_index(pc, a, view.string_literals().len(), "string literal")?;
+            Instr::OP_PUSH_NUM => {
+                check_index(pc, bx, view.number_literals_len(), "number literal")?;
             }
             Instr::OP_GET_GLOBAL | Instr::OP_SET_GLOBAL => {
-                check_index(pc, a, view.string_literals().len(), "string literal")?;
-                if std::str::from_utf8(&view.string_literals()[a as usize]).is_err() {
+                check_index(pc, bx, view.string_literals().len(), "string literal")?;
+                if std::str::from_utf8(&view.string_literals()[bx as usize]).is_err() {
                     return Err(err(Some(pc), "global name operand is not UTF-8"));
                 }
-                if op == Instr::OP_GET_GLOBAL {
-                    let expected = match global_slots[a as usize] {
+                // The sentinel means "deliberately uncached" and is valid
+                // anywhere, not only once the slots are exhausted. The compiler
+                // never emits it early, but a hand-built or deliberately
+                // uncached snapshot is still semantically valid, and the
+                // runtime handles it by taking the slow path.
+                if op == Instr::OP_GET_GLOBAL && a != u8::MAX {
+                    let expected = match global_slots[bx as usize] {
                         Some(slot) => slot,
                         None => {
                             let slot = next_global_slot;
-                            next_global_slot = next_global_slot
-                                .checked_add(1)
-                                .ok_or_else(|| err(Some(pc), "too many global cache slots"))?;
-                            global_slots[a as usize] = Some(slot);
+                            if slot != u8::MAX {
+                                next_global_slot += 1;
+                            }
+                            global_slots[bx as usize] = Some(slot);
                             slot
                         }
                     };
-                    if inst.bx() != expected {
+                    if a != expected {
                         return Err(err(
                             Some(pc),
                             "global cache slot does not match first-use order",
@@ -318,42 +332,55 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
                 }
             }
             Instr::OP_GET_FIELD => {
-                check_index(pc, a, view.string_literals().len(), "string literal")?;
-                if inst.bx() != next_field_slot {
-                    return Err(err(
-                        Some(pc),
-                        "field cache slot does not match instruction order",
-                    ));
+                check_index(pc, bx, view.string_literals().len(), "string literal")?;
+                // As above: the sentinel is accepted anywhere and excluded from
+                // the sequential slot count.
+                if a != u8::MAX {
+                    if a != next_field_slot {
+                        return Err(err(
+                            Some(pc),
+                            "field cache slot does not match instruction order",
+                        ));
+                    }
+                    next_field_slot += 1;
                 }
-                next_field_slot = next_field_slot
-                    .checked_add(1)
-                    .ok_or_else(|| err(Some(pc), "too many field cache slots"))?;
             }
             Instr::OP_SET_FIELD => {
-                check_index(pc, b, view.string_literals().len(), "string literal")?;
-                if c != next_set_field_slot {
+                check_index(pc, bx, view.string_literals().len(), "string literal")?;
+                if a != u8::MAX && a as usize != next_set_field_slot {
                     return Err(err(
                         Some(pc),
                         "set-field cache slot does not match instruction order",
                     ));
                 }
-                next_set_field_slot = next_set_field_slot
-                    .checked_add(1)
-                    .ok_or_else(|| err(Some(pc), "too many set-field cache slots"))?;
+                if a != u8::MAX {
+                    next_set_field_slot += 1;
+                }
             }
-            Instr::OP_INIT_FIELD => {
-                check_index(pc, b, view.string_literals().len(), "string literal")?;
+            // Every remaining opcode that names a string literal in Bx. Merged
+            // into one arm so the bounds check cannot be forgotten for one of
+            // them; forged bytecode reaches this path too.
+            Instr::OP_PUSH_STRING
+            | Instr::OP_INIT_FIELD_PINNED
+            | Instr::OP_SET_FIELD_AT
+            | Instr::OP_INIT_FIELD => {
+                check_index(pc, bx, view.string_literals().len(), "string literal")?;
             }
             Instr::OP_NEW_TABLE_TEMPLATE => {
-                check_index(pc, a, view.table_templates().len(), "table template")?;
+                check_index(
+                    pc,
+                    u16::from(a),
+                    view.table_templates().len(),
+                    "table template",
+                )?;
             }
-            Instr::OP_CLOSURE => check_index(pc, a, view.nested_len(), "nested chunk")?,
+            Instr::OP_CLOSURE => check_index(pc, u16::from(a), view.nested_len(), "nested chunk")?,
             Instr::OP_GET_BUILTIN | Instr::OP_SET_BUILTIN if (a as usize) >= Builtin::COUNT => {
                 return Err(err(Some(pc), "builtin slot is out of range"));
             }
             Instr::OP_GET_LOCAL | Instr::OP_SET_LOCAL => check_slots(pc, a, 1, slots)?,
             Instr::OP_GET_UPVALUE | Instr::OP_SET_UPVALUE => {
-                check_index(pc, a, view.upvalues_len(), "upvalue")?;
+                check_index(pc, u16::from(a), view.upvalues_len(), "upvalue")?;
             }
             Instr::OP_FOR_PREP | Instr::OP_FOR_LOOP | Instr::OP_TFOR_LOOP => {
                 check_slots(pc, a, 4, slots)?;
@@ -404,7 +431,7 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
     }
     if view.global_cache_slots() != next_global_slot
         || view.field_cache_slots() != next_field_slot
-        || view.set_field_cache_slots() != next_set_field_slot
+        || view.set_field_cache_slots() as usize != next_set_field_slot
     {
         return Err(err(None, "declared cache slots do not match instructions"));
     }

@@ -130,7 +130,7 @@ impl Frame {
     }
 
     #[must_use]
-    fn get_number_constant(&self, i: u8) -> f64 {
+    fn get_number_constant(&self, i: u16) -> f64 {
         self.bytecode.number_literals[i as usize]
     }
 
@@ -212,8 +212,8 @@ impl Frame {
                 Instr::OP_SET_UPVALUE => state.instr_set_upvalue(self, inst.a()),
 
                 // Globals
-                Instr::OP_GET_GLOBAL => state.instr_get_global(self, inst.a(), inst.bx())?,
-                Instr::OP_SET_GLOBAL => state.instr_set_global(self, inst.a())?,
+                Instr::OP_GET_GLOBAL => state.instr_get_global(self, inst.bx(), inst.a())?,
+                Instr::OP_SET_GLOBAL => state.instr_set_global(self, inst.bx())?,
 
                 // Builtins (fast path for well-known globals)
                 Instr::OP_GET_BUILTIN => state.instr_get_builtin(inst.a()),
@@ -265,11 +265,11 @@ impl Frame {
                 Instr::OP_PUSH_NIL => state.push_nil(),
                 Instr::OP_PUSH_BOOL => state.push_boolean(inst.a() != 0),
                 Instr::OP_PUSH_NUM => {
-                    let n = self.get_number_constant(inst.a());
+                    let n = self.get_number_constant(inst.bx());
                     state.push_number(n);
                 }
                 Instr::OP_PUSH_STRING => {
-                    let val = state.get_string_constant(self, inst.a());
+                    let val = state.get_string_constant(self, inst.bx());
                     state.stack.push(val);
                 }
 
@@ -317,7 +317,7 @@ impl Frame {
                 // Table reads are free
                 Instr::OP_GET_FIELD => {
                     self.record_call_site(state);
-                    state.instr_get_field(self, inst.a(), inst.bx(), &mut local_cost)?;
+                    state.instr_get_field(self, inst.bx(), inst.a(), &mut local_cost)?;
                 }
                 Instr::OP_GET_TABLE => {
                     self.record_call_site(state);
@@ -386,11 +386,11 @@ impl Frame {
                 // Table writes cost 1
                 Instr::OP_INIT_FIELD => {
                     add_cost!(state, local_cost, 1);
-                    state.instr_init_field(self, inst.a(), inst.b())?;
+                    state.instr_init_field(self, inst.a(), inst.bx())?;
                 }
                 Instr::OP_INIT_FIELD_PINNED => {
                     add_cost!(state, local_cost, 1);
-                    state.instr_init_field_pinned(self, inst.a(), inst.b())?;
+                    state.instr_init_field_pinned(self, inst.bx(), inst.a())?;
                 }
                 Instr::OP_INIT_INDEX => {
                     add_cost!(state, local_cost, 1);
@@ -399,7 +399,12 @@ impl Frame {
                 Instr::OP_SET_FIELD => {
                     self.record_call_site(state);
                     add_cost!(state, local_cost, 1);
-                    state.instr_set_field(self, inst.a(), inst.b(), inst.c(), &mut local_cost)?;
+                    state.instr_set_field(self, 0, inst.bx(), inst.a(), &mut local_cost)?;
+                }
+                Instr::OP_SET_FIELD_AT => {
+                    self.record_call_site(state);
+                    add_cost!(state, local_cost, 1);
+                    state.instr_set_field(self, inst.a(), inst.bx(), u8::MAX, &mut local_cost)?;
                 }
                 Instr::OP_SET_TABLE => {
                     self.record_call_site(state);
@@ -412,7 +417,7 @@ impl Frame {
                     let n = inst.a();
                     let count = state.instr_set_list_count(n)?;
                     add_cost!(state, local_cost, count as u64);
-                    state.instr_set_list(n)?;
+                    state.instr_set_list(n, inst.bx())?;
                 }
 
                 // Unknown opcode

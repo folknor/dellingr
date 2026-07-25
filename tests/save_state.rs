@@ -659,7 +659,7 @@ fn setup_anchor_survives_load_final_gc() {
 fn unsupported_versions_fail_before_setup() {
     let state = fresh();
     let save = state.save_state().expect("state saves");
-    for version in [3_u16, 5_u16] {
+    for version in [3_u16, 4_u16] {
         let mut bytes = save.bytes.clone();
         bytes[4..6].copy_from_slice(&version.to_le_bytes());
         let setup_ran = Arc::new(AtomicBool::new(false));
@@ -672,6 +672,39 @@ fn unsupported_versions_fail_before_setup() {
         ));
         assert!(!setup_ran.load(Ordering::SeqCst));
     }
+}
+
+#[test]
+fn wide_literal_indices_and_uncached_slots_round_trip() {
+    let globals = (0..256)
+        .map(|n| format!("g{n} = {n}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let reads = (0..256)
+        .map(|n| format!("r = g{n}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let fields = (0..256)
+        .map(|n| format!("t.f{n} = {n}; q = t.f{n}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let source = format!("{globals}\nlocal t = {{}}\n{fields}\n{reads}\nanswer = g255 + t.f255");
+
+    let mut state = State::new();
+    run(&mut state, &source);
+    let saved = state.save_state().expect("wide bytecode should save");
+    let mut loaded = State::load_state(&saved.bytes, Box::new(DefaultCallbacks), |_| {})
+        .expect("wide bytecode should load");
+    loaded
+        .load_string("return answer")
+        .expect("loaded state should accept a continuation");
+    loaded
+        .call(ArgCount::Fixed(0), RetCount::Fixed(1))
+        .expect("continuation should run");
+    assert_eq!(
+        loaded.to_number(-1).expect("answer should be numeric"),
+        510.0
+    );
 }
 
 #[test]
@@ -976,6 +1009,22 @@ fn binary_string_literal_round_trips_through_save() {
     run(&mut loaded, "result = f()");
     loaded.get_global("result");
     assert_eq!(loaded.to_bytes(-1).unwrap(), [255]);
+    loaded.pop(1).unwrap();
+}
+
+#[test]
+fn uncached_set_field_bytecode_loads_from_a_save() {
+    let assignments = "t.x = 1\n".repeat(256);
+    let mut original = fresh();
+    run(
+        &mut original,
+        &format!("function f() local t = {{}}\n{assignments}return t.x end"),
+    );
+
+    let mut loaded = reload(&original);
+    run(&mut loaded, "result = f()");
+    loaded.get_global("result");
+    assert_eq!(loaded.to_number(-1).expect("result should be numeric"), 1.0);
     loaded.pop(1).unwrap();
 }
 

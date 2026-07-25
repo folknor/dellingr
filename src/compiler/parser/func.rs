@@ -71,10 +71,10 @@ impl<'a> Parser<'a> {
             let method_name_id = self.find_or_add_string(method_name)?;
 
             self.parse_fndef_method(Some(full_name))?;
-            self.push(Instr::set_field(0, method_name_id));
+            self.push(Instr::set_field_at(0, method_name_id));
         } else {
             self.parse_fndef_named(Some(full_name))?;
-            self.push(Instr::set_field(0, last_field_id));
+            self.push(Instr::set_field_at(0, last_field_id));
         }
         Ok(())
     }
@@ -100,7 +100,7 @@ impl<'a> Parser<'a> {
 
         // Parse the function params and body with implicit self.
         self.parse_fndef_method(Some(full_name))?;
-        self.push(Instr::set_field(0, method_name_id));
+        self.push(Instr::set_field_at(0, method_name_id));
         Ok(())
     }
 

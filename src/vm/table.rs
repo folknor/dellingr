@@ -88,7 +88,7 @@ impl Table {
     }
 
     pub(super) fn with_template_keys(
-        key_ids: &[u8],
+        key_ids: &[u16],
         string_literals: &[Val],
         string_literal_start: usize,
     ) -> Self {

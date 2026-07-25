@@ -243,6 +243,7 @@ impl Instr {
     pub(crate) const OP_TFOR_CALL: u8 = 52;
     pub(crate) const OP_CALL: u8 = 53;
     pub(crate) const OP_INIT_FIELD_PINNED: u8 = 54;
+    pub(crate) const OP_SET_FIELD_AT: u8 = 55;
 
     // Jump instructions (signed 16-bit offset in B+C slots)
     pub(crate) const OP_JUMP: u8 = 60;
@@ -273,13 +274,6 @@ impl Instr {
     #[inline]
     pub(crate) const fn op_ab(opcode: u8, a: u8, b: u8) -> Self {
         Instr((opcode as u32) << 24 | (a as u32) << 16 | (b as u32) << 8)
-    }
-
-    /// Create an instruction with three u8 operands (A, B, C).
-    #[inline]
-    #[allow(dead_code)]
-    pub(crate) const fn op_abc(opcode: u8, a: u8, b: u8, c: u8) -> Self {
-        Instr((opcode as u32) << 24 | (a as u32) << 16 | (b as u32) << 8 | c as u32)
     }
 
     /// Create an instruction with a signed 16-bit offset (sBx).
@@ -432,15 +426,16 @@ impl Instr {
         Self::op(Self::OP_PUSH_NIL)
     }
 
-    // One u8 operand
-    pub(crate) const fn get_global(idx: u8) -> Self {
-        Self::op_a(Self::OP_GET_GLOBAL, idx)
+    // Literal-bearing forms: the pool id is a u16 in Bx, and A carries the
+    // inline-cache slot (255 = uncached), a stack offset, or is reserved as 0.
+    pub(crate) const fn get_global(idx: u16) -> Self {
+        Self::op_a_bx(Self::OP_GET_GLOBAL, u8::MAX, idx)
     }
-    pub(crate) const fn get_global_cached(idx: u8, cache_idx: u16) -> Self {
-        Self::op_a_bx(Self::OP_GET_GLOBAL, idx, cache_idx)
+    pub(crate) const fn get_global_cached(idx: u16, cache_idx: u8) -> Self {
+        Self::op_a_bx(Self::OP_GET_GLOBAL, cache_idx, idx)
     }
-    pub(crate) const fn set_global(idx: u8) -> Self {
-        Self::op_a(Self::OP_SET_GLOBAL, idx)
+    pub(crate) const fn set_global(idx: u16) -> Self {
+        Self::op_a_bx(Self::OP_SET_GLOBAL, 0, idx)
     }
     pub(crate) const fn get_local(slot: u8) -> Self {
         Self::op_a(Self::OP_GET_LOCAL, slot)
@@ -454,20 +449,20 @@ impl Instr {
     pub(crate) const fn set_upvalue(idx: u8) -> Self {
         Self::op_a(Self::OP_SET_UPVALUE, idx)
     }
-    pub(crate) const fn get_field(idx: u8) -> Self {
-        Self::op_a(Self::OP_GET_FIELD, idx)
+    pub(crate) const fn get_field(idx: u16) -> Self {
+        Self::op_a_bx(Self::OP_GET_FIELD, u8::MAX, idx)
     }
-    pub(crate) const fn get_field_cached(idx: u8, cache_idx: u16) -> Self {
-        Self::op_a_bx(Self::OP_GET_FIELD, idx, cache_idx)
+    pub(crate) const fn get_field_cached(idx: u16, cache_idx: u8) -> Self {
+        Self::op_a_bx(Self::OP_GET_FIELD, cache_idx, idx)
     }
     pub(crate) const fn init_index(offset: u8) -> Self {
         Self::op_a(Self::OP_INIT_INDEX, offset)
     }
-    pub(crate) const fn push_num(idx: u8) -> Self {
-        Self::op_a(Self::OP_PUSH_NUM, idx)
+    pub(crate) const fn push_num(idx: u16) -> Self {
+        Self::op_a_bx(Self::OP_PUSH_NUM, 0, idx)
     }
-    pub(crate) const fn push_string(idx: u8) -> Self {
-        Self::op_a(Self::OP_PUSH_STRING, idx)
+    pub(crate) const fn push_string(idx: u16) -> Self {
+        Self::op_a_bx(Self::OP_PUSH_STRING, 0, idx)
     }
     pub(crate) const fn tfor_prep(slot: u8) -> Self {
         Self::op_a(Self::OP_TFOR_PREP, slot)
@@ -484,8 +479,14 @@ impl Instr {
     pub(crate) const fn vararg(n: u8) -> Self {
         Self::op_a(Self::OP_VARARG, n)
     }
+    /// Test-only: production emission always names its batch explicitly through
+    /// `set_list_batch`, so this shorthand for batch 0 exists for assertions.
+    #[cfg(test)]
     pub(crate) const fn set_list(count: u8) -> Self {
-        Self::op_a(Self::OP_SET_LIST, count)
+        Self::set_list_batch(count, 0)
+    }
+    pub(crate) const fn set_list_batch(count: u8, batch: u16) -> Self {
+        Self::op_a_bx(Self::OP_SET_LIST, count, batch)
     }
     pub(crate) const fn set_table(offset: u8) -> Self {
         Self::op_a(Self::OP_SET_TABLE, offset)
@@ -500,18 +501,20 @@ impl Instr {
         Self::op_a(Self::OP_SET_BUILTIN, slot.to_u8())
     }
 
-    // Two u8 operands
-    pub(crate) const fn set_field(offset: u8, idx: u8) -> Self {
-        Self::op_ab(Self::OP_SET_FIELD, offset, idx)
+    // Field writes: `set_field_at` carries an explicit receiver offset and is
+    // never cached; `set_field_cached` implies offset 0 and uses A for its
+    // cache slot. Finalization rewrites offset-zero sites to the cached form.
+    pub(crate) const fn set_field_at(offset: u8, idx: u16) -> Self {
+        Self::op_a_bx(Self::OP_SET_FIELD_AT, offset, idx)
     }
-    pub(crate) const fn set_field_cached(offset: u8, idx: u8, cache_idx: u8) -> Self {
-        Self::op_abc(Self::OP_SET_FIELD, offset, idx, cache_idx)
+    pub(crate) const fn set_field_cached(idx: u16, cache_idx: u8) -> Self {
+        Self::op_a_bx(Self::OP_SET_FIELD, cache_idx, idx)
     }
-    pub(crate) const fn init_field(offset: u8, idx: u8) -> Self {
-        Self::op_ab(Self::OP_INIT_FIELD, offset, idx)
+    pub(crate) const fn init_field(offset: u8, idx: u16) -> Self {
+        Self::op_a_bx(Self::OP_INIT_FIELD, offset, idx)
     }
-    pub(crate) const fn init_field_pinned(key_idx: u8, entry_idx: u8) -> Self {
-        Self::op_ab(Self::OP_INIT_FIELD_PINNED, key_idx, entry_idx)
+    pub(crate) const fn init_field_pinned(key_idx: u16, entry_idx: u8) -> Self {
+        Self::op_a_bx(Self::OP_INIT_FIELD_PINNED, entry_idx, key_idx)
     }
     pub(crate) const fn tfor_call(slot: u8, num_vars: u8) -> Self {
         Self::op_ab(Self::OP_TFOR_CALL, slot, num_vars)
@@ -575,29 +578,30 @@ impl std::fmt::Debug for Instr {
             Self::OP_NEGATE => write!(f, "Negate"),
             Self::OP_MARK_CALL_BASE => write!(f, "MarkCallBase"),
             Self::OP_PUSH_NIL => write!(f, "PushNil"),
-            Self::OP_GET_GLOBAL => write!(f, "GetGlobal({})", self.a()),
-            Self::OP_SET_GLOBAL => write!(f, "SetGlobal({})", self.a()),
+            Self::OP_GET_GLOBAL => write!(f, "GetGlobal({}, {})", self.a(), self.bx()),
+            Self::OP_SET_GLOBAL => write!(f, "SetGlobal({})", self.bx()),
             Self::OP_GET_LOCAL => write!(f, "GetLocal({})", self.a()),
             Self::OP_SET_LOCAL => write!(f, "SetLocal({})", self.a()),
             Self::OP_GET_UPVALUE => write!(f, "GetUpvalue({})", self.a()),
             Self::OP_SET_UPVALUE => write!(f, "SetUpvalue({})", self.a()),
-            Self::OP_GET_FIELD => write!(f, "GetField({})", self.a()),
+            Self::OP_GET_FIELD => write!(f, "GetField({}, {})", self.a(), self.bx()),
             Self::OP_INIT_INDEX => write!(f, "InitIndex({})", self.a()),
-            Self::OP_PUSH_NUM => write!(f, "PushNum({})", self.a()),
-            Self::OP_PUSH_STRING => write!(f, "PushString({})", self.a()),
+            Self::OP_PUSH_NUM => write!(f, "PushNum({})", self.bx()),
+            Self::OP_PUSH_STRING => write!(f, "PushString({})", self.bx()),
             Self::OP_TFOR_PREP => write!(f, "TForPrep({})", self.a()),
             Self::OP_RETURN => write!(f, "Return({:?})", RetCount::from_u8(self.a())),
             Self::OP_CLOSE_UPVALUES => write!(f, "CloseUpvalues({})", self.a()),
             Self::OP_CLOSURE => write!(f, "Closure({})", self.a()),
             Self::OP_VARARG => write!(f, "Vararg({})", self.a()),
-            Self::OP_SET_LIST => write!(f, "SetList({})", self.a()),
+            Self::OP_SET_LIST => write!(f, "SetList({}, {})", self.a(), self.bx()),
             Self::OP_SET_TABLE => write!(f, "SetTable({})", self.a()),
             Self::OP_PUSH_BOOL => write!(f, "PushBool({})", self.a() != 0),
             Self::OP_GET_BUILTIN => write!(f, "GetBuiltin({:?})", Builtin::from_u8(self.a())),
             Self::OP_SET_BUILTIN => write!(f, "SetBuiltin({:?})", Builtin::from_u8(self.a())),
-            Self::OP_SET_FIELD => write!(f, "SetField({}, {})", self.a(), self.b()),
-            Self::OP_INIT_FIELD => write!(f, "InitField({}, {})", self.a(), self.b()),
-            Self::OP_INIT_FIELD_PINNED => write!(f, "InitFieldPinned({}, {})", self.a(), self.b()),
+            Self::OP_SET_FIELD => write!(f, "SetField({}, {})", self.a(), self.bx()),
+            Self::OP_SET_FIELD_AT => write!(f, "SetFieldAt({}, {})", self.a(), self.bx()),
+            Self::OP_INIT_FIELD => write!(f, "InitField({}, {})", self.a(), self.bx()),
+            Self::OP_INIT_FIELD_PINNED => write!(f, "InitFieldPinned({}, {})", self.a(), self.bx()),
             Self::OP_TFOR_CALL => write!(f, "TForCall({}, {})", self.a(), self.b()),
             Self::OP_CALL => write!(
                 f,

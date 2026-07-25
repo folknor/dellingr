@@ -131,6 +131,7 @@ impl ScopeCost {
                 | Instr::OP_INIT_FIELD_PINNED
                 | Instr::OP_INIT_INDEX
                 | Instr::OP_SET_FIELD
+                | Instr::OP_SET_FIELD_AT
                 | Instr::OP_SET_TABLE => {
                     scope.table_writes += 1;
                     scope.own_cost += 1;

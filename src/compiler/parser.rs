@@ -5,6 +5,7 @@ use super::UpvalueDesc;
 use super::error::Error;
 use super::error::ErrorKind;
 use super::error::SyntaxError;
+use super::exp_desc::CallSite;
 use super::exp_desc::ExpDesc;
 use super::exp_desc::PlaceExp;
 use super::exp_desc::PrefixExp;
@@ -93,9 +94,8 @@ impl<'a> Parser<'a> {
             Err(self.error(SyntaxError::TooManyLocals))
         } else {
             self.locals.push((name.to_string(), self.nest_level));
-            if self.locals.len() > self.chunk.num_locals as usize {
-                self.chunk.num_locals += 1;
-            }
+            let non_param_locals = self.locals.len() - self.chunk.num_params as usize;
+            self.chunk.num_locals = self.chunk.num_locals.max(non_param_locals as u8);
             Ok(())
         }
     }
@@ -266,39 +266,39 @@ impl<'a> Parser<'a> {
     }
 
     /// Expects an identifier and returns the id of its string literal.
-    fn expect_identifier_id(&mut self) -> Result<u8> {
+    fn expect_identifier_id(&mut self) -> Result<u16> {
         let name = self.expect_identifier()?;
         self.find_or_add_string(name)
     }
 
     /// Stores a literal string and returns its index.
-    fn find_or_add_string(&mut self, string: &str) -> Result<u8> {
+    fn find_or_add_string(&mut self, string: &str) -> Result<u16> {
         self.find_or_add_string_bytes(string.as_bytes())
     }
 
     /// Stores literal string bytes and returns its index.
-    fn find_or_add_string_bytes(&mut self, bytes: &[u8]) -> Result<u8> {
+    fn find_or_add_string_bytes(&mut self, bytes: &[u8]) -> Result<u16> {
         match self
             .chunk
             .string_literals
             .iter()
             .position(|existing| existing.as_slice() == bytes)
         {
-            Some(i) => Ok(i as u8),
+            Some(i) => Ok(i as u16),
             None => {
                 let i = self.chunk.string_literals.len();
-                if i == u8::MAX as usize {
+                if i > u16::MAX as usize {
                     Err(self.error(SyntaxError::TooManyStrings))
                 } else {
                     self.chunk.string_literals.push(bytes.to_vec());
-                    Ok(i as u8)
+                    Ok(i as u16)
                 }
             }
         }
     }
 
     /// Stores a literal number and returns its index.
-    fn find_or_add_number(&mut self, num: f64) -> Result<u8> {
+    fn find_or_add_number(&mut self, num: f64) -> Result<u16> {
         find_or_add(&mut self.chunk.number_literals, &num)
             .ok_or_else(|| self.error(SyntaxError::TooManyNumbers))
     }
@@ -425,6 +425,12 @@ impl<'a> Parser<'a> {
     fn push(&mut self, instr: Instr) {
         self.chunk.code.push(instr);
         self.chunk.line_info.push(self.current_line);
+    }
+
+    /// Adds an instruction with an explicit source line.
+    fn push_at_line(&mut self, instr: Instr, line: u32) {
+        self.chunk.code.push(instr);
+        self.chunk.line_info.push(line);
     }
 
     /// Removes the instruction at `idx`, keeping line_info aligned.
@@ -609,8 +615,12 @@ impl<'a> Parser<'a> {
     /// Emits code to evaluate the prefix expression as a normal expression.
     fn eval_prefix_exp(&mut self, exp: &PrefixExp) {
         match exp {
-            PrefixExp::FunctionCall(num_args) => {
-                self.push(Instr::call(ArgCount::Fixed(*num_args), RetCount::Fixed(1)));
+            PrefixExp::FunctionCall(call) => {
+                let (num_args, line) = (call.num_args(), call.line());
+                self.push_at_line(
+                    Instr::call(ArgCount::Fixed(num_args), RetCount::Fixed(1)),
+                    line,
+                );
             }
             PrefixExp::Parenthesized => (),
             PrefixExp::Place(place) => {
@@ -723,20 +733,20 @@ const fn hex_value(byte: u8) -> Option<u8> {
 }
 
 /// Returns the index of an entry in the literals list, adding it if it does not exist.
-fn find_or_add<T, E>(queue: &mut Vec<T>, x: &E) -> Option<u8>
+fn find_or_add<T, E>(queue: &mut Vec<T>, x: &E) -> Option<u16>
 where
     T: Borrow<E> + PartialEq<E>,
     E: PartialEq<T> + ToOwned<Owned = T> + ?Sized,
 {
     match queue.iter().position(|y| y == x) {
-        Some(i) => Some(i as u8),
+        Some(i) => Some(i as u16),
         None => {
             let i = queue.len();
-            if i == u8::MAX as usize {
+            if i > u16::MAX as usize {
                 None
             } else {
                 queue.push(x.to_owned());
-                Some(i as u8)
+                Some(i as u16)
             }
         }
     }
