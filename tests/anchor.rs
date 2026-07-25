@@ -278,7 +278,7 @@ fn anchor_type_reflects_underlying_value() {
     let a_num = state.anchor().unwrap();
     assert_eq!(state.anchor_type(a_num), Some(LuaType::Number));
 
-    state.push_string("hello");
+    state.push_string("hello").expect("short test string fits");
     let a_str = state.anchor().unwrap();
     assert_eq!(state.anchor_type(a_str), Some(LuaType::String));
 

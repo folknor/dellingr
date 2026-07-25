@@ -106,6 +106,13 @@ pub enum LoadError {
     UnknownEnvObject(String),
     /// Binary payload could not be decoded.
     DecodeError(String),
+    /// A saved Lua string exceeded the fixed resource limit.
+    StringSizeExceeded {
+        /// Size requested by the save.
+        size: usize,
+        /// Maximum permitted string size.
+        limit: usize,
+    },
     /// Arena indices or object graph contents were corrupt.
     CorruptArena,
     /// A saved bytecode program violates VM structural invariants.
@@ -148,6 +155,9 @@ impl fmt::Display for LoadError {
             LoadError::UnknownFunction(id) => write!(f, "unknown saved function id {id}"),
             LoadError::UnknownEnvObject(id) => write!(f, "unknown saved environment object {id}"),
             LoadError::DecodeError(err) => write!(f, "save decode error: {err}"),
+            LoadError::StringSizeExceeded { size, limit } => {
+                write!(f, "string size {size} exceeds limit {limit}")
+            }
             LoadError::CorruptArena => write!(f, "corrupt save arena"),
             LoadError::InvalidBytecode {
                 chunk,
@@ -1478,6 +1488,17 @@ impl<'a> Decoder<'a> {
         Ok(self.read_exact(len)?.to_vec())
     }
 
+    fn read_lua_string_bytes(&mut self) -> Result<Vec<u8>, LoadError> {
+        let len = self.read_len()?;
+        if len > super::MAX_STRING_BYTES {
+            return Err(LoadError::StringSizeExceeded {
+                size: len,
+                limit: super::MAX_STRING_BYTES,
+            });
+        }
+        Ok(self.read_exact(len)?.to_vec())
+    }
+
     fn read_string(&mut self) -> Result<String, LoadError> {
         String::from_utf8(self.read_bytes()?)
             .map_err(|_| LoadError::DecodeError("string is not UTF-8".to_string()))
@@ -1526,7 +1547,7 @@ impl SavePayload {
             cost_budget: input.read_i64()?,
             cost_budget_configured: input.read_bool()?,
             cost_used: input.read_u64()?,
-            strings: read_vec(input, Decoder::read_bytes)?,
+            strings: read_vec(input, Decoder::read_lua_string_bytes)?,
             bytecode: read_vec(input, SavedBytecode::decode)?,
             upvalues: read_vec(input, SavedVal::decode)?,
             objects: read_vec(input, SavedObject::decode)?,
@@ -1740,7 +1761,7 @@ impl SavedBytecode {
         Ok(Self {
             code: read_vec(input, Decoder::read_u32)?,
             number_literals: read_vec(input, Decoder::read_u64)?,
-            string_literals: read_vec(input, Decoder::read_bytes)?,
+            string_literals: read_vec(input, Decoder::read_lua_string_bytes)?,
             table_templates: read_vec(input, |input| read_vec(input, Decoder::read_u16))?,
             global_cache_slots: input.read_u8()?,
             field_cache_slots: input.read_u8()?,

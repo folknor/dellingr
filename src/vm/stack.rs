@@ -99,15 +99,17 @@ impl State {
     }
 
     /// Pushes the given UTF-8 string onto the stack.
-    pub fn push_string(&mut self, s: impl AsRef<str>) {
-        let val = self.alloc_string(s.as_ref().as_bytes());
+    pub fn push_string(&mut self, s: impl AsRef<str>) -> Result<()> {
+        let val = self.alloc_string(s.as_ref().as_bytes())?;
         self.stack.push(val);
+        Ok(())
     }
 
     /// Pushes the given raw Lua string bytes onto the stack.
-    pub fn push_bytes(&mut self, bytes: impl AsRef<[u8]>) {
-        let val = self.alloc_string(bytes.as_ref());
+    pub fn push_bytes(&mut self, bytes: impl AsRef<[u8]>) -> Result<()> {
+        let val = self.alloc_string(bytes.as_ref())?;
         self.stack.push(val);
+        Ok(())
     }
 
     /// Pushes a Rust function onto the stack.

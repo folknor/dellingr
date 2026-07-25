@@ -461,7 +461,7 @@ fn set_table_str_key_value_roots_heap_value() {
     state
         .set_table_str_key_value(1, "child", child)
         .expect("setting rooted heap value must succeed");
-    state.push_string("child");
+    state.push_string("child").expect("short test string fits");
     state.get_table_raw(1).expect("child lookup must succeed");
     // Must dereference: if interning the key had collected the child, the
     // stale pointer would still satisfy an `as_object_ptr().is_some()` check.
@@ -501,7 +501,9 @@ fn string_allocations_drive_automatic_gc_threshold() {
 
     // Keep enough distinct strings rooted to reach the threshold.
     for i in 0..20 {
-        state.push_string(format!("live-{i}"));
+        state
+            .push_string(format!("live-{i}"))
+            .expect("short test string fits");
     }
 
     assert_eq!(state.object_count(), 0);
@@ -510,7 +512,9 @@ fn string_allocations_drive_automatic_gc_threshold() {
 
     // This allocation must collect first. All 20 strings survive, so the
     // adaptive threshold must include them and grow to 40.
-    state.push_string("trigger");
+    state
+        .push_string("trigger")
+        .expect("short test string fits");
 
     assert_eq!(state.string_count(), 21);
     assert_eq!(state.gc_threshold(), 40);
@@ -520,7 +524,9 @@ fn string_allocations_drive_automatic_gc_threshold() {
     // automatically rather than growing without bound.
     state.set_top(0).unwrap();
     for i in 0..1_000 {
-        state.push_string(format!("temporary-{i}"));
+        state
+            .push_string(format!("temporary-{i}"))
+            .expect("short test string fits");
         state.pop(1).unwrap();
     }
 

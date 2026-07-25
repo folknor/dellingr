@@ -4,7 +4,26 @@
 //! when it encounters unexpected types or corrupt state.
 
 use dellingr::error::ErrorKind;
-use dellingr::{ArgCount, LuaType, RetCount, State};
+use dellingr::{ArgCount, LuaType, MAX_STRING_BYTES, RetCount, State};
+
+#[test]
+fn host_string_limit_is_inclusive_and_leaves_stack_unchanged() {
+    let mut state = State::new();
+    state
+        .push_bytes(vec![b'x'; MAX_STRING_BYTES])
+        .expect("the exact string limit must succeed");
+    let err = state
+        .push_bytes(vec![b'x'; MAX_STRING_BYTES + 1])
+        .expect_err("a string above the limit must fail");
+    match err.kind {
+        ErrorKind::StringSizeExceeded { size, limit } => {
+            assert_eq!(size, MAX_STRING_BYTES + 1);
+            assert_eq!(limit, MAX_STRING_BYTES);
+        }
+        kind => panic!("expected StringSizeExceeded, got: {kind:?}"),
+    }
+    assert_eq!(state.get_top(), 1);
+}
 
 /// Helper: runs Lua code that returns a number, checks the result.
 fn run_number(code: &str) -> f64 {
@@ -921,7 +940,7 @@ fn table_move_costs_empty_and_each_moved_element() {
     // Call the native function directly so bytecode dispatch cannot consume
     // the exhausted budget before table.move reaches its empty-range charge.
     state.get_global("table");
-    state.push_bytes("move");
+    state.push_bytes("move").expect("short test string fits");
     state.get_table(-2).expect("table.move lookup succeeds");
     state.remove(-2).expect("table table is removed");
     state.new_table();

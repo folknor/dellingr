@@ -42,7 +42,7 @@ impl State {
         val: Val,
     ) -> Result<()> {
         self.with_rooted_value(val, |state| {
-            let key = state.alloc_string(name);
+            let key = state.alloc_string(name)?;
             let idx = state.convert_idx(table_idx)?;
             let obj_ptr = state.stack[idx].as_object_ptr();
             let typ = state.stack[idx].typ(&state.heap);
@@ -428,7 +428,7 @@ impl State {
             .and_then(super::table::Table::get_metatable);
 
         if let Some(mt_ptr) = metatable_ptr {
-            let tostring_key = self.alloc_string("__tostring");
+            let tostring_key = self.alloc_string("__tostring")?;
             let tostring_handler = self
                 .heap
                 .as_table_ref(mt_ptr)

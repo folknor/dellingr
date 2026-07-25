@@ -91,8 +91,11 @@ reachable `RustFunc` must be registered with a stable id (e.g.
 
 Save files are user-editable input. Loading restores the saved cost counters,
 so hosts that load user-editable saves must call `set_cost_budget` after a
-successful load. Save authentication is required if tampering with future RNG
-outcomes matters.
+successful load. Saves containing a Lua string larger than 16 MiB are rejected
+on load, including ones written by an earlier build using the same snapshot
+format version - an older format version is rejected before that, as an
+unsupported version. Save authentication is required if tampering with future
+RNG outcomes matters.
 
 ## Status
 

@@ -278,6 +278,7 @@ impl<'a> Parser<'a> {
 
     /// Stores literal string bytes and returns its index.
     fn find_or_add_string_bytes(&mut self, bytes: &[u8]) -> Result<u16> {
+        crate::vm::check_string_size(bytes.len()).map_err(|err| self.error(err.kind))?;
         match self
             .chunk
             .string_literals
@@ -312,12 +313,20 @@ impl<'a> Parser<'a> {
         let range = (start + 1)..(start + len as usize - 1);
         let raw = self.input.substring(range).as_bytes();
 
-        // Process escape sequences
-        let mut result = Vec::with_capacity(raw.len());
+        // Process escape sequences.
+        //
+        // The cap applies to the DECODED Lua string, not to its source
+        // spelling: `"\z" ..` a megabyte of whitespace decodes to nothing, and
+        // `\x61` spends four source bytes per output byte. Bound only the
+        // reservation by the cap, and check each byte as it is actually
+        // emitted (below) plus the finished string at `find_or_add_string_bytes`.
+        let mut result = Vec::with_capacity(raw.len().min(crate::vm::MAX_STRING_BYTES));
         let mut raw_offset = 0;
         while raw_offset < raw.len() {
             let byte = raw[raw_offset];
             raw_offset += 1;
+            crate::vm::checked_string_growth(result.len(), 1)
+                .map_err(|err| self.error(err.kind))?;
             if byte == b'\\' {
                 let error_pos = start + 1 + raw_offset - 1;
                 let next = *raw

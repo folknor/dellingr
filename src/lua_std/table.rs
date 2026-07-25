@@ -127,7 +127,7 @@ pub(crate) fn open_table(state: &mut State) {
         }
 
         // Add the "n" field
-        state.push_string("n");
+        state.push_string("n")?;
         state.push_number(num_args as f64);
         state.set_table_raw(table_idx)?;
 
@@ -170,13 +170,15 @@ pub(crate) fn open_table(state: &mut State) {
 
         if i > j {
             state.set_top(0)?;
-            state.push_bytes(b"");
+            state.push_bytes(b"")?;
             return Ok(1);
         }
 
         let mut result = Vec::new();
         for idx in i..=j {
             if idx > i {
+                let next = crate::vm::checked_string_growth(result.len(), sep.len())?;
+                result.reserve(next - result.len());
                 result.extend_from_slice(&sep);
             }
             state.push_number(idx as f64);
@@ -184,7 +186,10 @@ pub(crate) fn open_table(state: &mut State) {
             let typ = state.typ(-1);
             match typ {
                 LuaType::String | LuaType::Number => {
-                    result.extend_from_slice(&state.bytes_coerce(-1)?);
+                    let bytes = state.bytes_coerce(-1)?;
+                    let next = crate::vm::checked_string_growth(result.len(), bytes.len())?;
+                    result.reserve(next - result.len());
+                    result.extend_from_slice(&bytes);
                 }
                 _ => return Err(state.error(ErrorKind::TypeError(TypeError::Concat(typ)))),
             }
@@ -192,7 +197,7 @@ pub(crate) fn open_table(state: &mut State) {
         }
 
         state.set_top(0)?;
-        state.push_bytes(result);
+        state.push_bytes(result)?;
         Ok(1)
     });
 

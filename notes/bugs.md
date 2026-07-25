@@ -128,30 +128,6 @@ local function id(s) return s end
 
 ## Medium severity
 
-### 24. `OP_CONCAT` is free: exponential memory growth at near-zero cost (B-B8 + C-D3, two independent reports; design-review flag)
-
-- **Locations:** `src/vm/frame.rs:304-307` (charges nothing),
-  `src/vm/eval.rs:228-263` (`concat_helper` does O(total bytes) work and
-  allocation).
-- **Cause:** `s = s .. s` in a free `while true` loop doubles memory every
-  iteration with zero cost charged - ~34 iterations is a 16 GB attempt, ~40
-  exceeds any realistic host memory. The in-code comment declares string ops
-  free, and README's Budget section concedes structural freebies, but that
-  argument is about time on control flow; exponential allocation is a
-  different failure domain (OOM kill of the host rather than idling a tick
-  budget).
-- **Repro:**
-
-```lua
-local s = "x"
-for i = 1, 34 do s = s .. s end   -- 16 GB attempt, total charged cost ~34
-```
-
-- **Recommendation:** charge concat proportional to output length (like
-  SET_LIST charges per element - dynamic charging is already in the design
-  vocabulary), or a max-string-length cap. Decision belongs to the cost-model
-  owner.
-
 ---
 
 ## Low severity

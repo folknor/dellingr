@@ -131,11 +131,25 @@ pub(crate) fn open_base(state: &mut State) {
     // redirect print output to per-script consoles.
     add("print", |state| {
         let top = state.get_top();
-        let mut parts = Vec::with_capacity(top);
+        let mut message = String::new();
         for i in 1..=top {
-            parts.push(state.to_string_with_meta(i as isize)?);
+            if i != 1 {
+                crate::vm::checked_string_growth(message.len(), 1)?;
+                message.push('\t');
+            }
+            // Preflight string arguments against their raw byte length before
+            // converting. The conversion is lossy-UTF-8, so an invalid byte
+            // expands to three, and a legal 16 MiB string of 0xff would
+            // otherwise materialize as a ~48 MiB `String` before the check
+            // below could reject it. Other types render to short text.
+            if state.typ(i as isize) == LuaType::String {
+                let raw_len = state.to_bytes(i as isize)?.len();
+                crate::vm::checked_string_growth(message.len(), raw_len)?;
+            }
+            let part = state.to_string_with_meta(i as isize)?;
+            crate::vm::checked_string_growth(message.len(), part.len())?;
+            message.push_str(&part);
         }
-        let message = parts.join("\t");
         state.host_print(&message);
         Ok(0)
     });
@@ -155,7 +169,7 @@ pub(crate) fn open_base(state: &mut State) {
         state.check_any(1)?;
         let typ = state.typ(1);
         state.set_top(0)?;
-        state.push_string(typ.as_str());
+        state.push_string(typ.as_str())?;
         Ok(1)
     });
 
@@ -224,7 +238,7 @@ pub(crate) fn open_base(state: &mut State) {
         } else {
             let s = state.to_string_with_meta(1)?;
             state.set_top(0)?;
-            state.push_string(s);
+            state.push_string(s)?;
         }
         Ok(1)
     });
@@ -438,7 +452,7 @@ fn raw_metafield(state: &mut State, idx: isize) -> Result<bool> {
         return Ok(false);
     }
     state.push_value(-1)?;
-    state.push_string("__metatable");
+    state.push_string("__metatable")?;
     state.get_table_raw(-2)?;
     if state.typ(-1) != LuaType::Nil {
         state.remove(-2)?;

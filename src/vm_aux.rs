@@ -109,7 +109,9 @@ mod tests {
     #[test]
     fn optional_type_preserves_non_nil_arg_error() {
         let mut state = State::new();
-        state.push_string("wrong type");
+        state
+            .push_string("wrong type")
+            .expect("short test string fits");
 
         let optional = state
             .check_optional_type(1, LuaType::Number)

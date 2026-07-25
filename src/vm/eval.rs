@@ -152,7 +152,9 @@ impl State {
 
             if let Some(mt_ptr) = metatable_ptr {
                 let call_handler = self.with_rooted_value(func_val, |state| {
-                    let call_key = state.alloc_string("__call");
+                    let call_key = state
+                        .alloc_string("__call")
+                        .expect("a fixed metamethod name is far below MAX_STRING_BYTES");
                     state
                         .heap
                         .as_table_ref(mt_ptr)
@@ -235,41 +237,59 @@ impl State {
     pub(super) fn concat_helper(&mut self, n: usize) -> Result<()> {
         let idx = self.stack.len() - n;
 
-        // First pass: type-check and compute the total byte length so we
-        // can size the buffer exactly. Numbers get a 32-byte upper bound.
+        // First pass: type-check and compute the EXACT total byte length.
+        //
+        // Numbers are rendered here rather than estimated. A fixed estimate is
+        // wrong in both directions: 32 bytes over-counts `1` and would reject a
+        // legal result - which would also change what the script costs, since
+        // the next costed operation never runs - while under-counting the likes
+        // of `1e308`, which Rust renders as 309 bytes, would let the buffer grow
+        // past the cap unchecked.
         let mut total_len = 0;
+        let mut rendered_numbers = Vec::new();
         for val in &self.stack[idx..] {
             if let Some(s) = val.as_string(&self.heap) {
-                total_len += s.len();
-            } else if val.as_num().is_some() {
-                total_len += 32;
+                total_len = super::checked_string_growth(total_len, s.len())?;
+            } else if let Some(num) = val.as_num() {
+                // Auto-convert numbers to strings (standard Lua behavior).
+                // Format integers without decimal point, floats with.
+                let rendered = if num.fract() == 0.0 && num.abs() < 1e15 {
+                    format!("{}", num as i64)
+                } else {
+                    format!("{num}")
+                };
+                total_len = super::checked_string_growth(total_len, rendered.len())?;
+                rendered_numbers.push(rendered);
             } else {
                 return Err(self.type_error(TypeError::Concat(val.typ(&self.heap))));
             }
         }
 
         let mut buffer = Vec::with_capacity(total_len);
+        let mut rendered = rendered_numbers.iter();
         for val in &self.stack[idx..] {
             if let Some(s) = val.as_string(&self.heap) {
                 buffer.extend_from_slice(s);
-            } else if let Some(num) = val.as_num() {
-                // Auto-convert numbers to strings (standard Lua behavior).
-                // Format integers without decimal point, floats with.
-                if num.fract() == 0.0 && num.abs() < 1e15 {
-                    buffer.extend_from_slice(format!("{}", num as i64).as_bytes());
-                } else {
-                    buffer.extend_from_slice(format!("{num}").as_bytes());
-                }
+            } else if val.as_num().is_some() {
+                let text = rendered
+                    .next()
+                    .expect("one rendering was produced per numeric operand above");
+                buffer.extend_from_slice(text.as_bytes());
             }
         }
 
+        // Intern before truncating, so a rejected concat leaves the operands on
+        // the stack rather than consuming them.
+        let val = self.alloc_string(&buffer)?;
         self.stack.truncate(idx);
-        let val = self.alloc_string(&buffer);
         self.stack.push(val);
         Ok(())
     }
 
     pub(super) fn eval_closure(&mut self, closure: Closure, num_args: u8) -> Result<u8> {
+        for string in &closure.bytecode.string_literals {
+            super::check_string_size(string.len())?;
+        }
         // Check call depth limit
         if self.call_depth >= MAX_CALL_DEPTH {
             return Err(Error::without_location(ErrorKind::CallDepthExceeded {

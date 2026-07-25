@@ -199,7 +199,9 @@ fn rustfn_error_with_arguments_clears_call_frame() {
     let mut state = State::new();
 
     state.push_number(10.0);
-    state.push_string("host sentinel");
+    state
+        .push_string("host sentinel")
+        .expect("short test string fits");
     let top_before = state.get_top();
 
     state.push_rust_fn(|state| {
@@ -207,12 +209,14 @@ fn rustfn_error_with_arguments_clears_call_frame() {
         assert_eq!(state.to_string(1).unwrap(), "alpha");
         assert_eq!(state.to_number(2).unwrap(), 23.0);
         assert_eq!(state.typ(3), LuaType::Boolean);
-        state.push_string("callback temporary");
+        state
+            .push_string("callback temporary")
+            .expect("short test string fits");
         Err(Error::without_location(ErrorKind::InternalError(
             "argument callback failed".to_string(),
         )))
     });
-    state.push_string("alpha");
+    state.push_string("alpha").expect("short test string fits");
     state.push_number(23.0);
     state.push_boolean(true);
 
@@ -229,7 +233,9 @@ fn lua_error_clears_frame_above_host_stack() {
     let mut state = State::new();
 
     state.push_number(7.0);
-    state.push_string("host sentinel");
+    state
+        .push_string("host sentinel")
+        .expect("short test string fits");
     let top_before = state.get_top();
 
     state
@@ -267,7 +273,9 @@ fn lua_error_clears_frame_above_host_stack() {
 fn non_callable_dynamic_call_error_clears_call_frame() {
     let mut state = State::new();
 
-    state.push_string("host sentinel");
+    state
+        .push_string("host sentinel")
+        .expect("short test string fits");
     let top_before = state.get_top();
 
     state
@@ -333,14 +341,18 @@ fn nested_dynamic_callback_error_clears_all_call_frames() {
         assert_eq!(state.to_string(6).unwrap(), "m2");
         assert_eq!(state.to_string(7).unwrap(), "a");
         assert_eq!(state.to_string(8).unwrap(), "b");
-        state.push_string("callback temporary");
+        state
+            .push_string("callback temporary")
+            .expect("short test string fits");
         Err(Error::without_location(ErrorKind::InternalError(
             "nested dynamic callback failed".to_string(),
         )))
     });
     state.set_global("fail");
 
-    state.push_string("host sentinel");
+    state
+        .push_string("host sentinel")
+        .expect("short test string fits");
     let top_before = state.get_top();
 
     state
@@ -414,14 +426,16 @@ fn rustfn_table_field_called_inside_dynamic_arg_sees_only_its_arguments() {
     let mut state = State::new();
 
     state.get_global("string");
-    state.push_string("arg_probe");
+    state
+        .push_string("arg_probe")
+        .expect("short test string fits");
     state.push_rust_fn(|state| {
         assert_eq!(state.get_top(), 3);
         assert_eq!(state.to_string(1).unwrap(), "hello");
         assert_eq!(state.to_string(2).unwrap(), "l");
         assert_eq!(state.to_string(3).unwrap(), "L");
         state.set_top(0).unwrap();
-        state.push_string("ok");
+        state.push_string("ok").expect("short test string fits");
         Ok(1)
     });
     state.set_table_raw(-3).unwrap();

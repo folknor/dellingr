@@ -181,7 +181,9 @@ fn sub_and_reverse_are_bytewise() {
 #[test]
 fn push_bytes_and_to_bytes_preserve_invalid_utf8() {
     let mut state = State::new();
-    state.push_bytes([0xff, b'a']);
+    state
+        .push_bytes([0xff, b'a'])
+        .expect("short test string fits");
 
     assert_eq!(state.to_bytes(-1).unwrap(), &[0xff, b'a']);
     assert_eq!(state.to_string(-1).unwrap(), "�a");

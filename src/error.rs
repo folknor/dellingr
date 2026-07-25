@@ -79,6 +79,13 @@ pub enum ErrorKind {
         /// Stack size that triggered the overflow.
         size: usize,
     },
+    /// A Lua string exceeded the fixed resource limit.
+    StringSizeExceeded {
+        /// Size requested by the operation.
+        size: usize,
+        /// Maximum permitted string size.
+        limit: usize,
+    },
     /// Invalid stack index passed to a host API.
     InvalidStackIndex {
         /// The bad index, as supplied by the caller.
@@ -308,6 +315,9 @@ impl fmt::Display for ErrorKind {
             }
             StackOverflow { size } => {
                 write!(f, "stack overflow ({size} values)")
+            }
+            StringSizeExceeded { size, limit } => {
+                write!(f, "string size {size} exceeds limit {limit}")
             }
             InvalidStackIndex { index } => {
                 write!(f, "internal error: invalid stack index ({index})")

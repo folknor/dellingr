@@ -49,6 +49,28 @@ use object::{GcHeap, Markable, UpvaluePool, UpvalueRef};
 use rng::VmRng;
 use table::Table;
 
+/// Maximum size in bytes of any Lua string.
+pub const MAX_STRING_BYTES: usize = 16 * 1024 * 1024;
+
+pub(crate) fn check_string_size(size: usize) -> Result<()> {
+    if size > MAX_STRING_BYTES {
+        return Err(Error::without_location(ErrorKind::StringSizeExceeded {
+            size,
+            limit: MAX_STRING_BYTES,
+        }));
+    }
+    Ok(())
+}
+
+pub(crate) fn checked_string_growth(current: usize, additional: usize) -> Result<usize> {
+    // Saturating rather than wrapping: an overflowing total is reported as
+    // usize::MAX, which is above the cap and so rejected, instead of wrapping
+    // to a small value that would pass the check.
+    let size = current.saturating_add(additional);
+    check_string_size(size)?;
+    Ok(size)
+}
+
 /// Values temporarily held outside the visible VM stack.
 pub(super) struct TransientRoots {
     values: Vec<Val>,
@@ -768,13 +790,14 @@ impl State {
 
     /// Allocates a string on the heap.
     #[hotpath::measure]
-    pub(super) fn alloc_string(&mut self, bytes: impl AsRef<[u8]>) -> Val {
+    pub(super) fn alloc_string(&mut self, bytes: impl AsRef<[u8]>) -> Result<Val> {
+        check_string_size(bytes.as_ref().len())?;
         // Check if GC is needed before allocating
         if self.heap.is_full() {
             self.gc_collect();
         }
         let ptr = self.heap.alloc_string(bytes.as_ref());
-        Val::Str(ptr)
+        Ok(Val::Str(ptr))
     }
 
     /// Construct an [`Error`] of the given kind with no source position.

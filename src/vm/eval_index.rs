@@ -346,7 +346,9 @@ impl State {
     pub(super) fn protected_index_key(&mut self, receiver: Val, key: Val) -> Val {
         self.stack.push(receiver);
         self.stack.push(key);
-        let index_key = self.alloc_string("__index");
+        let index_key = self
+            .alloc_string("__index")
+            .expect("fixed metamethod key is below the string size limit");
         // Internal invariant, not host input: exactly the two values pushed
         // above are removed, so this uses the panicking form rather than the
         // now-fallible public `pop`.

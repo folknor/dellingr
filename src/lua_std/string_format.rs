@@ -71,13 +71,17 @@ pub(crate) fn format(state: &mut State) -> Result<u8> {
 
     while cursor < format_bytes.len() {
         if format_bytes[cursor] != b'%' {
+            crate::vm::checked_string_growth(output.len(), 1)?;
             output.push(format_bytes[cursor]);
             cursor += 1;
             continue;
         }
         if format_bytes.get(cursor + 1) == Some(&b'%') {
             let (directive, next) = parse_directive(state, &format_bytes, cursor)?;
-            output.extend_from_slice(&format_argument(state, 0, &directive)?);
+            let formatted = format_argument(state, 0, &directive)?;
+            let output_len = crate::vm::checked_string_growth(output.len(), formatted.len())?;
+            output.reserve(output_len - output.len());
+            output.extend_from_slice(&formatted);
             cursor = next;
             continue;
         }
@@ -90,12 +94,14 @@ pub(crate) fn format(state: &mut State) -> Result<u8> {
         let (directive, next) = parse_directive(state, &format_bytes, cursor)?;
         validate_directive(state, &directive)?;
         let formatted = format_argument(state, argument, &directive)?;
+        let output_len = crate::vm::checked_string_growth(output.len(), formatted.len())?;
+        output.reserve(output_len - output.len());
         output.extend_from_slice(&formatted);
         cursor = next;
     }
 
     state.set_top(0)?;
-    state.push_bytes(output);
+    state.push_bytes(output)?;
     Ok(1)
 }
 
@@ -740,7 +746,7 @@ fn pad_bytes(bytes: &[u8], width: Option<u8>, left: bool) -> Vec<u8> {
 
 fn quote_argument(state: &State, idx: isize, argument: usize) -> Result<Vec<u8>> {
     match state.typ(idx) {
-        LuaType::String => Ok(quote_string(state.to_bytes(idx)?)),
+        LuaType::String => quote_string(state.to_bytes(idx)?),
         LuaType::Number => {
             let number = state.to_number(idx)?;
             let output = if number.is_nan() {
@@ -772,31 +778,43 @@ fn quote_argument(state: &State, idx: isize, argument: usize) -> Result<Vec<u8>>
     }
 }
 
-fn quote_string(bytes: &[u8]) -> Vec<u8> {
-    let mut output = Vec::with_capacity(bytes.len() + 2);
+fn quote_string(bytes: &[u8]) -> Result<Vec<u8>> {
+    let capacity = crate::vm::checked_string_growth(bytes.len(), 2)?;
+    let mut output = Vec::with_capacity(capacity);
     output.push(b'"');
     for (index, byte) in bytes.iter().copied().enumerate() {
         match byte {
             b'"' | b'\\' => {
+                crate::vm::checked_string_growth(output.len(), 2)?;
                 output.push(b'\\');
                 output.push(byte);
             }
             b'\n' => {
+                crate::vm::checked_string_growth(output.len(), 2)?;
                 output.push(b'\\');
                 output.push(b'\n');
             }
             0..=31 | 127 => {
-                output.push(b'\\');
                 let next_is_digit = bytes.get(index + 1).is_some_and(u8::is_ascii_digit);
                 if next_is_digit {
-                    output.extend_from_slice(format!("{byte:03}").as_bytes());
+                    let escaped = format!("{byte:03}");
+                    crate::vm::checked_string_growth(output.len(), escaped.len() + 1)?;
+                    output.push(b'\\');
+                    output.extend_from_slice(escaped.as_bytes());
                 } else {
-                    output.extend_from_slice(byte.to_string().as_bytes());
+                    let escaped = byte.to_string();
+                    crate::vm::checked_string_growth(output.len(), escaped.len() + 1)?;
+                    output.push(b'\\');
+                    output.extend_from_slice(escaped.as_bytes());
                 }
             }
-            _ => output.push(byte),
+            _ => {
+                crate::vm::checked_string_growth(output.len(), 1)?;
+                output.push(byte);
+            }
         }
     }
+    crate::vm::checked_string_growth(output.len(), 1)?;
     output.push(b'"');
-    output
+    Ok(output)
 }
