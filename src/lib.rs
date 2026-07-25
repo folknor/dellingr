@@ -34,6 +34,7 @@ mod vm_aux;
 /// Error types returned by the VM and parser. Surfaced through [`Result`].
 pub mod error;
 
+pub use cost_meter::COST_MODEL_VERSION;
 pub use host::{DefaultCallbacks, HostCallbacks};
 pub use instr::{ArgCount, RetCount};
 pub use vm::Anchor;
@@ -316,6 +317,9 @@ impl std::fmt::Display for CostAnalysis {
 ///
 /// Returns a `CostAnalysis` with per-scope cost breakdown.
 /// The actual runtime cost depends on control flow and loop iterations.
+/// This accounts only for static bytecode. It excludes data-dependent native
+/// work in the string, pattern, and table libraries, so it is neither a runtime
+/// lower nor upper bound, and it is not a native-cost estimate.
 ///
 /// For repeated analysis of the same source, prefer `Engine::compile` followed
 /// by `Engine::analyze_cost(&program)` so the parse is paid once.
@@ -351,6 +355,22 @@ mod tests {
         let fixed = analyze_cost("return {1, 2}").expect("fixed table constructor should parse");
         assert_eq!(fixed.root.own_cost, 3);
         assert_eq!(fixed.root.array_elements, 2);
+    }
+
+    #[test]
+    fn static_analysis_excludes_data_dependent_native_work() {
+        let analysis =
+            analyze_cost("return string.upper('abcd')").expect("string.upper program should parse");
+        assert_eq!(analysis.root.total_cost, 0);
+
+        let mut state = State::new();
+        state
+            .load_string("return string.upper('abcd')")
+            .expect("string.upper program should load");
+        state
+            .call(ArgCount::Fixed(0), RetCount::Fixed(1))
+            .expect("string.upper program should run");
+        assert_eq!(state.cost_used(), 4);
     }
 }
 

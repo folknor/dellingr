@@ -47,6 +47,7 @@ use super::lua_val::RustFunc;
 use super::object::{GcHeap, RawObject, Upvalue, UpvalueRef};
 use super::rng::VmRng;
 use super::{ObjectPtr, State, Val};
+use crate::COST_MODEL_VERSION;
 use crate::compiler::{Bytecode, UpvalueDesc};
 use crate::host::HostCallbacks;
 use crate::instr::Instr;
@@ -54,7 +55,7 @@ use crate::instr::Instr;
 mod verify;
 
 const MAGIC: [u8; 4] = *b"DLGS";
-const FORMAT_VERSION: u16 = 5;
+const FORMAT_VERSION: u16 = 6;
 
 /// Bytes produced by [`State::save_state`] plus non-fatal save diagnostics.
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -100,6 +101,8 @@ pub enum LoadError {
     BadMagic,
     /// Save format version is not supported by this build.
     UnsupportedVersion,
+    /// Save cost model version is not supported by this build.
+    UnsupportedCostModelVersion,
     /// A saved function id was not registered by the load-time environment.
     UnknownFunction(String),
     /// A saved environment-object token was not present at load time.
@@ -152,6 +155,9 @@ impl fmt::Display for LoadError {
         match self {
             LoadError::BadMagic => write!(f, "bad save magic"),
             LoadError::UnsupportedVersion => write!(f, "unsupported save format version"),
+            LoadError::UnsupportedCostModelVersion => {
+                write!(f, "unsupported save cost model version")
+            }
             LoadError::UnknownFunction(id) => write!(f, "unknown saved function id {id}"),
             LoadError::UnknownEnvObject(id) => write!(f, "unknown saved environment object {id}"),
             LoadError::DecodeError(err) => write!(f, "save decode error: {err}"),
@@ -922,11 +928,11 @@ impl State {
         self.validate_quiescent()?;
         let payload = SaveBuilder::new(self).finish()?;
         let mut encoder = Encoder::new();
-        encoder.write_magic_and_version();
-        // Diagnostic metadata only. FORMAT_VERSION (in the magic block) is the
-        // hard compatibility gate; this human-readable crate version records
-        // which build produced the snapshot for debugging and is intentionally
-        // not compared on load (L10).
+        encoder.write_magic_and_versions();
+        // Diagnostic metadata only. The format and cost-model versions in the
+        // magic block are the hard compatibility gates; this human-readable
+        // crate version records which build produced the snapshot for debugging
+        // and is intentionally not compared on load (L10).
         encoder.write_bytes(env!("CARGO_PKG_VERSION").as_bytes())?;
         payload.encode(&mut encoder)?;
         Ok(SaveState {
@@ -947,11 +953,11 @@ impl State {
         setup: impl FnOnce(&mut State),
     ) -> Result<State, LoadError> {
         let mut decoder = Decoder::new(bytes);
-        decoder.read_magic_and_version()?;
+        decoder.read_magic_and_versions()?;
         // Read and discard the diagnostic crate-version string. Compatibility is
-        // enforced solely by FORMAT_VERSION in read_magic_and_version above; this
-        // string is metadata, not a compat gate, so it is deliberately not
-        // compared (L10).
+        // enforced by the format and cost-model versions in
+        // read_magic_and_versions above; this string is metadata, not a compat
+        // gate, so it is deliberately not compared (L10).
         let _engine_version = decoder.read_bytes()?;
         let payload = verify::verify_payload(SavePayload::decode(&mut decoder)?)?;
         decoder.finish()?;
@@ -1333,9 +1339,10 @@ impl Encoder {
         self.bytes
     }
 
-    fn write_magic_and_version(&mut self) {
+    fn write_magic_and_versions(&mut self) {
         self.bytes.extend_from_slice(&MAGIC);
         self.write_u16(FORMAT_VERSION);
+        self.write_u16(COST_MODEL_VERSION);
     }
 
     fn write_u8(&mut self, n: u8) {
@@ -1415,13 +1422,16 @@ impl<'a> Decoder<'a> {
         self.bytes.len().saturating_sub(self.pos)
     }
 
-    fn read_magic_and_version(&mut self) -> Result<(), LoadError> {
+    fn read_magic_and_versions(&mut self) -> Result<(), LoadError> {
         let magic = self.read_exact(4)?;
         if magic != MAGIC {
             return Err(LoadError::BadMagic);
         }
         if self.read_u16()? != FORMAT_VERSION {
             return Err(LoadError::UnsupportedVersion);
+        }
+        if self.read_u16()? != COST_MODEL_VERSION {
+            return Err(LoadError::UnsupportedCostModelVersion);
         }
         Ok(())
     }
@@ -1889,7 +1899,7 @@ mod tests {
             format_pointer_ids: Vec::new(),
         };
         let mut encoder = Encoder::new();
-        encoder.write_magic_and_version();
+        encoder.write_magic_and_versions();
         encoder
             .write_bytes(env!("CARGO_PKG_VERSION").as_bytes())
             .map_err(|error| LoadError::DecodeError(error.to_string()))?;

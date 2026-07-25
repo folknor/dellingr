@@ -40,17 +40,26 @@ use super::error::StackFrame;
 use super::error::TypeError;
 use super::host::{DefaultCallbacks, HostCallbacks};
 use super::instr::{ArgCount, Builtin, RetCount};
+use super::patterns::LuaPattern;
 
 use anchor::Registry;
 
 pub(super) use lua_val::Val;
 pub(super) use object::ObjectPtr;
-use object::{GcHeap, Markable, UpvaluePool, UpvalueRef};
+use object::{GcHeap, Markable, StringPtr, UpvaluePool, UpvalueRef};
 use rng::VmRng;
 use table::Table;
 
 /// Maximum size in bytes of any Lua string.
 pub const MAX_STRING_BYTES: usize = 16 * 1024 * 1024;
+
+const GMATCH_PATTERN_CACHE_ENTRIES: usize = 256;
+const GMATCH_PATTERN_CACHE_BYTES: usize = MAX_STRING_BYTES;
+
+struct GmatchPatternEntry {
+    pattern: std::result::Result<LuaPattern, crate::patterns::PatternError>,
+    byte_len: usize,
+}
 
 pub(crate) fn check_string_size(size: usize) -> Result<()> {
     if size > MAX_STRING_BYTES {
@@ -195,6 +204,16 @@ pub struct State {
     pub(super) cost_budget_configured: bool,
     /// Total cost consumed (for reporting).
     pub(super) cost_used: u64,
+    /// Compiled patterns retained for active `string.gmatch` iterators.
+    ///
+    /// Keys are interned string pointers, so cache lookup does not compare
+    /// pattern bytes. Insertion order makes eviction deterministic.
+    /// It is an implementation cache only: iterator state remains entirely in
+    /// Lua values and a snapshot simply rebuilds entries on later iteration.
+    gmatch_patterns: IndexMap<StringPtr, GmatchPatternEntry>,
+    gmatch_pattern_bytes: usize,
+    #[cfg(debug_assertions)]
+    gmatch_pattern_compilations: u64,
     /// Current metamethod call depth (for __index/__newindex chains).
     /// Prevents stack overflow from circular metamethod references.
     pub(super) metamethod_depth: u32,
@@ -361,6 +380,10 @@ impl State {
             cost_budget: i64::MAX,
             cost_budget_configured: false,
             cost_used: 0,
+            gmatch_patterns: IndexMap::new(),
+            gmatch_pattern_bytes: 0,
+            #[cfg(debug_assertions)]
+            gmatch_pattern_compilations: 0,
             metamethod_depth: 0,
             call_depth: 0,
             call_stack: Vec::with_capacity(64), // Pre-size for call stack
@@ -413,6 +436,13 @@ impl State {
         self.cost_remaining
     }
 
+    /// Test instrumentation for the gmatch compilation cache.
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn gmatch_pattern_compilations(&self) -> u64 {
+        self.gmatch_pattern_compilations
+    }
+
     /// Consume cost from the budget. Returns an error if budget is exhausted
     /// and cost > 0. The action that pushes you over budget completes before
     /// stopping (checked at the START of each operation).
@@ -438,6 +468,129 @@ impl State {
         } else {
             CostMeter::count_only(&mut self.cost_used)
         }
+    }
+
+    /// Compile and retain a `string.gmatch` pattern on its first iteration.
+    ///
+    /// Calling this from the iterator rather than its constructor preserves
+    /// gmatch's deferred pattern-validation behaviour.
+    pub(crate) fn memoize_gmatch_pattern(&mut self, idx: isize) -> Result<()> {
+        let idx = self.convert_idx(idx)?;
+        let val = &self.stack[idx];
+        let ptr = val.as_string_ptr().ok_or_else(|| {
+            Error::without_location(ErrorKind::ArgError(crate::error::ArgError {
+                arg_number: idx as isize + 1,
+                func_name: None,
+                expected: Some(LuaType::String),
+                received: Some(val.typ(&self.heap)),
+            }))
+        })?;
+        if let Some(cached) = self.gmatch_patterns.get(&ptr) {
+            return cached
+                .pattern
+                .as_ref()
+                .map(|_| ())
+                .map_err(|err| self.error(ErrorKind::RuntimeError(err.to_string())));
+        }
+        let pattern_len = val
+            .as_string(&self.heap)
+            .expect("string pointer came from a string value")
+            .len();
+        self.consume_cost(pattern_len.max(1) as u64)?;
+        #[cfg(debug_assertions)]
+        {
+            self.gmatch_pattern_compilations = self.gmatch_pattern_compilations.saturating_add(1);
+        }
+        let compiled = LuaPattern::from_bytes_try(
+            self.stack[idx]
+                .as_string(&self.heap)
+                .expect("string pointer came from a string value"),
+        );
+        let error = compiled.as_ref().err().cloned();
+        while self.gmatch_patterns.len() >= GMATCH_PATTERN_CACHE_ENTRIES
+            || self.gmatch_pattern_bytes.saturating_add(pattern_len) > GMATCH_PATTERN_CACHE_BYTES
+        {
+            let (_, evicted) = self
+                .gmatch_patterns
+                .shift_remove_index(0)
+                .expect("a nonempty gmatch cache has an oldest entry");
+            self.gmatch_pattern_bytes = self.gmatch_pattern_bytes.saturating_sub(evicted.byte_len);
+        }
+        self.gmatch_pattern_bytes = self.gmatch_pattern_bytes.saturating_add(pattern_len);
+        self.gmatch_patterns.insert(
+            ptr,
+            GmatchPatternEntry {
+                pattern: compiled,
+                byte_len: pattern_len,
+            },
+        );
+        error.map_or(Ok(()), |err| {
+            Err(self.error(ErrorKind::RuntimeError(err.to_string())))
+        })
+    }
+
+    /// Returns a gmatch subject borrow, its cached matcher, and a cost meter.
+    ///
+    /// These values come from disjoint `State` fields. Keeping the split here
+    /// lets the iterator match directly against the stack-resident subject.
+    pub(crate) fn gmatch_subject_matcher_and_cost_meter(
+        &mut self,
+        subject_idx: isize,
+        pattern_idx: isize,
+    ) -> Result<(&[u8], &mut LuaPattern, CostMeter<'_>)> {
+        let subject_idx = self.convert_idx(subject_idx)?;
+        let pattern_idx = self.convert_idx(pattern_idx)?;
+        let State {
+            stack,
+            heap,
+            cost_budget_configured,
+            cost_remaining,
+            cost_used,
+            gmatch_patterns,
+            ..
+        } = self;
+        let subject_val = &stack[subject_idx];
+        let subject = subject_val.as_string(heap).ok_or_else(|| {
+            Error::without_location(ErrorKind::ArgError(crate::error::ArgError {
+                arg_number: subject_idx as isize + 1,
+                func_name: None,
+                expected: Some(LuaType::String),
+                received: Some(subject_val.typ(heap)),
+            }))
+        })?;
+        let pattern_val = &stack[pattern_idx];
+        let pattern_ptr = pattern_val.as_string_ptr().ok_or_else(|| {
+            Error::without_location(ErrorKind::ArgError(crate::error::ArgError {
+                arg_number: pattern_idx as isize + 1,
+                func_name: None,
+                expected: Some(LuaType::String),
+                received: Some(pattern_val.typ(heap)),
+            }))
+        })?;
+        // Both of these are caller-ordering invariants rather than script-
+        // reachable states: the iterator memoizes before matching, and a cached
+        // compilation failure is surfaced before we get here. They are still
+        // reported rather than asserted, so a future caller that gets the order
+        // wrong sees an error instead of a panic in a host callback.
+        let entry = gmatch_patterns.get_mut(&pattern_ptr).ok_or_else(|| {
+            Error::without_location(ErrorKind::InternalError(
+                "gmatch pattern was not memoized before matching".into(),
+            ))
+        })?;
+        let matcher = match entry.pattern.as_mut() {
+            Ok(matcher) => matcher,
+            Err(_) => {
+                return Err(Error::without_location(ErrorKind::InternalError(
+                    "a failed gmatch compilation must be reported before matching".into(),
+                )));
+            }
+        };
+        let meter = if *cost_budget_configured {
+            CostMeter::finite_budget(cost_remaining, cost_used)
+        } else {
+            CostMeter::count_only(cost_used)
+        };
+        Ok((subject, matcher, meter))
     }
 
     pub(crate) fn budget_exceeded_error(&self) -> Error {
@@ -566,6 +719,8 @@ impl State {
     /// This marks all reachable objects and frees unreachable ones.
     #[hotpath::measure]
     pub fn gc_collect(&mut self) {
+        self.gmatch_patterns.clear();
+        self.gmatch_pattern_bytes = 0;
         // Mark all roots
         let mut worklist = self.heap.take_mark_worklist();
         mark_gc_roots(self, &mut worklist);

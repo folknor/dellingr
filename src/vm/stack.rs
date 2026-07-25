@@ -120,6 +120,38 @@ impl State {
         Ok(())
     }
 
+    /// Copies a byte range from a string already on the stack into a new Lua
+    /// string. The source stack value remains rooted if allocation collects.
+    pub(crate) fn push_bytes_from_stack_range(
+        &mut self,
+        idx: isize,
+        range: std::ops::Range<usize>,
+    ) -> Result<()> {
+        let i = self.convert_idx(idx)?;
+        let val = self.stack[i];
+        let bytes = val.as_string(&self.heap).ok_or_else(|| {
+            Error::without_location(ErrorKind::ArgError(crate::error::ArgError {
+                arg_number: idx,
+                func_name: None,
+                expected: Some(super::LuaType::String),
+                received: Some(val.typ(&self.heap)),
+            }))
+        })?;
+        // The copy is not redundant: `bytes` borrows `self.heap`, and pushing
+        // needs `&mut self`. Copying out first ends the borrow, and it also
+        // keeps the source rooted on the stack if the allocation collects.
+        let mut copied = Vec::new();
+        match bytes.get(range) {
+            Some(slice) => copied.extend_from_slice(slice),
+            None => {
+                return Err(Error::without_location(ErrorKind::InternalError(
+                    "capture range outside the source string".into(),
+                )));
+            }
+        }
+        self.push_bytes(copied)
+    }
+
     /// Pushes a Rust function onto the stack.
     pub fn push_rust_fn(&mut self, f: RustFunc) -> Result<()> {
         self.check_stack_slot()?;

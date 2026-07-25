@@ -65,6 +65,10 @@ This is a bound on the value stack, **not** a total host-memory quota. It stops 
 
 There's a few gotchas with the current instruction-cost accounting. For example, `while true do end` is free, which means that a users Lua script could run forever. This is a known trade-off made in the full light of day - the main consumer of dellingr does not want to penalise the user (that is, subtract from their per-gametick budget) for structural semantics. Users should be encouraged to write more code, not less.
 
+Data-dependent native work in the string, pattern, and table libraries is charged: bytes examined or emitted, table elements visited, and matcher primitives each consume budget. Structural semantics remain free by design. A helper extraction, an intermediate name, or another legible refactor should not make a script more expensive, because the budget is a game-design instrument rather than a CPU meter.
+
+This cost model changed in 0.4.0. Embedders must re-measure their tick budgets: the increase depends on string lengths, output expansion, pattern matches and backtracking, and table contents.
+
 ## Compatibility divergences
 
 Numeric `for` loops with a zero step skip their body in both directions. Lua 5.2 skips an ascending range but loops forever for a descending one; Lua 5.4 raises an error. dellingr deliberately skips the loop to avoid the unbounded execution case.
@@ -118,7 +122,7 @@ toolchain check.
 
 ```toml
 [dependencies]
-dellingr = "0.3"
+dellingr = "0.4"
 ```
 
 ## Library usage/VM
@@ -139,7 +143,8 @@ dellingr = "0.3"
   estimate for a script: sums each costed opcode once across the main
   chunk and every nested function body (counted once each, whether or not
   invoked; loops/branches counted once), so it is neither a runtime lower
-  nor upper bound.
+  nor upper bound. It excludes data-dependent native string, pattern, and
+  table work, so it is not a native-cost estimate.
 - Per-state user-data (`Send + 'static`) for hanging embedder context off
   the VM.
 

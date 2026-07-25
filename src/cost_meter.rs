@@ -1,5 +1,11 @@
 //! Runtime cost accounting independent of VM state.
 
+/// Version of the runtime cost model used by persisted state.
+///
+/// Version 1 was the original implicit model. Version 2 charges native string
+/// and pattern work in addition to bytecode instructions.
+pub const COST_MODEL_VERSION: u16 = 2;
+
 /// Tracks costs either without a budget or against a finite budget.
 ///
 /// The meter deliberately borrows only counters. This keeps data-dependent

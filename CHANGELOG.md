@@ -6,6 +6,32 @@ All notable changes to dellingr are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-25
+
+### Changed (breaking)
+
+- The cost model now charges data-dependent native work in the string, pattern,
+  and `table.concat` libraries. This work was previously entirely uncharged.
+  There is no conversion formula: the increase depends on string lengths,
+  output expansion, match success, captures, and backtracking shape. Every
+  embedder must re-measure its tick budgets.
+- Snapshots now use format version 6 and persist `COST_MODEL_VERSION` alongside
+  the format version. Old snapshots are rejected rather than being loaded with
+  counters from a different cost model.
+- `COST_MODEL_VERSION` is exported so hosts can identify the runtime accounting
+  model independently of the crate version.
+
+### Fixed
+
+- `string.len` and `string.sub` no longer clone their whole input. `gmatch` no
+  longer recopies its subject or recompiles its pattern on every iteration, so
+  a full scan is linear in its subject rather than quadratic. Measured on
+  `examples/strings/patterns.lua`: 160ms to 65ms, a 2.4x improvement that more
+  than absorbs the new per-primitive charging.
+- Compiled `gmatch` patterns are cached with a bound on both entry count and
+  total cached bytes, and the cache is cleared on collection. Without the bound
+  a script using many distinct patterns grew host memory without limit.
+
 ### Added
 
 - Optional `snapshot` feature: `State::save_state()` / `State::load_state()`
@@ -23,7 +49,7 @@ All notable changes to dellingr are documented here. The format follows
   referenced by token, so old saves see the current stdlib. A save records
   whether the source had the standard environment, so a snapshot of
   `State::empty()` round-trips as empty rather than merging in the stdlib on
-  load (`FORMAT_VERSION` is 5). Dynamic-call and table-constructor base stacks
+  load (`FORMAT_VERSION` is 6). Dynamic-call and table-constructor base stacks
   unwind on a frame error, keeping the State quiescent so a host that catches
   an error can still snapshot or reuse it.
 - The lexer accepts Lua 5.2 hex-float literals (`0x1.8p+0`, `0x.8`, `0x1p-2`),

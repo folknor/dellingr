@@ -64,6 +64,7 @@ pub(crate) fn format(state: &mut State) -> Result<u8> {
             ));
         }
     };
+    charge_cost(state, format_bytes.len().max(1) as u64)?;
     let argument_count = state.get_top();
     let mut output = Vec::new();
     let mut argument = 1usize;
@@ -71,17 +72,14 @@ pub(crate) fn format(state: &mut State) -> Result<u8> {
 
     while cursor < format_bytes.len() {
         if format_bytes[cursor] != b'%' {
-            crate::vm::checked_string_growth(output.len(), 1)?;
-            output.push(format_bytes[cursor]);
+            append_output(state, &mut output, &format_bytes[cursor..=cursor])?;
             cursor += 1;
             continue;
         }
         if format_bytes.get(cursor + 1) == Some(&b'%') {
             let (directive, next) = parse_directive(state, &format_bytes, cursor)?;
             let formatted = format_argument(state, 0, &directive)?;
-            let output_len = crate::vm::checked_string_growth(output.len(), formatted.len())?;
-            output.reserve(output_len - output.len());
-            output.extend_from_slice(&formatted);
+            append_output(state, &mut output, &formatted)?;
             cursor = next;
             continue;
         }
@@ -94,15 +92,29 @@ pub(crate) fn format(state: &mut State) -> Result<u8> {
         let (directive, next) = parse_directive(state, &format_bytes, cursor)?;
         validate_directive(state, &directive)?;
         let formatted = format_argument(state, argument, &directive)?;
-        let output_len = crate::vm::checked_string_growth(output.len(), formatted.len())?;
-        output.reserve(output_len - output.len());
-        output.extend_from_slice(&formatted);
+        append_output(state, &mut output, &formatted)?;
         cursor = next;
     }
 
     state.set_top(0)?;
     state.push_bytes(output)?;
     Ok(1)
+}
+
+fn charge_cost(state: &mut State, cost: u64) -> Result<()> {
+    if state.cost_meter().consume(cost) {
+        Ok(())
+    } else {
+        Err(state.budget_exceeded_error())
+    }
+}
+
+fn append_output(state: &mut State, output: &mut Vec<u8>, bytes: &[u8]) -> Result<()> {
+    let next = crate::vm::checked_string_growth(output.len(), bytes.len())?;
+    charge_cost(state, bytes.len() as u64)?;
+    output.reserve(next - output.len());
+    output.extend_from_slice(bytes);
+    Ok(())
 }
 
 fn parse_directive(state: &State, bytes: &[u8], start: usize) -> Result<(Directive, usize)> {
@@ -342,6 +354,7 @@ fn format_argument(state: &mut State, argument: usize, directive: &Directive) ->
             } else {
                 state.bytes_with_tostring_meta(idx)?
             };
+            charge_cost(state, bytes.len() as u64)?;
             if directive.has_modifiers && bytes.contains(&0) {
                 return Err(format_arg_error(state, argument, "string contains zeros"));
             }
@@ -363,16 +376,20 @@ fn format_argument(state: &mut State, argument: usize, directive: &Directive) ->
     }
 }
 
-fn number_argument(state: &State, idx: isize, argument: usize) -> Result<f64> {
+fn number_argument(state: &mut State, idx: isize, argument: usize) -> Result<f64> {
     match state.typ(idx) {
         LuaType::Number => state.to_number(idx),
-        LuaType::String => parse_lua_numeral(state.to_bytes(idx)?).ok_or_else(|| {
-            format_arg_error(
-                state,
-                argument,
-                &format!("number expected, got {}", state.typ(idx).as_str()),
-            )
-        }),
+        LuaType::String => {
+            let bytes = state.to_bytes(idx)?.to_vec();
+            charge_cost(state, bytes.len() as u64)?;
+            parse_lua_numeral(&bytes).ok_or_else(|| {
+                format_arg_error(
+                    state,
+                    argument,
+                    &format!("number expected, got {}", state.typ(idx).as_str()),
+                )
+            })
+        }
         received => Err(format_arg_error(
             state,
             argument,
@@ -381,7 +398,7 @@ fn number_argument(state: &State, idx: isize, argument: usize) -> Result<f64> {
     }
 }
 
-fn integer_argument(state: &State, idx: isize, argument: usize) -> Result<i64> {
+fn integer_argument(state: &mut State, idx: isize, argument: usize) -> Result<i64> {
     let number = number_argument(state, idx, argument)?;
     exact_i64(number)
         .ok_or_else(|| format_arg_error(state, argument, "number has no integer representation"))
@@ -744,9 +761,13 @@ fn pad_bytes(bytes: &[u8], width: Option<u8>, left: bool) -> Vec<u8> {
     output
 }
 
-fn quote_argument(state: &State, idx: isize, argument: usize) -> Result<Vec<u8>> {
+fn quote_argument(state: &mut State, idx: isize, argument: usize) -> Result<Vec<u8>> {
     match state.typ(idx) {
-        LuaType::String => quote_string(state.to_bytes(idx)?),
+        LuaType::String => {
+            let bytes = state.to_bytes(idx)?.to_vec();
+            charge_cost(state, bytes.len() as u64)?;
+            quote_string(&bytes)
+        }
         LuaType::Number => {
             let number = state.to_number(idx)?;
             let output = if number.is_nan() {

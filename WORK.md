@@ -4,262 +4,297 @@ Current work item. Numbers refer to finding numbers in `notes/bugs.md`.
 
 ---
 
-## Target #62: public push methods do not enforce `MAX_STACK_SIZE`
+## Target #16: pattern matching, string byte-work and `table.concat` are uncharged
 
-The last non-deferred finding.
+A deliberate **breaking cost-model change**. The crate is far from 1.0 and the
+decision to take the break is made. Ships as 0.4.0.
 
-`MAX_STACK_SIZE = 1_000_000` is described as a global limit, but the public
-push methods append directly with no `check_stack_space`
-(`src/vm/stack.rs:87-118`):
+### Verified, by execution, not reading
 
-| method | fallible today | checks the cap |
-|---|---|---|
-| `push_nil` | no | no |
-| `push_number` | no | no |
-| `push_boolean` | no | no |
-| `push_rust_fn` | no | no |
-| `push_string` | yes (string size) | no |
-| `push_bytes` | yes (string size) | no |
-| `push_value` | yes (index) | no |
-| `push_named_rust_fn` | yes (registration) | no |
+- 200 `gsub` passes over a 131,072-byte string: `Cost used: 0`.
+- `"a*a*a*a*b"` against 30 non-matching `a` bytes: `Cost used: 0`.
+- `table.concat` over 10,000 ten-byte elements: total 10,002 - table creation 1,
+  10,000 table writes, and exactly **1** for the concat itself.
 
-So a host `RustFunc` pushing in a loop never meets the cap. `check_stack_space`
-is applied mainly when preparing Lua frames (`src/vm/eval.rs:363`).
-
-Loop 17 closed the bulk-allocation half of this in `set_top`, which could
-allocate a million values in a single call. This is the slower drip through the
-same gap.
-
-### The scope question this loop has to answer first
-
-The finding itself notes this is "a documentation-versus-code mismatch as much
-as a defect": it needs host code rather than script code, and a host that wants
-to exhaust memory has easier routes.
-
-Two honest resolutions, and they are different work:
-
-1. **Make the cap real.** The four infallible pushes become fallible. That is a
-   public API break and roughly **114 internal call sites** in `src/` alone,
-   plus tests and examples. `push_bytes`/`push_string` are already fallible
-   after the string-cap work, so part of the cost is paid.
-2. **Make the documentation true.** State precisely that `MAX_STACK_SIZE`
-   bounds VM-driven growth - Lua frames, `set_top` - and that host pushes are
-   the host's responsibility, the same way the crate already says a State
-   unwound through by a panic must be discarded.
-
-**Do not simply do (1) because it is more work, or (2) because it is less.**
-Decide which is true of the design, then execute it fully.
-
-### Constraints
-
-- Determinism unaffected; charge nothing new (#16).
-- If (1): a rejected push must leave the stack unchanged, and `push_nil` is on
-  hot paths, so the check must be a predictable branch, not a recomputation.
-- If (2): the README, the `MAX_STACK_SIZE` doc comment and `AGENTS.md` must all
-  agree, and `#62` should be deleted as "working as designed", not left open.
-- `unwrap_used` denied outside `#[cfg(test)]`; clippy denies warnings.
+There is no `consume_cost` or `cost_meter` call anywhere in
+`src/lua_std/string.rs`, `src/lua_std/string_format.rs` or `src/patterns/`.
 
 ---
 
-## Implementation status: steps 1-7 complete, deep review applied
+## THE GOVERNING PRINCIPLE - read this before writing any charge point
 
-The gate is green with **no lint suppression**. #62 has been deleted from
-`notes/bugs.md`. What remains is the commit.
+The budget is a game-design instrument, not a CPU meter. Its consumer subtracts
+from a per-gametick allowance for scripts written by players, including
+children. The README's Budget section states the intent: do not penalise
+structural semantics, because users should be encouraged to write *more* code,
+not less.
 
-- **Steps 1-2.** `src/vm/stack.rs` has `check_stack_slot` (single slot),
-  `check_stack_space(n)` (aggregate) and `push_unchecked` (legal only after a
-  preflight or when replacing popped values). All eight public push methods
-  enforce the cap; `push_nil`/`push_number`/`push_boolean`/`push_rust_fn` now
-  return `Result`. `push_named_rust_fn` checks capacity *before* registering.
-  `balance_stack` is fallible and preflights.
-- **Step 3.** `new_table`, `get_global`, `push_chunk` and `open_libs` are
-  fallible; all 145 call sites migrated across `src/`, `tests/` and `examples/`.
-- **Step 4.** Every growth path in `src/` classified. The only bare
-  `self.stack.push` left is the body of `push_unchecked`. Net-positive sites are
-  preflighted: `__index`/`__newindex` dispatch (3 and 4 slots), `__len` (2),
-  `__tostring` (2), `table_sort_less` (3), `table_next` (2), the cached-global
-  and string-method paths (1). `instr_get_local`, `instr_get_upvalue` and
-  `instr_get_builtin` are fallible, since those are the per-instruction operand
-  pushes where a script-driven overrun actually lands.
-- **Step 5.** Cap failures in `State::call` (both padding points), generic-for
-  callback normalization, and the `__index`/`__newindex` table branches restore
-  `stack_bottom`, truncate the frame, and drop internal temporaries.
-- **Step 6.** Nine boundary tests at the end of `src/vm/tests.rs`.
-- **Step 7.** README "Runtime limits", the AGENTS.md invariant note, the
-  `MAX_STACK_SIZE` doc comment, and a CHANGELOG entry for the API break.
+The operative consequence, which governs every decision below:
 
-### Findings from the deep review, all fixed
+> **Never bill a script for our implementation artifacts.**
+> Cost is what the script asked for, measured in units a player could name -
+> bytes examined, bytes produced, elements visited. Not what our code happened
+> to do to deliver it.
 
-`table_next` checked one slot but pushed two. `protected_index_key` pushed two
-protection values *before* popping, so "net-neutral" did not apply to it - it is
-now `Option`-returning and degrades to the checked slow path. The second result
-padding point in `State::call` propagated with `?` and left callback results on
-the host stack. `open_libs` is public and could install part of the standard
-library before failing, so it now reserves its headroom up front.
-`table_remove_at` mutated the table before reserving the result slot. The
-`__index`/`__newindex` table branches leaked their handler temporary on error.
-Plus a stale rustdoc example and the missing CHANGELOG entry.
+Two corollaries, both testable:
 
-### Known coverage gap
+1. **Refactoring-invariance.** The same work costs the same however it is
+   written. Extracting a helper, naming an intermediate, adding a guard clause,
+   or using a capture instead of a bare pattern must not change the bill.
+2. **Bill proportional work; fix superlinear artifacts.** Work proportional to
+   what the script asked for gets charged. Work that is superlinear *only*
+   because of how we store or re-derive things gets **removed, not billed**.
 
-The step-6 list included a test that a rejected `push_named_rust_fn` does not
-register its id. The code preflights before registering, so it is correct by
-construction, but non-registration is not observable through the public API and
-that item has no test behind it.
+This is why `len` and `sub` must stop cloning the whole subject, and why
+`gmatch_iter` must stop recopying the subject and recompiling the pattern on
+every iteration: a full `gmatch` scan runs O(n) iterations, so billing that
+copy would charge the single most legible way to walk words **quadratically in
+the subject**. Declining to charge it is equally unacceptable - it would leave
+an uncharged O(n^2) hole of exactly the kind this finding is about. So the
+artifact goes away.
 
-### Process note for whoever picks this up
+Legibility is never the more expensive option. If a charge point cannot satisfy
+that, it is measuring us rather than the script, and it comes out.
 
-Two single-turn `review --profile build` sessions failed on this item. The
-first silently added a crate-level `#![allow(unused_must_use)]`, which made
-`brokkr check` pass while ~82 call sites were still dropping their `Result` -
-the gate cannot see an invariant that has been switched off. The second was
-honest about stopping short. The task is not hard, it is long: it does not fit
-a single turn, so it belongs in the orchestrating conversation where the
-compiler can be consulted repeatedly.
+---
 
-## Agreed implementation plan
+## Agreed design
 
-### Decision: make the cap real (resolution 1)
+### Unit
 
-Argued from the crate's own stance, not from effort:
+One per deterministic logical work item: one table element visited, one byte
+processed or emitted, one matcher primitive. No hardware-inspired divisor -
+existing costs are already semantic (table construction is one per element,
+`table.sort` is `n`, not `n log n`). Per charged native operation,
+`cost = max(1, work)`. `string.len` is the sole zero-cost exception.
 
-- Lua and Rust frames explicitly **share one stack**, so a "maximum stack size"
-  naturally applies to both (`vm.rs:256-259`).
-- Host callbacks already have an error channel built for exactly this:
-  `RustFunc = fn(&mut State) -> Result<u8>` (`lua_val.rs:8`).
-- A failing callback already truncates its frame and restores `stack_bottom`,
-  leaving the State usable (`eval.rs:68`).
-- The host API deliberately turns misuse into errors *before* mutation -
-  `set_top`/`pop` (`stack.rs:25`), `set_table_raw` (`table_ops.rs:136`),
-  `set_metatable_of` (`228`) - all done in this same series.
-- Avoiding a host-process abort is already the stated reason for resource
-  limits (`README.md:50`), and `MAX_STRING_BYTES` already applies through the
-  host push API despite not being a complete memory sandbox.
+### Matcher charge points - per primitive, no batching
 
-"A malicious host can exhaust memory anyway" is not the relevant contract - the
-same argument would delete `MAX_STRING_BYTES`. The cap protects the VM's own
-invariant and catches accidental host misuse.
+Settled against the alternative of batching within provably-linear scans: once
+`singlematch` itself charges, there is nothing left to batch, and per-primitive
+charging has **zero overshoot**. Correctness of the bound beats the branch.
 
-### Scope correction: the four methods are not enough
+- One unit at the top of every `match_at` loop iteration, before
+  `items.get(item)` (`luapat.rs:460`, where the reserved-for-cost comment sits).
+- One unit at the start of every `singlematch`, including out-of-range attempts.
+- One unit per subject byte inspected by `match_balance`, including the opening
+  test.
+- One unit per byte compared by a backreference - replace the slice equality at
+  `luapat.rs:521` with an explicit charged loop.
+- One unit per comparison in literal search (`find_subslice`).
 
-Changing only `push_nil`/`push_number`/`push_boolean`/`push_rust_fn` would
-**not** make the cap global. `new_table` (`table_ops.rs:14`), `get_global`
-(`vm.rs:612`), anchors (`anchor.rs:197`) and many VM paths grow the same
-vector. Each needs either enforcement or an explicit proof that its growth was
-already preflighted.
+Charging only recursive entries is insufficient: long literal runs and every
+depth-free continuation do unbounded work inside one invocation. Charging only
+`singlematch` is insufficient: zero-width captures, frontiers, anchors, `%b`
+and backreferences do work without it.
 
-### Blast radius, assessed
+**The bound holds.** Every unbounded matcher loop either consumes directly or
+re-enters `match_at`, which consumes before continuing. With remaining budget
+`B`, at most `B` further primitives complete. `max_expand` cannot hide
+combinatorial work because every backtracking candidate re-enters a charged
+`match_at`.
 
-90 real call sites in `src/` for the four methods (not the 114 a naive grep
-suggests):
+**Captures must not pay for recursion.** `CaptureStart`/`CaptureEnd`/
+`PositionCapture` recurse where a bare pattern iterates. They are charged the
+same one unit per `match_at` entry as any other continuation, plus the bytes
+they actually materialize - never a surcharge for the recursion itself. Pin it:
+`(%a+)` and `%a+` cost the same modulo materialized capture bytes.
 
-| area | calls | work |
-|---|---:|---|
-| standard library | 74 | all already in `Result`-returning bodies; add `?` |
-| production VM core | 14 | 13 already `Result`; one needs a signature change |
-| `#[cfg(test)]` | 2 | `expect`/`?` |
+### Compilation
 
-Plus ~80 signature-migration sites in `tests/`. The genuinely hard cases:
+The matcher is **compiled** - `Compiler` interns 256-bit `ByteClass` bitsets, so
+there is no runtime pattern-byte scan for bracket classes. `pattern.len()` is
+the semantic compilation reservation, charged once per pattern the script
+supplies. It is deliberately *not* an exact count of internal compiler steps
+(the fixed 256-byte class expansion, `BTreeMap` comparisons) - those are
+artifacts.
 
-- `balance_stack` is infallible (`stack.rs:264`) and must return `Result<()>`.
-- Rust-callback result padding cannot just use `?` - failure must still restore
-  `stack_bottom` and truncate the frame (`eval.rs:73`, `102`).
-- Generic-for callback normalization has the same cleanup problem
-  (`eval_control.rs:244`).
-- Lua frame setup already preflights the whole parameter/local allocation
-  (`eval.rs:374`); keep the batch preflight rather than adding unreachable
-  mid-prologue errors.
-- `Frame::eval` contains unchecked direct pushes as well as public-method calls
-  (`frame.rs:190`, `260`), so a true cap needs that wider audit.
+### Error channel
 
-### Granularity
+```rust
+// patterns/errors.rs
+pub(crate) enum MatchError {
+    Pattern(PatternError),
+    BudgetExceeded,
+}
+impl From<PatternError> for MatchError { .. }
+```
 
-Check **every logical operation that can increase `stack.len()`**. A single
-push becomes unbounded by repetition, so there is no meaningful
-bounded/unbounded split; and validating on callback return is too late, because
-a callback can allocate indefinitely without returning.
+`PatternError` and `LuaPattern::from_bytes_try(&[u8]) -> Result<_, PatternError>`
+stay exactly as they are. The compile-time / match-time error split is contract
+and is asserted by tests. Budget exhaustion surfaces only from matching, and
+maps to `state.budget_exceeded_error()` (`ErrorKind::BudgetExceeded`), never
+flattened into the pattern `RuntimeError` path. One conversion helper in
+`string.rs`, used by all call sites.
 
-- single public push: one predictable `len >= MAX_STACK_SIZE` branch
-- known bulk growth (`set_top`, frame locals, varargs, result padding):
-  preflight once, then an internal unchecked append
-- net-neutral operations that pop before pushing: no extra branch
-- **no cost charge added**
+### Meter threading
 
-### Steps
+Per-call matcher context, **not** stored in `LuaPattern` - that would tie a
+compiled pattern to borrowed `State` counters and stop `gsub` releasing the
+borrow before re-entering Lua.
 
-1. Establish the invariant with three helpers: an inline single-slot check, an
-   aggregate `check_stack_space(n)`, and a narrowly scoped unchecked internal
-   append usable only after preflight or for net-neutral replacement.
-2. All eight public push methods enforce the cap; the four infallible ones
-   return `Result<()>`. Preflight strings before allocation and named functions
-   before registration, so a rejected push leaves no side effect.
-3. Migrate the 74 stdlib calls with `?`, then core and tests. `balance_stack`
-   becomes `Result<()>`.
-4. Audit every other growth path: make `new_table`, `get_global` and public
-   `open_libs` fallible; update `push_anchor`, `call_anchor`, `table_next`,
-   `get_metatable_of`, `table_remove_at`; preflight multi-value inserts and
-   result padding; classify every raw `stack.push`/`insert`/`extend` as
-   checked, preflighted, or net-neutral.
-5. Preserve cleanup on failure in `State::call`, generic-for callbacks,
-   metamethod dispatch and frame setup - a cap error must leave
-   `stack_bottom`, call metadata and marker stacks clean.
-6. Boundary tests: success at cap-1 and rejection at cap, every push type,
-   unchanged stack on rejection, callback overflow cleanup then State reuse,
-   named-function registration side effects, unchanged cost accounting,
-   aggregate frame/result padding.
-7. Update README, the `MAX_STACK_SIZE` comment and AGENTS.md to say the cap
-   covers the shared Lua/Rust value stack but is **not** a total host-memory
-   quota. Delete #62 once tests pass.
+```rust
+struct MatchState<'data, 'meter, 'cost> {
+    subject: &'data [u8],
+    pattern: &'data CompiledPattern,
+    meter: &'meter mut CostMeter<'cost>,
+    captures: [Capture; LUA_MAXCAPTURES],
+}
 
-### Interaction with #59
+pub(crate) fn matches_bytes_from(&mut self, subject: &[u8], init: usize,
+    meter: &mut CostMeter<'_>) -> Result<bool, MatchError>;
+pub(super) fn str_match(subject: &[u8], pattern: &CompiledPattern, init: usize,
+    out: &mut [LuaCapture; LUA_MAXMATCHES], meter: &mut CostMeter<'_>)
+    -> Result<usize, MatchError>;
+```
 
-Push-time enforcement does **not** replace the deferred saved-bytecode
-verifier. #59 is about underflow, invalid local ranges, marker stacks and CFG
-joins, which can panic without any growth. If every growth path is checked or
-preflighted, that verifier no longer needs to prove
-`height <= MAX_STACK_SIZE` for memory safety - it still must prove no
-underflow, valid ranges, balanced markers and join agreement. Host callback
-pushes are outside #59 entirely.
+`singlematch`, `match_balance`, `recurse`, `max_expand`, `min_expand`,
+`match_at` and `captures` all become fallible over `MatchError`.
 
-### Nothing existing should newly fail
+Callers reserve materialization/compilation cost *before* `from_bytes_try`,
+scope `state.cost_meter()` around only the match, drop it, then translate.
 
-No current behaviour approaches a million values. The largest deliberate
-callback pushes 256 values (`tests/rustfn_error.rs:111`) and the GC test holds
-20 strings with 1000 push/pop iterations (`src/vm/tests.rs:497`); both stay
-valid and only need `?`. Many tests stop *compiling* on the signature change,
-but none should return `StackOverflow`.
+### Refusal boundary
 
-### Why this was not built in the same session
+Errors kill the callback by design; side effects already committed are not
+rolled back and must not be. The required guarantee is narrower: **a partially
+built result is never returned, and a refused charge never advances iterator
+state.**
 
-The finding reads as a small omission; the review established it is a
-cross-cutting invariant touching most stdlib signatures, several public APIs
-and every raw stack-growth site. Starting it late in a long session risked
-landing it half-applied, which for a stack invariant is worse than not starting
-- a partial audit gives the appearance of a guarantee without the guarantee.
-The plan above is complete enough to execute directly.
+- Charge capture materialization *before* pushing any capture value.
+- Charge replacement bytes *before* scanning them.
+- Charge emitted bytes *before* growing or appending to a result buffer.
+- Finish and drop the matcher meter scope *before* any table lookup or function
+  invocation that re-enters Lua.
+- Never `push_bytes(result)` until every emitted byte is charged.
+- `gmatch_iter` writes `pos` before pushing captures (`string.rs:713`); all
+  capture-byte charges must be preflighted before that write, or a refusal
+  consumes a match without returning it.
 
-### Superseded open questions
+### Charge schedule
 
-1. **Which resolution?** Argue it from the crate's own stance. Note the VM
-   already treats host misuse as recoverable elsewhere - `set_top`, `pop`,
-   `set_table_raw` and `set_metatable_of` were all made fallible rather than
-   panicking, on the reasoning that a host mistake must not poison the process.
-   Does that reasoning extend to memory exhaustion, or is exhaustion
-   categorically the host's problem?
-2. **If (1), what is the real blast radius?** 114 `src/` call sites is a count,
-   not an assessment: how many are in `RustFunc`s that already return `Result`
-   and so need only `?`, and how many are in infallible internal contexts that
-   would need restructuring? Name the hard ones.
-3. **If (1), does the cap belong on every push or only on unbounded ones?**
-   A single `push_nil` cannot exhaust memory; a loop can. Is a per-push check
-   the right granularity, or should the VM validate depth when control returns
-   from a callback - bounding the damage without changing the API?
-4. **Interaction with #59.** That deferred finding wants a stack-discipline
-   verifier for saved bytecode. Does enforcing the cap at push time change what
-   that verifier would need to prove?
-5. Is there any existing test or example that pushes more than a trivial number
-   of values and would newly fail?
+| Function | Charged work |
+|---|---|
+| `len` | **Zero.** Must stop cloning; read the length from the borrow |
+| `sub` | Returned bytes, min 1. Must stop cloning the whole source |
+| `upper`/`lower`/`reverse` | Input length, min 1 |
+| `find`/`match` | Subject + pattern materialization, compilation, literal or matcher steps, returned capture bytes |
+| `gmatch` creation | Subject/pattern materialization + `max(1, pattern.len())` compilation reservation. **Do not validate here** |
+| `gmatch` iteration | Matcher steps + returned capture bytes **only**. No recopy charge, no recompile charge |
+| `gsub` | Subject/pattern materialization, search/matcher work, replacement bytes examined, capture arguments materialized, emitted bytes |
+| `format` | Format bytes scanned, argument bytes examined (incl. truncated `%s` and numeric-string parsing), emitted bytes |
+| `table.concat` | Separator materialization, elements visited, emitted element and separator bytes |
 
-Read `src/vm/stack.rs` (the push methods, `check_stack_space`), `src/vm.rs`
-(`MAX_STACK_SIZE` and its doc), `src/vm/eval.rs:363`, `README.md`, and
-`AGENTS.md`.
+Both sides for constructors: a no-match `gsub` charges once to scan and once to
+copy.
+
+Two corrections to the original sketch, both from reading:
+
+1. **`gmatch` validation stays deferred.**
+   `tests/string_bytes.rs:349` (`deferred_pattern_validation_keeps_existing_call_timing`)
+   pins that `string.gmatch("abc", "%")` returns a function rather than
+   erroring. It says nothing about recompiling, so validation defers to the
+   first *iteration* while compilation still happens once.
+2. **`format bytes + output bytes` is incomplete.** `string.format("%.0s", huge)`
+   clones and scans the whole argument while emitting nothing, and numeric
+   conversions parse arbitrarily long string arguments. Those input bytes need
+   charges.
+
+### Versioning
+
+```rust
+// cost_meter.rs
+pub const COST_MODEL_VERSION: u16 = 2;   // 1 = the old implicit model
+// lib.rs
+pub use cost_meter::COST_MODEL_VERSION;
+```
+
+Snapshots persist `cost_remaining`, `cost_budget` and `cost_used`, so an old
+counter under new units is invalid. In `save_state.rs`: bump `FORMAT_VERSION`
+5 -> 6, write `COST_MODEL_VERSION` immediately after it, require strict equality
+on both before decoding payload or running setup, add
+`LoadError::UnsupportedCostModelVersion`. Old snapshots **fail to load**; they
+must not load with reset counters, which would be a budget bypass. The README
+save-state section already documents version rejection, so no new prose there.
+
+No feature-gated legacy mode - the old behaviour is the hole, and compile-time
+modes fragment a contractual cost.
+
+### `analyze_cost` stays numerically unchanged
+
+It cannot resolve data lengths, or even prove a call reaches the stdlib, since
+globals are mutable. Document that explicitly on the function and in the CLI
+`--analyze` output. Pin it: `analyze_cost("return string.upper('abcd')") == 0`
+while execution adds exactly 4.
+
+---
+
+## Phases - validate between each, do not run them as one session
+
+Phase boundaries are compile-clean. `brokkr fmt` + `brokkr check` between.
+
+**Phase 1 - matcher core.** `cost_meter.rs` (`COST_MODEL_VERSION`, keep
+`consume` inline), `patterns/errors.rs` (`MatchError`), `patterns/luapat.rs`
+(meter in `MatchState`, all charge points, charged backref loop, fallible
+helpers), `patterns/mod.rs` (signatures, `MatchError` export, update unit tests
+with a `CountOnly` meter, add exact finite-budget tests for `%b`, backrefs,
+outer search, greedy/minimal expansion, pathological nested greedies).
+
+**Phase 2 - artifact removal.** `len` reads length from a borrow instead of
+`string_or_number_bytes`. `sub` slices instead of cloning. `gmatch_iter` stops
+recopying the subject and recompiling: a `State` helper hands back a subject
+borrow and a `CostMeter` from disjoint fields in one call, captures push via an
+index+range helper rather than an external slice borrow, and the compiled
+pattern is memoized. No charge points yet.
+
+**Phase 3 - stdlib charging.** `string.rs` helpers (`charge_cost`, charged
+`find_subslice`, `append_bytes` taking `&mut State`, capture preflight helpers,
+the `MatchError` conversion helper) then each function per the schedule.
+`string_format.rs` (`append_output`, argument-byte charges in `format_argument`
+and `number_argument`). `table.rs` `concat` (drop the flat 1; separator
+materialization; per-element charge before each lookup under a finite budget,
+one reservation under `CountOnly`; exact emitted bytes before each append).
+
+**Phase 4 - versioning, docs, tests, release.** `save_state.rs` header gate and
+`tests/save_state.rs` cases (format and cost-model mismatch independently,
+rejection before setup, counter round-trip on match). `lib.rs`/`main.rs` export
+and docs. New `tests/string_cost.rs`. README Budget rewrite + perf table
+refresh. CHANGELOG. `Cargo.toml`/`Cargo.lock` to 0.4.0.
+
+## Tests that enforce the principle
+
+These are not optional extras; they are what stops the principle being prose.
+
+- `string.len` on a large string adds **0**.
+- `(%a+)` costs `%a+` plus a **constant independent of subject size**. Measured:
+  the delta is 600 over 100 calls at a 23-byte subject and 600 over 100 calls at
+  a 1472-byte subject - flat 6 per call, 0.4% of the call cost. Capture items
+  are real pattern items the script wrote and cost O(1) each per match; what the
+  principle forbids is a surcharge that *scales*, so pin the constancy, not
+  equality. A test that asserts the delta is unchanged across two subject sizes
+  is the one with teeth.
+- An N-iteration `gmatch` over a subject costs O(N x steps), **not**
+  O(N x (subject + pattern)) - assert the total for a full scan is linear in
+  the subject, not quadratic.
+- The same work split across an extracted helper costs what the inlined version
+  did.
+- Exact basic charges for every affected function; `upper("")`, empty `sub`,
+  `format("")` and empty-range `concat` each add exactly 1.
+- Matcher refusal surfaces `ErrorKind::BudgetExceeded`.
+- Pathological backtracking stops at exactly the configured budget.
+- No partial `gsub` result; replacement-callback side effects persist despite a
+  later refusal.
+- `gmatch` refusal does not advance iterator position.
+- State reuse after refusal; under `snapshot`, quiescent after each refusal.
+- `table.concat` element, separator, output and empty-range accounting.
+- `CountOnly` determinism across repeated runs.
+
+## Benchmarks to report after phase 3
+
+`./hotbench.sh strings/mixed --runs 20` and
+`./hotbench.sh strings/patterns --runs 20`. Baseline on this host:
+`strings/mixed` 405 us warm, cost 2,705; `strings/patterns` 63 us warm, cost 39.
+Report median and spread, percentage regression against the pre-change commit,
+`warm_avg_cost` churn, and `CountOnly` versus a very large finite budget. The
+two existing targets cannot isolate the per-primitive increment, so add a
+focused literal-search and a pathological-backtracking case.

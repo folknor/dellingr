@@ -1,7 +1,7 @@
 use core::fmt;
 
 /// Error type returned by _try methods
-#[derive(PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub(crate) enum PatternError {
     InvalidPatternCapture,
     InvalidCaptureIndex(Option<i8>),
@@ -9,6 +9,19 @@ pub(crate) enum PatternError {
     TooManyCaptures,
     MatchDepthExceeded,
     UnfinishedCapture,
+}
+
+/// Error returned while executing a compiled Lua pattern.
+#[derive(PartialEq, Debug)]
+pub(crate) enum MatchError {
+    Pattern(PatternError),
+    BudgetExceeded,
+}
+
+impl From<PatternError> for MatchError {
+    fn from(error: PatternError) -> Self {
+        Self::Pattern(error)
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]

@@ -93,6 +93,9 @@ fn main() {
         match analyze_cost(&source) {
             Ok(analysis) => {
                 println!("{analysis}");
+                println!(
+                    "Warning: analyze_cost accounts only for static bytecode and excludes all data-dependent native string, pattern, and table work; it is not a runtime bound or native-cost estimate."
+                );
             }
             Err(e) => {
                 eprintln!("Parse error: {e}");

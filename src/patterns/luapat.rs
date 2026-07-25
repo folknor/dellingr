@@ -3,6 +3,8 @@
 use core::result;
 use std::collections::BTreeMap;
 
+use crate::cost_meter::CostMeter;
+
 use super::errors::*;
 
 pub(super) const LUA_MAXCAPTURES: usize = 32;
@@ -11,6 +13,7 @@ const MAXCCALLS: usize = 200;
 const L_ESC: u8 = b'%';
 
 type Result<T> = result::Result<T, PatternError>;
+type MatchResult<T> = result::Result<T, MatchError>;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub(crate) enum LuaCapture {
@@ -368,49 +371,65 @@ fn match_class(ch: u8, class: u8) -> bool {
     }
 }
 
-struct MatchState<'a> {
-    subject: &'a [u8],
-    pattern: &'a CompiledPattern,
+struct MatchState<'data, 'meter, 'cost> {
+    subject: &'data [u8],
+    pattern: &'data CompiledPattern,
+    meter: &'meter mut CostMeter<'cost>,
     captures: [Capture; LUA_MAXCAPTURES],
 }
 
-impl<'a> MatchState<'a> {
-    fn new(subject: &'a [u8], pattern: &'a CompiledPattern) -> Self {
+impl<'data, 'meter, 'cost> MatchState<'data, 'meter, 'cost> {
+    fn new(
+        subject: &'data [u8],
+        pattern: &'data CompiledPattern,
+        meter: &'meter mut CostMeter<'cost>,
+    ) -> Self {
         Self {
             subject,
             pattern,
+            meter,
             captures: [Capture {
                 init: 0,
                 len: CapLen::Len(0),
             }; LUA_MAXCAPTURES],
         }
     }
-    fn singlematch(&self, pos: usize, class: ClassId) -> bool {
-        let Some(&byte) = self.subject.get(pos) else {
-            return false;
-        };
-        self.pattern.classes[class.0].contains(byte)
+    fn charge(&mut self) -> MatchResult<()> {
+        if self.meter.consume(1) {
+            Ok(())
+        } else {
+            Err(MatchError::BudgetExceeded)
+        }
     }
-    fn match_balance(&self, pos: usize, open: u8, close: u8) -> Option<usize> {
+    fn singlematch(&mut self, pos: usize, class: ClassId) -> MatchResult<bool> {
+        self.charge()?;
+        let Some(&byte) = self.subject.get(pos) else {
+            return Ok(false);
+        };
+        Ok(self.pattern.classes[class.0].contains(byte))
+    }
+    fn match_balance(&mut self, pos: usize, open: u8, close: u8) -> MatchResult<Option<usize>> {
+        self.charge()?;
         if self.subject.get(pos) != Some(&open) {
-            return None;
+            return Ok(None);
         }
         let mut depth = 1;
         let mut cursor = pos + 1;
         while let Some(&byte) = self.subject.get(cursor) {
+            self.charge()?;
             if byte == close {
                 depth -= 1;
                 if depth == 0 {
-                    return Some(cursor + 1);
+                    return Ok(Some(cursor + 1));
                 }
             } else if byte == open {
                 depth += 1;
             }
             cursor += 1;
         }
-        None
+        Ok(None)
     }
-    fn recurse(&mut self, pos: usize, item: usize, depth: usize) -> Result<Option<usize>> {
+    fn recurse(&mut self, pos: usize, item: usize, depth: usize) -> MatchResult<Option<usize>> {
         self.match_at(pos, item, depth + 1)
     }
     fn max_expand(
@@ -420,9 +439,9 @@ impl<'a> MatchState<'a> {
         class: ClassId,
         min: usize,
         depth: usize,
-    ) -> Result<Option<usize>> {
+    ) -> MatchResult<Option<usize>> {
         let mut end = pos;
-        while self.singlematch(end, class) {
+        while self.singlematch(end, class)? {
             end += 1;
         }
         while end >= pos + min {
@@ -442,23 +461,28 @@ impl<'a> MatchState<'a> {
         item: usize,
         class: ClassId,
         depth: usize,
-    ) -> Result<Option<usize>> {
+    ) -> MatchResult<Option<usize>> {
         loop {
             if let Some(result) = self.recurse(pos, item + 1, depth)? {
                 return Ok(Some(result));
             }
-            if !self.singlematch(pos, class) {
+            if !self.singlematch(pos, class)? {
                 return Ok(None);
             }
             pos += 1;
         }
     }
-    fn match_at(&mut self, mut pos: usize, mut item: usize, depth: usize) -> Result<Option<usize>> {
+    fn match_at(
+        &mut self,
+        mut pos: usize,
+        mut item: usize,
+        depth: usize,
+    ) -> MatchResult<Option<usize>> {
         if depth >= MAXCCALLS {
-            return Err(PatternError::MatchDepthExceeded);
+            return Err(PatternError::MatchDepthExceeded.into());
         }
         loop {
-            // Central matcher-step site reserved for the future cost hook.
+            self.charge()?;
             let Some(current) = self.pattern.items.get(item).copied() else {
                 return Ok(Some(pos));
             };
@@ -490,7 +514,7 @@ impl<'a> MatchState<'a> {
                     // patterns that reference rejects match here.
                     return self.recurse(pos, item + 1, depth);
                 }
-                Item::Balance { open, close } => match self.match_balance(pos, open, close) {
+                Item::Balance { open, close } => match self.match_balance(pos, open, close)? {
                     Some(next) => {
                         pos = next;
                         item += 1;
@@ -516,12 +540,16 @@ impl<'a> MatchState<'a> {
                     let len = match capture.len {
                         CapLen::Len(length) => length,
                         CapLen::Position => return Ok(None),
-                        CapLen::Unfinished => return Err(PatternError::UnfinishedCapture),
+                        CapLen::Unfinished => return Err(PatternError::UnfinishedCapture.into()),
                     };
-                    if self.subject.get(capture.init..capture.init + len)
-                        != self.subject.get(pos..pos + len)
-                    {
-                        return Ok(None);
+                    for offset in 0..len {
+                        let Some(&byte) = self.subject.get(pos + offset) else {
+                            return Ok(None);
+                        };
+                        self.charge()?;
+                        if self.subject[capture.init + offset] != byte {
+                            return Ok(None);
+                        }
                     }
                     pos += len;
                     item += 1;
@@ -529,14 +557,14 @@ impl<'a> MatchState<'a> {
                 Item::EndAnchor => return Ok((pos == self.subject.len()).then_some(pos)),
                 Item::Atom { class, repeat } => match repeat {
                     Repeat::One => {
-                        if !self.singlematch(pos, class) {
+                        if !self.singlematch(pos, class)? {
                             return Ok(None);
                         }
                         pos += 1;
                         item += 1;
                     }
                     Repeat::Optional => {
-                        if self.singlematch(pos, class)
+                        if self.singlematch(pos, class)?
                             && let Some(result) = self.recurse(pos + 1, item + 1, depth)?
                         {
                             return Ok(Some(result));
@@ -549,20 +577,20 @@ impl<'a> MatchState<'a> {
                     // expansion helper. Otherwise a long run of them exhausts
                     // the depth budget on a subject they all match emptily.
                     Repeat::ZeroOrMoreGreedy => {
-                        if !self.singlematch(pos, class) {
+                        if !self.singlematch(pos, class)? {
                             item += 1;
                             continue;
                         }
                         return self.max_expand(pos, item, class, 0, depth);
                     }
                     Repeat::OneOrMoreGreedy => {
-                        if !self.singlematch(pos, class) {
+                        if !self.singlematch(pos, class)? {
                             return Ok(None);
                         }
                         return self.max_expand(pos + 1, item, class, 0, depth);
                     }
                     Repeat::ZeroOrMoreMinimal => {
-                        if !self.singlematch(pos, class) {
+                        if !self.singlematch(pos, class)? {
                             item += 1;
                             continue;
                         }
@@ -577,7 +605,7 @@ impl<'a> MatchState<'a> {
         start: usize,
         end: usize,
         out: &mut [LuaCapture; LUA_MAXMATCHES],
-    ) -> Result<usize> {
+    ) -> MatchResult<usize> {
         out[0] = LuaCapture::Bytes { start, end };
         for index in 0..self.pattern.captures {
             out[index + 1] = match self.captures[index].len {
@@ -586,7 +614,7 @@ impl<'a> MatchState<'a> {
                     end: self.captures[index].init + length,
                 },
                 CapLen::Position => LuaCapture::Position(self.captures[index].init),
-                CapLen::Unfinished => return Err(PatternError::UnfinishedCapture),
+                CapLen::Unfinished => return Err(PatternError::UnfinishedCapture.into()),
             };
         }
         Ok(self.pattern.captures + 1)
@@ -602,7 +630,8 @@ pub(super) fn str_match(
     pattern: &CompiledPattern,
     init: usize,
     out: &mut [LuaCapture; LUA_MAXMATCHES],
-) -> Result<usize> {
+    meter: &mut CostMeter<'_>,
+) -> MatchResult<usize> {
     if pattern.items.is_empty() {
         out[0] = LuaCapture::Bytes {
             start: init,
@@ -612,7 +641,7 @@ pub(super) fn str_match(
     }
     let mut pos = init;
     loop {
-        let mut state = MatchState::new(subject, pattern);
+        let mut state = MatchState::new(subject, pattern, meter);
         if let Some(end) = state.match_at(pos, 0, 0)? {
             return state.captures(pos, end, out);
         }

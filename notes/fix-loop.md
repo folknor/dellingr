@@ -29,6 +29,15 @@ Notes:
 
 - Steps 4 and 7 are `echo "..." | review bare --profile deep|build`. The
   session ID is printed above the response; keep it for step 8.
+- **Point sessions at `WORK.md` and nothing else.** Never tell a review or build
+  session to read `CLAUDE.md` or `AGENTS.md`. The two files exist for different
+  readers: codex already picks up `AGENTS.md` by convention, and `CLAUDE.md` is
+  Claude-side process that only pollutes a codex session's context. `WORK.md`
+  must therefore carry every project constraint the session actually needs -
+  lint gates, banned constructs, "do not run cargo/brokkr" - restated inline in
+  the prompt or in `WORK.md` itself, not delegated by reference. If a session
+  needed to know something and did not, that is a gap in `WORK.md`, not a
+  missing reading assignment.
 - **Codex refusal fallback.** Codex Sol's safety filter sometimes trips on
   parts of this codebase. It is a false positive - VM internals, GC roots, and
   hostile-input hardening read like exploit work out of context. When it

@@ -672,10 +672,10 @@ fn setup_anchor_survives_load_final_gc() {
 }
 
 #[test]
-fn unsupported_versions_fail_before_setup() {
+fn unsupported_format_versions_fail_before_setup() {
     let state = fresh();
     let save = state.save_state().expect("state saves");
-    for version in [3_u16, 4_u16] {
+    for version in [5_u16, 7_u16] {
         let mut bytes = save.bytes.clone();
         bytes[4..6].copy_from_slice(&version.to_le_bytes());
         let setup_ran = Arc::new(AtomicBool::new(false));
@@ -685,6 +685,25 @@ fn unsupported_versions_fail_before_setup() {
                 observed.store(true, Ordering::SeqCst);
             }),
             Err(LoadError::UnsupportedVersion)
+        ));
+        assert!(!setup_ran.load(Ordering::SeqCst));
+    }
+}
+
+#[test]
+fn unsupported_cost_model_versions_fail_before_setup() {
+    let state = fresh();
+    let save = state.save_state().expect("state saves");
+    for version in [1_u16, 3_u16] {
+        let mut bytes = save.bytes.clone();
+        bytes[6..8].copy_from_slice(&version.to_le_bytes());
+        let setup_ran = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&setup_ran);
+        assert!(matches!(
+            State::load_state(&bytes, Box::new(DefaultCallbacks), move |_| {
+                observed.store(true, Ordering::SeqCst);
+            }),
+            Err(LoadError::UnsupportedCostModelVersion)
         ));
         assert!(!setup_ran.load(Ordering::SeqCst));
     }

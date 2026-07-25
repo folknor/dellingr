@@ -6,6 +6,14 @@ use crate::Result;
 use crate::State;
 use crate::error::{ErrorKind, TypeError};
 
+fn charge_cost(state: &mut State, cost: u64) -> Result<()> {
+    if state.cost_meter().consume(cost) {
+        Ok(())
+    } else {
+        Err(state.budget_exceeded_error())
+    }
+}
+
 fn table_unpack_values(state: &mut State) -> crate::Result<u8> {
     super::unpack_values(state)
 }
@@ -141,16 +149,17 @@ pub(crate) fn open_table(state: &mut State) -> Result<()> {
         Ok(1)
     });
 
-    // table.concat(list [, sep [, i [, j]]]) - costs 1
+    // table.concat(list [, sep [, i [, j]]])
     // Returns list[i]..sep..list[i+1]..sep..list[j].
     // Default: sep="", i=1, j=#list
     add_fn!("concat", |state| {
-        state.consume_cost(1)?;
         state.check_type(1, LuaType::Table)?;
         let len = i64::try_from(state.table_len(1)).expect("table length fits in i64");
 
         let sep = if state.check_optional_type(2, LuaType::String)? {
-            state.to_bytes(2)?.to_vec()
+            let bytes = state.to_bytes(2)?.to_vec();
+            charge_cost(state, bytes.len() as u64)?;
+            bytes
         } else {
             Vec::new()
         };
@@ -170,6 +179,9 @@ pub(crate) fn open_table(state: &mut State) -> Result<()> {
         state.set_top(1)?;
 
         if i > j {
+            if sep.is_empty() {
+                charge_cost(state, 1)?;
+            }
             state.set_top(0)?;
             state.push_bytes(b"")?;
             return Ok(1);
@@ -179,9 +191,11 @@ pub(crate) fn open_table(state: &mut State) -> Result<()> {
         for idx in i..=j {
             if idx > i {
                 let next = crate::vm::checked_string_growth(result.len(), sep.len())?;
+                charge_cost(state, sep.len() as u64)?;
                 result.reserve(next - result.len());
                 result.extend_from_slice(&sep);
             }
+            charge_cost(state, 1)?;
             state.push_number(idx as f64)?;
             state.get_table(1)?;
             let typ = state.typ(-1);
@@ -189,6 +203,7 @@ pub(crate) fn open_table(state: &mut State) -> Result<()> {
                 LuaType::String | LuaType::Number => {
                     let bytes = state.bytes_coerce(-1)?;
                     let next = crate::vm::checked_string_growth(result.len(), bytes.len())?;
+                    charge_cost(state, bytes.len() as u64)?;
                     result.reserve(next - result.len());
                     result.extend_from_slice(&bytes);
                 }
