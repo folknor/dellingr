@@ -345,11 +345,25 @@ fn finalize(bc: &mut Bytecode) -> Result<()> {
         "line_info desynced from code"
     );
     bc.assign_cache_slots()?;
+    // Runs in release too, and the result is propagated rather than dropped.
+    // Verifying our own fresh output guards against a compiler bug, and the
+    // only reason to pay for it is to act on it: a debug-only assertion would
+    // let a release build emit stack-imbalanced bytecode and discover it later
+    // as a VM panic, which is precisely the failure mode this crate refuses.
+    // Reporting it as a compile error keeps a compiler bug catchable instead of
+    // fatal. The debug assertion stays on top so CI fails loudly at the source
+    // rather than surfacing it as a user-facing error.
     if let Err(error) = verify::validate_bytecode(bc) {
         debug_assert!(
             false,
             "compiler emitted bytecode rejected by the snapshot verifier: {error:?}"
         );
+        return Err(error::Error::without_location(
+            error::ErrorKind::InternalError(format!(
+                "compiler emitted invalid bytecode: {}",
+                error.reason
+            )),
+        ));
     }
     for nested in &mut bc.nested {
         // The parser produces nested `Arc<Bytecode>` with a refcount of 1, so
