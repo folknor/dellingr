@@ -2,6 +2,7 @@
 
 use super::exact_integer_argument;
 use crate::LuaType;
+use crate::Result;
 use crate::State;
 use crate::error::{ErrorKind, TypeError};
 
@@ -9,9 +10,9 @@ fn table_unpack_values(state: &mut State) -> crate::Result<u8> {
     super::unpack_values(state)
 }
 
-pub(crate) fn open_table(state: &mut State) {
+pub(crate) fn open_table(state: &mut State) -> Result<()> {
     // Create the table table
-    state.new_table_with_capacity(8);
+    state.new_table_with_capacity(8)?;
 
     // Helper to add a function to the table at stack index -1.
     macro_rules! add_fn {
@@ -116,19 +117,19 @@ pub(crate) fn open_table(state: &mut State) {
         let num_args = state.get_top();
 
         // Create new table
-        state.new_table();
+        state.new_table()?;
         let table_idx = state.get_top() as isize;
 
         // Insert all arguments into the table
         for i in 1..=num_args {
-            state.push_number(i as f64); // push the index (key)
+            state.push_number(i as f64)?; // push the index (key)
             state.push_value(i as isize)?; // push the argument (value)
             state.set_table_raw(table_idx)?;
         }
 
         // Add the "n" field
         state.push_string("n")?;
-        state.push_number(num_args as f64);
+        state.push_number(num_args as f64)?;
         state.set_table_raw(table_idx)?;
 
         // Remove all original arguments, leave just the table
@@ -181,7 +182,7 @@ pub(crate) fn open_table(state: &mut State) {
                 result.reserve(next - result.len());
                 result.extend_from_slice(&sep);
             }
-            state.push_number(idx as f64);
+            state.push_number(idx as f64)?;
             state.get_table(1)?;
             let typ = state.typ(-1);
             match typ {
@@ -254,8 +255,8 @@ pub(crate) fn open_table(state: &mut State) {
                     let src_key = (f + i) as f64;
                     let dest_key = (t + i) as f64;
 
-                    state.push_number(dest_key);
-                    state.push_number(src_key);
+                    state.push_number(dest_key)?;
+                    state.push_number(src_key)?;
                     state.get_table(1)?;
                     state.set_table_raw(dest_idx)?;
                 }
@@ -267,8 +268,8 @@ pub(crate) fn open_table(state: &mut State) {
                     let src_key = (f + i) as f64;
                     let dest_key = (t + i) as f64;
 
-                    state.push_number(dest_key);
-                    state.push_number(src_key);
+                    state.push_number(dest_key)?;
+                    state.push_number(src_key)?;
                     state.get_table(1)?;
                     state.set_table_raw(dest_idx)?;
                 }
@@ -284,8 +285,8 @@ pub(crate) fn open_table(state: &mut State) {
                     let src_key = (f + i) as f64;
                     let dest_key = (t + i) as f64;
 
-                    state.push_number(dest_key);
-                    state.push_number(src_key);
+                    state.push_number(dest_key)?;
+                    state.push_number(src_key)?;
                     state.get_table(1)?;
                     state.set_table_raw(dest_idx)?;
                 }
@@ -294,8 +295,8 @@ pub(crate) fn open_table(state: &mut State) {
                     let src_key = (f + i) as f64;
                     let dest_key = (t + i) as f64;
 
-                    state.push_number(dest_key);
-                    state.push_number(src_key);
+                    state.push_number(dest_key)?;
+                    state.push_number(src_key)?;
                     state.get_table(1)?;
                     state.set_table_raw(dest_idx)?;
                 }
@@ -312,6 +313,7 @@ pub(crate) fn open_table(state: &mut State) {
 
     // Set the table table as a global
     state.set_global("table");
+    Ok(())
 }
 
 fn position_out_of_bounds(state: &State, func_name: &str) -> crate::error::Error {

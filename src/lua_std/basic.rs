@@ -46,12 +46,12 @@ fn base_unpack_values(state: &mut State) -> Result<u8> {
 pub(crate) fn base_ipairs(state: &mut State) -> Result<u8> {
     state.check_type(1, LuaType::Table)?;
     state.set_top(1)?;
-    state.push_rust_fn(base_ipairs_iter);
+    state.push_rust_fn(base_ipairs_iter)?;
     // Swap the table and function
     state.push_value(1)?;
     state.remove(1)?;
     // Push the initial index
-    state.push_number(0.0);
+    state.push_number(0.0)?;
     Ok(3)
 }
 
@@ -62,16 +62,16 @@ pub(crate) fn base_ipairs_iter(state: &mut State) -> Result<u8> {
     let old_index = state.to_number(2)?;
     let new_index = old_index + 1.0;
     state.pop(1)?; // pop the old number
-    state.push_number(new_index);
+    state.push_number(new_index)?;
     state.get_table(1)?;
     // ipairs stops only on nil, not on false
     if state.typ(-1) != LuaType::Nil {
-        state.push_number(new_index);
+        state.push_number(new_index)?;
         state.replace(1)?; // Replaces the table with the index
         Ok(2)
     } else {
         state.set_top(0)?;
-        state.push_nil();
+        state.push_nil()?;
         Ok(1)
     }
 }
@@ -82,7 +82,7 @@ pub(crate) fn base_next(state: &mut State) -> Result<u8> {
     state.check_type(1, LuaType::Table)?;
     // If no key given, use nil
     if state.get_top() < 2 {
-        state.push_nil();
+        state.push_nil()?;
     }
     state.set_top(2)?;
     // Stack: [table, key]
@@ -105,16 +105,16 @@ pub(crate) fn base_pairs(state: &mut State) -> Result<u8> {
     state.check_type(1, LuaType::Table)?;
     state.set_top(1)?;
     // Return: next function, table, nil
-    state.push_rust_fn(base_next);
+    state.push_rust_fn(base_next)?;
     state.push_value(1)?; // table
-    state.push_nil(); // initial key
+    state.push_nil()?; // initial key
     // Stack: [table, next, table, nil]
     // We need to return: [next, table, nil]
     state.remove(1)?; // Remove original table
     Ok(3)
 }
 
-pub(crate) fn open_base(state: &mut State) {
+pub(crate) fn open_base(state: &mut State) -> Result<()> {
     let mut add = |name, func| {
         #[cfg(feature = "snapshot")]
         state.set_global_stdlib_rust_fn(name, name, func);
@@ -216,9 +216,9 @@ pub(crate) fn open_base(state: &mut State) {
             let num = parse_integer_with_base(state.to_bytes(1)?, base as u32);
             state.pop(state.get_top() as isize)?;
             if let Some(num) = num {
-                state.push_number(num);
+                state.push_number(num)?;
             } else {
-                state.push_nil();
+                state.push_nil()?;
             }
             return Ok(1);
         }
@@ -228,22 +228,22 @@ pub(crate) fn open_base(state: &mut State) {
             LuaType::Number => {
                 let num = state.to_number(1)?;
                 state.pop(state.get_top() as isize)?;
-                state.push_number(num);
+                state.push_number(num)?;
                 Ok(1)
             }
             LuaType::String => {
                 let parsed = parse_lua_numeral(state.to_bytes(1)?);
                 state.set_top(0)?;
                 if let Some(num) = parsed {
-                    state.push_number(num);
+                    state.push_number(num)?;
                 } else {
-                    state.push_nil();
+                    state.push_nil()?;
                 }
                 Ok(1)
             }
             _ => {
                 state.pop(state.get_top() as isize)?;
-                state.push_nil();
+                state.push_nil()?;
                 Ok(1)
             }
         }
@@ -340,7 +340,7 @@ pub(crate) fn open_base(state: &mut State) {
         state.check_any(2)?;
         let equal = state.raw_equal(1, 2);
         state.set_top(0)?;
-        state.push_boolean(equal);
+        state.push_boolean(equal)?;
         Ok(1)
     });
 
@@ -363,7 +363,7 @@ pub(crate) fn open_base(state: &mut State) {
             }
         };
         state.set_top(0)?;
-        state.push_number(len as f64);
+        state.push_number(len as f64)?;
         Ok(1)
     });
 
@@ -378,7 +378,7 @@ pub(crate) fn open_base(state: &mut State) {
         if state.typ(1) == LuaType::String && state.to_bytes(1)? == b"#" {
             // Return count of remaining args
             state.set_top(0)?;
-            state.push_number((num_args - 1) as f64);
+            state.push_number((num_args - 1) as f64)?;
             return Ok(1);
         }
 
@@ -435,33 +435,29 @@ pub(crate) fn open_base(state: &mut State) {
     });
 
     // _G - Global environment table (proxy with metamethods)
-    state.new_table(); // _G table
-    state.new_table(); // metatable
+    state.new_table()?; // _G table
+    state.new_table()?; // metatable
 
     // __index: function(t, k) return globals[k] end
     #[cfg(feature = "snapshot")]
-    state
-        .set_table_str_key_named_rust_fn(-1, "__index", "_G.__index", global_env_index)
-        .expect("_G metatable __index assignment cannot fail");
+    state.set_table_str_key_named_rust_fn(-1, "__index", "_G.__index", global_env_index)?;
     #[cfg(not(feature = "snapshot"))]
-    state
-        .set_table_str_key_rust_fn(-1, "__index", global_env_index)
-        .expect("_G metatable __index assignment cannot fail");
+    state.set_table_str_key_rust_fn(-1, "__index", global_env_index)?;
 
     // __newindex: function(t, k, v) globals[k] = v end
     #[cfg(feature = "snapshot")]
-    state
-        .set_table_str_key_named_rust_fn(-1, "__newindex", "_G.__newindex", global_env_newindex)
-        .expect("_G metatable __newindex assignment cannot fail");
+    state.set_table_str_key_named_rust_fn(
+        -1,
+        "__newindex",
+        "_G.__newindex",
+        global_env_newindex,
+    )?;
     #[cfg(not(feature = "snapshot"))]
-    state
-        .set_table_str_key_rust_fn(-1, "__newindex", global_env_newindex)
-        .expect("_G metatable __newindex assignment cannot fail");
+    state.set_table_str_key_rust_fn(-1, "__newindex", global_env_newindex)?;
 
-    state
-        .set_metatable_of(1)
-        .expect("_G metatable installation cannot fail");
+    state.set_metatable_of(1)?;
     state.set_global("_G");
+    Ok(())
 }
 
 /// Pushes the raw metatable when unprotected, otherwise its `__metatable` value.
@@ -502,7 +498,7 @@ fn global_env_index(state: &mut State) -> Result<u8> {
     if state.typ(2) == LuaType::String {
         let key = state.to_string(2)?;
         state.set_top(0)?;
-        state.get_global(&key);
+        state.get_global(&key)?;
     } else {
         state.push_value(2)?;
         state.get_table_raw(1)?;

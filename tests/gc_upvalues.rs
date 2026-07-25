@@ -7,18 +7,22 @@
 use dellingr::{ArgCount, RetCount, State};
 
 fn install_force_gc(state: &mut State) {
-    state.push_rust_fn(|state| {
-        state.gc_collect();
-        Ok(0)
-    });
+    state
+        .push_rust_fn(|state| {
+            state.gc_collect();
+            Ok(0)
+        })
+        .unwrap();
     state.set_global("force_gc");
 }
 
 fn install_force_next_gc(state: &mut State) {
-    state.push_rust_fn(|state| {
-        state.gc_set_threshold(1);
-        Ok(0)
-    });
+    state
+        .push_rust_fn(|state| {
+            state.gc_set_threshold(1);
+            Ok(0)
+        })
+        .unwrap();
     state.set_global("force_next_gc");
 }
 
@@ -185,7 +189,7 @@ fn closure_captured_table_survives_gc() {
     state.gc_collect();
 
     // Call the closure - should still work
-    state.get_global("test_fn");
+    state.get_global("test_fn").unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
 
     let result = state.to_number(-1).unwrap();
@@ -219,7 +223,7 @@ fn closure_survives_multiple_gc_cycles() {
     for expected in 1..=5 {
         state.gc_collect();
 
-        state.get_global("counter");
+        state.get_global("counter").unwrap();
         state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
 
         let result = state.to_number(-1).unwrap();
@@ -258,7 +262,7 @@ fn nested_closures_survive_gc() {
 
     state.gc_collect();
 
-    state.get_global("nested_fn");
+    state.get_global("nested_fn").unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
 
     let result = state.to_number(-1).unwrap();
@@ -296,8 +300,8 @@ fn metatable_as_upvalue_survives_gc() {
     state.gc_collect();
 
     // Create an object using the closure
-    state.get_global("create_object");
-    state.push_number(99.0);
+    state.get_global("create_object").unwrap();
+    state.push_number(99.0).unwrap();
     state.call(ArgCount::Fixed(1), RetCount::Fixed(1)).unwrap();
     state.set_global("obj");
 
@@ -375,7 +379,7 @@ fn closure_with_mixed_upvalues() {
 
     state.gc_collect();
 
-    state.get_global("mixed_fn");
+    state.get_global("mixed_fn").unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(4)).unwrap();
 
     assert_eq!(state.to_number(-4).unwrap(), 42.0);
@@ -415,7 +419,7 @@ fn closure_in_table_survives_gc() {
     state.gc_collect();
 
     // Check "answer"
-    state.get_global("get");
+    state.get_global("get").unwrap();
     state.push_string("answer").expect("short test string fits");
     state.call(ArgCount::Fixed(1), RetCount::Fixed(1)).unwrap();
     assert_eq!(state.to_number(-1).unwrap(), 42.0);
@@ -424,7 +428,7 @@ fn closure_in_table_survives_gc() {
     state.gc_collect();
 
     // Check "pi"
-    state.get_global("get");
+    state.get_global("get").unwrap();
     state.push_string("pi").expect("short test string fits");
     state.call(ArgCount::Fixed(1), RetCount::Fixed(1)).unwrap();
     let pi = state.to_number(-1).unwrap();

@@ -78,10 +78,11 @@ impl State {
 
     /// Opens all standard Lua libraries.
     #[hotpath::measure]
-    pub fn open_libs(&mut self) {
-        lua_std::open_libs(self);
+    pub fn open_libs(&mut self) -> Result<()> {
+        lua_std::open_libs(self)?;
         #[cfg(feature = "snapshot")]
         self.capture_env_tokens();
+        Ok(())
     }
 }
 
@@ -98,7 +99,9 @@ mod tests {
                 .expect("missing optional argument must be accepted")
         );
 
-        state.push_nil();
+        state
+            .push_nil()
+            .expect("an empty stack has room for one value");
         assert!(
             !state
                 .check_optional_type(1, LuaType::Number)

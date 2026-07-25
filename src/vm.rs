@@ -253,7 +253,7 @@ pub(super) struct EnvBaseline {
 /// Lua's default is 200, we use 1000 for a bit more headroom.
 const MAX_CALL_DEPTH: u32 = 1000;
 
-/// Maximum stack size (number of values) to prevent memory exhaustion.
+/// Maximum values on the shared Lua/Rust value stack, not a total host-memory quota.
 const MAX_STACK_SIZE: usize = 1_000_000;
 
 // Important note on how the stack is tracked:
@@ -289,7 +289,8 @@ impl State {
     /// ```
     pub fn with_callbacks(callbacks: Box<dyn HostCallbacks + Send>) -> Self {
         let mut me = Self::empty_with_callbacks(callbacks);
-        me.open_libs();
+        me.open_libs()
+            .expect("standard library initialization starts with an empty value stack");
         me
     }
 
@@ -465,7 +466,7 @@ impl State {
     ///     let collector = state.user_data::<Arc<Mutex<CommandCollector>>>().unwrap();
     ///     collector.lock().unwrap().turn = Some(0.5);
     ///     Ok(0)
-    /// });
+    /// })?;
     /// ```
     pub fn set_user_data<T: Send + 'static>(&mut self, data: T) {
         self.user_data = Some(Box::new(data));
@@ -611,14 +612,14 @@ impl State {
 
     /// Pushes onto the stack the value of the global `name`.
     #[hotpath::measure]
-    pub fn get_global(&mut self, name: &str) {
+    pub fn get_global(&mut self, name: &str) -> Result<()> {
         // Check builtins first for common names
         let val = if let Some(slot) = Builtin::from_name(name) {
             self.builtins[slot as usize]
         } else {
             self.globals.get(name).copied().unwrap_or_default()
         };
-        self.stack.push(val);
+        self.push_val(val)
     }
 
     /// Instr::pop()s a value from the stack and sets it as the new value of global

@@ -61,10 +61,63 @@ Decide which is true of the design, then execute it fully.
 
 ---
 
-## Agreed implementation plan - NOT YET IMPLEMENTED
+## Implementation status: steps 1-7 complete, deep review applied
 
-Planned and reviewed, deliberately not started: see "Why this was not built in
-the same session" at the end.
+The gate is green with **no lint suppression**. #62 has been deleted from
+`notes/bugs.md`. What remains is the commit.
+
+- **Steps 1-2.** `src/vm/stack.rs` has `check_stack_slot` (single slot),
+  `check_stack_space(n)` (aggregate) and `push_unchecked` (legal only after a
+  preflight or when replacing popped values). All eight public push methods
+  enforce the cap; `push_nil`/`push_number`/`push_boolean`/`push_rust_fn` now
+  return `Result`. `push_named_rust_fn` checks capacity *before* registering.
+  `balance_stack` is fallible and preflights.
+- **Step 3.** `new_table`, `get_global`, `push_chunk` and `open_libs` are
+  fallible; all 145 call sites migrated across `src/`, `tests/` and `examples/`.
+- **Step 4.** Every growth path in `src/` classified. The only bare
+  `self.stack.push` left is the body of `push_unchecked`. Net-positive sites are
+  preflighted: `__index`/`__newindex` dispatch (3 and 4 slots), `__len` (2),
+  `__tostring` (2), `table_sort_less` (3), `table_next` (2), the cached-global
+  and string-method paths (1). `instr_get_local`, `instr_get_upvalue` and
+  `instr_get_builtin` are fallible, since those are the per-instruction operand
+  pushes where a script-driven overrun actually lands.
+- **Step 5.** Cap failures in `State::call` (both padding points), generic-for
+  callback normalization, and the `__index`/`__newindex` table branches restore
+  `stack_bottom`, truncate the frame, and drop internal temporaries.
+- **Step 6.** Nine boundary tests at the end of `src/vm/tests.rs`.
+- **Step 7.** README "Runtime limits", the AGENTS.md invariant note, the
+  `MAX_STACK_SIZE` doc comment, and a CHANGELOG entry for the API break.
+
+### Findings from the deep review, all fixed
+
+`table_next` checked one slot but pushed two. `protected_index_key` pushed two
+protection values *before* popping, so "net-neutral" did not apply to it - it is
+now `Option`-returning and degrades to the checked slow path. The second result
+padding point in `State::call` propagated with `?` and left callback results on
+the host stack. `open_libs` is public and could install part of the standard
+library before failing, so it now reserves its headroom up front.
+`table_remove_at` mutated the table before reserving the result slot. The
+`__index`/`__newindex` table branches leaked their handler temporary on error.
+Plus a stale rustdoc example and the missing CHANGELOG entry.
+
+### Known coverage gap
+
+The step-6 list included a test that a rejected `push_named_rust_fn` does not
+register its id. The code preflights before registering, so it is correct by
+construction, but non-registration is not observable through the public API and
+that item has no test behind it.
+
+### Process note for whoever picks this up
+
+Two single-turn `review --profile build` sessions failed on this item. The
+first silently added a crate-level `#![allow(unused_must_use)]`, which made
+`brokkr check` pass while ~82 call sites were still dropping their `Result` -
+the gate cannot see an invariant that has been switched off. The second was
+honest about stopping short. The task is not hard, it is long: it does not fit
+a single turn, so it belongs in the orchestrating conversation where the
+compiler can be consulted repeatedly.
+
+## Agreed implementation plan
 
 ### Decision: make the cap real (resolution 1)
 

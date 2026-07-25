@@ -103,8 +103,13 @@ impl State {
             let reported = usize::from(num_ret_reported);
             match reported.cmp(&num_ret_actual) {
                 Ordering::Greater => {
+                    if let Err(e) = self.check_stack_space(reported - num_ret_actual) {
+                        self.stack.truncate(idx);
+                        self.stack_bottom = old_stack_bottom;
+                        return Err(e);
+                    }
                     for _ in num_ret_actual..reported {
-                        self.push_nil();
+                        self.push_unchecked(Val::Nil);
                     }
                 }
                 Ordering::Less => {
@@ -177,6 +182,10 @@ impl State {
                             )));
                         }
                     };
+                    if let Err(e) = self.check_stack_space(2) {
+                        self.stack.truncate(idx);
+                        return Err(e);
+                    }
                     self.stack.insert(idx, func_val);
                     self.stack.insert(idx, call_handler);
                     // Now call with actual_num_args + 1 (table is first arg)
@@ -188,7 +197,13 @@ impl State {
         };
         // RetCount::All means "return all" - don't adjust the stack
         if let RetCount::Fixed(expected) = num_ret_expected {
-            self.balance_stack(expected as usize, num_ret_actual as usize);
+            // Padding the results up to `expected` can hit the cap. Clear the
+            // call's frame on failure like every other error path here, so the
+            // caller is not left holding a partial result set.
+            if let Err(e) = self.balance_stack(expected as usize, num_ret_actual as usize) {
+                self.stack.truncate(idx);
+                return Err(e);
+            }
         }
         Ok(())
     }
@@ -211,7 +226,7 @@ impl State {
     ) -> Result<()> {
         self.current_source = source_name.clone();
         let bytecode = compiler::parse_str_named(s, source_name)?;
-        self.push_chunk(Arc::new(bytecode));
+        self.push_chunk(Arc::new(bytecode))?;
         Ok(())
     }
 
@@ -282,7 +297,7 @@ impl State {
         // the stack rather than consuming them.
         let val = self.alloc_string(&buffer)?;
         self.stack.truncate(idx);
-        self.stack.push(val);
+        self.push_unchecked(val); // Replaces the concatenation operands just removed.
         Ok(())
     }
 
@@ -397,7 +412,7 @@ impl State {
         match num_args.cmp(&num_params) {
             Ordering::Less => {
                 for _ in num_args..num_params {
-                    self.push_nil();
+                    self.push_unchecked(Val::Nil);
                 }
             }
             Ordering::Greater => {
@@ -410,7 +425,7 @@ impl State {
         }
 
         for _ in 0..num_locals {
-            self.push_nil();
+            self.push_unchecked(Val::Nil);
         }
 
         let mut frame = self.initialize_frame(closure, varargs);
@@ -481,7 +496,7 @@ impl State {
         self.stack_bottom = old_stack_bottom;
 
         // Push return values back onto the stack
-        self.stack.extend(ret_vals);
+        self.stack.extend(ret_vals); // Replaces values removed with this frame.
 
         // Pop call info
         self.call_stack.pop();
@@ -510,18 +525,24 @@ impl State {
         )
     }
 
-    pub(crate) fn push_chunk(&mut self, bytecode: Arc<Bytecode>) {
-        self.push_closure(bytecode, Vec::new());
+    pub(crate) fn push_chunk(&mut self, bytecode: Arc<Bytecode>) -> Result<()> {
+        self.push_closure(bytecode, Vec::new())
     }
 
     #[hotpath::measure]
-    pub(super) fn push_closure(&mut self, bytecode: Arc<Bytecode>, upvalues: Vec<UpvalueRef>) {
+    pub(super) fn push_closure(
+        &mut self,
+        bytecode: Arc<Bytecode>,
+        upvalues: Vec<UpvalueRef>,
+    ) -> Result<()> {
+        self.check_stack_space(1)?;
         // Check if GC is needed before allocating
         if self.heap.is_full() {
             self.gc_collect();
         }
         let obj = self.heap.alloc_lua_fn(bytecode, upvalues);
-        self.stack.push(Val::Obj(obj));
+        self.push_unchecked(Val::Obj(obj));
+        Ok(())
     }
 
     /// Find an existing open upvalue for the given stack index, or create a new one.

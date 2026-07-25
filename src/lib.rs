@@ -453,7 +453,7 @@ impl State {
     pub fn load(&mut self, program: &Program) -> Result<()> {
         // Mirror load_string_named: track the source for callback context.
         self.current_source = program.0.source.clone();
-        self.push_chunk(Arc::clone(&program.0));
+        self.push_chunk(Arc::clone(&program.0))?;
         Ok(())
     }
 }

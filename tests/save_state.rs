@@ -1,5 +1,4 @@
 #![cfg(feature = "snapshot")]
-
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -164,7 +163,7 @@ fn tombstones_are_omitted_from_snapshots() {
             &mut loaded,
             "t.b = 4; order = ''; for k in pairs(t) do order = order .. k end",
         );
-        loaded.get_global("order");
+        loaded.get_global("order").unwrap();
         assert_eq!(loaded.to_string(-1).unwrap(), expected_order);
         loaded.pop(1).unwrap();
     }
@@ -312,7 +311,7 @@ fn gmatch_closure_survives_save_load() {
     let save = state.save_state().unwrap();
     let mut loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), |_| {}).unwrap();
 
-    loaded.get_global("f");
+    loaded.get_global("f").unwrap();
     loaded.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
     assert_eq!(loaded.to_string(-1).unwrap(), "b");
 }
@@ -328,7 +327,7 @@ fn empty_gmatch_closure_survives_save_load() {
     let save = state.save_state().unwrap();
     let mut loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), |_| {}).unwrap();
 
-    loaded.get_global("g");
+    loaded.get_global("g").unwrap();
     loaded.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
     assert_eq!(loaded.to_string(-1).unwrap(), "");
 }
@@ -361,7 +360,7 @@ fn empty_state_round_trip_stays_empty() {
         "_G",
         "error",
     ] {
-        loaded.get_global(name);
+        loaded.get_global(name).unwrap();
         assert_eq!(loaded.typ(-1), LuaType::Nil, "{name}");
         loaded.pop(1).unwrap();
     }
@@ -380,7 +379,7 @@ fn pairs_iterator_round_trips_after_next_rebinding() {
         .load_string("for key, value in iter, iter_state, iter_key do result = value end")
         .unwrap();
     loaded.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
-    loaded.get_global("result");
+    loaded.get_global("result").unwrap();
     assert_eq!(loaded.to_number(-1).unwrap(), 7.0);
 }
 
@@ -399,10 +398,10 @@ fn dynamic_table_constructor_round_trips_after_completion() {
     let save = original.save_state().unwrap();
     let mut loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), |_| {}).unwrap();
     run(&mut loaded, "a = #t; b = t[1] + t[2] + t[3] + t[4]");
-    loaded.get_global("a");
+    loaded.get_global("a").unwrap();
     assert_eq!(loaded.to_number(-1).unwrap(), 4.0);
     loaded.pop(1).unwrap();
-    loaded.get_global("b");
+    loaded.get_global("b").unwrap();
     assert_eq!(loaded.to_number(-1).unwrap(), 11.0);
 }
 
@@ -460,14 +459,14 @@ fn configured_budget_remains_enforced_after_load() {
 
     // Invoke the native function directly so the saved two units are consumed
     // by table.move itself rather than by bytecode dispatch before the call.
-    loaded.get_global("table");
+    loaded.get_global("table").unwrap();
     loaded.push_bytes("move").expect("short test string fits");
     loaded.get_table(-2).expect("table.move lookup succeeds");
     loaded.remove(-2).expect("table table is removed");
-    loaded.get_global("t");
-    loaded.push_number(1.0);
-    loaded.push_number(5.0);
-    loaded.push_number(2.0);
+    loaded.get_global("t").unwrap();
+    loaded.push_number(1.0).unwrap();
+    loaded.push_number(5.0).unwrap();
+    loaded.push_number(2.0).unwrap();
     let error = loaded
         .call(ArgCount::Fixed(4), RetCount::Fixed(1))
         .expect_err("restored configured budget stops table.move");
@@ -478,9 +477,9 @@ fn configured_budget_remains_enforced_after_load() {
     ));
     assert_eq!(loaded.cost_remaining(), 0);
 
-    loaded.get_global("t");
+    loaded.get_global("t").unwrap();
     for (index, expected) in [1.0, 2.0, 3.0, 4.0, 4.0, 5.0].into_iter().enumerate() {
-        loaded.push_number((index + 1) as f64);
+        loaded.push_number((index + 1) as f64).unwrap();
         loaded.get_table(-2).expect("table read succeeds");
         assert_eq!(
             loaded.to_number(-1).expect("table value is numeric"),
@@ -497,7 +496,7 @@ fn unregistered_reachable_rust_function_fails_save() {
     }
 
     let mut state = State::new();
-    state.push_rust_fn(host_fn);
+    state.push_rust_fn(host_fn).unwrap();
     state.set_global("host_fn");
 
     let err = state.save_state().unwrap_err();
@@ -511,7 +510,7 @@ fn unregistered_reachable_rust_function_fails_save() {
 #[test]
 fn anchor_count_is_diagnostic_not_persisted() {
     let mut state = State::new();
-    state.push_number(1.0);
+    state.push_number(1.0).unwrap();
     let anchor = state.anchor().unwrap();
 
     let save = state.save_state().unwrap();
@@ -661,7 +660,7 @@ fn setup_anchor_survives_load_final_gc() {
     let save = original.save_state().expect("state saves");
     let mut setup_anchor = None;
     let mut loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), |state| {
-        state.push_number(42.0);
+        state.push_number(42.0).unwrap();
         setup_anchor = Some(state.anchor().expect("setup anchor succeeds"));
     })
     .expect("state loads");
@@ -772,7 +771,7 @@ fn missing_host_function_registration_errors_on_load() {
 #[test]
 fn registered_host_function_reconnects_on_load() {
     fn host_value(state: &mut State) -> dellingr::Result<u8> {
-        state.push_number(42.0);
+        state.push_number(42.0)?;
         Ok(1)
     }
 
@@ -805,13 +804,13 @@ fn rust_function_save_id_is_independent_of_registration_order() {
     let mut first = State::new();
     first.register_rust_fn("game.z", host_fn).unwrap();
     first.register_rust_fn("game.a", host_fn).unwrap();
-    first.push_rust_fn(host_fn);
+    first.push_rust_fn(host_fn).unwrap();
     first.set_global("host_fn");
 
     let mut second = State::new();
     second.register_rust_fn("game.a", host_fn).unwrap();
     second.register_rust_fn("game.z", host_fn).unwrap();
-    second.push_rust_fn(host_fn);
+    second.push_rust_fn(host_fn).unwrap();
     second.set_global("host_fn");
 
     assert_eq!(
@@ -834,14 +833,14 @@ fn reload(state: &State) -> State {
 }
 
 fn global_num(state: &mut State, name: &str) -> f64 {
-    state.get_global(name);
+    state.get_global(name).unwrap();
     let n = state.to_number(-1).unwrap();
     state.pop(1).unwrap();
     n
 }
 
 fn global_str(state: &mut State, name: &str) -> String {
-    state.get_global(name);
+    state.get_global(name).unwrap();
     let s = state.to_string_with_meta(-1).unwrap();
     state.pop(1).unwrap();
     s
@@ -1024,7 +1023,7 @@ fn binary_string_literal_round_trips_through_save() {
 
     let mut loaded = reload(&original);
     run(&mut loaded, "result = f()");
-    loaded.get_global("result");
+    loaded.get_global("result").unwrap();
     assert_eq!(loaded.to_bytes(-1).unwrap(), [255]);
     loaded.pop(1).unwrap();
 }
@@ -1040,7 +1039,7 @@ fn uncached_set_field_bytecode_loads_from_a_save() {
 
     let mut loaded = reload(&original);
     run(&mut loaded, "result = f()");
-    loaded.get_global("result");
+    loaded.get_global("result").unwrap();
     assert_eq!(loaded.to_number(-1).expect("result should be numeric"), 1.0);
     loaded.pop(1).unwrap();
 }
@@ -1071,35 +1070,35 @@ fn non_utf8_and_edge_values_round_trip() {
         .push_bytes([0u8, 159, 146, 150, 255])
         .expect("short test string fits");
     state.set_global("binval");
-    state.push_number(-0.0);
+    state.push_number(-0.0).unwrap();
     state.set_global("negzero");
-    state.push_number(f64::NAN);
+    state.push_number(f64::NAN).unwrap();
     state.set_global("nan");
 
     // Table keyed by a non-UTF8 byte string.
-    state.new_table();
+    state.new_table().unwrap();
     state
         .push_bytes([0xff, 0x00, 0xfe])
         .expect("short test string fits");
-    state.push_number(42.0);
+    state.push_number(42.0).unwrap();
     state.set_table_raw(-3).unwrap();
     state.set_global("bt");
 
     let mut loaded = reload(&state);
 
-    loaded.get_global("binval");
+    loaded.get_global("binval").unwrap();
     assert_eq!(loaded.to_bytes(-1).unwrap(), [0u8, 159, 146, 150, 255]);
     loaded.pop(1).unwrap();
 
-    loaded.get_global("negzero");
+    loaded.get_global("negzero").unwrap();
     assert_eq!(loaded.to_number(-1).unwrap().to_bits(), (-0.0f64).to_bits());
     loaded.pop(1).unwrap();
 
-    loaded.get_global("nan");
+    loaded.get_global("nan").unwrap();
     assert!(loaded.to_number(-1).unwrap().is_nan());
     loaded.pop(1).unwrap();
 
-    loaded.get_global("bt");
+    loaded.get_global("bt").unwrap();
     loaded
         .push_bytes([0xff, 0x00, 0xfe])
         .expect("short test string fits");

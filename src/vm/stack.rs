@@ -51,7 +51,7 @@ impl State {
             Ordering::Greater => {
                 self.check_stack_space(new_top - old_top)?;
                 for _ in old_top..new_top {
-                    self.push_nil();
+                    self.push_unchecked(Val::Nil);
                 }
             }
         }
@@ -84,52 +84,64 @@ impl State {
     }
 
     /// Pushes a `nil` value onto the stack.
-    pub fn push_nil(&mut self) {
-        self.stack.push(Val::Nil);
+    pub fn push_nil(&mut self) -> Result<()> {
+        self.check_stack_slot()?;
+        self.push_unchecked(Val::Nil);
+        Ok(())
     }
 
     /// Pushes a number with value `n` onto the stack.
-    pub fn push_number(&mut self, n: f64) {
-        self.stack.push(Val::Num(n));
+    pub fn push_number(&mut self, n: f64) -> Result<()> {
+        self.check_stack_slot()?;
+        self.push_unchecked(Val::Num(n));
+        Ok(())
     }
 
     /// Pushes a boolean onto the stack.
-    pub fn push_boolean(&mut self, b: bool) {
-        self.stack.push(Val::Bool(b));
+    pub fn push_boolean(&mut self, b: bool) -> Result<()> {
+        self.check_stack_slot()?;
+        self.push_unchecked(Val::Bool(b));
+        Ok(())
     }
 
     /// Pushes the given UTF-8 string onto the stack.
     pub fn push_string(&mut self, s: impl AsRef<str>) -> Result<()> {
+        self.check_stack_slot()?;
         let val = self.alloc_string(s.as_ref().as_bytes())?;
-        self.stack.push(val);
+        self.push_unchecked(val);
         Ok(())
     }
 
     /// Pushes the given raw Lua string bytes onto the stack.
     pub fn push_bytes(&mut self, bytes: impl AsRef<[u8]>) -> Result<()> {
+        self.check_stack_slot()?;
         let val = self.alloc_string(bytes.as_ref())?;
-        self.stack.push(val);
+        self.push_unchecked(val);
         Ok(())
     }
 
     /// Pushes a Rust function onto the stack.
-    pub fn push_rust_fn(&mut self, f: RustFunc) {
-        self.stack.push(Val::RustFn(f));
+    pub fn push_rust_fn(&mut self, f: RustFunc) -> Result<()> {
+        self.check_stack_slot()?;
+        self.push_unchecked(Val::RustFn(f));
+        Ok(())
     }
 
     /// Register and push a Rust function with a stable save/load id.
     #[cfg(feature = "snapshot")]
     pub fn push_named_rust_fn(&mut self, id: &str, f: RustFunc) -> Result<()> {
+        self.check_stack_slot()?;
         self.register_rust_fn(id, f)
             .map_err(|err| Error::without_location(ErrorKind::InternalError(err.to_string())))?;
-        self.push_rust_fn(f);
+        self.push_unchecked(Val::RustFn(f));
         Ok(())
     }
 
     /// Pushes a copy of the element at the given index onto the stack.
     pub fn push_value(&mut self, i: isize) -> Result<()> {
         let val = self.at_index(i)?;
-        self.stack.push(val);
+        self.check_stack_slot()?;
+        self.push_unchecked(val);
         Ok(())
     }
 
@@ -263,11 +275,12 @@ impl State {
 
     /// Balances a stack after an operation that returns an indefinite number of
     /// results.
-    pub(super) fn balance_stack(&mut self, expected: usize, received: usize) {
+    pub(super) fn balance_stack(&mut self, expected: usize, received: usize) -> Result<()> {
         match expected.cmp(&received) {
             Ordering::Greater => {
+                self.check_stack_space(expected - received)?;
                 for _ in received..expected {
-                    self.push_nil();
+                    self.push_unchecked(Val::Nil);
                 }
             }
             Ordering::Less => {
@@ -277,11 +290,36 @@ impl State {
             }
             Ordering::Equal => (),
         }
+        Ok(())
+    }
+
+    /// Append after a successful capacity check, or when replacing popped values.
+    #[inline(always)]
+    pub(super) fn push_unchecked(&mut self, val: Val) {
+        self.stack.push(val);
+    }
+
+    /// Check and append an internal value that has no public typed push API.
+    #[inline(always)]
+    pub(super) fn push_val(&mut self, val: Val) -> Result<()> {
+        self.check_stack_slot()?;
+        self.push_unchecked(val);
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn check_stack_slot(&self) -> Result<()> {
+        if self.stack.len() >= MAX_STACK_SIZE {
+            return Err(Error::without_location(ErrorKind::StackOverflow {
+                size: self.stack.len().saturating_add(1),
+            }));
+        }
+        Ok(())
     }
 
     /// Check that we have room for `n` more values on the stack.
     /// Returns an error if adding `n` values would exceed the stack limit.
-    pub(super) fn check_stack_space(&self, n: usize) -> Result<()> {
+    pub(crate) fn check_stack_space(&self, n: usize) -> Result<()> {
         let new_size = self.stack.len().saturating_add(n);
         if new_size > MAX_STACK_SIZE {
             return Err(Error::without_location(ErrorKind::StackOverflow {

@@ -40,10 +40,12 @@ fn deleted_controls_and_reinsertion_keep_iteration_correct() {
 fn collectable_tombstone_key_survives_next_control_lookup() {
     let mut state = State::new();
     state.gc_disable_auto();
-    state.push_rust_fn(|state| {
-        state.gc_collect();
-        Ok(0)
-    });
+    state
+        .push_rust_fn(|state| {
+            state.gc_collect();
+            Ok(0)
+        })
+        .unwrap();
     state.set_global("force_gc");
     state
         .load_string("local t = {}; local a = {}; local b = {}; t[a] = 1; t[b] = 2; local control = next(t); t[control] = nil; force_gc(); return next(t, control) == b and 1 or 0")

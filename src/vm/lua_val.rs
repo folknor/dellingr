@@ -215,7 +215,7 @@ mod tests {
     }
 
     fn second_callback(state: &mut State) -> Result<u8> {
-        state.push_number(1.0);
+        state.push_number(1.0)?;
         Ok(1)
     }
 

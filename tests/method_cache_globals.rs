@@ -57,12 +57,12 @@ fn string_method_cache_survives_gc_after_string_rebind() {
     state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
 
     // Warm the string-method IC at the call site inside `warm`.
-    state.get_global("warm");
+    state.get_global("warm").unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
     state.pop(1).unwrap();
 
     // Rebind `string` in Lua and drop the local reference.
-    state.get_global("rebind_and_drop");
+    state.get_global("rebind_and_drop").unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
 
     // Force GC so the original `string` lib (no longer rooted via the
@@ -72,7 +72,7 @@ fn string_method_cache_survives_gc_after_string_rebind() {
     // would either return stale data or panic on a stale ObjectPtr.
     state.gc_collect();
 
-    state.get_global("probe");
+    state.get_global("probe").unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
     let result = state.to_string(-1).unwrap();
     assert_eq!(result, "NEW");
@@ -91,7 +91,7 @@ fn string_method_cache_blocked_by_with_restricted_env() {
     state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
 
     // Warm the IC outside the sandbox.
-    state.get_global("call_upper");
+    state.get_global("call_upper").unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
     let warm = state.to_string(-1).unwrap();
     assert_eq!(warm, "HI");
@@ -103,7 +103,7 @@ fn string_method_cache_blocked_by_with_restricted_env() {
     // errors. Without the fix, the cached ObjectPtr (still alive in
     // `saved_builtins`) silently bypasses the restriction.
     let restricted_result = state.with_restricted_env(&["call_upper"], |state| {
-        state.get_global("call_upper");
+        state.get_global("call_upper").unwrap();
         state.call(ArgCount::Fixed(0), RetCount::Fixed(1))
     });
     assert!(
@@ -113,7 +113,7 @@ fn string_method_cache_blocked_by_with_restricted_env() {
     );
 
     // After the sandbox returns, the IC works again on a fresh call.
-    state.get_global("call_upper");
+    state.get_global("call_upper").unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
     let after = state.to_string(-1).unwrap();
     assert_eq!(after, "HI");

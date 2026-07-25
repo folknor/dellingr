@@ -114,7 +114,7 @@ fn golden_fixture_round_trips() {
     loaded
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect("probe runs");
-    loaded.get_global("result");
+    loaded.get_global("result").unwrap();
     assert_eq!(
         loaded.to_string(-1).expect("probe returns a string"),
         "10|true|true|true|by-object-key|shared|leaf|tail"

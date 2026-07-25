@@ -118,7 +118,7 @@ fn malformed_pattern_capture_errors_are_runtime_errors() {
 #[test]
 fn call_rejects_missing_fixed_arguments_without_panicking() {
     let mut state = State::new();
-    state.push_rust_fn(|_state| Ok(0));
+    state.push_rust_fn(|_state| Ok(0)).unwrap();
 
     let err = state
         .call(ArgCount::Fixed(1), RetCount::Fixed(0))
@@ -134,7 +134,7 @@ fn call_rejects_missing_fixed_arguments_without_panicking() {
 #[test]
 fn public_call_rejects_dynamic_without_base_without_panicking() {
     let mut state = State::new();
-    state.push_rust_fn(|_state| Ok(0));
+    state.push_rust_fn(|_state| Ok(0)).unwrap();
 
     let err = state
         .call(ArgCount::Dynamic, RetCount::Fixed(0))
@@ -369,7 +369,7 @@ fn budget_stops_at_the_first_operation_after_exhaustion() {
             .expect_err("the operation after the exhausted budget must fail");
         assert!(matches!(err.kind, ErrorKind::BudgetExceeded { .. }));
 
-        state.get_global("x");
+        state.get_global("x").unwrap();
         assert_eq!(
             state.to_number(-1).expect("x should be numeric"),
             budget as f64
@@ -391,7 +391,7 @@ fn budget_flushes_pending_caller_cost_before_nested_call() {
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect_err("callee must observe the caller's pending cost");
     assert!(matches!(err.kind, ErrorKind::BudgetExceeded { .. }));
-    state.get_global("x");
+    state.get_global("x").unwrap();
     assert_eq!(state.to_number(-1).expect("x should be numeric"), 1.0);
     assert_eq!(state.cost_used(), 1);
     assert_eq!(state.cost_remaining(), 0);
@@ -791,11 +791,11 @@ fn table_sort_default_rejects_incomparable_values_without_mutation() {
     state
         .table_sort(1, false)
         .expect_err("mixed default sort must fail");
-    state.push_number(1.0);
+    state.push_number(1.0).unwrap();
     state.get_table(1).unwrap();
     assert_eq!(state.to_number(-1).unwrap(), 1.0);
     state.pop(1).unwrap();
-    state.push_number(2.0);
+    state.push_number(2.0).unwrap();
     state.get_table(1).unwrap();
     assert_eq!(state.to_string(-1).unwrap(), "a");
 }
@@ -854,7 +854,7 @@ fn table_sort_charges_before_mutating() {
 
     // Restore budget and confirm the table is untouched: still {3, 1, 2}.
     state.set_cost_budget(i64::MAX);
-    state.push_number(1.0);
+    state.push_number(1.0).unwrap();
     state.get_table(1).unwrap();
     assert_eq!(state.to_number(-1).unwrap(), 3.0);
 }
@@ -966,14 +966,14 @@ fn table_move_costs_empty_and_each_moved_element() {
     state.set_cost_budget(0);
     // Call the native function directly so bytecode dispatch cannot consume
     // the exhausted budget before table.move reaches its empty-range charge.
-    state.get_global("table");
+    state.get_global("table").unwrap();
     state.push_bytes("move").expect("short test string fits");
     state.get_table(-2).expect("table.move lookup succeeds");
     state.remove(-2).expect("table table is removed");
-    state.new_table();
-    state.push_number(2.0);
-    state.push_number(1.0);
-    state.push_number(1.0);
+    state.new_table().unwrap();
+    state.push_number(2.0).unwrap();
+    state.push_number(1.0).unwrap();
+    state.push_number(1.0).unwrap();
     let error = state
         .call(ArgCount::Fixed(4), RetCount::Fixed(1))
         .expect_err("empty table.move must charge a configured exhausted budget");
@@ -1006,9 +1006,9 @@ fn table_move_rejects_overflow_ranges_before_mutating() {
             .expect_err("overflow range must fail cleanly");
         assert!(matches!(err.kind, ErrorKind::RuntimeError(ref got) if got == message));
 
-        state.get_global("t");
+        state.get_global("t").unwrap();
         for (index, expected) in [10.0, 20.0, 30.0].into_iter().enumerate() {
-            state.push_number((index + 1) as f64);
+            state.push_number((index + 1) as f64).unwrap();
             state.get_table(-2).expect("table read succeeds");
             assert_eq!(
                 state.to_number(-1).expect("table value is numeric"),
@@ -1043,10 +1043,10 @@ fn table_after_budgeted_move(budget: i64) -> (dellingr::error::Error, Vec<f64>) 
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect_err("limited move must stop at the exhausted budget");
 
-    state.get_global("t");
+    state.get_global("t").unwrap();
     let mut values = Vec::new();
     for index in 1..=5 {
-        state.push_number(index as f64);
+        state.push_number(index as f64).unwrap();
         state.get_table(-2).expect("table read succeeds");
         values.push(state.to_number(-1).expect("table value is numeric"));
         state.pop(1).unwrap();
@@ -1278,13 +1278,13 @@ fn global_lookup_cache_respects_restricted_env() {
         .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
 
-    state.get_global("read_x");
+    state.get_global("read_x").unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
     assert_eq!(state.to_number(-1).unwrap(), 1.0);
     state.pop(1).unwrap();
 
     let restricted = state.with_restricted_env(&["read_x"], |state| {
-        state.get_global("read_x");
+        state.get_global("read_x").unwrap();
         state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
         let result = state.to_number(-1).unwrap();
         state.pop(1).unwrap();
@@ -1292,7 +1292,7 @@ fn global_lookup_cache_respects_restricted_env() {
     });
     assert_eq!(restricted, 2.0);
 
-    state.get_global("read_x");
+    state.get_global("read_x").unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
     assert_eq!(state.to_number(-1).unwrap(), 1.0);
 }
@@ -1303,7 +1303,7 @@ fn restricted_env_restored_after_panic() {
     // so a caller that catches the panic can reuse the State. `math` is not in
     // the whitelist, so it is nil during the closure but must be back after.
     let mut state = State::new();
-    state.new_table();
+    state.new_table().unwrap();
     state.set_global("saved_object");
 
     let prev_hook = std::panic::take_hook();
@@ -1318,10 +1318,10 @@ fn restricted_env_restored_after_panic() {
     assert!(caught.is_err(), "the panic must propagate");
 
     // Environment restored: a non-whitelisted global is available again.
-    state.get_global("math");
+    state.get_global("math").unwrap();
     assert_eq!(state.typ(-1), LuaType::Table);
     state.pop(1).unwrap();
-    state.get_global("saved_object");
+    state.get_global("saved_object").unwrap();
     assert_eq!(state.typ(-1), LuaType::Table);
     state.pop(1).unwrap();
 }

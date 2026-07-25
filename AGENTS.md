@@ -74,6 +74,17 @@ Compilation pipeline: source to `compiler::parse_str` to bytecode `Chunk` to exe
 
 `MAX_CALL_DEPTH = 1000`, `MAX_STACK_SIZE = 1_000_000`.
 
+**The stack cap is a real, global invariant, not a documented aspiration.**
+Every path that can grow `State.stack` is either checked (a single
+`check_stack_slot`), batch-preflighted (`check_stack_space(n)` before an
+unchecked append), or provably net-neutral because it pops before it pushes.
+`push_unchecked` is legal *only* after a preflight or when replacing popped
+values - reaching for `self.stack.push(..)` directly re-opens the hole. The
+public `push_*` methods, `new_table`, `get_global` and `open_libs` are all
+fallible for this reason; a rejected operation must leave the stack, the string
+pool and the function registry unchanged. The cap bounds the shared Lua/Rust
+value stack, not total host memory, and enforcing it charges no cost.
+
 **GC roots**: `vm::mark_gc_roots` is the *single source of truth* for what's reachable. Any allocator that may trigger GC must use this same root set. Closed upvalues are reached transitively via the closures that hold them, not as a separate root set - there's an explicit comment about this (`vm.rs` / `vm/object.rs`). Root an object with `GcHeap::mark`, never by pushing onto the worklist directly: `mark` sets the object's colour *and* queues it, whereas a bare push traces the object's children while leaving the object itself Unmarked, so sweep frees it and later reads dangle. A `debug_assert!` in `drain_mark_worklist` enforces this - the mistake is otherwise invisible until something actually collects.
 
 **Stack indexing**: Rust callbacks (`RustFunc = fn(&mut State) -> Result<u8>`) use **1-based** indexing; Lua bytecode internally uses 0-based. `vm_aux.rs` and the lua_std modules show the 1-based pattern.

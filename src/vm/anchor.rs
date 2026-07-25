@@ -199,10 +199,7 @@ impl State {
     /// belongs to a different `State`.
     pub fn push_anchor(&mut self, a: Anchor) -> Result<()> {
         match self.registry.get(a) {
-            Some(val) => {
-                self.stack.push(val);
-                Ok(())
-            }
+            Some(val) => self.push_val(val),
             None => Err(Error::without_location(ErrorKind::InvalidAnchor)),
         }
     }
@@ -240,6 +237,7 @@ impl State {
                 index: -(n_args as isize) - 1,
             })
         })?;
+        self.check_stack_space(1)?;
         self.stack.insert(insert_at, val);
         self.call(args, rets)
     }

@@ -86,7 +86,7 @@ impl State {
                     "NewTableTemplate: invalid template {template_id}"
                 )))
             })?;
-        self.new_table_with_template(template, frame.string_literal_start());
+        self.new_table_with_template(template, frame.string_literal_start())?;
         Ok(())
     }
 
@@ -141,9 +141,11 @@ impl State {
         let val = self.pop_val();
 
         // Check for string first
+        // The operand was popped above, so pushing a single result back is
+        // net-neutral and needs no preflight.
         if let Some(s) = val.as_string(&self.heap) {
             let len = s.len();
-            self.stack.push(Val::Num(len as f64));
+            self.push_unchecked(Val::Num(len as f64));
             return Ok(());
         }
 
@@ -170,9 +172,11 @@ impl State {
                 });
 
                 if !matches!(len_handler, Val::Nil) {
-                    // Call __len(table)
-                    self.stack.push(len_handler);
-                    self.stack.push(val);
+                    // Call __len(table). Two values pushed against the one
+                    // popped above, so this is net-positive by one slot.
+                    self.check_stack_space(2)?;
+                    self.push_unchecked(len_handler);
+                    self.push_unchecked(val);
                     Frame::flush_local_cost(self, local_cost)?;
                     self.call(ArgCount::Fixed(1), RetCount::Fixed(1))?;
                     return Ok(());
@@ -180,7 +184,7 @@ impl State {
             }
 
             // No __len, use default array_len
-            self.stack.push(Val::Num(len as f64));
+            self.push_unchecked(Val::Num(len as f64));
             return Ok(());
         }
 
@@ -190,13 +194,15 @@ impl State {
     #[hotpath::measure]
     pub(super) fn instr_negate(&mut self) -> Result<()> {
         let n = self.pop_num()?;
-        self.stack.push(Val::Num(-n));
+        // Net-neutral: one operand popped, one result pushed.
+        self.push_unchecked(Val::Num(-n));
         Ok(())
     }
 
     pub(super) fn instr_not(&mut self) {
         let b = self.pop_val().truthy();
-        self.stack.push(Val::Bool(!b));
+        // Net-neutral: one operand popped, one result pushed.
+        self.push_unchecked(Val::Bool(!b));
     }
 
     #[hotpath::measure]
@@ -443,7 +449,8 @@ impl State {
                     let key = Val::Num(i as f64);
                     tbl.insert(key, val)?;
                 }
-                self.stack.push(tbl_value);
+                // Net-neutral: the table was popped above and is pushed back.
+                self.push_unchecked(tbl_value);
                 Ok(())
             }
             None => Err(self.error(ErrorKind::InternalError(format!(
@@ -498,7 +505,8 @@ impl State {
             }
         };
 
-        self.stack.push(Val::Bool(
+        // Net-negative: two operands popped, one result pushed.
+        self.push_unchecked(Val::Bool(
             result.is_some_and(|result| if negate { !result } else { result }),
         ));
         Ok(())
@@ -509,7 +517,8 @@ impl State {
     pub(super) fn eval_float_float(&mut self, f: impl Fn(f64, f64) -> f64) -> Result<()> {
         let n2 = self.pop_num()?;
         let n1 = self.pop_num()?;
-        self.stack.push(Val::Num(f(n1, n2)));
+        // Net-negative: two operands popped, one result pushed.
+        self.push_unchecked(Val::Num(f(n1, n2)));
         Ok(())
     }
 

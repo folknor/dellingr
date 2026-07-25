@@ -25,13 +25,13 @@ impl State {
             frame.jump(offset)?;
         }
         if keep_cond {
-            self.stack.push(val);
+            self.push_unchecked(val); // Replaces the condition popped above.
         }
         Ok(())
     }
 
     #[hotpath::measure]
-    pub(super) fn instr_closure(&mut self, frame: &mut Frame, i: u8) {
+    pub(super) fn instr_closure(&mut self, frame: &mut Frame, i: u8) -> Result<()> {
         let bytecode = frame.get_nested_bytecode(i);
         // Capture upvalues based on the bytecode's upvalue descriptors
         let mut captured_upvalues = Vec::with_capacity(bytecode.upvalues.len());
@@ -49,7 +49,7 @@ impl State {
             };
             captured_upvalues.push(uv_ref);
         }
-        self.push_closure(bytecode, captured_upvalues);
+        self.push_closure(bytecode, captured_upvalues)
     }
 
     #[hotpath::measure]
@@ -148,9 +148,10 @@ impl State {
             return self.instr_tfor_call_rust_fn(f, base, state, control, num_vars);
         }
 
-        self.stack.push(iterator);
-        self.stack.push(state);
-        self.stack.push(control);
+        self.check_stack_space(3)?;
+        self.push_unchecked(iterator);
+        self.push_unchecked(state);
+        self.push_unchecked(control);
 
         // Call with 2 args (state, control), expecting num_vars returns
         self.call(ArgCount::Fixed(2), RetCount::Fixed(num_vars))?;
@@ -252,8 +253,9 @@ impl State {
         let old_stack_bottom = self.stack_bottom;
         let call_base = self.stack.len();
 
-        self.stack.push(state);
-        self.stack.push(control);
+        self.check_stack_space(2)?;
+        self.push_unchecked(state);
+        self.push_unchecked(control);
         self.stack_bottom = call_base;
 
         let result = f(self);
@@ -270,8 +272,13 @@ impl State {
         let reported = usize::from(num_ret_reported);
         match reported.cmp(&num_ret_actual) {
             std::cmp::Ordering::Greater => {
+                if let Err(e) = self.check_stack_space(reported - num_ret_actual) {
+                    self.stack.truncate(call_base);
+                    self.stack_bottom = old_stack_bottom;
+                    return Err(e);
+                }
                 for _ in num_ret_actual..reported {
-                    self.push_nil();
+                    self.push_unchecked(Val::Nil);
                 }
             }
             std::cmp::Ordering::Less => {
@@ -284,7 +291,10 @@ impl State {
         }
         self.stack_bottom = old_stack_bottom;
 
-        self.balance_stack(num_vars as usize, num_ret_reported as usize);
+        if let Err(e) = self.balance_stack(num_vars as usize, num_ret_reported as usize) {
+            self.stack.truncate(call_base);
+            return Err(e);
+        }
         let results_start = self.stack.len() - num_vars as usize;
         for i in 0..num_vars as usize {
             self.stack[base + 3 + i] = self.stack[results_start + i];

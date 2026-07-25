@@ -11,13 +11,14 @@
 //! `math.random` are bit-stable everywhere).
 
 use crate::LuaType;
+use crate::Result;
 use crate::State;
 use crate::error::{ArgError, ErrorKind};
 use std::f64::consts::PI;
 
-pub(crate) fn open_math(state: &mut State) {
+pub(crate) fn open_math(state: &mut State) -> Result<()> {
     // Create the math table
-    state.new_table_with_capacity(24);
+    state.new_table_with_capacity(24)?;
 
     // Helper to add a function to the table at stack index -1.
     macro_rules! add_fn {
@@ -39,7 +40,7 @@ pub(crate) fn open_math(state: &mut State) {
         state.check_type(1, LuaType::Number)?;
         let x = state.to_number(1)?;
         state.set_top(0)?;
-        state.push_number(x.sin());
+        state.push_number(x.sin())?;
         Ok(1)
     });
 
@@ -49,7 +50,7 @@ pub(crate) fn open_math(state: &mut State) {
         state.check_type(1, LuaType::Number)?;
         let x = state.to_number(1)?;
         state.set_top(0)?;
-        state.push_number(x.cos());
+        state.push_number(x.cos())?;
         Ok(1)
     });
 
@@ -61,7 +62,7 @@ pub(crate) fn open_math(state: &mut State) {
         let y = state.to_number(1)?;
         let x = state.to_number(2)?;
         state.set_top(0)?;
-        state.push_number(y.atan2(x));
+        state.push_number(y.atan2(x))?;
         Ok(1)
     });
 
@@ -71,7 +72,7 @@ pub(crate) fn open_math(state: &mut State) {
         state.check_type(1, LuaType::Number)?;
         let x = state.to_number(1)?;
         state.set_top(0)?;
-        state.push_number(x.sqrt());
+        state.push_number(x.sqrt())?;
         Ok(1)
     });
 
@@ -81,7 +82,7 @@ pub(crate) fn open_math(state: &mut State) {
         state.check_type(1, LuaType::Number)?;
         let x = state.to_number(1)?;
         state.set_top(0)?;
-        state.push_number(x.abs());
+        state.push_number(x.abs())?;
         Ok(1)
     });
 
@@ -108,7 +109,7 @@ pub(crate) fn open_math(state: &mut State) {
             }
         }
         state.set_top(0)?;
-        state.push_number(result);
+        state.push_number(result)?;
         Ok(1)
     });
 
@@ -135,7 +136,7 @@ pub(crate) fn open_math(state: &mut State) {
             }
         }
         state.set_top(0)?;
-        state.push_number(result);
+        state.push_number(result)?;
         Ok(1)
     });
 
@@ -145,7 +146,7 @@ pub(crate) fn open_math(state: &mut State) {
         state.check_type(1, LuaType::Number)?;
         let x = state.to_number(1)?;
         state.set_top(0)?;
-        state.push_number(x.floor());
+        state.push_number(x.floor())?;
         Ok(1)
     });
 
@@ -155,7 +156,7 @@ pub(crate) fn open_math(state: &mut State) {
         state.check_type(1, LuaType::Number)?;
         let x = state.to_number(1)?;
         state.set_top(0)?;
-        state.push_number(x.ceil());
+        state.push_number(x.ceil())?;
         Ok(1)
     });
 
@@ -201,7 +202,7 @@ pub(crate) fn open_math(state: &mut State) {
         };
 
         state.set_top(0)?;
-        state.push_number(result);
+        state.push_number(result)?;
         Ok(1)
     });
 
@@ -211,7 +212,7 @@ pub(crate) fn open_math(state: &mut State) {
         state.check_type(1, LuaType::Number)?;
         let x = state.to_number(1)?;
         state.set_top(0)?;
-        state.push_number(x.tan());
+        state.push_number(x.tan())?;
         Ok(1)
     });
 
@@ -221,7 +222,7 @@ pub(crate) fn open_math(state: &mut State) {
         state.check_type(1, LuaType::Number)?;
         let x = state.to_number(1)?;
         state.set_top(0)?;
-        state.push_number(x.acos());
+        state.push_number(x.acos())?;
         Ok(1)
     });
 
@@ -231,7 +232,7 @@ pub(crate) fn open_math(state: &mut State) {
         state.check_type(1, LuaType::Number)?;
         let x = state.to_number(1)?;
         state.set_top(0)?;
-        state.push_number(x.asin());
+        state.push_number(x.asin())?;
         Ok(1)
     });
 
@@ -250,7 +251,7 @@ pub(crate) fn open_math(state: &mut State) {
             y.atan()
         };
         state.set_top(0)?;
-        state.push_number(result);
+        state.push_number(result)?;
         Ok(1)
     });
 
@@ -260,7 +261,7 @@ pub(crate) fn open_math(state: &mut State) {
         state.check_type(1, LuaType::Number)?;
         let x = state.to_number(1)?;
         state.set_top(0)?;
-        state.push_number(x.to_degrees());
+        state.push_number(x.to_degrees())?;
         Ok(1)
     });
 
@@ -270,7 +271,7 @@ pub(crate) fn open_math(state: &mut State) {
         state.check_type(1, LuaType::Number)?;
         let x = state.to_number(1)?;
         state.set_top(0)?;
-        state.push_number(x.to_radians());
+        state.push_number(x.to_radians())?;
         Ok(1)
     });
 
@@ -280,7 +281,7 @@ pub(crate) fn open_math(state: &mut State) {
         state.check_type(1, LuaType::Number)?;
         let x = state.to_number(1)?;
         state.set_top(0)?;
-        state.push_number(x.exp());
+        state.push_number(x.exp())?;
         Ok(1)
     });
 
@@ -303,7 +304,7 @@ pub(crate) fn open_math(state: &mut State) {
             x.ln()
         };
         state.set_top(0)?;
-        state.push_number(result);
+        state.push_number(result)?;
         Ok(1)
     });
 
@@ -315,7 +316,7 @@ pub(crate) fn open_math(state: &mut State) {
         let x = state.to_number(1)?;
         let y = state.to_number(2)?;
         state.set_top(0)?;
-        state.push_number(x % y);
+        state.push_number(x % y)?;
         Ok(1)
     });
 
@@ -331,21 +332,18 @@ pub(crate) fn open_math(state: &mut State) {
             x - integral
         };
         state.set_top(0)?;
-        state.push_number(integral);
-        state.push_number(fractional);
+        state.push_number(integral)?;
+        state.push_number(fractional)?;
         Ok(2)
     });
 
     // math.pi (constant)
-    state
-        .set_table_str_key_number(-1, "pi", PI)
-        .expect("math.pi assignment cannot fail");
+    state.set_table_str_key_number(-1, "pi", PI)?;
 
     // math.huge (infinity constant)
-    state
-        .set_table_str_key_number(-1, "huge", f64::INFINITY)
-        .expect("math.huge assignment cannot fail");
+    state.set_table_str_key_number(-1, "huge", f64::INFINITY)?;
 
     // Set the math table as a global
     state.set_global("math");
+    Ok(())
 }

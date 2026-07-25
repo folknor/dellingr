@@ -70,7 +70,7 @@ fn main() {
     let setup_object_count = state.object_count();
 
     // Phase 3: cold call - first invocation of `_bench`.
-    state.get_global("_bench");
+    state.get_global("_bench").unwrap();
     if state.typ(-1) == LuaType::Nil {
         state
             .pop(1)
@@ -100,7 +100,7 @@ fn main() {
     // Phase 4: warm calls.
     let warm_start = Instant::now();
     for _ in 0..WARM_ITERATIONS {
-        state.get_global("_bench");
+        state.get_global("_bench").unwrap();
         if let Err(e) = state.call(ArgCount::Fixed(0), RetCount::Fixed(0)) {
             eprintln!("Warm _bench call error in {}: {e}", script_path.display());
             exit(1);

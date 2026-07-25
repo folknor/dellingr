@@ -26,11 +26,14 @@ impl State {
 
         let cache = frame.caches.field_lookup.get(cache_idx as usize);
 
+        // Every push below is balanced against the receiver popped above, so
+        // this path never exceeds the height it was entered at and needs no
+        // preflight.
         if let Some(ptr) = val.as_object_ptr()
             && let Some((direct, has_metatable)) = self.get_table_field_direct(ptr, key, cache)
         {
             if let Some(result) = direct {
-                self.stack.push(result);
+                self.push_unchecked(result);
                 return Ok(());
             }
 
@@ -39,11 +42,11 @@ impl State {
             }
 
             if let Some(result) = self.get_index_table_field_direct(val, ptr, key, cache) {
-                self.stack.push(result);
+                self.push_unchecked(result);
                 return Ok(());
             }
 
-            self.stack.push(val);
+            self.push_unchecked(val);
             let table_idx = self.stack.len() - 1;
             self.get_table_with_key(table_idx, key, local_cost)?;
             let result = self.pop_val();
@@ -52,7 +55,7 @@ impl State {
             if matches!(result, Val::Nil) {
                 self.push_table_library_field(key, local_cost)
             } else {
-                self.stack.push(result);
+                self.push_unchecked(result);
                 Ok(())
             }
         } else if val.as_string_ptr().is_some() {
@@ -69,14 +72,18 @@ impl State {
         cache: Option<&FieldLookupCacheSlot>,
         local_cost: &mut u64,
     ) -> Result<()> {
+        // Net-positive by one slot: callers in `metamethod.rs` reach this
+        // without having popped a receiver first, so the check belongs here
+        // rather than at the call sites.
         if let Some(cache) = cache
             && let Some(method) = self.get_cached_string_method(key, cache)
         {
-            self.stack.push(method);
+            self.check_stack_space(1)?;
+            self.push_unchecked(method);
             return Ok(());
         }
 
-        self.get_global("string");
+        self.get_global("string")?;
         let string_lib_idx = self.stack.len() - 1;
         self.get_table_with_key(string_lib_idx, key, local_cost)?;
         let result = self.pop_val();
@@ -95,7 +102,8 @@ impl State {
             });
         }
 
-        self.stack.push(result);
+        self.check_stack_space(1)?;
+        self.push_unchecked(result);
         Ok(())
     }
 
@@ -210,7 +218,7 @@ impl State {
             return cached;
         }
 
-        let index_key = self.protected_index_key(receiver, key);
+        let index_key = self.protected_index_key(receiver, key)?;
         let receiver_table = self.heap.as_table_ref(ptr)?;
         let receiver_metatable = receiver_table.get_metatable()?;
         let metatable = self.heap.as_table_ref(receiver_metatable)?;
@@ -343,9 +351,21 @@ impl State {
     }
 
     #[inline(always)]
-    pub(super) fn protected_index_key(&mut self, receiver: Val, key: Val) -> Val {
-        self.stack.push(receiver);
-        self.stack.push(key);
+    /// Interns `"__index"` while keeping `receiver` and `key` reachable for the
+    /// GC across the allocation.
+    ///
+    /// This pushes its two protection values *before* popping anything, so it
+    /// is net-positive while it runs and must respect the cap like any other
+    /// growth path. It sits on an `Option`-returning inline-cache fast path, so
+    /// exhaustion is reported as `None`: the caller then falls through to the
+    /// slow lookup, which performs the same work through checked pushes and
+    /// surfaces a proper `StackOverflow`.
+    pub(super) fn protected_index_key(&mut self, receiver: Val, key: Val) -> Option<Val> {
+        if self.check_stack_space(2).is_err() {
+            return None;
+        }
+        self.push_unchecked(receiver);
+        self.push_unchecked(key);
         let index_key = self
             .alloc_string("__index")
             .expect("fixed metamethod key is below the string size limit");
@@ -354,7 +374,7 @@ impl State {
         // now-fallible public `pop`.
         self.pop_val();
         self.pop_val();
-        index_key
+        Some(index_key)
     }
 
     #[inline(always)]
@@ -363,12 +383,13 @@ impl State {
         key: Val,
         local_cost: &mut u64,
     ) -> Result<()> {
-        self.get_global("table");
+        self.get_global("table")?;
         let table_lib_idx = self.stack.len() - 1;
         self.get_table_with_key(table_lib_idx, key, local_cost)?;
         let result = self.pop_val();
         self.pop_val();
-        self.stack.push(result);
+        // Net-negative from here: two values popped, one pushed back.
+        self.push_unchecked(result);
         Ok(())
     }
 
@@ -380,8 +401,10 @@ impl State {
     ) -> Result<()> {
         let s = &frame.bytecode().string_literals[string_num as usize];
         let cache = frame.caches.global_lookup.get(cache_idx as usize);
+        // Net-positive by one slot, matching the uncached `get_global` path.
         if let Some(val) = cache.and_then(|cache| self.get_cached_global(cache)) {
-            self.stack.push(val);
+            self.check_stack_space(1)?;
+            self.push_unchecked(val);
             return Ok(());
         }
 
@@ -406,7 +429,8 @@ impl State {
         } else {
             Val::Nil
         };
-        self.stack.push(val);
+        self.check_stack_space(1)?;
+        self.push_unchecked(val);
         Ok(())
     }
 
@@ -421,9 +445,11 @@ impl State {
 
     /// Fast path for getting well-known builtin globals.
     #[inline(always)]
-    pub(super) fn instr_get_builtin(&mut self, slot: u8) {
+    pub(super) fn instr_get_builtin(&mut self, slot: u8) -> Result<()> {
         let val = self.builtins[slot as usize];
-        self.stack.push(val);
+        self.check_stack_space(1)?;
+        self.push_unchecked(val);
+        Ok(())
     }
 
     /// Fast path for setting well-known builtin globals.
@@ -443,19 +469,23 @@ impl State {
     }
 
     #[inline(always)]
-    pub(super) fn instr_get_local(&mut self, local_num: u8) {
+    pub(super) fn instr_get_local(&mut self, local_num: u8) -> Result<()> {
         let i = local_num as usize + self.stack_bottom;
         let val = self.stack[i];
-        self.stack.push(val);
+        self.check_stack_space(1)?;
+        self.push_unchecked(val);
+        Ok(())
     }
 
-    pub(super) fn instr_get_upvalue(&mut self, frame: &Frame, upvalue_num: u8) {
+    pub(super) fn instr_get_upvalue(&mut self, frame: &Frame, upvalue_num: u8) -> Result<()> {
         let uv_ref = frame.upvalues[upvalue_num as usize];
         let val = match self.upvalue_pool.get(uv_ref) {
             Upvalue::Open(stack_idx) => self.stack[*stack_idx],
             Upvalue::Closed(v) => *v,
         };
-        self.stack.push(val);
+        self.check_stack_space(1)?;
+        self.push_unchecked(val);
+        Ok(())
     }
 
     pub(super) fn instr_set_upvalue(&mut self, frame: &Frame, upvalue_num: u8) {

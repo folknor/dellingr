@@ -55,6 +55,12 @@ One divergence worth knowing: a nested parenthesis costs two levels rather than 
 
 Per-function ceilings, all reported as syntax errors rather than silently truncated: 255 locals and 255 upvalues, and 65536 distinct string literals and number literals. Table constructors and `t.f = v` assignment sites are effectively unbounded - array entries are written in batches, and assignment sites past the 255th simply stop being inline-cached rather than being rejected.
 
+## Runtime limits
+
+Call depth is capped at 1000 frames. The shared Lua/Rust value stack is capped at 1,000,000 values, and that cap is enforced on every operation that can grow the stack - bytecode operand pushes, frame setup, metamethod dispatch, and the host-facing `push_*` / `new_table` / `get_global` methods alike. Exceeding it produces a catchable `StackOverflow` error rather than an abort, and a rejected operation leaves the stack exactly as it was.
+
+This is a bound on the value stack, **not** a total host-memory quota. It stops a runaway script or a looping host callback from growing the stack without limit; it does not stop a host from allocating memory by other means, any more than the 16 MiB string cap does. Enforcing it charges nothing against the instruction-cost budget.
+
 ## Budget
 
 There's a few gotchas with the current instruction-cost accounting. For example, `while true do end` is free, which means that a users Lua script could run forever. This is a known trade-off made in the full light of day - the main consumer of dellingr does not want to penalise the user (that is, subtract from their per-gametick budget) for structural semantics. Users should be encouraged to write more code, not less.

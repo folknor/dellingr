@@ -23,7 +23,7 @@ All notable changes to dellingr are documented here. The format follows
   referenced by token, so old saves see the current stdlib. A save records
   whether the source had the standard environment, so a snapshot of
   `State::empty()` round-trips as empty rather than merging in the stdlib on
-  load (`FORMAT_VERSION` is 3). Dynamic-call and table-constructor base stacks
+  load (`FORMAT_VERSION` is 5). Dynamic-call and table-constructor base stacks
   unwind on a frame error, keeping the State quiescent so a host that catches
   an error can still snapshot or reuse it.
 - The lexer accepts Lua 5.2 hex-float literals (`0x1.8p+0`, `0x.8`, `0x1p-2`),
@@ -60,13 +60,155 @@ All notable changes to dellingr are documented here. The format follows
   continuously proves the compiler emits only what the loader accepts. This is
   phase 1: operand-stack dataflow analysis is deliberately deferred (tracked as
   finding #59), so the no-abort-on-load guarantee is not yet established.
+- Snapshots persist mutations to the standard-library tables. The encoder used
+  to emit a bare token for any environment object and never walk its entries, so
+  `math.myconst = 42`, `string.trim = f`, or a whole subtable reachable only
+  through `table.foo` vanished on load with no `SaveError` and no diagnostic.
+  `Table::version()` could not drive the detection - it deliberately does not
+  bump on a value update, so `math.floor = myfloor` evades it - so the
+  environment baseline (ordered entries plus metatable) is captured at
+  construction and the save emits a delta of deletions, upserts, an optional key
+  order, and a tri-state metatable change. Deletions are required, or a deleted
+  stock entry is resurrected from the freshly built library. Delta values go
+  through the normal iterative walker, so a graph reachable only through `math`
+  (including a cycle back into `math`) lands in the ordinary arenas. An
+  unmodified environment costs four bytes and an `O(E)` scan. Replay preserves
+  keys the save never saw, which is what lets a newer build or a load-setup
+  closure add `math.future` without failing the load.
+- Object identities survive a load: `format_pointer_ids` and its counter are
+  persisted, so a `tostring` result stored in a saved global can no longer come
+  back byte-identical to a *different* object's identity. Ids are restored
+  exactly and the counter is saved even when the values it counted are gone, so
+  a collected object's id is never reused. Only identities reachable in the
+  payload are written, since the map is deliberately not a GC root.
+- `error(msg, level)` is implemented: `0` suppresses the location prefix, `N`
+  blames the caller `N-1` frames up, and an out-of-range level renders no
+  prefix.
+- Lua strings are capped at 16 MiB (`MAX_STRING_BYTES`, inclusive), in the same
+  class as `MAX_CALL_DEPTH` and the one-million value stack, with a dedicated
+  `ErrorKind::StringSizeExceeded { size, limit }` so hosts need not parse text
+  to recognise a resource-limit termination. See "Fixed" for the hole this
+  closes. No `consume_cost` call is added anywhere and every under-cap script's
+  `Cost used` is byte-identical; per-byte charging remains finding #16.
+- `ErrorKind::ScriptError`, so a script-raised `error()` is no longer reported
+  as `InternalError` - which is documented as "corrupt bytecode or VM bug", and
+  so had embedders filtering for crash reporting collecting ordinary script
+  errors. `RuntimeError`'s documentation was wrong in the other direction (the
+  VM itself raises it) and now says so.
 
 ### Changed
 
-- **Breaking (save format):** the snapshot format is bumped v2 to v3; existing
-  save files are rejected with `UnsupportedVersion`. The bump persists whether a
-  cost budget is configured, without which a restored state took the unbudgeted
-  `table.move` path and bypassed its own remaining budget.
+- **Breaking (save format):** the snapshot format is bumped v2 to v5; existing
+  save files are rejected with `UnsupportedVersion` by a strict equality gate,
+  with no fallback parsing. v3 persists whether a cost budget is configured,
+  without which a restored state took the unbudgeted `table.move` path and
+  bypassed its own remaining budget; v4 adds the environment delta and the
+  object-identity registry; v5 carries the widened literal pools. The golden
+  fixture is regenerated at each bump.
+- **Breaking (API):** three signature changes, all so that host misuse becomes
+  an error before any mutation rather than a panic or an unbounded allocation.
+  `State::to_string` takes `&mut self`, because minting a deterministic identity
+  requires mutable access - accepted deliberately over preserving the address
+  leak or adding interior mutability purely for display. `State::set_top` and
+  `State::pop` return `Result<()>`. `push_bytes` and `push_string` return
+  `Result<()>`. Roughly 89 production call sites propagate with `?`; nothing
+  depended on the old behaviour.
+- **Breaking (API):** `MAX_STACK_SIZE` is now a real, global cap on the shared
+  Lua/Rust value stack rather than a limit applied only when preparing Lua
+  frames. Previously a host `RustFunc` pushing in a loop never met it. Every
+  path that can grow the stack is now checked, batch-preflighted, or provably
+  net-neutral, so the cap holds for bytecode operand pushes, frame setup and
+  metamethod dispatch as well as the host API. `push_nil`, `push_number`,
+  `push_boolean`, `push_rust_fn`, `new_table`, `get_global` and
+  `State::open_libs` therefore return `Result<()>`; exceeding the cap is a
+  catchable `StackOverflow` and a rejected operation leaves the stack, the
+  string pool and the function registry unchanged. Enforcement charges nothing
+  against the instruction-cost budget, and no existing workload approaches a
+  million values. This bounds the value stack, not total host memory.
+- The Lua pattern matcher is rewritten as a one-pass compiler plus a safe
+  index-based matcher, replacing a raw-pointer transliteration of the reference
+  C. Every atom - literal, `.`, `%a`-style class and bracket class alike - is an
+  interned 256-bit byte class, so matching an item is one bitset test with no
+  branch on atom kind, identical classes are deduplicated through a `BTreeMap`
+  to keep the compiled form deterministic, and compiling once removes
+  `classend`'s rescan of class bytes at every subject position the scan loop
+  tries. Two conformance bugs that could not be patched in place fall out of the
+  new shape; see "Fixed". Error timing is unchanged and remains contract:
+  compile errors surface from `from_bytes_try`, match-time errors from
+  `matches_bytes_from`, and `gmatch` still compiles lazily on first iteration.
+  No cost is charged anywhere in the matcher; the central step site is left
+  ready for finding #16.
+- `table.sort` is an iterative heap sort with a fallible comparator, replacing a
+  bubble sort with no early exit that always performed exactly `N(N-1)/2`
+  comparator calls - about 5*10^7 full call round trips on 10k elements, charged
+  10^4. Heap sort is the choice specifically because a Lua comparator is
+  script-controlled and may be inconsistent: every index derives from fixed heap
+  bounds, so a comparator that always returns true yields a wrong-but-safe
+  permutation rather than an out-of-bounds access (`sort_by` could not be used -
+  it is infallible and can panic on a non-total order). Inconsistent comparators
+  stay deterministic-but-undiagnosed; reference's "invalid order function" is an
+  artifact of its quicksort bounds check, and reproducing it would mean adding
+  comparator calls purely to detect it. Rooting is taken only on the comparator
+  path, so the default comparison no longer pays for two extra copies of the
+  array, and on comparator error the detached array is dropped before writeback,
+  leaving every original slot intact.
+- Per-function capacity ceilings are lifted. Literal indices were 8-bit
+  operands, so `{1, ...}` x300, 300 named constructor fields, 300 `t.fN = N`
+  assignments and 300 distinct number literals each failed to compile where
+  reference Lua accepts them. The literal pools move to 16-bit ids carried in
+  `Bx` (u16 rather than u32 deliberately: 65536 is 200x the motivating cases,
+  and u32 would require multiword encoding and a different literal-loading
+  design), array constructors flush in batches with `SET_LIST` carrying a batch
+  ordinal in its previously reserved `Bx`, and table templates become
+  `Vec<Vec<u16>>` so no hidden ceiling survives behind the widened instructions.
+  `GET_GLOBAL`, `GET_FIELD` and `SET_FIELD` had no free operand bytes, so their
+  inline-cache slots narrow to 8 bits with 255 meaning "uncached": cached sites
+  cap at 255 per function and the rest take the slow path, measured at 1.81x on
+  a map-backed table (about 18ns per write) with instruction cost unchanged
+  either way. Nothing in the repo comes close - the most field-heavy example has
+  83 field instructions in the entire file. `SET_FIELD` splits into `SET_FIELD`
+  (cached, implied receiver offset zero) and `SET_FIELD_AT` (uncached, explicit
+  offset), so the hot path keeps its cache and the rare multi-lvalue path pays
+  instead of everything paying. Verification treats the sentinel accordingly and
+  bounds-checks every `Bx` literal and every u16 template key, with a
+  forged-snapshot test per opcode.
+- The `string` library accepts numbers wherever it accepts strings, through one
+  shared helper. Both references use `luaL_checklstring` throughout, which takes
+  numbers and rejects booleans, tables and functions. The previous exact-type
+  check was accidental rather than deliberate: concat already coerces numbers
+  and `string.format` already accepts a numeric format string, so the strictness
+  was not applied consistently even within the crate. Arithmetic is the opposite
+  case and stays strict - `"10" + 1` remains an error, because that strictness
+  *is* applied consistently across `as_num`, unary negation and numeric `for`,
+  breadth that reads as VM policy rather than an oversight. It is now documented
+  under "Won't implement" instead of being an undocumented divergence.
+- `tostring` on a heap object renders `table: 0x1` / `function: 0x2` instead of
+  `object: ObjectKey(7v1)` - the slotmap key's Rust `Debug` form, with the type
+  word wrong for every object because `Display for ObjectPtr` had no heap
+  access. The type now comes from the heap-aware `Val::typ` and the digits from
+  the same deterministic `format_pointer_id` registry `%p` uses, so `tostring(t)`
+  and `string.format("%p", t)` agree as they do in reference. `Display for
+  ObjectPtr` and `Display for Val` are deleted rather than left as traps:
+  rendering an object correctly needs both the heap and the `State`, so any
+  heap-free impl can only reintroduce the leak.
+- `math.log` special-cases base 10 with `log10`, so `math.log(1000, 10)` is
+  exactly `3` rather than `2.9999999999999996`. Base 2 is deliberately left
+  alone: it is a genuine 5.2/5.4 split and dellingr currently matches 5.2.
+- `rust-version` returns to the 1.92 already documented in README and AGENTS.md.
+  The real floor is 1.88 (let-chains and `slice::as_chunks`, with let-chains
+  requiring edition 2024); nothing in the locked dependency tree needs the 1.97
+  the manifest claimed, which arrived alongside an unrelated bump. The README
+  dependency snippet moves from 0.2 to 0.3 to match the crate.
+- `drain_mark_worklist` debug-asserts that every entry it pops was already
+  coloured `Reachable`. `GcHeap::mark` sets an object's colour *and* queues it;
+  pushing a pointer straight onto the worklist instead traces that object's
+  children while leaving the object itself `Unmarked`, so sweep frees it and
+  later reads dangle. This happened for real in this series (see the save/load
+  rooting fix below) and the full suite passed with the bug present. Release
+  builds are unaffected.
+- Zero-step numeric `for` is documented as a deliberate divergence: dellingr
+  skips in both directions, where 5.2 skips ascending but loops forever
+  descending and 5.4 errors.
 - `table.move` charges per element instead of a flat 1. The range came straight
   from script arguments and was not bounded by table size, and neither reads of
   an empty table nor writes of nil allocate, so `table.move({}, 1, 2^30, 1)` was
@@ -106,6 +248,174 @@ All notable changes to dellingr are documented here. The format follows
 
 ### Fixed
 
+- Unbounded string allocation. `OP_CONCAT` charges nothing while
+  `concat_helper` does `O(total bytes)` of work and allocation, and the
+  surrounding loop is deliberately free, so building a 1 MiB string reported
+  `Cost used: 0` and completed even under `--limit 100` - another twenty
+  iterations is a terabyte attempt, and a host could not defend by lowering the
+  budget, because the cost is zero at any budget. Fixed with the 16 MiB resource
+  limit above, enforced in two layers: admission into the interner is now
+  fallible as the backstop, and every expanding producer checks before growing
+  its buffer (concat, `table.concat`, `string.format` including `%q`'s expanded
+  temporary, all three `gsub` branches, `gmatch`'s leading-`^` rewrite, `print`'s
+  assembled message, host `push_bytes`/`push_string`, and compiled string
+  literals). Checking only at intern time is too late - the dangerous `Vec`
+  already exists by then. Concat renders numeric operands during the length pass
+  rather than assuming a fixed 32-byte bound, which was wrong in both directions
+  (over-counting `1` as 32 bytes and so rejecting legal results just under the
+  cap, which would itself have changed what a script costs; under-counting
+  `1e308`, which Rust renders as 309 bytes), accumulates saturating so an
+  overflowing total is rejected rather than wrapping to a small value that would
+  pass, and interns before truncating the operand stack so a rejected concat
+  leaves its operands in place. Literals are capped by decoded size, not source
+  spelling. `print` preflights string arguments against their raw length, since
+  lossy UTF-8 expands an invalid byte to three and a legal 16 MiB string of
+  `0xff` would otherwise materialize as ~48 MiB. Snapshot loading enforces the
+  identical inclusive boundary on payload strings and bytecode literals.
+  Recorded rather than glossed: a per-string cap is not a total-memory quota.
+- A method or function call whose callee expression was not a plain name, and
+  which had at least one argument that was itself a call, dispatched the
+  receiver instead of the method - `("ab"):find(id("b"))` raised "attempt to
+  call a string value", as did `({ f = f }):f(id("q"))`, `("a" ..
+  "b"):find(id("b"))` and `make("a")(id("b"))`. `OP_MARK_CALL_BASE` was emitted
+  *before* the callee expression was evaluated, so it had to guess how many
+  values the callee had already left on the stack; the guess covered exactly two
+  shapes and was wrong for everything else. The marker now comes after the
+  callee is evaluated, where the answer is always the same - the callee is the
+  single value on top, so the base is one slot below it - which holds whether
+  the callee pushed itself, was already on the stack as a parenthesized
+  expression or constructor, replaced its receiver in a field access, collapsed
+  a receiver and key in an index, or is the single result of an inner call. The
+  adjustment operand is consequently always 1 and the verifier now requires
+  exactly that. Extending the table of adjustments instead cannot work: an inner
+  call's `OP_CALL` is emitted by the evaluation step that *follows* the marker,
+  so at marker time its width is not yet fixed. Two further defects predating it
+  are covered by the same reordering: an index receiver pushes a table and a key
+  that `OP_GET_TABLE` collapses into one, and the marker's base was computed by
+  unchecked subtraction from the absolute stack length, which would accept a
+  base below the active frame whenever the stack was deep enough and then take a
+  caller-owned slot as this call's callee.
+- Two pattern-matcher conformance bugs, both consequences of the old module's
+  shape and so fixed by the rewrite above. `matchdepth` was decremented on entry
+  to `patt_match` but restored only on the two fallthrough exits, so the six
+  tail-call continuations leaked a level each, and the scan loop never reset it
+  between anchor positions - a 250-byte subject died on its first `find`. Depth
+  is now passed by value, every C `goto init` transition is a loop iteration,
+  and only the five genuinely recursive edges consume a level, reproducing
+  reference's boundary exactly (`("a?"):rep(199)` matches, `rep(200)` raises
+  "pattern too complex", 201 sequential literal items match fine). Separately,
+  `%f` treated slice-start as string-start while every caller passed a suffix,
+  so each resumption point became a false left boundary and
+  `("abcd"):gsub("%f[%w]%w", "X")` produced `"XXXX"` instead of `"Xbcd"`; the
+  matcher now takes the whole subject with an init offset and reports absolute
+  positions, deleting the base parameter chain threaded through `string.rs`'s
+  capture helpers along with five re-slice sites. Three further defects caught
+  by review during the rewrite are fixed and pinned: `*` and `-` items that
+  cannot match once take the depth-free accept-empty transition rather than
+  recursing, position captures consume a depth level as reference's
+  `start_capture` does, and bracket classes preserve reference's mutually
+  exclusive escape/range/literal branch order, without which `[z-a]` wrongly
+  contained `z` and `[%--a]` expanded to a broad range.
+- `table.insert` at a position shifted elements with `shift_remove` followed by
+  `insert`, from high index to low. `IndexMap` appends a re-inserted key, so the
+  shifted keys ended up in reverse insertion order followed by the new key, and
+  each `shift_remove` was `O(tail)` - making a single `table.insert(t, 1, v)` on
+  a 50k array roughly 10^9 memmoves charged as 1. It now carries a value forward
+  across the existing keys, writing each slot in place, so the operation is
+  `O(N)` and insertion order is preserved (`pairs` order is unspecified by Lua,
+  so that half is a quality fix rather than a conformance one). Rotation works
+  directly on inline, map and tombstoned storage, so the `ensure_map` call is
+  gone. The same function unconditionally cached `len + 1` as the array length
+  even when that was not a border - for `{1,2,3}` with `t[5]` set, the
+  post-shift `t[5]` is non-nil so 4 is not a border, and the cache reader trusts
+  any cached value without validating it. It now caches only when the inserted
+  value is non-nil and `len + 2` is nil.
+- `table.sort`'s default comparator ordered numbers before strings and returned
+  `Equal` for everything else, so `table.sort{1,"a"}` and `table.sort{{},{}}`
+  silently succeeded where reference raises a type error. It now errors on
+  incomparable operands from inside the comparator rather than a pre-scan,
+  because reference accepts `table.sort{true}` - a singleton is never compared.
+  `TypeError::Comparison` renders equal types as "attempt to compare two table
+  values" instead of "table with table".
+- Errors carried no position at all, rendering `0:0: internal error: oops` where
+  reference gives `input:1: oops`, even though the traceback printed directly
+  underneath had the right line. Position is now filled from the frame the error
+  surfaced in, through one helper used by both error-return paths out of a Lua
+  frame (the result-count overflow path previously bypassed it). `Display` takes
+  the source and the line from the same stack frame, because reading the source
+  from the traceback while taking the line from the error itself can splice a
+  host `RustFunc`'s own line onto an unrelated Lua chunk's name.
+- `Val::typ_simple` mapped every object to `Table` "for display purposes", so
+  indexing a function reported "attempt to index a table value". All 36 call
+  sites had heap access; they now use `Val::typ` and `typ_simple` is deleted.
+- A string `__index` handler raised a type error instead of chaining. One shared
+  helper now resolves a key against the global string table for direct field
+  access, generic bracket indexing and string `__index` alike. This also fixes
+  `("abc")[1]`, which errored but is nil in reference - the bracket path
+  rejected strings as non-tables while the field path already fell back.
+  `getmetatable("abc")` is still nil and string `__newindex` stays invalid; the
+  no-string-metatable design is unchanged.
+- `to_string_with_meta` accepted any `__tostring` result while its sibling
+  `bytes_with_tostring_meta` correctly rejected non-strings, and `print` and
+  `tostring` used the permissive one. They are now one path.
+- A use-after-free in save/load rooting: `mark_gc_roots` pushed canonical
+  environment pointers straight onto the mark worklist, which traces an object's
+  children without colouring the object itself, so sweep still freed it. With a
+  library shadowed and nothing else referencing the canonical table, the next
+  save dereferenced a dangling pointer. It now goes through `GcHeap::mark`, and
+  the debug assertion described above makes the class of mistake mechanical.
+- `load_state` ran the host's setup closure and then `materialize_payload`,
+  which ended by clearing the anchor registry - so an anchor created during
+  setup was stale the moment `load_state` returned, with no error. The clear now
+  happens before setup. Setup anchors must survive: the registry is a GC root,
+  so otherwise the final collection frees values only setup holds.
+- `instr_tfor_call_rust_fn` computed the actual result count as `get_top() as
+  u8`, so a host iterator `RustFunc` leaving more than 255 values on its frame
+  wrapped 256 to 0; the `Greater` arm then pushed spurious nils and the
+  rotate/truncate bookkeeping left hundreds of stray values inside the loop
+  frame - silent stack corruption. It now compares in `usize` and retains the
+  topmost reported values, matching the sibling path in `State::call`.
+  Deliberately not a "too many results" rejection: `get_top()` covers the whole
+  frame including arguments the callback never removed.
+- `State::set_top` grew the stack by pushing nils in a bare loop with no
+  `check_stack_space`, so `set_top(isize::MAX)` would OOM the process, bypassing
+  the 1M-value cap; `State::pop` panicked on counts above the top and silently
+  accepted negative counts, because its assertion only checked the upper bound
+  and `0..n` is empty for a negative `n`. Both now validate fully before
+  mutating, so a rejected call leaves the stack untouched - which also settles
+  the inconsistency where they panicked while `insert`, `remove`, `replace` and
+  `push_value` returned `InvalidStackIndex`. `set_table_raw` and
+  `set_metatable_of` popped their operands before validating, so a host calling
+  them with too few visible values reached `pop_val` and panicked; they now
+  check that the operands sit above the table index, which additionally prevents
+  popping the table itself and then indexing off the end of the stack.
+- Only `OP_CALL` refreshed `CallInfo.ip`, so calls made by `OP_TFOR_CALL` and by
+  `__index`/`__newindex`/`__len` dispatch left the caller's ip pointing at the
+  previous `OP_CALL`, and tracebacks reported the wrong caller line for errors
+  raised inside iterators and metamethods. Deriving lines at trace-build time is
+  not possible - `build_stack_trace` holds only the innermost live `Frame` and
+  derives outer entries from `CallInfo` alone - so the ip is now refreshed at
+  each dispatch site that can re-enter Lua. Only outer traceback entries were
+  affected.
+- A call spanning several lines was attributed to its closing line, because
+  `OP_CALL` is emitted after the argument list is parsed. The opening line is
+  now carried on `PrefixExp::FunctionCall` and used at emission, so tracebacks
+  blame the same line reference does. The line and argument count are packed
+  into four bytes to keep that variant from dominating an enum the parser copies
+  constantly.
+- `add_local` grew `num_locals` whenever `locals.len()` exceeded it, but
+  parameters were pushed without updating it, so sibling scopes in a function
+  with parameters re-triggered growth and every call pushed extra nils. It now
+  maximizes `locals.len() - num_params`.
+- `_G` no longer stringifies keys, so `_G[1]` and `_G["1"]` are distinct as they
+  are in reference. String keys still route through `State::globals`; non-string
+  keys are stored raw in the proxy.
+- Oversized `GET_FIELD` sites raised `InternalError`, which since the
+  error-taxonomy change means "VM bug"; it is now a line-bearing `SyntaxError`,
+  consistent with the `SET_FIELD` path beside it. `Frame::jump` rejected `ip ==
+  code.len()` only after the fact; the bound is now strict. Both are defence in
+  depth rather than reachable panics - the bytecode verifier already requires
+  jump targets strictly below `code_len`.
 - Optional standard-library arguments treat an explicit `nil` as absent, like
   both references. The prevailing `if num_args >= k { check_type(k, ...) }`
   pattern errored on a `nil` reference would simply default, so the ordinary

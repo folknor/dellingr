@@ -13,7 +13,7 @@ fn load_function(state: &mut State, src: &str) {
 #[test]
 fn anchor_round_trips_a_simple_value() {
     let mut state = State::new();
-    state.push_number(42.0);
+    state.push_number(42.0).unwrap();
     let a = state.anchor().unwrap();
     assert_eq!(state.anchor_count(), 1);
     state.push_anchor(a).unwrap();
@@ -23,7 +23,7 @@ fn anchor_round_trips_a_simple_value() {
 #[test]
 fn anchor_at_does_not_pop() {
     let mut state = State::new();
-    state.push_number(7.0);
+    state.push_number(7.0).unwrap();
     let _a = state.anchor_at(-1).unwrap();
     // Top is still 7.0.
     assert_eq!(state.to_number(-1).unwrap(), 7.0);
@@ -33,11 +33,11 @@ fn anchor_at_does_not_pop() {
 fn anchor_count_tracks_inserts_and_releases() {
     let mut state = State::new();
 
-    state.push_number(1.0);
+    state.push_number(1.0).unwrap();
     let a = state.anchor().unwrap();
-    state.push_number(2.0);
+    state.push_number(2.0).unwrap();
     let b = state.anchor().unwrap();
-    state.push_number(3.0);
+    state.push_number(3.0).unwrap();
     let c = state.anchor().unwrap();
     assert_eq!(state.anchor_count(), 3);
 
@@ -56,7 +56,7 @@ fn anchor_count_tracks_inserts_and_releases() {
 #[test]
 fn push_anchor_after_release_returns_invalid_anchor() {
     let mut state = State::new();
-    state.push_number(99.0);
+    state.push_number(99.0).unwrap();
     let a = state.anchor().unwrap();
     assert!(state.release_anchor(a));
 
@@ -68,12 +68,12 @@ fn push_anchor_after_release_returns_invalid_anchor() {
 fn generation_rejects_stale_handle_after_slot_reuse() {
     let mut state = State::new();
 
-    state.push_number(1.0);
+    state.push_number(1.0).unwrap();
     let a = state.anchor().unwrap();
     assert!(state.release_anchor(a));
 
     // The next anchor likely lands in the same slot; generation should differ.
-    state.push_number(2.0);
+    state.push_number(2.0).unwrap();
     let b = state.anchor().unwrap();
     assert_ne!(a, b, "slotmap should bump the generation on reuse");
 
@@ -91,7 +91,7 @@ fn cross_state_anchor_is_rejected() {
     let mut state_a = State::new();
     let mut state_b = State::new();
 
-    state_a.push_number(123.0);
+    state_a.push_number(123.0).unwrap();
     let a = state_a.anchor().unwrap();
 
     let err = state_b.push_anchor(a).unwrap_err();
@@ -104,7 +104,7 @@ fn cross_state_anchor_is_rejected() {
 #[test]
 fn anchor_nil_is_rejected() {
     let mut state = State::new();
-    state.push_nil();
+    state.push_nil().unwrap();
     let err = state.anchor().unwrap_err();
     assert!(matches!(err.kind, ErrorKind::AnchorNil));
 }
@@ -112,8 +112,8 @@ fn anchor_nil_is_rejected() {
 #[test]
 fn anchor_at_nil_is_rejected_without_popping() {
     let mut state = State::new();
-    state.push_number(1.0);
-    state.push_nil();
+    state.push_number(1.0).unwrap();
+    state.push_nil().unwrap();
 
     let err = state.anchor_at(-1).unwrap_err();
     assert!(matches!(err.kind, ErrorKind::AnchorNil));
@@ -129,7 +129,7 @@ fn anchor_function_accepts_lua_function() {
     load_function(&mut state, "return function(x) return x + 1 end");
     let a = state.anchor_function().unwrap();
 
-    state.push_number(10.0);
+    state.push_number(10.0).unwrap();
     state
         .call_anchor(a, ArgCount::Fixed(1), RetCount::Fixed(1))
         .unwrap();
@@ -139,10 +139,12 @@ fn anchor_function_accepts_lua_function() {
 #[test]
 fn anchor_function_accepts_rust_function() {
     let mut state = State::new();
-    state.push_rust_fn(|state| {
-        state.push_number(7.0);
-        Ok(1)
-    });
+    state
+        .push_rust_fn(|state| {
+            state.push_number(7.0).unwrap();
+            Ok(1)
+        })
+        .unwrap();
     let a = state.anchor_function().unwrap();
     state
         .call_anchor(a, ArgCount::Fixed(0), RetCount::Fixed(1))
@@ -153,15 +155,15 @@ fn anchor_function_accepts_rust_function() {
 #[test]
 fn anchor_function_rejects_number() {
     let mut state = State::new();
-    state.push_number(1.0);
+    state.push_number(1.0).unwrap();
     assert!(state.anchor_function().is_err());
 }
 
 #[test]
 fn anchor_does_not_pop_on_nil_error() {
     let mut state = State::new();
-    state.push_number(7.0);
-    state.push_nil();
+    state.push_number(7.0).unwrap();
+    state.push_nil().unwrap();
     assert!(matches!(
         state.anchor().unwrap_err().kind,
         ErrorKind::AnchorNil,
@@ -175,8 +177,8 @@ fn anchor_does_not_pop_on_nil_error() {
 #[test]
 fn anchor_function_does_not_pop_on_type_error() {
     let mut state = State::new();
-    state.push_number(7.0);
-    state.push_number(1.0);
+    state.push_number(7.0).unwrap();
+    state.push_number(1.0).unwrap();
     let err = state.anchor_function().unwrap_err();
     assert!(matches!(err.kind, ErrorKind::TypeError(_)));
     assert_eq!(state.get_top(), 2);
@@ -212,11 +214,11 @@ fn anchored_closure_survives_gc_after_global_dropped() {
     state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
 
     // Anchor the global so we can safely drop it.
-    state.get_global("handler");
+    state.get_global("handler").unwrap();
     let h = state.anchor_function().unwrap();
 
     // Drop the global reference and force a GC.
-    state.push_nil();
+    state.push_nil().unwrap();
     state.set_global("handler");
     state.gc_collect();
 
@@ -255,7 +257,7 @@ fn anchor_invisible_to_with_restricted_env() {
     let mut state = State::new();
 
     // Anchor a value; it's not in globals.
-    state.push_number(1234.0);
+    state.push_number(1234.0).unwrap();
     let a = state.anchor().unwrap();
 
     // Run a restricted-env block; the anchor is still valid inside.
@@ -274,7 +276,7 @@ fn anchor_invisible_to_with_restricted_env() {
 fn anchor_type_reflects_underlying_value() {
     let mut state = State::new();
 
-    state.push_number(1.0);
+    state.push_number(1.0).unwrap();
     let a_num = state.anchor().unwrap();
     assert_eq!(state.anchor_type(a_num), Some(LuaType::Number));
 
@@ -303,14 +305,14 @@ fn determinism_two_states_same_sequence_same_output() {
         let g = state.anchor_function().unwrap();
 
         // Use them, release, anchor again to provoke slot reuse.
-        state.push_number(3.0);
+        state.push_number(3.0).unwrap();
         state
             .call_anchor(f, ArgCount::Fixed(1), RetCount::Fixed(1))
             .unwrap();
         let r1 = state.to_number(-1).unwrap();
         state.pop(1).unwrap();
 
-        state.push_number(5.0);
+        state.push_number(5.0).unwrap();
         state
             .call_anchor(g, ArgCount::Fixed(1), RetCount::Fixed(1))
             .unwrap();
@@ -322,7 +324,7 @@ fn determinism_two_states_same_sequence_same_output() {
 
         load_function(state, "return function(x) return x - 1 end");
         let h = state.anchor_function().unwrap();
-        state.push_number(10.0);
+        state.push_number(10.0).unwrap();
         state
             .call_anchor(h, ArgCount::Fixed(1), RetCount::Fixed(1))
             .unwrap();

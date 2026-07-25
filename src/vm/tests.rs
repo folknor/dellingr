@@ -323,12 +323,12 @@ fn gc_collect_preserves_disabled_auto_gc() {
 #[test]
 fn gc_preserves_nested_suspended_environments() {
     let mut state = State::new();
-    state.new_table();
+    state.new_table().unwrap();
     let original = state.pop_val();
     state.set_global_value("original", original);
 
     state.with_restricted_env(&[], |state| {
-        state.new_table();
+        state.new_table().unwrap();
         let outer = state.pop_val();
         state.set_global_value("outer", outer);
 
@@ -455,7 +455,7 @@ fn set_table_str_key_value_roots_heap_value() {
     let mut state = State::empty();
     state.gc_disable_auto();
     let child = state.alloc_table();
-    state.new_table();
+    state.new_table().unwrap();
     state.gc_set_threshold(state.heap_size());
 
     state
@@ -564,7 +564,7 @@ fn callback_pattern_local_upvalue() {
 
     // Now the main chunk has finished. The upvalue for `helper` should be closed.
     // Call the global callback from "outside" (simulating fcomm2's callback pattern)
-    state.get_global("on_tick");
+    state.get_global("on_tick").unwrap();
     assert_eq!(state.typ(-1), crate::LuaType::Function);
 
     state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
@@ -599,7 +599,7 @@ fn callback_pattern_mutable_upvalue() {
 
     // Call tick multiple times
     for expected in 1..=5 {
-        state.get_global("tick");
+        state.get_global("tick").unwrap();
         state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
         let result = state.to_number(-1).unwrap();
         state.pop(1).unwrap();
@@ -633,7 +633,7 @@ fn callback_pattern_nested_locals() {
     state.load_string(code).unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
 
-    state.get_global("callback");
+    state.get_global("callback").unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
     let result = state.to_number(-1).unwrap();
     assert_eq!(result, 111.0); // 100 + 10 + 1
@@ -657,4 +657,219 @@ fn error_line_numbers() {
     // Check the stack trace points to line 3
     assert!(!err.stack_trace.is_empty());
     assert_eq!(err.stack_trace[0].line, 3);
+}
+
+// --- MAX_STACK_SIZE is a real cap on the shared Lua/Rust value stack (#62) ---
+
+use super::MAX_STACK_SIZE;
+
+/// Fill the value stack to exactly one slot below the cap.
+fn fill_to_one_below_cap(state: &mut State) {
+    state
+        .set_top((MAX_STACK_SIZE - 1) as isize)
+        .expect("filling to one below the cap must be allowed");
+    assert_eq!(state.get_top(), MAX_STACK_SIZE - 1);
+}
+
+#[test]
+fn last_slot_below_the_cap_is_usable() {
+    let mut state = State::empty();
+    fill_to_one_below_cap(&mut state);
+
+    // The cap is exclusive of nothing: the millionth value is still legal.
+    state.push_nil().expect("the final slot must be usable");
+    assert_eq!(state.get_top(), MAX_STACK_SIZE);
+}
+
+#[test]
+fn every_push_type_is_rejected_at_the_cap() {
+    let mut state = State::empty();
+    fill_to_one_below_cap(&mut state);
+    state.push_nil().expect("the final slot must be usable");
+
+    let top = state.get_top();
+    assert_eq!(top, MAX_STACK_SIZE);
+
+    // Each public push must refuse, and must leave the stack untouched.
+    assert!(state.push_nil().is_err());
+    assert_eq!(state.get_top(), top);
+    assert!(state.push_number(1.0).is_err());
+    assert_eq!(state.get_top(), top);
+    assert!(state.push_boolean(true).is_err());
+    assert_eq!(state.get_top(), top);
+    assert!(state.push_rust_fn(force_gc).is_err());
+    assert_eq!(state.get_top(), top);
+    assert!(state.push_string("x").is_err());
+    assert_eq!(state.get_top(), top);
+    assert!(state.push_bytes(b"x").is_err());
+    assert_eq!(state.get_top(), top);
+    assert!(state.push_value(1).is_err());
+    assert_eq!(state.get_top(), top);
+    assert!(state.new_table().is_err());
+    assert_eq!(state.get_top(), top);
+}
+
+#[test]
+fn a_rejected_push_reports_stack_overflow() {
+    let mut state = State::empty();
+    fill_to_one_below_cap(&mut state);
+    state.push_nil().expect("the final slot must be usable");
+
+    let err = state.push_nil().expect_err("the cap must be enforced");
+    assert!(
+        matches!(err.kind, crate::error::ErrorKind::StackOverflow { .. }),
+        "expected StackOverflow, got {:?}",
+        err.kind
+    );
+}
+
+#[test]
+fn set_top_cannot_exceed_the_cap() {
+    let mut state = State::empty();
+    // The bulk path preflights, so it must refuse in one shot rather than
+    // allocating most of the way and then failing.
+    assert!(state.set_top((MAX_STACK_SIZE + 1) as isize).is_err());
+    assert_eq!(state.get_top(), 0);
+}
+
+#[test]
+fn the_cap_does_not_charge_cost() {
+    let mut state = State::empty();
+    fill_to_one_below_cap(&mut state);
+    state.push_nil().expect("the final slot must be usable");
+
+    let before = state.cost_used();
+    assert!(state.push_nil().is_err());
+    assert_eq!(
+        state.cost_used(),
+        before,
+        "enforcing the stack cap must not charge the cost budget"
+    );
+}
+
+#[test]
+fn table_next_preflights_both_of_its_pushes() {
+    // `next` pops one key and pushes two values, so one free slot is not
+    // enough. Checking for only one would let the pair land above the cap.
+    let mut state = State::empty();
+    state.new_table().expect("room for the table");
+    state.push_string("k").expect("room for the key");
+    state.push_number(1.0).expect("room for the value");
+    state.set_table_raw(1).expect("populating the table");
+
+    // Top of stack is the traversal key that `table_next` consumes.
+    state
+        .set_top(MAX_STACK_SIZE as isize)
+        .expect("filling to the cap");
+
+    let err = state
+        .table_next(1)
+        .expect_err("popping one and pushing two must not fit at the cap");
+    assert!(
+        matches!(err.kind, crate::error::ErrorKind::StackOverflow { .. }),
+        "expected StackOverflow, got {:?}",
+        err.kind
+    );
+}
+
+#[test]
+fn table_remove_at_does_not_mutate_when_the_result_has_nowhere_to_go() {
+    // The removed value can only be returned by pushing it. If the push is
+    // going to fail, the element must still be in the table afterwards.
+    let mut state = State::empty();
+    state.new_table().expect("room for the table");
+    state.push_number(1.0).expect("room for the key");
+    state.push_number(42.0).expect("room for the value");
+    state.set_table_raw(1).expect("populating the array part");
+    assert_eq!(state.table_len(1), 1);
+
+    state
+        .set_top(MAX_STACK_SIZE as isize)
+        .expect("filling to the cap");
+
+    assert!(
+        state.table_remove_at(1, 1).is_err(),
+        "there is no slot for the removed value"
+    );
+    assert_eq!(
+        state.table_len(1),
+        1,
+        "the element must survive a rejected removal"
+    );
+}
+
+#[test]
+fn open_libs_is_all_or_nothing_against_the_cap() {
+    // `State::open_libs` is public, so a host can call it on a full stack. It
+    // must refuse up front rather than installing part of the standard library.
+    let mut state = State::empty();
+    assert!(state.globals.is_empty(), "empty() starts with no globals");
+
+    // Deliberately leave a few slots free - fewer than the setup's headroom,
+    // but enough that the one-push-at-a-time installs would each succeed. This
+    // is the case that distinguishes an up-front reservation from a per-push
+    // check: without the reservation the libraries install most of their
+    // globals and only fail later, at the four-slot `_G` construction.
+    state
+        .set_top((MAX_STACK_SIZE - 3) as isize)
+        .expect("filling to just below the cap");
+
+    assert!(state.open_libs().is_err(), "no headroom for library setup");
+    assert!(
+        state.globals.is_empty(),
+        "a rejected open_libs must not install any globals"
+    );
+}
+
+/// A rejected `push_named_rust_fn` must not leave the id registered. That is
+/// not directly observable, but it is visible through a save: an unregistered
+/// reachable `RustFunc` fails the save, so if the rejected push had registered
+/// the id anyway, the save below would succeed instead.
+#[cfg(feature = "snapshot")]
+#[test]
+fn a_rejected_named_push_does_not_register_the_function() {
+    fn host_fn(_state: &mut State) -> crate::Result<u8> {
+        Ok(0)
+    }
+
+    let mut state = State::new();
+    state
+        .set_top(MAX_STACK_SIZE as isize)
+        .expect("filling to the cap");
+    assert!(
+        state.push_named_rust_fn("host.fn", host_fn).is_err(),
+        "the named push must be rejected at the cap"
+    );
+
+    // Back below the cap, reach the same function without an id.
+    state.set_top(0).expect("shrinking is always allowed");
+    state
+        .push_rust_fn(host_fn)
+        .expect("room again below the cap");
+    state.set_global("host_fn");
+
+    let err = state
+        .save_state()
+        .expect_err("the id must not have been registered by the rejected push");
+    assert!(
+        matches!(
+            err,
+            crate::vm::save_state::SaveError::UnregisteredFunction { .. }
+        ),
+        "expected UnregisteredFunction, got {err:?}"
+    );
+}
+
+#[test]
+fn a_state_stays_usable_after_a_rejected_push() {
+    let mut state = State::empty();
+    fill_to_one_below_cap(&mut state);
+    state.push_nil().expect("the final slot must be usable");
+    assert!(state.push_nil().is_err());
+
+    // Drop back well below the cap; the State must behave normally afterwards.
+    state.set_top(2).expect("shrinking is always allowed");
+    assert_eq!(state.get_top(), 2);
+    state.push_number(7.0).expect("room again below the cap");
+    assert_eq!(state.to_number(-1).unwrap(), 7.0);
 }

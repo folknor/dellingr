@@ -96,42 +96,6 @@ valid. Fix history lives in git.
 
 ## Low severity
 
-### 62. Public push methods do not enforce `MAX_STACK_SIZE` (found 2026-07-25, from the loop-17 review)
-
-Not from the original audit. Surfaced while fixing #47, and deliberately left
-out of that loop's scope.
-
-- **Location:** `src/vm/stack.rs:65` onwards - `push_nil`, `push_number`,
-  `push_bytes` and the other public push methods append to `self.stack`
-  directly with no `check_stack_space`. The cap is applied mainly when
-  preparing Lua frames (`src/vm/eval.rs:363`).
-- **Cause:** `MAX_STACK_SIZE = 1_000_000` is described as a global limit, but a
-  host `RustFunc` pushing in a loop never meets it. #47 closed the
-  bulk-allocation hazard in `set_top`, which could allocate a million values in
-  one call; this is the slower drip through the same gap.
-- **Severity:** low. Requires host code, not script code, and a host that
-  wants to exhaust memory has easier ways. It is a documentation-versus-code
-  mismatch as much as a defect.
-- **Fix: planned and reviewed, plan is in `WORK.md`.** The decision is to make
-  the cap real rather than document it away - Lua and Rust frames share one
-  stack, callbacks already have a `Result` channel, and the host API elsewhere
-  turns misuse into errors before mutating.
-- **It is bigger than it looks.** Fixing only the four infallible push methods
-  would not make the cap global: `new_table` (`table_ops.rs:14`), `get_global`
-  (`vm.rs:612`), anchors (`anchor.rs:197`) and other VM paths grow the same
-  vector, and `Frame::eval` has unchecked direct pushes
-  (`frame.rs:190`, `260`). A real invariant needs every growth path classified
-  as checked, batch-preflighted, or net-neutral.
-- **Cost:** 90 call sites in `src/` (74 of them one-line `?` additions in
-  stdlib bodies) plus ~80 signature migrations in `tests/`, `balance_stack`
-  becoming fallible, and public API breaks for `new_table` / `get_global` /
-  `open_libs` on top of the four push methods. The hard cases are the ones
-  where a failure must still restore `stack_bottom` and truncate a frame:
-  Rust-callback result padding (`eval.rs:73`, `102`) and generic-for callback
-  normalization (`eval_control.rs:244`).
-- Nothing existing approaches a million values, so no current test should newly
-  return `StackOverflow` - many will simply stop compiling on the signatures.
-
 ---
 
 ## Coverage with no finding (merged from all five corners)

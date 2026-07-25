@@ -46,7 +46,8 @@ impl State {
             // Check for __index metamethod
             if let Some(mt_ptr) = mt_ptr {
                 // Protect key from GC during string allocation
-                self.stack.push(key);
+                self.check_stack_space(1)?;
+                self.push_unchecked(key);
                 let index_key = self.alloc_string("__index")?;
                 let key = self.pop_val();
 
@@ -61,7 +62,8 @@ impl State {
             }
         }
 
-        self.stack.push(val);
+        self.check_stack_space(1)?;
+        self.push_unchecked(val);
         Ok(())
     }
 
@@ -100,21 +102,33 @@ impl State {
 
                 if is_table {
                     // __index is a table: look up key in that table
-                    self.stack.push(Val::Obj(ptr));
+                    self.check_stack_space(1)?;
+                    self.push_unchecked(Val::Obj(ptr));
                     let new_idx = self.stack.len() - 1;
-                    self.get_table_with_key(new_idx, key, local_cost)?;
+                    // The handler table above is an internal temporary. If the
+                    // recursive lookup fails - including on its own cap check -
+                    // drop it rather than leaving it visible to the caller.
+                    if let Err(e) = self.get_table_with_key(new_idx, key, local_cost) {
+                        self.stack.truncate(new_idx);
+                        return Err(e);
+                    }
                     // Stack: [... __index_table, result]
                     // Remove the __index table, keep the result
                     let val = self.pop_val();
                     self.pop(1)?;
-                    self.stack.push(val);
+                    // Net-negative: two values popped above, one pushed back,
+                    // so this cannot cross the cap and needs no preflight.
+                    self.push_unchecked(val);
                     Ok(())
                 } else if is_function {
-                    // __index is a function: call it with (table, key)
+                    // __index is a function: call it with (table, key).
+                    // Net-positive by three slots; preflight so a rejection
+                    // leaves the operand stack exactly as it was.
                     let table_val = self.stack[table_idx];
-                    self.stack.push(Val::Obj(ptr));
-                    self.stack.push(table_val);
-                    self.stack.push(key);
+                    self.check_stack_space(3)?;
+                    self.push_unchecked(Val::Obj(ptr));
+                    self.push_unchecked(table_val);
+                    self.push_unchecked(key);
                     Frame::flush_local_cost(self, local_cost)?;
                     self.call(ArgCount::Fixed(2), RetCount::Fixed(1))?;
                     Ok(())
@@ -124,11 +138,13 @@ impl State {
                 }
             }
             Val::RustFn(f) => {
-                // __index is a Rust function: call it with (table, key)
+                // __index is a Rust function: call it with (table, key).
+                // Net-positive by three slots; preflight before any mutation.
                 let table_val = self.stack[table_idx];
-                self.stack.push(Val::RustFn(f));
-                self.stack.push(table_val);
-                self.stack.push(key);
+                self.check_stack_space(3)?;
+                self.push_unchecked(Val::RustFn(f));
+                self.push_unchecked(table_val);
+                self.push_unchecked(key);
                 Frame::flush_local_cost(self, local_cost)?;
                 self.call(ArgCount::Fixed(2), RetCount::Fixed(1))?;
                 Ok(())
@@ -169,8 +185,9 @@ impl State {
             if let Some(mt_ptr) = mt_ptr {
                 // Protect key and val from GC during string allocation by pushing clones
                 // (clones share the same underlying heap objects, so marking them marks originals)
-                self.stack.push(key);
-                self.stack.push(val);
+                self.check_stack_space(2)?;
+                self.push_unchecked(key);
+                self.push_unchecked(val);
                 let newindex_key = self.alloc_string("__newindex")?;
                 self.pop(2)?; // Discard protections
 
@@ -238,18 +255,25 @@ impl State {
 
                 if is_table {
                     // __newindex is a table: set the value in that table instead
-                    self.stack.push(Val::Obj(ptr));
+                    self.check_stack_space(1)?;
+                    self.push_unchecked(Val::Obj(ptr));
                     let new_idx = self.stack.len() - 1;
-                    self.set_table_with_key(new_idx, key, val, local_cost)?;
+                    // Same internal temporary as the __index table case.
+                    if let Err(e) = self.set_table_with_key(new_idx, key, val, local_cost) {
+                        self.stack.truncate(new_idx);
+                        return Err(e);
+                    }
                     self.pop(1)?; // Remove the __newindex table
                     Ok(())
                 } else if is_function {
-                    // __newindex is a function: call it with (table, key, value)
+                    // __newindex is a function: call it with (table, key, value).
+                    // Net-positive by four slots; preflight before any mutation.
                     let table_val = self.stack[table_idx];
-                    self.stack.push(Val::Obj(ptr));
-                    self.stack.push(table_val);
-                    self.stack.push(key);
-                    self.stack.push(val);
+                    self.check_stack_space(4)?;
+                    self.push_unchecked(Val::Obj(ptr));
+                    self.push_unchecked(table_val);
+                    self.push_unchecked(key);
+                    self.push_unchecked(val);
                     Frame::flush_local_cost(self, local_cost)?;
                     self.call(ArgCount::Fixed(3), RetCount::Fixed(0))?;
                     Ok(())
@@ -259,12 +283,14 @@ impl State {
                 }
             }
             Val::RustFn(f) => {
-                // __newindex is a Rust function: call it with (table, key, value)
+                // __newindex is a Rust function: call it with (table, key, value).
+                // Net-positive by four slots; preflight before any mutation.
                 let table_val = self.stack[table_idx];
-                self.stack.push(Val::RustFn(f));
-                self.stack.push(table_val);
-                self.stack.push(key);
-                self.stack.push(val);
+                self.check_stack_space(4)?;
+                self.push_unchecked(Val::RustFn(f));
+                self.push_unchecked(table_val);
+                self.push_unchecked(key);
+                self.push_unchecked(val);
                 Frame::flush_local_cost(self, local_cost)?;
                 self.call(ArgCount::Fixed(3), RetCount::Fixed(0))?;
                 Ok(())

@@ -192,7 +192,7 @@ impl Frame {
                         .stack
                         .last()
                         .expect("Dup instruction requires a stack value");
-                    state.stack.push(val);
+                    state.push_val(val)?;
                 }
                 Instr::OP_SWAP => {
                     let len = state.stack.len();
@@ -204,11 +204,11 @@ impl Frame {
                 Instr::OP_BRANCH_TRUE_KEEP => state.instr_branch(self, true, inst.sbx(), true)?,
 
                 // Local variables
-                Instr::OP_GET_LOCAL => state.instr_get_local(inst.a()),
+                Instr::OP_GET_LOCAL => state.instr_get_local(inst.a())?,
                 Instr::OP_SET_LOCAL => state.instr_set_local(inst.a()),
 
                 // Upvalues
-                Instr::OP_GET_UPVALUE => state.instr_get_upvalue(self, inst.a()),
+                Instr::OP_GET_UPVALUE => state.instr_get_upvalue(self, inst.a())?,
                 Instr::OP_SET_UPVALUE => state.instr_set_upvalue(self, inst.a()),
 
                 // Globals
@@ -216,11 +216,11 @@ impl Frame {
                 Instr::OP_SET_GLOBAL => state.instr_set_global(self, inst.bx())?,
 
                 // Builtins (fast path for well-known globals)
-                Instr::OP_GET_BUILTIN => state.instr_get_builtin(inst.a()),
+                Instr::OP_GET_BUILTIN => state.instr_get_builtin(inst.a())?,
                 Instr::OP_SET_BUILTIN => state.instr_set_builtin(inst.a()),
 
                 // Functions (calls and returns are free)
-                Instr::OP_CLOSURE => state.instr_closure(self, inst.a()),
+                Instr::OP_CLOSURE => state.instr_closure(self, inst.a())?,
                 Instr::OP_CALL => {
                     self.record_call_site(state);
                     Self::flush_local_cost(state, &mut local_cost)?;
@@ -261,44 +261,46 @@ impl Frame {
                     let n = inst.a();
                     if n == u8::MAX {
                         // Push all varargs
+                        state.check_stack_space(self.varargs.len())?;
                         for val in &self.varargs {
-                            state.stack.push(*val);
+                            state.push_unchecked(*val);
                         }
                     } else {
                         // Push exactly n values, padding with nil if needed
                         let n = n as usize;
+                        state.check_stack_space(n)?;
                         for i in 0..n {
                             if i < self.varargs.len() {
-                                state.stack.push(self.varargs[i]);
+                                state.push_unchecked(self.varargs[i]);
                             } else {
-                                state.push_nil();
+                                state.push_unchecked(Val::Nil);
                             }
                         }
                     }
                 }
 
                 // Literals (free)
-                Instr::OP_PUSH_NIL => state.push_nil(),
-                Instr::OP_PUSH_BOOL => state.push_boolean(inst.a() != 0),
+                Instr::OP_PUSH_NIL => state.push_nil()?,
+                Instr::OP_PUSH_BOOL => state.push_boolean(inst.a() != 0)?,
                 Instr::OP_PUSH_NUM => {
                     let n = self.get_number_constant(inst.bx());
-                    state.push_number(n);
+                    state.push_number(n)?;
                 }
                 Instr::OP_PUSH_STRING => {
                     let val = state.get_string_constant(self, inst.bx());
-                    state.stack.push(val);
+                    state.push_val(val)?;
                 }
 
                 // Equality (comparisons are free)
                 Instr::OP_EQUAL => {
                     let val2 = state.pop_val();
                     let val1 = state.pop_val();
-                    state.push_boolean(val1 == val2);
+                    state.push_unchecked(Val::Bool(val1 == val2));
                 }
                 Instr::OP_NOT_EQUAL => {
                     let val2 = state.pop_val();
                     let val1 = state.pop_val();
-                    state.push_boolean(val1 != val2);
+                    state.push_unchecked(Val::Bool(val1 != val2));
                 }
 
                 // Orderings (comparisons are free)
@@ -382,11 +384,11 @@ impl Frame {
                 // Table creation costs 1
                 Instr::OP_NEW_TABLE => {
                     add_cost!(state, local_cost, 1);
-                    state.new_table();
+                    state.new_table()?;
                 }
                 Instr::OP_NEW_TABLE_PRESIZED => {
                     add_cost!(state, local_cost, 1);
-                    state.new_table_with_capacity(inst.a() as usize);
+                    state.new_table_with_capacity(inst.a() as usize)?;
                 }
                 Instr::OP_NEW_TABLE_TEMPLATE => {
                     add_cost!(state, local_cost, 1);
@@ -395,7 +397,7 @@ impl Frame {
                 Instr::OP_NEW_TABLE_TRACKED => {
                     add_cost!(state, local_cost, 1);
                     let table_idx = state.stack.len();
-                    state.new_table_with_capacity(inst.a() as usize);
+                    state.new_table_with_capacity(inst.a() as usize)?;
                     state.table_constructor_bases.push(table_idx);
                 }
 

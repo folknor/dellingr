@@ -78,7 +78,7 @@ fn string_or_number_bytes(state: &mut State, idx: isize) -> Result<Vec<u8>> {
 fn push_capture_value(state: &mut State, bytes: &[u8], capture: LuaCapture) -> Result<()> {
     match capture {
         LuaCapture::Bytes { start, end } => state.push_bytes(&bytes[start..end])?,
-        LuaCapture::Position(offset) => state.push_number((offset + 1) as f64),
+        LuaCapture::Position(offset) => state.push_number((offset + 1) as f64)?,
     }
     Ok(())
 }
@@ -236,9 +236,9 @@ fn append_gsub_replacement(
     Ok(())
 }
 
-pub(crate) fn open_string(state: &mut State) {
+pub(crate) fn open_string(state: &mut State) -> Result<()> {
     // Create the string table
-    state.new_table_with_capacity(10);
+    state.new_table_with_capacity(10)?;
 
     // Helper to add a function to the table at stack index -1.
     macro_rules! add_fn {
@@ -312,11 +312,11 @@ pub(crate) fn open_string(state: &mut State) {
 
             state.set_top(0)?;
             if let Some((start, end)) = result {
-                state.push_number(start as f64);
-                state.push_number(end as f64);
+                state.push_number(start as f64)?;
+                state.push_number(end as f64)?;
                 Ok(2)
             } else {
-                state.push_nil();
+                state.push_nil()?;
                 Ok(1)
             }
         } else {
@@ -325,7 +325,7 @@ pub(crate) fn open_string(state: &mut State) {
             state.set_top(0)?;
 
             if init > s.len() {
-                state.push_nil();
+                state.push_nil()?;
                 return Ok(1);
             }
             let mut matcher = LuaPattern::from_bytes_try(&pattern)
@@ -336,8 +336,8 @@ pub(crate) fn open_string(state: &mut State) {
             {
                 true => {
                     let range = matcher.range();
-                    state.push_number((range.start + 1) as f64);
-                    state.push_number(range.end as f64);
+                    state.push_number((range.start + 1) as f64)?;
+                    state.push_number(range.end as f64)?;
 
                     let n = matcher.num_matches();
                     if n > 1 {
@@ -348,7 +348,7 @@ pub(crate) fn open_string(state: &mut State) {
                     Ok(2 + n.saturating_sub(1) as u8)
                 }
                 false => {
-                    state.push_nil();
+                    state.push_nil()?;
                     Ok(1)
                 }
             }
@@ -362,7 +362,7 @@ pub(crate) fn open_string(state: &mut State) {
     add_fn!("len", |state| {
         let len = string_or_number_bytes(state, 1)?.len();
         state.set_top(0)?;
-        state.push_number(len as f64);
+        state.push_number(len as f64)?;
         Ok(1)
     });
 
@@ -406,7 +406,7 @@ pub(crate) fn open_string(state: &mut State) {
         state.set_top(0)?;
 
         if init > s.len() {
-            state.push_nil();
+            state.push_nil()?;
             return Ok(1);
         }
         if pattern.is_empty() {
@@ -421,7 +421,7 @@ pub(crate) fn open_string(state: &mut State) {
         {
             push_captures(state, &s, &matcher)
         } else {
-            state.push_nil();
+            state.push_nil()?;
             Ok(1)
         }
     });
@@ -442,18 +442,18 @@ pub(crate) fn open_string(state: &mut State) {
         state.set_top(0)?;
 
         if pattern.is_empty() {
-            state.new_table();
+            state.new_table()?;
             state.push_string("pos")?;
-            state.push_number(0.0);
+            state.push_number(0.0)?;
             state.set_table_raw(-3)?;
             state.push_string("len")?;
-            state.push_number(s.len() as f64);
+            state.push_number(s.len() as f64)?;
             state.set_table_raw(-3)?;
 
             return push_gmatch_wrapper(state, "string.gmatch.empty_iter", gmatch_empty_iter);
         }
 
-        state.new_table();
+        state.new_table()?;
         state.push_string("s")?;
         state.push_bytes(&s)?;
         state.set_table_raw(-3)?;
@@ -461,7 +461,7 @@ pub(crate) fn open_string(state: &mut State) {
         state.push_bytes(&pattern)?;
         state.set_table_raw(-3)?;
         state.push_string("pos")?;
-        state.push_number(0.0);
+        state.push_number(0.0)?;
         state.set_table_raw(-3)?;
 
         push_gmatch_wrapper(state, "string.gmatch.iter", gmatch_iter)
@@ -491,7 +491,7 @@ pub(crate) fn open_string(state: &mut State) {
         if max_replacements == Some(0) {
             state.set_top(0)?;
             state.push_bytes(s)?;
-            state.push_number(0.0);
+            state.push_number(0.0)?;
             return Ok(2);
         }
 
@@ -511,7 +511,7 @@ pub(crate) fn open_string(state: &mut State) {
 
             state.set_top(0)?;
             state.push_bytes(result)?;
-            state.push_number(count as f64);
+            state.push_number(count as f64)?;
             return Ok(2);
         }
 
@@ -544,7 +544,7 @@ pub(crate) fn open_string(state: &mut State) {
             append_bytes(&mut result, &s[pos..])?;
             state.set_top(0)?;
             state.push_bytes(result)?;
-            state.push_number(count as f64);
+            state.push_number(count as f64)?;
             return Ok(2);
         }
 
@@ -598,7 +598,7 @@ pub(crate) fn open_string(state: &mut State) {
 
         state.set_top(0)?;
         state.push_bytes(result)?;
-        state.push_number(count as f64);
+        state.push_number(count as f64)?;
         Ok(2)
     });
 
@@ -609,14 +609,19 @@ pub(crate) fn open_string(state: &mut State) {
     {
         state
             .register_rust_fn("string.gmatch.iter", gmatch_iter)
-            .expect("gmatch iter id registration cannot conflict");
+            .map_err(|err| {
+                crate::error::Error::without_location(ErrorKind::InternalError(err.to_string()))
+            })?;
         state
             .register_rust_fn("string.gmatch.empty_iter", gmatch_empty_iter)
-            .expect("gmatch empty_iter id registration cannot conflict");
+            .map_err(|err| {
+                crate::error::Error::without_location(ErrorKind::InternalError(err.to_string()))
+            })?;
     }
 
     // Set the string table as a global
     state.set_global("string");
+    Ok(())
 }
 
 fn push_named_or_plain_rust_fn(
@@ -630,7 +635,7 @@ fn push_named_or_plain_rust_fn(
     }
     #[cfg(not(feature = "snapshot"))]
     {
-        state.push_rust_fn(func);
+        state.push_rust_fn(func)?;
     }
     Ok(())
 }
@@ -640,7 +645,7 @@ fn push_gmatch_wrapper(
     iter_id: &str,
     iter: fn(&mut State) -> Result<u8>,
 ) -> Result<u8> {
-    state.push_chunk(gmatch_wrapper());
+    state.push_chunk(gmatch_wrapper())?;
     push_named_or_plain_rust_fn(state, iter_id, iter)?;
     state.push_value(1)?;
     state.remove(1)?;
@@ -661,12 +666,12 @@ fn gmatch_empty_iter(state: &mut State) -> Result<u8> {
 
     if pos > len {
         state.set_top(0)?;
-        state.push_nil();
+        state.push_nil()?;
         return Ok(1);
     }
 
     state.push_string("pos")?;
-    state.push_number((pos + 1) as f64);
+    state.push_number((pos + 1) as f64)?;
     state.set_table_raw(1)?;
     state.set_top(0)?;
     state.push_bytes(b"")?;
@@ -693,7 +698,7 @@ fn gmatch_iter(state: &mut State) -> Result<u8> {
 
     if pos > s.len() {
         state.set_top(0)?;
-        state.push_nil();
+        state.push_nil()?;
         return Ok(1);
     }
 
@@ -706,14 +711,14 @@ fn gmatch_iter(state: &mut State) -> Result<u8> {
         let range = matcher.range();
         let new_pos = range.end + usize::from(range.start == range.end);
         state.push_string("pos")?;
-        state.push_number(new_pos as f64);
+        state.push_number(new_pos as f64)?;
         state.set_table_raw(1)?;
 
         state.set_top(0)?;
         push_captures(state, &s, &matcher)
     } else {
         state.set_top(0)?;
-        state.push_nil();
+        state.push_nil()?;
         Ok(1)
     }
 }

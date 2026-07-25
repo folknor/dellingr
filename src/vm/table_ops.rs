@@ -13,17 +13,26 @@ use crate::instr::{ArgCount, RetCount};
 impl State {
     /// Creates a new empty table and pushes it onto the stack.
     #[hotpath::measure]
-    pub fn new_table(&mut self) {
+    pub fn new_table(&mut self) -> Result<()> {
+        self.check_stack_space(1)?;
         let val = self.alloc_table();
-        self.stack.push(val);
+        self.push_unchecked(val);
+        Ok(())
     }
 
-    pub(crate) fn new_table_with_capacity(&mut self, capacity: usize) {
+    pub(crate) fn new_table_with_capacity(&mut self, capacity: usize) -> Result<()> {
+        self.check_stack_space(1)?;
         let val = self.alloc_table_with_capacity(capacity);
-        self.stack.push(val);
+        self.push_unchecked(val);
+        Ok(())
     }
 
-    pub(super) fn new_table_with_template(&mut self, key_ids: &[u16], string_literal_start: usize) {
+    pub(super) fn new_table_with_template(
+        &mut self,
+        key_ids: &[u16],
+        string_literal_start: usize,
+    ) -> Result<()> {
+        self.check_stack_space(1)?;
         if self.heap.is_full() {
             self.gc_collect();
         }
@@ -32,7 +41,8 @@ impl State {
             &self.string_literals,
             string_literal_start,
         );
-        self.stack.push(Val::Obj(obj));
+        self.push_unchecked(Val::Obj(obj));
+        Ok(())
     }
 
     pub(crate) fn set_table_str_key_value(
@@ -119,8 +129,7 @@ impl State {
         match obj_ptr.and_then(|ptr| self.heap.as_table_ref(ptr)) {
             Some(t) => {
                 let val = t.get(&key);
-                self.stack.push(val);
-                Ok(())
+                self.push_val(val)
             }
             None => Err(self.type_error(TypeError::TableIndex(typ))),
         }
@@ -173,12 +182,16 @@ impl State {
         match obj_ptr.and_then(|ptr| self.heap.as_table_ref(ptr)) {
             Some(t) => match t.next(&key) {
                 TableNext::Pair(next_key, next_val) => {
-                    self.stack.push(next_key);
-                    self.stack.push(next_val);
+                    // Two values are pushed against the one key popped above,
+                    // so the preflight must cover both of them: measured from
+                    // the current length this needs two free slots, not one.
+                    self.check_stack_space(2)?;
+                    self.push_unchecked(next_key);
+                    self.push_unchecked(next_val);
                     Ok(true)
                 }
                 TableNext::End => {
-                    self.stack.push(Val::Nil);
+                    self.push_unchecked(Val::Nil); // Replaces the key popped above.
                     Ok(false)
                 }
                 TableNext::InvalidKey => {
@@ -215,8 +228,8 @@ impl State {
             .and_then(super::table::Table::get_metatable);
 
         match metatable {
-            Some(mt) => self.stack.push(Val::Obj(mt)),
-            None => self.push_nil(),
+            Some(mt) => self.push_val(Val::Obj(mt))?,
+            None => self.push_nil()?,
         }
         Ok(())
     }
@@ -282,11 +295,14 @@ impl State {
         let obj_ptr = self.stack[idx].as_object_ptr();
         let typ = self.stack[idx].typ(&self.heap);
 
+        // Reserve the result slot *before* mutating the table: failing after
+        // `array_remove` would discard the value with no way to return it.
+        self.check_stack_space(1)?;
         let removed = match obj_ptr.and_then(|ptr| self.heap.as_table(ptr)) {
             Some(t) => t.array_remove(pos),
             None => return Err(self.type_error(TypeError::TableIndex(typ))),
         };
-        self.stack.push(removed);
+        self.push_unchecked(removed);
         Ok(())
     }
 
@@ -393,9 +409,12 @@ impl State {
 
     fn table_sort_less(&mut self, a: Val, b: Val, comp_idx: Option<usize>) -> Result<bool> {
         if let Some(comp_idx) = comp_idx {
-            self.stack.push(self.stack[comp_idx]);
-            self.stack.push(a);
-            self.stack.push(b);
+            // Comparator plus two operands: net-positive by three slots until
+            // the call consumes them, so preflight before any mutation.
+            self.check_stack_space(3)?;
+            self.push_unchecked(self.stack[comp_idx]);
+            self.push_unchecked(a);
+            self.push_unchecked(b);
             self.call(ArgCount::Fixed(2), RetCount::Fixed(1))?;
             return Ok(self.pop_val().truthy());
         }
@@ -435,8 +454,11 @@ impl State {
                 .map_or(Val::Nil, |mt| mt.get(&tostring_key));
 
             if !matches!(tostring_handler, Val::Nil) {
-                self.stack.push(tostring_handler);
-                self.stack.push(val);
+                // Handler plus receiver: net-positive by two slots until the
+                // call consumes them.
+                self.check_stack_space(2)?;
+                self.push_unchecked(tostring_handler);
+                self.push_unchecked(val);
                 self.call(ArgCount::Fixed(1), RetCount::Fixed(1))?;
                 let result = self.pop_val();
                 if matches!(

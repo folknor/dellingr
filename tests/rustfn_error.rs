@@ -27,7 +27,7 @@ fn host_direct_rustfn_error_notifies_on_error_once() {
     // must still notify on_error, consistently with the Lua-reached case (L6).
     let counter = Arc::new(Mutex::new(0));
     let mut state = State::with_callbacks(Box::new(ErrorCounter(Arc::clone(&counter))));
-    state.push_rust_fn(boom_fn);
+    state.push_rust_fn(boom_fn).unwrap();
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect_err("rust fn errors");
@@ -40,7 +40,7 @@ fn lua_reached_rustfn_error_notifies_on_error_once() {
     // twice (the Lua frame notifies; State::call must not also notify) (L6).
     let counter = Arc::new(Mutex::new(0));
     let mut state = State::with_callbacks(Box::new(ErrorCounter(Arc::clone(&counter))));
-    state.push_rust_fn(boom_fn);
+    state.push_rust_fn(boom_fn).unwrap();
     state.set_global("boom");
     state.load_string("return boom()").unwrap();
     state
@@ -52,9 +52,9 @@ fn lua_reached_rustfn_error_notifies_on_error_once() {
 #[test]
 fn set_top_accepts_negative_indices() {
     let mut state = State::new();
-    state.push_number(1.0);
-    state.push_number(2.0);
-    state.push_number(3.0);
+    state.push_number(1.0).unwrap();
+    state.push_number(2.0).unwrap();
+    state.push_number(3.0).unwrap();
 
     state.set_top(-1).unwrap();
     assert_eq!(state.get_top(), 3);
@@ -71,8 +71,8 @@ fn set_top_accepts_negative_indices() {
 #[test]
 fn fallible_stack_operations_leave_the_stack_unchanged_on_error() {
     let mut state = State::new();
-    state.push_number(1.0);
-    state.push_number(2.0);
+    state.push_number(1.0).unwrap();
+    state.push_number(2.0).unwrap();
     let top = state.get_top();
 
     for result in [
@@ -93,16 +93,16 @@ fn table_mutators_reject_missing_operands_without_panicking() {
     // These pop their operands, so a host calling them with too few visible
     // values must get an error rather than reach the panicking `pop_val`.
     let mut state = State::new();
-    state.new_table();
+    state.new_table().unwrap();
     // set_table_raw needs a key and a value; only one is present.
-    state.push_number(1.0);
+    state.push_number(1.0).unwrap();
     let top = state.get_top();
     assert!(state.set_table_raw(1).is_err());
     assert_eq!(state.get_top(), top);
 
     // set_metatable_of needs a metatable; the stack is empty above the table.
     let mut state = State::new();
-    state.new_table();
+    state.new_table().unwrap();
     let top = state.get_top();
     assert!(state.set_metatable_of(1).is_err());
     assert_eq!(state.get_top(), top);
@@ -110,16 +110,18 @@ fn table_mutators_reject_missing_operands_without_panicking() {
 
 fn iterator_with_256_visible_values(state: &mut State) -> dellingr::Result<u8> {
     for _ in 0..253 {
-        state.push_nil();
+        state.push_nil()?;
     }
-    state.push_number(42.0);
+    state.push_number(42.0)?;
     Ok(1)
 }
 
 #[test]
 fn generic_for_rust_iterator_keeps_its_topmost_reported_result() {
     let mut state = State::new();
-    state.push_rust_fn(iterator_with_256_visible_values);
+    state
+        .push_rust_fn(iterator_with_256_visible_values)
+        .unwrap();
     state.set_global("overfull_iter");
     state
         .load_string("for value in overfull_iter do return value end")
@@ -140,22 +142,24 @@ fn rustfn_error_restores_stack_bottom() {
     let mut state = State::new();
 
     // Register a Rust function that returns an error.
-    state.push_rust_fn(|_state| {
-        Err(Error::without_location(ErrorKind::InternalError(
-            "intentional error".to_string(),
-        )))
-    });
+    state
+        .push_rust_fn(|_state| {
+            Err(Error::without_location(ErrorKind::InternalError(
+                "intentional error".to_string(),
+            )))
+        })
+        .unwrap();
     state.set_global("error_fn");
 
     // Push some values to establish a stack state.
-    state.push_number(1.0);
-    state.push_number(2.0);
+    state.push_number(1.0).unwrap();
+    state.push_number(2.0).unwrap();
 
     let top_before = state.get_top();
     assert_eq!(top_before, 2, "Should have 2 values on stack");
 
     // Call the error function - this should fail.
-    state.get_global("error_fn");
+    state.get_global("error_fn").unwrap();
     let result = state.call(ArgCount::Fixed(0), RetCount::Fixed(0));
 
     assert!(result.is_err(), "Expected error from rust fn");
@@ -174,18 +178,20 @@ fn stack_operations_after_rustfn_error() {
     let mut state = State::new();
 
     // Register a Rust function that returns an error.
-    state.push_rust_fn(|_state| {
-        Err(Error::without_location(ErrorKind::InternalError(
-            "intentional error".to_string(),
-        )))
-    });
+    state
+        .push_rust_fn(|_state| {
+            Err(Error::without_location(ErrorKind::InternalError(
+                "intentional error".to_string(),
+            )))
+        })
+        .unwrap();
     state.set_global("error_fn");
 
     // Push a known value
-    state.push_number(42.0);
+    state.push_number(42.0).unwrap();
 
     // Call the error function.
-    state.get_global("error_fn");
+    state.get_global("error_fn").unwrap();
     let result = state.call(ArgCount::Fixed(0), RetCount::Fixed(0));
     assert!(result.is_err(), "Expected error from rust fn");
 
@@ -198,27 +204,29 @@ fn stack_operations_after_rustfn_error() {
 fn rustfn_error_with_arguments_clears_call_frame() {
     let mut state = State::new();
 
-    state.push_number(10.0);
+    state.push_number(10.0).unwrap();
     state
         .push_string("host sentinel")
         .expect("short test string fits");
     let top_before = state.get_top();
 
-    state.push_rust_fn(|state| {
-        assert_eq!(state.get_top(), 3);
-        assert_eq!(state.to_string(1).unwrap(), "alpha");
-        assert_eq!(state.to_number(2).unwrap(), 23.0);
-        assert_eq!(state.typ(3), LuaType::Boolean);
-        state
-            .push_string("callback temporary")
-            .expect("short test string fits");
-        Err(Error::without_location(ErrorKind::InternalError(
-            "argument callback failed".to_string(),
-        )))
-    });
+    state
+        .push_rust_fn(|state| {
+            assert_eq!(state.get_top(), 3);
+            assert_eq!(state.to_string(1).unwrap(), "alpha");
+            assert_eq!(state.to_number(2).unwrap(), 23.0);
+            assert_eq!(state.typ(3), LuaType::Boolean);
+            state
+                .push_string("callback temporary")
+                .expect("short test string fits");
+            Err(Error::without_location(ErrorKind::InternalError(
+                "argument callback failed".to_string(),
+            )))
+        })
+        .unwrap();
     state.push_string("alpha").expect("short test string fits");
-    state.push_number(23.0);
-    state.push_boolean(true);
+    state.push_number(23.0).unwrap();
+    state.push_boolean(true).unwrap();
 
     let result = state.call(ArgCount::Fixed(3), RetCount::Fixed(0));
     assert!(result.is_err(), "Expected error from Rust callback");
@@ -232,7 +240,7 @@ fn rustfn_error_with_arguments_clears_call_frame() {
 fn lua_error_clears_frame_above_host_stack() {
     let mut state = State::new();
 
-    state.push_number(7.0);
+    state.push_number(7.0).unwrap();
     state
         .push_string("host sentinel")
         .expect("short test string fits");
@@ -304,19 +312,21 @@ fn multiple_rustfn_errors() {
     let mut state = State::new();
 
     // Register error function
-    state.push_rust_fn(|_state| {
-        Err(Error::without_location(ErrorKind::InternalError(
-            "error".to_string(),
-        )))
-    });
+    state
+        .push_rust_fn(|_state| {
+            Err(Error::without_location(ErrorKind::InternalError(
+                "error".to_string(),
+            )))
+        })
+        .unwrap();
     state.set_global("error_fn");
 
     // Call it multiple times
     for i in 0..5 {
-        state.push_number(i as f64);
+        state.push_number(i as f64).unwrap();
         let top_before = state.get_top();
 
-        state.get_global("error_fn");
+        state.get_global("error_fn").unwrap();
         let result = state.call(ArgCount::Fixed(0), RetCount::Fixed(0));
         assert!(result.is_err(), "Expected error from rust fn");
 
@@ -331,23 +341,25 @@ fn multiple_rustfn_errors() {
 fn nested_dynamic_callback_error_clears_all_call_frames() {
     let mut state = State::new();
 
-    state.push_rust_fn(|state| {
-        assert_eq!(state.get_top(), 8);
-        assert_eq!(state.to_string(1).unwrap(), "inner");
-        assert_eq!(state.to_string(2).unwrap(), "m1");
-        assert_eq!(state.to_string(3).unwrap(), "m2");
-        assert_eq!(state.to_string(4).unwrap(), "outer");
-        assert_eq!(state.to_string(5).unwrap(), "m1");
-        assert_eq!(state.to_string(6).unwrap(), "m2");
-        assert_eq!(state.to_string(7).unwrap(), "a");
-        assert_eq!(state.to_string(8).unwrap(), "b");
-        state
-            .push_string("callback temporary")
-            .expect("short test string fits");
-        Err(Error::without_location(ErrorKind::InternalError(
-            "nested dynamic callback failed".to_string(),
-        )))
-    });
+    state
+        .push_rust_fn(|state| {
+            assert_eq!(state.get_top(), 8);
+            assert_eq!(state.to_string(1).unwrap(), "inner");
+            assert_eq!(state.to_string(2).unwrap(), "m1");
+            assert_eq!(state.to_string(3).unwrap(), "m2");
+            assert_eq!(state.to_string(4).unwrap(), "outer");
+            assert_eq!(state.to_string(5).unwrap(), "m1");
+            assert_eq!(state.to_string(6).unwrap(), "m2");
+            assert_eq!(state.to_string(7).unwrap(), "a");
+            assert_eq!(state.to_string(8).unwrap(), "b");
+            state
+                .push_string("callback temporary")
+                .expect("short test string fits");
+            Err(Error::without_location(ErrorKind::InternalError(
+                "nested dynamic callback failed".to_string(),
+            )))
+        })
+        .unwrap();
     state.set_global("fail");
 
     state
@@ -388,16 +400,18 @@ fn nested_dynamic_callback_error_clears_all_call_frames() {
 fn rustfn_called_inside_dynamic_arg_sees_only_its_arguments() {
     let mut state = State::new();
 
-    state.push_rust_fn(|state| {
-        let top = state.get_top() as f64;
-        assert_eq!(state.to_string(1).unwrap(), "a");
-        assert_eq!(state.to_string(2).unwrap(), "b");
-        assert_eq!(state.to_string(3).unwrap(), "c");
-        assert_eq!(state.typ(3), dellingr::LuaType::String);
-        state.set_top(0).unwrap();
-        state.push_number(top);
-        Ok(1)
-    });
+    state
+        .push_rust_fn(|state| {
+            let top = state.get_top() as f64;
+            assert_eq!(state.to_string(1).unwrap(), "a");
+            assert_eq!(state.to_string(2).unwrap(), "b");
+            assert_eq!(state.to_string(3).unwrap(), "c");
+            assert_eq!(state.typ(3), dellingr::LuaType::String);
+            state.set_top(0).unwrap();
+            state.push_number(top).unwrap();
+            Ok(1)
+        })
+        .unwrap();
     state.set_global("arg_count");
 
     state
@@ -425,19 +439,21 @@ fn rustfn_called_inside_dynamic_arg_sees_only_its_arguments() {
 fn rustfn_table_field_called_inside_dynamic_arg_sees_only_its_arguments() {
     let mut state = State::new();
 
-    state.get_global("string");
+    state.get_global("string").unwrap();
     state
         .push_string("arg_probe")
         .expect("short test string fits");
-    state.push_rust_fn(|state| {
-        assert_eq!(state.get_top(), 3);
-        assert_eq!(state.to_string(1).unwrap(), "hello");
-        assert_eq!(state.to_string(2).unwrap(), "l");
-        assert_eq!(state.to_string(3).unwrap(), "L");
-        state.set_top(0).unwrap();
-        state.push_string("ok").expect("short test string fits");
-        Ok(1)
-    });
+    state
+        .push_rust_fn(|state| {
+            assert_eq!(state.get_top(), 3);
+            assert_eq!(state.to_string(1).unwrap(), "hello");
+            assert_eq!(state.to_string(2).unwrap(), "l");
+            assert_eq!(state.to_string(3).unwrap(), "L");
+            state.set_top(0).unwrap();
+            state.push_string("ok").expect("short test string fits");
+            Ok(1)
+        })
+        .unwrap();
     state.set_table_raw(-3).unwrap();
     state.pop(1).unwrap();
 
