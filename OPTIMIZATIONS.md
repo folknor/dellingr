@@ -9,6 +9,32 @@ Each entry: what, sketch, why-not-yet, signal that would change the calculus.
 
 ---
 
+## Investigate
+
+### Unexplained 5x regression in `strings/patterns` between 0.2.0 and 0.4.0
+
+What: the README perf table recorded `examples/strings/patterns.lua` at 30ms.
+Measured on the same host (plantasjen, the table's reference machine) on
+2026-07-25, immediately *before* the #16 cost-model work, it was **160ms**. The
+#16 artifact removal - `gmatch` no longer recopying the subject and recompiling
+the pattern per iteration - brought it to **65ms**, which is what the table now
+records. So roughly 2.4x was recovered and roughly 2x is still unaccounted for.
+
+Why this is a real signal and not noise: 5x is far outside run-to-run spread
+(hyperfine sigma on this bench is ~1ms over 20 runs), and
+`examples/strings/patterns.lua` has not been modified since the commit that
+added it (`4f39dd7`, 2026-05-05), so the two figures measure the same work. The
+`vs lua5.2` ratio moved from 1.62x to 3.57x over the same period, which is the
+same story told against an external fixed point.
+
+Signal that would change the calculus: bisect `bench.sh strings/patterns`
+between the 0.2.0-era README capture and `4f39dd7`'s successors. The suspects
+are whatever introduced the per-iteration `gmatch` subject copy (now gone) and
+anything that touched pattern compilation or `string.find`'s plain-path fast
+route. Worth doing before any further pattern-matcher optimization work, since
+a 2x regression sitting in the baseline will distort every measurement taken
+against it.
+
 ## Architectural
 
 ### Share RuntimeCaches across closures of the same Bytecode
