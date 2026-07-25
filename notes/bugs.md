@@ -53,48 +53,6 @@ print(s:find("a%d"))      -- reference: nil; dellingr: error "pattern too comple
   `matchdepth = MAXCCALLS; level = 0` at the top of each `str_match` attempt.
   The luapat rewrite (optimizations.md #4) fixes this structurally.
 
-### 13. Every pattern ending in an escaped percent (`%%`) is rejected as malformed (E-E2)
-
-- **Location:** `src/patterns/luapat.rs:688` (`str_check`):
-  `if at(sub(ms.p_end, 1)) == b'%' { return Err(... EndsWithPercent) }`.
-- **Cause:** checks only the last byte, so valid patterns ending in the
-  two-byte escape `%%` are rejected: `"%d+%%"`, `"%%"`, `"%%%%"`. Reference
-  only rejects a genuinely dangling `%`. The runtime matcher (`classend`)
-  handles `%%` correctly; only this eager pre-check misfires. The pre-check
-  exists because `str_match_check`'s `L_ESC` arm (line 534: `let c = at(p)`)
-  lacks its own bounds check and would read past the end on a trailing single
-  `%`.
-- **Repro:**
-
-```lua
-print(("50%"):gsub("%%", " percent"))  -- reference: "50 percent" 1; dellingr: error
-print(("100%"):match("%d+%%"))         -- reference: "100%"; dellingr: error
-```
-
-- **Fix:** check trailing-percent parity (or add the bounds check in the loop
-  and drop the pre-check).
-
-### 14. Script-reachable panic: 32 captures including a position capture overflow the results array (E-E3)
-
-- **Locations:** `src/patterns/luapat.rs:628-630` (validator's `()` branch
-  just advances `p` - position captures not counted), `:300-302`
-  (`start_capture` allows `level` to reach exactly 32 = LUA_MAXCAPTURES),
-  `src/patterns/mod.rs:18` (`matches: [LuaCapture; 32]`), `:669`
-  (`str_match` stores the whole match at `mm[0]`, captures into `mm[1..]`,
-  len 31).
-- **Cause:** a pattern with 32 `()` passes `str_check`; with `level == 32`,
-  `push_captures` writes `mm[1..][31]` - index out of bounds, panic (not a
-  Lua error).
-- **Repro:**
-
-```lua
--- 32 position captures:
-print(("x"):match("()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()"))
-```
-
-- **Fix:** size the results array `LUA_MAXCAPTURES + 1`, and make the
-  validator count position captures (also fixes #34a).
-
 ### 15. `table.move`: unbounded uncharged work (budget bypass) and integer overflow (C-D1 + E-E12, two independent reports)
 
 - **Location:** `src/lua_std/table.rs:255-307`.
@@ -392,39 +350,6 @@ print(("ab"):find("%f[%a]%a", 2))       -- reference: nil;    dellingr: 2 2
   offset and keep the full subject, like reference `prepstate`. Also deletes
   all the `base +` capture-offset arithmetic in string.rs.
 
-### 34. Pattern validator capture-count divergences (E-E4)
-
-`src/patterns/luapat.rs`, `str_match_check`:
-
-- a) Position captures are not counted (lines 628-630), so backreference
-  validation is wrong when position captures precede a real capture:
-
-```lua
-print(("aa"):match("()(a)%2"))  -- reference: 1 "a"; dellingr: error "invalid capture index %2"
-```
-
-- b) Off-by-one ceiling: the validator increments `level` and then rejects
-  `level >= 32` (lines 623-627), allowing only 31 captures, while the runtime
-  (`start_capture`, line 302) and reference allow exactly 32. A
-  32-normal-capture pattern is spuriously rejected with "too many captures".
-
-### 35. Escaped uppercase non-class letters match the wrong character (E-E5)
-
-- **Location:** `src/patterns/luapat.rs:171-191` (`match_class`).
-- **Cause:** lowercases the class byte before the literal-comparison
-  fallback (`let res = match class.to_ascii_lowercase() { ... lc => return
-  lc == ch }`); reference compares the original byte in the default case
-  (`default: return (cl == c);`). Affected:
-  `%B %E %F %H %I %J %K %M %N %O %Q %R %T %V %Y` (uppercase letters whose
-  lowercase is not a class letter), both bare and inside `[...]` classes.
-  Naive "escape every char" pattern-quoting helpers produce exactly these.
-- **Repro:**
-
-```lua
-print(("E"):match("%E"))  -- reference: "E"; dellingr: nil
-print(("e"):match("%E"))  -- reference: nil; dellingr: "e"
-```
-
 ### 36. Explicit `nil` is rejected for optional stdlib arguments (E-E10)
 
 - **Cause:** reference `luaL_opt*` treats nil as "absent"; the prevailing
@@ -650,15 +575,6 @@ there are none in a fresh State, so moving the clear earlier is free.)
 AGENTS.md both say 1.92. One is wrong. (README's `dellingr = "0.2"` snippet
 also trails the crate's 0.3.0, minor.)
 
-### 56. Empty pattern is UB one call site away (E-E14, hardening)
-
-`str_check` (`luapat.rs:681`) and `str_match` (`:655`) do `at(p)` on the
-first pattern byte unconditionally; with an empty pattern that is an
-out-of-bounds read of a dangling pointer. Every current stdlib call site
-guards empty patterns before reaching the matcher, but the invariant is
-implicit and undocumented. Add an explicit empty guard in
-`LuaPattern::from_bytes_try` / `str_match`.
-
 ### 57. `tonumber` divergences (E-E15)
 
 `src/lua_std/basic.rs:18-40, 159-215`:
@@ -869,10 +785,8 @@ glibc's.
 - E's verification list: (1) #36 assumes `check_type` errors on nil - check
   `vm_aux.rs`; (2) `table_remove_at(1, 0)` / `(1, len+1)` semantics vs
   reference's `t[0]` read/write edge (vm-side, was out of E's corner);
-  (3) the E repros are diff-test ready, but #14 is a panic - keep it out of
-  `examples/` until fixed or run_examples will abort; (4)
-  `src/patterns/mod.rs:211` asserts the #12 divergence as expected behavior
-  and will need updating with the fix.
+  (3) `src/patterns/mod.rs:211` asserts the #12 divergence as expected
+  behavior and will need updating with the fix.
 - B ordered findings most-severe-first without labels; severities shown here
   for B items are the consolidator's placement of B's ordering, not new
   adjudication.

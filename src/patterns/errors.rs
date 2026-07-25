@@ -9,8 +9,6 @@ pub(crate) enum PatternError {
     TooManyCaptures,
     MatchDepthExceeded,
     UnfinishedCapture,
-    NoOpenCapture,
-    NoCaptureLength,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -38,7 +36,7 @@ impl fmt::Display for PatternError {
             Self::InvalidPatternCapture => write!(f, "invalid pattern capture"),
             Self::InvalidCaptureIndex(None) => write!(f, "invalid capture index"),
             Self::InvalidCaptureIndex(Some(idx)) => {
-                write!(f, "invalid capture index %{}", (*idx as usize) + 1)
+                write!(f, "invalid capture index %{}", i16::from(*idx) + 1)
             }
             Self::MalformedPattern(what) => {
                 let what = what.as_str();
@@ -47,8 +45,6 @@ impl fmt::Display for PatternError {
             Self::TooManyCaptures => write!(f, "too many captures"),
             Self::MatchDepthExceeded => write!(f, "pattern too complex"),
             Self::UnfinishedCapture => write!(f, "unfinished capture"),
-            Self::NoOpenCapture => write!(f, "no open capture"),
-            Self::NoCaptureLength => write!(f, "capture was unfinished or positional"),
         }
     }
 }

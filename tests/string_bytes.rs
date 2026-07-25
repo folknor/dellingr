@@ -233,6 +233,28 @@ fn find_backreferences_compare_captures() {
 }
 
 #[test]
+fn string_match_returns_all_32_capture_results() {
+    for (pattern, subject, expected_position) in [
+        ("()".repeat(32), "x".to_owned(), true),
+        ("(x)".repeat(32), "x".repeat(32), false),
+    ] {
+        let mut state = State::new();
+        state
+            .load_string(format!("return string.match({subject:?}, {pattern:?})"))
+            .unwrap();
+        state.call(ArgCount::Fixed(0), RetCount::All).unwrap();
+        assert_eq!(state.get_top(), 32);
+        for index in 1..=32 {
+            if expected_position {
+                assert_eq!(state.to_number(index).unwrap(), 1.0);
+            } else {
+                assert_eq!(state.to_bytes(index).unwrap(), b"x");
+            }
+        }
+    }
+}
+
+#[test]
 fn position_captures_are_numbers_in_all_string_wrappers() {
     let mut state = State::new();
     state

@@ -8,14 +8,14 @@ pub(crate) mod errors;
 use self::errors::*;
 
 mod luapat;
-use self::luapat::{LUA_MAXCAPTURES, str_check, str_match};
+use self::luapat::{LUA_MAXMATCHES, str_check, str_match};
 
 pub(crate) use self::luapat::LuaCapture;
 
 /// A compiled Lua string pattern and the captures from the latest match.
 pub(crate) struct LuaPattern<'a> {
     patt: &'a [u8],
-    matches: [LuaCapture; LUA_MAXCAPTURES],
+    matches: [LuaCapture; LUA_MAXMATCHES],
     n_match: usize,
 }
 
@@ -25,7 +25,7 @@ impl<'a> LuaPattern<'a> {
         str_check(bytes)?;
         Ok(LuaPattern {
             patt: bytes,
-            matches: [LuaCapture::Bytes { start: 0, end: 0 }; LUA_MAXCAPTURES],
+            matches: [LuaCapture::Bytes { start: 0, end: 0 }; LUA_MAXMATCHES],
             n_match: 0,
         })
     }
@@ -177,6 +177,117 @@ mod tests {
         assert_eq!(pattern.capture(1), LuaCapture::Position(0));
         assert_eq!(pattern.capture(2), LuaCapture::Bytes { start: 0, end: 1 });
         assert_eq!(pattern.capture(3), LuaCapture::Position(1));
+    }
+
+    #[test]
+    fn escaped_percent_patterns_match_and_dangling_percent_is_rejected() {
+        for (pattern, subject, range) in [
+            (b"%%".as_slice(), b"%".as_slice(), 0..1),
+            (b"%d+%%".as_slice(), b"100%".as_slice(), 0..4),
+            (b"%%%%".as_slice(), b"%%".as_slice(), 0..2),
+        ] {
+            let mut matcher = LuaPattern::from_bytes_try(pattern).unwrap();
+            assert!(matcher.matches_bytes(subject).unwrap());
+            assert_eq!(matcher.range(), range);
+        }
+        assert!(matches!(
+            LuaPattern::from_bytes_try(b"%"),
+            Err(PatternError::MalformedPattern(
+                MalformedPattern::EndsWithPercent
+            ))
+        ));
+    }
+
+    #[test]
+    fn validator_counts_position_captures_and_preserves_closed_lengths() {
+        let mut matcher = LuaPattern::from_bytes_try(b"()(a)%2").unwrap();
+        assert!(matcher.matches_bytes(b"aa").unwrap());
+        assert_eq!(matcher.capture(1), LuaCapture::Position(0));
+        assert_eq!(matcher.capture(2), LuaCapture::Bytes { start: 0, end: 1 });
+    }
+
+    #[test]
+    fn capture_limit_allows_32_and_rejects_33() {
+        let position = b"()".repeat(LUA_MAXMATCHES - 1);
+        let mut position_matcher = LuaPattern::from_bytes_try(&position).unwrap();
+        assert!(position_matcher.matches_bytes(b"x").unwrap());
+        assert_eq!(position_matcher.num_matches(), LUA_MAXMATCHES);
+        assert_eq!(
+            position_matcher.capture(LUA_MAXMATCHES - 1),
+            LuaCapture::Position(0)
+        );
+
+        let ordinary = b"(x)".repeat(LUA_MAXMATCHES - 1);
+        let subject = b"x".repeat(LUA_MAXMATCHES - 1);
+        let mut ordinary_matcher = LuaPattern::from_bytes_try(&ordinary).unwrap();
+        assert!(ordinary_matcher.matches_bytes(&subject).unwrap());
+        assert_eq!(ordinary_matcher.num_matches(), LUA_MAXMATCHES);
+        assert_eq!(
+            ordinary_matcher.capture(LUA_MAXMATCHES - 1),
+            LuaCapture::Bytes { start: 31, end: 32 }
+        );
+
+        let mixed = [b"()".repeat(16), b"(x)".repeat(16)].concat();
+        let mut mixed_matcher = LuaPattern::from_bytes_try(&mixed).unwrap();
+        assert!(mixed_matcher.matches_bytes(b"xxxxxxxxxxxxxxxx").unwrap());
+        assert_eq!(mixed_matcher.num_matches(), LUA_MAXMATCHES);
+
+        for pattern in [b"()".repeat(LUA_MAXMATCHES), b"(x)".repeat(LUA_MAXMATCHES)] {
+            assert!(matches!(
+                LuaPattern::from_bytes_try(&pattern),
+                Err(PatternError::TooManyCaptures)
+            ));
+        }
+    }
+
+    #[test]
+    fn escaped_uppercase_literals_match_their_original_byte() {
+        for class in b"BEFHIJKMNOQRTVY" {
+            for pattern in [vec![b'%', *class], vec![b'[', b'%', *class, b']']] {
+                let mut matcher = LuaPattern::from_bytes_try(&pattern).unwrap();
+                assert!(matcher.matches_bytes(&[*class]).unwrap(), "{pattern:?}");
+                assert!(
+                    !matcher
+                        .matches_bytes(&[class.to_ascii_lowercase()])
+                        .unwrap()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn space_class_includes_vertical_tab() {
+        for byte in [0x0b, 0x0c] {
+            let mut space = LuaPattern::from_bytes_try(b"%s").unwrap();
+            assert!(space.matches_bytes(&[byte]).unwrap());
+            let mut non_space = LuaPattern::from_bytes_try(b"%S").unwrap();
+            assert!(!non_space.matches_bytes(&[byte]).unwrap());
+        }
+    }
+
+    #[test]
+    fn empty_pattern_matches_the_initial_empty_range() {
+        for subject in [b"".as_slice(), b"abc".as_slice()] {
+            let mut matcher = LuaPattern::from_bytes_try(b"").unwrap();
+            assert!(matcher.matches_bytes(subject).unwrap());
+            assert_eq!(matcher.range(), 0..0);
+            assert_eq!(matcher.num_matches(), 1);
+        }
+    }
+
+    #[test]
+    fn position_capture_backreference_does_not_match() {
+        let mut matcher = LuaPattern::from_bytes_try(b"()%1").unwrap();
+        assert!(!matcher.matches_bytes(b"abc").unwrap());
+    }
+
+    #[test]
+    fn zero_capture_index_formats_without_overflow() {
+        let error = match LuaPattern::from_bytes_try(b"(a)%0") {
+            Ok(_) => panic!("%0 must be rejected"),
+            Err(error) => error,
+        };
+        assert_eq!(error.to_string(), "invalid capture index %0");
     }
 
     #[test]

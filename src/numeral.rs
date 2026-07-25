@@ -39,7 +39,7 @@ fn trim_lua_whitespace(mut bytes: &[u8]) -> &[u8] {
     bytes
 }
 
-const fn is_lua_whitespace(byte: u8) -> bool {
+pub(crate) const fn is_lua_whitespace(byte: u8) -> bool {
     matches!(byte, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
 }
 

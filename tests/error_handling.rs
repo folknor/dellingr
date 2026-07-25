@@ -32,6 +32,20 @@ fn assert_invalid_next_key(code: &str) {
     }
 }
 
+fn assert_pattern_runtime_error(code: &str, message: &str) {
+    let err = expect_error(code);
+    match err.kind {
+        ErrorKind::RuntimeError(actual) => assert_eq!(actual, message),
+        kind => panic!("Expected pattern runtime error, got: {kind:?}"),
+    }
+}
+
+#[test]
+fn malformed_pattern_capture_errors_are_runtime_errors() {
+    assert_pattern_runtime_error(r#"string.match("aa", "(a)%0")"#, "invalid capture index %0");
+    assert_pattern_runtime_error(r#"string.match("a", ")")"#, "invalid pattern capture");
+}
+
 #[test]
 fn call_rejects_missing_fixed_arguments_without_panicking() {
     let mut state = State::new();

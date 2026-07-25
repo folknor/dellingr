@@ -6,6 +6,7 @@ use core::result;
 use super::errors::*;
 
 pub(super) const LUA_MAXCAPTURES: usize = 32;
+pub(super) const LUA_MAXMATCHES: usize = LUA_MAXCAPTURES + 1;
 /* maximum recursion depth for 'match' */
 const MAXCCALLS: usize = 200;
 
@@ -52,13 +53,6 @@ enum CapLen {
 impl CapLen {
     fn is_unfinished(&self) -> bool {
         matches!(*self, CapLen::Unfinished)
-    }
-
-    fn size(&self) -> Result<usize> {
-        match *self {
-            CapLen::Len(size) => Ok(size),
-            _ => Err(PatternError::NoCaptureLength),
-        }
     }
 }
 
@@ -111,7 +105,7 @@ impl MatchState {
     }
 
     fn capture_to_close(&self) -> Result<usize> {
-        let mut level = (self.level - 1) as isize;
+        let mut level = self.level as isize - 1;
         while level >= 0 {
             if self.capture[level as usize].is_unfinished() {
                 return Ok(level as usize);
@@ -176,12 +170,12 @@ fn match_class(ch: u8, class: u8) -> bool {
         b'g' => ch.is_ascii_graphic(),
         b'l' => ch.is_ascii_lowercase(),
         b'p' => ch.is_ascii_punctuation(),
-        b's' => ch.is_ascii_whitespace(),
+        b's' => crate::numeral::is_lua_whitespace(ch),
         b'u' => ch.is_ascii_uppercase(),
         b'w' => ch.is_ascii_alphanumeric(),
         b'x' => ch.is_ascii_hexdigit(),
         b'z' => ch == b'\0',
-        lc => return lc == ch,
+        _ => return class == ch,
     };
     if class.is_ascii_lowercase() {
         res
@@ -326,7 +320,11 @@ impl MatchState {
 
     fn match_capture(&mut self, s: CPtr, l: usize) -> Result<CPtr> {
         let l = self.check_capture(l)?;
-        let len = self.capture[l].len.size()?;
+        let len = match self.capture[l].len {
+            CapLen::Len(len) => len,
+            CapLen::Position => return Ok(null()),
+            CapLen::Unfinished => return Err(PatternError::UnfinishedCapture),
+        };
         if diff(self.src_end, s) < len {
             return Ok(null());
         }
@@ -531,7 +529,11 @@ impl MatchState {
             p = next(p);
             match ch {
                 L_ESC => {
-                    //p = next(p);
+                    if p >= self.p_end {
+                        return Err(PatternError::MalformedPattern(
+                            MalformedPattern::EndsWithPercent,
+                        ));
+                    }
                     let c = at(p);
                     match c {
                         b'b' => {
@@ -616,25 +618,27 @@ impl MatchState {
                     // p enters pointing just past '('. A pattern ending in '('
                     // leaves p == p_end, so bounds-check before the deref (L14);
                     // treat it as an (unfinished) open capture.
+                    if self.level >= LUA_MAXCAPTURES || stack_idx >= LUA_MAXCAPTURES {
+                        return Err(PatternError::TooManyCaptures);
+                    }
+                    let level = self.level;
                     if p >= self.p_end || at(p) != b')' {
                         // not a position capture
-                        level_stack[stack_idx] = self.level;
+                        level_stack[stack_idx] = level;
                         stack_idx += 1;
-                        self.capture[self.level].len = CapLen::Unfinished;
-                        self.level += 1;
-                        if self.level >= LUA_MAXCAPTURES {
-                            return Err(PatternError::TooManyCaptures);
-                        }
+                        self.capture[level].len = CapLen::Unfinished;
                     } else {
                         p = next(p);
+                        self.capture[level].len = CapLen::Position;
                     }
+                    self.level = level + 1;
                 }
                 b')' => {
                     if stack_idx == 0 {
-                        return Err(PatternError::NoOpenCapture);
+                        return Err(PatternError::InvalidPatternCapture);
                     }
                     stack_idx -= 1;
-                    self.capture[level_stack[stack_idx]].len = CapLen::Position;
+                    self.capture[level_stack[stack_idx]].len = CapLen::Len(0);
                 }
                 _ => {}
             }
@@ -646,7 +650,15 @@ impl MatchState {
     }
 }
 
-pub(super) fn str_match(s: &[u8], p: &[u8], mm: &mut [LuaCapture]) -> Result<usize> {
+pub(super) fn str_match(
+    s: &[u8],
+    p: &[u8],
+    mm: &mut [LuaCapture; LUA_MAXMATCHES],
+) -> Result<usize> {
+    if p.is_empty() {
+        mm[0] = LuaCapture::Bytes { start: 0, end: 0 };
+        return Ok(1);
+    }
     let mut lp = p.len();
     let mut p = p.as_ptr();
     let ls = s.len();
@@ -677,6 +689,9 @@ pub(super) fn str_match(s: &[u8], p: &[u8], mm: &mut [LuaCapture]) -> Result<usi
 }
 
 pub(super) fn str_check(p: &[u8]) -> Result<()> {
+    if p.is_empty() {
+        return Ok(());
+    }
     let mut lp = p.len();
     let mut p = p.as_ptr();
     let anchor = at(p) == b'^';
@@ -685,11 +700,6 @@ pub(super) fn str_check(p: &[u8]) -> Result<()> {
         lp -= 1; /* skip anchor character */
     }
     let mut ms = MatchState::new(null(), null(), add(p, lp));
-    if at(sub(ms.p_end, 1)) == b'%' {
-        return Err(PatternError::MalformedPattern(
-            MalformedPattern::EndsWithPercent,
-        ));
-    }
     ms.str_match_check(p)?;
     Ok(())
 }

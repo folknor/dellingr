@@ -4,252 +4,248 @@ Current work item. Numbers refer to finding numbers in `notes/bugs.md`.
 
 ---
 
-## Targets #27, #28: recursive traversals abort the host on deep data
+## Targets #13, #14, #34, #35, #56: local pattern-matcher defects
 
-Two traversals over the same object graph, both recursive with no depth bound,
-both reachable from ordinary script data rather than hostile input. One loop
-because they are the same defect shape over the same graph - though see the
-question below about whether they genuinely share an implementation.
+Five defects in `src/patterns/`, all local rather than structural. Grouped
+because they touch one file and one test surface.
 
-### #27 (Medium, but verified as a hard abort) - GC mark phase is recursive
+**Deliberately excluded from this loop:** #12 (matchdepth consumed by tail
+calls) and #33 (`%f` loses left context because the stdlib re-slices the
+subject). Both need the `str_match` rework - an `init` offset plus converting
+tail continuations into a loop - which is most of the `optimizations.md` #4
+rewrite. Doing them here would turn five small, individually verifiable fixes
+into one large one.
 
-`GcHeap::mark` (`src/vm/object.rs:352-363`) -> `mark_children` (`:370-386`) ->
-`Table::mark_values` (`src/vm/table.rs`) -> `Val::mark_reachable` ->
-`GcHeap::mark`, recursing once per level of nesting with no bound. Roughly 5
-frames per level.
+All four testable findings verified by running against reference Lua 5.4.
 
-`MAX_CALL_DEPTH` and `MAX_METAMETHOD_DEPTH` protect the interpreter; nothing
-protects the collector.
+### #14 (High) - script-reachable panic on 32 captures
 
-**Verified by running:**
+**Verified:**
 
 ```lua
-local t = {}
-for i = 1, 500000 do t = { t } end
+("x"):match("()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()")
 ```
 
-Result: `thread 'main' has overflowed its stack / fatal runtime error: stack
-overflow, aborting / Aborted (core dumped)`. Exit code 134. A plain Lua script,
-costing ~2 per iteration and well inside any normal budget, kills the host
-process uncatchably. Auto-GC fires during the loop, so it aborts before the
-script even finishes.
+gives `panicked at src/patterns/luapat.rs:498:21: index out of bounds: the len
+is 31 but the index is 31`. A Lua script panics the host process rather than
+raising a Lua error.
 
-This is also what currently blocks the "no malformed save can abort during
-load" guarantee from the previous loop: `materialize_payload` ends with a
-`gc_collect()` (`save_state.rs:601`), and a decoded save may legitimately
-contain a deep table graph. Rejecting deep graphs is not an option - scripts
-build them normally - so the collector has to stop recursing.
+- `src/patterns/mod.rs:18` sizes `matches: [LuaCapture; 32]`, and `:669`
+  stores the whole match at `mm[0]` with captures going into `mm[1..]`, so only
+  31 capture slots exist.
+- `start_capture` (`luapat.rs:300-302`) lets `level` reach exactly 32
+  (`LUA_MAXCAPTURES`), and `push_captures` then writes `mm[1..][31]`.
+- The validator's `()` branch (`luapat.rs:628-630`) just advances `p` without
+  counting, so a pattern of 32 position captures passes `str_check`.
 
-### #28 (Medium) - `SaveBuilder::encode_object` is recursive
+Fix: size the results array `LUA_MAXCAPTURES + 1`, and make the validator count
+position captures. The latter also fixes #34a.
 
-`src/vm/save_state.rs:313-351`: `encode_object` -> `encode_val` ->
-`encode_object`, once per nesting level. A script builds the chain cheaply, the
-host then calls `save_state()`, and the native stack overflows inside an API
-whose signature promises `Result<_, SaveError>`. Script-controlled data killing
-the host during a host API call.
+### #13 (High) - every pattern ending in `%%` is rejected
 
-In practice #27 usually fires first with auto-GC enabled, which is why the
-save-side abort is less visible - but a host that disabled auto-GC, or that
-saves a graph built up just under the collection threshold, reaches this one.
+**Verified:** `("50%"):gsub("%%", " percent")` raises
+`malformed pattern (ends with '%')`; reference returns `50 percent  1`. Same
+for `("100%"):match("%d+%%")`, which reference answers `100%`.
 
-### Constraints
+`str_check` (`luapat.rs:688`) inspects only the final byte:
 
-- **Determinism.** Save output must stay byte-identical, which means the
-  traversal order of `encode_object` must not change. A worklist that visits
-  children in a different order would silently change every save file. GC order
-  is not externally visible, but arena/id assignment order in the save
-  absolutely is.
-- `mark` is on the GC hot path and carries `#[hotpath::measure]`. AGENTS.md
-  notes the recursion caveat for that attribute.
-- The heap uses colours (`Color::Unmarked` / `Reachable`); an explicit worklist
-  needs to keep the "already visited" test doing the same work it does now, or
-  marking gets quadratic on shared subgraphs.
-- `optimizations.md` #5 already proposes the iterative worklist for both.
+```rust
+if at(sub(ms.p_end, 1)) == b'%' { return Err(... EndsWithPercent) }
+```
+
+so it cannot distinguish a dangling `%` from the two-byte escape `%%`. The
+runtime matcher's `classend` handles `%%` correctly - only this eager
+pre-check misfires. The pre-check exists because `str_match_check`'s `L_ESC`
+arm (`:534`, `let c = at(p)`) has no bounds check of its own and would read
+past the end on a genuinely trailing `%`.
+
+Fix: check trailing-percent *parity*, or add the bounds check inside the loop
+and drop the pre-check entirely. The second is tidier if it does not cost
+anything.
+
+### #34 (Medium) - validator capture-count divergences
+
+a. Position captures are not counted (`luapat.rs:628-630`), so backreference
+   validation is wrong when a position capture precedes a real one.
+   **Verified:** `("aa"):match("()(a)%2")` raises `invalid capture index %2`;
+   reference returns `1  a`.
+
+b. Off-by-one ceiling: the validator increments `level` then rejects
+   `level >= 32` (`:623-627`), permitting only 31 captures, while
+   `start_capture` (`:302`) and reference both allow exactly 32. A pattern with
+   32 ordinary captures is spuriously rejected as "too many captures".
+
+Note (a) and #14 share a root cause and must be fixed consistently: after
+counting position captures, the ceiling has to be right or valid patterns start
+being rejected.
+
+### #35 (Medium) - escaped uppercase non-class letters match the wrong character
+
+`match_class` (`luapat.rs:171-191`) lowercases the class byte before the
+literal-comparison fallback:
+
+```rust
+let res = match class.to_ascii_lowercase() { ... lc => return lc == ch };
+```
+
+Reference compares the original byte in the default case (`return (cl == c)`).
+
+**Verified, and it is fully inverted:**
+
+| pattern | subject | dellingr | reference |
+|---|---|---|---|
+| `%E` | `"E"` | nil | `E` |
+| `%E` | `"e"` | `e` | nil |
+| `%K` | `"K"` | nil | `K` |
+| `[%N]` | `"N"` | nil | `N` |
+
+Affects `%B %E %F %H %I %J %K %M %N %O %Q %R %T %V %Y` - the uppercase letters
+whose lowercase is not a class letter - both bare and inside `[...]`. Naive
+"escape every character" pattern-quoting helpers emit exactly these.
+
+### #56 (Low, hardening) - empty pattern is one call site from an OOB read
+
+`str_check` (`luapat.rs:681`) and `str_match` (`:655`) do `at(p)` on the first
+pattern byte unconditionally. With an empty pattern that reads out of bounds
+through a dangling pointer. Every current stdlib call site guards empty
+patterns first, so it is not live - but the invariant is implicit and
+undocumented, and this module is a raw-pointer transliteration of C where that
+is exactly the kind of assumption that rots.
+
+Fix: an explicit empty guard in `LuaPattern::from_bytes_try` / `str_match`.
+
+### Found during review, not in the original audit
+
+**A second script-reachable panic: `%0`.** Verified:
+`("aa"):match("(a)%0")` gives
+`panicked at src/patterns/errors.rs:41:56: attempt to add with overflow`.
+`InvalidCaptureIndex(Some(-1))` is cast to `usize` before adding one. Release
+happens to wrap and print `%0`, so this is debug-only in effect but wrong in
+both.
+
+**`%s` does not match vertical tab.** Verified against reference:
+
+| expression | dellingr | reference 5.4 |
+|---|---|---|
+| `("\11"):match("%s")` | nil | matches |
+| `("\11"):match("%S")` | matches | nil |
+| `("\12"):match("%s")` | matches | matches |
+
+`match_class` uses Rust's `is_ascii_whitespace`, which excludes 0x0B; C's
+`isspace` includes it. Form feed (0x0C) is in both, so VT is the only
+divergent byte. This is the same root cause as finding #42 (the lexer's
+`consume_whitespace`), and `src/compiler/numeral.rs`'s `is_lua_whitespace`
+already has the correct set.
+
+Note the review initially concluded the remaining predicates agreed with
+reference; that was checked and is wrong for `%s`/`%S` specifically.
 
 ---
 
 ## Agreed implementation plan
 
-Two separate implementations. They share a defect pattern, not useful code: GC
-needs an infallible colour-transition tracer over `ObjectPtr`, while saving
-needs a fallible deterministic continuation machine over four arenas plus
-diagnostic paths. A generic walker would obscure both. They land together
-because deep-save loading re-enters #27 through `gc_collect()`
-(`save_state.rs:652`), but as two commits.
+### Capture ceiling - get this exactly right
 
-### Part 1: iterative GC tracer
+`LUA_MAXCAPTURES` stays **32**. It counts entries in `MatchState.capture`, and
+both ordinary and position captures consume one. Reference's `start_capture`
+rejects only when `level >= 32`, so capture 32 is valid and 33 is rejected.
 
-Add a non-semantic `mark_worklist: Vec<ObjectPtr>` to `GcHeap`
-(`src/vm/object.rs:189`). The codec builds a separate `SavePayload` and never
-serializes `GcHeap`, so it is excluded automatically.
-
-At collection start `std::mem::take` it into a local, clear defensively, mark
-and drain, then restore the empty vector. No `RefCell`, no per-collection
-allocation, capacity preserved across collections. There are no normal GC error
-returns; on an invariant panic the heap keeps the empty replacement rather than
-stale pointers.
-
-Per-edge rule, O(1), no set or map:
-
-- look the target up in the `SlotMap`;
-- if `Unmarked`, set `Reachable` **immediately** and push;
-- if already `Reachable`, do nothing.
-
-Setting the colour *before* enqueueing is what makes cycles and shared
-subgraphs enqueue each object at most once. Strings keep their existing direct
-mark and never enter the object worklist.
-
-`Markable` now enqueues object pointers and marks strings rather than tracing
-children. The drain loop pops an object and enqueues: closed closure upvalue
-values; table keys, values, and metatable. `mark_gc_roots` stays the single
-authoritative root list. Touches `object.rs`, `table.rs:739`, `vm.rs:83`,
-`anchor.rs:127`. Keep `#[hotpath::measure]` only on non-recursive entry points.
-
-### Part 2: iterative save walker
-
-**The order requirement is the whole risk here.** Current traversal, which the
-byte layout encodes because ids are assigned at first encounter:
+dellingr's wrapper additionally stores the whole match at `matches[0]` with
+explicit captures in `matches[1..=32]`, so it needs **33 slots**:
 
 ```text
-globals in state.globals insertion order
-  table id assigned before any child
-    entry 0 key subtree     (fully traversed)
-    entry 0 value subtree   (fully traversed)
-    entry 1 key subtree
-    entry 1 value subtree
-    ...
-    metatable subtree       (only after every entry)
-  closure: bytecode first, then upvalues in vector order
+LUA_MAXCAPTURES = 32
+LUA_MAXMATCHES  = LUA_MAXCAPTURES + 1
 ```
 
-Replace recursive `encode_object` and the object-reaching `encode_upvalue`
-calls with a **LIFO task machine**, not a breadth-first discover-all-children
-pass:
+Counting must use the same pre-increment rule as the runtime: reject when
+`level >= LUA_MAXCAPTURES`, otherwise write capture `level` and increment.
+**Never increment then test `>=`** - that is #34b.
 
-```rust
-enum EncodeTask {
-    Value { val, path, destination },
-    Object { ptr, id, path },
-    Upvalue { upvalue, path, destination },
-}
-```
+Make `str_match` take `&mut [LuaCapture; LUA_MAXMATCHES]` so the capacity is
+compile-time enforced rather than a comment.
 
-Destinations are small index-based slots: root result, table key/value slot,
-table metatable, closure upvalue slot, saved-upvalue value. Keep pending
-object/upvalue slots as `Option`-based internals so successful completion
-proves every field was filled, converting to `SavedObject`/`SavedVal` only at
-the end. Checked indexed access, no production `unwrap`.
+### `src/patterns/luapat.rs`
 
-When expanding a table, push in this order:
+- `match_class`: compare the **original** `class` byte in the default arm
+  (`_ => return class == ch`), fixing #35.
+- `match_class`: `b's'` must include vertical tab. Use the same set as
+  `numeral.rs`'s `is_lua_whitespace` rather than `is_ascii_whitespace`.
+- `str_match_check`:
+  - bounds-check the `L_ESC` byte before dereferencing (this is what lets the
+    eager pre-check go);
+  - count **both** position and ordinary captures;
+  - check capacity before indexing `capture` or `level_stack`;
+  - allow the 31 -> 32 transition;
+  - mark position captures `Position` immediately;
+  - mark closed ordinary captures `Len(0)` - currently mis-tagged `Position`
+    at `:637`, behaviour-neutral today because validation only tests
+    "unfinished", but wrong;
+  - return `InvalidPatternCapture` for an unmatched `)`, matching reference's
+    "invalid pattern capture" rather than "no open capture".
+- `str_check`: delete the final-byte `%` pre-check (#13). It only bought an
+  O(1) rejection, masked the unsafe validator dereference, and gave worse
+  diagnostics for things like an unterminated bracket ending in `%`. Runtime
+  `classend` already does its own dangling-escape check, and the new bounds
+  check runs during one-time validation, not matching.
+- `str_check` / `str_match`: explicit empty-pattern handling (#56). An empty
+  pattern matches `0..0` and returns one internal match.
+- `match_capture`: `CapLen::Position` must yield `Ok(null())` - no match -
+  rather than `NoCaptureLength`. Reference accepts `()%1` as a valid pattern
+  that simply does not match, and fixing #34a would otherwise turn it into an
+  error.
+- `capture_to_close`: cast before subtracting (`self.level as isize - 1`).
+  Validation currently prevents level zero reaching it, but the subtraction
+  order is a latent panic.
+- Drop `CapLen::size` once unused.
 
-1. metatable first, so it stays at the bottom;
-2. entries in **reverse** index order;
-3. within each entry, value first then key.
+### `src/patterns/mod.rs`
 
-The next pop is then entry 0's key, and any object it discovers is pushed above
-every sibling so its whole subtree completes before entry 0's value. Closure
-upvalue tasks likewise pushed in reverse. That reproduces the recursive
-preorder exactly.
+Size `LuaPattern.matches` and its initializer with `LUA_MAXMATCHES`. **Do not**
+touch `push_captures` in `lua_std/string.rs` - its `n - 1` correctly keeps the
+whole-match bookkeeping slot internal.
 
-Keep the existing `BTreeMap` id maps and assign ids at exactly the same
-first-encounter points. **Leave `encode_bytecode` recursive and unchanged** -
-it walks a different, syntax-bounded graph, and changing it at the same time
-would enlarge the byte-stability risk for no benefit.
+### `src/patterns/errors.rs`
 
-Do **not** carry full path strings in tasks: `format!("{path}...")` becomes
-O(depth^2) memory once native recursion is gone. Use an append-only breadcrumb
-arena:
+Format capture indices in signed space (`i16::from(idx) + 1`), fixing the `%0`
+overflow panic. Remove `NoCaptureLength` and `NoOpenCapture` once their
+replacements are in place.
 
-```text
-Breadcrumb { parent: Option<PathId>, segment: PathSegment }
-PathSegment = Global(name) | TableKey(i) | TableValue(i) | Metatable | Upvalue(i)
-```
+### Out of scope
 
-Tasks carry only a `PathId`. Reconstruct the exact current text iteratively
-only when producing `UnregisteredFunction`, preserving `.key[n]`, `[n]`,
-`.metatable` and `.upvalue[n]` and the existing first-error order.
-
-### Byte-stability gate
-
-`tests/save_golden.rs` and `tests/fixtures/save_golden.bin` were captured from
-the recursive implementation and committed before this work. If
-`save_traversal_order_matches_golden_fixture` fails, the walker reordered the
-graph - **fix the walker, do not regenerate the fixture.** Regeneration is an
-`#[ignore]`d test precisely so a reordering cannot quietly rewrite its own
-expectation.
-
-### Benchmarks
-
-Baselines captured on this machine immediately before the change:
-
-| target | wall | warm avg |
-|---|---:|---:|
-| `alloc/closure` | 87.9 ms +- 1.5 | 281 us |
-| `iter/pairs` | 84.3 ms +- 1.0 | 538 us |
-
-`alloc/closure` is the meaningful gate: it collects ~10,000 times, which is
-also why a fresh worklist allocation per collection would be a poor choice.
-`iter/pairs` collects 7 times and should stay below noise.
+The validator has no counterpart in `lstrlib.c` - it is an eager dellingr
+layer, and it will keep rejecting malformed suffixes that reference might never
+execute (`"a%"` against `"b"`). Do not broaden this into removing it. #12 and
+#33 stay out.
 
 ### Tests
 
-- `src/vm/object.rs`: a 100,000-object table chain marked and collected
-  iteratively, verifying every reachable object survives.
-- `src/vm/object.rs`: a cyclic/shared diamond covering object keys, values,
-  metatables and closed closure upvalues - live objects survive, an unreachable
-  cycle is swept.
-- `src/vm/object.rs`: repeated collections leave the reused worklist empty
-  between cycles.
-- `src/vm/tests.rs`: an ordinary Lua chain with auto-GC enabled, deep enough to
-  abort the old implementation, now completes.
-- `tests/save_state.rs`: a 50,000-deep global chain with auto-GC disabled -
-  save, load, and traverse every level iteratively.
-- Exact diagnostic-path tests for an unregistered Rust function reached through
-  a table key, a table value, a nested metatable table, and a closure upvalue.
+`src/patterns/mod.rs` unit tests:
 
-### Recursion audit result
+- `%%`, `%d+%%`, `%%%%`, while keeping the dangling-`%` rejection;
+- `()(a)%2` returning `Position(0)` and `"a"`;
+- exactly 32 position captures, exactly 32 ordinary captures, and a mixed 32;
+- 33 of each returning `TooManyCaptures` **without indexing arrays**;
+- every affected uppercase byte in `BEFHIJKMNOQRTVY`, bare and bracketed;
+- vertical tab against `%s` and `%S`, plus form feed as the control;
+- empty pattern matching `0..0` on empty and non-empty subjects;
+- `()%1` returning no match rather than an error;
+- `%0` formatting exactly as `invalid capture index %0`.
 
-There is no third recursive traversal of the Lua object graph.
-`Val::mark_reachable`, `Table::mark_values`, the slice/`IndexMap` `Markable`
-impls, `Registry`, `TransientRoots` and `SuspendedEnvironment` are components
-or root enumerators of the same GC walk; `encode_upvalue` is an edge adapter
-inside the same save walk. Load materialization is already flat and two-pass.
+`tests/string_bytes.rs`: public-API regressions calling `string.match` with 32
+position captures and 32 ordinary captures, verifying all 32 Lua results. This
+is the host-panic regression that matters most.
 
-This closes the unbounded-native-recursion class for runtime Lua data graphs.
-Everything else that recurses is bounded: Lua calls at `MAX_CALL_DEPTH` 1000,
-metamethod chains at 200, pattern matching at 200, table-valued `__call` chains
-indirectly at 255 by the `u8` argument count, and the parser / `encode_bytecode`
-/ `build_bytecode` family at `MAX_SYNTAX_DEPTH` 200 over a different graph.
+`tests/error_handling.rs`: `%0` and unmatched-`)` producing clean
+`RuntimeError`s with reference-compatible messages.
 
-### Superseded questions
+Extend `examples/pattern_result_handling.lua` with #13, #34a, #35, the VT case,
+and the 32-capture boundary, so the differential gate covers them against both
+Lua 5.2 and 5.4 automatically.
 
-1. Do #27 and #28 genuinely share an implementation, or only a pattern? The
-   previous loop's reviewer argued the three recursive problems (this pair plus
-   the now-fixed `build_bytecode`) share a design pattern but not useful
-   generic code, since GC works on `ObjectPtr` reachability and colour
-   transitions while save encoding needs allocate/fill phases plus
-   deterministic paths and diagnostics. Confirm or correct that. If they do not
-   share code, say whether they should still land together.
-2. For #27: explicit gray stack (`Vec<ObjectPtr>`) is the obvious shape. Where
-   exactly does the worklist live - a scratch `Vec` on `GcHeap` reused across
-   collections, or allocated per collect? Reused avoids a per-GC allocation but
-   adds a field that must not be serialized and must be cleared on error paths.
-   What does it cost on the `iter/pairs` and `alloc/closure` benches?
-3. For #28: what is the exact current traversal order, and how do you preserve
-   it byte-for-byte under an explicit stack? This is the part I would most
-   expect to get silently wrong - an explicit stack naturally reverses child
-   order unless the children are pushed in reverse. Is there an existing
-   byte-stability test that would catch a regression here, and is it strong
-   enough?
-4. Is there a third recursive traversal over the same graph that I have not
-   listed? `Val::mark_reachable`, `Table::mark_values`, and the `Markable` impls
-   are the obvious neighbours, and the previous loop added
-   `TransientRoots`/`SuspendedEnvironment` impls. Sweep for anything else that
-   recurses per nesting level.
-5. Does anything else in the crate recurse per level of *script-controlled*
-   data depth, outside these traversals? The parser is now bounded and
-   `build_bytecode` is bounded; I want to know whether this closes the class or
-   just two instances of it.
+### Regression to watch
 
-Read `src/vm/object.rs`, `src/vm/table.rs`'s `mark_values`, the `Markable`
-impls, and `SaveBuilder` in `src/vm/save_state.rs`.
+`src/patterns/mod.rs:211` (`runtime_match_errors_are_not_swallowed`, 201
+literal `a`s) enshrines the #12 divergence as expected. Its pattern is
+non-empty, capture-free and escape-free, so nothing here should touch it - but
+run it explicitly and flag it if the outcome changes.
