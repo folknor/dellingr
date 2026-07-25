@@ -125,45 +125,6 @@ print(s:find("a%d"))      -- reference: nil; dellingr: error "pattern too comple
 
 ## Medium severity
 
-### 18. Bare CR inside string literals (A-A5, sibling of the L17 CR fixes)
-
-- **Locations:** `lexer.rs` `lex_string` (353-368) rejects only `'\n'` inside
-  a string; `parser.rs` `get_literal_string_contents:343` maps escape `\<LF>`
-  to `'\n'` but `\<CR>` falls into the `_ =>` arm (InvalidEscapeSequence).
-- **Cause / divergences:** reference Lua treats both CR and LF as "unfinished
-  string"; dellingr compiles `"a<CR>b"` and embeds a raw 0x0D byte. Reference
-  maps `\<CR>`, `\<CR><LF>`, and `\<LF><CR>` all to a single `'\n'`; dellingr
-  errors on `\<CR>` and produces the two bytes `\n\r` for `\<LF><CR>`. Any
-  script written or transferred with CR / CRLF / mixed line endings inside
-  string literals diverges.
-- **Fix:** in `lex_string`, treat `'\r'` like `'\n'` (unfinished string) for
-  the unescaped case; in the escape decoder, accept `\<CR>` / `\<CR><LF>` /
-  `\<LF><CR>` as one `'\n'`.
-
-### 19. `--[=[ ... ]=]` leveled long comments misparsed (A-A6)
-
-- **Location:** `lexer.rs skip_comment` (210-236) recognizes only `--[[`.
-- **Cause:** a leveled opener `--[=[` (any `--[=...=[`) falls through to the
-  single-line branch, so only the first line is skipped and the comment BODY
-  is lexed as live source. Reference 5.2/5.4 skips the whole block.
-
-```lua
---[=[
-this line is a comment in reference Lua
-]=]
-print("ok")
-```
-
-  Reference prints `ok`; dellingr attempts to parse line 2 as code (usually a
-  confusing syntax error; if the body happens to be valid Lua it would
-  execute). Given long strings already produce a dedicated
-  LongStringUnsupported error at `[=`/`[[`, the consistent fix is to error on
-  `--[=` as well (or support levels in the comment skipper - comments are not
-  on the "Won't implement" list, `--[[` already works).
-- **Related, lower priority:** an unfinished `--[[` at EOF is silently
-  accepted (skip_comment returns on None, lexer emits EOF); reference errors
-  "unfinished long comment". Accepts-more divergence.
-
 ### 22. `instr_tfor_call_rust_fn` truncates the result count with `as u8` (B-B6, host-API only)
 
 - **Location:** `src/vm/eval_control.rs:266`
@@ -347,42 +308,6 @@ print(table.concat(t, "", 2, 2))  -- reference: "x"; dellingr: ""
 ---
 
 ## Low severity
-
-### 40. `break;` and code after `break` are rejected (A-A7)
-
-`parser.rs:538-542`: after `break`, `parse_statements` exits without
-consuming an optional `;` (compare `parse_return`, `stmt.rs:40`) and without
-allowing further statements. `while true do break; end` -> "'end' expected
-near ';'" (valid in 5.1/5.2/5.4); `while true do break print(1) end` ->
-rejected (valid dead code in 5.2/5.4). The trailing-semicolon case is the one
-real scripts hit. Minimal fix: `self.input.try_pop(TokenType::Semi)?;` after
-`add_break()`.
-
-### 41. Numeral-touching-letter only rejected for hex-digit letters (A-A8)
-
-`lexer.rs lex_exponent:465-468` and the hex tail check (403-405) reject a
-trailing letter only if `is_ascii_hexdigit()`. Reference rejects ANY
-alphanumeric touching a numeral: `print(3or 4)` prints 3 in dellingr,
-"malformed number near '3o'" in reference; `1e5or 2`, `0x5rad` (codified in
-`test_lexer07`) same class. Fix: reject `is_ascii_alphanumeric()` (and `_`)
-after a numeral.
-
-### 42. Vertical tab is not whitespace (A-A9)
-
-`lexer.rs consume_whitespace` (264-276) uses `is_ascii_whitespace`, which
-excludes VT (0x0B); C `isspace` includes it, so reference accepts VT between
-tokens and after `\z`; dellingr: InvalidCharacter. Same for the parser-side
-`\z` skip (`parser.rs:339`). One-line predicate fix in both places
-(`numeral.rs is_lua_whitespace` already has the correct set; reuse it).
-
-### 43. LParenLineStart ambiguity check keyed to LF only (A-A10)
-
-`consume_whitespace` sets `starts_line` only on `'\n'` (lexer.rs:270). A file
-using bare-CR line endings never produces `LParenLineStart`, so the
-intentional "ambiguous function call" error silently does not fire for CR
-files: `f<CR>(g)` parses as a call while `f<LF>(g)` errors. After the L17
-bare-CR line-counting fix, this is the one remaining LF-only assumption in
-the lexer. Set `ret = true` for the bare-CR branch too.
 
 ### 44. Capacity ceilings likely to bite data-heavy game scripts (A-A11 + B-B10)
 
@@ -714,9 +639,6 @@ glibc's.
 
 ## Orchestrator notes (carried from the corner reports)
 
-- The A-corner P2/P3 items (#18, #19, #40-#43) are diff-testable against
-  lua5.2/lua5.4 with small scripts; the CR/VT cases need byte-level fixtures
-  (careful with editors normalizing line endings).
 - E's verification list: (1) #36 assumes `check_type` errors on nil - check
   `vm_aux.rs`; (2) `table_remove_at(1, 0)` / `(1, len+1)` semantics vs
   reference's `t[0]` read/write edge (vm-side, was out of E's corner);

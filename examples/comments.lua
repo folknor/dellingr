@@ -23,4 +23,11 @@ print("Test 4: inline multi-line: " .. tostring(x == 8))
 --[[ This has [brackets] inside ]]
 print("Test 5: brackets in comment passed")
 
+local leveled_comment_ran = false
+--[=[
+leveled_comment_ran = true
+print("This must stay commented")
+]=]
+print("Test 6: leveled comment: " .. tostring(not leveled_comment_ran))
+
 print("All comment tests passed!")

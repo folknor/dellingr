@@ -112,4 +112,12 @@ for val in ipairs(arr3) do
 end
 print("single_sum (indices):", single_sum)
 
+-- Test 11: statements after break are parsed but unreachable
+local after_break = false
+while true do
+    break;
+    after_break = true
+end
+print("Test 11: dead assignment after break: " .. tostring(not after_break))
+
 print("All loop tests complete!")

@@ -83,6 +83,25 @@ fn literal_string_decodes_z_and_named_escapes() {
 }
 
 #[test]
+fn literal_string_normalizes_escaped_physical_newlines() {
+    for source in [
+        "return \"a\\\rb\"",
+        "return \"a\\\r\nb\"",
+        "return \"a\\\n\rb\"",
+    ] {
+        assert!(source.as_bytes().contains(&b'\r'));
+        assert_eq!(literal_bytes(source), b"a\nb", "{source:?}");
+    }
+}
+
+#[test]
+fn literal_string_z_skips_vertical_tab() {
+    let source = "return \"a\\z\x0b b\"";
+    assert!(source.as_bytes().contains(&0x0b));
+    assert_eq!(literal_bytes(source), b"ab");
+}
+
+#[test]
 fn literal_string_escape_errors_use_the_backslash_position() {
     for (source, expected) in [
         (r#"return "\256""#, "decimal escape"),
@@ -1190,19 +1209,47 @@ fn test32() {
 #[test]
 fn test33() {
     use super::*;
-    let text = "print()\n(foo)()\n";
-    match parse_str(text) {
-        Err(Error {
-            kind: ErrorKind::SyntaxError(SyntaxError::LParenLineStart),
-            line_num,
-            column,
-            ..
-        }) => {
-            assert_eq!(line_num, 2);
-            assert_eq!(column, 1);
+    for text in [
+        "print()\n(foo)()\n",
+        "print()\r(foo)()\r",
+        "print()\r\n(foo)()\r\n",
+    ] {
+        match parse_str(text) {
+            Err(Error {
+                kind: ErrorKind::SyntaxError(SyntaxError::LParenLineStart),
+                line_num,
+                column,
+                ..
+            }) => {
+                assert_eq!(line_num, 2, "{text:?}");
+                assert_eq!(column, 1, "{text:?}");
+            }
+            _ => panic!("Should detect ambiguous function call because of linebreak: {text:?}"),
         }
-        _ => panic!("Should detect ambiguous function call because of linebreak"),
     }
+}
+
+#[test]
+fn break_allows_semicolons_and_following_statements() {
+    for source in [
+        "while true do break; end",
+        "while true do break;;; end",
+        "while true do break; reached = 1 end",
+    ] {
+        parse_str(source).expect("break must allow following statements");
+    }
+
+    let mut state = State::new();
+    state
+        .load_string("local reached = 0; while true do break; reached = 1 end; return reached")
+        .expect("break fixture must compile");
+    state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(1))
+        .expect("break fixture must run");
+    assert_eq!(
+        state.to_number(-1).expect("return value must be numeric"),
+        0.0
+    );
 }
 
 #[test]

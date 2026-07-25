@@ -4,227 +4,264 @@ Current work item. Numbers refer to finding numbers in `notes/bugs.md`.
 
 ---
 
-## Targets #17, #20, #21, #39: semantic divergences from reference Lua
+## Targets #18, #19, #40, #41, #42, #43: lexer and parser conformance
 
-Four independent, small correctness bugs. Grouped because each is a
-self-contained fix and all four are diff-testable against reference.
+Six small divergences, all in `src/compiler/lexer.rs` and
+`src/compiler/parser.rs`. Grouped because they share a file, a test surface,
+and a theme: dellingr's lexer accepts or rejects things reference Lua does not.
 
-All verified by running against Lua 5.4.
+Two verified by running; the rest are byte-level or established by reading.
 
-### #17 (Medium) - `for` control expressions see the loop variable
+### #40 (Low) - `break;` is rejected
 
-In Lua the control expressions of a `for` are evaluated in the *enclosing*
-scope; the loop variable only exists inside the body. dellingr adds the locals
-first and then parses the expressions, so `find_last_local` resolves a name to
-the fresh loop slot.
+**Verified:** `while true do break; end` gives `2:20: 'end' expected near ';'`.
+Reference parses it fine (it went on to fail at a later line). Valid in 5.1,
+5.2 and 5.4.
 
-- numeric: `stmt.rs:230-244` - `add_local("")` x3, `add_local(name)`, *then*
-  `parse_expr()` for start/stop/step.
-- generic: `stmt.rs:291-316` - the three hidden locals plus every visible name
-  are added, *then* `parse_explist()`.
+`parser.rs:538-542`: after `break`, `parse_statements` exits without consuming
+an optional `;` - compare `parse_return` (`stmt.rs:40`), which does - and
+without allowing further statements. So `while true do break print(1) end` is
+also rejected, though that is valid dead code in reference.
 
-**Verified:**
+The trailing-semicolon case is the one real scripts hit. Minimal fix:
+`self.input.try_pop(TokenType::Semi)?;` after `add_break()`.
+
+### #41 (Low) - a numeral touching a letter is only rejected for hex digits
+
+**Verified:** `print(3or 4)` prints `3` in dellingr; reference errors
+`malformed number near '3o'`.
+
+`lexer.rs` `lex_exponent:465-468` and the hex tail check at `403-405` reject a
+trailing letter only when `is_ascii_hexdigit()`. Reference rejects **any**
+alphanumeric touching a numeral. Same class: `1e5or 2`, and `0x5rad` which is
+already codified in `test_lexer07`.
+
+Fix: reject `is_ascii_alphanumeric()` (and `_`) immediately after a numeral.
+
+### #42 (Low) - vertical tab is not treated as whitespace
+
+`lexer.rs consume_whitespace` (264-276) uses `is_ascii_whitespace`, which
+excludes VT (0x0B); C's `isspace` includes it. So reference accepts VT between
+tokens and after `\z`, and dellingr raises `InvalidCharacter`. The parser-side
+`\z` skip (`parser.rs:339`) has the same problem.
+
+This is the exact sibling of the pattern-matcher `%s` bug fixed in the previous
+loop, and `src/numeral.rs`'s `is_lua_whitespace` - now `pub(crate)` - already
+has the correct set. Reuse it in both places rather than adding a third
+definition.
+
+### #18 (Medium) - bare CR inside string literals
+
+`lexer.rs` `lex_string` (353-368) rejects only `'\n'` inside a string, so
+`"a<CR>b"` compiles and embeds a raw 0x0D byte; reference treats both CR and LF
+as "unfinished string".
+
+`parser.rs` `get_literal_string_contents:343` maps escape `\<LF>` to `'\n'`,
+but `\<CR>` falls into the `_ =>` arm and errors `InvalidEscapeSequence`.
+Reference maps `\<CR>`, `\<CR><LF>` and `\<LF><CR>` all to a single `'\n'`;
+dellingr errors on the first and produces two bytes `\n\r` for the last.
+
+Any script written or transferred with CR or CRLF line endings inside string
+literals diverges.
+
+Fix: treat `'\r'` like `'\n'` in `lex_string` for the unescaped case, and
+accept `\<CR>`, `\<CR><LF>`, `\<LF><CR>` as one `'\n'` in the escape decoder.
+
+### #19 (Medium) - `--[=[ ... ]=]` leveled long comments are misparsed
+
+`lexer.rs skip_comment` (210-236) recognises only `--[[`. A leveled opener
+`--[=[` falls through to the single-line branch, so only the first line is
+skipped and the comment **body is lexed as live source**. Reference skips the
+whole block.
 
 ```lua
-local i = 5
-for i = i, 7 do print(i) end
+--[=[
+this line is a comment in reference Lua
+]=]
+print("ok")
 ```
 
-Reference prints `5 6 7`. dellingr raises
-`attempt to perform arithmetic on a nil value` - the start expression read the
-new, still-nil slot.
+Reference prints `ok`; dellingr tries to parse line 2 as code - usually a
+confusing syntax error, but if the body happens to be valid Lua it would
+execute.
 
-Worse than the error suggests: slot reuse can make this silently *wrong*
-rather than an error. If an earlier scope used the same slot index, the stale
-value is read as the start value, giving wrong iteration bounds with no
-diagnostic. The generic form has the same shape:
-`for _, t in ipairs(t) do ... end`.
+Given long *strings* already produce a dedicated `LongStringUnsupported` error
+at `[=` / `[[`, the consistent fix is to error on `--[=` too. Supporting levels
+in the comment skipper is the alternative - comments are not on the README's
+"Won't implement" list and `--[[` already works.
 
-Fix direction: parse the control expressions first, then add the hidden and
-visible locals. The emitted slot arithmetic already targets `locals.len()`
--relative slots, so record the base index before parsing and add the locals
-after.
+Related, lower priority: an unfinished `--[[` at EOF is silently accepted
+(`skip_comment` returns on None, the lexer emits EOF); reference errors
+`unfinished long comment`.
 
-### #20 (Medium) - NaN `<=` and `>=` evaluate true
+### #43 (Low) - the ambiguous-call check is keyed to LF only
 
-`eval_compare` (`src/vm/eval_store.rs:484-509`) maps `partial_cmp -> None` to
-`Ordering::Equal`, and `frame.rs:277-278` implements `<=` as negated `>` and
-`>=` as negated `<`. For NaN the result is `Equal`, which is neither
-`Greater` nor `Less`, so the negated forms return true.
+`consume_whitespace` sets `starts_line` only on `'\n'` (`lexer.rs:270`). A file
+with bare-CR line endings never produces `LParenLineStart`, so the deliberate
+"ambiguous function call" error silently does not fire: `f<CR>(g)` parses as a
+call while `f<LF>(g)` errors. After the L17 bare-CR line-counting fix this is
+the one remaining LF-only assumption in the lexer.
 
-**Verified:**
-
-| expression | dellingr | reference |
-|---|---|---|
-| `(0/0) <= 1` | true | false |
-| `(0/0) >= 1` | true | false |
-| `1 <= 0/0` | true | false |
-| `(0/0) < 1` | false | false |
-
-`<` and `>` are already correct, since `Equal` matches neither target.
-
-Fix: on `partial_cmp() == None`, push false unconditionally *before* the
-negate step - or compute `<=` as a first-class comparison rather than `!(>)`.
-
-### #21 (Medium) - floored modulo gives NaN for an infinite divisor
-
-`OP_MOD` (`src/vm/frame.rs:328-333`) computes `a - (a/b).floor() * b`. With
-`b = inf`: `a/b` is 0, and `0 * inf` is NaN.
-
-**Verified:**
-
-| expression | dellingr | reference |
-|---|---|---|
-| `1 % (1/0)` | NaN | 1.0 |
-| `-1 % (1/0)` | NaN | inf |
-
-The formula is also less exact than `fmod` for large finite operands, where
-rounding in `a/b` can flip the floor.
-
-Fix: implement as reference's `luai_nummod` does -
-`m = a.rem(b)` (fmod), then `if m != 0 && (m < 0) != (b < 0) { m += b }`.
-
-### #39 (Medium) - `math.modf(+-inf)` returns a NaN fractional part
-
-`src/lua_std/math.rs:323` uses `x.fract()`, which is `x - x.trunc()`, so
-`inf - inf` is NaN.
-
-**Verified:**
-
-| expression | dellingr | reference |
-|---|---|---|
-| `math.modf(1/0)` | `inf`, `NaN` | `inf`, `0.0` |
-| `math.modf(-1/0)` | `-inf`, `NaN` | `-inf`, `0.0` |
-
-Reference returns 0.0 for the fractional part (5.2 via C `modf`, 5.4 via an
-explicit `n == ip` test).
+Fix: set `ret = true` for the bare-CR branch too.
 
 ---
 
 ## Agreed implementation plan
 
-Correction to the above: **Lua 5.2 also returns NaN** for `1 % inf` - its
-`luai_nummod` is the old direct floor formula, and fmod-plus-adjust is the 5.4
-implementation. For #39, 5.2 returns *signed* zero (`-0` for `-inf`) while 5.4
-explicitly returns positive `0.0`. So both are 5.4-targeted changes.
+Two qualifications from review. **#41 is a Lua 5.4 tightening, not universal
+conformance** - 5.2 accepts `3or`. Take 5.4's behaviour, since rejecting glued
+tokens is safer, but document the 5.2 difference in the test. And **#43
+enforces dellingr's own ambiguity policy** rather than reference behaviour:
+both references accept `f<LF>(g)`. Fixing it makes the deliberate rejection
+consistent across line endings, which is the point.
 
-That matters for testing: `diff_test.sh` passes a file when dellingr matches
-**either** 5.2 or 5.4, whole-file. A modulo example on its own would therefore
-pass before *and* after the fix and enforce nothing. Each new example must
-include something only 5.4 produces, so the whole file is forced to match 5.4.
+### Seventh bug, found during review
 
-### #17 - `for` control scope
+`skip_comment` terminates a short `--` comment only on LF. Verified: under CR
+line endings `-- comment<CR>print("ok")` is swallowed entirely by dellingr,
+while both references print `ok`. Same newline cleanup; include it.
 
-Record the base, parse all control expressions, then declare the locals. This
-is sufficient for both forms. Slot layout is unchanged: numeric keeps controls
-at `base..base+2` and the visible variable at `base+3`; generic keeps controls
-at `base..base+2` and visible variables at `base+3..`.
+### #19 - support leveled long comments, do not error
 
-Nothing else depends on declaration timing: the per-iteration close stays at
-`base + 3`, `enter_loop(base)` still makes `break` close every loop-owned slot,
-`exit_loop` still patches jumps before `level_down` emits the final close, and
-`FOR_PREP` / `FOR_LOOP` / `TFOR_PREP` / `TFOR_CALL` / `TFOR_LOOP` keep exactly
-the same operands. Expression parsing adds no persistent locals - function
-literals replace and restore the outer locals vector in `parse_chunk`
-(`parser.rs:491`), so nested closures cannot move the saved base.
+Long comments are lexical trivia, not the deliberately omitted long-*string*
+value feature. Supporting them adds no value type, allocation facility, opcode
+or cost-model concern, and the lexer can scan them deterministically in linear
+time with no allocation. It also removes the genuinely dangerous current
+behaviour where apparently-commented code becomes executable. Long strings stay
+rejected; that boundary is unaffected.
 
-Bytecode stability follows because `add_local` emits no instructions or
-literals; it only updates `locals` and `num_locals`. Any program whose control
-expressions do not mention a loop-variable name compiles byte-identically.
+Unfinished-long-comment diagnostics are deliberately **out of scope** - that
+needs an error-policy decision (`UnexpectedEof` versus a new variant) and
+closed leveled comments can be fixed independently.
 
-Add a non-mutating `ensure_local_capacity(additional)` preflight - 4 slots for
-numeric, `3 + names.len()` for generic - so the existing "too many locals"
-error precedence is preserved without declaring anything early.
+### #40 - allow statements after `break` too, not just the semicolon
 
-### #20 - NaN ordered comparisons
+In `parse_statements_inner` (`parser.rs:566`), consume `break`, call
+`add_break()`, then continue the statement loop; the existing `Semi` arm
+already handles one or many semicolons. Following bytecode is emitted but
+unreachable, because `add_break()` already emitted an unconditional jump
+patched to the loop exit. Simpler and more consistent than special-casing one
+semicolon. `return` staying terminal is not a contradiction - it has separate
+grammar and lowering, and reference also accepts ordinary statements after
+`break`.
 
-`eval_compare` (`eval_store.rs:480`) is reached only by the four ordered
-opcodes in `frame.rs:273`, and has exactly three paths: number/number via
-`partial_cmp` (where `None` means NaN), string/string total byte ordering
-(never `None`), and the existing type error. There is no comparison-metamethod
-path - those are deliberately unsupported - and equality uses separate arms.
+### `src/compiler/lexer.rs`
 
-So: represent the result as `Option<bool>`, apply `negate` only inside `Some`,
-and map `None` to false. String ordering and type errors are untouched.
+- Import `crate::numeral::is_lua_whitespace`.
+- `consume_whitespace`: use the Lua predicate instead of `is_ascii_whitespace`
+  (guard the char-to-byte conversion with `is_ascii()`), and set `starts_line`
+  for **either** CR or LF (#42, #43).
+- `next_char`: treat CRLF and LFCR each as one logical newline, deferring the
+  first member and recording the line start after the second.
+- `lex_string`: reject unescaped CR exactly like unescaped LF; after an escaped
+  physical CR or LF, consume an immediately following opposite newline byte so
+  CRLF and LFCR stay one escape token (#18).
+- `lex_full_number` and `lex_exponent`: reject a trailing ASCII alphanumeric or
+  `_` (#41).
+- `skip_comment`: after the first `[`, count consecutive `=` and recognise a
+  long comment only when another `[` follows; scan for `]`, the same count of
+  `=`, then `]`. A failed opener probe stays an ordinary single-line comment,
+  since the consumed characters are already comment text. Level-zero `--[[`
+  keeps working (#19). Also terminate short `--` comments on CR as well as LF
+  (the seventh bug).
+- Keep `[=[...]=]` long *strings* routed to `LongStringUnsupported`.
 
-### #21 - Lua modulo
+### `src/compiler/parser.rs`
 
-Neither Rust operator alone works: `%` is fmod (sign follows the dividend) and
-needs correction when the divisor has the opposite sign, while `rem_euclid`
-always seeks a non-negative result and is wrong for negative divisors
-(Lua requires `5 % -3 == -1`).
+- `get_literal_string_contents`: use `is_lua_whitespace` for `\z`; separate the
+  named `\n` escape from physical escaped newlines; map escaped CR and LF both
+  to `b'\n'`; when the next byte forms CRLF or LFCR, advance past it so the
+  pair yields exactly one byte.
+- `parse_statements_inner`: drop the terminating `break Ok(())` from the
+  `TokenType::Break` arm.
 
-Use `%` plus Lua 5.4's exact two-branch predicate: add `b` when
-`m > 0 && b < 0`, or when `m < 0 && b > 0`; otherwise keep `m`. Prefer this
-spelling over the approximate `m != 0 && sign-mismatch` form, because the
-reference predicate avoids an unnecessary addition when `m` is NaN.
+No change needed in `src/numeral.rs`.
 
-Private helper in `frame.rs`, called from `OP_MOD`. Cost stays exactly 1.
+### Testing strategy for the byte-level cases
 
-### #39 - `math.modf`
+**Use Rust string escapes in unit tests; do not put raw CR/VT bytes in checked
+-in files.** The Rust source stays ordinary ASCII while the compiled test value
+holds the exact bytes:
 
-`open_math` (`math.rs:317`): compute `integral = x.trunc()` once, then use
-`fractional = 0.0` when `x == integral` and `x - integral` otherwise. That
-mirrors 5.4's infinity guard and deliberately yields positive zero.
+```rust
+let cr_source = "return \"a\\\r\nb\"";
+let vt_source = "return \"a\\z\x0b b\"";
+```
+
+Add `as_bytes()` assertions for `b'\r'`, `b'\n'` and `0x0b` where useful, so
+the fixture shape is itself pinned. Keep CR/VT cases out of `examples/`.
+`tests/string_bytes.rs` is **not** a precedent here - its gremlins exclusion is
+for literal Unicode test data, not line endings - and no new exclusion is
+needed.
+
+### Corpus impact
+
+No example relies on #19 or #41, but **`test_lexer07` (`lexer.rs:654`)
+explicitly asserts that `0x5rad` lexes as a hex token followed by an
+identifier**. It must be inverted, not preserved. `examples/comments.lua` uses
+only level-zero `--[[`. Occurrences like `"1_0"` in `tonumber` tests are inside
+Lua string literals and unaffected.
+
+What changes for previously-compiling source: #18 rejects bare-CR strings,
+newly accepts escaped CR/CRLF, and changes escaped-LFCR output; #19 can change
+behaviour where a "comment" body was being executed; #40 only *adds* accepted
+programs and leaves ordinary `break` bytecode unchanged; #41 rejects 5.2-style
+adjacency; #42 newly accepts VT and changes `\z` contents; #43 rejects bare-CR
+continuations dellingr previously accepted.
 
 ### Tests
 
-No existing test or example asserts any of the four wrong results, so nothing
-needs updating. `test21` (`parser/tests.rs:586`) pins numeric-for bytecode
-exactly and must keep passing - it is the regression guard for #17.
+Lexer unit module:
 
-**Do not** put the new numeric cases in `edge_cases.lua` or `feature_test.lua`:
-both carry file-wide `-- DIFF:` markers, which would silently remove them from
-differential enforcement.
+- `bare_cr_in_short_string_is_unclosed`
+- `vertical_tab_is_lua_whitespace`
+- `bare_cr_marks_lparen_as_line_start`
+- `leveled_long_comments_use_exact_matching_level` - levels 0, 1, 2 plus a
+  mismatched inner delimiter
+- `short_comment_ends_at_cr`
+- replace `test_lexer07` with `numeral_identifier_adjacency_is_malformed`
+  covering `3or`, `1e5or`, `3_name`, `0x5rad`, asserting `SyntaxError::BadNumber`
+- keep the existing valid hex-float tests
 
-New `examples/for_control_scope.lua`, untagged:
+`src/compiler/parser/tests.rs`:
 
-- numeric collision with a deliberately stale reused slot, which today yields a
-  wrong value rather than throwing;
-- generic collision with a stale table in the reused visible-variable slot;
-- `name: true/false` assertions so `run_examples` and both reference
-  interpreters cover it.
+- `literal_string_normalizes_escaped_physical_newlines` - bare CR, CRLF, LFCR
+  all decoding to `b"a\nb"`
+- `literal_string_z_skips_vertical_tab` - assert `b"ab"`, not merely that it
+  compiles
+- `break_allows_semicolons_and_following_statements` - `break;`, repeated
+  semicolons, and a dead assignment after `break`
+- extend `test33` to assert the same `LParenLineStart` error and `(2, 1)`
+  location for LF, CR and CRLF
 
-New `examples/lua54_numeric_edges.lua`, untagged:
+Differential coverage:
 
-- every ordered comparison with NaN on both sides;
-- string `<=`/`>=` guards, to prove string ordering did not change;
-- positive and negative infinite-divisor modulo, plus finite opposite-sign;
-- `math.modf(+-inf)`, including `1 / fractional == math.huge` to pin *positive*
-  zero;
-- **and a 5.4-only signature so the whole file must match 5.4** rather than
-  being satisfied by 5.2's old modulo behaviour.
-
-`src/compiler/parser/tests.rs`: keep `test21`; add an exact-bytecode fixture
-for an ordinary generic loop; add a nested-function control-expression test
-asserting a same-named reference captures the enclosing local rather than the
-future loop slot.
-
-`src/vm/frame.rs` unit tests: the modulo helper directly, for finite opposite
-signs, both infinite-divisor signs, NaN propagation, and signed zero.
+- extend `examples/comments.lua` with a leveled comment whose body would print
+  or mutate state if executed
+- extend `examples/loops.lua` with `break;` followed by a dead assignment, then
+  assert the assignment did not run
 
 ### Superseded questions
 
-1. For #17, is "record the base index, parse the control expressions, then add
-   the locals" actually sufficient for **both** the numeric and generic forms?
-   The generic form adds three hidden locals plus an arbitrary name list, and I
-   want to know whether the emitted slot arithmetic, the close-upvalue
-   boundaries, or the break-jump bookkeeping depend on the locals existing
-   before the expressions are parsed. This is the one with real regression
-   potential.
-2. For #20, is pushing false on `None` correct for **every** comparison
-   operator that routes through `eval_compare`, including any metamethod or
-   string-comparison path? Reference makes every ordered comparison involving
-   NaN false, but I want the change scoped to numeric NaN rather than
-   accidentally changing string ordering.
-3. For #21, does `f64::rem_euclid` or plain `%` in Rust already give reference
-   semantics, or is the explicit fmod-plus-adjust the only correct route? Rust's
-   `%` on floats is fmod, so the adjust step is presumably still needed for
-   sign.
-4. Do any of these four have existing tests or examples that assert the
-   *current* wrong behaviour and would need updating? #20 in particular feels
-   like something a test might have pinned.
+1. For #19, error on `--[=` or support levels? Erroring is consistent with the
+   long-string decision, but a leveled comment is a much more ordinary thing to
+   find in real source than a leveled long string, and the current behaviour -
+   silently executing the comment body if it parses - is the worst of the three
+   options. Recommend one.
+2. #18, #42 and #43 all need byte-level fixtures containing raw CR and VT.
+   `notes/bugs.md` warns that editors normalise line endings. What is the
+   robust way to write these tests in this repo - build the source as a Rust
+   byte string in a unit test rather than an `examples/` file? Note
+   `tests/string_bytes.rs` is already excluded from the gremlins scan, which
+   suggests a precedent.
+3. Do any of these change what currently-valid programs compile to? #41 and #19
+   are both *accepts-more* divergences being tightened, so they can only reject
+   things that previously compiled. Is there anything in `examples/` or the
+   test corpus that relies on the current leniency?
+4. #40's second half - statements after `break` - is valid dead code in
+   reference. Worth fixing, or is rejecting it a defensible divergence to
+   document instead? I lean towards fixing the semicolon and documenting the
+   dead-code case, but say if that is inconsistent.
 
-Read `src/compiler/parser/stmt.rs`'s numeric and generic `for` handling,
-`src/vm/eval_store.rs`'s `eval_compare`, `src/vm/frame.rs`'s comparison and
-`OP_MOD` arms, and `src/lua_std/math.rs`.
+Read `src/compiler/lexer.rs`, `src/compiler/parser.rs`'s `parse_statements` and
+`get_literal_string_contents`, and `src/numeral.rs`'s `is_lua_whitespace`.

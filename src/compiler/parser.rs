@@ -12,6 +12,7 @@ use super::lexer::TokenStream;
 use super::token::Token;
 use super::token::TokenType;
 use crate::instr::{ArgCount, Builtin, RetCount};
+use crate::numeral::is_lua_whitespace;
 
 use std::borrow::Borrow;
 
@@ -362,11 +363,23 @@ impl<'a> Parser<'a> {
                         raw_offset += 2;
                     }
                     b'z' => {
-                        while raw.get(raw_offset).is_some_and(u8::is_ascii_whitespace) {
+                        while raw
+                            .get(raw_offset)
+                            .is_some_and(|byte| is_lua_whitespace(*byte))
+                        {
                             raw_offset += 1;
                         }
                     }
-                    b'n' | b'\n' => result.push(b'\n'), // \n escape or literal escaped newline
+                    b'n' => result.push(b'\n'),
+                    newline @ (b'\r' | b'\n') => {
+                        result.push(b'\n');
+                        if raw
+                            .get(raw_offset)
+                            .is_some_and(|next| *next != newline && matches!(*next, b'\r' | b'\n'))
+                        {
+                            raw_offset += 1;
+                        }
+                    }
                     b't' => result.push(b'\t'),
                     b'r' => result.push(b'\r'),
                     b'\\' => result.push(b'\\'),
@@ -587,7 +600,6 @@ impl<'a> Parser<'a> {
                 TokenType::Break => {
                     self.input.next()?; // consume 'break' keyword
                     self.add_break()?;
-                    break Ok(());
                 }
                 _ => break Ok(()),
             }

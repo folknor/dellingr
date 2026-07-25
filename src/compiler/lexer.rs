@@ -5,6 +5,7 @@ use super::error::Error;
 use super::error::SyntaxError;
 use super::token::Token;
 use super::token::TokenType::{self, *};
+use crate::numeral::is_lua_whitespace;
 
 use std::iter::Peekable;
 use std::slice::SliceIndex;
@@ -208,17 +209,26 @@ impl<'a> Lexer<'a> {
     /// the EOF token. Iterative (no recursion) so consecutive comments are
     /// stack-safe (L17).
     fn skip_comment(&mut self) {
-        // Check for multi-line comment: --[[ ... ]]
+        // Check for a long comment: --[=*[ ... ]=*]. A failed opener probe is
+        // still ordinary comment text, so falling through is correct.
         if self.peek_char() == Some('[') {
             self.next_char(); // consume '['
-            if self.peek_char() == Some('[') {
-                self.next_char(); // consume second '['
-                // Multi-line comment: skip until ]]
+            let mut level = 0;
+            while self.try_next('=') {
+                level += 1;
+            }
+            if self.try_next('[') {
+                // Long comment: skip until a closing delimiter of the same level.
                 loop {
                     match self.next_char() {
-                        Some(']') if self.peek_char() == Some(']') => {
-                            self.next_char(); // consume second ']'
-                            return;
+                        Some(']') => {
+                            let mut closing_level = 0;
+                            while self.try_next('=') {
+                                closing_level += 1;
+                            }
+                            if closing_level == level && self.try_next(']') {
+                                return;
+                            }
                         }
                         None => return,
                         _ => {}
@@ -229,7 +239,7 @@ impl<'a> Lexer<'a> {
         }
         // Single-line comment: skip until newline (consumed) or EOF
         while let Some(c) = self.next_char() {
-            if c == '\n' {
+            if matches!(c, '\r' | '\n') {
                 return;
             }
         }
@@ -246,13 +256,12 @@ impl<'a> Lexer<'a> {
         match self.iter.next() {
             Some((pos, c)) => {
                 self.pos = pos + c.len_utf8();
-                // Track line starts. A bare '\r' (old-Mac newline, or one
-                // skipped after a string '\z') also begins a new line; '\r\n'
-                // is counted once, via its '\n' (L17).
-                match c {
-                    '\n' => self.linebreaks.push(self.pos),
-                    '\r' if self.peek_char() != Some('\n') => self.linebreaks.push(self.pos),
-                    _ => {}
+                // CRLF and LFCR are each one logical newline. Defer the first
+                // member, then record the line start after the second.
+                if matches!(c, '\r' | '\n')
+                    && !matches!(self.peek_char(), Some(next) if next != c && matches!(next, '\r' | '\n'))
+                {
+                    self.linebreaks.push(self.pos);
                 }
                 Some(c)
             }
@@ -264,10 +273,10 @@ impl<'a> Lexer<'a> {
     fn consume_whitespace(&mut self) -> bool {
         let mut ret = false;
         while let Some(c) = self.peek_char() {
-            if !c.is_ascii_whitespace() {
+            if !c.is_ascii() || !is_lua_whitespace(c as u8) {
                 break;
             }
-            if c == '\n' {
+            if matches!(c, '\r' | '\n') {
                 ret = true;
             }
             self.next_char();
@@ -356,10 +365,19 @@ impl<'a> Lexer<'a> {
                 return Ok(LiteralString);
             } else if c == '\\' {
                 // Skip the escaped character - escape processing is done in the parser
-                if self.next_char() == Some('z') {
-                    self.consume_whitespace();
+                match self.next_char() {
+                    Some('z') => {
+                        self.consume_whitespace();
+                    }
+                    Some(newline @ ('\r' | '\n')) => {
+                        if matches!(self.peek_char(), Some(next) if next != newline && matches!(next, '\r' | '\n'))
+                        {
+                            self.next_char();
+                        }
+                    }
+                    _ => {}
                 }
-            } else if c == '\n' {
+            } else if matches!(c, '\r' | '\n') {
                 return Err(self.error(SyntaxError::UnclosedString));
             }
         }
@@ -401,7 +419,9 @@ impl<'a> Lexer<'a> {
             }
 
             match self.peek_char() {
-                Some(c) if c.is_ascii_hexdigit() => Err(self.error(SyntaxError::BadNumber)),
+                Some(c) if c.is_ascii_alphanumeric() || c == '_' => {
+                    Err(self.error(SyntaxError::BadNumber))
+                }
                 _ => Ok(LiteralHexNumber),
             }
         } else {
@@ -449,8 +469,8 @@ impl<'a> Lexer<'a> {
         count
     }
 
-    /// Consumes the optional exponent part of a literal number, then checks
-    /// for any trailing letters.
+    /// Consumes the optional exponent part of a literal number, then rejects
+    /// an identifier character glued to it.
     fn lex_exponent(&mut self, _tok_start: usize) -> Result<()> {
         if self.try_next('E') || self.try_next('e') {
             // The exponent might have a sign.
@@ -463,7 +483,9 @@ impl<'a> Lexer<'a> {
             self.lex_digits();
         }
         match self.peek_char() {
-            Some(c) if c.is_ascii_hexdigit() => Err(self.error(SyntaxError::BadNumber)),
+            Some(c) if c.is_ascii_alphanumeric() || c == '_' => {
+                Err(self.error(SyntaxError::BadNumber))
+            }
             _ => Ok(()),
         }
     }
@@ -652,10 +674,78 @@ mod tests {
     }
 
     #[test]
-    fn test_lexer07() {
-        let input = "0x5rad";
-        let tokens = &[(LiteralHexNumber, 0, 3), (Identifier, 3, 3)];
-        check_line(input, tokens);
+    fn bare_cr_in_short_string_is_unclosed() {
+        let source = "\"a\rb\"";
+        assert_eq!(source.as_bytes()[2], b'\r');
+        let err = Lexer::new(source)
+            .next_token()
+            .expect_err("bare CR must terminate a short string");
+        assert!(matches!(
+            err.kind,
+            crate::error::ErrorKind::SyntaxError(SyntaxError::UnclosedString)
+        ));
+    }
+
+    #[test]
+    fn vertical_tab_is_lua_whitespace() {
+        let source = "left\x0bright";
+        assert_eq!(source.as_bytes()[4], 0x0b);
+        check_line(source, &[(Identifier, 0, 4), (Identifier, 5, 5)]);
+    }
+
+    #[test]
+    fn bare_cr_marks_lparen_as_line_start() {
+        let source = "f\r(g)";
+        assert_eq!(source.as_bytes()[1], b'\r');
+        check(
+            source,
+            &[
+                (Identifier, 0, 1),
+                (LParenLineStart, 2, 1),
+                (Identifier, 3, 1),
+                (RParen, 4, 1),
+            ],
+            &[0, 2],
+        );
+    }
+
+    #[test]
+    fn leveled_long_comments_use_exact_matching_level() {
+        let source = "--[[ zero ]]\nzero\n--[=[ one ]=]\none\n--[==[ two ]==]\ntwo\n--[==[ ]=] still comment ]==]\nthree";
+        check(
+            source,
+            &[
+                (Identifier, 13, 4),
+                (Identifier, 32, 3),
+                (Identifier, 52, 3),
+                (Identifier, 86, 5),
+            ],
+            &[0, 13, 18, 32, 36, 52, 56, 86],
+        );
+    }
+
+    #[test]
+    fn short_comment_ends_at_cr() {
+        let source = "-- comment\rprint";
+        assert_eq!(source.as_bytes()[10], b'\r');
+        check(source, &[(Identifier, 11, 5)], &[0, 11]);
+    }
+
+    #[test]
+    fn numeral_identifier_adjacency_is_malformed() {
+        // Lua 5.2 accepts `3or`; dellingr follows Lua 5.4's stricter rule.
+        for input in ["3or", "1e5or", "3_name", "0x5rad"] {
+            let err = Lexer::new(input)
+                .next_token()
+                .expect_err("glued numeral and identifier must fail");
+            assert!(
+                matches!(
+                    err.kind,
+                    crate::error::ErrorKind::SyntaxError(SyntaxError::BadNumber)
+                ),
+                "{input:?}"
+            );
+        }
     }
 
     #[test]
