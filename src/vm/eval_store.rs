@@ -362,6 +362,7 @@ impl State {
         true
     }
 
+    #[hotpath::measure]
     pub(super) fn instr_set_global(&mut self, frame: &Frame, string_num: u16) -> Result<()> {
         let s = self.get_string_constant(frame, string_num);
         let val = self.pop_val();
@@ -522,6 +523,7 @@ impl State {
         Ok(())
     }
 
+    #[hotpath::measure]
     pub(super) fn get_string_constant(&self, frame: &Frame, i: u16) -> Val {
         // self.string_literals[i as usize].clone()
         let index = frame.string_literal_start() + i as usize;

@@ -11,24 +11,32 @@ Built with LLMs. See [LLM.md](LLM.md).
 
 ## Performance
 
-It's slower than reference Lua, but not dramatically so: roughly 1.6-3x behind lua5.2 on most workloads. LuaJIT is obviously in its own league. dellingr is fast enough for continuous bounded execution of a few kilobytes of Lua code to let a game run at several thousand FPS.
+It's slower than reference Lua, but not dramatically so: roughly 1.6-3x behind lua5.2 on representative workloads. LuaJIT is obviously in its own league. dellingr is fast enough for continuous bounded execution of a few kilobytes of Lua code to let a game run at several thousand FPS.
 
 Run `./bench.sh` to reproduce on your own host. Sample run on AMD Ryzen 9 5900X / Linux 7.0:
 
 | bench                    | dellingr |  lua-rs | vs lua5.5 | vs lua5.4 | vs lua5.2 | vs luajit |
 |--------------------------|---------:|--------:|----------:|----------:|----------:|----------:|
-| `benchmark`              |    172ms |   104ms |     4.11x |     4.12x |     2.79x |    23.86x |
-| `numerics/arithmetic`    |    115ms |    60ms |     4.46x |     4.32x |     3.20x |    26.24x |
-| `iter/pairs`             |     85ms |   169ms |     2.02x |     1.92x |     1.89x |    15.59x |
-| `tables/fill`            |    106ms |    64ms |     4.14x |     3.51x |     2.63x |     7.27x |
-| `strings/mixed`          |     37ms |    65ms |     2.89x |     3.18x |     2.09x |     3.18x |
-| `strings/patterns`       |     65ms |    22ms |     3.70x |     3.67x |     3.57x |     5.60x |
-| `strings/literal_find`   |     20ms |       - |     3.13x |     3.22x |     2.29x |     5.82x |
-| `fields/same_obj_read`   |    110ms |    61ms |     3.86x |     4.63x |     2.44x |    29.36x |
-| `alloc/closure`          |     92ms |   126ms |     2.45x |     2.43x |     2.03x |     3.09x |
-| `alloc/record_tables`    |    276ms |       - |     3.53x |     3.27x |     2.16x |    93.46x |
+| `benchmark`              |    173ms |   104ms |     4.11x |     4.04x |     2.81x |    23.72x |
+| `numerics/arithmetic`    |    115ms |    60ms |     4.43x |     4.34x |     3.17x |    26.09x |
+| `numerics/constants` *   |     67ms |       - |     6.74x |     6.63x |     5.80x |    23.17x |
+| `iter/pairs`             |     86ms |   169ms |     2.02x |     1.91x |     1.86x |    15.58x |
+| `tables/fill`            |    106ms |    64ms |     4.12x |     3.53x |     2.60x |     7.20x |
+| `strings/mixed`          |     37ms |    65ms |     2.93x |     3.19x |     2.10x |     3.15x |
+| `strings/patterns`       |     66ms |    22ms |     3.74x |     3.68x |     3.56x |     5.58x |
+| `strings/literal_find`   |     20ms |       - |     3.12x |     3.20x |     2.29x |     5.85x |
+| `fields/same_obj_read`   |    112ms |    61ms |     3.86x |     4.63x |     2.40x |    29.25x |
+| `fields/miss` *          |    149ms |       - |     6.62x |     7.46x |     4.46x |    98.11x |
+| `globals/write` *        |    112ms |       - |     5.55x |     6.83x |     3.73x |    88.28x |
+| `calls/many_literals` *  |    574ms |       - |    42.87x |    42.74x |    26.37x |   561.25x |
+| `alloc/closure`          |     95ms |   126ms |     2.50x |     2.50x |     2.07x |     3.18x |
+| `alloc/record_tables`    |    278ms |       - |     3.53x |     3.23x |     2.15x |    92.56x |
+| `alloc/gc_churn` *       |     25ms |       - |     1.61x |     1.55x |     1.34x |     2.16x |
+| `parse/large_source` *   |     31ms |       - |     8.04x |     8.26x |     7.29x |    11.19x |
 
-<sub>The `lua-rs` column was captured 2026-06-02 against [ianm199/lua-rs](https://github.com/ianm199/lua-rs) at commit [`98bd6bd`](https://github.com/ianm199/lua-rs/commit/98bd6bd); the two rows added since carry no `lua-rs` figure. Every other column was captured 2026-07-25.</sub>
+<sub>Rows marked `*` are diagnostic probes, not representative workloads. Each one deliberately isolates a single known-unoptimized path so that optimization work has something to measure against, so their ratios are the worst cases dellingr can be made to exhibit rather than what typical scripts see. `calls/many_literals` in particular is a designed worst case: it calls a function carrying 32 string constants that returns from its first branch, so nearly all of its runtime is per-call literal re-interning. `parse/large_source` measures parse and codegen on a 5000-line chunk rather than execution.</sub>
+
+<sub>The `lua-rs` column was captured 2026-06-02 against [ianm199/lua-rs](https://github.com/ianm199/lua-rs) at commit [`98bd6bd`](https://github.com/ianm199/lua-rs/commit/98bd6bd); rows added since carry no `lua-rs` figure. Every other column was captured 2026-07-25.</sub>
 
 Note that recorded results always track the latest git head and may not match the released version.
 

@@ -459,6 +459,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Updates current line based on token position.
+    #[hotpath::measure]
     fn update_line(&mut self, pos: usize) {
         let (line, _) = self.input.line_and_column(pos);
         self.current_line = line as u32;

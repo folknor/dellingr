@@ -378,6 +378,7 @@ impl State {
     }
 
     #[inline(always)]
+    #[hotpath::measure]
     pub(super) fn push_table_library_field(
         &mut self,
         key: Val,

@@ -508,6 +508,7 @@ impl<'a> Lexer<'a> {
 
     /// Returns the current position of the `Lexer`.
     #[must_use]
+    #[hotpath::measure]
     fn line_and_col(&self, pos: usize) -> (usize, usize) {
         let iter = self.linebreaks.windows(2).enumerate();
         for (line_num, linebreak_pair) in iter {

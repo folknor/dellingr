@@ -69,6 +69,7 @@ impl UpvaluePool {
     }
 
     /// Allocate a new upvalue and return its reference.
+    #[hotpath::measure]
     pub(super) fn alloc(&mut self, upvalue: Upvalue) -> UpvalueRef {
         let idx = self.slots.len() as u32;
         self.slots.push(upvalue);
@@ -229,6 +230,7 @@ impl GcHeap {
     }
 
     /// Get the object as a Lua function (closure), if it is one.
+    #[hotpath::measure]
     pub(super) fn as_lua_function(&self, ptr: ObjectPtr) -> Option<Closure> {
         match &self.get(ptr).raw {
             RawObject::LuaFn(closure) => Some((**closure).clone()),

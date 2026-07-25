@@ -15,6 +15,41 @@ Cross-references like "#N" without a file refer to bugs.md finding numbers.
 
 ---
 
+## Measured baselines (2026-07-25)
+
+Six diagnostic probes were added to `examples/` so that the candidates below
+have something to measure against; before this the bench suite covered
+steady-state execution well and was blind to parse time, miss paths, global
+writes, literal interning, constant folding and GC marking. Full numbers are in
+the README table; what they say about the candidates here:
+
+- **#8 (per-call literal interning) is the standout.** `calls/many_literals`
+  runs at 574ms / 42.9x lua5.5 - an order of magnitude worse than any other
+  bench. It is a designed worst case (32 constants, returns from the first
+  branch), so it is not a claim about typical code, but it does establish that
+  the cost is real and scales exactly as the item predicts.
+- **The parse-time cluster (#6, #7, #22, #23) is worth doing.**
+  `parse/large_source` is 8.0x lua5.5 / 7.3x lua5.2 on a 5000-line chunk, the
+  worst ratio outside the literal probe. Note this is a single measurement, not
+  a demonstrated quadratic; confirming the curve needs a second file size.
+- **#10 (table-lib fallback on the miss path) is confirmed.** `fields/miss` is
+  6.6x lua5.5 against `fields/same_obj_read` at 3.9x, so a missing field costs
+  roughly 1.7x what a hit does in relative terms.
+- **#9 (SET_GLOBAL IC) is confirmed.** `globals/write` at 5.6x lua5.5.
+- **#17 (constant folding) is confirmed.** `numerics/constants` at 6.7x lua5.5
+  against `numerics/arithmetic` at 4.4x; the pair isolates folding because
+  arithmetic.lua deliberately has no foldable expression.
+- **#5's GC half and #21 look unurgent.** `alloc/gc_churn` is 1.6x lua5.5, the
+  best ratio in the suite - marking is already competitive, so the case for the
+  iterative mark walk rests on the robustness argument (removing the unbounded
+  recursion) rather than on throughput.
+
+Still unmeasured: the snapshot path (#26, and the save-walker half of #5).
+Snapshots are driven from Rust, not from Lua, so benching them needs harness
+work rather than a new `.lua` file.
+
+---
+
 ## Full coherent rewrites
 
 ### 1. Register-based codegen (A-O1; biggest throughput lever)
@@ -23,7 +58,7 @@ The parser emits a pure stack machine: `x = a + b` is GET_LOCAL, GET_LOCAL,
 ADD, SET_LOCAL - four dispatches plus stack traffic; a register VM does it
 in one ADD(dst, a, b). Reference Lua's 5.0 move from stack to register VM is
 the single largest reason for the persistent 1.6-3x gap on arithmetic/field
-benches (`numerics/arithmetic` 2.8x, `fields/same_obj_read` 2.5x vs lua5.2).
+benches (`numerics/arithmetic` 3.2x, `fields/same_obj_read` 2.4x vs lua5.2).
 The 32-bit ABC encoding in `instr.rs` already has the operand room; locals
 already live in fixed frame slots, which are registers in all but name. The
 expression parser would grow a lua-style expdesc with delayed emission (the
@@ -182,7 +217,7 @@ area (or a per-frame side slot); on each step, if ptr+version match, step
 `get_index(index + 1)` directly; on mismatch, fall back to the key-based
 `next`. Deterministic (same order as today), invisible to scripts, and it
 composes with the #6 fix (a tombstone-aware `get_index` walk skips dead
-entries without hashing). `iter/pairs` is a headline bench (88ms, 2.1x
+entries without hashing). `iter/pairs` is a headline bench (86ms, 2.0x
 lua5.5) - this removes the dominant per-step cost.
 
 ### 14. Stop cloning `Closure` on every Lua call (C-O3 + B-O5, two independent proposals)
@@ -205,11 +240,17 @@ Subsumed by #2 if that lands.
 
 ### 15. gmatch: drop the Lua-side wrapper and table-backed iterator state (E-O2)
 
-Current per-iteration cost (string.rs:11-26, 431-471, 688-732): one Lua call
-into the compiled wrapper chunk + one RustFn call, three `get_table` lookups
-("s", "p", "pos") + one `set_table_raw`, two full `to_vec` copies of subject
-and pattern, and a full pattern re-validation (`from_bytes_try`) - every
-iteration. A generic-for iterator already receives `(state, control)`, so a
+Partially shipped as of 2026-07-25 - narrow this item before working it. The
+per-iteration `to_vec` copies of subject and pattern and the full pattern
+re-validation (`from_bytes_try`) are gone; `string.rs` now has
+`memoize_gmatch_pattern` and `gmatch_subject_matcher_and_cost_meter`. That was
+the bulk of the win, and `strings/patterns` moved 160ms to 66ms on the back of
+it.
+
+What remains (string.rs:19, 519-558, 739-751): one Lua call into the compiled
+wrapper chunk (`gmatch_wrapper()`, still a compiled Bytecode) + one RustFn call,
+plus three `get_table` lookups ("s", "p", "pos") and one `set_table_raw` against
+the table-backed iterator state, every iteration. A generic-for iterator already receives `(state, control)`, so a
 RustFunc can be the iterator directly; hold the iterator state (subject Val,
 compiled pattern, pos) in a Rust-side object (heap object variant or
 registry anchor) instead of a Lua table of strings. Order-of-magnitude

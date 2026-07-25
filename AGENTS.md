@@ -108,20 +108,42 @@ value stack, not total host memory, and enforcing it charges no cost.
 
 ```
 examples/hotpath.rs        # harness (parse / cold call / warm calls)
-examples/numerics/         # arithmetic
-examples/calls/            # global, local, method, vararg, fixedarg, ...
-examples/fields/           # same_obj_read, same_obj_write, polymorphic, ...
+examples/numerics/         # arithmetic, constants
+examples/calls/            # global, local, method, vararg, fixedarg, many_literals, ...
+examples/fields/           # same_obj_read, same_obj_write, polymorphic, miss, ...
+examples/globals/          # write
 examples/iter/             # pairs, ipairs
 examples/tables/           # fill, mixed, numeric_index
-examples/alloc/            # closure, short_tables
+examples/alloc/            # closure, short_tables, gc_churn
 examples/strings/          # mixed
+examples/parse/            # large_source (+ generate.py, see below)
 ```
+
+Benches come in two flavours, and the distinction matters when reading the
+README table. Most are *workload* benches, meant to look like plausible script
+code. A few are *diagnostic probes* written to isolate one known-unoptimized
+path so that a candidate optimization has something to measure against;
+`numerics/constants`, `fields/miss`, `globals/write`, `calls/many_literals`,
+`alloc/gc_churn` and `parse/large_source` are all probes. Their ratios against
+reference Lua are worst cases by construction, not representative numbers, and
+each carries a header comment naming the candidate it exists to measure and the
+sibling bench to compare it against.
+
+`examples/parse/large_source.lua` is generated - regenerate with `python3
+examples/parse/generate.py`, do not edit it by hand. It exists because the
+parse-time candidates have costs that scale with source size (two of them
+quadratically) and every other bench is 15-80 lines, far too small for that to
+surface. Note the parser caps a chunk at 255 nested functions, which bounds how
+many top-level definitions the generator can emit; size comes from making each
+function longer instead.
 
 Each bench script is also a standalone-runnable test: top-level setup + a `_bench()` function + an outer loop that calls `_bench()` enough times for hyperfine resolution and prints `<name>: true`. This lets one file serve three masters: the hotpath harness (calls `_bench` directly for parse/cold/warm phasing), `tests/run_examples.rs` (executes the standalone runner, asserts no `: false`), and `bench.sh` (hyperfine timings vs reference Lua 5.2/5.4/5.5 + LuaJIT).
 
 The harness measures four phases on one State and emits KV pairs to stderr: `parse_us`, `cold_call_us`, `warm_avg_us` (averaged over 20 iterations), plus the dellingr-specific `cost_used` per phase and the derived `cost_per_us`. Cost is deterministic across hosts; wall time is the noisy metric. `setup_*` and `final_*` heap/object counts bracket GC pressure.
 
-Two internal hot paths carry `#[hotpath::measure]`: `compiler::parse_str_named` (one full parse) and `vm::State::gc_collect` (one mark+sweep). Both are non-recursive entry points. The annotation is a no-op when the `hotpath` cargo feature is off. **Don't add `#[hotpath::measure]` to `eval_closure` or any function that recurses through the bytecode dispatch loop**: each level adds enough stack-frame bloat to abort the `call_depth_exceeded_error` test (which intentionally recurses to `MAX_CALL_DEPTH = 1000`).
+Roughly ninety internal functions carry `#[hotpath::measure]`, concentrated in `vm/table.rs`, `vm/table_ops.rs`, `vm/eval*.rs`, `vm/object.rs` and the compiler front end. The annotation is a no-op when the `hotpath` cargo feature is off, so it costs nothing in normal builds; it is cheap to add one when a new candidate needs a measurement point, and worth doing at the same time as the bench that will exercise it. **Don't add `#[hotpath::measure]` to `eval_closure` or any function that recurses through the bytecode dispatch loop**: each level adds enough stack-frame bloat to abort the `call_depth_exceeded_error` test (which intentionally recurses to `MAX_CALL_DEPTH = 1000`). A function *called from* the dispatch loop is fine as long as its own frame is popped before the loop recurses - the constraint is about frames that stay live across the recursive descent, not about being on the call path at all. `eval.rs` carries an inline comment at the one site where this is easy to get wrong.
+
+When adding annotations, verify the `hotpath` configuration still builds (`cargo check --features hotpath`); the plain gate does not compile that feature, so a bad annotation is otherwise invisible.
 
 To add a new target: write `examples/{category}/{name}.lua` defining `_bench()` and a standalone runner footer. No Rust changes, no manifest updates.
 

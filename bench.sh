@@ -27,14 +27,20 @@ else
     scripts=(
         examples/benchmark.lua
         examples/numerics/arithmetic.lua
+        examples/numerics/constants.lua
         examples/iter/pairs.lua
         examples/tables/fill.lua
         examples/strings/mixed.lua
         examples/strings/patterns.lua
         examples/strings/literal_find.lua
         examples/fields/same_obj_read.lua
+        examples/fields/miss.lua
+        examples/globals/write.lua
+        examples/calls/many_literals.lua
         examples/alloc/closure.lua
         examples/alloc/record_tables.lua
+        examples/alloc/gc_churn.lua
+        examples/parse/large_source.lua
     )
 fi
 
