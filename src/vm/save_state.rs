@@ -1930,6 +1930,146 @@ mod tests {
         drop(reason);
     }
 
+    fn stack_rejection(code: Vec<Instr>, num_locals: u8, instruction: u32) {
+        let mut bytecode = valid_saved_bytecode();
+        bytecode.code = code.into_iter().map(Instr::raw).collect();
+        bytecode.line_info = vec![1; bytecode.code.len()];
+        bytecode.num_locals = num_locals;
+        assert_invalid(
+            rejected_bytecode(vec![bytecode], Vec::new()),
+            0,
+            Some(instruction),
+        );
+    }
+
+    #[test]
+    fn verifier_rejects_forged_operand_stack_discipline() {
+        stack_rejection(
+            vec![Instr::op(Instr::OP_POP), Instr::ret(RetCount::Fixed(0))],
+            0,
+            0,
+        );
+        stack_rejection(
+            vec![Instr::op(Instr::OP_SWAP), Instr::ret(RetCount::Fixed(0))],
+            0,
+            0,
+        );
+        stack_rejection(
+            vec![Instr::op(Instr::OP_DUP), Instr::ret(RetCount::Fixed(0))],
+            0,
+            0,
+        );
+        stack_rejection(
+            vec![
+                Instr::push_nil(),
+                Instr::concat(2),
+                Instr::ret(RetCount::Fixed(0)),
+            ],
+            0,
+            1,
+        );
+        stack_rejection(vec![Instr::ret(RetCount::Fixed(1))], 0, 0);
+        stack_rejection(
+            vec![
+                Instr::push_bool(true),
+                Instr::branch_false(1),
+                Instr::push_nil(),
+                Instr::ret(RetCount::Fixed(0)),
+            ],
+            0,
+            3,
+        );
+        stack_rejection(
+            vec![
+                Instr::jump(1),
+                Instr::ret(RetCount::Fixed(0)),
+                Instr::push_nil(),
+                Instr::jump(-2),
+                Instr::ret(RetCount::Fixed(0)),
+            ],
+            0,
+            2,
+        );
+        stack_rejection(
+            vec![
+                Instr::call(ArgCount::Dynamic, RetCount::Fixed(1)),
+                Instr::ret(RetCount::Fixed(0)),
+            ],
+            0,
+            0,
+        );
+        stack_rejection(
+            vec![Instr::set_list(0), Instr::ret(RetCount::Fixed(0))],
+            0,
+            0,
+        );
+        stack_rejection(
+            vec![
+                Instr::push_nil(),
+                Instr::op_a(Instr::OP_MARK_CALL_BASE, 1),
+                Instr::ret(RetCount::Fixed(0)),
+            ],
+            0,
+            2,
+        );
+        stack_rejection(
+            vec![
+                Instr::op_a(Instr::OP_MARK_CALL_BASE, 1),
+                Instr::ret(RetCount::Fixed(0)),
+            ],
+            0,
+            0,
+        );
+        stack_rejection(
+            vec![
+                Instr::push_nil(),
+                Instr::call(ArgCount::Fixed(0), RetCount::All),
+                Instr::branch_false(0),
+                Instr::ret(RetCount::Fixed(0)),
+            ],
+            0,
+            2,
+        );
+        stack_rejection(
+            vec![
+                Instr::push_nil(),
+                Instr::push_nil(),
+                Instr::set_table(0),
+                Instr::ret(RetCount::Fixed(0)),
+            ],
+            0,
+            2,
+        );
+        stack_rejection(
+            vec![
+                Instr::push_nil(),
+                Instr::push_nil(),
+                Instr::init_index(0),
+                Instr::ret(RetCount::Fixed(0)),
+            ],
+            0,
+            2,
+        );
+        stack_rejection(
+            vec![Instr::set_local(0), Instr::ret(RetCount::Fixed(0))],
+            1,
+            0,
+        );
+
+        let mut bad_set_field_at = valid_saved_bytecode();
+        bad_set_field_at.string_literals.push(b"field".to_vec());
+        bad_set_field_at.code = vec![
+            Instr::set_field_at(0, 0).raw(),
+            Instr::ret(RetCount::Fixed(0)).raw(),
+        ];
+        bad_set_field_at.line_info = vec![1; bad_set_field_at.code.len()];
+        assert_invalid(
+            rejected_bytecode(vec![bad_set_field_at], Vec::new()),
+            0,
+            Some(0),
+        );
+    }
+
     #[test]
     fn verifier_rejects_instruction_and_cache_corruption() {
         let mut empty = valid_saved_bytecode();

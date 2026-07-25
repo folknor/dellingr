@@ -6,6 +6,19 @@ All notable changes to dellingr are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Saved bytecode is now verified for operand-stack discipline before it is
+  materialized. Previously a forged save whose chunk began with `OP_POP` or
+  `OP_SWAP` passed every structural check and panicked the host process on
+  load, since `pop_val` and `OP_SWAP` index the stack unguarded. Verification
+  abstractly interprets each chunk - operand height relative to the frame base,
+  the vararg-call and table-constructor marker stacks, and exact state
+  agreement at every control-flow join - and rejects violations as
+  `LoadError::InvalidBytecode`. This completes the documented promise that
+  malformed save structure cannot trigger an indexing or stack-underflow panic
+  during load.
+
 ## [0.4.0] - 2026-07-25
 
 ### Changed (breaking)

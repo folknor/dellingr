@@ -14,7 +14,6 @@ use super::Result;
 use super::error;
 use super::vm::{ObjectPtr, Val};
 
-#[cfg(feature = "snapshot")]
 pub(crate) use parser::MAX_SYNTAX_DEPTH;
 
 /// Describes where an upvalue comes from when creating a closure.
@@ -365,6 +364,81 @@ fn finalize(bc: &mut Bytecode) -> Result<()> {
 #[cfg(test)]
 mod runtime_cache_tests {
     use super::*;
+
+    /// The dynamic shapes the verifier's `Known`/`Dyn` transitions and marker
+    /// stacks exist for. If the corpus stops containing one of these, the
+    /// acceptance proof silently stops covering the interesting half of the
+    /// analysis, so the corpus test pins that each was actually seen.
+    #[derive(Default)]
+    struct DynamicShapes {
+        mark_call_base: bool,
+        dynamic_call: bool,
+        new_table_tracked: bool,
+        dynamic_set_list: bool,
+        return_all: bool,
+        vararg_all: bool,
+    }
+
+    fn assert_verified_tree(bytecode: &Bytecode, seen: &mut DynamicShapes) {
+        verify::validate_bytecode(bytecode)
+            .expect("compiler output must pass bytecode verification");
+        for instruction in &bytecode.code {
+            match instruction.opcode() {
+                Instr::OP_MARK_CALL_BASE => seen.mark_call_base = true,
+                Instr::OP_NEW_TABLE_TRACKED => seen.new_table_tracked = true,
+                Instr::OP_CALL if instruction.a() == u8::MAX => seen.dynamic_call = true,
+                Instr::OP_SET_LIST if instruction.a() == 0 => seen.dynamic_set_list = true,
+                Instr::OP_RETURN if instruction.a() == u8::MAX => seen.return_all = true,
+                Instr::OP_VARARG if instruction.a() == u8::MAX => seen.vararg_all = true,
+                _ => {}
+            }
+        }
+        for nested in &bytecode.nested {
+            assert_verified_tree(nested, seen);
+        }
+    }
+
+    fn collect_lua_sources(directory: &std::path::Path, paths: &mut Vec<std::path::PathBuf>) {
+        let entries = std::fs::read_dir(directory).expect("examples directory must be readable");
+        for entry in entries {
+            let path = entry
+                .expect("example directory entry must be readable")
+                .path();
+            if path.is_dir() {
+                collect_lua_sources(&path, paths);
+            } else if path.extension().is_some_and(|extension| extension == "lua") {
+                paths.push(path);
+            }
+        }
+    }
+
+    #[test]
+    fn compiler_examples_pass_stack_discipline_verification() {
+        let mut paths = Vec::new();
+        collect_lua_sources(std::path::Path::new("examples"), &mut paths);
+        paths.sort();
+        // Without this the corpus proof passes vacuously if the walk finds
+        // nothing, which is exactly the failure mode that would let a verifier
+        // that rejects real compiler output reach a release.
+        assert!(
+            paths.len() > 20,
+            "the example corpus is the proof that the verifier accepts real \
+             compiler output; found only {} sources",
+            paths.len()
+        );
+        let mut seen = DynamicShapes::default();
+        for path in paths {
+            let source = std::fs::read_to_string(&path).expect("example source must be readable");
+            let bytecode = parse_str(&source).expect("example source must compile");
+            assert_verified_tree(&bytecode, &mut seen);
+        }
+        assert!(seen.mark_call_base, "corpus lost OP_MARK_CALL_BASE");
+        assert!(seen.dynamic_call, "corpus lost dynamic OP_CALL");
+        assert!(seen.new_table_tracked, "corpus lost OP_NEW_TABLE_TRACKED");
+        assert!(seen.dynamic_set_list, "corpus lost dynamic OP_SET_LIST");
+        assert!(seen.return_all, "corpus lost OP_RETURN with RetCount::All");
+        assert!(seen.vararg_all, "corpus lost OP_VARARG with all varargs");
+    }
 
     #[test]
     fn global_lookup_cache_tracks_distinct_get_global_names_only() {

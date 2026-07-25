@@ -16,6 +16,13 @@ Numbering is stable: fixed items are deleted outright and their numbers are
 never reused, so gaps in the sequence are expected and cross-references stay
 valid. Fix history lives in git.
 
+**Every finding from this hunt is now fixed**, including the deferred
+saved-bytecode stack-discipline verifier that was the last one standing. What
+remains below is the coverage record: the areas each corner examined without
+finding anything, the claims measurement later disproved, and the orchestrator
+notes. Keep it - it is the map of what has already been looked at, and it is
+what stops the next hunt re-deriving the same non-findings.
+
 ---
 
 ## High severity
@@ -122,33 +129,6 @@ as static reading can tell. Rust's round-half-even float formatting matches
 glibc's.
 
 ---
-
-## Deferred hardening
-
-### 59. Saved bytecode stack discipline is not verified (phase 2)
-
-- **Locations:** `src/vm/eval.rs:235,407,434`, `eval_index.rs:436`,
-  `eval_store.rs:454`, and the bytecode dispatch paths for `DUP`, `SWAP`,
-  `MARK_CALL_BASE`, table initialization, field/table stores, numeric and
-  generic loop helpers, fixed `SET_LIST`, and `GET_TABLE`.
-- **Cause:** phase 1 validates bytecode structure, operands, cache layout, and
-  nesting, but deliberately does not perform abstract operand-stack dataflow
-  or marker-stack/CFG-join verification. Forged code can therefore still
-  underflow `pop_val`, `DUP`'s `.last().expect`, `SWAP`'s `len - 1`/`len - 2`,
-  `CONCAT A`'s `len - A`, fixed `RETURN n` while locating return values,
-  `RETURN RetCount::All`'s `stack.len() - frame_base`, direct local accesses,
-  loop-local ranges, a later `get_top()` call below `stack_bottom`, or open
-  upvalues after malformed code has popped frame slots.
-- **Fix sketch:** add the deferred stack-discipline verifier with abstract
-  stack heights, vararg-call and table-constructor marker stacks, dynamic
-  result counts, and agreement at CFG joins. It needs compiler-corpus proof
-  before it may reject saves.
-- **Status:** this is now the *only* thing standing between phase 1 and the
-  stated promise ("malformed save structure is rejected with a `LoadError`; it
-  cannot trigger an indexing, stack-underflow, or recursive-traversal panic
-  during load"). The recursive-GC half of that caveat is gone: marking and save
-  encoding are both iterative, so a deep decoded table graph no longer
-  overflows during the `gc_collect()` at the end of materialization.
 
 ## Orchestrator notes (carried from the corner reports)
 
