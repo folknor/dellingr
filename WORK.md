@@ -66,7 +66,162 @@ saves a graph built up just under the collection threshold, reaches this one.
   marking gets quadratic on shared subgraphs.
 - `optimizations.md` #5 already proposes the iterative worklist for both.
 
-### Questions for the reviewer
+---
+
+## Agreed implementation plan
+
+Two separate implementations. They share a defect pattern, not useful code: GC
+needs an infallible colour-transition tracer over `ObjectPtr`, while saving
+needs a fallible deterministic continuation machine over four arenas plus
+diagnostic paths. A generic walker would obscure both. They land together
+because deep-save loading re-enters #27 through `gc_collect()`
+(`save_state.rs:652`), but as two commits.
+
+### Part 1: iterative GC tracer
+
+Add a non-semantic `mark_worklist: Vec<ObjectPtr>` to `GcHeap`
+(`src/vm/object.rs:189`). The codec builds a separate `SavePayload` and never
+serializes `GcHeap`, so it is excluded automatically.
+
+At collection start `std::mem::take` it into a local, clear defensively, mark
+and drain, then restore the empty vector. No `RefCell`, no per-collection
+allocation, capacity preserved across collections. There are no normal GC error
+returns; on an invariant panic the heap keeps the empty replacement rather than
+stale pointers.
+
+Per-edge rule, O(1), no set or map:
+
+- look the target up in the `SlotMap`;
+- if `Unmarked`, set `Reachable` **immediately** and push;
+- if already `Reachable`, do nothing.
+
+Setting the colour *before* enqueueing is what makes cycles and shared
+subgraphs enqueue each object at most once. Strings keep their existing direct
+mark and never enter the object worklist.
+
+`Markable` now enqueues object pointers and marks strings rather than tracing
+children. The drain loop pops an object and enqueues: closed closure upvalue
+values; table keys, values, and metatable. `mark_gc_roots` stays the single
+authoritative root list. Touches `object.rs`, `table.rs:739`, `vm.rs:83`,
+`anchor.rs:127`. Keep `#[hotpath::measure]` only on non-recursive entry points.
+
+### Part 2: iterative save walker
+
+**The order requirement is the whole risk here.** Current traversal, which the
+byte layout encodes because ids are assigned at first encounter:
+
+```text
+globals in state.globals insertion order
+  table id assigned before any child
+    entry 0 key subtree     (fully traversed)
+    entry 0 value subtree   (fully traversed)
+    entry 1 key subtree
+    entry 1 value subtree
+    ...
+    metatable subtree       (only after every entry)
+  closure: bytecode first, then upvalues in vector order
+```
+
+Replace recursive `encode_object` and the object-reaching `encode_upvalue`
+calls with a **LIFO task machine**, not a breadth-first discover-all-children
+pass:
+
+```rust
+enum EncodeTask {
+    Value { val, path, destination },
+    Object { ptr, id, path },
+    Upvalue { upvalue, path, destination },
+}
+```
+
+Destinations are small index-based slots: root result, table key/value slot,
+table metatable, closure upvalue slot, saved-upvalue value. Keep pending
+object/upvalue slots as `Option`-based internals so successful completion
+proves every field was filled, converting to `SavedObject`/`SavedVal` only at
+the end. Checked indexed access, no production `unwrap`.
+
+When expanding a table, push in this order:
+
+1. metatable first, so it stays at the bottom;
+2. entries in **reverse** index order;
+3. within each entry, value first then key.
+
+The next pop is then entry 0's key, and any object it discovers is pushed above
+every sibling so its whole subtree completes before entry 0's value. Closure
+upvalue tasks likewise pushed in reverse. That reproduces the recursive
+preorder exactly.
+
+Keep the existing `BTreeMap` id maps and assign ids at exactly the same
+first-encounter points. **Leave `encode_bytecode` recursive and unchanged** -
+it walks a different, syntax-bounded graph, and changing it at the same time
+would enlarge the byte-stability risk for no benefit.
+
+Do **not** carry full path strings in tasks: `format!("{path}...")` becomes
+O(depth^2) memory once native recursion is gone. Use an append-only breadcrumb
+arena:
+
+```text
+Breadcrumb { parent: Option<PathId>, segment: PathSegment }
+PathSegment = Global(name) | TableKey(i) | TableValue(i) | Metatable | Upvalue(i)
+```
+
+Tasks carry only a `PathId`. Reconstruct the exact current text iteratively
+only when producing `UnregisteredFunction`, preserving `.key[n]`, `[n]`,
+`.metatable` and `.upvalue[n]` and the existing first-error order.
+
+### Byte-stability gate
+
+`tests/save_golden.rs` and `tests/fixtures/save_golden.bin` were captured from
+the recursive implementation and committed before this work. If
+`save_traversal_order_matches_golden_fixture` fails, the walker reordered the
+graph - **fix the walker, do not regenerate the fixture.** Regeneration is an
+`#[ignore]`d test precisely so a reordering cannot quietly rewrite its own
+expectation.
+
+### Benchmarks
+
+Baselines captured on this machine immediately before the change:
+
+| target | wall | warm avg |
+|---|---:|---:|
+| `alloc/closure` | 87.9 ms +- 1.5 | 281 us |
+| `iter/pairs` | 84.3 ms +- 1.0 | 538 us |
+
+`alloc/closure` is the meaningful gate: it collects ~10,000 times, which is
+also why a fresh worklist allocation per collection would be a poor choice.
+`iter/pairs` collects 7 times and should stay below noise.
+
+### Tests
+
+- `src/vm/object.rs`: a 100,000-object table chain marked and collected
+  iteratively, verifying every reachable object survives.
+- `src/vm/object.rs`: a cyclic/shared diamond covering object keys, values,
+  metatables and closed closure upvalues - live objects survive, an unreachable
+  cycle is swept.
+- `src/vm/object.rs`: repeated collections leave the reused worklist empty
+  between cycles.
+- `src/vm/tests.rs`: an ordinary Lua chain with auto-GC enabled, deep enough to
+  abort the old implementation, now completes.
+- `tests/save_state.rs`: a 50,000-deep global chain with auto-GC disabled -
+  save, load, and traverse every level iteratively.
+- Exact diagnostic-path tests for an unregistered Rust function reached through
+  a table key, a table value, a nested metatable table, and a closure upvalue.
+
+### Recursion audit result
+
+There is no third recursive traversal of the Lua object graph.
+`Val::mark_reachable`, `Table::mark_values`, the slice/`IndexMap` `Markable`
+impls, `Registry`, `TransientRoots` and `SuspendedEnvironment` are components
+or root enumerators of the same GC walk; `encode_upvalue` is an edge adapter
+inside the same save walk. Load materialization is already flat and two-pass.
+
+This closes the unbounded-native-recursion class for runtime Lua data graphs.
+Everything else that recurses is bounded: Lua calls at `MAX_CALL_DEPTH` 1000,
+metamethod chains at 200, pattern matching at 200, table-valued `__call` chains
+indirectly at 255 by the `u8` argument count, and the parser / `encode_bytecode`
+/ `build_bytecode` family at `MAX_SYNTAX_DEPTH` 200 over a different graph.
+
+### Superseded questions
 
 1. Do #27 and #28 genuinely share an implementation, or only a pattern? The
    previous loop's reviewer argued the three recursive problems (this pair plus

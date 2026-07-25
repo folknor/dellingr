@@ -22,6 +22,23 @@ fn run(state: &mut State, source: &str) {
     state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
 }
 
+#[test]
+fn deep_global_chain_saves_and_loads_iteratively() {
+    let mut state = State::new();
+    state.gc_disable_auto();
+    run(
+        &mut state,
+        "deep = {}\nfor i = 1, 50000 do deep = { next = deep } end",
+    );
+    let save = state.save_state().expect("deep chain saves");
+    let mut loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), |_| {})
+        .expect("deep chain loads");
+    run(
+        &mut loaded,
+        "local t = deep\nfor i = 1, 50000 do t = t.next end\ndone = t ~= nil",
+    );
+}
+
 fn new_capture_state() -> (State, Arc<Mutex<Vec<String>>>) {
     let callbacks = Capture::default();
     let lines = Arc::clone(&callbacks.lines);

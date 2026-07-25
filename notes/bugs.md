@@ -325,41 +325,6 @@ for k, v in pairs(t) do print(k, v) end
 - **Fix:** value-rotation rewrite (optimizations.md #11) fixes order and cost
   together; charge the shifted count (as `table_sort` does).
 
-### 27. GC mark phase is recursive - deep structures overflow the Rust stack (C-A5; cross-noted by D)
-
-- **Locations:** `src/vm/object.rs:355-386` (`GcHeap::mark` ->
-  `mark_children` -> `Table::mark_values` -> `Val::mark_reachable` ->
-  `GcHeap::mark`), `src/vm/table.rs:555-573`.
-- **Cause:** recursion once per nesting level with no depth bound.
-  `MAX_CALL_DEPTH`/`MAX_METAMETHOD_DEPTH` protect the interpreter; nothing
-  protects the collector. A script builds a chain far deeper than the ~8 MB
-  main-thread stack tolerates (roughly 5 frames per level).
-- **Repro:**
-
-```lua
-local t = {}
-for i = 1, 500000 do t = { t } end   -- cost ~2/iteration; auto-GC fires
--- during the loop and the mark phase recurses ~i deep -> stack overflow abort
-```
-
-- **Fix:** iterative marking with an explicit worklist (`Vec<ObjectPtr>` gray
-  stack; optimizations.md #5). Also removes the `#[hotpath::measure]`
-  recursion caveat for `mark`.
-
-### 28. `SaveBuilder::encode_object` recursion is unbounded in data depth (D-D4, script-triggered host abort)
-
-- **Location:** `src/vm/save_state.rs:313-351` (`encode_object` ->
-  `encode_val` -> `encode_object`).
-- **Cause:** recursion per nesting level of tables/closures. A script builds a
-  deep chain cheaply (`local t = {} ; for i = 1, 200000 do t = {t} end ;
-  g = t` costs ~2 per iteration, well inside normal budgets); the host then
-  calls `save_state()` and overflows the native stack - script-controlled
-  data kills the host during an API call typed to return
-  `Result<_, SaveError>`. `GcHeap::mark`/`mark_children` share the recursive
-  shape (see #27), so with auto-GC enabled the same chain usually aborts
-  inside `gc_collect` even before the save is attempted. Both should move to
-  an explicit worklist together (optimizations.md #5).
-
 ### 30. User mutations inside environment tables are silently dropped by save/load (D-D5, round-trip fidelity)
 
 - **Location:** `src/vm/save_state.rs:303-310`.
@@ -887,8 +852,13 @@ glibc's.
 - **Fix sketch:** add the deferred stack-discipline verifier with abstract
   stack heights, vararg-call and table-constructor marker stacks, dynamic
   result counts, and agreement at CFG joins. It needs compiler-corpus proof
-  before it may reject saves. Finding #27 also blocks the full
-  no-abort-on-load guarantee because GC marking remains recursive.
+  before it may reject saves.
+- **Status:** this is now the *only* thing standing between phase 1 and the
+  stated promise ("malformed save structure is rejected with a `LoadError`; it
+  cannot trigger an indexing, stack-underflow, or recursive-traversal panic
+  during load"). The recursive-GC half of that caveat is gone: marking and save
+  encoding are both iterative, so a deep decoded table graph no longer
+  overflows during the `gc_collect()` at the end of materialization.
 
 ## Orchestrator notes (carried from the corner reports)
 

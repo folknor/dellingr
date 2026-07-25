@@ -238,10 +238,61 @@ struct SaveBuilder<'a> {
     string_ids: BTreeMap<Vec<u8>, u32>,
     bytecode: Vec<SavedBytecode>,
     bytecode_ids: BTreeMap<usize, u32>,
-    upvalues: Vec<SavedVal>,
+    upvalues: Vec<Option<SavedVal>>,
     upvalue_ids: BTreeMap<usize, u32>,
-    objects: Vec<Option<SavedObject>>,
+    objects: Vec<Option<PendingObject>>,
     object_ids: BTreeMap<ObjectPtr, u32>,
+    roots: Vec<Option<SavedVal>>,
+    breadcrumbs: Vec<Breadcrumb>,
+}
+
+#[derive(Clone, Copy)]
+enum ValueDestination {
+    Root(usize),
+    TableKey { object: u32, entry: usize },
+    TableValue { object: u32, entry: usize },
+    Metatable { object: u32 },
+    Upvalue(u32),
+}
+enum EncodeTask {
+    Value {
+        val: Val,
+        path: PathId,
+        destination: ValueDestination,
+    },
+    Object {
+        ptr: ObjectPtr,
+        id: u32,
+        path: PathId,
+    },
+    Upvalue {
+        upvalue: UpvalueRef,
+        path: PathId,
+        object: u32,
+        index: usize,
+    },
+}
+type PathId = usize;
+enum PathSegment {
+    Global(String),
+    TableKey(usize),
+    TableValue(usize),
+    Metatable,
+    Upvalue(usize),
+}
+struct Breadcrumb {
+    parent: Option<PathId>,
+    segment: PathSegment,
+}
+enum PendingObject {
+    Table {
+        entries: Vec<(Option<SavedVal>, Option<SavedVal>)>,
+        metatable: Option<Option<SavedVal>>,
+    },
+    Closure {
+        chunk: u32,
+        upvalues: Vec<Option<u32>>,
+    },
 }
 
 impl<'a> SaveBuilder<'a> {
@@ -257,6 +308,8 @@ impl<'a> SaveBuilder<'a> {
             upvalue_ids: BTreeMap::new(),
             objects: Vec::new(),
             object_ids: BTreeMap::new(),
+            roots: Vec::new(),
+            breadcrumbs: Vec::new(),
         }
     }
 
@@ -269,7 +322,7 @@ impl<'a> SaveBuilder<'a> {
         // under a builtin name but no longer hold the canonical value.
         let mut user_globals = Vec::new();
         for (name, val) in &self.state.globals {
-            let saved = self.encode_val(*val, &format!("global {name}"))?;
+            let saved = self.encode_root(*val, PathSegment::Global(name.clone()))?;
             user_globals.push((name.as_bytes().to_vec(), saved));
         }
 
@@ -277,7 +330,16 @@ impl<'a> SaveBuilder<'a> {
             .objects
             .into_iter()
             .map(|obj| {
-                obj.ok_or_else(|| SaveError::EncodeError("unfilled object slot".to_string()))
+                Self::finish_object(
+                    obj.ok_or_else(|| SaveError::EncodeError("unfilled object slot".to_string()))?,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let upvalues = self
+            .upvalues
+            .into_iter()
+            .map(|value| {
+                value.ok_or_else(|| SaveError::EncodeError("unfilled upvalue slot".to_string()))
             })
             .collect::<Result<Vec<_>, _>>()?;
 
@@ -289,50 +351,125 @@ impl<'a> SaveBuilder<'a> {
             cost_used: self.state.cost_used,
             strings: self.strings,
             bytecode: self.bytecode,
-            upvalues: self.upvalues,
+            upvalues,
             objects,
             user_globals,
         })
     }
 
-    fn encode_val(&mut self, val: Val, path: &str) -> Result<SavedVal, SaveError> {
-        match val {
-            Val::Nil => Ok(SavedVal::Nil),
-            Val::Bool(b) => Ok(SavedVal::Bool(b)),
-            Val::Num(n) => Ok(SavedVal::Num(n.to_bits())),
-            Val::Str(ptr) => {
-                let bytes = self.state.heap.get_string(ptr).to_vec();
-                let id = if let Some(id) = self.string_ids.get(&bytes) {
-                    *id
-                } else {
-                    let id = u32::try_from(self.strings.len())
-                        .map_err(|_| SaveError::EncodeError("too many strings".to_string()))?;
-                    self.strings.push(bytes.clone());
-                    self.string_ids.insert(bytes, id);
-                    id
-                };
-                Ok(SavedVal::Str(id))
-            }
-            Val::RustFn(func) => {
-                let addr = func as usize;
-                let id = self.state.rust_fn_ids_by_addr.get(&addr).ok_or_else(|| {
-                    SaveError::UnregisteredFunction {
-                        reachable_from: path.to_string(),
-                    }
-                })?;
-                Ok(SavedVal::Fn(id.clone()))
-            }
-            Val::Obj(ptr) => {
-                if let Some(token) = self.env_reverse.get(&ptr) {
-                    Ok(SavedVal::EnvObj(token.clone()))
-                } else {
-                    Ok(SavedVal::Obj(self.encode_object(ptr, path)?))
+    fn encode_root(&mut self, val: Val, segment: PathSegment) -> Result<SavedVal, SaveError> {
+        let root = self.roots.len();
+        self.roots.push(None);
+        let path = self.push_path(None, segment);
+        self.run_tasks(vec![EncodeTask::Value {
+            val,
+            path,
+            destination: ValueDestination::Root(root),
+        }])?;
+        self.roots[root]
+            .take()
+            .ok_or_else(|| SaveError::EncodeError("unfilled root slot".to_string()))
+    }
+
+    fn run_tasks(&mut self, mut tasks: Vec<EncodeTask>) -> Result<(), SaveError> {
+        while let Some(task) = tasks.pop() {
+            match task {
+                EncodeTask::Value {
+                    val,
+                    path,
+                    destination,
+                } => {
+                    let saved = match val {
+                        Val::Nil => Ok(SavedVal::Nil),
+                        Val::Bool(b) => Ok(SavedVal::Bool(b)),
+                        Val::Num(n) => Ok(SavedVal::Num(n.to_bits())),
+                        Val::Str(ptr) => {
+                            let bytes = self.state.heap.get_string(ptr).to_vec();
+                            let id = if let Some(id) = self.string_ids.get(&bytes) {
+                                *id
+                            } else {
+                                let id = u32::try_from(self.strings.len()).map_err(|_| {
+                                    SaveError::EncodeError("too many strings".to_string())
+                                })?;
+                                self.strings.push(bytes.clone());
+                                self.string_ids.insert(bytes, id);
+                                id
+                            };
+                            Ok(SavedVal::Str(id))
+                        }
+                        Val::RustFn(func) => {
+                            let addr = func as usize;
+                            let id =
+                                self.state.rust_fn_ids_by_addr.get(&addr).ok_or_else(|| {
+                                    SaveError::UnregisteredFunction {
+                                        reachable_from: self.render_path(path),
+                                    }
+                                })?;
+                            Ok(SavedVal::Fn(id.clone()))
+                        }
+                        Val::Obj(ptr) => {
+                            if let Some(token) = self.env_reverse.get(&ptr) {
+                                Ok(SavedVal::EnvObj(token.clone()))
+                            } else {
+                                let id = self.object_id(ptr, path, &mut tasks)?;
+                                Ok(SavedVal::Obj(id))
+                            }
+                        }
+                    }?;
+                    self.write_value(destination, saved)?;
+                }
+                EncodeTask::Object { ptr, id, path } => {
+                    self.expand_object(ptr, id, path, &mut tasks)?;
+                }
+                EncodeTask::Upvalue {
+                    upvalue,
+                    path,
+                    object,
+                    index,
+                } => {
+                    let key = upvalue.index();
+                    let id = if let Some(id) = self.upvalue_ids.get(&key) {
+                        *id
+                    } else {
+                        let id = u32::try_from(self.upvalues.len())
+                            .map_err(|_| SaveError::EncodeError("too many upvalues".to_string()))?;
+                        self.upvalue_ids.insert(key, id);
+                        self.upvalues.push(None);
+                        match self.state.upvalue_pool.get(upvalue) {
+                            Upvalue::Closed(val) => tasks.push(EncodeTask::Value {
+                                val: *val,
+                                path,
+                                destination: ValueDestination::Upvalue(id),
+                            }),
+                            Upvalue::Open(_) => return Err(SaveError::OpenUpvalueReachable),
+                        }
+                        id
+                    };
+                    let pending = self
+                        .objects
+                        .get_mut(object as usize)
+                        .ok_or_else(|| SaveError::EncodeError("missing object slot".to_string()))?;
+                    let Some(PendingObject::Closure { upvalues, .. }) = pending else {
+                        return Err(SaveError::EncodeError(
+                            "upvalue destination is not a closure".to_string(),
+                        ));
+                    };
+                    let slot = upvalues.get_mut(index).ok_or_else(|| {
+                        SaveError::EncodeError("missing closure upvalue slot".to_string())
+                    })?;
+                    *slot = Some(id);
                 }
             }
         }
+        Ok(())
     }
 
-    fn encode_object(&mut self, ptr: ObjectPtr, path: &str) -> Result<u32, SaveError> {
+    fn object_id(
+        &mut self,
+        ptr: ObjectPtr,
+        path: PathId,
+        tasks: &mut Vec<EncodeTask>,
+    ) -> Result<u32, SaveError> {
         if let Some(id) = self.object_ids.get(&ptr) {
             return Ok(*id);
         }
@@ -340,58 +477,197 @@ impl<'a> SaveBuilder<'a> {
             .map_err(|_| SaveError::EncodeError("too many objects".to_string()))?;
         self.object_ids.insert(ptr, id);
         self.objects.push(None);
+        tasks.push(EncodeTask::Object { ptr, id, path });
+        Ok(id)
+    }
 
-        let saved = match &self.state.heap.get(ptr).raw {
+    fn expand_object(
+        &mut self,
+        ptr: ObjectPtr,
+        id: u32,
+        path: PathId,
+        tasks: &mut Vec<EncodeTask>,
+    ) -> Result<(), SaveError> {
+        let pending = match &self.state.heap.get(ptr).raw {
             RawObject::Table(table) => {
-                let mut entries = Vec::new();
-                for (idx, (key, value)) in table.entries().into_iter().enumerate() {
-                    let key_path = format!("{path}.key[{idx}]");
-                    let value_path = format!("{path}[{idx}]");
-                    entries.push((
-                        self.encode_val(key, &key_path)?,
-                        self.encode_val(value, &value_path)?,
-                    ));
+                let entries = table.entries();
+                let metatable = table.get_metatable();
+                if let Some(mt) = metatable {
+                    tasks.push(EncodeTask::Value {
+                        val: Val::Obj(mt),
+                        path: self.push_path(Some(path), PathSegment::Metatable),
+                        destination: ValueDestination::Metatable { object: id },
+                    });
                 }
-                let metatable = table
-                    .get_metatable()
-                    .map(|mt| self.encode_val(Val::Obj(mt), &format!("{path}.metatable")))
-                    .transpose()?;
-                SavedObject::Table { entries, metatable }
+                for (idx, (key, value)) in entries.into_iter().enumerate().rev() {
+                    tasks.push(EncodeTask::Value {
+                        val: value,
+                        path: self.push_path(Some(path), PathSegment::TableValue(idx)),
+                        destination: ValueDestination::TableValue {
+                            object: id,
+                            entry: idx,
+                        },
+                    });
+                    tasks.push(EncodeTask::Value {
+                        val: key,
+                        path: self.push_path(Some(path), PathSegment::TableKey(idx)),
+                        destination: ValueDestination::TableKey {
+                            object: id,
+                            entry: idx,
+                        },
+                    });
+                }
+                PendingObject::Table {
+                    entries: vec![(None, None); table.entries().len()],
+                    metatable: metatable.map(|_| None),
+                }
             }
             RawObject::LuaFn(closure) => {
                 let chunk = self.encode_bytecode(&closure.bytecode)?;
-                let mut upvalues = Vec::with_capacity(closure.upvalues.len());
-                for (idx, uv_ref) in closure.upvalues.iter().copied().enumerate() {
-                    upvalues.push(self.encode_upvalue(uv_ref, &format!("{path}.upvalue[{idx}]"))?);
+                for (idx, uv_ref) in closure.upvalues.iter().copied().enumerate().rev() {
+                    tasks.push(EncodeTask::Upvalue {
+                        upvalue: uv_ref,
+                        path: self.push_path(Some(path), PathSegment::Upvalue(idx)),
+                        object: id,
+                        index: idx,
+                    });
                 }
-                SavedObject::Closure { chunk, upvalues }
+                PendingObject::Closure {
+                    chunk,
+                    upvalues: vec![None; closure.upvalues.len()],
+                }
             }
         };
-
-        self.objects[id as usize] = Some(saved);
-        Ok(id)
+        let slot = self
+            .objects
+            .get_mut(id as usize)
+            .ok_or_else(|| SaveError::EncodeError("missing object slot".to_string()))?;
+        *slot = Some(pending);
+        Ok(())
     }
 
-    fn encode_upvalue(&mut self, uv_ref: UpvalueRef, path: &str) -> Result<u32, SaveError> {
-        let key = uv_ref.index();
-        if let Some(id) = self.upvalue_ids.get(&key) {
-            return Ok(*id);
+    fn write_value(
+        &mut self,
+        destination: ValueDestination,
+        value: SavedVal,
+    ) -> Result<(), SaveError> {
+        match destination {
+            ValueDestination::Root(index) => {
+                *self
+                    .roots
+                    .get_mut(index)
+                    .ok_or_else(|| SaveError::EncodeError("missing root slot".to_string()))? =
+                    Some(value);
+            }
+            ValueDestination::Upvalue(id) => {
+                *self
+                    .upvalues
+                    .get_mut(id as usize)
+                    .ok_or_else(|| SaveError::EncodeError("missing upvalue slot".to_string()))? =
+                    Some(value);
+            }
+            ValueDestination::TableKey { object, entry }
+            | ValueDestination::TableValue { object, entry } => {
+                let pending = self
+                    .objects
+                    .get_mut(object as usize)
+                    .ok_or_else(|| SaveError::EncodeError("missing object slot".to_string()))?;
+                let Some(PendingObject::Table { entries, .. }) = pending else {
+                    return Err(SaveError::EncodeError(
+                        "table destination is not a table".to_string(),
+                    ));
+                };
+                let slot = entries.get_mut(entry).ok_or_else(|| {
+                    SaveError::EncodeError("missing table entry slot".to_string())
+                })?;
+                if matches!(destination, ValueDestination::TableKey { .. }) {
+                    slot.0 = Some(value);
+                } else {
+                    slot.1 = Some(value);
+                }
+            }
+            ValueDestination::Metatable { object } => {
+                let pending = self
+                    .objects
+                    .get_mut(object as usize)
+                    .ok_or_else(|| SaveError::EncodeError("missing object slot".to_string()))?;
+                let Some(PendingObject::Table { metatable, .. }) = pending else {
+                    return Err(SaveError::EncodeError(
+                        "metatable destination is not a table".to_string(),
+                    ));
+                };
+                *metatable = Some(Some(value));
+            }
         }
-        let id = u32::try_from(self.upvalues.len())
-            .map_err(|_| SaveError::EncodeError("too many upvalues".to_string()))?;
-        self.upvalue_ids.insert(key, id);
-        // As with bytecode, reserve the arena slot before recursively encoding
-        // the value. An upvalue can reach another closure and thus another
-        // upvalue before this one has been fully encoded.
-        self.upvalues.push(SavedVal::Nil);
-        let saved = match self.state.upvalue_pool.get(uv_ref) {
-            Upvalue::Closed(val) => self.encode_val(*val, path)?,
-            Upvalue::Open(_) => return Err(SaveError::OpenUpvalueReachable),
-        };
-        self.upvalues[id as usize] = saved;
-        Ok(id)
+        Ok(())
     }
 
+    fn push_path(&mut self, parent: Option<PathId>, segment: PathSegment) -> PathId {
+        let id = self.breadcrumbs.len();
+        self.breadcrumbs.push(Breadcrumb { parent, segment });
+        id
+    }
+    fn render_path(&self, path: PathId) -> String {
+        let mut ids = Vec::new();
+        let mut current = Some(path);
+        while let Some(id) = current {
+            ids.push(id);
+            current = self.breadcrumbs[id].parent;
+        }
+        let mut text = String::new();
+        for id in ids.into_iter().rev() {
+            match &self.breadcrumbs[id].segment {
+                PathSegment::Global(name) => {
+                    text.push_str("global ");
+                    text.push_str(name);
+                }
+                PathSegment::TableKey(index) => text.push_str(&format!(".key[{index}]")),
+                PathSegment::TableValue(index) => text.push_str(&format!("[{index}]")),
+                PathSegment::Metatable => text.push_str(".metatable"),
+                PathSegment::Upvalue(index) => text.push_str(&format!(".upvalue[{index}]")),
+            }
+        }
+        text
+    }
+    fn finish_object(object: PendingObject) -> Result<SavedObject, SaveError> {
+        match object {
+            PendingObject::Table { entries, metatable } => Ok(SavedObject::Table {
+                entries: entries
+                    .into_iter()
+                    .map(|(key, value)| {
+                        Ok((
+                            key.ok_or_else(|| {
+                                SaveError::EncodeError("unfilled table key slot".to_string())
+                            })?,
+                            value.ok_or_else(|| {
+                                SaveError::EncodeError("unfilled table value slot".to_string())
+                            })?,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, SaveError>>()?,
+                metatable: match metatable {
+                    None => None,
+                    Some(Some(value)) => Some(value),
+                    Some(None) => {
+                        return Err(SaveError::EncodeError(
+                            "unfilled metatable slot".to_string(),
+                        ));
+                    }
+                },
+            }),
+            PendingObject::Closure { chunk, upvalues } => Ok(SavedObject::Closure {
+                chunk,
+                upvalues: upvalues
+                    .into_iter()
+                    .map(|value| {
+                        value.ok_or_else(|| {
+                            SaveError::EncodeError("unfilled closure upvalue slot".to_string())
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            }),
+        }
+    }
     fn encode_bytecode(&mut self, bc: &Arc<Bytecode>) -> Result<u32, SaveError> {
         let key = Arc::as_ptr(bc) as usize;
         if let Some(id) = self.bytecode_ids.get(&key) {
