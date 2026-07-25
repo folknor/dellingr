@@ -147,7 +147,7 @@ pub(crate) fn open_base(state: &mut State) {
         } else {
             "(error raised with no message)".to_string()
         };
-        Err(state.error(ErrorKind::InternalError(message)))
+        Err(state.error(ErrorKind::ScriptError(message)))
     });
 
     // Returns the type of its only argument, coded as a string.

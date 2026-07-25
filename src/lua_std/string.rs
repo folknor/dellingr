@@ -144,7 +144,7 @@ fn append_gsub_replacement(
 ) -> Result<()> {
     match repl_type {
         LuaType::String | LuaType::Number => {
-            let repl = state.to_bytes_coerce(3)?.into_owned();
+            let repl = state.bytes_coerce(3)?;
             append_string_replacement(state, out, &repl, bytes, captures)?;
         }
         LuaType::Table => {
@@ -169,7 +169,7 @@ fn append_gsub_replacement(
                         t.as_str()
                     ))));
                 }
-                let val = state.to_bytes_coerce(-1)?.into_owned();
+                let val = state.bytes_coerce(-1)?;
                 state.pop(2);
                 out.extend_from_slice(&val);
             }
@@ -201,7 +201,7 @@ fn append_gsub_replacement(
                         t.as_str()
                     ))));
                 }
-                let val = state.to_bytes_coerce(-1)?.into_owned();
+                let val = state.bytes_coerce(-1)?;
                 state.pop(1);
                 out.extend_from_slice(&val);
             }

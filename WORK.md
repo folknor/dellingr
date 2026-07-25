@@ -4,216 +4,200 @@ Current work item. Numbers refer to finding numbers in `notes/bugs.md`.
 
 ---
 
-## Targets #26, #32, #48: the table-operations cluster
+## Targets #49, #50, #51, #52, #61: error and `tostring` taxonomy
 
-Three defects in `table.insert` and `table.sort`. All verified by execution;
-5.2 and 5.4 agree throughout.
+Five small defects in how values are described to users, all in the same
+area. All verified by execution against Lua 5.4.
 
-| case | dellingr | Lua 5.2 | Lua 5.4 |
-|---|---|---|---|
-| `t={10,20,30}; table.insert(t,1,99)`, then `pairs` | `4=30 3=20 2=10 1=99` | `1=99 2=10 3=20 4=30` | same as 5.2 |
-| `table.sort{1,"a",2}` | succeeds, `1 2 a` | error `attempt to compare string with number` | same |
-| `table.sort{{},{}}` | succeeds (no-op) | error `attempt to compare two table values` | same |
-| `table.sort{true,false}` | succeeds (no-op) | - | error `attempt to compare two boolean values` |
+| case | dellingr | Lua 5.4 |
+|---|---|---|
+| `print(setmetatable({}, {__tostring=function() return {} end}))` | prints `object: ObjectKey(10v1)` | error `'__tostring' must return a string` |
+| `t = setmetatable({}, {__index="abc"}); type(t.upper)` | error `attempt to index a string value` | `function` |
+| `local f = function() end; f.x` | `attempt to index a table value` | `attempt to index a function value` |
+| `error("oops")` | `0:0: internal error: oops` | `input:1: oops` |
+| `tostring({})` | `object: ObjectKey(7v1)` | `table: 0x...` |
 
-### #26 (Medium) - `table.insert(t, pos, v)` reverses order and is O(N^2)
+### #49 (Low) - `print`/`tostring` accept a non-string `__tostring` result
 
-`src/vm/table.rs:577-601` (`Table::array_insert`). The shift loop runs high to
-low doing `shift_remove(key i)` then `insert(key i+1)`. Each re-insert *appends*
-at the end of the `IndexMap`, so the shifted keys end up in reverse insertion
-order followed by the new key.
+`to_string_with_meta` (`src/vm/table_ops.rs:398-430`) stringifies whatever
+`__tostring` returns. Its sibling `bytes_with_tostring_meta` (`434-467`)
+already gets this right, checking `String | Number` and otherwise raising
+`'__tostring' must return a string`.
 
-Two consequences, of unequal weight:
+`print` and the `tostring` builtin use the permissive one
+(`lua_std/basic.rs:132, 223`). The fix is to fold `to_string_with_meta` onto
+`bytes_with_tostring_meta` so there is one code path and one behaviour, rather
+than duplicating the check.
 
-- **Cost (the real defect).** Every `shift_remove` is O(tail) in an `IndexMap`
-  and there are O(N) of them, so a single `table.insert(t, 1, v)` on a 50k
-  array is on the order of 10^9 memmoves - charged 1. This extends the
-  "O(N) shifts charged as 1" entry that `OPTIMIZATIONS.md` already tracks; that
-  entry understates it as O(N).
-- **Order (weaker claim, be honest about it).** Lua does **not** specify `pairs`
-  iteration order, so the reversal is not strictly a conformance violation.
-  It is still a surprising, user-visible regression from insertion order, and
-  the fix below restores it for free. Do not describe this as a conformance fix
-  in comments or the commit message.
+### #50 (Low) - `__index` bottoming out in a string errors instead of chaining
 
-`array_remove` happens to preserve order because its forward loop re-appends in
-ascending key order - so only the insert path is wrong.
+`handle_index_metamethod_inner` (`src/vm/metamethod.rs:88-137`) accepts only
+table / function / RustFn handlers. A string `__index` is legal in reference,
+where indexing simply re-dispatches on the string value.
 
-**Cache nit, same function:** `array_insert` unconditionally sets
-`cached_array_len = Some(len + 1)` (line 599). For a non-sequence such as
-`t={1,2,3}; t[5]=5`, after the shift `t[5]` is non-nil, so `len + 1` is not a
-border. Note the measured `#u` divergence here (dellingr 4, reference 5) is
-**not** a conformance target - `#` on a table with holes is explicitly any
-border, and both answers are valid. Fix the cache because storing a value that
-is not a border at all is wrong on its own terms, not to match reference:
-only trust `Some(len + 1)` when `get(len + 2)` is nil, else `set(None)`.
+Note the interaction with the project's design: dellingr has no string
+metatable, but `t.foo` on a table *does* fall back to the `table` library
+(finding C-F1 in the coverage notes), and string values reach the string
+library through their own path. So "re-dispatch on the string" has to mean
+whatever `("abc").upper` already means in dellingr - confirm that before
+implementing, and if the two cannot be made consistent, say so rather than
+half-implementing it.
 
-### #32 (Medium) - `table.sort` with a comparator is O(N^2) comparator calls
+The error message is doubly wrong today: it says "attempt to index a table
+value" (via `typ_simple`) for a *string* handler, which is #51.
 
-`src/vm/table_ops.rs:305-329`. Bubble sort with no early-exit swap flag, so it
-always runs the full N(N-1)/2 rounds even on already-sorted input. The
-comparator call is free by design and a `return a < b` body charges ~0, so
-`table.sort` on 10k elements is ~5*10^7 full call-machinery round trips charged
-`n` = 10^4.
+### #51 (Low) - error messages misreport every object as a table
 
-The charge itself is correct and must stay where it is: `consume_cost(n.max(1))`
-runs at line 299 **before** any comparator runs, which is the L18 contract and
-is covered by an existing test. Do not move or rescale it in this loop -
-changing what sort costs is a cost-model change, and cost-model changes are #16.
+`Val::typ_simple` (`src/vm/lua_val.rs:89-98`) maps every `Obj` to
+`LuaType::Table` "for display purposes". So indexing a Lua function reports
+"attempt to index a table value".
 
-### #48 (Low) - default `table.sort` silently orders incomparable types
+The reason the shortcut exists is that `typ_simple` has no heap access. Every
+call site that feeds an error message needs auditing: those with a heap in
+scope should use `Val::typ(&heap)` instead. Loop 14 already did this for
+`TypeError::Comparison` in `table_sort`, so the pattern is established.
 
-`src/vm/table_ops.rs:330-349`. Without a comparator, numbers sort before
-strings and anything else compares `Equal`, so `table.sort{1,"a",2}` succeeds
-and `table.sort{{},{}}` is a no-op "sorted". Reference raises a type error in
-every one of those cases. Given the project's "errors kill the callback" stance,
-silently succeeding is the divergence.
+**Do not** simply delete `typ_simple` if some call site genuinely has no heap;
+in that case report the honest fallback rather than a confident wrong answer.
 
-The blocker is structural: `arr.sort_by` takes an infallible comparator, so the
-error has nowhere to go. That is why this needs the same rewrite as #32.
+### #52 (Low) - script `error()` raises `ErrorKind::InternalError`
 
-### Why one loop
+`src/lua_std/basic.rs:140-147` implements `error` with
+`ErrorKind::InternalError(message)`, but `src/error.rs:97-99` documents that
+variant as "corrupt bytecode or VM bug ... report these as bugs" and renders it
+`internal error: <msg>`.
 
-`optimizations.md` #12 is the standing sort rewrite and #11 the insert
-rewrite. #32 and #48 are the same function and #48 cannot be fixed without
-making the sort fallible, so splitting them would mean writing the comparator
-plumbing twice.
+Two problems: an embedder filtering `InternalError` for crash reporting
+receives ordinary script errors, and the rendering diverges from reference.
+`RuntimeError`, or a dedicated `ScriptError` variant carrying the position
+prefix, is the right shape.
+
+### #61 (Medium) - `tostring` leaks a Rust `Debug` slotmap key
+
+`impl fmt::Display for ObjectPtr` (`src/vm/object.rs:175-181`) writes
+`object: {:?}` of the raw key because it has no heap access.
+`Val::to_string_with_heap` (`lua_val.rs:108`) and `to_bytes_with_heap` (`120`)
+both call it and both *do* have the heap.
+
+Two defects in one line: the type word is always `object` rather than
+`table`/`function`, and `ObjectKey(7v1)` exposes an internal representation.
+
+**Determinism constraint:** the replacement cannot be a real address. The
+digits are inherently divergent from reference and are not what matters; the
+type word and the absence of Rust syntax are.
 
 ### Constraints
 
-- **Determinism is a product requirement.** The sort must be deterministic for
-  equal elements and identical across hosts. Reference `table.sort` is *not*
-  stable and dellingr need not be either, but it must be reproducible.
-- A comparator can re-enter Lua, mutate the table, error, or exhaust the
-  budget. Today the sort works on `arr`, a detached copy, with
-  `with_rooted_values` keeping elements alive; preserve that GC discipline.
-- Reference detects an inconsistent comparator ("invalid order function for
-  sorting"). Decide deliberately whether to reproduce that or to remain
-  well-defined-but-silent, and record the choice.
-- `unwrap_used` denied outside `#[cfg(test)]`; `HashMap`/`HashSet` banned.
-- Charge nothing new and rescale nothing (#16 owns cost-model changes).
+- Determinism is a product requirement - no addresses, no unseeded entropy.
+- `unwrap_used` denied outside `#[cfg(test)]`; `HashMap`/`HashSet` banned;
+  clippy denies warnings, so no dead code.
+- Charge nothing new (#16 owns cost-model changes).
+- Errors must leave the State consistent and reusable.
 
 ---
 
 ## Agreed implementation plan
 
-The orchestrator and the deep reviewer converged independently on carried-value
-rotation for insert and a hand-written fallible heap sort. Settled, not a menu.
+Settled between the orchestrator and the deep reviewer. Two items grew beyond
+the original findings; both are justified below rather than assumed.
 
-### `Table::array_insert` - carried-value rotation
+### 1. One metamethod-aware conversion path (#49)
 
-```text
-carry = new value
-for key in pos..=len:
-    old = get(key)
-    write carry at key
-    carry = old
-write carry at len + 1
-```
+Make `to_string_with_meta` delegate to `bytes_with_tostring_meta`, which
+already enforces `String | Number` and raises
+`'__tostring' must return a string`. One code path, one behaviour. This fixes
+`print` and `tostring` together (`basic.rs:132`, `219`).
 
-Use `Table::insert` for the writes so missing keys and nil values keep normal
-table semantics. **Do not remove and reinsert live keys** - that is the whole
-bug. An existing-key write keeps its slot, so order is preserved and each step
-is an O(1) lookup instead of an O(tail) memmove: O(N) total.
+### 2. Object rendering (#61)
 
-Storage shapes all work without special-casing:
+Stop routing user-visible conversion through `ObjectPtr::Display`. Render as
+`table: 0x{id:x}` / `function: 0x{id:x}`, taking the type from
+`Val::typ(&heap)` and the digits from the **existing deterministic
+`format_pointer_id` registry** (`table_ops.rs:469`, `vm.rs:178`) that `%p`
+already uses.
 
-- `Inline` (`table.rs:456-470`) updates existing keys in place, and promotion at
-  the fifth entry preserves order (`479-491`).
-- `Map` (`472-474`): `IndexMap::insert` updates an existing value without moving
-  its entry.
-- Tombstones: keep the initial `compact_dead()`. A nil carried through the
-  rotation then goes through the established remove/tombstone paths
-  (`358-361`, `512-543`).
+Not the slotmap bits: reference renders `tostring(t)` and `string.format("%p", t)`
+with the same digits, so a second identity scheme would be wrong on its own
+terms as well as divergent.
 
-**Drop the `ensure_map()` call** - rotation does not need it. `array_remove`
-still does, and is unchanged.
+**This changes the public API.** `State::to_string` (`stack.rs:175`) and
+`to_bytes_coerce` (`196`) become `&mut self`, because minting an id needs
+mutable access. Accepted deliberately: the crate is pre-1.0 and explicitly
+unstable, and the alternative is either preserving the leak or adding interior
+mutability purely for display. Call it out in the commit message.
 
-For the sparse case `t={1,2,3}; t[5]=5; table.insert(t,1,v)`, `array_len()`
-picks border 3, and rotation yields `t[1]=v, t[2]=1, t[3]=2, t[4]=3, t[5]=5`.
-Key 5 keeps its insertion-order slot and the new key 4 is appended after it -
-deterministic, though not ascending `pairs` order. That is fine; `pairs` order
-is not a conformance requirement.
+### 3. Shared string-index helper (#50)
 
-**Cache:** set `Some(len + 1)` only when the inserted value is non-nil **and**
-`get(len + 2)` is nil; otherwise `None`. In the sparse case `t[5]` is non-nil,
-so border 4 must not be cached. The reader (`299-312`) trusts any `Some`
-without validating it, which is why storing a non-border is a real defect.
+Add one slow-path helper that resolves any key against the current global
+`string` table, and call it from all three places:
 
-### `table_sort` - one fallible iterative heap sort for both branches
+- the existing direct field slow path (`eval_index.rs:58`),
+- generic string bracket indexing (`eval_index.rs:464`), which today rejects
+  strings as non-tables,
+- the `Val::Str` arm of `__index` chaining (`metamethod.rs:88`).
 
-Hand-written iterative min-heap sort followed by a final reverse. Rationale:
+This is broader than finding #50 as written, and it is the *correct* scope:
+`("abc")[1]` currently errors but is `nil` in reference, because reference's
+string metatable points `__index` at the string table. Making the bracket path
+agree with the field path removes a real divergence rather than adding one.
 
-- O(N log N) worst case, in-place over `arr`, no recursion, no host-dependent
-  pivot choice.
-- **Every index comes from fixed heap bounds, so a comparator that lies about
-  ordering cannot produce an out-of-bounds access.** This is the load-bearing
-  reason not to use `sort_by`: it is infallible, cannot short-circuit on the
-  first error, and assumes a total order that an arbitrary Lua comparator need
-  not provide.
-- The comparison helper returns `Result<bool>` so errors propagate with `?`.
+The no-string-metatable design is preserved - `getmetatable("abc")` stays nil.
+String `__newindex` remains invalid.
 
-GC and re-entrancy invariants to preserve exactly:
+`tests/metamethod_errors.rs:361` currently asserts that a string `__index`
+handler *fails*; it must become a success test for `.upper`.
 
-- Extract `arr` and release the table borrow before any callback (`285-292`).
-- **Root the complete initial array for the whole sort.** `Vec<Val>` is
-  invisible to GC and `transient_roots` is part of the authoritative root set
-  (`vm.rs:90`). Rooting only the current comparison pair breaks the forced-GC
-  test at `src/vm/tests.rs:420`, whose comparator clears the source table
-  before collection.
-- Hold no `&Table`, `&GcHeap` or element reference across `State::call`; copy
-  each `Val`, then call.
-- On comparator error, return **before** `set_array`. The detached array may be
-  partially permuted and is simply dropped, so comparator-authored table
-  mutations survive and sort-authored ones do not.
-- On success, re-fetch the table and write back as today (`351-360`).
+### 4. Heap-aware types everywhere (#51)
 
-Keep `consume_cost(n.max(1))` exactly where it is (`294`), before comparator
-selection and sorting. The L18 pre-mutation contract is covered by
-`tests/error_handling.rs:577`.
+Replace all 36 `typ_simple` invocations with `typ(&heap)` and **delete
+`typ_simple`** - leaving it would be dead code, which the lint gate denies.
+Every site is inside a `State` method with `self.heap` or `state.heap` in
+scope:
 
-**Inconsistent comparators: deliberately deterministic-but-silent.** Heap sort
-always terminates safely even for `return true`. Reference's "invalid order
-function for sorting" is an incidental artifact of its quicksort bounds check;
-reproducing it would mean adding algorithm-specific extra comparator calls.
-Record this in a code comment and pin it with a test.
+- `eval_store.rs`: 47, 62, 104, 125, 185, 236, 372, 435, 493, 494, 523 (11)
+- `table_ops.rs`: 48, 117, 143, 163, 223, 228, 251, 268, 287 (9)
+- `metamethod.rs`: 40, 122, 135, 160, 255, 269 (6)
+- `eval_control.rs`: 67, 70, 73, 96, 98, 101 (6)
+- `eval_index.rs`: 94, 477 (2)
+- `eval.rs`: 247 (1)
+- `stack.rs`: 172 (1)
 
-### Default comparison (#48)
+### 5. `ErrorKind::ScriptError(String)` (#52)
 
-Put the check **inside the fallible comparator**, not in a pre-scan. Reference
-permits a singleton incomparable value - both 5.2 and 5.4 accept
-`table.sort{true}` because no comparison ever happens - so a pre-scan rejects
-too early.
+`RuntimeError` is documented as "raised by a library operation" and
+`InternalError` as a VM bug (`error.rs:95`); a script's `error()` is neither,
+and hosts see `ErrorKind` through `Result` and `HostCallbacks`
+(`host.rs:48`). Add a distinct variant carrying only the message - position
+belongs to `Error`, not duplicated in the variant.
 
-Implement primitive `<` consistently with `eval_compare`
-(`src/vm/eval_store.rs:476`): numbers numerically, strings lexicographically,
-every other pairing a `TypeError::Comparison`. Use `Val::typ(&heap)`, **not**
-`typ_simple`, which labels every object a table (`lua_val.rs:86` - that is
-finding #51).
+Internal blast radius is small: the only exhaustive match is `Display`
+(`error.rs:268`); `is_recoverable` uses a non-exhaustive `if let` (`231`).
+`tests/string_format.rs:273` asserts `InternalError` and must become
+`ScriptError`.
 
-Both references compare the second element against the first for `{1,"a"}`,
-report `attempt to compare string with number`, and leave the table unchanged.
-A min-heap's first child-versus-parent comparison reproduces that pairing and
-errors before any writeback.
+### 6. Real error positions instead of `0:0:`
 
-`TypeError::Comparison` formatting (`src/error.rs:371`) currently produces
-"attempt to compare table with table". Special-case equal types to get
-reference's "attempt to compare two table values".
+`State::error` unconditionally builds `(0, 0)` and carries a TODO
+(`vm.rs:729`), while the exact line already exists in `Frame::current_line`
+(`frame.rs:75`) and the same frame is in scope where the traceback is attached
+(`eval.rs:383`). Populate a missing `line_num` there, before the traceback, so
+named chunks render `input:1: oops` like reference. Parser errors keep their
+existing line/column rendering.
+
+This fixes the *default* position only. `error(msg, level)` - selecting a
+caller frame, and level 0 meaning "no position" - stays with #58.
 
 ### Tests
 
-Insert: inline, map and tombstone paths; the sparse cache case; that `pairs`
-order after `table.insert(t,1,v)` is ascending again.
+Invalid table and boolean `__tostring` results through **both** `print` and
+`tostring`, plus an accepted numeric result; string `__index` via dot and
+bracket keys; function-valued arithmetic, concat, length, comparison and index
+errors all naming `function`; `ScriptError` classification and named-source
+line rendering; `tostring` giving a stable repeated identity, the right type
+word, no `ObjectKey` substring, and digits agreeing with `%p`; and State reuse
+after each new error path.
 
-Sort: mixed number/string, two tables, and two booleans all error with
-reference's exact message; `table.sort{true}` succeeds; comparator-call count
-is O(N log N) rather than N(N-1)/2; a comparator that mutates the same table;
-nested sort re-entry; an inconsistent comparator terminates deterministically;
-and the table is unchanged after a default-comparison error.
-
-Preserve the existing GC/quiescence tests at `src/vm/tests.rs:420` and
-`tests/save_state.rs:216`.
-
-Read `src/vm/table.rs` (`array_insert`, `array_remove`, storage shapes),
-`src/vm/table_ops.rs` (`table_sort`), `src/vm/eval_store.rs` (`eval_compare`),
-`src/error.rs` (`TypeError::Comparison`), and `src/lua_std/table.rs`.
+Read `src/vm/table_ops.rs` (`to_string_with_meta`, `bytes_with_tostring_meta`,
+`format_pointer_id`), `src/vm/metamethod.rs`, `src/vm/eval_index.rs`,
+`src/vm/lua_val.rs`, `src/vm/object.rs`, `src/vm/stack.rs`, `src/vm/frame.rs`,
+`src/lua_std/basic.rs`, and `src/error.rs`.

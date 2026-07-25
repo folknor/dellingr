@@ -726,13 +726,15 @@ impl State {
         Val::Str(ptr)
     }
 
-    /// Construct an [`Error`] of the given kind with source position
-    /// drawn from the current frame (placeholder until line tracking lands).
+    /// Construct an [`Error`] of the given kind with no source position.
+    ///
+    /// The position is filled in later, on the way out of the Lua frame the
+    /// error surfaced in (see `locate_in_frame`), because that is the first
+    /// point with access to the frame's line information. Errors that never
+    /// unwind through a Lua frame - those raised by a host `RustFunc` called
+    /// directly - keep a zero position.
     pub fn error(&self, kind: ErrorKind) -> Error {
-        // TODO actually find position
-        let pos = 0;
-        let column = 0;
-        Error::new(kind, pos, column)
+        Error::new(kind, 0, 0)
     }
 
     pub(super) fn type_error(&self, e: TypeError) -> Error {

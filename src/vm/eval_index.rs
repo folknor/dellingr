@@ -56,43 +56,47 @@ impl State {
                 Ok(())
             }
         } else if val.as_string_ptr().is_some() {
-            // String: look up method in the 'string' global table.
-            // IC fast path: if the cached entry's lib version matches and the
-            // key is still at the cached index, return the cached value.
-            if let Some(cache) = cache
-                && let Some(method) = self.get_cached_string_method(key, cache)
-            {
-                self.stack.push(method);
-                return Ok(());
-            }
-
-            self.get_global("string");
-            let string_lib_idx = self.stack.len() - 1;
-            self.get_table_with_key(string_lib_idx, key, local_cost)?;
-            // Stack now: [... string_lib, result]
-            let result = self.pop_val();
-            let string_lib = self.pop_val();
-
-            // Populate cache when the resolution was a direct hit on the
-            // string lib (skip when __index resolved it elsewhere).
-            if let Some(cache) = cache
-                && let Some(lib_ptr) = string_lib.as_object_ptr()
-                && let Some(tbl) = self.heap.as_table_ref(lib_ptr)
-                && let Some((index, _)) = tbl.get_with_index(&key)
-            {
-                cache.set_string_method(StringMethodCacheEntry {
-                    string_lib: lib_ptr,
-                    version: tbl.version(),
-                    index,
-                    globals_version: self.globals_version,
-                });
-            }
-
-            self.stack.push(result);
-            Ok(())
+            self.get_string_table_field(key, cache, local_cost)
         } else {
-            Err(self.type_error(TypeError::TableIndex(val.typ_simple())))
+            Err(self.type_error(TypeError::TableIndex(val.typ(&self.heap))))
         }
+    }
+
+    /// Resolves a string index through the current global `string` table.
+    pub(super) fn get_string_table_field(
+        &mut self,
+        key: Val,
+        cache: Option<&FieldLookupCacheSlot>,
+        local_cost: &mut u64,
+    ) -> Result<()> {
+        if let Some(cache) = cache
+            && let Some(method) = self.get_cached_string_method(key, cache)
+        {
+            self.stack.push(method);
+            return Ok(());
+        }
+
+        self.get_global("string");
+        let string_lib_idx = self.stack.len() - 1;
+        self.get_table_with_key(string_lib_idx, key, local_cost)?;
+        let result = self.pop_val();
+        let string_lib = self.pop_val();
+
+        if let Some(cache) = cache
+            && let Some(lib_ptr) = string_lib.as_object_ptr()
+            && let Some(tbl) = self.heap.as_table_ref(lib_ptr)
+            && let Some((index, _)) = tbl.get_with_index(&key)
+        {
+            cache.set_string_method(StringMethodCacheEntry {
+                string_lib: lib_ptr,
+                version: tbl.version(),
+                index,
+                globals_version: self.globals_version,
+            });
+        }
+
+        self.stack.push(result);
+        Ok(())
     }
 
     #[inline(always)]
@@ -467,6 +471,12 @@ impl State {
         // Table is now on top of the stack
         let table_idx = self.stack.len() - 1;
         let tbl_val = self.stack[table_idx];
+        if tbl_val.as_string_ptr().is_some() {
+            self.get_string_table_field(key, None, local_cost)?;
+            let result = self.pop_val();
+            self.stack[table_idx] = result;
+            return Ok(());
+        }
         let obj_ptr = tbl_val.as_object_ptr();
         let (val, has_metatable) = match obj_ptr.and_then(|ptr| self.heap.as_table_ref(ptr)) {
             Some(tbl) => {
@@ -474,7 +484,7 @@ impl State {
                 (val, tbl.get_metatable().is_some())
             }
             None => {
-                let typ = tbl_val.typ_simple();
+                let typ = tbl_val.typ(&self.heap);
                 self.pop_val();
                 return Err(self.type_error(TypeError::TableIndex(typ)));
             }

@@ -92,8 +92,14 @@ pub enum ErrorKind {
     /// use case for a stable handle; embedders that need an "absent" value
     /// should use `Option<Anchor>`.
     AnchorNil,
-    /// A runtime error raised by a library operation.
+    /// A runtime fault detected by the VM or by a library operation - a bad
+    /// pattern, too many results, an invalid `next` key and so on. Distinct
+    /// from [`ErrorKind::ScriptError`], which the script raised on purpose,
+    /// and from [`ErrorKind::InternalError`], which indicates a VM bug.
     RuntimeError(String),
+    /// An error explicitly raised by script code through `error()`. Hosts can
+    /// use this to tell deliberate script termination from a VM-detected fault.
+    ScriptError(String),
     /// Internal error (corrupt bytecode or VM bug). The string is a
     /// human-readable description; report these as bugs.
     InternalError(String),
@@ -253,7 +259,19 @@ impl SyntaxError {
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}: {}", self.line_num, self.column, self.kind)?;
+        // Take the source and the line from the SAME record. Reading the source
+        // from the innermost frame but the line from `self.line_num` can splice
+        // together two unrelated locations: a host `RustFunc` may return an
+        // `Error` carrying its own line, which says nothing about the Lua chunk
+        // whose name is about to be printed next to it.
+        if let Some(frame) = self.stack_trace.first()
+            && let Some(source) = frame.source.as_deref()
+            && frame.line != 0
+        {
+            write!(f, "{source}:{}: {}", frame.line, self.kind)?;
+        } else {
+            write!(f, "{}:{}: {}", self.line_num, self.column, self.kind)?;
+        }
         if !self.stack_trace.is_empty() {
             writeln!(f)?;
             writeln!(f, "stack traceback:")?;
@@ -305,7 +323,11 @@ impl fmt::Display for ErrorKind {
             AnchorNil => {
                 write!(f, "cannot anchor nil")
             }
-            RuntimeError(msg) => write!(f, "{msg}"),
+            // A script's `error()` message and a library runtime error render
+            // identically, exactly as reference does. The variants are distinct
+            // so hosts can tell deliberate script termination from a VM-detected
+            // fault, which is not a rendering difference.
+            RuntimeError(msg) | ScriptError(msg) => write!(f, "{msg}"),
             InternalError(msg) => {
                 write!(f, "internal error: {msg}")
             }

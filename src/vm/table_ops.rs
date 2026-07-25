@@ -45,7 +45,7 @@ impl State {
             let key = state.alloc_string(name);
             let idx = state.convert_idx(table_idx)?;
             let obj_ptr = state.stack[idx].as_object_ptr();
-            let typ = state.stack[idx].typ_simple();
+            let typ = state.stack[idx].typ(&state.heap);
 
             match obj_ptr.and_then(|ptr| state.heap.as_table(ptr)) {
                 Some(t) => {
@@ -114,7 +114,7 @@ impl State {
 
         // Get the ObjectPtr and type for error reporting
         let obj_ptr = self.stack[idx].as_object_ptr();
-        let typ = self.stack[idx].typ_simple();
+        let typ = self.stack[idx].typ(&self.heap);
 
         match obj_ptr.and_then(|ptr| self.heap.as_table_ref(ptr)) {
             Some(t) => {
@@ -140,7 +140,7 @@ impl State {
 
         // Get the ObjectPtr and type for error reporting
         let obj_ptr = self.stack[idx].as_object_ptr();
-        let typ = self.stack[idx].typ_simple();
+        let typ = self.stack[idx].typ(&self.heap);
 
         match obj_ptr.and_then(|ptr| self.heap.as_table(ptr)) {
             Some(t) => {
@@ -160,7 +160,7 @@ impl State {
         let key = self.pop_val();
 
         let obj_ptr = self.stack[idx].as_object_ptr();
-        let typ = self.stack[idx].typ_simple();
+        let typ = self.stack[idx].typ(&self.heap);
 
         match obj_ptr.and_then(|ptr| self.heap.as_table_ref(ptr)) {
             Some(t) => match t.next(&key) {
@@ -220,12 +220,12 @@ impl State {
     pub fn set_metatable_of(&mut self, table_idx: isize) -> Result<()> {
         let mt_val = self.pop_val();
         let idx = self.convert_idx(table_idx)?;
-        let typ = self.stack[idx].typ_simple();
+        let typ = self.stack[idx].typ(&self.heap);
 
         let mt = match mt_val {
             Val::Nil => None,
             Val::Obj(ptr) if self.heap.as_table_ref(ptr).is_some() => Some(ptr),
-            other => return Err(self.type_error(TypeError::TableIndex(other.typ_simple()))),
+            other => return Err(self.type_error(TypeError::TableIndex(other.typ(&self.heap)))),
         };
 
         match self.stack[idx]
@@ -248,7 +248,7 @@ impl State {
         let value = self.pop_val();
         let idx = self.convert_idx(table_idx)?;
         let obj_ptr = self.stack[idx].as_object_ptr();
-        let typ = self.stack[idx].typ_simple();
+        let typ = self.stack[idx].typ(&self.heap);
 
         match obj_ptr.and_then(|ptr| self.heap.as_table(ptr)) {
             Some(t) => {
@@ -265,7 +265,7 @@ impl State {
     pub fn table_remove_at(&mut self, table_idx: isize, pos: usize) -> Result<()> {
         let idx = self.convert_idx(table_idx)?;
         let obj_ptr = self.stack[idx].as_object_ptr();
-        let typ = self.stack[idx].typ_simple();
+        let typ = self.stack[idx].typ(&self.heap);
 
         let removed = match obj_ptr.and_then(|ptr| self.heap.as_table(ptr)) {
             Some(t) => t.array_remove(pos),
@@ -284,7 +284,7 @@ impl State {
 
         // Get the array values
         let obj_ptr = self.stack[idx].as_object_ptr();
-        let typ = self.stack[idx].typ_simple();
+        let typ = self.stack[idx].typ(&self.heap);
 
         let mut arr = match obj_ptr.and_then(|ptr| self.heap.as_table_ref(ptr)) {
             Some(t) => t.get_array(),
@@ -399,34 +399,7 @@ impl State {
     /// If the value is a table with a __tostring metamethod, calls it and returns the result.
     #[hotpath::measure]
     pub fn to_string_with_meta(&mut self, idx: isize) -> Result<String> {
-        let i = self.convert_idx(idx)?;
-        let val = self.stack[i];
-
-        // Check if it's a table with __tostring
-        let metatable_ptr = val
-            .as_object_ptr()
-            .and_then(|ptr| self.heap.as_table_ref(ptr))
-            .and_then(super::table::Table::get_metatable);
-
-        if let Some(mt_ptr) = metatable_ptr {
-            let tostring_key = self.alloc_string("__tostring");
-            let tostring_handler = self
-                .heap
-                .as_table_ref(mt_ptr)
-                .map_or(Val::Nil, |mt| mt.get(&tostring_key));
-
-            if !matches!(tostring_handler, Val::Nil) {
-                // Call the __tostring metamethod
-                self.stack.push(tostring_handler);
-                self.stack.push(val);
-                self.call(ArgCount::Fixed(1), RetCount::Fixed(1))?;
-                let result = self.pop_val();
-                return Ok(result.to_string_with_heap(&self.heap));
-            }
-        }
-
-        // No __tostring, use default
-        Ok(val.to_string_with_heap(&self.heap))
+        Ok(String::from_utf8_lossy(&self.bytes_with_tostring_meta(idx)?).into_owned())
     }
 
     /// Converts a value with `tostring` semantics while preserving arbitrary
@@ -455,7 +428,7 @@ impl State {
                     result.typ(&self.heap),
                     super::LuaType::String | super::LuaType::Number
                 ) {
-                    return Ok(result.to_bytes_with_heap(&self.heap).into_owned());
+                    return Ok(result.to_bytes_with_heap(&self.heap));
                 }
                 return Err(self.error(ErrorKind::RuntimeError(
                     "'__tostring' must return a string".to_string(),
@@ -463,7 +436,17 @@ impl State {
             }
         }
 
-        Ok(val.to_bytes_with_heap(&self.heap).into_owned())
+        self.bytes_with_default_string_coercion(idx)
+    }
+
+    pub(crate) fn bytes_with_default_string_coercion(&mut self, idx: isize) -> Result<Vec<u8>> {
+        let i = self.convert_idx(idx)?;
+        let val = self.stack[i];
+        if matches!(val, Val::Obj(_)) {
+            let id = self.format_pointer_id(idx)?;
+            return Ok(format!("{}: 0x{id:x}", val.typ(&self.heap).as_str()).into_bytes());
+        }
+        Ok(val.to_bytes_with_heap(&self.heap))
     }
 
     /// Returns a deterministic, state-local identity for pointer-like values.

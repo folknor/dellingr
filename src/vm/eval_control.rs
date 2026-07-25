@@ -64,13 +64,13 @@ impl State {
         let start_val = self.pop_val();
         let step = step_val
             .as_num()
-            .ok_or_else(|| self.type_error(TypeError::Arithmetic(step_val.typ_simple())))?;
+            .ok_or_else(|| self.type_error(TypeError::Arithmetic(step_val.typ(&self.heap))))?;
         let end = end_val
             .as_num()
-            .ok_or_else(|| self.type_error(TypeError::Arithmetic(end_val.typ_simple())))?;
+            .ok_or_else(|| self.type_error(TypeError::Arithmetic(end_val.typ(&self.heap))))?;
         let start = start_val
             .as_num()
-            .ok_or_else(|| self.type_error(TypeError::Arithmetic(start_val.typ_simple())))?;
+            .ok_or_else(|| self.type_error(TypeError::Arithmetic(start_val.typ(&self.heap))))?;
         if check_numeric_for_condition(start, end, step) {
             for (local_slot, n) in
                 (local as usize + self.stack_bottom..).zip([start, end, step, start])
@@ -91,14 +91,14 @@ impl State {
         offset: i16,
     ) -> Result<()> {
         let slot = local_slot as usize + self.stack_bottom;
-        let mut var = self.stack[slot]
-            .as_num()
-            .ok_or_else(|| self.type_error(TypeError::Arithmetic(self.stack[slot].typ_simple())))?;
+        let mut var = self.stack[slot].as_num().ok_or_else(|| {
+            self.type_error(TypeError::Arithmetic(self.stack[slot].typ(&self.heap)))
+        })?;
         let limit = self.stack[slot + 1].as_num().ok_or_else(|| {
-            self.type_error(TypeError::Arithmetic(self.stack[slot + 1].typ_simple()))
+            self.type_error(TypeError::Arithmetic(self.stack[slot + 1].typ(&self.heap)))
         })?;
         let step = self.stack[slot + 2].as_num().ok_or_else(|| {
-            self.type_error(TypeError::Arithmetic(self.stack[slot + 2].typ_simple()))
+            self.type_error(TypeError::Arithmetic(self.stack[slot + 2].typ(&self.heap)))
         })?;
         var += step;
         if check_numeric_for_condition(var, limit, step) {

@@ -172,14 +172,6 @@ impl ObjectPtr {
     }
 }
 
-impl fmt::Display for ObjectPtr {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // We can't display the actual content without heap access,
-        // so just show the key debug representation
-        write!(f, "object: {:?}", self.0)
-    }
-}
-
 // ============================================================================
 // GcHeap - SlotMap-based garbage collected heap
 // ============================================================================

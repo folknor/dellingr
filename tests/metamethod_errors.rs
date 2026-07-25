@@ -16,6 +16,16 @@ fn run_number(code: &str) -> f64 {
     state.to_number(-1).unwrap()
 }
 
+/// Helper: runs Lua code that returns a string.
+fn run_string(code: &str) -> String {
+    let mut state = State::new();
+    state.load_string(code).expect("source compiles");
+    state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(1))
+        .unwrap_or_else(|e| panic!("Error running: {code}\n{e}"));
+    state.to_string(-1).expect("script returns a string")
+}
+
 /// Helper: runs a Lua string and returns the error.
 fn expect_error(code: &str) -> dellingr::error::Error {
     let mut state = State::new();
@@ -359,17 +369,31 @@ fn index_number_handler_errors() {
 }
 
 #[test]
-fn index_string_handler_errors() {
-    let err = expect_error(
+fn index_string_handler_uses_string_library_for_dot_and_bracket_keys() {
+    let value = run_string(
         r#"
         local t = setmetatable({}, { __index = "not a table" })
-        return t.x
+        return type(t.upper) .. "," .. type(t["upper"]) .. "," .. type(t[1])
     "#,
     );
-    assert!(
-        matches!(err.kind, ErrorKind::TypeError(_)),
-        "Expected TypeError for string __index, got: {err}"
-    );
+    assert_eq!(value, "function,function,nil");
+}
+
+#[test]
+fn function_type_errors_name_functions() {
+    for code in [
+        "local f = function() end; return f + 1",
+        "local f = function() end; return f .. 'x'",
+        "local f = function() end; return #f",
+        "local f = function() end; return f < 1",
+        "local f = function() end; return f.x",
+    ] {
+        let error = expect_error(code);
+        assert!(
+            error.to_string().contains("function"),
+            "function error must name function: {error}"
+        );
+    }
 }
 
 #[test]

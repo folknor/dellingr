@@ -44,7 +44,7 @@ impl State {
                     Ok(false)
                 }
             }
-            None => Err(self.type_error(TypeError::TableIndex(tbl_val.typ_simple()))),
+            None => Err(self.type_error(TypeError::TableIndex(tbl_val.typ(&self.heap)))),
         }
     }
 
@@ -59,7 +59,7 @@ impl State {
         let positive_offset = self.stack.len() - negative_offset as usize - 1;
         let key = self.get_string_constant(frame, key_id);
         let obj_ptr = self.stack[positive_offset].as_object_ptr();
-        let typ = self.stack[positive_offset].typ_simple();
+        let typ = self.stack[positive_offset].typ(&self.heap);
 
         match obj_ptr.and_then(|ptr| self.heap.as_table(ptr)) {
             Some(tbl) => {
@@ -101,7 +101,7 @@ impl State {
         let table_idx = self.stack.len() - 1;
         let key = self.get_string_constant(frame, key_id);
         let obj_ptr = self.stack[table_idx].as_object_ptr();
-        let typ = self.stack[table_idx].typ_simple();
+        let typ = self.stack[table_idx].typ(&self.heap);
 
         match obj_ptr.and_then(|ptr| self.heap.as_table(ptr)) {
             Some(tbl) => {
@@ -122,7 +122,7 @@ impl State {
         let val = self.pop_val();
         let key = self.pop_val();
         let positive_offset = self.stack.len() - negative_offset as usize - 1;
-        let tbl_typ = self.stack[positive_offset].typ_simple();
+        let tbl_typ = self.stack[positive_offset].typ(&self.heap);
         let obj_ptr = self.stack[positive_offset].as_object_ptr();
 
         match obj_ptr.and_then(|ptr| self.heap.as_table(ptr)) {
@@ -182,7 +182,7 @@ impl State {
             return Ok(());
         }
 
-        Err(self.type_error(TypeError::Length(val.typ_simple())))
+        Err(self.type_error(TypeError::Length(val.typ(&self.heap))))
     }
 
     #[hotpath::measure]
@@ -233,7 +233,7 @@ impl State {
         {
             Some(ptr) => ptr,
             None => {
-                let typ = tbl_val.typ_simple();
+                let typ = tbl_val.typ(&self.heap);
                 return Err(self.type_error(TypeError::TableIndex(typ)));
             }
         };
@@ -369,7 +369,7 @@ impl State {
         } else {
             Err(self.error(ErrorKind::InternalError(format!(
                 "SetGlobal: expected string constant, got {}",
-                s.typ_simple()
+                s.typ(&self.heap)
             ))))
         }
     }
@@ -432,7 +432,7 @@ impl State {
         };
         let tbl_value = self.pop_val();
         let obj_ptr = tbl_value.as_object_ptr();
-        let typ = tbl_value.typ_simple();
+        let typ = tbl_value.typ(&self.heap);
 
         match obj_ptr.and_then(|ptr| self.heap.as_table(ptr)) {
             Some(tbl) => {
@@ -490,8 +490,8 @@ impl State {
             _ => {
                 // Type mismatch - error
                 return Err(self.error(ErrorKind::TypeError(TypeError::Comparison(
-                    v1.typ_simple(),
-                    v2.typ_simple(),
+                    v1.typ(&self.heap),
+                    v2.typ(&self.heap),
                 ))));
             }
         };
@@ -520,6 +520,6 @@ impl State {
     pub(super) fn pop_num(&mut self) -> Result<f64> {
         let val = self.pop_val();
         val.as_num()
-            .ok_or_else(|| self.type_error(TypeError::Arithmetic(val.typ_simple())))
+            .ok_or_else(|| self.type_error(TypeError::Arithmetic(val.typ(&self.heap))))
     }
 }

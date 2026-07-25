@@ -286,9 +286,95 @@ fn tostring_errors_propagate_without_format_wrapping() {
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect_err("__tostring must fail");
     assert!(
-        matches!(&error.kind, ErrorKind::InternalError(message) if message == "format tostring boom"),
+        matches!(&error.kind, ErrorKind::ScriptError(message) if message == "format tostring boom"),
         "format must propagate the original error unchanged, got {error:?}"
     );
+}
+
+#[test]
+fn tostring_and_print_reject_non_string_metamethod_results() {
+    for expression in ["tostring(value)", "print(value)"] {
+        expect_runtime_error(
+            &format!(
+                r#"
+                local value = setmetatable({{}}, {{
+                    __tostring = function() return {{}} end
+                }})
+                {expression}
+                "#
+            ),
+            "'__tostring' must return a string",
+        );
+        expect_runtime_error(
+            &format!(
+                r#"
+                local value = setmetatable({{}}, {{
+                    __tostring = function() return true end
+                }})
+                {expression}
+                "#
+            ),
+            "'__tostring' must return a string",
+        );
+    }
+}
+
+#[test]
+fn tostring_accepts_numeric_metamethod_results() {
+    assert_eq!(
+        run_bytes(
+            r#"
+            local value = setmetatable({}, { __tostring = function() return 42 end })
+            return tostring(value)
+            "#
+        ),
+        b"42"
+    );
+}
+
+#[test]
+fn tostring_object_identity_matches_pointer_format() {
+    let rendered = run_bytes(
+        r#"
+        local table_value = {}
+        local function_value = function() end
+        return tostring(table_value) .. "|" .. tostring(table_value)
+            .. "|" .. tostring(function_value) .. "|" .. string.format("%p", table_value)
+            .. "|" .. string.format("%p", function_value)
+        "#,
+    );
+    let rendered = String::from_utf8(rendered).expect("rendering is UTF-8");
+    let fields: Vec<_> = rendered.split('|').collect();
+    assert_eq!(fields.len(), 5);
+    assert_eq!(fields[0], fields[1]);
+    assert!(fields[0].starts_with("table: 0x"));
+    assert!(fields[2].starts_with("function: 0x"));
+    assert!(!rendered.contains("ObjectKey"));
+    assert_eq!(fields[0].strip_prefix("table: "), Some(fields[3]));
+    assert_eq!(fields[2].strip_prefix("function: "), Some(fields[4]));
+}
+
+#[test]
+fn script_error_has_source_line_and_state_remains_reusable() {
+    let mut state = State::new();
+    state
+        .load_string_named("error('oops')", Some("input".to_string()))
+        .expect("error source compiles");
+    let error = state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+        .expect_err("script error must fail");
+    assert!(matches!(&error.kind, ErrorKind::ScriptError(message) if message == "oops"));
+    assert_eq!(error.line_num(), 1);
+    assert_eq!(error.stack_trace[0].source.as_deref(), Some("input"));
+    assert!(error.to_string().starts_with("input:1: oops"));
+
+    state
+        .load_string("return 7")
+        .expect("reuse source compiles");
+    state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(1))
+        .expect("state remains reusable after script error");
+    assert_eq!(state.to_number(-1).expect("reuse result is a number"), 7.0);
 }
 
 #[test]

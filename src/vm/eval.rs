@@ -244,7 +244,7 @@ impl State {
             } else if val.as_num().is_some() {
                 total_len += 32;
             } else {
-                return Err(self.type_error(TypeError::Concat(val.typ_simple())));
+                return Err(self.type_error(TypeError::Concat(val.typ(&self.heap))));
             }
         }
 
@@ -336,6 +336,20 @@ impl State {
         self.eval_closure_frame(closure, old_stack_bottom, num_args, Vec::new())
     }
 
+    /// Fill in a runtime error's source line from the frame it surfaced in.
+    ///
+    /// Every error-return path out of a Lua frame must go through this, so that
+    /// the line rendered alongside the traceback's source always comes from the
+    /// same frame. An error that already carries a location keeps it - that is
+    /// how parser errors survive with their own line and column.
+    fn locate_in_frame(error: Error, frame: &Frame) -> Error {
+        if error.line_num == 0 {
+            Error::new(error.kind, frame.current_line() as usize, error.column)
+        } else {
+            error
+        }
+    }
+
     fn eval_closure_frame(
         &mut self,
         closure: Closure,
@@ -386,6 +400,7 @@ impl State {
                 // Only attach stack trace if error doesn't already have one
                 // (inner function calls may have already attached the trace)
                 let e = if e.stack_trace.is_empty() {
+                    let e = Self::locate_in_frame(e, &frame);
                     let trace = self.build_stack_trace(&frame);
                     let e = e.with_stack_trace(trace);
                     // Notify host callbacks of the error
@@ -416,6 +431,7 @@ impl State {
                         let e = self.error(ErrorKind::RuntimeError(
                             "too many results (limit 255)".into(),
                         ));
+                        let e = Self::locate_in_frame(e, &frame);
                         let trace = self.build_stack_trace(&frame);
                         let e = e.with_stack_trace(trace);
                         self.host_error(&e);

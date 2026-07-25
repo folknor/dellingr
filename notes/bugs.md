@@ -116,8 +116,9 @@ local function id(s) return s end
   the `vararg_call_bases` / `MARK_CALL_BASE` machinery rather than at method
   lookup itself.
 - **Severity:** high. The idiom is ordinary Lua, it fails loudly rather than
-  silently, and the `internal error` variant is the taxonomy problem of #52 as
-  well as a wrong result.
+  silently. Note the `internal error` wording here is now accurate rather than
+  a taxonomy slip: since #52 landed, `InternalError` genuinely means a VM bug,
+  which is what this is.
 - **Not yet located.** Start at the method-call desugaring in the parser and
   the call-base marking for dynamic argument counts; the front-end audit
   explicitly cleared "method-call desugaring" and `mark_call_base` bounds, so
@@ -266,46 +267,6 @@ consistent and reusable, the panicking forms are the odd ones out. Suggest
 `check_stack_space` in the growth arm and converting the asserts to
 `InvalidStackIndex` errors pre-1.0.
 
-### 49. `print`/`tostring` accept a non-string `__tostring` result (C-B7)
-
-`to_string_with_meta` (`src/vm/table_ops.rs:363-392`) stringifies whatever
-`__tostring` returns; its sibling `bytes_with_tostring_meta` (396-429)
-correctly errors "'__tostring' must return a string". Reference errors in
-both. `print` and the `tostring` builtin use the permissive one
-(`lua_std/basic.rs:132, 223`).
-`print(setmetatable({}, { __tostring = function() return {} end }))` errors
-in reference, prints "object: ..." in dellingr. Fix: fold
-`to_string_with_meta` over `bytes_with_tostring_meta` (one code path, one
-behavior).
-
-### 50. `__index` bottoming out in a string value errors instead of chaining (C-B8)
-
-`handle_index_metamethod_inner` (`src/vm/metamethod.rs:88-137`) accepts only
-table/function/RustFn handlers; a string `__index` (legal in reference,
-where indexing re-dispatches on the string) raises a type error. Exotic;
-note-only given the "no string metatable" design, but the error message
-("attempt to index a table value" via `typ_simple`) is doubly wrong.
-
-### 51. Error messages misreport functions as tables (C-B9)
-
-`Val::typ_simple` (`src/vm/lua_val.rs:94`) maps every `Obj` to
-`LuaType::Table` "for display purposes". Indexing a Lua function
-(`local f = function() end; return f.x`) reports "attempt to index a *table*
-value". Cosmetic, but user-facing and visible in diff tests against
-reference messages.
-
-### 52. Script `error()` raises `ErrorKind::InternalError` (D-D10, error taxonomy)
-
-`src/lua_std/basic.rs:140-147` implements the `error` builtin with
-`ErrorKind::InternalError(message)`. `src/error.rs:97-99` documents
-`InternalError` as "corrupt bytecode or VM bug ... report these as bugs" and
-renders it "internal error: <msg>". So `error("oops")` surfaces as an
-internal VM bug ("0:0: internal error: oops") - wrong taxonomy for host
-telemetry (an embedder filtering `InternalError` for crash reporting gets
-user-raised errors), and diverges from reference's `input:LINE: oops`.
-`RuntimeError` (or a dedicated `ScriptError` variant carrying the position
-prefix) is the right shape. Spans error.rs and basic.rs.
-
 ### 53. Anchors created inside the `load_state` setup closure are silently invalidated (D-D11)
 
 `src/vm/save_state.rs:599`: `materialize_payload` ends with
@@ -335,7 +296,10 @@ From E (E-E16, all confirmed at code level, cosmetic-to-small):
 - String library rejects number arguments where reference coerces
   (`string.len(42)`, `string.sub(123, 1)` error). One systematic decision
   should be recorded either way.
-- `error()` ignores the level argument and adds no position prefix (arguably
+- `error()` ignores the level argument. The position prefix half of this item
+  is fixed - errors now render `chunk:line: message` from the frame they
+  surfaced in - but `level` is still unimplemented, so `error(msg, 2)` cannot
+  blame the caller and `error(msg, 0)` cannot suppress the prefix (arguably
   deliberate without pcall).
 - `string.format("%u")` accepted; Lua 5.4 removed `%u`. Harmless leniency,
   but the module claims the 5.4 contract - decide deliberately.

@@ -3,7 +3,6 @@
 //! This module contains methods for pushing, popping, and manipulating
 //! values on the VM stack.
 
-use std::borrow::Cow;
 use std::cmp::Ordering;
 
 use super::lua_val::{RustFunc, Val};
@@ -169,14 +168,13 @@ impl State {
         let i = self.convert_idx(idx)?;
         let val = &self.stack[i];
         val.as_num()
-            .ok_or_else(|| self.type_error(super::TypeError::Arithmetic(val.typ_simple())))
+            .ok_or_else(|| self.type_error(super::TypeError::Arithmetic(val.typ(&self.heap))))
     }
 
     /// Converts the value at the given index to a UTF-8 string.
     /// Lua strings with invalid UTF-8 bytes are converted lossily.
-    pub fn to_string(&self, idx: isize) -> Result<String> {
-        let i = self.convert_idx(idx)?;
-        Ok(self.stack[i].to_string_with_heap(&self.heap))
+    pub fn to_string(&mut self, idx: isize) -> Result<String> {
+        Ok(String::from_utf8_lossy(&self.bytes_with_default_string_coercion(idx)?).into_owned())
     }
 
     /// Returns exact Lua string bytes at the given index.
@@ -194,9 +192,8 @@ impl State {
     }
 
     /// Converts any Lua value to bytes using Lua's default string coercion rules.
-    pub(crate) fn to_bytes_coerce(&self, idx: isize) -> Result<Cow<'_, [u8]>> {
-        let i = self.convert_idx(idx)?;
-        Ok(self.stack[i].to_bytes_with_heap(&self.heap))
+    pub(crate) fn bytes_coerce(&mut self, idx: isize) -> Result<Vec<u8>> {
+        self.bytes_with_default_string_coercion(idx)
     }
 
     /// Returns the type of the value in the given acceptable index.

@@ -49,7 +49,7 @@ enum Conversion {
 
 pub(crate) fn format(state: &mut State) -> Result<u8> {
     let format_bytes = match state.typ(1) {
-        LuaType::Number => state.to_bytes_coerce(1)?.into_owned(),
+        LuaType::Number => state.bytes_coerce(1)?,
         LuaType::String => state.to_bytes(1)?.to_vec(),
         received => {
             let got = if state.get_top() == 0 {

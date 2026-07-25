@@ -184,7 +184,7 @@ pub(crate) fn open_table(state: &mut State) {
             let typ = state.typ(-1);
             match typ {
                 LuaType::String | LuaType::Number => {
-                    result.extend_from_slice(state.to_bytes_coerce(-1)?.as_ref());
+                    result.extend_from_slice(&state.bytes_coerce(-1)?);
                 }
                 _ => return Err(state.error(ErrorKind::TypeError(TypeError::Concat(typ)))),
             }

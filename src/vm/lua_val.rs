@@ -2,7 +2,6 @@ use super::Result;
 use super::State;
 use super::object::{Closure, GcHeap, ObjectPtr, StringPtr};
 
-use std::borrow::Cow;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 
@@ -83,42 +82,15 @@ impl Val {
         }
     }
 
-    /// Returns the value's type for non-object types.
-    /// For objects, this is unsafe to call - use typ() with heap access instead.
-    /// This is useful for error messages where we already know it's not an object.
-    pub(super) fn typ_simple(&self) -> LuaType {
+    pub(super) fn to_bytes_with_heap(self, heap: &GcHeap) -> Vec<u8> {
         match self {
-            Nil => LuaType::Nil,
-            Bool(_) => LuaType::Boolean,
-            Num(_) => LuaType::Number,
-            RustFn(_) => LuaType::Function,
-            Str(_) => LuaType::String,
-            Obj(_) => LuaType::Table, // Assume table for display purposes
-        }
-    }
-
-    /// Convert this value to a string representation.
-    /// Requires heap access to get string and object contents.
-    pub(super) fn to_string_with_heap(self, heap: &GcHeap) -> String {
-        match self {
-            Nil => "nil".to_string(),
-            Bool(b) => b.to_string(),
-            Num(n) => n.to_string(),
-            RustFn(_) => RUST_FN_DISPLAY.to_string(),
-            Obj(o) => format!("{o}"),
-            Str(s) => String::from_utf8_lossy(heap.get_string(s)).into_owned(),
-        }
-    }
-
-    pub(super) fn to_bytes_with_heap(self, heap: &GcHeap) -> Cow<'_, [u8]> {
-        match self {
-            Nil => Cow::Borrowed(b"nil"),
-            Bool(false) => Cow::Borrowed(b"false"),
-            Bool(true) => Cow::Borrowed(b"true"),
-            Num(n) => Cow::Owned(n.to_string().into_bytes()),
-            RustFn(_) => Cow::Borrowed(b"<function>"),
-            Obj(o) => Cow::Owned(format!("{o}").into_bytes()),
-            Str(s) => Cow::Borrowed(heap.get_string(s)),
+            Nil => b"nil".to_vec(),
+            Bool(false) => b"false".to_vec(),
+            Bool(true) => b"true".to_vec(),
+            Num(n) => n.to_string().into_bytes(),
+            RustFn(_) => b"<function>".to_vec(),
+            Obj(_) => unreachable!("object rendering requires State pointer identity"),
+            Str(s) => heap.get_string(s).to_vec(),
         }
     }
 }
@@ -136,18 +108,10 @@ impl fmt::Debug for Val {
     }
 }
 
-impl fmt::Display for Val {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Nil => write!(f, "nil"),
-            Bool(b) => b.fmt(f),
-            Num(n) => n.fmt(f),
-            Obj(o) => o.fmt(f),
-            Str(s) => s.fmt(f),
-            RustFn(_) => f.write_str(RUST_FN_DISPLAY),
-        }
-    }
-}
+// No `Display for Val`. Rendering an object needs the heap for its type and
+// the State for its deterministic identity, so a heap-free impl could only
+// leak the slotmap key's `Debug` form - which is exactly what finding #61 was.
+// User-visible conversion goes through `State::to_string`/`bytes_coerce`.
 
 /// This is very dangerous, since f64 doesn't implement Eq.
 impl Eq for Val {}
@@ -274,16 +238,11 @@ mod tests {
     }
 
     #[test]
-    fn rust_function_rendering_is_consistent_and_allocation_free_for_bytes() {
+    fn rust_function_rendering_is_consistent_for_bytes() {
         let value = Val::RustFn(first_callback);
         let state = State::empty();
 
         assert_eq!(format!("{value:?}"), RUST_FN_DISPLAY);
-        assert_eq!(format!("{value}"), RUST_FN_DISPLAY);
-        assert_eq!(value.to_string_with_heap(&state.heap), RUST_FN_DISPLAY);
-        assert!(matches!(
-            value.to_bytes_with_heap(&state.heap),
-            Cow::Borrowed(b"<function>")
-        ));
+        assert_eq!(value.to_bytes_with_heap(&state.heap), b"<function>");
     }
 }
