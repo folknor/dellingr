@@ -318,9 +318,15 @@ pub(crate) fn open_math(state: &mut State) {
         state.consume_cost(1)?;
         state.check_type(1, LuaType::Number)?;
         let x = state.to_number(1)?;
+        let integral = x.trunc();
+        let fractional = if matches!(x.partial_cmp(&integral), Some(std::cmp::Ordering::Equal)) {
+            0.0
+        } else {
+            x - integral
+        };
         state.set_top(0);
-        state.push_number(x.trunc());
-        state.push_number(x.fract());
+        state.push_number(integral);
+        state.push_number(fractional);
         Ok(2)
     });
 

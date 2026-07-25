@@ -99,6 +99,15 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Checks whether this scope can accommodate more locals without changing it.
+    fn ensure_local_capacity(&self, additional: usize) -> Result<()> {
+        if additional > u8::MAX as usize - self.locals.len() {
+            Err(self.error(SyntaxError::TooManyLocals))
+        } else {
+            Ok(())
+        }
+    }
+
     /// Constructs an error of the given kind at the current position.
     // TODO: rename to error_here
     #[must_use]

@@ -236,12 +236,11 @@ impl<'a> Parser<'a> {
     fn parse_numeric_for(&mut self, name: &str) -> Result<()> {
         // The start(current), stop and step are stored in three "hidden" local slots.
         let current_local_slot = self.locals.len() as u8;
-        self.add_local("")?;
-        self.add_local("")?;
-        self.add_local("")?;
 
-        // The actual local is in a fourth slot, so that it can be reassigned to.
-        self.add_local(name)?;
+        // Control expressions are evaluated in the enclosing scope, before the
+        // loop variable exists. Check capacity now so its error precedence is
+        // unchanged without bringing the locals into scope too early.
+        self.ensure_local_capacity(4)?;
 
         // First, all 3 control expressions are evaluated.
         self.parse_expr()?;
@@ -250,6 +249,13 @@ impl<'a> Parser<'a> {
 
         // optional step value
         self.parse_numeric_for_step()?;
+
+        self.add_local("")?;
+        self.add_local("")?;
+        self.add_local("")?;
+
+        // The actual local is in a fourth slot, so that it can be reassigned to.
+        self.add_local(name)?;
 
         // The ForPrep command pulls three values off the stack and places them
         // into locals to use in the loop.
@@ -302,24 +308,33 @@ impl<'a> Parser<'a> {
         }
         self.expect(TokenType::In)?;
 
-        // The hidden control variables: iterator function, state, control var
-        let base_slot = self.locals.len() as u8;
-        self.add_local("")?; // iterator function (slot 0)
-        self.add_local("")?; // state (slot 1)
-        self.add_local("")?; // control variable (slot 2)
-
-        // Add the visible loop variables
         let num_loop_vars =
             u8::try_from(names.len()).map_err(|_| self.error(SyntaxError::TooManyLocals))?;
-        for name in &names {
-            self.add_local(name)?;
-        }
+        let local_count = 3usize
+            .checked_add(names.len())
+            .ok_or_else(|| self.error(SyntaxError::TooManyLocals))?;
+
+        // The hidden control variables: iterator function, state, control var
+        let base_slot = self.locals.len() as u8;
+
+        // The expressions run in the enclosing scope. Preserve the existing
+        // local-limit error without declaring the future loop locals early.
+        self.ensure_local_capacity(local_count)?;
 
         // Evaluate the expression list (should produce iterator, state, initial)
         // We expect exactly 3 values
         let (num_exprs, last_exp) = self.parse_explist()?;
 
         self.adjust_multi_assign(3, usize::from(num_exprs), &last_exp)?;
+
+        self.add_local("")?; // iterator function (slot 0)
+        self.add_local("")?; // state (slot 1)
+        self.add_local("")?; // control variable (slot 2)
+
+        // Add the visible loop variables
+        for name in &names {
+            self.add_local(name)?;
+        }
 
         self.expect(TokenType::Do)?;
 

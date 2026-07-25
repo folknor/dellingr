@@ -6,6 +6,7 @@ use super::Parser;
 use super::TokenStream;
 use super::parse_str;
 use crate::State;
+use crate::compiler::UpvalueDesc;
 use crate::error::{ErrorKind, SyntaxError};
 use crate::instr::{ArgCount, Builtin, RetCount};
 
@@ -605,6 +606,41 @@ fn test21() {
         ..Bytecode::default()
     };
     check_it(text, chunk);
+}
+
+#[test]
+fn generic_for_bytecode_keeps_control_and_visible_slots() {
+    let text = "for k, v in pairs(t) do x = k end";
+    let code = vec![
+        Instr::get_builtin(Builtin::Pairs),
+        Instr::get_global(0),
+        Instr::call(ArgCount::Fixed(1), RetCount::Fixed(3)),
+        Instr::tfor_prep(0),
+        Instr::tfor_call(0, 2),
+        Instr::tfor_loop(0, 4),
+        Instr::get_local(3),
+        Instr::set_global(1),
+        Instr::close_upvalues(3),
+        Instr::jump(-6),
+        Instr::close_upvalues(0),
+        Instr::ret(RetCount::Fixed(0)),
+    ];
+    let chunk = Bytecode {
+        code,
+        string_literals: vec!["t".into(), "x".into()],
+        num_locals: 5,
+        ..Bytecode::default()
+    };
+    check_it(text, chunk);
+}
+
+#[test]
+fn for_control_function_captures_enclosing_same_named_local() {
+    let chunk = parse_str("local i = 10; for i = (function() return i end)(), 10 do end")
+        .expect("for control fixture must compile");
+    let function = &chunk.nested[0];
+
+    assert_eq!(function.upvalues, vec![UpvalueDesc::Local(0)]);
 }
 
 #[test]

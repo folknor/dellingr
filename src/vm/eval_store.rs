@@ -482,13 +482,10 @@ impl State {
         let v1 = self.pop_val();
 
         let result = match (&v1, &v2) {
-            (Val::Num(n1), Val::Num(n2)) => {
-                let cmp = n1.partial_cmp(n2).unwrap_or(std::cmp::Ordering::Equal);
-                cmp == target
-            }
+            (Val::Num(n1), Val::Num(n2)) => n1.partial_cmp(n2).map(|cmp| cmp == target),
             (Val::Str(s1), Val::Str(s2)) => {
                 let cmp = self.heap.get_string(*s1).cmp(self.heap.get_string(*s2));
-                cmp == target
+                Some(cmp == target)
             }
             _ => {
                 // Type mismatch - error
@@ -499,8 +496,9 @@ impl State {
             }
         };
 
-        self.stack
-            .push(Val::Bool(if negate { !result } else { result }));
+        self.stack.push(Val::Bool(
+            result.is_some_and(|result| if negate { !result } else { result }),
+        ));
         Ok(())
     }
 

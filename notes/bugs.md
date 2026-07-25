@@ -125,37 +125,6 @@ print(s:find("a%d"))      -- reference: nil; dellingr: error "pattern too comple
 
 ## Medium severity
 
-### 17. `for` control expressions see the loop variable (scoping bug) (A-A4)
-
-- **Locations:** numeric: `stmt.rs:230-244` (`add_local("")` x3,
-  `add_local(name)`, then `parse_expr()` for start/stop/step); generic:
-  `stmt.rs:291-316` (hidden x3 + all visible names added, then
-  `parse_explist()`).
-- **Cause:** in Lua, control expressions are evaluated in the enclosing scope;
-  the loop variable is only in scope in the body. `find_last_local` picks the
-  newest binding, so any name collision resolves to the fresh (nil or stale)
-  loop-var slot. Worse, slot reuse can make it silently wrong rather than an
-  error: after an earlier scope used the same slot index, the stale value is
-  read as the start value (wrong iteration bounds, no error).
-- **Repro:**
-
-```lua
-local i = 5
-for i = i, 7 do print(i) end
--- reference: prints 5 6 7
--- dellingr: start expr reads the new slot (nil) -> runtime error
---           "'for' initial value must be a number"
-
-local t = {10, 20}
-for _, t in ipairs(t) do print(t) end
--- reference: prints 10 20
--- dellingr: ipairs(t) reads the new nil slot -> bad-argument error
-```
-
-- **Fix:** parse the control expressions first, then add the hidden + visible
-  locals (the emitted slot arithmetic already targets `locals.len()`-relative
-  slots, so record the base index before parsing and add the locals after).
-
 ### 18. Bare CR inside string literals (A-A5, sibling of the L17 CR fixes)
 
 - **Locations:** `lexer.rs` `lex_string` (353-368) rejects only `'\n'` inside
@@ -194,46 +163,6 @@ print("ok")
 - **Related, lower priority:** an unfinished `--[[` at EOF is silently
   accepted (skip_comment returns on None, lexer emits EOF); reference errors
   "unfinished long comment". Accepts-more divergence.
-
-### 20. NaN comparisons: `<=` and `>=` evaluate true (B-B3 + C-B3, two independent reports)
-
-- **Locations:** `src/vm/eval_store.rs:484-509` (`eval_compare` maps
-  `partial_cmp -> None` to `Ordering::Equal`), `src/vm/frame.rs:277-278`
-  (`<=` implemented as negated `>`, `>=` as negated `<`).
-- **Cause:** for NaN operands the comparison result is `Equal`, which is not
-  `Greater`/`Less`, so the negated forms return true. Reference: every
-  ordered comparison involving NaN is false. `<`/`>` are unaffected (Equal
-  matches neither target).
-- **Repro:**
-
-```lua
-print((0/0) <= 1)   -- dellingr: true, Lua: false
-print((0/0) >= 1)   -- dellingr: true, Lua: false
-print(1 <= 0/0)     -- dellingr: true, Lua: false
-print((0/0) < 1)    -- both: false (only <=/>= are wrong)
-```
-
-- **Fix:** on `partial_cmp() == None`, push false unconditionally (before the
-  negate step), or compute `<=` as a first-class comparison instead of
-  `!(>)`.
-
-### 21. Floored-modulo formula produces NaN for infinite divisor (B-B5)
-
-- **Location:** `src/vm/frame.rs:328-333` (`OP_MOD` computes
-  `a - (a/b).floor() * b`).
-- **Cause:** with `b = inf`: `a/b = 0`, `0 * inf = NaN`. Reference (5.2 and
-  5.4 `luai_nummod`) is fmod-based: `1 % math.huge == 1.0`,
-  `-1 % math.huge == inf`. The formula is also less exact than `fmod` for
-  large finite operands (rounding in `a/b` can flip the floor).
-- **Repro:**
-
-```lua
-print(1 % (1/0))    -- dellingr: nan,  Lua: 1.0
-print(-1 % (1/0))   -- dellingr: nan,  Lua: inf
-```
-
-- **Fix:** implement as reference does:
-  `m = a.rem(b) (fmod); if m != 0 && (m < 0) != (b < 0) { m += b }`.
 
 ### 22. `instr_tfor_call_rust_fn` truncates the result count with `as u8` (B-B6, host-API only)
 
@@ -414,18 +343,6 @@ print(table.concat(t, "", 2, 2))  -- reference: "x"; dellingr: ""
   255-result cap itself is a deliberate protocol limit (verified: RustFunc
   return counts are plain numbers in `vm/eval.rs:102-119`, no sentinel
   collision at exactly 255).
-
-### 39. `math.modf(+-inf)` returns NaN fractional part (E-E11)
-
-- **Location:** `src/lua_std/math.rs:323` (`x.fract()` =
-  `x - x.trunc()` = `inf - inf` = NaN for infinite inputs).
-- **Cause:** reference (5.2's C `modf`, 5.4's explicit `n == ip` test)
-  returns 0.0.
-- **Repro:**
-
-```lua
-print(math.modf(math.huge))  -- reference: inf 0.0 (5.2: "inf 0"); dellingr: inf nan
-```
 
 ---
 
@@ -797,7 +714,6 @@ glibc's.
 
 ## Orchestrator notes (carried from the corner reports)
 
-- #17 deserves a regression test before/with any fix.
 - The A-corner P2/P3 items (#18, #19, #40-#43) are diff-testable against
   lua5.2/lua5.4 with small scripts; the CR/VT cases need byte-level fixtures
   (careful with editors normalizing line endings).

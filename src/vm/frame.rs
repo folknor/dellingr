@@ -1,4 +1,13 @@
 use std::ops;
+
+/// Lua 5.4 floored modulo, including its special floating-point cases.
+fn lua_modulo(a: f64, b: f64) -> f64 {
+    let mut m = a % b;
+    if (m > 0.0 && b < 0.0) || (m < 0.0 && b > 0.0) {
+        m += b;
+    }
+    m
+}
 use std::sync::Arc;
 
 use super::super::compiler::RuntimeCaches;
@@ -327,9 +336,7 @@ impl Frame {
                 }
                 Instr::OP_MOD => {
                     add_cost!(state, local_cost, 1);
-                    // Lua uses floored modulo: a % b = a - floor(a/b) * b
-                    // This differs from Rust's remainder when signs differ
-                    state.eval_float_float(|a, b| a - (a / b).floor() * b)?;
+                    state.eval_float_float(lua_modulo)?;
                 }
                 Instr::OP_POW => {
                     add_cost!(state, local_cost, 1);
@@ -407,6 +414,18 @@ impl Frame {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lua_modulo_matches_lua54_floating_point_rules() {
+        assert_eq!(lua_modulo(5.0, -3.0), -1.0);
+        assert_eq!(lua_modulo(-5.0, 3.0), 1.0);
+        assert_eq!(lua_modulo(1.0, f64::INFINITY), 1.0);
+        assert_eq!(lua_modulo(-1.0, f64::INFINITY), f64::INFINITY);
+        assert_eq!(lua_modulo(1.0, f64::NEG_INFINITY), f64::NEG_INFINITY);
+        assert!(lua_modulo(f64::NAN, 1.0).is_nan());
+        assert!(lua_modulo(1.0, f64::NAN).is_nan());
+        assert!(lua_modulo(-0.0, 3.0).is_sign_negative());
+    }
 
     #[test]
     fn jump_accepts_i16_minimum_offset() {

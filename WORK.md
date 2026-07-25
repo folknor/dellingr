@@ -4,272 +4,227 @@ Current work item. Numbers refer to finding numbers in `notes/bugs.md`.
 
 ---
 
-## Targets #15, #16: work that is done but never charged
+## Targets #17, #20, #21, #39: semantic divergences from reference Lua
 
-Per-opcode instruction-cost accounting is dellingr's reason to exist - the
-README's pitch is bounded execution for a game tick. These two findings are
-holes in that budget large enough to drive a script through.
+Four independent, small correctness bugs. Grouped because each is a
+self-contained fix and all four are diff-testable against reference.
 
-**Verified together.** This script, run with `--limit 100000`:
+All verified by running against Lua 5.4.
+
+### #17 (Medium) - `for` control expressions see the loop variable
+
+In Lua the control expressions of a `for` are evaluated in the *enclosing*
+scope; the loop variable only exists inside the body. dellingr adds the locals
+first and then parses the expressions, so `find_last_local` resolves a name to
+the fresh loop slot.
+
+- numeric: `stmt.rs:230-244` - `add_local("")` x3, `add_local(name)`, *then*
+  `parse_expr()` for start/stop/step.
+- generic: `stmt.rs:291-316` - the three hidden locals plus every visible name
+  are added, *then* `parse_explist()`.
+
+**Verified:**
 
 ```lua
-local t = {}
-table.move(t, 1, 200000, 1)          -- 200k table ops
-
-local s = "x"
-for i = 1, 16 do s = s .. s end      -- 65536-byte string
-for i = 1, 200 do
-  local _ = s:gsub("x", "y")         -- 200 passes over 65 KB
-end
+local i = 5
+for i = i, 7 do print(i) end
 ```
 
-reports **`Cost used: 2`**. Hundreds of megabytes of real work, charged two.
+Reference prints `5 6 7`. dellingr raises
+`attempt to perform arithmetic on a nil value` - the start expression read the
+new, still-nil slot.
 
-### #15 (High) - `table.move` is unbounded and uncharged, and overflows
+Worse than the error suggests: slot reuse can make this silently *wrong*
+rather than an error. If an earlier scope used the same slot index, the stale
+value is read as the start value, giving wrong iteration bounds with no
+diagnostic. The generic form has the same shape:
+`for _, t in ipairs(t) do ... end`.
 
-`src/lua_std/table.rs:255-307`. Charges a flat 1, then loops `e - f + 1` times
-doing `get_table` + `set_table_raw`, both free. The range comes straight from
-script arguments and is **not bounded by table size**, so nil reads and nil
-writes still iterate. No allocation is required, so memory limits do not help
-either - `table.move({}, 1, 2^30, 1)` is ~10^9 table operations for cost 1.
+Fix direction: parse the control expressions first, then add the hidden and
+visible locals. The emitted slot arithmetic already targets `locals.len()`
+-relative slots, so record the base index before parsing and add the locals
+after.
 
-Separately, `e - f + 1` overflows `isize` at saturated extremes:
-`table.move(t, -1e300, 1e300, 1)` gives `f = isize::MIN`, `e = isize::MAX`.
-Panic in debug, silent wrap in release. Reference guards this with
-"too many elements to move" (`f > 0 || e < LUA_MAXINTEGER + f`).
+### #20 (Medium) - NaN `<=` and `>=` evaluate true
 
-`table_sort` already does the right thing here - it charges `n.max(1)` **before**
-running the comparator, with a comment explaining the contract. That is the
-template.
+`eval_compare` (`src/vm/eval_store.rs:484-509`) maps `partial_cmp -> None` to
+`Ordering::Equal`, and `frame.rs:277-278` implements `<=` as negated `>` and
+`>=` as negated `<`. For NaN the result is `Equal`, which is neither
+`Greater` nor `Less`, so the negated forms return true.
 
-### #16 (High) - pattern matching and string byte-work are entirely uncharged
+**Verified:**
 
-There is no `consume_cost` anywhere in `src/lua_std/string.rs`,
-`src/lua_std/string_format.rs`, or `src/patterns/`. Consequences:
+| expression | dellingr | reference |
+|---|---|---|
+| `(0/0) <= 1` | true | false |
+| `(0/0) >= 1` | true | false |
+| `1 <= 0/0` | true | false |
+| `(0/0) < 1` | false | false |
 
-- A script builds a large string with ~17 concat ops by repeated doubling,
-  then every `gsub` / `find` / `match` / `upper` / `format("%s")` does O(n) or
-  worse for ~0 charge, in a loop. That is the measurement above.
-- Backtracking patterns are superpolynomial in *time* while the depth cap only
-  bounds *recursion*: `"a*a*a*a*b"` against a long non-matching run of `a`s
-  does O(n^k) `singlematch` work inside `max_expand` for one free call.
-- `table.concat(t)` does `len` lookups and builds an arbitrarily large byte
-  vector for cost 1 (this half is also C-D2).
+`<` and `>` are already correct, since `Equal` matches neither target.
 
-`table.insert`/`remove` charging 1 for O(n) is already acknowledged in
-`notes/optimizations.md`; the string and pattern side is tracked nowhere.
+Fix: on `partial_cmp() == None`, push false unconditionally *before* the
+negate step - or compute `<=` as a first-class comparison rather than `!(>)`.
 
-### The cost contract
+### #21 (Medium) - floored modulo gives NaN for an infinite divisor
 
-From `table_sort`'s existing comment and the L18 convention: **charge before
-the side effect**, so an exhausted budget blocks the work rather than letting
-it complete and only then failing. `cost_remaining` is `i64` precisely so the
-operation that crosses the boundary completes and the *next* costed op fails.
+`OP_MOD` (`src/vm/frame.rs:328-333`) computes `a - (a/b).floor() * b`. With
+`b = inf`: `a/b` is 0, and `0 * inf` is NaN.
 
----
+**Verified:**
 
-## Agreed plan - staged, this commit is stage 1 only
+| expression | dellingr | reference |
+|---|---|---|
+| `1 % (1/0)` | NaN | 1.0 |
+| `-1 % (1/0)` | NaN | inf |
 
-Fixing #16 changes what every string operation costs. There is no conversion
-formula: the increase depends on string lengths, output expansion, match
-success, captures and backtracking shape. That makes it a **cost-model version
-bump**, not a bug fix - embedders must re-measure their tick budgets, and
-snapshots persist cost counters so the save format is implicated too.
+The formula is also less exact than `fmod` for large finite operands, where
+rounding in `a/b` can flip the floor.
 
-So it is staged, and this commit is stage 1:
+Fix: implement as reference's `luai_nummod` does -
+`m = a.rem(b)` (fmod), then `if m != 0 && (m < 0) != (b < 0) { m += b }`.
 
-- **Stage 1 (this commit):** `table.move` correctness and charging, plus the
-  neutral cost-meter infrastructure that stage 2 needs. `table.move`
-  undercharging is a plain bug - it already charged, just not proportionally.
-- **Stage 2 (separate commit):** string, pattern, `format` and `concat`
-  charging. This is the breaking half and is isolated so it can be held back or
-  reverted before a release without disturbing stage 1.
+### #39 (Medium) - `math.modf(+-inf)` returns a NaN fractional part
 
-### Stage 1: `table.move`
+`src/lua_std/math.rs:323` uses `x.fract()`, which is `x - x.trunc()`, so
+`inf - inf` is NaN.
 
-Arguments parse as exact `i64` via the existing `exact_i64` conversion, so
-non-integral and out-of-range arguments fail cleanly rather than saturating
-through `as isize`. Apply **both** reference guards, before any mutation or
-charge:
+**Verified:**
 
-- source span: "too many elements to move";
-- destination end: "destination wrap around".
+| expression | dellingr | reference |
+|---|---|---|
+| `math.modf(1/0)` | `inf`, `NaN` | `inf`, `0.0` |
+| `math.modf(-1/0)` | `-inf`, `NaN` | `-inf`, `0.0` |
 
-Reference does both up front (`ltablib.c`'s `tmove`), and doing so is what
-removes the `e - f + 1` overflow: today `table.move(t, -1e300, 1e300, 1)` gives
-`f = isize::MIN`, `e = isize::MAX` and panics in debug, silently wraps in
-release and returns without moving anything.
-
-Charging:
-
-- **With an active finite budget:** charge one unit immediately before each
-  source-lookup/destination-write pair, and stop before the first element whose
-  charge finds the budget exhausted. A single up-front `consume_cost(count)` is
-  *not* sufficient, because `consume_cost`'s contract lets an operation that
-  starts with positive budget cross it and still complete - so a billion-unit
-  charge would still run a billion iterations once.
-- **Without a configured budget:** one `count.max(1)` charge before the loop,
-  keeping the current tight loop and paying no per-element overhead.
-
-A budget failure can therefore leave a partially moved table. That follows from
-treating each element as a costed operation, and errors already kill the
-callback. Both the forward and backward overlap paths must charge in their
-actual copy order, so partial results stay deterministic.
-
-### Stage 1: cost-meter infrastructure
-
-- A count-only meter for the default/no-limit path.
-- A finite-budget meter borrowing only `remaining` and `used`, with saturating
-  counters matching `State::consume_cost`.
-- A private flag recording whether a real budget was configured. **Do not infer
-  this from `i64::MAX`** after earlier charges have already moved the counter.
-
-Defined outside `vm` so stage 2 can pass it into the matcher without the
-matcher ever seeing `State`.
-
-### Stage 2 (recorded here, not implemented in this commit)
-
-Unit: one per deterministic logical work item - one table element visited, one
-byte processed or emitted, one matcher primitive. No hardware-inspired divisor;
-existing costs are already semantic rather than cycle-calibrated (table
-construction is one per element, `table.sort` is `n`, not `n log n`). Per
-operation, `cost = max(1, sum of work units)`.
-
-Charge points in the matcher, threaded via the meter: every `patt_match`
-entry/continuation, every `singlematch`, every pattern byte inspected locating
-or testing a bracket class, every subject byte inspected by `%b`, every byte
-compared by a backreference, every literal-search comparison. Pattern
-validation reserves `pattern.len()` up front. **Do not** batch as one-per-K -
-that makes the stopping boundary depend on K and lets a pathological matcher
-overshoot by K.
-
-Per-function contractual work:
-
-| Operation | Work |
-|---|---|
-| `string.len` | free, O(1) |
-| `string.sub` | returned bytes |
-| `string.upper/lower/reverse` | input length |
-| `string.find` | pattern length + comparisons/steps + returned capture bytes |
-| `string.match` | pattern length + steps + materialized result bytes |
-| `string.gmatch` create | pattern validation length |
-| each `gmatch` step | steps + materialized capture bytes |
-| `string.gsub` | pattern + search work + replacement bytes examined + emitted bytes + captures materialized for callbacks |
-| `string.format` | format bytes scanned + output bytes |
-| `table.concat` | elements visited + output bytes including separators |
-
-Both sides for constructors: a no-match `gsub` charges once to scan and once to
-copy. Output buffers charge before mutating, since `gsub`/`format`/`concat`
-output size is unknown at entry. Matcher work must be committed before a `gsub`
-replacement function re-enters Lua.
-
-Matcher failures need `MatchError::{Pattern, Budget}` so budget exhaustion
-surfaces as `ErrorKind::BudgetExceeded` rather than being flattened into the
-existing pattern `RuntimeError`.
-
-Staging for stage 2: export a `COST_MODEL_VERSION`, release as the next pre-1.0
-breaking minor, do **not** feature-gate a legacy mode (the old behaviour is the
-hole, and compile-time modes fragment contractual costs), and bump/validate the
-cost-model version in snapshots so old-unit counters cannot silently continue.
-
-`analyze_cost` stays numerically unchanged - it cannot resolve data lengths or
-even prove a call reaches the stdlib, since globals are mutable. Its docs and
-the CLI output should say explicitly that it covers only statically knowable
-bytecode charges and excludes runtime data-dependent native work. Pin that with
-a test: `analyze_cost("return string.upper('abcd')") == 0` while execution
-costs 4.
-
-### Stage 1 tests
-
-- `table.move` cost for empty, one-element and many-element ranges.
-- Both overlap directions.
-- Source-span overflow and destination wrap-around rejected with the reference
-  messages, before any mutation.
-- Budget zero performs no mutation at all.
-- Budget 2 leaves a deterministic partial move, identical across runs.
-- Extreme arguments (`-1e300`/`1e300`) produce a clean error in both debug and
-  release rather than a panic or a silent no-op.
-- Two fresh states running the same script report identical cost.
+Reference returns 0.0 for the fractional part (5.2 via C `modf`, 5.4 via an
+explicit `n == ip` test).
 
 ---
 
-## Review findings to fix
+## Agreed implementation plan
 
-Both range guards, the per-element stop-before-work charging, deterministic
-partial mutation in both overlap directions, the explicit flag never being
-inferred from `i64::MAX`, and `CostMeter`'s usability without `State` all
-verified correct. Three defects remain.
+Correction to the above: **Lua 5.2 also returns NaN** for `1 % inf` - its
+`luai_nummod` is the old direct floor formula, and fmod-plus-adjust is the 5.4
+implementation. For #39, 5.2 returns *signed* zero (`-0` for `-inf`) while 5.4
+explicitly returns positive `0.0`. So both are 5.4-targeted changes.
 
-### 1. Restored configured budgets silently become unconfigured
+That matters for testing: `diff_test.sh` passes a file when dellingr matches
+**either** 5.2 or 5.4, whole-file. A modulo example on its own would therefore
+pass before *and* after the fix and enforce nothing. Each new example must
+include something only 5.4 produces, so the whole file is forced to match 5.4.
 
-`save_state.rs:911` restores `cost_remaining`, `cost_budget` and `cost_used`,
-but **not** `cost_budget_configured`. A fresh `State` starts with the flag
-false, so after `load_state` a `table.move` takes the `CountOnly` path and
-bypasses the remaining budget entirely.
+### #17 - `for` control scope
 
-Concretely: restore with two units remaining, move five elements - all five
-complete, `cost_used` grows, and `cost_remaining` is still two. Restore with
-*zero* remaining and the move still runs; only some later opcode notices.
+Record the base, parse all control expressions, then declare the locals. This
+is sufficient for both forms. Slot layout is unchanged: numeric keeps controls
+at `base..base+2` and the visible variable at `base+3`; generic keeps controls
+at `base..base+2` and visible variables at `base+3..`.
 
-`set_cost_budget` afterwards is not a workaround, because it resets usage and
-remaining budget rather than continuing the persisted one.
+Nothing else depends on declaration timing: the per-iteration close stays at
+`base + 3`, `enter_loop(base)` still makes `break` close every loop-owned slot,
+`exit_loop` still patches jumps before `level_down` emits the final close, and
+`FOR_PREP` / `FOR_LOOP` / `TFOR_PREP` / `TFOR_CALL` / `TFOR_LOOP` keep exactly
+the same operands. Expression parsing adds no persistent locals - function
+literals replace and restore the outer locals vector in `parse_chunk`
+(`parser.rs:491`), so nested closures cannot move the saved base.
 
-I told the build session to defer this as a snapshot-format change. That was
-wrong: it changes observable enforcement and breaks continuation of an
-embedder's persisted budget, which is the guarantee the whole cost model
-exists to provide. **Persist and restore the configured mode in stage 1**, with
-whatever format version handling that requires.
+Bytecode stability follows because `add_local` emits no instructions or
+literals; it only updates `locals` and `num_locals`. Any program whose control
+expressions do not mention a loop-variable name compiles byte-identically.
 
-### 2. Empty moves evade a configured budget
+Add a non-mutating `ensure_local_capacity(additional)` preflight - 4 slots for
+numeric, `3 + names.len()` for generic - so the existing "too many locals"
+error precedence is preserved without declaring anything early.
 
-`table.rs:290`: the `count.max(1)` charge happens only on the no-budget path.
-With a configured budget an empty range enters neither copy loop and so charges
-**zero**, even when the budget is already exhausted.
+### #20 - NaN ordered comparisons
 
-So `table.move(t, 2, 1, 1)` now succeeds against a zero budget, where the old
-flat-1 charge would have failed before doing anything. That is a regression the
-existing empty-range cost test misses, because it only exercises an
-unconfigured state.
+`eval_compare` (`eval_store.rs:480`) is reached only by the four ordered
+opcodes in `frame.rs:273`, and has exactly three paths: number/number via
+`partial_cmp` (where `None` means NaN), string/string total byte ordering
+(never `None`), and the existing type error. There is no comparison-metamethod
+path - those are deliberately unsupported - and equality uses separate arms.
 
-Charge the `max(1)` minimum on both paths, and extend the test to cover a
-configured budget.
+So: represent the result as `Option<bool>`, apply `negate` only inside `Some`,
+and map `None` to false. String ordering and type errors are untouched.
 
-### 3. The no-budget loop still branches per element
+### #21 - Lua modulo
 
-`table.rs:303` and `table.rs:316` keep an `if finite_budget` inside every
-iteration, on the path that is supposed to be the tight budget-free loop. An
-optimizer may unswitch it, but the implementation should not depend on that.
-Hoist the branch: separate budgeted and unbudgeted loop variants.
+Neither Rust operator alone works: `%` is fmod (sign follows the dividend) and
+needs correction when the divisor has the opposite sign, while `rem_euclid`
+always seeks a non-negative result and is wrong for negative divisors
+(Lua requires `5 % -3 == -1`).
+
+Use `%` plus Lua 5.4's exact two-branch predicate: add `b` when
+`m > 0 && b < 0`, or when `m < 0 && b > 0`; otherwise keep `m`. Prefer this
+spelling over the approximate `m != 0 && sign-mismatch` form, because the
+reference predicate avoids an unnecessary addition when `m` is NaN.
+
+Private helper in `frame.rs`, called from `OP_MOD`. Cost stays exactly 1.
+
+### #39 - `math.modf`
+
+`open_math` (`math.rs:317`): compute `integral = x.trunc()` once, then use
+`fractional = 0.0` when `x == integral` and `x - integral` otherwise. That
+mirrors 5.4's infinity guard and deliberately yields positive zero.
+
+### Tests
+
+No existing test or example asserts any of the four wrong results, so nothing
+needs updating. `test21` (`parser/tests.rs:586`) pins numeric-for bytecode
+exactly and must keep passing - it is the regression guard for #17.
+
+**Do not** put the new numeric cases in `edge_cases.lua` or `feature_test.lua`:
+both carry file-wide `-- DIFF:` markers, which would silently remove them from
+differential enforcement.
+
+New `examples/for_control_scope.lua`, untagged:
+
+- numeric collision with a deliberately stale reused slot, which today yields a
+  wrong value rather than throwing;
+- generic collision with a stale table in the reused visible-variable slot;
+- `name: true/false` assertions so `run_examples` and both reference
+  interpreters cover it.
+
+New `examples/lua54_numeric_edges.lua`, untagged:
+
+- every ordered comparison with NaN on both sides;
+- string `<=`/`>=` guards, to prove string ordering did not change;
+- positive and negative infinite-divisor modulo, plus finite opposite-sign;
+- `math.modf(+-inf)`, including `1 / fractional == math.huge` to pin *positive*
+  zero;
+- **and a 5.4-only signature so the whole file must match 5.4** rather than
+  being satisfied by 5.2's old modulo behaviour.
+
+`src/compiler/parser/tests.rs`: keep `test21`; add an exact-bytecode fixture
+for an ordinary generic loop; add a nested-function control-expression test
+asserting a same-named reference captures the enclosing local rather than the
+future loop slot.
+
+`src/vm/frame.rs` unit tests: the modulo helper directly, for finite opposite
+signs, both infinite-divisor signs, NaN propagation, and signed zero.
 
 ### Superseded questions
 
-1. What is the right charging model for the pattern matcher? Per `patt_match`
-   invocation is the obvious hook, but backtracking means invocations are the
-   thing that explodes, so that may be exactly right - or it may be so
-   fine-grained that it costs more than the match. Per K `singlematch` steps is
-   the alternative. Whichever, it needs to be charged against
-   `State.cost_remaining` from inside `src/patterns/`, which currently has no
-   access to `State` at all. How should that thread through without dragging
-   the VM into the matcher?
-2. What is the unit? Existing charges are per-opcode integers. Is one unit per
-   byte scanned right, or should string work be charged at some ratio to
-   opcode cost? Getting the ratio wrong makes previously-fine scripts start
-   failing their budget, which is a compatibility break for the embedder. Say
-   what the ratio should be and why.
-3. Which string functions need length-proportional charges, and charged on
-   input length, output length, or both? `gsub` can produce output far larger
-   than its input.
-4. For #15, is clamping `e` to something sane the right call in addition to
-   the reference overflow check, or does the charge alone make it safe? If a
-   script is charged 10^9 it will exhaust any real budget immediately, which
-   might make clamping unnecessary.
-5. **Does this break existing scripts?** This is the part I care about most.
-   Adding charges where there were none can only *increase* measured cost, so
-   any embedder currently running close to their budget will start failing.
-   `analyze_cost` is also documented as "neither a lower nor an upper bound",
-   but its relationship to runtime cost changes here. What is the migration
-   story, and should any of this be feature-gated or staged?
+1. For #17, is "record the base index, parse the control expressions, then add
+   the locals" actually sufficient for **both** the numeric and generic forms?
+   The generic form adds three hidden locals plus an arbitrary name list, and I
+   want to know whether the emitted slot arithmetic, the close-upvalue
+   boundaries, or the break-jump bookkeeping depend on the locals existing
+   before the expressions are parsed. This is the one with real regression
+   potential.
+2. For #20, is pushing false on `None` correct for **every** comparison
+   operator that routes through `eval_compare`, including any metamethod or
+   string-comparison path? Reference makes every ordered comparison involving
+   NaN false, but I want the change scoped to numeric NaN rather than
+   accidentally changing string ordering.
+3. For #21, does `f64::rem_euclid` or plain `%` in Rust already give reference
+   semantics, or is the explicit fmod-plus-adjust the only correct route? Rust's
+   `%` on floats is fmod, so the adjust step is presumably still needed for
+   sign.
+4. Do any of these four have existing tests or examples that assert the
+   *current* wrong behaviour and would need updating? #20 in particular feels
+   like something a test might have pinned.
 
-Read `src/lua_std/string.rs`, `src/lua_std/table.rs`, `src/lua_std/string_format.rs`,
-`src/patterns/`, `State::consume_cost` in `src/vm.rs`, and `analyze_cost` in
-`src/lib.rs`.
+Read `src/compiler/parser/stmt.rs`'s numeric and generic `for` handling,
+`src/vm/eval_store.rs`'s `eval_compare`, `src/vm/frame.rs`'s comparison and
+`OP_MOD` arms, and `src/lua_std/math.rs`.
