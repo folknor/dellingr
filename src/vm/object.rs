@@ -373,6 +373,20 @@ impl GcHeap {
         upvalue_pool: &UpvaluePool,
     ) {
         while let Some(ptr) = worklist.pop() {
+            // Everything on the worklist must have been coloured by
+            // `GcHeap::mark`. Pushing a pointer straight onto the worklist
+            // traces its children but leaves the object itself Unmarked, so
+            // sweep frees it and later reads dangle - a root added that way
+            // looks correct until something actually collects. This assertion
+            // turns "remember to call mark" into a checked invariant; it costs
+            // nothing in release builds.
+            debug_assert!(
+                self.objects
+                    .get(ptr.0)
+                    .is_none_or(|obj| obj.color.get() == Color::Reachable),
+                "GC worklist entry was not marked reachable; it was pushed \
+                 directly instead of through GcHeap::mark"
+            );
             self.mark_children(self.get(ptr), upvalue_pool, worklist);
         }
     }
