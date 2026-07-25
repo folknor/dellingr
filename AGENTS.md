@@ -109,7 +109,7 @@ value stack, not total host memory, and enforcing it charges no cost.
 
 ## Hotpath benchmarks
 
-`examples/hotpath.rs` is a single Rust harness. It takes one positional arg (a target path like `fields/same_obj_read`) and loads `examples/{target}.lua`, which must define a global `_bench()` function. Bench scripts live in subdirectories of `examples/` alongside correctness tests:
+`examples/hotpath.rs` is a single Rust harness, and the binary brokkr invokes for `--bench` / `--hotpath` / `--alloc` runs. It takes one positional arg - either a script path (`bench/arithmetic.lua`) or a legacy target name (`fields/same_obj_read`, resolved to `examples/{target}.lua`) - and the script must define a global `_bench()` function. `--iterations N` overrides the warm-call count (default 20). When `BROKKR_MARKER_FIFO` names a writable path, the harness also emits brokkr sidecar markers (`PARSE`/`SETUP`/`COLD`/`WARM` START/END pairs, plus up to 32 batched `WARM_BLOCK` sub-spans) and `@name=value` counters; without the env var those emits are no-ops. Probe and correctness bench scripts live in subdirectories of `examples/` alongside correctness tests:
 
 ```
 examples/hotpath.rs        # harness (parse / cold call / warm calls)
@@ -144,7 +144,9 @@ function longer instead.
 
 Each bench script is also a standalone-runnable test: top-level setup + a `_bench()` function + an outer loop that calls `_bench()` enough times for hyperfine resolution and prints `<name>: true`. This lets one file serve three masters: the hotpath harness (calls `_bench` directly for parse/cold/warm phasing), `tests/run_examples.rs` (executes the standalone runner, asserts no `: false`), and `scripts/bench.sh` (hyperfine timings vs reference Lua 5.2/5.4/5.5 + LuaJIT).
 
-The harness measures four phases on one State and emits KV pairs to stderr: `parse_us`, `cold_call_us`, `warm_avg_us` (averaged over 20 iterations), plus the dellingr-specific `cost_used` per phase and the derived `cost_per_us`. Cost is deterministic across hosts; wall time is the noisy metric. `setup_*` and `final_*` heap/object counts bracket GC pressure.
+`bench/` holds the brokkr *verdict* workloads: seconds-scale ports of the curated examples/ benches - same kernels, wrapped in a repeat loop calibrated so one `_bench()` call is ~100ms, footer fixed at 30 calls, which lands the standalone run at ~3s and the harness warm phase at ~2s with the default 20 iterations. A 20ms-per-launch bench cannot resolve the deltas the optimization backlog targets; a seconds-scale one can. They are registered as content-addressed workloads in `brokkr.toml` (commented out until brokkr ships the `[dellingr]` config surface); editing a bench/ script requires re-hashing its registry entry, which is the deliberate signal that older stored results no longer compare. `bench/` is intentionally outside every examples/ glob - `run_examples.rs`, the diff gate, and `bench.sh` do not see it - so the fast test/diff/ratio surfaces and the slow verdict surface stay independent.
+
+The harness measures four phases on one State and emits KV pairs to stderr: `parse_us`, `cold_call_us`, `warm_avg_us` (averaged over the warm iterations, default 20), plus the dellingr-specific `cost_used` per phase and the derived `cost_per_us`. Wall time is the benchmarking metric; cost is a deterministic property of the workload and rides along as a fingerprint (a cost change means the script or compiler changed, not the VM's speed). `setup_*` and `final_*` heap/object counts bracket GC pressure. Note the harness runs the script's top level during setup, so the standalone footer's calls execute there - the "cold" call is only cold with respect to what the footer has not already warmed.
 
 Roughly ninety internal functions carry `#[hotpath::measure]`, concentrated in `vm/table.rs`, `vm/table_ops.rs`, `vm/eval*.rs`, `vm/object.rs` and the compiler front end. The annotation is a no-op when the `hotpath` cargo feature is off, so it costs nothing in normal builds; it is cheap to add one when a new candidate needs a measurement point, and worth doing at the same time as the bench that will exercise it. **Don't add `#[hotpath::measure]` to `eval_closure` or any function that recurses through the bytecode dispatch loop**: each level adds enough stack-frame bloat to abort the `call_depth_exceeded_error` test (which intentionally recurses to `MAX_CALL_DEPTH = 1000`). A function *called from* the dispatch loop is fine as long as its own frame is popped before the loop recurses - the constraint is about frames that stay live across the recursive descent, not about being on the call path at all. `eval.rs` carries an inline comment at the one site where this is easy to get wrong.
 
@@ -176,7 +178,7 @@ date and upstream commit, so refresh both together.
 
 ## Project conventions worth knowing
 
-- Examples in `examples/` are part of the test surface - don't add throwaway scripts there. Use `hotpath/` for bench scripts (see above).
+- Examples in `examples/` are part of the test surface - don't add throwaway scripts there. brokkr verdict workloads live in `bench/` (see above).
 - The CLI prints `Cost used: N` after each run; `scripts/diff_test.sh` filters this line out before comparing.
 - The crate was lifted out of a game project (originally extracted from `fcomm2`); some doc comments still mention `FleetCallbacks` etc. as illustrative examples.
 - `target/` is a symlink to a shared cargo cache.

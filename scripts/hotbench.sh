@@ -61,7 +61,7 @@ echo "==== harness output ===="
 # crate's own per-function stats table (p50/p95/p99 over every
 # #[hotpath::measure] site) at exit. The per-function table is the reason the
 # annotations exist - do not filter it out.
-"$HOTPATH_BIN" "$TARGET" 2>&1
+"$HOTPATH_BIN" "$SCRIPT" 2>&1
 
 echo ""
 echo "==== hyperfine ===="

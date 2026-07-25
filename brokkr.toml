@@ -28,6 +28,90 @@ debug = true
 [gremlins]
 exclude = ["tests/string_bytes.rs"]
 
+# Benchmarking harness: `brokkr dellingr --lua <name> --bench|--hotpath|--alloc`.
+# brokkr builds the cargo example target below (plain for --bench, with the
+# standing hotpath / hotpath-alloc feature convention for the instrumented
+# modes) and invokes it with the workload's registered file path.
+#
+# Workloads are content-addressed: the file is part of the measurement's
+# identity, so editing a bench script REQUIRES updating its xxh128 here -
+# that re-registration is the deliberate signal that older stored rows no
+# longer compare against new ones. Not hostname-keyed: these files are in
+# git, identical on every host.
+#
+# Workloads live in bench/ (seconds-scale ports of the examples/ probes;
+# see bench/ file headers). examples/ scripts stay fast for the test
+# suite, the diff gate, and scripts/bench.sh. Exception: large_source is
+# a parse-time probe registered against its examples/ file - the harness
+# parse phase is the measurement, so standalone duration is irrelevant.
+
+[dellingr]
+example = "hotpath"
+
+[dellingr.workloads.benchmark]
+file = "bench/benchmark.lua"
+xxh128 = "51b15378d6e75699f24b1fd2d025b30a"
+
+[dellingr.workloads.arithmetic]
+file = "bench/arithmetic.lua"
+xxh128 = "5b241180b776f94825c7bc316347f1f4"
+
+[dellingr.workloads.constants]
+file = "bench/constants.lua"
+xxh128 = "78d3fe1436826a60c8df7d9b3123d0ce"
+
+[dellingr.workloads.pairs]
+file = "bench/pairs.lua"
+xxh128 = "40f694a23ec14829b96e0403b9a0b6dd"
+
+[dellingr.workloads.fill]
+file = "bench/fill.lua"
+xxh128 = "2d409aa1bb5f82a2a841f80aa69f54a5"
+
+[dellingr.workloads.mixed]
+file = "bench/mixed.lua"
+xxh128 = "4193f315750f157ff7fb2b1ec6f30165"
+
+[dellingr.workloads.patterns]
+file = "bench/patterns.lua"
+xxh128 = "42d9c2249ebdda7440c60d344725d9fb"
+
+[dellingr.workloads.literal_find]
+file = "bench/literal_find.lua"
+xxh128 = "c23da899a8d2925a4f1ec6ea872160d7"
+
+[dellingr.workloads.same_obj_read]
+file = "bench/same_obj_read.lua"
+xxh128 = "cdb6bfdf21a72c08d4b1d683d7d85d07"
+
+[dellingr.workloads.miss]
+file = "bench/miss.lua"
+xxh128 = "1b6cbb9b7b5acc669bcb9a52759b8ccf"
+
+[dellingr.workloads.write]
+file = "bench/write.lua"
+xxh128 = "e083a0a88b2838c78d0b684dd2bbd1dc"
+
+[dellingr.workloads.many_literals]
+file = "bench/many_literals.lua"
+xxh128 = "af2ca0e8c8623e2c31e9d1c5cfc9e6fc"
+
+[dellingr.workloads.closure]
+file = "bench/closure.lua"
+xxh128 = "5befb079865e20e3343cd9beaa8e84be"
+
+[dellingr.workloads.record_tables]
+file = "bench/record_tables.lua"
+xxh128 = "9ebd1f3da641203c82de3ee42b0c251c"
+
+[dellingr.workloads.gc_churn]
+file = "bench/gc_churn.lua"
+xxh128 = "1ed1ab2e97827b61e317a94d3f197a5a"
+
+[dellingr.workloads.large_source]
+file = "examples/parse/large_source.lua"
+xxh128 = "4df913d61046b591ea1f67ce6381e776"
+
 # Differential gate: run every examples/**/*.lua through dellingr and reference
 # Lua 5.2/5.4 and require the output to match (see scripts/diff_gate.sh - debug
 # build, so the gate is cheap on every check). It prints "ok" on success or

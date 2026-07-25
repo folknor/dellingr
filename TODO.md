@@ -6,7 +6,31 @@ get deleted as they ship or stop being worth tracking.
 
 ## Deferred forward-looking ideas
 
-### Prune or index the `%p` identity map
+### Grow the brokkr workload registry to the full candidate surface
+
+What: `bench/` currently ports the 15 curated benches (+ `large_source`
+registered against its examples/ file). The optimization backlogs name
+more trackers that exist in `examples/` but have no seconds-scale
+verdict port yet: the `calls/` family (`local`, `global`, `method`,
+`method_cached`, `method_chain`, `vararg`, `fixedarg`, `general`,
+`factory_closure` - the measurement surface for the frame-flattening
+and closure-clone rewrites), `fields/polymorphic` / `same_obj_cached` /
+`same_obj_write`, `tables/numeric_index` / `mixed`, `alloc/short_tables`,
+`iter/ipairs`. Port with the same recipe (kernel + calibrated repeat
+loop, ~100ms/call, footer 30) and register with xxh128.
+
+Also open: a seconds-scale parse workload (`large_source` at a second,
+larger size - which doubles as the missing second data point for the
+suspected-quadratic parse candidates), and a Rust-driven snapshot bench
+(notes/optimizations.md #26 - needs harness support, not a .lua file).
+
+Why deferred: the registry cannot go live until brokkr ships the
+`[dellingr]` config surface (the released parser reads unknown
+top-level tables as hostname sections); porting the rest before the
+first workloads have proven the recipe would be premature batch work.
+
+Signal that would promote it: brokkr support landing, or active work
+starting on any candidate whose tracker is still examples/-only.
 
 What: `string.format("%p")` assigns deterministic ids from
 `State.format_pointer_ids`, a `Vec<(Val, u64)>` probed by linear
