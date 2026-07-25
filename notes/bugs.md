@@ -20,39 +20,6 @@ valid. Fix history lives in git.
 
 ## High severity
 
-### 12. Pattern matcher: matchdepth consumed by tail calls and never reset between attempts (E-E1)
-
-- **Locations:** `src/patterns/luapat.rs:351` (decrement on entry); tail-style
-  `return self.patt_match(...)` paths that skip the restore: line 391 (`%b`
-  continuation), 413 (`%f` continuation), 421 (backref continuation), and in
-  `patt_default_match` lines 440 (`*`/`?`/`-` accept-empty), 455 (`?`
-  else-branch), 473 (item with no suffix); `str_match` (line 661) never
-  resets `matchdepth` (or `level`) between anchor positions.
-- **Cause:** reference C uses `goto init` for these transitions, so tail
-  continuation is depth-free there; 5.2 even asserts
-  `matchdepth == MAXCCALLS` before every anchor attempt. Two failure modes:
-  1. Pattern length: a chain of N non-suffixed items costs N depth; any
-     pattern with more than ~198 sequential items errors "pattern too
-     complex" (reference matches arbitrary-length patterns). The test at
-     `src/patterns/mod.rs:211` (`runtime_match_errors_are_not_swallowed`,
-     201 literal `a`s) enshrines the divergence as expected.
-  2. Leak across the scan loop: each failed anchor attempt that partially
-     matched leaks depth equal to its tail-chain length; a subject with ~200
-     partial matches kills the call.
-- **Repro (mode 2):**
-
-```lua
-local s = ""
-for i = 1, 250 do s = s .. "a" end
-print(s:find("a%d"))      -- reference: nil; dellingr: error "pattern too complex"
--- realistic shape: subject with many "id" prefixes, pattern "id=(%d+)"
-```
-
-- **Fix sketch:** rewrite the tail transitions as a loop
-  (`s = ...; p = ...; continue`), mirroring C's `goto init`, and reset
-  `matchdepth = MAXCCALLS; level = 0` at the top of each `str_match` attempt.
-  The luapat rewrite (optimizations.md #4) fixes this structurally.
-
 ### 16. Cost-model gap: pattern matching and string byte-work are entirely uncharged (E-E13; table.concat also C-D2)
 
 - **Locations:** no `consume_cost` anywhere in `src/lua_std/string.rs`,
@@ -120,6 +87,41 @@ print(s:find("a%d"))      -- reference: nil; dellingr: error "pattern too comple
     `analyze_cost("return string.upper('abcd')") == 0` while execution costs 4.
 - **Related:** `OP_CONCAT` being free is separate (#24) and should not be
   folded in - though while it stands, a large subject remains cheap to build.
+
+### 60. Method call on a parenthesized receiver with a call argument dispatches the receiver (found 2026-07-25, verified by execution)
+
+Not from the original audit - found while verifying #12. **Verified against
+HEAD**, so it predates the matcher rewrite; both Lua 5.2 and 5.4 handle every
+form below.
+
+- **Repro:**
+
+```lua
+local function id(s) return s end
+("ab"):find(id("b"))                        -- error: attempt to call a string value
+({ f = function(self, x) return x end }):f(id("q"))  -- error: attempt to call a table value
+(id("ab")):find(id("b"))                    -- error: attempt to call a string value
+("a" .. "b"):find(id("b"))                  -- error: attempt to call a string value
+```
+
+- **Trigger:** a method call `(<expr>):m(...)` where the receiver is a
+  *parenthesized or constructor* primary expression **and** at least one
+  argument is itself a function call. Both conditions are required:
+  `("ab"):find("b")` (no call argument) and `s:find(id("b"))` (simple-name
+  receiver) are both correct, which is why this survived.
+- **Symptom:** the error names the *receiver's* type, so the VM calls the
+  receiver instead of the resolved method. A longer variant
+  (`rep("a",201):find(rep("a",201))`) instead surfaces
+  `internal error: dynamic call base is outside the active stack`, pointing at
+  the `vararg_call_bases` / `MARK_CALL_BASE` machinery rather than at method
+  lookup itself.
+- **Severity:** high. The idiom is ordinary Lua, it fails loudly rather than
+  silently, and the `internal error` variant is the taxonomy problem of #52 as
+  well as a wrong result.
+- **Not yet located.** Start at the method-call desugaring in the parser and
+  the call-base marking for dynamic argument counts; the front-end audit
+  explicitly cleared "method-call desugaring" and `mark_call_base` bounds, so
+  the interaction between the two is the untested seam.
 
 ---
 
@@ -238,26 +240,6 @@ for k, v in pairs(t) do print(k, v) end
   free by design and a trivial `return a < b` body charges ~0, so
   `table.sort` on 10k elements is ~5*10^7 full call-machinery round trips for
   cost 10^4. Fix via the sort rewrite (optimizations.md #12).
-
-### 33. `%f` frontier loses left context because stdlib re-slices the subject (E-E7)
-
-- **Locations:** matcher treats slice-start as string-start
-  (`previous = '\0'`, `luapat.rs:403-407`); re-slice sites: `gsub` loop
-  (`&s[pos..]`, `string.rs:575`), `gmatch_iter` (`&s[pos..]`,
-  `string.rs:712`), `find`/`match` with init (`&s[init..]`,
-  `string.rs:320/416`).
-- **Cause:** reference keeps `src_init` at the true beginning of the subject
-  even when matching from `init` or resuming gmatch/gsub mid-string.
-- **Repro:**
-
-```lua
-print(("abcd"):gsub("%f[%w]%w", "X"))   -- reference: "Xbcd" 1; dellingr: "XXXX" 4
-print(("ab"):find("%f[%a]%a", 2))       -- reference: nil;    dellingr: 2 2
-```
-
-- **Fix (structural, optimizations.md #4):** give `str_match` an `init`
-  offset and keep the full subject, like reference `prepstate`. Also deletes
-  all the `base +` capture-offset arithmetic in string.rs.
 
 ---
 
@@ -584,11 +566,10 @@ glibc's.
 
 ## Orchestrator notes (carried from the corner reports)
 
-- E's verification list: (1) #36 assumes `check_type` errors on nil - check
-  `vm_aux.rs`; (2) `table_remove_at(1, 0)` / `(1, len+1)` semantics vs
-  reference's `t[0]` read/write edge (vm-side, was out of E's corner);
-  (3) `src/patterns/mod.rs:211` asserts the #12 divergence as expected
-  behavior and will need updating with the fix.
+- E's verification list: (1) resolved with #36; (2) `table_remove_at(1, 0)` /
+  `(1, len+1)` semantics vs reference's `t[0]` read/write edge (vm-side, was
+  out of E's corner); (3) resolved with #12 - the test now pins reference's
+  exact 199/200 depth boundary instead of asserting the divergence.
 - B ordered findings most-severe-first without labels; severities shown here
   for B items are the consolidator's placement of B's ordering, not new
   adjudication.

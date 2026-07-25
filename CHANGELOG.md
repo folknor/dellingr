@@ -23,7 +23,7 @@ All notable changes to dellingr are documented here. The format follows
   referenced by token, so old saves see the current stdlib. A save records
   whether the source had the standard environment, so a snapshot of
   `State::empty()` round-trips as empty rather than merging in the stdlib on
-  load (`FORMAT_VERSION` is 2). Dynamic-call and table-constructor base stacks
+  load (`FORMAT_VERSION` is 3). Dynamic-call and table-constructor base stacks
   unwind on a frame error, keeping the State quiescent so a host that catches
   an error can still snapshot or reuse it.
 - The lexer accepts Lua 5.2 hex-float literals (`0x1.8p+0`, `0x.8`, `0x1p-2`),
@@ -33,8 +33,64 @@ All notable changes to dellingr are documented here. The format follows
   Lua instead of failing past `u128` range; malformed forms (`0x.`, `0x1p`,
   `0x1p+`) are a syntax error.
 
+- Clearing the field a `pairs` traversal is currently sitting on is now
+  supported - the filter-in-place idiom reference Lua permits. `Table::remove`
+  leaves the key in place and stores `Val::Nil`, tracked by a `dead_count`;
+  every index-based accessor hides dead slots (`next` excepted, since finding a
+  dead control key is the point), so a warm `SET_FIELD` cache cannot write
+  through a tombstone and resurrect a deleted field. Reinserting a key appends
+  rather than reviving in place, preserving iteration order, and compaction runs
+  only when tombstones are dense, keeping a `t[k] = v; t[k] = nil` cycle from
+  going quadratic. Costs ~2.5% on `iter/pairs`.
+- Source limits are bounded and documented (new README "Source limits"
+  section): parser recursion is capped at 200 levels (`TooManySyntaxLevels`)
+  and upvalues per function at 255 (`TooManyUpvalues`). Previously deep nesting
+  overflowed the native stack - an abort, not a returnable `SyntaxError` - and
+  the 256th upvalue silently got index 0 and read the wrong variable. One
+  accepted divergence: a paren costs two depth ticks, so parens nest ~99 deep
+  against reference Lua's ~200; every other construct gets the full 200.
+- Saves are verified before they are materialized. Save files are user-editable
+  and the bytecode inside them was previously trusted completely, so a
+  hand-edited save could drive the interpreter out of bounds and abort the host.
+  A verifier behind a `VerifiedSavePayload` (no unchecked constructor) checks
+  chunk and graph invariants, every operand used as an index, jump targets,
+  closure capture arity, and acyclicity plus a 200-deep bound; rejections raise
+  the new `LoadError::InvalidBytecode`. The same checks run on compiler output
+  as a debug assertion over a shared bytecode view, so the test corpus
+  continuously proves the compiler emits only what the loader accepts. This is
+  phase 1: operand-stack dataflow analysis is deliberately deferred (tracked as
+  finding #59), so the no-abort-on-load guarantee is not yet established.
+
 ### Changed
 
+- **Breaking (save format):** the snapshot format is bumped v2 to v3; existing
+  save files are rejected with `UnsupportedVersion`. The bump persists whether a
+  cost budget is configured, without which a restored state took the unbudgeted
+  `table.move` path and bypassed its own remaining budget.
+- `table.move` charges per element instead of a flat 1. The range came straight
+  from script arguments and was not bounded by table size, and neither reads of
+  an empty table nor writes of nil allocate, so `table.move({}, 1, 2^30, 1)` was
+  ~10^9 table operations for cost 1. Charging stops before the first element
+  whose charge finds the budget exhausted, which leaves a partially moved table;
+  both overlap directions charge in real copy order, so that partial state is
+  deterministic. With no budget configured there is a single `count.max(1)`
+  charge and no per-element branch. The neutral `CostMeter` infrastructure for
+  charging string and pattern byte-work lands here but is not yet wired up -
+  that is a cost-model version bump, not a bug fix.
+- `tostring` on a Rust function renders a constant `<function>` instead of the
+  real function pointer, which ASLR changes between runs of the same binary -
+  a replay-visible determinism break, since scripts can branch on the string.
+  Lua promises uniqueness for `%p` and not for `tostring`, so nothing that was
+  actually guaranteed is lost; this also settles an inconsistency where
+  `Debug`/`Display` printed the payload slot address and `to_string_with_heap`
+  the code address.
+- Leveled long comments (`--[=[ ... ]=]`) are now lexed. Long *strings* remain
+  rejected as `LongStringUnsupported`: comments are lexical trivia and need no
+  value type, allocation, opcode, or cost-model change.
+- `break` is no longer terminal: `while true do break; end` compiles, as does
+  dead code after a `break`, matching reference Lua.
+- Numerals glued to identifiers are rejected (`print(3or 4)` is now "malformed
+  number near '3o'"). This tracks Lua 5.4; 5.2 accepts the old form.
 - Bumped the `hotpath` profiling dependency (used by the `hotpath` feature and
   the `examples/hotpath.rs` bench harness) from 0.15 to 0.21.1.
 - The VM RNG is now an in-crate SplitMix64 (`VmRng`); the `rand` dependency was
@@ -50,6 +106,107 @@ All notable changes to dellingr are documented here. The format follows
 
 ### Fixed
 
+- Optional standard-library arguments treat an explicit `nil` as absent, like
+  both references. The prevailing `if num_args >= k { check_type(k, ...) }`
+  pattern errored on a `nil` reference would simply default, so the ordinary
+  plain-find idiom `("a.b"):find(".", nil, true)` raised a bad-argument error
+  instead of returning `2, 2`. A shared `check_optional_type` helper replaces
+  the per-call-site guards (which is what produced the drift: `table.remove` and
+  `table.move` handled `nil` correctly by hand while nothing else did) and
+  delegates to `check_type`, so wrong non-nil arguments keep the same error kind
+  and payload. Separately, `table.concat` no longer ignores an explicit range on
+  a sparse table (`table.concat(t, "", 2, 2)`), and `unpack` no longer truncates
+  negative start indices through `as usize` (`unpack(t, -2, 2)` returns five
+  values from `t[-2]`, not three from `t[0]`).
+- Four semantic divergences from Lua 5.4. `for` control expressions are
+  evaluated in the enclosing scope instead of with the loop variable already in
+  scope, so `local i = 5; for i = i, 7 do` prints `5 6 7` rather than raising
+  (or, with slot reuse, silently reading a stale value for the bounds); slot
+  layout is unchanged, so any program whose control expressions do not mention a
+  loop-variable name compiles byte-for-byte as before. NaN ordered comparisons
+  return false - `partial_cmp`'s `None` mapped to `Ordering::Equal`, and `<=`
+  and `>=` are negated `>` and `<`, so both returned true. `1 % math.huge` is
+  `1.0` instead of NaN, and `math.modf(inf)` returns a zero fractional part
+  instead of NaN.
+- Seven pattern-matcher defects, two of which aborted the host from a script:
+  32 position captures indexed past the results array (the validator did not
+  count position captures at all), and `"(a)%0"` overflowed formatting its own
+  error message. The capture ceiling was also off by one the other way, so only
+  31 were permitted where reference allows 32. Escaped uppercase classes matched
+  the wrong character entirely - `match_class` lowercased before its literal
+  fallback, so `%E` matched `"e"` and failed on `"E"`, affecting every escaped
+  uppercase letter that naive quoting helpers emit. `%s` now matches vertical
+  tab (C's `isspace` includes 0x0B, Rust's `is_ascii_whitespace` does not), and
+  patterns ending in `%%` are no longer rejected outright, so
+  `("50%"):gsub("%%", " percent")` works.
+- Six lexer conformance defects. `skip_comment` recognised only `--[[`, so a
+  leveled opener like `--[=[` fell through to the single-line branch and the
+  comment *body* was lexed as live source - a confusing syntax error usually,
+  but silent execution when the body happens to be valid Lua. Short comments
+  had the same class of bug under CR line endings, swallowing the following
+  statement. Bare CR was mishandled throughout: accepted inside string literals,
+  `\<CR>` errored instead of mapping to one newline, `\<LF><CR>` produced two
+  bytes, and a CR-terminated file never set `starts_line`, so the ambiguous-call
+  rejection did not fire. Vertical tab is now whitespace between tokens and
+  after `\z`, sharing `numeral.rs`'s `is_lua_whitespace` with the pattern
+  matcher rather than growing a third definition.
+- The GC marks the heap iteratively, so deep data cannot abort the host.
+  `GcHeap::mark` recursed roughly five native frames per level of nesting with
+  no bound - `local t = {} for i = 1, 500000 do t = { t } end` cost about 2 per
+  iteration, sat inside any normal budget, and died with a stack overflow and a
+  core dump. Marking now uses an explicit worklist, colouring before push so
+  cycles and shared subgraphs enqueue each object at most once; the scratch
+  `Vec` is owned by `GcHeap` and taken with `mem::take`, so it costs no
+  allocation across the ~10,000 collections a GC-heavy script performs. Costs
+  ~2.6% on `alloc/closure`.
+- `save_state()` walks the object graph with an explicit task stack instead of
+  recursing, so a deep graph no longer overflows the native stack inside an API
+  whose signature promises `Result<_, SaveError>`. Output is byte-identical:
+  object ids are assigned at first encounter, so the layout encodes the exact
+  depth-first preorder, and children are pushed in reverse to preserve it. A
+  golden fixture committed beforehand pins that order - neither existing
+  byte-stability test could detect a reordering, since both run whatever
+  algorithm is present twice. Diagnostic paths come from an append-only
+  breadcrumb arena keyed by a `PathId`, reconstructed only when an
+  `UnregisteredFunction` error is actually raised.
+- Two save-corruption bugs in the writer, exposed by the new load verifier. Both
+  the bytecode and upvalue arenas assigned an id from the current length but
+  pushed the entry only after recursively encoding children, so a first-seen
+  parent and its first-seen child received the same id - a closure over the
+  parent serialized as chunk 0 and decoded to the child, silently restoring the
+  wrong program. Existing round-trip tests missed it because they only invoked
+  closures that already existed.
+- Four GC root holes that let a script abort the host process. `mark_gc_roots`
+  is documented as the single source of truth for reachability, but frame
+  varargs (drained into a Rust-owned `Vec`), `#t` with a `__len` metatable
+  (receiver popped before interning `"__len"`), `table.sort`'s array copy (held
+  across an arbitrary comparator), and `with_restricted_env`'s `mem::replace`d
+  globals each held a live `Val` across an operation that can collect, producing
+  an "object was freed" panic. `active_call_roots` becomes a `TransientRoots`
+  registry covering both scoped values and suspended environments, with
+  watermarked helpers giving LIFO nesting, and `validate_quiescent` requires it
+  to be empty so a leaked root is visible rather than silent.
+- `Val::RustFn` has real value identity. `PartialEq` and `Hash` coerced match
+  bindings to `*const RustFunc`, yielding the address of each `Val`'s payload
+  slot rather than the function pointer inside it, so `print == print` and
+  `rawequal(print, print)` were false and host functions were unusable as table
+  keys (repeated assignment appended duplicate entries). `%p` on the same
+  function minted a fresh id every call, defeating the deterministic identity it
+  exists for, and the method inline cache could never validate a cached
+  `__index = <RustFn>` handler. Now compares with `std::ptr::fn_addr_eq` and
+  hashes the address value.
+- `line_info` stays aligned with `code`. `Parser::push` appends to both in
+  lockstep and is the only thing keeping them aligned, but ten sites mutated
+  `code` directly - two of them `code.remove(mark_idx)`, which runs for every
+  plain fixed-arg call, so the tables drifted on essentially any real script.
+  Stack traces, `host_print` lines, and the serialized snapshot line table were
+  all wrong. Emitted bytecode is byte-identical at every site.
+- `next` distinguishes end-of-iteration from an invalid control key. Returning
+  `(nil, nil)` for both meant `next(t, 0/0)` on a map-backed table reached
+  `IndexMap::get_index_of`, whose hash hard-asserts `!is_nan()` - and that
+  assert fires in release, so a script could abort the host. A control key that
+  is not present now raises Lua's "invalid key to 'next'" instead of ending
+  iteration silently.
 - Pattern backreferences (`%1`-`%9`) no longer hang or corrupt memory. The
   compile-time validator infinite-looped on any backreference (rewinding onto
   the `%` instead of past the digit), and the matcher wrote candidate bytes
@@ -188,8 +345,8 @@ All notable changes to dellingr are documented here. The format follows
   representable in i64 (so `%u`/`%x` of -1 give the wrapped u64 forms), `%s`
   honors `__tostring` byte-exactly and keeps embedded NUL when unmodified, and
   `%q` emits 5.4's literal forms (numbers take the hex-float branch: `1.5` is
-  `0x1.8p+0`, NaN is `(0/0)`, inf is `1e9999`; dellingr's own lexer cannot yet
-  re-parse hex-float literals - recorded as C30). `%p` stays deterministic:
+  `0x1.8p+0`, NaN is `(0/0)`, inf is `1e9999`; the lexer's hex-float support
+  above makes that output re-parseable by dellingr). `%p` stays deterministic:
   `(null)` for non-object values and a stable state-local id for
   strings/tables/functions instead of a real address.
 

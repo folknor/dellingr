@@ -60,31 +60,31 @@ fn lua_end_index(len: usize, idx: isize) -> usize {
     }
 }
 
-fn push_capture_value(state: &mut State, bytes: &[u8], capture: LuaCapture, base: usize) {
+fn push_capture_value(state: &mut State, bytes: &[u8], capture: LuaCapture) {
     match capture {
         LuaCapture::Bytes { start, end } => state.push_bytes(&bytes[start..end]),
-        LuaCapture::Position(offset) => state.push_number((base + offset + 1) as f64),
+        LuaCapture::Position(offset) => state.push_number((offset + 1) as f64),
     }
 }
 
-fn push_captures(state: &mut State, bytes: &[u8], pattern: &LuaPattern<'_>, base: usize) -> u8 {
+fn push_captures(state: &mut State, bytes: &[u8], pattern: &LuaPattern) -> u8 {
     let n = pattern.num_matches();
     if n > 1 {
         for i in 1..n {
-            push_capture_value(state, bytes, pattern.capture(i), base);
+            push_capture_value(state, bytes, pattern.capture(i));
         }
         (n - 1) as u8
     } else {
-        push_capture_value(state, bytes, pattern.capture(0), base);
+        push_capture_value(state, bytes, pattern.capture(0));
         1
     }
 }
 
-fn append_capture_bytes(out: &mut Vec<u8>, bytes: &[u8], capture: LuaCapture, base: usize) {
+fn append_capture_bytes(out: &mut Vec<u8>, bytes: &[u8], capture: LuaCapture) {
     match capture {
         LuaCapture::Bytes { start, end } => out.extend_from_slice(&bytes[start..end]),
         LuaCapture::Position(offset) => {
-            out.extend_from_slice((base + offset + 1).to_string().as_bytes());
+            out.extend_from_slice((offset + 1).to_string().as_bytes());
         }
     }
 }
@@ -95,7 +95,6 @@ fn append_string_replacement(
     repl: &[u8],
     bytes: &[u8],
     captures: &[LuaCapture],
-    base: usize,
 ) -> Result<()> {
     let mut i = 0usize;
     while i < repl.len() {
@@ -107,7 +106,7 @@ fn append_string_replacement(
             } else if next.is_ascii_digit() {
                 let idx = (next - b'0') as usize;
                 if idx == 0 {
-                    append_capture_bytes(out, bytes, captures[0], base);
+                    append_capture_bytes(out, bytes, captures[0]);
                 } else {
                     let capture = if captures.len() == 1 && idx == 1 {
                         captures[0]
@@ -116,7 +115,7 @@ fn append_string_replacement(
                             state.error(ErrorKind::RuntimeError("invalid capture index".into()))
                         })?
                     };
-                    append_capture_bytes(out, bytes, capture, base);
+                    append_capture_bytes(out, bytes, capture);
                 }
                 i += 2;
             } else {
@@ -142,12 +141,11 @@ fn append_gsub_replacement(
     repl_type: &LuaType,
     bytes: &[u8],
     captures: &[LuaCapture],
-    base: usize,
 ) -> Result<()> {
     match repl_type {
         LuaType::String | LuaType::Number => {
             let repl = state.to_bytes_coerce(3)?.into_owned();
-            append_string_replacement(state, out, &repl, bytes, captures, base)?;
+            append_string_replacement(state, out, &repl, bytes, captures)?;
         }
         LuaType::Table => {
             let key = if captures.len() > 1 {
@@ -156,13 +154,13 @@ fn append_gsub_replacement(
                 captures[0]
             };
             state.push_value(3)?;
-            push_capture_value(state, bytes, key, base);
+            push_capture_value(state, bytes, key);
             state.get_table(-2)?;
             let keep_original = state.typ(-1) == LuaType::Nil
                 || (state.typ(-1) == LuaType::Boolean && !state.to_boolean(-1));
             if keep_original {
                 state.pop(2);
-                append_capture_bytes(out, bytes, captures[0], base);
+                append_capture_bytes(out, bytes, captures[0]);
             } else {
                 let t = state.typ(-1);
                 if !matches!(t, LuaType::String | LuaType::Number) {
@@ -180,21 +178,21 @@ fn append_gsub_replacement(
             state.push_value(3)?;
             if captures.len() > 1 {
                 for cap in &captures[1..] {
-                    push_capture_value(state, bytes, *cap, base);
+                    push_capture_value(state, bytes, *cap);
                 }
                 state.call(
                     ArgCount::Fixed((captures.len() - 1) as u8),
                     RetCount::Fixed(1),
                 )?;
             } else {
-                push_capture_value(state, bytes, captures[0], base);
+                push_capture_value(state, bytes, captures[0]);
                 state.call(ArgCount::Fixed(1), RetCount::Fixed(1))?;
             }
             let keep_original = state.typ(-1) == LuaType::Nil
                 || (state.typ(-1) == LuaType::Boolean && !state.to_boolean(-1));
             if keep_original {
                 state.pop(1);
-                append_capture_bytes(out, bytes, captures[0], base);
+                append_capture_bytes(out, bytes, captures[0]);
             } else {
                 let t = state.typ(-1);
                 if !matches!(t, LuaType::String | LuaType::Number) {
@@ -208,7 +206,7 @@ fn append_gsub_replacement(
                 out.extend_from_slice(&val);
             }
         }
-        _ => append_capture_bytes(out, bytes, captures[0], base),
+        _ => append_capture_bytes(out, bytes, captures[0]),
     }
     Ok(())
 }
@@ -313,23 +311,21 @@ pub(crate) fn open_string(state: &mut State) {
                 state.push_nil();
                 return Ok(1);
             }
-            let search = &s[init..];
-
             let mut matcher = LuaPattern::from_bytes_try(&pattern)
                 .map_err(|err| state.error(ErrorKind::RuntimeError(err.to_string())))?;
             match matcher
-                .matches_bytes(search)
+                .matches_bytes_from(&s, init)
                 .map_err(|err| state.error(ErrorKind::RuntimeError(err.to_string())))?
             {
                 true => {
                     let range = matcher.range();
-                    state.push_number((init + range.start + 1) as f64);
-                    state.push_number((init + range.end) as f64);
+                    state.push_number((range.start + 1) as f64);
+                    state.push_number(range.end as f64);
 
                     let n = matcher.num_matches();
                     if n > 1 {
                         for i in 1..n {
-                            push_capture_value(state, search, matcher.capture(i), init);
+                            push_capture_value(state, &s, matcher.capture(i));
                         }
                     }
                     Ok(2 + n.saturating_sub(1) as u8)
@@ -406,14 +402,13 @@ pub(crate) fn open_string(state: &mut State) {
             state.push_bytes(b"");
             return Ok(1);
         }
-        let search = &s[init..];
         let mut matcher = LuaPattern::from_bytes_try(&pattern)
             .map_err(|err| state.error(ErrorKind::RuntimeError(err.to_string())))?;
         if matcher
-            .matches_bytes(search)
+            .matches_bytes_from(&s, init)
             .map_err(|err| state.error(ErrorKind::RuntimeError(err.to_string())))?
         {
-            Ok(push_captures(state, search, &matcher, init))
+            Ok(push_captures(state, &s, &matcher))
         } else {
             state.push_nil();
             Ok(1)
@@ -498,8 +493,8 @@ pub(crate) fn open_string(state: &mut State) {
             let mut count = 0usize;
             for i in 0..=s.len() {
                 if max_replacements.is_none_or(|max| count < max) {
-                    let captures = [LuaCapture::Bytes { start: 0, end: 0 }];
-                    append_gsub_replacement(state, &mut result, &repl_type, &s[i..], &captures, i)?;
+                    let captures = [LuaCapture::Bytes { start: i, end: i }];
+                    append_gsub_replacement(state, &mut result, &repl_type, &s, &captures)?;
                     count += 1;
                 }
                 if i < s.len() {
@@ -532,11 +527,8 @@ pub(crate) fn open_string(state: &mut State) {
                 let end = start + pattern.len();
                 result.extend_from_slice(&s[pos..start]);
 
-                let captures = [LuaCapture::Bytes {
-                    start: match_start,
-                    end: match_start + pattern.len(),
-                }];
-                append_gsub_replacement(state, &mut result, &repl_type, search, &captures, pos)?;
+                let captures = [LuaCapture::Bytes { start, end }];
+                append_gsub_replacement(state, &mut result, &repl_type, &s, &captures)?;
 
                 pos = end;
                 count += 1;
@@ -562,23 +554,22 @@ pub(crate) fn open_string(state: &mut State) {
                 break;
             }
 
-            let search = &s[pos..];
             if !matcher
-                .matches_bytes(search)
+                .matches_bytes_from(&s, pos)
                 .map_err(|err| state.error(ErrorKind::RuntimeError(err.to_string())))?
             {
                 break;
             }
 
             let range = matcher.range();
-            result.extend_from_slice(&s[pos..pos + range.start]);
+            result.extend_from_slice(&s[pos..range.start]);
             captures.clear();
             captures.extend((0..matcher.num_matches()).map(|i| matcher.capture(i)));
-            append_gsub_replacement(state, &mut result, &repl_type, search, &captures, pos)?;
+            append_gsub_replacement(state, &mut result, &repl_type, &s, &captures)?;
             count += 1;
 
             if range.start == range.end {
-                let match_end = pos + range.end;
+                let match_end = range.end;
                 let next_pos = match_end + 1;
                 if match_end < s.len() {
                     result.push(s[match_end]);
@@ -587,7 +578,7 @@ pub(crate) fn open_string(state: &mut State) {
                     pos = s.len() + 1;
                 }
             } else {
-                pos += range.end;
+                pos = range.end;
             }
             if anchored {
                 break;
@@ -699,21 +690,20 @@ fn gmatch_iter(state: &mut State) -> Result<u8> {
         return Ok(1);
     }
 
-    let search = &s[pos..];
     let mut matcher = LuaPattern::from_bytes_try(&pattern)
         .map_err(|err| state.error(ErrorKind::RuntimeError(err.to_string())))?;
     if matcher
-        .matches_bytes(search)
+        .matches_bytes_from(&s, pos)
         .map_err(|err| state.error(ErrorKind::RuntimeError(err.to_string())))?
     {
         let range = matcher.range();
-        let new_pos = pos + range.end + usize::from(range.start == range.end);
+        let new_pos = range.end + usize::from(range.start == range.end);
         state.push_string("pos");
         state.push_number(new_pos as f64);
         state.set_table_raw(1)?;
 
         state.set_top(0);
-        Ok(push_captures(state, search, &matcher, pos))
+        Ok(push_captures(state, &s, &matcher))
     } else {
         state.set_top(0);
         state.push_nil();

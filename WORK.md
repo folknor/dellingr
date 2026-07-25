@@ -4,189 +4,256 @@ Current work item. Numbers refer to finding numbers in `notes/bugs.md`.
 
 ---
 
-## Targets #36, #37, #38: stdlib argument handling (and #57, which is invalid)
+## Targets #12 and #33: rewrite the Lua pattern matcher
 
-Three small stdlib divergences, all about how optional and negative arguments
-are interpreted. Verified against **both** Lua 5.2 and 5.4, which agree on all
-three - so these are universal conformance bugs, not 5.4 tightenings.
+Two matcher bugs that cannot be patched in place, because both are consequences
+of the module's shape rather than local mistakes. `notes/optimizations.md` #4
+already specifies the rewrite that fixes them structurally; this loop executes
+it.
 
-### #57 is invalid - delete it, do not implement it
+Both targets are **verified by execution**, and Lua 5.2 and 5.4 agree on every
+case - these are universal conformance bugs, not 5.4 tightenings.
 
-`notes/bugs.md` #57 claims two `tonumber` divergences. Both fail verification:
-
-| expression | dellingr | Lua 5.2 | Lua 5.4 |
+| case | dellingr | Lua 5.2 | Lua 5.4 |
 |---|---|---|---|
-| `tonumber("+ff", 16)` | 255 | 255 | 255 |
-| `tonumber(10, 16)` | error | 16 | error |
+| `s = ("a"):rep(250); s:find("a%d")` | error `pattern too complex` | `nil` | `nil` |
+| `("abcd"):gsub("%f[%w]%w", "X")` | `XXXX  4` | `Xbcd  1` | `Xbcd  1` |
+| `("ab"):find("%f[%a]%a", 2)` | `2  2` | `nil` | `nil` |
 
-The first claim - that reference returns nil for a `+` sign with an explicit
-base - is simply wrong; all three agree on 255. The second is real but points
-the other way: dellingr matches **5.4** exactly, including the error message
-("bad argument #1 to 'tonumber' (string expected, got number)"), and only 5.2
-coerces. Since dellingr targets 5.4 semantics elsewhere, that is current
-behaviour rather than a defect.
+### #12 (High) - matchdepth is consumed by tail calls and never reset
 
-The audit was explicit that nothing in it had been verified. This is the case
-where that mattered. Delete #57 and record why, so nobody re-derives it.
+`patt_match` decrements `matchdepth` on entry (`luapat.rs:349`) and restores it
+only on the two fallthrough exits (427, 475). Six transitions instead do a Rust
+tail call and never restore:
 
-### #36 (Medium) - explicit `nil` is rejected for optional arguments
+- `luapat.rs:389` - `%b` continuation
+- `411` - `%f` continuation
+- `419` - backreference continuation
+- `440` - `patt_default_match` accept-empty for `*` / `?` / `-`
+- `453` - the `?` else-branch
+- `471` - item with no suffix
 
-**Verified:** `("a.b"):find(".", nil, true)` raises
-`bad argument #3 to <anonymous> (number expected, got nil)`. Both references
-return `2`. That is the standard plain-find idiom, so this is the one most
-likely to bite real scripts.
+Reference C uses `goto init` for exactly these, so continuation is depth-free
+there. Two distinct failure modes follow:
 
-Reference `luaL_opt*` treats nil as "absent". The prevailing dellingr pattern
-is `if num_args >= k { check_type(k, ...) }`, which errors on an explicit nil
-instead. Affected: `string.find` init (`string.rs:268`), `string.sub` j,
-`string.match` init, `string.gsub` n, `table.concat` sep/i/j, `table.sort`
-comp, `table.unpack`/`unpack` i/j, and `table.insert` pos (its 3-arg form with
-a nil pos errors differently from reference). `select` is already fine.
+1. **Pattern length.** A chain of N non-suffixed items costs N depth, so any
+   pattern with more than ~198 sequential items fails. Reference matches
+   arbitrarily long patterns.
+2. **Leak across the scan loop.** `str_match`'s loop (`luapat.rs:674-687`)
+   never resets `matchdepth` or `level` between anchor positions, so every
+   failed attempt that partially matched leaks depth equal to its tail-chain
+   length. 5.2 asserts `matchdepth == MAXCCALLS` before every attempt.
 
-The codebase already has the right pattern applied inconsistently: `tonumber`
-base and `table.remove` pos both guard with `state.typ(k) != LuaType::Nil`.
+Mode 2 is why the repro above dies on its *first* `find` rather than after 200:
+250 failed anchor attempts against a 250-byte subject leak one level each.
 
-### #37 (Medium) - `table.concat`'s empty short-circuit ignores an explicit range
+`src/patterns/mod.rs:322` (`runtime_match_errors_are_not_swallowed`, 201
+literal `a`s) asserts the divergence as expected behaviour and must be replaced,
+not deleted - the property it names is worth keeping, so it needs a subject and
+pattern that still legitimately exceed the depth limit after the fix.
 
-**Verified:** with `t[2] = "x"` and nothing else, `table.concat(t, "", 2, 2)`
-returns `""` in dellingr and `"x"` in both references.
+### #33 (Medium) - `%f` loses left context because callers re-slice the subject
 
-`src/lua_std/table.rs:224`: `if i > j || len == 0 { return "" }`. Reference
-only defaults `j` from `#t`; an explicit `i..j` range is honoured regardless of
-the border. Also, `i`/`j` go through `as usize`, so negative values saturate to
-0 rather than addressing negative indices.
+The matcher treats slice-start as string-start (`previous = '\0'`,
+`luapat.rs:401-405`), but every caller hands it a suffix rather than the whole
+subject with an offset:
 
-### #38 (Medium) - `unpack` / `table.unpack` truncate negative start indices
+- `string.rs:316` - `find` with `init`
+- `409` - `match` with `init`
+- `565` - the `gsub` loop
+- `702` - `gmatch_iter`
+- `288` - the plain-find fast path
 
-**Verified:** `select("#", table.unpack({10, 20}, -2, 2))` gives 3 in dellingr
-and 5 in both references.
+Reference `prepstate` keeps `src_init` at the true beginning of the subject even
+when matching from `init` or resuming mid-string. Every one of the ~14 `base` /
+`init` / `pos` capture-offset arguments threaded through `push_capture_value`,
+`push_captures`, `append_capture_bytes` and the gsub replacement helpers exists
+only to compensate for that re-slicing.
 
-`src/lua_std/basic.rs:241` and `src/lua_std/table.rs:121` do
-`state.to_number(2)? as usize`, saturating negatives to 0. So `unpack(t, -2, 2)`
-returns `t[0], t[1], t[2]` instead of `t[-2]..t[2]` - wrong count *and* wrong
-values.
+### Why a rewrite rather than two patches
 
-The 255-result cap is a deliberate protocol limit and is not in question.
+`notes/optimizations.md` #4 is the standing plan and it covers both:
+
+- Loop-based tail transitions (C's `goto init`) instead of Rust tail calls
+  fix #12's depth semantics and remove real per-item call overhead.
+- An `init` offset parameter, with the whole subject passed once, fixes #33 and
+  deletes the `base` arithmetic across `string.rs`.
+- Safe `usize` offsets into `&[u8]` instead of the raw-pointer `CPtr` layer
+  eliminate the `unsafe` derefs and the empty-pattern UB class.
+- Precompiling the pattern into an item list removes `classend`'s re-scan of
+  class bytes at every subject position tried by the scan loop (today O(pattern)
+  per position) and folds the validator and compiler into one pass with one
+  authoritative capture count.
+
+The cost hook for #16 lands naturally in this shape. **Do not charge anything
+in this loop** - #16 is a deliberately staged breaking cost-model change. Leave
+the structure ready and nothing more.
+
+### Constraints
+
+- The public surface is `LuaPattern` in `src/patterns/mod.rs`
+  (`from_bytes_try`, `matches_bytes`, `range`, `capture`, `num_matches`) plus
+  `LuaCapture` and the `PatternError` taxonomy in `patterns/errors.rs`. Error
+  variants and their `Display` strings are asserted by tests in `mod.rs` and by
+  `tests/gsub_errors.rs`; they are contract, keep them exact.
+- `LUA_MAXMATCHES` is 32 and the 32-capture limit stays.
+- Determinism is a product requirement. No iteration-order or entropy changes.
+- `unwrap_used` is denied outside `#[cfg(test)]`; `HashMap`/`HashSet` banned.
+- The whole existing `mod.rs` test suite must keep passing unchanged, with the
+  single exception of `runtime_match_errors_are_not_swallowed`.
 
 ---
 
 ## Agreed implementation plan
 
-Two further audit corrections from review: `string.find(".", nil, true)`
-returns `2, 2`, not the `1, 1` bugs.md records; and **`table.insert` is not
-part of #36** - all three implementations reject `table.insert(t, nil, 9)` at
-argument 2, because the 3-arg form makes `pos` required. Drop it from the
-finding and leave the code alone.
+The orchestrator and the deep reviewer verified both findings independently and
+converged on the same design, including the same depth boundary derived
+separately against reference. What follows is settled, not a menu.
 
-Separately noted, out of scope: dellingr's arg errors say `<anonymous>` where
-reference names the function, because `check_type` sets `func_name: None`. That
-is systemic and cosmetic, not part of these findings.
+### Depth model
 
-### The shared helper (#36)
+Count **active invocations of the core matcher, including the initial one**.
+Permit 200 concurrently active; reject the 201st. Pass depth **by value** as an
+argument rather than mutating a shared remaining-budget field:
 
-Two internal helpers in `src/vm_aux.rs`:
+```rust
+if depth >= MAXCCALLS {
+    return Err(PatternError::MatchDepthExceeded);
+}
+```
 
-- `State::is_none_or_nil(arg_number) -> bool`
-- `State::check_optional_type(arg_number, expected) -> Result<bool>`
+Recursive calls receive `depth + 1`; loop continuations keep `depth` unchanged.
+Each anchor attempt starts at `depth = 0`. This also corrects the current
+off-by-one, where the guard fires when the decrement reaches zero.
 
-`check_optional_type` returns `false` for missing or nil, otherwise delegates
-to the existing `check_type` and returns `true`. **That delegation is
-load-bearing**: a wrong non-nil value must keep exactly the same `ArgError`,
-argument index, expected/received types and label.
+Only these edges recurse and therefore count:
 
-**Do not** add `opt_number` / `opt_string` style helpers yet - they would mix
-optionality with coercion and integer-conversion policy and risk changing
-non-nil behaviour, notably `table.concat`'s string-only separator.
+- `start_capture`'s call back into the matcher (`luapat.rs:302`)
+- `end_capture`'s (`313`)
+- every continuation attempt from `max_expand` (`271`) and `min_expand` (`283`)
+- the greedy speculative branch of `?` (`449`)
 
-Adopt at: `string.sub` arg 3; `string.find` arg 3; `string.match` arg 3;
-`string.gsub` arg 4; `table.sort` arg 2; `table.concat` args 2, 3, 4;
-`table.unpack` args 2, 3; global `unpack` args 2, 3. Also the two that already
-handle nil correctly by hand - `table.remove` arg 2 and `table.move` arg 5 - so
-the pattern is uniform. Use `is_none_or_nil` directly for `tonumber`, keeping
-its existing precedence where argument 1 is validated before argument 2.
+The helpers themselves consume no level - only their calls back in do. The `?`
+fallback at `453` is a tail continuation and must **not** consume a level.
 
-`string.find`'s `plain` argument already works, since `to_boolean(nil)` is
-false.
+Everything else becomes a loop iteration, mirroring C's `goto init`: the `%b`,
+`%f` and backreference continuations (`389`, `411`, `419`), the accept-empty
+path (`440`), and the no-suffix item (`471`).
 
-Confirmed: `check_type` distinguishes missing from present, so an explicit nil
-becomes `received: Some(LuaType::Nil)` and errors. No affected function bypasses
-it.
+**Verified boundary, both 5.2 and 5.4:** `("a?"):rep(199)` over 199 `a`s
+matches; `("a?"):rep(200)` over 200 `a`s raises `pattern too complex`; 201
+sequential *literal* items match fine. The rewrite must reproduce this exactly.
 
-### Integer conversion (#37, #38)
+### Capture state per attempt
 
-Generalize the existing `table_position` (`table.rs:368`) into a shared
-`exact_integer_argument(state, arg, function_name)` in `src/lua_std.rs`, built
-on `exact_i64` (`numeral.rs:5`), and reuse it from insert/remove/move, concat
-and both unpack paths.
+`level` does **not** leak today - `start_capture` decrements on failure
+(`303`) and `end_capture` restores `Unfinished` (`316`), and an error aborts
+`str_match` outright, so no later attempt observes partial unwind. Confirmed
+behaviourally: `("aac"):find("(a)c")` gives `2, 3, "a"` in dellingr and both
+references.
 
-`unpack_values` (extract the duplicated global/table bodies into one private
-helper, keeping thin separate registration closures so the snapshot Rust-fn ids
-stay distinct and stable):
+Reset it anyway. Every anchor attempt starts with fresh capture state and
+`depth = 0`, so the invariant is structural rather than contingent on every
+unwind path being correct.
 
-- keep `i` and `j` as `i64`;
-- return zero results when `i > j`;
-- `j.checked_sub(i)`, where overflow means "too many results to unpack";
-- reject spans >= 255, preserving the existing exact 255-result maximum;
-- only then iterate, converting keys to `f64`.
+### Whole subject plus `init`
 
-`table.concat`: keep signed `i64` endpoints and remove **only** `len == 0` from
-the empty-result condition. An inclusive signed range avoids negative
-truncation and needs no `j - i` arithmetic.
+An `init` offset is sufficient; no separate end offset is needed. The suffix
+slices lose only the **left** boundary - `src_end` is already derived from the
+suffix pointer plus its length (`luapat.rs:664`), which is why `$` and the
+frontier end sentinel already behave correctly at resumed positions. Confirmed
+identical across dellingr and both references:
 
-**No bound tied to `#t`.** Lua uses the border only to default `j`; explicit
-endpoints may address any numeric keys, negative or far past the border, and a
-missing element errors naturally. `table.concat`'s unbounded work is finding
-#16, deliberately staged, and its remedy is per-element/output-byte charging -
-**do not** fold that breaking cost-model change in here as a range clamp.
+- `("ab"):find("$", 2)` -> `3, 2`
+- `("ab"):find("%f[%z]", 2)` -> `3, 2`
+- `("ab"):gmatch(".%f[%z]")` -> `"b"`
+- `("ab"):gsub("%f[%z]", "X")` -> `"abX", 1`
 
-Note `exact_i64` also rejects fractions, infinities, NaN and out-of-safe-range
-values. That matches 5.4; 5.2 accepts or truncates some, so those error cases
-belong in Rust tests rather than the universal differential example.
+New entry point is conceptually `matches_bytes_from(subject, init)` with
+`src_init = 0`, `src_end = subject.len()`, scanning from `init`.
+`matches_bytes(subject)` stays as the zero-offset wrapper.
+
+### Offset cleanup in `string.rs`
+
+Delete the `base` parameter outright from `push_capture_value` (63),
+`push_captures` (70), `append_capture_bytes` (83), `append_string_replacement`
+(92) and `append_gsub_replacement` (139). Pass the whole subject;
+`LuaCapture::Bytes` indexes it directly and `LuaCapture::Position(offset)` needs
+only `offset + 1`.
+
+Offsets that legitimately remain: `init`/`pos` as the scan-start argument and
+gmatch iterator state; the `+1` zero-to-one-based conversion; the one-byte
+advance after an empty match (580, 710); `gsub`'s `pos` for copying unmatched
+text; and the plain-search conversion at 288, since `find_subslice` still
+reports suffix-relative results.
+
+### Compiled representation
+
+One pass producing an ordered program plus precompiled byte classes:
+
+```rust
+enum Item {
+    Atom { atom: Atom, repeat: Repeat },
+    Balance { open: u8, close: u8 },
+    Frontier { class: ClassId },
+    Backref { slot: u8 },
+    CaptureStart { slot: u8 },
+    CaptureEnd { slot: u8 },
+    PositionCapture { slot: u8 },
+    EndAnchor,
+}
+
+enum Atom { Literal(u8), Any, Class(ClassId) }
+
+enum Repeat { One, Optional, ZeroOrMoreGreedy, OneOrMoreGreedy, ZeroOrMoreMinimal }
+```
+
+Each class is a deterministic 256-bit set (`[u64; 4]`) in a `Vec<ByteClass>`
+referenced by `ClassId`, so bracket classes, complements, ranges, `%a`-style
+classes, frontier classes and `%z` all test in O(1) per subject byte with no
+reparsing. This is what removes `classend`'s per-position rescan.
+
+The compiler keeps a fixed 32-entry capture stack, assigns slots, resolves
+`CaptureEnd` and backreferences, records the one authoritative capture count,
+and emits the existing errors in left-to-right order. Leading `^` is pattern
+metadata, not an item.
+
+### Error timing is contract - do not shift it
+
+- Compilation happens in `from_bytes_try` (`mod.rs:24`), where `str_check`
+  already runs. Every validation error keeps firing there.
+- `matches_bytes` retains only data-dependent errors: `MatchDepthExceeded`,
+  plus the two backreference cases below.
+- Preserve every `PatternError` variant and its exact `Display` string
+  (`errors.rs:33`). `tests/gsub_errors.rs` and the `mod.rs` suite assert them.
+- A backreference to an *unfinished* capture stays a match-time
+  `UnfinishedCapture`; a backreference to a *position* capture stays a plain
+  non-match, not an error (`mod.rs:279`).
+- Do not move validation ahead of the past-end checks in `find`/`match`
+  (`string.rs:312`, `401`), nor ahead of `gsub`'s zero-replacement early return
+  (`489`).
+- `gmatch` compiles lazily when the iterator first runs (`703`). Keep that.
+  Caching an owned compiled matcher in iterator state is a snapshot/state-design
+  change and is out of scope.
+
+### Scope limits
+
+- **Charge nothing.** Leave one centralized matcher-step site suitable for the
+  future #16 cost hook, but add no meter and no `consume_cost`. #16 is a staged
+  breaking cost-model change and is not part of this loop.
+- `LUA_MAXCAPTURES` stays 32; `LUA_MAXMATCHES` stays 33.
+- The entire `mod.rs` test suite keeps passing unchanged except for the body of
+  `runtime_match_errors_are_not_swallowed`.
 
 ### Tests
 
-New `examples/stdlib_optional_args.lua`, **no `DIFF` marker** - all three
-findings are universal, so unlike the previous loop no 5.4-forcing trick is
-needed. Cover: all four string optional-nil cases; `table.concat`
-separator/start/end defaults; `table.sort(t, nil)`; both unpack endpoint
-defaults; a sparse explicit concat range outside `#t`; negative concat indices;
-negative unpack ranges.
+Add before rewriting: the #12 no-leak repro and the 199/200 boundary; every #33
+entry and resumption case; absolute byte and position captures; resumed `$` and
+`%f[%z]`; and the deferred-error timing cases above. Replace only the body of
+`runtime_match_errors_are_not_swallowed`, keeping its name and intent.
 
-For global `unpack`, use `local compat_unpack = unpack or table.unpack` so
-dellingr and 5.2 exercise the global while 5.4 produces identical output via
-`table.unpack`.
+A new `examples/` script covering the #33 cases needs **no `DIFF` marker** -
+5.2 and 5.4 agree with the fixed behaviour.
 
-Rust tests: `optional_type_treats_missing_and_nil_as_absent`;
-`optional_type_preserves_non_nil_arg_error`; update
-`unpack_rejects_huge_range_without_overflow` (`tests/call_counts.rs:100`) for
-the exact-integer error; add `unpack_rejects_i64_span_overflow` using accepted
-near-`i64` endpoints so `checked_sub` itself is exercised; exact-integer
-rejection for fractional and out-of-range `table.concat` endpoints;
-`table_insert_nil_position_is_required`; extend
-`tonumber_uses_lua_numeral_grammar` with `tonumber("+ff", 16) == 255`; and a
-`tonumber(10, 16)` test asserting argument 1, expected string, received number.
-
-Those last two pin #57's measurements so the invalid finding is not
-re-derived.
-
-### Superseded questions
-
-1. For #36, what is the right shared helper? Doing it call-site by call-site
-   invites exactly the inconsistency that produced this bug - two functions
-   already do it correctly and the rest do not. Is there an `opt_*` family that
-   should exist in `vm_aux.rs` alongside `check_type`, and does adopting it
-   change any error message or argument index for the *non*-nil cases?
-2. `notes/bugs.md` flagged an unverified assumption behind #36: that
-   `check_type(k, T)` errors on nil. My repro confirms it does for
-   `string.find`. Confirm it holds for every listed function, since a couple
-   may already route through a different path.
-3. For #37 and #38, negative and out-of-range indices need care about
-   overflow when converted. What is the correct conversion - the `exact_i64`
-   helper the `table.move` fix now uses? And does honouring an explicit range
-   in `concat` need a bound on how far past the border it will read?
-4. Is `table.insert`'s 3-arg nil-pos case genuinely part of #36, or a different
-   bug? bugs.md says it "errors differently than reference", which is vaguer
-   than the rest.
-
-Read `src/lua_std/string.rs`, `src/lua_std/table.rs`, `src/lua_std/basic.rs`,
-and `check_type` plus its neighbours in `src/vm/vm_aux.rs`.
+Read `src/patterns/luapat.rs`, `src/patterns/mod.rs`, `src/patterns/errors.rs`,
+and the matcher call sites in `src/lua_std/string.rs`.

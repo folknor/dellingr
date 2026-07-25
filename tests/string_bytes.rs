@@ -295,6 +295,57 @@ fn position_captures_use_absolute_positions_after_init() {
 }
 
 #[test]
+fn resumed_patterns_keep_frontier_context_and_absolute_captures() {
+    let mut state = State::new();
+    state
+        .load_string(
+            r#"
+        local a, b = string.find("ab", "%f[%a]%a", 2)
+        local c, d = string.find("abcd", "%f[%w]%w", 2)
+        local m, p, q = string.match("ab", "()(b)()", 2)
+        local out, n = string.gsub("abcd", "%f[%w]%w", "X")
+        local g
+        for x in string.gmatch("ab", ".%f[%z]") do g = x end
+        return a, b, c, d, m, p, q, out, n, g
+        "#,
+        )
+        .unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(10)).unwrap();
+    assert_eq!(state.typ(-10), dellingr::LuaType::Nil);
+    assert_eq!(state.typ(-9), dellingr::LuaType::Nil);
+    assert_eq!(state.typ(-8), dellingr::LuaType::Nil);
+    assert_eq!(state.typ(-7), dellingr::LuaType::Nil);
+    assert_eq!(state.to_number(-6).unwrap(), 2.0);
+    assert_eq!(state.to_bytes(-5).unwrap(), b"b");
+    assert_eq!(state.to_number(-4).unwrap(), 3.0);
+    assert_eq!(state.to_bytes(-3).unwrap(), b"Xbcd");
+    assert_eq!(state.to_number(-2).unwrap(), 1.0);
+    assert_eq!(state.to_bytes(-1).unwrap(), b"b");
+}
+
+#[test]
+fn deferred_pattern_validation_keeps_existing_call_timing() {
+    let mut state = State::new();
+    state
+        .load_string(
+            r#"
+            local f = string.find("abc", "%", 5)
+            local m = string.match("abc", "%", 5)
+            local g, n = string.gsub("abc", "%", "X", 0)
+            local iter = string.gmatch("abc", "%")
+            return f, m, g, n, type(iter)
+            "#,
+        )
+        .unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(5)).unwrap();
+    assert_eq!(state.typ(-5), dellingr::LuaType::Nil);
+    assert_eq!(state.typ(-4), dellingr::LuaType::Nil);
+    assert_eq!(state.to_bytes(-3).unwrap(), b"abc");
+    assert_eq!(state.to_number(-2).unwrap(), 0.0);
+    assert_eq!(state.to_bytes(-1).unwrap(), b"function");
+}
+
+#[test]
 fn end_position_patterns_match_once() {
     let mut state = State::new();
     state

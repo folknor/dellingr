@@ -82,7 +82,7 @@ Compilation pipeline: source to `compiler::parse_str` to bytecode `Chunk` to exe
 
 **Cost model**: opcodes charge in `vm/eval.rs`'s dispatch; `analyze_cost` (`src/lib.rs`) walks bytecode statically and produces a `ScopeCost` tree (own + nested totals). The README's "Budget" section flags that structural ops like `while true do end` are intentionally free.
 
-**Patterns**: Lua-pattern matching is delegated to the `lua-patterns` crate (not a custom impl). `string.rs` has helpers `is_plain_lua_pattern` (fast path) and `gsub_replacement` (string / table / function replacements with Lua's `%0..%9` capture syntax).
+**Patterns**: Lua-pattern matching is an in-crate implementation in `src/patterns/`, not a dependency. `luapat.rs` compiles a pattern once into an item program plus interned 256-bit byte classes (`from_bytes_try`), then matches over `&[u8]` with absolute subject offsets (`matches_bytes_from(subject, init)` - callers pass the *whole* subject with a start offset, never a re-slice, so `%f` keeps its left context). Recursion depth is passed by value and bounded at `MAXCCALLS = 200` active invocations, matching reference exactly; only capture start/end, `max_expand`/`min_expand` backtracking and the greedy `?` branch recurse, while every other continuation is a loop iteration (reference's `goto init`). Compile-time errors surface from `from_bytes_try` and match-time ones from `matches_bytes_from`; that split is contract, asserted by tests. `string.rs` has helpers `is_plain_lua_pattern` (fast path) and `gsub_replacement` (string / table / function replacements with Lua's `%0..%9` capture syntax).
 
 ## Tests
 

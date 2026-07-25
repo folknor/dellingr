@@ -85,32 +85,6 @@ and renders as a constant `<function>`, so nothing outside NaN-boxing needs
 an id. Squeezing a raw `fn` pointer into the NaN payload is the part that
 would force one.
 
-### 4. Full rewrite of `src/patterns/luapat.rs` (E-O1; structurally fixes #12, #14, #33, #34, #56, and hosts the #16 cost hook)
-
-The module is a raw-pointer transliteration of C with three
-recently-patched bug clusters and four more found in this hunt. A rewrite
-buys correctness and speed at once:
-
-- Safe index arithmetic (`usize` offsets into `&[u8]`) instead of `CPtr`;
-  eliminates the `unsafe` derefs and the empty-pattern UB class entirely.
-  With slices + indices LLVM bounds-checks mostly fold; the C-shaped pointer
-  code is not load-bearing for perf.
-- Loop-based tail transitions (the C `goto init`) instead of Rust tail
-  calls: fixes the matchdepth semantics (#12) AND removes real call overhead
-  per pattern item.
-- `init` offset parameter (reference `prepstate` shape): subject is passed
-  once, whole; fixes `%f` (#33), deletes the `base` arithmetic and the
-  slice re-derivations in string.rs.
-- Pre-compiled pattern: one pass producing an item list (item kind, class
-  range, suffix, precomputed `classend`). Today `classend` re-scans the
-  class bytes for every item at every subject position tried by
-  `str_match`'s scan loop - O(pattern) per position. Precompiling makes the
-  scan loop O(1) per item and folds the validator (`str_check`) and the
-  compiler into one pass with one authoritative capture count (fixing the
-  #14/#34 validator/runtime skew by construction).
-- A cost hook (charge per K match steps into `State`) lands naturally here
-  (#16).
-
 ### 5. Iterative graph walks: GC mark + save walker + bytecode rebuild (C-O6 + D-OPT-1; removes the #11/#27/#28 abort class)
 
 One rewrite kills three unbounded recursions: replace `GcHeap::mark_children`,

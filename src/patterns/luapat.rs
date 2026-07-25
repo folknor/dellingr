@@ -1,37 +1,16 @@
-// translation of Lua 5.2 string pattern code
+//! Compiled, byte-oriented Lua patterns.
 
-use core::ptr::null;
 use core::result;
+use std::collections::BTreeMap;
 
 use super::errors::*;
 
 pub(super) const LUA_MAXCAPTURES: usize = 32;
 pub(super) const LUA_MAXMATCHES: usize = LUA_MAXCAPTURES + 1;
-/* maximum recursion depth for 'match' */
 const MAXCCALLS: usize = 200;
-
 const L_ESC: u8 = b'%';
 
-fn add(p: CPtr, count: usize) -> CPtr {
-    unsafe { p.add(count) }
-}
-
-fn sub(p: CPtr, count: usize) -> CPtr {
-    unsafe { p.offset(-(count as isize)) }
-}
-
-fn next(p: CPtr) -> CPtr {
-    add(p, 1)
-}
-
-fn at(p: CPtr) -> u8 {
-    unsafe { *p }
-}
-
-fn diff(p1: CPtr, p2: CPtr) -> usize {
-    let d = (p1 as isize).wrapping_sub(p2 as isize);
-    d as usize
-}
+type Result<T> = result::Result<T, PatternError>;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub(crate) enum LuaCapture {
@@ -39,7 +18,7 @@ pub(crate) enum LuaCapture {
         start: usize,
         end: usize,
     },
-    /// Zero-based byte offset within the subject passed to `str_match`.
+    /// Zero-based byte offset within the complete subject.
     Position(usize),
 }
 
@@ -50,120 +29,325 @@ enum CapLen {
     Position,
 }
 
-impl CapLen {
-    fn is_unfinished(&self) -> bool {
-        matches!(*self, CapLen::Unfinished)
-    }
-}
-
-type CPtr = *const u8;
-
 #[derive(Copy, Clone)]
 struct Capture {
-    init: CPtr,
+    init: usize,
     len: CapLen,
 }
 
-impl Capture {
-    fn is_unfinished(&self) -> bool {
-        self.len.is_unfinished()
+#[derive(Copy, Clone)]
+struct ClassId(usize);
+
+#[derive(Clone)]
+struct ByteClass([u64; 4]);
+
+impl ByteClass {
+    fn empty() -> Self {
+        Self([0; 4])
+    }
+    fn insert(&mut self, byte: u8) {
+        self.0[usize::from(byte) / 64] |= 1 << (byte % 64);
+    }
+    fn contains(&self, byte: u8) -> bool {
+        self.0[usize::from(byte) / 64] & (1 << (byte % 64)) != 0
+    }
+    fn invert(&mut self) {
+        for word in &mut self.0 {
+            *word = !*word;
+        }
     }
 }
 
-type Result<T> = result::Result<T, PatternError>;
-
-struct MatchState {
-    matchdepth: usize, /* control for recursive depth (to avoid stack overflow) */
-    src_init: CPtr,    /* init of source string */
-    src_end: CPtr,     /* end ('\0') of source string */
-    p_end: CPtr,       /* end ('\0') of pattern */
-    level: usize,      /* total number of captures (finished or unfinished) */
-    capture: [Capture; LUA_MAXCAPTURES],
+#[derive(Copy, Clone)]
+enum Repeat {
+    One,
+    Optional,
+    ZeroOrMoreGreedy,
+    OneOrMoreGreedy,
+    ZeroOrMoreMinimal,
 }
 
-impl MatchState {
-    fn new(s: CPtr, se: CPtr, pe: CPtr) -> MatchState {
-        MatchState {
-            matchdepth: MAXCCALLS,
-            src_init: s,
-            src_end: se,
-            p_end: pe,
-            level: 0,
-            capture: [Capture {
-                init: null(),
-                len: CapLen::Len(0),
-            }; LUA_MAXCAPTURES],
+#[derive(Copy, Clone)]
+enum Item {
+    Atom { class: ClassId, repeat: Repeat },
+    Balance { open: u8, close: u8 },
+    Frontier { class: ClassId },
+    Backref { slot: u8 },
+    CaptureStart { slot: u8 },
+    CaptureEnd { slot: u8 },
+    PositionCapture { slot: u8 },
+    EndAnchor,
+}
+
+pub(super) struct CompiledPattern {
+    items: Vec<Item>,
+    classes: Vec<ByteClass>,
+    anchored: bool,
+    captures: usize,
+}
+
+struct Compiler<'a> {
+    pattern: &'a [u8],
+    pos: usize,
+    items: Vec<Item>,
+    classes: Vec<ByteClass>,
+    /// Deduplicates identical classes so a pattern like `%a%a%a` or a long
+    /// literal run stores one `ByteClass` per *distinct* class, not per item.
+    /// `BTreeMap` rather than a hash map: iteration and identity must stay
+    /// deterministic.
+    class_ids: BTreeMap<[u64; 4], ClassId>,
+    capture_stack: [usize; LUA_MAXCAPTURES],
+    stack_len: usize,
+    captures: usize,
+}
+
+impl<'a> Compiler<'a> {
+    fn new(pattern: &'a [u8]) -> Self {
+        Self {
+            pattern,
+            pos: 0,
+            items: Vec::new(),
+            classes: Vec::new(),
+            class_ids: BTreeMap::new(),
+            capture_stack: [0; LUA_MAXCAPTURES],
+            stack_len: 0,
+            captures: 0,
         }
     }
 
-    fn check_capture(&self, l: usize) -> Result<usize> {
-        let l = l as i8 - b'1' as i8;
-        if l < 0 || l as usize >= self.level || self.capture[l as usize].is_unfinished() {
-            return Err(PatternError::InvalidCaptureIndex(Some(l)));
+    /// Intern a class, returning the id of an identical existing one if there
+    /// is one. Every atom - literal byte, `.`, `%a`-style class and bracket
+    /// class alike - is compiled to one of these, so matching a single item is
+    /// always one bitset test with no per-item branch on atom kind.
+    fn intern_class(&mut self, class: ByteClass) -> ClassId {
+        if let Some(&id) = self.class_ids.get(&class.0) {
+            return id;
         }
-        Ok(l as usize)
+        let id = ClassId(self.classes.len());
+        self.class_ids.insert(class.0, id);
+        self.classes.push(class);
+        id
     }
 
-    fn capture_to_close(&self) -> Result<usize> {
-        let mut level = self.level as isize - 1;
-        while level >= 0 {
-            if self.capture[level as usize].is_unfinished() {
-                return Ok(level as usize);
+    fn literal_class(&mut self, byte: u8) -> ClassId {
+        let mut result = ByteClass::empty();
+        result.insert(byte);
+        self.intern_class(result)
+    }
+
+    fn any_class(&mut self) -> ClassId {
+        let mut result = ByteClass::empty();
+        result.invert();
+        self.intern_class(result)
+    }
+
+    fn class_for_escape(&mut self, class: u8) -> ClassId {
+        let mut result = ByteClass::empty();
+        for byte in u8::MIN..=u8::MAX {
+            if match_class(byte, class) {
+                result.insert(byte);
             }
-            level -= 1;
         }
-        Err(PatternError::InvalidPatternCapture)
+        self.intern_class(result)
     }
 
-    fn classend(&self, p: CPtr) -> Result<CPtr> {
-        let ch = at(p);
-        let mut next_p = next(p);
-        Ok(match ch {
-            L_ESC => {
-                if next_p == self.p_end {
-                    return Err(PatternError::MalformedPattern(
-                        MalformedPattern::EndsWithPercent,
-                    ));
-                }
-                next(next_p)
+    fn bracket_class(&mut self) -> Result<ClassId> {
+        let mut invert = false;
+        if self.pattern.get(self.pos) == Some(&b'^') {
+            invert = true;
+            self.pos += 1;
+        }
+        let class_start = self.pos;
+        let mut scan = self.pos;
+        let close = loop {
+            let Some(&byte) = self.pattern.get(scan) else {
+                return Err(PatternError::MalformedPattern(
+                    MalformedPattern::MissingBracket,
+                ));
+            };
+            scan += 1;
+            if byte == L_ESC && scan < self.pattern.len() {
+                scan += 1;
             }
-            b'[' => {
-                if next_p < self.p_end && at(next_p) == b'^' {
-                    next_p = next(next_p);
+            if scan >= self.pattern.len() {
+                return Err(PatternError::MalformedPattern(
+                    MalformedPattern::MissingBracket,
+                ));
+            }
+            if self.pattern[scan] == b']' {
+                break scan;
+            }
+        };
+        if class_start == close {
+            return Err(PatternError::MalformedPattern(
+                MalformedPattern::MissingBracket,
+            ));
+        }
+        // The three arms below are mutually exclusive and ordered exactly as
+        // reference `matchbracketclass`. Flattening them changes which bytes a
+        // class contains: an escaped item can never also open a range, and a
+        // range never separately contributes its start byte - so `[z-a]`
+        // matches nothing rather than `z`, `[%a-z]` is the alphabetic class
+        // plus a literal `-`, and `[%--a]` is exactly `-` and `a`.
+        let mut class = ByteClass::empty();
+        while self.pos < close {
+            let byte = self.pattern[self.pos];
+            if byte == L_ESC && self.pos + 1 < close {
+                let escaped = self.pattern[self.pos + 1];
+                self.pos += 2;
+                for candidate in u8::MIN..=u8::MAX {
+                    if match_class(candidate, escaped) {
+                        class.insert(candidate);
+                    }
                 }
-                // Reference Lua consumes at least one class byte before
-                // accepting ']' (a do-while), so `[]` is malformed and `[]]`
-                // is a class containing ']' (C29). Bounds-check before every
-                // deref; keep in sync with the `[` arm in `str_match_check`.
-                loop {
-                    if next_p == self.p_end {
+            } else if self.pos + 2 < close && self.pattern[self.pos + 1] == b'-' {
+                let end = self.pattern[self.pos + 2];
+                self.pos += 3;
+                // A descending range such as `[z-a]` is empty, and inserting
+                // nothing is what makes it match nothing.
+                for candidate in byte..=end {
+                    class.insert(candidate);
+                }
+            } else {
+                class.insert(byte);
+                self.pos += 1;
+            }
+        }
+        self.pos = close + 1;
+        if invert {
+            class.invert();
+        }
+        Ok(self.intern_class(class))
+    }
+
+    fn compile(mut self) -> Result<CompiledPattern> {
+        let anchored = self.pattern.first() == Some(&b'^');
+        if anchored {
+            self.pos = 1;
+        }
+        while self.pos < self.pattern.len() {
+            let byte = self.pattern[self.pos];
+            self.pos += 1;
+            match byte {
+                b'(' => {
+                    if self.captures == LUA_MAXCAPTURES {
+                        return Err(PatternError::TooManyCaptures);
+                    }
+                    let slot = self.captures;
+                    self.captures += 1;
+                    if self.pattern.get(self.pos) == Some(&b')') {
+                        self.pos += 1;
+                        self.items.push(Item::PositionCapture { slot: slot as u8 });
+                    } else {
+                        self.capture_stack[self.stack_len] = slot;
+                        self.stack_len += 1;
+                        self.items.push(Item::CaptureStart { slot: slot as u8 });
+                    }
+                }
+                b')' => {
+                    if self.stack_len == 0 {
+                        return Err(PatternError::InvalidPatternCapture);
+                    }
+                    self.stack_len -= 1;
+                    self.items.push(Item::CaptureEnd {
+                        slot: self.capture_stack[self.stack_len] as u8,
+                    });
+                }
+                b'$' if self.pos == self.pattern.len() => self.items.push(Item::EndAnchor),
+                L_ESC => {
+                    let Some(&escaped) = self.pattern.get(self.pos) else {
                         return Err(PatternError::MalformedPattern(
-                            MalformedPattern::MissingBracket,
+                            MalformedPattern::EndsWithPercent,
                         ));
-                    }
-                    let ch = at(next_p);
-                    next_p = next(next_p);
-                    if ch == L_ESC && next_p < self.p_end {
-                        next_p = next(next_p); /* skip escapes (e.g. `%]') */
-                    }
-                    if next_p == self.p_end {
-                        return Err(PatternError::MalformedPattern(
-                            MalformedPattern::MissingBracket,
-                        ));
-                    }
-                    if at(next_p) == b']' {
-                        break;
+                    };
+                    self.pos += 1;
+                    match escaped {
+                        b'b' => {
+                            let Some(&open) = self.pattern.get(self.pos) else {
+                                return Err(PatternError::MalformedPattern(
+                                    MalformedPattern::MissingBalancedArguments,
+                                ));
+                            };
+                            let Some(&close) = self.pattern.get(self.pos + 1) else {
+                                return Err(PatternError::MalformedPattern(
+                                    MalformedPattern::MissingBalancedArguments,
+                                ));
+                            };
+                            self.pos += 2;
+                            self.items.push(Item::Balance { open, close });
+                        }
+                        b'f' => {
+                            if self.pattern.get(self.pos) != Some(&b'[') {
+                                return Err(PatternError::MalformedPattern(
+                                    MalformedPattern::MissingFrontierBracket,
+                                ));
+                            }
+                            self.pos += 1;
+                            let class = self.bracket_class()?;
+                            self.items.push(Item::Frontier { class });
+                        }
+                        b'0'..=b'9' => {
+                            // `%1`..`%9` are one-based, so `%0` yields -1 and is
+                            // always invalid. The short-circuit order keeps
+                            // every `as usize` below on a nonnegative value.
+                            let index = escaped as i8 - b'1' as i8;
+                            let resolved = index >= 0
+                                && (index as usize) < self.captures
+                                && !self.capture_stack[..self.stack_len]
+                                    .contains(&(index as usize));
+                            if !resolved {
+                                return Err(PatternError::InvalidCaptureIndex(Some(index)));
+                            }
+                            self.items.push(Item::Backref { slot: index as u8 });
+                        }
+                        _ => {
+                            let class = self.class_for_escape(escaped);
+                            self.push_atom(class);
+                        }
                     }
                 }
-                next(next_p)
+                b'[' => {
+                    let class = self.bracket_class()?;
+                    self.push_atom(class);
+                }
+                b'.' => {
+                    let class = self.any_class();
+                    self.push_atom(class);
+                }
+                _ => {
+                    let class = self.literal_class(byte);
+                    self.push_atom(class);
+                }
             }
-            _ => next_p,
+        }
+        if self.stack_len != 0 {
+            return Err(PatternError::UnfinishedCapture);
+        }
+        Ok(CompiledPattern {
+            items: self.items,
+            classes: self.classes,
+            anchored,
+            captures: self.captures,
         })
+    }
+
+    fn push_atom(&mut self, class: ClassId) {
+        let repeat = match self.pattern.get(self.pos) {
+            Some(b'?') => Repeat::Optional,
+            Some(b'*') => Repeat::ZeroOrMoreGreedy,
+            Some(b'+') => Repeat::OneOrMoreGreedy,
+            Some(b'-') => Repeat::ZeroOrMoreMinimal,
+            _ => Repeat::One,
+        };
+        if !matches!(repeat, Repeat::One) {
+            self.pos += 1;
+        }
+        self.items.push(Item::Atom { class, repeat });
     }
 }
 
 fn match_class(ch: u8, class: u8) -> bool {
-    let res = match class.to_ascii_lowercase() {
+    let result = match class.to_ascii_lowercase() {
         b'a' => ch.is_ascii_alphabetic(),
         b'c' => ch.is_ascii_control(),
         b'd' => ch.is_ascii_digit(),
@@ -174,572 +358,267 @@ fn match_class(ch: u8, class: u8) -> bool {
         b'u' => ch.is_ascii_uppercase(),
         b'w' => ch.is_ascii_alphanumeric(),
         b'x' => ch.is_ascii_hexdigit(),
-        b'z' => ch == b'\0',
+        b'z' => ch == 0,
         _ => return class == ch,
     };
     if class.is_ascii_lowercase() {
-        res
+        result
     } else {
-        !res
+        !result
     }
 }
 
-fn matchbracketclass(c: u8, p: CPtr, ec: CPtr) -> bool {
-    let mut p = p;
-    // [^ inverts match
-    let sig = if at(next(p)) == b'^' {
-        p = next(p);
-        false
-    } else {
-        true
-    };
-    p = next(p);
-    while p < ec {
-        if at(p) == L_ESC {
-            // e.g %s
-            p = next(p);
-            if match_class(c, at(p)) {
-                return sig;
-            }
-        } else
-        // e.g a-z
-        if at(next(p)) == b'-' && add(p, 2) < ec {
-            let lastc = at(p);
-            p = add(p, 2);
-            if lastc <= c && c <= at(p) {
-                return sig;
-            }
-        } else if at(p) == c {
-            return sig;
+struct MatchState<'a> {
+    subject: &'a [u8],
+    pattern: &'a CompiledPattern,
+    captures: [Capture; LUA_MAXCAPTURES],
+}
+
+impl<'a> MatchState<'a> {
+    fn new(subject: &'a [u8], pattern: &'a CompiledPattern) -> Self {
+        Self {
+            subject,
+            pattern,
+            captures: [Capture {
+                init: 0,
+                len: CapLen::Len(0),
+            }; LUA_MAXCAPTURES],
         }
-        p = next(p);
     }
-    !sig
-}
-
-impl MatchState {
-    fn singlematch(&self, s: CPtr, p: CPtr, ep: CPtr) -> bool {
-        if s >= self.src_end {
+    fn singlematch(&self, pos: usize, class: ClassId) -> bool {
+        let Some(&byte) = self.subject.get(pos) else {
             return false;
-        }
-        let c = at(s);
-        let pc = at(p);
-        match pc {
-            b'.' => true, /* matches any char */
-            L_ESC => match_class(c, at(next(p))),
-            b'[' => matchbracketclass(c, p, sub(ep, 1)),
-            _ => c == pc,
-        }
-    }
-
-    fn matchbalance(&self, s: CPtr, p: CPtr) -> Result<CPtr> {
-        if p >= sub(self.p_end, 1) {
-            return Err(PatternError::MalformedPattern(
-                MalformedPattern::MissingBalancedArguments,
-            ));
-        }
-        if s == self.src_end || at(s) != at(p) {
-            return Ok(null());
-        }
-        // e.g. %b()
-        let b = at(p);
-        let e = at(next(p));
-        let mut cont = 1;
-        let mut s = next(s);
-        while s < self.src_end {
-            let ch = at(s);
-            if ch == e {
-                cont -= 1;
-                if cont == 0 {
-                    return Ok(next(s));
-                }
-            } else if ch == b {
-                cont += 1;
-            }
-            s = next(s);
-        }
-        Ok(null()) /* string ends out of balance */
-    }
-
-    fn max_expand(&mut self, s: CPtr, p: CPtr, ep: CPtr) -> Result<CPtr> {
-        let mut i = 0isize; /* counts maximum expand for item */
-        while self.singlematch(add(s, i as usize), p, ep) {
-            i += 1;
-        }
-        /* keeps trying to match with the maximum repetitions */
-        while i >= 0 {
-            let res = self.patt_match(add(s, i as usize), next(ep))?;
-            if !res.is_null() {
-                return Ok(res);
-            }
-            i -= 1; /* else didn't match; reduce 1 repetition to try again */
-        }
-        Ok(null())
-    }
-
-    fn min_expand(&mut self, s: CPtr, p: CPtr, ep: CPtr) -> Result<CPtr> {
-        let mut s = s;
-        loop {
-            let res = self.patt_match(s, next(ep))?;
-            if !res.is_null() {
-                return Ok(res);
-            } else if self.singlematch(s, p, ep) {
-                s = next(s);
-            } else {
-                return Ok(null());
-            }
-        }
-    }
-
-    fn start_capture(&mut self, s: CPtr, p: CPtr, what: CapLen) -> Result<CPtr> {
-        let level = self.level;
-        if level >= LUA_MAXCAPTURES {
-            return Err(PatternError::TooManyCaptures);
-        }
-        self.capture[level].init = s;
-        self.capture[level].len = what;
-        self.level = level + 1;
-        let res = self.patt_match(s, p)?;
-        if res.is_null() {
-            /* match failed? */
-            self.level -= 1; /* undo capture */
-        }
-        Ok(res)
-    }
-
-    fn end_capture(&mut self, s: CPtr, p: CPtr) -> Result<CPtr> {
-        let l = self.capture_to_close()?;
-        self.capture[l].len = CapLen::Len(diff(s, self.capture[l].init)); /* close capture */
-        let res = self.patt_match(s, p)?;
-        if res.is_null() {
-            /* match failed? */
-            self.capture[l].len = CapLen::Unfinished;
-        }
-        Ok(res)
-    }
-
-    fn match_capture(&mut self, s: CPtr, l: usize) -> Result<CPtr> {
-        let l = self.check_capture(l)?;
-        let len = match self.capture[l].len {
-            CapLen::Len(len) => len,
-            CapLen::Position => return Ok(null()),
-            CapLen::Unfinished => return Err(PatternError::UnfinishedCapture),
         };
-        if diff(self.src_end, s) < len {
-            return Ok(null());
+        self.pattern.classes[class.0].contains(byte)
+    }
+    fn match_balance(&self, pos: usize, open: u8, close: u8) -> Option<usize> {
+        if self.subject.get(pos) != Some(&open) {
+            return None;
         }
-        if len == 0 {
-            return Ok(s);
+        let mut depth = 1;
+        let mut cursor = pos + 1;
+        while let Some(&byte) = self.subject.get(cursor) {
+            if byte == close {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(cursor + 1);
+                }
+            } else if byte == open {
+                depth += 1;
+            }
+            cursor += 1;
         }
-        // SAFETY: both ranges lie within the subject buffer - the guard above
-        // bounds the candidate range, and the capture range was bounded when the
-        // capture was closed. Comparison only; overlap is irrelevant.
-        let captured = unsafe { core::slice::from_raw_parts(self.capture[l].init, len) };
-        let candidate = unsafe { core::slice::from_raw_parts(s, len) };
-        if captured == candidate {
-            Ok(add(s, len))
-        } else {
-            Ok(null())
+        None
+    }
+    fn recurse(&mut self, pos: usize, item: usize, depth: usize) -> Result<Option<usize>> {
+        self.match_at(pos, item, depth + 1)
+    }
+    fn max_expand(
+        &mut self,
+        pos: usize,
+        item: usize,
+        class: ClassId,
+        min: usize,
+        depth: usize,
+    ) -> Result<Option<usize>> {
+        let mut end = pos;
+        while self.singlematch(end, class) {
+            end += 1;
+        }
+        while end >= pos + min {
+            if let Some(result) = self.recurse(end, item + 1, depth)? {
+                return Ok(Some(result));
+            }
+            if end == pos + min {
+                break;
+            }
+            end -= 1;
+        }
+        Ok(None)
+    }
+    fn min_expand(
+        &mut self,
+        mut pos: usize,
+        item: usize,
+        class: ClassId,
+        depth: usize,
+    ) -> Result<Option<usize>> {
+        loop {
+            if let Some(result) = self.recurse(pos, item + 1, depth)? {
+                return Ok(Some(result));
+            }
+            if !self.singlematch(pos, class) {
+                return Ok(None);
+            }
+            pos += 1;
         }
     }
-
-    fn patt_match(&mut self, s: CPtr, p: CPtr) -> Result<CPtr> {
-        let mut s = s;
-        let mut p = p;
-        self.matchdepth -= 1;
-        if self.matchdepth == 0 {
+    fn match_at(&mut self, mut pos: usize, mut item: usize, depth: usize) -> Result<Option<usize>> {
+        if depth >= MAXCCALLS {
             return Err(PatternError::MatchDepthExceeded);
         }
-
-        if p == self.p_end {
-            /* end of pattern? */
-            self.matchdepth += 1;
-            return Ok(s);
-        }
-        match at(p) {
-            b'(' => {
-                /* start capture */
-                if at(next(p)) == b')' {
-                    /* position capture? */
-                    s = self.start_capture(s, add(p, 2), CapLen::Position)?;
-                } else {
-                    s = self.start_capture(s, next(p), CapLen::Unfinished)?;
-                }
-            }
-            b')' => {
-                /* end capture */
-                s = self.end_capture(s, next(p))?;
-            }
-            b'$' => {
-                if next(p) != self.p_end {
-                    /* is the `$' the last char in pattern? */
-                    /* no; go to default */
-                    return self.patt_default_match(s, p);
-                }
-                s = if s == self.src_end { s } else { null() }; /* check end of string */
-            }
-            L_ESC => {
-                /* escaped sequences not in the format class[*+?-]? */
-                match at(next(p)) {
-                    b'b' => {
-                        /* balanced string? */
-                        s = self.matchbalance(s, add(p, 2))?;
-                        if !s.is_null() {
-                            // e.g, after %b()
-                            return self.patt_match(s, add(p, 4));
-                        }
-                    }
-                    b'f' => {
-                        /* frontier? */
-                        p = add(p, 2);
-                        if at(p) != b'[' {
-                            return Err(PatternError::MalformedPattern(
-                                MalformedPattern::MissingFrontierBracket,
-                            ));
-                        }
-                        let ep = self.classend(p)?; /* points to what is next */
-                        let previous = if s == self.src_init {
-                            b'\0'
-                        } else {
-                            at(sub(s, 1))
-                        };
-                        let epl = sub(ep, 1);
-                        let current = if s == self.src_end { b'\0' } else { at(s) };
-                        if !matchbracketclass(previous, p, epl)
-                            && matchbracketclass(current, p, epl)
-                        {
-                            return self.patt_match(s, ep);
-                        }
-                        s = null(); /* match failed */
-                    }
-                    b'0'..=b'9' => {
-                        /* capture results (%0-%9)? */
-                        s = self.match_capture(s, at(next(p)) as usize)?;
-                        if !s.is_null() {
-                            return self.patt_match(s, add(p, 2));
-                        }
-                    }
-                    _ => return self.patt_default_match(s, p),
-                }
-            }
-            _ => return self.patt_default_match(s, p),
-        }
-        self.matchdepth += 1;
-        Ok(s)
-    }
-
-    fn patt_default_match(&mut self, s: CPtr, p: CPtr) -> Result<CPtr> {
-        let mut s = s;
-        /* pattern class plus optional suffix */
-        let ep = self.classend(p)?; /* points to optional suffix */
-        let epc = if ep == self.p_end { 0 } else { at(ep) };
-        /* does not match at least once? */
-        if !self.singlematch(s, p, ep) {
-            if epc == b'*' || epc == b'?' || epc == b'-' {
-                /* accept empty? */
-                return self.patt_match(s, next(ep));
-            }
-            /* '+' or no suffix */
-            s = null(); /* fail */
-        } else {
-            /* matched once */
-            match epc {
-                /* handle optional suffix */
-                b'?' => {
-                    let res = self.patt_match(next(s), next(ep))?;
-                    if !res.is_null() {
-                        s = res;
-                    } else {
-                        return self.patt_match(s, next(ep));
-                    }
-                }
-                b'+' => {
-                    /* 1 or more repetitions */
-                    s = next(s);
-                    s = self.max_expand(s, p, ep)?;
-                }
-                b'*' => {
-                    /* 0 or more repetitions */
-                    s = self.max_expand(s, p, ep)?;
-                }
-                b'-' => {
-                    /* 0 or more repetitions (minimum) */
-                    s = self.min_expand(s, p, ep)?;
-                }
-                _ => {
-                    /* no suffix */
-                    return self.patt_match(next(s), ep);
-                }
-            }
-        }
-        self.matchdepth += 1;
-        Ok(s)
-    }
-
-    fn push_onecapture(&mut self, i: usize, s: CPtr, e: CPtr, mm: &mut [LuaCapture]) -> Result<()> {
-        if i >= self.level {
-            if i == 0 {
-                /* ms->level == 0, too */
-                mm[0] = LuaCapture::Bytes {
-                    start: 0,
-                    end: diff(e, s),
-                };
-                Ok(())
-            } else {
-                Err(PatternError::InvalidCaptureIndex(None))
-            }
-        } else {
-            let init = self.capture[i].init;
-            match self.capture[i].len {
-                CapLen::Unfinished => Err(PatternError::UnfinishedCapture),
-                CapLen::Position => {
-                    mm[i] = LuaCapture::Position(diff(init, self.src_init));
-                    Ok(())
-                }
-                CapLen::Len(l) => {
-                    let start = diff(init, self.src_init);
-                    mm[i] = LuaCapture::Bytes {
-                        start,
-                        end: start + l,
+        loop {
+            // Central matcher-step site reserved for the future cost hook.
+            let Some(current) = self.pattern.items.get(item).copied() else {
+                return Ok(Some(pos));
+            };
+            match current {
+                Item::CaptureStart { slot } => {
+                    self.captures[usize::from(slot)] = Capture {
+                        init: pos,
+                        len: CapLen::Unfinished,
                     };
-                    Ok(())
+                    return self.recurse(pos, item + 1, depth);
                 }
+                Item::CaptureEnd { slot } => {
+                    let slot = usize::from(slot);
+                    self.captures[slot].len = CapLen::Len(pos - self.captures[slot].init);
+                    let result = self.recurse(pos, item + 1, depth)?;
+                    if result.is_none() {
+                        self.captures[slot].len = CapLen::Unfinished;
+                    }
+                    return Ok(result);
+                }
+                Item::PositionCapture { slot } => {
+                    self.captures[usize::from(slot)] = Capture {
+                        init: pos,
+                        len: CapLen::Position,
+                    };
+                    // Reference routes `()` through `start_capture`, which
+                    // recurses, so a position capture costs a depth level just
+                    // like `(`. Continuing in this loop instead would let
+                    // patterns that reference rejects match here.
+                    return self.recurse(pos, item + 1, depth);
+                }
+                Item::Balance { open, close } => match self.match_balance(pos, open, close) {
+                    Some(next) => {
+                        pos = next;
+                        item += 1;
+                    }
+                    None => return Ok(None),
+                },
+                Item::Frontier { class } => {
+                    let previous = pos
+                        .checked_sub(1)
+                        .and_then(|i| self.subject.get(i))
+                        .copied()
+                        .unwrap_or(0);
+                    let current = self.subject.get(pos).copied().unwrap_or(0);
+                    if self.pattern.classes[class.0].contains(previous)
+                        || !self.pattern.classes[class.0].contains(current)
+                    {
+                        return Ok(None);
+                    }
+                    item += 1;
+                }
+                Item::Backref { slot } => {
+                    let capture = self.captures[usize::from(slot)];
+                    let len = match capture.len {
+                        CapLen::Len(length) => length,
+                        CapLen::Position => return Ok(None),
+                        CapLen::Unfinished => return Err(PatternError::UnfinishedCapture),
+                    };
+                    if self.subject.get(capture.init..capture.init + len)
+                        != self.subject.get(pos..pos + len)
+                    {
+                        return Ok(None);
+                    }
+                    pos += len;
+                    item += 1;
+                }
+                Item::EndAnchor => return Ok((pos == self.subject.len()).then_some(pos)),
+                Item::Atom { class, repeat } => match repeat {
+                    Repeat::One => {
+                        if !self.singlematch(pos, class) {
+                            return Ok(None);
+                        }
+                        pos += 1;
+                        item += 1;
+                    }
+                    Repeat::Optional => {
+                        if self.singlematch(pos, class)
+                            && let Some(result) = self.recurse(pos + 1, item + 1, depth)?
+                        {
+                            return Ok(Some(result));
+                        }
+                        item += 1;
+                    }
+                    // `*` and `-` that cannot match even once take reference's
+                    // depth-free accept-empty transition (`goto init`), so they
+                    // must advance in this loop rather than recurse through an
+                    // expansion helper. Otherwise a long run of them exhausts
+                    // the depth budget on a subject they all match emptily.
+                    Repeat::ZeroOrMoreGreedy => {
+                        if !self.singlematch(pos, class) {
+                            item += 1;
+                            continue;
+                        }
+                        return self.max_expand(pos, item, class, 0, depth);
+                    }
+                    Repeat::OneOrMoreGreedy => {
+                        if !self.singlematch(pos, class) {
+                            return Ok(None);
+                        }
+                        return self.max_expand(pos + 1, item, class, 0, depth);
+                    }
+                    Repeat::ZeroOrMoreMinimal => {
+                        if !self.singlematch(pos, class) {
+                            item += 1;
+                            continue;
+                        }
+                        return self.min_expand(pos, item, class, depth);
+                    }
+                },
             }
         }
     }
-
-    fn push_captures(&mut self, s: CPtr, e: CPtr, mm: &mut [LuaCapture]) -> Result<usize> {
-        let nlevels = if self.level == 0 && !s.is_null() {
-            1
-        } else {
-            self.level
-        };
-        for i in 0..nlevels {
-            self.push_onecapture(i, s, e, mm)?;
+    fn captures(
+        &self,
+        start: usize,
+        end: usize,
+        out: &mut [LuaCapture; LUA_MAXMATCHES],
+    ) -> Result<usize> {
+        out[0] = LuaCapture::Bytes { start, end };
+        for index in 0..self.pattern.captures {
+            out[index + 1] = match self.captures[index].len {
+                CapLen::Len(length) => LuaCapture::Bytes {
+                    start: self.captures[index].init,
+                    end: self.captures[index].init + length,
+                },
+                CapLen::Position => LuaCapture::Position(self.captures[index].init),
+                CapLen::Unfinished => return Err(PatternError::UnfinishedCapture),
+            };
         }
-        Ok(nlevels) /* number of strings pushed */
+        Ok(self.pattern.captures + 1)
     }
+}
 
-    pub(crate) fn str_match_check(&mut self, p: CPtr) -> Result<()> {
-        let mut level_stack = [0; LUA_MAXCAPTURES];
-        let mut stack_idx = 0;
-        let mut p = p;
-        while p < self.p_end {
-            let ch = at(p);
-            p = next(p);
-            match ch {
-                L_ESC => {
-                    if p >= self.p_end {
-                        return Err(PatternError::MalformedPattern(
-                            MalformedPattern::EndsWithPercent,
-                        ));
-                    }
-                    let c = at(p);
-                    match c {
-                        b'b' => {
-                            // `%b` needs TWO delimiter bytes (e.g. `%b()`). Skip
-                            // both so `%b((` is accepted and neither delimiter is
-                            // re-parsed as a capture (L14). p enters pointing at
-                            // 'b'.
-                            p = next(p); // first delimiter
-                            if p >= self.p_end {
-                                return Err(PatternError::MalformedPattern(
-                                    MalformedPattern::MissingBalancedArguments,
-                                ));
-                            }
-                            p = next(p); // second delimiter
-                            if p >= self.p_end {
-                                return Err(PatternError::MalformedPattern(
-                                    MalformedPattern::MissingBalancedArguments,
-                                ));
-                            }
-                            p = next(p); // past the `%bxy` item
-                        }
-                        b'f' => {
-                            // p enters pointing at 'f'. Bounds-check before the
-                            // deref so `%f` / `%fx` at the pattern end do not read
-                            // one past the end (L14). Leave p at '[' for the outer
-                            // loop to validate the class.
-                            p = next(p);
-                            if p >= self.p_end || at(p) != b'[' {
-                                return Err(PatternError::MalformedPattern(
-                                    MalformedPattern::MissingFrontierBracket,
-                                ));
-                            }
-                        }
-                        b'0'..=b'9' => {
-                            let l = (c as i8) - (b'1' as i8);
-                            // println!("level {}", self.level);
-                            if l < 0
-                                || l as usize >= self.level
-                                || self.capture[l as usize].is_unfinished()
-                            {
-                                return Err(PatternError::InvalidCaptureIndex(Some(l)));
-                            }
-                            p = next(p);
-                        }
-                        _ => p = next(p),
-                    }
-                }
-                b'[' => {
-                    // Scan to the closing ']'. Reference Lua consumes at least
-                    // one class byte before accepting ']' (a do-while), so `[]`
-                    // is malformed and `[]]` is a class containing ']' (C29).
-                    // Bounds-check before every deref so an unterminated class
-                    // (`[`, `[a`, a trailing escape) is rejected without
-                    // reading past the pattern end (L14). Keep in sync with
-                    // `classend`.
-                    if p < self.p_end && at(p) == b'^' {
-                        p = next(p);
-                    }
-                    loop {
-                        if p >= self.p_end {
-                            return Err(PatternError::MalformedPattern(
-                                MalformedPattern::MissingBracket,
-                            ));
-                        }
-                        let ch = at(p);
-                        p = next(p);
-                        if ch == L_ESC && p < self.p_end {
-                            p = next(p); // skip the escaped byte (e.g. `%]`)
-                        }
-                        if p >= self.p_end {
-                            return Err(PatternError::MalformedPattern(
-                                MalformedPattern::MissingBracket,
-                            ));
-                        }
-                        if at(p) == b']' {
-                            break;
-                        }
-                    }
-                    // p points at ']'; the outer loop consumes it.
-                }
-                b'(' => {
-                    // p enters pointing just past '('. A pattern ending in '('
-                    // leaves p == p_end, so bounds-check before the deref (L14);
-                    // treat it as an (unfinished) open capture.
-                    if self.level >= LUA_MAXCAPTURES || stack_idx >= LUA_MAXCAPTURES {
-                        return Err(PatternError::TooManyCaptures);
-                    }
-                    let level = self.level;
-                    if p >= self.p_end || at(p) != b')' {
-                        // not a position capture
-                        level_stack[stack_idx] = level;
-                        stack_idx += 1;
-                        self.capture[level].len = CapLen::Unfinished;
-                    } else {
-                        p = next(p);
-                        self.capture[level].len = CapLen::Position;
-                    }
-                    self.level = level + 1;
-                }
-                b')' => {
-                    if stack_idx == 0 {
-                        return Err(PatternError::InvalidPatternCapture);
-                    }
-                    stack_idx -= 1;
-                    self.capture[level_stack[stack_idx]].len = CapLen::Len(0);
-                }
-                _ => {}
-            }
-        }
-        if stack_idx > 0 {
-            return Err(PatternError::UnfinishedCapture);
-        }
-        Ok(())
-    }
+pub(super) fn compile(pattern: &[u8]) -> Result<CompiledPattern> {
+    Compiler::new(pattern).compile()
 }
 
 pub(super) fn str_match(
-    s: &[u8],
-    p: &[u8],
-    mm: &mut [LuaCapture; LUA_MAXMATCHES],
+    subject: &[u8],
+    pattern: &CompiledPattern,
+    init: usize,
+    out: &mut [LuaCapture; LUA_MAXMATCHES],
 ) -> Result<usize> {
-    if p.is_empty() {
-        mm[0] = LuaCapture::Bytes { start: 0, end: 0 };
+    if pattern.items.is_empty() {
+        out[0] = LuaCapture::Bytes {
+            start: init,
+            end: init,
+        };
         return Ok(1);
     }
-    let mut lp = p.len();
-    let mut p = p.as_ptr();
-    let ls = s.len();
-    let s = s.as_ptr();
-    let mut s1 = s;
-    let anchor = at(p) == b'^';
-    if anchor {
-        p = next(p);
-        lp -= 1; /* skip anchor character */
-    }
-
-    let mut ms = MatchState::new(s, add(s, ls), add(p, lp));
+    let mut pos = init;
     loop {
-        let res = ms.patt_match(s1, p)?;
-        if !res.is_null() {
-            mm[0] = LuaCapture::Bytes {
-                start: diff(s1, s),
-                end: diff(res, s),
-            };
-            return Ok(ms.push_captures(null(), null(), &mut mm[1..])? + 1);
+        let mut state = MatchState::new(subject, pattern);
+        if let Some(end) = state.match_at(pos, 0, 0)? {
+            return state.captures(pos, end, out);
         }
-        if anchor || s1 == ms.src_end {
-            break;
+        if pattern.anchored || pos == subject.len() {
+            return Ok(0);
         }
-        s1 = next(s1);
-    }
-    Ok(0)
-}
-
-pub(super) fn str_check(p: &[u8]) -> Result<()> {
-    if p.is_empty() {
-        return Ok(());
-    }
-    let mut lp = p.len();
-    let mut p = p.as_ptr();
-    let anchor = at(p) == b'^';
-    if anchor {
-        p = next(p);
-        lp -= 1; /* skip anchor character */
-    }
-    let mut ms = MatchState::new(null(), null(), add(p, lp));
-    ms.str_match_check(p)?;
-    Ok(())
-}
-
-/*
-fn check(s: &[u8], p: &[u8]) {
-    if let Err(e) = str_check(p) {
-        println!("check error {}",e);
-        return;
-    }
-
-    let mut matches = [LuaMatch{start: 0, end: 0}; 10];
-    match str_match(s, p, &mut matches) {
-        Ok(n) => {
-            println!("ok {} matches", n);
-            for i in 0..n {
-                println!("match {:?} {:?}",
-                    matches[i],
-                    String::from_utf8(s[matches[i].start .. matches[i].end].to_vec())
-                );
-            }
-        },
-        Err(e) => {
-            println!("error: {}", e)
-        }
+        pos += 1;
     }
 }
-
-
-
-fn main() {
-    let mut args = std::env::args().skip(1);
-    let pat = args.next().unwrap();
-    let s = args.next().unwrap();
-    check(s.as_bytes(), pat.as_bytes());
-
-    //~ check(b"hello",b"%a");
-    //~ check(b"0hello",b"%a+");
-    //~ check(b"hello",b"%l(%a)");
-    //check(b"hello",b"he(l+)");
-    //check(b"k  {and {so}}",b"k%s+(%b{})");
-}
- */
