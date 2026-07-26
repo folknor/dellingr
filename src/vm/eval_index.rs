@@ -24,7 +24,7 @@ impl State {
         let val = self.pop_val();
         let key = self.get_string_constant(frame, field_id);
 
-        let cache = frame.caches.field_lookup.get(cache_idx as usize);
+        let cache = frame.runtime.caches.field_lookup.get(cache_idx as usize);
 
         // Every push below is balanced against the receiver popped above, so
         // this path never exceeds the height it was entered at and needs no
@@ -430,7 +430,7 @@ impl State {
         cache_idx: u8,
     ) -> Result<()> {
         let s = &frame.bytecode().string_literals[string_num as usize];
-        let cache = frame.caches.global_lookup.get(cache_idx as usize);
+        let cache = frame.runtime.caches.global_lookup.get(cache_idx as usize);
         // Net-positive by one slot, matching the uncached `get_global` path.
         if let Some(val) = cache.and_then(|cache| self.get_cached_global(cache)) {
             self.check_stack_space(1)?;

@@ -64,7 +64,7 @@ fn active_frame_string_literal_survives_explicit_gc() {
 }
 
 #[test]
-fn string_literals_are_unrooted_after_frame_exits() {
+fn string_literals_are_reclaimed_one_collection_after_runtime_cache_sweep() {
     let mut state = State::empty();
     state.gc_disable_auto();
 
@@ -78,6 +78,11 @@ fn string_literals_are_unrooted_after_frame_exits() {
         .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
 
+    assert!(state.string_count() > 0);
+    state.gc_collect();
+    // The sweep drops the dead runtime bundle after root marking, so its
+    // literals intentionally survive this collection and disappear on the
+    // next one.
     assert!(state.string_count() > 0);
     state.gc_collect();
     assert_eq!(state.string_count(), 0);

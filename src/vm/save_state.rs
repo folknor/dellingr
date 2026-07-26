@@ -978,7 +978,7 @@ impl State {
     fn validate_quiescent(&self) -> Result<(), SaveError> {
         if self.stack.is_empty()
             && self.stack_bottom == 0
-            && self.string_literals.is_empty()
+            && self.pending_bytecode_caches.is_empty()
             && self.transient_roots.is_empty()
             && self.open_upvalues.is_empty()
             && self.vararg_call_bases.is_empty()
@@ -1052,7 +1052,8 @@ fn materialize_payload(
                 for uv_id in saved_upvalues {
                     refs.push(*upvalues_ref(&upvalues, *uv_id)?);
                 }
-                state.heap.alloc_lua_fn(bc, refs)
+                let runtime = state.resolve_bytecode_runtime_no_gc(&bc);
+                state.heap.alloc_lua_fn(bc, runtime, refs)
             }
         };
         objects.push(ptr);
@@ -1181,7 +1182,7 @@ fn materialize_payload(
         .collect::<Result<Vec<_>, LoadError>>()?;
     state.stack.clear();
     state.stack_bottom = 0;
-    state.string_literals.clear();
+    state.pending_bytecode_caches.clear();
     state.transient_roots.values.clear();
     state.transient_roots.suspended_envs.clear();
     state.open_upvalues.clear();
@@ -2137,6 +2138,58 @@ mod tests {
                 "{forged:?} with an out-of-range string id must be rejected"
             );
         }
+    }
+
+    #[test]
+    fn restored_same_bytecode_closures_share_one_runtime() {
+        // The no-GC resolver must give every restored closure shell of one
+        // materialized Bytecode the same runtime bundle - not a cold copy
+        // each - or a loaded State pays per-closure caches all over again.
+        let mut original = State::new();
+        original
+            .load_string(
+                "function make(n) return function() return n end end \
+                 a = make(1) b = make(2)",
+            )
+            .expect("factory source compiles");
+        original
+            .call(crate::ArgCount::Fixed(0), crate::RetCount::Fixed(0))
+            .expect("factory source runs");
+        let save = original.save_state().expect("state saves");
+        let mut loaded = State::load_state(&save.bytes, Box::new(crate::DefaultCallbacks), |_| {})
+            .expect("state loads");
+        loaded.get_global("a").expect("a exists");
+        let a = loaded
+            .pop_val()
+            .as_lua_function(&loaded.heap)
+            .expect("a is a closure");
+        loaded.get_global("b").expect("b exists");
+        let b = loaded
+            .pop_val()
+            .as_lua_function(&loaded.heap)
+            .expect("b is a closure");
+        assert!(Arc::ptr_eq(&a.runtime, &b.runtime));
+    }
+
+    #[test]
+    fn decoder_rejects_oversized_string_literal() {
+        // Bytecode literals intern during materialization now that the
+        // per-Bytecode literal cache exists (through the no-GC resolver,
+        // which cannot surface a size error), and the per-call eval_closure
+        // size backstop is gone with it. The decoder's read_lua_string_bytes
+        // cap is therefore the load path's ONLY guard against a forged
+        // oversized literal - this pins it so it cannot be relaxed without
+        // reintroducing the unbounded-allocation hole. (Compile-time literals
+        // are capped by the parser; raw test bytecode is prevalidated by
+        // resolve_bytecode_runtime.)
+        let mut oversized = valid_saved_bytecode();
+        oversized
+            .string_literals
+            .push(vec![b'a'; crate::vm::MAX_STRING_BYTES + 1]);
+        assert!(matches!(
+            rejected_bytecode(vec![oversized], Vec::new()),
+            LoadError::StringSizeExceeded { .. }
+        ));
     }
 
     #[test]

@@ -16,8 +16,8 @@ use std::sync::Arc;
 use slotmap::{SlotMap, new_key_type};
 
 use super::Bytecode;
+use super::BytecodeRuntime;
 use super::LuaType;
-use super::RuntimeCaches;
 use super::Table;
 use super::Val;
 
@@ -105,15 +105,13 @@ impl UpvaluePool {
 
 /// A Lua closure: a function with captured upvalues.
 ///
-/// `bytecode` is the immutable, `Arc`-shareable compiled code. `caches` are
-/// the per-execution lookup caches; they share an `Arc` between this closure
-/// and any frames currently executing it (recursive calls all see each
-/// other's cache writes through the shared `Arc`). Both Arcs are cheap to
-/// clone since they only refcount.
+/// `bytecode` is immutable and `Arc`-shareable. `runtime` is State-local,
+/// shared by every closure of this bytecode and any executing frames; its
+/// caches are never serialized and its literals are GC roots.
 #[derive(Clone, Debug)]
 pub(super) struct Closure {
     pub(super) bytecode: Arc<Bytecode>,
-    pub(super) caches: Arc<RuntimeCaches>,
+    pub(super) runtime: Arc<BytecodeRuntime>,
     /// `Arc<[..]>`, not `Vec`: the closure is cloned on every Lua-to-Lua
     /// call (`as_lua_function`) and the upvalue list is never mutated after
     /// construction - writes go through the `UpvaluePool` slots the refs
@@ -280,9 +278,9 @@ impl GcHeap {
     pub(super) fn alloc_lua_fn(
         &mut self,
         bytecode: Arc<Bytecode>,
+        runtime: Arc<BytecodeRuntime>,
         upvalues: Vec<UpvalueRef>,
     ) -> ObjectPtr {
-        let caches = Arc::new(RuntimeCaches::new(&bytecode));
         let upvalues = if upvalues.is_empty() {
             Arc::clone(&self.empty_upvalues)
         } else {
@@ -290,7 +288,7 @@ impl GcHeap {
         };
         let closure = Closure {
             bytecode,
-            caches,
+            runtime,
             upvalues,
         };
         let raw = RawObject::LuaFn(Box::new(closure));
@@ -325,14 +323,9 @@ impl GcHeap {
     pub(super) fn alloc_table_with_template(
         &mut self,
         key_ids: &[u16],
-        string_literals: &[Val],
-        string_literal_start: usize,
+        literals: &[Val],
     ) -> ObjectPtr {
-        let raw = RawObject::Table(Table::with_template_keys(
-            key_ids,
-            string_literals,
-            string_literal_start,
-        ));
+        let raw = RawObject::Table(Table::with_template_keys(key_ids, literals));
         let wrapped = WrappedObject {
             raw,
             color: Cell::new(Color::Unmarked),
@@ -423,6 +416,7 @@ impl GcHeap {
     ) {
         match &obj.raw {
             RawObject::LuaFn(closure) => {
+                closure.runtime.literals.mark_reachable(self, worklist);
                 // Mark values stored in closed upvalues
                 for uv_ref in closure.upvalues.iter() {
                     if let Upvalue::Closed(val) = upvalue_pool.get(*uv_ref) {
@@ -468,6 +462,17 @@ impl GcHeap {
 
         #[cfg(feature = "debug_gc")]
         println!("Final size: {}", self.objects.len());
+    }
+
+    pub(super) fn reachable_lua_bytecodes(&self) -> Vec<Arc<Bytecode>> {
+        self.objects
+            .values()
+            .filter(|object| object.color.get() == Color::Reachable)
+            .filter_map(|object| match &object.raw {
+                RawObject::LuaFn(closure) => Some(Arc::clone(&closure.bytecode)),
+                RawObject::Table(_) => None,
+            })
+            .collect()
     }
 
     // ========================================================================

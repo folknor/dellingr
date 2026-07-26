@@ -72,16 +72,19 @@ What: today every Lua-to-Lua call recurses through Rust (`State::call` ->
 `eval_closure` -> `eval_closure_inner` -> `Frame::eval`), with per-call costs
 that are all consequences of the frame being a Rust stack local:
 
-- `Closure` clone per call (`GcHeap::as_lua_function`, `object.rs`): clones
-  the upvalues `Vec<UpvalueRef>` (heap alloc per call for any closure with
-  upvalues) + 2 Arc refcount bumps.
+- `Closure` clone per call (`GcHeap::as_lua_function`, `object.rs`): three
+  Arc refcount bumps since 2026-07-26 (upvalues became `Arc<[UpvalueRef]>`,
+  commit eeb406a, killing the per-call heap allocation) - still a copy that
+  a flattened loop would not make at all.
 - Duplicate frame bookkeeping: `CallInfo` push (another `Arc<Bytecode>`
   clone) parallel to the `Frame` itself.
 - `stack.remove(idx)` to extract the callee (O(args) memmove, `eval.rs:68`).
 - varargs `drain(..).collect()` Vec per vararg call (`eval.rs:355`).
 - return values `drain(..).collect()` into a fresh Vec then `extend` back
   (`eval.rs:488`) - an allocation per returning call.
-- per-call string-literal interning (see the per-Bytecode caches entry).
+- (per-call string-literal interning was on this list until the per-Bytecode
+  runtime cache shipped on 2026-07-26; the frame handoff is now pure Arc
+  moves).
 
 Sketch: a single dispatch loop over a State-owned `Vec<FrameState>` (bytecode
 Arc, ip, base, vararg span, cache ptr) eliminates every item above, merges
@@ -122,42 +125,6 @@ one.
 ---
 
 ## Architectural
-
-### Per-Bytecode State-level caches: RuntimeCaches sharing + literal interning (merged with B-O2)
-
-Two costs, one mechanism - an `IndexMap<*const Bytecode, ...>` on `State`:
-
-What (a): `alloc_lua_fn` (`src/vm/object.rs`) allocates a fresh
-`Arc::new(RuntimeCaches::new(&bytecode))` per closure, so factory patterns -
-`mk()` returning a new closure each call - pay cold-cache cost on every
-produced closure's first access. Pre-split (when `Rc<Chunk>` carried caches
-inline), all closures of the same chunk shared one cache.
-
-What (b): `initialize_frame` (`eval.rs:509-516`) re-interns ALL of a chunk's
-string literals into `state.string_literals` on every call, and truncates
-them on return - k intern-pool probes + pushes + per-literal GC-threshold
-checks per call, where k counts every field name and string constant in the
-function. Pure per-call overhead for steady-state code. Measured:
-`calls/many_literals` (a designed worst case - 32 constants, returns from the
-first branch) sits at 42.9x lua5.5, an order of magnitude worse than any
-other bench; not a claim about typical code, but the cost is real and scales
-exactly as predicted.
-
-Sketch: key both off `Bytecode` identity in per-State maps - closure creation
-looks up or installs the shared `Arc<RuntimeCaches>`; a literal cache holds
-the interned `Vec<Val>` per Bytecode, marked as a GC root (or literal strings
-pinned for loaded programs). `get_string_constant` becomes a direct slice
-index and the `string_literal_start` frame plumbing disappears.
-
-Why deferred: adds `State` surface, a lookup per closure creation, and
-complicates GC of dead `Bytecode`s (the maps need to drop entries whose
-`Bytecode` is no longer referenced). For (a) specifically, the current cost is
-one `Arc` allocation per closure (not per call); recursion already shares.
-
-Signal that would promote it: (b)'s measurement already argues for the
-literal half on literal-heavy code; `examples/calls/factory_closure.lua`
-drifting further from `calls/local` would argue for (a). Implement both in
-one pass - the map infrastructure is the expensive part.
 
 ### Shape-based polymorphic field IC
 
@@ -468,38 +435,6 @@ Signal that would promote it: a profile showing State construction
 dominating request-path latency, or a real "one State per request"
 embedder asking.
 
-### Pool runtime cache Vecs across Closures
-
-What: `RuntimeCaches::new` allocates three `Vec`s (global,
-field, set_field) per `Closure`. For workloads that churn closures
-(e.g. tight loops calling functions that themselves construct
-closures), this triples the allocation pressure on `alloc_lua_fn`
-compared to pre-split.
-
-Sketch: pool the cache Vecs in `State` with a free-list keyed by
-size class (or per `Bytecode` identity). On closure construction,
-pop a recycled Vec; on closure GC, push it back. Same template as
-`UpvaluePool` (`src/vm/object.rs`).
-
-Why deferred: `examples/alloc/closure.lua` runs at 77ms / 2.05x
-lua5.5 post-split, which is in the same band as pre-split numbers
-in the README - the regression we feared didn't materialize. The
-allocator is already amortizing well enough.
-
-Signal that would promote it: a workload where `alloc/closure`
-shows real regression vs reference Lua, or a profile where
-`RuntimeCaches::new` allocations show up in the heap-pressure
-top. Note the per-Bytecode cache-sharing entry above would make
-this one mostly moot - shared caches aren't re-allocated per
-closure at all.
-
-Measured (2026-07-26, commit d9382ef, plantasjen, `--alloc` mode):
-`alloc/closure` churns 90.1 MB per harness run, 69% of it in
-`alloc_lua_fn` at exactly 128 B per closure x 510K closures - the
-per-closure Box + cache allocation this entry and the cache-sharing
-entry both target. `alloc/gc_churn` shows the same shape at 266 B
-per (larger) closure.
-
 ---
 
 ## Execution core
@@ -533,31 +468,6 @@ in the loop's control area (or a per-frame side slot); on each step, if
 ptr+version match, step `get_index(index + 1)` directly (tombstone-aware, so
 dead entries skip without hashing); on mismatch, fall back to the key-based
 `next`. Deterministic (same order as today) and invisible to scripts.
-
-### Stop cloning `Closure` on every Lua call (C-O3 + B-O5)
-
-What: `State::call` -> `Val::as_lua_function` -> `GcHeap::as_lua_function`
-(`object.rs:234-239`) deep-clones the `Closure`, including
-`upvalues: Vec<UpvalueRef>`, on every Lua-to-Lua call - a heap allocation
-per call for closures with captured upvalues, avoidable copying for all
-calls. Options, increasing invasiveness:
-
-- `Closure.upvalues` as `Arc<[UpvalueRef]>` (clone becomes a refcount bump;
-  `RuntimeCaches` and `Bytecode` are already Arcs, making the whole clone
-  trivially cheap) - the audit estimated ~all the win for a 3-line diff; or
-  a SmallVec inline <= 2;
-- or restructure `eval_closure` to take `ObjectPtr` and borrow the closure
-  from the heap per access (bigger borrow-model change).
-
-Measured (2026-07-26, commit d9382ef, plantasjen, `--alloc` mode):
-`numerics/arithmetic` - a workload whose Lua heap is static at 51 bytes -
-churns 21.3 MB of process allocation per harness run, of which
-`as_lua_function` (the clone site) holds 4.3 MB across 1.1M calls; most of
-the remaining 17 MB is the per-return drain-to-Vec (see the call-path
-micro entry).
-
-Benches `calls/*` should move; `alloc/closure` guards against regression.
-Subsumed by the frame-stack flattening rewrite if that lands.
 
 ### Sweep the upvalue pool during GC (D-OPT-5 + C-E3)
 

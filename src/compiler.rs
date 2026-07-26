@@ -176,8 +176,7 @@ impl PartialEq for SetFieldLookupCacheSlot {
 ///
 /// `Bytecode` is `Send + Sync` and `Arc`-shareable: it holds no per-execution
 /// state, only the instructions, literal pools, and static metadata. The
-/// per-`State` lookup caches live on `RuntimeCaches`, which is allocated
-/// alongside each `Closure`.
+/// per-`State` lookup caches live in the State's per-Bytecode runtime bundle.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Bytecode {
     pub(crate) code: Vec<Instr>,
@@ -212,8 +211,8 @@ pub(crate) struct Bytecode {
 impl Bytecode {
     /// Walk the instruction stream, rewrite cache-able opcodes with their
     /// allocated slot index, and record per-cache slot counts on the
-    /// `Bytecode`. Recurses into nested functions. Each `Closure` allocates
-    /// its own `RuntimeCaches` sized from these counts.
+    /// `Bytecode`. Recurses into nested functions. The State allocates one
+    /// runtime cache bundle per Bytecode identity, sized from these counts.
     fn assign_cache_slots(&mut self) -> Result<()> {
         let mut global_cache_indices = vec![None; self.string_literals.len()];
         let mut global_cache_len = 0usize;
@@ -275,17 +274,16 @@ impl Bytecode {
     }
 }
 
-/// Per-execution lookup caches owned by a `Closure`.
+/// Per-(State, Bytecode) lookup caches owned by the State runtime bundle.
 ///
 /// These are never shared across `State`s: cached `ObjectPtr` keys are only
 /// valid inside the heap of the State that wrote them, and version cells are
-/// keyed to that State's `globals_version` / table versions. Each `Closure`
-/// allocates its own caches sized from the immutable `Bytecode`.
+/// keyed to that State's `globals_version` / table versions. They are never
+/// serialized and are rebuilt cold when a snapshot is loaded.
 ///
 /// The interior `Cell`s give cache writes a `&self`-only borrow shape, which
 /// matches the dispatch loop's invariants: simultaneous frames executing the
-/// same `Closure` (recursion) all see each other's writes through a shared
-/// `Arc<RuntimeCaches>`.
+/// same State-local runtime bundle all see each other's writes.
 #[derive(Debug, Default)]
 pub(crate) struct RuntimeCaches {
     pub(super) global_lookup: Vec<GlobalLookupCacheSlot>,

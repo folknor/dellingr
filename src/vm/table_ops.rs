@@ -32,17 +32,13 @@ impl State {
     pub(super) fn new_table_with_template(
         &mut self,
         key_ids: &[u16],
-        string_literal_start: usize,
+        literals: &[Val],
     ) -> Result<()> {
         self.check_stack_space(1)?;
         if self.heap.is_full() {
             self.gc_collect();
         }
-        let obj = self.heap.alloc_table_with_template(
-            key_ids,
-            &self.string_literals,
-            string_literal_start,
-        );
+        let obj = self.heap.alloc_table_with_template(key_ids, literals);
         self.push_unchecked(Val::Obj(obj));
         Ok(())
     }

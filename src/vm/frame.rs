@@ -10,9 +10,9 @@ fn lua_modulo(a: f64, b: f64) -> f64 {
 }
 use std::sync::Arc;
 
-use super::super::compiler::RuntimeCaches;
 use super::super::error::{Error, ErrorKind, StackFrame};
 use super::Bytecode;
+use super::BytecodeRuntime;
 use super::Instr;
 use super::Result;
 use super::State;
@@ -24,14 +24,11 @@ use crate::instr::{ArgCount, RetCount};
 pub(super) struct Frame {
     /// The bytecode being executed (shared via Arc; cheap to clone, immutable).
     bytecode: Arc<Bytecode>,
-    /// Per-execution lookup caches, shared with the owning `Closure` and any
-    /// other active frames on the same closure (recursive calls).
-    pub(super) caches: Arc<RuntimeCaches>,
+    /// State-local literals and lookup caches shared by this bytecode's
+    /// closures and active frames.
+    pub(super) runtime: Arc<BytecodeRuntime>,
     /// The index of the next (not current) instruction
     ip: usize,
-    /// Offset into `State.string_literals` where this chunk's literals are
-    /// stored.
-    string_literal_start: usize,
     /// The upvalues captured by this closure. Shared with the `Closure`
     /// (and any other active frames on it) - never mutated through the
     /// frame; writes go through the `UpvaluePool` slots.
@@ -47,18 +44,16 @@ impl Frame {
     #[must_use]
     pub(super) fn new(
         bytecode: Arc<Bytecode>,
-        caches: Arc<RuntimeCaches>,
+        runtime: Arc<BytecodeRuntime>,
         upvalues: Arc<[UpvalueRef]>,
         varargs: Vec<Val>,
-        string_literal_start: usize,
         stack_bottom: usize,
     ) -> Self {
         let ip = 0;
         Self {
             bytecode,
-            caches,
+            runtime,
             ip,
-            string_literal_start,
             upvalues,
             varargs,
             stack_bottom,
@@ -70,8 +65,8 @@ impl Frame {
         &self.bytecode
     }
 
-    pub(super) fn string_literal_start(&self) -> usize {
-        self.string_literal_start
+    pub(super) fn literal(&self, i: u16) -> Val {
+        self.runtime.literals[i as usize]
     }
 
     /// Get the current line number (1-indexed), or 0 if unknown.
@@ -474,8 +469,11 @@ mod tests {
             code: vec![Instr::ret(RetCount::Fixed(0)); i16::MIN.unsigned_abs() as usize],
             ..Bytecode::default()
         });
-        let caches = Arc::new(RuntimeCaches::new(&bytecode));
-        let mut frame = Frame::new(bytecode, caches, Arc::from([]), Vec::new(), 0, 0);
+        let runtime = Arc::new(BytecodeRuntime {
+            literals: Box::new([]),
+            caches: super::super::compiler::RuntimeCaches::new(&bytecode),
+        });
+        let mut frame = Frame::new(bytecode, runtime, Arc::from([]), Vec::new(), 0);
         frame.ip = i16::MIN.unsigned_abs() as usize;
 
         frame
@@ -490,8 +488,11 @@ mod tests {
             code: vec![Instr::ret(RetCount::Fixed(0))],
             ..Bytecode::default()
         });
-        let caches = Arc::new(RuntimeCaches::new(&bytecode));
-        let mut frame = Frame::new(bytecode, caches, Arc::from([]), Vec::new(), 0, 0);
+        let runtime = Arc::new(BytecodeRuntime {
+            literals: Box::new([]),
+            caches: super::super::compiler::RuntimeCaches::new(&bytecode),
+        });
+        let mut frame = Frame::new(bytecode, runtime, Arc::from([]), Vec::new(), 0);
 
         let error = frame.jump(1).expect_err("jump to end must be rejected");
         assert!(matches!(

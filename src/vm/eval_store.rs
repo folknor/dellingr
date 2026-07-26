@@ -87,7 +87,7 @@ impl State {
                     "NewTableTemplate: invalid template {template_id}"
                 )))
             })?;
-        self.new_table_with_template(template, frame.string_literal_start())?;
+        self.new_table_with_template(template, &frame.runtime.literals)?;
         Ok(())
     }
 
@@ -218,7 +218,11 @@ impl State {
         let val = self.pop_val();
         let idx = self.stack.len() - stack_offset as usize - 1;
         let key = self.get_string_constant(frame, field_id);
-        let cache = frame.caches.set_field_lookup.get(cache_idx as usize);
+        let cache = frame
+            .runtime
+            .caches
+            .set_field_lookup
+            .get(cache_idx as usize);
 
         if !matches!(val, Val::Nil)
             && let Some(ptr) = self.stack[idx].as_object_ptr()
@@ -526,9 +530,7 @@ impl State {
 
     #[hotpath::measure]
     pub(super) fn get_string_constant(&self, frame: &Frame, i: u16) -> Val {
-        // self.string_literals[i as usize].clone()
-        let index = frame.string_literal_start() + i as usize;
-        self.string_literals[index]
+        frame.literal(i)
     }
 
     pub(super) fn pop_num(&mut self) -> Result<f64> {

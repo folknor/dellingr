@@ -1186,6 +1186,35 @@ fn corruption_sweep_never_panics() {
 }
 
 #[test]
+fn same_bytecode_closures_and_binary_literals_survive_snapshot() {
+    // Two closures of one factory Bytecode share a rebuilt runtime bundle on
+    // load (internal sharing is pinned by a vm.rs unit test; this asserts the
+    // observable half), and a non-UTF-8 string literal must round-trip
+    // through the load-time interning path.
+    let mut original = fresh();
+    run(
+        &mut original,
+        r#"
+            local key = "\255\254bin"
+            function make_adder(n)
+                return function(t) return t[key] + n end
+            end
+            add1 = make_adder(1)
+            add2 = make_adder(2)
+            subject = { ["\255\254bin"] = 40 }
+        "#,
+    );
+    let mut loaded = reload(&original);
+    run(
+        &mut loaded,
+        "r1 = add1(subject) r2 = add2(subject) r3 = add1(subject)",
+    );
+    assert_eq!(global_num(&mut loaded, "r1"), 41.0);
+    assert_eq!(global_num(&mut loaded, "r2"), 42.0);
+    assert_eq!(global_num(&mut loaded, "r3"), 41.0);
+}
+
+#[test]
 fn table_library_extension_survives_snapshot() {
     let mut original = fresh();
     run(&mut original, "table.custom = function(t) return 17 end");

@@ -302,9 +302,6 @@ impl State {
     }
 
     pub(super) fn eval_closure(&mut self, closure: Closure, num_args: u8) -> Result<u8> {
-        for string in &closure.bytecode.string_literals {
-            super::check_string_size(string.len())?;
-        }
         // Check call depth limit
         if self.call_depth >= MAX_CALL_DEPTH {
             return Err(Error::without_location(ErrorKind::CallDepthExceeded {
@@ -454,7 +451,6 @@ impl State {
         }
 
         let mut frame = self.initialize_frame(closure, varargs);
-        let string_literal_start = frame.string_literal_start();
         let ret_count = match frame.eval(self) {
             Ok(count) => count,
             Err(e) => {
@@ -473,7 +469,6 @@ impl State {
                 // Must restore stack_bottom before returning error (see comment in RustFn handling)
                 self.close_upvalues(self.stack_bottom);
                 self.stack.truncate(self.stack_bottom);
-                self.string_literals.truncate(string_literal_start);
                 self.stack_bottom = old_stack_bottom;
                 self.call_stack.pop();
                 return Err(e);
@@ -498,7 +493,6 @@ impl State {
                         self.host_error(&e);
                         self.close_upvalues(self.stack_bottom);
                         self.stack.truncate(self.stack_bottom);
-                        self.string_literals.truncate(string_literal_start);
                         self.stack_bottom = old_stack_bottom;
                         self.call_stack.pop();
                         return Err(e);
@@ -517,7 +511,6 @@ impl State {
 
         // Clear the frame's stack space
         self.stack.truncate(self.stack_bottom);
-        self.string_literals.truncate(string_literal_start);
         self.stack_bottom = old_stack_bottom;
 
         // Push return values back onto the stack
@@ -531,21 +524,11 @@ impl State {
 
     #[hotpath::measure]
     pub(super) fn initialize_frame(&mut self, closure: Closure, varargs: Vec<Val>) -> Frame {
-        let string_literal_start = self.string_literals.len();
-        for s in &closure.bytecode.string_literals {
-            // Check if GC is needed before allocating
-            if self.heap.is_full() {
-                self.gc_collect();
-            }
-            let string_ptr = self.heap.alloc_string(s);
-            self.string_literals.push(Val::Str(string_ptr));
-        }
         Frame::new(
             closure.bytecode,
-            closure.caches,
+            closure.runtime,
             closure.upvalues,
             varargs,
-            string_literal_start,
             self.stack_bottom,
         )
     }
@@ -561,11 +544,19 @@ impl State {
         upvalues: Vec<UpvalueRef>,
     ) -> Result<()> {
         self.check_stack_space(1)?;
+        let runtime = self.resolve_bytecode_runtime(&bytecode)?;
+        let identity = Arc::as_ptr(&bytecode) as usize;
+        self.pending_bytecode_caches.push(identity);
         // Check if GC is needed before allocating
         if self.heap.is_full() {
             self.gc_collect();
         }
-        let obj = self.heap.alloc_lua_fn(bytecode, upvalues);
+        let obj = self.heap.alloc_lua_fn(bytecode, runtime, upvalues);
+        let pending = self
+            .pending_bytecode_caches
+            .pop()
+            .expect("pending bytecode cache missing after closure allocation");
+        debug_assert_eq!(pending, identity);
         self.push_unchecked(Val::Obj(obj));
         Ok(())
     }
@@ -615,10 +606,10 @@ impl State {
     #[cfg(test)]
     pub(super) fn eval_chunk(&mut self, bytecode: Bytecode, num_args: u8) -> Result<u8> {
         let bytecode = Arc::new(bytecode);
-        let caches = Arc::new(super::RuntimeCaches::new(&bytecode));
+        let runtime = self.resolve_bytecode_runtime(&bytecode)?;
         let closure = Closure {
             bytecode,
-            caches,
+            runtime,
             upvalues: Arc::from([]),
         };
         self.eval_closure(closure, num_args)

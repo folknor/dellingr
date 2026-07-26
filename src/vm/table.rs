@@ -97,14 +97,10 @@ impl Table {
         }
     }
 
-    pub(super) fn with_template_keys(
-        key_ids: &[u16],
-        string_literals: &[Val],
-        string_literal_start: usize,
-    ) -> Self {
+    pub(super) fn with_template_keys(key_ids: &[u16], literals: &[Val]) -> Self {
         let mut map = IndexMap::with_capacity(key_ids.len());
         for key_id in key_ids {
-            let key = string_literals[string_literal_start + *key_id as usize];
+            let key = literals[*key_id as usize];
             map.insert(key, Val::Nil);
         }
         Self {
