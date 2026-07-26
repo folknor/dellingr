@@ -133,7 +133,7 @@ hotpath_xxh128 = "2b1eee4dc05ff8a546448a438637c7ae"
 file = "bench/many_literals.lua"
 xxh128 = "af2ca0e8c8623e2c31e9d1c5cfc9e6fc"
 hotpath_file = "examples/calls/many_literals.lua"
-hotpath_xxh128 = "6b32c4cdc38ff7b7f609f186aac6b5d2"
+hotpath_xxh128 = "19aa377694a551e4817077fff79add56"
 
 [dellingr.workloads.closure]
 file = "bench/closure.lua"

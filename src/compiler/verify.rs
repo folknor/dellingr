@@ -576,7 +576,7 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
     }
     let slots = view.num_params() as usize + view.num_locals() as usize;
     let mut global_slots = vec![None; view.string_literals().len()];
-    let mut next_global_slot = 0u8;
+    let mut next_global_slot = 0usize;
     let mut next_field_slot = 0u8;
     let mut next_set_field_slot = 0usize;
     for pc in 0..code_len {
@@ -590,8 +590,10 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
         let c = inst.c();
         let bx = inst.bx();
         let reserved_zero = match op {
-            // These forms use every operand byte.
+            // These forms use every operand byte. SET_GLOBAL joined the group
+            // when its A byte became the biased cache index (0 = uncached).
             Instr::OP_GET_GLOBAL
+            | Instr::OP_SET_GLOBAL
             | Instr::OP_GET_FIELD
             | Instr::OP_SET_FIELD
             | Instr::OP_SET_FIELD_AT
@@ -605,7 +607,6 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
             // as a signed offset and likewise reserve A.
             Instr::OP_PUSH_NUM
             | Instr::OP_PUSH_STRING
-            | Instr::OP_SET_GLOBAL
             | Instr::OP_JUMP
             | Instr::OP_BRANCH_FALSE
             | Instr::OP_BRANCH_TRUE_KEEP
@@ -670,19 +671,29 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
                         Some(slot) => slot,
                         None => {
                             let slot = next_global_slot;
-                            if slot != u8::MAX {
+                            if slot < u8::MAX as usize {
                                 next_global_slot += 1;
                             }
                             global_slots[bx as usize] = Some(slot);
                             slot
                         }
                     };
-                    if a != expected {
+                    if a as usize != expected {
                         return Err(err(
                             Some(pc),
                             "global cache slot does not match first-use order",
                         ));
                     }
+                }
+                if op == Instr::OP_SET_GLOBAL && a != 0 {
+                    let expected = next_global_slot;
+                    if expected >= u8::MAX as usize || a as usize - 1 != expected {
+                        return Err(err(
+                            Some(pc),
+                            "global cache slot does not match first-use order",
+                        ));
+                    }
+                    next_global_slot += 1;
                 }
             }
             Instr::OP_GET_FIELD => {
@@ -786,7 +797,7 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
             }
         }
     }
-    if view.global_cache_slots() != next_global_slot
+    if view.global_cache_slots() as usize != next_global_slot
         || view.field_cache_slots() != next_field_slot
         || view.set_field_cache_slots() as usize != next_set_field_slot
     {

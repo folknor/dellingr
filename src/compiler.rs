@@ -186,7 +186,8 @@ pub(crate) struct Bytecode {
     /// for a pure named-field constructor's keys, in insertion order.
     pub(crate) table_templates: Vec<Vec<u16>>,
     /// Number of slots in this function's global lookup cache.
-    /// Cache slot indices are baked into `OP_GET_GLOBAL` instructions.
+    /// Cache slot indices are baked into `OP_GET_GLOBAL` and `OP_SET_GLOBAL`
+    /// instructions.
     pub(crate) global_cache_slots: u8,
     /// Number of slots in this function's field lookup cache.
     pub(crate) field_cache_slots: u8,
@@ -242,6 +243,13 @@ impl Bytecode {
                         }
                     };
                     *inst = Instr::get_global_cached(inst.bx(), cache_idx);
+                }
+                Instr::OP_SET_GLOBAL => {
+                    if global_cache_len < u8::MAX as usize {
+                        let cache_idx = global_cache_len as u8;
+                        global_cache_len += 1;
+                        *inst = Instr::set_global_cached(inst.bx(), cache_idx);
+                    }
                 }
                 Instr::OP_GET_FIELD => {
                     let cache_idx = if field_cache_len < u8::MAX as usize {
@@ -453,7 +461,7 @@ mod runtime_cache_tests {
     }
 
     #[test]
-    fn global_lookup_cache_tracks_distinct_get_global_names_only() {
+    fn global_lookup_cache_shares_gets_and_assigns_fresh_set_slots() {
         let bc = parse_str(
             r#"
             local literal = "not a global"
@@ -471,10 +479,62 @@ mod runtime_cache_tests {
             .collect();
 
         assert_eq!(get_globals.len(), 3);
-        assert_eq!(bc.global_cache_slots, 2);
-        assert!(bc.string_literals.len() > bc.global_cache_slots as usize);
+        let set_globals: Vec<_> = bc
+            .code
+            .iter()
+            .filter(|inst| inst.opcode() == Instr::OP_SET_GLOBAL)
+            .collect();
+
+        assert_eq!(set_globals.len(), 2);
+        // 2 distinct read names (shared by literal) + 2 fresh SET sites; the
+        // two non-global literals ("not a global", "field") hold no slot -
+        // they would push this to 6 if literal count drove allocation.
+        assert_eq!(bc.global_cache_slots, 4);
         assert_eq!(get_globals[0].a(), get_globals[1].a());
         assert_ne!(get_globals[0].a(), get_globals[2].a());
+        assert_eq!(set_globals[0].a(), 2);
+        assert_eq!(set_globals[1].a(), 4);
+    }
+
+    #[test]
+    fn global_set_cache_uses_biased_fresh_slots_and_excludes_builtins() {
+        let bc = parse_str("foo = 1; foo = 2; table = {}").expect("source compiles");
+        let set_globals: Vec<_> = bc
+            .code
+            .iter()
+            .filter(|inst| inst.opcode() == Instr::OP_SET_GLOBAL)
+            .collect();
+
+        assert_eq!(bc.global_cache_slots, 2);
+        assert_eq!(set_globals.len(), 2);
+        assert_eq!(set_globals[0].a(), 1);
+        assert_eq!(set_globals[1].a(), 2);
+        assert!(
+            bc.code
+                .iter()
+                .any(|inst| inst.opcode() == Instr::OP_SET_BUILTIN)
+        );
+    }
+
+    #[test]
+    fn global_set_cache_leaves_the_256th_site_uncached() {
+        let source = (0..256)
+            .map(|idx| format!("set_cache_{idx} = {idx}"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        let bc = parse_str(source).expect("source compiles");
+        let set_globals: Vec<_> = bc
+            .code
+            .iter()
+            .filter(|inst| inst.opcode() == Instr::OP_SET_GLOBAL)
+            .collect();
+
+        assert_eq!(bc.global_cache_slots, u8::MAX);
+        assert_eq!(set_globals.len(), 256);
+        for (idx, inst) in set_globals.iter().take(255).enumerate() {
+            assert_eq!(inst.a(), idx as u8 + 1);
+        }
+        assert_eq!(set_globals[255].a(), 0);
     }
 
     #[test]

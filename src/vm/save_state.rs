@@ -1886,6 +1886,14 @@ mod tests {
         bytecode: Vec<SavedBytecode>,
         objects: Vec<SavedObject>,
     ) -> Result<State, LoadError> {
+        load_bytecode_with_globals(bytecode, objects, Vec::new())
+    }
+
+    fn load_bytecode_with_globals(
+        bytecode: Vec<SavedBytecode>,
+        objects: Vec<SavedObject>,
+        user_globals: Vec<(Vec<u8>, SavedVal)>,
+    ) -> Result<State, LoadError> {
         let payload = SavePayload {
             has_standard_environment: false,
             rng_state: 0,
@@ -1897,7 +1905,7 @@ mod tests {
             bytecode,
             upvalues: Vec::new(),
             objects,
-            user_globals: Vec::new(),
+            user_globals,
             env_deltas: Vec::new(),
             next_format_pointer_id: 1,
             format_pointer_ids: Vec::new(),
@@ -2117,6 +2125,54 @@ mod tests {
             LoadError::InvalidBytecode { .. }
         ));
 
+        let mut legacy_set = valid_saved_bytecode();
+        legacy_set.string_literals.push(b"x".to_vec());
+        legacy_set.code.insert(0, Instr::set_global(0).raw());
+        legacy_set.code.insert(0, Instr::push_nil().raw());
+        legacy_set.line_info = vec![1; legacy_set.code.len()];
+        assert!(load_bytecode(vec![legacy_set], Vec::new()).is_ok());
+
+        let mut valid_set = valid_saved_bytecode();
+        valid_set.string_literals.push(b"x".to_vec());
+        valid_set.global_cache_slots = 1;
+        valid_set
+            .code
+            .insert(0, Instr::set_global_cached(0, 0).raw());
+        valid_set.code.insert(0, Instr::push_nil().raw());
+        valid_set.line_info = vec![1; valid_set.code.len()];
+        assert!(load_bytecode(vec![valid_set], Vec::new()).is_ok());
+
+        let mut out_of_range_set = valid_saved_bytecode();
+        out_of_range_set.string_literals.push(b"x".to_vec());
+        out_of_range_set.global_cache_slots = 1;
+        out_of_range_set
+            .code
+            .insert(0, Instr::set_global_cached(0, 1).raw());
+        out_of_range_set.code.insert(0, Instr::push_nil().raw());
+        out_of_range_set.line_info = vec![1; out_of_range_set.code.len()];
+        assert_invalid(
+            rejected_bytecode(vec![out_of_range_set], Vec::new()),
+            0,
+            Some(1),
+        );
+
+        let mut wrong_order_set = valid_saved_bytecode();
+        wrong_order_set.string_literals.push(b"x".to_vec());
+        wrong_order_set.global_cache_slots = 2;
+        wrong_order_set.code = vec![
+            Instr::push_nil().raw(),
+            Instr::set_global_cached(0, 1).raw(),
+            Instr::push_nil().raw(),
+            Instr::set_global_cached(0, 0).raw(),
+            Instr::ret(RetCount::Fixed(0)).raw(),
+        ];
+        wrong_order_set.line_info = vec![1; wrong_order_set.code.len()];
+        assert_invalid(
+            rejected_bytecode(vec![wrong_order_set], Vec::new()),
+            0,
+            Some(1),
+        );
+
         // Every opcode that names a string literal in Bx shares one verifier
         // arm; forge an out-of-range id through each so a future edit cannot
         // drop one of them from that arm unnoticed.
@@ -2138,6 +2194,83 @@ mod tests {
                 "{forged:?} with an out-of-range string id must be rejected"
             );
         }
+    }
+
+    #[test]
+    fn legacy_uncached_set_cannot_alias_a_warmed_get_slot() {
+        let mut bytecode = valid_saved_bytecode();
+        bytecode.code = vec![
+            Instr::get_global_cached(0, 0).raw(),
+            Instr::pop().raw(),
+            Instr::push_num(0).raw(),
+            // Legacy v6 encoding: A=0 is uncached, never global slot zero.
+            Instr::set_global(1).raw(),
+            Instr::ret(RetCount::Fixed(0)).raw(),
+        ];
+        bytecode.number_literals.push(42.0f64.to_bits());
+        bytecode.string_literals = vec![b"x".to_vec(), b"y".to_vec()];
+        bytecode.global_cache_slots = 1;
+        bytecode.line_info = vec![1; bytecode.code.len()];
+        let mut state = load_bytecode_with_globals(
+            vec![bytecode],
+            vec![SavedObject::Closure {
+                chunk: 0,
+                upvalues: Vec::new(),
+            }],
+            vec![
+                (b"x".to_vec(), SavedVal::Num(1.0f64.to_bits())),
+                (b"y".to_vec(), SavedVal::Num(2.0f64.to_bits())),
+                (b"writer".to_vec(), SavedVal::Obj(0)),
+            ],
+        )
+        .expect("legacy fixture loads");
+
+        for _ in 0..2 {
+            state.get_global("writer").expect("writer exists");
+            state
+                .call(crate::ArgCount::Fixed(0), crate::RetCount::Fixed(0))
+                .expect("writer runs");
+        }
+        state.get_global("x").expect("x exists");
+        assert_eq!(state.to_number(-1).expect("x is numeric"), 1.0);
+        state.pop(1).expect("x pops");
+        state.get_global("y").expect("y exists");
+        assert_eq!(state.to_number(-1).expect("y is numeric"), 42.0);
+    }
+
+    #[test]
+    fn forged_builtin_set_global_never_populates_a_cache_slot() {
+        let mut bytecode = valid_saved_bytecode();
+        bytecode.code = vec![
+            Instr::push_num(0).raw(),
+            Instr::set_global_cached(0, 0).raw(),
+            Instr::ret(RetCount::Fixed(0)).raw(),
+        ];
+        bytecode.number_literals.push(7.0f64.to_bits());
+        bytecode.string_literals.push(b"table".to_vec());
+        bytecode.global_cache_slots = 1;
+        bytecode.line_info = vec![1; bytecode.code.len()];
+        let mut state = load_bytecode_with_globals(
+            vec![bytecode],
+            vec![SavedObject::Closure {
+                chunk: 0,
+                upvalues: Vec::new(),
+            }],
+            vec![(b"writer".to_vec(), SavedVal::Obj(0))],
+        )
+        .expect("forged builtin fixture loads");
+
+        state.get_global("writer").expect("writer exists");
+        let writer = state.pop_val();
+        let closure = writer
+            .as_lua_function(&state.heap)
+            .expect("writer is a closure");
+        let runtime = Arc::clone(&closure.runtime);
+        state.push_val(writer).expect("writer fits on stack");
+        state
+            .call(crate::ArgCount::Fixed(0), crate::RetCount::Fixed(0))
+            .expect("writer runs");
+        assert!(runtime.caches.global_lookup[0].get().is_none());
     }
 
     #[test]

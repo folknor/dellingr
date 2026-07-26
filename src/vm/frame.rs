@@ -210,7 +210,7 @@ impl Frame {
 
                 // Globals
                 Instr::OP_GET_GLOBAL => state.instr_get_global(self, inst.bx(), inst.a())?,
-                Instr::OP_SET_GLOBAL => state.instr_set_global(self, inst.bx())?,
+                Instr::OP_SET_GLOBAL => state.instr_set_global(self, inst.bx(), inst.a())?,
 
                 // Builtins (fast path for well-known globals)
                 Instr::OP_GET_BUILTIN => state.instr_get_builtin(inst.a())?,

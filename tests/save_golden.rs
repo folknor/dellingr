@@ -62,14 +62,22 @@ fn golden_bytes() -> Vec<u8> {
     state.save_state().expect("golden state saves").bytes
 }
 
-fn fixture_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/save_golden.bin")
+fn fixture_path(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("tests/fixtures/{name}"))
+}
+
+fn current_fixture_path() -> PathBuf {
+    fixture_path("save_golden_current.bin")
+}
+
+fn legacy_fixture_path() -> PathBuf {
+    fixture_path("save_golden_legacy_v6.bin")
 }
 
 #[test]
 #[ignore = "regeneration helper; run explicitly after an intentional format change"]
 fn regenerate() {
-    let path = fixture_path();
+    let path = current_fixture_path();
     std::fs::create_dir_all(path.parent().expect("fixture path has a parent"))
         .expect("fixture directory is writable");
     std::fs::write(&path, golden_bytes()).expect("fixture is writable");
@@ -78,7 +86,7 @@ fn regenerate() {
 
 #[test]
 fn save_traversal_order_matches_golden_fixture() {
-    let expected = std::fs::read(fixture_path()).expect(
+    let expected = std::fs::read(current_fixture_path()).expect(
         "golden fixture missing; regenerate with \
          `cargo test --features snapshot --test save_golden -- --ignored regenerate`",
     );
@@ -93,7 +101,7 @@ fn save_traversal_order_matches_golden_fixture() {
 
 #[test]
 fn golden_fixture_round_trips() {
-    let bytes = std::fs::read(fixture_path()).expect("golden fixture present");
+    let bytes = std::fs::read(legacy_fixture_path()).expect("legacy v6 fixture present");
     let mut loaded =
         State::load_state(&bytes, Box::new(DefaultCallbacks), |_| {}).expect("fixture loads");
 

@@ -437,6 +437,12 @@ impl Instr {
     pub(crate) const fn set_global(idx: u16) -> Self {
         Self::op_a_bx(Self::OP_SET_GLOBAL, 0, idx)
     }
+    /// `SET_GLOBAL` uses a biased cache encoding: zero is uncached (including
+    /// legacy snapshots), while one through 255 name cache slots zero through
+    /// 254. This differs deliberately from `GET_GLOBAL`'s 255 sentinel.
+    pub(crate) const fn set_global_cached(idx: u16, cache_idx: u8) -> Self {
+        Self::op_a_bx(Self::OP_SET_GLOBAL, cache_idx + 1, idx)
+    }
     pub(crate) const fn get_local(slot: u8) -> Self {
         Self::op_a(Self::OP_GET_LOCAL, slot)
     }
@@ -579,7 +585,7 @@ impl std::fmt::Debug for Instr {
             Self::OP_MARK_CALL_BASE => write!(f, "MarkCallBase"),
             Self::OP_PUSH_NIL => write!(f, "PushNil"),
             Self::OP_GET_GLOBAL => write!(f, "GetGlobal({}, {})", self.a(), self.bx()),
-            Self::OP_SET_GLOBAL => write!(f, "SetGlobal({})", self.bx()),
+            Self::OP_SET_GLOBAL => write!(f, "SetGlobal({}, {})", self.a(), self.bx()),
             Self::OP_GET_LOCAL => write!(f, "GetLocal({})", self.a()),
             Self::OP_SET_LOCAL => write!(f, "SetLocal({})", self.a()),
             Self::OP_GET_UPVALUE => write!(f, "GetUpvalue({})", self.a()),

@@ -1,11 +1,12 @@
--- Hypothesis: every Lua call re-interns ALL of the callee chunk's string
--- literals into state.string_literals, then truncates them on return. The cost
--- is proportional to the literal count of the function, not to how many
--- literals the call actually touches.
--- `classify` below carries ~32 distinct string constants but returns from the
--- first branch on every call here, so essentially all of that interning work is
--- pure per-call overhead. Caching the interned literals per (State, Bytecode)
--- makes this bench collapse toward calls/local.lua.
+-- Historical probe, kept as the regression tracker for its fix. Until
+-- 2026-07-26 every Lua call re-interned ALL of the callee chunk's string
+-- literals and truncated them on return - cost proportional to the literal
+-- count, not to what the call touched. `classify` carries ~32 distinct
+-- string constants but returns from the first branch, so that interning was
+-- pure per-call overhead. The per-(State, Bytecode) literal cache (commit
+-- b14fde8) collapsed the seconds-scale twin bench/many_literals.lua from
+-- 5.0s to 0.7s (interleaved worktree pairs, plantasjen); this file now
+-- guards against the per-call path ever coming back.
 -- Compare against calls/local.lua: same local-call shape, one literal.
 
 local function classify(code)
