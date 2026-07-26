@@ -442,12 +442,6 @@ impl<'a> Parser<'a> {
         self.chunk.line_info.push(line);
     }
 
-    /// Removes the instruction at `idx`, keeping line_info aligned.
-    fn remove_instr(&mut self, idx: usize) -> Instr {
-        self.chunk.line_info.remove(idx);
-        self.chunk.code.remove(idx)
-    }
-
     /// Overwrites the last emitted instruction in place, returning the old one.
     fn replace_last_instr(&mut self, instr: Instr) -> Instr {
         let slot = self

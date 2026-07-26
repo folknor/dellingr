@@ -181,6 +181,7 @@ impl Frame {
                 // === FREE OPERATIONS (cost 0) ===
 
                 // General control flow
+                Instr::OP_NOP => {}
                 Instr::OP_POP => {
                     state.pop_val();
                 }

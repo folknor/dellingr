@@ -2197,6 +2197,68 @@ mod tests {
     }
 
     #[test]
+    fn forged_nop_and_legacy_close_upvalues_load_and_execute() {
+        for code in [
+            vec![Instr::nop(), Instr::ret(RetCount::Fixed(0))],
+            vec![Instr::close_upvalues(0), Instr::ret(RetCount::Fixed(0))],
+        ] {
+            let mut bytecode = valid_saved_bytecode();
+            bytecode.code = code.into_iter().map(Instr::raw).collect();
+            bytecode.line_info = vec![1; bytecode.code.len()];
+            let mut state = load_bytecode_with_globals(
+                vec![bytecode],
+                vec![SavedObject::Closure {
+                    chunk: 0,
+                    upvalues: Vec::new(),
+                }],
+                vec![(b"writer".to_vec(), SavedVal::Obj(0))],
+            )
+            .expect("forged free-op fixture loads");
+            state.get_global("writer").expect("writer exists");
+            state
+                .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+                .expect("forged free-op fixture runs");
+            assert_eq!(state.cost_used(), 0);
+        }
+
+        // Insert before the RETURN rather than replacing it: overwriting the
+        // terminal RETURN trips the ends-in-return check first and the
+        // reserved-operand arm would go unexercised.
+        let mut bad_nop = valid_saved_bytecode();
+        bad_nop.code.insert(0, Instr::op_a(Instr::OP_NOP, 1).raw());
+        bad_nop.line_info.insert(0, 1);
+        let error = rejected_bytecode(vec![bad_nop], Vec::new());
+        let LoadError::InvalidBytecode { reason, .. } = &error else {
+            panic!("malformed nop must be InvalidBytecode, got {error:?}");
+        };
+        assert!(reason.contains("reserved operand bytes"), "{reason}");
+    }
+
+    #[test]
+    fn compiler_saves_contain_no_nops_or_closure_free_closes() {
+        let mut state = State::new();
+        state
+            .load_string("writer = function() local x = 0; for i = 1, 3 do do local y = i; x = x + y end end; fixed(1) end")
+            .expect("compiler fixture loads");
+        state
+            .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+            .expect("compiler fixture installs writer");
+        state.get_global("writer").expect("writer exists");
+        state
+            .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+            .expect_err("undefined fixed call is not relevant after compilation");
+        let payload = SaveBuilder::new(&state)
+            .finish()
+            .expect("failed callback leaves state saveable");
+        assert!(payload.bytecode.iter().all(|chunk| {
+            chunk.code.iter().all(|raw| {
+                let opcode = Instr::from_raw(*raw).opcode();
+                opcode != Instr::OP_NOP && opcode != Instr::OP_CLOSE_UPVALUES
+            })
+        }));
+    }
+
+    #[test]
     fn legacy_uncached_set_cannot_alias_a_warmed_get_slot() {
         let mut bytecode = valid_saved_bytecode();
         bytecode.code = vec![

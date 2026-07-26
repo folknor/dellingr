@@ -96,7 +96,7 @@ pub struct ScopeCost {
 }
 
 impl ScopeCost {
-    fn analyze_chunk(chunk: &Bytecode, name: String) -> Self {
+    pub(crate) fn analyze_chunk(chunk: &Bytecode, name: String) -> Self {
         let mut scope = ScopeCost {
             name,
             ..Default::default()
@@ -371,6 +371,56 @@ mod tests {
             .call(ArgCount::Fixed(0), RetCount::Fixed(1))
             .expect("string.upper program should run");
         assert_eq!(state.cost_used(), 4);
+    }
+
+    #[test]
+    fn stripping_changes_only_static_instruction_counts() {
+        let closure_free = analyze_cost(
+            "local x = 0; for i = 1, 3 do do local y = i; x = x + y end end; return x",
+        )
+        .expect("closure-free loop should parse");
+        // Static analysis counts the loop body's single OP_ADD once; the
+        // runtime sweep below observes it three times.
+        assert_eq!(closure_free.root.own_cost, 1);
+        assert_eq!(closure_free.root.total_cost, 1);
+        assert_eq!(closure_free.root.instructions, 16);
+
+        let dynamic = analyze_cost("local function f(...) return ... end; return f(1, f())")
+            .expect("dynamic-call program should parse");
+        assert_eq!(dynamic.root.own_cost, 0);
+        assert_eq!(dynamic.root.total_cost, 0);
+
+        let capture = analyze_cost(
+            "local function make() local x = 1; return function() return x end end; return make()()",
+        )
+        .expect("closure-capture program should parse");
+        assert_eq!(capture.root.own_cost, 0);
+        assert_eq!(capture.root.total_cost, 0);
+
+        for (source, returns, expected_cost) in [
+            (
+                "local x = 0; for i = 1, 3 do do local y = i; x = x + y end end; return x",
+                RetCount::Fixed(1),
+                3,
+            ),
+            (
+                "local function f(...) return ... end; return f(1, f())",
+                RetCount::All,
+                0,
+            ),
+            (
+                "local function make() local x = 1; return function() return x end end; return make()()",
+                RetCount::Fixed(1),
+                0,
+            ),
+        ] {
+            let mut state = State::new();
+            state.load_string(source).expect("cost fixture should load");
+            state
+                .call(ArgCount::Fixed(0), returns)
+                .expect("cost fixture should run");
+            assert_eq!(state.cost_used(), expected_cost, "{source}");
+        }
     }
 }
 

@@ -309,8 +309,9 @@ impl Parser<'_> {
                     )); // Return all values
                     u8::MAX // Signal to VM to calculate arg count from call base
                 } else {
-                    // No special handling needed, remove the Instr::mark_call_base()
-                    self.remove_instr(mark_idx);
+                    // Keep parse-time instruction indices stable. Finalization
+                    // strips this free placeholder with one jump remap.
+                    self.chunk.code[mark_idx] = Instr::nop();
                     self.checked_fixed_arg_count(num_args as usize, 0)?
                 };
                 let prefix = PrefixExp::FunctionCall(CallSite::new(num_args, line as u32));
@@ -377,8 +378,9 @@ impl Parser<'_> {
                     )); // Return all values
                     u8::MAX // Signal to VM to calculate arg count from call base
                 } else {
-                    // No special handling needed, remove the Instr::mark_call_base()
-                    self.remove_instr(mark_idx);
+                    // Keep parse-time instruction indices stable. Finalization
+                    // strips this free placeholder with one jump remap.
+                    self.chunk.code[mark_idx] = Instr::nop();
                     self.checked_fixed_arg_count(num_args as usize, 1)?
                 };
                 // Stack: [method, obj, arg1, arg2, ...]

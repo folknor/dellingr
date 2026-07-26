@@ -214,6 +214,7 @@ impl Instr {
     pub(crate) const OP_NEW_TABLE_PRESIZED: u8 = 23; // A=expected constructor fields
     pub(crate) const OP_NEW_TABLE_TEMPLATE: u8 = 24; // A=table template index
     pub(crate) const OP_NEW_TABLE_TRACKED: u8 = 25; // A=expected constructor fields
+    pub(crate) const OP_NOP: u8 = 26;
 
     // One u8 operand (in A slot)
     pub(crate) const OP_GET_GLOBAL: u8 = 30;
@@ -355,6 +356,9 @@ impl Instr {
     // No operands
     pub(crate) const fn pop() -> Self {
         Self::op(Self::OP_POP)
+    }
+    pub(crate) const fn nop() -> Self {
+        Self::op(Self::OP_NOP)
     }
     pub(crate) const fn dup() -> Self {
         Self::op(Self::OP_DUP)
@@ -570,6 +574,7 @@ impl Instr {
 impl std::fmt::Debug for Instr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.opcode() {
+            Self::OP_NOP => write!(f, "Nop"),
             Self::OP_POP => write!(f, "Pop"),
             Self::OP_DUP => write!(f, "Dup"),
             Self::OP_SWAP => write!(f, "Swap"),

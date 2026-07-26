@@ -184,7 +184,8 @@ fn check_slots(
 fn known_opcode(opcode: u8) -> bool {
     matches!(
         opcode,
-        Instr::OP_POP
+        Instr::OP_NOP
+            | Instr::OP_POP
             | Instr::OP_DUP
             | Instr::OP_SWAP
             | Instr::OP_NEW_TABLE
@@ -437,7 +438,7 @@ fn verify_stack_discipline(view: &impl BytecodeView) -> Result<(), BytecodeValid
             // Both work entirely within the locals region: `TFOR_CALL` drives
             // the iterator through local slots and is internally balanced, and
             // `CLOSE_UPVALUES` only closes upvalues at or above a local slot.
-            Instr::OP_TFOR_CALL | Instr::OP_CLOSE_UPVALUES => {}
+            Instr::OP_NOP | Instr::OP_TFOR_CALL | Instr::OP_CLOSE_UPVALUES => {}
             Instr::OP_FOR_PREP => {
                 require_known(&next.height)?;
                 next.height.remove(3, pc)?;
@@ -621,7 +622,8 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
             _ => {
                 let a_is_reserved = matches!(
                     op,
-                    Instr::OP_POP
+                    Instr::OP_NOP
+                        | Instr::OP_POP
                         | Instr::OP_DUP
                         | Instr::OP_SWAP
                         | Instr::OP_NEW_TABLE

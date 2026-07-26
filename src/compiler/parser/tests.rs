@@ -519,6 +519,9 @@ fn test17() {
         Instr::set_local(1),
         Instr::set_local(0),
         Instr::get_builtin(Builtin::Print),
+        // Fixed calls leave their retired call-base mark as a nop; finalize
+        // strips it (raw parser output is what these tests pin).
+        Instr::nop(),
         Instr::get_local(1),
         Instr::call(ArgCount::Fixed(1), RetCount::Fixed(0)),
         Instr::ret(RetCount::Fixed(0)),
@@ -632,6 +635,7 @@ fn generic_for_bytecode_keeps_control_and_visible_slots() {
     let text = "for k, v in pairs(t) do x = k end";
     let code = vec![
         Instr::get_builtin(Builtin::Pairs),
+        Instr::nop(),
         Instr::get_global(0),
         Instr::call(ArgCount::Fixed(1), RetCount::Fixed(3)),
         Instr::tfor_prep(0),
@@ -726,6 +730,7 @@ fn test25() {
     let text = "puts()";
     let code = vec![
         Instr::get_global(0),
+        Instr::nop(),
         Instr::call(ArgCount::Fixed(0), RetCount::Fixed(0)),
         Instr::ret(RetCount::Fixed(0)),
     ];
@@ -1139,6 +1144,7 @@ fn test30() {
             Instr::closure(0),
             Instr::set_local(0),
             Instr::get_builtin(Builtin::Print),
+            Instr::nop(),
             Instr::get_local(0),
             Instr::call(ArgCount::Fixed(1), RetCount::Fixed(0)),
             Instr::ret(RetCount::Fixed(0)),
@@ -1167,6 +1173,7 @@ fn test31() {
     let text = "local s = type(4)";
     let code = vec![
         Instr::get_builtin(Builtin::Type),
+        Instr::nop(),
         Instr::push_num(0),
         Instr::call(ArgCount::Fixed(1), RetCount::Fixed(1)),
         Instr::set_local(0),
@@ -1196,6 +1203,7 @@ fn test32() {
         Instr::get_local(1),                                // Get print
         Instr::mark_call_base(1),                           // Mark the slot holding the callee
         Instr::get_local(0),                                // Get type
+        Instr::nop(),                                       // Inner fixed call's retired mark
         Instr::push_nil(),                                  // Push nil argument
         Instr::call(ArgCount::Fixed(1), RetCount::All),     // Call type(nil), return ALL values
         Instr::call(ArgCount::Dynamic, RetCount::Fixed(0)), // Call print with dynamic arg count
@@ -1268,6 +1276,7 @@ fn test34() {
         Instr::jump(-6),
         Instr::close_upvalues(0),
         Instr::get_global(0),
+        Instr::nop(),
         Instr::call(ArgCount::Fixed(0), RetCount::Fixed(0)),
         Instr::ret(RetCount::Fixed(0)),
     ];
@@ -1354,6 +1363,7 @@ fn local_tail_call_assignment_bytecode_is_unchanged() {
         function.code,
         vec![
             Instr::get_global(0),
+            Instr::nop(),
             Instr::call(ArgCount::Fixed(0), RetCount::Fixed(3)),
             Instr::set_local(2),
             Instr::set_local(1),
