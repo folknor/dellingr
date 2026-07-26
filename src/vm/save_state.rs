@@ -1140,6 +1140,9 @@ fn materialize_payload(
                     ordered.push((key, value));
                 }
             }
+            if delta.token == "table" {
+                state.drop_table_library_fallback();
+            }
             let table = state.heap.as_table(ptr).ok_or(LoadError::CorruptArena)?;
             table
                 .clear_and_insert_entries(ordered)

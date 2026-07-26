@@ -384,6 +384,35 @@ impl State {
         key: Val,
         local_cost: &mut u64,
     ) -> Result<()> {
+        if let Some(cache) = &self.table_library_fallback {
+            if key.as_string_ptr().is_some_and(|key_ptr| {
+                cache
+                    .names
+                    .iter()
+                    .any(|name| name.as_string_ptr() == Some(key_ptr))
+            }) {
+                return self.push_table_library_field_slow(key, local_cost);
+            }
+
+            if self.builtins[crate::instr::Builtin::Table as usize].as_object_ptr()
+                == Some(cache.table)
+                && self
+                    .heap
+                    .as_table_ref(cache.table)
+                    .is_some_and(|table| table.fallback_shape() == cache.shape)
+            {
+                // The normal fallback temporarily pushes the library and its
+                // result, so preflight its two-slot high-water mark even though
+                // this proven-nil path only pushes the final replacement value.
+                self.check_stack_space(2)?;
+                self.push_unchecked(Val::Nil);
+                return Ok(());
+            }
+        }
+        self.push_table_library_field_slow(key, local_cost)
+    }
+
+    fn push_table_library_field_slow(&mut self, key: Val, local_cost: &mut u64) -> Result<()> {
         self.get_global("table")?;
         let table_lib_idx = self.stack.len() - 1;
         self.get_table_with_key(table_lib_idx, key, local_cost)?;
@@ -463,6 +492,9 @@ impl State {
         // reaching the lib via __index) re-resolve through the new
         // binding instead of resurrecting the old one.
         self.globals_version = self.globals_version.wrapping_add(1);
+        if crate::instr::Builtin::from_u8(slot) == Some(crate::instr::Builtin::Table) {
+            self.invalidate_table_library_fallback_rebind(val);
+        }
         // Also update globals for _G compatibility
         if let Some(builtin) = crate::instr::Builtin::from_u8(slot) {
             self.globals.insert(builtin.name().to_string(), val);

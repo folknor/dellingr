@@ -1,271 +1,280 @@
 # WORK.md
 
-Current work item. Numbers refer to finding numbers in `notes/bugs.md`.
+Current work item. This is an optimization loop, not a bug fix: the target is
+measured, the fix must not change observable script behavior without an
+explicit decision, and the verdict is an interleaved A/B benchmark, not a test
+going green.
 
 ---
 
-## Target #59: saved bytecode stack discipline is not verified
+## Target: gate the table-library fallback off the field-read miss path
 
-The last item in `notes/bugs.md`, filed under deferred hardening. #16 shipped
-in 0.4.0; this is the only thing left.
+### The mechanism
 
-### The promise, and the gap
+Every plain-table field read that misses takes a table-library fallback lookup
+before returning nil. `instr_get_field` (`src/vm/eval_index.rs:16-66`):
 
-`load_state` promises that malformed save structure "is rejected with a
-`LoadError`; it cannot trigger an indexing, stack-underflow, or
-recursive-traversal panic during load". The recursive-traversal half is
-already true - marking and save encoding are both iterative, so a deep decoded
-table graph no longer overflows during the `gc_collect()` at the end of
-materialization. The stack-underflow half is **not**.
+- receiver has **no metatable** and the key is absent -> line 41:
+  `push_table_library_field(key, local_cost)`
+- receiver has a metatable, `__index` resolution returned nil -> line 56:
+  same fallback
 
-Save files are user-editable input. The README says so explicitly and tells
-hosts to reset the cost budget after loading a save. A forged save is therefore
-untrusted input reaching the bytecode interpreter.
+`push_table_library_field` (`eval_index.rs:382-395`) does
+`get_global("table")` (a Builtin array read - cheap) plus a full
+`get_table_with_key` probe against the library table, plus the stack traffic
+around it. The feature it serves is method sugar on plain tables:
+`t:insert(x)` resolves `insert` through the `table` library when `t` has no
+such field. But the fallback fires for EVERY missing key, and
+`if t.optional_field then` is among the most common patterns in real script
+code.
 
-### What is verified today, verified by reading
+### Measured evidence (2026-07-26, plantasjen)
 
-`src/compiler/verify.rs` (442 lines) is the phase 1 verifier, reached from
-`save_state/verify.rs:305` via `verify_payload`, and it runs before
-materialization. It checks, per chunk:
+- `--hotpath` on `examples/fields/miss.lua` (uuid 170db9ef, commit c4a303b):
+  `push_table_library_field` is 27.3% of the whole run, 2,163,000 calls at
+  100ns avg; the enclosing `instr_get_field` is 58.6%.
+- `--bench` verdict workload `miss` (bench/miss.lua): 5.3s standalone;
+  ratio vs reference: `fields/miss` 6.6x lua5.5 against
+  `fields/same_obj_read` 3.9x (2026-07-25 README table, commit b4ae38e) - a
+  missing field costs ~1.7x a hit in relative terms.
 
-- opcode is known (`known_opcode`)
-- operand indices are in range (`check_index`) - number/string literals, table
-  templates, nested chunk ids, upvalue ids, local slots
-- inline-cache slot bounds (`check_slots`) for global/field/set-field caches
-- jump targets land inside the code and are not negative-out-of-range
-- reserved operand fields are zero
-- `line_info` length agreement
+The bench workload `miss` is a diagnostic probe (header comment in the file
+says what it isolates); the win on plausible code is smaller but the pattern
+is ubiquitous.
 
-`save_state/verify.rs` then checks the nested-chunk graph (acyclic, depth
-within `MAX_SYNTAX_DEPTH`, child upvalue descriptors valid against the parent),
-closures, values, references, environment deltas and pointer ids.
+### The key fact making a gate possible
 
-**There is no notion of stack height anywhere in either file.** Grep for
-`stack`, `height` or `discipline` in `src/compiler/verify.rs` returns nothing.
+The fallback can only ever resolve keys that are members of the `table`
+library. That name set is known statically at VM build time
+(`src/lua_std/table.rs` installs them: insert, remove, concat, sort, unpack,
+pack, move, ...read the file for the exact list). For any other key the
+fallback is a guaranteed nil - pure wasted work.
 
-### What that leaves reachable
+### The semantic trap the audit missed
 
-Forged-but-structurally-valid code can still underflow or index outside the
-current frame. From the finding, with the sites it names:
+`push_table_library_field` resolves against the **current** `table` global at
+call time. Scripts (or hosts) can mutate it:
 
-- `pop_val` underflow
-- `DUP`'s `.last().expect(..)`
-- `SWAP`'s `len - 1` / `len - 2`
-- `CONCAT A`'s `len - A`
-- fixed `RETURN n` while locating return values
-- `RETURN RetCount::All`'s `stack.len() - frame_base`
-- direct local accesses and loop-local ranges below the frame base
-- a later `get_top()` call below `stack_bottom`
-- open upvalues left pointing at popped frame slots
+- `table.mymethod = function(t) ... end` then `t:mymethod()` resolves through
+  the fallback today.
+- `table = something_else` (rebinding the global; note `table` is a `Builtin`,
+  so check how SET_GLOBAL/SET_BUILTIN interacts with the builtins array).
+- `with_restricted_env` swaps the whole global environment.
+- Snapshot save/load reconstructs globals; the loaded `table` may be an
+  extended one.
 
-Cited sites: `src/vm/eval.rs:235,407,434`, `eval_index.rs:436`,
-`eval_store.rs:454`, plus the dispatch paths for `DUP`, `SWAP`,
-`MARK_CALL_BASE`, table initialization, field/table stores, the numeric and
-generic loop helpers, fixed `SET_LIST`, and `GET_TABLE`.
+A purely static gate ("key not in the compiled-in name list -> skip fallback")
+changes observable behavior for all of those. The plan must either:
 
-### What the verifier has to prove
+(a) preserve semantics exactly - static fast-reject PLUS a cheap validity
+    check that detects "the table library is not in its pristine state" and
+    falls back to today's path (identity of the `table` global value +
+    `Table::version` of the library table are the obvious ingredients; work
+    out where to cache them and what invalidates the cache - note
+    `globals_version` exists for the global ICs, check exactly when it bumps),
+    or
+(b) declare the restriction (fallback sugar only resolves the built-in name
+    set) as a deliberate contract change - which is a product decision the
+    orchestrator must sign off on, not something to decide inside the session.
 
-Abstract interpretation over each chunk's code with:
+Prefer (a) unless it costs the fast path something measurable; flag (b) only
+if (a) turns out structurally ugly.
 
-- an abstract operand-stack height per program point
-- agreement at every CFG join (both edges of every branch, and every jump
-  target) - a disagreement is a rejection, not a merge
-- the vararg-call marker stack (`MARK_CALL_BASE` / `CALL` with
-  `ArgCount::Dynamic`) and the table-constructor marker stack
-  (`OP_NEW_TABLE_TRACKED` / dynamic `SET_LIST`), each balanced along every path
-  and agreeing at joins
-- dynamic result counts (`RetCount::All`, `ArgCount::Dynamic`), which make the
-  height unknown until the matching marker pops - the abstract domain needs a
-  representation for this rather than a single integer
-- height never dropping below the frame base, and local slot accesses always
-  within `num_params + num_locals`
-- `MAX_STACK_SIZE` is **not** this verifier's job. The #62 work made every
-  growth path checked or preflighted at runtime, so the obligation here is
-  absence of underflow, valid ranges, balanced markers and join agreement -
-  not a height ceiling.
+### Design options to weigh
 
-### The hard constraint
+1. **Runtime gate, interned-pointer compares.** At State init (or lazily),
+   intern the lib method names and hold their `StringPtr`s (strings are
+   interned per-State, so pointer equality is content equality). On the miss
+   path, compare the key's `StringPtr` against the ~10 pinned pointers before
+   taking the fallback. No compiler changes, no bytecode changes. Cost: up to
+   ~10 u64 compares per miss (vs today's global read + table probe + stack
+   traffic). The pinned pointers must survive GC (string interning + GC sweep
+   of unused strings - verify pinned literals are rooted, or root them).
+2. **Compile-time site splitting.** The compiler knows each GET_FIELD's key
+   literal. Emit the fallback-capable path only for sites whose literal is in
+   the static name set (a flag bit or an opcode variant); all other sites
+   skip the fallback with zero runtime checks. More invasive: touches
+   codegen, the opcode surface, `analyze_cost`, the phase-1 bytecode
+   verifier, and interacts with the snapshot format (`verify.rs` knows the
+   opcode list). Same semantic trap, same validity-check need at the
+   surviving sites.
+3. **Method-call-position-only fallback.** Rejected unless review finds
+   otherwise: `local f = t.insert` resolves through the fallback today, so
+   restricting to method position is a behavior change of shape (b) with
+   extra compiler work on top.
 
-**It needs compiler-corpus proof before it may reject saves.** A verifier that
-rejects bytecode the real compiler emits turns every affected save into an
-unloadable file. The corpus is `examples/*.lua` plus every test fixture; the
-gate is that the verifier accepts every chunk the compiler produces for all of
-them, including nested functions, before it is allowed to fail a load.
+Option 1 is the working hypothesis: smallest diff, no new surfaces, and the
+per-miss cost drops from a table probe to a handful of compares.
 
-That suggests landing it in two stages: compute and check in a mode that cannot
-reject (assert in tests, accept in production), prove it over the corpus, then
-turn on rejection. Decide whether that staging is worth it or whether corpus
-coverage in tests is sufficient proof to enable rejection directly.
+### Cost-model question (needs an explicit answer in the plan)
 
-### Open questions for the reviewer
+The fallback path charges cost today (`local_cost` flows into
+`get_table_with_key`). Skipping it makes miss reads cheaper in `cost_used`,
+which re-bases the cost fingerprint of any script with misses - same
+replay-versioning consideration as constant folding (see OPTIMIZATIONS.md).
+Decide: charge-as-before (keep the fingerprint stable, forgo the cost-side
+honesty) or let cost reflect actual work (note it in the commit as a
+fingerprint change). State which and why in the plan.
 
-1. **Is the abstract domain a plain integer height, or does it need a symbolic
-   component?** `RetCount::All` and `ArgCount::Dynamic` make the height depend
-   on runtime values between a marker and its consumer. Does tracking "height
-   relative to the innermost marker" suffice, or is a richer domain needed?
-   Name the opcodes that make this hard.
-2. **Is the CFG reducible enough for a single pass?** The compiler emits
-   structured control flow only - there is no `goto`. Can the verifier work in
-   one forward pass with a worklist over jump targets, or does it need
-   iteration to a fixed point? If one pass suffices, what property of the
-   emitted code guarantees it, and does the verifier have to *check* that
-   property rather than assume it, given the input is forged?
-3. **What exactly must hold at a join?** Equal height is the obvious rule, but
-   the marker stacks also have to agree in depth *and* in the base each marker
-   records. Is equality the right rule, or does anything the compiler emits
-   legitimately join at different heights?
-4. **Which of the listed panic sites are actually reachable** given phase 1
-   already runs? Some may already be excluded by operand-range checks. A
-   demonstrated repro for at least one is worth more than the list.
-5. **Cost.** This runs per load, over every chunk. What is the complexity, and
-   does it need a bound on total code size so that verification itself cannot
-   become the denial of service?
-6. **Is `MAX_CALL_DEPTH` or anything else in scope**, or is underflow plus
-   local-range plus marker balance genuinely the whole obligation?
+### Constraints (restated inline; do not go read other process docs)
 
-### Constraints
+- Do NOT run `cargo`, `brokkr`, or any build/test/bench command. Read and
+  write code only; the orchestrator validates and benchmarks between steps.
+- Determinism is a product requirement: no HashMap/HashSet (IndexMap/BTreeMap
+  only), no unseeded RNG, identical source must produce identical behavior
+  and identical `cost_used` for a given VM version.
+- Clippy denies warnings; `unwrap_used` denied outside `#[cfg(test)]`
+  (`expect` with an invariant-explaining message is allowed); `Result::ok()`
+  banned; `dbg_macro`/`todo!` denied.
+- The stack cap is a real invariant: any new push path must be checked,
+  preflighted, or provably net-neutral (see the comment discipline in
+  `eval_index.rs` - pushes annotated against the pops that balance them).
+- `push_table_library_field` is `#[hotpath::measure]`-annotated; keep a
+  measurement point on whatever the fallback becomes. Do not annotate any
+  function whose frame stays live across the recursive bytecode dispatch.
+- Behavior changes require the orchestrator's sign-off (see the semantic
+  trap above). The default is exact semantic preservation.
+- The examples/ tree is a test surface (run_examples + differential gate vs
+  reference Lua). `t:insert(...)` sugar and fallback-miss behavior are
+  observable there; any new test scripts must print `<name>: true` and
+  diff clean against lua5.2/lua5.4 - but note reference Lua does NOT have
+  this fallback (plain `t.insert` is nil there), so fallback-specific tests
+  belong in Rust integration tests, not diffed examples.
 
-- Rejection must produce `LoadError::InvalidBytecode { .. }` with the chunk
-  index and offending instruction, matching the existing `invalid(..)` shape.
-- Verification runs **before** materialization, like the rest of
-  `verify_payload`.
-- Determinism: identical input rejects or accepts identically.
-- `unwrap_used` denied outside `#[cfg(test)]`; `Result::ok()` banned;
-  `HashMap`/`HashSet` banned; clippy denies warnings.
-- No new cost charges. Verification is host-side load work, not script work.
-- Do not weaken any existing phase 1 check to make the new one fit.
+### Reading list (all paths relative to repo root)
 
-### Reading
+- `src/vm/eval_index.rs` - `instr_get_field`, `push_table_library_field`,
+  `get_string_table_field` (the string twin - NOT in scope, but the gate
+  must not accidentally break it), the field IC helpers.
+- `src/vm/eval_store.rs` - SET-side twin `try_insert_table_direct` for the
+  stack-discipline comment conventions.
+- `src/lua_std/table.rs` - the authoritative name set and how it installs.
+- `src/vm/object.rs` - string interning (`alloc_string`, `find_by_hash`),
+  GC sweep of strings, what pins a `StringPtr`.
+- `src/vm.rs` - `globals_version` semantics, `builtins` array, `set_global`
+  paths, `with_restricted_env`.
+- `src/vm/table.rs` - `Table::version` bump rules (documented at the field).
+- `tests/` - existing integration suites for shape; `examples/` fallback
+  usage (grep for `:insert(` / `:remove(`).
 
-`src/compiler/verify.rs`, `src/vm/save_state/verify.rs`, `src/instr.rs`
-(encoding, `ArgCount`/`RetCount` sentinels), `src/vm/frame.rs` (the dispatch
-loop and what each opcode does to the stack), `src/vm/eval.rs`,
-`src/vm/eval_control.rs`, `src/vm/eval_index.rs`, `src/vm/eval_store.rs`,
-`src/vm/save_state.rs` (load path and existing rejection tests around lines
-1860-2160), `README.md` (save-state section).
+### Deliverable
+
+An implementation plan: chosen option, the validity-check design with its
+exact invalidation triggers, the cost-model answer, the diff's file-by-file
+shape, the test list (Rust-side + any example updates), and the bench
+prediction (which workloads move, which must not move - `same_obj_read` and
+`polymorphic` are the hit-path guards).
 
 ---
 
-## Agreed plan
+## Agreed plan (consolidated 2026-07-26; implement exactly this)
 
-### Frame model
+Option 1, runtime gate, exact semantic preservation. Two corrections to the
+problem statement above, both verified: (1) the ordinary fallback charges NO
+cost today - `GET_FIELD` and raw table reads are free and `get_table_with_key`
+only forwards `local_cost` into metamethod-driven Lua calls - so the gate must
+not charge anything and `cost_used` fingerprints must not move; (2) the gate
+logic is inverted from the sketch: MEMBER keys always take today's fallback,
+and the validity guard exists only to prove a pristine library table cannot
+contain a NON-member key.
 
-`stack_bottom` points at param 0; params+locals occupy `num_params + num_locals`
-slots; the operand region begins at `frame_base = stack_bottom + num_params +
-num_locals` (`eval.rs:462`). **Height** is the operand count above `frame_base`,
-0 at pc 0. `pop_val` panics only when the whole `Vec` is empty, but any pop at
-height 0 silently consumes a local or a caller's slot - both are the corruption
-class #59 names. The main chunk (`stack_bottom == 0`, no locals) turns it into
-the hard panic.
+### The cache
 
-A leaked marker is also caller-corrupting: `eval_closure` (`eval.rs:322-331`)
-truncates `vararg_call_bases` / `table_constructor_bases` **only on error**, so
-a chunk returning Ok with a live marker poisons the caller's next dynamic call.
-"Both marker stacks empty at every `OP_RETURN`" is a hard obligation.
+`TableLibraryFallbackCache`, an `Option<_>` field on `State`, captured in
+`vm_aux.rs` immediately after `lua_std::open_libs` succeeds (before snapshot
+environment capture), and only when the installed `table` value is an actual
+table with no metatable:
 
-### Domain
+- the canonical library `ObjectPtr`
+- the seven method-name keys read from the installed table itself (not a
+  hardcoded list, so the gate cannot drift from the registration), held as
+  rooted `Val::Str`
+- a conservative shape guard: `Table::version` + physical storage-slot count
+  + dead/tombstone count + metatable identity (`Option<ObjectPtr>`, `None` at
+  capture)
 
-A plain integer is not enough:
+The name `Val`s join `mark_gc_roots`. The canonical `ObjectPtr` is
+deliberately NOT rooted by the cache; setter invalidation (below) plus
+generational slotmap keys keep a stale pointer from ever being dereferenced -
+it is compared first, and a freed/reused slot compares unequal.
 
-```rust
-enum Height { Known(u32), Dyn { floor: u32 } }
-```
+### The gate, on every fallback request (`push_table_library_field`)
 
-relative to `frame_base`, plus two abstract marker stacks (`Vec<u32>` of Known
-bases). A floor suffices because every panic site is a pop or a `len - k`
-subtraction.
+1. Key pointer equals one of the seven cached names -> execute today's
+   fallback body unchanged. This preserves `t:insert(x)`,
+   `local f = t.insert`, replaced members, and deleted members exactly.
+2. Otherwise validate: current `Builtin::Table` value is the cached object,
+   the object is still a table, and its shape guard equals the capture.
+3. Valid -> preflight TWO stack slots (the high-water mark of today's
+   fallback, preserving the exact overflow boundary), then push nil.
+4. Any check fails, or no cache -> today's body unchanged.
 
-`Dyn` producers: `OP_CALL` with `B == 255` (`RetCount::All`), `OP_VARARG` with
-`A == 255`. Consumers: `OP_CALL` with `A == 255`, `OP_SET_LIST` with `A == 0`,
-`OP_RETURN` with `A == 255`.
+Keep the `#[hotpath::measure]` annotation on `push_table_library_field` so
+call counts stay comparable while the mean falls. Do not touch
+`get_string_table_field` (the string twin).
 
-Restrictions keeping the domain small, all corpus-checkable: `MARK_CALL_BASE`
-and `NEW_TABLE_TRACKED` require `Known`; all control-transfer opcodes and
-`RETURN Fixed(n)` require `Known`, so `Dyn` cannot flow into a jump target.
+### Invalidation triggers (each one explicit in code)
 
-### Control flow - single forward worklist pass, no fixed point
+- `open_libs`: recapture, replacing any previous cache.
+- Any write that can rebind the `table` global - the shared global setter
+  (host `set_global`, `_G` writes, general `SET_GLOBAL`) and
+  `instr_set_builtin` - drops the cache when the new value is not the cached
+  canonical object; reassigning the same object may keep it.
+- Shape drift is caught by the guard itself: added key -> slot count;
+  deleted key -> dead count; compaction/reorder -> version; metatable
+  install -> metatable identity. Value-only replacement of an existing entry
+  changes nothing and needs no invalidation (member keys bypass the guard;
+  a non-member key cannot already exist in a pristine table).
+- `with_restricted_env`: do NOT drop on swap - the identity check rejects
+  the gate while restricted (builtins swapped) and it becomes valid again on
+  restore. The suspended environment roots the object meanwhile.
+- Snapshot load: ordinary env deltas are caught by guard/setter paths, but
+  explicitly drop the cache before an ordered `"table"` environment delta
+  runs `clear_and_insert_entries` (`save_state.rs` load path) - a wholesale
+  rebuild of the same object could coincidentally restore pristine-looking
+  shape fields.
 
-The join rule is **exact equality**, not a lattice merge, so a state is written
-once and every later edge into it must equal it. Terminates in O(edges)
-regardless of whether the forged CFG is reducible or adversarial. Equality *is*
-the checked property - nothing is assumed about compiler output.
+### Behavior explicitly preserved (test each)
 
-- `states: Vec<Option<AbsState>>` indexed by pc; worklist `Vec<usize>`.
-- Seed pc 0 with `{ Known(0), [], [] }`.
-- Successors: fall-through, plus the already-range-checked jump target; both
-  for conditionals; target only for `OP_JUMP`; none for `OP_RETURN`.
-- Join must agree on height variant+value **and** both marker stacks
-  element-wise including each recorded base - depth alone is insufficient,
-  because `SET_LIST 0` / `CALL Dynamic` use the base to compute post-height.
-- Unreachable pcs stay `None` and are accepted: dispatch starts at pc 0 and
-  traverses the same edges, so unverified code is unexecutable. Existing phase 1
-  operand checks still cover it. This avoids rejecting dead code.
+- All seven names resolve via `t.<name>` and `t:<name>(...)` on plain tables.
+- `local f = t.insert; f(t, x)` works.
+- `table.insert = replacement` is observed by the fallback.
+- `table.custom = f` resolves via `t.custom` and `t:custom()` (guard
+  invalidated by slot count).
+- Rebinding `table` to a replacement table resolves its members; rebinding
+  to a non-table preserves today's error (yes, the error - see the semantic
+  trap section; preserving it is deliberate).
+- A metatable on the canonical table resolves unknown keys via `__index`.
+- `with_restricted_env` without `table` whitelisted preserves today's error;
+  behavior restores after.
+- Rebind + forced GC never touches the stale cached object.
+- A pristine-table unknown miss has byte-identical `cost_used` (exact-cost
+  regression test, so nobody accidentally charges the gate later).
+- Snapshot round-trips preserve extension, rebind, metatable fallback, and
+  the ordered-replay case.
 
-### Markers
+### File-by-file
 
-- `MARK_CALL_BASE`: require `Known(h)`, `h >= 1`; push `h - 1`.
-- `CALL A == 255`: pop (empty -> reject); require `floor >= base + 1`.
-- `NEW_TABLE_TRACKED`: require `Known(h)`; push `h`; height `h + 1`.
-- `SET_LIST A == 0`: pop (empty -> reject); require `floor >= base + 1`; height
-  `Known(base + 1)`.
-- Continuous invariant: after every instruction, `floor >= top_live_marker_base
-  + 1` for each stack.
-- Cap each abstract stack at `MAX_SYNTAX_DEPTH` - without it a forged chunk of N
-  trackers then N branches makes join comparisons O(N^2).
+- `src/vm/table.rs`: compact shape-guard accessor + an init-only accessor
+  returning the table's live string-key values; unit tests that append,
+  tombstone-delete, compaction, and metatable install each break pristine
+  validation.
+- `src/vm.rs`: the cache struct + `Option` field (init `None`), capture and
+  rebind-invalidation helpers, rooting in `mark_gc_roots`, hook in the
+  shared global setter.
+- `src/vm_aux.rs`: capture after `open_libs`.
+- `src/vm/eval_index.rs`: the gate in `push_table_library_field`;
+  `instr_set_builtin` invalidation.
+- `src/vm/save_state.rs`: explicit drop before ordered `"table"` env replay.
+- New `tests/table_library_fallback.rs`: the semantic/GC/restricted-env/cost
+  list above.
+- `tests/save_state.rs`: the four snapshot regressions.
 
-### Placement
+No compiler, opcode, verifier, analyze_cost, stdlib-registration, example,
+bench-script, registry-pin, or snapshot-format changes.
 
-Private `verify_stack_discipline(view: &impl BytecodeView)` in
-`src/compiler/verify.rs`, called as the **last** statement of
-`validate_bytecode`, so every existing check runs first unweakened and the
-transfer function may rely on already-validated operands (`CONCAT >= 2`,
-`MARK_CALL_BASE A == 1`, `TFOR_CALL B >= 1`, jump targets in range) - no
-`unwrap` anywhere. Errors use the existing `err(Some(pc), reason)`, so
-`save_state/verify.rs:305` maps them to `LoadError::InvalidBytecode` unchanged.
-`BytecodeView` needs no new methods. Height arithmetic in `u32` with
-`checked_add`/`checked_sub`, overflow rejects.
+### Bench prediction (orchestrator verifies after the build)
 
-### Staging: none. Land computation and rejection together
-
-`finalize` (`src/compiler.rs:349-354`) already runs `validate_bytecode` on every
-compiled chunk and `debug_assert!`s on failure - accept-in-release,
-assert-in-tests. Extending it turns the whole existing suite into the corpus
-proof the day the check lands: a false rejection fails CI as a debug assertion
-before it can fail a load. The only hard-rejecting path is the load path, which
-is exactly where rejection is wanted. Add one explicit corpus test; the
-two-stage flag machinery buys nothing and costs a release plus dormant-code
-risk.
-
-### Complexity
-
-O(code_len) visits + O(edges) joins, each join O(marker depth), capped at
-`MAX_SYNTAX_DEPTH`. No new total-code-size bound needed - each instruction is 4
-payload bytes, so `code_len` is already linear in the save size. The
-marker-depth cap is the one bound that must be added.
-
-### Tests
-
-Rejection (alongside the existing forged-bytecode tests,
-`save_state.rs:1860-2160`), each asserting `LoadError::InvalidBytecode` with the
-expected chunk and instruction:
-
-1. `[POP, RETURN 0]` - the host-panic repro, reject at pc 0
-2. `[SWAP, RETURN 0]` and `[DUP, RETURN 0]`
-3. `[PUSH_NIL, CONCAT 2, RETURN 0]` - height 1 < 2
-4. `[RETURN Fixed(1)]` - return values exceed height
-5. Join mismatch: `[PUSH_BOOL, BRANCH_FALSE +1, PUSH_NIL, RETURN 0]`
-6. Back-edge mismatch: a loop that grows height per iteration
-7. `CALL(Dynamic, Fixed 1)` with no `MARK_CALL_BASE`
-8. `SET_LIST(0)` with no `NEW_TABLE_TRACKED`
-9. `[PUSH_NIL, MARK_CALL_BASE 1, RETURN 0]` - live marker at return
-10. `MARK_CALL_BASE` at height 0
-11. `CALL(Fixed 0, All)` then `BRANCH_FALSE` - branch at `Dyn`
-12. `SET_FIELD_AT` / `SET_TABLE` / `INIT_INDEX` with offset below height
-13. `[SET_LOCAL 0, ...]` with `num_locals = 1` at height 0
-
-Corpus acceptance: a test iterating every `examples/**/*.lua`, compiling with
-`compiler::parse_str`, walking the `nested` tree recursively, asserting
-`validate_bytecode` passes on every chunk. Must exercise the dynamic shapes
-(`MARK_CALL_BASE` / `CALL Dynamic` / `NEW_TABLE_TRACKED` / `SET_LIST 0` /
-`RETURN All`). The `debug_assert!` at `compiler.rs:350` makes every other test
-an implicit corpus case for free.
+`fields/miss` improves materially (fallback was 27.3% of the instrumented
+run; 15-25% wall reduction plausible). `same_obj_read` and `polymorphic`
+must stay within noise. No `cost_used` may move on any workload.

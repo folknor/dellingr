@@ -1184,3 +1184,71 @@ fn corruption_sweep_never_panics() {
         ));
     }
 }
+
+#[test]
+fn table_library_extension_survives_snapshot() {
+    let mut original = fresh();
+    run(&mut original, "table.custom = function(t) return 17 end");
+    let mut loaded = reload(&original);
+    run(&mut loaded, "result = ({}):custom()");
+    assert_eq!(global_num(&mut loaded, "result"), 17.0);
+}
+
+#[test]
+fn rebound_table_library_survives_snapshot() {
+    let mut original = fresh();
+    run(
+        &mut original,
+        "table = { custom = function(t) return 23 end }",
+    );
+    let mut loaded = reload(&original);
+    run(&mut loaded, "result = ({}):custom()");
+    assert_eq!(global_num(&mut loaded, "result"), 23.0);
+}
+
+#[test]
+fn table_library_metatable_fallback_survives_snapshot() {
+    let mut original = fresh();
+    run(
+        &mut original,
+        r#"
+            setmetatable(table, { __index = function(_, key)
+                if key == "custom" then return function() return 29 end end
+            end })
+        "#,
+    );
+    let mut loaded = reload(&original);
+    run(&mut loaded, "result = ({}):custom()");
+    assert_eq!(global_num(&mut loaded, "result"), 29.0);
+}
+
+#[test]
+fn ordered_table_library_replay_drops_the_pristine_fallback_cache() {
+    // The final library must have exactly SEVEN live keys - the pristine
+    // slot count - with different membership, and a forced reorder so the
+    // load path takes the ordered `clear_and_insert_entries` replay. An
+    // eight-key table would fail the shape guard on slot count alone and
+    // never exercise the explicit cache drop this test exists to pin:
+    // without the drop, a seven-key rebuild can coincidentally restore
+    // pristine-looking shape fields while `custom` has replaced `insert`,
+    // and the gate would answer nil for a key the table actually has.
+    let mut original = fresh();
+    run(
+        &mut original,
+        r#"
+            table.insert = nil
+            table.custom = function() return 31 end
+            local remove = table.remove
+            table.remove = nil
+            table.remove = remove
+        "#,
+    );
+    let mut loaded = reload(&original);
+    run(
+        &mut loaded,
+        "result = ({}):custom() \
+         insert_gone = (({}).insert == nil) and 1 or 0",
+    );
+    assert_eq!(global_num(&mut loaded, "result"), 31.0);
+    assert_eq!(global_num(&mut loaded, "insert_gone"), 1.0);
+}

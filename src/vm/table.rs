@@ -60,6 +60,16 @@ pub(super) struct Table {
     dead_count: usize,
 }
 
+/// The table properties that prove a pristine table cannot contain an
+/// unrecognised table-library fallback key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct TableShape {
+    version: u64,
+    slots: usize,
+    dead_count: usize,
+    metatable: Option<ObjectPtr>,
+}
+
 impl Default for Table {
     fn default() -> Self {
         Self {
@@ -120,6 +130,39 @@ impl Table {
     #[inline]
     pub(super) fn version(&self) -> u64 {
         self.version.get()
+    }
+
+    /// Returns the shape properties that change when a new fallback key could
+    /// become visible without replacing an existing table-library member.
+    pub(super) fn fallback_shape(&self) -> TableShape {
+        let slots = match &self.storage {
+            TableStorage::Inline { len, .. } => *len as usize,
+            TableStorage::Map(map) => map.len(),
+        };
+        TableShape {
+            version: self.version(),
+            slots,
+            dead_count: self.dead_count,
+            metatable: self.metatable,
+        }
+    }
+
+    /// Returns the live string keys in insertion order for init-only library
+    /// cache capture. Callers validate the expected registration count.
+    pub(super) fn live_string_keys(&self) -> Vec<Val> {
+        match &self.storage {
+            TableStorage::Inline { entries, len } => entries
+                .iter()
+                .take(*len as usize)
+                .filter(|(key, value)| key.as_string_ptr().is_some() && !matches!(value, Val::Nil))
+                .map(|(key, _)| *key)
+                .collect(),
+            TableStorage::Map(map) => map
+                .iter()
+                .filter(|(key, value)| key.as_string_ptr().is_some() && !matches!(value, Val::Nil))
+                .map(|(key, _)| *key)
+                .collect(),
+        }
     }
 
     #[inline]
@@ -1001,5 +1044,44 @@ mod tests {
         t.insert(n(5), Val::Bool(true)).unwrap();
         assert_eq!(t.version(), 1);
         assert!(matches!(t.next(&n(4)), TableNext::Pair(Val::Num(5.0), _)));
+    }
+
+    #[test]
+    fn fallback_shape_rejects_appended_key() {
+        let mut table = Table::default();
+        let pristine = table.fallback_shape();
+        table.insert(n(1), Val::Bool(true)).unwrap();
+        assert_ne!(table.fallback_shape(), pristine);
+    }
+
+    #[test]
+    fn fallback_shape_rejects_tombstone_delete() {
+        let mut table = Table::default();
+        table.insert(n(1), Val::Bool(true)).unwrap();
+        let pristine = table.fallback_shape();
+        table.insert(n(1), Val::Nil).unwrap();
+        assert_ne!(table.fallback_shape(), pristine);
+    }
+
+    #[test]
+    fn fallback_shape_rejects_compaction() {
+        let mut table = Table::default();
+        fill(&mut table, 1..=5);
+        let pristine = table.fallback_shape();
+        for key in 1..=4 {
+            table.insert(n(key), Val::Nil).unwrap();
+        }
+        table.insert(n(6), Val::Bool(true)).unwrap();
+        assert_ne!(table.fallback_shape(), pristine);
+    }
+
+    #[test]
+    fn fallback_shape_rejects_metatable_install() {
+        let mut heap = GcHeap::with_threshold(20);
+        let metatable = heap.alloc_table();
+        let mut table = Table::default();
+        let pristine = table.fallback_shape();
+        table.set_metatable(Some(metatable));
+        assert_ne!(table.fallback_shape(), pristine);
     }
 }
