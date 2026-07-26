@@ -250,7 +250,7 @@ impl<'a> Parser<'a> {
     /// Returns the token if it matches, `Err` otherwise.
     fn expect(&mut self, expected: TokenType) -> Result<Token> {
         let token = self.input.next()?;
-        self.update_line(token.start);
+        self.update_line(token);
         if token.typ == expected {
             Ok(token)
         } else {
@@ -307,7 +307,9 @@ impl<'a> Parser<'a> {
     /// Converts a literal string's offsets into Lua string bytes, processing escape sequences.
     fn get_literal_string_contents(&self, tok: Token) -> Result<Vec<u8>> {
         // Chop off the quotes
-        let Token { start, len, typ } = tok;
+        let Token {
+            start, len, typ, ..
+        } = tok;
         assert_eq!(typ, TokenType::LiteralString);
         assert!(len >= 2);
         let range = (start + 1)..(start + len as usize - 1);
@@ -452,11 +454,10 @@ impl<'a> Parser<'a> {
         std::mem::replace(slot, instr)
     }
 
-    /// Updates current line based on token position.
+    /// Updates current line from the lexer stamp on a consumed or peeked token.
     #[hotpath::measure]
-    fn update_line(&mut self, pos: usize) {
-        let (line, _) = self.input.line_and_column(pos);
-        self.current_line = line as u32;
+    fn update_line(&mut self, token: Token) {
+        self.current_line = token.line;
     }
 
     /// Called when entering a loop to track break statements.
@@ -524,10 +525,10 @@ impl<'a> Parser<'a> {
         let num_params =
             u8::try_from(params.len()).map_err(|_| self.error(SyntaxError::TooManyLocals))?;
         let source = self.chunk.source.clone();
-        self.outer_chunks.push(self.chunk.clone());
-        self.chunk = Bytecode::default();
+        self.outer_chunks.push(std::mem::take(&mut self.chunk));
         self.chunk.source = source;
         self.chunk.is_vararg = is_vararg;
+        self.chunk.num_params = num_params;
 
         // Save and reset locals for the new chunk - each function has its own
         // local variable slots starting at 0
@@ -538,7 +539,6 @@ impl<'a> Parser<'a> {
         let saved_upvalues = std::mem::take(&mut self.upvalues);
         self.outer_upvalues.push(saved_upvalues);
 
-        self.chunk.num_params = num_params;
         for &param in params {
             self.locals.push((param.into(), self.nest_level));
         }
@@ -549,13 +549,13 @@ impl<'a> Parser<'a> {
         // Copy upvalues to chunk
         self.chunk.upvalues = self.upvalues.iter().map(|(_, desc)| *desc).collect();
 
-        let tmp_chunk = self.chunk.clone();
-        self.chunk = self.outer_chunks.pop().ok_or_else(|| {
+        let outer_chunk = self.outer_chunks.pop().ok_or_else(|| {
             self.error_at(
                 ErrorKind::InternalError("compiler: outer chunk stack empty".into()),
                 0,
             )
         })?;
+        let tmp_chunk = std::mem::replace(&mut self.chunk, outer_chunk);
 
         // Restore outer locals and upvalues
         self.locals = self.outer_locals.pop().ok_or_else(|| {
@@ -589,7 +589,7 @@ impl<'a> Parser<'a> {
     fn parse_statements_inner(&mut self) -> Result<()> {
         loop {
             // Update line number at start of each statement for accurate error reporting
-            let stmt_start = self.input.peek()?.start;
+            let stmt_start = *self.input.peek()?;
             self.update_line(stmt_start);
 
             match self.input.peek_type()? {

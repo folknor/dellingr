@@ -1224,6 +1224,7 @@ fn test33() {
         "print()\n(foo)()\n",
         "print()\r(foo)()\r",
         "print()\r\n(foo)()\r\n",
+        "print()\n\r(foo)()\n\r",
     ] {
         match parse_str(text) {
             Err(Error {
@@ -1416,6 +1417,97 @@ fn line_info_reports_correct_line() {
             .line,
         5
     );
+}
+
+#[test]
+fn recursive_line_info_keeps_multiline_token_and_call_lines() {
+    for newline in ["\n", "\r", "\r\n", "\n\r"] {
+        let source = format!(
+            "local function f(){newline}local s = \"a\\z{newline} b\"{newline}-- comment{newline}g(){newline}obj:m(){newline}end"
+        );
+        let chunk = parse_str(&source).expect("line-info fixture must compile");
+        let function = &chunk.nested[0];
+
+        assert_eq!(
+            function.line_info,
+            vec![2, 2, 5, 5, 5, 6, 6, 6, 6, 6, 6, 7],
+            "{newline:?}"
+        );
+        let call_lines: Vec<_> = function
+            .code
+            .iter()
+            .zip(&function.line_info)
+            .filter_map(|(instruction, line)| {
+                (instruction.opcode() == Instr::OP_CALL).then_some(*line)
+            })
+            .collect();
+        assert_eq!(call_lines, vec![5, 6], "{newline:?}");
+    }
+}
+
+#[test]
+fn parser_error_positions_stay_pinned_after_comments_and_newlines() {
+    for newline in ["\n", "\r", "\r\n", "\n\r"] {
+        let after_comment = format!("-- comment{newline}end");
+        let err = parse_str(&after_comment).expect_err("stray end must fail");
+        assert!(matches!(
+            err.kind,
+            ErrorKind::SyntaxError(SyntaxError::UnexpectedTok(_))
+        ));
+        assert_eq!((err.line_num, err.column), (2, 1), "{newline:?}");
+
+        let bad_escape = format!("-- comment{newline}return \"\\q\"");
+        let err = parse_str(&bad_escape).expect_err("bad escape must fail");
+        assert!(matches!(
+            err.kind,
+            ErrorKind::SyntaxError(SyntaxError::InvalidEscapeSequence)
+        ));
+        assert_eq!((err.line_num, err.column), (2, 9), "{newline:?}");
+
+        let invalid_after_newline = format!("x = 1{newline}@");
+        let err = parse_str(&invalid_after_newline).expect_err("invalid character must fail");
+        assert!(matches!(
+            err.kind,
+            ErrorKind::SyntaxError(SyntaxError::InvalidCharacter('@'))
+        ));
+        assert_eq!((err.line_num, err.column), (2, 2), "{newline:?}");
+    }
+}
+
+#[test]
+fn nested_chunks_preserve_shape_and_source_name() {
+    let chunk = super::parse_str_named(
+        "function f() function g() end end",
+        Some("nested-lines.lua".to_string()),
+    )
+    .expect("nested fixture must compile");
+
+    assert_eq!(chunk.source.as_deref(), Some("nested-lines.lua"));
+    assert_eq!(
+        chunk.code,
+        vec![
+            Instr::closure(0),
+            Instr::set_global(0),
+            Instr::ret(RetCount::Fixed(0)),
+        ]
+    );
+    assert_eq!(chunk.string_literals, vec![Vec::from("f")]);
+
+    let f = &chunk.nested[0];
+    assert_eq!(f.source.as_deref(), Some("nested-lines.lua"));
+    assert_eq!(
+        f.code,
+        vec![
+            Instr::closure(0),
+            Instr::set_global(0),
+            Instr::ret(RetCount::Fixed(0)),
+        ]
+    );
+    assert_eq!(f.string_literals, vec![Vec::from("g")]);
+
+    let g = &f.nested[0];
+    assert_eq!(g.source.as_deref(), Some("nested-lines.lua"));
+    assert_eq!(g.code, vec![Instr::ret(RetCount::Fixed(0))]);
 }
 
 fn upvalue_program(grandparent_locals: usize, parent_locals: usize) -> String {

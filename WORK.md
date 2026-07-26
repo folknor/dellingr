@@ -1,240 +1,204 @@
 # WORK.md
 
-Current work item. Optimization loop 7: one finalize-time instruction-strip
-pass, two consumers.
+Current work item. Optimization loop 8: the parse-time cluster - three
+front-end costs with one measurement surface (`large_source` parse_us).
 
 ---
 
-## Target: strip provably dead instructions in `finalize` with a single correct jump remap
+## Targets (one loop, three independent fixes)
 
-### The two consumers
+### (1) Token-stamped line numbers - kills the quadratic (A-O2)
 
-**(a) CLOSE_UPVALUES in closure-free functions (A-O9).** Scope exits emit
-OP_CLOSE_UPVALUES unconditionally (`parser.rs` `level_down` + the loop
-parsers) - including once per iteration inside for-loop bodies. If a
-function body creates no closures (no OP_CLOSURE in its code - note
-`chunk.nested` non-empty does NOT imply a closure is created in THIS
-function's code path... verify: nested chunks only exist for OP_CLOSURE
-sites, so "no OP_CLOSURE emitted" is the precise condition), no upvalue
-over its locals can ever be open, and every CLOSE_UPVALUES in it is a
-guaranteed-no-op dispatch. Measured: `close_upvalues` shows 1.5M-4.6M
-calls on loop-heavy workloads at 2.2-4.0% of instrumented wall (pairs,
-composite, factory_closure); the uninstrumented cost is a call + an
-empty-list check per loop iteration, everywhere.
+`update_line` (`parser.rs`, the small fn near the helpers) calls the
+lexer's `line_and_col`, a LINEAR walk of the whole `linebreaks` vec, at
+every statement start and every `expect()`. Parse time is therefore
+O(statements x lines); a 10k-line chunk does tens of millions of window
+compares inside `parse_str`, a `#[hotpath::measure]`d function. Measured:
+`parse/large_source` (5000 generated lines) at 8.0x lua5.5 - the worst
+ratio outside the since-fixed literal probe (2026-07-25 README, b4ae38e).
 
-**(b) `Vec::remove` in call emission (A-O4).** Every plain call currently
-does `remove_instr` -> `code.remove(mark_idx)` (`parser.rs:446-448`,
-called from the expression parser's call emission): an O(n) tail shift
-per call plus the matching `line_info` shift, making call-heavy chunks
-quadratic-ish in emission. The pragmatic fix from the backlog: emit the
-mark unconditionally, and when the call turns out not to need it, REWRITE
-it to a nop instead of removing it - then let the shared strip pass
-delete all nops at finalize time with one remap.
+Fix: the lexer knows the current line when it produces a token - stamp
+`Token` with `line: u32` (check `Token`'s layout for padding; it carries
+`typ`, `start`, `len` today - verify) and make `update_line` a field copy.
+Keep `line_and_col` for error rendering, and make THAT binary-searchable
+via `partition_point` (the linebreaks vec is sorted) so error paths win
+too. Audit every `line_and_col`/`line_and_column` caller.
 
-### The infrastructure
+### (2) `mem::take` instead of two full Bytecode clones per nested function (A-O3)
 
-A `strip_dead_instructions` pass in `finalize` (`src/compiler.rs`),
-running BEFORE `assign_cache_slots` and before verification:
+`parse_chunk` does `outer_chunks.push(self.chunk.clone())` and later
+`let tmp_chunk = self.chunk.clone()` - deep copies of code, literal
+pools, line_info and nested Arcs of the partially built outer chunk and
+the finished inner chunk, immediately overwritten. `std::mem::take` /
+`std::mem::replace` make both O(1). Cost today is O(enclosing-chunk size)
+per nested function definition. (Line numbers shifted since the audit -
+locate by the two `self.chunk.clone()` hits in `parser.rs`.)
 
-1. Build the removal set: every OP_NOP (new opcode, see below), plus -
-   when the chunk contains no OP_CLOSURE - every OP_CLOSE_UPVALUES.
-2. Compute the pc remap (prefix sums of removals).
-3. Rewrite every jump-carrying instruction's offset: OP_JUMP,
-   OP_BRANCH_FALSE, OP_BRANCH_TRUE_KEEP, OP_BRANCH_FALSE_KEEP,
-   OP_FOR_PREP, OP_FOR_LOOP, OP_TFOR_LOOP - enumerate from `instr.rs` /
-   the verifier's successor logic, not from memory; any opcode the
-   verifier treats as a control transfer must be covered. Offsets are
-   relative (sBx / signed), so the new offset is
-   remap(target) - remap(source_next) style arithmetic - define it
-   precisely against the existing jump semantics (ip points at NEXT
-   instruction; offsets are applied to that).
-4. Drop the removed instructions from `code` AND `line_info` together.
-5. Reject (or keep unstripped) any pathological case rather than emitting
-   wrong offsets: a jump whose new offset would not fit i16 cannot occur
-   from shrinking, but assert it anyway.
+### (3) Zero-allocation identifiers in the lexer (A-O5, lexer half only)
 
-**OP_NOP**: a new opcode, executed as a no-op in dispatch (it should never
-survive finalize for compiler-produced code, but saved/forged bytecode is
-its own world - see below). The verifier must accept it (stack-neutral,
-all operands reserved-zero); `analyze_cost` treats it as free; dispatch
-executes it as nothing. This keeps old-binary-reads-new-save... actually
-NO: a nop that never survives finalize never enters a save. But a FORGED
-save may contain OP_NOP - the verifier and dispatch must handle it
-anyway. State explicitly whether compiler output can ever retain a nop
-(it must not - assert in finalize).
-
-### Order-of-operations question (answer explicitly)
-
-`assign_cache_slots` bakes slot indices positionally; the verifier
-validates slot streams in instruction order; the stack-discipline pass
-walks jumps. Stripping must happen BEFORE slot assignment and
-verification so both see the final code. Confirm `finalize`'s current
-pass order allows this, and that `remove_instr`'s existing careful
-`line_info` handling has no other callers left after (b) - if the mark
-rewrite covers every `remove_instr` use, delete `remove_instr`.
-
-### Semantics and cost
-
-- CLOSE_UPVALUES stripping is observable ONLY through timing - the op is
-  free (verify), and closing never does anything in a closure-free
-  function. Argue there is no path where an upvalue over this function's
-  locals exists without an OP_CLOSURE in its code (host API? varargs?
-  metamethods? - none capture locals, but verify).
-- `cost_used` must be byte-identical: CLOSE_UPVALUES and the stripped
-  marks are free ops (verify both in `frame.rs` dispatch and
-  `analyze_cost`), so removal changes no charges.
-- Iteration/replay: bytecode SHAPE changes (fewer instructions), which
-  changes nothing observable - but `analyze_cost` outputs (ScopeCost own
-  totals) may shift if it counts per-instruction anything (verify what
-  analyze_cost reports for free ops).
-- Snapshot: saved bytecode is post-finalize, so saves carry stripped
-  code; old saves with unstripped CLOSE_UPVALUES remain valid (dispatch
-  still executes them). FORMAT_VERSION untouched. Forged saves with
-  OP_NOP now pass known_opcode - deliberate, dispatch handles it.
-- The golden fixture WILL change again (stripped code in saved chunks) -
-  regenerate current, keep legacy (same procedure as loop 4).
-
-### Parser-side change for (b)
-
-At the two `remove_instr` call sites in the expression parser, replace
-removal with an in-place rewrite of the mark instruction to OP_NOP.
-Nothing else about call emission changes; jump targets recorded before
-the mark stay valid because nothing shifts at parse time anymore (that is
-the entire point). Any parser bookkeeping that stored indices relative to
-post-removal positions must be audited - the removal previously SHIFTED
-later indices, so removing the removal changes subsequent index
-arithmetic; read `expr.rs`/`parser.rs` call emission thoroughly (this is
-where the 5ff9a27 "mark the call base after evaluating the callee"
-history lives - understand it before touching).
+`lex_word` builds a fresh `String` per identifier/keyword token, used
+only for keyword matching, then discarded (the parser re-slices the
+source). Match on the `&source[token_start..pos]` slice instead - one
+allocation per token removed. The parser-side half of A-O5 (`locals:
+Vec<(String, i32)>` etc. becoming `&'a str` borrows) is OUT OF SCOPE for
+this loop: it touches lifetime plumbing across the whole parser for a
+smaller win - keep the entry in OPTIMIZATIONS.md, narrowed.
 
 ### Constraints (inline; sessions read nothing else)
 
 - Read/write code only; no cargo/brokkr/test/bench commands.
-- Determinism; identical `cost_used`; no HashMap/HashSet; clippy strict;
-  `unwrap_used` denied outside tests; `Result::ok()` banned.
-- The stack-discipline verifier + finalize debug_assert + the full
-  example corpus are the safety net for remap bugs - extend the corpus
-  test if any dynamic shape (marker stacks!) interacts with stripping:
-  OP_MARK_CALL_BASE is exactly the instruction being nopped in (b), and
-  the abstract interpreter tracks its marker stack - a nop that used to
-  be a mark must NOT reach the verifier (it is stripped first), but a
-  forged save CAN contain OP_NOP anywhere; define its verifier transfer
-  as stack-neutral no-op.
-- Keep `#[hotpath::measure]` on `close_upvalues` (its call counts
-  dropping to ~frame-exit-only is the measurement of success).
+- BYTECODE OUTPUT MUST BE BYTE-IDENTICAL: identical code, literals,
+  line_info, error positions (line AND column) for every input. The
+  parser bytecode-shape tests, the golden fixtures, the diff gate, and
+  every error-message test are the oracle - none may change. This is a
+  pure-speed loop.
+- `cost_used` identical (parsing charges nothing - keep it so).
+- Determinism; clippy strict; `unwrap_used` denied outside tests;
+  `Result::ok()` banned; no HashMap/HashSet.
+- Token size changes affect lexer-internal memory only (tokens are
+  transient); note any size growth.
+- Keep `#[hotpath::measure]` annotations on the parse path
+  (`parse_str_named`, `next_token`, `update_line` if annotated) so
+  before/after distributions compare.
+
+### Open questions for the reviewer
+
+1. Does the lexer actually know the line at token-production time, or
+   does it only track byte positions and compute lines lazily? Read
+   `lexer.rs` and state the true cheapest way to stamp tokens (a running
+   line counter incremented on newline consumption is the classic shape;
+   verify how `linebreaks` is built and whether comments/long strings
+   complicate the counter).
+2. `update_line` feeds `current_line` which feeds instruction emission
+   (`line_info`). Confirm stamping changes NO line_info values - the
+   stamped line must equal what `line_and_col(pos).0` returned for the
+   same token position, including tricky cases: multi-line strings,
+   comments before statements, CRLF handling (the lexer was aligned with
+   reference Lua on newlines in 1db7f75 - do not disturb that).
+3. Is `line_and_column` (public-ish error path) the same walk? Both it
+   and `line_and_col` should become `partition_point` searches - confirm
+   the vec's sortedness invariant and the exact tie-breaking (a position
+   ON a newline byte).
+4. For (2): after `mem::take(&mut self.chunk)`, the parser continues
+   filling a fresh default chunk - verify every field the taken chunk
+   carried is either restored or deliberately reset, especially
+   `source` (name), `num_params`, `is_vararg`, and the upvalue
+   bookkeeping around nested-function entry/exit.
+5. For (3): confirm keyword matching is the String's only use, and
+   whether `describe_token` / error paths re-slice the source
+   independently (they appear to - `input.substring(..)`).
 
 ### Deliverable
 
-Implementation plan: the strip pass algorithm with exact remap math, the
-OP_NOP opcode spec (encoding, dispatch, verifier transfer, analyze_cost),
-the parser call-emission rewrite with the index-arithmetic audit, pass
-ordering in finalize, test list (remap correctness across every jump
-shape incl. backward jumps and jump-over-stripped-regions; closure-free
-vs closure-containing functions; forged OP_NOP saves; golden fixture
-split; exact-cost pins; parse-time complexity guard for (b) if
-measurable), and bench predictions (`pairs`/`benchmark`/`gc_churn` gain a
-little from (a); `large_source` parse_us gains from (b); nothing
-regresses; `cost_used` identical).
+Implementation plan answering the questions with file-by-file shape and
+a test list (line-number oracle across multi-line strings/comments/CRLF;
+error-position pins; a nested-function-heavy fixture proving (2) changes
+nothing observable; existing corpus as the byte-identity oracle), plus
+bench prediction: `large_source` parse_us drops materially (the
+quadratic term dies); nothing else moves; the second data point for the
+suspected quadratic (TODO.md's larger generated size) can finally be
+taken cheaply afterward.
 
 ---
 
 ## Agreed plan (consolidated 2026-07-26; implement exactly this)
 
-Two corrections to the problem statement, both verified: the CURRENT golden
-fixture does NOT change (the golden program contains no strippable
-instruction - `make` has OP_CLOSURE so its CLOSEs stay, and nops never
-survive finalize; do NOT regenerate either fixture), and `gc_churn`'s
-closure-producing kernel keeps its per-iteration CLOSE (only closure-free
-functions strip). Also verified: 5ff9a27's mark placement (after callee,
-before args) is load-bearing - the mark must execute before argument
-evaluation because varargs/all-results calls make the height dynamic; the
-parser index audit is clean (all recorded indices stay stable once nothing
-shifts at parse time); `remove_instr` has exactly two callers and dies;
-the complete transfer set is JUMP, BRANCH_FALSE, BRANCH_TRUE_KEEP,
-BRANCH_FALSE_KEEP, FOR_PREP, FOR_LOOP, TFOR_LOOP (TFOR_PREP is not a
-transfer); no path opens an upvalue over a frame's locals without that
-frame executing OP_CLOSURE (find_or_create_upvalue's only caller is
-instr_closure; frame return/error safety closes remain untouched);
-CLOSE_UPVALUES and MARK_CALL_BASE are free in both dispatch and
-analyze_cost, so cost_used/own_cost/total_cost stay identical - only the
-public `ScopeCost::instructions` count decreases (assert exactly that).
+Corrections to the problem statement, verified: `Token.line: u32` does NOT
+fit padding - Token grows ~16 -> 24 bytes on 64-bit (transient lexer
+memory; document, accept). `TokenStream::line_and_column` is a wrapper;
+the one linear walk is `Lexer::line_and_col`. TWO additional parse-path
+callers exist beyond `update_line`: the call-opening line lookups in
+`expr.rs` (ordinary + method calls, packed into `CallSite` and emitted via
+`push_at_line`) - both must switch to the stamped token line or the hot
+path keeps positional searches.
 
-### 1. OP_NOP
+### Line stamping (the equivalence is proven, implement exactly this shape)
 
-`OP_NOP = 26` (next unused operandless slot) in `instr.rs`; `Instr::nop()`
-constructor; Debug prints `Nop`. Dispatch: empty free arm in `frame.rs`.
-Verifier: known opcode, operandless reserved-zero, stack-neutral transfer,
-fallthrough successor. analyze_cost: free. Finalized compiler output must
-never contain one (debug-asserted below); a forged v6 save containing a
-zero-operand nop becomes accepted and executable - deliberate.
+`Lexer` has no line counter, but `linebreaks.len()` IS the current
+one-based line: `next_char` appends a line start per logical newline (CR,
+LF, CRLF, LFCR handled; comments, `\z` gaps and escaped physical newlines
+all consume through `next_char`; long strings unsupported). The correct
+stamp: after consuming leading whitespace and setting `tok_start`, capture
+`tok_line = linebreaks.len() as u32` BEFORE consuming the token body -
+capturing after would be wrong for `\z`/escaped-newline strings. Stamp
+ordinary AND EOF tokens. Storing on `Token` is required because `peek2`
+lookahead can advance the lexer lines ahead of consumption.
 
-### 2. Parser rewrite (consumer b)
+Equivalence: for a token at byte `s`, every line start `<= s` is already
+recorded and none later is, so `linebreaks.len()` at stamp time equals the
+old `line_and_col(s).0` - newlines inside the token body have offsets
+`> s` and never affected the old lookup either. `line_info` is therefore
+byte-identical.
 
-Both fixed-call `remove_instr(mark_idx)` sites in
-`parser/expr.rs` (~line 265 region) become
-`self.chunk.code[mark_idx] = Instr::nop();` - `line_info[mark_idx]` stays
-until finalize. Dynamic calls keep their real marker. Delete
-`remove_instr` (`parser.rs:446`).
+### Error-path search
 
-### 3. `strip_dead_instructions(&mut Bytecode) -> Result<()>` in compiler.rs
+Replace `line_and_col`'s `windows(2)` walk with the exact-equivalent
+binary search: `partition_point(|&start| start <= pos) - 1`, returning
+`(idx + 1, pos - linebreaks[idx] + 1)`. The `<=` predicate is the
+tie-break: a pos equal to a recorded start is the new line at column 1; a
+pos on the newline byte(s) belongs to the preceding line. Columns stay
+byte-based. Keep positional lookup ONLY in the two error paths
+(`Lexer::error_at`, `Parser::error_at`).
 
-- `has_closure = code contains OP_CLOSURE`; removable = every OP_NOP, plus
-  every OP_CLOSE_UPVALUES when `!has_closure`.
-- Boundary map, length n+1: `map[p]` = retained old instructions with
-  index < p.
-- For each retained transfer at old pc `s` (the seven opcodes above):
-  `old_next = s + 1; old_target = old_next + old_sBx;`
-  `new_sBx = map[old_target] - map[old_next]`. A removed target's map
-  value is exactly the next retained instruction - correct fallthrough
-  semantics for removed no-ops.
-- Validate old target in `0..n`, new target within retained code, i16
-  conversion (shrinkage cannot grow a valid jump, but a failed conversion
-  still returns an internal compiler error, never a wrong offset).
-  Preserve the A operand on the three loop transfers.
-- Compact `code` + `line_info` with one removal mask.
+### `parse_chunk` ownership (field table verified; follow this sequence)
 
-### 4. finalize ordering
+1. Validate + compute `num_params` first (preserve failure behavior).
+2. Clone only `self.chunk.source` (parent and child deliberately share
+   the source name string - the ONE remaining clone, of one Option
+   String).
+3. `outer_chunks.push(mem::take(&mut self.chunk))`.
+4. Set the fresh child's `source`, `is_vararg`, `num_params`.
+5. Compile as today; fill `self.chunk.upvalues` at completion.
+6. `mem::replace` restores the popped outer chunk while taking the
+   finished child.
 
-assert code/line_info aligned -> strip -> assert aligned again ->
-debug-assert no OP_NOP remains -> assign_cache_slots -> validate_bytecode
--> recurse into nested chunks (recursion stays in finalize; while there,
-fix the stale `assign_cache_slots` comment claiming it recurses itself).
+`locals`/`upvalues` bookkeeping (outer_locals/outer_upvalues, recursive
+descriptor additions to parent entries) is separate parser state and
+untouched. Error-inside-child behavior unchanged (parser discarded
+either way).
 
-### 5. Snapshots
+### `lex_word`
 
-Format 6 untouched. Compiler saves carry stripped code, never OP_NOP. Old
-saves with CLOSE_UPVALUES stay valid (dispatch support remains). Neither
-golden fixture is touched.
+Consume the same continuation characters, then
+`keyword_match(&self.source[tok_start..self.pos])` - no String. Token
+type/start/len/line/lexer-pos identical; the parser re-slices the source
+independently (`get_text`, `describe_token`).
 
-### Tests
+### Consumers
 
-- Strip unit tests: all seven transfer opcodes; forward AND backward
-  jumps; removal before both endpoints / strictly between / at the
-  target; consecutive removals; mixed nop+close regions; A preserved on
-  loop transfers; line_info pairing preserved; out-of-range and failed
-  remap return errors.
-- Parser/finalize: raw parser output has nops for fixed normal AND
-  method calls; dynamic vararg/all-results calls retain MARK_CALL_BASE;
-  finalized trees contain no nops; closure-free nested functions contain
-  no CLOSE; functions with OP_CLOSURE retain theirs; parent/child chunks
-  independent; keep the 5ff9a27 method-receiver/nested-dynamic corpus
-  cases.
-- Upvalue correctness: closures capturing loop-body locals still close
-  across block/if/numeric-for/generic-for/while/repeat/break exits; keep
-  `block_upvalue_closes_before_slot_reuse` and friends green.
-- Verifier/snapshot: forged `[NOP, RETURN]` loads, executes, costs zero;
-  nop with nonzero operands rejected; forged `[CLOSE_UPVALUES, RETURN]`
-  (old-style) still accepted; saved compiler output contains neither.
-- Cost: pin runtime `cost_used` for a closure-free loop, a dynamic call,
-  and a closure-capture case; pin analyze_cost `own_cost`/`total_cost`;
-  assert ONLY `instructions` decreases.
-- No timing-sensitive parse test - the structural guard is "no
-  `Vec::remove` left in the parser"; the orchestrator measures
-  `large_source` parse_us.
+- `update_line` (keep its annotation) becomes a `Token.line` field copy;
+  callers (`expect`, statement start) pass the token.
+- The two `expr.rs` call-line sites use `peek()?.line`.
+- Update exhaustive Token destructurings with `..`.
 
-### Bench acceptance (orchestrator)
+### Docs
 
-`pairs`/`benchmark` small gains; `factory_closure`'s loop CLOSE strips
-(its kernel calls `mk` but contains no OP_CLOSURE itself); `gc_churn`
-holds (kernel keeps CLOSE); `large_source` parse_us improves; nothing
-regresses; `cost_used` identical everywhere.
+OPTIMIZATIONS.md: remove the shipped A-O2/A-O3 entries; narrow A-O5 to
+the parser-side owned-names half (and fix its stale "fits padding"
+wording).
+
+### Tests (characterization pins written with hand-derived expectations)
+
+- Lexer token-line oracle: LF, CR, CRLF, LFCR, repeated newlines, EOF
+  after newline, short + leveled long comments, `\z`, escaped physical
+  newlines, `peek2` lookahead crossing lines.
+- `line_and_col` boundary pins: both bytes of CRLF/LFCR and the first
+  byte after; pos equal to a line start.
+- Recursive `line_info` fixtures: multiline strings, comments, ordinary
+  + method calls, all newline encodings.
+- Error line AND column pins: lexer errors, unexpected token after
+  comments, escape errors, the ambiguous line-start-paren error, errors
+  on/after newline sequences.
+- BYTE-IDENTITY ORACLES (already in-tree; any change is a regression,
+  never an expected update): `save_golden_current.bin` byte stability
+  (contains nested closures - it IS the pre-change fixture), both legacy
+  fixtures, all parser bytecode-shape tests, the compiler corpus, the
+  diff gate, static-cost pins, `cost_used` pins.
+- Confirm existing hotpath annotations remain.
+
+### Bench acceptance (orchestrator, post-rsync)
+
+`large_source` parse_us falls materially (quadratic term dies + chunk
+clones + identifier allocs gone); everything else unchanged beyond
+noise; then collect TODO.md's larger generated size as the second curve
+point.

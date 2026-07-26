@@ -263,8 +263,7 @@ impl Parser<'_> {
                 self.parse_prefix_extension(prefix)
             }
             TokenType::LParen | TokenType::LiteralString | TokenType::LCurly => {
-                let call_start = self.input.peek()?.start;
-                let (line, _) = self.input.line_and_column(call_start);
+                let line = self.input.peek()?.line;
                 // Evaluate the callee FIRST, then mark. The mark records where
                 // this call's frame begins, and after the callee is evaluated
                 // it is always exactly one value on top - whether it pushed
@@ -314,7 +313,7 @@ impl Parser<'_> {
                     self.chunk.code[mark_idx] = Instr::nop();
                     self.checked_fixed_arg_count(num_args as usize, 0)?
                 };
-                let prefix = PrefixExp::FunctionCall(CallSite::new(num_args, line as u32));
+                let prefix = PrefixExp::FunctionCall(CallSite::new(num_args, line));
                 self.parse_prefix_extension(prefix)
             }
             TokenType::LParenLineStart => {
@@ -322,8 +321,7 @@ impl Parser<'_> {
                 Err(self.error_at(SyntaxError::LParenLineStart, pos))
             }
             TokenType::Colon => {
-                let call_start = self.input.peek()?.start;
-                let (line, _) = self.input.line_and_column(call_start);
+                let line = self.input.peek()?.line;
                 // Method call: obj:method(args) becomes obj.method(obj, args).
                 //
                 // Same ordering as a normal call: evaluate the receiver first,
@@ -384,7 +382,7 @@ impl Parser<'_> {
                     self.checked_fixed_arg_count(num_args as usize, 1)?
                 };
                 // Stack: [method, obj, arg1, arg2, ...]
-                let prefix = PrefixExp::FunctionCall(CallSite::new(num_args, line as u32));
+                let prefix = PrefixExp::FunctionCall(CallSite::new(num_args, line));
                 self.parse_prefix_extension(prefix)
             }
             _ => Ok(base_expr),

@@ -149,8 +149,11 @@ impl<'a> Lexer<'a> {
         loop {
             let starts_line = self.consume_whitespace();
             let tok_start = self.pos;
+            // Capture before consuming the body: a string token can consume
+            // logical newlines through \z or an escaped physical newline.
+            let tok_line = self.linebreaks.len() as u32;
             let Some(first_char) = self.next_char() else {
-                return Ok(self.end_of_file());
+                return Ok(self.end_of_file(tok_line));
             };
             let tok_type = match first_char {
                 '+' => Plus,
@@ -191,7 +194,7 @@ impl<'a> Lexer<'a> {
 
                 '0'..='9' => self.lex_full_number(tok_start, first_char)?,
 
-                'a'..='z' | 'A'..='Z' | '_' => self.lex_word(first_char),
+                'a'..='z' | 'A'..='Z' | '_' => self.lex_word(tok_start),
 
                 _ => return Err(self.error(SyntaxError::InvalidCharacter(first_char))),
             };
@@ -200,6 +203,7 @@ impl<'a> Lexer<'a> {
                 typ: tok_type,
                 start: tok_start,
                 len,
+                line: tok_line,
             });
         }
     }
@@ -491,48 +495,36 @@ impl<'a> Lexer<'a> {
     }
 
     /// Reads a word and returns it as an identifier or keyword.
-    fn lex_word(&mut self, first_char: char) -> TokenType {
-        let mut word = String::new();
-        word.push(first_char);
+    fn lex_word(&mut self, tok_start: usize) -> TokenType {
         while let Some(c) = self.peek_char() {
             if c.is_ascii_alphabetic() || c.is_ascii_digit() || c == '_' {
-                word.push(c);
                 self.next_char();
             } else {
                 break;
             }
         }
 
-        keyword_match(&word)
+        keyword_match(&self.source[tok_start..self.pos])
     }
 
     /// Returns the current position of the `Lexer`.
     #[must_use]
     #[hotpath::measure]
     fn line_and_col(&self, pos: usize) -> (usize, usize) {
-        let iter = self.linebreaks.windows(2).enumerate();
-        for (line_num, linebreak_pair) in iter {
-            if pos < linebreak_pair[1] {
-                let column = pos - linebreak_pair[0];
-                // lines and columns start counting at 1
-                return (line_num + 1, column + 1);
-            }
-        }
-        let line_num = self.linebreaks.len() - 1;
-        let column = pos
-            - self
-                .linebreaks
-                .last()
-                .expect("lexer always stores the first line start");
-        (line_num + 1, column + 1)
+        // A byte at a recorded line start is column 1 of that new line;
+        // newline bytes themselves precede the following recorded start.
+        let line_index = self.linebreaks.partition_point(|&start| start <= pos) - 1;
+        let column = pos - self.linebreaks[line_index];
+        (line_index + 1, column + 1)
     }
 
     #[must_use]
-    const fn end_of_file(&self) -> Token {
+    const fn end_of_file(&self, line: u32) -> Token {
         Token {
             typ: TokenType::EndOfFile,
             start: self.pos,
             len: 0,
+            line,
         }
     }
 }
@@ -572,9 +564,12 @@ mod tests {
 
     fn check(input: &str, tokens: &[(TokenType, usize, u32)], lines: &[usize]) {
         let mut lexer = Lexer::new(input);
-        let mut tokens = tokens
-            .iter()
-            .map(|&(typ, start, len)| Token { typ, start, len });
+        let mut tokens = tokens.iter().map(|&(typ, start, len)| Token {
+            typ,
+            start,
+            len,
+            line: lines.partition_point(|&line_start| line_start <= start) as u32,
+        });
         loop {
             let actual = lexer.next_token().unwrap();
             if actual.typ == TokenType::EndOfFile {
@@ -888,5 +883,92 @@ mod tests {
     #[test]
     fn multiline_comments_remain_non_panicking() {
         check_line("--[[comment]] next", &[(Identifier, 14, 4)]);
+    }
+
+    #[test]
+    fn token_lines_are_stamped_before_token_bodies() {
+        for (source, expected_lines) in [
+            ("a\nb", vec![1, 2, 2]),
+            ("a\rb", vec![1, 2, 2]),
+            ("a\r\nb", vec![1, 2, 2]),
+            ("a\n\rb", vec![1, 2, 2]),
+            ("a\n\nb", vec![1, 3, 3]),
+            ("a\n", vec![1, 2]),
+            ("a\r", vec![1, 2]),
+            ("a\r\n", vec![1, 2]),
+            ("a\n\r", vec![1, 2]),
+            ("-- short\na", vec![2, 2]),
+            ("--[[ zero\n]]\na", vec![3, 3]),
+            ("--[=[ one\n]=]\na", vec![3, 3]),
+            ("\"a\\z\n b\" x", vec![1, 2, 2]),
+            ("\"a\\\rb\" x", vec![1, 2, 2]),
+            ("\"a\\\r\nb\" x", vec![1, 2, 2]),
+            ("\"a\\\n\rb\" x", vec![1, 2, 2]),
+        ] {
+            let mut lexer = Lexer::new(source);
+            let mut actual_lines = Vec::new();
+            loop {
+                let token = lexer.next_token().expect("line fixture must lex");
+                actual_lines.push(token.line);
+                if token.typ == TokenType::EndOfFile {
+                    break;
+                }
+            }
+            assert_eq!(actual_lines, expected_lines, "{source:?}");
+        }
+    }
+
+    #[test]
+    fn peek2_preserves_line_stamps_across_lookahead() {
+        let mut tokens = TokenStream::new("a\nb");
+        assert_eq!(tokens.peek().unwrap().line, 1);
+        assert_eq!(tokens.peek2().unwrap().line, 2);
+        assert_eq!(tokens.next().unwrap().line, 1);
+        assert_eq!(tokens.next().unwrap().line, 2);
+        assert_eq!(tokens.next().unwrap().line, 2);
+    }
+
+    #[test]
+    fn line_and_col_keeps_newline_boundary_tie_breaks() {
+        let mut lexer = Lexer::new("a\r\nb\n\rc");
+        while lexer.next_token().expect("boundary fixture must lex").typ != TokenType::EndOfFile {}
+
+        for (pos, expected) in [
+            (0, (1, 1)),
+            (1, (1, 2)),
+            (2, (1, 3)),
+            (3, (2, 1)),
+            (4, (2, 2)),
+            (5, (2, 3)),
+            (6, (3, 1)),
+        ] {
+            assert_eq!(lexer.line_and_col(pos), expected, "byte {pos}");
+        }
+    }
+
+    #[test]
+    fn lexer_error_positions_stay_pinned_across_newlines() {
+        let err = Lexer::new("\r\n@")
+            .next_token()
+            .expect_err("invalid character must fail");
+        assert_eq!((err.line_num, err.column), (2, 2));
+
+        // Pre-existing quirk, preserved: the unterminated-string error fires
+        // on the newline's FIRST byte, before a CRLF/LFCR pair's line start
+        // is recorded (next_char records the pair only after its second
+        // byte), so the pair renders on line 1 while a bare CR/LF - recorded
+        // immediately - renders on line 2. The old linear walk saw the same
+        // linebreaks state and gave the same answers.
+        for (source, expected) in [
+            ("\"a\r\"", (2, 1)),
+            ("\"a\n\"", (2, 1)),
+            ("\"a\r\n\"", (1, 4)),
+            ("\"a\n\r\"", (1, 4)),
+        ] {
+            let err = Lexer::new(source)
+                .next_token()
+                .expect_err("physical newline must leave a string unclosed");
+            assert_eq!((err.line_num, err.column), expected, "{source:?}");
+        }
     }
 }

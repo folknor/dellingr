@@ -6,6 +6,8 @@ pub(super) struct Token {
     pub(super) typ: TokenType,
     pub(super) start: usize,
     pub(super) len: u32,
+    /// One-based source line captured when this token starts.
+    pub(super) line: u32,
 }
 
 #[rustfmt::skip]

@@ -476,19 +476,6 @@ Measured context: `parse/large_source` (5000 generated lines) is 8.0x lua5.5
 that is a single measurement, not a demonstrated quadratic; confirming the
 curve needs a second file size.
 
-### Token-stamped line numbers (A-O2; kills quadratic parse behavior)
-
-What: `update_line` (`parser.rs:463`) calls `line_and_col`, a linear walk of
-the whole `linebreaks` vec (`lexer.rs:512`), at every statement start and
-every `expect()`. Parse time is therefore O(statements x lines) - quadratic
-for large scripts; a 10k-line chunk does tens of millions of window compares
-inside `parse_str`, a measured hotpath.
-
-Sketch: the lexer already knows the current line when it produces a token -
-stamp `Token` with `line: u32` (fits existing padding) and make `update_line`
-a field copy; keep `line_and_col` (binary-searchable via `partition_point`,
-the vec is sorted) only for error rendering.
-
 ### Stop using `Vec::remove` in call emission (A-O4)
 
 What: every plain call does `remove_instr` -> `code.remove(mark_idx)`
@@ -539,28 +526,14 @@ Sketch: a `finalize` pass can prove this per-Bytecode and drop/nop them.
 Most game-script hot loops are closure-free; this removes a per-iteration
 dispatch from all of them.
 
-### `parse_chunk`: `mem::take` instead of two full Bytecode clones per nested function (A-O3)
+### Parser-owned identifier and name storage (A-O5)
 
-What: `parser.rs:533` (`outer_chunks.push(self.chunk.clone())`) and
-`parser.rs:558` (`let tmp_chunk = self.chunk.clone()`) deep-copy code,
-literal pools, line_info, and nested Arcs of the partially built outer chunk
-and the finished inner chunk, then immediately overwrite the originals.
-`std::mem::take` / `std::mem::replace` make both O(1). Cost today is
-O(enclosing-chunk size) per nested function definition - top-level files
-with many functions pay repeatedly.
-
-### Zero-allocation identifiers and names in the front end (A-O5)
-
-What:
-
-- `lex_word` (`lexer.rs:494-504`) builds a fresh `String` for every
-  identifier/keyword token, used only for `keyword_match`, then thrown away
-  (the parser re-slices the source anyway). Match on the
-  `&source[tok_start..pos]` slice instead: one alloc per token removed on
-  the front-end hot path.
-- `locals: Vec<(String, i32)>`, `upvalues`, and namelists allocate a String
-  per declaration. The parser already carries `'a`; these can be `&'a str`
-  borrows of the source.
+The lexer half shipped on 2026-07-26: `lex_word` now matches its source slice
+without allocating, and token line stamps grow the transient `Token` from
+roughly 16 to 24 bytes on 64-bit hosts. What remains is parser-side ownership:
+`locals: Vec<(String, i32)>`, `upvalues`, and namelists still allocate a
+`String` per declaration. The parser already carries `'a`; these can be
+`&'a str` borrows of the source.
 
 ---
 
