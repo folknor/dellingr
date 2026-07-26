@@ -579,6 +579,7 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
     let mut next_global_slot = 0usize;
     let mut next_field_slot = 0u8;
     let mut next_set_field_slot = 0usize;
+    let mut next_tfor_cursor_slot = 0usize;
     for pc in 0..code_len {
         let inst = Instr::from_raw(view.raw_instruction(pc));
         let op = inst.opcode();
@@ -591,9 +592,11 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
         let bx = inst.bx();
         let reserved_zero = match op {
             // These forms use every operand byte. SET_GLOBAL joined the group
-            // when its A byte became the biased cache index (0 = uncached).
+            // when its A byte became the biased cache index (0 = uncached);
+            // TFOR_CALL joined when its C byte became the biased cursor slot.
             Instr::OP_GET_GLOBAL
             | Instr::OP_SET_GLOBAL
+            | Instr::OP_TFOR_CALL
             | Instr::OP_GET_FIELD
             | Instr::OP_SET_FIELD
             | Instr::OP_SET_FIELD_AT
@@ -611,8 +614,8 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
             | Instr::OP_BRANCH_FALSE
             | Instr::OP_BRANCH_TRUE_KEEP
             | Instr::OP_BRANCH_FALSE_KEEP => a == 0,
-            // Two-byte forms reserve C.
-            Instr::OP_TFOR_CALL | Instr::OP_CALL => c == 0,
+            // CALL is the remaining two-byte form that reserves C.
+            Instr::OP_CALL => c == 0,
             // All remaining known instructions are either operandless or use
             // only A, and therefore reserve B+C (and A for operandless ops).
             _ => {
@@ -756,6 +759,15 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
                     return Err(err(Some(pc), "TFOR_CALL requires at least one result"));
                 }
                 check_slots(pc, a, 3 + b as usize, slots)?;
+                if c != 0 {
+                    if c as usize - 1 != next_tfor_cursor_slot {
+                        return Err(err(
+                            Some(pc),
+                            "TFOR_CALL cursor slot does not match instruction order",
+                        ));
+                    }
+                    next_tfor_cursor_slot += 1;
+                }
             }
             Instr::OP_CLOSE_UPVALUES if (a as usize) > slots => {
                 return Err(err(Some(pc), "close-upvalues level is out of range"));

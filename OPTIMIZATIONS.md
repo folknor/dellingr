@@ -439,36 +439,6 @@ embedder asking.
 
 ## Execution core
 
-### SET_GLOBAL inline cache and allocation-free global writes (B-O3)
-
-What: `instr_set_global` (`eval_store.rs:366-379`) does UTF-8 validation +
-`String` allocation + IndexMap hash lookup on every global assignment;
-`set_global_value_owned` re-checks `Builtin::from_name`. GET_GLOBAL already
-has an IC (`globals_version` + index). Measured: `globals/write` (a designed
-probe) at 5.6x lua5.5.
-
-Sketch: mirror the read IC for writes - cache the entry index per SET_GLOBAL
-site (slot in `RuntimeCaches`), validated by `globals_version`; on hit, write
-through `globals.get_index_mut` with zero allocation. The builtin check can
-be resolved at compile time (the parser already emits SET_BUILTIN for known
-names, so the runtime `Builtin::from_name` re-check is only needed on the
-cold path).
-
-### Version-validated cursor for `pairs` (C-O4)
-
-What: `instr_tfor_call_next` (`eval_control.rs:187`) calls
-`Table::next(&control)`, a full hash lookup (`get_index_of`) of the control
-key on every iteration - `pairs` over an N-entry Map table is N hash probes.
-`iter/pairs` is a headline bench (2.0x lua5.5) and this is the dominant
-per-step cost.
-
-Sketch: the TFOR fast path already special-cases `base_next` by fn address,
-so it can carry a hidden numeric cursor: cache `(table_ptr, version, index)`
-in the loop's control area (or a per-frame side slot); on each step, if
-ptr+version match, step `get_index(index + 1)` directly (tombstone-aware, so
-dead entries skip without hashing); on mismatch, fall back to the key-based
-`next`. Deterministic (same order as today) and invisible to scripts.
-
 ### Sweep the upvalue pool during GC (D-OPT-5 + C-E3)
 
 What: `src/vm/object.rs:51-53` justifies never freeing upvalue slots with

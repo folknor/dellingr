@@ -276,6 +276,12 @@ impl Instr {
         Instr((opcode as u32) << 24 | (a as u32) << 16 | (b as u32) << 8)
     }
 
+    /// Create an instruction with three u8 operands (A, B, C).
+    #[inline]
+    pub(crate) const fn op_abc(opcode: u8, a: u8, b: u8, c: u8) -> Self {
+        Instr((opcode as u32) << 24 | (a as u32) << 16 | (b as u32) << 8 | c as u32)
+    }
+
     /// Create an instruction with a signed 16-bit offset (sBx).
     #[inline]
     pub(crate) const fn op_sbx(opcode: u8, sbx: i16) -> Self {
@@ -525,6 +531,12 @@ impl Instr {
     pub(crate) const fn tfor_call(slot: u8, num_vars: u8) -> Self {
         Self::op_ab(Self::OP_TFOR_CALL, slot, num_vars)
     }
+    /// `TFOR_CALL` uses a biased cursor encoding: zero is uncached (including
+    /// legacy snapshots), while one through 255 cursor slots zero through
+    /// 254.
+    pub(crate) const fn tfor_call_cached(slot: u8, num_vars: u8, cache_idx: u8) -> Self {
+        Self::op_abc(Self::OP_TFOR_CALL, slot, num_vars, cache_idx + 1)
+    }
     pub(crate) const fn call(num_args: ArgCount, num_rets: RetCount) -> Self {
         Self::op_ab(Self::OP_CALL, num_args.to_u8(), num_rets.to_u8())
     }
@@ -608,7 +620,7 @@ impl std::fmt::Debug for Instr {
             Self::OP_SET_FIELD_AT => write!(f, "SetFieldAt({}, {})", self.a(), self.bx()),
             Self::OP_INIT_FIELD => write!(f, "InitField({}, {})", self.a(), self.bx()),
             Self::OP_INIT_FIELD_PINNED => write!(f, "InitFieldPinned({}, {})", self.a(), self.bx()),
-            Self::OP_TFOR_CALL => write!(f, "TForCall({}, {})", self.a(), self.b()),
+            Self::OP_TFOR_CALL => write!(f, "TForCall({}, {}, {})", self.a(), self.b(), self.c()),
             Self::OP_CALL => write!(
                 f,
                 "Call({:?}, {:?})",

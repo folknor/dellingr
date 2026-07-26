@@ -1,4 +1,5 @@
 use super::super::compiler::UpvalueDesc;
+use super::super::compiler::{RuntimeCaches, TforCursorEntry, TforCursorSlot};
 use super::super::error::TypeError;
 use super::Result;
 use super::State;
@@ -125,7 +126,13 @@ impl State {
 
     /// TForCall: Call iterator(state, control), store results in loop variable slots.
     #[hotpath::measure]
-    pub(super) fn instr_tfor_call(&mut self, local_slot: u8, num_vars: u8) -> Result<()> {
+    pub(super) fn instr_tfor_call(
+        &mut self,
+        local_slot: u8,
+        num_vars: u8,
+        cursor_operand: u8,
+        caches: &RuntimeCaches,
+    ) -> Result<()> {
         let base = local_slot as usize + self.stack_bottom;
         // Push iterator function, state, and control onto stack for call
         let iterator = self.stack[base];
@@ -136,7 +143,7 @@ impl State {
             let base_next_fn: RustFunc = base_next;
             let base_ipairs_iter_fn: RustFunc = base_ipairs_iter;
             if std::ptr::fn_addr_eq(f, base_next_fn)
-                && self.instr_tfor_call_next(base, state, control, num_vars)
+                && self.instr_tfor_call_next(base, state, control, num_vars, cursor_operand, caches)
             {
                 return Ok(());
             }
@@ -190,22 +197,42 @@ impl State {
         state: Val,
         control: Val,
         num_vars: u8,
+        cursor_operand: u8,
+        caches: &RuntimeCaches,
     ) -> bool {
-        let Some(tbl) = state
-            .as_object_ptr()
-            .and_then(|ptr| self.heap.as_table_ref(ptr))
-        else {
+        let Some(table_ptr) = state.as_object_ptr() else {
+            return false;
+        };
+        let Some(tbl) = self.heap.as_table_ref(table_ptr) else {
             return false;
         };
 
-        match tbl.next(&control) {
-            super::table::TableNext::Pair(next_key, next_val) => {
-                self.write_tfor_results(base, num_vars, next_key, Some(next_val));
+        let cursor = cursor_operand
+            .checked_sub(1)
+            .and_then(|index| caches.tfor_cursor.get(index as usize));
+        let next = match cursor.and_then(TforCursorSlot::get) {
+            Some(entry) if entry.table == table_ptr => {
+                match tbl.next_from_matching_index(entry.index, &control) {
+                    super::table::TableNextWithIndex::InvalidKey => tbl.next_with_index(&control),
+                    next => next,
+                }
             }
-            super::table::TableNext::End => {
+            _ => tbl.next_with_index(&control),
+        };
+        match next {
+            super::table::TableNextWithIndex::Pair { index, key, value } => {
+                if let Some(slot) = cursor {
+                    slot.set(TforCursorEntry {
+                        table: table_ptr,
+                        index,
+                    });
+                }
+                self.write_tfor_results(base, num_vars, key, Some(value));
+            }
+            super::table::TableNextWithIndex::End => {
                 self.write_tfor_results(base, num_vars, Val::Nil, None);
             }
-            super::table::TableNext::InvalidKey => return false,
+            super::table::TableNextWithIndex::InvalidKey => return false,
         }
         true
     }

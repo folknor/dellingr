@@ -1,189 +1,204 @@
 # WORK.md
 
-Current work item. Optimization loop 4 of the measured sequence.
+Current work item. Optimization loop 5 of the measured sequence.
 
 ---
 
-## Target: SET_GLOBAL inline cache and allocation-free global writes
+## Target: version-validated cursor for `pairs` iteration
 
 ### The mechanism
 
-`instr_set_global` (`src/vm/eval_store.rs`, near the `get_string_constant`
-definition) does UTF-8 validation + `String` allocation + `Builtin::from_name`
-re-check + IndexMap hash lookup on EVERY global assignment.
-`instr_get_global` (`src/vm/eval_index.rs`) already has an IC: a
-`GlobalLookupCacheEntry { globals_version, index }` per compiler-assigned
-slot, validated by `globals_version`, hitting `globals.get_index` with zero
-allocation. Writes have no equivalent.
+`instr_tfor_call` (`src/vm/eval_control.rs:128`) already fast-paths the
+builtin `next` by fn address into `instr_tfor_call_next` (line 187), which
+calls `Table::next(&control)` - a full hash probe (`get_index_of`) of the
+control key on EVERY iteration. `pairs` over an N-entry Map table is N hash
+probes. Measured: `iter/pairs` at 2.0x lua5.5; `--hotpath` (uuid 625433ea):
+`instr_tfor_call` 31.5% + `Table::next` 10.8% + `instr_tfor_loop` 4.0% =
+~46% of the workload in the generic-for machinery.
 
-### Measured evidence
+### Working design (challenge it)
 
-`globals/write` (a designed probe; bench/write.lua is the seconds-scale twin)
-at 5.6x lua5.5 (2026-07-25 README table, commit b4ae38e). `--hotpath` uuid
-09074bd5 exists for distribution reading.
+A per-TFOR_CALL-site cursor in `RuntimeCaches`, carried by the instruction's
+C operand, which is reserved-zero today (`verify.rs`: "Two-byte forms
+reserve C" - OP_TFOR_CALL | OP_CALL => c == 0):
 
-### Working design (verify each claim against code)
-
-Mirror the read IC:
-
-- Compiler: `assign_cache_slots` in `finalize` already rewrites
-  GET_GLOBAL/GET_FIELD/SET_FIELD with real slot indices - extend it to
-  OP_SET_GLOBAL, reusing the `global_lookup` slot family (RuntimeCaches
-  already ships `global_lookup: Vec<GlobalLookupCacheSlot>`; a read and a
-  write of the same name at different sites get different slots, which is
-  fine). Verify what OP_SET_GLOBAL's A operand carries today - if it is a
-  reserved-zero field, it can become the cache index.
-- Runtime: on SET_GLOBAL with a slot, validate `globals_version` + cached
-  index; on hit, write through `globals.get_index_mut(index)` - no UTF-8
-  work, no String allocation, no hash. On miss, run today's path and
-  repopulate the slot (only for existing non-builtin names; new-key inserts
-  and builtin names take the slow path - note the parser emits SET_BUILTIN
-  for statically-known builtin names, so the runtime `Builtin::from_name`
-  check is cold-path only).
-- IndexMap index stability: adding new globals appends (existing indices
-  stable); nothing removes globals except environment swaps, which bump
-  `globals_version`. Verify `set_global_value_owned` / `restrict_globals` /
-  snapshot load for any path that reorders or removes entries WITHOUT
-  bumping `globals_version` - any such path is a correctness bug for the
-  READ IC already, so finding one is a finding in itself.
-
-### Snapshot compatibility question (answer explicitly)
-
-Saved bytecode is post-`finalize` and re-verified on load (`check_slots`
-bounds cache indices). Old saves carry OP_SET_GLOBAL with whatever the old
-A operand held (presumably 0) and old slot COUNTS:
-
-- If A was reserved-and-zero-verified until now, old saves' SET_GLOBAL
-  sites will all reference slot 0 under the new runtime. `Vec::get` on an
-  out-of-range/unassigned slot must degrade to the slow path (today's
-  behavior), never panic or alias incorrectly - aliasing slot 0 across
-  sites is a warmth problem, not a correctness problem (validation is per
-  access), but confirm the verifier's reserved-field check does not now
-  REJECT old saves (a check that says "A must be zero" must be relaxed to
-  "A must be a valid slot or zero"), and confirm new saves with nonzero A
-  pass the slot-bounds check.
-- State whether FORMAT_VERSION must bump. The strict-equality gate means a
-  bump invalidates every existing save - avoid it if the operand
-  reinterpretation is backward-safe as described. If it is truly needed,
-  STOP and report rather than implementing.
+- **Encoding**: reuse loop 4's proven biased scheme - C = 0 uncached (every
+  legacy save), C >= 1 means cursor slot C-1. `finalize` assigns fresh slots
+  per TFOR_CALL site; verifier mirrors the SET_GLOBAL first-use-stream
+  rules; FORMAT_VERSION stays 6 (legacy saves just never use cursors).
+- **Slot storage**: a new `tfor_cursor` family in `RuntimeCaches`
+  (`Cell<Option<TforCursorEntry>>`). CRITICAL: do NOT add a slot-count
+  field to `Bytecode` if that field would enter the snapshot encoding -
+  check how `global_cache_slots` etc. are serialized and either mirror
+  that safely (would it change the format?) or derive the count by
+  scanning the code for OP_TFOR_CALL in `RuntimeCaches::new`. If
+  mirroring changes the saved-bytecode encoding, derive instead - a
+  format bump is not acceptable for this feature.
+- **Entry**: `(table: ObjectPtr, index: usize)` - the storage index where
+  `control` was found last step. Validation is SELF-CONTAINED:
+  `state.as_object_ptr() == entry.table` AND the table's entry at
+  `entry.index` is live with key == control. On validation, the next pair
+  is the first live entry after `entry.index` (a forward walk that skips
+  dead slots EXACTLY as `Table::next` does); store the new index. On any
+  mismatch, fall back to `Table::next(&control)` and repopulate from its
+  found position (Table will need a `next`-variant that also reports the
+  index it found/returned).
+- **Why key-at-index validation, not version**: RuntimeCaches is shared
+  per (State, Bytecode) since b14fde8, so ONE site's cursor can be hit by
+  concurrently active iterations - recursion like
+  `function f(t) for k in pairs(t) do f(t) end end` runs nested
+  iterations of the same site over the same table. `(ptr, version)` alone
+  would validate while the shared cursor points at the INNER iteration's
+  position, corrupting the outer's sequence - a correctness bug, not
+  warmth. Key-at-index makes the cursor self-validating: a repositioned
+  cursor fails the control-key compare and falls back to the hash path,
+  which is always correct. `Table::version` may still be worth carrying to
+  cheapen the common case (skip the key compare when version matches?) -
+  NO: version does not bump on tail appends/tombstones, and the key
+  compare is one Val compare against an already-loaded entry; keep the
+  entry minimal unless the reviewer finds a real win.
+- **Iteration-order identity**: the cursor walk must produce byte-for-byte
+  the sequence today's `Table::next` produces on BOTH storage variants
+  (Inline scan and Map index walk), including dead-slot skipping,
+  `TableNext::End` at the tail, and `InvalidKey` behavior (a control key
+  not present -> fall back, which yields InvalidKey exactly as today,
+  making `instr_tfor_call_next` return false into the generic path).
+  Consider whether Inline tables should bypass the cursor entirely (their
+  `next` is already a tiny scan; a cursor may be pure overhead there).
+- **Mutation during iteration**: reference-Lua UB territory, but dellingr
+  today has DEFINED deterministic behavior via `Table::next` - the cursor
+  must not change any of it. Tombstoning the control key itself, appending
+  during iteration, compaction (version bump + binding shift): each must
+  land in the same observable sequence as today. The existing table unit
+  tests around `next` + tombstones (`table.rs` tests) are the oracle;
+  extend them through the cursor path.
 
 ### Constraints (inline; sessions read nothing else)
 
 - Read and write code only; no cargo/brokkr/test/bench commands.
-- Determinism: no HashMap/HashSet; identical behavior and identical
-  `cost_used` (global writes' cost status must not change - check whether
-  SET_GLOBAL charges today and preserve exactly).
-- Clippy denies warnings; `unwrap_used` denied outside tests;
-  `Result::ok()` banned.
-- The write IC must respect every invalidation the slow path performs
-  today: `globals_version` bumps, the `table_library_fallback` rebind hook
-  (builtin writes only - confirm the cached fast path cannot carry a
-  builtin name), and `_G` metatable writes (which go through
-  `set_global_value_owned`, not the bytecode IC - confirm).
-- RuntimeCaches is shared per (State, Bytecode) since commit b14fde8 -
-  slots are per-site, shared across closures of one chunk; same
-  correctness argument as the read IC.
-- `src/compiler/verify.rs` `check_slots` and the reserved-operand checks
-  must stay consistent with whatever encoding is chosen; extend the forged
-  -bytecode tests for an out-of-range SET_GLOBAL slot.
-- Keep `#[hotpath::measure]` on `instr_set_global`.
+- Determinism: identical iteration sequences and identical `cost_used`
+  (TFOR_CALL's cost status must not change - verify what it charges).
+- No HashMap/HashSet; clippy denies warnings; `unwrap_used` denied outside
+  tests; `Result::ok()` banned.
+- `instr_tfor_call_next` returning `false` must keep meaning "take the
+  generic call path" with the stack untouched.
+- Verifier: TFOR_CALL leaves the reserved-C group; nonzero C validates
+  against the first-use stream + declared count (mirror loop 4's tests:
+  legacy zero accepted, out-of-range/wrong-order rejected).
+- ipairs (`instr_tfor_call_ipairs`) is NOT in scope - it is already
+  index-stepped.
+- Keep `#[hotpath::measure]` annotations; `Table::next` keeps its own.
 
 ### Deliverable
 
-Implementation plan: encoding choice, compiler/finalize changes, runtime
-fast/slow path shape, verifier changes, snapshot-compat answer, test list
-(slot forging, warm-hit semantics incl. env swap + builtin rebind + new-key
-insert after warm hit, exact-cost pin), bench prediction (`write` collapses
-toward `same_obj_write`-class ratios; nothing else moves; `cost_used`
-identical).
+Implementation plan: entry/validation shape (argue the self-validation
+design or improve it), the slot-count serialization answer (derive vs
+field), Table API addition (`next_from_index`-style walk + index-reporting
+`next`), verifier changes, test list (order-identity oracle across both
+storage variants + tombstone/append/compaction mid-iteration + recursion
+over one site + forged-save operands + exact-cost pin), bench prediction
+(`pairs` moves materially; `benchmark`/`mixed` composites hold or improve;
+nothing regresses; `cost_used` identical).
 
 ---
 
 ## Agreed plan (consolidated 2026-07-26; implement exactly this)
 
-The problem statement's "aliasing is only a warmth problem" claim is WRONG
-and the design below exists to fix it: `GlobalLookupCacheEntry` stores only
-`(globals_version, index)`, no name, so a legacy save's SET site
-reinterpreted as slot 0 could hit an unrelated warmed READ entry and
-overwrite the wrong global. Backward safety comes from a biased encoding
-instead.
+A control-key-validated cursor, NOT version-validated. Three review
+verdicts baked in: (1) the same-site hazard is real (shared
+`Arc<BytecodeRuntime>` means recursive invocations overwrite one site
+slot; identity+version would falsely validate; the slot-key compare is
+sufficient because table keys are unique) - do NOT carry or consult
+`Table::version`; (2) validation must accept a TOMBSTONED control slot
+(key matches, value nil): `Table::next` treats dead controls as valid
+positions and only skips dead slots while finding the successor, so
+requiring liveness would restore the hash probe for filter-in-place
+iteration; (3) the three existing cache-count fields ARE serialized bytes
+in `SavedBytecode` - adding a fourth changes format 6, so the cursor
+count is DERIVED from the code (the validated C high-water mark), no new
+field anywhere.
 
-### Encoding
+### Encoding + allocation
 
-`OP_SET_GLOBAL`: `Bx` stays the string-literal index; `A` becomes:
-- `0`: uncached - every legacy save, and post-capacity overflow sites.
-- `1..=255`: cache index `A - 1` (slots `0..=254`).
+- `TFOR_CALL.C`: 0 = uncached (all legacy saves); 1..=255 = cursor slot
+  C-1. Add `Instr::tfor_call_cached` (keep the legacy constructor),
+  include C in Debug formatting.
+- `assign_cache_slots`: fresh slot per TFOR_CALL site in instruction
+  order; 256th+ sites stay C=0. NO `Bytecode`/`SavedBytecode` count
+  field.
 
-`GET_GLOBAL` is untouched (its uncached sentinel stays 255). Add
-`Instr::set_global_cached`, update the Debug formatting, and comment the
-opcode-specific bias where the encoding is defined.
+### Runtime storage
 
-### Compiler (`assign_cache_slots` in `finalize`)
+- `TforCursorEntry { table: ObjectPtr, index: usize }` in a
+  `Cell<Option<_>>` slot; `tfor_cursor: Vec<_>` on `RuntimeCaches`,
+  sized in `RuntimeCaches::new` by scanning the code for the largest
+  nonzero TFOR C operand (verified first-use ordering makes the
+  high-water mark the exact count). Entries are non-rooting like every
+  other object-pointer cache; validation dereferences only the live
+  table from the current iterator state.
 
-- GET_GLOBAL keeps its share-by-literal-index behavior.
-- Each SET_GLOBAL site gets a FRESH slot from the same `global_lookup`
-  family, encoded with the `+1` bias; when the shared 255-slot capacity is
-  exhausted, later SET sites stay `A = 0`.
-- Cached reads and writes count together into `global_cache_slots`.
-- Recursion into nested chunks unchanged.
+### Table API (refactor, do not duplicate `next` semantics)
 
-### Runtime (`instr_set_global`, keeps `#[hotpath::measure]`, stays cost-free)
+- One storage-specific forward-walk primitive: scan from a supplied
+  index -> `Pair { index, key, value }` or `End`.
+- `next_with_index(control)`: NaN rejected; nil starts at 0; otherwise
+  locate the physical control slot INCLUDING a tombstoned one;
+  physically absent -> `InvalidKey`; then forward-walk skipping
+  nil-valued slots.
+- `next_from_matching_index(index, control)`: validate the raw slot key
+  equals control (regardless of value liveness), then forward-walk in
+  the same storage match.
+- Reimplement the existing annotated `Table::next` as a projection of
+  the indexed variant so direct `next()` calls keep their behavior and
+  annotation.
 
-Dispatch passes `inst.a()`. The handler:
-1. Pops the value exactly once.
-2. Decodes the slot with `checked_sub(1)` + `Vec::get`; zero/absent/
-   out-of-range -> slow path.
-3. Hit: `globals_version` must match, then `globals.get_index_mut(index)`
-   updates only the value; a missing index falls back safely.
-4. Miss/slow: UTF-8-validate from the bytecode literal. Builtin names
-   ALWAYS go through the existing central setter (version bump +
-   table_library_fallback rebind hook intact) and never populate the SET
-   cache. An existing non-builtin updates in place via its found index and
-   populates the slot (no String allocation, no second hash). A new
-   non-builtin allocates the owned name via `set_global_value_owned` and
-   leaves the site cold - the next execution populates.
+### VM fast path (`instr_tfor_call` / `instr_tfor_call_next`)
 
-### Verifier (`src/compiler/verify.rs` + save-side reverification)
+- Thread `inst.c()` + the frame's cache bundle through.
+- Cursor consulted only after the iterator is exactly builtin
+  `base_next` and the state is a table. `checked_sub(1)` + `Vec::get`;
+  C=0/unavailable -> `next_with_index`.
+- Pointer match -> `next_from_matching_index`; any mismatch ->
+  `next_with_index`. On a pair: store (table ptr, returned index), write
+  results. On End: nils as today. On InvalidKey: no result writes, no
+  cursor population, return `false` so the generic path produces the
+  standard "invalid key to 'next'" error with the stack untouched.
+- One path for both storage variants (Inline included - it removes
+  prefix rescans and one path is less semantic risk; revisit only if
+  measurement shows an Inline regression).
 
-- Remove SET_GLOBAL from the reserved-`A` group.
-- `A = 0` accepted, consumes no slot. Nonzero decodes as `A - 1`, must be
-  in `global_cache_slots` bounds AND match the next compiler-canonical
-  global slot in the existing first-use validation stream (cached SET
-  sites consume fresh positions; GET keeps deduplicating by literal).
-- Final declared-count equality stays.
+### Verifier + snapshots
 
-### Snapshot compatibility
-
-`FORMAT_VERSION` stays 6, `COST_MODEL_VERSION` stays 2. Old saves' `A = 0`
-sites stay uncached (cannot alias); their GET-only slot counts stay valid;
-new saves with nonzero A pass the revised verifier. Old binaries cannot
-read new saves (they still reserve A) - acceptable; the guarantee is new
-binary reads old saves. The full-byte golden fixture WILL change: keep the
-existing fixture as a legacy-v6 load-and-execute compatibility case, and
-regenerate a current-output fixture for byte stability
-(`tests/save_golden.rs`) - do not overwrite the only old-save evidence.
+- TFOR_CALL leaves the reserved-C group (CALL stays). Track
+  `next_tfor_cursor_slot`: C=0 accepted anywhere; nonzero requires
+  `C - 1 == next_tfor_cursor_slot` (gaps, duplicates, reversals, and
+  post-255 values rejected), then increment. The validated high-water
+  mark IS the declaration - deliberately no final count-equality check
+  for this family. `FORMAT_VERSION` stays 6.
 
 ### Tests
 
-- Compiler: GET dedup preserved; SET sites distinct; biased operands;
-  builtin exclusion; 255 cached SET sites + an uncached 256th.
-- Forged saves: legacy `A = 0` accepted with zero slots; `A = 1` accepted
-  with one slot; out-of-range and wrong-first-use-order SET slots
-  rejected; a legacy `A = 0` SET coexisting with a warmed unrelated GET
-  slot cannot overwrite the GET's global.
-- Warm-site semantics: one SET site executed 3+ times (insert, populate,
-  hit); alternating closures sharing one (State, Bytecode) runtime.
-- Env swap: warm a writer, run it restricted, restore, confirm
-  repopulation against each version with no cross-environment leak.
-- Builtin rebind: warm a non-builtin writer, rebind `table`, confirm hook
-  + version bump + writer repopulation; internal forged-builtin SET test
-  proving builtin sites never cache.
-- Append stability: warm `x`-writer, insert new `y` (including via `_G.y`
-  proxy), write `x` again, both correct.
-- Exact-cost pin: three-addition writer stays exactly `cost_used == 3`.
-- New-save round-trip with nonzero SET operands + retained legacy fixture.
+- Compiler: sequential C per site; 255-site cap; 256th at C=0.
+- Table oracle (Inline AND Map): exact key/value/index sequences; nil
+  start; dead prefix/middle/tail skipping; tombstoned control accepted;
+  tail End; absent + NaN -> InvalidKey.
+- Cursor mutation through real `pairs` bytecode: tombstone current
+  control; tombstone future entries; tail append (no version bump);
+  inline append + Inline->Map promotion; compaction shifting the current
+  binding; tombstone-reinsertion moving a key to the back.
+- Same-site recursion: one recursive function whose single pairs site
+  walks `a,b,c` at depth two - the outer traversal must retain its
+  `b,c` suffix after the inner overwrites the shared slot.
+- Preserve/extend generic-for invalid-control tests (`false` still
+  reaches builtin `next` -> "invalid key to 'next'").
+- Forged saves: legacy C=0 accepted; C=1 and C=1,2 streams accepted;
+  first C=2 and C=255 rejected as gaps; duplicates/reversals rejected;
+  round-trip preserves nonzero C and rebuilds cold slots.
+- Exact-cost pin: three-field table walked twice with an empty pairs
+  body = cost 4 (one creation + three writes), cold and warm.
 
 ### Bench acceptance (orchestrator)
 
-`write` collapses toward cached-write-class ratios; nothing else moves
-materially; `cost_used` byte-identical everywhere.
+`pairs` moves materially; `benchmark` improves modestly; registered
+`mixed` (string-focused) holds; `ipairs`, direct `next`, and every
+`cost_used` identical.

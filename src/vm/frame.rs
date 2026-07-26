@@ -316,7 +316,7 @@ impl Frame {
                 Instr::OP_TFOR_CALL => {
                     self.record_call_site(state);
                     Self::flush_local_cost(state, &mut local_cost)?;
-                    state.instr_tfor_call(inst.a(), inst.b())?;
+                    state.instr_tfor_call(inst.a(), inst.b(), inst.c(), &self.runtime.caches)?;
                 }
                 Instr::OP_TFOR_LOOP => state.instr_tfor_loop(self, inst.a(), inst.sbx())?,
 

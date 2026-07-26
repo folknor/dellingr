@@ -31,6 +31,27 @@ pub(super) struct GlobalLookupCacheEntry {
     pub(super) index: usize,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct TforCursorEntry {
+    pub(super) table: ObjectPtr,
+    pub(super) index: usize,
+}
+
+#[derive(Debug, Default)]
+pub(super) struct TforCursorSlot {
+    entry: Cell<Option<TforCursorEntry>>,
+}
+
+impl TforCursorSlot {
+    pub(super) fn get(&self) -> Option<TforCursorEntry> {
+        self.entry.get()
+    }
+
+    pub(super) fn set(&self, entry: TforCursorEntry) {
+        self.entry.set(Some(entry));
+    }
+}
+
 #[derive(Debug, Default)]
 pub(super) struct GlobalLookupCacheSlot {
     entry: Cell<Option<GlobalLookupCacheEntry>>,
@@ -219,6 +240,7 @@ impl Bytecode {
         let mut global_cache_len = 0usize;
         let mut field_cache_len = 0usize;
         let mut set_field_cache_len = 0usize;
+        let mut tfor_cursor_len = 0usize;
 
         for inst in &mut self.code {
             match inst.opcode() {
@@ -271,6 +293,10 @@ impl Bytecode {
                     };
                     *inst = Instr::set_field_cached(inst.bx(), cache_idx);
                 }
+                Instr::OP_TFOR_CALL if tfor_cursor_len < u8::MAX as usize => {
+                    *inst = Instr::tfor_call_cached(inst.a(), inst.b(), tfor_cursor_len as u8);
+                    tfor_cursor_len += 1;
+                }
                 _ => {}
             }
         }
@@ -297,6 +323,7 @@ pub(crate) struct RuntimeCaches {
     pub(super) global_lookup: Vec<GlobalLookupCacheSlot>,
     pub(super) field_lookup: Vec<FieldLookupCacheSlot>,
     pub(super) set_field_lookup: Vec<SetFieldLookupCacheSlot>,
+    pub(super) tfor_cursor: Vec<TforCursorSlot>,
 }
 
 // SAFETY: `RuntimeCaches` contains `Cell`s, which are `!Sync` in isolation.
@@ -320,6 +347,19 @@ impl RuntimeCaches {
                 .collect(),
             set_field_lookup: (0..bc.set_field_cache_slots as usize)
                 .map(|_| SetFieldLookupCacheSlot::default())
+                .collect(),
+            // Cursor slots deliberately have no Bytecode count: the three
+            // existing cache counts are snapshot bytes, and a fourth would
+            // change format 6. Verified C operands make this high-water mark
+            // the exact allocation count.
+            tfor_cursor: (0..bc
+                .code
+                .iter()
+                .filter(|inst| inst.opcode() == Instr::OP_TFOR_CALL)
+                .map(|inst| inst.c() as usize)
+                .max()
+                .unwrap_or(0))
+                .map(|_| TforCursorSlot::default())
                 .collect(),
         }
     }
@@ -535,6 +575,28 @@ mod runtime_cache_tests {
             assert_eq!(inst.a(), idx as u8 + 1);
         }
         assert_eq!(set_globals[255].a(), 0);
+    }
+
+    #[test]
+    fn tfor_cursor_slots_are_sequential_and_cap_at_255() {
+        let source = (0..256)
+            .map(|_| "for _ in pairs(t) do end")
+            .collect::<Vec<_>>()
+            .join("; ");
+        let source = format!("local t = {{}}; {source}");
+        let bc = parse_str(source).expect("source compiles");
+        let calls: Vec<_> = bc
+            .code
+            .iter()
+            .filter(|inst| inst.opcode() == Instr::OP_TFOR_CALL)
+            .collect();
+
+        assert_eq!(calls.len(), 256);
+        for (index, inst) in calls.iter().take(255).enumerate() {
+            assert_eq!(inst.c(), index as u8 + 1);
+        }
+        assert_eq!(calls[255].c(), 0);
+        assert_eq!(RuntimeCaches::new(&bc).tfor_cursor.len(), 255);
     }
 
     #[test]

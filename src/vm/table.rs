@@ -34,6 +34,15 @@ pub(super) enum TableNext {
     InvalidKey,
 }
 
+/// The result of advancing a table iterator, retaining the physical storage
+/// index of a returned pair for the `pairs` cursor cache.
+#[derive(Debug)]
+pub(super) enum TableNextWithIndex {
+    Pair { index: usize, key: Val, value: Val },
+    End,
+    InvalidKey,
+}
+
 impl Default for TableStorage {
     fn default() -> Self {
         TableStorage::Inline {
@@ -709,64 +718,92 @@ impl Table {
         self.metatable = mt;
     }
 
+    /// Scan physical storage from `index`, skipping nil-valued tombstones.
+    fn next_live_from(&self, index: usize) -> TableNextWithIndex {
+        match &self.storage {
+            TableStorage::Inline { entries, len } => entries
+                .iter()
+                .take(*len as usize)
+                .enumerate()
+                .skip(index)
+                .find(|(_, (_, value))| !matches!(value, Val::Nil))
+                .map_or(TableNextWithIndex::End, |(index, (key, value))| {
+                    TableNextWithIndex::Pair {
+                        index,
+                        key: *key,
+                        value: *value,
+                    }
+                }),
+            TableStorage::Map(map) => map
+                .iter()
+                .enumerate()
+                .skip(index)
+                .find(|(_, (_, value))| !matches!(value, Val::Nil))
+                .map_or(TableNextWithIndex::End, |(index, (key, value))| {
+                    TableNextWithIndex::Pair {
+                        index,
+                        key: *key,
+                        value: *value,
+                    }
+                }),
+        }
+    }
+
+    /// Advance from `control`, retaining physical storage indices. A dead
+    /// control slot remains valid, matching Lua's `next` behaviour here.
+    pub(super) fn next_with_index(&self, control: &Val) -> TableNextWithIndex {
+        if matches!(control, Val::Num(n) if n.is_nan()) {
+            return TableNextWithIndex::InvalidKey;
+        }
+        if matches!(control, Val::Nil) {
+            return self.next_live_from(0);
+        }
+        let index = match &self.storage {
+            TableStorage::Inline { entries, len } => entries
+                .iter()
+                .take(*len as usize)
+                .position(|(key, _)| key == control),
+            TableStorage::Map(map) => map.get_index_of(control),
+        };
+        index.map_or(TableNextWithIndex::InvalidKey, |index| {
+            self.next_live_from(index.saturating_add(1))
+        })
+    }
+
+    /// Validate a cursor's raw slot key, including a tombstone, then advance
+    /// with the same storage-specific walk as `next_with_index`.
+    pub(super) fn next_from_matching_index(
+        &self,
+        index: usize,
+        control: &Val,
+    ) -> TableNextWithIndex {
+        if matches!(control, Val::Num(n) if n.is_nan()) {
+            return TableNextWithIndex::InvalidKey;
+        }
+        let matches = match &self.storage {
+            TableStorage::Inline { entries, len } => {
+                index < *len as usize && entries[index].0 == *control
+            }
+            TableStorage::Map(map) => map
+                .get_index(index)
+                .is_some_and(|(key, _)| *key == *control),
+        };
+        if matches {
+            self.next_live_from(index.saturating_add(1))
+        } else {
+            TableNextWithIndex::InvalidKey
+        }
+    }
+
     /// Returns the next key-value pair after the given key.
     /// If key is nil, returns the first key-value pair. Distinguishes the end
     /// of iteration from an invalid control key.
     #[hotpath::measure]
     pub(super) fn next(&self, key: &Val) -> TableNext {
-        if matches!(key, Val::Num(n) if n.is_nan()) {
-            return TableNext::InvalidKey;
-        }
-
-        match &self.storage {
-            TableStorage::Inline { entries, len } => {
-                if matches!(key, Val::Nil) {
-                    entries
-                        .iter()
-                        .take(*len as usize)
-                        .find(|(_, value)| !matches!(value, Val::Nil))
-                        .map_or(TableNext::End, |(k, v)| TableNext::Pair(*k, *v))
-                } else {
-                    // Find the key, then return the next one
-                    match entries
-                        .iter()
-                        .take(*len as usize)
-                        .position(|entry| &entry.0 == key)
-                    {
-                        Some(index) => entries
-                            .iter()
-                            .take(*len as usize)
-                            .skip(index + 1)
-                            .find(|(_, value)| !matches!(value, Val::Nil))
-                            .map_or(TableNext::End, |(k, v)| TableNext::Pair(*k, *v)),
-                        None => TableNext::InvalidKey,
-                    }
-                }
-            }
-            TableStorage::Map(map) => {
-                if matches!(key, Val::Nil) {
-                    if let Some((k, v)) = map.iter().find(|(_, value)| !matches!(value, Val::Nil)) {
-                        TableNext::Pair(*k, *v)
-                    } else {
-                        TableNext::End
-                    }
-                } else {
-                    match map.get_index_of(key) {
-                        Some(index) => {
-                            if let Some((k, v)) = map
-                                .iter()
-                                .skip(index + 1)
-                                .find(|(_, value)| !matches!(value, Val::Nil))
-                            {
-                                TableNext::Pair(*k, *v)
-                            } else {
-                                TableNext::End
-                            }
-                        }
-                        None => TableNext::InvalidKey,
-                    }
-                }
-            }
+        match self.next_with_index(key) {
+            TableNextWithIndex::Pair { key, value, .. } => TableNext::Pair(key, value),
+            TableNextWithIndex::End => TableNext::End,
+            TableNextWithIndex::InvalidKey => TableNext::InvalidKey,
         }
     }
 }
@@ -947,6 +984,122 @@ mod tests {
         assert!(matches!(t.next(&n(5)), TableNext::End));
         assert!(matches!(t.next(&n(6)), TableNext::InvalidKey));
         assert!(matches!(t.next(&Val::Num(f64::NAN)), TableNext::InvalidKey));
+    }
+
+    #[test]
+    fn indexed_next_is_the_next_oracle_for_both_storage_variants() {
+        for count in [4, 5] {
+            let mut table = Table::default();
+            fill(&mut table, 1..=count);
+            table.remove(&n(1));
+            table.remove(&n(3));
+
+            let mut control = Val::Nil;
+            let mut expected = Vec::new();
+            let mut indexed = Vec::new();
+            loop {
+                match table.next(&control) {
+                    TableNext::Pair(key, value) => {
+                        expected.push((key, value));
+                        control = key;
+                    }
+                    TableNext::End => break,
+                    TableNext::InvalidKey => panic!("control from next must stay valid"),
+                }
+            }
+            control = Val::Nil;
+            loop {
+                match table.next_with_index(&control) {
+                    TableNextWithIndex::Pair { index, key, value } => {
+                        indexed.push((index, key, value));
+                        match table.next_from_matching_index(index, &key) {
+                            TableNextWithIndex::Pair {
+                                key: next, value, ..
+                            } => match table.next(&key) {
+                                TableNext::Pair(actual_key, actual_value) => {
+                                    assert_eq!((actual_key, actual_value), (next, value));
+                                }
+                                _ => panic!("indexed successor must match next"),
+                            },
+                            TableNextWithIndex::End => {
+                                assert!(matches!(table.next(&key), TableNext::End));
+                            }
+                            TableNextWithIndex::InvalidKey => {
+                                panic!("returned index must validate")
+                            }
+                        }
+                        control = key;
+                    }
+                    TableNextWithIndex::End => break,
+                    TableNextWithIndex::InvalidKey => panic!("nil control must be valid"),
+                }
+            }
+            assert_eq!(
+                expected,
+                indexed
+                    .into_iter()
+                    .map(|(_, key, value)| (key, value))
+                    .collect::<Vec<_>>()
+            );
+            assert!(matches!(
+                table.next_with_index(&n(1)),
+                TableNextWithIndex::Pair { .. }
+            ));
+            assert!(matches!(
+                table.next_with_index(&n(count + 1)),
+                TableNextWithIndex::InvalidKey
+            ));
+            assert!(matches!(
+                table.next_with_index(&Val::Num(f64::NAN)),
+                TableNextWithIndex::InvalidKey
+            ));
+        }
+    }
+
+    #[test]
+    fn indexed_next_accepts_tombstoned_control_and_reports_tail_end() {
+        // count 3 stays Inline; count 5 exercises Map storage.
+        for count in [3, 5] {
+            let mut table = Table::default();
+            fill(&mut table, 1..=count);
+            table.remove(&n(2));
+            let control_index = match table.next_with_index(&n(1)) {
+                TableNextWithIndex::Pair {
+                    index,
+                    key: Val::Num(3.0),
+                    ..
+                } => index,
+                _ => panic!("expected the live successor"),
+            };
+            // A tombstoned control (key 2, dead at index 1) must validate and
+            // step to the live successor - filter-in-place iteration depends
+            // on it.
+            assert!(matches!(
+                table.next_from_matching_index(1, &n(2)),
+                TableNextWithIndex::Pair {
+                    key: Val::Num(3.0),
+                    ..
+                }
+            ));
+            // Stepping from key 3 continues (count 5) or ends (count 3).
+            match table.next_from_matching_index(control_index, &n(3)) {
+                TableNextWithIndex::Pair {
+                    key: Val::Num(next),
+                    ..
+                } if count == 5 => assert_eq!(next, 4.0),
+                TableNextWithIndex::End if count == 3 => {}
+                other => panic!("unexpected successor of key 3 (count {count}): {other:?}"),
+            }
+            // Tail End from the actual last key, on both storage variants.
+            let last_index = match table.next_with_index(&n(count - 1)) {
+                TableNextWithIndex::Pair { index, .. } => index,
+                _ => panic!("expected the last live entry"),
+            };
+            assert!(matches!(
+                table.next_from_matching_index(last_index, &n(count)),
+                TableNextWithIndex::End
+            ));
+        }
     }
 
     #[test]

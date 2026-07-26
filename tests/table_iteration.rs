@@ -53,3 +53,56 @@ fn collectable_tombstone_key_survives_next_control_lookup() {
     state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
     assert_eq!(state.to_number(-1).unwrap(), 1.0);
 }
+
+#[test]
+fn pairs_cursor_preserves_mutation_and_same_site_recursion_semantics() {
+    assert_eq!(
+        run_number(
+            "local t={a=1,b=2,c=3,d=4}; local s=''; for k in pairs(t) do s=s..k; if k=='a' then t.b=nil; t.e=5 end end; return s == 'acde' and 1 or 0",
+        ),
+        1.0
+    );
+    assert_eq!(
+        run_number(
+            "local t={a=1,b=2,c=3,d=4}; local s=''; for k in pairs(t) do s=s..k; if k=='a' then t.e=5 end end; return s == 'abcde' and 1 or 0",
+        ),
+        1.0
+    );
+    assert_eq!(
+        run_number(
+            "local t={a=1,b=2,c=3,d=4,e=5}; local s=''; for k in pairs(t) do s=s..k; if k=='c' then t.a=nil; t.b=nil; t.d=nil; t.f=6 end end; return s == 'abcef' and 1 or 0",
+        ),
+        1.0
+    );
+    assert_eq!(
+        run_number(
+            "local t={a=1,b=2,c=3,d=4}; local s=''; for k in pairs(t) do s=s..k; if k=='a' then t.b=nil; t.b=2 end end; return s == 'acdb' and 1 or 0",
+        ),
+        1.0
+    );
+    assert_eq!(
+        run_number(
+            "local function walk(t, depth) local s=''; for k in pairs(t) do if depth > 0 then walk(t, depth-1) end s=s..k end return s end; return walk({a=1,b=2,c=3}, 1) == 'abc' and 1 or 0",
+        ),
+        1.0
+    );
+}
+
+#[test]
+fn pairs_cursor_keeps_invalid_controls_and_costs_unchanged() {
+    let mut state = State::new();
+    state
+        .load_string("local t={a=1,b=2,c=3}; for k in pairs(t) do end; for k in pairs(t) do end")
+        .unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
+    assert_eq!(state.cost_used(), 4);
+
+    let mut invalid = State::new();
+    invalid
+        .load_string("local t={a=1}; return next(t, 'missing')")
+        .unwrap();
+    let error = invalid
+        .call(ArgCount::Fixed(0), RetCount::Fixed(1))
+        .expect_err("invalid next control must take the generic builtin path");
+    assert!(error.to_string().contains("invalid key to 'next'"));
+}

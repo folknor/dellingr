@@ -2239,6 +2239,80 @@ mod tests {
     }
 
     #[test]
+    fn forged_tfor_cursor_operands_validate_and_round_trip_without_metadata() {
+        let mut legacy = valid_saved_bytecode();
+        legacy.code = vec![
+            Instr::tfor_call(0, 1).raw(),
+            Instr::ret(RetCount::Fixed(0)).raw(),
+        ];
+        legacy.num_locals = 4;
+        legacy.line_info = vec![1; legacy.code.len()];
+        assert!(load_bytecode(vec![legacy.clone()], Vec::new()).is_ok());
+
+        let mut sequential = legacy.clone();
+        sequential.code = vec![
+            Instr::tfor_call_cached(0, 1, 0).raw(),
+            Instr::tfor_call_cached(0, 1, 1).raw(),
+            Instr::ret(RetCount::Fixed(0)).raw(),
+        ];
+        sequential.line_info = vec![1; sequential.code.len()];
+        assert!(load_bytecode(vec![sequential.clone()], Vec::new()).is_ok());
+        let mut restored = load_bytecode_with_globals(
+            vec![sequential.clone()],
+            vec![SavedObject::Closure {
+                chunk: 0,
+                upvalues: Vec::new(),
+            }],
+            vec![(b"writer".to_vec(), SavedVal::Obj(0))],
+        )
+        .expect("cached cursor fixture loads");
+        restored.get_global("writer").expect("writer exists");
+        let closure = restored
+            .pop_val()
+            .as_lua_function(&restored.heap)
+            .expect("writer is a closure");
+        assert_eq!(closure.runtime.caches.tfor_cursor.len(), 2);
+        assert!(
+            closure
+                .runtime
+                .caches
+                .tfor_cursor
+                .iter()
+                .all(|slot| slot.get().is_none())
+        );
+        roundtrip!(SavedBytecode, sequential);
+
+        for code in [
+            vec![
+                Instr::tfor_call_cached(0, 1, 1),
+                Instr::ret(RetCount::Fixed(0)),
+            ],
+            vec![
+                Instr::tfor_call_cached(0, 1, 254),
+                Instr::ret(RetCount::Fixed(0)),
+            ],
+            vec![
+                Instr::tfor_call_cached(0, 1, 0),
+                Instr::tfor_call_cached(0, 1, 0),
+                Instr::ret(RetCount::Fixed(0)),
+            ],
+            vec![
+                Instr::tfor_call_cached(0, 1, 1),
+                Instr::tfor_call_cached(0, 1, 0),
+                Instr::ret(RetCount::Fixed(0)),
+            ],
+        ] {
+            let mut forged = legacy.clone();
+            forged.code = code.into_iter().map(Instr::raw).collect();
+            forged.line_info = vec![1; forged.code.len()];
+            assert!(matches!(
+                rejected_bytecode(vec![forged], Vec::new()),
+                LoadError::InvalidBytecode { .. }
+            ));
+        }
+    }
+
+    #[test]
     fn forged_builtin_set_global_never_populates_a_cache_slot() {
         let mut bytecode = valid_saved_bytecode();
         bytecode.code = vec![
