@@ -119,9 +119,11 @@ examples/fields/           # same_obj_read, same_obj_write, polymorphic, miss, .
 examples/globals/          # write
 examples/iter/             # pairs, ipairs
 examples/tables/           # fill, mixed, numeric_index
-examples/alloc/            # closure, short_tables, gc_churn
-examples/strings/          # mixed
+examples/alloc/            # closure, short_tables, record_tables, gc_churn
+examples/strings/          # mixed, patterns, literal_find
 examples/parse/            # large_source (+ generate.py, see below)
+examples/composite/        # benchmark (the seven-section mixed suite at ~1/100
+                           # of bench/benchmark.lua, written as its hotpath_file)
 ```
 
 Benches come in two flavours, and the distinction matters when reading the
@@ -144,7 +146,7 @@ function longer instead.
 
 Each bench script is also a standalone-runnable test: top-level setup + a `_bench()` function + an outer loop that calls `_bench()` enough times for hyperfine resolution and prints `<name>: true`. This lets one file serve three masters: the hotpath harness (calls `_bench` directly for parse/cold/warm phasing), `tests/run_examples.rs` (executes the standalone runner, asserts no `: false`), and `scripts/bench.sh` (hyperfine timings vs reference Lua 5.2/5.4/5.5 + LuaJIT).
 
-`bench/` holds the brokkr *verdict* workloads: seconds-scale ports of the curated examples/ benches - same kernels, wrapped in a repeat loop calibrated so one `_bench()` call is ~100ms, footer fixed at 30 calls, which lands the standalone run at ~3s and the harness warm phase at ~2s with the default 20 iterations. A 20ms-per-launch bench cannot resolve the deltas the optimization backlog targets; a seconds-scale one can. They are registered as content-addressed workloads in `brokkr.toml` (commented out until brokkr ships the `[dellingr]` config surface); editing a bench/ script requires re-hashing its registry entry, which is the deliberate signal that older stored results no longer compare. `bench/` is intentionally outside every examples/ glob - `run_examples.rs`, the diff gate, and `bench.sh` do not see it - so the fast test/diff/ratio surfaces and the slow verdict surface stay independent.
+`bench/` holds the brokkr *verdict* workloads: seconds-scale ports of the curated examples/ benches - same kernels, wrapped in a repeat loop calibrated so one `_bench()` call is ~100ms, footer fixed at 30 calls, which lands the standalone run at ~3s and the harness warm phase at ~2s with the default 20 iterations. A 20ms-per-launch bench cannot resolve the deltas the optimization backlog targets; a seconds-scale one can. Each `[dellingr.workloads.*]` registration in `brokkr.toml` therefore pins *two* files: `file`/`xxh128` (the bench/ port, for wall-clock verdict runs) and `hotpath_file`/`hotpath_xxh128` (the examples/ counterpart, for instrumented profiling, which only works at the ms scale); editing either file requires re-hashing its pin, which is the deliberate signal that older stored results no longer compare. The pairing is a real constraint when editing either file: the two must stay the same kernel in the same proportions, or per-function distributions measured on the ms file stop describing the seconds-scale walls. `bench/` is intentionally outside every examples/ glob - `run_examples.rs`, the diff gate, and `bench.sh` do not see it - so the fast test/diff/ratio surfaces and the slow verdict surface stay independent.
 
 The harness measures four phases on one State and emits KV pairs to stderr: `parse_us`, `cold_call_us`, `warm_avg_us` (averaged over the warm iterations, default 20), plus the dellingr-specific `cost_used` per phase and the derived `cost_per_us`. Wall time is the benchmarking metric; cost is a deterministic property of the workload and rides along as a fingerprint (a cost change means the script or compiler changed, not the VM's speed). `setup_*` and `final_*` heap/object counts bracket GC pressure. Note the harness runs the script's top level during setup, so the standalone footer's calls execute there - the "cold" call is only cold with respect to what the footer has not already warmed.
 

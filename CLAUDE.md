@@ -24,10 +24,18 @@
 Dev tool at `~/Programs/brokkr`, invoked as `brokkr` from the project root
 (reads `./brokkr.toml`). Besides `check`/`test`, it owns dellingr's
 benchmarking. Workloads are the content-addressed `[dellingr.workloads.*]`
-registrations in brokkr.toml (seconds-scale scripts in `bench/`, harness =
-`examples/hotpath.rs` - see AGENTS.md "Hotpath benchmarks" for that layer).
-Editing a registered script requires updating its xxh128 in brokkr.toml;
-brokkr refuses on hash drift, naming the registration to re-register.
+registrations in brokkr.toml, each pinning TWO files (harness =
+`examples/hotpath.rs` - see AGENTS.md "Hotpath benchmarks" for that layer):
+`file`/`xxh128` is the seconds-scale `bench/` script `--bench` resolves;
+`hotpath_file`/`hotpath_xxh128` is the ms-scale `examples/` counterpart
+`--hotpath`/`--alloc` resolve. The instrumented modes REFUSE a workload
+without the pair: hotpath's per-call event queue is unbounded, and a
+seconds-scale file under instrumentation backlogs 30+ GB of RAM (few-GB RSS
+peaks on ms-scale files are normal). The same math governs
+`scripts/hotbench.sh` and any manual `--features hotpath` run - point them
+at examples/ kernels, never at `bench/` files. Editing a registered script requires
+updating its pin's hash in brokkr.toml; brokkr refuses on hash drift, naming
+the registration to re-register. Digests are xxh128: `xxhsum -H2 <file>`.
 
 ```
 brokkr dellingr --lua <W>                    # run once, print timing, store nothing
