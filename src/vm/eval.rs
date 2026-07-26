@@ -352,7 +352,7 @@ impl State {
         if is_vararg && num_args > num_params {
             let num_varargs = (num_args - num_params) as usize;
             let vararg_start = self.stack.len() - num_varargs;
-            let varargs: Vec<Val> = self.stack.drain(vararg_start..).collect();
+            let varargs = self.collect_varargs(vararg_start);
             // Root from the slice before moving `varargs` into the frame:
             // with_rooted_values copies into transient_roots anyway, so cloning
             // the Vec first would allocate twice per vararg call for nothing.
@@ -369,6 +369,31 @@ impl State {
         }
 
         self.eval_closure_frame(closure, old_stack_bottom, num_args, Vec::new())
+    }
+
+    /// Drain the frame's extra arguments into the per-frame vararg Vec.
+    ///
+    /// A one-line helper so the allocation has its own hotpath measurement
+    /// point: the enclosing call machinery stays live across the recursive
+    /// descent and must not carry `#[hotpath::measure]` (see AGENTS.md), so
+    /// without this extraction the per-vararg-call Vec attributes to the root
+    /// guard. `#[inline]` keeps plain builds at the original codegen.
+    #[hotpath::measure]
+    #[inline]
+    fn collect_varargs(&mut self, vararg_start: usize) -> Vec<Val> {
+        self.stack.drain(vararg_start..).collect()
+    }
+
+    /// Drain a returning frame's results into the per-return Vec.
+    ///
+    /// Same rationale as [`Self::collect_varargs`]: this is the one heap
+    /// allocation on every returning Lua call (the drain-to-Vec the
+    /// OPTIMIZATIONS.md call-path entries target), and the function that
+    /// performs it cannot be measured itself.
+    #[hotpath::measure]
+    #[inline]
+    fn collect_return_values(&mut self, ret_start: usize) -> Vec<Val> {
+        self.stack.drain(ret_start..).collect()
     }
 
     /// Fill in a runtime error's source line from the frame it surfaced in.
@@ -485,7 +510,7 @@ impl State {
 
         // Save return values from the top of the stack
         let ret_start = self.stack.len() - actual_num_returned as usize;
-        let ret_vals: Vec<Val> = self.stack.drain(ret_start..).collect();
+        let ret_vals = self.collect_return_values(ret_start);
 
         // Close any open upvalues in this frame before clearing the stack
         self.close_upvalues(self.stack_bottom);

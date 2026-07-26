@@ -493,6 +493,13 @@ top. Note the per-Bytecode cache-sharing entry above would make
 this one mostly moot - shared caches aren't re-allocated per
 closure at all.
 
+Measured (2026-07-26, commit d9382ef, plantasjen, `--alloc` mode):
+`alloc/closure` churns 90.1 MB per harness run, 69% of it in
+`alloc_lua_fn` at exactly 128 B per closure x 510K closures - the
+per-closure Box + cache allocation this entry and the cache-sharing
+entry both target. `alloc/gc_churn` shows the same shape at 266 B
+per (larger) closure.
+
 ---
 
 ## Execution core
@@ -541,6 +548,13 @@ calls. Options, increasing invasiveness:
   a SmallVec inline <= 2;
 - or restructure `eval_closure` to take `ObjectPtr` and borrow the closure
   from the heap per access (bigger borrow-model change).
+
+Measured (2026-07-26, commit d9382ef, plantasjen, `--alloc` mode):
+`numerics/arithmetic` - a workload whose Lua heap is static at 51 bytes -
+churns 21.3 MB of process allocation per harness run, of which
+`as_lua_function` (the clone site) holds 4.3 MB across 1.1M calls; most of
+the remaining 17 MB is the per-return drain-to-Vec (see the call-path
+micro entry).
 
 Benches `calls/*` should move; `alloc/closure` guards against regression.
 Subsumed by the frame-stack flattening rewrite if that lands.
@@ -831,9 +845,12 @@ bundling with other snapshot work.
   later (B-O5):** replace return-value drain-to-Vec + extend with
   `self.stack.drain(self.stack_bottom..ret_start)` (one memmove, after
   `close_upvalues`) - removes one heap allocation per returning call.
-  `State::call` fixed-arg path: avoid `stack.remove(idx)` by treating the
-  callee slot as frame slot -1 (adjust `stack_bottom`); pairs naturally
-  with the rewrite.
+  Measured (2026-07-26, commit d9382ef, plantasjen, `--alloc` mode): on
+  `numerics/arithmetic` the unattributed root blob is 17.0 MB over ~1.1M
+  returning calls, ~16 B per return; the drain now has its own
+  measurement point (`collect_return_values`). `State::call` fixed-arg
+  path: avoid `stack.remove(idx)` by treating the callee slot as frame
+  slot -1 (adjust `stack_bottom`); pairs naturally with the rewrite.
 - **Dispatch micro-items, verify with asm/bench first (B-O6):** opcode space
   is sparse (0-25, 30-54, 60-63, 70-72); a dense renumbering (or
   `#[repr(u8)]` enum with a validated dense range) helps LLVM emit a single

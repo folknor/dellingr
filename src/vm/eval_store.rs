@@ -72,6 +72,7 @@ impl State {
         }
     }
 
+    #[hotpath::measure]
     pub(super) fn instr_new_table_template(
         &mut self,
         frame: &Frame,

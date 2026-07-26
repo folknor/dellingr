@@ -20,6 +20,7 @@ impl State {
         Ok(())
     }
 
+    #[hotpath::measure]
     pub(crate) fn new_table_with_capacity(&mut self, capacity: usize) -> Result<()> {
         self.check_stack_space(1)?;
         let val = self.alloc_table_with_capacity(capacity);
@@ -27,6 +28,7 @@ impl State {
         Ok(())
     }
 
+    #[hotpath::measure]
     pub(super) fn new_table_with_template(
         &mut self,
         key_ids: &[u16],
