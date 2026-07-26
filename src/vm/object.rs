@@ -114,7 +114,12 @@ impl UpvaluePool {
 pub(super) struct Closure {
     pub(super) bytecode: Arc<Bytecode>,
     pub(super) caches: Arc<RuntimeCaches>,
-    pub(super) upvalues: Vec<UpvalueRef>,
+    /// `Arc<[..]>`, not `Vec`: the closure is cloned on every Lua-to-Lua
+    /// call (`as_lua_function`) and the upvalue list is never mutated after
+    /// construction - writes go through the `UpvaluePool` slots the refs
+    /// point at - so sharing turns a per-call heap allocation into a
+    /// refcount bump.
+    pub(super) upvalues: Arc<[UpvalueRef]>,
 }
 
 /// The raw object data managed by GC.
@@ -189,6 +194,10 @@ pub(crate) struct GcHeap {
     strings: StringPool,
     /// Reused scratch space for the iterative GC mark phase.
     mark_worklist: Vec<ObjectPtr>,
+    /// Shared empty upvalue list for closures without captures, so their
+    /// construction stays allocation-free (a fresh `Arc<[_]>` would pay an
+    /// Arc-header allocation where a `Vec::new` paid nothing).
+    empty_upvalues: Arc<[UpvalueRef]>,
 }
 
 impl GcHeap {
@@ -199,6 +208,7 @@ impl GcHeap {
             threshold,
             strings: StringPool::new(),
             mark_worklist: Vec::new(),
+            empty_upvalues: Arc::from([]),
         }
     }
 
@@ -273,6 +283,11 @@ impl GcHeap {
         upvalues: Vec<UpvalueRef>,
     ) -> ObjectPtr {
         let caches = Arc::new(RuntimeCaches::new(&bytecode));
+        let upvalues = if upvalues.is_empty() {
+            Arc::clone(&self.empty_upvalues)
+        } else {
+            upvalues.into()
+        };
         let closure = Closure {
             bytecode,
             caches,
@@ -409,7 +424,7 @@ impl GcHeap {
         match &obj.raw {
             RawObject::LuaFn(closure) => {
                 // Mark values stored in closed upvalues
-                for uv_ref in &closure.upvalues {
+                for uv_ref in closure.upvalues.iter() {
                     if let Upvalue::Closed(val) = upvalue_pool.get(*uv_ref) {
                         val.mark_reachable(self, worklist);
                     }

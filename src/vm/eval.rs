@@ -619,7 +619,7 @@ impl State {
         let closure = Closure {
             bytecode,
             caches,
-            upvalues: Vec::new(),
+            upvalues: Arc::from([]),
         };
         self.eval_closure(closure, num_args)
     }

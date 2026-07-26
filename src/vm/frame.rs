@@ -32,8 +32,10 @@ pub(super) struct Frame {
     /// Offset into `State.string_literals` where this chunk's literals are
     /// stored.
     string_literal_start: usize,
-    /// The upvalues captured by this closure.
-    pub(super) upvalues: Vec<UpvalueRef>,
+    /// The upvalues captured by this closure. Shared with the `Closure`
+    /// (and any other active frames on it) - never mutated through the
+    /// frame; writes go through the `UpvaluePool` slots.
+    pub(super) upvalues: Arc<[UpvalueRef]>,
     /// The varargs passed to this function (if it's a vararg function).
     varargs: Vec<Val>,
     /// The stack bottom when this frame was created (used for closing upvalues).
@@ -46,7 +48,7 @@ impl Frame {
     pub(super) fn new(
         bytecode: Arc<Bytecode>,
         caches: Arc<RuntimeCaches>,
-        upvalues: Vec<UpvalueRef>,
+        upvalues: Arc<[UpvalueRef]>,
         varargs: Vec<Val>,
         string_literal_start: usize,
         stack_bottom: usize,
@@ -473,7 +475,7 @@ mod tests {
             ..Bytecode::default()
         });
         let caches = Arc::new(RuntimeCaches::new(&bytecode));
-        let mut frame = Frame::new(bytecode, caches, Vec::new(), Vec::new(), 0, 0);
+        let mut frame = Frame::new(bytecode, caches, Arc::from([]), Vec::new(), 0, 0);
         frame.ip = i16::MIN.unsigned_abs() as usize;
 
         frame
@@ -489,7 +491,7 @@ mod tests {
             ..Bytecode::default()
         });
         let caches = Arc::new(RuntimeCaches::new(&bytecode));
-        let mut frame = Frame::new(bytecode, caches, Vec::new(), Vec::new(), 0, 0);
+        let mut frame = Frame::new(bytecode, caches, Arc::from([]), Vec::new(), 0, 0);
 
         let error = frame.jump(1).expect_err("jump to end must be rejected");
         assert!(matches!(

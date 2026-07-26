@@ -730,30 +730,25 @@ wall time improves) or accept a replay-versioning event.
 
 ## IC extensions (same shape as existing ICs)
 
-### Table-library fallback: gate the miss path, IC the hit path (merged with B-O4/C-O5)
+### Table-library fallback IC for the hit path (merged with B-O4/C-O5)
 
-What (miss path - measured, simpler, do first): every plain-table field read
-that misses (no metatable, key absent) - the extremely common
-`if t.optional_field then` pattern - takes `push_table_library_field`
-(`eval_index.rs:41, 56, 382`): a global lookup of `table` plus a full
-`get_table_with_key` against the library table, before returning nil. The
-fallback feature (`t:insert(...)` sugar) only ever resolves the handful of
-table-lib method names, and the name set is static. Measured: `fields/miss`
-(a designed probe) at 6.6x lua5.5 against `fields/same_obj_read` at 3.9x -
-a missing field costs roughly 1.7x what a hit does in relative terms.
+The miss-path half of this entry shipped 2026-07-26 (commit 11854a8): a
+pristine-shape gate on `push_table_library_field` returns nil for
+non-member keys without probing the library, and `bench/miss` moved 5.2s
+to ~3.0s (worktree-matched interleaved pairs, plantasjen) with
+`same_obj_read` and `cost_used` unmoved. What remains is the hit side:
 
-Sketch (miss): check the key against a compile-time set of table-lib names
-(they are string literals; a per-chunk bitmask computed at literal-pool
-build time, or an interned-ptr comparison against the few lib method
-strings) and skip the fallback entirely for all other keys - no cache
-invalidation at all. Alternatively only emit the fallback-capable GET_FIELD
-variant in method-call position, where the sugar is actually used.
+What: when `tbl:insert(...)` etc. do fall through to the `table` library,
+cache the resolved value at the call site - same shape as the shipped
+string-method IC. The shipped gate's cached member-name pointers and
+shape guard are reusable ingredients.
 
-What (hit path - deferred): when `tbl:insert(...)` etc. do fall through to
-the `table` library, cache the resolved value at the call site - same shape
-as the shipped string-method IC. Rarer pattern than string methods, and the
-fallback hit path isn't a hot bench; the miss gate above removes the common
-cost without any cache.
+Why deferred: rarer pattern than string methods, and the fallback hit
+path isn't a hot bench; the miss gate already removed the common cost
+without any per-site cache.
+
+Signal: a workload where `t:insert(...)`-style sugar fires in a tight
+loop.
 
 ### Method IC: refresh "no method" entries on mutation
 
