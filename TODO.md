@@ -17,20 +17,23 @@ verdict port yet: the `calls/` family (`local`, `global`, `method`,
 and closure-clone rewrites), `fields/polymorphic` / `same_obj_cached` /
 `same_obj_write`, `tables/numeric_index` / `mixed`, `alloc/short_tables`,
 `iter/ipairs`. Port with the same recipe (kernel + calibrated repeat
-loop, ~100ms/call, footer 30) and register with xxh128.
+loop, ~100ms/call, footer 30) and register both pins (the bench/ port
+as `file`, the examples/ original as `hotpath_file`).
 
 Also open: a seconds-scale parse workload (`large_source` at a second,
 larger size - which doubles as the missing second data point for the
 suspected-quadratic parse candidates), and a Rust-driven snapshot bench
-(notes/optimizations.md #26 - needs harness support, not a .lua file).
+(OPTIMIZATIONS.md "Snapshot path" - needs harness support, not a .lua
+file).
 
-Why deferred: the registry cannot go live until brokkr ships the
-`[dellingr]` config surface (the released parser reads unknown
-top-level tables as hostname sections); porting the rest before the
-first workloads have proven the recipe would be premature batch work.
+Why deferred: the registry is live with the 16 curated workloads;
+porting the rest before those have proven the recipe would be
+premature batch work.
 
-Signal that would promote it: brokkr support landing, or active work
-starting on any candidate whose tracker is still examples/-only.
+Signal that would promote it: active work starting on any candidate
+whose tracker is still examples/-only.
+
+### Sweep `%p` format-pointer ids during GC
 
 What: `string.format("%p")` assigns deterministic ids from
 `State.format_pointer_ids`, a `Vec<(Val, u64)>` probed by linear

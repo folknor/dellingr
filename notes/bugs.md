@@ -9,8 +9,9 @@ and both are noted. Original corner finding IDs are kept in parentheses.
 Findings reported independently by two corners are marked as such - treat
 that as a confidence signal, not a verification.
 
-Structural fixes for several of these live in [optimizations.md](optimizations.md);
-cross-references below use its item numbers.
+The optimization candidates from the same hunt were triaged into the tracked
+backlog at [/OPTIMIZATIONS.md](../OPTIMIZATIONS.md) on 2026-07-26; the
+separate notes/optimizations.md file is gone.
 
 Numbering is stable: fixed items are deleted outright and their numbers are
 never reused, so gaps in the sequence are expected and cross-references stay

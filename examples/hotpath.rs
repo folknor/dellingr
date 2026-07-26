@@ -41,6 +41,15 @@ use std::time::Instant;
 
 use dellingr::{ArgCount, LuaType, RetCount, State};
 
+// hotpath 0.15 installed CountingAllocator internally under hotpath-alloc; as
+// of 0.16 it is a plain generic type the consumer must declare - the crate no
+// longer wires it up on its own. Without this, hotpath-alloc builds fall back
+// to the system allocator and track_alloc/track_dealloc never fire, so every
+// function silently reports 0 bytes.
+#[cfg(feature = "hotpath-alloc")]
+#[global_allocator]
+static ALLOC: hotpath::CountingAllocator = hotpath::CountingAllocator::new();
+
 const DEFAULT_ITERATIONS: u32 = 20;
 const DEFAULT_TARGET: &str = "numerics/arithmetic";
 /// Upper bound on `WARM_BLOCK` marker pairs per run; keeps the sidecar

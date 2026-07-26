@@ -7,6 +7,13 @@ contradicted by new evidence, or stop being worth tracking.
 
 Each entry: what, sketch, why-not-yet, signal that would change the calculus.
 
+Entries tagged like (A-O1) came in through the 2026-07-24 corner audits
+(A: front end, B: execution core, C: data plane, D: state/persistence/host,
+E: stdlib/patterns), consolidated here after triage against the code on
+2026-07-26; the audit's separate candidate file is gone. Bench ratios cited
+below are from the 2026-07-25 README table refresh (commit b4ae38e,
+plantasjen) unless noted.
+
 ---
 
 ## Investigate
@@ -14,9 +21,10 @@ Each entry: what, sketch, why-not-yet, signal that would change the calculus.
 ### Residual ~2x in `strings/patterns` - decided not to chase (2026-07-25)
 
 What: the 0.2.0-era README recorded `examples/strings/patterns.lua` at 30ms; it
-measured 160ms on the same host before the #16 gmatch work and 65ms after, so
-roughly 2.4x was recovered and roughly 2x remains unaccounted for. The bench
-re-measured at 66ms on 2026-07-25, so the residual is stable, not drifting.
+measured 160ms on the same host before the gmatch memoization work and 65ms
+after, so roughly 2.4x was recovered and roughly 2x remains unaccounted for.
+The bench re-measured at 66ms on 2026-07-25, so the residual is stable, not
+drifting.
 
 Decision: not chasing it. The portion with an identified mechanism (per-iteration
 subject recopy and pattern recompilation in `gmatch`) is already fixed. What is
@@ -31,29 +39,125 @@ corresponding change to the pattern code, or a pattern-matcher optimization
 landing with a much smaller win than its mechanism predicts (which would hint
 that something else dominates the bench).
 
+---
+
+## Full coherent rewrites
+
+Large enough to reshape whole subsystems. Each subsumes several smaller
+entries below; check the cross-references before starting a subsumed item.
+
+### Register-based codegen (A-O1; biggest throughput lever)
+
+What: the parser emits a pure stack machine: `x = a + b` is GET_LOCAL,
+GET_LOCAL, ADD, SET_LOCAL - four dispatches plus stack traffic; a register VM
+does it in one ADD(dst, a, b). Reference Lua's 5.0 move from stack to register
+VM is the single largest reason for the persistent gap on arithmetic/field
+benches (`numerics/arithmetic` 3.2x, `fields/same_obj_read` 2.4x vs lua5.2).
+
+Sketch: the 32-bit ABC encoding in `instr.rs` already has the operand room;
+locals already live in fixed frame slots, which are registers in all but name.
+The expression parser would grow a lua-style expdesc with delayed emission
+(the existing `ExpDesc`/`PlaceExp` split is halfway there), and
+`mark_call_base` / `dup` / `swap` gymnastics disappear.
+
+Hard-constraint interactions: determinism unaffected; per-opcode cost
+accounting survives but cost_used values re-base (fewer, fatter ops) - a
+product decision to version, same as any replay-affecting change. Subsumes
+the field-update fusion and GET/SET cache-slot-sharing entries below, which
+become natural in a register IR.
+
+### Flatten the interpreter into an explicit State-owned frame stack (B-O1)
+
+What: today every Lua-to-Lua call recurses through Rust (`State::call` ->
+`eval_closure` -> `eval_closure_inner` -> `Frame::eval`), with per-call costs
+that are all consequences of the frame being a Rust stack local:
+
+- `Closure` clone per call (`GcHeap::as_lua_function`, `object.rs`): clones
+  the upvalues `Vec<UpvalueRef>` (heap alloc per call for any closure with
+  upvalues) + 2 Arc refcount bumps.
+- Duplicate frame bookkeeping: `CallInfo` push (another `Arc<Bytecode>`
+  clone) parallel to the `Frame` itself.
+- `stack.remove(idx)` to extract the callee (O(args) memmove, `eval.rs:68`).
+- varargs `drain(..).collect()` Vec per vararg call (`eval.rs:355`).
+- return values `drain(..).collect()` into a fresh Vec then `extend` back
+  (`eval.rs:488`) - an allocation per returning call.
+- per-call string-literal interning (see the per-Bytecode caches entry).
+
+Sketch: a single dispatch loop over a State-owned `Vec<FrameState>` (bytecode
+Arc, ip, base, vararg span, cache ptr) eliminates every item above, merges
+`Frame` with `CallInfo` (stack traces read the real frames), and makes frames
+visible to `mark_gc_roots` directly - the vararg/temporary rooting that today
+rides on `transient_roots` watermarks becomes structural. Calls become "push
+frame record, continue loop"; returns become "memmove rets down, pop frame
+record". MAX_CALL_DEPTH becomes a plain length check, and the AGENTS.md
+concern about Rust-stack bloat per recursion level (the hotpath-annotation
+caveat) disappears.
+
+Why deferred: highest-leverage rewrite in the execution core, and priced like
+it. Call-heavy benches (`calls/*`, `benchmark`) are the ones sitting at ~4x
+lua5.5. Pre-1.0, internal-only: `State::call`'s public signature can stay.
+Subsumes the Closure-clone entry and the call-path micro cleanups below.
+
+### 8-byte NaN-boxed `Val` (C-O7)
+
+What: `Val` (`src/vm/lua_val.rs`) is 16 bytes (tag + payload). NaN-boxing
+(payloads in the NaN space of an f64: slotmap keys are 64-bit but their useful
+entropy fits 48-51 bits with an index/generation split; RustFn would need a
+registry index rather than a raw pointer) halves stack/table/upvalue memory
+traffic and makes `stack: Vec<Val>` copies twice as dense.
+
+Why deferred: full-rewrite class - touches every `match` on `Val` - but it is
+mechanical, determinism-neutral, and is the standard reason reference VMs beat
+tagged-enum interpreters on memory-bound workloads (`tables/fill`, `fields/*`
+are exactly the 3-4x-behind benches). If judged too invasive, a cheaper
+intermediate is boxing only `Table` storage entries more densely; but the full
+version is where the payoff is.
+
+Note the RustFn registry index is a cost of this item, not a shared
+prerequisite: `Val::RustFn` compares and hashes by function address and
+renders as a constant `<function>`, so nothing outside NaN-boxing needs an id.
+Squeezing a raw `fn` pointer into the NaN payload is the part that would force
+one.
+
+---
+
 ## Architectural
 
-### Share RuntimeCaches across closures of the same Bytecode
+### Per-Bytecode State-level caches: RuntimeCaches sharing + literal interning (merged with B-O2)
 
-What: today `alloc_lua_fn` (`src/vm/object.rs`) allocates a fresh
-`Arc::new(RuntimeCaches::new(&bytecode))` per closure, so factory
-patterns - `mk()` returning a new closure each call - pay cold-cache
-cost on every produced closure's first access. Pre-split (when
-`Rc<Chunk>` carried caches inline), all closures of the same chunk
-shared one cache. Recover that by keying caches off the `Bytecode`
-pointer in a per-State `IndexMap<*const Bytecode, Arc<RuntimeCaches>>`,
-so closure creation looks up an existing entry or installs one.
+Two costs, one mechanism - an `IndexMap<*const Bytecode, ...>` on `State`:
+
+What (a): `alloc_lua_fn` (`src/vm/object.rs`) allocates a fresh
+`Arc::new(RuntimeCaches::new(&bytecode))` per closure, so factory patterns -
+`mk()` returning a new closure each call - pay cold-cache cost on every
+produced closure's first access. Pre-split (when `Rc<Chunk>` carried caches
+inline), all closures of the same chunk shared one cache.
+
+What (b): `initialize_frame` (`eval.rs:509-516`) re-interns ALL of a chunk's
+string literals into `state.string_literals` on every call, and truncates
+them on return - k intern-pool probes + pushes + per-literal GC-threshold
+checks per call, where k counts every field name and string constant in the
+function. Pure per-call overhead for steady-state code. Measured:
+`calls/many_literals` (a designed worst case - 32 constants, returns from the
+first branch) sits at 42.9x lua5.5, an order of magnitude worse than any
+other bench; not a claim about typical code, but the cost is real and scales
+exactly as predicted.
+
+Sketch: key both off `Bytecode` identity in per-State maps - closure creation
+looks up or installs the shared `Arc<RuntimeCaches>`; a literal cache holds
+the interned `Vec<Val>` per Bytecode, marked as a GC root (or literal strings
+pinned for loaded programs). `get_string_constant` becomes a direct slice
+index and the `string_literal_start` frame plumbing disappears.
 
 Why deferred: adds `State` surface, a lookup per closure creation, and
-complicates GC of dead `Bytecode`s (the cache map needs to drop
-entries whose `Bytecode` is no longer referenced). The current cost is
-one `Arc` allocation per closure (not per call); recursion already
-shares (same `Closure`, same `Arc`).
+complicates GC of dead `Bytecode`s (the maps need to drop entries whose
+`Bytecode` is no longer referenced). For (a) specifically, the current cost is
+one `Arc` allocation per closure (not per call); recursion already shares.
 
-Signal that would promote it: `examples/calls/factory_closure.lua`
-drifting further from `calls/local` than today's gap, or a workload
-where per-closure cold caches dominate. The bench exists specifically
-to track this.
+Signal that would promote it: (b)'s measurement already argues for the
+literal half on literal-heavy code; `examples/calls/factory_closure.lua`
+drifting further from `calls/local` would argue for (a). Implement both in
+one pass - the map infrastructure is the expensive part.
 
 ### Shape-based polymorphic field IC
 
@@ -243,7 +347,8 @@ ideally sharing one cache slot across the read and write of the same
 Why deferred: requires parser-side pattern recognition, a new opcode, and
 unifying cache slot management. The win compounds (one dispatch + one
 cache lookup instead of three), but the complexity is parser-level, not
-VM-level, which is where we've been working.
+VM-level, which is where we've been working. Subsumed by register-based
+codegen if that lands - fusion is a natural register-IR peephole.
 
 Signal that would promote it: a workload where method bodies of the form
 `self.field = self.field + ...` dominate, and the per-instruction
@@ -374,7 +479,7 @@ compared to pre-split.
 Sketch: pool the cache Vecs in `State` with a free-list keyed by
 size class (or per `Bytecode` identity). On closure construction,
 pop a recycled Vec; on closure GC, push it back. Same template as
-`UpvaluePool` (`src/vm/object.rs:54-69`).
+`UpvaluePool` (`src/vm/object.rs`).
 
 Why deferred: `examples/alloc/closure.lua` runs at 77ms / 2.05x
 lua5.5 post-split, which is in the same band as pre-split numbers
@@ -384,26 +489,257 @@ allocator is already amortizing well enough.
 Signal that would promote it: a workload where `alloc/closure`
 shows real regression vs reference Lua, or a profile where
 `RuntimeCaches::new` allocations show up in the heap-pressure
-top.
+top. Note the per-Bytecode cache-sharing entry above would make
+this one mostly moot - shared caches aren't re-allocated per
+closure at all.
+
+---
+
+## Execution core
+
+### SET_GLOBAL inline cache and allocation-free global writes (B-O3)
+
+What: `instr_set_global` (`eval_store.rs:366-379`) does UTF-8 validation +
+`String` allocation + IndexMap hash lookup on every global assignment;
+`set_global_value_owned` re-checks `Builtin::from_name`. GET_GLOBAL already
+has an IC (`globals_version` + index). Measured: `globals/write` (a designed
+probe) at 5.6x lua5.5.
+
+Sketch: mirror the read IC for writes - cache the entry index per SET_GLOBAL
+site (slot in `RuntimeCaches`), validated by `globals_version`; on hit, write
+through `globals.get_index_mut` with zero allocation. The builtin check can
+be resolved at compile time (the parser already emits SET_BUILTIN for known
+names, so the runtime `Builtin::from_name` re-check is only needed on the
+cold path).
+
+### Version-validated cursor for `pairs` (C-O4)
+
+What: `instr_tfor_call_next` (`eval_control.rs:187`) calls
+`Table::next(&control)`, a full hash lookup (`get_index_of`) of the control
+key on every iteration - `pairs` over an N-entry Map table is N hash probes.
+`iter/pairs` is a headline bench (2.0x lua5.5) and this is the dominant
+per-step cost.
+
+Sketch: the TFOR fast path already special-cases `base_next` by fn address,
+so it can carry a hidden numeric cursor: cache `(table_ptr, version, index)`
+in the loop's control area (or a per-frame side slot); on each step, if
+ptr+version match, step `get_index(index + 1)` directly (tombstone-aware, so
+dead entries skip without hashing); on mismatch, fall back to the key-based
+`next`. Deterministic (same order as today) and invisible to scripts.
+
+### Stop cloning `Closure` on every Lua call (C-O3 + B-O5)
+
+What: `State::call` -> `Val::as_lua_function` -> `GcHeap::as_lua_function`
+(`object.rs:234-239`) deep-clones the `Closure`, including
+`upvalues: Vec<UpvalueRef>`, on every Lua-to-Lua call - a heap allocation
+per call for closures with captured upvalues, avoidable copying for all
+calls. Options, increasing invasiveness:
+
+- `Closure.upvalues` as `Arc<[UpvalueRef]>` (clone becomes a refcount bump;
+  `RuntimeCaches` and `Bytecode` are already Arcs, making the whole clone
+  trivially cheap) - the audit estimated ~all the win for a 3-line diff; or
+  a SmallVec inline <= 2;
+- or restructure `eval_closure` to take `ObjectPtr` and borrow the closure
+  from the heap per access (bigger borrow-model change).
+
+Benches `calls/*` should move; `alloc/closure` guards against regression.
+Subsumed by the frame-stack flattening rewrite if that lands.
+
+### Sweep the upvalue pool during GC (D-OPT-5 + C-E3)
+
+What: `src/vm/object.rs:51-53` justifies never freeing upvalue slots with
+"VMs have short lifetimes", but the snapshot feature exists precisely for
+long-lived, save/load-cycled States, and the product runs continuous
+per-tick callbacks. Every closure-with-captures created over a session leaks
+a pool slot forever (`UpvaluePool::alloc` only grows); ironically a
+save/load round-trip compacts the pool (only reachable closed upvalues are
+serialized).
+
+Sketch: sweep the pool during `gc_collect` - mark reachable `UpvalueRef`s
+while marking closures (the infrastructure already threads `upvalue_pool`
+through marking), then thread freed indices into a free list consumed by
+`alloc`. Determinism holds because allocation order stays a pure function of
+execution history.
+
+### Iterative `build_bytecode` on the load path (last leg of C-O6/D-OPT-1)
+
+What: the GC mark walk and the save-side encoder were both rewritten onto
+explicit worklists (2026-07-25/26; see git); `build_bytecode`
+(`save_state.rs:1275`) is the one graph walk still recursing - one Rust
+frame per nested-chunk depth when loading a snapshot, so hostile or deep
+save data can still abort the host on the load path.
+
+Sketch: same treatment as the other two - an explicit stack of pending chunk
+ids, iterate until empty, traversal order pinned to match today's recursion.
+The `visiting` cycle-detection array already exists and carries over.
+
+---
+
+## Front end / parse time
+
+Measured context: `parse/large_source` (5000 generated lines) is 8.0x lua5.5
+/ 7.3x lua5.2 - the worst ratio outside the literal-interning probe. Note
+that is a single measurement, not a demonstrated quadratic; confirming the
+curve needs a second file size.
+
+### Token-stamped line numbers (A-O2; kills quadratic parse behavior)
+
+What: `update_line` (`parser.rs:463`) calls `line_and_col`, a linear walk of
+the whole `linebreaks` vec (`lexer.rs:512`), at every statement start and
+every `expect()`. Parse time is therefore O(statements x lines) - quadratic
+for large scripts; a 10k-line chunk does tens of millions of window compares
+inside `parse_str`, a measured hotpath.
+
+Sketch: the lexer already knows the current line when it produces a token -
+stamp `Token` with `line: u32` (fits existing padding) and make `update_line`
+a field copy; keep `line_and_col` (binary-searchable via `partition_point`,
+the vec is sorted) only for error rendering.
+
+### Stop using `Vec::remove` in call emission (A-O4)
+
+What: every plain call does `remove_instr` -> `code.remove(mark_idx)`
+(`parser.rs:446-448`): O(n) tail shift per call, so call-heavy chunks are
+quadratic-ish in emission. `remove_instr` keeps `line_info` aligned, so it
+is not a line-attribution bug.
+
+Sketch: (a) introduce OP_NOP and patch the mark in place (O(1), keeps
+line_info aligned; one extra cheap dispatch on calls that needed the mark
+removed - or strip nops in `finalize` with a jump-offset remap done once,
+correctly, in one place); (b) restructure so the mark is only emitted once
+the arg list is known to need it (requires buffered args or a pre-scan).
+(a) is the pragmatic fix.
+
+### Constant folding, with reference Lua's guards (A-O6)
+
+What: there is no folding at all: `local ms = 60 * 1000` multiplies at
+runtime on every execution, `-5` is PUSH_NUM + NEGATE per hit, and both
+charge cost. Measured: `numerics/constants` at 6.7x lua5.5 against
+`numerics/arithmetic` at 4.4x; the pair isolates folding because
+arithmetic.lua deliberately has no foldable expression.
+
+Sketch: fold literal arithmetic/unary at parse time with lcode.c's guards
+(refuse to fold results that are NaN or 0.0, exactly to avoid the -0.0
+literal-pool collapse: `find_or_add_number` dedups with `==`, which
+conflates 0.0/-0.0). Note: folding changes cost_used for identical source -
+same replay-versioning consideration as the register-codegen rewrite.
+
+### Compare-and-branch fusion (A-O7)
+
+What: `while i < n do` emits LESS (push bool) + BRANCH_FALSE (pop bool) -
+two dispatches plus stack traffic per iteration of every hot loop condition.
+
+Sketch: a peephole in the parser (or in `finalize`) fusing comparison +
+branch into one opcode halves the dispatch on loop headers. Needs new
+opcodes on the execution side. Subsumed by register-based codegen if that
+lands.
+
+### Skip CLOSE_UPVALUES in closure-free functions (A-O9)
+
+What: scope exits emit CLOSE_UPVALUES unconditionally (`parser.rs:428, 495`
+and the loop parsers) - including once per iteration inside numeric/generic
+for bodies. If a function body creates no closures (`chunk.nested` empty and
+no OP_CLOSURE emitted), no upvalue over its locals can ever be open, and
+every CLOSE_UPVALUES in it is a guaranteed no-op paying a dispatch.
+
+Sketch: a `finalize` pass can prove this per-Bytecode and drop/nop them.
+Most game-script hot loops are closure-free; this removes a per-iteration
+dispatch from all of them.
+
+### `parse_chunk`: `mem::take` instead of two full Bytecode clones per nested function (A-O3)
+
+What: `parser.rs:533` (`outer_chunks.push(self.chunk.clone())`) and
+`parser.rs:558` (`let tmp_chunk = self.chunk.clone()`) deep-copy code,
+literal pools, line_info, and nested Arcs of the partially built outer chunk
+and the finished inner chunk, then immediately overwrite the originals.
+`std::mem::take` / `std::mem::replace` make both O(1). Cost today is
+O(enclosing-chunk size) per nested function definition - top-level files
+with many functions pay repeatedly.
+
+### Zero-allocation identifiers and names in the front end (A-O5)
+
+What:
+
+- `lex_word` (`lexer.rs:494-504`) builds a fresh `String` for every
+  identifier/keyword token, used only for `keyword_match`, then thrown away
+  (the parser re-slices the source anyway). Match on the
+  `&source[tok_start..pos]` slice instead: one alloc per token removed on
+  the front-end hot path.
+- `locals: Vec<(String, i32)>`, `upvalues`, and namelists allocate a String
+  per declaration. The parser already carries `'a`; these can be `&'a str`
+  borrows of the source.
+
+---
+
+## Stdlib / patterns
+
+### gmatch: drop the Lua-side wrapper and table-backed iterator state (E-O2)
+
+Partially shipped as of 2026-07-25 - the per-iteration subject/pattern
+copies and pattern re-validation are gone (`memoize_gmatch_pattern`,
+`gmatch_subject_matcher_and_cost_meter`); that was the bulk of the win
+(`strings/patterns` 160ms -> 66ms).
+
+What remains (`string.rs:19, 537-558, 739-786`): one Lua call into the
+compiled wrapper chunk (`gmatch_wrapper()`, still a compiled Bytecode) + one
+RustFn call, plus `get_table` lookups ("s", "pos") and one `set_table_raw`
+against the table-backed iterator state, every iteration. A generic-for
+iterator already receives `(state, control)`, so a RustFunc can be the
+iterator directly; hold the iterator state (subject Val, compiled pattern,
+pos) in a Rust-side object (heap object variant or registry anchor) instead
+of a Lua table. The wrapper/table design mainly serves the snapshot feature;
+keep a serializable representation for that (the state is just
+(string, string, number)).
+
+### gsub: precompile the replacement template (E-O3)
+
+What: the owned-copy half of the original finding is fixed
+(`append_gsub_replacement` now borrows via `bytes_coerce`), but string
+replacements still re-parse `%N` escapes for every match
+(`string.rs:233-243` -> `append_string_replacement`). Parse the template
+once per gsub call into `Vec<Segment{Literal(range) | Capture(n)}>`;
+per-match work becomes pure byte appends.
+
+### Plain find/gsub: replace the naive subslice scan (E-O4)
+
+What: `find_subslice` (`string.rs:49`) is a byte-at-a-time nested scan -
+O(n*m) with no skip loop - now charging 1 cost per byte compared. A
+memchr-based first-byte skip (or full two-way/memmem) is deterministic and
+typically several-fold faster on long subjects; serves the `string.find`
+plain path and the plain-gsub loop.
+
+Watch out: the per-byte cost charge means the scan algorithm is
+script-observable through cost_used. Changing the algorithm changes what a
+given call costs - either keep charging as-if-naive (cost model stays put,
+wall time improves) or accept a replay-versioning event.
 
 ---
 
 ## IC extensions (same shape as existing ICs)
 
-### Table-library fallback IC
+### Table-library fallback: gate the miss path, IC the hit path (merged with B-O4/C-O5)
 
-What: when `tbl:insert(...)`, `tbl:concat(...)` etc. fall through from
-direct lookup to the `table` global library, cache the resolved value at
-the call site.
+What (miss path - measured, simpler, do first): every plain-table field read
+that misses (no metatable, key absent) - the extremely common
+`if t.optional_field then` pattern - takes `push_table_library_field`
+(`eval_index.rs:41, 56, 382`): a global lookup of `table` plus a full
+`get_table_with_key` against the library table, before returning nil. The
+fallback feature (`t:insert(...)` sugar) only ever resolves the handful of
+table-lib method names, and the name set is static. Measured: `fields/miss`
+(a designed probe) at 6.6x lua5.5 against `fields/same_obj_read` at 3.9x -
+a missing field costs roughly 1.7x what a hit does in relative terms.
 
-Sketch: same shape as the string method IC above, but for the `table`
-global instead of `string`.
+Sketch (miss): check the key against a compile-time set of table-lib names
+(they are string literals; a per-chunk bitmask computed at literal-pool
+build time, or an interned-ptr comparison against the few lib method
+strings) and skip the fallback entirely for all other keys - no cache
+invalidation at all. Alternatively only emit the fallback-capable GET_FIELD
+variant in method-call position, where the sugar is actually used.
 
-Why deferred: rarer pattern than string methods in current code, and the
-fallback path itself isn't a hot bench.
-
-Signal: same as string method IC - a workload where these fallbacks fire
-in a tight loop.
+What (hit path - deferred): when `tbl:insert(...)` etc. do fall through to
+the `table` library, cache the resolved value at the call site - same shape
+as the shipped string-method IC. Rarer pattern than string methods, and the
+fallback hit path isn't a hot bench; the miss gate above removes the common
+cost without any cache.
 
 ### Method IC: refresh "no method" entries on mutation
 
@@ -448,7 +784,8 @@ Saves a slot per such pair and shares warmup state.
 Sketch: parser-time def-use analysis. For `self.count = self.count + 1`,
 both the GET and SET refer to `self`'s `count`. They could share an
 entry shape (table_ptr, version, index) since both lookups bottom out
-in the same table at the same index.
+in the same table at the same index. Subsumed by register-based codegen
+if that lands.
 
 Why deferred: requires DEF-USE analysis that the parser doesn't currently
 do. The memory savings are small (one cache slot per pair = ~24 bytes per
@@ -458,3 +795,64 @@ new pair, which is bounded.
 Signal: profiling showing the parser is fast and we have headroom to add
 analysis passes, OR a workload where many distinct (receiver, key) pairs
 each get fewer than ~3 accesses (so warmup amortization matters).
+
+---
+
+## Snapshot path
+
+Still unmeasured as a whole: snapshots are driven from Rust, not from Lua,
+so benching them needs harness work rather than a new `.lua` file.
+
+### StringPtr-keyed save dedupe (second half of D-OPT-3)
+
+What: the breadcrumb half of the original finding is fixed (the encoder
+tracks `PathSegment`s and renders the human-readable path only when
+building an error). What remains: `encode_val` for `Val::Str` copies the
+string content, probes `string_ids: BTreeMap<Vec<u8>, u32>`
+(`save_state.rs:279`; full-content comparisons per probe), then clones the
+bytes again for the id map. Strings are interned per-State, so `StringPtr`
+equality is content equality: key the dedupe map as
+`BTreeMap<StringPtr, u32>` and copy the content exactly once, when first
+appending to `strings`. Ids still assigned in first-encounter order, so
+byte-identical output.
+
+### Encoder buffer pre-sizing (D-OPT-6)
+
+What: `Encoder::new` starts from an empty Vec; a large save reallocates the
+output buffer log-many times. One-line `Vec::with_capacity` seeded from a
+cheap estimate (`strings total bytes + 16 x value count`). Only worth
+bundling with other snapshot work.
+
+---
+
+## Micro / take-or-leave
+
+- **Call-path cleanups worthwhile even if the frame-stack rewrite lands
+  later (B-O5):** replace return-value drain-to-Vec + extend with
+  `self.stack.drain(self.stack_bottom..ret_start)` (one memmove, after
+  `close_upvalues`) - removes one heap allocation per returning call.
+  `State::call` fixed-arg path: avoid `stack.remove(idx)` by treating the
+  callee slot as frame slot -1 (adjust `stack_bottom`); pairs naturally
+  with the rewrite.
+- **Dispatch micro-items, verify with asm/bench first (B-O6):** opcode space
+  is sparse (0-25, 30-54, 60-63, 70-72); a dense renumbering (or
+  `#[repr(u8)]` enum with a validated dense range) helps LLVM emit a single
+  dense jump table without range holes. `get_instr` bounds-checks every
+  fetch; with one-time validation that all jump targets are in-bounds at
+  load/finalize time, the fetch could use a pointer/len cursor - only if
+  profiles show it; keep panics over UB.
+- **Table micro (C-O8):** `Table::get_with_index` on Map does `get_index_of`
+  + `get_index` (two probes); IndexMap's `get_full` does it in one.
+  `promote_to_map` allocates capacity `INLINE_CAPACITY + 1 = 5`
+  (`table.rs:485`), guaranteeing a rehash almost immediately for growing
+  tables; promoting straight to 8 avoids one rehash on the common
+  grow-past-inline path. (`try_insert_table_direct`'s double probe is only
+  on the metatable-present path; the no-metatable path is single-probe
+  already - fine as is.)
+- **Stdlib micro (E):** `string.format` should format into one output buffer
+  instead of per-directive Vec round-trips. `table.pack`:
+  `for _ in 0..num_args { state.remove(1) }` (`table.rs:145-147`) is O(n^2)
+  stack shuffling; a single rotate/truncate does it. `is_plain_lua_pattern`
+  treats `-` as magic even though a `-` with no preceding class item at
+  pattern start is literal; conservative is fine, just noting the fast path
+  misses hyphenated plain needles like `"foo-bar"`.
