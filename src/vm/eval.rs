@@ -381,18 +381,6 @@ impl State {
         self.stack.drain(vararg_start..).collect()
     }
 
-    /// Drain a returning frame's results into the per-return Vec.
-    ///
-    /// Same rationale as [`Self::collect_varargs`]: this is the one heap
-    /// allocation on every returning Lua call (the drain-to-Vec the
-    /// OPTIMIZATIONS.md call-path entries target), and the function that
-    /// performs it cannot be measured itself.
-    #[hotpath::measure]
-    #[inline]
-    fn collect_return_values(&mut self, ret_start: usize) -> Vec<Val> {
-        self.stack.drain(ret_start..).collect()
-    }
-
     /// Fill in a runtime error's source line from the frame it surfaced in.
     ///
     /// Every error-return path out of a Lua frame must go through this, so that
@@ -502,19 +490,23 @@ impl State {
             RetCount::Fixed(n) => n,
         };
 
-        // Save return values from the top of the stack
-        let ret_start = self.stack.len() - actual_num_returned as usize;
-        let ret_vals = self.collect_return_values(ret_start);
-
-        // Close any open upvalues in this frame before clearing the stack
+        // Close open upvalues BEFORE moving anything: they point at the
+        // frame's local slots, which sit below `ret_start` and must still
+        // hold their values when the close reads them. The returns are
+        // transient operands above the locals, so no upvalue can point at
+        // them - closing first observes exactly what the old
+        // drain-then-close order did.
         self.close_upvalues(self.stack_bottom);
 
-        // Clear the frame's stack space
-        self.stack.truncate(self.stack_bottom);
+        // Slide the return values down over the frame in one memmove: drain
+        // the params/locals/operands beneath them and let the tail shift.
+        // This replaces a per-returning-call Vec allocation (measured at
+        // 16 B x 1.1M returns = 80% of arithmetic's process allocation) with
+        // zero allocations; the stack only ever shrinks here, so the cap
+        // needs no preflight.
+        let ret_start = self.stack.len() - actual_num_returned as usize;
+        self.stack.drain(self.stack_bottom..ret_start);
         self.stack_bottom = old_stack_bottom;
-
-        // Push return values back onto the stack
-        self.stack.extend(ret_vals); // Replaces values removed with this frame.
 
         // Pop call info
         self.call_stack.pop();
