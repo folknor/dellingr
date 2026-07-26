@@ -16,5 +16,8 @@ target
 .diff_test_*.out
 .brokkr/*
 !.brokkr/results.db
+overnight.sh
+overnight-logs
 
-research/
+research
+
