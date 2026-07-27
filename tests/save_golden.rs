@@ -1,7 +1,7 @@
 #![cfg(feature = "snapshot")]
 
 //! Pins the save codec's traversal order against a byte fixture captured
-//! before the iterative-walker rewrite (notes/bugs.md #28).
+//! before the iterative-walker rewrite.
 //!
 //! `saves_are_byte_stable` and `compiler_produced_save_resaves_byte_for_byte`
 //! cannot catch a reordering: both run the *current* algorithm twice, so any

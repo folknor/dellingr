@@ -232,6 +232,8 @@ fn classify_conversion(byte: u8) -> Option<Conversion> {
         b'%' => Conversion::Percent,
         b'c' => Conversion::Char,
         b'd' | b'i' => Conversion::SignedDecimal,
+        // %u is deprecated, not removed: 5.2 and 5.4 both still accept it and
+        // print the integer. Rejecting it here would diverge from both.
         b'u' => Conversion::UnsignedDecimal,
         b'o' => Conversion::Octal,
         b'x' => Conversion::HexLower,
@@ -245,6 +247,8 @@ fn classify_conversion(byte: u8) -> Option<Conversion> {
         b'A' => Conversion::HexFloatUpper,
         b's' => Conversion::String,
         b'q' => Conversion::Quoted,
+        // %p is 5.4-only; 5.2 rejects it with "invalid option". Accepting it
+        // follows this module's 5.4 contract, so the 5.2 mismatch is expected.
         b'p' => Conversion::Pointer,
         _ => return None,
     };
@@ -366,6 +370,9 @@ fn format_argument(state: &mut State, argument: usize, directive: &Directive) ->
         Conversion::Quoted => quote_argument(state, idx, argument),
         Conversion::Pointer => {
             let bytes = match state.typ(idx) {
+                // `(null)` is correct, not a stub: 5.4 substitutes it for any
+                // argument with no pointer representation. Verified against
+                // the reference - `string.format("%p", 42)` prints `(null)`.
                 LuaType::Nil | LuaType::Boolean | LuaType::Number => b"(null)".to_vec(),
                 LuaType::String | LuaType::Table | LuaType::Function => {
                     format!("0x{:x}", state.format_pointer_id(idx)?).into_bytes()

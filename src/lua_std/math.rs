@@ -188,6 +188,11 @@ pub(crate) fn open_math(state: &mut State) -> Result<()> {
                 let m = state.to_number(1)? as i64;
                 let n = state.to_number(2)? as i64;
                 if m > n {
+                    // Argument #1 is deliberate and matches 5.4; only 5.2
+                    // blames #2. Reading this against 5.2 makes it look like
+                    // an off-by-one, so it has been "found" as a bug before -
+                    // verified against both interpreters, and changing it to
+                    // #2 would introduce a divergence rather than fix one.
                     return Err(state.error(ErrorKind::RuntimeError(
                         "bad argument #1 to 'random' (interval is empty)".to_string(),
                     )));

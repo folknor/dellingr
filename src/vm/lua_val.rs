@@ -110,7 +110,7 @@ impl fmt::Debug for Val {
 
 // No `Display for Val`. Rendering an object needs the heap for its type and
 // the State for its deterministic identity, so a heap-free impl could only
-// leak the slotmap key's `Debug` form - which is exactly what finding #61 was.
+// leak the slotmap key's `Debug` form - which is exactly the leak this avoids.
 // User-visible conversion goes through `State::to_string`/`bytes_coerce`.
 
 /// This is very dangerous, since f64 doesn't implement Eq.

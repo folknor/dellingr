@@ -41,7 +41,7 @@ impl LuaPattern {
     ///
     /// Test-only: every caller in the standard library matches against the
     /// whole subject with an explicit `init`, so that `%f` keeps its left
-    /// context (finding #33).
+    /// context.
     #[cfg(test)]
     pub(crate) fn matches_bytes(
         &mut self,

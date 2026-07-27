@@ -1,5 +1,5 @@
 -- Regression coverage for call-base marking when the callee expression is
--- already on the stack before the call frame is marked (notes/bugs.md #60).
+-- already on the stack before the call frame is marked.
 -- Every case needs BOTH a receiver that is not a plain name AND an argument
 -- that is itself a call, which is what makes the argument count dynamic.
 local function id(value) return value end

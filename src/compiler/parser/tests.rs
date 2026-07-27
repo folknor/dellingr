@@ -1199,7 +1199,7 @@ fn test32() {
         Instr::set_local(0),
         // The callee is evaluated first, then the base is marked one slot
         // below the top. Marking before evaluation required guessing how many
-        // values the callee expression had already left on the stack (#60).
+        // values the callee expression had already left on the stack.
         Instr::get_local(1),                                // Get print
         Instr::mark_call_base(1),                           // Mark the slot holding the callee
         Instr::get_local(0),                                // Get type

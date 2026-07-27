@@ -659,7 +659,7 @@ fn error_line_numbers() {
     assert_eq!(err.stack_trace[0].line, 3);
 }
 
-// --- MAX_STACK_SIZE is a real cap on the shared Lua/Rust value stack (#62) ---
+// --- MAX_STACK_SIZE is a real cap on the shared Lua/Rust value stack ---
 
 use super::MAX_STACK_SIZE;
 

@@ -277,7 +277,7 @@ impl Parser<'_> {
                 // which was wrong for every shape except a plain name and a
                 // field access, and is not even a fixed number for an inner
                 // call - the base then pointed at the receiver and the VM
-                // called that instead of the callee (#60).
+                // called that instead of the callee.
                 self.eval_prefix_exp(&base_expr);
                 // Always mark call base - needed when last arg is vararg or a
                 // function call, both of which make the argument count dynamic.
@@ -326,7 +326,7 @@ impl Parser<'_> {
                 //
                 // Same ordering as a normal call: evaluate the receiver first,
                 // then mark, so the base always sits one slot below the top
-                // regardless of what shape the receiver expression had (#60).
+                // regardless of what shape the receiver expression had.
                 // The dup/get_field/swap below leaves the resolved method in
                 // that marked slot with the receiver above it, which is exactly
                 // the [callee, args...] layout the call expects.

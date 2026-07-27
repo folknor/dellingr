@@ -1,12 +1,13 @@
-# Bug-fix loop methodology
+# Fix loop methodology
 
-The process driving `WORK.md` against `notes/bugs.md`. `WORK.md` itself holds
-only the current loop's problem statement and plan - codex sessions read it and
-should see the problem, not the process.
+The process driving `WORK.md` against the backlogs: `OPTIMIZATIONS.md` for
+performance work, `TODO.md` for features, refactors and ergonomic gaps.
+`WORK.md` itself holds only the current loop's problem statement and plan -
+codex sessions read it and should see the problem, not the process.
 
 One loop:
 
-1. Pick the next target(s) from `notes/bugs.md`.
+1. Pick the next target(s) from `OPTIMIZATIONS.md` or `TODO.md`.
 2. Shallow-verify the target(s) are real by reading the cited code.
 3. Write the problem statement into `WORK.md`.
 4. Launch `review bare --profile deep` (codex, read-only, xhigh) pointed at
@@ -19,7 +20,8 @@ One loop:
    step 4 with `--session <ID>`.
 9. Actionable findings get fixed - by a build session (findings written into
    `WORK.md`) or by hand.
-10. Update `notes/bugs.md`, run `brokkr fmt` + `brokkr check`, commit.
+10. Delete the shipped entry from its backlog, run `brokkr fmt` +
+    `brokkr check`, commit.
 
 `brokkr check` is the whole gate. Its `diff-lua` script_check runs
 `scripts/diff_gate.sh` at `stage = "post-test"`, so the differential comparison

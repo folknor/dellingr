@@ -6,6 +6,16 @@ All notable changes to dellingr are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- `analyze_cost` reports lower `ScopeCost::instructions` counts for unchanged
+  source. Bytecode finalization now strips retired call marks and no-op
+  `CloseUpvalues`, which were emitted but never executed. Charged cost is
+  unaffected - `own_cost`, `total_cost`, and runtime `cost_used` are identical,
+  since the stripped instructions were free under the cost model. Only
+  embedders comparing raw instruction counts against stored baselines will
+  observe a difference.
+
 ### Fixed
 
 - Saved bytecode is now verified for operand-stack discipline before it is
