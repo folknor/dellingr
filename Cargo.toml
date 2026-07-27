@@ -7,6 +7,20 @@ description = "An embeddable, pure-Rust Lua VM with precise instruction-cost acc
 license = "MIT"
 repository = "https://github.com/folknor/dellingr"
 
+# Dev-only surface: the brokkr results DB alone was ~1.2 MB of the 2.7 MB
+# 0.4.0 artifact. `examples/` and `tests/` stay in - the declared
+# `[[example]]` target needs the former to build, and both carry the .lua
+# corpus that `tests/run_examples.rs` and the diff gate execute.
+exclude = [
+    ".brokkr/",
+    "bench/",
+    "notes/",
+    "scripts/",
+    "WORK.md",
+    "brokkr.toml",
+    ".review.toml",
+]
+
 [profile.release]
 opt-level = 3
 lto = "fat"
