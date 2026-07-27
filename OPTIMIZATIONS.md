@@ -11,7 +11,7 @@ Entries tagged like (A-O1) came in through the 2026-07-24 corner audits
 (A: front end, B: execution core, C: data plane, D: state/persistence/host,
 E: stdlib/patterns), consolidated here after triage against the code on
 2026-07-26; the audit's separate candidate file is gone. Bench ratios cited
-below are from the 2026-07-25 README table refresh (commit b4ae38e,
+below are from the 2026-07-27 README table refresh (commit abf7c7b,
 plantasjen) unless noted.
 
 ---
@@ -23,13 +23,13 @@ plantasjen) unless noted.
 What: the 0.2.0-era README recorded `examples/strings/patterns.lua` at 30ms; it
 measured 160ms on the same host before the gmatch memoization work and 65ms
 after, so roughly 2.4x was recovered and roughly 2x remains unaccounted for.
-The bench re-measured at 66ms on 2026-07-25, so the residual is stable, not
+The bench re-measured at 60ms on 2026-07-27, so the residual is stable, not
 drifting.
 
 Decision: not chasing it. The portion with an identified mechanism (per-iteration
 subject recopy and pattern recompilation in `gmatch`) is already fixed. What is
 left has no suspect attached, and bisecting it is open-ended work against a
-bench whose absolute number is now 66ms. Relative deltas remain valid against an
+bench whose absolute number is now 60ms. Relative deltas remain valid against an
 inflated baseline, so this does not block measuring pattern-matcher
 optimizations - it would only matter if the residual were a live cost that is
 cheap to recover, which nothing currently suggests.
@@ -52,7 +52,7 @@ What: the parser emits a pure stack machine: `x = a + b` is GET_LOCAL,
 GET_LOCAL, ADD, SET_LOCAL - four dispatches plus stack traffic; a register VM
 does it in one ADD(dst, a, b). Reference Lua's 5.0 move from stack to register
 VM is the single largest reason for the persistent gap on arithmetic/field
-benches (`numerics/arithmetic` 3.2x, `fields/same_obj_read` 2.4x vs lua5.2).
+benches (`numerics/arithmetic` 2.6x, `fields/same_obj_read` 3.8x vs lua5.2).
 
 Sketch: the 32-bit ABC encoding in `instr.rs` already has the operand room;
 locals already live in fixed frame slots, which are registers in all but name.
@@ -79,12 +79,11 @@ that are all consequences of the frame being a Rust stack local:
 - Duplicate frame bookkeeping: `CallInfo` push (another `Arc<Bytecode>`
   clone) parallel to the `Frame` itself.
 - `stack.remove(idx)` to extract the callee (O(args) memmove, `eval.rs:68`).
-- varargs `drain(..).collect()` Vec per vararg call (`eval.rs:355`).
-- return values `drain(..).collect()` into a fresh Vec then `extend` back
-  (`eval.rs:488`) - an allocation per returning call.
+- varargs `drain(..).collect()` Vec per vararg call (`eval.rs:381`).
 - (per-call string-literal interning was on this list until the per-Bytecode
   runtime cache shipped on 2026-07-26; the frame handoff is now pure Arc
-  moves).
+  moves. The return-value drain-to-Vec left on 2026-07-26 too, commit
+  a96cff4 - `eval.rs:508` now slides the results down in place.)
 
 Sketch: a single dispatch loop over a State-owned `Vec<FrameState>` (bytecode
 Arc, ip, base, vararg span, cache ptr) eliminates every item above, merges
@@ -97,8 +96,8 @@ concern about Rust-stack bloat per recursion level (the hotpath-annotation
 caveat) disappears.
 
 Why deferred: highest-leverage rewrite in the execution core, and priced like
-it. Call-heavy benches (`calls/*`, `benchmark`) are the ones sitting at ~4x
-lua5.5. Pre-1.0, internal-only: `State::call`'s public signature can stay.
+it. Call-heavy benches (`calls/*`, `benchmark`) are the ones sitting at
+3.4-4.4x lua5.5. Pre-1.0, internal-only: `State::call`'s public signature can stay.
 Subsumes the Closure-clone entry and the call-path micro cleanups below.
 
 ### 8-byte NaN-boxed `Val` (C-O7)
@@ -111,8 +110,8 @@ traffic and makes `stack: Vec<Val>` copies twice as dense.
 
 Why deferred: full-rewrite class - touches every `match` on `Val` - but it is
 mechanical, determinism-neutral, and is the standard reason reference VMs beat
-tagged-enum interpreters on memory-bound workloads (`tables/fill`, `fields/*`
-are exactly the 3-4x-behind benches). If judged too invasive, a cheaper
+tagged-enum interpreters on memory-bound workloads (`tables/fill` and
+`fields/same_obj_read` are the 2.6-3.8x-behind-lua5.2 benches). If judged too invasive, a cheaper
 intermediate is boxing only `Table` storage entries more densely; but the full
 version is where the payoff is.
 
@@ -471,31 +470,19 @@ The `visiting` cycle-detection array already exists and carries over.
 
 ## Front end / parse time
 
-Measured context: `parse/large_source` (5000 generated lines) is 8.0x lua5.5
-/ 7.3x lua5.2 - the worst ratio outside the literal-interning probe. Note
-that is a single measurement, not a demonstrated quadratic; confirming the
-curve needs a second file size.
-
-### Stop using `Vec::remove` in call emission (A-O4)
-
-What: every plain call does `remove_instr` -> `code.remove(mark_idx)`
-(`parser.rs:446-448`): O(n) tail shift per call, so call-heavy chunks are
-quadratic-ish in emission. `remove_instr` keeps `line_info` aligned, so it
-is not a line-attribution bug.
-
-Sketch: (a) introduce OP_NOP and patch the mark in place (O(1), keeps
-line_info aligned; one extra cheap dispatch on calls that needed the mark
-removed - or strip nops in `finalize` with a jump-offset remap done once,
-correctly, in one place); (b) restructure so the mark is only emitted once
-the arg list is known to need it (requires buffered args or a pre-scan).
-(a) is the pragmatic fix.
+Measured context: `parse/large_source` (5000 generated lines) was 8.0x lua5.5
+/ 7.3x lua5.2 before the finalize strip pass (commit bc99ae4) removed the
+quadratic call-mark emission; it now measures 2.3x lua5.5 / 2.0x lua5.2, and
+the section's remaining entries are no longer backed by an outlier ratio.
+The suspected-quadratic parse candidates were never confirmed on a curve -
+that still needs a second file size.
 
 ### Constant folding, with reference Lua's guards (A-O6)
 
 What: there is no folding at all: `local ms = 60 * 1000` multiplies at
 runtime on every execution, `-5` is PUSH_NUM + NEGATE per hit, and both
-charge cost. Measured: `numerics/constants` at 6.7x lua5.5 against
-`numerics/arithmetic` at 4.4x; the pair isolates folding because
+charge cost. Measured: `numerics/constants` at 6.5x lua5.5 against
+`numerics/arithmetic` at 3.6x; the pair isolates folding because
 arithmetic.lua deliberately has no foldable expression.
 
 Sketch: fold literal arithmetic/unary at parse time with lcode.c's guards
@@ -513,18 +500,6 @@ Sketch: a peephole in the parser (or in `finalize`) fusing comparison +
 branch into one opcode halves the dispatch on loop headers. Needs new
 opcodes on the execution side. Subsumed by register-based codegen if that
 lands.
-
-### Skip CLOSE_UPVALUES in closure-free functions (A-O9)
-
-What: scope exits emit CLOSE_UPVALUES unconditionally (`parser.rs:428, 495`
-and the loop parsers) - including once per iteration inside numeric/generic
-for bodies. If a function body creates no closures (`chunk.nested` empty and
-no OP_CLOSURE emitted), no upvalue over its locals can ever be open, and
-every CLOSE_UPVALUES in it is a guaranteed no-op paying a dispatch.
-
-Sketch: a `finalize` pass can prove this per-Bytecode and drop/nop them.
-Most game-script hot loops are closure-free; this removes a per-iteration
-dispatch from all of them.
 
 ### Parser-owned identifier and name storage (A-O5)
 
@@ -544,7 +519,7 @@ roughly 16 to 24 bytes on 64-bit hosts. What remains is parser-side ownership:
 Partially shipped as of 2026-07-25 - the per-iteration subject/pattern
 copies and pattern re-validation are gone (`memoize_gmatch_pattern`,
 `gmatch_subject_matcher_and_cost_meter`); that was the bulk of the win
-(`strings/patterns` 160ms -> 66ms).
+(`strings/patterns` 160ms -> 60ms).
 
 What remains (`string.rs:19, 537-558, 739-786`): one Lua call into the
 compiled wrapper chunk (`gmatch_wrapper()`, still a compiled Bytecode) + one
@@ -689,16 +664,13 @@ bundling with other snapshot work.
 
 ## Micro / take-or-leave
 
-- **Call-path cleanups worthwhile even if the frame-stack rewrite lands
-  later (B-O5):** replace return-value drain-to-Vec + extend with
-  `self.stack.drain(self.stack_bottom..ret_start)` (one memmove, after
-  `close_upvalues`) - removes one heap allocation per returning call.
-  Measured (2026-07-26, commit d9382ef, plantasjen, `--alloc` mode): on
-  `numerics/arithmetic` the unattributed root blob is 17.0 MB over ~1.1M
-  returning calls, ~16 B per return; the drain now has its own
-  measurement point (`collect_return_values`). `State::call` fixed-arg
-  path: avoid `stack.remove(idx)` by treating the callee slot as frame
-  slot -1 (adjust `stack_bottom`); pairs naturally with the rewrite.
+- **Call-path cleanup worthwhile even if the frame-stack rewrite lands
+  later (B-O5):** the return-value half shipped 2026-07-26 (commit
+  a96cff4); `eval.rs:508` is now the in-place `drain`. What remains is the
+  `State::call` fixed-arg path, which still does `stack.remove(idx)` to
+  extract the callee (`eval.rs:68`) - an O(args) memmove per call. Avoid it
+  by treating the callee slot as frame slot -1 (adjust `stack_bottom`);
+  pairs naturally with the rewrite.
 - **Dispatch micro-items, verify with asm/bench first (B-O6):** opcode space
   is sparse (0-25, 30-54, 60-63, 70-72); a dense renumbering (or
   `#[repr(u8)]` enum with a validated dense range) helps LLVM emit a single
