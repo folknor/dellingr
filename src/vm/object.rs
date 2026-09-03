@@ -648,7 +648,7 @@ struct StringEntry {
 /// - Each key contains a generation number
 /// - When a slot is freed and reused, the generation increments
 /// - Accessing with an old key panics instead of causing memory corruption
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) struct StringPtr(StringKey);
 
 impl fmt::Display for StringPtr {

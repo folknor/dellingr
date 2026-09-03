@@ -436,22 +436,6 @@ embedder asking.
 
 ---
 
-## Execution core
-
-### Iterative `build_bytecode` on the load path (last leg of C-O6/D-OPT-1)
-
-What: the GC mark walk and the save-side encoder were both rewritten onto
-explicit worklists (2026-07-25/26; see git); `build_bytecode`
-(`save_state.rs:1275`) is the one graph walk still recursing - one Rust
-frame per nested-chunk depth when loading a snapshot, so hostile or deep
-save data can still abort the host on the load path.
-
-Sketch: same treatment as the other two - an explicit stack of pending chunk
-ids, iterate until empty, traversal order pinned to match today's recursion.
-The `visiting` cycle-detection array already exists and carries over.
-
----
-
 ## Front end / parse time
 
 Measured context: `parse/large_source` (5000 generated lines) was 8.0x lua5.5
@@ -622,27 +606,8 @@ each get fewer than ~3 accesses (so warmup amortization matters).
 ## Snapshot path
 
 Still unmeasured as a whole: snapshots are driven from Rust, not from Lua,
-so benching them needs harness work rather than a new `.lua` file.
-
-### StringPtr-keyed save dedupe (second half of D-OPT-3)
-
-What: the breadcrumb half of the original finding is fixed (the encoder
-tracks `PathSegment`s and renders the human-readable path only when
-building an error). What remains: `encode_val` for `Val::Str` copies the
-string content, probes `string_ids: BTreeMap<Vec<u8>, u32>`
-(`save_state.rs:279`; full-content comparisons per probe), then clones the
-bytes again for the id map. Strings are interned per-State, so `StringPtr`
-equality is content equality: key the dedupe map as
-`BTreeMap<StringPtr, u32>` and copy the content exactly once, when first
-appending to `strings`. Ids still assigned in first-encounter order, so
-byte-identical output.
-
-### Encoder buffer pre-sizing (D-OPT-6)
-
-What: `Encoder::new` starts from an empty Vec; a large save reallocates the
-output buffer log-many times. One-line `Vec::with_capacity` seeded from a
-cheap estimate (`strings total bytes + 16 x value count`). Only worth
-bundling with other snapshot work.
+so benching them needs harness work rather than a new `.lua` file (tracked
+in TODO.md's workload-registry entry).
 
 ---
 

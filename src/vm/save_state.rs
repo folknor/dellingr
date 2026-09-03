@@ -44,7 +44,7 @@ use std::sync::Arc;
 use std::collections::BTreeMap;
 
 use super::lua_val::RustFunc;
-use super::object::{GcHeap, RawObject, Upvalue, UpvalueRef};
+use super::object::{GcHeap, RawObject, StringPtr, Upvalue, UpvalueRef};
 use super::rng::VmRng;
 use super::{ObjectPtr, State, Val};
 use crate::COST_MODEL_VERSION;
@@ -256,6 +256,27 @@ struct SavePayload {
     format_pointer_ids: Vec<(SavedVal, u64)>,
 }
 
+impl SavePayload {
+    /// Rough encoded size: string content plus ~16 bytes per value slot.
+    /// Used only to seed the encoder's buffer capacity.
+    fn encoded_size_estimate(&self) -> usize {
+        let string_bytes: usize = self.strings.iter().map(Vec::len).sum();
+        let value_count = self
+            .objects
+            .iter()
+            .map(|obj| match obj {
+                SavedObject::Table { entries, .. } => entries.len() * 2 + 1,
+                SavedObject::Closure { upvalues, .. } => upvalues.len() + 1,
+            })
+            .sum::<usize>()
+            + self.upvalues.len()
+            + self.user_globals.len() * 2;
+        string_bytes
+            .saturating_add(value_count.saturating_mul(16))
+            .saturating_add(1024)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 struct SavedEnvDelta {
     token: String,
@@ -276,7 +297,12 @@ struct SaveBuilder<'a> {
     state: &'a State,
     env_reverse: BTreeMap<ObjectPtr, String>,
     strings: Vec<Vec<u8>>,
-    string_ids: BTreeMap<Vec<u8>, u32>,
+    /// Strings are interned per-State, so `StringPtr` equality is content
+    /// equality: keying the dedupe on the pointer avoids a content copy and
+    /// byte-wise comparisons per probe. Ids are still assigned in
+    /// first-encounter order, so the payload is byte-identical to the
+    /// content-keyed map this replaced.
+    string_ids: BTreeMap<StringPtr, u32>,
     bytecode: Vec<SavedBytecode>,
     bytecode_ids: BTreeMap<usize, u32>,
     upvalues: Vec<Option<SavedVal>>,
@@ -419,11 +445,7 @@ impl<'a> SaveBuilder<'a> {
 
     fn saved_reachable_pointer_value(&self, value: Val) -> Option<SavedVal> {
         match value {
-            Val::Str(ptr) => self
-                .string_ids
-                .get(self.state.heap.get_string(ptr))
-                .copied()
-                .map(SavedVal::Str),
+            Val::Str(ptr) => self.string_ids.get(&ptr).copied().map(SavedVal::Str),
             Val::RustFn(func) => self
                 .state
                 .rust_fn_ids_by_addr
@@ -541,15 +563,15 @@ impl<'a> SaveBuilder<'a> {
                         Val::Bool(b) => Ok(SavedVal::Bool(b)),
                         Val::Num(n) => Ok(SavedVal::Num(n.to_bits())),
                         Val::Str(ptr) => {
-                            let bytes = self.state.heap.get_string(ptr).to_vec();
-                            let id = if let Some(id) = self.string_ids.get(&bytes) {
+                            let id = if let Some(id) = self.string_ids.get(&ptr) {
                                 *id
                             } else {
                                 let id = u32::try_from(self.strings.len()).map_err(|_| {
                                     SaveError::EncodeError("too many strings".to_string())
                                 })?;
-                                self.strings.push(bytes.clone());
-                                self.string_ids.insert(bytes, id);
+                                // The single content copy per distinct string.
+                                self.strings.push(self.state.heap.get_string(ptr).to_vec());
+                                self.string_ids.insert(ptr, id);
                                 id
                             };
                             Ok(SavedVal::Str(id))
@@ -927,7 +949,7 @@ impl State {
     pub fn save_state(&self) -> Result<SaveState, SaveError> {
         self.validate_quiescent()?;
         let payload = SaveBuilder::new(self).finish()?;
-        let mut encoder = Encoder::new();
+        let mut encoder = Encoder::with_capacity(payload.encoded_size_estimate());
         encoder.write_magic_and_versions();
         // Diagnostic metadata only. The format and cost-model versions in the
         // magic block are the hard compatibility gates; this human-readable
@@ -1268,36 +1290,66 @@ fn materialize_bytecode(
     let mut out: Vec<Option<Arc<Bytecode>>> = vec![None; saved.len()];
     let mut visiting = vec![false; saved.len()];
     for idx in 0..saved.len() {
-        let bc = build_bytecode(idx, saved, &mut out, &mut visiting)?;
-        out[idx] = Some(bc);
+        build_bytecode_tree(idx, saved, &mut out, &mut visiting)?;
     }
     out.into_iter()
         .map(|bc| bc.ok_or(LoadError::CorruptArena))
         .collect()
 }
 
-fn build_bytecode(
-    idx: usize,
+/// Materialize the chunk at `root` and everything nested under it.
+///
+/// Iterative depth-first walk on an explicit stack of `(chunk, next_child)`
+/// frames: nesting depth in hostile or deep save data costs heap, not Rust
+/// stack, so the load path cannot abort the host by recursion. Traversal
+/// order, memoization through `out`, and cycle detection through `visiting`
+/// all match the recursive version this replaced.
+fn build_bytecode_tree(
+    root: usize,
     saved: &[SavedBytecode],
     out: &mut [Option<Arc<Bytecode>>],
     visiting: &mut [bool],
-) -> Result<Arc<Bytecode>, LoadError> {
-    if let Some(bc) = &out[idx] {
-        return Ok(Arc::clone(bc));
+) -> Result<(), LoadError> {
+    if out[root].is_some() {
+        return Ok(());
     }
-    let Some(is_visiting) = visiting.get_mut(idx) else {
-        return Err(LoadError::CorruptArena);
-    };
-    if *is_visiting {
-        return Err(LoadError::CorruptArena);
+    visiting[root] = true;
+    let mut stack: Vec<(usize, usize)> = vec![(root, 0)];
+    while let Some((idx, cursor)) = stack.last_mut() {
+        let idx = *idx;
+        let src = saved.get(idx).ok_or(LoadError::CorruptArena)?;
+        if let Some(child) = src.nested.get(*cursor) {
+            *cursor += 1;
+            let child = *child as usize;
+            if out.get(child).ok_or(LoadError::CorruptArena)?.is_some() {
+                continue;
+            }
+            if visiting[child] {
+                return Err(LoadError::CorruptArena);
+            }
+            visiting[child] = true;
+            stack.push((child, 0));
+            continue;
+        }
+        let nested = src
+            .nested
+            .iter()
+            .map(|child| {
+                out[*child as usize]
+                    .as_ref()
+                    .map(Arc::clone)
+                    .ok_or(LoadError::CorruptArena)
+            })
+            .collect::<Result<Vec<_>, LoadError>>()?;
+        out[idx] = Some(build_bytecode_node(src, nested));
+        visiting[idx] = false;
+        stack.pop();
     }
-    *is_visiting = true;
-    let src = saved.get(idx).ok_or(LoadError::CorruptArena)?;
-    let mut nested = Vec::with_capacity(src.nested.len());
-    for child in &src.nested {
-        nested.push(build_bytecode(*child as usize, saved, out, visiting)?);
-    }
-    let bc = Arc::new(Bytecode {
+    Ok(())
+}
+
+fn build_bytecode_node(src: &SavedBytecode, nested: Vec<Arc<Bytecode>>) -> Arc<Bytecode> {
+    Arc::new(Bytecode {
         code: src.code.iter().map(|raw| Instr::from_raw(*raw)).collect(),
         number_literals: src
             .number_literals
@@ -1324,10 +1376,7 @@ fn build_bytecode(
         name: src.name.clone(),
         source: src.source.clone(),
         line_info: src.line_info.clone(),
-    });
-    out[idx] = Some(Arc::clone(&bc));
-    visiting[idx] = false;
-    Ok(bc)
+    })
 }
 
 struct Encoder {
@@ -1335,8 +1384,18 @@ struct Encoder {
 }
 
 impl Encoder {
+    #[cfg(test)]
     fn new() -> Self {
         Self { bytes: Vec::new() }
+    }
+
+    /// Seed the output buffer so a large save does not reallocate it
+    /// log-many times. The estimate is cheap and deliberately rough; the
+    /// buffer still grows normally if it undershoots.
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            bytes: Vec::with_capacity(capacity),
+        }
     }
 
     fn finish(self) -> Vec<u8> {
@@ -2614,12 +2673,52 @@ mod tests {
         second.nested.push(0);
         assert_invalid(rejected_bytecode(vec![first, second], Vec::new()), 0, None);
 
+        let mut deep_self = valid_saved_bytecode();
+        deep_self.nested.push(0);
+        assert_invalid(rejected_bytecode(vec![deep_self], Vec::new()), 0, None);
+
         let mut nested_bad_opcode = valid_saved_bytecode();
         nested_bad_opcode.code[0] = Instr::op(255).raw();
         assert_invalid(
             rejected_bytecode(vec![valid_saved_bytecode(), nested_bad_opcode], Vec::new()),
             1,
             Some(0),
+        );
+    }
+
+    fn chunk_chain(depth: u32) -> Vec<SavedBytecode> {
+        let mut chain = Vec::with_capacity(depth as usize);
+        for idx in 0..depth {
+            let mut chunk = valid_saved_bytecode();
+            if idx + 1 < depth {
+                chunk.nested.push(idx + 1);
+            }
+            chain.push(chunk);
+        }
+        chain
+    }
+
+    #[test]
+    fn nested_chunk_depth_is_capped_at_the_parser_limit() {
+        use crate::compiler::MAX_SYNTAX_DEPTH;
+
+        // The deepest chain the verifier admits materializes fine; one deeper
+        // is rejected before materialization. Materialization itself walks an
+        // explicit stack, so it does not depend on this cap for Rust-stack
+        // safety - the two layers are independent.
+        load_bytecode(
+            chunk_chain(MAX_SYNTAX_DEPTH),
+            vec![SavedObject::Closure {
+                chunk: 0,
+                upvalues: Vec::new(),
+            }],
+        )
+        .expect("a chain at the parser depth limit is valid save data");
+
+        assert_invalid(
+            rejected_bytecode(chunk_chain(MAX_SYNTAX_DEPTH + 1), Vec::new()),
+            MAX_SYNTAX_DEPTH,
+            None,
         );
     }
 
