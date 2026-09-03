@@ -455,15 +455,6 @@ branch into one opcode halves the dispatch on loop headers. Needs new
 opcodes on the execution side. Subsumed by register-based codegen if that
 lands.
 
-### Parser-owned identifier and name storage (A-O5)
-
-The lexer half shipped on 2026-07-26: `lex_word` now matches its source slice
-without allocating, and token line stamps grow the transient `Token` from
-roughly 16 to 24 bytes on 64-bit hosts. What remains is parser-side ownership:
-`locals: Vec<(String, i32)>`, `upvalues`, and namelists still allocate a
-`String` per declaration. The parser already carries `'a`; these can be
-`&'a str` borrows of the source.
-
 ---
 
 ## Stdlib / patterns

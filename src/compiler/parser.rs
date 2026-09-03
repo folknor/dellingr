@@ -32,17 +32,18 @@ struct Parser<'a> {
     input: TokenStream<'a>,
     chunk: Bytecode,
     nest_level: i32,
-    locals: Vec<(String, i32)>,
+    /// Names borrow the source (`'a`), so declarations allocate nothing.
+    locals: Vec<(&'a str, i32)>,
     outer_chunks: Vec<Bytecode>,
     /// Break-jump state for each nested loop.
     loop_breaks: Vec<LoopContext>,
     /// Upvalues for the current function being compiled.
     /// Each entry is (name, descriptor).
-    upvalues: Vec<(String, UpvalueDesc)>,
+    upvalues: Vec<(&'a str, UpvalueDesc)>,
     /// Stack of locals from outer functions (pushed when entering a nested function).
-    outer_locals: Vec<Vec<(String, i32)>>,
+    outer_locals: Vec<Vec<(&'a str, i32)>>,
     /// Stack of upvalues from outer functions.
-    outer_upvalues: Vec<Vec<(String, UpvalueDesc)>>,
+    outer_upvalues: Vec<Vec<(&'a str, UpvalueDesc)>>,
     /// Current line number for instruction emission.
     current_line: u32,
     /// Current nesting depth across recursive parser entry points.
@@ -99,11 +100,11 @@ impl<'a> Parser<'a> {
 
     /// Creates a new local slot at the current nest_level.
     /// Fails if we have exceeded the maximum number of locals.
-    fn add_local(&mut self, name: &str) -> Result<()> {
+    fn add_local(&mut self, name: &'a str) -> Result<()> {
         if self.locals.len() == u8::MAX as usize {
             Err(self.error(SyntaxError::TooManyLocals))
         } else {
-            self.locals.push((name.to_string(), self.nest_level));
+            self.locals.push((name, self.nest_level));
             let non_param_locals = self.locals.len() - self.chunk.num_params as usize;
             self.chunk.num_locals = self.chunk.num_locals.max(non_param_locals as u8);
             Ok(())
@@ -599,7 +600,7 @@ impl<'a> Parser<'a> {
 
     /// Parses a `Bytecode`.
     #[hotpath::measure]
-    fn parse_chunk(&mut self, params: &[&str], is_vararg: bool) -> Result<Bytecode> {
+    fn parse_chunk(&mut self, params: &[&'a str], is_vararg: bool) -> Result<Bytecode> {
         let num_params =
             u8::try_from(params.len()).map_err(|_| self.error(SyntaxError::TooManyLocals))?;
         let source = self.chunk.source.clone();
@@ -619,7 +620,7 @@ impl<'a> Parser<'a> {
         self.outer_upvalues.push(saved_upvalues);
 
         for &param in params {
-            self.locals.push((param.into(), self.nest_level));
+            self.locals.push((param, self.nest_level));
         }
 
         self.parse_statements()?;
@@ -722,7 +723,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Parses a variable's name. Returns Local, Upvalue, or Global.
-    fn parse_prefix_identifier(&mut self, name: &str) -> Result<PlaceExp> {
+    fn parse_prefix_identifier(&mut self, name: &'a str) -> Result<PlaceExp> {
         // First check if it's a local in the current function
         if let Some(i) = find_last_local(&self.locals, name) {
             return Ok(PlaceExp::Local(i as u8));
@@ -793,7 +794,7 @@ impl<'a> Parser<'a> {
 
 /// Finds the index of the last local entry which matches `name`.
 #[must_use]
-fn find_last_local(locals: &[(String, i32)], name: &str) -> Option<usize> {
+fn find_last_local(locals: &[(&str, i32)], name: &str) -> Option<usize> {
     let mut i = locals.len();
     while i > 0 {
         i -= 1;

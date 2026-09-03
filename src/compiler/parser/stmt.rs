@@ -238,7 +238,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Parses a numeric `for` loop, starting with the first expression after the `=`.
-    fn parse_numeric_for(&mut self, name: &str) -> Result<()> {
+    fn parse_numeric_for(&mut self, name: &'a str) -> Result<()> {
         // The start(current), stop and step are stored in three "hidden" local slots.
         let current_local_slot = self.locals.len() as u8;
 
@@ -305,11 +305,11 @@ impl<'a> Parser<'a> {
     }
 
     /// Parses a generic `for` loop: `for var1, var2, ... in explist do body end`
-    fn parse_generic_for(&mut self, first_name: &str) -> Result<()> {
+    fn parse_generic_for(&mut self, first_name: &'a str) -> Result<()> {
         // Collect all loop variable names
-        let mut names = vec![first_name.to_string()];
+        let mut names = vec![first_name];
         while self.input.try_pop(TokenType::Comma)?.is_some() {
-            names.push(self.expect_identifier()?.to_string());
+            names.push(self.expect_identifier()?);
         }
         self.expect(TokenType::In)?;
 
