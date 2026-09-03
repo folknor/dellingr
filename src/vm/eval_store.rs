@@ -546,6 +546,9 @@ impl State {
     /// result instead of pushing it. Shared by the plain comparison opcodes
     /// and the fused compare-and-branch forms; an incomparable pair (NaN
     /// involved) compares false before negation, matching the push path.
+    /// `inline(always)`: this sits directly in the bytecode dispatch loop's
+    /// hot arms, and an outlined call measurably regressed `arithmetic`.
+    #[inline(always)]
     pub(super) fn eval_compare_bool(
         &mut self,
         target: std::cmp::Ordering,
