@@ -31,6 +31,38 @@ impl State {
         Ok(())
     }
 
+    /// Fused ordering-comparison + branch-if-false (see `eval_compare_bool`
+    /// for the comparison semantics).
+    #[hotpath::measure]
+    pub(super) fn instr_branch_compare(
+        &mut self,
+        frame: &mut Frame,
+        target: std::cmp::Ordering,
+        negate: bool,
+        offset: i16,
+    ) -> Result<()> {
+        if !self.eval_compare_bool(target, negate)? {
+            frame.jump(offset)?;
+        }
+        Ok(())
+    }
+
+    /// Fused (in)equality + branch-if-false.
+    #[hotpath::measure]
+    pub(super) fn instr_branch_equal(
+        &mut self,
+        frame: &mut Frame,
+        want_equal: bool,
+        offset: i16,
+    ) -> Result<()> {
+        let val2 = self.pop_val();
+        let val1 = self.pop_val();
+        if (val1 == val2) != want_equal {
+            frame.jump(offset)?;
+        }
+        Ok(())
+    }
+
     #[hotpath::measure]
     pub(super) fn instr_closure(&mut self, frame: &mut Frame, i: u8) -> Result<()> {
         let bytecode = frame.get_nested_bytecode(i);
