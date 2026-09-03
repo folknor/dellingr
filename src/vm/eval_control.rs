@@ -31,33 +31,48 @@ impl State {
         Ok(())
     }
 
-    /// Fused ordering-comparison + branch-if-false (see `eval_compare_bool`
-    /// for the comparison semantics).
+    /// Fused comparison + branch-if-false, all six variants. The dispatch
+    /// loop hands the opcode through so its own match needs only one range
+    /// arm (see the comment at the dispatch site). Ordering forms share
+    /// `eval_compare_bool`'s semantics; equality forms compare Vals raw.
     #[hotpath::measure]
-    pub(super) fn instr_branch_compare(
+    pub(super) fn instr_branch_fused(
         &mut self,
         frame: &mut Frame,
-        target: std::cmp::Ordering,
-        negate: bool,
+        opcode: u8,
         offset: i16,
     ) -> Result<()> {
-        if !self.eval_compare_bool(target, negate)? {
-            frame.jump(offset)?;
-        }
-        Ok(())
-    }
-
-    /// Fused (in)equality + branch-if-false.
-    #[hotpath::measure]
-    pub(super) fn instr_branch_equal(
-        &mut self,
-        frame: &mut Frame,
-        want_equal: bool,
-        offset: i16,
-    ) -> Result<()> {
-        let val2 = self.pop_val();
-        let val1 = self.pop_val();
-        if (val1 == val2) != want_equal {
+        use std::cmp::Ordering;
+        let condition = match opcode {
+            crate::instr::Instr::OP_BRANCH_FALSE_LESS => {
+                self.eval_compare_bool(Ordering::Less, false)?
+            }
+            crate::instr::Instr::OP_BRANCH_FALSE_GREATER => {
+                self.eval_compare_bool(Ordering::Greater, false)?
+            }
+            crate::instr::Instr::OP_BRANCH_FALSE_LESS_EQUAL => {
+                self.eval_compare_bool(Ordering::Greater, true)?
+            }
+            crate::instr::Instr::OP_BRANCH_FALSE_GREATER_EQUAL => {
+                self.eval_compare_bool(Ordering::Less, true)?
+            }
+            crate::instr::Instr::OP_BRANCH_FALSE_EQUAL => {
+                let val2 = self.pop_val();
+                let val1 = self.pop_val();
+                val1 == val2
+            }
+            crate::instr::Instr::OP_BRANCH_FALSE_NOT_EQUAL => {
+                let val2 = self.pop_val();
+                let val1 = self.pop_val();
+                val1 != val2
+            }
+            _ => {
+                return Err(self.error(crate::error::ErrorKind::InternalError(
+                    "fused branch dispatched with a non-fused opcode".into(),
+                )));
+            }
+        };
+        if !condition {
             frame.jump(offset)?;
         }
         Ok(())

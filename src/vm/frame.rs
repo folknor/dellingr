@@ -302,35 +302,11 @@ impl Frame {
                 Instr::OP_GREATER_EQUAL => state.eval_compare(std::cmp::Ordering::Less, true)?, // >= is !<
 
                 // Fused comparison + BranchFalse (both halves free): pop two
-                // operands, jump when the comparison is false. Outlined like
-                // instr_branch so the dispatch loop's codegen stays compact.
-                Instr::OP_BRANCH_FALSE_LESS => {
-                    state.instr_branch_compare(self, std::cmp::Ordering::Less, false, inst.sbx())?;
-                }
-                Instr::OP_BRANCH_FALSE_GREATER => {
-                    state.instr_branch_compare(
-                        self,
-                        std::cmp::Ordering::Greater,
-                        false,
-                        inst.sbx(),
-                    )?;
-                }
-                Instr::OP_BRANCH_FALSE_LESS_EQUAL => {
-                    state.instr_branch_compare(
-                        self,
-                        std::cmp::Ordering::Greater,
-                        true,
-                        inst.sbx(),
-                    )?;
-                }
-                Instr::OP_BRANCH_FALSE_GREATER_EQUAL => {
-                    state.instr_branch_compare(self, std::cmp::Ordering::Less, true, inst.sbx())?;
-                }
-                Instr::OP_BRANCH_FALSE_EQUAL => {
-                    state.instr_branch_equal(self, true, inst.sbx())?;
-                }
-                Instr::OP_BRANCH_FALSE_NOT_EQUAL => {
-                    state.instr_branch_equal(self, false, inst.sbx())?;
+                // operands, jump when the comparison is false. One range arm
+                // with the variant decode outlined - per-variant arms here
+                // measurably perturbed the dispatch loop's codegen.
+                Instr::OP_BRANCH_FALSE_LESS..=Instr::OP_BRANCH_FALSE_NOT_EQUAL => {
+                    state.instr_branch_fused(self, inst.opcode(), inst.sbx())?;
                 }
 
                 // `for` loops - control flow is free
