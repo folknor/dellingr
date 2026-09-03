@@ -997,3 +997,93 @@ fn push_gmatch_capture(state: &mut State, capture: LuaCapture) -> Result<()> {
         LuaCapture::Position(offset) => state.push_number((offset + 1) as f64),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The byte-at-a-time nested scan `find_subslice` replaced. The skip-scan
+    /// claims charge-for-charge equivalence with this loop, budget-exhaustion
+    /// boundary included; this twin keeps that claim checked.
+    fn naive_find(state: &mut State, haystack: &[u8], needle: &[u8]) -> Result<Option<usize>> {
+        if needle.is_empty() {
+            return Ok(Some(0));
+        }
+        if needle.len() > haystack.len() {
+            return Ok(None);
+        }
+        for start in 0..=haystack.len() - needle.len() {
+            for (offset, needle_byte) in needle.iter().enumerate() {
+                charge_cost(state, 1)?;
+                if haystack[start + offset] != *needle_byte {
+                    break;
+                }
+                if offset + 1 == needle.len() {
+                    return Ok(Some(start));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    #[test]
+    fn find_subslice_matches_the_naive_scan_at_every_budget() {
+        let cases: &[(&[u8], &[u8])] = &[
+            (b"xxxxab", b"ab"),
+            (b"aaaaaa", b"aab"),
+            (b"abababab", b"abb"),
+            (b"hello world", b"world"),
+            (b"hello world", b"worlds"),
+            (b"aaa", b"aaaa"),
+            (b"", b""),
+            (b"abc", b""),
+            (b"mississippi", b"issip"),
+            (b"aaaaab", b"aaab"),
+            (b"ab", b"ab"),
+            (b"ba", b"ab"),
+        ];
+        for (haystack, needle) in cases {
+            // Unbudgeted runs must agree on result and total charge.
+            let mut fast_state = State::new();
+            let mut slow_state = State::new();
+            let fast = find_subslice(&mut fast_state, haystack, needle).unwrap();
+            let slow = naive_find(&mut slow_state, haystack, needle).unwrap();
+            assert_eq!(fast, slow, "result for {haystack:?}/{needle:?}");
+            assert_eq!(
+                fast_state.cost_used(),
+                slow_state.cost_used(),
+                "cost for {haystack:?}/{needle:?}"
+            );
+            let total = fast_state.cost_used();
+
+            // Every budget up to just past the total must succeed or fail at
+            // the same point with identical counters.
+            for budget in 0..=total + 1 {
+                let mut fast_state = State::new();
+                fast_state.set_cost_budget(budget as i64);
+                let mut slow_state = State::new();
+                slow_state.set_cost_budget(budget as i64);
+                let fast = find_subslice(&mut fast_state, haystack, needle);
+                let slow = naive_find(&mut slow_state, haystack, needle);
+                match (&fast, &slow) {
+                    (Ok(a), Ok(b)) => assert_eq!(a, b, "{haystack:?}/{needle:?} @{budget}"),
+                    (Err(_), Err(_)) => {}
+                    _ => panic!(
+                        "budget outcome diverged for {haystack:?}/{needle:?} @{budget}: \
+                         fast={fast:?} slow={slow:?}"
+                    ),
+                }
+                assert_eq!(
+                    fast_state.cost_used(),
+                    slow_state.cost_used(),
+                    "cost_used for {haystack:?}/{needle:?} @{budget}"
+                );
+                assert_eq!(
+                    fast_state.cost_remaining(),
+                    slow_state.cost_remaining(),
+                    "cost_remaining for {haystack:?}/{needle:?} @{budget}"
+                );
+            }
+        }
+    }
+}

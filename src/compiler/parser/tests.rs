@@ -1661,6 +1661,22 @@ fn constant_folding_only_fires_on_literal_operands() {
 }
 
 #[test]
+fn folding_and_fusion_keep_line_info_synced_with_code() {
+    // Folding pops both arrays and fusion rewrites in place; a desync here
+    // corrupts stack traces silently.
+    for source in [
+        "return 60 * 1000 + 8",
+        "x = -5^2",
+        "local n = 0\nwhile n < 3 do\n  n = n + 1 + 2\nend\nreturn n",
+        "local a = 5 if a or 1 < 2 then return 1 end return 0",
+        "local f = function() return 2 * 3 end\nif f() >= 6 then return 1 end",
+    ] {
+        let chunk = parse_str(source).expect("line-info fixture compiles");
+        assert_line_info_matches_code_len(&chunk);
+    }
+}
+
+#[test]
 fn compare_branch_fusion_shapes_and_semantics() {
     // Conditions ending in a comparison fuse with the branch in while, if,
     // and repeat-until forms.

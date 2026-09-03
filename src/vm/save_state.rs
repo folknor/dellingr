@@ -2723,6 +2723,107 @@ mod tests {
     }
 
     #[test]
+    fn fused_and_folded_closures_round_trip_through_save_load() {
+        // A parser-emitted closure carrying fused compare-and-branch opcodes
+        // and folded literals must pass the load-side verifier and run.
+        let mut state = State::new();
+        state
+            .load_string(
+                "function count(n)\n  local i = 0\n  while i < n do i = i + 1 end\n  if i == n then return i + 60 * 1000 end\n  return -1\nend",
+            )
+            .expect("script compiles");
+        state
+            .call(crate::ArgCount::Fixed(0), crate::RetCount::Fixed(0))
+            .expect("chunk runs");
+        let save = state.save_state().expect("state saves");
+        let mut loaded = State::load_state(&save.bytes, Box::new(crate::DefaultCallbacks), |_| {})
+            .expect("save containing fused opcodes loads");
+        loaded.get_global("count").expect("count exists");
+        loaded.push_number(5.0).expect("argument fits");
+        loaded
+            .call(crate::ArgCount::Fixed(1), crate::RetCount::Fixed(1))
+            .expect("loaded count runs");
+        assert_eq!(loaded.to_number(-1).expect("numeric result"), 60005.0);
+    }
+
+    #[test]
+    fn reused_upvalue_pool_slots_round_trip_through_save_load() {
+        // Force the pool sweep to free slots, then allocate closures that
+        // reuse them, and prove the save/load identity mapping (keyed on
+        // slot index) still round-trips the reused slots' values.
+        let mut state = State::new();
+        state
+            .load_string(
+                "do\n  local dead = 1\n  local f = function() dead = dead + 1 end\nend\ncollect_marker = 1",
+            )
+            .expect("dead-closure script compiles");
+        state
+            .call(crate::ArgCount::Fixed(0), crate::RetCount::Fixed(0))
+            .expect("dead-closure chunk runs");
+        state.gc_collect();
+        state
+            .load_string("local n = 41\nbump = function() n = n + 1 return n end\nbump()")
+            .expect("live-closure script compiles");
+        state
+            .call(crate::ArgCount::Fixed(0), crate::RetCount::Fixed(0))
+            .expect("live-closure chunk runs");
+        let save = state.save_state().expect("state saves after slot reuse");
+        let mut loaded = State::load_state(&save.bytes, Box::new(crate::DefaultCallbacks), |_| {})
+            .expect("save loads");
+        loaded.get_global("bump").expect("bump exists");
+        loaded
+            .call(crate::ArgCount::Fixed(0), crate::RetCount::Fixed(1))
+            .expect("loaded bump runs");
+        assert_eq!(loaded.to_number(-1).expect("numeric result"), 43.0);
+    }
+
+    #[test]
+    fn forged_fused_branches_validate_stack_and_targets() {
+        // Underflow: a fused branch pops two, only one value is on the stack.
+        let mut underflow = valid_saved_bytecode();
+        underflow.code = vec![
+            Instr::push_nil().raw(),
+            Instr::branch_false_less(0).raw(),
+            Instr::ret(RetCount::Fixed(0)).raw(),
+        ];
+        underflow.line_info = vec![1; underflow.code.len()];
+        assert_invalid(rejected_bytecode(vec![underflow], Vec::new()), 0, Some(1));
+
+        // Jump target past the end of the code.
+        let mut oob = valid_saved_bytecode();
+        oob.code = vec![
+            Instr::push_nil().raw(),
+            Instr::push_nil().raw(),
+            Instr::branch_false_equal(5).raw(),
+            Instr::ret(RetCount::Fixed(0)).raw(),
+        ];
+        oob.line_info = vec![1; oob.code.len()];
+        assert_invalid(rejected_bytecode(vec![oob], Vec::new()), 0, Some(2));
+
+        // The A byte is reserved and must be zero.
+        let mut reserved = valid_saved_bytecode();
+        reserved.code = vec![
+            Instr::push_nil().raw(),
+            Instr::push_nil().raw(),
+            Instr::op_a_sbx(Instr::OP_BRANCH_FALSE_GREATER, 1, 0).raw(),
+            Instr::ret(RetCount::Fixed(0)).raw(),
+        ];
+        reserved.line_info = vec![1; reserved.code.len()];
+        assert_invalid(rejected_bytecode(vec![reserved], Vec::new()), 0, Some(2));
+
+        // The well-formed shape is accepted.
+        let mut ok = valid_saved_bytecode();
+        ok.code = vec![
+            Instr::push_nil().raw(),
+            Instr::push_nil().raw(),
+            Instr::branch_false_not_equal(0).raw(),
+            Instr::ret(RetCount::Fixed(0)).raw(),
+        ];
+        ok.line_info = vec![1; ok.code.len()];
+        assert!(load_bytecode(vec![ok], Vec::new()).is_ok());
+    }
+
+    #[test]
     fn saved_val_variants_round_trip() {
         roundtrip!(SavedVal, SavedVal::Nil);
         roundtrip!(SavedVal, SavedVal::Bool(false));
