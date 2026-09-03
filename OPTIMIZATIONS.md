@@ -18,6 +18,38 @@ plantasjen) unless noted.
 
 ## Investigate
 
+### bench/arithmetic +11% wall after compare-and-branch fusion landed (2026-09-03)
+
+What: after A-O7 (commits fd4d333..6cc8493), `bench/arithmetic` measures
+4.0s vs 3.6s at pre-fusion 1efb68e in interleaved matched pairs
+(plantasjen), while `bench/benchmark` is flat and `--hotpath`
+instrumented WARM blocks are consistently *faster* on the fused binary
+(15ms vs 17ms per block, -6 to -12%).
+
+Isolation performed: the regression persists byte-for-byte with fusion
+emission disabled in the parser (identical bytecode to baseline, only
+the dispatch arms present), with one range arm vs six individual arms,
+and with `eval_compare` restored self-contained. It tracks the binary,
+not the executed path. Conclusion: release code-layout perturbation of
+the dispatch loop, hitting the bench where dispatch overhead is the
+largest fraction of per-op work (arithmetic is the lightest-op kernel;
+its hot `if n < 2` recursion is call+dispatch bound). This is the same
+codegen fragility AGENTS.md and the 2026-05-06 IC revert record.
+
+Five same-binary launches of `bench/arithmetic` at 71afe0e (plantasjen)
+all report 4000ms - launch-to-launch spread is below the 100ms reporting
+granularity here, so launch noise cannot account for the delta; it is a
+property of the binary.
+
+Not chasing it further this pass: the mechanism measurably wins under
+instrumentation and on the composite; the loss is layout lottery, and
+chasing alignment is open-ended (B-O6's "verify with asm first"
+applies). What would settle it: a placebo experiment (rebuild 1efb68e
+with an unused-function-sized text shift and re-pair) to characterize
+dellingr's own binary-to-binary band, or an asm/alignment look at
+`Frame::eval` on this host. If the register-codegen rewrite lands, this
+dispatch loop is rebuilt wholesale and the question dissolves.
+
 ### Residual ~2x in `strings/patterns` - decided not to chase (2026-07-25)
 
 What: the 0.2.0-era README recorded `examples/strings/patterns.lua` at 30ms; it

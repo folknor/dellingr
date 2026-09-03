@@ -94,10 +94,15 @@ Querying results (`.brokkr/results.db`):
 - **A same-day matched pair beats any historical number.** When they
   disagree, retire the historical figure.
 - Launch-to-launch wall noise is the dominant band for a CPU-bound VM
-  (sibling projects measured ~7% on byte-identical binaries; dellingr's
-  own band is not yet characterized). Treat small single-digit-% wall
-  deltas as noise until it is; the five-launch same-binary control is
-  cheap - run it before trusting a small delta.
+  (sibling projects measured ~7% on byte-identical binaries). First
+  dellingr data point: five same-binary launches of bench/arithmetic at
+  71afe0e on plantasjen all reported 4000ms - launch spread below the
+  100ms reporting granularity there. Binary-to-binary layout deltas are
+  a separate, larger effect (see OPTIMIZATIONS.md's arithmetic entry:
+  ~11% between binaries whose executed path is identical). The
+  five-launch same-binary control is cheap - run it before trusting a
+  small delta, and suspect layout before mechanism when a delta
+  survives it on an unrelated code path.
 - Performance numbers in markdown must include commit hash and hostname.
 
 ## Rules
