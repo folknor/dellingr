@@ -6,6 +6,16 @@ All notable changes to dellingr are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **Constant folding.** Literal arithmetic and unary negation now fold at
+  parse time with reference lcode.c's guards (NaN and -0.0 results stay
+  runtime operations). Folded operations no longer execute or charge cost,
+  so `cost_used` decreases for identical source containing literal
+  arithmetic like `60 * 1000` or `-5` - re-baseline stored cost
+  fingerprints. Runtime results are bit-exact (the folder and the VM share
+  one definition of each operation, floored modulo included).
+
 ### Fixed
 
 - **Upvalue pool no longer grows monotonically.** Pool slots whose upvalue is

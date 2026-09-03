@@ -445,20 +445,6 @@ the section's remaining entries are no longer backed by an outlier ratio.
 The suspected-quadratic parse candidates were never confirmed on a curve -
 that still needs a second file size.
 
-### Constant folding, with reference Lua's guards (A-O6)
-
-What: there is no folding at all: `local ms = 60 * 1000` multiplies at
-runtime on every execution, `-5` is PUSH_NUM + NEGATE per hit, and both
-charge cost. Measured: `numerics/constants` at 6.5x lua5.5 against
-`numerics/arithmetic` at 3.6x; the pair isolates folding because
-arithmetic.lua deliberately has no foldable expression.
-
-Sketch: fold literal arithmetic/unary at parse time with lcode.c's guards
-(refuse to fold results that are NaN or 0.0, exactly to avoid the -0.0
-literal-pool collapse: `find_or_add_number` dedups with `==`, which
-conflates 0.0/-0.0). Note: folding changes cost_used for identical source -
-same replay-versioning consideration as the register-codegen rewrite.
-
 ### Compare-and-branch fusion (A-O7)
 
 What: `while i < n do` emits LESS (push bool) + BRANCH_FALSE (pop bool) -

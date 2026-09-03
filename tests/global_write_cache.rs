@@ -77,9 +77,11 @@ fn builtin_rebind_invalidates_its_fallback_without_disturbing_a_writer() {
 #[test]
 fn global_writes_remain_cost_free() {
     let mut state = State::new();
+    // The adds must involve a local so constant folding leaves all three as
+    // runtime (costed) operations; the global write itself must charge 0.
     run(
         &mut state,
-        "function writer() x = 1 + 1 + 1 + 1 end; writer()",
+        "function writer(v) x = v + 1 + 1 + 1 end; writer(1)",
     );
     assert_eq!(state.cost_used(), 3);
 }

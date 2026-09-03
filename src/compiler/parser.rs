@@ -47,6 +47,15 @@ struct Parser<'a> {
     current_line: u32,
     /// Current nesting depth across recursive parser entry points.
     syntax_depth: u32,
+    /// Constant folding is forbidden on instructions below this code index.
+    /// Raised to every patched forward-jump target: a fold merges the two
+    /// operand pushes into one, and a jump landing between them (e.g. the
+    /// `or`-skip in `(a or 2) * 3`) must keep executing exactly the second
+    /// push. A backward target *at* the first operand is fine - the folded
+    /// push computes the same value the landing site would have - so the
+    /// barrier is exclusive of the first operand index. Per-chunk, saved and
+    /// reset across `parse_chunk`.
+    fold_barrier: usize,
 }
 
 /// Tracks the break jumps and upvalue-close boundary for one loop.
@@ -80,6 +89,7 @@ pub(super) fn parse_str_named(source: &str, source_name: Option<String>) -> Resu
         outer_upvalues: Vec::new(),
         current_line: 1,
         syntax_depth: 0,
+        fold_barrier: 0,
     };
     parser.parse_all()
 }
@@ -156,6 +166,9 @@ impl<'a> Parser<'a> {
         constructor: impl FnOnce(i16) -> Instr,
     ) -> Result<()> {
         self.chunk.code[from] = constructor(self.checked_jump_offset(from, target)?);
+        // A patched landing site must keep executing exactly the instruction
+        // it points at; see `fold_barrier`.
+        self.fold_barrier = self.fold_barrier.max(target);
         Ok(())
     }
 
@@ -438,6 +451,71 @@ impl<'a> Parser<'a> {
         self.chunk.line_info.push(self.current_line);
     }
 
+    /// The values of the two trailing instructions when both are `PushNum`
+    /// and no patched jump target forbids merging them (`fold_barrier`).
+    fn foldable_binary_operands(&self) -> Option<(f64, f64)> {
+        let first = self.chunk.code.len().checked_sub(2)?;
+        if first < self.fold_barrier {
+            return None;
+        }
+        let lhs = self.chunk.code[first];
+        let rhs = self.chunk.code[first + 1];
+        if lhs.opcode() != Instr::OP_PUSH_NUM || rhs.opcode() != Instr::OP_PUSH_NUM {
+            return None;
+        }
+        Some((
+            self.chunk.number_literals[lhs.bx() as usize],
+            self.chunk.number_literals[rhs.bx() as usize],
+        ))
+    }
+
+    /// A folded result must not be NaN (many payloads collapse to one
+    /// literal) or -0.0 (`find_or_add_number` dedups with `==`, which
+    /// conflates 0.0 and -0.0) - reference lcode.c's guards.
+    fn fold_result_allowed(value: f64) -> bool {
+        !value.is_nan() && !(value == 0.0 && value.is_sign_negative())
+    }
+
+    /// Emits an arithmetic instruction, folding `PushNum a; PushNum b; op`
+    /// into one `PushNum` when both operands are number literals. `op` must
+    /// be the same function the VM dispatch applies for this opcode, so the
+    /// folded value is bit-exact with runtime evaluation. A full literal
+    /// pool falls back to emitting the instruction unfolded rather than
+    /// failing a program the unfolded compiler accepted.
+    fn push_arith(&mut self, instr: Instr, op: fn(f64, f64) -> f64) {
+        if let Some((lhs, rhs)) = self.foldable_binary_operands() {
+            let result = op(lhs, rhs);
+            if Self::fold_result_allowed(result)
+                && let Ok(idx) = self.find_or_add_number(result)
+            {
+                self.chunk.code.pop();
+                self.chunk.line_info.pop();
+                self.replace_last_instr(Instr::push_num(idx));
+                return;
+            }
+        }
+        self.push(instr);
+    }
+
+    /// Emits unary negation, folding `PushNum v; Negate` into `PushNum -v`.
+    /// Replacing in place is safe even at a jump target: the landing site
+    /// still computes the same value.
+    fn push_negate(&mut self) {
+        if self.chunk.code.len() > self.fold_barrier
+            && let Some(last) = self.chunk.code.last()
+            && last.opcode() == Instr::OP_PUSH_NUM
+        {
+            let value = -self.chunk.number_literals[last.bx() as usize];
+            if Self::fold_result_allowed(value)
+                && let Ok(idx) = self.find_or_add_number(value)
+            {
+                self.replace_last_instr(Instr::push_num(idx));
+                return;
+            }
+        }
+        self.push(Instr::negate());
+    }
+
     /// Adds an instruction with an explicit source line.
     fn push_at_line(&mut self, instr: Instr, line: u32) {
         self.chunk.code.push(instr);
@@ -526,6 +604,7 @@ impl<'a> Parser<'a> {
             u8::try_from(params.len()).map_err(|_| self.error(SyntaxError::TooManyLocals))?;
         let source = self.chunk.source.clone();
         self.outer_chunks.push(std::mem::take(&mut self.chunk));
+        let outer_fold_barrier = std::mem::take(&mut self.fold_barrier);
         self.chunk.source = source;
         self.chunk.is_vararg = is_vararg;
         self.chunk.num_params = num_params;
@@ -556,6 +635,7 @@ impl<'a> Parser<'a> {
             )
         })?;
         let tmp_chunk = std::mem::replace(&mut self.chunk, outer_chunk);
+        self.fold_barrier = outer_fold_barrier;
 
         // Restore outer locals and upvalues
         self.locals = self.outer_locals.pop().ok_or_else(|| {

@@ -149,6 +149,7 @@ fn checked_jump_offset_accepts_i16_boundaries_only() {
         outer_upvalues: Vec::new(),
         current_line: 1,
         syntax_depth: 0,
+        fold_barrier: 0,
     };
 
     assert_eq!(parser.checked_jump_offset(0, 32_768).unwrap(), i16::MAX);
@@ -159,16 +160,15 @@ fn checked_jump_offset_accepts_i16_boundaries_only() {
 
 #[test]
 fn test01() {
+    // 5 + 6 folds at parse time; the operand literals stay pooled.
     let text = "x = 5 + 6";
     let out = Bytecode {
         code: vec![
-            Instr::push_num(0),
-            Instr::push_num(1),
-            Instr::add(),
+            Instr::push_num(2),
             Instr::set_global(0),
             Instr::ret(RetCount::Fixed(0)),
         ],
-        number_literals: vec![5.0, 6.0],
+        number_literals: vec![5.0, 6.0, 11.0],
         string_literals: vec!["x".into()],
         ..Bytecode::default()
     };
@@ -177,17 +177,16 @@ fn test01() {
 
 #[test]
 fn test02() {
+    // ^ binds tighter than unary minus: 5^2 folds to 25, then negation
+    // folds to -25.
     let text = "x = -5^2";
     let out = Bytecode {
         code: vec![
-            Instr::push_num(0),
-            Instr::push_num(1),
-            Instr::pow(),
-            Instr::negate(),
+            Instr::push_num(3),
             Instr::set_global(0),
             Instr::ret(RetCount::Fixed(0)),
         ],
-        number_literals: vec![5.0, 2.0],
+        number_literals: vec![5.0, 2.0, 25.0, -25.0],
         string_literals: vec!["x".into()],
         ..Bytecode::default()
     };
@@ -216,18 +215,17 @@ fn test03() {
 
 #[test]
 fn test04() {
+    // 2 + 3 folds to 5 before the concat.
     let text = "x = 1 .. 2 + 3";
     let output = Bytecode {
         code: vec![
             Instr::push_num(0),
-            Instr::push_num(1),
-            Instr::push_num(2),
-            Instr::add(),
+            Instr::push_num(3),
             Instr::concat(2),
             Instr::set_global(0),
             Instr::ret(RetCount::Fixed(0)),
         ],
-        number_literals: vec![1.0, 2.0, 3.0],
+        number_literals: vec![1.0, 2.0, 3.0, 5.0],
         string_literals: vec!["x".into()],
         ..Bytecode::default()
     };
@@ -255,17 +253,15 @@ fn concat_chain_emits_single_n_ary_concat() {
 
 #[test]
 fn test05() {
+    // -3 folds to a literal, then 2^-3 folds to 0.125.
     let text = "x = 2^-3";
     let output = Bytecode {
         code: vec![
-            Instr::push_num(0),
-            Instr::push_num(1),
-            Instr::negate(),
-            Instr::pow(),
+            Instr::push_num(3),
             Instr::set_global(0),
             Instr::ret(RetCount::Fixed(0)),
         ],
-        number_literals: vec![2.0, 3.0],
+        number_literals: vec![2.0, 3.0, -3.0, 0.125],
         string_literals: vec!["x".into()],
         ..Bytecode::default()
     };
@@ -1588,4 +1584,95 @@ fn syntax_depth_headroom() {
         "elseif true then ".repeat(depth)
     ))
     .expect("elseif chaining below the limit must compile");
+}
+
+// ---------------------------------------------------------------------------
+// Constant folding
+// ---------------------------------------------------------------------------
+
+fn assert_no_opcode(source: &str, opcode: u8) {
+    let chunk = parse_str(source).expect("fold fixture compiles");
+    assert!(
+        chunk.code.iter().all(|instr| instr.opcode() != opcode),
+        "expected opcode {opcode} folded away in `{source}`, got {:?}",
+        chunk.code
+    );
+}
+
+fn assert_has_opcode(source: &str, opcode: u8) {
+    let chunk = parse_str(source).expect("fold fixture compiles");
+    assert!(
+        chunk.code.iter().any(|instr| instr.opcode() == opcode),
+        "expected opcode {opcode} NOT folded in `{source}`, got {:?}",
+        chunk.code
+    );
+}
+
+fn eval_number(source: &str) -> f64 {
+    let mut state = State::new();
+    state.load_string(source).expect("fold fixture compiles");
+    state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(1))
+        .expect("fold fixture runs");
+    state.to_number(-1).expect("fold fixture returns a number")
+}
+
+#[test]
+fn constant_folding_collapses_literal_arithmetic() {
+    assert_no_opcode("return 60 * 1000", Instr::OP_MULTIPLY);
+    assert_no_opcode("return 1 + 2 + 3", Instr::OP_ADD);
+    assert_no_opcode("return 10 - 4", Instr::OP_SUBTRACT);
+    assert_no_opcode("return 10 / 4", Instr::OP_DIVIDE);
+    assert_no_opcode("return 10 % 3", Instr::OP_MOD);
+    assert_no_opcode("return 2 ^ 10", Instr::OP_POW);
+    assert_no_opcode("return -5", Instr::OP_NEGATE);
+    assert_no_opcode("return -(2 * 3)", Instr::OP_NEGATE);
+
+    let chunk = parse_str("return 60 * 1000 + 8").expect("chain folds");
+    assert!(chunk.number_literals.contains(&60008.0));
+
+    assert_eq!(eval_number("return 60 * 1000 + 8"), 60008.0);
+    assert_eq!(eval_number("return -5 % 3"), 1.0);
+    assert_eq!(eval_number("return 5 % -3"), -1.0);
+    assert_eq!(eval_number("return 2 ^ 10"), 1024.0);
+    assert_eq!(eval_number("return - -5"), 5.0);
+}
+
+#[test]
+fn constant_folding_refuses_nan_and_negative_zero_results() {
+    // NaN payloads and -0.0 collapse in the ==-deduped literal pool, so
+    // these stay runtime operations (reference lcode.c's guards).
+    assert_has_opcode("return 0 / 0", Instr::OP_DIVIDE);
+    assert_has_opcode("return -0", Instr::OP_NEGATE);
+    assert_has_opcode("return 0 * -1", Instr::OP_MULTIPLY);
+    // Infinity is a normal foldable value.
+    assert_no_opcode("return 1 / 0", Instr::OP_DIVIDE);
+    assert_eq!(eval_number("return 1 / 0"), f64::INFINITY);
+}
+
+#[test]
+fn constant_folding_only_fires_on_literal_operands() {
+    assert_has_opcode("local x = 1 return x + 2", Instr::OP_ADD);
+    assert_has_opcode("local x = 1 return 2 + x", Instr::OP_ADD);
+    // Mixed: the literal half folds, the variable half stays.
+    let chunk = parse_str("local x = 1 return x + 2 * 3").expect("mixed compiles");
+    assert!(chunk.code.iter().any(|i| i.opcode() == Instr::OP_ADD));
+    assert!(chunk.code.iter().all(|i| i.opcode() != Instr::OP_MULTIPLY));
+}
+
+#[test]
+fn constant_folding_respects_jump_targets() {
+    // The `or` skip branch lands on the second operand push; merging the
+    // pair would make a truthy `a` skip the multiplication entirely.
+    assert_has_opcode("local a = 5 return (a or 2) * 3", Instr::OP_MULTIPLY);
+    assert_eq!(eval_number("local a = 5 return (a or 2) * 3"), 15.0);
+    assert_eq!(eval_number("local a = false return (a or 2) * 3"), 6.0);
+    assert_eq!(eval_number("local a = 5 return (a and 2) * 3"), 6.0);
+
+    // A while condition is a backward-jump target; landing on the folded
+    // push is value-equivalent, so this may fold - and must still loop.
+    assert_eq!(
+        eval_number("local n = 0\nwhile 2 * 3 do\n  n = n + 1\n  if n >= 2 then return n end\nend"),
+        2.0
+    );
 }

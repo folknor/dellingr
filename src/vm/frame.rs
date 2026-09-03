@@ -1,13 +1,6 @@
 use std::ops;
 
-/// Lua 5.4 floored modulo, including its special floating-point cases.
-fn lua_modulo(a: f64, b: f64) -> f64 {
-    let mut m = a % b;
-    if (m > 0.0 && b < 0.0) || (m < 0.0 && b > 0.0) {
-        m += b;
-    }
-    m
-}
+use crate::numeral::lua_modulo;
 use std::sync::Arc;
 
 use super::super::error::{Error, ErrorKind, StackFrame};

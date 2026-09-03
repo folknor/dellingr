@@ -1,3 +1,5 @@
+use std::ops;
+
 use super::ArgCount;
 use super::CallSite;
 use super::ExpDesc;
@@ -131,15 +133,16 @@ impl Parser<'_> {
     fn parse_addition(&mut self) -> Result<ExpDesc> {
         let mut exp_desc = self.parse_multiplication()?;
         loop {
-            let instr = match self.input.peek_type()? {
-                TokenType::Plus => Instr::add(),
-                TokenType::Minus => Instr::subtract(),
+            // The fold ops mirror the VM dispatch's functions exactly.
+            let (instr, op): (Instr, fn(f64, f64) -> f64) = match self.input.peek_type()? {
+                TokenType::Plus => (Instr::add(), <f64 as ops::Add>::add),
+                TokenType::Minus => (Instr::subtract(), <f64 as ops::Sub>::sub),
                 _ => break,
             };
             exp_desc = ExpDesc::Other;
             self.input.next()?;
             self.parse_multiplication()?;
-            self.push(instr);
+            self.push_arith(instr, op);
         }
         Ok(exp_desc)
     }
@@ -148,16 +151,16 @@ impl Parser<'_> {
     fn parse_multiplication(&mut self) -> Result<ExpDesc> {
         let mut exp_desc = self.parse_unary()?;
         loop {
-            let instr = match self.input.peek_type()? {
-                TokenType::Star => Instr::multiply(),
-                TokenType::Slash => Instr::divide(),
-                TokenType::Mod => Instr::modulo(),
+            let (instr, op): (Instr, fn(f64, f64) -> f64) = match self.input.peek_type()? {
+                TokenType::Star => (Instr::multiply(), <f64 as ops::Mul>::mul),
+                TokenType::Slash => (Instr::divide(), <f64 as ops::Div>::div),
+                TokenType::Mod => (Instr::modulo(), crate::numeral::lua_modulo),
                 _ => break,
             };
             exp_desc = ExpDesc::Other;
             self.input.next()?;
             self.parse_unary()?;
-            self.push(instr);
+            self.push_arith(instr, op);
         }
         Ok(exp_desc)
     }
@@ -171,7 +174,8 @@ impl Parser<'_> {
     }
 
     fn parse_unary_inner(&mut self) -> Result<ExpDesc> {
-        let instr = match self.input.peek_type()? {
+        let token_type = self.input.peek_type()?;
+        let instr = match token_type {
             TokenType::Not => Instr::not(),
             TokenType::Hash => Instr::length(),
             TokenType::Minus => Instr::negate(),
@@ -181,7 +185,11 @@ impl Parser<'_> {
         };
         self.input.next()?;
         self.parse_unary()?;
-        self.push(instr);
+        if token_type == TokenType::Minus {
+            self.push_negate();
+        } else {
+            self.push(instr);
+        }
 
         Ok(ExpDesc::Other)
     }
@@ -192,7 +200,7 @@ impl Parser<'_> {
         if self.input.try_pop(TokenType::Caret)?.is_some() {
             exp_desc = ExpDesc::Other;
             self.parse_unary()?;
-            self.push(Instr::pow());
+            self.push_arith(Instr::pow(), f64::powf);
         }
 
         Ok(exp_desc)

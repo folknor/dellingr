@@ -1,4 +1,17 @@
-//! Lua numeral recognition shared by runtime-facing conversions.
+//! Lua numeral recognition and numeric semantics shared by runtime-facing
+//! conversions and the compile-time constant folder.
+
+/// Lua 5.4 floored modulo, including its special floating-point cases.
+///
+/// The parser's constant folder must produce the bit-exact result the VM
+/// would compute at runtime, so both call this one definition.
+pub(crate) fn lua_modulo(a: f64, b: f64) -> f64 {
+    let mut m = a % b;
+    if (m > 0.0 && b < 0.0) || (m < 0.0 && b > 0.0) {
+        m += b;
+    }
+    m
+}
 
 /// Returns an integer-valued finite `f64` when it lies inside the range whose
 /// endpoints can be checked exactly in an `f64`.
