@@ -241,6 +241,12 @@ fn known_opcode(opcode: u8) -> bool {
             | Instr::OP_BRANCH_FALSE
             | Instr::OP_BRANCH_TRUE_KEEP
             | Instr::OP_BRANCH_FALSE_KEEP
+            | Instr::OP_BRANCH_FALSE_LESS
+            | Instr::OP_BRANCH_FALSE_LESS_EQUAL
+            | Instr::OP_BRANCH_FALSE_GREATER
+            | Instr::OP_BRANCH_FALSE_GREATER_EQUAL
+            | Instr::OP_BRANCH_FALSE_EQUAL
+            | Instr::OP_BRANCH_FALSE_NOT_EQUAL
             | Instr::OP_FOR_PREP
             | Instr::OP_FOR_LOOP
             | Instr::OP_TFOR_LOOP
@@ -450,6 +456,15 @@ fn verify_stack_discipline(view: &impl BytecodeView) -> Result<(), BytecodeValid
                 require_known(&next.height)?;
                 next.height.remove(1, pc)?;
             }
+            Instr::OP_BRANCH_FALSE_LESS
+            | Instr::OP_BRANCH_FALSE_LESS_EQUAL
+            | Instr::OP_BRANCH_FALSE_GREATER
+            | Instr::OP_BRANCH_FALSE_GREATER_EQUAL
+            | Instr::OP_BRANCH_FALSE_EQUAL
+            | Instr::OP_BRANCH_FALSE_NOT_EQUAL => {
+                require_known(&next.height)?;
+                next.height.remove(2, pc)?;
+            }
             Instr::OP_BRANCH_TRUE_KEEP | Instr::OP_BRANCH_FALSE_KEEP => {
                 require_known(&next.height)?;
                 require_at_least(&next.height, 1)?;
@@ -500,6 +515,12 @@ fn verify_stack_discipline(view: &impl BytecodeView) -> Result<(), BytecodeValid
             Instr::OP_BRANCH_FALSE
             | Instr::OP_BRANCH_TRUE_KEEP
             | Instr::OP_BRANCH_FALSE_KEEP
+            | Instr::OP_BRANCH_FALSE_LESS
+            | Instr::OP_BRANCH_FALSE_LESS_EQUAL
+            | Instr::OP_BRANCH_FALSE_GREATER
+            | Instr::OP_BRANCH_FALSE_GREATER_EQUAL
+            | Instr::OP_BRANCH_FALSE_EQUAL
+            | Instr::OP_BRANCH_FALSE_NOT_EQUAL
             | Instr::OP_FOR_PREP
             | Instr::OP_FOR_LOOP
             | Instr::OP_TFOR_LOOP => {
@@ -614,7 +635,13 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
             | Instr::OP_JUMP
             | Instr::OP_BRANCH_FALSE
             | Instr::OP_BRANCH_TRUE_KEEP
-            | Instr::OP_BRANCH_FALSE_KEEP => a == 0,
+            | Instr::OP_BRANCH_FALSE_KEEP
+            | Instr::OP_BRANCH_FALSE_LESS
+            | Instr::OP_BRANCH_FALSE_LESS_EQUAL
+            | Instr::OP_BRANCH_FALSE_GREATER
+            | Instr::OP_BRANCH_FALSE_GREATER_EQUAL
+            | Instr::OP_BRANCH_FALSE_EQUAL
+            | Instr::OP_BRANCH_FALSE_NOT_EQUAL => a == 0,
             // CALL is the remaining two-byte form that reserves C.
             Instr::OP_CALL => c == 0,
             // All remaining known instructions are either operandless or use
@@ -797,6 +824,12 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
                 | Instr::OP_BRANCH_FALSE
                 | Instr::OP_BRANCH_TRUE_KEEP
                 | Instr::OP_BRANCH_FALSE_KEEP
+                | Instr::OP_BRANCH_FALSE_LESS
+                | Instr::OP_BRANCH_FALSE_LESS_EQUAL
+                | Instr::OP_BRANCH_FALSE_GREATER
+                | Instr::OP_BRANCH_FALSE_GREATER_EQUAL
+                | Instr::OP_BRANCH_FALSE_EQUAL
+                | Instr::OP_BRANCH_FALSE_NOT_EQUAL
                 | Instr::OP_FOR_PREP
                 | Instr::OP_FOR_LOOP
                 | Instr::OP_TFOR_LOOP

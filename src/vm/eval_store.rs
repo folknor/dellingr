@@ -536,6 +536,21 @@ impl State {
     /// `negate` inverts the result (for <= and >=).
     #[hotpath::measure]
     pub(super) fn eval_compare(&mut self, target: std::cmp::Ordering, negate: bool) -> Result<()> {
+        let result = self.eval_compare_bool(target, negate)?;
+        // Net-negative: two operands popped, one result pushed.
+        self.push_unchecked(Val::Bool(result));
+        Ok(())
+    }
+
+    /// Pop two operands and compare them (numbers or strings), returning the
+    /// result instead of pushing it. Shared by the plain comparison opcodes
+    /// and the fused compare-and-branch forms; an incomparable pair (NaN
+    /// involved) compares false before negation, matching the push path.
+    pub(super) fn eval_compare_bool(
+        &mut self,
+        target: std::cmp::Ordering,
+        negate: bool,
+    ) -> Result<bool> {
         let v2 = self.pop_val();
         let v1 = self.pop_val();
 
@@ -554,11 +569,7 @@ impl State {
             }
         };
 
-        // Net-negative: two operands popped, one result pushed.
-        self.push_unchecked(Val::Bool(
-            result.is_some_and(|result| if negate { !result } else { result }),
-        ));
-        Ok(())
+        Ok(result.is_some_and(|result| if negate { !result } else { result }))
     }
 
     #[inline(always)]

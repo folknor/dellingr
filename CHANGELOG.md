@@ -15,6 +15,13 @@ All notable changes to dellingr are documented here. The format follows
   arithmetic like `60 * 1000` or `-5` - re-baseline stored cost
   fingerprints. Runtime results are bit-exact (the folder and the VM share
   one definition of each operation, floored modulo included).
+- **Compare-and-branch fusion.** A condition ending in a comparison now
+  compiles to one fused compare-and-branch opcode instead of a comparison
+  push plus a BranchFalse pop (six new opcodes, 64-69). Comparisons and
+  branches were both cost-free, so `cost_used` is unaffected. The save
+  format version is unchanged: an older binary handed a snapshot containing
+  the new opcodes rejects it cleanly as `InvalidBytecode` ("unknown
+  opcode") rather than misexecuting.
 
 ### Fixed
 

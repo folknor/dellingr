@@ -301,6 +301,43 @@ impl Frame {
                 Instr::OP_LESS_EQUAL => state.eval_compare(std::cmp::Ordering::Greater, true)?, // <= is !>
                 Instr::OP_GREATER_EQUAL => state.eval_compare(std::cmp::Ordering::Less, true)?, // >= is !<
 
+                // Fused comparison + BranchFalse (both halves free): pop two
+                // operands, jump when the comparison is false.
+                Instr::OP_BRANCH_FALSE_LESS => {
+                    if !state.eval_compare_bool(std::cmp::Ordering::Less, false)? {
+                        self.jump(inst.sbx())?;
+                    }
+                }
+                Instr::OP_BRANCH_FALSE_GREATER => {
+                    if !state.eval_compare_bool(std::cmp::Ordering::Greater, false)? {
+                        self.jump(inst.sbx())?;
+                    }
+                }
+                Instr::OP_BRANCH_FALSE_LESS_EQUAL => {
+                    if !state.eval_compare_bool(std::cmp::Ordering::Greater, true)? {
+                        self.jump(inst.sbx())?;
+                    }
+                }
+                Instr::OP_BRANCH_FALSE_GREATER_EQUAL => {
+                    if !state.eval_compare_bool(std::cmp::Ordering::Less, true)? {
+                        self.jump(inst.sbx())?;
+                    }
+                }
+                Instr::OP_BRANCH_FALSE_EQUAL => {
+                    let val2 = state.pop_val();
+                    let val1 = state.pop_val();
+                    if val1 != val2 {
+                        self.jump(inst.sbx())?;
+                    }
+                }
+                Instr::OP_BRANCH_FALSE_NOT_EQUAL => {
+                    let val2 = state.pop_val();
+                    let val1 = state.pop_val();
+                    if val1 == val2 {
+                        self.jump(inst.sbx())?;
+                    }
+                }
+
                 // `for` loops - control flow is free
                 Instr::OP_FOR_LOOP => state.instr_for_loop(self, inst.a(), inst.sbx())?,
                 Instr::OP_FOR_PREP => state.instr_for_prep(self, inst.a(), inst.sbx())?,

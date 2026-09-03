@@ -498,6 +498,40 @@ impl<'a> Parser<'a> {
         self.push(instr);
     }
 
+    /// Emits the branch-if-false that follows a condition, fusing it with a
+    /// trailing comparison instruction when one is present. Returns the
+    /// branch's code index and the constructor to patch it with (both the
+    /// fused and plain forms start as offset-0 placeholders).
+    ///
+    /// The fuse refuses when `fold_barrier` reaches the would-be branch slot:
+    /// a patched jump landing there (the `or`-skip in `if a or b < c then`)
+    /// expects to pop one condition value, and the fused instruction pops
+    /// two. A target at the comparison itself is fine - the fused form has
+    /// the same stack effect and control flow from that entry point.
+    fn push_branch_false(&mut self) -> (usize, fn(i16) -> Instr) {
+        let len = self.chunk.code.len();
+        if len > self.fold_barrier
+            && let Some(last) = self.chunk.code.last()
+        {
+            let fused: Option<fn(i16) -> Instr> = match last.opcode() {
+                Instr::OP_LESS => Some(Instr::branch_false_less),
+                Instr::OP_LESS_EQUAL => Some(Instr::branch_false_less_equal),
+                Instr::OP_GREATER => Some(Instr::branch_false_greater),
+                Instr::OP_GREATER_EQUAL => Some(Instr::branch_false_greater_equal),
+                Instr::OP_EQUAL => Some(Instr::branch_false_equal),
+                Instr::OP_NOT_EQUAL => Some(Instr::branch_false_not_equal),
+                _ => None,
+            };
+            if let Some(constructor) = fused {
+                let idx = len - 1;
+                self.chunk.code[idx] = constructor(0);
+                return (idx, constructor);
+            }
+        }
+        self.push(Instr::branch_false(0));
+        (len, Instr::branch_false)
+    }
+
     /// Emits unary negation, folding `PushNum v; Negate` into `PushNum -v`.
     /// Replacing in place is safe even at a jump target: the landing site
     /// still computes the same value.

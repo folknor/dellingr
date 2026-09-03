@@ -445,16 +445,6 @@ the section's remaining entries are no longer backed by an outlier ratio.
 The suspected-quadratic parse candidates were never confirmed on a curve -
 that still needs a second file size.
 
-### Compare-and-branch fusion (A-O7)
-
-What: `while i < n do` emits LESS (push bool) + BRANCH_FALSE (pop bool) -
-two dispatches plus stack traffic per iteration of every hot loop condition.
-
-Sketch: a peephole in the parser (or in `finalize`) fusing comparison +
-branch into one opcode halves the dispatch on loop headers. Needs new
-opcodes on the execution side. Subsumed by register-based codegen if that
-lands.
-
 ---
 
 ## Stdlib / patterns

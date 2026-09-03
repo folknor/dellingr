@@ -409,17 +409,17 @@ fn test12() {
 
 #[test]
 fn test13() {
+    // The elseif condition ends in a comparison, so its branch fuses.
     let text = "if true then a = 5 elseif 6 == 7 then a = 3 else a = 4 end";
     let code = vec![
         Instr::push_bool(true),
         Instr::branch_false(3),
         Instr::push_num(0),
         Instr::set_global(0),
-        Instr::jump(9),
+        Instr::jump(8),
         Instr::push_num(1),
         Instr::push_num(2),
-        Instr::equal(),
-        Instr::branch_false(3),
+        Instr::branch_false_equal(3),
         Instr::push_num(3),
         Instr::set_global(0),
         Instr::jump(2),
@@ -438,17 +438,17 @@ fn test13() {
 
 #[test]
 fn test14() {
+    // The loop condition ends in a comparison, so the test branch fuses.
     let text = "while a < 10 do a = a + 1 end";
     let code = vec![
         Instr::get_global(0),
         Instr::push_num(0),
-        Instr::less(),
-        Instr::branch_false(5),
+        Instr::branch_false_less(5),
         Instr::get_global(0),
         Instr::push_num(1),
         Instr::add(),
         Instr::set_global(0),
-        Instr::jump(-9),
+        Instr::jump(-8),
         Instr::ret(RetCount::Fixed(0)),
     ];
     let chunk = Bytecode {
@@ -1658,6 +1658,65 @@ fn constant_folding_only_fires_on_literal_operands() {
     let chunk = parse_str("local x = 1 return x + 2 * 3").expect("mixed compiles");
     assert!(chunk.code.iter().any(|i| i.opcode() == Instr::OP_ADD));
     assert!(chunk.code.iter().all(|i| i.opcode() != Instr::OP_MULTIPLY));
+}
+
+#[test]
+fn compare_branch_fusion_shapes_and_semantics() {
+    // Conditions ending in a comparison fuse with the branch in while, if,
+    // and repeat-until forms.
+    assert_no_opcode("local n = 0 while n < 3 do n = n + 1 end", Instr::OP_LESS);
+    assert_no_opcode(
+        "local a = 1 if a >= 2 then return 1 end return 0",
+        Instr::OP_GREATER_EQUAL,
+    );
+    assert_no_opcode(
+        "local n = 0 repeat n = n + 1 until n ~= 1",
+        Instr::OP_NOT_EQUAL,
+    );
+
+    assert_eq!(
+        eval_number("local n = 0 while n < 3 do n = n + 1 end return n"),
+        3.0
+    );
+    assert_eq!(
+        eval_number("local n = 0 repeat n = n + 1 until n >= 4 return n"),
+        4.0
+    );
+    assert_eq!(
+        eval_number("if 'a' < 'b' then return 1 else return 2 end"),
+        1.0
+    );
+    // NaN compares false through the fused path, like the push path.
+    assert_eq!(
+        eval_number("local nan = 0/0 if nan == nan then return 1 else return 2 end"),
+        2.0
+    );
+    // The fused path still raises the comparison type error.
+    let mut state = State::new();
+    state
+        .load_string("if 1 < 'x' then return 1 end return 0")
+        .expect("type-error fixture compiles");
+    assert!(
+        state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).is_err(),
+        "number/string comparison must still error when fused"
+    );
+}
+
+#[test]
+fn compare_branch_fusion_respects_or_skip_targets() {
+    // `a or (1 < 2)`: the or-skip lands on the would-be branch slot, which
+    // must pop exactly one condition value - fusing would pop two.
+    let source = "local a = 5 if a or 1 < 2 then return 1 end return 0";
+    assert_has_opcode(source, Instr::OP_LESS);
+    assert_eq!(eval_number(source), 1.0);
+    assert_eq!(
+        eval_number("local a = false if a or 2 < 1 then return 1 end return 0"),
+        0.0
+    );
+    assert_eq!(
+        eval_number("local a = false if a or 1 < 2 then return 1 end return 0"),
+        1.0
+    );
 }
 
 #[test]

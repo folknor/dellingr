@@ -251,6 +251,15 @@ impl Instr {
     pub(crate) const OP_BRANCH_FALSE: u8 = 61;
     pub(crate) const OP_BRANCH_TRUE_KEEP: u8 = 62;
     pub(crate) const OP_BRANCH_FALSE_KEEP: u8 = 63;
+    // Fused comparison + BranchFalse: pop two operands, jump when the
+    // comparison is false. Emitted by the parser when a condition ends in a
+    // comparison; halves the dispatch on hot loop headers and if-conditions.
+    pub(crate) const OP_BRANCH_FALSE_LESS: u8 = 64;
+    pub(crate) const OP_BRANCH_FALSE_LESS_EQUAL: u8 = 65;
+    pub(crate) const OP_BRANCH_FALSE_GREATER: u8 = 66;
+    pub(crate) const OP_BRANCH_FALSE_GREATER_EQUAL: u8 = 67;
+    pub(crate) const OP_BRANCH_FALSE_EQUAL: u8 = 68;
+    pub(crate) const OP_BRANCH_FALSE_NOT_EQUAL: u8 = 69;
 
     // u8 + signed 16-bit offset (A slot + sBx)
     pub(crate) const OP_FOR_PREP: u8 = 70;
@@ -558,6 +567,24 @@ impl Instr {
     pub(crate) const fn branch_false_keep(offset: i16) -> Self {
         Self::op_sbx(Self::OP_BRANCH_FALSE_KEEP, offset)
     }
+    pub(crate) const fn branch_false_less(offset: i16) -> Self {
+        Self::op_sbx(Self::OP_BRANCH_FALSE_LESS, offset)
+    }
+    pub(crate) const fn branch_false_less_equal(offset: i16) -> Self {
+        Self::op_sbx(Self::OP_BRANCH_FALSE_LESS_EQUAL, offset)
+    }
+    pub(crate) const fn branch_false_greater(offset: i16) -> Self {
+        Self::op_sbx(Self::OP_BRANCH_FALSE_GREATER, offset)
+    }
+    pub(crate) const fn branch_false_greater_equal(offset: i16) -> Self {
+        Self::op_sbx(Self::OP_BRANCH_FALSE_GREATER_EQUAL, offset)
+    }
+    pub(crate) const fn branch_false_equal(offset: i16) -> Self {
+        Self::op_sbx(Self::OP_BRANCH_FALSE_EQUAL, offset)
+    }
+    pub(crate) const fn branch_false_not_equal(offset: i16) -> Self {
+        Self::op_sbx(Self::OP_BRANCH_FALSE_NOT_EQUAL, offset)
+    }
 
     // u8 + signed 16-bit offset
     pub(crate) const fn for_prep(slot: u8, offset: i16) -> Self {
@@ -636,6 +663,18 @@ impl std::fmt::Debug for Instr {
             Self::OP_BRANCH_FALSE => write!(f, "BranchFalse({})", self.sbx()),
             Self::OP_BRANCH_TRUE_KEEP => write!(f, "BranchTrueKeep({})", self.sbx()),
             Self::OP_BRANCH_FALSE_KEEP => write!(f, "BranchFalseKeep({})", self.sbx()),
+            Self::OP_BRANCH_FALSE_LESS => write!(f, "BranchFalseLess({})", self.sbx()),
+            Self::OP_BRANCH_FALSE_LESS_EQUAL => {
+                write!(f, "BranchFalseLessEqual({})", self.sbx())
+            }
+            Self::OP_BRANCH_FALSE_GREATER => write!(f, "BranchFalseGreater({})", self.sbx()),
+            Self::OP_BRANCH_FALSE_GREATER_EQUAL => {
+                write!(f, "BranchFalseGreaterEqual({})", self.sbx())
+            }
+            Self::OP_BRANCH_FALSE_EQUAL => write!(f, "BranchFalseEqual({})", self.sbx()),
+            Self::OP_BRANCH_FALSE_NOT_EQUAL => {
+                write!(f, "BranchFalseNotEqual({})", self.sbx())
+            }
             Self::OP_FOR_PREP => write!(f, "ForPrep({}, {})", self.a(), self.sbx()),
             Self::OP_FOR_LOOP => write!(f, "ForLoop({}, {})", self.a(), self.sbx()),
             Self::OP_TFOR_LOOP => write!(f, "TForLoop({}, {})", self.a(), self.sbx()),

@@ -467,10 +467,8 @@ impl<'a> Parser<'a> {
             self.push(Instr::close_upvalues(body_locals_start));
         }
 
-        let expr_end = self.chunk.code.len();
-        self.push(Instr::branch_false(
-            self.checked_jump_offset(expr_end, body_start)?,
-        ));
+        let (branch_index, branch_constructor) = self.push_branch_false();
+        self.patch_jump(branch_index, body_start, branch_constructor)?;
         self.exit_loop()?;
         self.level_down();
         Ok(())
@@ -490,8 +488,7 @@ impl<'a> Parser<'a> {
         self.parse_expr()?;
         self.expect(TokenType::Do)?;
 
-        let test_position = self.chunk.code.len();
-        self.push(Instr::branch_false(0));
+        let (test_position, test_constructor) = self.push_branch_false();
 
         // Track locals before body
         let body_locals_start = self.locals.len() as u8;
@@ -510,7 +507,7 @@ impl<'a> Parser<'a> {
             self.checked_jump_offset(body_end, condition_start)?,
         ));
 
-        self.patch_jump(test_position, self.chunk.code.len(), Instr::branch_false)?;
+        self.patch_jump(test_position, self.chunk.code.len(), test_constructor)?;
 
         self.exit_loop()?;
         self.level_down();
@@ -538,13 +535,12 @@ impl<'a> Parser<'a> {
         self.expect(TokenType::Then)?;
         self.nest_level += 1;
 
-        let branch_instr_index = self.chunk.code.len();
-        self.push(Instr::branch_false(0));
+        let (branch_instr_index, branch_constructor) = self.push_branch_false();
 
         self.parse_statements()?;
         let branch_target = self.close_if_arm()?;
 
-        self.patch_jump(branch_instr_index, branch_target, Instr::branch_false)?;
+        self.patch_jump(branch_instr_index, branch_target, branch_constructor)?;
         Ok(())
     }
 
