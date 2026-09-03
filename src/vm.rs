@@ -764,12 +764,27 @@ impl State {
         // Mark all roots
         let mut worklist = self.heap.take_mark_worklist();
         mark_gc_roots(self, &mut worklist);
+        // Open upvalues point at live stack slots but may not yet be held by
+        // any closure (mid-capture in instr_closure); their pool slots are
+        // roots for the pool sweep even though they hold no heap reference.
+        for (_, uv_ref) in &self.open_upvalues {
+            self.upvalue_pool.mark_slot(*uv_ref);
+        }
         self.heap
             .drain_mark_worklist(&mut worklist, &self.upvalue_pool);
         self.heap.restore_mark_worklist(worklist);
         self.sweep_bytecode_caches();
         // Sweep unmarked objects
         self.heap.collect();
+        // Pool slots not marked via a reachable closure or an open-upvalue
+        // entry can never be read again; recycle them.
+        self.upvalue_pool.sweep();
+        // `format_pointer_ids` entries are deliberately not GC roots; an entry
+        // whose value no longer resolves can never be observed again (the
+        // generational key cannot alias a future allocation), so drop it to
+        // keep the linear probe bounded by live `%p` usage.
+        self.format_pointer_ids
+            .retain(|(val, _)| self.heap.val_is_live(val));
     }
 
     /// Drop state-local runtime entries which no reachable closure, active

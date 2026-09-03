@@ -4,6 +4,20 @@ All notable changes to dellingr are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 [Semantic Versioning](https://semver.org/) once 1.0 lands.
 
+## [Unreleased]
+
+### Fixed
+
+- **Upvalue pool no longer grows monotonically.** Pool slots whose upvalue is
+  unreachable are swept onto a free list during `gc_collect` and reused by
+  later allocations, so a long-lived State no longer retains one slot for
+  every closure-with-captures ever created. Reuse order is deterministic
+  (LIFO, at deterministic GC points).
+- **`string.format("%p")` identity map is now GC-swept.** Entries whose value
+  no longer resolves on the heap are dropped during collection, bounding the
+  lookup scan by live `%p` usage instead of lifetime-total usage. Assigned ids
+  are never reissued.
+
 ## [0.4.0] - 2026-07-27
 
 The bulk of this release is hardening. Roughly a dozen defects could abort the

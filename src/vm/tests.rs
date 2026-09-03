@@ -873,3 +873,98 @@ fn a_state_stays_usable_after_a_rejected_push() {
     state.push_number(7.0).expect("room again below the cap");
     assert_eq!(state.to_number(-1).unwrap(), 7.0);
 }
+
+#[test]
+fn gc_sweeps_dead_upvalue_pool_slots_and_reuses_them() {
+    let mut state = State::new();
+    let make_counters = r#"
+        counters = {}
+        for i = 1, 100 do
+            local n = i
+            counters[i] = function() n = n + 1 return n end
+        end
+    "#;
+    state
+        .eval_chunk(parse_str(make_counters).unwrap(), 0)
+        .expect("closure factory runs");
+    state.gc_collect();
+    let occupied_live = state.upvalue_pool.occupied_count();
+    assert!(occupied_live >= 100, "each counter holds one captured slot");
+
+    state
+        .eval_chunk(parse_str("counters = nil").unwrap(), 0)
+        .expect("release runs");
+    state.gc_collect();
+    assert!(
+        state.upvalue_pool.occupied_count() < occupied_live - 90,
+        "dead capture slots must be swept onto the free list"
+    );
+
+    // A second wave must reuse freed slots instead of growing the pool.
+    let total_before = state.upvalue_pool.total_slots();
+    state
+        .eval_chunk(parse_str(make_counters).unwrap(), 0)
+        .expect("second closure factory runs");
+    assert_eq!(
+        state.upvalue_pool.total_slots(),
+        total_before,
+        "the second wave should be served from the free list"
+    );
+}
+
+#[test]
+fn live_upvalues_survive_the_pool_sweep_and_keep_working() {
+    let mut state = State::new();
+    state.set_global_value("force_gc", Val::RustFn(force_gc));
+    let input = parse_str(
+        r#"
+        local n = 10
+        local function bump() n = n + 1 return n end
+        bump()
+        force_gc()
+        return bump()
+        "#,
+    )
+    .expect("upvalue script parses");
+    state
+        .eval_chunk(input, 0)
+        .expect("live upvalue must survive the pool sweep");
+    assert_eq!(state.to_number(-1).expect("numeric return"), 12.0);
+}
+
+#[test]
+fn gc_drops_format_pointer_ids_for_dead_values() {
+    let mut state = State::new();
+    // Auto-GC would sweep dead entries mid-loop; disable it so the assertion
+    // below observes the accumulation and one explicit collect does the sweep.
+    state.gc_disable_auto();
+    let input = parse_str(
+        r#"
+        keep = {}
+        local ids = string.format("%p", keep)
+        for i = 1, 50 do
+            ids = string.format("%p", { i })
+        end
+        "#,
+    )
+    .expect("%p script parses");
+    state.eval_chunk(input, 0).expect("%p script runs");
+    assert!(state.format_pointer_ids.len() >= 50);
+    let next_id = state.next_format_pointer_id;
+    state.gc_collect();
+    assert!(
+        state.format_pointer_ids.len() <= 2,
+        "entries for collected values must be swept, got {}",
+        state.format_pointer_ids.len()
+    );
+    // The id counter never rewinds: a swept identity is never reissued.
+    assert_eq!(state.next_format_pointer_id, next_id);
+    // The surviving global keeps its entry.
+    assert!(
+        state
+            .format_pointer_ids
+            .iter()
+            .any(|(val, _)| live_table(&state, *val)),
+        "the reachable value's identity entry must survive"
+    );
+}

@@ -438,22 +438,6 @@ embedder asking.
 
 ## Execution core
 
-### Sweep the upvalue pool during GC (D-OPT-5 + C-E3)
-
-What: `src/vm/object.rs:51-53` justifies never freeing upvalue slots with
-"VMs have short lifetimes", but the snapshot feature exists precisely for
-long-lived, save/load-cycled States, and the product runs continuous
-per-tick callbacks. Every closure-with-captures created over a session leaks
-a pool slot forever (`UpvaluePool::alloc` only grows); ironically a
-save/load round-trip compacts the pool (only reachable closed upvalues are
-serialized).
-
-Sketch: sweep the pool during `gc_collect` - mark reachable `UpvalueRef`s
-while marking closures (the infrastructure already threads `upvalue_pool`
-through marking), then thread freed indices into a free list consumed by
-`alloc`. Determinism holds because allocation order stays a pure function of
-execution history.
-
 ### Iterative `build_bytecode` on the load path (last leg of C-O6/D-OPT-1)
 
 What: the GC mark walk and the save-side encoder were both rewritten onto

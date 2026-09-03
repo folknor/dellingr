@@ -48,11 +48,29 @@ impl UpvalueRef {
     }
 }
 
+/// Lifecycle colour of one upvalue pool slot. `Free` slots sit on the free
+/// list awaiting reuse; occupied slots cycle Unmarked -> Reachable -> Unmarked
+/// across each GC (mirroring `Color` for heap objects).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum UpvalueSlotColor {
+    Free,
+    Unmarked,
+    Reachable,
+}
+
 /// Pool for upvalue storage. Avoids per-upvalue heap allocations by storing
-/// all upvalues contiguously. Upvalues are never freed until the VM is dropped,
-/// which is fine for game scripting where VMs have short lifetimes.
+/// all upvalues contiguously. Slots whose `UpvalueRef` is unreachable at GC
+/// time are swept onto a free list and reused by later allocations, so a
+/// long-lived State does not leak one slot per closure-with-captures ever
+/// created. Reuse order (LIFO) is a pure function of execution history, so
+/// determinism holds.
 pub(crate) struct UpvaluePool {
     slots: Vec<Upvalue>,
+    /// Parallel to `slots`. `Cell` because marking happens while the GC mark
+    /// phase holds the pool immutably.
+    colors: Vec<Cell<UpvalueSlotColor>>,
+    /// Indices of `Free` slots, consumed LIFO by `alloc`.
+    free: Vec<u32>,
 }
 
 impl Default for UpvaluePool {
@@ -65,15 +83,53 @@ impl UpvaluePool {
     pub(super) fn new() -> Self {
         Self {
             slots: Vec::with_capacity(64),
+            colors: Vec::with_capacity(64),
+            free: Vec::new(),
         }
     }
 
     /// Allocate a new upvalue and return its reference.
     #[hotpath::measure]
     pub(super) fn alloc(&mut self, upvalue: Upvalue) -> UpvalueRef {
+        if let Some(idx) = self.free.pop() {
+            self.slots[idx as usize] = upvalue;
+            self.colors[idx as usize].set(UpvalueSlotColor::Unmarked);
+            return UpvalueRef::new(idx);
+        }
         let idx = self.slots.len() as u32;
         self.slots.push(upvalue);
+        self.colors.push(Cell::new(UpvalueSlotColor::Unmarked));
         UpvalueRef::new(idx)
+    }
+
+    /// Mark one slot reachable during the GC mark phase.
+    pub(super) fn mark_slot(&self, uv_ref: UpvalueRef) {
+        let color = &self.colors[uv_ref.index()];
+        debug_assert!(
+            color.get() != UpvalueSlotColor::Free,
+            "a reachable closure or open-upvalue entry holds an UpvalueRef \
+             whose slot was swept; the pool root set is incomplete"
+        );
+        color.set(UpvalueSlotColor::Reachable);
+    }
+
+    /// Sweep unmarked slots onto the free list. Call after the heap mark
+    /// phase, once every reachable closure and open upvalue has passed
+    /// through `mark_slot`.
+    pub(super) fn sweep(&mut self) {
+        for (idx, color) in self.colors.iter().enumerate() {
+            match color.get() {
+                UpvalueSlotColor::Reachable => color.set(UpvalueSlotColor::Unmarked),
+                UpvalueSlotColor::Unmarked => {
+                    // Drop the held value so a swept closed upvalue cannot
+                    // pin heap objects; the slot is dead until reallocated.
+                    self.slots[idx] = Upvalue::Closed(Val::Nil);
+                    color.set(UpvalueSlotColor::Free);
+                    self.free.push(idx as u32);
+                }
+                UpvalueSlotColor::Free => {}
+            }
+        }
     }
 
     #[cfg(feature = "snapshot")]
@@ -86,15 +142,35 @@ impl UpvaluePool {
         self.slots[uv_ref.index()] = Upvalue::Closed(val);
     }
 
+    /// Slots currently holding a live upvalue (total minus free-listed).
+    #[cfg(test)]
+    pub(super) fn occupied_count(&self) -> usize {
+        self.slots.len() - self.free.len()
+    }
+
+    /// Total slots ever allocated, including free-listed ones.
+    #[cfg(test)]
+    pub(super) fn total_slots(&self) -> usize {
+        self.slots.len()
+    }
+
     /// Get immutable access to an upvalue.
     #[inline]
     pub(super) fn get(&self, uv_ref: UpvalueRef) -> &Upvalue {
+        debug_assert!(
+            self.colors[uv_ref.index()].get() != UpvalueSlotColor::Free,
+            "read through an UpvalueRef whose slot was swept"
+        );
         &self.slots[uv_ref.index()]
     }
 
     /// Get mutable access to an upvalue.
     #[inline]
     pub(super) fn get_mut(&mut self, uv_ref: UpvalueRef) -> &mut Upvalue {
+        debug_assert!(
+            self.colors[uv_ref.index()].get() != UpvalueSlotColor::Free,
+            "write through an UpvalueRef whose slot was swept"
+        );
         &mut self.slots[uv_ref.index()]
     }
 }
@@ -417,8 +493,10 @@ impl GcHeap {
         match &obj.raw {
             RawObject::LuaFn(closure) => {
                 closure.runtime.literals.mark_reachable(self, worklist);
-                // Mark values stored in closed upvalues
+                // Mark the upvalue slots themselves (so the pool sweep keeps
+                // them) and the values stored in closed ones.
                 for uv_ref in closure.upvalues.iter() {
+                    upvalue_pool.mark_slot(*uv_ref);
                     if let Upvalue::Closed(val) = upvalue_pool.get(*uv_ref) {
                         val.mark_reachable(self, worklist);
                     }
@@ -478,6 +556,17 @@ impl GcHeap {
     // ========================================================================
     // Memory tracking
     // ========================================================================
+
+    /// Whether a Val's referent still resolves in the heap. Non-heap values
+    /// are always live. Generational keys make this safe to ask about values
+    /// that were deliberately not rooted (e.g. `format_pointer_ids`).
+    pub(super) fn val_is_live(&self, val: &Val) -> bool {
+        match val {
+            Val::Obj(ptr) => self.objects.contains_key(ptr.0),
+            Val::Str(ptr) => self.strings.contains(*ptr),
+            _ => true,
+        }
+    }
 
     /// Number of GC-managed objects (tables and closures).
     pub(super) fn object_count(&self) -> usize {
@@ -598,6 +687,10 @@ impl StringPool {
 
     pub(super) fn len(&self) -> usize {
         self.strings.len()
+    }
+
+    pub(super) fn contains(&self, ptr: StringPtr) -> bool {
+        self.strings.contains_key(ptr.0)
     }
 
     pub(super) fn hash_string(bytes: &[u8]) -> u64 {
