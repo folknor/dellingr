@@ -224,8 +224,7 @@ impl Table {
                     None
                 }
                 TableStorage::Map(map) => {
-                    let idx = map.get_index_of(key)?;
-                    let (_, value) = map.get_index(idx)?;
+                    let (idx, _, value) = map.get_full(key)?;
                     (!matches!(value, Val::Nil)).then_some((idx, *value))
                 }
             },
@@ -530,7 +529,9 @@ impl Table {
         debug_assert_eq!(self.dead_count, 0);
         let old_storage = std::mem::take(&mut self.storage);
         if let TableStorage::Inline { mut entries, len } = old_storage {
-            let mut map = IndexMap::with_capacity(INLINE_CAPACITY + 1);
+            // INLINE_CAPACITY + 1 would guarantee a rehash almost immediately
+            // for a growing table; start at 8 to skip that first rehash.
+            let mut map = IndexMap::with_capacity((INLINE_CAPACITY + 1).next_power_of_two());
             for entry in entries.iter_mut().take(len as usize) {
                 let (k, v) = std::mem::take(entry);
                 map.insert(k, v);

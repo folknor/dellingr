@@ -140,10 +140,11 @@ pub(crate) fn open_table(state: &mut State) -> Result<()> {
         state.push_number(num_args as f64)?;
         state.set_table_raw(table_idx)?;
 
-        // Remove all original arguments, leave just the table
-        // Table is at position (num_args + 1)
-        for _ in 0..num_args {
-            state.remove(1)?;
+        // Move the table into slot 1 and drop the arguments in one truncate,
+        // instead of O(n^2) remove-from-bottom shuffling.
+        if num_args > 0 {
+            state.replace(1)?;
+            state.set_top(1)?;
         }
 
         Ok(1)

@@ -605,18 +605,15 @@ in TODO.md's workload-registry entry).
   fetch; with one-time validation that all jump targets are in-bounds at
   load/finalize time, the fetch could use a pointer/len cursor - only if
   profiles show it; keep panics over UB.
-- **Table micro (C-O8):** `Table::get_with_index` on Map does `get_index_of`
-  + `get_index` (two probes); IndexMap's `get_full` does it in one.
-  `promote_to_map` allocates capacity `INLINE_CAPACITY + 1 = 5`
-  (`table.rs:485`), guaranteeing a rehash almost immediately for growing
-  tables; promoting straight to 8 avoids one rehash on the common
-  grow-past-inline path. (`try_insert_table_direct`'s double probe is only
-  on the metatable-present path; the no-metatable path is single-probe
-  already - fine as is.)
+- **Table micro (C-O8):** remaining note only -
+  `try_insert_table_direct`'s double probe is only on the
+  metatable-present path; the no-metatable path is single-probe
+  already - fine as is. (The `get_full` single-probe and the
+  promote-to-8 capacity shipped 2026-09-03.)
 - **Stdlib micro (E):** `string.format` should format into one output buffer
-  instead of per-directive Vec round-trips. `table.pack`:
-  `for _ in 0..num_args { state.remove(1) }` (`table.rs:145-147`) is O(n^2)
-  stack shuffling; a single rotate/truncate does it. `is_plain_lua_pattern`
-  treats `-` as magic even though a `-` with no preceding class item at
-  pattern start is literal; conservative is fine, just noting the fast path
-  misses hyphenated plain needles like `"foo-bar"`.
+  instead of per-directive Vec round-trips (invasive across ~15 helper
+  functions for a micro win; measure before bothering).
+  `is_plain_lua_pattern` treats `-` as magic even though a `-` with no
+  preceding class item at pattern start is literal; conservative is fine,
+  just noting the fast path misses hyphenated plain needles like
+  `"foo-bar"`.
