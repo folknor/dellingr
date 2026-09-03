@@ -466,16 +466,23 @@ copies and pattern re-validation are gone (`memoize_gmatch_pattern`,
 `gmatch_subject_matcher_and_cost_meter`); that was the bulk of the win
 (`strings/patterns` 160ms -> 60ms).
 
-What remains (`string.rs:19, 537-558, 739-786`): one Lua call into the
-compiled wrapper chunk (`gmatch_wrapper()`, still a compiled Bytecode) + one
-RustFn call, plus `get_table` lookups ("s", "pos") and one `set_table_raw`
-against the table-backed iterator state, every iteration. A generic-for
-iterator already receives `(state, control)`, so a RustFunc can be the
-iterator directly; hold the iterator state (subject Val, compiled pattern,
-pos) in a Rust-side object (heap object variant or registry anchor) instead
-of a Lua table. The wrapper/table design mainly serves the snapshot feature;
-keep a serializable representation for that (the state is just
-(string, string, number)).
+What remains (`string.rs`): one Lua call into the compiled wrapper chunk
+(`gmatch_wrapper()`, still a compiled Bytecode) + one RustFn call, plus
+`get_table` lookups ("s", "pos") and one `set_table_raw` against the
+table-backed iterator state, every iteration.
+
+Explored 2026-09-03, and the original sketch understates the cost. The
+generic-for protocol does pass `(state, control)` to the iterator, so a bare
+RustFn works *inside a for loop* - but reference Lua also supports capturing
+the iterator and calling it standalone (`local it = s:gmatch(p); it()`),
+where it receives no arguments at all. The state therefore has to live
+inside the callable, and dellingr's `RustFunc` is a plain fn pointer by
+design (determinism, snapshot registry keyed by address). Dropping the
+wrapper needs a new captured-state Rust callable - a `Val` variant or heap
+object holding (fn, state) - which touches GC marking, Val size (and the
+NaN-boxing plan), and snapshot encoding. That is rewrite-class, not a
+stdlib cleanup; only worth doing as part of a broader Val/callable rework,
+or if `strings/patterns` profiling shows the wrapper call dominating.
 
 ---
 
