@@ -46,6 +46,23 @@ fn charge_bytes(state: &mut State, bytes: usize) -> Result<()> {
     charge_cost(state, bytes.max(1) as u64)
 }
 
+/// Charge `units` scan comparisons with the exact semantics of charging
+/// them one at a time (see `CostMeter::consume_units`).
+fn charge_scan_units(state: &mut State, units: usize) -> Result<()> {
+    if state.cost_meter().consume_units(units as u64) {
+        Ok(())
+    } else {
+        Err(state.budget_exceeded_error())
+    }
+}
+
+/// Plain substring search: a first-byte skip loop over candidate windows.
+///
+/// The cost charged is byte-for-byte identical to the naive nested scan this
+/// replaced (1 per start position whose first byte mismatches, common prefix
+/// plus the mismatching comparison per candidate, `needle.len()` for the
+/// match), including where in the scan a finite budget runs out - the
+/// algorithm change is invisible through `cost_used`, only wall time moves.
 fn find_subslice(state: &mut State, haystack: &[u8], needle: &[u8]) -> Result<Option<usize>> {
     if needle.is_empty() {
         return Ok(Some(0));
@@ -53,16 +70,31 @@ fn find_subslice(state: &mut State, haystack: &[u8], needle: &[u8]) -> Result<Op
     if needle.len() > haystack.len() {
         return Ok(None);
     }
-    for start in 0..=haystack.len() - needle.len() {
-        for (offset, needle_byte) in needle.iter().enumerate() {
-            charge_cost(state, 1)?;
-            if haystack[start + offset] != *needle_byte {
-                break;
-            }
-            if offset + 1 == needle.len() {
-                return Ok(Some(start));
-            }
+    let first = needle[0];
+    let last_start = haystack.len() - needle.len();
+    let mut start = 0usize;
+    while start <= last_start {
+        let Some(offset) = haystack[start..=last_start]
+            .iter()
+            .position(|&b| b == first)
+        else {
+            charge_scan_units(state, last_start - start + 1)?;
+            return Ok(None);
+        };
+        charge_scan_units(state, offset)?;
+        let cand = start + offset;
+        let window = &haystack[cand..cand + needle.len()];
+        let prefix = window
+            .iter()
+            .zip(needle)
+            .take_while(|(hay, need)| hay == need)
+            .count();
+        if prefix == needle.len() {
+            charge_scan_units(state, needle.len())?;
+            return Ok(Some(cand));
         }
+        charge_scan_units(state, prefix + 1)?;
+        start = cand + 1;
     }
     Ok(None)
 }
@@ -230,17 +262,117 @@ fn append_string_replacement(
     Ok(())
 }
 
+/// A string replacement parsed once: literal runs (with `%%` unescaped) and
+/// `%N` capture references. Compiled lazily after the first successful
+/// replacement, so a malformed template still errors (or, with zero matches,
+/// never errors) exactly where the per-match parser did.
+enum ReplSegment {
+    Literal(Vec<u8>),
+    Capture(usize),
+}
+
+struct ReplTemplate {
+    segments: Vec<ReplSegment>,
+    /// Original template length; each application charges it up front,
+    /// mirroring `append_string_replacement`.
+    repl_len: usize,
+}
+
+fn compile_replacement_template(repl: &[u8]) -> Option<ReplTemplate> {
+    let mut segments = Vec::new();
+    let mut literal = Vec::new();
+    let mut i = 0usize;
+    while i < repl.len() {
+        if repl[i] == b'%' {
+            let next = *repl.get(i + 1)?;
+            if next == b'%' {
+                literal.push(b'%');
+            } else if next.is_ascii_digit() {
+                if !literal.is_empty() {
+                    segments.push(ReplSegment::Literal(std::mem::take(&mut literal)));
+                }
+                segments.push(ReplSegment::Capture((next - b'0') as usize));
+            } else {
+                return None;
+            }
+            i += 2;
+        } else {
+            literal.push(repl[i]);
+            i += 1;
+        }
+    }
+    if !literal.is_empty() {
+        segments.push(ReplSegment::Literal(literal));
+    }
+    Some(ReplTemplate {
+        segments,
+        repl_len: repl.len(),
+    })
+}
+
+/// Append literal bytes, charging 1 per byte with unit-exact batching. Falls
+/// back to the byte-at-a-time appender when the result would cross the string
+/// size cap, so cap-boundary charging matches the unbatched path too.
+fn append_bytes_units(state: &mut State, out: &mut Vec<u8>, bytes: &[u8]) -> Result<()> {
+    let Ok(next) = crate::vm::checked_string_growth(out.len(), bytes.len()) else {
+        for byte in bytes {
+            append_bytes(state, out, std::slice::from_ref(byte))?;
+        }
+        return Ok(());
+    };
+    charge_scan_units(state, bytes.len())?;
+    out.reserve(next - out.len());
+    out.extend_from_slice(bytes);
+    Ok(())
+}
+
+fn append_templated_replacement(
+    state: &mut State,
+    out: &mut Vec<u8>,
+    template: &ReplTemplate,
+    bytes: &[u8],
+    captures: &[LuaCapture],
+) -> Result<()> {
+    charge_cost(state, template.repl_len as u64)?;
+    for segment in &template.segments {
+        match segment {
+            ReplSegment::Literal(literal) => append_bytes_units(state, out, literal)?,
+            ReplSegment::Capture(idx) => {
+                let capture = if *idx == 0 || (captures.len() == 1 && *idx == 1) {
+                    captures[0]
+                } else {
+                    *captures.get(*idx).ok_or_else(|| {
+                        state.error(ErrorKind::RuntimeError("invalid capture index".into()))
+                    })?
+                };
+                append_capture_bytes(state, out, bytes, capture)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn append_gsub_replacement(
     state: &mut State,
     out: &mut Vec<u8>,
     repl_type: &LuaType,
     bytes: &[u8],
     captures: &[LuaCapture],
+    template: &mut Option<ReplTemplate>,
 ) -> Result<()> {
     match repl_type {
         LuaType::String | LuaType::Number => {
-            let repl = state.bytes_coerce(3)?;
-            append_string_replacement(state, out, &repl, bytes, captures)?;
+            if let Some(template) = template {
+                append_templated_replacement(state, out, template, bytes, captures)?;
+            } else {
+                // First replacement: the per-match parser keeps template
+                // errors surfacing at the same point (and not at all for
+                // zero-match calls). A successful first pass proves the
+                // template valid, so later matches use the compiled form.
+                let repl = state.bytes_coerce(3)?;
+                append_string_replacement(state, out, &repl, bytes, captures)?;
+                *template = compile_replacement_template(&repl);
+            }
         }
         LuaType::Table => {
             let key = if captures.len() > 1 {
@@ -589,13 +721,22 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
             return Ok(2);
         }
 
+        let mut template = None;
+
         if pattern.is_empty() {
             let mut result = Vec::with_capacity(s.len());
             let mut count = 0usize;
             for i in 0..=s.len() {
                 if max_replacements.is_none_or(|max| count < max) {
                     let captures = [LuaCapture::Bytes { start: i, end: i }];
-                    append_gsub_replacement(state, &mut result, &repl_type, &s, &captures)?;
+                    append_gsub_replacement(
+                        state,
+                        &mut result,
+                        &repl_type,
+                        &s,
+                        &captures,
+                        &mut template,
+                    )?;
                     count += 1;
                 }
                 if i < s.len() {
@@ -629,7 +770,14 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
                 append_bytes(state, &mut result, &s[pos..start])?;
 
                 let captures = [LuaCapture::Bytes { start, end }];
-                append_gsub_replacement(state, &mut result, &repl_type, &s, &captures)?;
+                append_gsub_replacement(
+                    state,
+                    &mut result,
+                    &repl_type,
+                    &s,
+                    &captures,
+                    &mut template,
+                )?;
 
                 pos = end;
                 count += 1;
@@ -668,7 +816,7 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
             append_bytes(state, &mut result, &s[pos..range.start])?;
             captures.clear();
             captures.extend((0..matcher.num_matches()).map(|i| matcher.capture(i)));
-            append_gsub_replacement(state, &mut result, &repl_type, &s, &captures)?;
+            append_gsub_replacement(state, &mut result, &repl_type, &s, &captures, &mut template)?;
             count += 1;
 
             if range.start == range.end {

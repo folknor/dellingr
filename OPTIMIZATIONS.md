@@ -500,28 +500,6 @@ of a Lua table. The wrapper/table design mainly serves the snapshot feature;
 keep a serializable representation for that (the state is just
 (string, string, number)).
 
-### gsub: precompile the replacement template (E-O3)
-
-What: the owned-copy half of the original finding is fixed
-(`append_gsub_replacement` now borrows via `bytes_coerce`), but string
-replacements still re-parse `%N` escapes for every match
-(`string.rs:233-243` -> `append_string_replacement`). Parse the template
-once per gsub call into `Vec<Segment{Literal(range) | Capture(n)}>`;
-per-match work becomes pure byte appends.
-
-### Plain find/gsub: replace the naive subslice scan (E-O4)
-
-What: `find_subslice` (`string.rs:49`) is a byte-at-a-time nested scan -
-O(n*m) with no skip loop - now charging 1 cost per byte compared. A
-memchr-based first-byte skip (or full two-way/memmem) is deterministic and
-typically several-fold faster on long subjects; serves the `string.find`
-plain path and the plain-gsub loop.
-
-Watch out: the per-byte cost charge means the scan algorithm is
-script-observable through cost_used. Changing the algorithm changes what a
-given call costs - either keep charging as-if-naive (cost model stays put,
-wall time improves) or accept a replay-versioning event.
-
 ---
 
 ## IC extensions (same shape as existing ICs)
