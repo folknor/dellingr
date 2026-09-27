@@ -4,12 +4,24 @@
 
 The crate ships both a library (`State`, `HostCallbacks`, `RustFunc`, `analyze_cost`, `ArgCount`, `RetCount`) and a thin CLI binary (`src/main.rs`). The public API is pre-1.0 and not stable.
 
+## Rules
+
+### General rules
+
+- Don't use gremlins! Em-dash, en-dash, strange quotes, whatever - they're all verboten.
+- Don't remind the user of the rules. They wrote them, so they know them.
+- The user can exempt you from any rule at any time.
+
+### Bash rules
+
+- Never read or write from `/tmp`. All data lives in the project.
+- Never run raw `cargo`, `curl`, `pkill`. Use `brokkr`.
+
 ## Commands
 
-Use `brokkr` (not raw `cargo`) for check/test. It runs a gremlins scan (banned Unicode), then clippy, then tests. Clippy denies warnings project-wide, so a clippy failure short-circuits before tests run. By default, output is filtered to changed files and capped at 20 diagnostics per phase.
+Use `brokkr` (not raw `cargo`) for check/test. It runs a gremlins scan (banned Unicode), then clippy, then tests. Clippy denies warnings project-wide, so a clippy failure short-circuits before tests run. Output is never capped or scoped: every diagnostic prints every time, and errors in files with unstaged changes are listed first.
 
-- `brokkr check` - gremlins + clippy + all tests (changed-files scope)
-- `brokkr check --all` - show every diagnostic, no cap, no scope filter
+- `brokkr check` - gremlins + clippy + all tests
 - `brokkr check --fix-gremlins` - rewrite banned Unicode in tracked files (em/en dash to `-`, smart quotes to straight, NBSP to space, zero-width/bidi deleted) before checking
 - `brokkr check -- --test <file>` - forward args to `cargo test` (args after the second `--` go to the test binary)
 - `brokkr test <NAME>` - release-mode focused single-test runner. Always passes `--release --include-ignored --nocapture --test-threads=1`. `<NAME>` is a case-sensitive substring filter (matches both unit and integration tests). Streams the test's own stdout/stderr live and prints a `[test] PASS/FAIL` footer with wall time.
@@ -23,9 +35,9 @@ Use `brokkr` (not raw `cargo`) for check/test. It runs a gremlins scan (banned U
 Running scripts (the binary, not the test runner):
 
 ```sh
-cargo run --release -- path/to/script.lua             # run a script
-cargo run --release -- --analyze path/to/script.lua   # static cost analysis, no execution
-cargo run --release -- --limit 100000 path/to/script.lua  # run with a cost budget
+brokkr run --release -- path/to/script.lua             # run a script
+brokkr run --release -- --analyze path/to/script.lua   # static cost analysis, no execution
+brokkr run --release -- --limit 100000 path/to/script.lua  # run with a cost budget
 brokkr run --quiet -- script.lua                      # forwards raw to cargo run
 ```
 
@@ -152,7 +164,7 @@ The harness measures four phases on one State and emits KV pairs to stderr: `par
 
 Roughly ninety internal functions carry `#[hotpath::measure]`, concentrated in `vm/table.rs`, `vm/table_ops.rs`, `vm/eval*.rs`, `vm/object.rs` and the compiler front end. The annotation is a no-op when the `hotpath` cargo feature is off, so it costs nothing in normal builds; it is cheap to add one when a new candidate needs a measurement point, and worth doing at the same time as the bench that will exercise it. **Don't add `#[hotpath::measure]` to `eval_closure` or any function that recurses through the bytecode dispatch loop**: each level adds enough stack-frame bloat to abort the `call_depth_exceeded_error` test (which intentionally recurses to `MAX_CALL_DEPTH = 1000`). A function *called from* the dispatch loop is fine as long as its own frame is popped before the loop recurses - the constraint is about frames that stay live across the recursive descent, not about being on the call path at all. `eval.rs` carries an inline comment at the one site where this is easy to get wrong.
 
-When adding annotations, verify the `hotpath` configuration still builds (`cargo check --features hotpath`); the plain gate does not compile that feature, so a bad annotation is otherwise invisible.
+When adding annotations, verify the `hotpath` configuration still builds (`brokkr check --features hotpath`); the plain gate does not compile that feature, so a bad annotation is otherwise invisible.
 
 To add a new target: write `examples/{category}/{name}.lua` defining `_bench()` and a standalone runner footer. No Rust changes, no manifest updates.
 

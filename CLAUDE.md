@@ -1,23 +1,57 @@
 @AGENTS.md
 
-## Multi-Agent Orchestration
+## More rules
 
-**Do NOT use worktree isolation for parallel agents.** Worktrees create merge conflicts that silently drop agent work. Instead, launch agents in the same tree with strict file ownership - zero overlap.
+### Subagents
 
-**Why no worktrees:** Worktrees let agents work on diverged snapshots. When merging back, `git checkout --ours/--theirs` drops code, conflict markers get missed, and features end up "existing but not wired" - types/functions created but never connected to bytecode dispatch, the standard library, or call sites. This has happened in long sessions and was only caught by a rigorous 3-pass audit.
+- Always get permission from the user before launching subagents.
+- Do NOT use git worktree isolation for parallel agents. Worktrees create merge conflicts that silently drop agent work. Instead, launch agents in the same tree with strict file ownership - zero overlap.
 
-**Agent coordination rules:**
-
+Agent coordination rules:
 - Each agent gets exclusive ownership of specific files. No two agents touch the same file.
 - Agents must read their target file FIRST. Do not replace existing code with placeholders or stub it out.
 - Agents must NOT run `brokkr`, `cargo`, or `./scripts/diff_test.sh`. The orchestrator validates between agents.
-- Include `CLAUDE.md` (and any other top-level docs they'll need, e.g. `LLM.md`) in every agent's required reading.
 
-**Audit protocol:**
-
+Audit protocol:
 - Do not trust agent claims of completion. Verify existence + wiring + behavior.
-- Use the 3-pass audit structure: domain-specific verification, then cross-cutting reconciliation (does the new instruction actually dispatch? is the new builtin actually installed by `open_libs`?), then editorial normalization.
+- Use the 3-pass audit structure: domain-specific verification, then cross-cutting reconciliation (is the new code actually wired into its callers?), then editorial normalization.
 - Any discrepancies doc should contain only current gaps, not historical records. Remove resolved items entirely.
+
+Subagent prompt rules:
+- Scope the investigation, not the report. Caps like "under 1500 chars" or "max 15 findings" throw away signal you asked them to surface.
+- Invite lateral findings up front. If they notice a bug, optimization, smell, or anything surprising while doing the scoped work, they should flag it, even when it's outside the immediate task.
+- Name the question, not the method. Don't prescribe tools ("use `git diff`", "use `Read`"), don't prescribe steps ("read in full, not just hunks"), don't enumerate files when the scope already implies them. Prescribing the method wastes tokens and signals distrust.
+- Don't restate rules the agent already inherits. Subagents load the same CLAUDE.md / AGENTS.md as the main session, so the bash rules, no-cargo, no-worktrees, gremlins, etc. are already in scope. Re-listing them is noise.
+- Do pass anything learned in *this* conversation that the agent can't see: the user's framing, prior decisions, what's already been ruled out, the specific claim being audited.
+
+### Codex agents
+
+Never tell a codex agent to read CLAUDE.md (it is Claude-specific and contradicts their job), and never tell them to read AGENTS.md (codex loads it automatically). Put any rule they need directly in the prompt.
+
+### Memory rules
+
+Do not use your Memory functionality. Durable context belongs in CLAUDE.md or the relevant docs.
+
+### Bash rules
+
+- Never use `sed`, `find`, `awk`, `head`, `tail`, or complex bash commands.
+- Never `find /`.
+- One Bash() invocation === one command.
+- Never chain commands with `&&`.
+- Never chain commands with `;`.
+- Never chain/pipe commands with `|`. Exception: piping into `review` is allowed.
+- Never capture stdout into env vars (`UUID=$(...)`).
+- Keep `git commit -m` messages free of zsh metacharacters - braces `{}`, brackets `[]`, parens `()`, angle brackets `<>`, `#`. They trip the permission matcher and block the commit. Spell lists out (`syntax, vm, data and runner`, not `{syntax,vm,data,runner}`), write `5.1 per bar` not `5.1/bar`, name attributes in prose not `#[attr]`.
+
+### git commit rules
+
+- Always run `brokkr fmt` before a commit.
+- Never commit markdown changes and/or `.brokkr/results.db` alone. Bundle them with upcoming code commits.
+- When committing other changes: always tag along markdown files and `.brokkr/results.db` if dirty. (`sidecar.db` stays out of git - way too large - which is why `.gitignore` un-ignores only `results.db` from `.brokkr/`.)
+- Write substantive engineering-focused commit messages.
+- Has `Cargo.lock` changed? Commit it.
+- Never `git push` unless the user explicitly asks. Stop after the commit.
+- Remember to update CHANGELOG.md for relevant commits (but not general small performance improvements.)
 
 ## 'brokkr' benchmarking
 
@@ -104,36 +138,3 @@ Querying results (`.brokkr/results.db`):
   small delta, and suspect layout before mechanism when a delta
   survives it on an unrelated code path.
 - Performance numbers in markdown must include commit hash and hostname.
-
-## Rules
-
-### General rules
-
-- Don't use gremlins! Em-dash, en-dash, strange quotes, whatever - they're all verboten.
-- Don't remind the user of CLAUDE.md rules. They wrote them, so they know them.
-
-### Memory rules
-
-Do not use your Memory functionality. Do not read, write, or update memories. Do not suggest saving things to memory. Durable context belongs in CLAUDE.md or the relevant docs, not in per-session memory files - this project is developed across several hosts and users, and memory does not transfer between them; CLAUDE.md does.
-
-### Bash rules
-
-- Each Bash invocation runs exactly one command. To run several, send multiple Bash calls (in parallel when independent). This subsumes `&&`, `;`, `|`, and multi-line scripts in one Bash call.
-- Never use `sed`, `find`, `awk`, `head`, `tail`, or complex bash commands.
-- Never chain commands with `&&`.
-- Never chain commands with `;`.
-- Never chain/pipe commands with `|`. Exception: piping into `review` is allowed (writing scratch prompt files is wasteful).
-- Never capture stdout into env vars (`UUID=$(...)`).
-- Never read or write from `/tmp`. All data lives in the project.
-- Never run raw `cargo`, `curl`, `pkill`. Use `brokkr`.
-- Never run `git` with `-C <path>`. Run `git` from the current working directory.
-
-### git commit rules
-
-- Always run `brokkr fmt` before a commit.
-- Never commit markdown changes and/or `.brokkr/results.db` alone. Bundle them with upcoming code commits.
-- When committing other changes: always tag along markdown files and `.brokkr/results.db` if dirty. (`sidecar.db` stays out of git - way too large - which is why `.gitignore` un-ignores only `results.db` from `.brokkr/`.)
-- Write substantive engineering-focused commit messages.
-- Has `Cargo.lock` changed? Commit it.
-- Never `git push` unless the user explicitly asks. Stop after the commit.
-- Remember to update CHANGELOG.md for relevant commits (but not general small performance improvements.)
