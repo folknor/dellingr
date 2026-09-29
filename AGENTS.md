@@ -149,10 +149,9 @@ each carries a header comment naming the candidate it exists to measure and the
 sibling bench to compare it against.
 
 `examples/parse/large_source.lua` is generated - regenerate with `python3
-examples/parse/generate.py`, do not edit it by hand. It exists because the
-parse-time candidates have costs that scale with source size (two of them
-quadratically) and every other bench is 15-80 lines, far too small for that to
-surface. Note the parser caps a chunk at 255 nested functions, which bounds how
+examples/parse/generate.py`, do not edit it by hand. It exists because
+parse and codegen costs that scale with source size cannot surface in the other
+benches, which are 15-80 lines. Note the parser caps a chunk at 255 nested functions, which bounds how
 many top-level definitions the generator can emit; size comes from making each
 function longer instead.
 
@@ -196,8 +195,9 @@ date and upstream commit, so refresh both together.
 - The CLI prints `Cost used: N` after each run; `scripts/diff_test.sh` filters this line out before comparing.
 - The crate was lifted out of a game project (originally extracted from `fcomm2`); some doc comments still mention `FleetCallbacks` etc. as illustrative examples.
 - `target/` is a symlink to a shared cargo cache.
-- `OPTIMIZATIONS.md` is a working backlog of forward-looking optimization ideas (rejected, deferred, hypothetical). Items get deleted as they ship or stop being worth tracking. Not a discrepancy doc.
-- `TODO.md` is the matching backlog for non-perf forward-looking ideas (features, refactors, ergonomic gaps). Same conventions: working list, items deleted as they land.
+- `notes/optimizations.md` is a working backlog of forward-looking optimization ideas (rejected, deferred, hypothetical). Items get deleted as they ship or stop being worth tracking. Not a discrepancy doc.
+- `notes/todo.md` is the matching backlog for non-perf forward-looking ideas (features, refactors, ergonomic gaps). Same conventions: working list, items deleted as they land.
+- `notes/work.md` holds the current fix loop's problem statement and plan; `notes/fix-loop.md` is the process that drives it.
 
 ## Document folders
 

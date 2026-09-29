@@ -1,21 +1,14 @@
 #!/usr/bin/env python3
 """Generate examples/parse/large_source.lua.
 
-The parse-time optimization candidates (token-stamped line numbers, the
-Vec::remove in call emission, mem::take in parse_chunk, zero-allocation
-identifiers) all have costs that scale with source size - two of them
-quadratically. Every other bench script in examples/ is 15-80 lines, which is
-far too small for any of that to surface above noise.
+Parse and codegen costs that scale with source size cannot surface in the
+other bench scripts in examples/, which are 15-80 lines - far too small to rise
+above noise. This one is large enough to.
 
 The generated file is deliberately WIDE, not deep: many top-level function
-definitions, each with several statements, several call sites, and a nested
-closure. That shape hits all four candidates at once:
-
-  - statements x lines           -> update_line's linear line_and_col walk
-  - call sites                   -> code.remove(mark_idx) tail shifts
-  - nested function definitions  -> parse_chunk's two full Bytecode clones,
-                                    each O(enclosing chunk size)
-  - identifiers                  -> per-token String allocation in lex_word
+definitions, each with several statements, several call sites, a nested
+closure, and plenty of identifiers, so lexing, statement parsing, call
+emission and nested-chunk finalization all get exercised at scale.
 
 Functions are globals rather than `local function` on purpose: hundreds of
 top-level locals would blow Lua's 200-local-per-function limit in the main
@@ -24,10 +17,7 @@ chunk.
 FUNCTION_COUNT is bounded by the parser's 255-nested-functions-per-chunk limit,
 since every top-level definition is a nested chunk of the main chunk. Size
 therefore comes from making each function longer rather than from adding more
-of them - which costs nothing in coverage, because the two quadratic candidates
-scale with statement and line count, and parse_chunk's clone is O(enclosing
-chunk size) per definition, so a bigger main chunk makes each of the 200 clones
-more expensive rather than less.
+of them.
 
 The generated body must stay cheap to RUN, since tests/run_examples.rs executes
 every examples/*.lua. Only a handful of the generated functions are ever

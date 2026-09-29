@@ -1,25 +1,27 @@
 # Fix loop methodology
 
-The process driving `WORK.md` against the backlogs: `OPTIMIZATIONS.md` for
-performance work, `TODO.md` for features, refactors and ergonomic gaps.
-`WORK.md` itself holds only the current loop's problem statement and plan -
-codex sessions read it and should see the problem, not the process.
+The process driving `notes/work.md` against the backlogs:
+`notes/optimizations.md` for performance work, `notes/todo.md` for features,
+refactors and ergonomic gaps. `notes/work.md` itself holds only the current
+loop's problem statement and plan - codex sessions read it and should see the
+problem, not the process.
 
 One loop:
 
-1. Pick the next target(s) from `OPTIMIZATIONS.md` or `TODO.md`.
+1. Pick the next target(s) from `notes/optimizations.md` or `notes/todo.md`.
 2. Shallow-verify the target(s) are real by reading the cited code.
-3. Write the problem statement into `WORK.md`.
+3. Write the problem statement into `notes/work.md`.
 4. Launch `review bare --profile deep` (codex, read-only, xhigh) pointed at
-   `WORK.md`: verify the targets independently, produce an implementation plan.
+   `notes/work.md`: verify the targets independently, produce an
+   implementation plan.
 5. While 4 runs: read the target code in depth and produce an independent plan.
 6. Consolidate. Argue with the reviewer until the plans agree. Write the agreed
-   plan into `WORK.md`.
+   plan into `notes/work.md`.
 7. Launch `review bare --profile build` (codex, workspace-write) to implement.
 8. Review the diff twice: once directly, once by resuming the deep session from
    step 4 with `--session <ID>`.
 9. Actionable findings get fixed - by a build session (findings written into
-   `WORK.md`) or by hand.
+   `notes/work.md`) or by hand.
 10. Delete the shipped entry from its backlog, run `brokkr fmt` +
     `brokkr check`, commit.
 
@@ -32,15 +34,15 @@ Notes:
 
 - Steps 4 and 7 are `echo "..." | review bare --profile deep|build`. The
   session ID is printed above the response; keep it for step 8.
-- **Point sessions at `WORK.md` and nothing else.** Never tell a review or build
-  session to read `CLAUDE.md` or `AGENTS.md`. The two files exist for different
-  readers: codex already picks up `AGENTS.md` by convention, and `CLAUDE.md` is
-  Claude-side process that only pollutes a codex session's context. `WORK.md`
-  must therefore carry every project constraint the session actually needs -
-  lint gates, banned constructs, "do not run cargo/brokkr" - restated inline in
-  the prompt or in `WORK.md` itself, not delegated by reference. If a session
-  needed to know something and did not, that is a gap in `WORK.md`, not a
-  missing reading assignment.
+- **Point sessions at `notes/work.md` and nothing else.** Never tell a review
+  or build session to read `CLAUDE.md` or `AGENTS.md`. The two files exist for
+  different readers: codex already picks up `AGENTS.md` by convention, and
+  `CLAUDE.md` is Claude-side process that only pollutes a codex session's
+  context. `notes/work.md` must therefore carry every project constraint the
+  session actually needs - lint gates, banned constructs, "do not run
+  cargo/brokkr" - restated inline in the prompt or in `notes/work.md` itself,
+  not delegated by reference. If a session needed to know something and did
+  not, that is a gap in `notes/work.md`, not a missing reading assignment.
 - **Codex refusal fallback.** Codex Sol's safety filter sometimes trips on
   parts of this codebase. It is a false positive - VM internals, GC roots, and
   hostile-input hardening read like exploit work out of context. When it
@@ -66,4 +68,4 @@ Notes:
     never alongside it.
   - The overlap in step 5 is read-only work only. Reading is fine; writing is
     not.
-- Loop history lives in git, not in `WORK.md`.
+- Loop history lives in git, not in `notes/work.md`.

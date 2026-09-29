@@ -1,4 +1,4 @@
-# OPTIMIZATIONS.md
+# optimizations.md
 
 Forward-looking ideas: optimizations considered but not yet implemented, plus
 notes on places where current code is deliberately conservative. This is a
@@ -34,7 +34,8 @@ not the executed path. Conclusion: release code-layout perturbation of
 the dispatch loop, hitting the bench where dispatch overhead is the
 largest fraction of per-op work (arithmetic is the lightest-op kernel;
 its hot `if n < 2` recursion is call+dispatch bound). This is the same
-codegen fragility AGENTS.md and the 2026-05-06 IC revert record.
+codegen fragility the 2026-05-06 revert under "Shape-based polymorphic
+field IC" records.
 
 Five same-binary launches of `bench/arithmetic` at 71afe0e (plantasjen)
 all report 4000ms - launch-to-launch spread is below the 100ms reporting
@@ -110,12 +111,12 @@ that are all consequences of the frame being a Rust stack local:
   a flattened loop would not make at all.
 - Duplicate frame bookkeeping: `CallInfo` push (another `Arc<Bytecode>`
   clone) parallel to the `Frame` itself.
-- `stack.remove(idx)` to extract the callee (O(args) memmove, `eval.rs:68`).
-- varargs `drain(..).collect()` Vec per vararg call (`eval.rs:381`).
+- `stack.remove(idx)` to extract the callee (O(args) memmove, `State::call`).
+- varargs `drain(..).collect()` Vec per vararg call (`collect_varargs`).
 - (per-call string-literal interning was on this list until the per-Bytecode
   runtime cache shipped on 2026-07-26; the frame handoff is now pure Arc
   moves. The return-value drain-to-Vec left on 2026-07-26 too, commit
-  a96cff4 - `eval.rs:508` now slides the results down in place.)
+  a96cff4 - `eval_closure_frame` now slides the results down in place.)
 
 Sketch: a single dispatch loop over a State-owned `Vec<FrameState>` (bytecode
 Arc, ip, base, vararg span, cache ptr) eliminates every item above, merges
@@ -130,7 +131,7 @@ caveat) disappears.
 Why deferred: highest-leverage rewrite in the execution core, and priced like
 it. Call-heavy benches (`calls/*`, `benchmark`) are the ones sitting at
 3.4-4.4x lua5.5. Pre-1.0, internal-only: `State::call`'s public signature can stay.
-Subsumes the Closure-clone entry and the call-path micro cleanups below.
+Subsumes the call-path micro cleanup below.
 
 ### 8-byte NaN-boxed `Val` (C-O7)
 
@@ -176,9 +177,8 @@ wins on iteration paths. The current monomorphic IC already catches
 same-object access well.
 
 Signal that would promote it: a real workload where polymorphic field
-access dominates and `field_hits`-style benches show 3-5x slower than
-`same_object_fields`. Currently they're within 3x and the bottleneck on
-field_hits is the outer `items[i]` array access, not the field reads.
+access dominates and `fields/polymorphic` measures 3-5x slower than
+`fields/same_obj_read`.
 
 Lighter-weight variant worth weighing first - more honestly described as
 a *key-position IC* than a shape IC, since it caches "this key is at
@@ -186,16 +186,19 @@ this ordinal IndexMap index" rather than recognizing table shapes.
 Validation is a three-state ladder, not a single OR:
 
 1. same table ptr + same `Table::version` - trust the cached index
-   (this is what `get_cached_field` already does at frame.rs:785).
+   (this is what `get_cached_field` already does).
 2. same ptr + bumped version, OR different ptr - re-read
    `tbl.get_index(idx)` and accept if the key at that index matches
    the cached key. On accept, refresh the cache.
 3. otherwise - slow path.
 
 Note that `Table::version` is bumped specifically when existing
-key-to-index bindings may shift (`remove`, `array_insert`,
-`array_remove`), not on tail-appending inserts or value-only updates,
-since those leave existing indices stable. Cross-receiver validation
+key-to-index bindings may shift: `array_insert`, `array_remove`,
+`compact_dead` sweeping tombstones out, and re-inserting a tombstoned
+key (which moves it to the back). Deleting a key only tombstones it
+(value set to nil, slot kept), and tail-appending inserts and
+value-only updates leave indices stable, so none of those bump it.
+Cross-receiver validation
 therefore *cannot* lean on version equality (different tables can both
 have version 0 with completely different layouts); the cross-receiver
 correctness guarantee comes from the key-at-index check alone.
@@ -323,7 +326,7 @@ Hidden costs that aren't obvious from the outside:
   each gaining one arm per new variant. This is real engineering
   cost but has no GC-safety implication.
 
-Signal that would promote it: `numeric_index` and `table_fill` becoming
+Signal that would promote it: `tables/numeric_index` and `tables/fill` becoming
 the dominant slowness in a real game-script workload. The dynamic
 numeric fast path in `Table::get` already covers loop-variable
 integer indexing on Map storage; the full storage split is only
@@ -350,8 +353,7 @@ codegen if that lands - fusion is a natural register-IR peephole.
 
 Signal that would promote it: a workload where method bodies of the form
 `self.field = self.field + ...` dominate, and the per-instruction
-dispatch cost shows up in profiling. method_dispatch is now ~200us; if
-we hit a floor below that, this is the natural next step.
+dispatch cost shows up in profiling.
 
 ### Compile-time table-shape prediction
 
@@ -468,17 +470,6 @@ embedder asking.
 
 ---
 
-## Front end / parse time
-
-Measured context: `parse/large_source` (5000 generated lines) was 8.0x lua5.5
-/ 7.3x lua5.2 before the finalize strip pass (commit bc99ae4) removed the
-quadratic call-mark emission; it now measures 2.3x lua5.5 / 2.0x lua5.2, and
-the section's remaining entries are no longer backed by an outlier ratio.
-The suspected-quadratic parse candidates were never confirmed on a curve -
-that still needs a second file size.
-
----
-
 ## Stdlib / patterns
 
 ### gmatch: drop the Lua-side wrapper and table-backed iterator state (E-O2)
@@ -549,8 +540,7 @@ access, where this miss path becomes hot. Vanishingly rare in practice.
 
 ### GET_FIELD slow-path cache repopulation after `__index` resolution
 
-What: symmetrically to the SET case above - after `get_table_with_key`
-resolves through `__index`, the resolved value lives somewhere
+What: after `get_table_with_key` resolves through `__index`, the resolved value lives somewhere
 identifiable (the index table for the table-handler case). The method IC
 already caches this. The direct-field cache could also populate when the
 resolution happened to bottom out in a raw entry on a relevant table,
@@ -591,7 +581,7 @@ each get fewer than ~3 accesses (so warmup amortization matters).
 
 Still unmeasured as a whole: snapshots are driven from Rust, not from Lua,
 so benching them needs harness work rather than a new `.lua` file (tracked
-in TODO.md's workload-registry entry).
+in todo.md's workload-registry entry).
 
 ---
 
@@ -599,15 +589,17 @@ in TODO.md's workload-registry entry).
 
 - **Call-path cleanup worthwhile even if the frame-stack rewrite lands
   later (B-O5):** the return-value half shipped 2026-07-26 (commit
-  a96cff4); `eval.rs:508` is now the in-place `drain`. What remains is the
-  `State::call` fixed-arg path, which still does `stack.remove(idx)` to
-  extract the callee (`eval.rs:68`) - an O(args) memmove per call. Avoid it
+  a96cff4); `eval_closure_frame` now does an in-place `drain`. What remains
+  is the `State::call` fixed-arg path, which still does `stack.remove(idx)`
+  to extract the callee - an O(args) memmove per call. Avoid it
   by treating the callee slot as frame slot -1 (adjust `stack_bottom`);
   pairs naturally with the rewrite.
 - **Dispatch micro-items, verify with asm/bench first (B-O6):** opcode space
-  is sparse (0-25, 30-54, 60-63, 70-72); a dense renumbering (or
-  `#[repr(u8)]` enum with a validated dense range) helps LLVM emit a single
-  dense jump table without range holes. `get_instr` bounds-checks every
+  is 0-26, 30-55, 60-72 - only two small holes (27-29, 56-59) since the
+  fused branches filled 64-69, so a dense renumbering (or `#[repr(u8)]`
+  enum with a validated dense range) has little left to close; LLVM
+  likely already emits one jump table with a few dead slots. `get_instr`
+  bounds-checks every
   fetch; with one-time validation that all jump targets are in-bounds at
   load/finalize time, the fetch could use a pointer/len cursor - only if
   profiles show it; keep panics over UB.

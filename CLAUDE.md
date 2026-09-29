@@ -132,7 +132,7 @@ Querying results (`.brokkr/results.db`):
   dellingr data point: five same-binary launches of bench/arithmetic at
   71afe0e on plantasjen all reported 4000ms - launch spread below the
   100ms reporting granularity there. Binary-to-binary layout deltas are
-  a separate, larger effect (see OPTIMIZATIONS.md's arithmetic entry:
+  a separate, larger effect (see notes/optimizations.md's arithmetic entry:
   ~11% between binaries whose executed path is identical). The
   five-launch same-binary control is cheap - run it before trusting a
   small delta, and suspect layout before mechanism when a delta

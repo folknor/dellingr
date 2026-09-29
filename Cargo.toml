@@ -16,7 +16,6 @@ exclude = [
     "bench/",
     "notes/",
     "scripts/",
-    "WORK.md",
     "brokkr.toml",
     ".review.toml",
 ]
@@ -82,7 +81,7 @@ todo = "deny"
 [dependencies]
 indexmap = "2.0"
 slotmap = "1.1"
-hotpath = "0.24.0"
+hotpath = "0.27.0"
 
 [[example]]
 name = "hotpath"

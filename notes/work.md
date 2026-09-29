@@ -1,4 +1,4 @@
-# WORK.md
+# work.md
 
 Nothing in flight. Fill this in with the next loop's problem statement
 before launching a session.
