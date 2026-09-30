@@ -8,6 +8,7 @@ All notable changes to dellingr are documented here. The format follows
 
 ### Changed
 
+- **MSRV raised to Rust 1.99** (`rust-version` in `Cargo.toml`).
 - **Constant folding.** Literal arithmetic and unary negation now fold at
   parse time with reference lcode.c's guards (NaN and -0.0 results stay
   runtime operations). Folded operations no longer execute or charge cost,

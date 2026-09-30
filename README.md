@@ -2,7 +2,7 @@
 
 <a href="https://crates.io/crates/dellingr"><img src="https://img.shields.io/crates/v/dellingr" alt="crates.io"></a>
 <a href="https://docs.rs/dellingr"><img src="https://img.shields.io/docsrs/dellingr" alt="docs.rs"></a>
-<img src="https://img.shields.io/badge/rust-1.92+-orange?logo=rust" alt="MSRV 1.92">
+<img src="https://img.shields.io/badge/rust-1.99+-orange?logo=rust" alt="MSRV 1.99">
 <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License"></a>
 
 An embeddable, deterministic, pure-Rust Lua VM with precise per-opcode instruction-cost accounting. No FFI, no system Lua dependency.
@@ -127,7 +127,7 @@ RNG outcomes matters.
 ## Status
 
 The public API is pre-1.0 and not yet stable. Breaking changes may land at any point.
-The declared MSRV is Rust 1.92; release validation should include a real 1.92
+The declared MSRV is Rust 1.99; release validation should include a real 1.99
 toolchain check.
 
 ```toml

@@ -454,8 +454,7 @@ impl State {
             }
             self.globals
                 .get_index(index)
-                .map(|(_, val)| *val)
-                .unwrap_or_default()
+                .map_or_else(Val::default, |(_, val)| *val)
         } else {
             Val::Nil
         };

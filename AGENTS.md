@@ -55,7 +55,7 @@ directory.
 
 Debug-print feature flags: `--features debug_parser`, `debug_vm`, `debug_gc`.
 
-MSRV is `1.92`. Edition 2024.
+MSRV is the `rust-version` in `Cargo.toml`. Edition 2024.
 
 ## Lint gate (don't disable, fix the code)
 

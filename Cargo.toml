@@ -2,7 +2,7 @@
 name = "dellingr"
 version = "0.4.0"
 edition = "2024"
-rust-version = "1.92"
+rust-version = "1.99"
 description = "An embeddable, pure-Rust Lua VM with precise instruction-cost accounting"
 license = "MIT"
 repository = "https://github.com/folknor/dellingr"
