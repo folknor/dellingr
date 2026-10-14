@@ -360,6 +360,7 @@ impl State {
         if self.stack.len() >= MAX_STACK_SIZE {
             return Err(Error::without_location(ErrorKind::StackOverflow {
                 size: self.stack.len().saturating_add(1),
+                limit: MAX_STACK_SIZE,
             }));
         }
         Ok(())
@@ -372,6 +373,7 @@ impl State {
         if new_size > MAX_STACK_SIZE {
             return Err(Error::without_location(ErrorKind::StackOverflow {
                 size: new_size,
+                limit: MAX_STACK_SIZE,
             }));
         }
         Ok(())

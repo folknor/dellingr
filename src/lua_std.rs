@@ -23,21 +23,29 @@ use crate::State;
 use crate::error::{Error, ErrorKind};
 use crate::numeral::exact_i64;
 
-/// Headroom the library setup needs on the value stack at any one moment.
+/// Capacity reservations for the standard-library setup path.
 ///
-/// `open_libs` is reachable from the public `State::open_libs`, so a host can
-/// call it on a non-empty stack. Every library installs its entries by pushing
-/// and immediately storing them, so the setup never holds more than a handful
-/// of live values; the deepest point is `_G` in `open_base`, which holds the
-/// table, its metatable, and a key/value pair - four slots. Reserving up front
-/// keeps the operation all-or-nothing: without it, a stack near the cap could
-/// install part of the standard library (and, under `snapshot`, part of the
-/// function registry) before failing partway through.
+/// Keep the per-library counts aligned with all entries added to each table.
+/// Math includes its `pi` and `huge` constants. The setup preflight reserves
+/// four slots before any library has been installed.
+const MATH_LIBRARY_CAPACITY: usize = 22;
+const STRING_LIBRARY_CAPACITY: usize = 10;
+const TABLE_LIBRARY_CAPACITY: usize = 7;
+
+/// Headroom the library setup reserves on the value stack.
+///
+/// `open_libs` is reachable from the public `State::open_libs`, so the
+/// preflight accounts for values already on the stack. The largest setup
+/// overlap is `_G` in `open_base`, which holds its table and metatable at once.
+/// Four slots leave room for two temporary values if that path grows.
+/// Reserving up front keeps the operation all-or-nothing: without it, a stack
+/// near the cap could install part of the standard library (and, under
+/// `snapshot`, part of the function registry) before failing partway through.
 ///
 /// The per-push checks remain the backstop if a future library ever exceeds
 /// this; they would report the overflow correctly, just without the
 /// all-or-nothing guarantee.
-const STDLIB_SETUP_HEADROOM: usize = 8;
+const STDLIB_SETUP_HEADROOM: usize = 4;
 
 pub(crate) fn open_libs(state: &mut State) -> Result<()> {
     state.check_stack_space(STDLIB_SETUP_HEADROOM)?;
@@ -151,14 +159,18 @@ pub(super) fn check_optional_type_named(
         .map_err(|error| name_argument_error(error, function_name))
 }
 
-/// Formats a standard-library argument error with a named function and detail.
+/// Builds a standard-library argument error with a named function and typed detail.
 pub(super) fn argument_error(
     state: &State,
     arg_number: isize,
     function_name: &str,
-    detail: &str,
+    detail: crate::error::ArgDetail,
 ) -> Error {
-    state.error(ErrorKind::bad_argument(arg_number, function_name, detail))
+    state.error(ErrorKind::argument_detail(
+        arg_number,
+        function_name,
+        detail,
+    ))
 }
 
 /// Converts a numeric argument to an exact i64, reporting its argument name.
@@ -169,12 +181,11 @@ pub(super) fn exact_integer_value(
     function_name: &str,
 ) -> Result<i64> {
     exact_i64(number).ok_or_else(|| {
-        argument_error(
-            state,
+        state.error(ErrorKind::argument_detail(
             arg_number,
             function_name,
-            "number has no integer representation",
-        )
+            crate::error::ArgDetail::NoInteger,
+        ))
     })
 }
 

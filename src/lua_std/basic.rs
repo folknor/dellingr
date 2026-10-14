@@ -4,7 +4,7 @@ use super::{check_any_named, check_type_named};
 use crate::LuaType;
 use crate::Result;
 use crate::State;
-use crate::error::{ArgError, ErrorKind, PrefixLocation};
+use crate::error::{ArgDetail, ArgError, ErrorKind, PrefixLocation};
 use crate::numeral::parse_lua_numeral;
 
 fn digit_value(byte: u8) -> Option<u32> {
@@ -40,6 +40,8 @@ fn parse_integer_with_base(bytes: &[u8], base: u32) -> Option<f64> {
     if negative { Some(-value) } else { Some(value) }
 }
 
+// Keep a separate callback address for the global name. Active callback-name
+// lookup and snapshot reverse lookup are keyed by the Rust function address.
 fn base_unpack_values(state: &mut State) -> Result<u8> {
     super::unpack_values(state)
 }
@@ -200,7 +202,7 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
                     state,
                     2,
                     "tonumber",
-                    "base out of range",
+                    ArgDetail::OutOfBounds("base out of range".to_owned()),
                 ));
             }
 
@@ -355,7 +357,7 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
                     state,
                     1,
                     "rawlen",
-                    "table or string expected",
+                    ArgDetail::Custom("table or string expected".to_owned()),
                 ));
             }
         };
@@ -393,7 +395,7 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
                 state,
                 1,
                 "select",
-                "index out of range",
+                ArgDetail::OutOfBounds("index out of range".to_owned()),
             ));
         }
 
@@ -429,7 +431,9 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
     // __newindex: function(t, k, v) globals[k] = v end
     state.register_lib_fn(-1, "_G", "__newindex", global_env_newindex)?;
 
-    state.set_metatable_of(1)?;
+    // Address the _G table relative to the top: a host may call open_libs
+    // with values already on the stack, so absolute index 1 is not ours.
+    state.set_metatable_of(-2)?;
     state.set_global("_G");
     Ok(())
 }

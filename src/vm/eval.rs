@@ -33,7 +33,9 @@ impl State {
     ///
     /// A fixed call with insufficient stack values returns `InvalidStackIndex`.
     /// Dynamic calls are bytecode-internal and return an error if used by a
-    /// host. Argument and result counts are limited to 255.
+    /// host. Argument and result counts are bounded by `limits::MAX_ARGUMENTS` and
+    /// `limits::MAX_RESULTS`. Reporting state follows the Error value: returning
+    /// an already reported Error from a later callback does not report it again.
     pub fn call(&mut self, num_args: ArgCount, num_ret_expected: RetCount) -> Result<()> {
         // Handle vararg call: ArgCount::Dynamic means calculate from vararg_call_bases stack
         let (idx, actual_num_args) = match num_args {
@@ -48,8 +50,11 @@ impl State {
                         "dynamic call base is outside the active stack".into(),
                     ))
                 })?;
-                let actual = u8::try_from(actual_len)
-                    .map_err(|_| self.error(ErrorKind::TooManyArguments { limit: u8::MAX }))?;
+                let actual = u8::try_from(actual_len).map_err(|_| {
+                    self.error(ErrorKind::TooManyArguments {
+                        limit: crate::limits::MAX_ARGUMENTS,
+                    })
+                })?;
                 (base, actual)
             }
             ArgCount::Fixed(n) => {
@@ -83,18 +88,9 @@ impl State {
             self.active_rust_fn = previous_rust_fn;
             let num_ret_reported = match result {
                 Ok(n) => n,
-                Err(mut e) => {
+                Err(e) => {
                     self.truncate_call_frame(idx, old_stack_bottom);
-                    // Enclosing Lua, native, and callable-chain boundaries own
-                    // nested failures. Reporting state belongs to Error, not
-                    // to the presence of a traceback supplied by the host.
-                    if self.call_depth == 0
-                        && self.call_chain_depth == 0
-                        && self.active_rust_fn.is_none()
-                    {
-                        self.host_error(&mut e);
-                    }
-                    return Err(e);
+                    return Err(self.report_call_error(e));
                 }
             };
 
@@ -104,7 +100,7 @@ impl State {
                 Ordering::Greater => {
                     if let Err(e) = self.check_stack_space(reported - num_ret_actual) {
                         self.truncate_call_frame(idx, old_stack_bottom);
-                        return Err(e);
+                        return Err(self.report_call_error(e));
                     }
                     for _ in num_ret_actual..reported {
                         self.push_unchecked(Val::Nil);
@@ -125,7 +121,7 @@ impl State {
             // This is the recursive Lua-call path, and the helper's closure plus
             // catch_unwind landing pad add enough per-level stack-frame bloat to
             // abort `call_depth_exceeded_error`, which recurses to
-            // MAX_CALL_DEPTH = 1000 (the same constraint AGENTS.md records for
+            // MAX_CALL_DEPTH (the same constraint AGENTS.md records for
             // #[hotpath::measure] on this path). A Rust panic unwinding through
             // here therefore leaks this root - but it also leaves call_stack,
             // string_literals, stack_bottom and the vararg bases inconsistent,
@@ -143,7 +139,7 @@ impl State {
                 Ok(n) => n,
                 Err(e) => {
                     self.truncate_call_frame(idx, old_stack_bottom);
-                    return Err(e);
+                    return Err(self.report_call_error(e));
                 }
             }
         } else {
@@ -175,12 +171,15 @@ impl State {
                             // (the callable was already removed above) so a direct
                             // host call does not leave the arguments visible.
                             self.truncate_call_frame(idx, old_stack_bottom);
-                            return Err(self.error(ErrorKind::TooManyArguments { limit: u8::MAX }));
+                            let error = self.error(ErrorKind::TooManyArguments {
+                                limit: crate::limits::MAX_ARGUMENTS,
+                            });
+                            return Err(self.report_call_error(error));
                         }
                     };
                     if let Err(e) = self.check_stack_space(2) {
                         self.truncate_call_frame(idx, old_stack_bottom);
-                        return Err(e);
+                        return Err(self.report_call_error(e));
                     }
                     self.stack.insert(idx, func_val);
                     self.stack.insert(idx, call_handler);
@@ -241,10 +240,18 @@ impl State {
             // caller is not left holding a partial result set.
             if let Err(e) = self.balance_stack(expected as usize, num_ret_actual as usize) {
                 self.truncate_call_frame(idx, old_stack_bottom);
-                return Err(e);
+                return Err(self.report_call_error(e));
             }
         }
         Ok(())
+    }
+
+    // Used only on error exits, never in the bytecode dispatch loop.
+    fn report_call_error(&mut self, mut error: Error) -> Error {
+        if self.call_depth == 0 && self.call_chain_depth == 0 && self.active_rust_fn.is_none() {
+            self.host_error(&mut error);
+        }
+        error
     }
 
     fn truncate_call_frame(&mut self, call_base: usize, old_stack_bottom: usize) {
@@ -351,6 +358,7 @@ impl State {
         if self.call_depth >= MAX_CALL_DEPTH {
             return Err(Error::without_location(ErrorKind::CallDepthExceeded {
                 depth: self.call_depth,
+                limit: MAX_CALL_DEPTH,
             }));
         }
         self.call_depth += 1;
@@ -450,6 +458,18 @@ impl State {
         error
     }
 
+    /// Report an error raised before the frame starts executing.
+    ///
+    /// Out of line and cold so the temporary `Frame` built for the traceback
+    /// does not enlarge `eval_closure_frame`'s stack frame, which stays live
+    /// across every level of Lua call recursion.
+    #[cold]
+    #[inline(never)]
+    fn report_setup_error(&mut self, error: Error, closure: Closure, varargs: Vec<Val>) -> Error {
+        let frame = self.initialize_frame(closure, varargs);
+        self.report_frame_error(error, &frame)
+    }
+
     fn cleanup_closure_frame(
         &mut self,
         frame_bottom: usize,
@@ -482,6 +502,7 @@ impl State {
             0
         };
         if let Err(e) = self.check_stack_space(extra_params + num_locals as usize) {
+            let e = self.report_setup_error(e, closure, varargs);
             self.cleanup_closure_frame(frame_bottom, old_stack_bottom, false);
             return Err(e);
         }
@@ -493,7 +514,11 @@ impl State {
                 }
             }
             Ordering::Greater => {
+                // A public fixed call prevalidates these argument slots, so
+                // this pop cannot fail through the host API. Keep reporting
+                // here for a future internal caller that violates that invariant.
                 if !is_vararg && let Err(e) = self.pop((num_args - num_params) as isize) {
+                    let e = self.report_setup_error(e, closure, varargs);
                     self.cleanup_closure_frame(frame_bottom, old_stack_bottom, false);
                     return Err(e);
                 }

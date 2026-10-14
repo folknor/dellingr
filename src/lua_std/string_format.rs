@@ -424,7 +424,12 @@ fn integer_argument(state: &mut State, idx: isize, argument: usize) -> Result<i6
 fn format_arg_error(state: &State, argument: usize, detail: &str) -> Error {
     let argument =
         isize::try_from(argument).expect("format argument index is bounded by the VM stack cap");
-    super::argument_error(state, argument, "format", detail)
+    super::argument_error(
+        state,
+        argument,
+        "format",
+        crate::error::ArgDetail::Custom(detail.to_owned()),
+    )
 }
 
 fn format_signed_integer(value: i64, directive: &Directive) -> Vec<u8> {

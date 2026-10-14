@@ -1,7 +1,8 @@
-use std::ops;
-
-use crate::numeral::lua_modulo;
 use std::sync::Arc;
+
+// The constant folder reaches these same functions through `numeral::arith_fn`;
+// dispatch names them directly so each stays an inlinable direct call.
+use crate::numeral::{lua_add, lua_div, lua_modulo, lua_mul, lua_sub};
 
 use super::super::error::{Error, ErrorKind, StackFrame};
 use super::Bytecode;
@@ -87,6 +88,9 @@ impl Frame {
         }
     }
 
+    // Verification normally excludes bad jumps. Retain this defensive check
+    // and its structured instruction/offset diagnostic: a verifier regression
+    // must return a VM error rather than cause an unchecked instruction fetch.
     /// Jump forward/back by `offset` instructions.
     pub(super) fn jump(&mut self, offset: i16) -> Result<()> {
         let new_ip = if offset >= 0 {
@@ -128,7 +132,7 @@ impl Frame {
     /// A finite budget also flushes before pending cost would exhaust it, so
     /// this interval does not change the charged prefix or `cost_used` at
     /// `BudgetExceeded`.
-    const COST_CHECK_INTERVAL: u64 = 64;
+    const COST_CHECK_INTERVAL: u64 = crate::limits::COST_CHECK_INTERVAL;
 
     pub(super) fn flush_local_cost(state: &mut State, local_cost: &mut u64) -> Result<()> {
         if *local_cost > 0 {
@@ -359,7 +363,7 @@ impl Frame {
                         local_cost,
                         const { Instr::op(Instr::OP_ADD).static_units() }
                     );
-                    state.eval_float_float(<f64 as ops::Add>::add)?;
+                    state.eval_float_float(lua_add)?;
                 }
                 Instr::OP_SUBTRACT => {
                     add_cost!(
@@ -367,7 +371,7 @@ impl Frame {
                         local_cost,
                         const { Instr::op(Instr::OP_SUBTRACT).static_units() }
                     );
-                    state.eval_float_float(<f64 as ops::Sub>::sub)?;
+                    state.eval_float_float(lua_sub)?;
                 }
                 Instr::OP_MULTIPLY => {
                     add_cost!(
@@ -375,7 +379,7 @@ impl Frame {
                         local_cost,
                         const { Instr::op(Instr::OP_MULTIPLY).static_units() }
                     );
-                    state.eval_float_float(<f64 as ops::Mul>::mul)?;
+                    state.eval_float_float(lua_mul)?;
                 }
                 Instr::OP_DIVIDE => {
                     add_cost!(
@@ -383,7 +387,7 @@ impl Frame {
                         local_cost,
                         const { Instr::op(Instr::OP_DIVIDE).static_units() }
                     );
-                    state.eval_float_float(<f64 as ops::Div>::div)?;
+                    state.eval_float_float(lua_div)?;
                 }
                 Instr::OP_MOD => {
                     add_cost!(

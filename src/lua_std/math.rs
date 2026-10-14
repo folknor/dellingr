@@ -13,16 +13,16 @@
 //! (`+ - * / %` and unary minus), comparisons, `sqrt`, and `math.random` are
 //! bit-stable across platforms.
 
-use super::{arg_integer, argument_error, check_type_named};
+use super::{MATH_LIBRARY_CAPACITY, arg_integer, check_type_named};
 use crate::LuaType;
 use crate::Result;
 use crate::State;
-use crate::error::{ArgError, ErrorKind};
+use crate::error::{ArgDetail, ArgError, ErrorKind};
 use std::f64::consts::PI;
 
 pub(crate) fn open_math(state: &mut State) -> Result<()> {
     // Create the math table
-    state.new_table_with_capacity(24)?;
+    state.new_table_with_capacity(MATH_LIBRARY_CAPACITY)?;
 
     // Helper to add a function to the table at stack index -1.
     macro_rules! add_fn {
@@ -173,7 +173,11 @@ pub(crate) fn open_math(state: &mut State) -> Result<()> {
                 // math.random(n) - returns integer in [1, n]
                 let n = arg_integer(state, 1, "random")?;
                 if n < 1 {
-                    return Err(argument_error(state, 1, "random", "interval is empty"));
+                    return Err(state.error(ErrorKind::argument_detail(
+                        1,
+                        "random",
+                        ArgDetail::IntervalEmpty,
+                    )));
                 }
                 state.rng.random_range_i64(1, n) as f64
             }
@@ -187,7 +191,11 @@ pub(crate) fn open_math(state: &mut State) -> Result<()> {
                     // an off-by-one, so it has been "found" as a bug before -
                     // verified against both interpreters, and changing it to
                     // #2 would introduce a divergence rather than fix one.
-                    return Err(argument_error(state, 1, "random", "interval is empty"));
+                    return Err(state.error(ErrorKind::argument_detail(
+                        1,
+                        "random",
+                        ArgDetail::IntervalEmpty,
+                    )));
                 }
                 state.rng.random_range_i64(m, n) as f64
             }

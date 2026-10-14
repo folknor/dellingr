@@ -59,19 +59,23 @@ Some of them might be added later (probably most of them behind a feature gate, 
 
 ## Source limits
 
-Source text is capped at 16 MiB per load. Longer source is rejected with `SourceSizeExceeded` before tokenising, which bounds load-time work for hosts that compile untrusted scripts.
+Source text is capped at `limits::MAX_SOURCE_BYTES` per load. Longer source is rejected with `SourceSizeExceeded` before tokenising, which bounds load-time work for hosts that compile untrusted scripts.
 
-The parser has a budget of 200 recursive syntax entries and raises `chunk has too many syntax levels` when it is exhausted, following the native-stack safeguard in reference Lua's `LUAI_MAXCCALLS`. Without the bound, deeply nested source exhausts the native stack, and a Rust stack overflow aborts the host process rather than returning a catchable error.
+The parser has a budget of `limits::MAX_SYNTAX_DEPTH` recursive syntax entries and raises `chunk has too many syntax levels` when it is exhausted, following the native-stack safeguard in reference Lua's `LUAI_MAXCCALLS`. Without the bound, deeply nested source exhausts the native stack, and a Rust stack overflow aborts the host process rather than returning a catchable error.
 
-One divergence worth knowing: a nested parenthesis costs two levels rather than one, because each level descends through both the expression and unary parsers. Parentheses therefore nest about 99 deep here against reference Lua's ~200. Every other construct - statement blocks, `elseif` chains, table constructors, unary operator runs, field-access chains - gets the full 200. Real code does not come close to either figure.
+A nested parenthesis consumes two syntax-budget entries because it descends through both the expression and unary parsers. Other constructs consume entries according to their recursive parser calls.
 
-Per-function compile-time limits are 255 locals, 255 upvalues, 255 direct child functions, and 65,536 distinct string literals and number literals per pool. Fixed calls and fixed multiple-assignment results allow 254 values because 255 is reserved for dynamic counts. All are reported as syntax errors rather than silently truncated. Table constructors and `t.f = v` assignment sites are effectively unbounded - array entries are written in batches, and assignment sites past the 255th simply stop being inline-cached rather than being rejected.
+Per-function compile-time caps are exposed in `dellingr::limits`: `MAX_LOCALS`, `MAX_UPVALUES`, `MAX_NESTED`, and `MAX_LITERALS` (per numeric or string pool). Fixed calls and multiple-assignment results use `MAX_FIXED_ARGS` and `MAX_FIXED_RESULTS`; the dynamic-count sentinel is reserved. Violations are syntax errors rather than silent truncation. Table array entries are written in batches; field assignment sites beyond `MAX_TABLE_TEMPLATES` stop being inline-cached rather than being rejected.
 
 ## Runtime limits
 
-Call depth is capped at 1000 frames. The shared Lua/Rust value stack is capped at 1,000,000 values, and that cap is enforced on every operation that can grow the stack - bytecode operand pushes, frame setup, metamethod dispatch, and the host-facing `push_*` / `new_table` / `get_global` methods alike. Exceeding it produces a catchable `StackOverflow` error rather than an abort, and a rejected operation leaves the stack exactly as it was.
+Call depth is capped at `limits::MAX_CALL_DEPTH`. The shared Lua/Rust value stack is capped at `limits::MAX_STACK_SIZE`, and that cap is enforced on every operation that can grow the stack - bytecode operand pushes, frame setup, metamethod dispatch, and the host-facing `push_*` / `new_table` / `get_global` methods alike. Exceeding it produces a catchable `StackOverflow` error rather than an abort, and a rejected operation leaves the stack exactly as it was.
 
-This is a bound on the value stack, **not** a total host-memory quota. It stops a runaway script or a looping host callback from growing the stack without limit; it does not stop a host from allocating memory by other means, any more than the 16 MiB string cap does. Enforcing it charges nothing against the instruction-cost budget.
+This is a bound on the value stack, **not** a total host-memory quota. It stops a runaway script or a looping host callback from growing the stack without limit; it does not stop a host from allocating memory by other means, any more than `limits::MAX_STRING_BYTES` does. Enforcing it charges nothing against the instruction-cost budget.
+
+Lua calls recurse on the host thread's native stack. `MAX_CALL_DEPTH` and `MAX_METAMETHOD_DEPTH` bound logical recursion, but cannot guarantee that a small native stack reaches those limits before a process-aborting stack overflow. Embedders must provision and validate thread stack space for their target, build profile, and callback call paths. The deep-recursion regression runs on a dedicated large thread stack; that is a tested configuration, not a portable minimum. Debug builds consume more native stack per call than optimized builds.
+
+`dellingr::limits` also exposes the gmatch pattern-cache entry and byte caps and the cost-check batching interval. These constants are fixed for the build. Limit errors expose both the observed size or depth and the active limit.
 
 ## Budget
 

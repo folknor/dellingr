@@ -510,10 +510,9 @@ fn finalize(bc: &mut Bytecode) -> Result<()> {
             "compiler emitted invalid bytecode in {chunk_desc}{location_desc}: {}",
             validation_error.reason
         );
-        return Err(
-            error::Error::new(error::ErrorKind::InternalError(message), line_num, 0)
-                .with_source_name(bc.source.clone()),
-        );
+        return Err(internal_error(message)
+            .with_location(line_num, 0)
+            .with_source_name(bc.source.clone()));
     }
     for nested in &mut bc.nested {
         // The parser produces nested `Arc<Bytecode>` with a refcount of 1, so

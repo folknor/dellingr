@@ -48,46 +48,18 @@ what keeps them in step.
 
 # Limits and tunables
 
-## HYG-010 - Runtime limits are private constants, restated as numbers in prose, with no injection point and no list
+## HYG-010 - Runtime limits have no injection point
 
-Reported by the vm, surface and stdlib hunters.
-
-`MAX_CALL_DEPTH = 1000` and `MAX_STACK_SIZE = 1_000_000` (vm.rs, private),
-`MAX_METAMETHOD_DEPTH = 200` (vm/metamethod.rs, private), `MAX_SYNTAX_DEPTH`
-(`pub(crate)`), `GMATCH_PATTERN_CACHE_ENTRIES`/`_BYTES` (vm.rs),
-`COST_CHECK_INTERVAL` (frame.rs), and the parser's 254/255 literals. Only
-`MAX_STRING_BYTES` is public. README restates "200 levels", "1000 frames",
-"1,000,000 values" and "16 MiB" (twice); AGENTS.md restates 1000 and
-1_000_000; error.rs doc comments say "runs 1000 frames deep"; an eval.rs
-comment says "MAX_CALL_DEPTH = 1000". The error variants
-`CallDepthExceeded`, `StackOverflow` and `MetamethodDepthExceeded` carry no
-`limit` field, unlike `StringSizeExceeded { size, limit }`.
+Reported by the vm, surface and stdlib hunters; the public limits surface,
+`limit` fields on the limit errors and name-citing prose are done. Pattern
+recursion and capture constants in patterns/luapat.rs and the save-state field
+caps are not yet on the public surface.
 
 No injection point: `call_depth_exceeded_error` has to recurse a real 1000
-frames on a big-stack thread, the stack-cap tests fill a million slots, and
-public types in error.rs (`PrefixLocation::TraceFrame`, `ScriptError`) are
-shaped around debug-build stack size at depth 1000.
-
-Fix: a `pub mod limits` (or `State::limits()`) re-exporting every limit; give
-every limit error a `limit` field; reword prose to cite the name. A per-State
-`Limits` struct (defaulted, fixed at construction for determinism, recorded by
-save/restore) would let tests use small caps and the game tune per script.
-Enforceable: a test that every `const MAX_*` in `src/` is re-exported; a
-doctest asserting README numbers equal the consts.
-
-## HYG-013 - Capacity hints and headroom are hand-counted, and some are already off
-
-Reported by the vm and stdlib hunters.
-
-`stack` 256, `call_stack` 64, `transient_roots` 64, table `INLINE_CAPACITY 4`,
-`reserve_stdlib_capacity` (`globals.reserve(Builtin::COUNT + 4)`,
-`heap.reserve(8, 96)` - VM magic numbers describing the library's shape),
-`new_table_with_capacity(24)` for math (22 entries registered), `(10)` for
-string (10), `(8)` for table (7). `STDLIB_SETUP_HEADROOM = 8` (lua_std.rs) is
-justified in prose ("four slots") and checked by nothing. Nothing lists the
-tunables. Fix: per-library `const FUNCTIONS: &[(&str, RustFunc)]` with
-capacities from `.len()`; named consts in one tuning section; a test that the
-stack high-water mark during `open_libs` stays within the headroom.
+frames on a big-stack thread, and the stack-cap tests fill a million slots. A
+per-State `Limits` struct (defaulted, fixed at construction for determinism,
+recorded by save/restore) would let tests use small caps and the game tune per
+script.
 
 ## HYG-014 - The table-library fast path silently disables itself if the function count changes
 
@@ -199,17 +171,6 @@ call already leaves the State inconsistent, so the partial guarantees buy
 nothing. Either poison the State on unwind (a flag checked on entry) and drop
 the per-site guards, or make it uniform.
 
-## HYG-037 - Fold operators and their runtime functions have two owners
-
-Reported by the compiler hunter. (The `^` half - folding baked host libm
-results into bytecode - is resolved: `^` is no longer folded, cost model 4.)
-
-Each fold operator is paired with its
-function in the parser (`parse_addition`, `parse_multiplication`, `parse_pow`)
-and again in `vm/frame.rs`, guarded only by a comment; an
-`arith_fn(opcode) -> fn(f64, f64) -> f64` in numeral.rs would be the single
-path.
-
 ## HYG-039 - Saves embed the crate version, and function identity depends on the host build's code folding
 
 Reported by the surface hunter.
@@ -235,30 +196,6 @@ An `Engine::raw()` user loading a stdlib save gets a stdlib State with no
 refusal. If intended, `load_state` should live on `Engine` and check or override
 the flag explicitly.
 
-## HYG-041 - Process-global state shared across States
-
-Reported by the vm, compiler and stdlib hunters.
-
-`anchor::NEXT_STATE_ID` is a process-global `AtomicU64` (only Anchor identity
-and Debug; documented in anchor.rs). `GMATCH_WRAPPER` (lua_std/string.rs) is a
-`static OnceLock<Arc<Bytecode>>` compiled once per process; sound because
-`Bytecode` is immutable and caches are per State, but its `source` is `None`, so
-tracebacks through `gmatch` name no chunk, and its `Arc` identity is shared
-across States, which matters if snapshot or identity logic keys on the pointer.
-The hunters found the RNG properly owned and `format_pointer_ids` per-State
-deterministic.
-
-## HYG-042 - Native stack depth is an unstated host requirement
-
-Reported by the vm hunter. Already tracked in notes/todo.md ("Depth limits are
-not stack-safe in unoptimized builds"); recorded here for the hunt's account.
-
-`MAX_CALL_DEPTH = 1000` is safe only on a large enough native stack. An
-embedder calling from a small-stack thread (a 2 MiB worker, or musl's 128 KiB
-default) gets an abort, not `CallDepthExceeded`. Nothing detects or documents
-the required stack size. Document a minimum and/or make the depth limit
-injectable (HYG-010). BUG-004 is the same failure mode with no limit at all.
-
 ## HYG-043 - Unbounded or quadratic growth in the VM and registries
 
 Reported by the vm, surface and compiler hunters.
@@ -279,39 +216,14 @@ Reported by the vm, surface and compiler hunters.
 
 # Rules duplicated inside the compiler
 
-## HYG-070 - `ArgDetail` is chosen by matching message text
-
-Reported by the wave 4 reviewer; typed `ErrorKind::argument_detail`
-constructors now exist in error.rs.
-
-The stdlib still goes through the text-matching `bad_argument` path:
-`lua_std.rs` `exact_integer_value`, two `math.random` branches, basic.rs
-`tonumber`/`rawlen`/`select`, string.rs `gsub`, table position validation and
-string_format.rs `format_arg_error`. Convert them, then drop the text matching.
-
-## HYG-073 - Some execution errors bypass the on_error reporting boundaries
-
-Reported by the wave 5 error-kinds fixer; unverified.
-
-Stack preflight failures and result-padding failures are raised outside the
-three boundaries that notify `on_error`, so a host may see the error returned
-without the callback firing. The wave 5 reviewer confirms `eval_closure_frame`
-returns early on `check_stack_space` and vararg `pop` failures without
-`report_frame_error`. Related: the private `reported` flag lives on the `Error`
-value, so a host that stores an error from one `call` and returns the same value
-from a later `RustFunc` gets no `on_error` for the second escape; undocumented.
-
 ## HYG-074 - Pattern and compiler-internal errors are still built ad hoc
 
 Reported by the wave 5 reviewer; residue of the mislabelled-error-kinds entry.
 
-- gmatch, match, find and gsub map `PatternError` to
-  `RuntimeError(err.to_string())` at four sites in string.rs, shedding
-  structure.
-- The compiler builds internal errors several ways: `compiler.rs`
-  `internal_error` (no location), `error_at(InternalError, 0)` in parser.rs
-  (renders a false line 1), `finalize`, and a new "outer literal index stack
-  empty" `error_at(..., 0)`. One helper per kind.
+Pattern errors are mapped to `RuntimeError(err.to_string())` through one helper
+in string.rs and twice in vm.rs `memoize_gmatch_pattern`, shedding structure.
+Proposed: `ErrorKind::PatternError(PatternErrorDetail)` whose Display delegates
+to the current pattern-error text. The compiler half is fixed.
 
 ## HYG-071 - Error-message function names depend on the build
 
@@ -442,15 +354,9 @@ Reported by the vm, surface and stdlib hunters.
   MAX_STRING_BYTES` building the same error in save_state.rs;
   `resolve_bytecode_runtime_no_gc` skips the check (relies on load-time
   validation).
-- `ErrorKind::InvalidJump` is constructed only in vm/frame.rs `jump` (and its
-  test), reachable only if verification has a bug; an `InternalError` in
-  disguise with its own public variant.
 - The commented-out alternative in `SyntaxError::is_recoverable` (`//
   matches!(self, Self::UnclosedString | Self::UnexpectedEof)`) records an open
   REPL question; move it to notes/todo.md or delete it.
 - `Box<dyn HostCallbacks + Send>` in `Engine::new_state_with_callbacks` and
   `State::load_state` restates a bound `HostCallbacks: Send` already has.
-- `base_unpack_values` (basic.rs) and `table_unpack_values` (table.rs) are
-  one-line wrappers around `unpack_values`; if they exist for distinct fn
-  addresses in the snapshot registry, say so in a comment.
 - `LuaPattern::matches_bytes` is `cfg(test)` only (documented, fine).

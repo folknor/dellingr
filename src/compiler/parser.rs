@@ -661,34 +661,26 @@ impl<'a> Parser<'a> {
         // Copy upvalues to chunk
         self.chunk.upvalues = self.upvalues.iter().map(|(_, desc)| *desc).collect();
 
-        let outer_chunk = self.outer_chunks.pop().ok_or_else(|| {
-            self.error_at(
-                ErrorKind::InternalError("compiler: outer chunk stack empty".into()),
-                0,
-            )
-        })?;
+        let outer_chunk = self
+            .outer_chunks
+            .pop()
+            .ok_or_else(|| super::internal_error("compiler: outer chunk stack empty"))?;
         let tmp_chunk = std::mem::replace(&mut self.chunk, outer_chunk);
-        self.literal_indices = self.outer_literal_indices.pop().ok_or_else(|| {
-            self.error_at(
-                ErrorKind::InternalError("compiler: outer literal index stack empty".into()),
-                0,
-            )
-        })?;
+        self.literal_indices = self
+            .outer_literal_indices
+            .pop()
+            .ok_or_else(|| super::internal_error("compiler: outer literal index stack empty"))?;
         self.fold_barrier = outer_fold_barrier;
 
         // Restore outer locals and upvalues
-        self.locals = self.outer_locals.pop().ok_or_else(|| {
-            self.error_at(
-                ErrorKind::InternalError("compiler: outer locals stack empty".into()),
-                0,
-            )
-        })?;
-        self.upvalues = self.outer_upvalues.pop().ok_or_else(|| {
-            self.error_at(
-                ErrorKind::InternalError("compiler: outer upvalues stack empty".into()),
-                0,
-            )
-        })?;
+        self.locals = self
+            .outer_locals
+            .pop()
+            .ok_or_else(|| super::internal_error("compiler: outer locals stack empty"))?;
+        self.upvalues = self
+            .outer_upvalues
+            .pop()
+            .ok_or_else(|| super::internal_error("compiler: outer upvalues stack empty"))?;
 
         #[cfg(feature = "debug_parser")]
         println!("Compiled chunk: {tmp_chunk:#?}");

@@ -808,8 +808,8 @@ fn open_libs_is_all_or_nothing_against_the_cap() {
     // Deliberately leave a few slots free - fewer than the setup's headroom,
     // but enough that the one-push-at-a-time installs would each succeed. This
     // is the case that distinguishes an up-front reservation from a per-push
-    // check: without the reservation the libraries install most of their
-    // globals and only fail later, at the four-slot `_G` construction.
+    // check: without the reservation every library would install, since no
+    // setup step holds more than the `_G` table and its metatable at once.
     state
         .set_top((MAX_STACK_SIZE - 3) as isize)
         .expect("filling to just below the cap");
@@ -818,6 +818,33 @@ fn open_libs_is_all_or_nothing_against_the_cap() {
     assert!(
         state.globals.is_empty(),
         "a rejected open_libs must not install any globals"
+    );
+}
+
+#[test]
+fn open_libs_with_values_on_the_stack_targets_its_own_g_table() {
+    // `_G` setup must address its table relative to the top, not absolute
+    // index 1, or a host value already on the stack receives the metatable.
+    let mut state = State::empty();
+    state.new_table().expect("host table fits");
+    state
+        .open_libs()
+        .expect("stdlib installs above a host value");
+    assert_eq!(state.get_top(), 1, "open_libs leaves the host value alone");
+    state.get_metatable_of(1).expect("index 1 is valid");
+    assert_eq!(
+        state.typ(-1),
+        crate::LuaType::Nil,
+        "the host table must not receive _G's metatable"
+    );
+    state.pop(1).expect("metatable slot");
+
+    state.get_global("_G").expect("_G fits");
+    state.get_metatable_of(-1).expect("_G is on the stack");
+    assert_eq!(
+        state.typ(-1),
+        crate::LuaType::Table,
+        "_G keeps its proxy metatable"
     );
 }
 

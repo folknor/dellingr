@@ -101,7 +101,8 @@ Compilation pipeline: source to `compiler::parse_str` to bytecode `Chunk` to exe
 - `callbacks: Box<dyn HostCallbacks>` and a typed `user_data` slot
 - `rng: VmRng` (in-crate SplitMix64) seeded via `set_rng_seed`
 
-`MAX_CALL_DEPTH = 1000`, `MAX_STACK_SIZE = 1_000_000`.
+`limits::MAX_CALL_DEPTH` and `limits::MAX_STACK_SIZE` bound calls and values.
+Logical recursion limits require sufficient host native stack space; see README Runtime limits.
 
 **The stack cap is a real, global invariant, not a documented aspiration.**
 Every path that can grow `State.stack` is either checked (a single
@@ -174,7 +175,7 @@ Each bench script is also a standalone-runnable test: top-level setup + a `_benc
 
 The harness measures four phases on one State and emits KV pairs to stderr: `parse_us`, `cold_call_us`, `warm_avg_us` (averaged over the configured warm iteration count; fractional, three decimals), plus the dellingr-specific `cold_cost` / `warm_avg_cost` and the derived `cost_per_us`. Wall time is the benchmarking metric; cost is a deterministic property of the workload and rides along as a fingerprint (a cost change means the script or compiler changed, not the VM's speed). `setup_*` and `final_*` heap/object counts bracket GC pressure. Note the harness runs the script's top level during setup, so the standalone footer's calls execute there - the "cold" call is only cold with respect to what the footer has not already warmed.
 
-Roughly ninety internal functions carry `#[hotpath::measure]`, concentrated in `vm/table.rs`, `vm/table_ops.rs`, `vm/eval*.rs`, `vm/object.rs` and the compiler front end. The annotation is a no-op when the `hotpath` cargo feature is off, so it costs nothing in normal builds; it is cheap to add one when a new candidate needs a measurement point, and worth doing at the same time as the bench that will exercise it. **Don't add `#[hotpath::measure]` to `eval_closure` or any function that recurses through the bytecode dispatch loop**: each level adds enough stack-frame bloat to abort the `call_depth_exceeded_error` test (which intentionally recurses to `MAX_CALL_DEPTH = 1000`). A function *called from* the dispatch loop is fine as long as its own frame is popped before the loop recurses - the constraint is about frames that stay live across the recursive descent, not about being on the call path at all. `eval.rs` carries an inline comment at the one site where this is easy to get wrong.
+Roughly ninety internal functions carry `#[hotpath::measure]`, concentrated in `vm/table.rs`, `vm/table_ops.rs`, `vm/eval*.rs`, `vm/object.rs` and the compiler front end. The annotation is a no-op when the `hotpath` cargo feature is off, so it costs nothing in normal builds; it is cheap to add one when a new candidate needs a measurement point, and worth doing at the same time as the bench that will exercise it. **Don't add `#[hotpath::measure]` to `eval_closure` or any function that recurses through the bytecode dispatch loop**: each level adds enough stack-frame bloat to abort the `call_depth_exceeded_error` test (which intentionally recurses to `limits::MAX_CALL_DEPTH`). A function *called from* the dispatch loop is fine as long as its own frame is popped before the loop recurses - the constraint is about frames that stay live across the recursive descent, not about being on the call path at all. `eval.rs` carries an inline comment at the one site where this is easy to get wrong.
 
 When adding annotations, verify the `hotpath` configuration still builds (`brokkr check --features hotpath`); the plain gate does not compile that feature, so a bad annotation is otherwise invisible.
 

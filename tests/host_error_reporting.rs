@@ -234,3 +234,111 @@ fn host_supplied_trace_does_not_suppress_notification() {
         assert_eq!(count.load(Ordering::SeqCst), 1);
     }
 }
+
+fn report_missing_results(_state: &mut State) -> dellingr::Result<u8> {
+    Ok(dellingr::limits::MAX_RESULTS)
+}
+
+#[test]
+fn execution_stack_preflights_notify_once() {
+    for case in 0..4 {
+        let count = Arc::new(AtomicUsize::new(0));
+        let mut state = State::with_callbacks(Box::new(ErrorCounter(Arc::clone(&count))));
+        match case {
+            0 => {
+                run_setup(
+                    &mut state,
+                    "function target(a, b) local c = a; return c end",
+                );
+            }
+            1 => {
+                state
+                    .push_rust_fn(report_missing_results)
+                    .expect("callback fits");
+                state.set_global("target");
+            }
+            2 => {
+                run_setup(&mut state, "function target() end");
+            }
+            _ => {
+                run_setup(
+                    &mut state,
+                    "target = setmetatable({}, { __call = function() end })",
+                );
+            }
+        }
+        // Leave one slot for the callable. Removing it admits the call, but
+        // frame setup / return padding / __call insertion must exceed the cap.
+        for _ in 0..dellingr::limits::MAX_STACK_SIZE - 1 {
+            state
+                .push_nil()
+                .expect("filler remains within the real limit");
+        }
+        state
+            .get_global("target")
+            .expect("callable fits at the cap");
+        let expected = if case == 2 {
+            RetCount::Fixed(2)
+        } else {
+            RetCount::Fixed(0)
+        };
+        let error = state
+            .call(ArgCount::Fixed(0), expected)
+            .expect_err("preflight exceeds the real stack limit");
+        assert!(matches!(error.kind, ErrorKind::StackOverflow { .. }));
+        assert_eq!(count.load(Ordering::SeqCst), 1, "case {case}");
+        assert_eq!(state.get_top(), dellingr::limits::MAX_STACK_SIZE - 1);
+        if case == 0 {
+            assert!(!error.stack_trace.is_empty());
+        }
+    }
+}
+
+#[test]
+fn callable_argument_overflow_notifies_once() {
+    let count = Arc::new(AtomicUsize::new(0));
+    let mut state = State::with_callbacks(Box::new(ErrorCounter(Arc::clone(&count))));
+    run_setup(
+        &mut state,
+        "target = setmetatable({}, { __call = function() end })",
+    );
+    state.get_global("target").expect("callable fits");
+    for _ in 0..dellingr::limits::MAX_ARGUMENTS {
+        state.push_nil().expect("arguments fit");
+    }
+    let error = state
+        .call(
+            ArgCount::Fixed(dellingr::limits::MAX_ARGUMENTS),
+            RetCount::Fixed(0),
+        )
+        .expect_err("implicit self exceeds argument ABI");
+    assert!(matches!(error.kind, ErrorKind::TooManyArguments { .. }));
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+    assert_eq!(state.get_top(), 0);
+}
+
+fn return_saved_error(state: &mut State) -> dellingr::Result<u8> {
+    Err(state
+        .user_data_mut::<Option<Error>>()
+        .expect("saved error slot exists")
+        .take()
+        .expect("saved error is present"))
+}
+
+#[test]
+fn returning_the_same_error_value_preserves_reporting_state() {
+    let count = Arc::new(AtomicUsize::new(0));
+    let mut state = State::with_callbacks(Box::new(ErrorCounter(Arc::clone(&count))));
+    state.push_rust_fn(fail_fn).expect("callback fits");
+    let error = state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+        .expect_err("first call fails");
+    state.set_user_data(Some(error));
+    state
+        .push_rust_fn(return_saved_error)
+        .expect("callback fits");
+    let _error = state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+        .expect_err("second call returns the same error");
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+}

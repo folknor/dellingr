@@ -4,15 +4,17 @@ use super::{arg_integer, check_optional_type_named, check_type_named, opt_intege
 use crate::LuaType;
 use crate::Result;
 use crate::State;
-use crate::error::{ErrorKind, TypeError};
+use crate::error::{ArgDetail, ErrorKind, TypeError};
 
+// Keep a separate callback address for the `table.unpack` snapshot id. If this
+// aliases global `unpack`, reverse callback-name lookup resolves only one id.
 fn table_unpack_values(state: &mut State) -> crate::Result<u8> {
     super::unpack_values(state)
 }
 
 pub(crate) fn open_table(state: &mut State) -> Result<()> {
     // Create the table table
-    state.new_table_with_capacity(8)?;
+    state.new_table_with_capacity(super::TABLE_LIBRARY_CAPACITY)?;
 
     // Helper to add a function to the table at stack index -1.
     macro_rules! add_fn {
@@ -298,5 +300,10 @@ pub(crate) fn open_table(state: &mut State) -> Result<()> {
 }
 
 fn position_out_of_bounds(state: &State, func_name: &str) -> crate::error::Error {
-    super::argument_error(state, 2, func_name, "position out of bounds")
+    super::argument_error(
+        state,
+        2,
+        func_name,
+        ArgDetail::OutOfBounds("position out of bounds".to_owned()),
+    )
 }

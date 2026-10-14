@@ -79,7 +79,7 @@ pub enum PrefixLocation {
     /// `u32` rather than `usize` so `PrefixLocation` stays 8 bytes and
     /// `ScriptError` stays within `ErrorKind`'s existing largest variant.
     /// Widening `ErrorKind` widens every `Result<_, Error>` held across the
-    /// Lua call recursion, which runs 1000 frames deep and overflows the
+    /// Lua call recursion, which runs to `limits::MAX_CALL_DEPTH` and overflows the
     /// debug-build stack - `call_depth_exceeded_error` catches exactly that.
     TraceFrame(u32),
 }
@@ -116,6 +116,8 @@ pub enum ErrorKind {
     MetamethodDepthExceeded {
         /// Recursion depth reached before bailing out.
         depth: u32,
+        /// Maximum permitted by the corresponding `limits` constant.
+        limit: u32,
     },
     /// Invalid jump target (compiler bug or corrupt bytecode).
     InvalidJump {
@@ -128,11 +130,15 @@ pub enum ErrorKind {
     CallDepthExceeded {
         /// Depth reached at the failing call.
         depth: u32,
+        /// Maximum permitted by the corresponding `limits` constant.
+        limit: u32,
     },
     /// Stack size exceeded (too many values on stack).
     StackOverflow {
         /// Stack size that triggered the overflow.
         size: usize,
+        /// Maximum permitted by the corresponding `limits` constant.
+        limit: usize,
     },
     /// A Lua string exceeded the fixed resource limit.
     StringSizeExceeded {
@@ -212,7 +218,7 @@ pub struct ArgError {
 }
 
 /// Maximum number of values a Rust callback can return.
-pub const MAX_RESULTS: u8 = u8::MAX;
+pub use crate::limits::MAX_RESULTS;
 
 /// Validate a result count against the Rust callback ABI.
 pub fn results_count(count: usize) -> Result<u8, ErrorKind> {
@@ -408,21 +414,6 @@ impl ErrorKind {
         })
     }
 
-    /// Build a named argument error while preserving its precise diagnostic.
-    pub(crate) fn bad_argument(arg_number: isize, function_name: &str, detail: &str) -> Self {
-        // Legacy stdlib callers pass text; preserve their structured results
-        // until they can select ArgDetail directly at validation sites.
-        let detail = match detail {
-            "number has no integer representation" => ArgDetail::NoInteger,
-            "interval is empty" => ArgDetail::IntervalEmpty,
-            "base out of range" | "index out of range" | "position out of bounds" => {
-                ArgDetail::OutOfBounds(detail.to_owned())
-            }
-            detail => ArgDetail::Custom(detail.to_owned()),
-        };
-        Self::argument_detail(arg_number, function_name, detail)
-    }
-
     /// Whether the underlying error category is recoverable - see
     /// [`Error::is_recoverable`].
     pub fn is_recoverable(&self) -> bool {
@@ -522,8 +513,11 @@ impl fmt::Display for ErrorKind {
                     "budget exceeded: used {used} cost with budget of {budget}"
                 )
             }
-            MetamethodDepthExceeded { depth } => {
-                write!(f, "metamethod chain too deep (depth {depth})")
+            MetamethodDepthExceeded { depth, limit } => {
+                write!(
+                    f,
+                    "metamethod chain too deep (depth {depth}, limit {limit})"
+                )
             }
             InvalidJump { ip, offset } => {
                 write!(
@@ -531,11 +525,11 @@ impl fmt::Display for ErrorKind {
                     "internal error: invalid jump (instruction {ip}, offset {offset})"
                 )
             }
-            CallDepthExceeded { depth } => {
-                write!(f, "call stack overflow (depth {depth})")
+            CallDepthExceeded { depth, limit } => {
+                write!(f, "call stack overflow (depth {depth}, limit {limit})")
             }
-            StackOverflow { size } => {
-                write!(f, "stack overflow ({size} values)")
+            StackOverflow { size, limit } => {
+                write!(f, "stack overflow ({size} values, limit {limit})")
             }
             StringSizeExceeded { size, limit } => {
                 write!(f, "string size {size} exceeds limit {limit}")

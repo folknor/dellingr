@@ -51,13 +51,22 @@ use object::{GcHeap, Markable, StringPtr, UpvaluePool, UpvalueRef};
 use rng::VmRng;
 use table::{Table, TableShape};
 
-/// Maximum size in bytes of any Lua string.
-pub const MAX_STRING_BYTES: usize = 16 * 1024 * 1024;
-
-const GMATCH_PATTERN_CACHE_ENTRIES: usize = 256;
-const GMATCH_PATTERN_CACHE_BYTES: usize = MAX_STRING_BYTES;
+pub use crate::limits::MAX_STRING_BYTES;
+use crate::limits::{
+    GMATCH_PATTERN_CACHE_BYTES, GMATCH_PATTERN_CACHE_ENTRIES, MAX_CALL_DEPTH, MAX_STACK_SIZE,
+};
+// Capacity hints for `reserve_stdlib_capacity`; they size allocations only and
+// never affect behaviour or iteration order. Keep them in step with the
+// registrations in `lua_std`. Every builtin slot is also a global, and `error`
+// is the one standard-library global without a builtin slot.
+const STDLIB_NON_BUILTIN_GLOBALS: usize = 1;
 // Keep room for a few host-defined globals alongside the standard library.
 const HOST_GLOBAL_CAPACITY_HEADROOM: usize = 4;
+// `_G`, its metatable, and the math, string and table library tables.
+const STDLIB_HEAP_TABLES: usize = 5;
+// Distinct interned keys across those tables: math's functions plus `pi` and
+// `huge`, the string and table functions, and `_G`'s `__index`/`__newindex`.
+const STDLIB_INTERNED_TABLE_KEYS: usize = 41;
 
 struct GmatchPatternEntry {
     pattern: std::result::Result<LuaPattern, crate::patterns::PatternError>,
@@ -313,13 +322,6 @@ pub(super) struct EnvBaseline {
     pub(super) metatable: Option<Val>,
 }
 
-/// Maximum call depth to prevent stack overflow from deep recursion.
-/// Lua's default is 200, we use 1000 for a bit more headroom.
-const MAX_CALL_DEPTH: u32 = 1000;
-
-/// Maximum values on the shared Lua/Rust value stack, not a total host-memory quota.
-const MAX_STACK_SIZE: usize = 1_000_000;
-
 // Important note on how the stack is tracked:
 // A State uses a single stack for all local variables, temporary values,
 // function arguments, and function return values. Both Lua frames and Rust
@@ -451,8 +453,9 @@ impl State {
 
     pub(crate) fn reserve_stdlib_capacity(&mut self) {
         self.globals
-            .reserve(Builtin::COUNT + HOST_GLOBAL_CAPACITY_HEADROOM);
-        self.heap.reserve(8, 96);
+            .reserve(Builtin::COUNT + STDLIB_NON_BUILTIN_GLOBALS + HOST_GLOBAL_CAPACITY_HEADROOM);
+        self.heap
+            .reserve(STDLIB_HEAP_TABLES, STDLIB_INTERNED_TABLE_KEYS);
     }
 
     /// Sets the RNG seed for deterministic math.random() behavior.

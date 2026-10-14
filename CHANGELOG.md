@@ -8,6 +8,23 @@ All notable changes to dellingr are documented here. The format follows
 
 ### Changed
 
+- **Public fixed limits.** `dellingr::limits` exposes runtime and compiler caps,
+  pattern-cache caps, and the cost-check batching interval. `MAX_STRING_BYTES`
+  and `error::MAX_RESULTS` remain available at their existing paths.
+- **Limit errors carry their caps.** `CallDepthExceeded` and
+  `MetamethodDepthExceeded` now have `limit: u32`; `StackOverflow` has
+  `limit: usize`. Their display messages include the limit. Hosts matching or
+  constructing these public variants must account for the new fields.
+- **Execution preflight errors notify `on_error`.** Lua-frame setup, callable
+  argument insertion, Rust result padding, and requested result padding now
+  report escaping errors exactly once. An already reported Error retains its
+  reporting state when returned again by a host callback.
+- **`string.gmatch` wrapper frames are named.** Errors raised inside the
+  internal gmatch wrapper chunk now carry the source name `string.gmatch` in
+  tracebacks and in the `source` passed to `on_error`, instead of none.
+- **Compiler internal errors carry no source position.** Invariant failures
+  in the parser's chunk bookkeeping report `InternalError` without a location,
+  rather than the meaningless start-of-source position they carried before.
 - **`^` is no longer constant-folded; `COST_MODEL_VERSION` is 4.** `pow`
   comes from the host libm, which is not bit-identical across targets, so a
   folded `^` baked the compiling host's result into bytecode and snapshots.
@@ -126,6 +143,9 @@ All notable changes to dellingr are documented here. The format follows
 
 ### Fixed
 
+- **`open_libs` with values already on the stack.** `_G` setup addressed its
+  table by absolute stack index 1, so calling `State::open_libs` above a host
+  value gave that value `_G`'s proxy metatable and left `_G` without one.
 - **Cyclic `__call` chains no longer abort the process.** A table whose
   `__call` resolves to a non-function (for example itself) is now bounded by the
   metamethod depth limit and fails with `MetamethodDepthExceeded`; function

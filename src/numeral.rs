@@ -1,6 +1,54 @@
 //! Lua numeral recognition and numeric semantics shared by runtime-facing
 //! conversions and the compile-time constant folder.
 
+use crate::instr::Instr;
+
+// The VM dispatch calls these named functions directly and the constant
+// folder reaches the same definitions through `arith_fn`, so a folded result
+// is bit-identical to the runtime one by construction.
+
+/// Lua `+` on numbers.
+#[inline(always)]
+pub(crate) fn lua_add(a: f64, b: f64) -> f64 {
+    a + b
+}
+
+/// Lua `-` on numbers.
+#[inline(always)]
+pub(crate) fn lua_sub(a: f64, b: f64) -> f64 {
+    a - b
+}
+
+/// Lua `*` on numbers.
+#[inline(always)]
+pub(crate) fn lua_mul(a: f64, b: f64) -> f64 {
+    a * b
+}
+
+/// Lua `/` on numbers.
+#[inline(always)]
+pub(crate) fn lua_div(a: f64, b: f64) -> f64 {
+    a / b
+}
+
+/// Returns the numeric function the VM dispatch uses for an arithmetic opcode
+/// that is safe to fold. Used by the constant folder only; the dispatch loop
+/// calls the named functions directly.
+///
+/// Exponentiation is deliberately excluded: its result depends on the host
+/// `powf` implementation, so folding it would bake a platform-specific result
+/// into bytecode.
+pub(crate) fn arith_fn(opcode: u8) -> fn(f64, f64) -> f64 {
+    match opcode {
+        Instr::OP_ADD => lua_add,
+        Instr::OP_SUBTRACT => lua_sub,
+        Instr::OP_MULTIPLY => lua_mul,
+        Instr::OP_DIVIDE => lua_div,
+        Instr::OP_MOD => lua_modulo,
+        _ => unreachable!("opcode has no foldable arithmetic function"),
+    }
+}
+
 /// Lua 5.4 floored modulo, including its special floating-point cases.
 ///
 /// The parser's constant folder must produce the bit-exact result the VM

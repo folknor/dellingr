@@ -26,7 +26,7 @@ mod compiler;
 mod cost_meter;
 mod host;
 mod instr;
-mod limits;
+pub mod limits;
 mod lua_std;
 mod numeral;
 #[doc(hidden)]

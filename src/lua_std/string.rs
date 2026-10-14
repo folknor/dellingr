@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, OnceLock};
 
-use super::{arg_integer, check_any_named, check_type_named, opt_integer};
+use super::{STRING_LIBRARY_CAPACITY, arg_integer, check_any_named, check_type_named, opt_integer};
 use crate::compiler;
 use crate::error::{ArgError, Error, ErrorKind};
 use crate::instr::{ArgCount, RetCount};
@@ -17,12 +17,15 @@ end
 const GMATCH_ITER_ID: &str = "string.gmatch.iter";
 const GMATCH_EMPTY_ITER_ID: &str = "string.gmatch.empty_iter";
 
+// This chunk is immutable. Runtime caches are State-local, and snapshot bytecode
+// ids are assigned per save, so sharing the Arc does not share mutable state.
+// Its source name keeps errors raised in the wrapper identifiable in traces.
 static GMATCH_WRAPPER: OnceLock<Arc<crate::compiler::Bytecode>> = OnceLock::new();
 
 fn gmatch_wrapper() -> Arc<crate::compiler::Bytecode> {
     Arc::clone(GMATCH_WRAPPER.get_or_init(|| {
         Arc::new(
-            compiler::parse_str_named(GMATCH_WRAPPER_SRC, None)
+            compiler::parse_str_named(GMATCH_WRAPPER_SRC, Some("string.gmatch".to_owned()))
                 .expect("the static gmatch wrapper source must compile"),
         )
     }))
@@ -87,9 +90,16 @@ fn find_subslice(state: &mut State, haystack: &[u8], needle: &[u8]) -> Result<Op
 
 fn match_error(state: &State, error: MatchError) -> Error {
     match error {
-        MatchError::Pattern(error) => state.error(ErrorKind::RuntimeError(error.to_string())),
+        MatchError::Pattern(error) => pattern_runtime_error(state, error),
         MatchError::BudgetExceeded => state.budget_exceeded_error(),
     }
+}
+
+fn pattern_runtime_error(state: &State, error: impl std::fmt::Display) -> Error {
+    // ErrorKind has no pattern-specific variant yet. Preserve the existing
+    // RuntimeError category and exact display text until it can carry the
+    // structured PatternError payload.
+    state.error(ErrorKind::RuntimeError(error.to_string()))
 }
 
 fn lua_start_index(len: usize, idx: i64) -> usize {
@@ -435,7 +445,7 @@ fn append_gsub_replacement(
 
 pub(crate) fn open_string(state: &mut State) -> Result<()> {
     // Create the string table
-    state.new_table_with_capacity(10)?;
+    state.new_table_with_capacity(STRING_LIBRARY_CAPACITY)?;
 
     // Helper to add a function to the table at stack index -1.
     macro_rules! add_fn {
@@ -511,7 +521,7 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
                 return Ok(1);
             }
             let mut matcher = LuaPattern::from_bytes_try(&pattern)
-                .map_err(|err| state.error(ErrorKind::RuntimeError(err.to_string())))?;
+                .map_err(|err| pattern_runtime_error(state, err))?;
             let matched = {
                 let mut meter = state.cost_meter();
                 matcher.matches_bytes_from(&s, init, &mut meter)
@@ -605,7 +615,7 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
             return Ok(1);
         }
         let mut matcher = LuaPattern::from_bytes_try(&pattern)
-            .map_err(|err| state.error(ErrorKind::RuntimeError(err.to_string())))?;
+            .map_err(|err| pattern_runtime_error(state, err))?;
         let matched = {
             let mut meter = state.cost_meter();
             matcher.matches_bytes_from(&s, init, &mut meter)
@@ -691,7 +701,7 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
                 state,
                 3,
                 "gsub",
-                "string/function/table expected",
+                crate::error::ArgDetail::Custom("string/function/table expected".to_owned()),
             ));
         }
         if max_replacements == Some(0) {
@@ -772,7 +782,7 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
         }
 
         let mut matcher = LuaPattern::from_bytes_try(&pattern)
-            .map_err(|err| state.error(ErrorKind::RuntimeError(err.to_string())))?;
+            .map_err(|err| pattern_runtime_error(state, err))?;
         let mut result = Vec::with_capacity(s.len());
         let mut captures = Vec::new();
         let mut pos = 0usize;

@@ -1,5 +1,3 @@
-use std::ops;
-
 use super::ArgCount;
 use super::CallSite;
 use super::ExpDesc;
@@ -138,16 +136,15 @@ impl Parser<'_> {
     fn parse_addition(&mut self) -> Result<ExpDesc> {
         let mut exp_desc = self.parse_multiplication()?;
         loop {
-            // The fold ops mirror the VM dispatch's functions exactly.
-            let (instr, op): (Instr, fn(f64, f64) -> f64) = match self.input.peek_type()? {
-                TokenType::Plus => (Instr::add(), <f64 as ops::Add>::add),
-                TokenType::Minus => (Instr::subtract(), <f64 as ops::Sub>::sub),
+            let instr = match self.input.peek_type()? {
+                TokenType::Plus => Instr::add(),
+                TokenType::Minus => Instr::subtract(),
                 _ => break,
             };
             exp_desc = ExpDesc::Other;
             self.input.next()?;
             self.parse_multiplication()?;
-            self.push_arith(instr, op);
+            self.push_arith(instr, crate::numeral::arith_fn(instr.opcode()));
         }
         Ok(exp_desc)
     }
@@ -156,16 +153,16 @@ impl Parser<'_> {
     fn parse_multiplication(&mut self) -> Result<ExpDesc> {
         let mut exp_desc = self.parse_unary()?;
         loop {
-            let (instr, op): (Instr, fn(f64, f64) -> f64) = match self.input.peek_type()? {
-                TokenType::Star => (Instr::multiply(), <f64 as ops::Mul>::mul),
-                TokenType::Slash => (Instr::divide(), <f64 as ops::Div>::div),
-                TokenType::Mod => (Instr::modulo(), crate::numeral::lua_modulo),
+            let instr = match self.input.peek_type()? {
+                TokenType::Star => Instr::multiply(),
+                TokenType::Slash => Instr::divide(),
+                TokenType::Mod => Instr::modulo(),
                 _ => break,
             };
             exp_desc = ExpDesc::Other;
             self.input.next()?;
             self.parse_unary()?;
-            self.push_arith(instr, op);
+            self.push_arith(instr, crate::numeral::arith_fn(instr.opcode()));
         }
         Ok(exp_desc)
     }

@@ -12,10 +12,7 @@ use super::lua_val::Val;
 use crate::error::ErrorKind;
 use crate::instr::{ArgCount, RetCount};
 
-/// Maximum depth for metamethod chains (__index/__newindex/__call).
-/// Prevents stack overflow from circular metamethod references.
-/// Lua uses 2000, but 200 is plenty for normal use cases.
-pub(super) const MAX_METAMETHOD_DEPTH: u32 = 200;
+use crate::limits::MAX_METAMETHOD_DEPTH;
 
 impl State {
     /// Run one metamethod step while enforcing the shared recursion limit.
@@ -29,6 +26,7 @@ impl State {
         if self.metamethod_depth >= MAX_METAMETHOD_DEPTH {
             return Err(self.error(ErrorKind::MetamethodDepthExceeded {
                 depth: self.metamethod_depth,
+                limit: MAX_METAMETHOD_DEPTH,
             }));
         }
         self.metamethod_depth += 1;
