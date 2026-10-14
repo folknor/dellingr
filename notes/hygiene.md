@@ -148,34 +148,6 @@ what keeps them in step.
 
 # Limits and tunables
 
-## HYG-008 - Compiler limits are bare 255/254 literals, restated in error text, and one has already diverged
-
-Reported by the compiler and surface hunters.
-
-- Parser: `add_local` (`u8::MAX`), `checked_fixed_arg_count` (`254`),
-  `add_upvalue`/`checked_parent_upvalue_index` (`u8::MAX`), the nested-function
-  cap in `parse_fndef_named` and `parse_fndef_method` (once each),
-  `try_use_table_template` (`u8::MAX`, twice), table batches (`i == u8::MAX`).
-- Verifier: `validate_bytecode` restates them (`len > 255`, `>
-  usize::from(u16::MAX) + 1`, `num_params + num_locals > 255`).
-- error.rs Display: `"(limit 255)"`, `"(limit 254)"`, independent of the
-  checks.
-- README: "255 locals and 255 upvalues, and 65536 ...".
-
-Diverged: `TooManyExpressions` says "limit 255", but
-`checked_multi_assign_width` raises it at width exactly 255, so the real limit
-there is 254. The same variant also covers concat chains over 255 and the
-`set_field_at`/`set_table` offset overflow - one message for three limits.
-`TooManyNestedFunctions`' doc says "nests function definitions deeper than the
-VM accepts", but the check (`parser/func.rs`) is on the count of direct child
-functions in one chunk (`nested.len() >= u8::MAX`); depth is governed by
-`TooManySyntaxLevels`.
-
-Fix: a `limits` module (`MAX_LOCALS`, `MAX_UPVALUES`, `MAX_FIXED_ARGS`,
-`MAX_NESTED`, `MAX_LITERALS`, ...) that parser, verifier and Display
-interpolate. Enforceable: one test per constant compiling N and N+1 and
-checking the message names N.
-
 ## HYG-009 - `MAX_SYNTAX_DEPTH` carries three meanings
 
 Reported by the compiler and surface hunters.
@@ -313,7 +285,9 @@ covers "cost of a given source" (bump it, and it now moves with compiler
 emission), or only per-opcode charges (reword doc and CHANGELOG so hosts do not
 use it as a fingerprint key). Enforceable: a golden test pinning `cost_used`
 for a fixed corpus with an assertion message naming `COST_MODEL_VERSION`, the
-pattern `save_golden.rs` uses for the format.
+pattern `save_golden.rs` uses for the format. Since then, gmatch compile cost
+moved from once per VM cache miss to once per iterator, which also changes
+`cost_used` for identical source.
 
 ## HYG-018 - Per-function native cost rules are scattered literals, inconsistent with each other and with the README
 
@@ -419,24 +393,6 @@ Reported by the vm and compiler hunters.
 Fix: one helper per kind; `State::error` removed from the public API or made to
 locate.
 
-## HYG-023 - Compiler errors lose their subject
-
-Reported by the compiler hunter.
-
-- `finalize` reports `"compiler emitted invalid bytecode: {reason}"` and drops
-  `BytecodeValidationError.instruction` (the pc), the chunk `name` and its
-  `source`, so a field report names no function and no instruction. The
-  `#[cfg_attr(not(feature = "snapshot"), allow(dead_code))]` on `reason` is
-  stale, since `finalize` reads it in every build.
-- Syntax errors carry line and column only; `parse_str_named` has the source
-  name but never attaches it.
-- Operator text assembled in the parser instead of error.rs Display:
-  `UnexpectedTok(format!("'{exp}' expected near {got}"))` and
-  `UnexpectedTok("cannot use '...' outside a vararg function")`, which should be
-  its own `SyntaxError` variant.
-- Keyword spellings live in `lexer.rs` `keyword_match` and `parser.rs`
-  `describe_token_type`; one `TokenType -> &'static str` table could drive both.
-
 ## HYG-024 - Aborts on caller-controlled input
 
 Reported by the compiler and vm hunters; BUG-011 is the `get_table` case.
@@ -466,35 +422,15 @@ cleanup in eval.rs.
 means not yet reported" is implicit, now documented by comments at both sites.
 A `reported: bool` on `Error` (error.rs) would be structural.
 
-## HYG-026 - Snapshot errors merge bugs with refusals and shed what an operator needs
+## HYG-026 - Snapshot error residue
 
-Reported by the surface hunter.
+Reported by the surface hunter; mostly fixed (Internal and TooLarge split,
+found/expected versions, CorruptArena reasons, decoder offsets).
 
-- `SaveError::EncodeError(String)` is returned from about 20 sites in
-  save_state.rs with fixed strings, mixing invariant violations ("unfilled
-  object slot", "missing root slot", "missing table entry slot", "missing
-  environment baseline", "environment object is not a table") with resource
-  refusals ("too many strings/objects/upvalues/chunks", "vector too long"). Split
-  into `SaveError::Internal(&'static str)` and `SaveError::TooLarge { what,
-  count }`.
-- `LoadError::UnsupportedVersion` and `UnsupportedCostModelVersion` carry
-  neither found nor expected values; add `{ found, expected }`.
-- `CorruptArena` comes from about 20 distinct checks in verify.rs and from
-  `object_ref`/`upvalues_ref`, all rendering "corrupt save arena". Give it a
-  `reason: &'static str` and an index, like `InvalidBytecode`.
-- `DecodeError(String)` messages carry no byte offset though `Decoder.pos` is
-  there.
-- verify.rs `invalid()` maps an overflowing chunk index to `u32::MAX`
-  (`unwrap_or(u32::MAX)`), a fabricated id; the index is bounded by a `u32`
-  length prefix, so the fallback is dead and should be an `expect` naming that
-  bound.
 - `DuplicateFunctionRegistration` is a `SaveError` raised by
   `State::register_rust_fn` at registration time, which is why
   `set_global_stdlib_rust_fn` must `.expect(...)` it; a `RegistrationError` or
   `error::Error` variant would match when it happens.
-- `on_error` is not fired for save or load failures and there is no logging on
-  that path, so the "single source of telemetry" claim in `on_error`'s doc does
-  not cover persistence.
 
 ## HYG-027 - `load_state`'s setup closure cannot fail
 
@@ -536,43 +472,37 @@ iterator error. Enforceable: add `Result::unwrap_or` /
 `Result::unwrap_or_default` to `clippy.toml` `disallowed-methods`, allowed at
 genuine sites.
 
-## HYG-030 - Save-file strings reach operator logs verbatim and unbounded
-
-Reported by the surface hunter.
-
-`LoadError::UnknownFunction(id)` and `UnknownEnvObject(token)` echo strings
-from the save file into Display; README says saves are user-editable, so a
-forged save can put terminal escapes or megabytes into a log line. Truncate and
-escape in Display. `SaveError::UnregisteredFunction { reachable_from }` renders
-a path of global names and table keys (user content), unescaped and unbounded in
-length for deep graphs (`SaveBuilder.breadcrumbs`, each `Global(String)`
-cloned).
-
-## HYG-031 - The decoder's length policy is per field
-
-Reported by the surface hunter.
-
-`read_lua_string_bytes` caps at `MAX_STRING_BYTES`; `read_bytes` (crate-version
-string, chunk names, sources, env tokens, `Fn` ids) has no cap beyond the
-remaining bytes; `read_vec` caps reservations at the remaining bytes. `source`
-is later cloned into every `StackFrame` on every error. One
-`read_bounded(kind, max)` with a per-field cap table would hold the policy.
-Duplicate detection is likewise open-coded with fresh `BTreeSet`s in
-`validate_environment_deltas` (three) and `validate_pointer_ids` (two); an
-`insert_unique(set, key, what)` helper would also give `CorruptArena` its reason
-string (HYG-026). Version gating is exact equality only, described per release
-in README/CHANGELOG prose; state the policy once next to the constants ("no
-migration; exact match; bump on any change an old reader would misread").
-
 ## HYG-032 - Table-key equality is re-derived on the load path
 
-Reported by the surface hunter.
+Reported by the surface hunter; a fixer confirmed it and left comments at
+`resolve_key` and `runtime_table_key`.
 
-verify.rs `resolve_key` normalises `-0.0` to `0` and rejects NaN and nil to
-detect duplicate saved keys; save_state.rs `runtime_table_key` does the same job
-at materialisation; the VM's table code has the canonical rule. If VM key
-normalisation changes, the verifier accepts saves the VM sees as colliding, or
-the reverse. Have `resolve_key` call the VM's canonicaliser.
+verify.rs `resolve_key` and save_state.rs `runtime_table_key` each normalise
+`-0.0` and reject NaN and nil. The VM has no single canonical key rule to call:
+table.rs rejects nil and NaN on insert, while numeric equality and negative-zero
+hashing live in lua_val.rs. Export one key-normalisation function from the
+table code and have both load-path sites call it.
+
+## HYG-066 - gmatch iterator re-interns its state keys every iteration
+
+Reported by the wave 2 reviewer.
+
+`gmatch_iter` reads its private state table with metamethod-capable
+`get_table` and interns `"compile_charged"` on every call (twice on the first).
+The table is never script-visible, so `get_table_raw` states the intent, and a
+pre-interned key would take the intern off the per-match hot path. Related: an
+iterator restored from a snapshot written before the flag existed lacks it and
+pays the compile charge once more; the format version did not move.
+
+## HYG-067 - `table_insert_at` resolves a negative index against a different stack
+
+Reported by the wave 2 reviewer; recorded in CHANGELOG.
+
+To validate before mutating, `table_insert_at` now resolves `table_idx` before
+popping the value, so a negative index counts from the value on top instead of
+from the stack after the pop. Internal callers pass `1`. Decide whether the
+public contract should be the old one (resolve after pop, validate without
+popping) and document it on the method either way.
 
 # State, ordering and ambient dependencies
 
@@ -817,110 +747,53 @@ parser's profile distribution.
 
 # Tooling and test harness
 
-## HYG-053 - The differential-test policy has residue
+## HYG-053 - The differential test accepts either reference version
 
-Reported by the tooling hunter; mostly fixed (reference-Lua preflight, zero
-exit for DIFF files, `DELLINGR_DIFF_TIMEOUT`, `-- SKIP-DIFF:` markers).
+Reported by the tooling hunter; the rest of the entry is fixed.
 
-- The five corpus skips (`benchmark.lua`, `stress_*.lua`,
-  `upvalue_stress.lua`) are still a fallback list in `diff_test.sh` and
-  `diff_test.rs`; converting them to `-- SKIP-DIFF:` markers in the files
-  retires both lists. Whether the Rust test still skips green on missing
-  reference Lua is unverified.
-- A match against either lua5.2 or lua5.4 passes the whole file, so a regression
+A match against either lua5.2 or lua5.4 passes the whole file, so a regression
   toward 5.2 behaviour in a 5.4-intended feature is invisible; per-file `-- REF:
   5.4` pinning would sharpen it.
 
-## HYG-055 - CLI output, usage and exit codes are ad hoc
+## HYG-055 - CLI exit codes are ad hoc
 
-Reported by the tooling hunter.
+Reported by the tooling hunter; the output, usage and argument-handling parts
+are fixed (table-driven parser in main.rs, summary on stderr).
 
-- `Cost used:` goes to stdout after the script's own prints, even when the
-  script errored (printed before the error check); the `--analyze` caveat
-  warning also goes to stdout. AGENTS.md says `diff_test.sh` filters the line
-  out; it actually passes `--quiet` (as `run_examples.rs` does), while
-  `bench.sh` and `hotbench.sh` run without it. The format string lives only in
-  main.rs and `cli_limits.rs` asserts it as a substring.
-- Messages are ad hoc `println!`/`eprintln!` with prefixes "Error:", "Parse
-  error:", "Error reading ...:" and "Unknown option:" (no prefix). Help goes to
-  stdout; short usage to stderr, as a second differently worded copy
-  (`Usage: dellingr [OPTIONS] <file.lua>` vs `Usage: dellingr [--limit N]
-  [--analyze] [--quiet] <file.lua>`).
-- `exit(1)` at seven sites in main.rs for usage, IO, parse and runtime errors
+`exit(1)` at seven sites in main.rs for usage, IO, parse and runtime errors
   alike; `exit(0)` for help; hotpath.rs uses 2 for usage and 1 otherwise;
   hotbench.sh 2 for usage; diff_test.sh 1. A caller cannot tell "script failed"
   from "invoked wrong" or "budget exhausted", which the game host cares about.
   Fix: an `ExitCode` enum per binary with distinct usage, IO, compile, runtime
   and budget codes, `main` returning it. Enforceable: ban
   `std::process::exit` in main.rs and `examples/` via `disallowed-methods`.
-- Argument handling: `std::env::args()` panics on non-UTF-8 (use `args_os`);
-  with several positionals the last silently wins; a lone `-` is "Unknown
-  option"; no `--` terminator for paths starting with `-`; `--limit` accepted
-  and ignored under `--analyze`. Fix: a parser library or a table-driven parser
-  with tests, generating usage from one option table.
-- `main.rs` installs `hotpath::CountingAllocator` under `hotpath-alloc` but never
-  builds a `HotpathGuard`, so nothing reports; its comment is a near-copy of
-  hotpath.rs's and has diverged ("through 0.14" vs "0.15"). Delete it or say why
-  it is load-bearing.
 
 ## HYG-056 - The bench harness has residue
 
-Reported by the tooling hunter; mostly fixed (required path argument, nonzero
-exit on missing `_bench` and marker failures, one metric list).
+Reported by the tooling hunter; the rest is fixed.
 
-- `O_NONBLOCK` is hand-rolled (`0x800` linux, `0x0004` macos); any other unix is
-  a compile error. Use `libc::O_NONBLOCK`, which needs `libc` declared as a
-  direct dependency (it is only transitive today).
 - The marker protocol (`<us> NAME`, `<us> @k=v`) is defined here and parsed in
   brokkr, with nothing keeping them in step (shared protocol crate or
   brokkr-side schema test).
-- `warm_avg_us` is now printed as fractional text (`{:.3}`); unverified whether
-  brokkr parses it as an integer.
-- The FIFO is opened `O_NONBLOCK` and any write error now exits 1, including
-  EAGAIN on a full pipe, so a slow brokkr reader can kill a bench run that
-  previously lost markers. Retry on WouldBlock.
-- `require_bench` looks up `_bench` inside the timed warm loop, charging a
-  `get_global` per iteration to the timing.
 - The plain-pattern classifier test re-spells the magic-byte literal instead of
   iterating luapat's constant, so it does not tie the fast path to the grammar.
 
-## HYG-057 - Workload lists and the harness calibration have several owners
+## HYG-057 - The bench/examples kernel pairing is unenforced
 
-Reported by the tooling hunter.
+Reported by the tooling hunter; the rest is fixed (bench.sh reads brokkr.toml,
+one reference-Lua array, `generate.py --check`).
 
-- Three workload registries: `bench.sh`'s default list, `[dellingr.workloads.*]`
-  in brokkr.toml, and AGENTS.md's directory table. `bench.sh` uses
-  `examples/benchmark.lua` (no `_bench`) where brokkr uses
-  `examples/composite/benchmark.lua`, and the README table comes from `bench.sh`,
-  so README and brokkr can mean different kernels by "benchmark". `bench.sh`
-  could read `hotpath_file` keys from brokkr.toml, or a test could diff the lists.
-- `bench.sh` spells `lua5.5 lua5.4 lua5.2 luajit` four times (preflight,
-  hyperfine `-n`, jq selectors, header) and says "5 lua versions" for 4
-  references plus dellingr. One array. Its hyperfine JSON is deleted afterwards,
-  so nothing durable remains unless stdout is copied.
-- `DEFAULT_ITERATIONS = 20` and `MAX_WARM_BLOCKS = 32` are restated in AGENTS.md
-  and CLAUDE.md ("default 20", "~2s warm phase", "up to 32"), and `bench/` files
-  are calibrated against 20. Reword the docs to refer to the constant.
-- Hash pins are enforced; the "same kernel in the same proportions" pairing
-  between `bench/X` and its examples/ counterpart is not. A test reading
-  brokkr.toml could check both files define `_bench` and that their per-call
-  `cost` is in a fixed ratio.
-- `large_source.lua` is pinned twice in brokkr.toml with the same hash; nothing
-  checks it equals `generate.py` output (the hash pin fires on legitimate
-  regeneration too). `generate.py` restates the parser's 255 nested-function
-  limit as prose and guards `FUNCTION_COUNT = 200` by comment only. A test or
-  brokkr script_check diffing generator output would hold it.
+Hash pins are enforced; the "same kernel in the same proportions" pairing
+between `bench/X` and its examples/ counterpart is not. A test reading
+brokkr.toml could check both files define `_bench` and that their per-call
+`cost` is in a fixed ratio. A fixer notes brokkr.toml declares no expected
+ratios and the composite and parse pairs are scaled differently. The README's
+`benchmark` row may still describe the old `examples/benchmark.lua` kernel.
 
 ## HYG-059 - Smaller test-harness drift
 
-Reported by the tooling and compiler hunters.
+Reported by the tooling and compiler hunters; the rest is fixed.
 
-- `run_examples.rs` checks stdout only; stderr is unchecked.
-- `run_feature_test_extended_in_process` unwraps the load/call result with no
-  message.
-- `cli_limits.rs` scratch files go to `CARGO_TARGET_TMPDIR` (correct), but in
-  `signed_limits...` the `remove_file` follows an assert inside the loop, so a
-  failure leaks the file; a drop guard would fix it.
 - `compiler_examples_pass_stack_discipline_verification` walks
   `Path::new("examples")` relative to cwd; use `env!("CARGO_MANIFEST_DIR")`.
 
@@ -953,29 +826,14 @@ the ids.
 
 Reported by the compiler hunter.
 
-- `#[allow(dead_code)]` on `Instr::c()` is stale (used by the verifier,
-  `RuntimeCaches::new` and `TFOR_CALL` dispatch); removing it lets the `unused`
-  deny catch future disuse.
-- Unused `_tok_start` parameters on `peek_equals`, `lex_string` and
-  `lex_exponent`, threaded through callers.
-- `assign_cache_slots` returns `Result<()>` with no error path; the `?` in
-  `finalize` reads as a check that never happens.
-- `strip_dead_instructions` re-checks `code.len() == line_info.len()` as a
-  runtime error right after `finalize`'s `debug_assert_eq!`, and the verifier
-  checks it a third time.
-- `// TODO: rename to error_here` on `Parser::error`; `parse_if` only forwards
-  to `parse_if_arm`.
-- The verifier accepts `OP_SET_FIELD_AT` with A=0 and `OP_NOP`, which the
-  compiler never ships (finalize rewrites and strips them). Fine for hand-built
-  snapshots, but say so in the verifier or reject them so "what the compiler
-  emits" and "what the verifier accepts" stay one documented set.
+`#[allow(dead_code)]` on `Instr::c()` is stale (used by the verifier,
+`RuntimeCaches::new` and `TFOR_CALL` dispatch); removing it lets the `unused`
+deny catch future disuse. The rest of the entry is fixed.
 
 ## HYG-063 - Dead or redundant code in the VM, surface and stdlib
 
 Reported by the vm, surface and stdlib hunters.
 
-- `"<function>"`: `RUST_FN_DISPLAY` exists in vm/lua_val.rs but
-  `to_bytes_with_heap` in the same file spells `b"<function>"`.
 - `bytes_coerce` is a pure alias of `bytes_with_default_string_coercion`.
 - String size check duplicated: `check_string_size` (vm.rs) and an inline `len >
   MAX_STRING_BYTES` building the same error in save_state.rs;
@@ -992,31 +850,15 @@ Reported by the vm, surface and stdlib hunters.
 - `base_unpack_values` (basic.rs) and `table_unpack_values` (table.rs) are
   one-line wrappers around `unpack_values`; if they exist for distinct fn
   addresses in the snapshot registry, say so in a comment.
-- `analyze_cost` and `Engine::analyze_cost` duplicate the whole body (parse,
-  `analyze_chunk` with `"main".to_string()`, wrap); one private helper.
 - `LuaPattern::matches_bytes` is `cfg(test)` only (documented, fine).
 
 ## HYG-064 - Doc comments that state stale or contradicted facts
 
 Reported by the compiler, vm, surface and stdlib hunters.
 
-- `instr.rs` module doc: "4x smaller than the previous enum-based representation
-  (~16 bytes per instruction)" describes a representation that no longer exists.
 - `State.globals` doc: "May be changed to an actual Table in the future".
 - vm.rs: orphan comment "State marking is done through mark_gc_roots() which
   has direct heap access".
-- `load_string_named` doc mentions `"[fleet:123]"`; the host.rs module example
-  uses `FleetCallbacks`/`fleet_id` and the pre-`Engine`
-  `State::with_callbacks(Box::new(callbacks))` entry point; point it at
-  `Engine::new_state_with_callbacks`.
+- `load_string_named` doc mentions `"[fleet:123]"`.
 - Public `concat` rejects `n < 2` with an ArgError naming `"concat"`, while its
   doc says n=0 yields the empty string and n=1 is a no-op.
-- `patterns/mod.rs` says "wrapper around the vendored Lua pattern matcher"; it
-  is an in-crate rewrite.
-- error.rs documents `MetamethodDepthExceeded` as covering `__index` and
-  `__newindex`; it now covers `__call` too.
-- The lib.rs crate-level and `Engine` doc examples are `ignore`d, never compiled,
-  and look compilable today; make them doctests.
-- `State: Send` has a compile-time witness in lib.rs; `Engine` ("is `Send +
-  Sync`") and `Program` ("safe to share across threads") do not. Extend the
-  `const _` block with `assert_send_sync::<Engine>()` and `::<Program>()`.

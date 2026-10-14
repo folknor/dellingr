@@ -1,6 +1,10 @@
 use std::fmt;
 
 use crate::LuaType;
+use crate::limits::{
+    MAX_ASSIGNMENT_OFFSET, MAX_EXPRESSIONS, MAX_FIXED_ARGS, MAX_FIXED_RESULTS, MAX_LITERALS,
+    MAX_LOCALS, MAX_NESTED, MAX_UPVALUES,
+};
 
 // Types
 
@@ -13,6 +17,15 @@ pub struct StackFrame {
     pub source: Option<String>,
     /// Line number where the call occurred (1-indexed).
     pub line: u32,
+}
+
+#[derive(Debug)]
+struct SourceName(String);
+
+impl SourceName {
+    fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 impl fmt::Display for StackFrame {
@@ -36,6 +49,9 @@ pub struct Error {
     pub line_num: usize,
     /// 1-based source column (0 if unknown).
     pub column: usize,
+    /// The box keeps this optional context to one pointer in each `Error`, which
+    /// is carried across recursive VM calls.
+    source_name: Option<Box<SourceName>>,
     /// Stack trace at the point of error (innermost frame first).
     pub stack_trace: Vec<StackFrame>,
 }
@@ -179,6 +195,10 @@ pub enum SyntaxError {
     LongStringUnsupported,
     /// More expressions in a single source construct than the VM accepts.
     TooManyExpressions,
+    /// An assignment target stack offset exceeds the bytecode operand width.
+    AssignmentOffsetTooLarge,
+    /// More fixed assignment results than a result-count operand can encode.
+    TooManyFixedResults,
     /// Function body has more locals than the VM accepts.
     TooManyLocals,
     /// Function has more upvalues than the bytecode can encode.
@@ -189,7 +209,7 @@ pub enum SyntaxError {
     TooManyArguments,
     /// A control-flow target cannot be represented by a jump instruction.
     JumpTooFar,
-    /// Source nests function definitions deeper than the VM accepts.
+    /// A chunk has more direct child functions than the bytecode can index.
     TooManyNestedFunctions,
     /// More numeric literals in a chunk than the literal pool accepts.
     TooManyNumbers,
@@ -201,9 +221,17 @@ pub enum SyntaxError {
     UnclosedString,
     /// Source ended while a construct was still open.
     UnexpectedEof,
-    /// Unexpected token. The String contains a description like
-    /// `"'...' outside vararg function"` or `"'<token>' near '<context>'"`.
+    /// Unexpected token. The String contains a token description.
     UnexpectedTok(String),
+    /// A required token was missing before another token.
+    ExpectedToken {
+        /// Spelling of the token the grammar required.
+        expected: String,
+        /// Description of the token actually found.
+        found: String,
+    },
+    /// `...` was used outside a vararg function.
+    VarargOutsideVarargFunction,
     /// A line started with an open parenthesis, which is ambiguous in Lua
     /// (could continue the previous statement). dellingr rejects this rather
     /// than guessing.
@@ -240,6 +268,7 @@ impl Error {
             kind: kind.into(),
             line_num,
             column,
+            source_name: None,
             stack_trace: Vec::new(),
         }
     }
@@ -260,6 +289,16 @@ impl Error {
         self.line_num = line_num;
         self.column = column;
         self
+    }
+
+    pub(crate) fn with_source_name(mut self, source_name: Option<String>) -> Self {
+        self.source_name = source_name.map(|source_name| Box::new(SourceName(source_name)));
+        self
+    }
+
+    /// Source file or chunk name attached to this error, if it came from named source.
+    pub fn source_name(&self) -> Option<&str> {
+        self.source_name.as_deref().map(SourceName::as_str)
     }
 
     /// 1-based column number where the error surfaced (0 if unknown).
@@ -292,6 +331,13 @@ impl ErrorKind {
 }
 
 impl SyntaxError {
+    pub(crate) fn expected_token(expected: &str, got: String) -> Self {
+        Self::ExpectedToken {
+            expected: expected.to_string(),
+            found: got,
+        }
+    }
+
     /// Returns true if this is a SyntaxError that can be fixed by appending
     /// more text to the source code.
     pub fn is_recoverable(&self) -> bool {
@@ -332,7 +378,18 @@ impl fmt::Display for Error {
                     Some(source) => write!(f, "{source}:{}: {}", frame.line, self.kind)?,
                     None => write!(f, "{}:{}: {}", frame.line, self.column, self.kind)?,
                 },
-                None => write!(f, "{}:{}: {}", self.line_num, self.column, self.kind)?,
+                None => match self.source_name() {
+                    Some(source) if self.line_num != 0 && self.column != 0 => write!(
+                        f,
+                        "{source}:{}:{}: {}",
+                        self.line_num, self.column, self.kind
+                    )?,
+                    Some(source) if self.line_num != 0 => {
+                        write!(f, "{source}:{}: {}", self.line_num, self.kind)?;
+                    }
+                    Some(source) => write!(f, "{source}: {}", self.kind)?,
+                    None => write!(f, "{}:{}: {}", self.line_num, self.column, self.kind)?,
+                },
             }
         }
         if !self.stack_trace.is_empty() {
@@ -434,22 +491,43 @@ impl fmt::Display for SyntaxError {
             HexadecimalDigitExpected => write!(f, "hexadecimal digit expected"),
             DecimalEscapeTooLarge => write!(f, "decimal escape too large"),
             LongStringUnsupported => write!(f, "long strings are not supported"),
-            TooManyExpressions => write!(f, "too many expressions in a single list (limit 255)"),
-            TooManyLocals => write!(f, "too many local variables"),
-            TooManyUpvalues => write!(f, "too many upvalues"),
+            TooManyExpressions => write!(f, "too many expressions (limit {MAX_EXPRESSIONS})"),
+            AssignmentOffsetTooLarge => write!(
+                f,
+                "assignment receiver offset exceeds {MAX_ASSIGNMENT_OFFSET}"
+            ),
+            TooManyFixedResults => write!(
+                f,
+                "too many fixed results in multiple assignment (limit {MAX_FIXED_RESULTS})"
+            ),
+            TooManyLocals => write!(f, "too many local variables (limit {MAX_LOCALS})"),
+            TooManyUpvalues => write!(f, "too many upvalues (limit {MAX_UPVALUES})"),
             TooManySyntaxLevels => write!(f, "chunk has too many syntax levels"),
-            TooManyArguments => write!(f, "too many arguments in a fixed call (limit 254)"),
+            TooManyArguments => write!(
+                f,
+                "too many arguments in a fixed call (limit {MAX_FIXED_ARGS})"
+            ),
             JumpTooFar => write!(
                 f,
                 "control-flow jump is too far (exceeds signed 16-bit range)"
             ),
-            TooManyNestedFunctions => write!(f, "too many nested functions (limit 255)"),
-            TooManyNumbers => write!(f, "too many literal numbers"),
-            TooManyStrings => write!(f, "too many literal strings"),
+            TooManyNestedFunctions => {
+                write!(f, "too many direct child functions (limit {MAX_NESTED})")
+            }
+            TooManyNumbers => {
+                write!(f, "too many literal numbers (limit {MAX_LITERALS})")
+            }
+            TooManyStrings => {
+                write!(f, "too many literal strings (limit {MAX_LITERALS})")
+            }
             TooManyTableFields => write!(f, "too many fields in table constructor"),
             UnclosedString => write!(f, "unfinished string"),
             UnexpectedEof => write!(f, "unexpected <eof>"),
             UnexpectedTok(msg) => write!(f, "{msg}"),
+            ExpectedToken { expected, found } => write!(f, "'{expected}' expected near {found}"),
+            VarargOutsideVarargFunction => {
+                write!(f, "cannot use '...' outside a vararg function")
+            }
             LParenLineStart => write!(f, "ambiguous function call"),
         }
     }

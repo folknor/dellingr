@@ -3,6 +3,7 @@ use super::Result;
 use super::SyntaxError;
 use super::UpvalueDesc;
 use super::find_last_local;
+use crate::limits::MAX_UPVALUES;
 
 impl<'a> Parser<'a> {
     /// Find an existing upvalue by name.
@@ -100,8 +101,8 @@ impl<'a> Parser<'a> {
 
     /// Add a new upvalue and return its index.
     fn add_upvalue(&mut self, name: &'a str, desc: UpvalueDesc) -> Result<u8> {
-        if self.upvalues.len() >= u8::MAX as usize {
-            return Err(self.error(SyntaxError::TooManyUpvalues));
+        if self.upvalues.len() >= MAX_UPVALUES {
+            return Err(self.error_here(SyntaxError::TooManyUpvalues));
         }
         let idx = self.upvalues.len() as u8;
         self.upvalues.push((name, desc));
@@ -110,8 +111,8 @@ impl<'a> Parser<'a> {
 
     fn checked_parent_upvalue_index(&self, parent_idx: usize) -> Result<u8> {
         let len = self.outer_upvalues[parent_idx].len();
-        if len >= u8::MAX as usize {
-            Err(self.error(SyntaxError::TooManyUpvalues))
+        if len >= MAX_UPVALUES {
+            Err(self.error_here(SyntaxError::TooManyUpvalues))
         } else {
             Ok(len as u8)
         }

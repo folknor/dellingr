@@ -41,7 +41,7 @@
 use std::fmt;
 use std::sync::Arc;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::lua_val::RustFunc;
 use super::object::{GcHeap, RawObject, StringPtr, Upvalue, UpvalueRef};
@@ -55,7 +55,19 @@ use crate::instr::Instr;
 mod verify;
 
 const MAGIC: [u8; 4] = *b"DLGS";
+// Save compatibility is exact-match only. There is no migration path; bump
+// this whenever an older reader would misread any encoded field.
 const FORMAT_VERSION: u16 = 6;
+
+const MAX_ENGINE_VERSION_BYTES: usize = 128;
+const MAX_SAVE_IDENTIFIER_BYTES: usize = 4 * 1024;
+const MAX_ENVIRONMENT_TOKEN_BYTES: usize = 256;
+const MAX_CHUNK_NAME_BYTES: usize = 4 * 1024;
+const MAX_CHUNK_SOURCE_BYTES: usize = 256 * 1024;
+const MAX_PATH_GLOBAL_BYTES: usize = 96;
+const MAX_RENDERED_PATH_SEGMENTS: usize = 32;
+const MAX_RENDERED_PATH_BYTES: usize = 512;
+const MAX_LOGGED_USER_TEXT_BYTES: usize = 128;
 
 /// Bytes produced by [`State::save_state`] plus non-fatal save diagnostics.
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -74,6 +86,9 @@ pub struct SaveDiagnostics {
 }
 
 /// Errors produced while saving a [`State`].
+///
+/// Save and load failures are returned directly and do not call
+/// [`HostCallbacks::on_error`].
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum SaveError {
     /// The VM has an active stack/call frame/open upvalue and cannot be snapshotted.
@@ -84,14 +99,24 @@ pub enum SaveError {
         reachable_from: String,
     },
     /// One save/load id was registered for two different Rust functions.
+    ///
+    /// Registration currently reports this through `SaveError` because the
+    /// registration API and its error type are outside this module's scope.
     DuplicateFunctionRegistration {
         /// The id that was bound to conflicting function addresses.
         id: String,
     },
     /// A reachable upvalue was still open.
     OpenUpvalueReachable,
-    /// Internal codec failure.
-    EncodeError(String),
+    /// A save-time invariant failed inside the codec.
+    Internal(&'static str),
+    /// A saved value or collection exceeded the codec's representable limit.
+    TooLarge {
+        /// Resource that exceeded its limit.
+        what: &'static str,
+        /// Requested size or count.
+        count: usize,
+    },
 }
 
 /// Errors produced while loading a saved [`State`].
@@ -100,15 +125,34 @@ pub enum LoadError {
     /// Save bytes did not start with the dellingr save magic.
     BadMagic,
     /// Save format version is not supported by this build.
-    UnsupportedVersion,
+    UnsupportedVersion {
+        /// Format version in the save.
+        found: u16,
+        /// Format version supported by this build.
+        expected: u16,
+    },
     /// Save cost model version is not supported by this build.
-    UnsupportedCostModelVersion,
+    UnsupportedCostModelVersion {
+        /// Cost model version in the save.
+        found: u16,
+        /// Cost model version supported by this build.
+        expected: u16,
+    },
     /// A saved function id was not registered by the load-time environment.
     UnknownFunction(String),
     /// A saved environment-object token was not present at load time.
     UnknownEnvObject(String),
     /// Binary payload could not be decoded.
     DecodeError(String),
+    /// A bounded metadata field exceeded its per-field resource limit.
+    FieldSizeExceeded {
+        /// Field whose limit was exceeded.
+        kind: &'static str,
+        /// Size requested by the save.
+        size: usize,
+        /// Maximum permitted size.
+        limit: usize,
+    },
     /// A saved Lua string exceeded the fixed resource limit.
     StringSizeExceeded {
         /// Size requested by the save.
@@ -117,7 +161,12 @@ pub enum LoadError {
         limit: usize,
     },
     /// Arena indices or object graph contents were corrupt.
-    CorruptArena,
+    CorruptArena {
+        /// Saved arena or collection invariant that failed.
+        reason: &'static str,
+        /// Index associated with the invalid entry.
+        index: usize,
+    },
     /// A saved bytecode program violates VM structural invariants.
     InvalidBytecode {
         /// Saved bytecode arena id.
@@ -134,16 +183,19 @@ impl fmt::Display for SaveError {
         match self {
             SaveError::NotQuiescent => write!(f, "state is not quiescent"),
             SaveError::UnregisteredFunction { reachable_from } => {
-                write!(
-                    f,
-                    "unregistered Rust function reachable from {reachable_from}"
-                )
+                f.write_str("unregistered Rust function reachable from ")?;
+                write_bounded_user_text(f, reachable_from)
             }
             SaveError::DuplicateFunctionRegistration { id } => {
-                write!(f, "id {id} registered for two different Rust functions")
+                f.write_str("id ")?;
+                write_bounded_user_text(f, id)?;
+                f.write_str(" registered for two different Rust functions")
             }
             SaveError::OpenUpvalueReachable => write!(f, "open upvalue reachable during save"),
-            SaveError::EncodeError(err) => write!(f, "save encode error: {err}"),
+            SaveError::Internal(reason) => write!(f, "save encode invariant failed: {reason}"),
+            SaveError::TooLarge { what, count } => {
+                write!(f, "save {what} count {count} exceeds the supported limit")
+            }
         }
     }
 }
@@ -154,17 +206,36 @@ impl fmt::Display for LoadError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             LoadError::BadMagic => write!(f, "bad save magic"),
-            LoadError::UnsupportedVersion => write!(f, "unsupported save format version"),
-            LoadError::UnsupportedCostModelVersion => {
-                write!(f, "unsupported save cost model version")
+            LoadError::UnsupportedVersion { found, expected } => {
+                write!(
+                    f,
+                    "unsupported save format version {found}; expected {expected}"
+                )
             }
-            LoadError::UnknownFunction(id) => write!(f, "unknown saved function id {id}"),
-            LoadError::UnknownEnvObject(id) => write!(f, "unknown saved environment object {id}"),
+            LoadError::UnsupportedCostModelVersion { found, expected } => {
+                write!(
+                    f,
+                    "unsupported save cost model version {found}; expected {expected}"
+                )
+            }
+            LoadError::UnknownFunction(id) => {
+                f.write_str("unknown saved function id ")?;
+                write_bounded_user_text(f, id)
+            }
+            LoadError::UnknownEnvObject(id) => {
+                f.write_str("unknown saved environment object ")?;
+                write_bounded_user_text(f, id)
+            }
             LoadError::DecodeError(err) => write!(f, "save decode error: {err}"),
+            LoadError::FieldSizeExceeded { kind, size, limit } => {
+                write!(f, "save {kind} size {size} exceeds limit {limit}")
+            }
             LoadError::StringSizeExceeded { size, limit } => {
                 write!(f, "string size {size} exceeds limit {limit}")
             }
-            LoadError::CorruptArena => write!(f, "corrupt save arena"),
+            LoadError::CorruptArena { reason, index } => {
+                write!(f, "corrupt save arena at index {index}: {reason}")
+            }
             LoadError::InvalidBytecode {
                 chunk,
                 instruction,
@@ -181,6 +252,32 @@ impl fmt::Display for LoadError {
 }
 
 impl std::error::Error for LoadError {}
+
+fn write_bounded_user_text(f: &mut fmt::Formatter<'_>, text: &str) -> fmt::Result {
+    let mut written = 0usize;
+    for character in text.chars() {
+        let escaped = character.escape_debug().to_string();
+        if written.saturating_add(escaped.len()) > MAX_LOGGED_USER_TEXT_BYTES {
+            f.write_str("...")?;
+            return Ok(());
+        }
+        f.write_str(&escaped)?;
+        written += escaped.len();
+    }
+    Ok(())
+}
+
+fn truncate_utf8(text: &str, max_bytes: usize) -> String {
+    let mut end = 0usize;
+    for character in text.chars() {
+        let next = end + character.len_utf8();
+        if next > max_bytes {
+            break;
+        }
+        end = next;
+    }
+    text[..end].to_owned()
+}
 
 // `Ord` is derived so verification can detect duplicate keys with an ordered
 // set instead of a linear scan. Every payload is attacker-controlled and its
@@ -250,7 +347,7 @@ struct SavePayload {
     bytecode: Vec<SavedBytecode>,
     upvalues: Vec<SavedVal>,
     objects: Vec<SavedObject>,
-    user_globals: Vec<(Vec<u8>, SavedVal)>,
+    user_globals: Vec<(String, SavedVal)>,
     env_deltas: Vec<SavedEnvDelta>,
     next_format_pointer_id: u64,
     format_pointer_ids: Vec<(SavedVal, u64)>,
@@ -394,8 +491,11 @@ impl<'a> SaveBuilder<'a> {
         // under a builtin name but no longer hold the canonical value.
         let mut user_globals = Vec::new();
         for (name, val) in &self.state.globals {
-            let saved = self.encode_root(*val, PathSegment::Global(name.clone()))?;
-            user_globals.push((name.as_bytes().to_vec(), saved));
+            let saved = self.encode_root(
+                *val,
+                PathSegment::Global(truncate_utf8(name, MAX_PATH_GLOBAL_BYTES)),
+            )?;
+            user_globals.push((name.clone(), saved));
         }
         let env_deltas = self.encode_env_deltas()?;
         let pointer_ids = self.state.format_pointer_ids.clone();
@@ -411,18 +511,12 @@ impl<'a> SaveBuilder<'a> {
         let objects = self
             .objects
             .into_iter()
-            .map(|obj| {
-                Self::finish_object(
-                    obj.ok_or_else(|| SaveError::EncodeError("unfilled object slot".to_string()))?,
-                )
-            })
+            .map(|obj| Self::finish_object(obj.ok_or(SaveError::Internal("unfilled object slot"))?))
             .collect::<Result<Vec<_>, _>>()?;
         let upvalues = self
             .upvalues
             .into_iter()
-            .map(|value| {
-                value.ok_or_else(|| SaveError::EncodeError("unfilled upvalue slot".to_string()))
-            })
+            .map(|value| value.ok_or(SaveError::Internal("unfilled upvalue slot")))
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(SavePayload {
@@ -469,17 +563,24 @@ impl<'a> SaveBuilder<'a> {
         }
         let mut deltas = Vec::new();
         for (token, ptr) in canonical {
-            let table = self.state.heap.as_table_ref(ptr).ok_or_else(|| {
-                SaveError::EncodeError("environment object is not a table".to_string())
-            })?;
-            let baseline = self.state.env_baselines.get(&ptr).ok_or_else(|| {
-                SaveError::EncodeError("missing environment baseline".to_string())
-            })?;
+            let table = self
+                .state
+                .heap
+                .as_table_ref(ptr)
+                .ok_or(SaveError::Internal("environment object is not a table"))?;
+            let baseline = self
+                .state
+                .env_baselines
+                .get(&ptr)
+                .ok_or(SaveError::Internal("missing environment baseline"))?;
             let live = table.entries();
             let mut deleted = Vec::new();
             for (key, _) in &baseline.entries {
                 if !live.iter().any(|(live_key, _)| live_key == key) {
-                    deleted.push(self.encode_root(*key, PathSegment::Global(token.clone()))?);
+                    deleted.push(self.encode_root(
+                        *key,
+                        PathSegment::Global(truncate_utf8(&token, MAX_PATH_GLOBAL_BYTES)),
+                    )?);
                 }
             }
             let mut upserts = Vec::new();
@@ -491,8 +592,14 @@ impl<'a> SaveBuilder<'a> {
                 {
                     Some((_, base_value)) if base_value == value => {}
                     _ => upserts.push((
-                        self.encode_root(*key, PathSegment::Global(token.clone()))?,
-                        self.encode_root(*value, PathSegment::Global(token.clone()))?,
+                        self.encode_root(
+                            *key,
+                            PathSegment::Global(truncate_utf8(&token, MAX_PATH_GLOBAL_BYTES)),
+                        )?,
+                        self.encode_root(
+                            *value,
+                            PathSegment::Global(truncate_utf8(&token, MAX_PATH_GLOBAL_BYTES)),
+                        )?,
                     )),
                 }
             }
@@ -508,16 +615,22 @@ impl<'a> SaveBuilder<'a> {
             let order = (replayed_order != live.iter().map(|(key, _)| *key).collect::<Vec<_>>())
                 .then(|| {
                     live.iter()
-                        .map(|(key, _)| self.encode_root(*key, PathSegment::Global(token.clone())))
+                        .map(|(key, _)| {
+                            self.encode_root(
+                                *key,
+                                PathSegment::Global(truncate_utf8(&token, MAX_PATH_GLOBAL_BYTES)),
+                            )
+                        })
                         .collect::<Result<Vec<_>, SaveError>>()
                 })
                 .transpose()?;
             let metatable = match (baseline.metatable, table.get_metatable().map(Val::Obj)) {
                 (before, after) if before == after => SavedMetatableDelta::Unchanged,
                 (_, None) => SavedMetatableDelta::Cleared,
-                (_, Some(value)) => SavedMetatableDelta::Set(
-                    self.encode_root(value, PathSegment::Global(token.clone()))?,
-                ),
+                (_, Some(value)) => SavedMetatableDelta::Set(self.encode_root(
+                    value,
+                    PathSegment::Global(truncate_utf8(&token, MAX_PATH_GLOBAL_BYTES)),
+                )?),
             };
             if !deleted.is_empty()
                 || !upserts.is_empty()
@@ -547,7 +660,7 @@ impl<'a> SaveBuilder<'a> {
         }])?;
         self.roots[root]
             .take()
-            .ok_or_else(|| SaveError::EncodeError("unfilled root slot".to_string()))
+            .ok_or(SaveError::Internal("unfilled root slot"))
     }
 
     fn run_tasks(&mut self, mut tasks: Vec<EncodeTask>) -> Result<(), SaveError> {
@@ -567,7 +680,10 @@ impl<'a> SaveBuilder<'a> {
                                 *id
                             } else {
                                 let id = u32::try_from(self.strings.len()).map_err(|_| {
-                                    SaveError::EncodeError("too many strings".to_string())
+                                    SaveError::TooLarge {
+                                        what: "strings",
+                                        count: self.strings.len(),
+                                    }
                                 })?;
                                 // The single content copy per distinct string.
                                 self.strings.push(self.state.heap.get_string(ptr).to_vec());
@@ -602,9 +718,11 @@ impl<'a> SaveBuilder<'a> {
                         && self.env_reverse.contains_key(&ptr)
                         && self.expanded_environment_objects.insert(ptr, ()).is_none()
                     {
-                        let table = self.state.heap.as_table_ref(ptr).ok_or_else(|| {
-                            SaveError::EncodeError("environment object is not a table".to_string())
-                        })?;
+                        let table = self
+                            .state
+                            .heap
+                            .as_table_ref(ptr)
+                            .ok_or(SaveError::Internal("environment object is not a table"))?;
                         if let Some(metatable) = table.get_metatable() {
                             tasks.push(EncodeTask::Value {
                                 val: Val::Obj(metatable),
@@ -640,8 +758,12 @@ impl<'a> SaveBuilder<'a> {
                     let id = if let Some(id) = self.upvalue_ids.get(&key) {
                         *id
                     } else {
-                        let id = u32::try_from(self.upvalues.len())
-                            .map_err(|_| SaveError::EncodeError("too many upvalues".to_string()))?;
+                        let id = u32::try_from(self.upvalues.len()).map_err(|_| {
+                            SaveError::TooLarge {
+                                what: "upvalues",
+                                count: self.upvalues.len(),
+                            }
+                        })?;
                         self.upvalue_ids.insert(key, id);
                         self.upvalues.push(None);
                         match self.state.upvalue_pool.get(upvalue) {
@@ -657,15 +779,13 @@ impl<'a> SaveBuilder<'a> {
                     let pending = self
                         .objects
                         .get_mut(object as usize)
-                        .ok_or_else(|| SaveError::EncodeError("missing object slot".to_string()))?;
+                        .ok_or(SaveError::Internal("missing object slot"))?;
                     let Some(PendingObject::Closure { upvalues, .. }) = pending else {
-                        return Err(SaveError::EncodeError(
-                            "upvalue destination is not a closure".to_string(),
-                        ));
+                        return Err(SaveError::Internal("upvalue destination is not a closure"));
                     };
-                    let slot = upvalues.get_mut(index).ok_or_else(|| {
-                        SaveError::EncodeError("missing closure upvalue slot".to_string())
-                    })?;
+                    let slot = upvalues
+                        .get_mut(index)
+                        .ok_or(SaveError::Internal("missing closure upvalue slot"))?;
                     *slot = Some(id);
                 }
             }
@@ -682,8 +802,10 @@ impl<'a> SaveBuilder<'a> {
         if let Some(id) = self.object_ids.get(&ptr) {
             return Ok(*id);
         }
-        let id = u32::try_from(self.objects.len())
-            .map_err(|_| SaveError::EncodeError("too many objects".to_string()))?;
+        let id = u32::try_from(self.objects.len()).map_err(|_| SaveError::TooLarge {
+            what: "objects",
+            count: self.objects.len(),
+        })?;
         self.object_ids.insert(ptr, id);
         self.objects.push(None);
         tasks.push(EncodeTask::Object { ptr, id, path });
@@ -750,7 +872,7 @@ impl<'a> SaveBuilder<'a> {
         let slot = self
             .objects
             .get_mut(id as usize)
-            .ok_or_else(|| SaveError::EncodeError("missing object slot".to_string()))?;
+            .ok_or(SaveError::Internal("missing object slot"))?;
         *slot = Some(pending);
         Ok(())
     }
@@ -765,30 +887,26 @@ impl<'a> SaveBuilder<'a> {
                 *self
                     .roots
                     .get_mut(index)
-                    .ok_or_else(|| SaveError::EncodeError("missing root slot".to_string()))? =
-                    Some(value);
+                    .ok_or(SaveError::Internal("missing root slot"))? = Some(value);
             }
             ValueDestination::Upvalue(id) => {
                 *self
                     .upvalues
                     .get_mut(id as usize)
-                    .ok_or_else(|| SaveError::EncodeError("missing upvalue slot".to_string()))? =
-                    Some(value);
+                    .ok_or(SaveError::Internal("missing upvalue slot"))? = Some(value);
             }
             ValueDestination::TableKey { object, entry }
             | ValueDestination::TableValue { object, entry } => {
                 let pending = self
                     .objects
                     .get_mut(object as usize)
-                    .ok_or_else(|| SaveError::EncodeError("missing object slot".to_string()))?;
+                    .ok_or(SaveError::Internal("missing object slot"))?;
                 let Some(PendingObject::Table { entries, .. }) = pending else {
-                    return Err(SaveError::EncodeError(
-                        "table destination is not a table".to_string(),
-                    ));
+                    return Err(SaveError::Internal("table destination is not a table"));
                 };
-                let slot = entries.get_mut(entry).ok_or_else(|| {
-                    SaveError::EncodeError("missing table entry slot".to_string())
-                })?;
+                let slot = entries
+                    .get_mut(entry)
+                    .ok_or(SaveError::Internal("missing table entry slot"))?;
                 if matches!(destination, ValueDestination::TableKey { .. }) {
                     slot.0 = Some(value);
                 } else {
@@ -799,11 +917,9 @@ impl<'a> SaveBuilder<'a> {
                 let pending = self
                     .objects
                     .get_mut(object as usize)
-                    .ok_or_else(|| SaveError::EncodeError("missing object slot".to_string()))?;
+                    .ok_or(SaveError::Internal("missing object slot"))?;
                 let Some(PendingObject::Table { metatable, .. }) = pending else {
-                    return Err(SaveError::EncodeError(
-                        "metatable destination is not a table".to_string(),
-                    ));
+                    return Err(SaveError::Internal("metatable destination is not a table"));
                 };
                 *metatable = Some(Some(value));
             }
@@ -814,28 +930,52 @@ impl<'a> SaveBuilder<'a> {
 
     fn push_path(&mut self, parent: Option<PathId>, segment: PathSegment) -> PathId {
         let id = self.breadcrumbs.len();
+        let segment = match segment {
+            PathSegment::Global(name) => {
+                PathSegment::Global(truncate_utf8(&name, MAX_PATH_GLOBAL_BYTES))
+            }
+            other => other,
+        };
         self.breadcrumbs.push(Breadcrumb { parent, segment });
         id
     }
     fn render_path(&self, path: PathId) -> String {
-        let mut ids = Vec::new();
+        let mut ids = Vec::with_capacity(MAX_RENDERED_PATH_SEGMENTS);
         let mut current = Some(path);
+        let mut global_name = None;
+        let mut skipped = false;
         while let Some(id) = current {
-            ids.push(id);
-            current = self.breadcrumbs[id].parent;
+            let breadcrumb = &self.breadcrumbs[id];
+            if let PathSegment::Global(name) = &breadcrumb.segment {
+                global_name = Some(name.as_str());
+            }
+            if ids.len() < MAX_RENDERED_PATH_SEGMENTS {
+                ids.push(id);
+            } else {
+                skipped = true;
+            }
+            current = breadcrumb.parent;
         }
         let mut text = String::new();
+        if let Some(name) = global_name {
+            text.push_str("global ");
+            text.push_str(name);
+        }
+        if skipped {
+            text.push_str("...");
+        }
         for id in ids.into_iter().rev() {
             match &self.breadcrumbs[id].segment {
-                PathSegment::Global(name) => {
-                    text.push_str("global ");
-                    text.push_str(name);
-                }
+                PathSegment::Global(_) => {}
                 PathSegment::TableKey(index) => text.push_str(&format!(".key[{index}]")),
                 PathSegment::TableValue(index) => text.push_str(&format!("[{index}]")),
                 PathSegment::Metatable => text.push_str(".metatable"),
                 PathSegment::Upvalue(index) => text.push_str(&format!(".upvalue[{index}]")),
             }
+        }
+        if text.len() > MAX_RENDERED_PATH_BYTES {
+            text = truncate_utf8(&text, MAX_RENDERED_PATH_BYTES.saturating_sub(3));
+            text.push_str("...");
         }
         text
     }
@@ -846,12 +986,8 @@ impl<'a> SaveBuilder<'a> {
                     .into_iter()
                     .map(|(key, value)| {
                         Ok((
-                            key.ok_or_else(|| {
-                                SaveError::EncodeError("unfilled table key slot".to_string())
-                            })?,
-                            value.ok_or_else(|| {
-                                SaveError::EncodeError("unfilled table value slot".to_string())
-                            })?,
+                            key.ok_or(SaveError::Internal("unfilled table key slot"))?,
+                            value.ok_or(SaveError::Internal("unfilled table value slot"))?,
                         ))
                     })
                     .collect::<Result<Vec<_>, SaveError>>()?,
@@ -859,9 +995,7 @@ impl<'a> SaveBuilder<'a> {
                     None => None,
                     Some(Some(value)) => Some(value),
                     Some(None) => {
-                        return Err(SaveError::EncodeError(
-                            "unfilled metatable slot".to_string(),
-                        ));
+                        return Err(SaveError::Internal("unfilled metatable slot"));
                     }
                 },
             }),
@@ -870,9 +1004,7 @@ impl<'a> SaveBuilder<'a> {
                 upvalues: upvalues
                     .into_iter()
                     .map(|value| {
-                        value.ok_or_else(|| {
-                            SaveError::EncodeError("unfilled closure upvalue slot".to_string())
-                        })
+                        value.ok_or(SaveError::Internal("unfilled closure upvalue slot"))
                     })
                     .collect::<Result<Vec<_>, _>>()?,
             }),
@@ -883,8 +1015,10 @@ impl<'a> SaveBuilder<'a> {
         if let Some(id) = self.bytecode_ids.get(&key) {
             return Ok(*id);
         }
-        let id = u32::try_from(self.bytecode.len())
-            .map_err(|_| SaveError::EncodeError("too many chunks".to_string()))?;
+        let id = u32::try_from(self.bytecode.len()).map_err(|_| SaveError::TooLarge {
+            what: "chunks",
+            count: self.bytecode.len(),
+        })?;
         self.bytecode_ids.insert(key, id);
 
         // Reserve the arena slot before recursively encoding children. Nested
@@ -954,8 +1088,11 @@ impl State {
         // Diagnostic metadata only. The format and cost-model versions in the
         // magic block are the hard compatibility gates; this human-readable
         // crate version records which build produced the snapshot for debugging
-        // and is intentionally not compared on load (L10).
-        encoder.write_bytes(env!("CARGO_PKG_VERSION").as_bytes())?;
+        // and is intentionally not compared on load.
+        encoder.write_bytes(
+            env!("CARGO_PKG_VERSION").as_bytes(),
+            ByteField::EngineVersion,
+        )?;
         payload.encode(&mut encoder)?;
         Ok(SaveState {
             bytes: encoder.finish(),
@@ -979,8 +1116,8 @@ impl State {
         // Read and discard the diagnostic crate-version string. Compatibility is
         // enforced by the format and cost-model versions in
         // read_magic_and_versions above; this string is metadata, not a compat
-        // gate, so it is deliberately not compared (L10).
-        let _engine_version = decoder.read_bytes()?;
+        // gate, so it is deliberately not compared.
+        let _engine_version = decoder.read_bytes(ByteField::EngineVersion)?;
         let payload = verify::verify_payload(SavePayload::decode(&mut decoder)?)?;
         decoder.finish()?;
 
@@ -1033,6 +1170,10 @@ fn build_env_forward(state: &State) -> BTreeMap<String, ObjectPtr> {
         .collect()
 }
 
+fn corrupt_arena(reason: &'static str, index: usize) -> LoadError {
+    LoadError::CorruptArena { reason, index }
+}
+
 fn materialize_payload(
     state: &mut State,
     payload: verify::VerifiedSavePayload,
@@ -1065,11 +1206,9 @@ fn materialize_payload(
                 chunk,
                 upvalues: saved_upvalues,
             } => {
-                let bc = Arc::clone(
-                    bytecode
-                        .get(*chunk as usize)
-                        .ok_or(LoadError::CorruptArena)?,
-                );
+                let bc = Arc::clone(bytecode.get(*chunk as usize).ok_or_else(|| {
+                    corrupt_arena("closure chunk id is out of range", *chunk as usize)
+                })?);
                 let mut refs = Vec::with_capacity(saved_upvalues.len());
                 for uv_id in saved_upvalues {
                     refs.push(*upvalues_ref(&upvalues, *uv_id)?);
@@ -1096,19 +1235,38 @@ fn materialize_payload(
     for (idx, saved_obj) in payload.objects.iter().enumerate() {
         match saved_obj {
             SavedObject::Table { entries, metatable } => {
+                let mut runtime_keys = BTreeSet::new();
                 let entries = entries
                     .iter()
-                    .map(|(key, value)| Ok((decode_val(key, &ctx)?, decode_val(value, &ctx)?)))
+                    .enumerate()
+                    .map(|(entry_index, (key, value))| {
+                        let key = decode_val(key, &ctx)?;
+                        insert_runtime_key(
+                            &mut runtime_keys,
+                            key,
+                            &state.heap,
+                            entry_index,
+                            "duplicate materialized table key",
+                        )?;
+                        Ok((key, decode_val(value, &ctx)?))
+                    })
                     .collect::<Result<Vec<_>, LoadError>>()?;
                 let ptr = objects[idx];
-                let table = state.heap.as_table(ptr).ok_or(LoadError::CorruptArena)?;
+                let table = state.heap.as_table(ptr).ok_or_else(|| {
+                    corrupt_arena("materialized table object has wrong type", idx)
+                })?;
                 table
                     .clear_and_insert_entries(entries)
-                    .map_err(|_| LoadError::CorruptArena)?;
+                    .map_err(|_| corrupt_arena("saved table entries are invalid", idx))?;
                 if let Some(mt) = metatable {
                     match decode_val(mt, &ctx)? {
                         Val::Obj(ptr) => table.set_metatable(Some(ptr)),
-                        _ => return Err(LoadError::CorruptArena),
+                        _ => {
+                            return Err(corrupt_arena(
+                                "saved table metatable is not an object",
+                                idx,
+                            ));
+                        }
                     }
                 }
             }
@@ -1116,48 +1274,108 @@ fn materialize_payload(
         }
     }
 
-    for delta in &payload.env_deltas {
+    for (delta_index, delta) in payload.env_deltas.iter().enumerate() {
         let ptr = *env_forward
             .get(&delta.token)
             .ok_or_else(|| LoadError::UnknownEnvObject(delta.token.clone()))?;
+        let mut deleted_keys = BTreeSet::new();
+        for (key_index, key) in delta.deleted.iter().enumerate() {
+            insert_runtime_key(
+                &mut deleted_keys,
+                decode_val(key, &ctx)?,
+                &state.heap,
+                key_index,
+                "duplicate materialized deleted key",
+            )?;
+        }
+        let mut upsert_keys = BTreeSet::new();
+        for (entry_index, (key, _)) in delta.upserts.iter().enumerate() {
+            insert_runtime_key(
+                &mut upsert_keys,
+                decode_val(key, &ctx)?,
+                &state.heap,
+                entry_index,
+                "duplicate materialized upsert key",
+            )?;
+        }
+        if !deleted_keys.is_disjoint(&upsert_keys) {
+            return Err(corrupt_arena(
+                "materialized key is both deleted and upserted",
+                delta_index,
+            ));
+        }
+        if let Some(order) = &delta.order {
+            let mut order_keys = BTreeSet::new();
+            for (key_index, key) in order.iter().enumerate() {
+                insert_runtime_key(
+                    &mut order_keys,
+                    decode_val(key, &ctx)?,
+                    &state.heap,
+                    key_index,
+                    "duplicate materialized environment order key",
+                )?;
+            }
+            if !deleted_keys.is_disjoint(&order_keys) {
+                return Err(corrupt_arena(
+                    "materialized environment order contains a deleted key",
+                    delta_index,
+                ));
+            }
+            if !upsert_keys.is_subset(&order_keys) {
+                return Err(corrupt_arena(
+                    "materialized environment order omits an upserted key",
+                    delta_index,
+                ));
+            }
+        }
         {
-            let table = state.heap.as_table(ptr).ok_or(LoadError::CorruptArena)?;
-            for key in &delta.deleted {
+            let table = state.heap.as_table(ptr).ok_or_else(|| {
+                corrupt_arena("environment token does not resolve to a table", delta_index)
+            })?;
+            for (key_index, key) in delta.deleted.iter().enumerate() {
                 table
                     .insert(decode_val(key, &ctx)?, Val::Nil)
-                    .map_err(|_| LoadError::CorruptArena)?;
+                    .map_err(|_| corrupt_arena("deleted environment key is invalid", key_index))?;
             }
-            for (key, value) in &delta.upserts {
+            for (entry_index, (key, value)) in delta.upserts.iter().enumerate() {
                 table
                     .insert(decode_val(key, &ctx)?, decode_val(value, &ctx)?)
-                    .map_err(|_| LoadError::CorruptArena)?;
+                    .map_err(|_| corrupt_arena("environment upsert is invalid", entry_index))?;
             }
         }
         if let Some(order) = &delta.order {
             let (current, metatable) = {
-                let table = state.heap.as_table(ptr).ok_or(LoadError::CorruptArena)?;
+                let table = state.heap.as_table(ptr).ok_or_else(|| {
+                    corrupt_arena("environment token does not resolve to a table", delta_index)
+                })?;
                 (table.entries(), table.get_metatable())
             };
             let mut current_by_key = BTreeMap::new();
-            for (key, value) in current.iter().copied() {
-                current_by_key.insert(runtime_table_key(key, &state.heap)?, (key, value));
+            for (key_index, (key, value)) in current.iter().copied().enumerate() {
+                current_by_key.insert(
+                    runtime_table_key(key, &state.heap, key_index)?,
+                    (key, value),
+                );
             }
             let mut ordered = Vec::with_capacity(current.len());
-            for key in order {
+            for (key_index, key) in order.iter().enumerate() {
                 let key = decode_val(key, &ctx)?;
                 let Some((current_key, value)) =
-                    current_by_key.remove(&runtime_table_key(key, &state.heap)?)
+                    current_by_key.remove(&runtime_table_key(key, &state.heap, key_index)?)
                 else {
-                    return Err(LoadError::CorruptArena);
+                    return Err(corrupt_arena(
+                        "environment order key is absent from the table",
+                        key_index,
+                    ));
                 };
                 ordered.push((current_key, value));
             }
             // A newer library or load setup may have added entries unknown to
             // the save. Preserve them after the saved order in their current
             // insertion order.
-            for (key, value) in current {
+            for (key_index, (key, value)) in current.into_iter().enumerate() {
                 if current_by_key
-                    .remove(&runtime_table_key(key, &state.heap)?)
+                    .remove(&runtime_table_key(key, &state.heap, key_index)?)
                     .is_some()
                 {
                     ordered.push((key, value));
@@ -1166,28 +1384,35 @@ fn materialize_payload(
             if delta.token == "table" {
                 state.drop_table_library_fallback();
             }
-            let table = state.heap.as_table(ptr).ok_or(LoadError::CorruptArena)?;
+            let table = state.heap.as_table(ptr).ok_or_else(|| {
+                corrupt_arena("environment token does not resolve to a table", delta_index)
+            })?;
             table
                 .clear_and_insert_entries(ordered)
-                .map_err(|_| LoadError::CorruptArena)?;
+                .map_err(|_| corrupt_arena("saved environment order is invalid", delta_index))?;
             // Rebuilding entries replaces the table shell. An unchanged delta
             // must retain a metatable that setup or a later library installed.
             table.set_metatable(metatable);
         }
-        let table = state.heap.as_table(ptr).ok_or(LoadError::CorruptArena)?;
+        let table = state.heap.as_table(ptr).ok_or_else(|| {
+            corrupt_arena("environment token does not resolve to a table", delta_index)
+        })?;
         match &delta.metatable {
             SavedMetatableDelta::Unchanged => {}
             SavedMetatableDelta::Cleared => table.set_metatable(None),
             SavedMetatableDelta::Set(saved) => match decode_val(saved, &ctx)? {
                 Val::Obj(ptr) => table.set_metatable(Some(ptr)),
-                _ => return Err(LoadError::CorruptArena),
+                _ => {
+                    return Err(corrupt_arena(
+                        "saved environment metatable is not an object",
+                        delta_index,
+                    ));
+                }
             },
         }
     }
 
     for (name, saved) in payload.user_globals {
-        let name = String::from_utf8(name)
-            .map_err(|_| LoadError::DecodeError("global name is not UTF-8".to_string()))?;
         let val = decode_val(&saved, &ctx)?;
         state.set_global_value_owned(name, val);
     }
@@ -1197,11 +1422,24 @@ fn materialize_payload(
     state.cost_budget_configured = payload.cost_budget_configured;
     state.cost_used = payload.cost_used;
     state.next_format_pointer_id = payload.next_format_pointer_id;
-    state.format_pointer_ids = payload
-        .format_pointer_ids
-        .iter()
-        .map(|(saved, id)| Ok((decode_val(saved, &ctx)?, *id)))
-        .collect::<Result<Vec<_>, LoadError>>()?;
+    let mut seen_pointer_values = BTreeSet::new();
+    let mut seen_pointer_ids = BTreeSet::new();
+    let mut format_pointer_ids = Vec::with_capacity(payload.format_pointer_ids.len());
+    for (index, (saved, id)) in payload.format_pointer_ids.iter().enumerate() {
+        let value = decode_val(saved, &ctx)?;
+        insert_runtime_key(
+            &mut seen_pointer_values,
+            value,
+            &state.heap,
+            index,
+            "duplicate materialized format pointer value",
+        )?;
+        if !seen_pointer_ids.insert(*id) {
+            return Err(corrupt_arena("duplicate format pointer id", index));
+        }
+        format_pointer_ids.push((value, *id));
+    }
+    state.format_pointer_ids = format_pointer_ids;
     state.stack.clear();
     state.stack_bottom = 0;
     state.pending_bytecode_caches.clear();
@@ -1219,11 +1457,15 @@ fn materialize_payload(
 }
 
 fn upvalues_ref(upvalues: &[UpvalueRef], id: u32) -> Result<&UpvalueRef, LoadError> {
-    upvalues.get(id as usize).ok_or(LoadError::CorruptArena)
+    upvalues
+        .get(id as usize)
+        .ok_or_else(|| corrupt_arena("upvalue id is out of range", id as usize))
 }
 
 fn object_ref(objects: &[ObjectPtr], id: u32) -> Result<&ObjectPtr, LoadError> {
-    objects.get(id as usize).ok_or(LoadError::CorruptArena)
+    objects
+        .get(id as usize)
+        .ok_or_else(|| corrupt_arena("object id is out of range", id as usize))
 }
 
 struct DecodeCtx<'a> {
@@ -1242,7 +1484,13 @@ enum RuntimeTableKey {
     RustFn(usize),
 }
 
-fn runtime_table_key(value: Val, heap: &GcHeap) -> Result<RuntimeTableKey, LoadError> {
+fn runtime_table_key(
+    value: Val,
+    heap: &GcHeap,
+    index: usize,
+) -> Result<RuntimeTableKey, LoadError> {
+    // Refusal: table.rs does not expose its key normalizer, so persistence
+    // currently mirrors Val's equality rule here for deterministic ordering.
     match value {
         Val::Bool(value) => Ok(RuntimeTableKey::Bool(value)),
         Val::Num(value) if !value.is_nan() => Ok(RuntimeTableKey::Num(if value == 0.0 {
@@ -1253,7 +1501,21 @@ fn runtime_table_key(value: Val, heap: &GcHeap) -> Result<RuntimeTableKey, LoadE
         Val::Str(ptr) => Ok(RuntimeTableKey::Str(heap.get_string(ptr).to_vec())),
         Val::Obj(ptr) => Ok(RuntimeTableKey::Obj(ptr)),
         Val::RustFn(func) => Ok(RuntimeTableKey::RustFn(func as usize)),
-        Val::Nil | Val::Num(_) => Err(LoadError::CorruptArena),
+        Val::Nil | Val::Num(_) => Err(corrupt_arena("nil or NaN is not a table key", index)),
+    }
+}
+
+fn insert_runtime_key(
+    keys: &mut BTreeSet<RuntimeTableKey>,
+    value: Val,
+    heap: &GcHeap,
+    index: usize,
+    reason: &'static str,
+) -> Result<(), LoadError> {
+    if keys.insert(runtime_table_key(value, heap, index)?) {
+        Ok(())
+    } else {
+        Err(corrupt_arena(reason, index))
     }
 }
 
@@ -1262,11 +1524,11 @@ fn decode_val(saved: &SavedVal, ctx: &DecodeCtx<'_>) -> Result<Val, LoadError> {
         SavedVal::Nil => Ok(Val::Nil),
         SavedVal::Bool(b) => Ok(Val::Bool(*b)),
         SavedVal::Num(bits) => Ok(Val::Num(f64::from_bits(*bits))),
-        SavedVal::Str(id) => Ok(Val::Str(
-            *ctx.strings
-                .get(*id as usize)
-                .ok_or(LoadError::CorruptArena)?,
-        )),
+        SavedVal::Str(id) => {
+            Ok(Val::Str(*ctx.strings.get(*id as usize).ok_or_else(
+                || corrupt_arena("string id is out of range", *id as usize),
+            )?))
+        }
         SavedVal::Obj(id) => Ok(Val::Obj(*object_ref(ctx.objects, *id)?)),
         SavedVal::Fn(id) => ctx
             .fn_forward
@@ -1293,7 +1555,10 @@ fn materialize_bytecode(
         build_bytecode_tree(idx, saved, &mut out, &mut visiting)?;
     }
     out.into_iter()
-        .map(|bc| bc.ok_or(LoadError::CorruptArena))
+        .enumerate()
+        .map(|(index, bc)| {
+            bc.ok_or_else(|| corrupt_arena("bytecode chunk was not materialized", index))
+        })
         .collect()
 }
 
@@ -1317,15 +1582,21 @@ fn build_bytecode_tree(
     let mut stack: Vec<(usize, usize)> = vec![(root, 0)];
     while let Some((idx, cursor)) = stack.last_mut() {
         let idx = *idx;
-        let src = saved.get(idx).ok_or(LoadError::CorruptArena)?;
+        let src = saved
+            .get(idx)
+            .ok_or_else(|| corrupt_arena("bytecode chunk id is out of range", idx))?;
         if let Some(child) = src.nested.get(*cursor) {
             *cursor += 1;
             let child = *child as usize;
-            if out.get(child).ok_or(LoadError::CorruptArena)?.is_some() {
+            if out
+                .get(child)
+                .ok_or_else(|| corrupt_arena("nested chunk id is out of range", child))?
+                .is_some()
+            {
                 continue;
             }
             if visiting[child] {
-                return Err(LoadError::CorruptArena);
+                return Err(corrupt_arena("nested chunk graph contains a cycle", child));
             }
             visiting[child] = true;
             stack.push((child, 0));
@@ -1335,10 +1606,15 @@ fn build_bytecode_tree(
             .nested
             .iter()
             .map(|child| {
-                out[*child as usize]
-                    .as_ref()
+                out.get(*child as usize)
+                    .and_then(|chunk| chunk.as_ref())
                     .map(Arc::clone)
-                    .ok_or(LoadError::CorruptArena)
+                    .ok_or_else(|| {
+                        corrupt_arena(
+                            "nested bytecode chunk was not materialized",
+                            *child as usize,
+                        )
+                    })
             })
             .collect::<Result<Vec<_>, LoadError>>()?;
         out[idx] = Some(build_bytecode_node(src, nested));
@@ -1381,12 +1657,54 @@ fn build_bytecode_node(src: &SavedBytecode, nested: Vec<Arc<Bytecode>>) -> Arc<B
 
 struct Encoder {
     bytes: Vec<u8>,
+    enforce_field_limits: bool,
+}
+
+// Resource caps for length-prefixed byte fields. They do not change the
+// encoding below each cap; the writer enforces the same policy as the reader.
+#[derive(Clone, Copy)]
+enum ByteField {
+    EngineVersion,
+    LuaString,
+    GlobalName,
+    FunctionId,
+    EnvironmentToken,
+    ChunkName,
+    ChunkSource,
+}
+
+impl ByteField {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::EngineVersion => "engine version",
+            Self::LuaString => "Lua string",
+            Self::GlobalName => "global name",
+            Self::FunctionId => "function id",
+            Self::EnvironmentToken => "environment token",
+            Self::ChunkName => "chunk name",
+            Self::ChunkSource => "chunk source",
+        }
+    }
+
+    const fn limit(self) -> usize {
+        match self {
+            Self::EngineVersion => MAX_ENGINE_VERSION_BYTES,
+            Self::LuaString | Self::GlobalName => super::MAX_STRING_BYTES,
+            Self::FunctionId => MAX_SAVE_IDENTIFIER_BYTES,
+            Self::EnvironmentToken => MAX_ENVIRONMENT_TOKEN_BYTES,
+            Self::ChunkName => MAX_CHUNK_NAME_BYTES,
+            Self::ChunkSource => MAX_CHUNK_SOURCE_BYTES,
+        }
+    }
 }
 
 impl Encoder {
     #[cfg(test)]
     fn new() -> Self {
-        Self { bytes: Vec::new() }
+        Self {
+            bytes: Vec::new(),
+            enforce_field_limits: false,
+        }
     }
 
     /// Seed the output buffer so a large save does not reallocate it
@@ -1395,6 +1713,7 @@ impl Encoder {
     fn with_capacity(capacity: usize) -> Self {
         Self {
             bytes: Vec::with_capacity(capacity),
+            enforce_field_limits: true,
         }
     }
 
@@ -1432,28 +1751,37 @@ impl Encoder {
         self.bytes.extend_from_slice(&n.to_le_bytes());
     }
 
-    fn write_len(&mut self, len: usize) -> Result<(), SaveError> {
-        let len = u32::try_from(len)
-            .map_err(|_| SaveError::EncodeError("vector too long".to_string()))?;
+    fn write_len(&mut self, len: usize, what: &'static str) -> Result<(), SaveError> {
+        let len = u32::try_from(len).map_err(|_| SaveError::TooLarge { what, count: len })?;
         self.write_u32(len);
         Ok(())
     }
 
-    fn write_bytes(&mut self, bytes: &[u8]) -> Result<(), SaveError> {
-        self.write_len(bytes.len())?;
+    fn write_bytes(&mut self, bytes: &[u8], field: ByteField) -> Result<(), SaveError> {
+        if self.enforce_field_limits && bytes.len() > field.limit() {
+            return Err(SaveError::TooLarge {
+                what: field.name(),
+                count: bytes.len(),
+            });
+        }
+        self.write_len(bytes.len(), field.name())?;
         self.bytes.extend_from_slice(bytes);
         Ok(())
     }
 
-    fn write_string(&mut self, s: &str) -> Result<(), SaveError> {
-        self.write_bytes(s.as_bytes())
+    fn write_string(&mut self, s: &str, field: ByteField) -> Result<(), SaveError> {
+        self.write_bytes(s.as_bytes(), field)
     }
 
-    fn write_option_string(&mut self, s: &Option<String>) -> Result<(), SaveError> {
+    fn write_option_string(
+        &mut self,
+        s: &Option<String>,
+        field: ByteField,
+    ) -> Result<(), SaveError> {
         match s {
             Some(s) => {
                 self.write_bool(true);
-                self.write_string(s)?;
+                self.write_string(s, field)?;
             }
             None => self.write_bool(false),
         }
@@ -1475,8 +1803,12 @@ impl<'a> Decoder<'a> {
         if self.pos == self.bytes.len() {
             Ok(())
         } else {
-            Err(LoadError::DecodeError("trailing bytes".to_string()))
+            Err(self.decode_error_at(self.pos, "trailing bytes"))
         }
+    }
+
+    fn decode_error_at(&self, offset: usize, message: &str) -> LoadError {
+        LoadError::DecodeError(format!("at byte {offset}: {message}"))
     }
 
     /// Bytes not yet consumed. Used to bound speculative allocations so a
@@ -1490,24 +1822,33 @@ impl<'a> Decoder<'a> {
         if magic != MAGIC {
             return Err(LoadError::BadMagic);
         }
-        if self.read_u16()? != FORMAT_VERSION {
-            return Err(LoadError::UnsupportedVersion);
+        let found = self.read_u16()?;
+        if found != FORMAT_VERSION {
+            return Err(LoadError::UnsupportedVersion {
+                found,
+                expected: FORMAT_VERSION,
+            });
         }
-        if self.read_u16()? != COST_MODEL_VERSION {
-            return Err(LoadError::UnsupportedCostModelVersion);
+        let found = self.read_u16()?;
+        if found != COST_MODEL_VERSION {
+            return Err(LoadError::UnsupportedCostModelVersion {
+                found,
+                expected: COST_MODEL_VERSION,
+            });
         }
         Ok(())
     }
 
     fn read_exact(&mut self, len: usize) -> Result<&'a [u8], LoadError> {
+        let start = self.pos;
         let end = self
             .pos
             .checked_add(len)
-            .ok_or_else(|| LoadError::DecodeError("length overflow".to_string()))?;
+            .ok_or_else(|| self.decode_error_at(start, "length overflow"))?;
         let slice = self
             .bytes
             .get(self.pos..end)
-            .ok_or_else(|| LoadError::DecodeError("truncated payload".to_string()))?;
+            .ok_or_else(|| self.decode_error_at(start, "truncated payload"))?;
         self.pos = end;
         Ok(slice)
     }
@@ -1520,7 +1861,7 @@ impl<'a> Decoder<'a> {
         match self.read_u8()? {
             0 => Ok(false),
             1 => Ok(true),
-            _ => Err(LoadError::DecodeError("invalid bool".to_string())),
+            _ => Err(self.decode_error_at(self.pos.saturating_sub(1), "invalid bool")),
         }
     }
 
@@ -1556,30 +1897,41 @@ impl<'a> Decoder<'a> {
         Ok(self.read_u32()? as usize)
     }
 
-    fn read_bytes(&mut self) -> Result<Vec<u8>, LoadError> {
-        let len = self.read_len()?;
-        Ok(self.read_exact(len)?.to_vec())
+    fn read_bytes(&mut self, field: ByteField) -> Result<Vec<u8>, LoadError> {
+        self.read_bounded(field)
     }
 
-    fn read_lua_string_bytes(&mut self) -> Result<Vec<u8>, LoadError> {
+    fn read_bounded(&mut self, field: ByteField) -> Result<Vec<u8>, LoadError> {
         let len = self.read_len()?;
-        if len > super::MAX_STRING_BYTES {
-            return Err(LoadError::StringSizeExceeded {
+        if len > field.limit() {
+            if matches!(field, ByteField::LuaString) {
+                return Err(LoadError::StringSizeExceeded {
+                    size: len,
+                    limit: field.limit(),
+                });
+            }
+            return Err(LoadError::FieldSizeExceeded {
+                kind: field.name(),
                 size: len,
-                limit: super::MAX_STRING_BYTES,
+                limit: field.limit(),
             });
         }
         Ok(self.read_exact(len)?.to_vec())
     }
 
-    fn read_string(&mut self) -> Result<String, LoadError> {
-        String::from_utf8(self.read_bytes()?)
-            .map_err(|_| LoadError::DecodeError("string is not UTF-8".to_string()))
+    fn read_lua_string_bytes(&mut self) -> Result<Vec<u8>, LoadError> {
+        self.read_bounded(ByteField::LuaString)
     }
 
-    fn read_option_string(&mut self) -> Result<Option<String>, LoadError> {
+    fn read_string(&mut self, field: ByteField) -> Result<String, LoadError> {
+        let start = self.pos;
+        String::from_utf8(self.read_bounded(field)?)
+            .map_err(|_| self.decode_error_at(start, "string is not UTF-8"))
+    }
+
+    fn read_option_string(&mut self, field: ByteField) -> Result<Option<String>, LoadError> {
         if self.read_bool()? {
-            Ok(Some(self.read_string()?))
+            Ok(Some(self.read_string(field)?))
         } else {
             Ok(None)
         }
@@ -1594,12 +1946,14 @@ impl SavePayload {
         out.write_i64(self.cost_budget);
         out.write_bool(self.cost_budget_configured);
         out.write_u64(self.cost_used);
-        write_vec(out, &self.strings, |out, bytes| out.write_bytes(bytes))?;
+        write_vec(out, &self.strings, |out, bytes| {
+            out.write_bytes(bytes, ByteField::LuaString)
+        })?;
         write_vec(out, &self.bytecode, |out, item| item.encode(out))?;
         write_vec(out, &self.upvalues, |out, item| item.encode(out))?;
         write_vec(out, &self.objects, |out, item| item.encode(out))?;
         write_vec(out, &self.user_globals, |out, (name, val)| {
-            out.write_bytes(name)?;
+            out.write_string(name, ByteField::GlobalName)?;
             val.encode(out)
         })?;
         write_vec(out, &self.env_deltas, |out, delta| delta.encode(out))?;
@@ -1614,7 +1968,7 @@ impl SavePayload {
 
     fn decode(input: &mut Decoder<'_>) -> Result<Self, LoadError> {
         Ok(Self {
-            has_standard_environment: input.read_u8()? != 0,
+            has_standard_environment: input.read_bool()?,
             rng_state: input.read_u64()?,
             cost_remaining: input.read_i64()?,
             cost_budget: input.read_i64()?,
@@ -1625,7 +1979,10 @@ impl SavePayload {
             upvalues: read_vec(input, SavedVal::decode)?,
             objects: read_vec(input, SavedObject::decode)?,
             user_globals: read_vec(input, |input| {
-                Ok((input.read_bytes()?, SavedVal::decode(input)?))
+                Ok((
+                    input.read_string(ByteField::GlobalName)?,
+                    SavedVal::decode(input)?,
+                ))
             })?,
             env_deltas: read_vec(input, SavedEnvDelta::decode)?,
             next_format_pointer_id: input.read_u64()?,
@@ -1638,7 +1995,7 @@ impl SavePayload {
 
 impl SavedEnvDelta {
     fn encode(&self, out: &mut Encoder) -> Result<(), SaveError> {
-        out.write_string(&self.token)?;
+        out.write_string(&self.token, ByteField::EnvironmentToken)?;
         write_vec(out, &self.deleted, |out, key| key.encode(out))?;
         write_vec(out, &self.upserts, |out, (key, value)| {
             key.encode(out)?;
@@ -1656,7 +2013,7 @@ impl SavedEnvDelta {
 
     fn decode(input: &mut Decoder<'_>) -> Result<Self, LoadError> {
         Ok(Self {
-            token: input.read_string()?,
+            token: input.read_string(ByteField::EnvironmentToken)?,
             deleted: read_vec(input, SavedVal::decode)?,
             upserts: read_vec(input, |input| {
                 Ok((SavedVal::decode(input)?, SavedVal::decode(input)?))
@@ -1684,13 +2041,12 @@ impl SavedMetatableDelta {
     }
 
     fn decode(input: &mut Decoder<'_>) -> Result<Self, LoadError> {
+        let tag_offset = input.pos;
         match input.read_u8()? {
             0 => Ok(Self::Unchanged),
             1 => Ok(Self::Cleared),
             2 => Ok(Self::Set(SavedVal::decode(input)?)),
-            _ => Err(LoadError::DecodeError(
-                "invalid environment metatable mode".to_string(),
-            )),
+            _ => Err(input.decode_error_at(tag_offset, "invalid environment metatable mode")),
         }
     }
 }
@@ -1715,17 +2071,18 @@ impl SavedVal {
             }
             SavedVal::Fn(id) => {
                 out.write_u8(6);
-                out.write_string(id)?;
+                out.write_string(id, ByteField::FunctionId)?;
             }
             SavedVal::EnvObj(token) => {
                 out.write_u8(7);
-                out.write_string(token)?;
+                out.write_string(token, ByteField::EnvironmentToken)?;
             }
         }
         Ok(())
     }
 
     fn decode(input: &mut Decoder<'_>) -> Result<Self, LoadError> {
+        let tag_offset = input.pos;
         match input.read_u8()? {
             0 => Ok(SavedVal::Nil),
             1 => Ok(SavedVal::Bool(false)),
@@ -1733,9 +2090,11 @@ impl SavedVal {
             3 => Ok(SavedVal::Num(input.read_u64()?)),
             4 => Ok(SavedVal::Str(input.read_u32()?)),
             5 => Ok(SavedVal::Obj(input.read_u32()?)),
-            6 => Ok(SavedVal::Fn(input.read_string()?)),
-            7 => Ok(SavedVal::EnvObj(input.read_string()?)),
-            _ => Err(LoadError::DecodeError("invalid value tag".to_string())),
+            6 => Ok(SavedVal::Fn(input.read_string(ByteField::FunctionId)?)),
+            7 => Ok(SavedVal::EnvObj(
+                input.read_string(ByteField::EnvironmentToken)?,
+            )),
+            _ => Err(input.decode_error_at(tag_offset, "invalid value tag")),
         }
     }
 }
@@ -1770,6 +2129,7 @@ impl SavedObject {
     }
 
     fn decode(input: &mut Decoder<'_>) -> Result<Self, LoadError> {
+        let tag_offset = input.pos;
         match input.read_u8()? {
             0 => {
                 let entries = read_vec(input, |input| {
@@ -1786,7 +2146,7 @@ impl SavedObject {
                 chunk: input.read_u32()?,
                 upvalues: read_vec(input, Decoder::read_u32)?,
             }),
-            _ => Err(LoadError::DecodeError("invalid object tag".to_string())),
+            _ => Err(input.decode_error_at(tag_offset, "invalid object tag")),
         }
     }
 }
@@ -1802,7 +2162,7 @@ impl SavedBytecode {
             Ok(())
         })?;
         write_vec(out, &self.string_literals, |out, bytes| {
-            out.write_bytes(bytes)
+            out.write_bytes(bytes, ByteField::LuaString)
         })?;
         write_vec(out, &self.table_templates, |out, keys| {
             write_vec(out, keys, |out, key| {
@@ -1821,8 +2181,8 @@ impl SavedBytecode {
         })?;
         write_vec(out, &self.upvalues, |out, item| item.encode(out))?;
         out.write_bool(self.is_vararg);
-        out.write_option_string(&self.name)?;
-        out.write_option_string(&self.source)?;
+        out.write_option_string(&self.name, ByteField::ChunkName)?;
+        out.write_option_string(&self.source, ByteField::ChunkSource)?;
         write_vec(out, &self.line_info, |out, line| {
             out.write_u32(*line);
             Ok(())
@@ -1844,8 +2204,8 @@ impl SavedBytecode {
             nested: read_vec(input, Decoder::read_u32)?,
             upvalues: read_vec(input, SavedUpvalueDesc::decode)?,
             is_vararg: input.read_bool()?,
-            name: input.read_option_string()?,
-            source: input.read_option_string()?,
+            name: input.read_option_string(ByteField::ChunkName)?,
+            source: input.read_option_string(ByteField::ChunkSource)?,
             line_info: read_vec(input, Decoder::read_u32)?,
         })
     }
@@ -1867,10 +2227,11 @@ impl SavedUpvalueDesc {
     }
 
     fn decode(input: &mut Decoder<'_>) -> Result<Self, LoadError> {
+        let tag_offset = input.pos;
         match input.read_u8()? {
             0 => Ok(SavedUpvalueDesc::Local(input.read_u8()?)),
             1 => Ok(SavedUpvalueDesc::Upvalue(input.read_u8()?)),
-            _ => Err(LoadError::DecodeError("invalid upvalue tag".to_string())),
+            _ => Err(input.decode_error_at(tag_offset, "invalid upvalue tag")),
         }
     }
 }
@@ -1880,7 +2241,7 @@ fn write_vec<T>(
     items: &[T],
     mut write_item: impl FnMut(&mut Encoder, &T) -> Result<(), SaveError>,
 ) -> Result<(), SaveError> {
-    out.write_len(items.len())?;
+    out.write_len(items.len(), "vector")?;
     for item in items {
         write_item(out, item)?;
     }
@@ -1951,7 +2312,7 @@ mod tests {
     fn load_bytecode_with_globals(
         bytecode: Vec<SavedBytecode>,
         objects: Vec<SavedObject>,
-        user_globals: Vec<(Vec<u8>, SavedVal)>,
+        user_globals: Vec<(String, SavedVal)>,
     ) -> Result<State, LoadError> {
         let payload = SavePayload {
             has_standard_environment: false,
@@ -1972,7 +2333,10 @@ mod tests {
         let mut encoder = Encoder::new();
         encoder.write_magic_and_versions();
         encoder
-            .write_bytes(env!("CARGO_PKG_VERSION").as_bytes())
+            .write_bytes(
+                env!("CARGO_PKG_VERSION").as_bytes(),
+                ByteField::EngineVersion,
+            )
             .map_err(|error| LoadError::DecodeError(error.to_string()))?;
         payload
             .encode(&mut encoder)
@@ -2270,7 +2634,7 @@ mod tests {
                     chunk: 0,
                     upvalues: Vec::new(),
                 }],
-                vec![(b"writer".to_vec(), SavedVal::Obj(0))],
+                vec![("writer".to_string(), SavedVal::Obj(0))],
             )
             .expect("forged free-op fixture loads");
             state.get_global("writer").expect("writer exists");
@@ -2339,9 +2703,9 @@ mod tests {
                 upvalues: Vec::new(),
             }],
             vec![
-                (b"x".to_vec(), SavedVal::Num(1.0f64.to_bits())),
-                (b"y".to_vec(), SavedVal::Num(2.0f64.to_bits())),
-                (b"writer".to_vec(), SavedVal::Obj(0)),
+                ("x".to_string(), SavedVal::Num(1.0f64.to_bits())),
+                ("y".to_string(), SavedVal::Num(2.0f64.to_bits())),
+                ("writer".to_string(), SavedVal::Obj(0)),
             ],
         )
         .expect("legacy fixture loads");
@@ -2384,7 +2748,7 @@ mod tests {
                 chunk: 0,
                 upvalues: Vec::new(),
             }],
-            vec![(b"writer".to_vec(), SavedVal::Obj(0))],
+            vec![("writer".to_string(), SavedVal::Obj(0))],
         )
         .expect("cached cursor fixture loads");
         restored.get_global("writer").expect("writer exists");
@@ -2451,7 +2815,7 @@ mod tests {
                 chunk: 0,
                 upvalues: Vec::new(),
             }],
-            vec![(b"writer".to_vec(), SavedVal::Obj(0))],
+            vec![("writer".to_string(), SavedVal::Obj(0))],
         )
         .expect("forged builtin fixture loads");
 
@@ -2526,7 +2890,10 @@ mod tests {
         missing_child.nested.push(1);
         assert_eq!(
             rejected_bytecode(vec![missing_child], Vec::new()),
-            LoadError::CorruptArena
+            LoadError::CorruptArena {
+                reason: "nested chunk id is out of range",
+                index: 1,
+            }
         );
 
         let mut cycle = valid_saved_bytecode();

@@ -26,16 +26,8 @@ fn gmatch_wrapper() -> Arc<crate::compiler::Bytecode> {
     }))
 }
 
-fn charge_cost(state: &mut State, cost: u64) -> Result<()> {
-    if state.cost_meter().consume(cost) {
-        Ok(())
-    } else {
-        Err(state.budget_exceeded_error())
-    }
-}
-
 fn charge_bytes(state: &mut State, bytes: usize) -> Result<()> {
-    charge_cost(state, bytes.max(1) as u64)
+    state.consume_cost(bytes.max(1) as u64)
 }
 
 /// Charge `units` scan comparisons with the exact semantics of charging
@@ -182,7 +174,7 @@ fn preflight_capture_bytes(
     for capture in captures {
         total = total.saturating_add(capture_byte_len(capture));
     }
-    charge_cost(state, total as u64)
+    state.consume_cost(total as u64)
 }
 
 fn append_capture_bytes(
@@ -203,7 +195,7 @@ fn append_capture_bytes(
 
 fn append_bytes(state: &mut State, out: &mut Vec<u8>, bytes: &[u8]) -> Result<()> {
     let next = crate::vm::checked_string_growth(out.len(), bytes.len())?;
-    charge_cost(state, bytes.len() as u64)?;
+    state.consume_cost(bytes.len() as u64)?;
     out.reserve(next - out.len());
     out.extend_from_slice(bytes);
     Ok(())
@@ -216,7 +208,7 @@ fn append_string_replacement(
     bytes: &[u8],
     captures: &[LuaCapture],
 ) -> Result<()> {
-    charge_cost(state, repl.len() as u64)?;
+    state.consume_cost(repl.len() as u64)?;
     let mut i = 0usize;
     while i < repl.len() {
         if repl[i] == b'%' && i + 1 < repl.len() {
@@ -327,7 +319,7 @@ fn append_templated_replacement(
     bytes: &[u8],
     captures: &[LuaCapture],
 ) -> Result<()> {
-    charge_cost(state, template.repl_len as u64)?;
+    state.consume_cost(template.repl_len as u64)?;
     for segment in &template.segments {
         match segment {
             ReplSegment::Literal(literal) => append_bytes_units(state, out, literal)?,
@@ -479,12 +471,12 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
     add_fn!("find", |state| {
         let subject = string_or_number_bytes(state, 1)?;
         let pattern = string_or_number_bytes(state, 2)?;
-        charge_cost(state, (subject.len() + pattern.len()).max(1) as u64)?;
+        state.consume_cost((subject.len() + pattern.len()).max(1) as u64)?;
         charge_bytes(state, pattern.len())?;
         let num_args = state.get_top();
 
-        let init = opt_integer(state, 3, "find")?
-            .map_or(0, |init| lua_start_index(subject.len(), init));
+        let init =
+            opt_integer(state, 3, "find")?.map_or(0, |init| lua_start_index(subject.len(), init));
         let plain = num_args >= 4 && state.to_boolean(4);
 
         let pattern_is_plain = { plain || crate::patterns::is_plain_for_find(&pattern) };
@@ -601,10 +593,9 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
     add_fn!("match", |state| {
         let s = string_or_number_bytes(state, 1)?;
         let pattern = string_or_number_bytes(state, 2)?;
-        charge_cost(state, (s.len() + pattern.len()).max(1) as u64)?;
+        state.consume_cost((s.len() + pattern.len()).max(1) as u64)?;
         charge_bytes(state, pattern.len())?;
-        let init = opt_integer(state, 3, "match")?
-            .map_or(0, |init| lua_start_index(s.len(), init));
+        let init = opt_integer(state, 3, "match")?.map_or(0, |init| lua_start_index(s.len(), init));
 
         state.set_top(0)?;
 
@@ -635,7 +626,7 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
     add_fn!("gmatch", |state| {
         let s = string_or_number_bytes(state, 1)?;
         let pattern = string_or_number_bytes(state, 2)?;
-        charge_cost(state, (s.len() + pattern.len()).max(1) as u64)?;
+        state.consume_cost((s.len() + pattern.len()).max(1) as u64)?;
         let pattern = if pattern.first() == Some(&b'^') {
             let escaped_len = crate::vm::checked_string_growth(pattern.len(), 1)?;
             let mut escaped = Vec::with_capacity(escaped_len);
@@ -678,7 +669,7 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
         state.check_any(3)?;
         let s = string_or_number_bytes(state, 1)?;
         let pattern = string_or_number_bytes(state, 2)?;
-        charge_cost(state, (s.len() + pattern.len()).max(1) as u64)?;
+        state.consume_cost((s.len() + pattern.len()).max(1) as u64)?;
         charge_bytes(state, pattern.len())?;
         let max_replacements = opt_integer(state, 4, "gsub")?.map(|n| {
             if n <= 0 {
@@ -698,7 +689,7 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
             )));
         }
         if max_replacements == Some(0) {
-            charge_cost(state, s.len() as u64)?;
+            state.consume_cost(s.len() as u64)?;
             state.set_top(0)?;
             state.push_bytes(s)?;
             state.push_number(0.0)?;
@@ -926,6 +917,20 @@ fn gmatch_iter(state: &mut State) -> Result<u8> {
         return Ok(1);
     }
 
+    state.push_string("compile_charged")?;
+    state.get_table(1)?;
+    let compile_charged = state.to_boolean(-1);
+    state.pop(1)?;
+    if !compile_charged {
+        // Charge once per iterator, not per cache miss. This flag is part of
+        // the saved Lua table, so GC, eviction and snapshot load cannot change
+        // the deterministic cost of continuing an existing iterator.
+        let pattern_len = state.to_bytes(3)?.len();
+        charge_bytes(state, pattern_len)?;
+        state.push_string("compile_charged")?;
+        state.push_boolean(true)?;
+        state.set_table_raw(1)?;
+    }
     state.memoize_gmatch_pattern(3)?;
     let (matched, range, captures) = {
         let (subject, matcher, mut meter) = state.gmatch_subject_matcher_and_cost_meter(2, 3)?;
@@ -998,7 +1003,7 @@ mod tests {
         }
         for start in 0..=haystack.len() - needle.len() {
             for (offset, needle_byte) in needle.iter().enumerate() {
-                charge_cost(state, 1)?;
+                state.consume_cost(1)?;
                 if haystack[start + offset] != *needle_byte {
                     break;
                 }

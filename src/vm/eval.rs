@@ -246,7 +246,8 @@ impl State {
 
     /// Loads a string as a Lua chunk with an optional source name.
     /// The source name is used in error messages and stack traces.
-    /// Use a filename for files, or something like `"[fleet:123]"` for dynamically loaded code.
+    /// Use a filename for files, or an application-defined chunk name for
+    /// dynamically loaded code.
     #[hotpath::measure]
     pub fn load_string_named(
         &mut self,
@@ -260,9 +261,9 @@ impl State {
     }
 
     /// Pops `n` values from the stack, concatenates them, and pushes the
-    /// result. If `n` is 1, the result is the single value on the stack (that
-    /// is, the function does nothing); if `n` is 0, the result is the empty
-    /// string.
+    /// result. `n` must be at least 2; smaller counts are rejected with an
+    /// argument error. A count larger than the current frame's values is
+    /// rejected with `InvalidStackIndex`.
     pub fn concat(&mut self, n: usize) -> Result<()> {
         if n < 2 {
             return Err(Error::without_location(ErrorKind::ArgError(
@@ -273,6 +274,11 @@ impl State {
                     received: None,
                 },
             )));
+        }
+        if n > self.stack.len() - self.stack_bottom {
+            return Err(self.error(ErrorKind::InvalidStackIndex {
+                index: isize::try_from(n).map_or(isize::MIN, |n| -n),
+            }));
         }
         self.concat_helper(n)
     }
@@ -295,13 +301,8 @@ impl State {
             if let Some(s) = val.as_string(&self.heap) {
                 total_len = super::checked_string_growth(total_len, s.len())?;
             } else if let Some(num) = val.as_num() {
-                // Auto-convert numbers to strings (standard Lua behavior).
-                // Format integers without decimal point, floats with.
-                let rendered = if num.fract() == 0.0 && num.abs() < 1e15 {
-                    format!("{}", num as i64)
-                } else {
-                    format!("{num}")
-                };
+                // Use the same spelling as tostring and default coercion.
+                let rendered = super::lua_val::number_to_string(num);
                 total_len = super::checked_string_growth(total_len, rendered.len())?;
                 rendered_numbers.push(rendered);
             } else {
@@ -345,7 +346,7 @@ impl State {
         // and its SetList) leaves a stale base behind. The per-frame error
         // cleanup in eval_closure_inner does not touch these stacks, so truncate
         // them here on any error so the State stays quiescent (reusable /
-        // snapshot-saveable) after a killed callback (L8).
+        // snapshot-saveable) after a killed callback.
         let vararg_base_watermark = self.vararg_call_bases.len();
         let table_base_watermark = self.table_constructor_bases.len();
 
@@ -484,9 +485,7 @@ impl State {
                 }
             }
             Ordering::Greater => {
-                if !is_vararg
-                    && let Err(e) = self.pop((num_args - num_params) as isize)
-                {
+                if !is_vararg && let Err(e) = self.pop((num_args - num_params) as isize) {
                     self.cleanup_closure_frame(frame_bottom, old_stack_bottom, false);
                     return Err(e);
                 }

@@ -26,6 +26,7 @@ mod compiler;
 mod cost_meter;
 mod host;
 mod instr;
+mod limits;
 mod lua_std;
 mod numeral;
 #[doc(hidden)]
@@ -51,15 +52,16 @@ use compiler::Bytecode;
 use instr::Instr;
 use std::sync::Arc;
 
-// Compile-time witness that `State` can be moved across threads. This is the
-// load-bearing property for sharing dellingr with multi-threaded async
-// runtimes (axum, tokio worker pools): embedders can hold a `Mutex<State>`
-// behind an `Arc` and dispatch calls from any worker. `State` is
-// deliberately NOT `Sync` - cost-budgeted dispatch and the bytecode cache
-// invariants only have well-defined semantics under exclusive access.
+// Compile-time witnesses for the thread-sharing contract. `State` can be
+// moved across threads but is deliberately NOT `Sync`; cost-budgeted dispatch
+// and bytecode-cache invariants only have well-defined semantics under
+// exclusive access. `Engine` and `Program` can be shared across threads.
 const _: () = {
     const fn assert_send<T: Send>() {}
+    const fn assert_send_sync<T: Send + Sync>() {}
     assert_send::<State>();
+    assert_send_sync::<Engine>();
+    assert_send_sync::<Program>();
 };
 
 /// Custom result type for evaluating Lua.
@@ -327,8 +329,12 @@ impl std::fmt::Display for CostAnalysis {
 /// by `Engine::analyze_cost(&program)` so the parse is paid once.
 pub fn analyze_cost(source: &str) -> Result<CostAnalysis> {
     let bc = compiler::parse_str(source)?;
-    let root = ScopeCost::analyze_chunk(&bc, "main".to_string());
-    Ok(CostAnalysis { root })
+    Ok(analyze_compiled_bytecode(&bc))
+}
+
+fn analyze_compiled_bytecode(bytecode: &Bytecode) -> CostAnalysis {
+    let root = ScopeCost::analyze_chunk(bytecode, "main".to_string());
+    CostAnalysis { root }
 }
 
 /// A factory for compiling Lua source and creating new `State`s.
@@ -337,15 +343,16 @@ pub fn analyze_cost(source: &str) -> Result<CostAnalysis> {
 /// threads via `Arc`. Compile a `Program` once on the engine, then load it
 /// into per-thread (or per-request) `State`s.
 ///
-/// ```ignore
+/// ```
+/// use dellingr::{ArgCount, Engine, RetCount};
 /// use std::sync::Arc;
-/// let engine = Arc::new(dellingr::Engine::new());
+/// let engine = Arc::new(Engine::new());
 /// let program = engine.compile("return 1 + 2").unwrap();
 ///
-/// // On each worker thread:
+/// // Load the same compiled program into a State for each worker.
 /// let mut state = engine.new_state();
 /// state.load(&program).unwrap();
-/// state.call(dellingr::ArgCount::Fixed(0), dellingr::RetCount::Fixed(1)).unwrap();
+/// state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
 /// ```
 #[derive(Debug)]
 pub struct Engine {
@@ -381,7 +388,7 @@ impl Engine {
     }
 
     /// Compile a Lua source string with a source name used in error messages
-    /// and stack traces (e.g. a filename or `"[fleet:123]"`).
+    /// and stack traces (e.g. a filename or chunk identifier).
     pub fn compile_named(&self, source: &str, name: impl Into<String>) -> Result<Program> {
         let bc = compiler::parse_str_named(source, Some(name.into()))?;
         Ok(Program(Arc::new(bc)))
@@ -389,8 +396,7 @@ impl Engine {
 
     /// Statically analyze the cost of a compiled `Program`. No execution.
     pub fn analyze_cost(&self, program: &Program) -> CostAnalysis {
-        let root = ScopeCost::analyze_chunk(&program.0, "main".to_string());
-        CostAnalysis { root }
+        analyze_compiled_bytecode(&program.0)
     }
 
     /// Create a new `State` configured by this engine.

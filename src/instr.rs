@@ -1,9 +1,7 @@
 //! Fixed-width 32-bit instruction encoding.
 //!
 //! Format: [opcode:8][A:8][B:8][C:8] or [opcode:8][A:8][sBx:16]
-//!
-//! This encoding is 4x smaller than the previous enum-based representation
-//! (~16 bytes per instruction) and much more cache-friendly.
+//! Each instruction is stored in one `u32`.
 
 /// Argument count for function calls.
 ///
@@ -292,7 +290,6 @@ impl Instr {
 
     /// Get the C operand.
     #[inline]
-    #[allow(dead_code)]
     pub(crate) const fn c(self) -> u8 {
         self.0 as u8
     }

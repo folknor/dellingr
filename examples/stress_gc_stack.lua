@@ -1,3 +1,4 @@
+-- SKIP-DIFF: GC stress test; still run by the example runner.
 -- Stress test: GC with tables on stack
 -- This tests the scenario where GC might free a table that's still on the stack
 -- Pattern: create table, keep reference, trigger GC, verify table still valid

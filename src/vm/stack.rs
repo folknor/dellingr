@@ -127,16 +127,7 @@ impl State {
         idx: isize,
         range: std::ops::Range<usize>,
     ) -> Result<()> {
-        let i = self.convert_idx(idx)?;
-        let val = self.stack[i];
-        let bytes = val.as_string(&self.heap).ok_or_else(|| {
-            Error::without_location(ErrorKind::ArgError(crate::error::ArgError {
-                arg_number: idx,
-                func_name: None,
-                expected: Some(super::LuaType::String),
-                received: Some(val.typ(&self.heap)),
-            }))
-        })?;
+        let bytes = self.to_bytes(idx)?;
         // The copy is not redundant: `bytes` borrows `self.heap`, and pushing
         // needs `&mut self`. Copying out first ends the borrow, and it also
         // keeps the source rooted on the stack if the allocation collects.
@@ -246,16 +237,31 @@ impl State {
 
     /// Returns exact Lua string bytes at the given index.
     pub fn to_bytes(&self, idx: isize) -> Result<&[u8]> {
+        let i = self.expect_string_at(idx)?;
+        Ok(self.stack[i]
+            .as_string(&self.heap)
+            .expect("expect_string_at validated the value's string type"))
+    }
+
+    /// Validate a string while preserving the caller's relative argument index.
+    pub(super) fn expect_string_at(&self, idx: isize) -> Result<usize> {
         let i = self.convert_idx(idx)?;
         let val = &self.stack[i];
-        val.as_string(&self.heap).ok_or_else(|| {
-            Error::without_location(ErrorKind::ArgError(crate::error::ArgError {
+        if val.as_string_ptr().is_some() {
+            return Ok(i);
+        }
+        // Iterator values use the same argument-type contract as to_bytes,
+        // including when a snapshot supplies a wrong type. Reserve internal
+        // errors for missing cache entries and failed-compilation ordering;
+        // neither changes the argument index or the expected value type.
+        Err(Error::without_location(ErrorKind::ArgError(
+            crate::error::ArgError {
                 arg_number: idx,
                 func_name: None,
                 expected: Some(super::LuaType::String),
                 received: Some(val.typ(&self.heap)),
-            }))
-        })
+            },
+        )))
     }
 
     /// Converts any Lua value to bytes using Lua's default string coercion rules.

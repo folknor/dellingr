@@ -684,7 +684,7 @@ fn unsupported_format_versions_fail_before_setup() {
             State::load_state(&bytes, Box::new(DefaultCallbacks), move |_| {
                 observed.store(true, Ordering::SeqCst);
             }),
-            Err(LoadError::UnsupportedVersion)
+            Err(LoadError::UnsupportedVersion { found, expected: 6 }) if found == version
         ));
         assert!(!setup_ran.load(Ordering::SeqCst));
     }
@@ -703,7 +703,8 @@ fn unsupported_cost_model_versions_fail_before_setup() {
             State::load_state(&bytes, Box::new(DefaultCallbacks), move |_| {
                 observed.store(true, Ordering::SeqCst);
             }),
-            Err(LoadError::UnsupportedCostModelVersion)
+            Err(LoadError::UnsupportedCostModelVersion { found, expected })
+                if found == version && expected == dellingr::COST_MODEL_VERSION
         ));
         assert!(!setup_ran.load(Ordering::SeqCst));
     }

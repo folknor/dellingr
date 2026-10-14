@@ -30,6 +30,35 @@ All notable changes to dellingr are documented here. The format follows
 - **Out-of-range argument messages.** `tonumber` base and `select` index out of
   range, and `rawlen` on a non-table non-string, now say so instead of `number
   expected, got number`; these are `RuntimeError` rather than `ArgError`.
+- **`tostring(-0.0)` is now `"-0.0"`**, as in Lua 5.4 (it was `"-0"`).
+  Concatenation and `tostring` share one number renderer, so `"x" .. -0.0`
+  agrees.
+- **CLI output split.** `Cost used: N` and the `--analyze` caveat now go to
+  stderr, so stdout carries only script output (and the analysis itself).
+  Arguments are read as OS strings (non-UTF-8 paths work), `--` ends option
+  parsing, unknown options and a second input file are usage errors, and
+  `--limit` cannot be combined with `--analyze`.
+- **`State::cost_remaining()` without a budget returns `i64::MAX`.** An
+  unbudgeted State previously reported its raw internal counter.
+- **`string.gmatch` charges pattern compilation once per iterator.** The charge
+  used to fall on every compilation-cache miss, so GC, cache eviction or a
+  snapshot reload could change a script's cost; it is now recorded in the
+  iterator's own state and is deterministic.
+- **Snapshot error shapes.** `LoadError::UnsupportedVersion` and
+  `UnsupportedCostModelVersion` now carry `found` and `expected`;
+  `CorruptArena` carries a `reason`; decode errors name the byte offset;
+  `SaveError` gains `Internal` and `TooLarge`; user-supplied strings in error
+  messages are escaped and length-capped. Every variable-length field has a
+  per-field size cap enforced on both save and load (chunk source names at
+  256 KiB, Lua strings at the 16 MiB string cap); a save that exceeds one fails
+  with `SaveError::TooLarge` rather than producing an unloadable file.
+- **`get_table`, `get_table_raw`, `table_next` and `table_insert_at` return
+  `InvalidStackIndex`** when the table index names the key/value slot itself,
+  instead of panicking. `table_insert_at` now resolves its table index before
+  popping the value, so a negative index counts from the value on top, like
+  the other table accessors.
+- **`State::concat`** rejects a count larger than the current frame's values
+  with `InvalidStackIndex` instead of panicking.
 
 ### Fixed
 

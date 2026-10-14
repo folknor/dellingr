@@ -14,6 +14,16 @@ pub type RustFunc = fn(&mut State) -> Result<u8>;
 
 const RUST_FN_DISPLAY: &str = "<function>";
 
+pub(super) fn number_to_string(number: f64) -> String {
+    // Val has no integer/float subtype, so retain established f64 spellings
+    // except for negative zero, whose Lua 5.4 form is unambiguous.
+    if number == 0.0 && number.is_sign_negative() {
+        "-0.0".to_string()
+    } else {
+        number.to_string()
+    }
+}
+
 #[derive(Clone, Copy, Default)]
 pub(crate) enum Val {
     #[default]
@@ -87,8 +97,8 @@ impl Val {
             Nil => b"nil".to_vec(),
             Bool(false) => b"false".to_vec(),
             Bool(true) => b"true".to_vec(),
-            Num(n) => n.to_string().into_bytes(),
-            RustFn(_) => b"<function>".to_vec(),
+            Num(n) => number_to_string(n).into_bytes(),
+            RustFn(_) => RUST_FN_DISPLAY.as_bytes().to_vec(),
             Obj(_) => unreachable!("object rendering requires State pointer identity"),
             Str(s) => heap.get_string(s).to_vec(),
         }
@@ -243,6 +253,9 @@ mod tests {
         let state = State::empty();
 
         assert_eq!(format!("{value:?}"), RUST_FN_DISPLAY);
-        assert_eq!(value.to_bytes_with_heap(&state.heap), b"<function>");
+        assert_eq!(
+            value.to_bytes_with_heap(&state.heap),
+            RUST_FN_DISPLAY.as_bytes()
+        );
     }
 }

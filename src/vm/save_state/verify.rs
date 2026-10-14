@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 
 use crate::compiler::MAX_SYNTAX_DEPTH;
 use crate::compiler::verify::{self, BytecodeView};
@@ -69,9 +69,27 @@ impl BytecodeView for SavedBytecode {
 
 fn invalid(chunk: usize, instruction: Option<u32>, reason: impl Into<String>) -> LoadError {
     LoadError::InvalidBytecode {
-        chunk: u32::try_from(chunk).unwrap_or(u32::MAX),
+        chunk: u32::try_from(chunk)
+            .expect("saved chunk indices are bounded by a u32 length prefix"),
         instruction,
         reason: reason.into(),
+    }
+}
+
+fn corrupt(reason: &'static str, index: usize) -> LoadError {
+    LoadError::CorruptArena { reason, index }
+}
+
+fn insert_unique<T: Ord>(
+    set: &mut BTreeSet<T>,
+    key: T,
+    reason: &'static str,
+    index: usize,
+) -> Result<(), LoadError> {
+    if set.insert(key) {
+        Ok(())
+    } else {
+        Err(corrupt(reason, index))
     }
 }
 
@@ -81,7 +99,7 @@ fn validate_nested_graph(bytecode: &[SavedBytecode]) -> Result<(), LoadError> {
         for child in &chunk.nested {
             let child = *child as usize;
             if child >= bytecode.len() {
-                return Err(LoadError::CorruptArena);
+                return Err(corrupt("nested chunk id is out of range", child));
             }
             indegree[child] = indegree[child]
                 .checked_add(1)
@@ -144,7 +162,7 @@ fn validate_closures(payload: &SavePayload) -> Result<(), LoadError> {
         };
         let chunk = *chunk as usize;
         let Some(bytecode) = payload.bytecode.get(chunk) else {
-            return Err(LoadError::CorruptArena);
+            return Err(corrupt("closure chunk id is out of range", chunk));
         };
         if upvalues.len() != bytecode.upvalues.len() {
             return Err(invalid(
@@ -153,11 +171,10 @@ fn validate_closures(payload: &SavePayload) -> Result<(), LoadError> {
                 "closure upvalue count does not match bytecode",
             ));
         }
-        if upvalues
-            .iter()
-            .any(|id| (*id as usize) >= payload.upvalues.len())
-        {
-            return Err(LoadError::CorruptArena);
+        for id in upvalues {
+            if (*id as usize) >= payload.upvalues.len() {
+                return Err(corrupt("closure upvalue id is out of range", *id as usize));
+            }
         }
     }
     Ok(())
@@ -166,56 +183,87 @@ fn validate_closures(payload: &SavePayload) -> Result<(), LoadError> {
 fn validate_value(value: &super::SavedVal, payload: &SavePayload) -> Result<(), LoadError> {
     match value {
         super::SavedVal::Str(id) if (*id as usize) >= payload.strings.len() => {
-            Err(LoadError::CorruptArena)
+            Err(corrupt("string id is out of range", *id as usize))
         }
         super::SavedVal::Obj(id) if (*id as usize) >= payload.objects.len() => {
-            Err(LoadError::CorruptArena)
+            Err(corrupt("object id is out of range", *id as usize))
         }
         _ => Ok(()),
     }
 }
 
 fn validate_environment_deltas(payload: &SavePayload) -> Result<(), LoadError> {
-    let mut tokens = std::collections::BTreeSet::new();
-    for delta in &payload.env_deltas {
-        if !tokens.insert(&delta.token) {
-            return Err(LoadError::CorruptArena);
-        }
-        let mut deleted = std::collections::BTreeSet::new();
-        for key in &delta.deleted {
+    let mut tokens = BTreeSet::new();
+    for (delta_index, delta) in payload.env_deltas.iter().enumerate() {
+        insert_unique(
+            &mut tokens,
+            &delta.token,
+            "duplicate environment token",
+            delta_index,
+        )?;
+        let mut deleted = BTreeSet::new();
+        for (key_index, key) in delta.deleted.iter().enumerate() {
             validate_value(key, payload)?;
-            if !deleted.insert(resolve_key(key, payload)?) {
-                return Err(LoadError::CorruptArena);
-            }
+            let resolved = resolve_key(key, payload, key_index)?;
+            insert_unique(
+                &mut deleted,
+                resolved,
+                "duplicate deleted environment key",
+                key_index,
+            )?;
         }
-        let mut upserts = std::collections::BTreeSet::new();
-        for (key, value) in &delta.upserts {
+        let mut upserts = BTreeSet::new();
+        for (entry_index, (key, value)) in delta.upserts.iter().enumerate() {
             validate_value(key, payload)?;
             validate_value(value, payload)?;
-            if matches!(value, super::SavedVal::Nil) || !upserts.insert(resolve_key(key, payload)?)
-            {
-                return Err(LoadError::CorruptArena);
+            if matches!(value, super::SavedVal::Nil) {
+                return Err(corrupt("environment upsert stores nil", entry_index));
             }
+            let resolved = resolve_key(key, payload, entry_index)?;
+            insert_unique(
+                &mut upserts,
+                resolved,
+                "duplicate environment upsert key",
+                entry_index,
+            )?;
         }
         if !deleted.is_disjoint(&upserts) {
-            return Err(LoadError::CorruptArena);
+            return Err(corrupt(
+                "environment key is both deleted and upserted",
+                delta_index,
+            ));
         }
         if let Some(order) = &delta.order {
-            let mut order_keys = std::collections::BTreeSet::new();
-            for key in order {
+            let mut order_keys = BTreeSet::new();
+            for (key_index, key) in order.iter().enumerate() {
                 validate_value(key, payload)?;
-                let key = resolve_key(key, payload)?;
-                if deleted.contains(&key) || !order_keys.insert(key) {
-                    return Err(LoadError::CorruptArena);
+                let key = resolve_key(key, payload, key_index)?;
+                if deleted.contains(&key) {
+                    return Err(corrupt(
+                        "environment order contains a deleted key",
+                        key_index,
+                    ));
                 }
+                insert_unique(
+                    &mut order_keys,
+                    key,
+                    "duplicate environment order key",
+                    key_index,
+                )?;
             }
             if !upserts.is_subset(&order_keys) {
-                return Err(LoadError::CorruptArena);
+                return Err(corrupt(
+                    "environment order omits an upserted key",
+                    delta_index,
+                ));
             }
         }
         if let super::SavedMetatableDelta::Set(value) = &delta.metatable {
             if !matches!(value, super::SavedVal::Obj(_) | super::SavedVal::EnvObj(_)) {
-                return Err(LoadError::CorruptArena);
+                return Err(corrupt(
+                    "environment metatable is not an object",
+                    delta_index,
+                ));
             }
             validate_value(value, payload)?;
         }
@@ -233,14 +281,22 @@ enum ResolvedKey {
     EnvObj(String),
 }
 
-fn resolve_key(value: &super::SavedVal, payload: &SavePayload) -> Result<ResolvedKey, LoadError> {
+fn resolve_key(
+    value: &super::SavedVal,
+    payload: &SavePayload,
+    index: usize,
+) -> Result<ResolvedKey, LoadError> {
+    // Refusal: vm/table.rs currently exposes no canonical key helper. It only
+    // rejects nil and NaN on insert, while Val equality/hash implement the
+    // number rule separately. The table owner must export that rule before
+    // this verifier can call it without duplicating semantics.
     match value {
-        super::SavedVal::Nil => Err(LoadError::CorruptArena),
+        super::SavedVal::Nil => Err(corrupt("nil is not a table key", index)),
         super::SavedVal::Bool(value) => Ok(ResolvedKey::Bool(*value)),
         super::SavedVal::Num(bits) => {
             let number = f64::from_bits(*bits);
             if number.is_nan() {
-                Err(LoadError::CorruptArena)
+                Err(corrupt("NaN is not a table key", index))
             } else {
                 Ok(ResolvedKey::Num(if number == 0.0 { 0 } else { *bits }))
             }
@@ -250,7 +306,7 @@ fn resolve_key(value: &super::SavedVal, payload: &SavePayload) -> Result<Resolve
             .get(*id as usize)
             .cloned()
             .map(ResolvedKey::Str)
-            .ok_or(LoadError::CorruptArena),
+            .ok_or_else(|| corrupt("table key string id is out of range", *id as usize)),
         super::SavedVal::Obj(id) => Ok(ResolvedKey::Obj(*id)),
         super::SavedVal::Fn(id) => Ok(ResolvedKey::Fn(id.clone())),
         super::SavedVal::EnvObj(id) => Ok(ResolvedKey::EnvObj(id.clone())),
@@ -263,9 +319,15 @@ fn validate_references(payload: &SavePayload) -> Result<(), LoadError> {
     }
     for object in &payload.objects {
         if let SavedObject::Table { entries, metatable } = object {
-            for (key, value) in entries {
+            let mut keys = BTreeSet::new();
+            for (entry_index, (key, value)) in entries.iter().enumerate() {
                 validate_value(key, payload)?;
                 validate_value(value, payload)?;
+                let key = resolve_key(key, payload, entry_index)?;
+                insert_unique(&mut keys, key, "duplicate saved table key", entry_index)?;
+                if matches!(value, super::SavedVal::Nil) {
+                    return Err(corrupt("saved table entry stores nil", entry_index));
+                }
             }
             if let Some(value) = metatable {
                 validate_value(value, payload)?;
@@ -279,22 +341,23 @@ fn validate_references(payload: &SavePayload) -> Result<(), LoadError> {
 }
 
 fn validate_pointer_ids(payload: &SavePayload) -> Result<(), LoadError> {
-    let mut ids = std::collections::BTreeSet::new();
+    let mut ids = BTreeSet::new();
     // Duplicate detection is split by variant and kept in ordered sets rather
     // than a linear scan: the list length is attacker-controlled, so an O(n^2)
     // check would make a forged save expensive to reject.
-    let mut values = std::collections::BTreeSet::new();
-    for (value, id) in &payload.format_pointer_ids {
-        let first_occurrence = match value {
+    let mut values = BTreeSet::new();
+    for (index, (value, id)) in payload.format_pointer_ids.iter().enumerate() {
+        match value {
             super::SavedVal::Obj(_)
             | super::SavedVal::EnvObj(_)
             | super::SavedVal::Str(_)
-            | super::SavedVal::Fn(_) => values.insert(resolve_key(value, payload)?),
-            _ => return Err(LoadError::CorruptArena),
-        };
-        if !first_occurrence || !ids.insert(*id) {
-            return Err(LoadError::CorruptArena);
+            | super::SavedVal::Fn(_) => {
+                let key = resolve_key(value, payload, index)?;
+                insert_unique(&mut values, key, "duplicate format pointer value", index)?;
+            }
+            _ => return Err(corrupt("invalid format pointer value", index)),
         }
+        insert_unique(&mut ids, *id, "duplicate format pointer id", index)?;
         validate_value(value, payload)?;
     }
     Ok(())
@@ -352,7 +415,7 @@ mod tests {
         };
         assert!(matches!(
             verify_payload(payload(duplicate_strings)),
-            Err(LoadError::CorruptArena)
+            Err(LoadError::CorruptArena { .. })
         ));
 
         let negative_zero = super::super::SavedEnvDelta {
@@ -367,7 +430,7 @@ mod tests {
         };
         assert!(matches!(
             verify_payload(payload(negative_zero)),
-            Err(LoadError::CorruptArena)
+            Err(LoadError::CorruptArena { .. })
         ));
 
         let invalid_order = super::super::SavedEnvDelta {
@@ -382,7 +445,7 @@ mod tests {
         };
         assert!(matches!(
             verify_payload(payload(invalid_order)),
-            Err(LoadError::CorruptArena)
+            Err(LoadError::CorruptArena { .. })
         ));
     }
 }

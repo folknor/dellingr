@@ -155,9 +155,9 @@ impl Frame {
         macro_rules! add_cost {
             ($state:expr, $local:expr, $cost:expr) => {{
                 let next = $local.saturating_add($cost);
-                if next >= Self::COST_CHECK_INTERVAL
-                    || $state.cost_remaining().saturating_sub_unsigned(next) <= 0
-                {
+                // This decides when to flush, not whether to accept a charge.
+                // consume_cost owns the runtime meter's admission rule.
+                if next >= Self::COST_CHECK_INTERVAL || $state.cost_batch_needs_flush(next) {
                     $state.consume_cost(next)?;
                     $local = 0;
                 } else {

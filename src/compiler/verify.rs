@@ -1,6 +1,10 @@
 use super::Bytecode;
 use super::MAX_SYNTAX_DEPTH;
 use crate::instr::{Builtin, Instr};
+use crate::limits::{
+    MAX_FRAME_SLOTS, MAX_LITERALS, MAX_NESTED, MAX_TABLE_TEMPLATE_FIELDS, MAX_TABLE_TEMPLATES,
+    MAX_UPVALUES,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Height {
@@ -77,9 +81,7 @@ struct AbsState {
 
 #[derive(Debug)]
 pub(crate) struct BytecodeValidationError {
-    #[cfg_attr(not(feature = "snapshot"), allow(dead_code))]
     pub(crate) instruction: Option<u32>,
-    #[cfg_attr(not(feature = "snapshot"), allow(dead_code))]
     pub(crate) reason: String,
 }
 
@@ -375,6 +377,8 @@ fn verify_stack_discipline(view: &impl BytecodeView) -> Result<(), BytecodeValid
                 next.height.remove(2, pc)?;
             }
             Instr::OP_SET_FIELD_AT => {
+                // A=0 is valid for generic bytecode even though compiler output
+                // rewrites that form to the cached field-store opcode.
                 require_at_least(&next.height, offset_requirement(a, 2)?)?;
                 next.height.remove(2, pc)?;
             }
@@ -548,6 +552,9 @@ fn verify_stack_discipline(view: &impl BytecodeView) -> Result<(), BytecodeValid
     Ok(())
 }
 
+// The verifier also accepts valid caller-built and snapshot bytecode forms
+// that compiler finalization normalizes: it strips `OP_NOP` and rewrites
+// `OP_SET_FIELD_AT` with A=0 to a cached `OP_SET_FIELD`.
 pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), BytecodeValidationError> {
     let code_len = view.code_len();
     if code_len == 0 {
@@ -556,29 +563,40 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
     if view.line_info_len() != code_len {
         return Err(err(None, "line info length does not match code length"));
     }
-    for (name, len) in [
-        ("table template", view.table_templates().len()),
-        ("nested chunk", view.nested_len()),
-        ("upvalue descriptor", view.upvalues_len()),
+    for (name, len, limit) in [
+        (
+            "table template",
+            view.table_templates().len(),
+            MAX_TABLE_TEMPLATES,
+        ),
+        ("nested chunk", view.nested_len(), MAX_NESTED),
+        ("upvalue descriptor", view.upvalues_len(), MAX_UPVALUES),
     ] {
-        if len > 255 {
-            return Err(err(None, format!("too many {name}s")));
+        if len > limit {
+            return Err(err(None, format!("too many {name}s (limit {limit})")));
         }
     }
-    if view.number_literals_len() > usize::from(u16::MAX) + 1
-        || view.string_literals().len() > usize::from(u16::MAX) + 1
-    {
-        return Err(err(None, "too many literals"));
+    if view.number_literals_len() > MAX_LITERALS || view.string_literals().len() > MAX_LITERALS {
+        return Err(err(
+            None,
+            format!("too many literals (limit {MAX_LITERALS})"),
+        ));
     }
     if view
         .table_templates()
         .iter()
-        .any(|template| template.len() > 255)
+        .any(|template| template.len() > MAX_TABLE_TEMPLATE_FIELDS)
     {
-        return Err(err(None, "table template is too large"));
+        return Err(err(
+            None,
+            format!("table template exceeds limit {MAX_TABLE_TEMPLATE_FIELDS}"),
+        ));
     }
-    if view.num_params() as usize + view.num_locals() as usize > 255 {
-        return Err(err(None, "frame slot count exceeds 255"));
+    if view.num_params() as usize + view.num_locals() as usize > MAX_FRAME_SLOTS {
+        return Err(err(
+            None,
+            format!("frame slot count exceeds {MAX_FRAME_SLOTS}"),
+        ));
     }
     if !matches!(
         Instr::from_raw(view.raw_instruction(code_len - 1)).opcode(),

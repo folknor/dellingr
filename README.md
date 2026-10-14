@@ -63,7 +63,7 @@ The parser bounds syntax nesting at 200 levels and raises `chunk has too many sy
 
 One divergence worth knowing: a nested parenthesis costs two levels rather than one, because each level descends through both the expression and unary parsers. Parentheses therefore nest about 99 deep here against reference Lua's ~200. Every other construct - statement blocks, `elseif` chains, table constructors, unary operator runs, field-access chains - gets the full 200. Real code does not come close to either figure.
 
-Per-function ceilings, all reported as syntax errors rather than silently truncated: 255 locals and 255 upvalues, and 65536 distinct string literals and number literals. Table constructors and `t.f = v` assignment sites are effectively unbounded - array entries are written in batches, and assignment sites past the 255th simply stop being inline-cached rather than being rejected.
+Per-function compile-time limits are 255 locals, 255 upvalues, 255 direct child functions, and 65,536 distinct string literals and number literals per pool. Fixed calls and fixed multiple-assignment results allow 254 values because 255 is reserved for dynamic counts. All are reported as syntax errors rather than silently truncated. Table constructors and `t.f = v` assignment sites are effectively unbounded - array entries are written in batches, and assignment sites past the 255th simply stop being inline-cached rather than being rejected.
 
 ## Runtime limits
 
@@ -168,6 +168,10 @@ cargo run --release -- --analyze path/to/script.lua
 cargo run --release -- --limit 100000 path/to/script.lua
 cargo run --release -- --quiet path/to/script.lua
 ```
+
+Script output goes to stdout. The `Cost used: N` summary (suppressed by
+`--quiet`) and the `--analyze` caveat go to stderr. `--` ends option parsing,
+so a script whose name starts with `-` can still be run.
 
 ## Acknowledgements
 

@@ -1,6 +1,6 @@
 //! Lua's Math Library
 //!
-//! Determinism contract (L5): `math.random` is fully deterministic - it draws
+//! Determinism contract: `math.random` is fully deterministic - it draws
 //! from the in-crate seeded `VmRng`, so a fixed seed yields the same stream on
 //! every platform. The transcendental functions (`sin`, `cos`, `exp`, `log`,
 //! `pow`, `sqrt`, ...) delegate to the platform's `f64` / libm implementation.

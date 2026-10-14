@@ -9,6 +9,10 @@ use crate::State;
 use crate::compiler::UpvalueDesc;
 use crate::error::{ErrorKind, SyntaxError};
 use crate::instr::{ArgCount, Builtin, RetCount};
+use crate::limits::{
+    MAX_ASSIGNMENT_OFFSET, MAX_EXPRESSIONS, MAX_FIXED_ARGS, MAX_FIXED_RESULTS, MAX_LITERALS,
+    MAX_LOCALS, MAX_NESTED, MAX_TABLE_BATCH_SIZE, MAX_TABLE_TEMPLATE_FIELDS, MAX_TABLE_TEMPLATES,
+};
 
 /// Recursively clear line_info from a chunk and its nested chunks.
 fn clear_line_info(chunk: &mut Bytecode) {
@@ -1475,7 +1479,7 @@ fn parser_error_positions_stay_pinned_after_comments_and_newlines() {
         let err = parse_str(&after_comment).expect_err("stray end must fail");
         assert!(matches!(
             err.kind,
-            ErrorKind::SyntaxError(SyntaxError::UnexpectedTok(_))
+            ErrorKind::SyntaxError(SyntaxError::ExpectedToken { .. })
         ));
         assert_eq!((err.line_num, err.column), (2, 1), "{newline:?}");
 
@@ -1533,6 +1537,15 @@ fn nested_chunks_preserve_shape_and_source_name() {
     assert_eq!(g.code, vec![Instr::ret(RetCount::Fixed(0))]);
 }
 
+#[test]
+fn named_source_is_attached_to_syntax_errors() {
+    let error = super::parse_str_named("end", Some("named-error.lua".to_string()))
+        .expect_err("stray end must fail");
+
+    assert_eq!(error.source_name(), Some("named-error.lua"));
+    assert!(error.to_string().starts_with("named-error.lua:1:1:"));
+}
+
 fn upvalue_program(grandparent_locals: usize, parent_locals: usize) -> String {
     let grandparent = (0..grandparent_locals)
         .map(|i| format!("a{i}"))
@@ -1552,14 +1565,266 @@ fn upvalue_program(grandparent_locals: usize, parent_locals: usize) -> String {
     )
 }
 
+fn identifier_list(prefix: &str, count: usize) -> String {
+    (0..count)
+        .map(|index| format!("{prefix}{index}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn value_list(count: usize) -> String {
+    vec!["1"; count].join(", ")
+}
+
+fn named_table_fields(count: usize) -> String {
+    (0..count)
+        .map(|index| format!("k{index} = 1"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn parser_for_limit_test() -> Parser<'static> {
+    Parser {
+        input: TokenStream::new(""),
+        chunk: Bytecode::default(),
+        nest_level: 0,
+        locals: Vec::new(),
+        outer_chunks: Vec::new(),
+        loop_breaks: Vec::new(),
+        upvalues: Vec::new(),
+        outer_locals: Vec::new(),
+        outer_upvalues: Vec::new(),
+        current_line: 1,
+        syntax_depth: 0,
+        fold_barrier: 0,
+    }
+}
+
+#[test]
+fn literal_pool_limits_match_their_error_messages() {
+    let max_literal_count = u32::try_from(MAX_LITERALS).expect("MAX_LITERALS fits in u32");
+    let mut parser = parser_for_limit_test();
+    parser.chunk.number_literals = (0..max_literal_count - 1).map(f64::from).collect();
+    assert_eq!(
+        parser
+            .find_or_add_number(f64::from(max_literal_count - 1))
+            .expect("MAX_LITERALS numbers must fit"),
+        u16::MAX
+    );
+    let error = parser
+        .find_or_add_number(f64::from(max_literal_count))
+        .expect_err("one more than MAX_LITERALS must fail");
+    assert!(matches!(
+        error.kind,
+        ErrorKind::SyntaxError(SyntaxError::TooManyNumbers)
+    ));
+    assert!(error.to_string().contains(&format!("limit {MAX_LITERALS}")));
+
+    let mut parser = parser_for_limit_test();
+    parser.chunk.string_literals = (0..MAX_LITERALS - 1)
+        .map(|index| index.to_string().into_bytes())
+        .collect();
+    assert_eq!(
+        parser
+            .find_or_add_string_bytes(b"last")
+            .expect("MAX_LITERALS strings must fit"),
+        u16::MAX
+    );
+    let error = parser
+        .find_or_add_string_bytes(b"overflow")
+        .expect_err("one more than MAX_LITERALS must fail");
+    assert!(matches!(
+        error.kind,
+        ErrorKind::SyntaxError(SyntaxError::TooManyStrings)
+    ));
+    assert!(error.to_string().contains(&format!("limit {MAX_LITERALS}")));
+}
+
+#[test]
+fn local_limit_matches_its_error_message() {
+    let source = format!("local {}", identifier_list("v", MAX_LOCALS));
+    parse_str(&source).expect("MAX_LOCALS local variables must compile");
+
+    let source = format!("local {}", identifier_list("v", MAX_LOCALS + 1));
+    let error = parse_str(&source).expect_err("one more than MAX_LOCALS must fail");
+    assert!(matches!(
+        error.kind,
+        ErrorKind::SyntaxError(SyntaxError::TooManyLocals)
+    ));
+    assert!(error.to_string().contains(&format!("limit {MAX_LOCALS}")));
+}
+
+#[test]
+fn fixed_argument_limit_matches_its_error_message() {
+    let source = format!("f({})", value_list(MAX_FIXED_ARGS));
+    parse_str(&source).expect("MAX_FIXED_ARGS arguments must compile");
+
+    let source = format!("f({})", value_list(MAX_FIXED_ARGS + 1));
+    let error = parse_str(&source).expect_err("one more than MAX_FIXED_ARGS must fail");
+    assert!(matches!(
+        error.kind,
+        ErrorKind::SyntaxError(SyntaxError::TooManyArguments)
+    ));
+    assert!(
+        error
+            .to_string()
+            .contains(&format!("limit {MAX_FIXED_ARGS}"))
+    );
+}
+
+#[test]
+fn expression_limit_matches_its_error_message() {
+    let source = format!("return {}", value_list(usize::from(MAX_EXPRESSIONS)));
+    parse_str(&source).expect("MAX_EXPRESSIONS values must compile");
+
+    let source = format!("return {}", value_list(usize::from(MAX_EXPRESSIONS) + 1));
+    let error = parse_str(&source).expect_err("one more than MAX_EXPRESSIONS must fail");
+    assert!(matches!(
+        error.kind,
+        ErrorKind::SyntaxError(SyntaxError::TooManyExpressions)
+    ));
+    assert!(
+        error
+            .to_string()
+            .contains(&format!("limit {MAX_EXPRESSIONS}"))
+    );
+}
+
+#[test]
+fn fixed_result_limit_matches_its_error_message() {
+    let source = format!("{} = f()", identifier_list("v", MAX_FIXED_RESULTS));
+    parse_str(&source).expect("MAX_FIXED_RESULTS values must compile");
+
+    let source = format!("{} = f()", identifier_list("v", MAX_FIXED_RESULTS + 1));
+    let error = parse_str(&source).expect_err("one more than MAX_FIXED_RESULTS must fail");
+    assert!(matches!(
+        error.kind,
+        ErrorKind::SyntaxError(SyntaxError::TooManyFixedResults)
+    ));
+    assert!(
+        error
+            .to_string()
+            .contains(&format!("limit {MAX_FIXED_RESULTS}"))
+    );
+}
+
+#[test]
+fn assignment_offset_limit_matches_its_error_message() {
+    let targets = vec!["t.k"; MAX_ASSIGNMENT_OFFSET + 1].join(", ");
+    parse_str(&format!("{targets} = 1")).expect("the maximum receiver offset must compile");
+
+    let targets = vec!["t.k"; MAX_ASSIGNMENT_OFFSET + 2].join(", ");
+    let error = parse_str(&format!("{targets} = 1"))
+        .expect_err("an offset past MAX_ASSIGNMENT_OFFSET must fail");
+    assert!(matches!(
+        error.kind,
+        ErrorKind::SyntaxError(SyntaxError::AssignmentOffsetTooLarge)
+    ));
+    assert!(
+        error
+            .to_string()
+            .contains(&format!("{MAX_ASSIGNMENT_OFFSET}"))
+    );
+}
+
+#[test]
+fn nested_function_limit_matches_its_error_message() {
+    let source = (0..MAX_NESTED)
+        .map(|index| format!("function f{index}() end"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    parse_str(&source).expect("MAX_NESTED child functions must compile");
+
+    let source = (0..MAX_NESTED + 1)
+        .map(|index| format!("function f{index}() end"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let error = parse_str(&source).expect_err("one more than MAX_NESTED must fail");
+    assert!(matches!(
+        error.kind,
+        ErrorKind::SyntaxError(SyntaxError::TooManyNestedFunctions)
+    ));
+    assert!(error.to_string().contains(&format!("limit {MAX_NESTED}")));
+}
+
+#[test]
+fn table_template_field_limit_uses_the_generic_fallback() {
+    let source = format!("t = {{{}}}", named_table_fields(MAX_TABLE_TEMPLATE_FIELDS));
+    let bytecode = parse_str(&source).expect("MAX_TABLE_TEMPLATE_FIELDS fields must fit");
+    assert_eq!(bytecode.table_templates[0].len(), MAX_TABLE_TEMPLATE_FIELDS);
+
+    let source = format!(
+        "t = {{{}}}",
+        named_table_fields(MAX_TABLE_TEMPLATE_FIELDS + 1)
+    );
+    let bytecode = parse_str(&source).expect("one more template field must use generic stores");
+    assert!(bytecode.table_templates.is_empty());
+    assert!(
+        bytecode
+            .code
+            .iter()
+            .any(|instruction| instruction.opcode() == Instr::OP_NEW_TABLE_PRESIZED)
+    );
+}
+
+#[test]
+fn table_template_count_limit_uses_the_generic_fallback() {
+    let table = "t = {a = 1, b = 2, c = 3, d = 4, e = 5}";
+    let source = vec![table; MAX_TABLE_TEMPLATES].join("\n");
+    let bytecode = parse_str(&source).expect("MAX_TABLE_TEMPLATES constructors must fit");
+    assert_eq!(bytecode.table_templates.len(), MAX_TABLE_TEMPLATES);
+
+    let source = vec![table; MAX_TABLE_TEMPLATES + 1].join("\n");
+    let bytecode = parse_str(&source).expect("extra templates must use generic stores");
+    assert_eq!(bytecode.table_templates.len(), MAX_TABLE_TEMPLATES);
+    assert!(
+        bytecode
+            .code
+            .iter()
+            .any(|instruction| instruction.opcode() == Instr::OP_NEW_TABLE_PRESIZED)
+    );
+}
+
+#[test]
+fn table_array_batch_limit_splits_at_the_encoded_count() {
+    let source = format!("t = {{{}}}", value_list(usize::from(MAX_TABLE_BATCH_SIZE)));
+    let bytecode = parse_str(&source).expect("one full array batch must compile");
+    let set_lists = bytecode
+        .code
+        .iter()
+        .filter(|instruction| instruction.opcode() == Instr::OP_SET_LIST)
+        .collect::<Vec<_>>();
+    assert_eq!(set_lists.len(), 1);
+    assert_eq!(set_lists[0].a(), MAX_TABLE_BATCH_SIZE);
+    assert_eq!(set_lists[0].bx(), 0);
+
+    let source = format!(
+        "t = {{{}}}",
+        value_list(usize::from(MAX_TABLE_BATCH_SIZE) + 1)
+    );
+    let bytecode = parse_str(&source).expect("one more entry must begin the next batch");
+    let set_lists = bytecode
+        .code
+        .iter()
+        .filter(|instruction| instruction.opcode() == Instr::OP_SET_LIST)
+        .collect::<Vec<_>>();
+    assert_eq!(set_lists.len(), 2);
+    assert_eq!(
+        (set_lists[0].a(), set_lists[0].bx()),
+        (MAX_TABLE_BATCH_SIZE, 0)
+    );
+    assert_eq!((set_lists[1].a(), set_lists[1].bx()), (1, 1));
+}
+
 #[test]
 fn too_many_upvalues_errors() {
-    let err = parse_str(&upvalue_program(200, 60)).expect_err("260 upvalues must be rejected");
+    let err = parse_str(&upvalue_program(200, 56)).expect_err("256 upvalues must be rejected");
     assert!(matches!(
         err.kind,
         ErrorKind::SyntaxError(SyntaxError::TooManyUpvalues)
     ));
-    parse_str(&upvalue_program(200, 50)).expect("250 upvalues must remain supported");
+    assert!(err.to_string().contains("limit 255"));
+    parse_str(&upvalue_program(200, 55)).expect("255 upvalues must remain supported");
 }
 
 #[test]

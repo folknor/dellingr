@@ -6,14 +6,6 @@ use crate::Result;
 use crate::State;
 use crate::error::{ErrorKind, TypeError};
 
-fn charge_cost(state: &mut State, cost: u64) -> Result<()> {
-    if state.cost_meter().consume(cost) {
-        Ok(())
-    } else {
-        Err(state.budget_exceeded_error())
-    }
-}
-
 fn table_unpack_values(state: &mut State) -> crate::Result<u8> {
     super::unpack_values(state)
 }
@@ -105,7 +97,7 @@ pub(crate) fn open_table(state: &mut State) -> Result<()> {
         let has_comp = state.check_optional_type(2, LuaType::Function)?;
 
         // Cost is charged inside table_sort BEFORE the comparator runs / the
-        // table is mutated (L18), so an exhausted budget blocks the sort.
+        // table is mutated, so an exhausted budget blocks the sort.
         state.table_sort(1, has_comp)?;
         state.set_top(0)?;
         Ok(0)
@@ -158,7 +150,7 @@ pub(crate) fn open_table(state: &mut State) -> Result<()> {
 
         let sep = if state.check_optional_type(2, LuaType::String)? {
             let bytes = state.to_bytes(2)?.to_vec();
-            charge_cost(state, bytes.len() as u64)?;
+            state.consume_cost(bytes.len() as u64)?;
             bytes
         } else {
             Vec::new()
@@ -171,7 +163,7 @@ pub(crate) fn open_table(state: &mut State) -> Result<()> {
 
         if i > j {
             if sep.is_empty() {
-                charge_cost(state, 1)?;
+                state.consume_cost(1)?;
             }
             state.set_top(0)?;
             state.push_bytes(b"")?;
@@ -182,11 +174,11 @@ pub(crate) fn open_table(state: &mut State) -> Result<()> {
         for idx in i..=j {
             if idx > i {
                 let next = crate::vm::checked_string_growth(result.len(), sep.len())?;
-                charge_cost(state, sep.len() as u64)?;
+                state.consume_cost(sep.len() as u64)?;
                 result.reserve(next - result.len());
                 result.extend_from_slice(&sep);
             }
-            charge_cost(state, 1)?;
+            state.consume_cost(1)?;
             state.push_number(idx as f64)?;
             state.get_table(1)?;
             let typ = state.typ(-1);
@@ -194,7 +186,7 @@ pub(crate) fn open_table(state: &mut State) -> Result<()> {
                 LuaType::String | LuaType::Number => {
                     let bytes = state.bytes_coerce(-1)?;
                     let next = crate::vm::checked_string_growth(result.len(), bytes.len())?;
-                    charge_cost(state, bytes.len() as u64)?;
+                    state.consume_cost(bytes.len() as u64)?;
                     result.reserve(next - result.len());
                     result.extend_from_slice(&bytes);
                 }
@@ -243,17 +235,13 @@ pub(crate) fn open_table(state: &mut State) -> Result<()> {
         // must copy backwards so earlier writes do not clobber later reads.
         let same_table = count > 0 && state.raw_equal(1, dest_idx);
         if count == 0 {
-            if !state.cost_meter().consume(1) {
-                return Err(state.budget_exceeded_error());
-            }
+            state.consume_cost(1)?;
         } else if state.cost_budget_configured {
             // A configured budget charges immediately before each lookup/write
             // pair, so exhaustion leaves a deterministic partial mutation.
             if same_table && t > f {
                 for i in (0..count).rev() {
-                    if !state.cost_meter().consume(1) {
-                        return Err(state.budget_exceeded_error());
-                    }
+                    state.consume_cost(1)?;
                     let src_key = (f + i) as f64;
                     let dest_key = (t + i) as f64;
 
@@ -264,9 +252,7 @@ pub(crate) fn open_table(state: &mut State) -> Result<()> {
                 }
             } else {
                 for i in 0..count {
-                    if !state.cost_meter().consume(1) {
-                        return Err(state.budget_exceeded_error());
-                    }
+                    state.consume_cost(1)?;
                     let src_key = (f + i) as f64;
                     let dest_key = (t + i) as f64;
 
@@ -279,9 +265,7 @@ pub(crate) fn open_table(state: &mut State) -> Result<()> {
         } else {
             // Without a configured limit, reserve the complete deterministic
             // cost once and keep the hot copy loops free of budget checks.
-            if !state.cost_meter().consume(count as u64) {
-                return Err(state.budget_exceeded_error());
-            }
+            state.consume_cost(count as u64)?;
             if same_table && t > f {
                 for i in (0..count).rev() {
                     let src_key = (f + i) as f64;

@@ -7,6 +7,7 @@ use super::Result;
 use super::RetCount;
 use super::SyntaxError;
 use super::TokenType;
+use crate::limits::{MAX_TABLE_BATCH_SIZE, MAX_TABLE_TEMPLATE_FIELDS, MAX_TABLE_TEMPLATES};
 
 type TableTemplateField = (u16, usize);
 type ParsedTableEntry = (u8, Option<TableTail>, Option<TableTemplateField>);
@@ -88,12 +89,12 @@ impl Parser<'_> {
             let mut field_count = 0u8;
             let mut template_candidate = TableTemplateCandidate::new();
             let last_tail = loop {
-                if i == u8::MAX {
+                if i == MAX_TABLE_BATCH_SIZE {
                     self.push(Instr::set_list_batch(i, batch));
                     i = 0;
                     batch = batch
                         .checked_add(1)
-                        .ok_or_else(|| self.error(SyntaxError::TooManyTableFields))?;
+                        .ok_or_else(|| self.error_here(SyntaxError::TooManyTableFields))?;
                 }
                 let (new_i, tail, named_field) = self.parse_table_entry(i)?;
                 i = new_i;
@@ -182,14 +183,14 @@ impl Parser<'_> {
         table_instr_idx: usize,
         fields: &[TableTemplateField],
     ) -> bool {
-        if fields.is_empty() || self.chunk.table_templates.len() >= u8::MAX as usize {
+        if fields.is_empty() || self.chunk.table_templates.len() >= MAX_TABLE_TEMPLATES {
             return false;
         }
 
         let mut template = Vec::with_capacity(fields.len());
         let mut field_indices = Vec::with_capacity(fields.len());
         for (key_id, _) in fields {
-            if template.len() >= u8::MAX as usize {
+            if template.len() >= MAX_TABLE_TEMPLATE_FIELDS {
                 return false;
             }
             if template.contains(key_id) {

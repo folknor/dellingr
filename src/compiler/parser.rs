@@ -13,6 +13,7 @@ use super::lexer::TokenStream;
 use super::token::Token;
 use super::token::TokenType;
 use crate::instr::{ArgCount, Builtin, RetCount};
+use crate::limits::{MAX_FIXED_ARGS, MAX_LITERALS, MAX_LOCALS};
 use crate::numeral::{hex_value, is_lua_whitespace, is_newline_pair};
 
 use std::borrow::Borrow;
@@ -75,7 +76,7 @@ pub(super) fn parse_str(source: &str) -> Result<Bytecode> {
 #[hotpath::measure]
 pub(super) fn parse_str_named(source: &str, source_name: Option<String>) -> Result<Bytecode> {
     let chunk = Bytecode {
-        source: source_name,
+        source: source_name.clone(),
         ..Default::default()
     };
     let parser = Parser {
@@ -92,7 +93,9 @@ pub(super) fn parse_str_named(source: &str, source_name: Option<String>) -> Resu
         syntax_depth: 0,
         fold_barrier: 0,
     };
-    parser.parse_all()
+    parser
+        .parse_all()
+        .map_err(|error| error.with_source_name(source_name))
 }
 
 impl<'a> Parser<'a> {
@@ -101,8 +104,8 @@ impl<'a> Parser<'a> {
     /// Creates a new local slot at the current nest_level.
     /// Fails if we have exceeded the maximum number of locals.
     fn add_local(&mut self, name: &'a str) -> Result<()> {
-        if self.locals.len() == u8::MAX as usize {
-            Err(self.error(SyntaxError::TooManyLocals))
+        if self.locals.len() == MAX_LOCALS {
+            Err(self.error_here(SyntaxError::TooManyLocals))
         } else {
             self.locals.push((name, self.nest_level));
             let non_param_locals = self.locals.len() - self.chunk.num_params as usize;
@@ -113,17 +116,16 @@ impl<'a> Parser<'a> {
 
     /// Checks whether this scope can accommodate more locals without changing it.
     fn ensure_local_capacity(&self, additional: usize) -> Result<()> {
-        if additional > u8::MAX as usize - self.locals.len() {
-            Err(self.error(SyntaxError::TooManyLocals))
+        if additional > MAX_LOCALS - self.locals.len() {
+            Err(self.error_here(SyntaxError::TooManyLocals))
         } else {
             Ok(())
         }
     }
 
     /// Constructs an error of the given kind at the current position.
-    // TODO: rename to error_here
     #[must_use]
-    fn error(&self, kind: impl Into<ErrorKind>) -> Error {
+    fn error_here(&self, kind: impl Into<ErrorKind>) -> Error {
         let pos = self.input.pos();
         self.error_at(kind, pos)
     }
@@ -137,15 +139,15 @@ impl<'a> Parser<'a> {
 
     fn checked_fixed_arg_count(&self, explicit: usize, implicit: usize) -> Result<u8> {
         let total = explicit + implicit;
-        if total > 254 {
-            return Err(self.error(SyntaxError::TooManyArguments));
+        if total > MAX_FIXED_ARGS {
+            return Err(self.error_here(SyntaxError::TooManyArguments));
         }
         Ok(total as u8)
     }
 
     fn enter_syntax_level(&mut self) -> Result<()> {
         if self.syntax_depth >= MAX_SYNTAX_DEPTH {
-            return Err(self.error(SyntaxError::TooManySyntaxLevels));
+            return Err(self.error_here(SyntaxError::TooManySyntaxLevels));
         }
         self.syntax_depth += 1;
         Ok(())
@@ -157,7 +159,7 @@ impl<'a> Parser<'a> {
 
     fn checked_jump_offset(&self, from: usize, target: usize) -> Result<i16> {
         let delta = target as isize - (from as isize + 1);
-        i16::try_from(delta).map_err(|_| self.error(SyntaxError::JumpTooFar))
+        i16::try_from(delta).map_err(|_| self.error_here(SyntaxError::JumpTooFar))
     }
 
     fn patch_jump(
@@ -181,7 +183,7 @@ impl<'a> Parser<'a> {
         } else {
             let got = self.describe_token(&token);
             let exp = Self::describe_token_type(expected);
-            SyntaxError::UnexpectedTok(format!("'{exp}' expected near {got}"))
+            SyntaxError::expected_token(exp, got)
         };
         self.error_at(error_kind, token.start)
     }
@@ -205,59 +207,7 @@ impl<'a> Parser<'a> {
 
     /// Returns the display name for a TokenType.
     fn describe_token_type(typ: TokenType) -> &'static str {
-        match typ {
-            TokenType::And => "and",
-            TokenType::Break => "break",
-            TokenType::Do => "do",
-            TokenType::Else => "else",
-            TokenType::ElseIf => "elseif",
-            TokenType::End => "end",
-            TokenType::False => "false",
-            TokenType::For => "for",
-            TokenType::Function => "function",
-            TokenType::If => "if",
-            TokenType::In => "in",
-            TokenType::Local => "local",
-            TokenType::Nil => "nil",
-            TokenType::Not => "not",
-            TokenType::Or => "or",
-            TokenType::Repeat => "repeat",
-            TokenType::Return => "return",
-            TokenType::Then => "then",
-            TokenType::True => "true",
-            TokenType::Until => "until",
-            TokenType::While => "while",
-            TokenType::Plus => "+",
-            TokenType::Minus => "-",
-            TokenType::Star => "*",
-            TokenType::Slash => "/",
-            TokenType::Mod => "%",
-            TokenType::Caret => "^",
-            TokenType::Hash => "#",
-            TokenType::Equal => "==",
-            TokenType::NotEqual => "~=",
-            TokenType::LessEqual => "<=",
-            TokenType::GreaterEqual => ">=",
-            TokenType::Less => "<",
-            TokenType::Greater => ">",
-            TokenType::LParen | TokenType::LParenLineStart => "(",
-            TokenType::RParen => ")",
-            TokenType::LCurly => "{",
-            TokenType::RCurly => "}",
-            TokenType::LSquare => "[",
-            TokenType::RSquare => "]",
-            TokenType::Semi => ";",
-            TokenType::Colon => ":",
-            TokenType::Comma => ",",
-            TokenType::Dot => ".",
-            TokenType::DotDot => "..",
-            TokenType::DotDotDot => "...",
-            TokenType::Assign => "=",
-            TokenType::Identifier => "<name>",
-            TokenType::LiteralNumber | TokenType::LiteralHexNumber => "<number>",
-            TokenType::LiteralString => "<string>",
-            TokenType::EndOfFile => "<eof>",
-        }
+        typ.spelling()
     }
 
     /// Pulls a token off the input and checks it against `expected`.
@@ -292,7 +242,7 @@ impl<'a> Parser<'a> {
 
     /// Stores literal string bytes and returns its index.
     fn find_or_add_string_bytes(&mut self, bytes: &[u8]) -> Result<u16> {
-        crate::vm::check_string_size(bytes.len()).map_err(|err| self.error(err.kind))?;
+        crate::vm::check_string_size(bytes.len()).map_err(|err| self.error_here(err.kind))?;
         match self
             .chunk
             .string_literals
@@ -302,8 +252,8 @@ impl<'a> Parser<'a> {
             Some(i) => Ok(i as u16),
             None => {
                 let i = self.chunk.string_literals.len();
-                if i > u16::MAX as usize {
-                    Err(self.error(SyntaxError::TooManyStrings))
+                if i >= MAX_LITERALS {
+                    Err(self.error_here(SyntaxError::TooManyStrings))
                 } else {
                     self.chunk.string_literals.push(bytes.to_vec());
                     Ok(i as u16)
@@ -315,7 +265,7 @@ impl<'a> Parser<'a> {
     /// Stores a literal number and returns its index.
     fn find_or_add_number(&mut self, num: f64) -> Result<u16> {
         find_or_add(&mut self.chunk.number_literals, &num)
-            .ok_or_else(|| self.error(SyntaxError::TooManyNumbers))
+            .ok_or_else(|| self.error_here(SyntaxError::TooManyNumbers))
     }
 
     /// Converts a literal string's offsets into Lua string bytes, processing escape sequences.
@@ -342,7 +292,7 @@ impl<'a> Parser<'a> {
             let byte = raw[raw_offset];
             raw_offset += 1;
             crate::vm::checked_string_growth(result.len(), 1)
-                .map_err(|err| self.error(err.kind))?;
+                .map_err(|err| self.error_here(err.kind))?;
             if byte == b'\\' {
                 let error_pos = start + 1 + raw_offset - 1;
                 let next = *raw
@@ -612,7 +562,7 @@ impl<'a> Parser<'a> {
             self.push(Instr::jump(0));
             Ok(())
         } else {
-            Err(self.error(SyntaxError::BreakOutsideLoop))
+            Err(self.error_here(SyntaxError::BreakOutsideLoop))
         }
     }
 
@@ -635,8 +585,11 @@ impl<'a> Parser<'a> {
     /// Parses a `Bytecode`.
     #[hotpath::measure]
     fn parse_chunk(&mut self, params: &[&'a str], is_vararg: bool) -> Result<Bytecode> {
-        let num_params =
-            u8::try_from(params.len()).map_err(|_| self.error(SyntaxError::TooManyLocals))?;
+        if params.len() > MAX_LOCALS {
+            return Err(self.error_here(SyntaxError::TooManyLocals));
+        }
+        let num_params = u8::try_from(params.len())
+            .map_err(|_| self.error_here(SyntaxError::TooManyLocals))?;
         let source = self.chunk.source.clone();
         self.outer_chunks.push(std::mem::take(&mut self.chunk));
         let outer_fold_barrier = std::mem::take(&mut self.fold_barrier);
@@ -711,7 +664,7 @@ impl<'a> Parser<'a> {
                 TokenType::Identifier | TokenType::LParen | TokenType::LParenLineStart => {
                     self.parse_assign_or_call()?;
                 }
-                TokenType::If => self.parse_if()?,
+                TokenType::If => self.parse_if_arm()?,
                 TokenType::While => self.parse_while()?,
                 TokenType::Repeat => self.parse_repeat()?,
                 TokenType::Do => self.parse_do()?,
@@ -850,7 +803,7 @@ where
         Some(i) => Some(i as u16),
         None => {
             let i = queue.len();
-            if i > u16::MAX as usize {
+            if i >= MAX_LITERALS {
                 None
             } else {
                 queue.push(x.to_owned());

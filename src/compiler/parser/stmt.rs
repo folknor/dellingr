@@ -8,6 +8,7 @@ use super::Result;
 use super::RetCount;
 use super::SyntaxError;
 use super::TokenType;
+use crate::limits::{MAX_ASSIGNMENT_OFFSET, MAX_FIXED_RESULTS};
 
 impl<'a> Parser<'a> {
     /// Parses a return statement. Return statements must always come last in a
@@ -110,13 +111,21 @@ impl<'a> Parser<'a> {
                 PlaceExp::Global(i) => Instr::set_global(i),
                 PlaceExp::Builtin(b) => Instr::set_builtin(b),
                 PlaceExp::FieldAccess(literal_id) => {
-                    let stack_offset = u8::try_from(num_lvals - i - 1)
-                        .map_err(|_| self.error(SyntaxError::TooManyExpressions))?;
+                    let stack_offset = num_lvals - i - 1;
+                    if stack_offset > MAX_ASSIGNMENT_OFFSET {
+                        return Err(self.error_here(SyntaxError::AssignmentOffsetTooLarge));
+                    }
+                    let stack_offset = u8::try_from(stack_offset)
+                        .map_err(|_| self.error_here(SyntaxError::AssignmentOffsetTooLarge))?;
                     Instr::set_field_at(stack_offset, literal_id)
                 }
                 PlaceExp::TableIndex => {
-                    let stack_offset = u8::try_from(num_lvals - i - 1)
-                        .map_err(|_| self.error(SyntaxError::TooManyExpressions))?;
+                    let stack_offset = num_lvals - i - 1;
+                    if stack_offset > MAX_ASSIGNMENT_OFFSET {
+                        return Err(self.error_here(SyntaxError::AssignmentOffsetTooLarge));
+                    }
+                    let stack_offset = u8::try_from(stack_offset)
+                        .map_err(|_| self.error_here(SyntaxError::AssignmentOffsetTooLarge))?;
                     Instr::set_table(stack_offset)
                 }
             };
@@ -165,9 +174,9 @@ impl<'a> Parser<'a> {
         // Actually perform the assignment
         for i in (0..num_names).rev() {
             let slot = u8::try_from(i)
-                .map_err(|_| self.error(SyntaxError::TooManyLocals))?
+                .map_err(|_| self.error_here(SyntaxError::TooManyLocals))?
                 .checked_add(old_local_count)
-                .ok_or_else(|| self.error(SyntaxError::TooManyLocals))?;
+                .ok_or_else(|| self.error_here(SyntaxError::TooManyLocals))?;
             self.push(Instr::set_local(slot));
         }
 
@@ -314,10 +323,10 @@ impl<'a> Parser<'a> {
         self.expect(TokenType::In)?;
 
         let num_loop_vars =
-            u8::try_from(names.len()).map_err(|_| self.error(SyntaxError::TooManyLocals))?;
+            u8::try_from(names.len()).map_err(|_| self.error_here(SyntaxError::TooManyLocals))?;
         let local_count = 3usize
             .checked_add(names.len())
-            .ok_or_else(|| self.error(SyntaxError::TooManyLocals))?;
+            .ok_or_else(|| self.error_here(SyntaxError::TooManyLocals))?;
 
         // The hidden control variables: iterator function, state, control var
         let base_slot = self.locals.len() as u8;
@@ -430,11 +439,10 @@ impl<'a> Parser<'a> {
     /// Converts a fixed multi-assignment result width without allowing the
     /// `255` dynamic/all-results sentinel into a fixed-width instruction.
     fn checked_multi_assign_width(&self, width: usize) -> Result<u8> {
-        let width = u8::try_from(width).map_err(|_| self.error(SyntaxError::TooManyExpressions))?;
-        if width == u8::MAX {
-            return Err(self.error(SyntaxError::TooManyExpressions));
+        if width > MAX_FIXED_RESULTS {
+            return Err(self.error_here(SyntaxError::TooManyFixedResults));
         }
-        Ok(width)
+        u8::try_from(width).map_err(|_| self.error_here(SyntaxError::TooManyFixedResults))
     }
 
     /// Parses a `do ... end` statement.
@@ -516,13 +524,9 @@ impl<'a> Parser<'a> {
     }
 
     /// Parses an if-then statement, including any attached `else` or `elseif` branches.
-    pub(super) fn parse_if(&mut self) -> Result<()> {
-        self.parse_if_arm()
-    }
-
     /// Parses an `if` or `elseif` block and any subsequent `elseif` or `else`
     /// blocks in the same chain.
-    fn parse_if_arm(&mut self) -> Result<()> {
+    pub(super) fn parse_if_arm(&mut self) -> Result<()> {
         self.enter_syntax_level()?;
         let result = self.parse_if_arm_inner();
         self.exit_syntax_level();

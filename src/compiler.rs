@@ -238,7 +238,7 @@ impl Bytecode {
     /// instruction words, so changing their opcode-specific sentinels requires
     /// a snapshot format version bump as well as matching verifier and runtime
     /// changes.
-    fn assign_cache_slots(&mut self) -> Result<()> {
+    fn assign_cache_slots(&mut self) {
         let mut global_cache_indices = vec![None; self.string_literals.len()];
         let mut global_cache_len = 0usize;
         let mut field_cache_len = 0usize;
@@ -307,7 +307,6 @@ impl Bytecode {
         self.global_cache_slots = global_cache_len as u8;
         self.field_cache_slots = field_cache_len as u8;
         self.set_field_cache_slots = set_field_cache_len as u8;
-        Ok(())
     }
 }
 
@@ -342,12 +341,6 @@ fn checked_remapped_offset(offset: i64) -> Result<i16> {
 /// Remove compiler-only no-ops and close-upvalue instructions that cannot
 /// observe any open upvalues, then remap every control-transfer offset.
 fn strip_dead_instructions(bc: &mut Bytecode) -> Result<()> {
-    if bc.code.len() != bc.line_info.len() {
-        return Err(internal_error(
-            "line_info desynced from code before instruction stripping",
-        ));
-    }
-
     let has_closure = bc
         .code
         .iter()
@@ -493,7 +486,7 @@ fn finalize(bc: &mut Bytecode) -> Result<()> {
         bc.line_info.len(),
         "line_info desynced from code"
     );
-    strip_dead_instructions(bc)?;
+    strip_dead_instructions(bc).map_err(|error| error.with_source_name(bc.source.clone()))?;
     debug_assert_eq!(
         bc.code.len(),
         bc.line_info.len(),
@@ -503,7 +496,7 @@ fn finalize(bc: &mut Bytecode) -> Result<()> {
         bc.code.iter().all(|inst| inst.opcode() != Instr::OP_NOP),
         "finalized compiler output must not contain OP_NOP"
     );
-    bc.assign_cache_slots()?;
+    bc.assign_cache_slots();
     // Runs in release too, and the result is propagated rather than dropped.
     // Verifying our own fresh output guards against a compiler bug, and the
     // only reason to pay for it is to act on it: a debug-only assertion would
@@ -512,17 +505,32 @@ fn finalize(bc: &mut Bytecode) -> Result<()> {
     // Reporting it as a compile error keeps a compiler bug catchable instead of
     // fatal. The debug assertion stays on top so CI fails loudly at the source
     // rather than surfacing it as a user-facing error.
-    if let Err(error) = verify::validate_bytecode(bc) {
+    if let Err(validation_error) = verify::validate_bytecode(bc) {
+        let chunk_desc = bc.name.as_deref().map_or_else(
+            || "unnamed chunk".to_string(),
+            |name| format!("function '{name}'"),
+        );
+        let location_desc = validation_error.instruction.map_or_else(
+            || " at chunk metadata".to_string(),
+            |instruction| format!(" at instruction {instruction}"),
+        );
         debug_assert!(
             false,
-            "compiler emitted bytecode rejected by the snapshot verifier: {error:?}"
+            "compiler emitted invalid bytecode in {chunk_desc}{location_desc}: {validation_error:?}"
         );
-        return Err(error::Error::without_location(
-            error::ErrorKind::InternalError(format!(
-                "compiler emitted invalid bytecode: {}",
-                error.reason
-            )),
-        ));
+        let line_num = validation_error
+            .instruction
+            .and_then(|instruction| bc.line_info.get(instruction as usize))
+            .copied()
+            .unwrap_or(0) as usize;
+        let message = format!(
+            "compiler emitted invalid bytecode in {chunk_desc}{location_desc}: {}",
+            validation_error.reason
+        );
+        return Err(
+            error::Error::new(error::ErrorKind::InternalError(message), line_num, 0)
+                .with_source_name(bc.source.clone()),
+        );
     }
     for nested in &mut bc.nested {
         // The parser produces nested `Arc<Bytecode>` with a refcount of 1, so

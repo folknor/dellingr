@@ -65,7 +65,7 @@ pub(crate) fn format(state: &mut State) -> Result<u8> {
             ));
         }
     };
-    charge_cost(state, format_bytes.len().max(1) as u64)?;
+    state.consume_cost(format_bytes.len().max(1) as u64)?;
     let argument_count = state.get_top();
     let mut output = Vec::new();
     let mut argument = 1usize;
@@ -102,17 +102,9 @@ pub(crate) fn format(state: &mut State) -> Result<u8> {
     Ok(1)
 }
 
-fn charge_cost(state: &mut State, cost: u64) -> Result<()> {
-    if state.cost_meter().consume(cost) {
-        Ok(())
-    } else {
-        Err(state.budget_exceeded_error())
-    }
-}
-
 fn append_output(state: &mut State, output: &mut Vec<u8>, bytes: &[u8]) -> Result<()> {
     let next = crate::vm::checked_string_growth(output.len(), bytes.len())?;
-    charge_cost(state, bytes.len() as u64)?;
+    state.consume_cost(bytes.len() as u64)?;
     output.reserve(next - output.len());
     output.extend_from_slice(bytes);
     Ok(())
@@ -359,7 +351,7 @@ fn format_argument(state: &mut State, argument: usize, directive: &Directive) ->
             } else {
                 state.bytes_with_tostring_meta(idx)?
             };
-            charge_cost(state, bytes.len() as u64)?;
+            state.consume_cost(bytes.len() as u64)?;
             if directive.has_modifiers && bytes.contains(&0) {
                 return Err(format_arg_error(state, argument, "string contains zeros"));
             }
@@ -389,7 +381,7 @@ fn number_argument(state: &mut State, idx: isize, argument: usize) -> Result<f64
         LuaType::Number => state.to_number(idx),
         LuaType::String => {
             let bytes = state.to_bytes(idx)?.to_vec();
-            charge_cost(state, bytes.len() as u64)?;
+            state.consume_cost(bytes.len() as u64)?;
             parse_lua_numeral(&bytes).ok_or_else(|| {
                 format_arg_error(
                     state,
@@ -772,7 +764,7 @@ fn quote_argument(state: &mut State, idx: isize, argument: usize) -> Result<Vec<
     match state.typ(idx) {
         LuaType::String => {
             let bytes = state.to_bytes(idx)?.to_vec();
-            charge_cost(state, bytes.len() as u64)?;
+            state.consume_cost(bytes.len() as u64)?;
             quote_string(&bytes)
         }
         LuaType::Number => {

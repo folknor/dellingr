@@ -74,6 +74,7 @@ version = "0.4.0"
 dependencies = [
  "hotpath",
  "indexmap",
+ "libc",
  "slotmap",
 ]
 

@@ -39,7 +39,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::exit;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use dellingr::{ArgCount, LuaType, RetCount, State};
 
@@ -62,19 +62,20 @@ const MAX_WARM_BLOCKS: u32 = 32;
 /// Protocol: `<timestamp_us> <name>\n` on the FIFO named by
 /// `BROKKR_MARKER_FIFO`, timestamped in microseconds since the first emit.
 fn emit_marker(name: &str) {
-    write_fifo(|mut f, us| f.write_all(format!("{us} {name}\n").as_bytes()));
+    write_fifo(|us| format!("{us} {name}\n"));
 }
 
 /// Emit a named counter value to the brokkr sidecar (if active).
 ///
 /// Protocol: `<timestamp_us> @<name>=<value>\n`.
 fn emit_counter(name: &str, value: i64) {
-    write_fifo(|mut f, us| f.write_all(format!("{us} @{name}={value}\n").as_bytes()));
+    write_fifo(|us| format!("{us} @{name}={value}\n"));
 }
 
 /// Shared FIFO write logic for markers and counters. No-op when
-/// `BROKKR_MARKER_FIFO` is unset. A configured but unusable FIFO fails the run.
-fn write_fifo(f: impl FnOnce(&std::fs::File, u128) -> io::Result<()>) {
+/// `BROKKR_MARKER_FIFO` is unset. A configured but unusable FIFO fails the run;
+/// a full FIFO is retried until the reader makes room.
+fn write_fifo(line: impl FnOnce(u128) -> String) {
     use std::sync::OnceLock;
 
     static STATE: OnceLock<Option<(std::fs::File, Instant)>> = OnceLock::new();
@@ -84,13 +85,9 @@ fn write_fifo(f: impl FnOnce(&std::fs::File, u128) -> io::Result<()>) {
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
-            #[cfg(target_os = "linux")]
-            const O_NONBLOCK: i32 = 0x800;
-            #[cfg(target_os = "macos")]
-            const O_NONBLOCK: i32 = 0x0004;
             match std::fs::OpenOptions::new()
                 .write(true)
-                .custom_flags(O_NONBLOCK)
+                .custom_flags(libc::O_NONBLOCK)
                 .open(&path)
             {
                 Ok(file) => Some((file, Instant::now())),
@@ -115,11 +112,28 @@ fn write_fifo(f: impl FnOnce(&std::fs::File, u128) -> io::Result<()>) {
 
     if let Some((file, start)) = state.as_ref() {
         let us = start.elapsed().as_micros();
-        if let Err(error) = f(file, us) {
+        let line = line(us);
+        if let Err(error) = write_fifo_all(file, line.as_bytes()) {
             eprintln!("Failed to write BROKKR_MARKER_FIFO: {error}");
             exit(1);
         }
     }
+}
+
+fn write_fifo_all(mut file: &fs::File, bytes: &[u8]) -> io::Result<()> {
+    let mut written = 0;
+    while written < bytes.len() {
+        match file.write(&bytes[written..]) {
+            Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+            Ok(count) => written += count,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 fn counter_value(v: u64) -> i64 {
@@ -214,6 +228,7 @@ fn run_metrics(run: &RunMetrics<'_>) -> Vec<Metric> {
             u128::from(run.warm_iterations),
             Some(i64::from(run.warm_iterations)),
         ),
+        // brokkr parses decimal key-value metrics as f64.
         text_metric("warm_avg_us", format!("{:.3}", run.warm_avg_us)),
         integer_metric(
             "warm_avg_cost",
@@ -361,6 +376,7 @@ fn main() {
     // Phase 4: warm calls, batched into at most MAX_WARM_BLOCKS sub-spans so
     // the sidecar sees within-process spread without flooding the FIFO.
     let iterations = args.iterations;
+    require_bench(&mut state, &args.script_path, "warm");
     let block_size = (iterations / MAX_WARM_BLOCKS).max(1);
     emit_marker("WARM_START");
     let warm_start = Instant::now();
@@ -369,7 +385,14 @@ fn main() {
         let n = block_size.min(iterations - done);
         emit_marker("WARM_BLOCK_START");
         for _ in 0..n {
-            require_bench(&mut state, &args.script_path, "warm");
+            // Keep the resolved function rooted and copy it for each call.
+            if let Err(error) = state.push_value(-1) {
+                eprintln!(
+                    "Failed to copy cached `_bench` for a warm call in {}: {error}",
+                    args.script_path.display()
+                );
+                exit(1);
+            }
             if let Err(e) = state.call(ArgCount::Fixed(0), RetCount::Fixed(0)) {
                 eprintln!(
                     "Warm _bench call error in {}: {e}",
@@ -382,6 +405,13 @@ fn main() {
         done += n;
     }
     let warm_total_us = warm_start.elapsed().as_secs_f64() * 1_000_000.0;
+    if let Err(error) = state.pop(1) {
+        eprintln!(
+            "Failed to release cached `_bench` after warm calls in {}: {error}",
+            args.script_path.display()
+        );
+        exit(1);
+    }
     emit_marker("WARM_END");
     let warm_avg_us = warm_total_us / f64::from(iterations);
     let warm_total_cost = state.cost_used() - setup_cost - cold_cost;

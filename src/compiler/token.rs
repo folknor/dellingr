@@ -33,6 +33,96 @@ pub(super) enum TokenType {
     EndOfFile,
 }
 
+impl TokenType {
+    // Keep this list sorted by `spelling()` for keyword binary search.
+    const KEYWORDS: &[Self] = &[
+        Self::And,
+        Self::Break,
+        Self::Do,
+        Self::Else,
+        Self::ElseIf,
+        Self::End,
+        Self::False,
+        Self::For,
+        Self::Function,
+        Self::If,
+        Self::In,
+        Self::Local,
+        Self::Nil,
+        Self::Not,
+        Self::Or,
+        Self::Repeat,
+        Self::Return,
+        Self::Then,
+        Self::True,
+        Self::Until,
+        Self::While,
+    ];
+
+    pub(super) fn keyword_match(s: &str) -> Self {
+        match Self::KEYWORDS.binary_search_by(|token_type| token_type.spelling().cmp(s)) {
+            Ok(index) => Self::KEYWORDS[index],
+            Err(_) => Self::Identifier,
+        }
+    }
+
+    pub(super) const fn spelling(self) -> &'static str {
+        match self {
+            Self::And => "and",
+            Self::Break => "break",
+            Self::Do => "do",
+            Self::Else => "else",
+            Self::ElseIf => "elseif",
+            Self::End => "end",
+            Self::False => "false",
+            Self::For => "for",
+            Self::Function => "function",
+            Self::If => "if",
+            Self::In => "in",
+            Self::Local => "local",
+            Self::Nil => "nil",
+            Self::Not => "not",
+            Self::Or => "or",
+            Self::Repeat => "repeat",
+            Self::Return => "return",
+            Self::Then => "then",
+            Self::True => "true",
+            Self::Until => "until",
+            Self::While => "while",
+            Self::Plus => "+",
+            Self::Minus => "-",
+            Self::Star => "*",
+            Self::Slash => "/",
+            Self::Mod => "%",
+            Self::Caret => "^",
+            Self::Hash => "#",
+            Self::Equal => "==",
+            Self::NotEqual => "~=",
+            Self::LessEqual => "<=",
+            Self::GreaterEqual => ">=",
+            Self::Less => "<",
+            Self::Greater => ">",
+            Self::LParen | Self::LParenLineStart => "(",
+            Self::RParen => ")",
+            Self::LCurly => "{",
+            Self::RCurly => "}",
+            Self::LSquare => "[",
+            Self::RSquare => "]",
+            Self::Semi => ";",
+            Self::Colon => ":",
+            Self::Comma => ",",
+            Self::Dot => ".",
+            Self::DotDot => "..",
+            Self::DotDotDot => "...",
+            Self::Assign => "=",
+            Self::Identifier => "<name>",
+            Self::LiteralNumber | Self::LiteralHexNumber => "<number>",
+            Self::LiteralString => "<string>",
+            Self::EndOfFile => "<eof>",
+        }
+    }
+}
+
 impl Token {
     pub(super) fn range(&self) -> Range<usize> {
         let start = self.start;

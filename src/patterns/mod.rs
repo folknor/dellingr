@@ -1,4 +1,4 @@
-//! Minimal internal wrapper around the vendored Lua pattern matcher.
+//! Internal implementation of Lua pattern matching on bytes.
 //!
 //! Lua patterns operate on bytes. Dellingr only needs the byte matching core.
 

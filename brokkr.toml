@@ -172,3 +172,11 @@ expect = "ok"
 match = "last-line"
 stream = "stdout"
 stage = "post-test"
+
+[[script_check]]
+name = "generated-large-source"
+command = "python3 examples/parse/generate.py --check"
+expect = "ok"
+match = "last-line"
+stream = "stdout"
+stage = "post-test"

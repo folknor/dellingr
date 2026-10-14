@@ -145,7 +145,7 @@ impl<'a> Lexer<'a> {
     pub(super) fn next_token(&mut self) -> Result<Token> {
         // Loop rather than recurse on comments: a comment skips its body and
         // continues the loop, so a long run of consecutive comments cannot
-        // exhaust the stack the way tail-recursing into `next_token` did (L17).
+        // exhaust the stack the way tail-recursing into `next_token` did.
         loop {
             let starts_line = self.consume_whitespace();
             let tok_start = self.pos;
@@ -172,9 +172,9 @@ impl<'a> Lexer<'a> {
                 '}' => RCurly,
                 ']' => RSquare,
 
-                '.' => self.peek_dot(tok_start)?,
+                '.' => self.peek_dot()?,
 
-                '=' | '<' | '>' | '~' => self.peek_equals(tok_start, first_char)?,
+                '=' | '<' | '>' | '~' => self.peek_equals(first_char)?,
 
                 '-' => {
                     if self.try_next('-') {
@@ -184,7 +184,7 @@ impl<'a> Lexer<'a> {
                     Minus
                 }
 
-                '\'' | '\"' => self.lex_string(first_char, tok_start)?,
+                '\'' | '\"' => self.lex_string(first_char)?,
                 '[' => {
                     if let Some('=' | '[') = self.peek_char() {
                         return Err(self.error_at(SyntaxError::LongStringUnsupported, tok_start));
@@ -192,7 +192,7 @@ impl<'a> Lexer<'a> {
                     LSquare
                 }
 
-                '0'..='9' => self.lex_full_number(tok_start, first_char)?,
+                '0'..='9' => self.lex_full_number(first_char)?,
 
                 'a'..='z' | 'A'..='Z' | '_' => self.lex_word(tok_start),
 
@@ -211,7 +211,7 @@ impl<'a> Lexer<'a> {
     /// Skips over the characters in a comment body. The enclosing `next_token`
     /// loop re-scans afterward; on EOF mid-comment the next iteration returns
     /// the EOF token. Iterative (no recursion) so consecutive comments are
-    /// stack-safe (L17).
+    /// stack-safe.
     fn skip_comment(&mut self) {
         // Check for a long comment: --[=*[ ... ]=*]. A failed opener probe is
         // still ordinary comment text, so falling through is correct.
@@ -315,7 +315,7 @@ impl<'a> Lexer<'a> {
 
     /// The lexer just read a `.`.
     /// Determines whether it is part of a `Dot`, `DotDot`, `DotDotDot` or `Number`.
-    fn peek_dot(&mut self, tok_start: usize) -> Result<TokenType> {
+    fn peek_dot(&mut self) -> Result<TokenType> {
         let typ = match self.peek_char() {
             Some('.') => {
                 self.next_char();
@@ -327,7 +327,7 @@ impl<'a> Lexer<'a> {
             }
             Some(c) if c.is_ascii_digit() => {
                 self.next_char();
-                self.lex_number_after_decimal(tok_start)?;
+                self.lex_number_after_decimal()?;
                 LiteralNumber
             }
             _ => Dot,
@@ -340,7 +340,7 @@ impl<'a> Lexer<'a> {
     ///
     /// Returns `Err` if the first character is `~` and it is not paired with a
     /// `=`.
-    fn peek_equals(&mut self, _tok_start: usize, first_char: char) -> Result<TokenType> {
+    fn peek_equals(&mut self, first_char: char) -> Result<TokenType> {
         if self.try_next('=') {
             let typ = match first_char {
                 '=' => Equal,
@@ -363,7 +363,7 @@ impl<'a> Lexer<'a> {
 
     /// Tokenizes a 'short' literal string, AKA a string denoted by single or
     /// double quotes and not by two square brackets.
-    fn lex_string(&mut self, quote: char, _tok_start: usize) -> Result<TokenType> {
+    fn lex_string(&mut self, quote: char) -> Result<TokenType> {
         while let Some(c) = self.next_char() {
             if c == quote {
                 return Ok(LiteralString);
@@ -390,7 +390,7 @@ impl<'a> Lexer<'a> {
     }
 
     /// Reads in a number which starts with a digit (as opposed to a decimal point).
-    fn lex_full_number(&mut self, tok_start: usize, first_char: char) -> Result<TokenType> {
+    fn lex_full_number(&mut self, first_char: char) -> Result<TokenType> {
         // Check for hex values (both 0x and 0X)
         if first_char == '0' && (self.try_next('x') || self.try_next('X')) {
             // Mantissa: hex digits with an optional fraction (Lua 5.2 hex
@@ -433,11 +433,11 @@ impl<'a> Lexer<'a> {
             // Handle the fraction and exponent components.
             if self.try_next('.') {
                 match self.peek_char() {
-                    Some(c) if c.is_ascii_digit() => self.lex_number_after_decimal(tok_start)?,
-                    _ => self.lex_exponent(tok_start)?,
+                    Some(c) if c.is_ascii_digit() => self.lex_number_after_decimal()?,
+                    _ => self.lex_exponent()?,
                 }
             } else {
-                self.lex_exponent(tok_start)?;
+                self.lex_exponent()?;
             }
 
             Ok(LiteralNumber)
@@ -445,9 +445,9 @@ impl<'a> Lexer<'a> {
     }
 
     /// Reads in a literal number which starts with a decimal point.
-    fn lex_number_after_decimal(&mut self, tok_start: usize) -> Result<()> {
+    fn lex_number_after_decimal(&mut self) -> Result<()> {
         self.lex_digits();
-        self.lex_exponent(tok_start)
+        self.lex_exponent()
     }
 
     /// Consumes an unbroken sequence of digits.
@@ -473,7 +473,7 @@ impl<'a> Lexer<'a> {
 
     /// Consumes the optional exponent part of a literal number, then rejects
     /// an identifier character glued to it.
-    fn lex_exponent(&mut self, _tok_start: usize) -> Result<()> {
+    fn lex_exponent(&mut self) -> Result<()> {
         if self.try_next('E') || self.try_next('e') {
             // The exponent might have a sign.
             if let Some(c) = self.peek_char()
@@ -500,7 +500,7 @@ impl<'a> Lexer<'a> {
             }
         }
 
-        keyword_match(&self.source[tok_start..self.pos])
+        TokenType::keyword_match(&self.source[tok_start..self.pos])
     }
 
     /// Returns the current position of the `Lexer`.
@@ -527,35 +527,6 @@ impl<'a> Lexer<'a> {
 
 fn is_identifier_continue(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
-}
-
-/// Checks if a word is a keyword, then returns the appropriate `TokenType`.
-#[must_use]
-fn keyword_match(s: &str) -> TokenType {
-    match s {
-        "and" => And,
-        "break" => Break,
-        "do" => Do,
-        "else" => Else,
-        "elseif" => ElseIf,
-        "end" => End,
-        "false" => False,
-        "for" => For,
-        "function" => Function,
-        "if" => If,
-        "in" => In,
-        "local" => Local,
-        "nil" => Nil,
-        "not" => Not,
-        "or" => Or,
-        "repeat" => Repeat,
-        "return" => Return,
-        "then" => Then,
-        "true" => True,
-        "until" => Until,
-        "while" => While,
-        _ => Identifier,
-    }
 }
 
 #[cfg(test)]
@@ -644,7 +615,7 @@ mod tests {
     #[test]
     fn consecutive_comments_are_stack_safe() {
         // A long run of comments used to tail-recurse through next_token and
-        // could overflow the stack (L17). It must lex to the trailing token
+        // could overflow the stack. It must lex to the trailing token
         // iteratively.
         let mut src = String::new();
         for _ in 0..100_000 {
@@ -659,7 +630,7 @@ mod tests {
     #[test]
     fn bare_cr_counts_as_newline() {
         // "a\rb": a bare '\r' begins a new line, so a linebreak is recorded at
-        // position 2 (L17).
+        // position 2.
         check("a\rb", &[(Identifier, 0, 1), (Identifier, 2, 1)], &[0, 2]);
     }
 

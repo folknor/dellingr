@@ -6,6 +6,7 @@ use super::PlaceExp;
 use super::Result;
 use super::SyntaxError;
 use super::TokenType;
+use crate::limits::MAX_NESTED;
 
 impl<'a> Parser<'a> {
     /// Parses a function declaration, which is any statement that starts with
@@ -147,8 +148,8 @@ impl<'a> Parser<'a> {
     /// Parses the parameters and body of a function definition with an optional name.
     pub(super) fn parse_fndef_named(&mut self, name: Option<String>) -> Result<()> {
         let (params, is_vararg) = self.parse_params()?;
-        if self.chunk.nested.len() >= u8::MAX as usize {
-            return Err(self.error(SyntaxError::TooManyNestedFunctions));
+        if self.chunk.nested.len() >= MAX_NESTED {
+            return Err(self.error_here(SyntaxError::TooManyNestedFunctions));
         }
 
         self.nest_level += 1;
@@ -168,8 +169,8 @@ impl<'a> Parser<'a> {
         let (mut params, is_vararg) = self.parse_params()?;
         // Prepend "self" to the parameter list
         params.insert(0, "self");
-        if self.chunk.nested.len() >= u8::MAX as usize {
-            return Err(self.error(SyntaxError::TooManyNestedFunctions));
+        if self.chunk.nested.len() >= MAX_NESTED {
+            return Err(self.error_here(SyntaxError::TooManyNestedFunctions));
         }
 
         self.nest_level += 1;

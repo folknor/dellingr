@@ -23,35 +23,35 @@ then
     DRY_RUN=1
 fi
 
-JSON_FILE=".bench-results.json"
+reference_luas=(lua5.5 lua5.4 lua5.2 luajit)
 
 if [ $# -gt 0 ]
 then
     scripts=("$@")
 else
-    scripts=(
-        examples/benchmark.lua
-        examples/numerics/arithmetic.lua
-        examples/numerics/constants.lua
-        examples/iter/pairs.lua
-        examples/tables/fill.lua
-        examples/strings/mixed.lua
-        examples/strings/patterns.lua
-        examples/strings/literal_find.lua
-        examples/fields/same_obj_read.lua
-        examples/fields/miss.lua
-        examples/globals/write.lua
-        examples/calls/many_literals.lua
-        examples/alloc/closure.lua
-        examples/alloc/record_tables.lua
-        examples/alloc/gc_churn.lua
-        examples/parse/large_source.lua
-    )
+    scripts=()
+    while IFS= read -r script
+    do
+        scripts+=("$script")
+    done < <(python3 -c '
+from pathlib import Path
+
+for line in Path("brokkr.toml").read_text(encoding="utf-8").splitlines():
+    key, separator, value = line.partition("=")
+    if separator and key.strip() == "hotpath_file":
+        value = value.strip()
+        if len(value) >= 2 and value[0] == chr(34) and value[-1] == chr(34):
+            print(value[1:-1])
+')
 fi
 
 # Validate before doing anything expensive.
 errors=()
-for tool in hyperfine lua5.2 lua5.4 lua5.5 luajit jq
+if [ "${#scripts[@]}" -eq 0 ]
+then
+    errors+=("no benchmark scripts found")
+fi
+for tool in hyperfine "${reference_luas[@]}" jq python3
 do
     if ! command -v "$tool" >/dev/null
     then
@@ -73,7 +73,8 @@ fi
 
 if [ "$DRY_RUN" = "1" ]
 then
-    printf 'dry-run OK: %d script(s), 5 lua versions, all tools present\n' "${#scripts[@]}"
+    printf 'dry-run OK: %d script(s), %d Lua implementations, all tools present\n' \
+        "${#scripts[@]}" "$(( ${#reference_luas[@]} + 1 ))"
     exit 0
 fi
 
@@ -92,49 +93,90 @@ echo "  branch: $(git rev-parse --abbrev-ref HEAD 2>/dev/null)"
 echo "  dirty:  $(git status --porcelain 2>/dev/null | wc -l) file(s)"
 echo "====================="
 echo ""
-printf '%-42s %10s %10s %10s %10s %10s\n' "bench" "dellingr" "vs lua5.5" "vs lua5.4" "vs lua5.2" "vs luajit"
-printf '%-42s %10s %10s %10s %10s %10s\n' "-----" "--------" "---------" "---------" "---------" "---------"
+printf '%-42s %10s' "bench" "dellingr"
+for reference_lua in "${reference_luas[@]}"
+do
+    printf ' %10s' "vs $reference_lua"
+done
+printf '\n'
+printf '%-42s %10s' "-----" "--------"
+for reference_lua in "${reference_luas[@]}"
+do
+    printf ' %10s' "---------"
+done
+printf '\n'
 
 failures=()
 START=$(date +%s)
+run_id="$(date '+%Y%m%dT%H%M%S%z')-$$"
+results_dir=".scratch/bench-results/$run_id"
+if ! mkdir -p "$results_dir"
+then
+    echo "cannot create benchmark results directory: $results_dir" >&2
+    exit 1
+fi
+run_index=0
 for script in "${scripts[@]}"
 do
-    rm -f "$JSON_FILE"
+    run_index=$((run_index + 1))
+    json_file="$results_dir/$run_index.json"
+    printf '%s\t%s\n' "$run_index" "$script" >> "$results_dir/scripts.tsv"
     SCRIPT_COMMAND="$(shell_quote "$script")"
+    benchmark_commands=(-n dellingr "$DELLINGR_COMMAND $SCRIPT_COMMAND")
+    for reference_lua in "${reference_luas[@]}"
+    do
+        benchmark_commands+=(-n "$reference_lua" "$reference_lua $SCRIPT_COMMAND")
+    done
     if ! hyperfine --warmup 2 -N \
-        --export-json "$JSON_FILE" \
-        -n dellingr "$DELLINGR_COMMAND $SCRIPT_COMMAND" \
-        -n lua5.5 "lua5.5 $SCRIPT_COMMAND" \
-        -n lua5.4 "lua5.4 $SCRIPT_COMMAND" \
-        -n lua5.2 "lua5.2 $SCRIPT_COMMAND" \
-        -n luajit "luajit $SCRIPT_COMMAND" \
+        --export-json "$json_file" \
+        "${benchmark_commands[@]}" \
         >/dev/null 2>&1
     then
         failures+=("$script")
-        printf '%-42s %10s %10s %10s %10s %10s\n' "$script" "FAIL" "-" "-" "-" "-"
+        printf '%-42s %10s' "$script" "FAIL"
+        for reference_lua in "${reference_luas[@]}"
+        do
+            printf ' %10s' "-"
+        done
+        printf '\n'
         continue
     fi
 
-    # Extract per-impl mean times and compute ratios entirely inside jq -
-    # no piping. Output one line: "<ms> <vs55>x <vs54>x <vs52>x <vsjit>x".
     summary=$(jq -r '
         ([.results[] | select(.command == "dellingr").mean] | first) as $d |
-        ([.results[] | select(.command == "lua5.5").mean] | first) as $l5 |
-        ([.results[] | select(.command == "lua5.4").mean] | first) as $l4 |
-        ([.results[] | select(.command == "lua5.2").mean] | first) as $l2 |
-        ([.results[] | select(.command == "luajit").mean] | first) as $jit |
-        "\(($d * 1000 + 0.5) | floor)ms \(((($d / $l5) * 100 + 0.5) | floor) / 100)x \(((($d / $l4) * 100 + 0.5) | floor) / 100)x \(((($d / $l2) * 100 + 0.5) | floor) / 100)x \(((($d / $jit) * 100 + 0.5) | floor) / 100)x"
-    ' "$JSON_FILE")
-    read -r ms vs55 vs54 vs52 vsjit <<< "$summary"
-    printf '%-42s %10s %10s %10s %10s %10s\n' "$script" "$ms" "$vs55" "$vs54" "$vs52" "$vsjit"
+        [
+            ((($d * 1000 + 0.5) | floor | tostring) + "ms"),
+            (.results[] | select(.command != "dellingr") |
+                (((($d / .mean) * 100 + 0.5) | floor / 100 | tostring) + "x"))
+        ] | join(" ")
+    ' "$json_file")
+    values=()
+    read -r -a values <<< "$summary"
+    if [ "${#values[@]}" -ne "$(( ${#reference_luas[@]} + 1 ))" ]
+    then
+        failures+=("$script")
+        printf '%-42s %10s' "$script" "FAIL"
+        for reference_lua in "${reference_luas[@]}"
+        do
+            printf ' %10s' "-"
+        done
+        printf '\n'
+        continue
+    fi
+    printf '%-42s %10s' "$script" "${values[0]}"
+    for index in "${!reference_luas[@]}"
+    do
+        printf ' %10s' "${values[$((index + 1))]}"
+    done
+    printf '\n'
 done
 ELAPSED=$(($(date +%s) - START))
-rm -f "$JSON_FILE"
 
 echo ""
 echo "==== bench end ===="
 printf '  elapsed: %ds\n' "$ELAPSED"
 printf '  ran:     %d, failed: %d\n' "${#scripts[@]}" "${#failures[@]}"
+printf '  results: %s\n' "$results_dir"
 if [ "${#failures[@]}" -gt 0 ]
 then
     printf '  - %s\n' "${failures[@]}"

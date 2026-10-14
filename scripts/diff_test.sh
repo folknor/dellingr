@@ -155,15 +155,6 @@ do
         continue
     fi
 
-    # Keep the existing corpus skips until its owners can move these reasons
-    # into the Lua files. No current examples carry SKIP-DIFF markers, and this
-    # scripts-only change cannot add markers to examples/.
-    case "$name" in
-        benchmark.lua|stress_gc_stack.lua|stress_rustfn.lua|stress_tables.lua|upvalue_stress.lua)
-            continue
-            ;;
-    esac
-
     has_diff=0
     if grep -q '^-- DIFF:' "$f"; then
         has_diff=1

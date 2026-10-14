@@ -32,6 +32,17 @@ impl<'a> CostMeter<'a> {
         Self::FiniteBudget { remaining, used }
     }
 
+    /// Selects the meter for a VM's persisted counters: a finite budget when
+    /// one is configured, otherwise count-only. Every runtime borrowing path
+    /// goes through here so the choice cannot drift between call sites.
+    pub(crate) fn runtime(configured: bool, remaining: &'a mut i64, used: &'a mut u64) -> Self {
+        if configured {
+            Self::finite_budget(remaining, used)
+        } else {
+            Self::count_only(used)
+        }
+    }
+
     /// Charges `n` unit costs with the exact outcome of `n` consecutive
     /// `consume(1)` calls: on a finite budget the charge stops at zero
     /// remaining and reports blocked, leaving `used`/`remaining` exactly
@@ -110,6 +121,64 @@ mod tests {
                 assert_eq!(used_a, used_b, "used mismatch at start={start} n={n}");
             }
         }
+    }
+
+    #[test]
+    fn direct_and_native_meters_share_budget_semantics() {
+        use crate::vm::State;
+        for budget in [None, Some(-1), Some(0), Some(1), Some(10)] {
+            let mut direct = State::new();
+            let mut native = State::new();
+            if let Some(budget) = budget {
+                direct.set_cost_budget(budget);
+                native.set_cost_budget(budget);
+            }
+            for cost in [0, 3, 0, 8, 1, u64::MAX, 0, 1] {
+                let accepted = direct.consume_cost(cost).is_ok();
+                assert_eq!(accepted, native.cost_meter().consume(cost));
+                assert_eq!(direct.cost_used(), native.cost_used());
+                assert_eq!(direct.cost_remaining(), native.cost_remaining());
+            }
+            if budget.is_none() {
+                assert_eq!(direct.cost_remaining(), i64::MAX);
+                assert_eq!(direct.cost_used(), u64::MAX);
+            }
+        }
+    }
+
+    fn assert_argument(error: crate::error::Error, number: isize) {
+        match error.kind {
+            crate::error::ErrorKind::ArgError(arg) => assert_eq!(arg.arg_number, number),
+            kind => panic!("expected an argument error, got {kind:?}"),
+        }
+    }
+
+    #[test]
+    fn gmatch_string_checks_preserve_relative_indexes_in_nested_frames() {
+        let mut state = crate::vm::State::new();
+        state.push_nil().unwrap();
+        state.push_nil().unwrap();
+        state.push_nil().unwrap();
+        state.stack_bottom = 2;
+        assert_argument(state.memoize_gmatch_pattern(1).unwrap_err(), 1);
+        assert_argument(
+            state
+                .gmatch_subject_matcher_and_cost_meter(1, 1)
+                .err()
+                .expect("non-string subject fails"),
+            1,
+        );
+        assert_argument(state.to_bytes(1).unwrap_err(), 1);
+        assert_argument(state.to_bytes(-1).unwrap_err(), -1);
+        assert_argument(state.push_bytes_from_stack_range(1, 0..0).unwrap_err(), 1);
+        state.push_string("subject").unwrap();
+        assert_argument(
+            state
+                .gmatch_subject_matcher_and_cost_meter(2, 1)
+                .err()
+                .expect("non-string pattern fails"),
+            1,
+        );
     }
 
     #[test]

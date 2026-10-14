@@ -16,10 +16,10 @@ fn run_feature_test_extended_in_process() {
             &source,
             Some("examples/feature_test_extended.lua".to_string()),
         )
-        .unwrap();
+        .expect("feature_test_extended.lua should load successfully");
     state
         .call(dellingr::ArgCount::Fixed(0), dellingr::RetCount::Fixed(0))
-        .unwrap();
+        .expect("feature_test_extended.lua should execute successfully");
 }
 
 fn collect_lua_files(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -49,9 +49,9 @@ fn check_example(path: &Path) -> Option<String> {
     println!("Running: {display}");
 
     let output = run_example(path);
+    let stderr = String::from_utf8_lossy(&output.stderr);
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
         Some(format!(
             "{}: exit code {:?}\nstdout: {}\nstderr: {}",
@@ -59,6 +59,11 @@ fn check_example(path: &Path) -> Option<String> {
             output.status.code(),
             stdout,
             stderr
+        ))
+    } else if !stderr.is_empty() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Some(format!(
+            "{display}: unexpected stderr\nstdout: {stdout}\nstderr: {stderr}"
         ))
     } else {
         let stdout = String::from_utf8_lossy(&output.stdout);

@@ -6,22 +6,19 @@
 //!
 //! # Example (Game Engine)
 //!
-//! ```ignore
-//! struct FleetCallbacks {
-//!     fleet_id: FleetId,
-//!     output: Vec<String>,
+//! ```
+//! use dellingr::{ArgCount, Engine, HostCallbacks, RetCount};
+//!
+//! struct GameCallbacks;
+//!
+//! impl HostCallbacks for GameCallbacks {
+//!     fn on_print(&mut self, _source: Option<&str>, _line: u32, _message: &str) {}
 //! }
 //!
-//! impl HostCallbacks for FleetCallbacks {
-//!     fn on_print(&mut self, source: Option<&str>, line: u32, message: &str) {
-//!         self.output.push(format!("[{}:{}] {}",
-//!             source.unwrap_or("?"), line, message));
-//!     }
-//! }
-//!
-//! // Create state with custom callbacks
-//! let callbacks = FleetCallbacks { fleet_id, output: Vec::new() };
-//! let mut state = State::with_callbacks(Box::new(callbacks));
+//! let engine = Engine::new();
+//! let mut state = engine.new_state_with_callbacks(Box::new(GameCallbacks));
+//! state.load_string("print('Hello!')").unwrap();
+//! state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
 //! ```
 
 use crate::error::Error;
@@ -37,7 +34,7 @@ pub trait HostCallbacks: Send {
     /// Called when Lua's `print()` function is executed.
     ///
     /// # Arguments
-    /// * `source` - The source file/chunk name (e.g., `"main.lua"` or `"[fleet:123]"`)
+    /// * `source` - The optional source file or chunk name
     /// * `line` - The current line number (0 if unknown)
     /// * `message` - The formatted message (all arguments joined with tabs)
     fn on_print(&mut self, _source: Option<&str>, _line: u32, message: &str) {

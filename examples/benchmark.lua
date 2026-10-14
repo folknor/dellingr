@@ -1,3 +1,4 @@
+-- SKIP-DIFF: standalone timing suite; still run by the example runner.
 -- Benchmark suite - compatible with Lua 5.2, 5.4, and our VM
 -- Run with external timing: time lua examples/benchmark.lua
 

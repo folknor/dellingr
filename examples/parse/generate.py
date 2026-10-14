@@ -12,10 +12,8 @@ emission and nested-chunk finalization all get exercised at scale.
 
 Functions are globals rather than `local function` on purpose: hundreds of
 top-level locals would blow Lua's 200-local-per-function limit in the main
-chunk.
-
-FUNCTION_COUNT is bounded by the parser's 255-nested-functions-per-chunk limit,
-since every top-level definition is a nested chunk of the main chunk. Size
+chunk. Every top-level function is a nested chunk, so the executable guard
+below keeps FUNCTION_COUNT within the parser's nested-function limit. Size
 therefore comes from making each function longer rather than from adding more
 of them.
 
@@ -23,12 +21,14 @@ The generated body must stay cheap to RUN, since the example runner executes
 every Lua file under examples/. Only a handful of the generated functions are
 ever called; the rest exist to be parsed.
 
-Usage: python3 examples/parse/generate.py
+Usage: python3 examples/parse/generate.py [--check]
 """
 
 import pathlib
+import sys
 
 FUNCTION_COUNT = 200
+MAX_NESTED_FUNCTIONS = (1 << 8) - 1  # parser/func.rs stores the count in u8
 OUT = pathlib.Path(__file__).with_name("large_source.lua")
 
 HEADER = '''-- GENERATED FILE - do not edit by hand.
@@ -102,11 +102,23 @@ print("parse/large_source: true")
 
 
 def main():
+    if not 0 < FUNCTION_COUNT <= MAX_NESTED_FUNCTIONS:
+        raise SystemExit("FUNCTION_COUNT exceeds the parser's nested-function limit")
+
     parts = [HEADER.format(count=FUNCTION_COUNT)]
     for i in range(1, FUNCTION_COUNT + 1):
         parts.append(TEMPLATE.format(i=i))
     parts.append(FOOTER.format(last=FUNCTION_COUNT))
     body = "".join(parts)
+
+    if sys.argv[1:] == ["--check"]:
+        if not OUT.exists() or OUT.read_text(encoding="utf-8") != body:
+            raise SystemExit(f"{OUT} does not match generated output")
+        print("ok")
+        return
+    if sys.argv[1:]:
+        raise SystemExit("usage: python3 examples/parse/generate.py [--check]")
+
     OUT.write_text(body, encoding="utf-8")
     print(f"wrote {OUT} ({body.count(chr(10))} lines)")
 

@@ -85,6 +85,9 @@ indexmap = "2.0"
 slotmap = "1.1"
 hotpath = "0.28.6"
 
+[dev-dependencies]
+libc = "0.2.190"
+
 [[example]]
 name = "hotpath"
 path = "examples/hotpath.rs"

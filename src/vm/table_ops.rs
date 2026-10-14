@@ -106,7 +106,9 @@ impl State {
     #[hotpath::measure]
     pub fn get_table(&mut self, i: isize) -> Result<()> {
         let idx = self.convert_idx(i)?;
-        assert!(idx != self.stack.len() - 1);
+        if idx == self.stack.len() - 1 {
+            return Err(self.error(ErrorKind::InvalidStackIndex { index: i }));
+        }
         let key = self.pop_val();
         let mut local_cost = 0;
         self.get_table_with_key(idx, key, &mut local_cost)
@@ -118,6 +120,9 @@ impl State {
     #[hotpath::measure]
     pub fn get_table_raw(&mut self, i: isize) -> Result<()> {
         let idx = self.convert_idx(i)?;
+        if idx == self.stack.len() - 1 {
+            return Err(self.error(ErrorKind::InvalidStackIndex { index: i }));
+        }
         let key = self.pop_val();
 
         // Get the ObjectPtr and type for error reporting
@@ -172,6 +177,9 @@ impl State {
     #[hotpath::measure]
     pub fn table_next(&mut self, table_idx: isize) -> Result<bool> {
         let idx = self.convert_idx(table_idx)?;
+        if idx == self.stack.len() - 1 {
+            return Err(self.error(ErrorKind::InvalidStackIndex { index: table_idx }));
+        }
         let key = self.pop_val();
 
         let obj_ptr = self.stack[idx].as_object_ptr();
@@ -271,8 +279,11 @@ impl State {
     /// The value is popped from the stack. `pos` has been validated by table.insert.
     #[hotpath::measure]
     pub fn table_insert_at(&mut self, table_idx: isize, pos: usize) -> Result<()> {
-        let value = self.pop_val();
         let idx = self.convert_idx(table_idx)?;
+        if idx == self.stack.len() - 1 {
+            return Err(self.error(ErrorKind::InvalidStackIndex { index: table_idx }));
+        }
+        let value = self.pop_val();
         let obj_ptr = self.stack[idx].as_object_ptr();
         let typ = self.stack[idx].typ(&self.heap);
 
@@ -322,7 +333,7 @@ impl State {
 
         // Charge cost BEFORE running the comparator or mutating the table, so an
         // exhausted budget blocks the sort rather than letting it complete and
-        // only then failing the charge (L18). `arr` is a detached copy here, so
+        // only then failing the charge. `arr` is a detached copy here, so
         // nothing has been mutated yet. Empty sorts still cost 1.
         let n = arr.len();
         self.consume_cost(n.max(1) as u64)?;

@@ -1,3 +1,4 @@
+-- SKIP-DIFF: Rust function stress test; still run by the example runner.
 -- Stress test: many rust_fn calls to see if VM alone causes corruption
 print("Starting stress test...")
 

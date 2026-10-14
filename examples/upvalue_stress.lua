@@ -1,3 +1,4 @@
+-- SKIP-DIFF: upvalue stress tests; still run by the example runner.
 -- Upvalue Stress Tests
 -- Tests edge cases and stress scenarios for upvalue/closure handling
 

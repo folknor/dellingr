@@ -200,7 +200,7 @@ struct BytecodeCacheEntry {
 /// The main interface into the Lua VM.
 pub struct State {
     /// The global environment. Uses IndexMap for deterministic iteration order
-    /// (GC marking, restrict_globals). May be changed to an actual Table in the future.
+    /// (GC marking, restrict_globals).
     pub(super) globals: IndexMap<String, Val>,
     /// Fast array for well-known builtin globals (print, pairs, type, etc.).
     /// Indexed by Builtin enum. Avoids IndexMap lookup for common globals.
@@ -321,8 +321,6 @@ const MAX_STACK_SIZE: usize = 1_000_000;
 // frames use this stack. `self.stack_bottom` refers to the first value in the
 // stack which belongs to the current frame. Note that Rust functions access
 // the stack using 1-based indexing, but Lua code uses 0-based indexing.
-
-// State marking is done through mark_gc_roots() which has direct heap access
 
 impl State {
     const GC_INITIAL_THRESHOLD: usize = 20;
@@ -475,8 +473,13 @@ impl State {
 
     /// Returns the cost remaining in the budget.
     /// Can be negative if the last action pushed over budget.
+    /// Without a configured budget, returns the unbounded sentinel `i64::MAX`.
     pub fn cost_remaining(&self) -> i64 {
-        self.cost_remaining
+        if self.cost_budget_configured {
+            self.cost_remaining
+        } else {
+            i64::MAX
+        }
     }
 
     /// Test instrumentation for the gmatch compilation cache.
@@ -493,24 +496,25 @@ impl State {
     /// Use this in RustFuncs to charge for expensive operations.
     #[inline(always)]
     pub fn consume_cost(&mut self, cost: u64) -> Result<()> {
-        if cost > 0 && self.cost_remaining <= 0 {
-            return Err(self.error(ErrorKind::BudgetExceeded {
-                used: self.cost_used,
-                budget: self.cost_budget,
-            }));
+        if self.cost_meter().consume(cost) {
+            Ok(())
+        } else {
+            Err(self.budget_exceeded_error())
         }
-        self.cost_remaining = self.cost_remaining.saturating_sub_unsigned(cost);
-        self.cost_used = self.cost_used.saturating_add(cost);
-        Ok(())
     }
 
     /// Returns a meter for runtime work that does not need VM state.
     pub(crate) fn cost_meter(&mut self) -> CostMeter<'_> {
-        if self.cost_budget_configured {
-            CostMeter::finite_budget(&mut self.cost_remaining, &mut self.cost_used)
-        } else {
-            CostMeter::count_only(&mut self.cost_used)
-        }
+        CostMeter::runtime(
+            self.cost_budget_configured,
+            &mut self.cost_remaining,
+            &mut self.cost_used,
+        )
+    }
+
+    /// Flush before batching would hide exhaustion of a configured budget.
+    pub(super) fn cost_batch_needs_flush(&self, pending: u64) -> bool {
+        self.cost_budget_configured && self.cost_remaining.saturating_sub_unsigned(pending) <= 0
     }
 
     /// Compile and retain a `string.gmatch` pattern on its first iteration.
@@ -518,16 +522,14 @@ impl State {
     /// Calling this from the iterator rather than its constructor preserves
     /// gmatch's deferred pattern-validation behaviour.
     pub(crate) fn memoize_gmatch_pattern(&mut self, idx: isize) -> Result<()> {
-        let idx = self.convert_idx(idx)?;
+        // Preserve the caller's relative argument number even inside a nested
+        // native frame. Wrong types in saved iterator state use the same
+        // argument-type contract as to_bytes, not a cache-ordering error.
+        let idx = self.expect_string_at(idx)?;
         let val = &self.stack[idx];
-        let ptr = val.as_string_ptr().ok_or_else(|| {
-            Error::without_location(ErrorKind::ArgError(crate::error::ArgError {
-                arg_number: idx as isize + 1,
-                func_name: None,
-                expected: Some(LuaType::String),
-                received: Some(val.typ(&self.heap)),
-            }))
-        })?;
+        let ptr = val
+            .as_string_ptr()
+            .expect("expect_string_at validated the value's string type");
         if let Some(cached) = self.gmatch_patterns.get(&ptr) {
             return cached
                 .pattern
@@ -539,7 +541,8 @@ impl State {
             .as_string(&self.heap)
             .expect("string pointer came from a string value")
             .len();
-        self.consume_cost(pattern_len.max(1) as u64)?;
+        // Compilation is an implementation cache effect. The iterator charges
+        // its first use once in saved Lua state, regardless of cache residency.
         #[cfg(debug_assertions)]
         {
             self.gmatch_pattern_compilations = self.gmatch_pattern_compilations.saturating_add(1);
@@ -581,8 +584,10 @@ impl State {
         subject_idx: isize,
         pattern_idx: isize,
     ) -> Result<(&[u8], &mut LuaPattern, CostMeter<'_>)> {
-        let subject_idx = self.convert_idx(subject_idx)?;
-        let pattern_idx = self.convert_idx(pattern_idx)?;
+        // Type failures describe supplied iterator state, not cache ordering.
+        // Validate before converting frame-relative indexes to absolute slots.
+        let subject_idx = self.expect_string_at(subject_idx)?;
+        let pattern_idx = self.expect_string_at(pattern_idx)?;
         let State {
             stack,
             heap,
@@ -592,24 +597,12 @@ impl State {
             gmatch_patterns,
             ..
         } = self;
-        let subject_val = &stack[subject_idx];
-        let subject = subject_val.as_string(heap).ok_or_else(|| {
-            Error::without_location(ErrorKind::ArgError(crate::error::ArgError {
-                arg_number: subject_idx as isize + 1,
-                func_name: None,
-                expected: Some(LuaType::String),
-                received: Some(subject_val.typ(heap)),
-            }))
-        })?;
-        let pattern_val = &stack[pattern_idx];
-        let pattern_ptr = pattern_val.as_string_ptr().ok_or_else(|| {
-            Error::without_location(ErrorKind::ArgError(crate::error::ArgError {
-                arg_number: pattern_idx as isize + 1,
-                func_name: None,
-                expected: Some(LuaType::String),
-                received: Some(pattern_val.typ(heap)),
-            }))
-        })?;
+        let subject = stack[subject_idx]
+            .as_string(heap)
+            .expect("expect_string_at validated the subject's string type");
+        let pattern_ptr = stack[pattern_idx]
+            .as_string_ptr()
+            .expect("expect_string_at validated the pattern's string type");
         // Both of these are caller-ordering invariants rather than script-
         // reachable states: the iterator memoizes before matching, and a cached
         // compilation failure is surfaced before we get here. They are still
@@ -628,11 +621,7 @@ impl State {
                 )));
             }
         };
-        let meter = if *cost_budget_configured {
-            CostMeter::finite_budget(cost_remaining, cost_used)
-        } else {
-            CostMeter::count_only(cost_used)
-        };
+        let meter = CostMeter::runtime(*cost_budget_configured, cost_remaining, cost_used);
         Ok((subject, matcher, meter))
     }
 
@@ -1098,7 +1087,7 @@ impl State {
         self.globals_version = self.globals_version.wrapping_add(1);
 
         // Execute the function under an unwind guard so a panic in `f` still
-        // restores the original environment before propagating (L11). Without
+        // restores the original environment before propagating. Without
         // this, an embedder that catches the panic and reuses the State would
         // find it stuck in the restricted environment. (Under panic=abort
         // catch_unwind never returns, but reuse is moot there.)

@@ -12,8 +12,6 @@ Thumbs.db
 
 target
 
-.bench-results.json
-.diff_test_*.out
 .scratch/
 .brokkr/*
 !.brokkr/results.db

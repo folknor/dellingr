@@ -11,6 +11,7 @@ use super::Result;
 use super::RetCount;
 use super::SyntaxError;
 use super::TokenType;
+use crate::limits::MAX_EXPRESSIONS;
 
 impl Parser<'_> {
     /// Parses a comma-separated list of expressions. Trailing and leading
@@ -22,7 +23,7 @@ impl Parser<'_> {
         let mut last_exp_desc = self.parse_expr()?;
         let mut num_expressions = 1;
         while let Some(token) = self.input.try_pop(TokenType::Comma)? {
-            if num_expressions == u8::MAX {
+            if num_expressions == MAX_EXPRESSIONS {
                 return Err(self.error_at(SyntaxError::TooManyExpressions, token.start));
             }
             last_exp_desc = self.parse_expr()?;
@@ -123,7 +124,11 @@ impl Parser<'_> {
             count += 1;
         }
         if count > 1 {
-            let n = u8::try_from(count).map_err(|_| self.error(SyntaxError::TooManyExpressions))?;
+            if count > u32::from(MAX_EXPRESSIONS) {
+                return Err(self.error_here(SyntaxError::TooManyExpressions));
+            }
+            let n = u8::try_from(count)
+                .map_err(|_| self.error_here(SyntaxError::TooManyExpressions))?;
             self.push(Instr::concat(n));
         }
         Ok(exp_desc)
@@ -427,9 +432,7 @@ impl Parser<'_> {
             TokenType::DotDotDot => {
                 // Check if we're in a vararg function
                 if !self.chunk.is_vararg {
-                    return Err(self.error(SyntaxError::UnexpectedTok(
-                        "cannot use '...' outside a vararg function".to_string(),
-                    )));
+                    return Err(self.error_here(SyntaxError::VarargOutsideVarargFunction));
                 }
                 // Default: push 1 value (will be adjusted if in tail position)
                 self.push(Instr::vararg(1));
