@@ -4,7 +4,7 @@ use super::{arg_integer, check_optional_type_named, check_type_named, opt_intege
 use crate::LuaType;
 use crate::Result;
 use crate::State;
-use crate::error::{ArgDetail, ErrorKind, TypeError};
+use crate::error::{ArgDetail, ErrorKind};
 use crate::instr::{ArgCount, RetCount};
 use crate::numeral::{exact_i64, parse_lua_numeral};
 
@@ -187,6 +187,10 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
             return Ok(1);
         }
 
+        // Keys past +-2^53 would round onto each other as f64 keys; refuse
+        // such ranges as table.move, insert and remove do.
+        check_sequence_keys(state, i, j, "table.concat")?;
+
         let mut result = Vec::new();
         for idx in i..=j {
             if idx > i {
@@ -207,7 +211,15 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
                     result.reserve(next - result.len());
                     result.extend_from_slice(&bytes);
                 }
-                _ => return Err(state.error(ErrorKind::TypeError(TypeError::Concat(typ)))),
+                // Reference wording (5.4.7, and the installed 5.2 agrees):
+                // the element's type and its index, not the generic
+                // concatenation TypeError, which loses the index.
+                _ => {
+                    return Err(state.error(ErrorKind::RuntimeError(format!(
+                        "invalid value ({}) at index {idx} in table for 'concat'",
+                        typ.as_str()
+                    ))));
+                }
             }
             state.pop(1)?;
         }
@@ -329,7 +341,12 @@ const MAX_EXACT_KEY: i64 = 1 << 53;
 /// Reject positions that would round when converted to numeric keys. A
 /// singleton may lie outside +-2^53 if that particular integer is exact;
 /// a range needs every intervening integer to be exact as well.
-fn check_sequence_keys(state: &State, first: i64, last: i64, function: &str) -> Result<()> {
+pub(super) fn check_sequence_keys(
+    state: &State,
+    first: i64,
+    last: i64,
+    function: &str,
+) -> Result<()> {
     let valid = if first == last {
         exact_i64(first as f64) == Some(first)
     } else {

@@ -53,9 +53,12 @@ pub trait HostCallbacks: Send {
     /// it directly (with no Lua frame on the stack). Errors from host-initiated
     /// table `__call` chains are covered too, including cyclic chains that reach
     /// the metamethod depth limit, and direct calls of non-callable values.
-    /// It is NOT fired for errors that `call()` itself
-    /// raises before dispatch (e.g. a malformed argument count from a host); the
-    /// host observes those solely through the `Result`.
+    /// It is NOT fired for host API misuse that `call()` or `call_anchor()`
+    /// rejects before dispatch, when nothing has executed: `ArgCount::Dynamic`,
+    /// insufficient stack values for the call, a dead anchor, or no stack
+    /// room to insert the anchored callee. The host observes those solely
+    /// through the `Result`. Once dispatch begins, setup failures (Lua frame
+    /// setup, `__call` argument insertion, result padding) do notify.
     ///
     /// Function labels in displayed argument errors are best-effort diagnostic
     /// text. Generic Rust callback checks can resolve a label from current

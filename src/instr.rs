@@ -9,6 +9,14 @@
 /// also use `Fixed(255)`; that runtime count cannot be encoded in bytecode.
 /// Keeping the runtime count is necessary when `__call` adds a receiver to
 /// 254 arguments. Only instruction encoding rejects the sentinel alias.
+//
+// A separate host-facing argument type (no `Dynamic`, no sentinel) was
+// considered and declined. `Fixed(255)` is not a live collision: runtime
+// counts never pass through `to_u8`, which asserts against the alias, and the
+// `__call` path needs runtime 255. Hosts naming `Dynamic` get a clean error
+// from `call`/`call_anchor` before any state changes. A new type would only
+// move that check to compile time, at the cost of breaking every host call
+// site; revisit if the host API is redesigned for 1.0.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ArgCount {
     /// Fixed number of arguments (0-254 in bytecode, 0-255 at runtime).

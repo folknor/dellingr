@@ -205,6 +205,13 @@ pub(crate) fn open_math(state: &mut State) -> Result<()> {
                         ArgDetail::IntervalEmpty,
                     )));
                 }
+                // Dellingr numbers are f64, so integer draws outside +-2^53
+                // can round. Rejection removes bias from the i64 draw, but
+                // the rounded f64 results need not be uniform.
+                // It cannot leave [m, n]: both bounds came in as f64 (and
+                // `arg_integer` rejects 2^63), so they are representable, and
+                // round-to-nearest is monotonic. The i64 draw itself is
+                // unbiased (rejection sampling in `VmRng::random_range_i64`).
                 state.rng.random_range_i64(m, n) as f64
             }
             _ => {

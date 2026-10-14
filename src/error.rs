@@ -329,6 +329,9 @@ pub enum SyntaxError {
     UnclosedString,
     /// Source ended while a construct was still open.
     UnexpectedEof,
+    /// A long comment (`--[[` / `--[==[`) reached EOF before its closing
+    /// delimiter. Reported at the comment's opener.
+    UnfinishedLongComment,
     /// Unexpected token. The String contains a token description.
     UnexpectedTok(String),
     /// A required token was missing before another token.
@@ -480,11 +483,12 @@ impl SyntaxError {
     /// Returns true if this is a SyntaxError that can be fixed by appending
     /// more text to the source code.
     pub fn is_recoverable(&self) -> bool {
-        // Deliberately EOF only. An unterminated string is not fixable by
-        // appending text: Lua short strings cannot span lines (and long
-        // strings are unsupported), so a REPL that keeps reading would never
-        // complete it.
-        matches!(self, Self::UnexpectedEof)
+        // Incomplete EOF constructs are recoverable. UnclosedString also
+        // covers unescaped line breaks, which appending text cannot fix, so
+        // short-string errors remain nonrecoverable.
+        // An unfinished long comment is the comment analogue of EOF: appending
+        // its closing delimiter completes the source.
+        matches!(self, Self::UnexpectedEof | Self::UnfinishedLongComment)
     }
 }
 
@@ -515,10 +519,22 @@ impl fmt::Display for Error {
         if suppress_prefix {
             write!(f, "{}", self.kind)?;
         } else {
-            match prefix_frame.filter(|frame| frame.line != 0) {
+            match prefix_frame {
                 Some(frame) => match frame.source.as_deref() {
                     Some(source) => write!(f, "{source}:{}: {}", frame.line, self.kind)?,
-                    None => write!(f, "{}:{}: {}", frame.line, self.column, self.kind)?,
+                    None => {
+                        // `self.column` belongs to the innermost error site.
+                        // Pair it with the frame's line only when that frame
+                        // IS the innermost site; otherwise the column is
+                        // unknown (0) for the selected frame.
+                        let same_site = matches!(
+                            prefix_location,
+                            PrefixLocation::Current | PrefixLocation::TraceFrame(0)
+                        ) && frame.line != 0
+                            && frame.line as usize == self.line_num;
+                        let column = if same_site { self.column } else { 0 };
+                        write!(f, "{}:{}: {}", frame.line, column, self.kind)?;
+                    }
                 },
                 None => match self.source_name() {
                     Some(source) if self.line_num != 0 && self.column != 0 => write!(
@@ -708,12 +724,18 @@ impl fmt::Display for SyntaxError {
             TooManyTableFields => write!(f, "too many fields in table constructor"),
             UnclosedString => write!(f, "unfinished string"),
             UnexpectedEof => write!(f, "unexpected <eof>"),
+            UnfinishedLongComment => write!(f, "unfinished long comment"),
             UnexpectedTok(msg) => write!(f, "{msg}"),
             ExpectedToken { expected, found } => write!(f, "'{expected}' expected near {found}"),
             VarargOutsideVarargFunction => {
                 write!(f, "cannot use '...' outside a vararg function")
             }
-            LParenLineStart => write!(f, "ambiguous function call"),
+            // Name the cause: the call is ambiguous only because the `(` sits
+            // on a later line than the expression it would call.
+            LParenLineStart => write!(
+                f,
+                "ambiguous syntax (function call x new statement): '(' on a new line"
+            ),
         }
     }
 }

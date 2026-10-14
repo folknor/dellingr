@@ -27,6 +27,11 @@ pub(super) struct Lexer<'a> {
     pos: usize,
     /// `linebreaks[i]` is the byte offset of the start of line `i`.
     linebreaks: Vec<usize>,
+    /// The last character read was the first member of a two-character
+    /// newline (`\r\n` or `\n\r`) whose line break is deferred to its second
+    /// member. That second member always closes the pair, so in `\r\n\r` the
+    /// trailing `\r` starts a fresh break, as reference `inclinenumber` does.
+    newline_pair_open: bool,
     iter: Peekable<CharIndices<'a>>,
     source: &'a str,
 }
@@ -135,6 +140,7 @@ impl<'a> Lexer<'a> {
         Self {
             iter: source.char_indices().peekable(),
             linebreaks,
+            newline_pair_open: false,
             pos: 0,
             source,
         }
@@ -249,7 +255,9 @@ impl<'a> Lexer<'a> {
                             }
                         }
                         None => {
-                            return Err(self.error_at(SyntaxError::UnexpectedEof, comment_start));
+                            return Err(
+                                self.error_at(SyntaxError::UnfinishedLongComment, comment_start)
+                            );
                         }
                         _ => {}
                     }
@@ -278,11 +286,17 @@ impl<'a> Lexer<'a> {
             Some((pos, c)) => {
                 self.pos = pos + c.len_utf8();
                 // CRLF and LFCR are each one logical newline. Defer the first
-                // member, then record the line start after the second.
-                if matches!(c, '\r' | '\n')
-                    && !matches!(self.peek_char(), Some(next) if is_newline_pair(c, next))
-                {
-                    self.linebreaks.push(self.pos);
+                // member, then record the line start after the second. The
+                // second member never opens a new pair: `\r\n\r` is two breaks.
+                if matches!(c, '\r' | '\n') {
+                    if !self.newline_pair_open
+                        && matches!(self.peek_char(), Some(next) if is_newline_pair(c, next))
+                    {
+                        self.newline_pair_open = true;
+                    } else {
+                        self.newline_pair_open = false;
+                        self.linebreaks.push(self.pos);
+                    }
                 }
                 Some(c)
             }
@@ -653,6 +667,40 @@ mod tests {
     }
 
     #[test]
+    fn crlf_then_cr_counts_twice() {
+        // Reference `inclinenumber` folds one pair per break: "\r\n" is one
+        // break and the trailing '\r' a second, so `b` sits on line 3.
+        check(
+            "a\r\n\rb",
+            &[(Identifier, 0, 1), (Identifier, 4, 1)],
+            &[0, 3, 4],
+        );
+        check(
+            "a\n\r\nb",
+            &[(Identifier, 0, 1), (Identifier, 4, 1)],
+            &[0, 3, 4],
+        );
+        check(
+            "a\r\n\r\nb",
+            &[(Identifier, 0, 1), (Identifier, 5, 1)],
+            &[0, 3, 5],
+        );
+    }
+
+    #[test]
+    fn escaped_crlf_then_cr_leaves_string_unclosed() {
+        // The escape swallows exactly one "\r\n" pair; the following bare
+        // '\r' is an unescaped newline that ends the short string.
+        let err = Lexer::new("\"a\\\r\n\rb\"")
+            .next_token()
+            .expect_err("an unescaped CR must end the short string");
+        assert!(matches!(
+            err.kind,
+            crate::error::ErrorKind::SyntaxError(SyntaxError::UnclosedString)
+        ));
+    }
+
+    #[test]
     fn bare_cr_in_short_string_is_unclosed() {
         let source = "\"a\rb\"";
         assert_eq!(source.as_bytes()[2], b'\r');
@@ -882,8 +930,9 @@ mod tests {
                 .expect_err("an unfinished long comment must not swallow the file");
             assert!(matches!(
                 err.kind,
-                crate::error::ErrorKind::SyntaxError(SyntaxError::UnexpectedEof)
+                crate::error::ErrorKind::SyntaxError(SyntaxError::UnfinishedLongComment)
             ));
+            assert!(err.is_recoverable(), "{input:?}");
             assert_eq!((err.line_num, err.column), (1, 3), "{input:?}");
         }
         // A short comment running to EOF stays legal.

@@ -61,17 +61,6 @@ Direction: either document the runtime cap for Lua frames, or widen the internal
 counts to `usize`. The `u8` exists for the bytecode operand encoding, which these
 dynamic paths do not need.
 
-## VM-021 - `ArgCount::Fixed(255)` is accepted by `call` but collides with the `Dynamic` sentinel
-
-Source: embedding (smaller item).
-
-`call` accepts `ArgCount::Fixed(255)` (`MAX_ARGUMENTS = 255`), but that value
-cannot round-trip through `to_u8`, because 255 is the `Dynamic` sentinel. This is
-harmless today because host calls never encode. The public `State::call` now
-rejects `Dynamic` at runtime (bytecode uses an internal `call_op`), but hosts
-can still name `ArgCount::Dynamic`. Both point to a separate host-facing
-argument type with neither a sentinel nor `Dynamic`.
-
 ## VM-022 - The host `get_table` disagrees with the `t[k]` opcode on string receivers
 
 Source: vm-exec (finding 8, LOW).
@@ -94,18 +83,6 @@ count, not a type or a missing value, and argument #1 is not a Lua argument.
 `ArgDetail::TypeMismatch`'s own doc ("Type or presence mismatch, described by
 expected and received") does not fit. `InvalidStackIndex` or `OutOfBounds` would
 be accurate.
-
-## VM-024 - `Error` Display can pair the selected frame's line with the innermost error's column
-
-Source: vm-exec (finding 10, LOW).
-
-In `error.rs` `impl Display for Error`, when the selected `prefix_frame` has a
-line but no source, it prints `"{frame.line}:{self.column}"`. The comment above
-insists on taking "the source and the line from the SAME record", but the column
-still comes from the innermost error. With `error(msg, 2)` (`TraceFrame(1)`) and
-an unnamed chunk, the output pairs the caller's line with the callee's column.
-Runtime errors always have column 0 today, so the visible effect is a spurious
-`:0`, but it is the exact splice the comment warns against.
 
 ## VM-026 - Smaller heap items: dangling tombstone keys, `array_insert` version ordering, quadratic env-delta encoding, allocator GC note
 
@@ -200,30 +177,6 @@ stdlib scope).
 through `set_global_value_owned` and never removes it. A script cycling through
 generated global names grows the map without bound.
 
-## VM-032 - `call_anchor` errors bypass `State::error`, unlike `call`
-
-Source: lateral finding from a resolution-loop fixer.
-
-`call_anchor` (`src/vm/anchor.rs`) builds its errors with
-`Error::without_location`, so they skip `self.error(...)`, while `State::call`
-reports through `self.error`. The two host entry points therefore report
-failures inconsistently: an anchor-call error carries no location and may not
-reach the host's `on_error` notification. The wave reviewer read it more
-broadly: the preflight errors of direct `State::call` also bypass `on_error`,
-because `State::error` only constructs an error and does not notify. The
-changelog describes `on_error` as firing for every exit.
-
-## VM-033 - `from_bytes_try` can no longer fail, but its `Result` and the gmatch compile-error cache remain
-
-Source: lateral finding from a resolution-loop fixer.
-
-Pattern validation is now lazy (the first malformed point compiles to an
-`Item::Fail` raised at match time), so `patterns::from_bytes_try` always
-returns `Ok`. It keeps its `Result` signature only so callers outside the
-patterns module kept compiling. `src/vm.rs` (around `memoize_gmatch_pattern`)
-still caches a compile error that cannot occur. Make the compile infallible and
-delete the dead error path.
-
 ## VM-034 - `set_cost_budget` from inside a callback interacts with the dispatch loop's pending cost
 
 Source: residue of the error-path cost-flush fix, from a resolution-loop fixer.
@@ -289,36 +242,3 @@ functions through globals and environment tables. One reachable only from host
 state (a value the host holds and passes back in) is not walked, so its id is
 dropped on save, and after load it gets a fresh id. The same script then renders
 the same function differently before and after a save. `%p` has the same gap.
-
-## VM-040 - The lexer counts `\r\n\r` as one line break instead of two
-
-Source: lateral finding from a resolution-loop reviewer.
-
-The newline handling in `src/compiler/lexer.rs` (the line-break consumer) folds
-`\r\n\r` into one break. Reference Lua's `inclinenumber` treats `\r\n` as one
-break and the trailing `\r` as a second. Line numbers in error messages and
-stack traces after such a sequence are off by one, and the line-based ambiguous
-`(` rule sees the wrong line.
-
-## VM-041 - `print` can allocate about three times its input before rejecting oversized output
-
-Source: lateral finding from a resolution-loop reviewer.
-
-`print` (`src/lua_std/basic.rs`) converts each argument to UTF-8 lossily before
-checking the size of the result. Each invalid byte expands to the 3-byte
-U+FFFD, so 16 MiB of invalid bytes allocate about 48 MiB before the expanded
-output is rejected against the string-size limit. The cap is meant to bound host
-memory per operation.
-
-## VM-039 - Lexer errors reuse generic variants for an unterminated long comment and an ambiguous call
-
-Source: lateral finding from the resolution-loop fixer that made both of them
-errors.
-
-An unterminated `--[[` now fails with `SyntaxError::UnexpectedEof` at the
-comment's opener, where reference Lua says `unfinished long comment`. A `(` on a
-later line than the previous token fails with `LParenLineStart`, which displays
-as "ambiguous function call" without mentioning the newline that makes it
-ambiguous. A dedicated `UnfinishedLongComment` variant and a message naming the
-line break (both in `src/error.rs`) would match the reference more closely and
-point users at the cause.

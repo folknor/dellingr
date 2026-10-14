@@ -912,8 +912,9 @@ fn table_concat_basic() {
 fn table_concat_rejects_boolean_elements() {
     let err = expect_error(r#"return table.concat({true}, ",")"#);
     assert!(
-        matches!(err.kind, ErrorKind::TypeError(_)),
-        "Expected TypeError, got: {err}"
+        matches!(&err.kind, ErrorKind::RuntimeError(m)
+            if m == "invalid value (boolean) at index 1 in table for 'concat'"),
+        "Expected the reference concat error, got: {err}"
     );
 }
 
@@ -921,8 +922,9 @@ fn table_concat_rejects_boolean_elements() {
 fn table_concat_rejects_nil_elements_in_range() {
     let err = expect_error(r#"return table.concat({1, nil, 3}, ",", 1, 3)"#);
     assert!(
-        matches!(err.kind, ErrorKind::TypeError(_)),
-        "Expected TypeError, got: {err}"
+        matches!(&err.kind, ErrorKind::RuntimeError(m)
+            if m == "invalid value (nil) at index 2 in table for 'concat'"),
+        "Expected the reference concat error, got: {err}"
     );
 }
 

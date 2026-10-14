@@ -100,44 +100,6 @@ half-opened State.
 
 Direction: validate all ids in a dry run before any mutation.
 
-## STD-014 - `math.random(m, n)` loses precision and has modulo bias for wide spans
-
-Source: stdlib (finding 15) and embedding (smaller item).
-
-`math.random(m, n)` returns `as f64` of an i64 draw. For spans beyond 2^53 the
-result is rounded: not uniform, and possibly outside `[m, n]` after rounding
-(for example, `n = 2^63 - 1` rounds up to 2^63). `% span` also has modulo bias.
-Neither is documented. Reference 5.4 returns integers here. The embedding hunter
-notes that whether this is a defect depends on `arg_integer` accepting such
-magnitudes, and that it should be checked against the math contract in
-`src/lua_std/math.rs`.
-
-## STD-015 - Smaller stdlib divergences
-
-Source: stdlib (finding 15).
-
-- `string.sub` validates argument 2 before argument 1, so `string.sub()` reports
-  `bad argument #2 ... number expected`, where the references report argument #1
-  (string expected).
-- `table.concat` raises the generic `TypeError::Concat` ("attempt to concatenate
-  a nil value"), where the references raise "invalid value (at index N) in table
-  for 'concat'". The index is lost.
-- Numeric-string coercion is inconsistent across the stdlib. `string.format`
-  `%d/%f` accept `"10"` (`number_argument` parses it), but `math.*`, `select`,
-  `string.sub` indices, `table.insert` positions, `tonumber(..., base)` and
-  `math.random` reject it through strict `check_type(Number)`. The README only
-  excludes coercion "in arithmetic and numeric control expressions".
-- `print` and `error` convert their arguments to UTF-8 lossily. For `print` this
-  follows the `on_print(&str)` API. For `error`, a byte-string message is
-  silently altered, because `ScriptError::message` is a `String`.
-- `string.find`/`match`/`gsub`/`gmatch`/`upper`/... copy the subject into a fresh
-  `Vec` on every call (`string_or_number_bytes`). The copy is charged, but it is
-  an avoidable allocation on the hottest string paths.
-- Explicit `table.concat(t, sep, i, j)` / `unpack(t, i, j)` ranges beyond
-  +/-2^53 can still collapse distinct integer keys onto one f64 key, unlike
-  `table.move`, `insert` and `remove`, which now reject such ranges. (Lateral
-  finding from a resolution-loop reviewer.)
-
 ## STD-018 - `table.sort` ignores `__len`, `__index` and `__newindex`
 
 Source: lateral finding from a resolution-loop fixer.
@@ -152,3 +114,29 @@ it. `table.sort` goes through the crate-internal `table_sort` in
 the gap. The same fixer suggests that a shared metamethod-aware length helper
 belongs in `table_ops.rs` beside `table_len`, instead of the library-local
 `sequence_len`.
+
+## STD-021 - `error` with a byte-string message is altered by lossy UTF-8 conversion
+
+Source: residue of the original stdlib hunt's smaller-divergences list. The
+rest of that list was resolved; this item needs a change in `src/error.rs`.
+
+`error(msg)` converts its message to UTF-8 lossily because
+`ScriptError::message` is a `String`, so a message containing invalid bytes is
+silently altered before the host sees it. The fixer's suggested shape: make
+`ScriptError::message` hold bytes (`Vec<u8>`) with a lossy accessor for display,
+and have `error` in `src/lua_std/basic.rs` read its argument through
+`bytes_with_tostring_meta(1)`. That is a public API change.
+
+The wave reviewer adds that `error()` and the public `to_string_with_meta()` also
+build the lossy-expanded string without the size preflight `print` now does, so
+invalid bytes can expand about threefold past the string cap before anything
+checks it.
+
+## STD-022 - Library range errors name functions inconsistently
+
+Source: lateral finding from a resolution-loop fixer.
+
+`check_sequence_keys` in `src/lua_std/table.rs` produces messages that name
+functions as `table.insert` / `table.concat`, while argument errors use the bare
+reference-style names (`'concat'`). One library raises both kinds of message for
+the same call.

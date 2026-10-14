@@ -42,22 +42,20 @@ pub(crate) struct LuaPattern {
 }
 
 impl LuaPattern {
-    /// Compile a Lua pattern from a slice of bytes.
+    /// Compile a Lua pattern from a slice of bytes. Compilation cannot fail.
     ///
-    /// This currently never returns `Err`. Reference Lua validates a pattern
-    /// lazily, only as far as a match actually reaches, so every pattern error
-    /// (malformed syntax, too many captures, a bad backreference) is raised
-    /// by `matches_bytes_from` at the point reference would raise it, and an
-    /// unclosed capture is reported as `LuaCapture::Unfinished` for the
-    /// consumer to reject. The `Result` is kept so callers that cache the
-    /// compile outcome need no change if an eager check is ever reintroduced.
-    pub(crate) fn from_bytes_try(bytes: &[u8]) -> Result<LuaPattern, PatternError> {
-        let compiled = compile(bytes);
-        Ok(LuaPattern {
-            compiled,
+    /// Reference Lua validates a pattern lazily, only as far as a match
+    /// actually reaches. Malformed syntax, too many captures and bad
+    /// backreferences compile into failure points raised by
+    /// `matches_bytes_from` at the point reference would raise them.
+    /// An unclosed capture is reported as
+    /// `LuaCapture::Unfinished` for the consumer to reject.
+    pub(crate) fn new(bytes: &[u8]) -> LuaPattern {
+        LuaPattern {
+            compiled: compile(bytes),
             matches: [LuaCapture::Bytes { start: 0, end: 0 }; LUA_MAXMATCHES],
             n_match: 0,
-        })
+        }
     }
 
     /// Match a slice of bytes with this pattern, searching from the start.
@@ -131,7 +129,7 @@ mod tests {
     fn match_err(pattern: &[u8], subject: &[u8]) -> PatternError {
         let mut used = 0;
         let mut meter = count_only(&mut used);
-        let mut matcher = LuaPattern::from_bytes_try(pattern).unwrap();
+        let mut matcher = LuaPattern::new(pattern);
         match matcher.matches_bytes(subject, &mut meter) {
             Err(MatchError::Pattern(error)) => error,
             other => panic!("{pattern:?} on {subject:?}: expected a pattern error, got {other:?}"),
@@ -142,12 +140,12 @@ mod tests {
     fn no_match_no_error(pattern: &[u8], subject: &[u8]) -> bool {
         let mut used = 0;
         let mut meter = count_only(&mut used);
-        let mut matcher = LuaPattern::from_bytes_try(pattern).unwrap();
+        let mut matcher = LuaPattern::new(pattern);
         matches!(matcher.matches_bytes(subject, &mut meter), Ok(false))
     }
 
     fn assert_exact_finite_cost(pattern: &[u8], subject: &[u8], cost: u64) {
-        let mut matcher = LuaPattern::from_bytes_try(pattern).unwrap();
+        let mut matcher = LuaPattern::new(pattern);
         let cost_i64 = i64::try_from(cost).expect("test cost must fit in i64");
         let mut remaining = cost_i64;
         let mut used = 0;
@@ -156,7 +154,7 @@ mod tests {
         assert_eq!(used, cost);
         assert_eq!(remaining, 0);
 
-        let mut matcher = LuaPattern::from_bytes_try(pattern).unwrap();
+        let mut matcher = LuaPattern::new(pattern);
         let mut remaining = cost_i64 - 1;
         let mut used = 0;
         let mut meter = CostMeter::finite_budget(&mut remaining, &mut used);
@@ -172,7 +170,7 @@ mod tests {
     fn byte_captures_and_matching() {
         let mut used = 0;
         let mut meter = count_only(&mut used);
-        let mut pattern = LuaPattern::from_bytes_try(b"^(%a+)").unwrap();
+        let mut pattern = LuaPattern::new(b"^(%a+)");
         assert!(pattern.matches_bytes(b"one dog", &mut meter).unwrap());
         assert_eq!(pattern.capture(0), LuaCapture::Bytes { start: 0, end: 3 });
         assert_eq!(pattern.capture(1), LuaCapture::Bytes { start: 0, end: 3 });
@@ -184,7 +182,7 @@ mod tests {
     fn multiple_byte_captures() {
         let mut used = 0;
         let mut meter = count_only(&mut used);
-        let mut pattern = LuaPattern::from_bytes_try(b"%s*(%d+)%s+(%S+)").unwrap();
+        let mut pattern = LuaPattern::new(b"%s*(%d+)%s+(%S+)");
         assert!(
             pattern
                 .matches_bytes(b" 233   hello dolly", &mut meter)
@@ -301,7 +299,7 @@ mod tests {
             (b"(a".as_slice(), b"abc".as_slice()),
             (b"bonzo (dog (cat)".as_slice(), b"bonzo dog cat".as_slice()),
         ] {
-            let mut matcher = LuaPattern::from_bytes_try(pattern).unwrap();
+            let mut matcher = LuaPattern::new(pattern);
             assert!(
                 matcher.matches_bytes(subject, &mut meter).unwrap(),
                 "{pattern:?}"
@@ -309,7 +307,7 @@ mod tests {
             assert_eq!(matcher.capture(1), LuaCapture::Unfinished, "{pattern:?}");
         }
         // A closed capture before the unclosed one is still a real value.
-        let mut matcher = LuaPattern::from_bytes_try(b"(a)(b").unwrap();
+        let mut matcher = LuaPattern::new(b"(a)(b");
         assert!(matcher.matches_bytes(b"ab", &mut meter).unwrap());
         assert_eq!(matcher.capture(1), LuaCapture::Bytes { start: 0, end: 1 });
         assert_eq!(matcher.capture(2), LuaCapture::Unfinished);
@@ -323,18 +321,18 @@ mod tests {
         let mut meter = count_only(&mut used);
         // A class consumes at least one byte before ']' can close it, so `[]]`
         // is a class containing ']'.
-        let mut literal_bracket = LuaPattern::from_bytes_try(b"[]]").unwrap();
+        let mut literal_bracket = LuaPattern::new(b"[]]");
         assert!(literal_bracket.matches_bytes(b"]", &mut meter).unwrap());
         assert_eq!(literal_bracket.range(), 0..1);
         assert!(!literal_bracket.matches_bytes(b"x", &mut meter).unwrap());
 
         // `[^]]` is "any byte except ']'".
-        let mut complement = LuaPattern::from_bytes_try(b"[^]]").unwrap();
+        let mut complement = LuaPattern::new(b"[^]]");
         assert!(complement.matches_bytes(b"x", &mut meter).unwrap());
         assert!(!complement.matches_bytes(b"]", &mut meter).unwrap());
 
         // An escaped `%]` is a class byte too, and does not close the class.
-        let mut escaped = LuaPattern::from_bytes_try(b"[%]]").unwrap();
+        let mut escaped = LuaPattern::new(b"[%]]");
         assert!(escaped.matches_bytes(b"]", &mut meter).unwrap());
 
         // `[]` and `[^]` never close, matching reference "malformed pattern
@@ -351,7 +349,7 @@ mod tests {
     fn position_captures_are_typed() {
         let mut used = 0;
         let mut meter = count_only(&mut used);
-        let mut pattern = LuaPattern::from_bytes_try(b"()(a)()").unwrap();
+        let mut pattern = LuaPattern::new(b"()(a)()");
         assert!(pattern.matches_bytes(b"abc", &mut meter).unwrap());
         assert_eq!(pattern.capture(1), LuaCapture::Position(0));
         assert_eq!(pattern.capture(2), LuaCapture::Bytes { start: 0, end: 1 });
@@ -367,7 +365,7 @@ mod tests {
             (b"%d+%%".as_slice(), b"100%".as_slice(), 0..4),
             (b"%%%%".as_slice(), b"%%".as_slice(), 0..2),
         ] {
-            let mut matcher = LuaPattern::from_bytes_try(pattern).unwrap();
+            let mut matcher = LuaPattern::new(pattern);
             assert!(matcher.matches_bytes(subject, &mut meter).unwrap());
             assert_eq!(matcher.range(), range);
         }
@@ -381,7 +379,7 @@ mod tests {
     fn validator_counts_position_captures_and_preserves_closed_lengths() {
         let mut used = 0;
         let mut meter = count_only(&mut used);
-        let mut matcher = LuaPattern::from_bytes_try(b"()(a)%2").unwrap();
+        let mut matcher = LuaPattern::new(b"()(a)%2");
         assert!(matcher.matches_bytes(b"aa", &mut meter).unwrap());
         assert_eq!(matcher.capture(1), LuaCapture::Position(0));
         assert_eq!(matcher.capture(2), LuaCapture::Bytes { start: 0, end: 1 });
@@ -392,7 +390,7 @@ mod tests {
         let mut used = 0;
         let mut meter = count_only(&mut used);
         let position = b"()".repeat(LUA_MAXMATCHES - 1);
-        let mut position_matcher = LuaPattern::from_bytes_try(&position).unwrap();
+        let mut position_matcher = LuaPattern::new(&position);
         assert!(position_matcher.matches_bytes(b"x", &mut meter).unwrap());
         assert_eq!(position_matcher.num_matches(), LUA_MAXMATCHES);
         assert_eq!(
@@ -402,7 +400,7 @@ mod tests {
 
         let ordinary = b"(x)".repeat(LUA_MAXMATCHES - 1);
         let subject = b"x".repeat(LUA_MAXMATCHES - 1);
-        let mut ordinary_matcher = LuaPattern::from_bytes_try(&ordinary).unwrap();
+        let mut ordinary_matcher = LuaPattern::new(&ordinary);
         assert!(
             ordinary_matcher
                 .matches_bytes(&subject, &mut meter)
@@ -415,7 +413,7 @@ mod tests {
         );
 
         let mixed = [b"()".repeat(16), b"(x)".repeat(16)].concat();
-        let mut mixed_matcher = LuaPattern::from_bytes_try(&mixed).unwrap();
+        let mut mixed_matcher = LuaPattern::new(&mixed);
         assert!(
             mixed_matcher
                 .matches_bytes(b"xxxxxxxxxxxxxxxx", &mut meter)
@@ -438,7 +436,7 @@ mod tests {
         let mut meter = count_only(&mut used);
         for class in b"BEFHIJKMNOQRTVY" {
             for pattern in [vec![b'%', *class], vec![b'[', b'%', *class, b']']] {
-                let mut matcher = LuaPattern::from_bytes_try(&pattern).unwrap();
+                let mut matcher = LuaPattern::new(&pattern);
                 assert!(
                     matcher.matches_bytes(&[*class], &mut meter).unwrap(),
                     "{pattern:?}"
@@ -457,9 +455,9 @@ mod tests {
         let mut used = 0;
         let mut meter = count_only(&mut used);
         for byte in [0x0b, 0x0c] {
-            let mut space = LuaPattern::from_bytes_try(b"%s").unwrap();
+            let mut space = LuaPattern::new(b"%s");
             assert!(space.matches_bytes(&[byte], &mut meter).unwrap());
-            let mut non_space = LuaPattern::from_bytes_try(b"%S").unwrap();
+            let mut non_space = LuaPattern::new(b"%S");
             assert!(!non_space.matches_bytes(&[byte], &mut meter).unwrap());
         }
     }
@@ -469,7 +467,7 @@ mod tests {
         let mut used = 0;
         let mut meter = count_only(&mut used);
         for subject in [b"".as_slice(), b"abc".as_slice()] {
-            let mut matcher = LuaPattern::from_bytes_try(b"").unwrap();
+            let mut matcher = LuaPattern::new(b"");
             assert!(matcher.matches_bytes(subject, &mut meter).unwrap());
             assert_eq!(matcher.range(), 0..0);
             assert_eq!(matcher.num_matches(), 1);
@@ -480,7 +478,7 @@ mod tests {
     fn position_capture_backreference_does_not_match() {
         let mut used = 0;
         let mut meter = count_only(&mut used);
-        let mut matcher = LuaPattern::from_bytes_try(b"()%1").unwrap();
+        let mut matcher = LuaPattern::new(b"()%1");
         assert!(!matcher.matches_bytes(b"abc", &mut meter).unwrap());
     }
 
@@ -494,13 +492,13 @@ mod tests {
     fn end_anchors_try_the_end_position() {
         let mut used = 0;
         let mut meter = count_only(&mut used);
-        let mut pattern = LuaPattern::from_bytes_try(b"$").unwrap();
+        let mut pattern = LuaPattern::new(b"$");
         assert!(pattern.matches_bytes(b"abc", &mut meter).unwrap());
         assert_eq!(pattern.range(), 3..3);
         assert!(pattern.matches_bytes(b"", &mut meter).unwrap());
         assert_eq!(pattern.range(), 0..0);
 
-        let mut anchored = LuaPattern::from_bytes_try(b"^$").unwrap();
+        let mut anchored = LuaPattern::new(b"^$");
         assert!(anchored.matches_bytes(b"", &mut meter).unwrap());
         assert_eq!(anchored.range(), 0..0);
     }
@@ -511,7 +509,7 @@ mod tests {
         let mut meter = count_only(&mut used);
         // `%b((` is valid because both `(` bytes are balance delimiters, not
         // captures.
-        let mut pattern = LuaPattern::from_bytes_try(b"%b((").unwrap();
+        let mut pattern = LuaPattern::new(b"%b((");
         assert!(pattern.matches_bytes(b"((", &mut meter).unwrap());
         assert_eq!(pattern.range(), 0..2);
     }
@@ -520,7 +518,7 @@ mod tests {
     fn frontier_at_end_is_safe() {
         let mut used = 0;
         let mut meter = count_only(&mut used);
-        let mut pattern = LuaPattern::from_bytes_try(b"%f[%z]").unwrap();
+        let mut pattern = LuaPattern::new(b"%f[%z]");
         assert!(pattern.matches_bytes(b"abc", &mut meter).unwrap());
         assert_eq!(pattern.range(), 3..3);
     }
@@ -530,7 +528,7 @@ mod tests {
         let mut used = 0;
         let mut meter = count_only(&mut used);
         let pattern = b"a?".repeat(200);
-        let mut pattern = LuaPattern::from_bytes_try(&pattern).unwrap();
+        let mut pattern = LuaPattern::new(&pattern);
         assert!(matches!(
             pattern.matches_bytes(&[b'a'; 200], &mut meter),
             Err(MatchError::Pattern(PatternError::MatchDepthExceeded))
@@ -542,7 +540,7 @@ mod tests {
         let mut used = 0;
         let mut meter = count_only(&mut used);
         let literal_pattern = vec![b'a'; 201];
-        let mut literals = LuaPattern::from_bytes_try(&literal_pattern).unwrap();
+        let mut literals = LuaPattern::new(&literal_pattern);
         assert!(
             literals
                 .matches_bytes(&vec![b'a'; 201], &mut meter)
@@ -550,10 +548,10 @@ mod tests {
         );
 
         let boundary_pattern = b"a?".repeat(199);
-        let mut boundary = LuaPattern::from_bytes_try(&boundary_pattern).unwrap();
+        let mut boundary = LuaPattern::new(&boundary_pattern);
         assert!(boundary.matches_bytes(&[b'a'; 199], &mut meter).unwrap());
 
-        let mut scan = LuaPattern::from_bytes_try(b"a%d").unwrap();
+        let mut scan = LuaPattern::new(b"a%d");
         assert!(!scan.matches_bytes(&vec![b'a'; 250], &mut meter).unwrap());
     }
 
@@ -566,7 +564,7 @@ mod tests {
         // matches the empty string. Both boundaries verified against 5.2/5.4.
         for suffix in *b"*-" {
             let pattern = [b'b', suffix].repeat(200);
-            let mut matcher = LuaPattern::from_bytes_try(&pattern).unwrap();
+            let mut matcher = LuaPattern::new(&pattern);
             assert!(
                 matcher.matches_bytes(b"", &mut meter).unwrap(),
                 "{suffix:?}"
@@ -585,11 +583,11 @@ mod tests {
         let prefix = b"()".repeat(LUA_MAXMATCHES - 1);
 
         let accepted = [prefix.clone(), b"a?".repeat(167)].concat();
-        let mut accepted = LuaPattern::from_bytes_try(&accepted).unwrap();
+        let mut accepted = LuaPattern::new(&accepted);
         assert!(accepted.matches_bytes(&[b'a'; 167], &mut meter).unwrap());
 
         let rejected = [prefix, b"a?".repeat(168)].concat();
-        let mut rejected = LuaPattern::from_bytes_try(&rejected).unwrap();
+        let mut rejected = LuaPattern::new(&rejected);
         assert!(matches!(
             rejected.matches_bytes(&[b'a'; 168], &mut meter),
             Err(MatchError::Pattern(PatternError::MatchDepthExceeded))
@@ -615,7 +613,7 @@ mod tests {
         ];
 
         for (pattern, members, non_members) in cases {
-            let mut matcher = LuaPattern::from_bytes_try(pattern).unwrap();
+            let mut matcher = LuaPattern::new(pattern);
             for byte in members {
                 assert!(
                     matcher.matches_bytes(&[*byte], &mut meter).unwrap(),
@@ -635,14 +633,14 @@ mod tests {
     fn resumed_matches_keep_absolute_offsets_and_left_context() {
         let mut used = 0;
         let mut meter = count_only(&mut used);
-        let mut frontier = LuaPattern::from_bytes_try(b"%f[%a]%a").unwrap();
+        let mut frontier = LuaPattern::new(b"%f[%a]%a");
         assert!(!frontier.matches_bytes_from(b"ab", 1, &mut meter).unwrap());
 
-        let mut end = LuaPattern::from_bytes_try(b"$").unwrap();
+        let mut end = LuaPattern::new(b"$");
         assert!(end.matches_bytes_from(b"ab", 1, &mut meter).unwrap());
         assert_eq!(end.range(), 2..2);
 
-        let mut captures = LuaPattern::from_bytes_try(b"()(b)()").unwrap();
+        let mut captures = LuaPattern::new(b"()(b)()");
         assert!(captures.matches_bytes_from(b"ab", 1, &mut meter).unwrap());
         assert_eq!(captures.range(), 1..2);
         assert_eq!(captures.capture(1), LuaCapture::Position(1));
@@ -673,7 +671,7 @@ mod tests {
 
     #[test]
     fn finite_budget_stops_pathological_nested_greedies() {
-        let mut matcher = LuaPattern::from_bytes_try(b"^a*a*a*b").unwrap();
+        let mut matcher = LuaPattern::new(b"^a*a*a*b");
         let mut remaining = 20;
         let mut used = 0;
         let mut meter = CostMeter::finite_budget(&mut remaining, &mut used);

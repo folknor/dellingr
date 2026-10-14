@@ -57,6 +57,12 @@ identical source - re-measure tick budgets.
   `InvalidStackIndex` without changing the stack or global.
 - **Host `State::call` rejects `ArgCount::Dynamic`.** Hosts must supply
   `ArgCount::Fixed`; dynamic counts are reserved for bytecode calls.
+- **`SyntaxError::UnfinishedLongComment` is a new public variant.**
+  Exhaustive matches must handle it; the error is recoverable by appending
+  the closing delimiter.
+- **`math.random` uses rejection sampling to remove modulo bias.** Rejected
+  draws advance the deterministic RNG stream, so replays from earlier builds
+  can diverge at those draws. Wide integer results still round to f64.
 - **`string.gsub` and `string.gmatch` use Lua 5.4's empty-match rule.** An
   empty match ending where the previous accepted match ended is skipped.
 - **`table_insert_at`** resolves a negative table index before popping the
@@ -73,8 +79,12 @@ identical source - re-measure tick budgets.
 - `dellingr::limits` exposes the runtime, compiler and pattern-cache caps.
 - `State::current_source()` and the `source` given to `on_print`/`on_error`
   come from the running Lua frame, not the last loaded chunk.
-- `on_error` fires exactly once for every error escaping to the host,
-  including preflight failures and errors that already carry a traceback.
+- `on_error` fires exactly once for every error raised once a call has
+  dispatched, including frame-setup failures and errors that already carry a
+  traceback; host API misuse rejected before dispatch (`ArgCount::Dynamic`,
+  too few arguments, a dead anchor) is returned without notifying.
+  `call_anchor` also returns failure to insert the callee into a full stack
+  without notifying.
 - Out-of-range `tonumber` base, `select` index and `rawlen` arguments say so
   instead of `number expected, got number`.
 - `InvalidStackIndex` no longer renders as an internal error.
@@ -89,6 +99,8 @@ identical source - re-measure tick budgets.
 - Pattern validation is lazy, as in reference Lua: malformed pattern parts
   raise only when matching reaches them, and unfinished captures raise only
   when a library function reads them.
+- The internal `LuaPattern::new` replaces `from_bytes_try`, making infallible
+  pattern compilation explicit; the `gmatch` cache stores only matchers.
 - `string.gmatch` accepts Lua 5.4's optional `init` argument.
 - `State::bytes_with_tostring_meta` is public for byte-exact conversion with
   `__tostring` semantics.
@@ -98,10 +110,26 @@ identical source - re-measure tick budgets.
 
 ### Fixed
 
-- Unterminated long comments raise a syntax error at their opener instead of
-  silently swallowing the remaining source.
+- Unterminated long comments raise `SyntaxError::UnfinishedLongComment`
+  (`unfinished long comment`) at their opener instead of silently swallowing
+  the remaining source.
+- Mixed newline sequences such as CR LF CR count as two line breaks, rather
+  than overlapping newline pairs and undercounting source lines.
 - A call's opening `(` on a later line is rejected as ambiguous even across
-  comments; previously an intervening comment could make it a call.
+  comments; previously an intervening comment could make it a call. The
+  message now reads `ambiguous syntax (function call x new statement): '(' on
+  a new line`.
+- Error display uses column 0 for a selected caller frame or a frame whose
+  line differs from the error's own line, instead of borrowing the innermost
+  column. A selected frame with an unknown line keeps its unknown location.
+- `string.sub` validates argument 1 before its index arguments.
+- `table.concat` reports `invalid value (T) at index N in table for 'concat'`
+  for invalid elements, preserving their type and index.
+- `table.concat`, global `unpack` and `table.unpack` reject nonempty ranges
+  beyond +/-2^53, where consecutive f64 integer keys stop being distinct.
+  Exactly representable singleton keys and empty ranges remain accepted.
+- `print` measures lossy UTF-8 expansion and rejects output over the string
+  cap before building the expanded text, including `__tostring` results.
 - `tostring` preserves non-UTF-8 bytes returned by `__tostring`.
 - Snapshot loading rejects pointer ids at or above the saved next id. An
   exhausted pointer-id counter raises an error instead of wrapping.
@@ -229,9 +257,9 @@ covered structurally rather than case by case.
 - The Lua pattern matcher is rewritten as a one-pass compiler plus a safe
   index-based matcher, replacing a raw-pointer transliteration of the reference
   C. Every atom is an interned 256-bit byte class, so matching is one bitset test
-  with no branch on atom kind. Error timing is unchanged and remains contract:
-  compile errors from `from_bytes_try`, match-time errors from
-  `matches_bytes_from`.
+  with no branch on atom kind. Compilation is infallible; malformed pattern
+  parts raise from `matches_bytes_from` only when reached, and unfinished
+  captures are rejected when a library function reads them.
 - `table.sort` is an iterative heap sort with a fallible comparator, replacing a
   bubble sort that always performed exactly `N(N-1)/2` comparator calls. Heap
   sort specifically because a script-controlled comparator may be inconsistent:

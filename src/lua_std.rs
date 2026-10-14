@@ -239,6 +239,9 @@ pub(super) fn unpack_values(state: &mut State) -> Result<u8> {
         Some(j) => j,
         None => table::sequence_len(state, 1)?,
     };
+    if i <= j {
+        table::check_sequence_keys(state, i, j, "unpack")?;
+    }
 
     state.set_top(1)?;
     if i > j {

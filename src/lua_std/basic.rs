@@ -155,18 +155,34 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
                 crate::vm::checked_string_growth(message.len(), 1)?;
                 message.push('\t');
             }
-            // Preflight string arguments against their raw byte length before
-            // converting. The conversion is lossy-UTF-8, so an invalid byte
-            // expands to three, and a legal 16 MiB string of 0xff would
-            // otherwise materialize as a ~48 MiB `String` before the check
-            // below could reject it. Other types render to short text.
-            if state.typ(stack_index) == LuaType::String {
-                let raw_len = state.to_bytes(stack_index)?.len();
-                crate::vm::checked_string_growth(message.len(), raw_len)?;
+            // The host receives `&str`, so each part is converted lossily:
+            // every maximal invalid UTF-8 subsequence becomes one 3-byte
+            // U+FFFD. Measure the converted length from the raw bytes first
+            // and check it against the cap before materializing expanded text.
+            // Conversion keeps an already capped raw value plus a `message`
+            // whose length never exceeds the cap. The raw bytes come from
+            // `bytes_with_tostring_meta`, which also covers `__tostring`
+            // results that are byte strings.
+            let raw = state.bytes_with_tostring_meta(stack_index)?;
+            let lossy_len: usize = raw
+                .utf8_chunks()
+                .map(|chunk| {
+                    chunk.valid().len()
+                        + if chunk.invalid().is_empty() {
+                            0
+                        } else {
+                            char::REPLACEMENT_CHARACTER.len_utf8()
+                        }
+                })
+                .sum();
+            crate::vm::checked_string_growth(message.len(), lossy_len)?;
+            message.reserve(lossy_len);
+            for chunk in raw.utf8_chunks() {
+                message.push_str(chunk.valid());
+                if !chunk.invalid().is_empty() {
+                    message.push(char::REPLACEMENT_CHARACTER);
+                }
             }
-            let part = state.to_string_with_meta(stack_index)?;
-            crate::vm::checked_string_growth(message.len(), part.len())?;
-            message.push_str(&part);
         }
         state.host_print(&message);
         Ok(0)

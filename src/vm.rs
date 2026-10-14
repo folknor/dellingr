@@ -69,7 +69,7 @@ const STDLIB_HEAP_TABLES: usize = 5;
 const STDLIB_INTERNED_TABLE_KEYS: usize = 41;
 
 struct GmatchPatternEntry {
-    pattern: std::result::Result<LuaPattern, crate::patterns::PatternError>,
+    pattern: LuaPattern,
     byte_len: usize,
 }
 
@@ -526,12 +526,8 @@ impl State {
         let ptr = val
             .as_string_ptr()
             .expect("expect_string_at validated the value's string type");
-        if let Some(cached) = self.gmatch_patterns.get(&ptr) {
-            return cached
-                .pattern
-                .as_ref()
-                .map(|_| ())
-                .map_err(|err| self.error(ErrorKind::PatternError(err.into())));
+        if self.gmatch_patterns.contains_key(&ptr) {
+            return Ok(());
         }
         let pattern_len = val
             .as_string(&self.heap)
@@ -543,12 +539,11 @@ impl State {
         {
             self.gmatch_pattern_compilations = self.gmatch_pattern_compilations.saturating_add(1);
         }
-        let compiled = LuaPattern::from_bytes_try(
+        let compiled = LuaPattern::new(
             self.stack[idx]
                 .as_string(&self.heap)
                 .expect("string pointer came from a string value"),
         );
-        let error = compiled.as_ref().err().copied();
         while self.gmatch_patterns.len() >= GMATCH_PATTERN_CACHE_ENTRIES
             || self.gmatch_pattern_bytes.saturating_add(pattern_len) > GMATCH_PATTERN_CACHE_BYTES
         {
@@ -566,9 +561,7 @@ impl State {
                 byte_len: pattern_len,
             },
         );
-        error.map_or(Ok(()), |err| {
-            Err(self.error(ErrorKind::PatternError(err.into())))
-        })
+        Ok(())
     }
 
     /// Returns a gmatch subject borrow, its cached matcher, and a cost meter.
@@ -609,16 +602,7 @@ impl State {
                 "gmatch pattern was not memoized before matching".into(),
             ))
         })?;
-        // Compilation currently cannot fail; this guard remains with the
-        // cache's Result representation until that representation is removed.
-        let matcher = match entry.pattern.as_mut() {
-            Ok(matcher) => matcher,
-            Err(_) => {
-                return Err(Error::without_location(ErrorKind::InternalError(
-                    "a failed gmatch compilation must be reported before matching".into(),
-                )));
-            }
-        };
+        let matcher = &mut entry.pattern;
         let meter = CostMeter::runtime(*cost_budget_configured, cost_remaining, cost_used);
         Ok((subject, matcher, meter))
     }

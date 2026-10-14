@@ -140,9 +140,27 @@ fn lua_sub_bytes(subject: &[u8], start_idx: i64, end_idx: i64) -> Vec<u8> {
 /// values. Keep the type gate separate from
 /// `bytes_with_default_string_coercion`, whose general conversion rules are
 /// intentionally broader.
+///
+/// The returned `Vec` is a copy of the subject even when the argument is
+/// already a string. That is deliberate: the pattern functions keep reading the
+/// subject while they charge cost, push captures and call `gsub` replacement
+/// functions, all of which need `&mut State`, so a borrow of the heap string
+/// cannot live across them. Removing the copy needs shared ownership of string
+/// bytes in the heap (an `Rc<[u8]>`-style handle) or unsafe aliasing of a
+/// stack-rooted string; neither is worth it for a copy that is already charged
+/// per byte and bounded by the string-size cap. `string.sub` shows the
+/// borrow-only fast path where nothing mutates the state mid-read.
 fn string_or_number_bytes(state: &mut State, idx: isize, function_name: &str) -> Result<Vec<u8>> {
+    check_string_or_number(state, idx, function_name)?;
+    state.bytes_with_default_string_coercion(idx)
+}
+
+/// The type gate of `string_or_number_bytes`, without the copy. Used where an
+/// argument must be validated before later arguments are read, so errors name
+/// the arguments in the reference's order.
+fn check_string_or_number(state: &State, idx: isize, function_name: &str) -> Result<()> {
     match state.typ(idx) {
-        LuaType::String | LuaType::Number => state.bytes_with_default_string_coercion(idx),
+        LuaType::String | LuaType::Number => Ok(()),
         received => Err(state.error(ErrorKind::ArgError(ArgError {
             arg_number: idx,
             func_name: Some(function_name.to_owned()),
@@ -483,6 +501,8 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
 
     // string.sub(s, i [, j])
     add_fn!("sub", |state| {
+        // Argument #1 is validated first, as in the reference.
+        check_string_or_number(state, 1, "sub")?;
         let i = arg_integer(state, 2, "sub")?;
         let j = opt_integer(state, 3, "sub")?.unwrap_or(-1);
         let bytes = if state.typ(1) == LuaType::String {
@@ -547,8 +567,7 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
                 state.push_nil()?;
                 return Ok(1);
             }
-            let mut matcher = LuaPattern::from_bytes_try(&pattern)
-                .map_err(|err| pattern_runtime_error(state, err))?;
+            let mut matcher = LuaPattern::new(&pattern);
             let matched = {
                 let mut meter = state.cost_meter();
                 matcher.matches_bytes_from(&s, init, &mut meter)
@@ -641,8 +660,7 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
             state.push_bytes(b"")?;
             return Ok(1);
         }
-        let mut matcher = LuaPattern::from_bytes_try(&pattern)
-            .map_err(|err| pattern_runtime_error(state, err))?;
+        let mut matcher = LuaPattern::new(&pattern);
         let matched = {
             let mut meter = state.cost_meter();
             matcher.matches_bytes_from(&s, init, &mut meter)
@@ -813,8 +831,7 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
             return Ok(2);
         }
 
-        let mut matcher = LuaPattern::from_bytes_try(&pattern)
-            .map_err(|err| pattern_runtime_error(state, err))?;
+        let mut matcher = LuaPattern::new(&pattern);
         let mut result = Vec::with_capacity(s.len());
         let mut captures = Vec::new();
         let mut pos = 0usize;

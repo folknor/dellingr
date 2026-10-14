@@ -51,7 +51,7 @@ Designed for sandboxed embedding, not as a general-purpose Lua replacement. Thes
 - `goto`/labels - simplifies VM, prevents obfuscated control flow
 - `string.rep`, `string.byte`, `string.char`
 - Arithmetic/comparison/concat metamethods
-- Implicit string-to-number coercion in arithmetic and numeric control expressions
+- Implicit string-to-number coercion in arithmetic, numeric control expressions, and numeric library arguments (`math.*`, `select`, string indices, table positions, `tonumber`'s base, `math.random`); `string.format`'s numeric conversions are the one place that accepts numeral strings, as reference Lua does
 - Long strings (`[[...]]`, `[=[...]=]`)
 
 Some of them might be added later (probably most of them behind a feature gate, if so). The lack of the features above make the VM much more suitable for embedded use. Especially in games where the Lua scripting might be exposed to users. In those cases, these 3 string methods - for example - could be used to work around restrictions the game wants to put on the user.

@@ -217,12 +217,23 @@ impl State {
     /// Returns `InvalidStackIndex` without changing the stack if the current
     /// frame has fewer than the requested arguments. `ArgCount::Dynamic` is
     /// reserved for bytecode and is rejected without changing the stack.
+    ///
+    /// Like [`State::call`], errors raised before dispatch (a dead anchor,
+    /// too few arguments, `Dynamic`, no stack room for the callee) are host
+    /// API misuse: they are returned but do not fire
+    /// [`HostCallbacks::on_error`](crate::HostCallbacks::on_error). Errors
+    /// from the dispatched call notify exactly as for `call`.
     pub fn call_anchor(&mut self, a: Anchor, args: ArgCount, rets: RetCount) -> Result<()> {
         // Hosts push only the arguments. Insert the anchored function below
         // them to provide call's callee-then-arguments stack layout.
+        //
+        // The preflight errors below are built with `self.error`, as `call`'s
+        // are, and deliberately not passed to `host_error`: `on_error` covers
+        // execution, and a misuse failure has executed nothing (see the
+        // `on_error` doc in host.rs).
         let val = match self.registry.get(a) {
             Some(val) => val,
-            None => return Err(Error::without_location(ErrorKind::InvalidAnchor)),
+            None => return Err(self.error(ErrorKind::InvalidAnchor)),
         };
         let n_args = match args {
             ArgCount::Fixed(n) => n as usize,
@@ -233,7 +244,7 @@ impl State {
                 // Dynamic would either panic on the missing base or read
                 // a stale one set up by prior bytecode and corrupt the
                 // call. Reject it explicitly.
-                return Err(Error::without_location(ErrorKind::InternalError(
+                return Err(self.error(ErrorKind::InternalError(
                     "call_anchor does not support ArgCount::Dynamic; use ArgCount::Fixed".into(),
                 )));
             }
@@ -244,7 +255,7 @@ impl State {
         // shift the calling Lua frame's registers, and `call` would then fail
         // with the inserted value left behind. Check before any mutation.
         if n_args > self.get_top() {
-            return Err(Error::without_location(ErrorKind::InvalidStackIndex {
+            return Err(self.error(ErrorKind::InvalidStackIndex {
                 index: -(n_args as isize) - 1,
             }));
         }

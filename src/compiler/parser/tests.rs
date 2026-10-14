@@ -2329,8 +2329,15 @@ fn unfinished_long_comment_is_a_syntax_error() {
     ] {
         let err = parse_str(source).expect_err("an unfinished long comment must not compile");
         assert!(
-            matches!(err.kind, ErrorKind::SyntaxError(SyntaxError::UnexpectedEof)),
+            matches!(
+                err.kind,
+                ErrorKind::SyntaxError(SyntaxError::UnfinishedLongComment)
+            ),
             "{source:?}: {err:?}"
+        );
+        assert!(
+            err.to_string().contains("unfinished long comment"),
+            "{source:?}: {err}"
         );
     }
 }

@@ -43,6 +43,11 @@ impl State {
         // pop it would remove a caller-owned slot as the callee and leave the
         // outer Dynamic OP_CALL without its base. Hosts never own a base, so
         // the public entry point rejects Dynamic before touching any state.
+        //
+        // This and call_op's InvalidStackIndex preflight are returned without
+        // notifying on_error: they are host misuse detected before anything
+        // executes, which the on_error doc in host.rs excludes by contract.
+        // Every failure after dispatch reaches an error-reporting boundary.
         if num_args == ArgCount::Dynamic {
             return Err(self.error(ErrorKind::InternalError(
                 "call does not support ArgCount::Dynamic; use ArgCount::Fixed".into(),
