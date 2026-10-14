@@ -321,6 +321,25 @@ fn gmatch_closure_survives_save_load() {
 }
 
 #[test]
+fn gmatch_last_match_end_survives_save_load() {
+    // The saved iterator must remember the previous end, or resuming after
+    // "abc" would incorrectly accept a trailing empty match.
+    let mut state = State::new();
+    state
+        .load_string(r#"f = string.gmatch("abc", "%a*"); return f()"#)
+        .unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
+    assert_eq!(state.to_string(-1).unwrap(), "abc");
+    state.pop(1).unwrap();
+
+    let save = state.save_state().unwrap();
+    let mut loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), no_setup).unwrap();
+    loaded.get_global("f").unwrap();
+    loaded.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
+    assert_eq!(loaded.typ(-1), LuaType::Nil);
+}
+
+#[test]
 fn empty_gmatch_closure_survives_save_load() {
     // The empty-pattern gmatch path uses a different iterator id; it too must be
     // registered at library-open so its closure restores.
@@ -501,7 +520,7 @@ fn unregistered_reachable_rust_function_fails_save() {
 
     let mut state = State::new();
     state.push_rust_fn(host_fn).unwrap();
-    state.set_global("host_fn");
+    state.set_global("host_fn").unwrap();
 
     let err = state.save_state().unwrap_err();
     assert!(matches!(
@@ -866,13 +885,13 @@ fn rust_function_save_id_is_independent_of_registration_order() {
     first.register_rust_fn("game.z", host_fn).unwrap();
     first.register_rust_fn("game.a", host_fn).unwrap();
     first.push_rust_fn(host_fn).unwrap();
-    first.set_global("host_fn");
+    first.set_global("host_fn").unwrap();
 
     let mut second = State::new();
     second.register_rust_fn("game.a", host_fn).unwrap();
     second.register_rust_fn("game.z", host_fn).unwrap();
     second.push_rust_fn(host_fn).unwrap();
-    second.set_global("host_fn");
+    second.set_global("host_fn").unwrap();
 
     assert_eq!(
         first.save_state().unwrap().bytes,
@@ -1158,11 +1177,11 @@ fn non_utf8_and_edge_values_round_trip() {
     state
         .push_bytes([0u8, 159, 146, 150, 255])
         .expect("short test string fits");
-    state.set_global("binval");
+    state.set_global("binval").unwrap();
     state.push_number(-0.0).unwrap();
-    state.set_global("negzero");
+    state.set_global("negzero").unwrap();
     state.push_number(f64::NAN).unwrap();
-    state.set_global("nan");
+    state.set_global("nan").unwrap();
 
     // Table keyed by a non-UTF8 byte string.
     state.new_table().unwrap();
@@ -1171,7 +1190,7 @@ fn non_utf8_and_edge_values_round_trip() {
         .expect("short test string fits");
     state.push_number(42.0).unwrap();
     state.set_table_raw(-3).unwrap();
-    state.set_global("bt");
+    state.set_global("bt").unwrap();
 
     let mut loaded = reload(&state);
 

@@ -434,7 +434,7 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
     // Address the _G table relative to the top: a host may call open_libs
     // with values already on the stack, so absolute index 1 is not ours.
     state.set_metatable_of(-2)?;
-    state.set_global("_G");
+    state.set_global("_G")?;
     Ok(())
 }
 
@@ -491,7 +491,7 @@ fn global_env_newindex(state: &mut State) -> Result<u8> {
     if state.typ(2) == LuaType::String {
         let key = state.to_string(2)?;
         state.push_value(3)?;
-        state.set_global(&key);
+        state.set_global(&key)?;
     } else {
         state.push_value(2)?;
         state.push_value(3)?;

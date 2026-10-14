@@ -36,17 +36,16 @@ struct Parser<'a> {
     nest_level: i32,
     /// Names borrow the source (`'a`), so declarations allocate nothing.
     locals: Vec<(&'a str, i32)>,
-    outer_chunks: Vec<Bytecode>,
-    outer_literal_indices: Vec<LiteralPoolIndices>,
-    /// Break-jump state for each nested loop.
+    /// Break-jump state for each loop enclosing the current position *within
+    /// the current function*. Per-function: a `break` inside a function
+    /// literal must never see the enclosing function's loops.
     loop_breaks: Vec<LoopContext>,
     /// Upvalues for the current function being compiled.
     /// Each entry is (name, descriptor).
     upvalues: Vec<(&'a str, UpvalueDesc)>,
-    /// Stack of locals from outer functions (pushed when entering a nested function).
-    outer_locals: Vec<Vec<(&'a str, i32)>>,
-    /// Stack of upvalues from outer functions.
-    outer_upvalues: Vec<Vec<(&'a str, UpvalueDesc)>>,
+    /// Suspended state of every enclosing function, outermost first. Pushed
+    /// and popped as a unit by `parse_chunk`; see `FuncState`.
+    outer_funcs: Vec<FuncState<'a>>,
     /// Current line number for instruction emission.
     current_line: u32,
     /// Current nesting depth across recursive parser entry points.
@@ -59,6 +58,23 @@ struct Parser<'a> {
     /// push computes the same value the landing site would have - so the
     /// barrier is exclusive of the first operand index. Per-chunk, saved and
     /// reset across `parse_chunk`.
+    fold_barrier: usize,
+}
+
+/// The per-function slice of `Parser` state, saved while a nested function
+/// literal is compiled. Every `Parser` field whose meaning is scoped to one
+/// function belongs here: `take_func_state` and `restore_func_state` move
+/// all of them as one unit, so a field cannot be saved without also being
+/// reset. (`loop_breaks` once sat outside that unit, which let a `break` in a
+/// function literal bind to the enclosing function's loop and patch the
+/// outer chunk with a nested-chunk index.)
+#[derive(Debug, Default)]
+struct FuncState<'a> {
+    chunk: Bytecode,
+    literal_indices: LiteralPoolIndices,
+    locals: Vec<(&'a str, i32)>,
+    upvalues: Vec<(&'a str, UpvalueDesc)>,
+    loop_breaks: Vec<LoopContext>,
     fold_barrier: usize,
 }
 
@@ -106,12 +122,9 @@ pub(super) fn parse_str_named(source: &str, source_name: Option<String>) -> Resu
         literal_indices: LiteralPoolIndices::default(),
         nest_level: 0,
         locals: Vec::new(),
-        outer_chunks: Vec::new(),
-        outer_literal_indices: Vec::new(),
         loop_breaks: Vec::new(),
         upvalues: Vec::new(),
-        outer_locals: Vec::new(),
-        outer_upvalues: Vec::new(),
+        outer_funcs: Vec::new(),
         current_line: 1,
         syntax_depth: 0,
         fold_barrier: 0,
@@ -612,6 +625,39 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Moves the current function's state out, leaving fresh defaults.
+    fn take_func_state(&mut self) -> FuncState<'a> {
+        FuncState {
+            chunk: std::mem::take(&mut self.chunk),
+            literal_indices: std::mem::take(&mut self.literal_indices),
+            locals: std::mem::take(&mut self.locals),
+            upvalues: std::mem::take(&mut self.upvalues),
+            loop_breaks: std::mem::take(&mut self.loop_breaks),
+            fold_barrier: std::mem::take(&mut self.fold_barrier),
+        }
+    }
+
+    /// Reinstates `saved` as the current function's state and returns the
+    /// state it displaces (the just-finished function).
+    fn restore_func_state(&mut self, saved: FuncState<'a>) -> FuncState<'a> {
+        let FuncState {
+            chunk,
+            literal_indices,
+            locals,
+            upvalues,
+            loop_breaks,
+            fold_barrier,
+        } = saved;
+        FuncState {
+            chunk: std::mem::replace(&mut self.chunk, chunk),
+            literal_indices: std::mem::replace(&mut self.literal_indices, literal_indices),
+            locals: std::mem::replace(&mut self.locals, locals),
+            upvalues: std::mem::replace(&mut self.upvalues, upvalues),
+            loop_breaks: std::mem::replace(&mut self.loop_breaks, loop_breaks),
+            fold_barrier: std::mem::replace(&mut self.fold_barrier, fold_barrier),
+        }
+    }
+
     // Actual parsing
 
     /// The main entry point for the parser. This parses the entire input.
@@ -638,22 +684,14 @@ impl<'a> Parser<'a> {
             u8::try_from(params.len()).map_err(|_| self.error_here(SyntaxError::TooManyLocals))?;
         // Nested chunks share the diagnostic source name through Arc.
         let source = self.chunk.source.clone();
-        self.outer_chunks.push(std::mem::take(&mut self.chunk));
-        self.outer_literal_indices
-            .push(std::mem::take(&mut self.literal_indices));
-        let outer_fold_barrier = std::mem::take(&mut self.fold_barrier);
+        // Suspend the enclosing function: its chunk, literal pools, locals
+        // (each function's slots start at 0), upvalues, loops and fold
+        // barrier all start fresh for the nested one.
+        let outer = self.take_func_state();
+        self.outer_funcs.push(outer);
         self.chunk.source = source;
         self.chunk.is_vararg = is_vararg;
         self.chunk.num_params = num_params;
-
-        // Save and reset locals for the new chunk - each function has its own
-        // local variable slots starting at 0
-        let saved_locals = std::mem::take(&mut self.locals);
-        self.outer_locals.push(saved_locals);
-
-        // Save and reset upvalues for the new chunk
-        let saved_upvalues = std::mem::take(&mut self.upvalues);
-        self.outer_upvalues.push(saved_upvalues);
 
         for &param in params {
             self.locals.push((param, self.nest_level));
@@ -665,26 +703,16 @@ impl<'a> Parser<'a> {
         // Copy upvalues to chunk
         self.chunk.upvalues = self.upvalues.iter().map(|(_, desc)| *desc).collect();
 
-        let outer_chunk = self
-            .outer_chunks
+        let outer = self
+            .outer_funcs
             .pop()
-            .ok_or_else(|| super::internal_error("compiler: outer chunk stack empty"))?;
-        let tmp_chunk = std::mem::replace(&mut self.chunk, outer_chunk);
-        self.literal_indices = self
-            .outer_literal_indices
-            .pop()
-            .ok_or_else(|| super::internal_error("compiler: outer literal index stack empty"))?;
-        self.fold_barrier = outer_fold_barrier;
-
-        // Restore outer locals and upvalues
-        self.locals = self
-            .outer_locals
-            .pop()
-            .ok_or_else(|| super::internal_error("compiler: outer locals stack empty"))?;
-        self.upvalues = self
-            .outer_upvalues
-            .pop()
-            .ok_or_else(|| super::internal_error("compiler: outer upvalues stack empty"))?;
+            .ok_or_else(|| super::internal_error("compiler: outer function stack empty"))?;
+        let finished = self.restore_func_state(outer);
+        debug_assert!(
+            finished.loop_breaks.is_empty(),
+            "every loop entered in a function is exited before its chunk ends"
+        );
+        let tmp_chunk = finished.chunk;
 
         #[cfg(feature = "debug_parser")]
         println!("Compiled chunk: {tmp_chunk:#?}");

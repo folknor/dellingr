@@ -65,7 +65,7 @@ fn host_call_through_callable_table_chain_notifies_once() {
     state
         .push_rust_fn(fail_fn)
         .expect("the Rust function should push");
-    state.set_global("fail");
+    state.set_global("fail").unwrap();
     run_setup(
         &mut state,
         r#"
@@ -104,7 +104,7 @@ fn host_table_read_through_failing_rust_index_notifies_once() {
     state
         .push_rust_fn(fail_fn)
         .expect("the Rust function should push");
-    state.set_global("fail");
+    state.set_global("fail").unwrap();
     run_setup(&mut state, "indexed = setmetatable({}, { __index = fail })");
 
     state
@@ -126,7 +126,7 @@ fn host_call_through_direct_rust_call_metamethod_notifies_once() {
     state
         .push_rust_fn(fail_fn)
         .expect("the Rust function should push");
-    state.set_global("fail");
+    state.set_global("fail").unwrap();
     run_setup(&mut state, "callable = setmetatable({}, { __call = fail })");
 
     let error = call_global(&mut state, "callable");
@@ -224,7 +224,7 @@ fn host_supplied_trace_does_not_suppress_notification() {
         let mut state = State::with_callbacks(Box::new(ErrorCounter(Arc::clone(&count))));
         state.push_rust_fn(fail_with_trace).expect("callback fits");
         if through_lua {
-            state.set_global("fail");
+            state.set_global("fail").unwrap();
             state.load_string("fail()").expect("chunk compiles");
         }
         let error = state
@@ -255,7 +255,7 @@ fn execution_stack_preflights_notify_once() {
                 state
                     .push_rust_fn(report_missing_results)
                     .expect("callback fits");
-                state.set_global("target");
+                state.set_global("target").unwrap();
             }
             2 => {
                 run_setup(&mut state, "function target() end");

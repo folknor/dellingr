@@ -61,6 +61,7 @@ fn stdlib_integer_arguments_reject_fractional_numbers_consistently() {
         r#"return string.sub("abc", 1.5)"#,
         r#"return string.find("abc", "a", 1.5)"#,
         r#"return string.match("abc", "a", 1.5)"#,
+        r#"return string.gmatch("abc", "a", 1.5)"#,
         r#"return string.gsub("a", "a", "b", 1.5)"#,
         r#"return string.format("%d", 1.5)"#,
         r#"return math.random(1.5)"#,
@@ -117,7 +118,7 @@ fn check_number(state: &mut State) -> dellingr::Result<u8> {
 
 fn install_callback(state: &mut State) {
     state.push_rust_fn(check_number).expect("callback fits");
-    state.set_global("host_number");
+    state.set_global("host_number").unwrap();
 }
 
 #[test]
@@ -207,7 +208,7 @@ fn nested_native_dispatch_restores_outer_argument_name() {
     state
         .push_rust_fn(nested_check_number)
         .expect("callback fits");
-    state.set_global("outer_number");
+    state.set_global("outer_number").unwrap();
     state
         .get_global("outer_number")
         .expect("outer callback exists");

@@ -1336,7 +1336,7 @@ fn restricted_env_restored_after_panic() {
     // the whitelist, so it is nil during the closure but must be back after.
     let mut state = State::new();
     state.new_table().unwrap();
-    state.set_global("saved_object");
+    state.set_global("saved_object").unwrap();
 
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {})); // silence the expected panic

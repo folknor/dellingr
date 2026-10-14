@@ -4,42 +4,16 @@ Forward-looking feature/refactor ideas. Not optimizations - those live in
 [optimizations.md](optimizations.md). This is a working backlog; entries
 get deleted as they ship or stop being worth tracking.
 
-## Open findings
-
-### `table.remove` from the front is quadratic
-
-What: `Table::array_remove` (`src/vm/table.rs`) shifts the array down with
-one `IndexMap::shift_remove` plus `insert` per element. `shift_remove` is
-itself O(n) (it moves every later entry), so one `table.remove(t, 1)` on an
-n-element array is O(n^2), and draining a queue from the front is O(n^3).
-`array_insert` should be checked for the same shape.
-
-Sketch: shift values in place over the existing integer-keyed entries
-(read value i+1, write it to i, drop the last key) so each call is one
-pass, or do it as part of the array-part work in optimizations.md.
-Insertion order of the surviving keys must stay as it is today, since
-`pairs()` order is replay-visible.
-
-Signal: already worth measuring - a queue drained with `table.remove(q, 1)`
-is ordinary game-script code.
-
-### `table.insert`/`table.remove` charge a flat 1 for a whole-array shift
-
-What: both charge one cost unit regardless of how many elements they
-shift, so a script can do O(n) (today O(n^2), see above) host work for a
-cost of 1. `table.move` charges per element for the same kind of work. A
-comment in `src/lua_std/table.rs` records the flat charge as a cost-model
-choice.
-
-Sketch: charge by shift distance (`len - pos + 1`), the way `table.move`
-charges per element. This changes `cost_used` for existing scripts, so it
-needs a `COST_MODEL_VERSION` bump and invalidates saves - bundle it with
-the next bump rather than doing it alone.
-
-Signal: budgets being relied on to bound host CPU for untrusted scripts,
-or the next cost-model bump for any other reason.
-
 ## Deferred forward-looking ideas
+
+### CLI: read the script from stdin on `-`
+
+What: `parse_args` in `src/main.rs` special-cases `"-"` so it is not
+rejected as an unknown option (the conventional stdin spelling), then hands
+it to `fs::read_to_string` as a file literally named `-`. Nothing documents
+stdin support. Either implement it or drop the special case.
+
+Signal: anyone wanting to pipe a script into the CLI.
 
 ### Grow the brokkr workload registry to the full candidate surface
 

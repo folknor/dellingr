@@ -42,9 +42,17 @@ pub(crate) struct LuaPattern {
 }
 
 impl LuaPattern {
-    /// Maybe create a new Lua pattern from a slice of bytes.
+    /// Compile a Lua pattern from a slice of bytes.
+    ///
+    /// This currently never returns `Err`. Reference Lua validates a pattern
+    /// lazily, only as far as a match actually reaches, so every pattern error
+    /// (malformed syntax, too many captures, a bad backreference) is raised
+    /// by `matches_bytes_from` at the point reference would raise it, and an
+    /// unclosed capture is reported as `LuaCapture::Unfinished` for the
+    /// consumer to reject. The `Result` is kept so callers that cache the
+    /// compile outcome need no change if an eager check is ever reintroduced.
     pub(crate) fn from_bytes_try(bytes: &[u8]) -> Result<LuaPattern, PatternError> {
-        let compiled = compile(bytes)?;
+        let compiled = compile(bytes);
         Ok(LuaPattern {
             compiled,
             matches: [LuaCapture::Bytes { start: 0, end: 0 }; LUA_MAXMATCHES],
@@ -82,7 +90,9 @@ impl LuaPattern {
     pub(crate) fn range(&self) -> ops::Range<usize> {
         match self.capture(0) {
             LuaCapture::Bytes { start, end } => start..end,
-            LuaCapture::Position(_) => unreachable!("the full match is always a byte range"),
+            LuaCapture::Position(_) | LuaCapture::Unfinished => {
+                unreachable!("the full match is always a byte range")
+            }
         }
     }
 
@@ -114,6 +124,26 @@ mod tests {
         assert!(!is_plain_for_find(b")*"));
         assert!(is_plain(b"]"));
         assert!(is_plain(b"literal bytes"));
+    }
+
+    /// Compile `pattern` (which never fails) and return the error matching it
+    /// against `subject` raises.
+    fn match_err(pattern: &[u8], subject: &[u8]) -> PatternError {
+        let mut used = 0;
+        let mut meter = count_only(&mut used);
+        let mut matcher = LuaPattern::from_bytes_try(pattern).unwrap();
+        match matcher.matches_bytes(subject, &mut meter) {
+            Err(MatchError::Pattern(error)) => error,
+            other => panic!("{pattern:?} on {subject:?}: expected a pattern error, got {other:?}"),
+        }
+    }
+
+    /// Whether `pattern` compiles and finds no match in `subject` without error.
+    fn no_match_no_error(pattern: &[u8], subject: &[u8]) -> bool {
+        let mut used = 0;
+        let mut meter = count_only(&mut used);
+        let mut matcher = LuaPattern::from_bytes_try(pattern).unwrap();
+        matches!(matcher.matches_bytes(subject, &mut meter), Ok(false))
     }
 
     fn assert_exact_finite_cost(pattern: &[u8], subject: &[u8], cost: u64) {
@@ -165,65 +195,126 @@ mod tests {
     }
 
     #[test]
-    fn bad_patterns() {
+    fn bad_patterns_raise_when_the_match_reaches_them() {
+        // Every subject here reaches the malformed point. "unfinished capture"
+        // is not a match error at all: see `unclosed_captures_are_reported_as_values`.
         let bad = [
             (
                 b"bonzo %".as_slice(),
+                b"bonzo ".as_slice(),
                 PatternError::MalformedPattern(MalformedPattern::EndsWithPercent),
             ),
-            (b"bonzo (dog%(".as_slice(), PatternError::UnfinishedCapture),
             (
                 b"alles [%a%[".as_slice(),
+                b"alles x".as_slice(),
                 PatternError::MalformedPattern(MalformedPattern::MissingBracket),
             ),
             (
-                b"bonzo (dog (cat)".as_slice(),
-                PatternError::UnfinishedCapture,
-            ),
-            (
                 b"frodo %f[%A".as_slice(),
+                b"frodo ".as_slice(),
                 PatternError::MalformedPattern(MalformedPattern::MissingBracket),
             ),
             (
                 b"frodo (1) (2(3)%2)%1".as_slice(),
-                PatternError::InvalidCaptureIndex(Some(1)),
+                b"frodo 1 23".as_slice(),
+                PatternError::InvalidCaptureIndex(1),
             ),
-            // The validator requires both balance delimiters and a bracketed frontier class.
             (
                 b"%b".as_slice(),
+                b"x".as_slice(),
                 PatternError::MalformedPattern(MalformedPattern::MissingBalancedArguments),
             ),
             (
                 b"%bx".as_slice(),
+                b"x".as_slice(),
                 PatternError::MalformedPattern(MalformedPattern::MissingBalancedArguments),
             ),
             (
                 b"%f".as_slice(),
+                b"x".as_slice(),
                 PatternError::MalformedPattern(MalformedPattern::MissingFrontierBracket),
             ),
             (
                 b"%fx".as_slice(),
+                b"x".as_slice(),
                 PatternError::MalformedPattern(MalformedPattern::MissingFrontierBracket),
             ),
             (
                 b"%f[".as_slice(),
+                b"x".as_slice(),
                 PatternError::MalformedPattern(MalformedPattern::MissingBracket),
             ),
+            // A bracket class is delimited before any byte is tested, so these
+            // raise even against an empty subject, as in reference.
             (
                 b"[".as_slice(),
+                b"".as_slice(),
                 PatternError::MalformedPattern(MalformedPattern::MissingBracket),
             ),
             (
                 b"[a".as_slice(),
+                b"".as_slice(),
                 PatternError::MalformedPattern(MalformedPattern::MissingBracket),
             ),
-            (b"(".as_slice(), PatternError::UnfinishedCapture),
+            (
+                b"a)".as_slice(),
+                b"a".as_slice(),
+                PatternError::InvalidPatternCapture,
+            ),
+            (
+                b"(a%1)".as_slice(),
+                b"aa".as_slice(),
+                PatternError::InvalidCaptureIndex(0),
+            ),
         ];
 
-        for (pattern, expected) in bad {
-            let result = LuaPattern::from_bytes_try(pattern);
-            assert!(matches!(result, Err(error) if error == expected));
+        for (pattern, subject, expected) in bad {
+            assert_eq!(match_err(pattern, subject), expected, "{pattern:?}");
         }
+    }
+
+    #[test]
+    fn malformed_tails_behind_a_failing_prefix_are_not_errors() {
+        // Reference validates lazily, so each of these returns nil in lua5.2
+        // and lua5.4. `x%1` and `x[` never error for any subject without an x.
+        for (pattern, subject) in [
+            (b"a)".as_slice(), b"b".as_slice()),
+            (b"x(".as_slice(), b"abc".as_slice()),
+            (b"x%1".as_slice(), b"abc".as_slice()),
+            (b"x[".as_slice(), b"abc".as_slice()),
+            (b"x%".as_slice(), b"abc".as_slice()),
+            (b"x%b".as_slice(), b"abc".as_slice()),
+            (b"x%f".as_slice(), b"abc".as_slice()),
+        ] {
+            assert!(no_match_no_error(pattern, subject), "{pattern:?}");
+        }
+        let too_many = [b"a".as_slice(), &b"()".repeat(40)].concat();
+        assert!(no_match_no_error(&too_many, b"b"));
+    }
+
+    #[test]
+    fn unclosed_captures_are_reported_as_values() {
+        let mut used = 0;
+        let mut meter = count_only(&mut used);
+        for (pattern, subject) in [
+            (b"(".as_slice(), b"a".as_slice()),
+            (b"(a".as_slice(), b"abc".as_slice()),
+            (b"bonzo (dog (cat)".as_slice(), b"bonzo dog cat".as_slice()),
+        ] {
+            let mut matcher = LuaPattern::from_bytes_try(pattern).unwrap();
+            assert!(
+                matcher.matches_bytes(subject, &mut meter).unwrap(),
+                "{pattern:?}"
+            );
+            assert_eq!(matcher.capture(1), LuaCapture::Unfinished, "{pattern:?}");
+        }
+        // A closed capture before the unclosed one is still a real value.
+        let mut matcher = LuaPattern::from_bytes_try(b"(a)(b").unwrap();
+        assert!(matcher.matches_bytes(b"ab", &mut meter).unwrap());
+        assert_eq!(matcher.capture(1), LuaCapture::Bytes { start: 0, end: 1 });
+        assert_eq!(matcher.capture(2), LuaCapture::Unfinished);
+        // With no match there is no capture to report, and no error.
+        assert!(no_match_no_error(b"x(", b"abc"));
     }
 
     #[test]
@@ -249,12 +340,10 @@ mod tests {
         // `[]` and `[^]` never close, matching reference "malformed pattern
         // (missing ']')" instead of parsing as an empty class.
         for pattern in [b"[]".as_slice(), b"[^]".as_slice(), b"[%]".as_slice()] {
-            assert!(matches!(
-                LuaPattern::from_bytes_try(pattern),
-                Err(PatternError::MalformedPattern(
-                    MalformedPattern::MissingBracket
-                ))
-            ));
+            assert_eq!(
+                match_err(pattern, b"]"),
+                PatternError::MalformedPattern(MalformedPattern::MissingBracket)
+            );
         }
     }
 
@@ -282,12 +371,10 @@ mod tests {
             assert!(matcher.matches_bytes(subject, &mut meter).unwrap());
             assert_eq!(matcher.range(), range);
         }
-        assert!(matches!(
-            LuaPattern::from_bytes_try(b"%"),
-            Err(PatternError::MalformedPattern(
-                MalformedPattern::EndsWithPercent
-            ))
-        ));
+        assert_eq!(
+            match_err(b"%", b"x"),
+            PatternError::MalformedPattern(MalformedPattern::EndsWithPercent)
+        );
     }
 
     #[test]
@@ -336,11 +423,12 @@ mod tests {
         );
         assert_eq!(mixed_matcher.num_matches(), LUA_MAXMATCHES);
 
-        for pattern in [b"()".repeat(LUA_MAXMATCHES), b"(x)".repeat(LUA_MAXMATCHES)] {
-            assert!(matches!(
-                LuaPattern::from_bytes_try(&pattern),
-                Err(PatternError::TooManyCaptures)
-            ));
+        let rejected = [
+            (b"()".repeat(LUA_MAXMATCHES), b"x".to_vec()),
+            (b"(x)".repeat(LUA_MAXMATCHES), b"x".repeat(LUA_MAXMATCHES)),
+        ];
+        for (pattern, subject) in rejected {
+            assert_eq!(match_err(&pattern, &subject), PatternError::TooManyCaptures);
         }
     }
 
@@ -398,10 +486,7 @@ mod tests {
 
     #[test]
     fn zero_capture_index_formats_without_overflow() {
-        let error = match LuaPattern::from_bytes_try(b"(a)%0") {
-            Ok(_) => panic!("%0 must be rejected"),
-            Err(error) => error,
-        };
+        let error = match_err(b"(a)%0", b"a");
         assert_eq!(error.to_string(), "invalid capture index %0");
     }
 

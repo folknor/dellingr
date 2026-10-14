@@ -13,7 +13,7 @@ fn install_force_gc(state: &mut State) {
             Ok(0)
         })
         .unwrap();
-    state.set_global("force_gc");
+    state.set_global("force_gc").unwrap();
 }
 
 fn install_force_next_gc(state: &mut State) {
@@ -23,7 +23,7 @@ fn install_force_next_gc(state: &mut State) {
             Ok(0)
         })
         .unwrap();
-    state.set_global("force_next_gc");
+    state.set_global("force_next_gc").unwrap();
 }
 
 #[test]
@@ -308,7 +308,7 @@ fn metatable_as_upvalue_survives_gc() {
     state.get_global("create_object").unwrap();
     state.push_number(99.0).unwrap();
     state.call(ArgCount::Fixed(1), RetCount::Fixed(1)).unwrap();
-    state.set_global("obj");
+    state.set_global("obj").unwrap();
 
     // Access via metatable method
     state.load_string("return obj:get_value()").unwrap();

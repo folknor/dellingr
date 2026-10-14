@@ -153,10 +153,18 @@ fn string_or_number_bytes(state: &mut State, idx: isize, function_name: &str) ->
     }
 }
 
+/// Reference Lua raises "unfinished capture" only when a library function
+/// reads a capture whose `(` the match never closed (`get_onecapture`), so
+/// every consumer of a capture value routes `LuaCapture::Unfinished` here.
+fn unfinished_capture_error(state: &State) -> Error {
+    pattern_runtime_error(state, PatternError::UnfinishedCapture)
+}
+
 fn push_capture_value(state: &mut State, bytes: &[u8], capture: LuaCapture) -> Result<()> {
     match capture {
         LuaCapture::Bytes { start, end } => state.push_bytes(&bytes[start..end])?,
         LuaCapture::Position(offset) => state.push_number((offset + 1) as f64)?,
+        LuaCapture::Unfinished => return Err(unfinished_capture_error(state)),
     }
     Ok(())
 }
@@ -182,7 +190,7 @@ fn push_captures(state: &mut State, bytes: &[u8], pattern: &LuaPattern) -> Resul
 fn capture_byte_len(capture: LuaCapture) -> usize {
     match capture {
         LuaCapture::Bytes { start, end } => end - start,
-        LuaCapture::Position(_) => 0,
+        LuaCapture::Position(_) | LuaCapture::Unfinished => 0,
     }
 }
 
@@ -190,8 +198,13 @@ fn preflight_capture_bytes(
     state: &mut State,
     captures: impl IntoIterator<Item = LuaCapture>,
 ) -> Result<()> {
+    // Every caller pushes exactly the captures it preflights, so reject an
+    // unclosed one before copying any capture bytes to the stack.
     let mut total = 0usize;
     for capture in captures {
+        if capture == LuaCapture::Unfinished {
+            return Err(unfinished_capture_error(state));
+        }
         total = total.saturating_add(capture_byte_len(capture));
     }
     state.consume_cost(total as u64)
@@ -209,6 +222,7 @@ fn append_capture_bytes(
             let position = (offset + 1).to_string();
             append_bytes(state, out, position.as_bytes())?;
         }
+        LuaCapture::Unfinished => return Err(unfinished_capture_error(state)),
     }
     Ok(())
 }
@@ -223,8 +237,7 @@ fn append_bytes(state: &mut State, out: &mut Vec<u8>, bytes: &[u8]) -> Result<()
 
 fn invalid_gsub_capture_error(state: &State) -> Error {
     // Replacement-template errors stay runtime errors: PatternError describes
-    // pattern compilation or matching, and its index-less detail means the
-    // matcher could not provide an index, while this parser knows the digit.
+    // errors in the pattern, while this index refers to a replacement template.
     state.error(ErrorKind::RuntimeError("invalid capture index".into()))
 }
 
@@ -643,11 +656,16 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
         }
     });
 
-    // string.gmatch(s, pattern)
+    // string.gmatch(s, pattern [, init])
     add_fn!("gmatch", |state| {
         let s = string_or_number_bytes(state, 1, "gmatch")?;
         let pattern = string_or_number_bytes(state, 2, "gmatch")?;
         state.consume_cost((s.len() + pattern.len()).max(1) as u64)?;
+        // Lua 5.4's optional `init`; past the end it parks the iterator at
+        // `len + 1`, where the first call returns nil.
+        let init = opt_integer(state, 3, "gmatch")?
+            .map_or(0, |init| lua_start_index(s.len(), init))
+            .min(s.len() + 1);
         let pattern = if pattern.first() == Some(&b'^') {
             let escaped_len = crate::vm::checked_string_growth(pattern.len(), 1)?;
             let mut escaped = Vec::with_capacity(escaped_len);
@@ -662,7 +680,7 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
         if pattern.is_empty() {
             state.new_table()?;
             state.push_string("pos")?;
-            state.push_number(0.0)?;
+            state.push_number(init as f64)?;
             state.set_table_raw(-3)?;
             state.push_string("len")?;
             state.push_number(s.len() as f64)?;
@@ -685,7 +703,7 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
         state.push_bytes(&pattern)?;
         state.set_table_raw(-3)?;
         state.push_string("pos")?;
-        state.push_number(0.0)?;
+        state.push_number(init as f64)?;
         state.set_table_raw(-3)?;
 
         push_gmatch_wrapper(state, GMATCH_ITER_ID, gmatch_iter)
@@ -802,8 +820,16 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
         let mut pos = 0usize;
         let mut count = 0usize;
         let anchored = pattern.first() == Some(&b'^');
+        // Lua 5.4 empty-match semantics (`lastmatch`): a match is rejected
+        // when it is empty and ends where the previous accepted match ended,
+        // and the scan then copies one byte and moves on. So
+        // `("abc"):gsub("%a*", "-")` is `"-", 1`, not 5.2's `"--", 2`. A
+        // rejected match always starts at `pos` (any match found further on
+        // ends past the previous one), so the search-based matcher only has to
+        // check the match it found.
+        let mut lastmatch = None;
 
-        while pos <= s.len() {
+        loop {
             if max_replacements.is_some_and(|max| count >= max) {
                 break;
             }
@@ -818,32 +844,27 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
             }
 
             let range = matcher.range();
+            if range.start == range.end && lastmatch == Some(range.end) {
+                if pos == s.len() {
+                    break;
+                }
+                append_bytes(state, &mut result, &s[pos..=pos])?;
+                pos += 1;
+                continue;
+            }
             append_bytes(state, &mut result, &s[pos..range.start])?;
             captures.clear();
             captures.extend((0..matcher.num_matches()).map(|i| matcher.capture(i)));
             append_gsub_replacement(state, &mut result, &repl_type, &s, &captures, &mut template)?;
             count += 1;
-
-            if range.start == range.end {
-                let match_end = range.end;
-                let next_pos = match_end + 1;
-                if match_end < s.len() {
-                    append_bytes(state, &mut result, &s[match_end..=match_end])?;
-                    pos = next_pos;
-                } else {
-                    pos = s.len() + 1;
-                }
-            } else {
-                pos = range.end;
-            }
+            pos = range.end;
+            lastmatch = Some(range.end);
             if anchored {
                 break;
             }
         }
 
-        if pos <= s.len() {
-            append_bytes(state, &mut result, &s[pos..])?;
-        }
+        append_bytes(state, &mut result, &s[pos..])?;
 
         state.set_top(0)?;
         state.push_bytes(result)?;
@@ -858,7 +879,7 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
     state.register_lib_fn_id(GMATCH_EMPTY_ITER_ID, gmatch_empty_iter)?;
 
     // Set the string table as a global
-    state.set_global("string");
+    state.set_global("string")?;
     Ok(())
 }
 
@@ -923,6 +944,17 @@ fn gmatch_iter(state: &mut State) -> Result<u8> {
     let pos = gmatch_state_index(state.to_number(-1).unwrap_or(0.0));
     state.pop(1)?;
 
+    // End of the previous accepted match, for Lua 5.4's empty-match rule.
+    // A fresh iterator has none.
+    state.push_string("lastmatch")?;
+    state.get_table_raw(1)?;
+    let lastmatch = if state.typ(-1) == LuaType::Number {
+        Some(gmatch_state_index(state.to_number(-1)?))
+    } else {
+        None
+    };
+    state.pop(1)?;
+
     state.expect_string_at_named(2, "gmatch")?;
     state.expect_string_at_named(3, "gmatch")?;
     if pos > state.to_bytes(2)?.len() {
@@ -961,7 +993,28 @@ fn gmatch_iter(state: &mut State) -> Result<u8> {
     state.memoize_gmatch_pattern(3)?;
     let (matched, range, captures) = {
         let (subject, matcher, mut meter) = state.gmatch_subject_matcher_and_cost_meter(2, 3)?;
-        let matched = matcher.matches_bytes_from(subject, pos, &mut meter);
+        // Lua 5.4 semantics: an empty match ending where the previous accepted
+        // match ended is rejected and the scan resumes one byte later, so
+        // `gmatch("abc", "%a*")` yields only "abc", not 5.2's "abc" then "".
+        // Only a match starting at `pos` can be rejected, so this retries at
+        // most once.
+        let mut search = pos;
+        let matched = loop {
+            match matcher.matches_bytes_from(subject, search, &mut meter) {
+                Ok(true) => {
+                    let found = matcher.range();
+                    if found.start == found.end && lastmatch == Some(found.end) {
+                        if search == subject.len() {
+                            break Ok(false);
+                        }
+                        search += 1;
+                        continue;
+                    }
+                    break Ok(true);
+                }
+                other => break other,
+            }
+        };
         let (range, captures) = if matches!(&matched, Ok(true)) {
             (
                 matcher.range(),
@@ -982,9 +1035,11 @@ fn gmatch_iter(state: &mut State) -> Result<u8> {
             &captures[..1]
         };
         preflight_capture_bytes(state, returned.iter().copied())?;
-        let new_pos = range.end + usize::from(range.start == range.end);
         state.push_string("pos")?;
-        state.push_number(new_pos as f64)?;
+        state.push_number(range.end as f64)?;
+        state.set_table_raw(1)?;
+        state.push_string("lastmatch")?;
+        state.push_number(range.end as f64)?;
         state.set_table_raw(1)?;
 
         let num_returns = if captures.len() > 1 {
@@ -1011,6 +1066,7 @@ fn push_gmatch_capture(state: &mut State, capture: LuaCapture) -> Result<()> {
     match capture {
         LuaCapture::Bytes { start, end } => state.push_bytes_from_stack_range(2, start..end),
         LuaCapture::Position(offset) => state.push_number((offset + 1) as f64),
+        LuaCapture::Unfinished => Err(unfinished_capture_error(state)),
     }
 }
 

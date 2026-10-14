@@ -17,7 +17,7 @@ impl<'a> Parser<'a> {
     /// Try to resolve a variable as an upvalue from outer scopes.
     /// Returns the upvalue index if found and added.
     pub(super) fn resolve_upvalue(&mut self, name: &'a str) -> Result<Option<u8>> {
-        self.resolve_upvalue_recursive(name, self.outer_locals.len())
+        self.resolve_upvalue_recursive(name, self.outer_funcs.len())
     }
 
     /// Recursively resolve an upvalue, creating upvalues in intermediate scopes as needed.
@@ -30,7 +30,7 @@ impl<'a> Parser<'a> {
         let parent_idx = depth - 1;
 
         // Check the parent's locals
-        let parent_locals = &self.outer_locals[parent_idx];
+        let parent_locals = &self.outer_funcs[parent_idx].locals;
         if let Some(local_idx) = find_last_local(parent_locals, name) {
             // Found in parent's locals - capture as Local
             let idx = self.add_upvalue(name, UpvalueDesc::Local(local_idx as u8))?;
@@ -38,7 +38,7 @@ impl<'a> Parser<'a> {
         }
 
         // Check the parent's existing upvalues
-        let parent_upvalues = &self.outer_upvalues[parent_idx];
+        let parent_upvalues = &self.outer_funcs[parent_idx].upvalues;
         if let Some(upvalue_idx) = parent_upvalues.iter().position(|(n, _)| *n == name) {
             // Found in parent's upvalues - capture as Upvalue
             let idx = self.add_upvalue(name, UpvalueDesc::Upvalue(upvalue_idx as u8))?;
@@ -66,21 +66,24 @@ impl<'a> Parser<'a> {
         // Check grandparent's locals
         if parent_idx > 0 {
             let grandparent_idx = parent_idx - 1;
-            let grandparent_locals = &self.outer_locals[grandparent_idx];
+            let grandparent_locals = &self.outer_funcs[grandparent_idx].locals;
             if let Some(local_idx) = find_last_local(grandparent_locals, name) {
                 // Found in grandparent's locals - parent captures as Local
                 let upvalue_idx = self.checked_parent_upvalue_index(parent_idx)?;
-                self.outer_upvalues[parent_idx].push((name, UpvalueDesc::Local(local_idx as u8)));
+                self.outer_funcs[parent_idx]
+                    .upvalues
+                    .push((name, UpvalueDesc::Local(local_idx as u8)));
                 return Ok(Some(upvalue_idx));
             }
 
             // Check grandparent's upvalues
-            let grandparent_upvalues = &self.outer_upvalues[grandparent_idx];
+            let grandparent_upvalues = &self.outer_funcs[grandparent_idx].upvalues;
             if let Some(gp_upvalue_idx) = grandparent_upvalues.iter().position(|(n, _)| *n == name)
             {
                 // Found in grandparent's upvalues - parent captures as Upvalue
                 let upvalue_idx = self.checked_parent_upvalue_index(parent_idx)?;
-                self.outer_upvalues[parent_idx]
+                self.outer_funcs[parent_idx]
+                    .upvalues
                     .push((name, UpvalueDesc::Upvalue(gp_upvalue_idx as u8)));
                 return Ok(Some(upvalue_idx));
             }
@@ -91,7 +94,9 @@ impl<'a> Parser<'a> {
             {
                 // Grandparent now has this as an upvalue, so parent can capture it
                 let upvalue_idx = self.checked_parent_upvalue_index(parent_idx)?;
-                self.outer_upvalues[parent_idx].push((name, UpvalueDesc::Upvalue(gp_upvalue_idx)));
+                self.outer_funcs[parent_idx]
+                    .upvalues
+                    .push((name, UpvalueDesc::Upvalue(gp_upvalue_idx)));
                 return Ok(Some(upvalue_idx));
             }
         }
@@ -110,7 +115,7 @@ impl<'a> Parser<'a> {
     }
 
     fn checked_parent_upvalue_index(&self, parent_idx: usize) -> Result<u8> {
-        let len = self.outer_upvalues[parent_idx].len();
+        let len = self.outer_funcs[parent_idx].upvalues.len();
         if len >= MAX_UPVALUES {
             Err(self.error_here(SyntaxError::TooManyUpvalues))
         } else {

@@ -24,79 +24,6 @@ Stdlib findings whose mechanism lives in `src/vm/table.rs` or
    inline instead.
 ```
 
-## STD-001 - Eager pattern compilation raises errors reference Lua never raises
-
-Source: patterns (finding 1, the hunter's one real defect in the engine).
-
-Claim broken: output matches reference Lua for everything implemented. No
-`-- DIFF:` marks this, and neither the README nor `reference/` documents it.
-Because errors kill the callback, a script that works in reference Lua dies
-here.
-
-Reference validates a pattern lazily: `match` only inspects the pattern text it
-actually reaches. `classEnd`, `check_capture`, `capture_to_close`,
-`start_capture`'s level check, and the `%b`/`%f` argument checks all run at
-match time. `Compiler::compile` in `luapat.rs` validates the whole pattern up
-front, and `string.find`/`match`/`gsub`/`gmatch` all call `from_bytes_try`
-before matching. So a malformed tail behind a prefix that never matches errors
-here and returns nil in reference:
-
-| call | lua5.4 / lua5.2 | dellingr |
-|---|---|---|
-| `string.match('b', 'a)')` | `nil` | error "invalid pattern capture" |
-| `string.gsub('b', 'a)', '')` | `b 0` | error |
-| `string.find('abc', 'x(')` | `nil` | error "unfinished capture" |
-| `string.find('abc', 'x%1')` | `nil` | error "invalid capture index %1" |
-| `string.find('abc', 'x[')` | `nil` | error "missing ']'" |
-| `string.match('b', 'a' .. ('()'):rep(40))` | `nil` | error "too many captures" |
-
-`'x%1'` and `'x['` are more than a difference in when the error fires: reference
-never errors on them for any subject that lacks an `x`. Errors that reference
-raises on success (for example `'('` matching, then `get_onecapture` raising
-"unfinished capture") are reproduced, because eager validation is a superset.
-The divergence runs one way only: dellingr errors in more cases.
-
-Hunter's direction:
-- (a) Keep the compiled program, but make validation lazy by compiling an error
-  into the item stream (`Item::Fail(PatternError)` at the first malformed point,
-  raised when `match_at` reaches it). This keeps the compile-once structure and
-  costs nothing on valid patterns, and it restores parity exactly, because every
-  reference error site corresponds to a fixed pattern position. The "unfinished
-  capture" case needs care: reference raises it only when pushing the results of
-  a successful match, so an unclosed `(` must become a deferred "fail on success"
-  flag, not an `Item::Fail` at the `(`.
-- (b) Alternatively, declare eager validation a deliberate divergence in the
-  README and add a `-- DIFF:` example.
-
-Interaction with the compile-time/match-time error split that AGENTS.md calls
-contract: (a) moves errors from `from_bytes_try` to `matches_bytes_from`. See
-also STD-016, whose dead arms become reachable under (a).
-
-## STD-002 - `gsub`/`gmatch` empty-match handling is Lua 5.2's while neighbouring surfaces follow 5.4, and no document says so
-
-Source: stdlib (finding 9) and patterns (finding 2).
-
-Claim broken: the `lua_std.rs` module doc lists the version-sensitive decisions
-per function and does not mention these. Other surfaces are explicitly 5.4:
-`string_format.rs` is "the Lua 5.4 `string.format` engine", and gmatch escapes a
-leading `^` as 5.4 does.
-
-`gsub` and `gmatch_iter` advance one byte after an empty match
-(`new_pos = end + (start == end)`), which is the 5.2 behaviour. 5.4 uses
-`lastmatch` to reject an empty match that ends where the previous match ended:
-- `("abc"):gsub("%a*", "-")` gives `"--", 2` here (5.2) and `"-", 1` in 5.4.
-- `gmatch("abc", "%a*")` yields `"abc"` and then `""` here (5.2), and only
-  `"abc"` in 5.4.
-
-`gsub`'s replacement-string handling follows 5.4, though: `%x` errors with
-"invalid use of '%'", where 5.2 copies `x`. So `string` mixes versions in a way
-nothing documents, and a script exercising both can match neither reference. The
-diff harness accepts either reference per file, so this passes today. `gmatch`
-also silently ignores 5.4's third `init` argument.
-
-Direction (patterns hunter): pick one version (5.4 would be consistent with the
-rest) and say so.
-
 ## STD-003 - Table library ignores `__len`
 
 Source: stdlib (finding 2).
@@ -174,6 +101,13 @@ pattern, and table libraries is charged: ... table elements visited".
 
 Direction: either spell out these exceptions in the README sentence, or change
 the charges (with a `COST_MODEL_VERSION` bump).
+
+Carried over from the `notes/todo.md` entry this replaces: the flat 1 for
+`table.insert`/`table.remove` is recorded in a `src/lua_std/table.rs` comment
+as a cost-model choice. The suggested charge is by shift distance
+(`len - pos + 1`), as `table.move` charges per element. That changes
+`cost_used` and invalidates saves, so it should be bundled with any other
+pending `COST_MODEL_VERSION` bump (see VM-002) rather than shipped alone.
 
 ## STD-007 - `string.format("%q", n)` matches neither reference for integral numbers
 
@@ -317,36 +251,3 @@ Source: stdlib (finding 15).
 - `string.find`/`match`/`gsub`/`gmatch`/`upper`/... copy the subject into a fresh
   `Vec` on every call (`string_or_number_bytes`). The copy is charged, but it is
   an avoidable allocation on the hottest string paths.
-
-## STD-016 - Pattern engine dead arms and smaller items
-
-Source: patterns (finding 3).
-
-- `Item::Backref`'s `CapLen::Unfinished` arm returns
-  `PatternError::UnfinishedCapture`, where reference raises "invalid capture
-  index %N" at that site (`check_capture`). The arm is unreachable today because
-  the compiler rejects backrefs to open captures, so it is dead code with a wrong
-  message. If STD-001 moves validation to match time, it becomes reachable and
-  the message must change.
-- The pattern engine never constructs `PatternError::InvalidCaptureIndex(None)`
-  (only tests in `errors.rs` do). The `Option` exists only for the shared
-  `PatternErrorDetail` used by gsub replacement errors.
-- `max_expand` takes a `min` parameter that every caller passes as `0` (`+`
-  pre-advances `pos` instead). The `end == pos + min` break is just
-  `end == pos`.
-- `MatchState::captures` can return `UnfinishedCapture` on a successful match,
-  but success traverses every item (no alternation, `$` only at the end), and the
-  compiler rejects unclosed captures, so that path is unreachable. It is fine as
-  a guard, but deserves an `expect`-style comment rather than a user-facing
-  error.
-- Compile-time host work is not proportional to the charged cost. Each `%x`
-  escape and each bracket-class escape loops over all 256 bytes, and each class
-  is interned through a `BTreeMap<[u64;4]>`. Callers charge `pattern.len()`, so a
-  pattern of N escapes does about 256N uncharged work. This is bounded and within
-  the README's "structural work is free" framing, so the hunter does not call it
-  a cost-model defect, but a `const` 256-bit table per class letter would remove
-  the loop.
-- The empty-item fast path in `str_match` (pattern `""` or `"^"`) charges no
-  matcher cost, whereas every other match charges at least one `charge()`. This
-  is deterministic and harmless, but inconsistent with "matcher primitives each
-  consume budget".

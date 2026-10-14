@@ -38,6 +38,12 @@ identical source - re-measure tick budgets.
   stdlib function named.
 - **`save_state` fails with `NotQuiescent` inside a Rust callback.**
 - **`State::cost_remaining()` returns `i64::MAX`** when no budget is set.
+- **`State::set_global` returns `Result<()>`.** An empty visible frame returns
+  `InvalidStackIndex` without changing the stack or global.
+- **Host `State::call` rejects `ArgCount::Dynamic`.** Hosts must supply
+  `ArgCount::Fixed`; dynamic counts are reserved for bytecode calls.
+- **`string.gsub` and `string.gmatch` use Lua 5.4's empty-match rule.** An
+  empty match ending where the previous accepted match ended is skipped.
 - **`table_insert_at`** resolves a negative table index before popping the
   value, like the other table accessors.
 - **CLI:** `Cost used: N` and the `--analyze` caveat go to stderr; unknown
@@ -59,6 +65,13 @@ identical source - re-measure tick budgets.
   `InvalidStackIndex` instead of panicking.
 - Comparisons in conditions compile to fused compare-and-branch opcodes; cost
   is unchanged.
+- Flat `elseif` and expression suffix chains are parsed iteratively, so their
+  length no longer counts against the syntax-depth budget. Nested expressions
+  still do.
+- Pattern validation is lazy, as in reference Lua: malformed pattern parts
+  raise only when matching reaches them, and unfinished captures raise only
+  when a library function reads them.
+- `string.gmatch` accepts Lua 5.4's optional `init` argument.
 
 ### Fixed
 
@@ -70,6 +83,10 @@ identical source - re-measure tick budgets.
   of non-callable values, and double-reported errors propagated through Rust
   callbacks.
 - `break` outside a loop reported line 1.
+- `break` inside a nested function could bind to an enclosing function's loop;
+  it now raises a compile error unless the nested function has its own loop.
+- `State::call_anchor` validates argument counts against the visible frame
+  before inserting the callee, so missing arguments leave the stack untouched.
 - `string.find` took the plain-text fast path for patterns containing `)`.
 - The upvalue pool and the `string.format("%p")` id map grew without bound in
   long-lived States; both are now swept by GC.

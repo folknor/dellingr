@@ -117,92 +117,6 @@ admission check, so the error path stays cold. The failing opcode was already
 admitted and executed, so charging it is consistent with "the action that pushes
 you over budget completes".
 
-## VM-003 - A host `call(ArgCount::Dynamic, ..)` inside a callback consumes the Lua caller's pending call base
-
-Source: vm-exec (MEDIUM) and embedding (finding 1, ranked first there).
-
-Where: `eval.rs` `State::call`, `ArgCount::Dynamic` arm.
-
-`OP_MARK_CALL_BASE` pushes an absolute base and then evaluates the arguments.
-Those arguments can call a `RustFunc`, as in `print(g())` or `f(1, g())`. If
-`g` calls `state.call(ArgCount::Dynamic, ..)`, `vararg_call_bases.pop()`
-succeeds and returns the outer frame's base, which lies below `g`'s
-`stack_bottom`. The only checks are that the stack is non-empty and a
-`checked_sub` against the absolute stack length. The call then does
-`self.stack.remove(base)` on a caller-owned slot and calls the outer callee with
-arguments spanning both frames. Later, the outer frame's own Dynamic `OP_CALL`
-fails with "no vararg_call_base set" / `InternalError`, or uses a stale base.
-
-Claims broken:
-- `call`'s doc: "Dynamic calls are bytecode-internal and return an error if used
-  by a host". This holds only when no Lua frame has a pending base.
-- The comment on `OP_MARK_CALL_BASE` names exactly this hazard ("would treat a
-  caller-owned slot as this call's callee") and validates against
-  `stack_bottom` at the marker. The consumer never repeats that check, even
-  though `stack_bottom` changes in between.
-- The stack-cap and frame-isolation invariants in AGENTS.md.
-
-`call_anchor` already rejects `Dynamic` explicitly, with a comment describing
-this hazard. `call` does not.
-
-Direction: at minimum, reject `base < self.stack_bottom` without popping.
-Better, reject `Dynamic` at the public entry point and split an internal
-`call_dynamic` out for the dispatch loop. Best, take `Dynamic` out of the public
-`ArgCount` entirely, since it is a bytecode encoding detail (see VM-021 on the
-`Fixed(255)` sentinel collision).
-
-## VM-004 - `State::set_global` pops below the current frame and can panic
-
-Source: vm-exec (MEDIUM) and embedding (finding 2).
-
-Where: `vm.rs` `set_global`, which calls `pop_val()` directly.
-
-- `pop_val` ignores `stack_bottom`. A `RustFunc` whose visible frame is empty
-  (`get_top() == 0`) and that calls `state.set_global("x")` silently pops the top
-  value of the calling Lua frame, such as a temporary or a local, and installs it
-  as the global. This corrupts the running Lua function.
-- Back in `call`, `num_ret_actual = self.get_top()` computes
-  `stack.len() - stack_bottom` with `stack.len() < stack_bottom`. That underflows
-  a usize: a panic in debug and a huge count in release.
-- With an empty backing stack at the top level, `set_global` panics with "VM
-  bug: pop from empty stack".
-
-Claim broken: AGENTS.md says the public stack API is fallible and a rejected
-operation leaves the stack unchanged. Every sibling (`pop`, `set_table_raw`,
-`concat`, `call`, `anchor`, `set_metatable_of`) validates against the visible
-frame, several with comments saying the host must get an error rather than reach
-the panicking `pop_val`. `set_global` is infallible, so it cannot even report
-the misuse.
-
-Direction: return `Result<()>` and check `get_top() >= 1` (for example via
-`at_index(-1)`) before popping.
-
-Doc nit (vm-exec): its doc comment reads "Instr::pop()s a value", which looks
-like a find-and-replace accident.
-
-## VM-005 - `call_anchor` checks the argument count against the absolute stack and mutates before failing
-
-Source: vm-heap (finding 4) and embedding (finding 3).
-
-Where: `src/vm/anchor.rs` `call_anchor`.
-
-It computes `insert_at = self.stack.len().checked_sub(n_args)` against the
-absolute stack length, not `get_top()`. Inside a `RustFunc` (`stack_bottom > 0`)
-with fewer than `n_args` visible values, `insert_at` lands below
-`stack_bottom`, and the function is `stack.insert`ed into the Lua caller's
-registers. `call(Fixed(n))` then fails its `get_top() >= n+1` check with
-`InvalidStackIndex`. The inserted value is never removed, so the caller's frame
-stays shifted by one slot.
-
-Claims broken: the anchor module's "errors leave the stack untouched"
-discipline, and the Anchor docs' promise that misuse surfaces as errors rather
-than silent corruption. Also README "Runtime limits": a rejected operation
-leaves the stack exactly as it was. Also `call`'s "A fixed call with
-insufficient stack values returns `InvalidStackIndex`", which holds only for the
-error, not the side effect.
-
-Direction: validate `n_args <= self.get_top()` before any mutation.
-
 ## VM-006 - Host table and metatable methods consume their operands before they fail
 
 Source: embedding (finding 4) and vm-exec (finding 7, second bullet). vm-exec
@@ -230,7 +144,8 @@ popping", but they validate only the stack shape, not the types.
 Direction: peek, validate everything, and pop only on commit, as
 `concat_helper` already does ("Intern before truncating").
 
-Structural direction (embedding, covering VM-004, VM-005, VM-006 and VM-007):
+Structural direction (embedding, covering this entry, VM-007 and the
+since-fixed `set_global` / `call_anchor` / host `Dynamic` call cases):
 the host API is a C-API-style set of stack-twiddling methods, each
 re-implementing "validate, then pop" by hand, and the same methods double as
 stdlib internals with stdlib-only preconditions. Split it into a narrow, fully
@@ -311,6 +226,12 @@ binary search and the `cached_array_len` bookkeeping. Interim fixes:
 `array_remove` overwrites `t[i] = t[i+1]` in place and removes only the last
 key. If the flat cost is kept, the host work must at least be linear.
 
+Constraint carried over from the `notes/todo.md` entry this replaces: the
+insertion order of surviving keys is replay-visible through `pairs()`, so any
+fix has to pin down what that order becomes and treat a change to it as a
+determinism-visible change. `array_insert` should be checked for the same
+quadratic shape.
+
 ## VM-009 - `table.remove` with `pos == 0` returns nil and leaves `t[0]`
 
 Source: vm-heap (finding 2) and stdlib (finding 6).
@@ -365,23 +286,6 @@ dropped explicitly.
 Direction: a rebuild keeps the old counter and bumps it past the old value
 instead of resetting it. More generally, a per-State monotonic "shape epoch"
 would make version collisions impossible by construction.
-
-## VM-012 - `StringPool::collect` is O(dead x live) through `IndexMap::shift_remove`
-
-Source: vm-heap (finding 6). The hunter flags this as a performance defect, not a
-correctness one, and says the comment justifying the structure is inaccurate.
-
-For each removed string, `collect` calls `hash_index.shift_remove(&hash)`, which
-shifts every later bucket. A collection that frees k of n strings costs O(k*n).
-String-heavy scripts (gsub or concat churn) pay this on every cycle. The comment
-says the index is "Iterated only during GC sweep", but it is never iterated.
-Insertion order is irrelevant, so `swap_remove` (or a single `retain` pass) is
-correct.
-
-Related: the pool computes an Fx hash, and then
-`IndexMap<u64, Vec<StringKey>>` re-hashes that u64 with SipHash (`RandomState`).
-A `hashbrown::HashTable<StringKey>` keyed by the stored hash would avoid both the
-second hash and the per-bucket `Vec` allocation.
 
 ## VM-013 - Every `IndexMap` in the VM uses the default `RandomState` hasher
 
@@ -528,8 +432,10 @@ Source: embedding (smaller item).
 
 `call` accepts `ArgCount::Fixed(255)` (`MAX_ARGUMENTS = 255`), but that value
 cannot round-trip through `to_u8`, because 255 is the `Dynamic` sentinel. This is
-harmless today because host calls never encode. Together with VM-003, it argues
-for a separate host-facing argument type with neither a sentinel nor `Dynamic`.
+harmless today because host calls never encode. The public `State::call` now
+rejects `Dynamic` at runtime (bytecode uses an internal `call_op`), but hosts
+can still name `ArgCount::Dynamic`. Both point to a separate host-facing
+argument type with neither a sentinel nor `Dynamic`.
 
 ## VM-022 - The host `get_table` disagrees with the `t[k]` opcode on string receivers
 
@@ -629,15 +535,10 @@ Also noted: the `__call` path in `call` preflights 2 slots after already removin
 the callable, though it needs only +1 net, so a call exactly at the stack cap is
 rejected even though it would fit. The hunter called this harmless.
 
-## VM-029 - Embedding-surface smaller items: CLI `-`, `ScopeCost` labels, anonymous scope numbering, README `Anchor` bounds
+## VM-029 - Embedding-surface smaller items: `ScopeCost` labels, anonymous scope numbering, README `Anchor` bounds
 
 Source: embedding (smaller items).
 
-- **CLI `-` argument** (`src/main.rs`): `parse_args` special-cases `"-"` so it is
-  not rejected as an unknown option, which is the conventional stdin spelling. It
-  then passes `"-"` to `fs::read_to_string` as a file named `-`. Nothing documents
-  stdin support, so no claim breaks, but the special case implies an intent the
-  code does not carry out. Either read stdin or drop the special case.
 - **`ScopeCost` display**: `function_calls` counts only `OP_CALL`, not
   `OP_TFOR_CALL` or metamethod calls, yet the summary labels it "Function calls".
   `fmt_indent` never prints a per-scope call count, so the per-scope breakdown
@@ -669,3 +570,27 @@ stdlib scope).
 `_G.k = nil` (or any global set to nil) inserts a `Nil` entry into `globals`
 through `set_global_value_owned` and never removes it. A script cycling through
 generated global names grows the map without bound.
+
+## VM-032 - `call_anchor` errors bypass `State::error`, unlike `call`
+
+Source: lateral finding from a resolution-loop fixer.
+
+`call_anchor` (`src/vm/anchor.rs`) builds its errors with
+`Error::without_location`, so they skip `self.error(...)`, while `State::call`
+reports through `self.error`. The two host entry points therefore report
+failures inconsistently: an anchor-call error carries no location and may not
+reach the host's `on_error` notification. The wave reviewer read it more
+broadly: the preflight errors of direct `State::call` also bypass `on_error`,
+because `State::error` only constructs an error and does not notify. The
+changelog describes `on_error` as firing for every exit.
+
+## VM-033 - `from_bytes_try` can no longer fail, but its `Result` and the gmatch compile-error cache remain
+
+Source: lateral finding from a resolution-loop fixer.
+
+Pattern validation is now lazy (the first malformed point compiles to an
+`Item::Fail` raised at match time), so `patterns::from_bytes_try` always
+returns `Ok`. It keeps its `Result` signature only so callers outside the
+patterns module kept compiling. `src/vm.rs` (around `memoize_gmatch_pattern`)
+still caches a compile error that cannot occur. Make the compile infallible and
+delete the dead error path.

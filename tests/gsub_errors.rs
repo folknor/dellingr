@@ -327,6 +327,56 @@ fn malformed_patterns_are_pattern_errors_in_all_wrappers() {
 }
 
 #[test]
+fn unclosed_captures_error_only_when_a_caller_reads_them() {
+    // Reference raises "unfinished capture" from `get_onecapture`, so every
+    // wrapper that returns all captures errors, while a gsub string
+    // replacement errors only if it names the unclosed capture. The non-error
+    // half lives in examples/pattern_lazy_validation.lua.
+    for code in [
+        r#"return string.find("abc", "(a")"#,
+        r#"return string.match("abc", "(a")"#,
+        r#"for _ in string.gmatch("abc", "(a") do end"#,
+        r#"return string.gsub("abc", "(a", "%1")"#,
+        r#"return string.gsub("abc", "(a)(b", "%2")"#,
+        r#"return string.gsub("abc", "(a", {})"#,
+        r#"return string.gsub("abc", "(a", function() end)"#,
+    ] {
+        let mut state = State::new();
+        state.load_string(code).unwrap();
+        let err = state
+            .call(ArgCount::Fixed(0), RetCount::Fixed(2))
+            .unwrap_err();
+        assert!(
+            matches!(err.kind, ErrorKind::PatternError(_)),
+            "{code}: {err:?}"
+        );
+        assert!(
+            err.to_string().contains("unfinished capture"),
+            "{code}: {err}"
+        );
+    }
+}
+
+#[test]
+fn malformed_pattern_tails_error_only_when_reached() {
+    // A malformed point behind a prefix that matches raises; behind one that
+    // never matches it is never reached (examples/pattern_lazy_validation.lua).
+    for (code, expected) in [
+        (
+            r#"return string.find("xabc", "x%1")"#,
+            "invalid capture index %1",
+        ),
+        (r#"return string.find("xabc", "x[")"#, "missing ']'"),
+        (
+            r#"return string.match("ab", "a)")"#,
+            "invalid pattern capture",
+        ),
+    ] {
+        assert_runtime_error(code, expected);
+    }
+}
+
+#[test]
 fn gsub_validates_replacement_grammar_only_for_actual_replacements() {
     for replacement in ["%q", "%"] {
         assert_runtime_error(

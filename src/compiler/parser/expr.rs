@@ -253,33 +253,61 @@ impl Parser<'_> {
         self.parse_prefix_extension(prefix)
     }
 
-    /// Attempts to parse an extension to a prefix expression: a field access,
-    /// table index, or function/method call.
+    /// Parses every extension of a prefix expression: field accesses, table
+    /// indexes, and function/method calls, in a loop like reference Lua's
+    /// `suffixedexp`. A suffix chain is flat, so its length adds no syntax
+    /// depth. Parsing the contents of an index or call charges a level while
+    /// those contents are active, in addition to their expression levels.
     #[hotpath::measure]
     fn parse_prefix_extension(&mut self, base_expr: PrefixExp) -> Result<PrefixExp> {
-        self.enter_syntax_level()?;
-        let result = self.parse_prefix_extension_inner(base_expr);
-        self.exit_syntax_level();
-        result
+        let mut expr = base_expr;
+        loop {
+            // These suffixes retain this loop and the suffix parser while
+            // descending into expressions. Keep their previous depth charge:
+            // without it, nested calls and indexes allow more native frames
+            // per syntax-budget tick than parenthesized expressions do. The
+            // charge is two ticks, not one: the suffix parser's frame is fat
+            // enough in debug builds that a single tick left nested calls
+            // overflowing a default 2MB test thread before the limit hit
+            // (syntax_depth_headroom).
+            let nested = matches!(
+                self.input.peek_type()?,
+                TokenType::LSquare | TokenType::LParen | TokenType::LCurly | TokenType::Colon
+            );
+            if nested {
+                self.enter_syntax_level()?;
+                self.enter_syntax_level()?;
+            }
+            let result = self.parse_prefix_suffix(&expr);
+            if nested {
+                self.exit_syntax_level();
+                self.exit_syntax_level();
+            }
+            match result? {
+                Some(extended) => expr = extended,
+                None => break,
+            }
+        }
+        Ok(expr)
     }
 
-    fn parse_prefix_extension_inner(&mut self, base_expr: PrefixExp) -> Result<PrefixExp> {
-        match self.input.peek_type()? {
+    /// Parses one suffix applied to `base_expr`, or returns `None` (consuming
+    /// nothing) when the next token does not start a suffix.
+    fn parse_prefix_suffix(&mut self, base_expr: &PrefixExp) -> Result<Option<PrefixExp>> {
+        let next = match self.input.peek_type()? {
             TokenType::Dot => {
-                self.eval_prefix_exp(&base_expr);
+                self.eval_prefix_exp(base_expr);
                 self.input.next()?;
                 let field_name = self.expect_identifier()?;
                 let name_idx = self.find_or_add_string(field_name)?;
-                let prefix = PlaceExp::FieldAccess(name_idx).into();
-                self.parse_prefix_extension(prefix)
+                PlaceExp::FieldAccess(name_idx).into()
             }
             TokenType::LSquare => {
-                self.eval_prefix_exp(&base_expr);
+                self.eval_prefix_exp(base_expr);
                 self.input.next()?;
                 self.parse_expr()?;
                 self.expect(TokenType::RSquare)?;
-                let prefix = PlaceExp::TableIndex.into();
-                self.parse_prefix_extension(prefix)
+                PlaceExp::TableIndex.into()
             }
             TokenType::LParen | TokenType::LiteralString | TokenType::LCurly => {
                 let line = self.input.peek()?.line;
@@ -297,7 +325,7 @@ impl Parser<'_> {
                 // field access, and is not even a fixed number for an inner
                 // call - the base then pointed at the receiver and the VM
                 // called that instead of the callee.
-                self.eval_prefix_exp(&base_expr);
+                self.eval_prefix_exp(base_expr);
                 // Always mark call base - needed when last arg is vararg or a
                 // function call, both of which make the argument count dynamic.
                 let mark_idx = self.chunk.code.len();
@@ -312,12 +340,11 @@ impl Parser<'_> {
                     self.chunk.code[mark_idx] = Instr::nop();
                     ArgCount::Fixed(self.checked_fixed_arg_count(num_args as usize, 0)?)
                 };
-                let prefix = PrefixExp::FunctionCall(CallSite::new(num_args, line));
-                self.parse_prefix_extension(prefix)
+                PrefixExp::FunctionCall(CallSite::new(num_args, line))
             }
             TokenType::LParenLineStart => {
                 let pos = self.input.next()?.start;
-                Err(self.error_at(SyntaxError::LParenLineStart, pos))
+                return Err(self.error_at(SyntaxError::LParenLineStart, pos));
             }
             TokenType::Colon => {
                 let line = self.input.peek()?.line;
@@ -329,7 +356,7 @@ impl Parser<'_> {
                 // The dup/get_field/swap below leaves the resolved method in
                 // that marked slot with the receiver above it, which is exactly
                 // the [callee, args...] layout the call expects.
-                self.eval_prefix_exp(&base_expr);
+                self.eval_prefix_exp(base_expr);
                 // Always mark call base - needed when last arg is vararg or a
                 // function call, both of which make the argument count dynamic.
                 let mark_idx = self.chunk.code.len();
@@ -361,11 +388,11 @@ impl Parser<'_> {
                     ArgCount::Fixed(self.checked_fixed_arg_count(num_args as usize, 1)?)
                 };
                 // Stack: [method, obj, arg1, arg2, ...]
-                let prefix = PrefixExp::FunctionCall(CallSite::new(num_args, line));
-                self.parse_prefix_extension(prefix)
+                PrefixExp::FunctionCall(CallSite::new(num_args, line))
             }
-            _ => Ok(base_expr),
-        }
+            _ => return Ok(None),
+        };
+        Ok(Some(next))
     }
 
     /// Parses a 'base' expression, after eliminating any operators. This can be:

@@ -211,12 +211,15 @@ impl State {
     /// Push the anchored value and call it. Convenience over
     /// `push_anchor` + `call`. Cost charges through the existing dispatch
     /// path; `anchor` and `release_anchor` themselves charge nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidStackIndex` without changing the stack if the current
+    /// frame has fewer than the requested arguments. `ArgCount::Dynamic` is
+    /// reserved for bytecode and is rejected without changing the stack.
     pub fn call_anchor(&mut self, a: Anchor, args: ArgCount, rets: RetCount) -> Result<()> {
-        // The function must be pushed BEFORE the args are arranged on the
-        // stack by the caller. Embedder protocol: push args, then
-        // call_anchor (which inserts the function below the args).
-        // Implementation: push the function on top, then rotate it under
-        // the args.
+        // Hosts push only the arguments. Insert the anchored function below
+        // them to provide call's callee-then-arguments stack layout.
         let val = match self.registry.get(a) {
             Some(val) => val,
             None => return Err(Error::without_location(ErrorKind::InvalidAnchor)),
@@ -235,12 +238,17 @@ impl State {
                 )));
             }
         };
-        // Insert the fn below the n_args topmost values.
-        let insert_at = self.stack.len().checked_sub(n_args).ok_or_else(|| {
-            Error::without_location(ErrorKind::InvalidStackIndex {
+        // Insert the fn below the n_args topmost values. Validate against the
+        // visible frame (get_top), not the absolute stack: inside a RustFunc
+        // an absolute check would let insert_at land below stack_bottom and
+        // shift the calling Lua frame's registers, and `call` would then fail
+        // with the inserted value left behind. Check before any mutation.
+        if n_args > self.get_top() {
+            return Err(Error::without_location(ErrorKind::InvalidStackIndex {
                 index: -(n_args as isize) - 1,
-            })
-        })?;
+            }));
+        }
+        let insert_at = self.stack.len() - n_args;
         self.check_stack_space(1)?;
         self.stack.insert(insert_at, val);
         self.call(args, rets)

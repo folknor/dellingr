@@ -873,7 +873,7 @@ fn a_rejected_named_push_does_not_register_the_function() {
     state
         .push_rust_fn(host_fn)
         .expect("room again below the cap");
-    state.set_global("host_fn");
+    state.set_global("host_fn").unwrap();
 
     let err = state
         .save_state()

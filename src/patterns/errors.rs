@@ -2,11 +2,16 @@ use core::fmt;
 
 use crate::error::{MalformedPatternDetail, PatternErrorDetail};
 
-/// Error type returned by _try methods
-#[derive(Clone, PartialEq, Debug)]
+/// A malformed-pattern or match-limit error. Raised at match time, at the
+/// point reference Lua would raise it; `Copy` so the compiled item stream can
+/// carry one in `Item::Fail`.
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub(crate) enum PatternError {
     InvalidPatternCapture,
-    InvalidCaptureIndex(Option<i8>),
+    /// Zero-based capture index (`%1` is 0, `%0` is -1). The matcher always
+    /// knows it; the public `PatternErrorDetail` keeps an `Option` for its
+    /// index-less display form, which this engine never produces.
+    InvalidCaptureIndex(i8),
     MalformedPattern(MalformedPattern),
     TooManyCaptures,
     MatchDepthExceeded,
@@ -14,7 +19,7 @@ pub(crate) enum PatternError {
 }
 
 /// Error returned while executing a compiled Lua pattern.
-#[derive(PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub(crate) enum MatchError {
     Pattern(PatternError),
     BudgetExceeded,
@@ -44,7 +49,7 @@ impl From<&PatternError> for PatternErrorDetail {
     fn from(error: &PatternError) -> Self {
         match error {
             PatternError::InvalidPatternCapture => Self::InvalidPatternCapture,
-            PatternError::InvalidCaptureIndex(index) => Self::InvalidCaptureIndex(*index),
+            PatternError::InvalidCaptureIndex(index) => Self::InvalidCaptureIndex(Some(*index)),
             PatternError::MalformedPattern(reason) => Self::MalformedPattern(match reason {
                 MalformedPattern::EndsWithPercent => MalformedPatternDetail::EndsWithPercent,
                 MalformedPattern::MissingBalancedArguments => {
@@ -80,11 +85,7 @@ mod tests {
                 "invalid pattern capture",
             ),
             (
-                PatternError::InvalidCaptureIndex(None),
-                "invalid capture index",
-            ),
-            (
-                PatternError::InvalidCaptureIndex(Some(-1)),
+                PatternError::InvalidCaptureIndex(-1),
                 "invalid capture index %0",
             ),
             (

@@ -354,6 +354,6 @@ pub(crate) fn open_math(state: &mut State) -> Result<()> {
     state.set_table_str_key_number(-1, "huge", f64::INFINITY)?;
 
     // Set the math table as a global
-    state.set_global("math");
+    state.set_global("math")?;
     Ok(())
 }

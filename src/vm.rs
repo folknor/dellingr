@@ -535,8 +535,8 @@ impl State {
 
     /// Compile and retain a `string.gmatch` pattern on its first iteration.
     ///
-    /// Calling this from the iterator rather than its constructor preserves
-    /// gmatch's deferred pattern-validation behaviour.
+    /// The iterator charges compilation once on first use. Malformed pattern
+    /// points are encoded in the compiled matcher and raise only when reached.
     pub(crate) fn memoize_gmatch_pattern(&mut self, idx: isize) -> Result<()> {
         // Preserve the caller's relative argument number even inside a nested
         // native frame. Wrong types in saved iterator state use the same
@@ -568,7 +568,7 @@ impl State {
                 .as_string(&self.heap)
                 .expect("string pointer came from a string value"),
         );
-        let error = compiled.as_ref().err().cloned();
+        let error = compiled.as_ref().err().copied();
         while self.gmatch_patterns.len() >= GMATCH_PATTERN_CACHE_ENTRIES
             || self.gmatch_pattern_bytes.saturating_add(pattern_len) > GMATCH_PATTERN_CACHE_BYTES
         {
@@ -621,17 +621,16 @@ impl State {
             .expect("expect_string_at validated the pattern's string type");
         // The sole caller is gmatch_iter: it memoizes immediately before this
         // borrow, with no allocation or collection between the two calls.
-        // Recompiling here would change deferred errors and instruction costs.
-        // Both of these are caller-ordering invariants rather than script-
-        // reachable states: the iterator memoizes before matching, and a cached
-        // compilation failure is surfaced before we get here. They are still
-        // reported rather than asserted, so a future caller that gets the order
-        // wrong sees an error instead of a panic in a host callback.
+        // A missing entry is a caller-ordering failure rather than a script-
+        // reachable state. Report it instead of asserting, so a future caller
+        // that gets the order wrong sees an error instead of a host panic.
         let entry = gmatch_patterns.get_mut(&pattern_ptr).ok_or_else(|| {
             Error::without_location(ErrorKind::InternalError(
                 "gmatch pattern was not memoized before matching".into(),
             ))
         })?;
+        // Compilation currently cannot fail; this guard remains with the
+        // cache's Result representation until that representation is removed.
         let matcher = match entry.pattern.as_mut() {
             Ok(matcher) => matcher,
             Err(_) => {
@@ -960,12 +959,22 @@ impl State {
         self.push_val(val)
     }
 
-    /// Instr::pop()s a value from the stack and sets it as the new value of global
+    /// Pops a value from the stack and sets it as the new value of global
     /// `name`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidStackIndex` and leaves the stack unchanged when the
+    /// current frame has no visible value; it never pops a slot owned by a
+    /// calling Lua frame.
     #[hotpath::measure]
-    pub fn set_global(&mut self, name: &str) {
+    pub fn set_global(&mut self, name: &str) -> Result<()> {
+        if self.get_top() == 0 {
+            return Err(self.error(ErrorKind::InvalidStackIndex { index: -1 }));
+        }
         let val = self.pop_val();
         self.set_global_value(name, val);
+        Ok(())
     }
 
     // Keep native context out of CallInfo: those entries represent Lua frames,

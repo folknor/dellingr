@@ -146,7 +146,7 @@ impl<'a> Parser<'a> {
         if self.chunk.nested.len() >= MAX_NESTED {
             return Err(self.error_here(SyntaxError::TooManyNestedFunctions));
         }
-        if self.outer_chunks.len() >= MAX_CHUNK_NESTING {
+        if self.outer_funcs.len() >= MAX_CHUNK_NESTING {
             return Err(self.error_here(SyntaxError::TooManySyntaxLevels));
         }
 

@@ -41,7 +41,7 @@ fn lua_reached_rustfn_error_notifies_on_error_once() {
     let counter = Arc::new(Mutex::new(0));
     let mut state = State::with_callbacks(Box::new(ErrorCounter(Arc::clone(&counter))));
     state.push_rust_fn(boom_fn).unwrap();
-    state.set_global("boom");
+    state.set_global("boom").unwrap();
     state.load_string("return boom()").unwrap();
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
@@ -122,7 +122,7 @@ fn generic_for_rust_iterator_keeps_its_topmost_reported_result() {
     state
         .push_rust_fn(iterator_with_256_visible_values)
         .unwrap();
-    state.set_global("overfull_iter");
+    state.set_global("overfull_iter").unwrap();
     state
         .load_string("for value in overfull_iter do return value end")
         .unwrap();
@@ -149,7 +149,7 @@ fn rustfn_error_restores_stack_bottom() {
             )))
         })
         .unwrap();
-    state.set_global("error_fn");
+    state.set_global("error_fn").unwrap();
 
     // Push some values to establish a stack state.
     state.push_number(1.0).unwrap();
@@ -185,7 +185,7 @@ fn stack_operations_after_rustfn_error() {
             )))
         })
         .unwrap();
-    state.set_global("error_fn");
+    state.set_global("error_fn").unwrap();
 
     // Push a known value
     state.push_number(42.0).unwrap();
@@ -319,7 +319,7 @@ fn multiple_rustfn_errors() {
             )))
         })
         .unwrap();
-    state.set_global("error_fn");
+    state.set_global("error_fn").unwrap();
 
     // Call it multiple times
     for i in 0..5 {
@@ -360,7 +360,7 @@ fn nested_dynamic_callback_error_clears_all_call_frames() {
             )))
         })
         .unwrap();
-    state.set_global("fail");
+    state.set_global("fail").unwrap();
 
     state
         .push_string("host sentinel")
@@ -412,7 +412,7 @@ fn rustfn_called_inside_dynamic_arg_sees_only_its_arguments() {
             Ok(1)
         })
         .unwrap();
-    state.set_global("arg_count");
+    state.set_global("arg_count").unwrap();
 
     state
         .load_string(

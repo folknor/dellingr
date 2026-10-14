@@ -13,7 +13,8 @@
 pub enum ArgCount {
     /// Fixed number of arguments (0-254 in bytecode, 0-255 at runtime).
     Fixed(u8),
-    /// Dynamic: calculate from vararg_call_bases stack.
+    /// Bytecode-only: calculate from the pending call-base stack.
+    /// Public host calls reject this variant; use [`ArgCount::Fixed`] instead.
     Dynamic,
 }
 

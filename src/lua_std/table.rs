@@ -297,7 +297,7 @@ pub(crate) fn open_table(state: &mut State) -> Result<()> {
     }
 
     // Set the table table as a global
-    state.set_global("table");
+    state.set_global("table")?;
     Ok(())
 }
 

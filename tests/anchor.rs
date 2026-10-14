@@ -219,7 +219,7 @@ fn anchored_closure_survives_gc_after_global_dropped() {
 
     // Drop the global reference and force a GC.
     state.push_nil().unwrap();
-    state.set_global("handler");
+    state.set_global("handler").unwrap();
     state.gc_collect();
 
     // The closure should still be reachable through the anchor.

@@ -46,7 +46,7 @@ fn collectable_tombstone_key_survives_next_control_lookup() {
             Ok(0)
         })
         .unwrap();
-    state.set_global("force_gc");
+    state.set_global("force_gc").unwrap();
     state
         .load_string("local t = {}; local a = {}; local b = {}; t[a] = 1; t[b] = 2; local control = next(t); t[control] = nil; force_gc(); return next(t, control) == b and 1 or 0")
         .unwrap();

@@ -175,12 +175,9 @@ fn checked_jump_offset_accepts_i16_boundaries_only() {
         literal_indices: Default::default(),
         nest_level: 0,
         locals: Vec::new(),
-        outer_chunks: Vec::new(),
-        outer_literal_indices: Vec::new(),
         loop_breaks: Vec::new(),
         upvalues: Vec::new(),
-        outer_locals: Vec::new(),
-        outer_upvalues: Vec::new(),
+        outer_funcs: Vec::new(),
         current_line: 1,
         syntax_depth: 0,
         fold_barrier: 0,
@@ -1598,12 +1595,9 @@ fn parser_for_limit_test() -> Parser<'static> {
         literal_indices: Default::default(),
         nest_level: 0,
         locals: Vec::new(),
-        outer_chunks: Vec::new(),
-        outer_literal_indices: Vec::new(),
         loop_breaks: Vec::new(),
         upvalues: Vec::new(),
-        outer_locals: Vec::new(),
-        outer_upvalues: Vec::new(),
+        outer_funcs: Vec::new(),
         current_line: 1,
         syntax_depth: 0,
         fold_barrier: 0,
@@ -1936,11 +1930,132 @@ fn syntax_depth_limit_body() {
         "{".repeat(depth),
         "}".repeat(depth)
     ));
+    // Nesting inside a suffix still recurses and still hits the cap.
     assert_too_many_syntax_levels(&format!(
-        "if true then {}end",
-        "elseif true then ".repeat(depth)
+        "local x = {}1{}",
+        "a[(".repeat(depth),
+        ")]".repeat(depth)
     ));
-    assert_too_many_syntax_levels(&format!("a{}", ".b".repeat(depth)));
+    assert_too_many_syntax_levels(&format!(
+        "local x = {}1{}",
+        "f(".repeat(depth),
+        ")".repeat(depth)
+    ));
+}
+
+#[test]
+fn flat_chains_do_not_consume_syntax_depth() {
+    // Reference Lua parses elseif arms and expression suffixes in loops, so
+    // chains far longer than MAX_SYNTAX_DEPTH must compile.
+    let arms = 1_000;
+    parse_str(&format!(
+        "local x = 0 if x == 0 then x = 1 {}else x = 2 end",
+        "elseif x == 1 then x = 3 ".repeat(arms)
+    ))
+    .expect("a long elseif chain must compile");
+    parse_str(&format!("local t = a{}", ".b".repeat(arms)))
+        .expect("a long field path must compile");
+    parse_str(&format!("local t = a{}", "[1]".repeat(arms)))
+        .expect("a long index path must compile");
+    parse_str(&format!("o{}", ":m()".repeat(arms))).expect("a long method chain must compile");
+    parse_str(&format!("f{}", "()".repeat(arms))).expect("a long call chain must compile");
+}
+
+#[test]
+fn long_elseif_chain_runs_the_matching_arm() {
+    let arms = 300;
+    let mut source = String::from(
+        "local function assert(c) if not c then error('assertion failed') end end \
+         local x = 250 local hit = -1 if x == 0 then hit = 0 ",
+    );
+    for arm in 1..arms {
+        source.push_str(&format!("elseif x == {arm} then hit = {arm} "));
+    }
+    source.push_str("else hit = -2 end assert(hit == 250)");
+    let mut state = State::new();
+    state
+        .load_string(&source)
+        .expect("long elseif chain compiles");
+    state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+        .expect("the matching arm runs");
+}
+
+#[test]
+fn mixed_suffix_chain_preserves_dynamic_call_arguments() {
+    let mut state = State::new();
+    state
+        .load_string(
+            "local function assert(c) if not c then error('assertion failed') end end \
+             local leaf = {} \
+             function leaf:m(x, y) \
+               assert(self == leaf and x == 4 and y == 5) \
+               return function(a, b) return a + x, b + y end \
+             end \
+             local root = {b = {leaf}} \
+             local function args() return 4, 5 end \
+             local x, y = root.b[1]:m(args())(args()) \
+             assert(x == 8 and y == 10)",
+        )
+        .expect("mixed suffix chain compiles");
+    state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+        .expect("both dynamic calls receive their own arguments");
+}
+
+#[test]
+fn break_in_nested_function_is_outside_any_loop() {
+    // Loop context is per-function: a `break` in a function literal must not
+    // bind to the enclosing function's loop (it once emitted a jump into the
+    // nested chunk and then patched the outer chunk at that index).
+    let loops = [
+        ("while true do ", " end"),
+        ("repeat ", " until true"),
+        ("for i = 1, 3 do ", " end"),
+        ("for k, v in pairs({}) do ", " end"),
+    ];
+    let bodies = [
+        "local f = function() break end",
+        // Long inner body: the nested jump index lies past the outer chunk.
+        "local f = function() local a = 1 local b = 2 local c = 3 local d = 4 \
+         local e = 5 local g = 6 local h = 7 break end",
+        // Break nested in a loop-free block of the inner function.
+        "local function f() if true then break end end",
+    ];
+    for (open, close) in loops {
+        for body in bodies {
+            let source = format!("{open}{body}{close}");
+            let err = parse_str(&source)
+                .expect_err("break inside a nested function's non-loop body must fail");
+            assert!(
+                matches!(
+                    err.kind,
+                    ErrorKind::SyntaxError(SyntaxError::BreakOutsideLoop)
+                ),
+                "{source}: unexpected error {err:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn loops_inside_and_around_nested_functions_keep_their_own_breaks() {
+    // A loop in the nested function and a loop around it each patch only
+    // their own breaks.
+    let source = "local function assert(c) if not c then error('assertion failed') end end \
+        local n = 0 \
+        while true do \
+          n = n + 1 \
+          local f = function() local s = 0 for i = 1, 10 do s = s + i if i == 3 then break end end return s end \
+          assert(f() == 6) \
+          if n > 2 then break end \
+        end \
+        assert(n == 3)";
+    let mut state = State::new();
+    state.load_string(source).expect("source compiles");
+    state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+        .expect("both loops break correctly");
 }
 
 #[test]
@@ -1968,12 +2083,23 @@ fn syntax_depth_headroom() {
     ))
     .expect("paren nesting below the limit must compile");
 
-    // elseif chains recurse on their own axis, bypassing parse_statements.
+    // Nested call arguments and indexes retain additional suffix-parser
+    // frames. Their active contents charge two extra ticks (four per level) to
+    // keep native-stack usage per budget tick below the parenthesis cycle
+    // above; 63 levels at three ticks overflowed a 2MB thread.
+    let suffix_depth = depth / 4;
     parse_str(&format!(
-        "if true then {}end",
-        "elseif true then ".repeat(depth)
+        "local x = {}1{}",
+        "f(".repeat(suffix_depth),
+        ")".repeat(suffix_depth)
     ))
-    .expect("elseif chaining below the limit must compile");
+    .expect("call nesting below the limit must compile");
+    parse_str(&format!(
+        "local x = {}1{}",
+        "a[".repeat(suffix_depth),
+        "]".repeat(suffix_depth)
+    ))
+    .expect("index nesting below the limit must compile");
 }
 
 // ---------------------------------------------------------------------------

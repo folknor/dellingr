@@ -623,3 +623,14 @@ in todo.md's workload-registry entry).
   preceding class item at pattern start is literal; conservative is fine,
   just noting the fast path misses hyphenated plain needles like
   `"foo-bar"`.
+- **String-pool sweep is O(dead x live):** `StringPool::collect`
+  (`src/vm/object.rs`) calls `hash_index.shift_remove(&hash)` per freed
+  string, which shifts every later bucket, so a collection freeing k of n
+  strings costs O(k*n) - gsub/concat churn pays it every cycle. The index's
+  insertion order is never observed (its comment says "Iterated only during
+  GC sweep", but nothing iterates it), so `swap_remove` or one `retain` pass
+  is correct. Further: the pool computes an Fx hash and then
+  `IndexMap<u64, Vec<StringKey>>` re-hashes that u64 with SipHash; a
+  `hashbrown::HashTable<StringKey>` keyed by the stored hash drops the second
+  hash and the per-bucket `Vec`. Measure on `alloc/gc_churn` and
+  `strings/mixed`.

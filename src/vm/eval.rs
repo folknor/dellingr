@@ -37,14 +37,46 @@ impl State {
     /// `limits::MAX_RESULTS`. Reporting state follows the Error value: returning
     /// an already reported Error from a later callback does not report it again.
     pub fn call(&mut self, num_args: ArgCount, num_ret_expected: RetCount) -> Result<()> {
+        // ArgCount::Dynamic consumes a base pushed by OP_MARK_CALL_BASE. A
+        // RustFunc running inside argument evaluation (`f(1, g())`) sees the
+        // outer Lua frame's pending base on vararg_call_bases; letting a host
+        // pop it would remove a caller-owned slot as the callee and leave the
+        // outer Dynamic OP_CALL without its base. Hosts never own a base, so
+        // the public entry point rejects Dynamic before touching any state.
+        if num_args == ArgCount::Dynamic {
+            return Err(self.error(ErrorKind::InternalError(
+                "call does not support ArgCount::Dynamic; use ArgCount::Fixed".into(),
+            )));
+        }
+        self.call_op(num_args, num_ret_expected)
+    }
+
+    /// Bytecode `OP_CALL` entry point: like [`State::call`], but also accepts
+    /// `ArgCount::Dynamic`, which consumes the base pushed by the frame's own
+    /// `OP_MARK_CALL_BASE`.
+    pub(super) fn call_op(&mut self, num_args: ArgCount, num_ret_expected: RetCount) -> Result<()> {
         // Handle vararg call: ArgCount::Dynamic means calculate from vararg_call_bases stack
         let (idx, actual_num_args) = match num_args {
             ArgCount::Dynamic => {
-                let base = self.vararg_call_bases.pop().ok_or_else(|| {
-                    self.error(ErrorKind::InternalError(
-                        "call with Dynamic args but no vararg_call_base set".into(),
-                    ))
-                })?;
+                // Defence in depth: a base below the current frame belongs to
+                // a caller and must not be consumed (checked before popping).
+                match self.vararg_call_bases.last() {
+                    None => {
+                        return Err(self.error(ErrorKind::InternalError(
+                            "call with Dynamic args but no vararg_call_base set".into(),
+                        )));
+                    }
+                    Some(&b) if b < self.stack_bottom => {
+                        return Err(self.error(ErrorKind::InternalError(
+                            "dynamic call base lies below the current frame".into(),
+                        )));
+                    }
+                    Some(_) => {}
+                }
+                let base = self
+                    .vararg_call_bases
+                    .pop()
+                    .expect("vararg_call_bases checked non-empty just above");
                 let actual_len = self.stack.len().checked_sub(base + 1).ok_or_else(|| {
                     self.error(ErrorKind::InternalError(
                         "dynamic call base is outside the active stack".into(),

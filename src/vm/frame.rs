@@ -216,7 +216,7 @@ impl Frame {
                 Instr::OP_CALL => {
                     self.record_call_site(state);
                     Self::flush_local_cost(state, &mut local_cost)?;
-                    state.call(ArgCount::from_u8(inst.a()), RetCount::from_u8(inst.b()))?;
+                    state.call_op(ArgCount::from_u8(inst.a()), RetCount::from_u8(inst.b()))?;
                 }
                 Instr::OP_MARK_CALL_BASE => {
                     // The verifier requires the serialized A operand to be 1;

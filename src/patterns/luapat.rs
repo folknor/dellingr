@@ -28,6 +28,12 @@ pub(crate) enum LuaCapture {
     },
     /// Zero-based byte offset within the complete subject.
     Position(usize),
+    /// A `(` the successful match never closed, as in `string.find("a", "(a")`.
+    /// Reference Lua raises "unfinished capture" only when a caller actually
+    /// reads such a capture (`get_onecapture`), so the matcher reports it as a
+    /// value and leaves raising to the library function that consumes it: a
+    /// `gsub` string replacement that never says `%1` does not error.
+    Unfinished,
 }
 
 #[derive(Copy, Clone)]
@@ -77,14 +83,38 @@ enum Repeat {
 
 #[derive(Copy, Clone)]
 enum Item {
-    Atom { class: ClassId, repeat: Repeat },
-    Balance { open: u8, close: u8 },
-    Frontier { class: ClassId },
-    Backref { slot: u8 },
-    CaptureStart { slot: u8 },
-    CaptureEnd { slot: u8 },
-    PositionCapture { slot: u8 },
+    Atom {
+        class: ClassId,
+        repeat: Repeat,
+    },
+    Balance {
+        open: u8,
+        close: u8,
+    },
+    Frontier {
+        class: ClassId,
+    },
+    Backref {
+        slot: u8,
+    },
+    CaptureStart {
+        slot: u8,
+    },
+    CaptureEnd {
+        slot: u8,
+    },
+    PositionCapture {
+        slot: u8,
+    },
     EndAnchor,
+    /// The first malformed point of the pattern. Reference Lua validates a
+    /// pattern lazily - only the text the matcher actually reaches - so a
+    /// malformed tail behind a prefix that never matches is not an error
+    /// there. Compiling the error into the item stream at the position where
+    /// reference would detect it reproduces that exactly: matching is strictly
+    /// left to right with no alternation, so every reference error site is a
+    /// fixed pattern position, and nothing past it is ever reachable.
+    Fail(PatternError),
 }
 
 pub(super) struct CompiledPattern {
@@ -149,6 +179,9 @@ impl<'a> Compiler<'a> {
         self.intern_class(result)
     }
 
+    /// Loops over all 256 bytes per escape, uncharged; callers charge the
+    /// pattern length, so this is bounded structural work (at most 256 steps
+    /// per pattern byte) under the README's "structural work is free" framing.
     fn class_for_escape(&mut self, class: u8) -> ClassId {
         let mut result = ByteClass::empty();
         for byte in u8::MIN..=u8::MAX {
@@ -228,11 +261,30 @@ impl<'a> Compiler<'a> {
         Ok(self.intern_class(class))
     }
 
-    fn compile(mut self) -> Result<CompiledPattern> {
+    /// Compile the pattern. This never fails: the first malformed point becomes
+    /// an `Item::Fail` that raises when (and only when) a match reaches it. An
+    /// unclosed `(` is not malformed at all at this level - it surfaces as a
+    /// `LuaCapture::Unfinished` result, see there.
+    fn compile(mut self) -> CompiledPattern {
         let anchored = self.pattern.first() == Some(&b'^');
         if anchored {
             self.pos = 1;
         }
+        if let Err(error) = self.compile_items() {
+            self.items.push(Item::Fail(error));
+        }
+        CompiledPattern {
+            items: self.items,
+            classes: self.classes,
+            anchored,
+            captures: self.captures,
+        }
+    }
+
+    /// Every error path below returns before pushing the item it rejects, so
+    /// the `Item::Fail` the caller appends sits exactly where the malformed
+    /// item would have been.
+    fn compile_items(&mut self) -> Result<()> {
         while self.pos < self.pattern.len() {
             let byte = self.pattern[self.pos];
             self.pos += 1;
@@ -304,7 +356,7 @@ impl<'a> Compiler<'a> {
                                 && !self.capture_stack[..self.stack_len]
                                     .contains(&(index as usize));
                             if !resolved {
-                                return Err(PatternError::InvalidCaptureIndex(Some(index)));
+                                return Err(PatternError::InvalidCaptureIndex(index));
                             }
                             self.items.push(Item::Backref { slot: index as u8 });
                         }
@@ -328,15 +380,7 @@ impl<'a> Compiler<'a> {
                 }
             }
         }
-        if self.stack_len != 0 {
-            return Err(PatternError::UnfinishedCapture);
-        }
-        Ok(CompiledPattern {
-            items: self.items,
-            classes: self.classes,
-            anchored,
-            captures: self.captures,
-        })
+        Ok(())
     }
 
     fn push_atom(&mut self, class: ClassId) {
@@ -442,18 +486,19 @@ impl<'data, 'meter, 'cost> MatchState<'data, 'meter, 'cost> {
         pos: usize,
         item: usize,
         class: ClassId,
-        min: usize,
         depth: usize,
     ) -> MatchResult<Option<usize>> {
+        // `+` pre-advances `pos` past its mandatory first byte, so every
+        // expansion here may shrink all the way back to `pos`.
         let mut end = pos;
         while self.singlematch(end, class)? {
             end += 1;
         }
-        while end >= pos + min {
+        loop {
             if let Some(result) = self.recurse(end, item + 1, depth)? {
                 return Ok(Some(result));
             }
-            if end == pos + min {
+            if end == pos {
                 break;
             }
             end -= 1;
@@ -545,7 +590,14 @@ impl<'data, 'meter, 'cost> MatchState<'data, 'meter, 'cost> {
                     let len = match capture.len {
                         CapLen::Len(length) => length,
                         CapLen::Position => return Ok(None),
-                        CapLen::Unfinished => return Err(PatternError::UnfinishedCapture.into()),
+                        // The compiler already turns a backreference to a
+                        // capture still open at that point into an
+                        // `Item::Fail`, so this arm is a guard. Reference
+                        // `check_capture` raises "invalid capture index %N"
+                        // here, not "unfinished capture".
+                        CapLen::Unfinished => {
+                            return Err(PatternError::InvalidCaptureIndex(slot as i8).into());
+                        }
                     };
                     for offset in 0..len {
                         let Some(&byte) = self.subject.get(pos + offset) else {
@@ -560,6 +612,7 @@ impl<'data, 'meter, 'cost> MatchState<'data, 'meter, 'cost> {
                     item += 1;
                 }
                 Item::EndAnchor => return Ok((pos == self.subject.len()).then_some(pos)),
+                Item::Fail(error) => return Err(error.into()),
                 Item::Atom { class, repeat } => match repeat {
                     Repeat::One => {
                         if !self.singlematch(pos, class)? {
@@ -586,13 +639,13 @@ impl<'data, 'meter, 'cost> MatchState<'data, 'meter, 'cost> {
                             item += 1;
                             continue;
                         }
-                        return self.max_expand(pos, item, class, 0, depth);
+                        return self.max_expand(pos, item, class, depth);
                     }
                     Repeat::OneOrMoreGreedy => {
                         if !self.singlematch(pos, class)? {
                             return Ok(None);
                         }
-                        return self.max_expand(pos + 1, item, class, 0, depth);
+                        return self.max_expand(pos + 1, item, class, depth);
                     }
                     Repeat::ZeroOrMoreMinimal => {
                         if !self.singlematch(pos, class)? {
@@ -605,12 +658,7 @@ impl<'data, 'meter, 'cost> MatchState<'data, 'meter, 'cost> {
             }
         }
     }
-    fn captures(
-        &self,
-        start: usize,
-        end: usize,
-        out: &mut [LuaCapture; LUA_MAXMATCHES],
-    ) -> MatchResult<usize> {
+    fn captures(&self, start: usize, end: usize, out: &mut [LuaCapture; LUA_MAXMATCHES]) -> usize {
         out[0] = LuaCapture::Bytes { start, end };
         for index in 0..self.pattern.captures {
             out[index + 1] = match self.captures[index].len {
@@ -619,14 +667,14 @@ impl<'data, 'meter, 'cost> MatchState<'data, 'meter, 'cost> {
                     end: self.captures[index].init + length,
                 },
                 CapLen::Position => LuaCapture::Position(self.captures[index].init),
-                CapLen::Unfinished => return Err(PatternError::UnfinishedCapture.into()),
+                CapLen::Unfinished => LuaCapture::Unfinished,
             };
         }
-        Ok(self.pattern.captures + 1)
+        self.pattern.captures + 1
     }
 }
 
-pub(super) fn compile(pattern: &[u8]) -> Result<CompiledPattern> {
+pub(super) fn compile(pattern: &[u8]) -> CompiledPattern {
     Compiler::new(pattern).compile()
 }
 
@@ -637,6 +685,10 @@ pub(super) fn str_match(
     out: &mut [LuaCapture; LUA_MAXMATCHES],
     meter: &mut CostMeter<'_>,
 ) -> MatchResult<usize> {
+    // `""` and `"^"` match the empty range at `init` without consulting the
+    // matcher, so they charge no matcher step. Every caller has already
+    // charged the pattern and subject lengths, and the result is the same
+    // deterministic cost every time.
     if pattern.items.is_empty() {
         out[0] = LuaCapture::Bytes {
             start: init,
@@ -648,7 +700,7 @@ pub(super) fn str_match(
     loop {
         let mut state = MatchState::new(subject, pattern, meter);
         if let Some(end) = state.match_at(pos, 0, 0)? {
-            return state.captures(pos, end, out);
+            return Ok(state.captures(pos, end, out));
         }
         if pattern.anchored || pos == subject.len() {
             return Ok(0);

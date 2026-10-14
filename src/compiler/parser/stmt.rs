@@ -261,8 +261,11 @@ impl<'a> Parser<'a> {
         let body_length = self.checked_jump_offset(loop_start_instr_index, loop_end + 1)?;
         self.push(Instr::for_loop(current_local_slot, -body_length));
 
-        // Correct the ForPrep instruction.
-        self.chunk.code[loop_start_instr_index] = Instr::for_prep(current_local_slot, body_length);
+        // Correct the ForPrep instruction. Through `patch_jump` like every
+        // other forward patch, so its landing site raises `fold_barrier`.
+        self.patch_jump(loop_start_instr_index, loop_end + 1, |offset| {
+            Instr::for_prep(current_local_slot, offset)
+        })?;
 
         self.exit_loop()?;
         Ok(())
@@ -486,56 +489,56 @@ impl<'a> Parser<'a> {
     /// Parses an if-then statement, including any attached `else` or `elseif` branches.
     /// Parses an `if` or `elseif` block and any subsequent `elseif` or `else`
     /// blocks in the same chain.
+    ///
+    /// The arms are parsed in a loop, like reference Lua's `ifstat`: an
+    /// `elseif` chain is flat, so the whole statement charges one syntax
+    /// level however many arms it has.
     pub(super) fn parse_if_arm(&mut self) -> Result<()> {
         self.enter_syntax_level()?;
-        let result = self.parse_if_arm_inner();
+        let result = self.parse_if_chain();
         self.exit_syntax_level();
         result
     }
 
-    fn parse_if_arm_inner(&mut self) -> Result<()> {
-        self.input.next()?; // `if` or `elseif` keyword
-        self.parse_expr()?;
-        self.expect(TokenType::Then)?;
-        self.nest_level += 1;
+    fn parse_if_chain(&mut self) -> Result<()> {
+        // Each non-final arm ends in a `Jump` to the end of the statement.
+        let mut end_jumps = Vec::new();
+        loop {
+            self.input.next()?; // `if` or `elseif` keyword
+            self.parse_expr()?;
+            self.expect(TokenType::Then)?;
+            self.nest_level += 1;
 
-        let (branch_instr_index, branch_constructor) = self.push_branch_false();
+            let (branch_instr_index, branch_constructor) = self.push_branch_false();
 
-        self.parse_statements()?;
-        let branch_target = self.close_if_arm()?;
+            self.parse_statements()?;
+            self.level_down();
 
-        self.patch_jump(branch_instr_index, branch_target, branch_constructor)?;
-        Ok(())
-    }
-
-    /// Parses the closing keyword of an `if` or `elseif` arms, and any arms
-    /// that may follow.
-    fn close_if_arm(&mut self) -> Result<usize> {
-        self.level_down();
-        match self.input.peek_type()? {
-            TokenType::ElseIf => self.parse_else_or_elseif(true),
-            TokenType::Else => self.parse_else_or_elseif(false),
-            _ => {
-                self.expect(TokenType::End)?;
-                Ok(self.chunk.code.len())
+            let next = self.input.peek_type()?;
+            if matches!(next, TokenType::ElseIf | TokenType::Else) {
+                end_jumps.push(self.chunk.code.len());
+                self.push(Instr::jump(0));
+            }
+            // A false condition lands on the next arm (or past the statement).
+            let next_arm_index = self.chunk.code.len();
+            self.patch_jump(branch_instr_index, next_arm_index, branch_constructor)?;
+            match next {
+                TokenType::ElseIf => {}
+                TokenType::Else => {
+                    self.parse_else()?;
+                    break;
+                }
+                _ => {
+                    self.expect(TokenType::End)?;
+                    break;
+                }
             }
         }
-    }
-
-    /// Parses an `elseif` or `else` block, and handles the `Jump` instruction
-    /// for the end of the preceding block.
-    fn parse_else_or_elseif(&mut self, elseif: bool) -> Result<usize> {
-        let jump_instr_index = self.chunk.code.len();
-        self.push(Instr::jump(0));
-        let next_arm_index = self.chunk.code.len();
-        if elseif {
-            self.parse_if_arm()?;
-        } else {
-            self.parse_else()?;
+        let end = self.chunk.code.len();
+        for jump_instr_index in end_jumps {
+            self.patch_jump(jump_instr_index, end, Instr::jump)?;
         }
-        let new_len = self.chunk.code.len();
-        self.patch_jump(jump_instr_index, new_len, Instr::jump)?;
-        Ok(next_arm_index)
+        Ok(())
     }
 
     /// Parses an `else` block.

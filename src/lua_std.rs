@@ -6,6 +6,9 @@
 //! `math.atan(y, x)` uses the Lua 5.3+ two-argument form. Global `unpack` follows
 //! Lua 5.2; `table.unpack` uses the same implementation. The `%p` conversion in
 //! `string.format` follows Lua 5.4 and is absent in Lua 5.2.
+//! `string.gsub` and `string.gmatch` follow Lua 5.4's empty-match rule: an
+//! empty match ending where the previous match ended is skipped.
+//! `string.gmatch` also accepts Lua 5.4's optional `init` argument.
 
 #![deny(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 

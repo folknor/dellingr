@@ -61,7 +61,7 @@ Some of them might be added later (probably most of them behind a feature gate, 
 
 Source text is capped at `limits::MAX_SOURCE_BYTES` per load. Longer source is rejected with `SourceSizeExceeded` before tokenising, which bounds load-time work for hosts that compile untrusted scripts.
 
-The parser has a budget of `limits::MAX_SYNTAX_DEPTH` recursive syntax entries and raises `chunk has too many syntax levels` when it is exhausted, following the native-stack safeguard in reference Lua's `LUAI_MAXCCALLS`. Without the bound, deeply nested source exhausts the native stack, and a Rust stack overflow aborts the host process rather than returning a catchable error.
+The parser has a budget of `limits::MAX_SYNTAX_DEPTH` recursive syntax entries and raises `chunk has too many syntax levels` when it is exhausted, in the spirit of reference Lua's `LUAI_MAXCCALLS` native-stack safeguard. As in reference Lua, flat chains - `elseif` arms and expression suffixes such as `a.b[c]:m()()` - are parsed iteratively, so their length does not consume the budget; nested contents still do. Without the bound, deeply nested source exhausts the native stack, and a Rust stack overflow aborts the host process rather than returning a catchable error.
 
 A nested parenthesis consumes two syntax-budget entries because it descends through both the expression and unary parsers. Other constructs consume entries according to their recursive parser calls.
 
