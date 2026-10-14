@@ -99,8 +99,9 @@ impl Val {
             Bool(false) => b"false".to_vec(),
             Bool(true) => b"true".to_vec(),
             Num(n) => number_to_string(n).into_bytes(),
-            RustFn(_) => RUST_FN_DISPLAY.as_bytes().to_vec(),
-            Obj(_) => unreachable!("object rendering requires State pointer identity"),
+            RustFn(_) | Obj(_) => {
+                unreachable!("function and object rendering requires State pointer identity")
+            }
             Str(s) => heap.get_string(s).to_vec(),
         }
     }
@@ -119,9 +120,10 @@ impl fmt::Debug for Val {
     }
 }
 
-// No `Display for Val`. Rendering an object needs the heap for its type and
-// the State for its deterministic identity, so a heap-free impl could only
-// leak the slotmap key's `Debug` form - which is exactly the leak this avoids.
+// No `Display for Val`. Rendering an object needs the heap for its type;
+// objects and Rust functions need the State for their deterministic identity.
+// A heap-free impl could only leak the slotmap key's `Debug` form - which is
+// exactly the leak this avoids.
 // User-visible conversion goes through `State::to_string`/
 // `bytes_with_default_string_coercion`.
 
@@ -263,14 +265,8 @@ mod tests {
     }
 
     #[test]
-    fn rust_function_rendering_is_consistent_for_bytes() {
+    fn rust_function_debug_rendering_is_opaque() {
         let value = Val::RustFn(first_callback);
-        let state = State::empty();
-
         assert_eq!(format!("{value:?}"), RUST_FN_DISPLAY);
-        assert_eq!(
-            value.to_bytes_with_heap(&state.heap),
-            RUST_FN_DISPLAY.as_bytes()
-        );
     }
 }

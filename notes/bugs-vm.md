@@ -23,21 +23,6 @@ anything.
    inline instead.
 ```
 
-## VM-010 - `tostring` mangles non-UTF-8 bytes returned by `__tostring`
-
-Source: vm-heap (finding 3).
-
-Claims broken: reference output parity, and the documented purpose of
-`bytes_with_tostring_meta` ("preserving arbitrary bytes returned by a
-`__tostring` metamethod").
-
-The `tostring` builtin (`lua_std/basic.rs`) calls `State::to_string_with_meta`,
-which does `String::from_utf8_lossy(&self.bytes_with_tostring_meta(idx)?)` and
-then `push_string`. A `__tostring` returning `"\xff"` produces `"\u{FFFD}"`
-(3 bytes), where reference returns the raw byte. The byte-preserving helper
-exists, but the builtin bypasses it. `to_string_with_meta` is also public API,
-and its `String` return type forces the same loss on hosts.
-
 ## VM-013 - Every `IndexMap` in the VM uses the default `RandomState` hasher
 
 Source: vm-heap (finding 7).
@@ -55,57 +40,6 @@ so performance is not reproducible. Every table lookup also pays for SipHash.
 Direction: a crate-wide type alias using a fixed-seed fast hasher (Fx or foldhash
 with a constant seed), which meets the stated rule and speeds up the VM's
 hottest path.
-
-## VM-016 - `next_format_pointer_id` is not validated against the saved ids
-
-Source: vm-heap (finding 10).
-
-Claim broken: `%p` / `tostring` identities are distinct per live value (the
-"deterministic, state-local identity" in `format_pointer_id`).
-
-`validate_pointer_ids` rejects duplicate saved ids, but does not require
-`next_format_pointer_id` to exceed all of them. A forged save with
-`next_format_pointer_id = 0` and an existing entry with id 0 gives the next fresh
-value the same rendered address as a live one. Engine-produced saves always
-satisfy the invariant, so this matters only for hostile or corrupted input. That
-is exactly the input the verifier claims to guard against.
-
-## VM-017 - Rust functions render as `<function>` and never get an identity
-
-Source: vm-heap (finding 11) and stdlib (finding 15, first bullet).
-
-Claims broken: `lua_val.rs`'s stated reason for having no `Display` ("Rendering
-an object needs ... its deterministic identity"). `format_pointer_id`'s own
-`debug_assert!`, which lists `Val::RustFn` as an expected caller. Reference
-output parity.
-
-`bytes_with_default_string_coercion` only routes `Val::Obj` through
-`format_pointer_id`. So `tostring(print)`, `tostring(math.floor)` and
-`string.format("%s", print)` all render as `<function>` (`RUST_FN_DISPLAY`),
-while `%p` on the same value yields a `0x..` identity and Lua closures render as
-`function: 0x..`. Two distinct builtins are indistinguishable by `tostring` but
-unequal under `==`. Reference gives distinct `function: builtin: 0x..` /
-`function: 0x..` strings.
-
-Direction: either give RustFns pointer ids in
-`bytes_with_default_string_coercion`, or stop the `debug_assert!` and the
-identity comment from claiming that they have them.
-
-## VM-018 - A zero `for` step silently skips the loop
-
-Source: vm-exec (finding 5, LOW). The stdlib hunter reports that the README's
-"Compatibility divergences" section lists the zero-step `for`. The vm-exec
-hunter reports that the README does not mention it. The two readings disagree.
-
-Where: `eval_control.rs` `check_numeric_for_condition`.
-
-`for i = 1, 10, 0 do ... end` runs zero iterations. Lua 5.4 raises "'for' step is
-zero", and Lua 5.2 loops forever. dellingr matches neither.
-
-Claim broken (vm-exec): output matches reference or is marked `-- DIFF:`. No
-example covers a zero step. The behaviour may be deliberate, since an infinite
-free loop is a budget hole, but if so it needs documenting; otherwise it should
-become the 5.4 error.
 
 ## VM-019 - Runtime 255-value caps on Lua returns and dynamic calls are documented as Rust-callback limits
 
@@ -326,7 +260,7 @@ via `shift_remove_index`, which shifts every later entry. A loop like
 at a constant charge. The array part no longer goes through this path; hash keys
 still do.
 
-## VM-037 - Snapshots and folded literals carry the producing host's NaN bits
+## VM-037 - Snapshots carry the producing host's NaN bits
 
 Source: lateral finding from the resolution-loop fixer that made
 `string.format` print NaN unsigned.
@@ -343,3 +277,48 @@ fixer also blamed folded literals; the wave reviewer reports that the parser
 already refuses to fold a NaN result, so only runtime values are affected.) If
 snapshots must be byte-identical across hosts (for example, hashed for replay
 verification), canonicalise NaN when saving.
+
+## VM-038 - A Rust function reachable only through host state loses its rendered identity across save and load
+
+Source: lateral finding from the resolution-loop fixer that gave Rust functions
+`tostring` identities.
+
+`tostring(f)` and `%p` render a Rust function as `function: 0x<id>`, with the id
+held in `format_pointer_ids`, which snapshots save. The save walk reaches Rust
+functions through globals and environment tables. One reachable only from host
+state (a value the host holds and passes back in) is not walked, so its id is
+dropped on save, and after load it gets a fresh id. The same script then renders
+the same function differently before and after a save. `%p` has the same gap.
+
+## VM-040 - The lexer counts `\r\n\r` as one line break instead of two
+
+Source: lateral finding from a resolution-loop reviewer.
+
+The newline handling in `src/compiler/lexer.rs` (the line-break consumer) folds
+`\r\n\r` into one break. Reference Lua's `inclinenumber` treats `\r\n` as one
+break and the trailing `\r` as a second. Line numbers in error messages and
+stack traces after such a sequence are off by one, and the line-based ambiguous
+`(` rule sees the wrong line.
+
+## VM-041 - `print` can allocate about three times its input before rejecting oversized output
+
+Source: lateral finding from a resolution-loop reviewer.
+
+`print` (`src/lua_std/basic.rs`) converts each argument to UTF-8 lossily before
+checking the size of the result. Each invalid byte expands to the 3-byte
+U+FFFD, so 16 MiB of invalid bytes allocate about 48 MiB before the expanded
+output is rejected against the string-size limit. The cap is meant to bound host
+memory per operation.
+
+## VM-039 - Lexer errors reuse generic variants for an unterminated long comment and an ambiguous call
+
+Source: lateral finding from the resolution-loop fixer that made both of them
+errors.
+
+An unterminated `--[[` now fails with `SyntaxError::UnexpectedEof` at the
+comment's opener, where reference Lua says `unfinished long comment`. A `(` on a
+later line than the previous token fails with `LParenLineStart`, which displays
+as "ambiguous function call" without mentioning the newline that makes it
+ambiguous. A dedicated `UnfinishedLongComment` variant and a message naming the
+line break (both in `src/error.rs`) would match the reference more closely and
+point users at the cause.

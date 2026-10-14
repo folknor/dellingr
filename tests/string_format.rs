@@ -33,6 +33,19 @@ fn expect_runtime_error(code: &str, expected: &str) {
 }
 
 #[test]
+fn upper_fixed_conversion_is_rejected_like_lua_54() {
+    // Reference lstrlib (5.4.9 checked) has no %F; 5.2 rejects it as well.
+    expect_runtime_error(
+        "string.format('%F', 1.5)",
+        "invalid conversion '%F' to 'format'",
+    );
+    expect_runtime_error(
+        "string.format('%5.2F', 1.5)",
+        "invalid conversion '%5.2F' to 'format'",
+    );
+}
+
+#[test]
 fn integer_conversions_match_lua_54() {
     assert_eq!(
         run_bytes(r#"return string.format("%d|%i|%u|%o|%x|%X", 42, -42, 42, 10, 255, 255)"#),
@@ -301,29 +314,25 @@ fn tostring_errors_propagate_without_format_wrapping() {
 
 #[test]
 fn tostring_and_print_reject_non_string_metamethod_results() {
-    for expression in ["tostring(value)", "print(value)"] {
-        expect_runtime_error(
-            &format!(
-                r#"
-                local value = setmetatable({{}}, {{
-                    __tostring = function() return {{}} end
-                }})
-                {expression}
-                "#
-            ),
-            "'__tostring' must return a string",
-        );
-        expect_runtime_error(
-            &format!(
-                r#"
-                local value = setmetatable({{}}, {{
-                    __tostring = function() return true end
-                }})
-                {expression}
-                "#
-            ),
-            "'__tostring' must return a string",
-        );
+    for expression in [
+        "tostring(value)",
+        "print(value)",
+        "string.format('%s', value)",
+        "error(value)",
+    ] {
+        for result in ["{}", "true", "print", "function() end"] {
+            expect_runtime_error(
+                &format!(
+                    r#"
+                    local value = setmetatable({{}}, {{
+                        __tostring = function() return {result} end
+                    }})
+                    {expression}
+                    "#
+                ),
+                "'__tostring' must return a string",
+            );
+        }
     }
 }
 

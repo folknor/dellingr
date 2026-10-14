@@ -96,6 +96,8 @@ Numeric `for` loops with a zero step skip their body in both directions. Lua 5.2
 
 `tonumber(s, base)` accumulates in floating point, as Lua 5.2 does; Lua 5.4 wraps to a 64-bit integer.
 
+A `(` that starts a later line than the previous token, and would continue the previous expression as a call, is rejected as ambiguous, whether or not a comment sits between them. Lua 5.2 and 5.4 accept it as a call.
+
 `table.move` rejects ranges whose keys fall outside +/-2^53, where integer keys stop being distinct in dellingr's f64 numbers. Metamethod-driven `table.insert` and `table.remove` reject key ranges that would round integer positions.
 
 ## Determinism
@@ -128,7 +130,7 @@ The optional `snapshot` feature adds `State::save_state()` and
 `State::load_state(...)` for game saves, serialized through a small in-crate
 deterministic binary codec (no `serde`/`bincode`). This is a data snapshot of a
 quiescent VM: globals, reachable tables/closures/upvalues/strings, the
-deterministic RNG stream, cost counters, and the object identities behind
+deterministic RNG stream, cost counters, and the state-local identities behind
 `tostring`/`%p` are persisted. Changes you make to the standard library tables
 themselves - `math.myconst = 42`, `string.trim = f`, or deleting a stock entry -
 are persisted as a delta against the pristine environment and replayed on load,

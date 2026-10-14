@@ -90,10 +90,23 @@ identical source - re-measure tick budgets.
   raise only when matching reaches them, and unfinished captures raise only
   when a library function reads them.
 - `string.gmatch` accepts Lua 5.4's optional `init` argument.
+- `State::bytes_with_tostring_meta` is public for byte-exact conversion with
+  `__tostring` semantics.
+- Rust functions render as `function: 0x<id>` instead of `<function>`, using
+  the same stable, state-local identity as `%p`, preserved in snapshots.
 - Retired the `fields/miss` diagnostic probe and its `miss` verdict workload.
 
 ### Fixed
 
+- Unterminated long comments raise a syntax error at their opener instead of
+  silently swallowing the remaining source.
+- A call's opening `(` on a later line is rejected as ambiguous even across
+  comments; previously an intervening comment could make it a call.
+- `tostring` preserves non-UTF-8 bytes returned by `__tostring`.
+- Snapshot loading rejects pointer ids at or above the saved next id. An
+  exhausted pointer-id counter raises an error instead of wrapping.
+- The length operator passes two copies of its operand to `__len`, as Lua
+  5.2 and 5.4 do.
 - Host table methods preserve operands on validation and stack preflight
   failures. Errors from calling an `__index` function still consume the key.
 - `State::table_remove_at` rejects positions outside `table.remove`'s range

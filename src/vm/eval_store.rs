@@ -175,13 +175,16 @@ impl State {
                 });
 
                 if !matches!(len_handler, Val::Nil) {
-                    // Call __len(table). Two values pushed against the one
-                    // popped above, so this is net-positive by one slot.
+                    // Call __len(table, table), as Lua 5.4's luaT_callTMres
+                    // does and as the table library's `sequence_len` does.
+                    // Three values pushed against the one popped above, so
+                    // this is net-positive by two slots.
                     Frame::flush_local_cost(self, local_cost)?;
-                    self.check_stack_space(2)?;
+                    self.check_stack_space(3)?;
                     self.push_unchecked(len_handler);
                     self.push_unchecked(val);
-                    self.call(ArgCount::Fixed(1), RetCount::Fixed(1))?;
+                    self.push_unchecked(val);
+                    self.call(ArgCount::Fixed(2), RetCount::Fixed(1))?;
                     return Ok(());
                 }
             }

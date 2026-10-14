@@ -270,9 +270,11 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
         if state.typ(1) == LuaType::String {
             state.set_top(1)?;
         } else {
-            let s = state.to_string_with_meta(1)?;
+            // Byte-exact: a `__tostring` result may hold non-UTF-8 bytes,
+            // which reference Lua returns unchanged.
+            let bytes = state.bytes_with_tostring_meta(1)?;
             state.set_top(0)?;
-            state.push_string(s)?;
+            state.push_bytes(bytes)?;
         }
         Ok(1)
     });

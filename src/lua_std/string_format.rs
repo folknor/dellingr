@@ -233,6 +233,9 @@ fn classify_conversion(byte: u8) -> Option<Conversion> {
         b'X' => Conversion::HexUpper,
         b'e' => Conversion::ScientificLower,
         b'E' => Conversion::ScientificUpper,
+        // No `F`: reference lstrlib rejects it too (5.4: "invalid conversion
+        // '%F' to 'format'"; 5.2: "invalid option"), so it falls to the
+        // invalid-conversion arm below on purpose.
         b'f' => Conversion::Fixed,
         b'g' => Conversion::GeneralLower,
         b'G' => Conversion::GeneralUpper,

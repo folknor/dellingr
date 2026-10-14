@@ -146,8 +146,15 @@ impl<'a> Lexer<'a> {
         // Loop rather than recurse on comments: a comment skips its body and
         // continues the loop, so a long run of consecutive comments cannot
         // exhaust the stack the way tail-recursing into `next_token` did.
+        //
+        // The line the previous token ended on. A `(` on any later line is
+        // `LParenLineStart`, however the newline was consumed - plain
+        // whitespace, a line comment's terminator, or a multi-line long
+        // comment - so a comment between `f` and `(g)` cannot change whether
+        // the parser reads a call or rejects the ambiguity.
+        let prev_token_end_line = self.linebreaks.len();
         loop {
-            let starts_line = self.consume_whitespace();
+            self.consume_whitespace();
             let tok_start = self.pos;
             // Capture before consuming the body: a string token can consume
             // logical newlines through \z or an escaped physical newline.
@@ -167,7 +174,7 @@ impl<'a> Lexer<'a> {
                 ';' => Semi,
                 ':' => Colon,
                 ',' => Comma,
-                '(' if starts_line => LParenLineStart,
+                '(' if tok_line as usize > prev_token_end_line => LParenLineStart,
                 '(' => LParen,
                 ')' => RParen,
                 '{' => LCurly,
@@ -180,7 +187,7 @@ impl<'a> Lexer<'a> {
 
                 '-' => {
                     if self.try_next('-') {
-                        self.skip_comment();
+                        self.skip_comment(tok_start)?;
                         continue;
                     }
                     Minus
@@ -211,10 +218,15 @@ impl<'a> Lexer<'a> {
     }
 
     /// Skips over the characters in a comment body. The enclosing `next_token`
-    /// loop re-scans afterward; on EOF mid-comment the next iteration returns
-    /// the EOF token. Iterative (no recursion) so consecutive comments are
-    /// stack-safe.
-    fn skip_comment(&mut self) {
+    /// loop re-scans afterward; a short comment may end at EOF, while an
+    /// unfinished long comment raises an error. Iterative (no recursion) so
+    /// consecutive comments are stack-safe.
+    ///
+    /// A long comment (`--[[` / `--[==[`) that reaches EOF before its closing
+    /// delimiter is an error reported at `comment_start`, as in reference Lua
+    /// ("unfinished long comment"); accepting it would silently drop the rest
+    /// of the file into the comment.
+    fn skip_comment(&mut self, comment_start: usize) -> Result<()> {
         // Check for a long comment: --[=*[ ... ]=*]. A failed opener probe is
         // still ordinary comment text, so falling through is correct.
         if self.peek_char() == Some('[') {
@@ -233,10 +245,12 @@ impl<'a> Lexer<'a> {
                                 closing_level += 1;
                             }
                             if closing_level == level && self.try_next(']') {
-                                return;
+                                return Ok(());
                             }
                         }
-                        None => return,
+                        None => {
+                            return Err(self.error_at(SyntaxError::UnexpectedEof, comment_start));
+                        }
                         _ => {}
                     }
                 }
@@ -246,9 +260,10 @@ impl<'a> Lexer<'a> {
         // Single-line comment: skip until newline (consumed) or EOF
         while let Some(c) = self.next_char() {
             if matches!(c, '\r' | '\n') {
-                return;
+                return Ok(());
             }
         }
+        Ok(())
     }
 
     /// Peeks the next character.
@@ -275,19 +290,14 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    /// Consumes any whitespace characters. Returns whether or not a newline was consumed.
-    fn consume_whitespace(&mut self) -> bool {
-        let mut ret = false;
+    /// Consumes any whitespace characters.
+    fn consume_whitespace(&mut self) {
         while let Some(c) = self.peek_char() {
             if !c.is_ascii() || !is_lua_whitespace(c as u8) {
                 break;
             }
-            if matches!(c, '\r' | '\n') {
-                ret = true;
-            }
             self.next_char();
         }
-        ret
     }
 
     /// Move a character forward, only if the current character matches
@@ -856,6 +866,64 @@ mod tests {
     #[test]
     fn multiline_comments_remain_non_panicking() {
         check_line("--[[comment]] next", &[(Identifier, 14, 4)]);
+    }
+
+    #[test]
+    fn unfinished_long_comment_is_an_error_at_its_opener() {
+        for input in [
+            "x --[[ never closed\nprint(1)",
+            "x --[==[ closed at the wrong level ]=]\nprint(1)",
+            "x --[[",
+        ] {
+            let mut lexer = Lexer::new(input);
+            assert_eq!(lexer.next_token().unwrap().typ, Identifier);
+            let err = lexer
+                .next_token()
+                .expect_err("an unfinished long comment must not swallow the file");
+            assert!(matches!(
+                err.kind,
+                crate::error::ErrorKind::SyntaxError(SyntaxError::UnexpectedEof)
+            ));
+            assert_eq!((err.line_num, err.column), (1, 3), "{input:?}");
+        }
+        // A short comment running to EOF stays legal.
+        check_line("x -- trailing", &[(Identifier, 0, 1)]);
+        check_line("x --[ not a long opener", &[(Identifier, 0, 1)]);
+    }
+
+    #[test]
+    fn lparen_line_start_ignores_intervening_comments() {
+        // Any newline between the previous token and `(` marks it, however
+        // the newline was consumed.
+        for input in [
+            "f\n(g)",
+            "f -- note\n(g)",
+            "f\n-- note\n(g)",
+            "f --[[ a\nb ]] (g)",
+            "f -- note\r(g)",
+            "f -- note\r\n(g)",
+            "f -- note\n\r(g)",
+            "f --[=[ a\rb ]=] --[[ c ]] (g)",
+        ] {
+            let mut lexer = Lexer::new(input);
+            assert_eq!(lexer.next_token().unwrap().typ, Identifier);
+            assert_eq!(
+                lexer.next_token().unwrap().typ,
+                LParenLineStart,
+                "{input:?}"
+            );
+        }
+        // Same-line comments leave a plain call paren.
+        for input in ["f --[[ note ]] (g)", "f(g)", "f (g)"] {
+            let mut lexer = Lexer::new(input);
+            assert_eq!(lexer.next_token().unwrap().typ, Identifier);
+            assert_eq!(lexer.next_token().unwrap().typ, LParen, "{input:?}");
+        }
+        // Two-token lookahead must keep the same comment boundary decision.
+        let mut tokens = TokenStream::new("f -- note\n(g)");
+        assert_eq!(tokens.peek2().unwrap().typ, LParenLineStart);
+        assert_eq!(tokens.next().unwrap().typ, Identifier);
+        assert_eq!(tokens.next().unwrap().typ, LParenLineStart);
     }
 
     #[test]

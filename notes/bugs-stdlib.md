@@ -152,19 +152,3 @@ it. `table.sort` goes through the crate-internal `table_sort` in
 the gap. The same fixer suggests that a shared metamethod-aware length helper
 belongs in `table_ops.rs` beside `table_len`, instead of the library-local
 `sequence_len`.
-
-## STD-020 - Bytecode `#` passes only one operand to `__len`
-
-Source: lateral finding from a resolution-loop reviewer.
-
-Lua 5.4 calls `__len(t, t)` (two operands). The table library's length helper
-now does too, but the bytecode `#` operator (`eval_store.rs`) passes only one.
-A `__len` that inspects its second argument behaves differently under `#t` and
-under `table.insert`.
-
-## STD-019 - `string.format` rejects `%F`
-
-Source: lateral finding from a resolution-loop fixer.
-
-Claim broken: `string_format.rs` is "the Lua 5.4 `string.format` engine". Lua
-5.4's `lstrlib` accepts the conversions `aAeEfFgG`. dellingr rejects `%F`.

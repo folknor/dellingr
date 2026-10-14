@@ -402,7 +402,13 @@ impl State {
 }
 
 fn check_numeric_for_condition(var: f64, limit: f64, step: f64) -> bool {
-    // Step of zero would cause infinite loop - skip the loop entirely
+    // Deliberate divergence: a zero step (including -0.0) skips the loop in
+    // both directions. Lua 5.4 raises "'for' step is zero"; Lua 5.2 skips an
+    // ascending range but loops forever on a descending one. The skip rules
+    // out the unbounded-execution case without killing the callback the way
+    // the 5.4 error would. Documented in the README's "Compatibility
+    // divergences"; pinned by
+    // examples/for_zero_step.lua (marked DIFF).
     if step == 0.0 {
         false
     } else if step > 0.0 {

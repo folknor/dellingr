@@ -630,6 +630,12 @@ fn validate_pointer_ids(payload: &SavePayload) -> Result<(), LoadError> {
             _ => return Err(corrupt("invalid format pointer value", index)),
         }
         insert_unique(&mut ids, *id, "duplicate format pointer id", index)?;
+        // The engine hands out ids from `next_format_pointer_id` upward, so a
+        // saved id at or above the counter would let the next fresh value
+        // render the same identity as a live one.
+        if *id >= payload.next_format_pointer_id {
+            return Err(corrupt("format pointer id not below next id", index));
+        }
         validate_value(value, payload)?;
     }
     Ok(())
@@ -979,5 +985,32 @@ mod tests {
             validate_environment_deltas(&env),
             Err(LoadError::CorruptArena { .. })
         ));
+    }
+
+    #[test]
+    fn pointer_ids_must_sit_below_the_next_id() {
+        let with_next = |next: u64| SavePayload {
+            has_standard_environment: true,
+            rng_state: 0,
+            cost_remaining: 0,
+            cost_budget: 0,
+            cost_budget_configured: false,
+            cost_used: 0,
+            strings: vec![b"x".to_vec()],
+            bytecode: Vec::new(),
+            upvalues: Vec::new(),
+            objects: Vec::new(),
+            user_globals: Vec::new(),
+            env_deltas: Vec::new(),
+            next_format_pointer_id: next,
+            format_pointer_ids: vec![(super::super::SavedVal::Str(0), 1)],
+        };
+        assert!(validate_pointer_ids(&with_next(2)).is_ok());
+        for next in [0, 1] {
+            assert!(matches!(
+                validate_pointer_ids(&with_next(next)),
+                Err(LoadError::CorruptArena { .. })
+            ));
+        }
     }
 }

@@ -2254,6 +2254,108 @@ fn compare_branch_fusion_respects_or_skip_targets() {
 }
 
 #[test]
+fn if_arms_ending_in_return_emit_no_end_jump() {
+    // Every arm returns, so no arm can fall through to the end of the `if`.
+    for source in [
+        "local x = 1 if x then return 1 else return 2 end",
+        "local x = 1 if x == 1 then return 1 elseif x == 2 then return 2 else return 3 end",
+        "local x = 1 if x then local y = x return y else return 2 end",
+    ] {
+        assert_no_opcode(source, Instr::OP_JUMP);
+    }
+    assert_eq!(
+        eval_number(
+            "local x = 2 if x == 1 then return 1 elseif x == 2 then return 2 else return 3 end"
+        ),
+        2.0
+    );
+    assert_eq!(
+        eval_number("local x = 5 if x == 1 then return 1 elseif x == 2 then return 2 end return 9"),
+        9.0
+    );
+    // A local captured in a returning arm still compiles and runs.
+    assert_eq!(
+        eval_number(
+            "local x = 1 if x then local y = 4 local f = function() return y end return f() else return 2 end"
+        ),
+        4.0
+    );
+}
+
+#[test]
+fn if_arm_ending_in_nested_if_keeps_its_end_jump() {
+    // The outer arm's last instruction is the nested `return 2`, but the
+    // nested `if`'s false branch lands past it and must still jump over the
+    // outer `else`.
+    let source = "local a, b, r = true, false, 0 \
+                  if a then if b then return 1 elseif b == nil then return 2 end \
+                  else r = 7 end return r + 3";
+    assert_has_opcode(source, Instr::OP_JUMP);
+    assert_eq!(eval_number(source), 3.0);
+    let source = "local a, b = true, false \
+                  if a then if b then return 1 end else return 7 end return 3";
+    assert_eq!(eval_number(source), 3.0);
+}
+
+#[test]
+fn if_arm_does_not_inherit_a_do_blocks_return_status() {
+    // A direct return in a do-block belongs to that block. The outer arm
+    // conservatively keeps its jump, even though this particular arm returns.
+    let source = "local a = true if a then do return 1 end else return 7 end return 3";
+    assert_has_opcode(source, Instr::OP_JUMP);
+    assert_eq!(eval_number(source), 1.0);
+
+    // A conditional return inside the do-block can fall through. Neither the
+    // block nor a later statement may make the outer arm skip its end jump.
+    for tail in ["", "r = 2"] {
+        let source = format!(
+            "local a, b, r = true, false, 0 \
+             if a then do if b then return 1 end end {tail} \
+             else r = 7 end return r + 3"
+        );
+        assert_has_opcode(&source, Instr::OP_JUMP);
+        assert_eq!(
+            eval_number(&source),
+            if tail.is_empty() { 3.0 } else { 5.0 }
+        );
+    }
+}
+
+#[test]
+fn unfinished_long_comment_is_a_syntax_error() {
+    for source in [
+        "x = 1 --[[ never closed\nx = 2",
+        "--[==[ wrong level ]=]\nreturn 1",
+    ] {
+        let err = parse_str(source).expect_err("an unfinished long comment must not compile");
+        assert!(
+            matches!(err.kind, ErrorKind::SyntaxError(SyntaxError::UnexpectedEof)),
+            "{source:?}: {err:?}"
+        );
+    }
+}
+
+#[test]
+fn lparen_on_a_later_line_is_ambiguous_regardless_of_comments() {
+    for source in [
+        "f()\n(g)()",
+        "f() -- note\n(g)()",
+        "f()\n-- note\n(g)()",
+        "f() --[[ a\nb ]] (g)()",
+    ] {
+        let err = parse_str(source).expect_err("a `(` on a later line must be rejected");
+        assert!(
+            matches!(
+                err.kind,
+                ErrorKind::SyntaxError(SyntaxError::LParenLineStart)
+            ),
+            "{source:?}: {err:?}"
+        );
+    }
+    parse_str("f() --[[ same line ]] (g)()").expect("a same-line `(` is a call");
+}
+
+#[test]
 fn constant_folding_respects_jump_targets() {
     // The `or` skip branch lands on the second operand push; merging the
     // pair would make a truthy `a` skip the multiplication entirely.

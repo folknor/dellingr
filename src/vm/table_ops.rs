@@ -497,16 +497,19 @@ impl State {
         }
     }
 
-    /// Converts the value at the given index to a string, checking for __tostring metamethod.
-    /// If the value is a table with a __tostring metamethod, calls it and returns the result.
+    /// Converts the value at the given index to a UTF-8 string, checking for
+    /// a `__tostring` metamethod. Invalid UTF-8 bytes (from a Lua string or a
+    /// `__tostring` result) are converted lossily; use
+    /// [`State::bytes_with_tostring_meta`] for the exact bytes.
     #[hotpath::measure]
     pub fn to_string_with_meta(&mut self, idx: isize) -> Result<String> {
         Ok(String::from_utf8_lossy(&self.bytes_with_tostring_meta(idx)?).into_owned())
     }
 
     /// Converts a value with `tostring` semantics while preserving arbitrary
-    /// bytes returned by a `__tostring` metamethod.
-    pub(crate) fn bytes_with_tostring_meta(&mut self, idx: isize) -> Result<Vec<u8>> {
+    /// bytes returned by a `__tostring` metamethod. This is what the
+    /// `tostring` builtin returns.
+    pub fn bytes_with_tostring_meta(&mut self, idx: isize) -> Result<Vec<u8>> {
         let i = self.convert_idx(idx)?;
         let val = self.stack[i];
         let metatable_ptr = val
@@ -550,7 +553,12 @@ impl State {
     pub(crate) fn bytes_with_default_string_coercion(&mut self, idx: isize) -> Result<Vec<u8>> {
         let i = self.convert_idx(idx)?;
         let val = self.stack[i];
-        if matches!(val, Val::Obj(_)) {
+        // Rust functions get the same state-local identity as closures, so
+        // distinct builtins (unequal under `==`, which compares addresses)
+        // render distinctly. The id map is keyed by the function value and is
+        // saved state: a registered RustFn reachable at save time encodes as
+        // a registry token, so its id survives save and load.
+        if matches!(val, Val::Obj(_) | Val::RustFn(_)) {
             let id = self.format_pointer_id(idx)?;
             return Ok(format!("{}: 0x{id:x}", val.typ(&self.heap).as_str()).into_bytes());
         }
@@ -567,7 +575,15 @@ impl State {
             return Ok(*id);
         }
         let id = self.next_format_pointer_id;
-        self.next_format_pointer_id = self.next_format_pointer_id.wrapping_add(1);
+        // A snapshot can place the counter at the end of its range. Refuse a
+        // fresh identity before mutating either field: wrapping would reissue
+        // old ids and violate the snapshot verifier's id < next invariant.
+        let next = id.checked_add(1).ok_or_else(|| {
+            self.error(ErrorKind::RuntimeError(
+                "format pointer identity space exhausted".to_string(),
+            ))
+        })?;
+        self.next_format_pointer_id = next;
         self.format_pointer_ids.insert(val, id);
         Ok(id)
     }

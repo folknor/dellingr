@@ -501,7 +501,8 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_if_chain(&mut self) -> Result<()> {
-        // Each non-final arm ends in a `Jump` to the end of the statement.
+        // Each non-final arm that can fall through ends in a `Jump` to the end
+        // of the statement.
         let mut end_jumps = Vec::new();
         loop {
             self.input.next()?; // `if` or `elseif` keyword
@@ -511,11 +512,17 @@ impl<'a> Parser<'a> {
 
             let (branch_instr_index, branch_constructor) = self.push_branch_false();
 
-            self.parse_statements()?;
+            // An arm whose own last statement is `return` cannot fall off its
+            // end, so its jump to the end of the statement would be dead code;
+            // skip it. This asks the parser, not the last emitted opcode: an
+            // arm ending in a nested `if ... then return end` also ends in a
+            // `Return` instruction, yet the nested `if`'s false branch lands
+            // after it and does fall through.
+            let arm_returns = self.parse_statements()?;
             self.level_down();
 
             let next = self.input.peek_type()?;
-            if matches!(next, TokenType::ElseIf | TokenType::Else) {
+            if !arm_returns && matches!(next, TokenType::ElseIf | TokenType::Else) {
                 end_jumps.push(self.chunk.code.len());
                 self.push(Instr::jump(0));
             }

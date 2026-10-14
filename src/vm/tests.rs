@@ -968,6 +968,76 @@ fn live_upvalues_survive_the_pool_sweep_and_keep_working() {
 }
 
 #[test]
+fn length_metamethod_preflights_three_slots_at_the_stack_cap() {
+    fn len_handler(state: &mut State) -> crate::Result<u8> {
+        assert_eq!(state.get_top(), 2);
+        assert!(state.raw_equal(1, 2));
+        *state
+            .user_data_mut::<usize>()
+            .expect("call counter is installed") += 1;
+        state.push_number(7.0)?;
+        Ok(1)
+    }
+
+    let mut state = State::new();
+    state.set_user_data(0usize);
+    state.set_global_value("len_handler", Val::RustFn(len_handler));
+    state
+        .load_string("t = setmetatable({}, { __len = len_handler })")
+        .unwrap();
+    state
+        .call(crate::ArgCount::Fixed(0), RetCount::Fixed(0))
+        .unwrap();
+    state.get_global("t").unwrap();
+    for entry_size in [MAX_STACK_SIZE - 1, MAX_STACK_SIZE] {
+        state.set_top((entry_size - 1) as isize).unwrap();
+        state.push_value(1).unwrap();
+        let error = state
+            .instr_length(&mut 0)
+            .expect_err("three slots do not fit");
+        assert!(matches!(
+            error.kind,
+            crate::error::ErrorKind::StackOverflow { size, limit }
+                if size == entry_size + 2 && limit == MAX_STACK_SIZE
+        ));
+        assert_eq!(state.get_top(), entry_size - 1);
+        assert_eq!(*state.user_data::<usize>().unwrap(), 0);
+    }
+
+    state.set_top((MAX_STACK_SIZE - 3) as isize).unwrap();
+    state.push_value(1).unwrap();
+    state
+        .instr_length(&mut 0)
+        .expect("three free slots after popping the operand");
+    assert_eq!(state.get_top(), MAX_STACK_SIZE - 2);
+    assert_eq!(state.to_number(-1).unwrap(), 7.0);
+    assert_eq!(*state.user_data::<usize>().unwrap(), 1);
+}
+
+#[test]
+fn exhausted_format_pointer_counter_does_not_wrap_or_mutate() {
+    let mut state = State::empty();
+    state.new_table().unwrap();
+    state.new_table().unwrap();
+    state.next_format_pointer_id = u64::MAX - 1;
+    assert_eq!(state.format_pointer_id(1).unwrap(), u64::MAX - 1);
+    assert_eq!(state.next_format_pointer_id, u64::MAX);
+
+    let error = state
+        .format_pointer_id(2)
+        .expect_err("counter must not wrap");
+    assert!(matches!(
+        error.kind,
+        crate::error::ErrorKind::RuntimeError(ref message)
+            if message == "format pointer identity space exhausted"
+    ));
+    assert_eq!(state.next_format_pointer_id, u64::MAX);
+    assert_eq!(state.format_pointer_ids.len(), 1);
+    assert_eq!(state.format_pointer_id(1).unwrap(), u64::MAX - 1);
+    assert_eq!(state.get_top(), 2);
+}
+
+#[test]
 fn gc_drops_format_pointer_ids_for_dead_values() {
     let mut state = State::new();
     // Auto-GC would sweep dead entries mid-loop; disable it so the assertion

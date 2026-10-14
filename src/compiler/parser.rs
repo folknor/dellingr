@@ -466,9 +466,11 @@ impl<'a> Parser<'a> {
         ))
     }
 
-    /// A folded result must not be NaN (many payloads collapse to one
-    /// literal) or -0.0 (`find_or_add_number` dedups with `==`, which
-    /// conflates 0.0 and -0.0) - reference lcode.c's guards.
+    /// A folded result must not be NaN or -0.0 - reference lcode.c's guards.
+    /// `find_or_add_number` dedups through `number_literal_key`, which gives
+    /// NaN no key (every folded NaN would take a fresh pool slot) and folds
+    /// both signed zeroes onto one key (a folded -0.0 could reuse an earlier
+    /// 0.0 slot, or later 0.0 literals could reuse its -0.0 slot).
     fn fold_result_allowed(value: f64) -> bool {
         !value.is_nan() && !(value == 0.0 && value.is_sign_negative())
     }
@@ -721,15 +723,18 @@ impl<'a> Parser<'a> {
     }
 
     /// Parses 0 or more statements, possibly separated by semicolons.
+    /// Returns whether the block's own last statement was a `return`, excluding
+    /// returns inside nested statements (including `do` blocks). A true result
+    /// guarantees that control cannot fall off the end of this block.
     #[hotpath::measure]
-    fn parse_statements(&mut self) -> Result<()> {
+    fn parse_statements(&mut self) -> Result<bool> {
         self.enter_syntax_level()?;
         let result = self.parse_statements_inner();
         self.exit_syntax_level();
         result
     }
 
-    fn parse_statements_inner(&mut self) -> Result<()> {
+    fn parse_statements_inner(&mut self) -> Result<bool> {
         loop {
             // Update line number at start of each statement for accurate error reporting
             let stmt_start = *self.input.peek()?;
@@ -749,12 +754,12 @@ impl<'a> Parser<'a> {
                 TokenType::Semi => {
                     self.input.next()?;
                 }
-                TokenType::Return => break self.parse_return(),
+                TokenType::Return => break self.parse_return().map(|()| true),
                 TokenType::Break => {
                     self.input.next()?; // consume 'break' keyword
                     self.add_break()?;
                 }
-                _ => break Ok(()),
+                _ => break Ok(false),
             }
         }
     }
