@@ -793,7 +793,7 @@ mod tests {
 
         let golden = include_str!("../tests/fixtures/opcode_encoding.txt");
         let (version, expected) = golden.split_once('\n').expect("fixture has a version line");
-        assert_eq!(version, "format=6");
+        assert_eq!(version, "format=7");
         let mut actual = String::new();
         for (opcode, name) in Instr::OPCODE_NAMES {
             writeln!(actual, "{name}={opcode}").expect("writing into String cannot fail");

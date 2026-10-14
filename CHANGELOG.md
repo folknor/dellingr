@@ -16,7 +16,17 @@ identical source - re-measure tick budgets.
   is not bit-identical across targets. `string.gmatch` charges pattern
   compilation once per iterator rather than per cache miss. `cost_used` now
   includes opcode cost pending in the dispatch batch when a runtime error ends
-  a frame. Older snapshots are rejected with `UnsupportedCostModelVersion`.
+  a frame. `table.insert`/`table.remove` charge one per element shifted,
+  `unpack`/`table.unpack` one per element visited and `table.pack` one per
+  argument stored, each with a minimum of 1. Older snapshots are rejected with
+  `UnsupportedCostModelVersion`.
+- **Tables have a real array part, and `pairs` order changed.** Keys `1..n`
+  live in a vector beside the insertion-ordered hash part and iterate first,
+  in key order, then the remaining keys in insertion order (previously all
+  keys in insertion order). `#` searches for a border in the array part;
+  positional nil slots in constructors are retained (`#{1, nil, 3}` is 3).
+  The snapshot format is version 7: it records each table's array length,
+  nil slots included.
 - **Field misses on plain tables return nil.** The implicit table-library
   lookup and `t:insert(...)` sugar are gone; use `table.insert(t, ...)`.
 - **`ArgError` has a required `detail: ArgDetail` field.**
@@ -95,6 +105,11 @@ identical source - re-measure tick budgets.
 - `State::call_anchor` validates argument counts against the visible frame
   before inserting the callee, so missing arguments leave the stack untouched.
 - `string.find` took the plain-text fast path for patterns containing `)`.
+- `table.remove(t, 1)` and the `table.sort` writeback did quadratic host work
+  for a linear or flat charge; both are now a single in-place shift or write.
+  `select(n, ...)` dropped its leading arguments one at a time.
+- `table.remove` on an empty sequence returns and clears `t[0]`, as reference
+  Lua does, instead of returning nil.
 - The upvalue pool and the `string.format("%p")` id map grew without bound in
   long-lived States; both are now swept by GC.
 

@@ -413,10 +413,11 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
         let start_pos = 1 + index; // 1-based position in stack
         let count = vararg_count - index + 1;
 
-        // Remove args before start_pos
-        for _ in 1..start_pos {
-            state.remove(1)?;
-        }
+        // Drop the args before start_pos in one move. Removing them one at a
+        // time shifted the whole frame per argument, O(n^2). With the single
+        // move, select does the same O(n) value copying as passing `...` on,
+        // which the VM does not charge per value either, so select stays free.
+        state.remove_bottom(start_pos - 1)?;
 
         crate::error::results_count(count).map_err(|kind| state.error(kind))
     });

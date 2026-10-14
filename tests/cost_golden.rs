@@ -24,7 +24,7 @@ const CORPUS: &[(&str, &str, u64)] = &[
     (
         "tables",
         "local t = {} for i = 1, 50 do t[i] = i end local n = 0 for _, v in ipairs(t) do n = n + v end table.insert(t, 1, 0) table.concat(t, ',')",
-        296,
+        345,
     ),
     (
         "strings_and_patterns",
@@ -116,6 +116,70 @@ fn cost_used_after_runtime_error_matches_golden_corpus() {
                  the executed costed opcodes; a change here needs a COST_MODEL_VERSION bump"
             );
         }
+    }
+}
+
+fn cost_of(source: &str) -> u64 {
+    let mut state = State::new();
+    state.load_string(source).expect("cost source compiles");
+    state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+        .expect("cost source runs");
+    state.cost_used()
+}
+
+#[test]
+fn unpack_charges_only_lookups_reached_before_an_index_error() {
+    let mut costs = Vec::new();
+    for end in [1, 10] {
+        let mut state = State::new();
+        state
+            .load_string(format!(
+                "local t = setmetatable({{}}, {{__index = function() return nil + 1 end}}) unpack(t, 1, {end})"
+            ))
+            .unwrap();
+        let err = state
+            .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+            .expect_err("first lookup errors");
+        assert!(matches!(err.kind, ErrorKind::TypeError(_)));
+        costs.push(state.cost_used());
+    }
+    assert_eq!(costs[0], costs[1], "unvisited slots must not consume cost");
+}
+
+/// The table library charges one per element shifted or visited (min 1).
+/// Each pair performs the same costed bytecode operations on different data,
+/// so the difference is exactly the data-dependent library charge.
+#[test]
+fn table_library_charges_scale_with_elements() {
+    let setup = "local t = {} for i = 1, 50 do t[i] = i end";
+    let pairs: &[(&str, &str, &str, u64)] = &[
+        // Insert at the front shifts 50 (cost 50); an append shifts none (1).
+        ("insert", "local d = -49", "local d = 1", 49),
+        // Removing the front shifts 49 (cost 49); a pop shifts none (1).
+        ("remove", "local d = -49", "local d = 0", 48),
+        // unpack(t, 1, 10) visits 10; unpack(t, 1, 1) visits 1.
+        ("unpack", "local j = 10", "local j = 1", 9),
+        // An empty range still costs the minimum 1.
+        ("unpack_empty", "local j = 1", "local j = 0", 0),
+        // pack stores 10 vs 1, on top of the unpack difference of 9.
+        ("pack", "local j = 10", "local j = 1", 18),
+    ];
+    for &(name, wide, narrow, expected) in pairs {
+        let body = match name {
+            "insert" => "local p = #t + d table.insert(t, p, 0)",
+            "remove" => "local p = #t + d table.remove(t, p)",
+            "unpack" | "unpack_empty" => "local a = unpack(t, 1, j)",
+            "pack" => "local a = table.pack(unpack(t, 1, j))",
+            _ => unreachable!("every pair names a body"),
+        };
+        let wide_cost = cost_of(&format!("{setup} {wide} {body}"));
+        let narrow_cost = cost_of(&format!("{setup} {narrow} {body}"));
+        assert_eq!(
+            wide_cost - narrow_cost,
+            expected,
+            "{name}: wide {wide_cost}, narrow {narrow_cost}"
+        );
     }
 }
 

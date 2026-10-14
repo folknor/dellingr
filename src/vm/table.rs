@@ -7,10 +7,18 @@ use super::Result;
 use super::TypeError;
 use super::Val;
 use super::object::{GcHeap, Markable, ObjectPtr};
+#[cfg(feature = "snapshot")]
+use crate::error::ErrorKind;
 
 /// Maximum number of entries for inline storage.
 /// Tables with more entries promote to IndexMap.
 const INLINE_CAPACITY: usize = 4;
+
+/// Tag bit marking a slot index (as handed to inline caches and the `pairs`
+/// cursor) as an array-part slot. Untagged indices are hash-part positions.
+/// Array slots never move, and tagging keeps hash positions independent of
+/// the array's length, so growing the array invalidates no cached index.
+const ARRAY_SLOT_TAG: usize = 1 << (usize::BITS - 1);
 
 /// The table-key forms rejected by Lua before hashing or equality is used.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -71,9 +79,10 @@ pub(super) fn normalize_table_key<S, O, F>(
     }
 }
 
-/// Storage for table entries. Small tables (≤4 entries) use inline array storage
-/// for better cache locality and reduced allocation overhead. Larger tables
-/// use IndexMap to maintain insertion order for deterministic `pairs()` iteration.
+/// Storage for the hash part. Small parts (<=4 entries) use inline array
+/// storage for better cache locality and reduced allocation overhead. Larger
+/// parts use IndexMap to maintain insertion order for deterministic `pairs()`
+/// iteration.
 #[derive(Debug)]
 enum TableStorage {
     /// Inline storage for small tables. Stores key-value pairs directly.
@@ -102,6 +111,13 @@ pub(super) enum TableNextWithIndex {
     InvalidKey,
 }
 
+/// A position in iteration order: the array part first, then the hash part.
+#[derive(Clone, Copy)]
+enum Position {
+    Array(usize),
+    Hash(usize),
+}
+
 impl Default for TableStorage {
     fn default() -> Self {
         TableStorage::Inline {
@@ -111,30 +127,45 @@ impl Default for TableStorage {
     }
 }
 
-/// A Lua table with optimized storage for small tables.
-/// Tables with ≤4 entries use inline array storage for better performance.
-/// Larger tables use IndexMap to maintain insertion order for `pairs()`.
+/// A Lua table: an array part for keys `1..=array.len()` beside an
+/// insertion-ordered hash part for everything else.
+///
+/// Shape rules, which every mutation preserves:
+///
+/// - Key `k` with `1 <= k <= array.len()` lives only in `array[k - 1]` (a nil
+///   there means absent). The hash part may still hold a dead tombstone for
+///   such a key, left by migration, but never a live one.
+/// - The array grows only by appending key `array.len() + 1`, after which
+///   any live hash entries for the following keys migrate into it. So the
+///   hash part never holds a live entry for key `array.len() + 1`.
+/// - The array never shrinks outside a snapshot rebuild: array slots keep
+///   their index for the table's lifetime, which is what lets a `pairs`
+///   traversal assign nil to any visited key.
+///
+/// `pairs()` visits live array slots in ascending key order, then the hash
+/// part in insertion order. Both are deterministic functions of the
+/// operation history, and a snapshot preserves the array length (including
+/// nil slots) so a loaded table continues identically.
 #[derive(Debug)]
 pub(super) struct Table {
+    array: Vec<Val>,
     storage: TableStorage,
     metatable: Option<ObjectPtr>,
-    /// Shape version for key/index stability. Value updates do not bump this.
+    /// Shape version for hash-part key/index stability. Value updates do not
+    /// bump this, and neither does anything in the array part, whose slots
+    /// never move.
     version: Cell<u64>,
-    /// Cached array length. None means cache is invalid and needs recomputation.
-    /// Invalidated when positive integer keys are inserted or removed.
-    /// Uses Cell for interior mutability so array_len() can cache on &self.
-    cached_array_len: Cell<Option<usize>>,
-    /// Number of occupied storage slots whose nil value makes them logically absent.
+    /// Number of occupied hash slots whose nil value makes them logically absent.
     dead_count: usize,
 }
 
 impl Default for Table {
     fn default() -> Self {
         Self {
+            array: Vec::new(),
             storage: TableStorage::default(),
             metatable: None,
             version: Cell::new(0),
-            cached_array_len: Cell::new(None),
             dead_count: 0,
         }
     }
@@ -147,10 +178,7 @@ impl Table {
         } else {
             Self {
                 storage: TableStorage::Map(IndexMap::with_capacity(capacity)),
-                metatable: None,
-                version: Cell::new(0),
-                cached_array_len: Cell::new(None),
-                dead_count: 0,
+                ..Self::default()
             }
         }
     }
@@ -164,26 +192,37 @@ impl Table {
         // Count the slots actually created, not the ids supplied: the bytecode
         // verifier rejects duplicate template keys, but a duplicate that got
         // through would otherwise leave phantom tombstones and underflow
-        // `map.len() - dead_count`.
+        // `map.len() - dead_count`. Template keys are verified to be strings,
+        // so none of them belongs in the array part.
         let dead_count = map.len();
         Self {
             storage: TableStorage::Map(map),
-            metatable: None,
-            version: Cell::new(0),
-            cached_array_len: Cell::new(None),
             dead_count,
+            ..Self::default()
         }
     }
 
-    /// Check if a value is a positive integer (potential array index).
+    /// The array slot holding `key`, if `key` is an integer in
+    /// `1..=array.len()`.
     #[inline]
     #[allow(clippy::float_cmp)]
-    fn is_array_key(key: &Val) -> bool {
-        if let Val::Num(n) = key {
-            *n > 0.0 && n.is_finite() && *n == n.floor()
+    fn array_slot(&self, key: &Val) -> Option<usize> {
+        if let Val::Num(n) = *key
+            && n >= 1.0
+            && n <= self.array.len() as f64
+            && n == n.floor()
+        {
+            Some(n as usize - 1)
         } else {
-            false
+            None
         }
+    }
+
+    /// Whether `key` is `array.len() + 1`, the key that extends the array.
+    #[inline]
+    #[allow(clippy::float_cmp)]
+    fn is_array_append_key(&self, key: &Val) -> bool {
+        matches!(key, Val::Num(n) if *n == (self.array.len() + 1) as f64)
     }
 
     #[inline]
@@ -198,6 +237,14 @@ impl Table {
 
     #[hotpath::measure]
     pub(super) fn get(&self, key: &Val) -> Val {
+        if let Some(slot) = self.array_slot(key) {
+            return self.array[slot];
+        }
+        self.hash_get(key)
+    }
+
+    #[inline]
+    fn hash_get(&self, key: &Val) -> Val {
         match key {
             Val::Nil => Val::Nil,
             Val::Num(n) if n.is_nan() => Val::Nil,
@@ -210,25 +257,17 @@ impl Table {
                     }
                     Val::Nil
                 }
-                TableStorage::Map(map) => {
-                    if Self::is_array_key(key)
-                        && let Val::Num(n) = key
-                    {
-                        let idx = (*n as usize) - 1;
-                        if let Some((Val::Num(kn), v)) = map.get_index(idx)
-                            && kn.to_bits() == n.to_bits()
-                        {
-                            return *v;
-                        }
-                    }
-                    map.get(key).copied().unwrap_or_default()
-                }
+                TableStorage::Map(map) => map.get(key).copied().unwrap_or_default(),
             },
         }
     }
 
     #[inline]
     pub(super) fn get_with_index(&self, key: &Val) -> Option<(usize, Val)> {
+        if let Some(slot) = self.array_slot(key) {
+            let value = self.array[slot];
+            return (!matches!(value, Val::Nil)).then_some((ARRAY_SLOT_TAG | slot, value));
+        }
         match key {
             Val::Nil => None,
             Val::Num(n) if n.is_nan() => None,
@@ -254,6 +293,12 @@ impl Table {
 
     #[inline]
     pub(super) fn get_index(&self, index: usize) -> Option<(Val, Val)> {
+        if index & ARRAY_SLOT_TAG != 0 {
+            let slot = index & !ARRAY_SLOT_TAG;
+            return self.array.get(slot).and_then(|value| {
+                (!matches!(value, Val::Nil)).then_some((Val::Num((slot + 1) as f64), *value))
+            });
+        }
         match &self.storage {
             TableStorage::Inline { entries, len } => {
                 if index < *len as usize {
@@ -268,28 +313,95 @@ impl Table {
         }
     }
 
+    /// Live entries in `pairs()` order: the array part, then the hash part.
     #[cfg(feature = "snapshot")]
     pub(super) fn entries(&self) -> Vec<(Val, Val)> {
-        match &self.storage {
-            TableStorage::Inline { entries, len } => entries
-                .iter()
-                .take(*len as usize)
-                .filter(|(_, value)| !matches!(value, Val::Nil))
-                .copied()
-                .collect(),
-            TableStorage::Map(map) => map
-                .iter()
-                .filter(|(_, value)| !matches!(value, Val::Nil))
-                .map(|(key, value)| (*key, *value))
-                .collect(),
-        }
+        let mut out = self.array_entries(false);
+        self.extend_with_live_hash_entries(&mut out);
+        out
+    }
+
+    /// The array length (nil slots included) and the snapshot entry list: one
+    /// entry per array slot, with nil values for empty slots, followed by the
+    /// live hash entries in insertion order. `rebuild_from_snapshot` inverts it.
+    #[cfg(feature = "snapshot")]
+    pub(super) fn snapshot_entries(&self) -> (usize, Vec<(Val, Val)>) {
+        let mut out = self.array_entries(true);
+        self.extend_with_live_hash_entries(&mut out);
+        (self.array.len(), out)
+    }
+
+    /// The array part with its nil slots, for environment-table snapshots.
+    #[cfg(feature = "snapshot")]
+    pub(super) fn array_part(&self) -> &[Val] {
+        &self.array
     }
 
     #[cfg(feature = "snapshot")]
+    fn array_entries(&self, include_nil: bool) -> Vec<(Val, Val)> {
+        self.array
+            .iter()
+            .enumerate()
+            .filter(|(_, value)| include_nil || !matches!(value, Val::Nil))
+            .map(|(slot, value)| (Val::Num((slot + 1) as f64), *value))
+            .collect()
+    }
+
+    #[cfg(feature = "snapshot")]
+    fn extend_with_live_hash_entries(&self, out: &mut Vec<(Val, Val)>) {
+        match &self.storage {
+            TableStorage::Inline { entries, len } => out.extend(
+                entries
+                    .iter()
+                    .take(*len as usize)
+                    .filter(|(_, value)| !matches!(value, Val::Nil))
+                    .copied(),
+            ),
+            TableStorage::Map(map) => out.extend(
+                map.iter()
+                    .filter(|(_, value)| !matches!(value, Val::Nil))
+                    .map(|(key, value)| (*key, *value)),
+            ),
+        }
+    }
+
+    /// Rebuild from live entries in `pairs()` order. The array part is
+    /// re-derived by insertion, so this does not reproduce nil array slots;
+    /// use `rebuild_from_snapshot` where the array length must round-trip.
+    #[cfg(feature = "snapshot")]
     pub(super) fn clear_and_insert_entries(&mut self, entries: Vec<(Val, Val)>) -> Result<()> {
-        // Reset to a shell sized for the incoming entries, then re-insert in
-        // order so `pairs()` iteration order round-trips. with_capacity picks
-        // inline vs map storage from the count.
+        self.rebuild(0, entries, false)
+    }
+
+    /// Rebuild from `snapshot_entries` output: the first `array_len` entries
+    /// are the array slots (keys `1..=array_len` in order, nil values for
+    /// empty slots), the rest live hash entries in insertion order.
+    #[cfg(feature = "snapshot")]
+    pub(super) fn rebuild_from_snapshot(
+        &mut self,
+        array_len: usize,
+        entries: Vec<(Val, Val)>,
+    ) -> Result<()> {
+        self.rebuild(array_len, entries, true)
+    }
+
+    #[cfg(feature = "snapshot")]
+    fn rebuild(
+        &mut self,
+        array_len: usize,
+        entries: Vec<(Val, Val)>,
+        exact_shape: bool,
+    ) -> Result<()> {
+        if array_len > entries.len() {
+            return Err(Error::new(
+                ErrorKind::InternalError("snapshot array length exceeds its entries".into()),
+                0,
+                0,
+            ));
+        }
+        // Reset to a shell sized for the incoming hash entries, then re-insert
+        // in order so `pairs()` iteration order round-trips. with_capacity
+        // picks inline vs map storage from the count.
         //
         // The rebuild may move keys to new indices, so the version must move
         // past every value an inline cache could have captured for this table
@@ -298,8 +410,31 @@ impl Table {
         // wrong slot. A per-table bump suffices: caches key on table identity,
         // which the rebuild preserves.
         let next_version = self.version().wrapping_add(1);
-        *self = Table::with_capacity(entries.len());
+        *self = Table::with_capacity(entries.len() - array_len);
+        let mut entries = entries.into_iter();
+        let mut array = Vec::with_capacity(array_len);
+        for (slot, (key, value)) in entries.by_ref().take(array_len).enumerate() {
+            if !matches!(key, Val::Num(n) if n.to_bits() == ((slot + 1) as f64).to_bits()) {
+                return Err(Error::new(
+                    ErrorKind::InternalError("snapshot array slot has the wrong key".into()),
+                    0,
+                    0,
+                ));
+            }
+            array.push(value);
+        }
+        self.array = array;
         for (key, value) in entries {
+            // With an exact shape, a hash entry at the array's append key
+            // would migrate into the array and reorder `pairs()`, so it
+            // cannot have come from `snapshot_entries`.
+            if exact_shape && (self.array_slot(&key).is_some() || self.is_array_append_key(&key)) {
+                return Err(Error::new(
+                    ErrorKind::InternalError("snapshot hash entry belongs in the array".into()),
+                    0,
+                    0,
+                ));
+            }
             self.insert(key, value)?;
         }
         self.version.set(next_version);
@@ -315,10 +450,18 @@ impl Table {
     /// remove-semantics and must go through the slow path) and that the
     /// entry at `index` corresponds to the intended key (typically verified
     /// by table_version match or get_index key compare). Does not bump
-    /// version (value-only change preserves (key, index) bindings) and does
-    /// not invalidate cached_array_len (presence of any key unchanged).
+    /// version (value-only change preserves (key, index) bindings).
     #[inline]
     pub(super) fn set_at_index(&mut self, index: usize, value: Val) -> bool {
+        if index & ARRAY_SLOT_TAG != 0 {
+            return match self.array.get_mut(index & !ARRAY_SLOT_TAG) {
+                Some(slot) if !matches!(*slot, Val::Nil) => {
+                    *slot = value;
+                    true
+                }
+                _ => false,
+            };
+        }
         match &mut self.storage {
             TableStorage::Inline { entries, len } => {
                 if index < *len as usize && !matches!(entries[index].1, Val::Nil) {
@@ -344,6 +487,9 @@ impl Table {
 
     /// Initializes a reserved template slot without exposing dead slots to caches.
     pub(super) fn init_at_index(&mut self, index: usize, key: Val, value: Val) -> bool {
+        if index & ARRAY_SLOT_TAG != 0 {
+            return false;
+        }
         let activated = match &mut self.storage {
             TableStorage::Inline { entries, len } if index < *len as usize => {
                 let (existing_key, existing_value) = &mut entries[index];
@@ -376,56 +522,42 @@ impl Table {
     /// Returns a "border" of the table per the Lua `#` operator.
     /// A border is any non-negative integer N where `t[N]` is non-nil (or N == 0)
     /// and `t[N+1]` is nil. For a sequence (no nil holes) this is the length.
-    /// For non-sequences any border is valid; the result is deterministic for
-    /// a given table state but may change after inserts/removes.
-    /// Uses cached value when available for O(1) performance.
+    ///
+    /// Only the array part is consulted: if
+    /// its last slot is live, the array length is a border (the hash part
+    /// never holds a live entry for the next key); otherwise a binary search
+    /// inside the array finds one. The result is a pure function of the array
+    /// part, which snapshots preserve, and costs O(1) for a full array and
+    /// O(log n) otherwise.
     #[hotpath::measure]
     pub(super) fn array_len(&self) -> usize {
-        if let Some(len) = self.cached_array_len.get() {
-            return len;
-        }
-        let len = self.compute_array_len();
-        self.cached_array_len.set(Some(len));
-        len
-    }
-
-    /// Computes a border via exponential doubling + binary search, matching
-    /// reference Lua's `luaH_getn`. O(log N) lookups for a dense table of
-    /// length N, vs O(N) for a linear scan.
-    #[hotpath::measure]
-    fn compute_array_len(&self) -> usize {
-        // t[1] nil: 0 is a border.
-        if matches!(self.get(&Val::Num(1.0)), Val::Nil) {
-            return 0;
-        }
-        // Doubling: find hi such that t[hi] is nil. Invariant: t[lo] non-nil.
-        let mut lo: usize = 1;
-        let mut hi: usize = 2;
-        while !matches!(self.get(&Val::Num(hi as f64)), Val::Nil) {
-            lo = hi;
-            if hi > usize::MAX / 2 {
-                // Pathologically large dense table; fall back to linear scan.
-                while !matches!(self.get(&Val::Num((lo + 1) as f64)), Val::Nil) {
-                    lo += 1;
+        match self.array.last() {
+            None => 0,
+            Some(last) if !matches!(last, Val::Nil) => self.array.len(),
+            Some(_) => {
+                // Invariant: lo == 0 or t[lo] is non-nil; t[hi] is nil.
+                let mut lo = 0;
+                let mut hi = self.array.len();
+                while hi - lo > 1 {
+                    let mid = lo + (hi - lo) / 2;
+                    if matches!(self.array[mid - 1], Val::Nil) {
+                        hi = mid;
+                    } else {
+                        lo = mid;
+                    }
                 }
-                return lo;
-            }
-            hi *= 2;
-        }
-        // Binary search [lo, hi): t[lo] non-nil, t[hi] nil.
-        while hi - lo > 1 {
-            let mid = lo + (hi - lo) / 2;
-            if matches!(self.get(&Val::Num(mid as f64)), Val::Nil) {
-                hi = mid;
-            } else {
-                lo = mid;
+                lo
             }
         }
-        lo
     }
 
     #[hotpath::measure]
     pub(super) fn insert(&mut self, key: Val, value: Val) -> Result<()> {
+        if let Some(slot) = self.array_slot(&key) {
+            self.array[slot] = value;
+            return Ok(());
+        }
+
         let key_input = match key {
             Val::Nil => TableKeyInput::Nil,
             Val::Bool(value) => TableKeyInput::Bool(value),
@@ -442,13 +574,14 @@ impl Table {
 
         // In Lua, assigning nil deletes the key rather than storing a nil value.
         if matches!(value, Val::Nil) {
-            self.remove(&key);
+            self.hash_remove(&key);
             return Ok(());
         }
 
-        // Invalidate cache if this could affect array length
-        if Self::is_array_key(&key) {
-            self.cached_array_len.set(None);
+        if self.is_array_append_key(&key) {
+            self.array.push(value);
+            self.migrate_from_hash();
+            return Ok(());
         }
 
         if self.dead_count == 0 {
@@ -496,6 +629,39 @@ impl Table {
             TableStorage::Map(_) => self.insert_into_map_with_tombstones(key, value),
         }
         Ok(())
+    }
+
+    /// After the array grew, move any live hash entries for the keys that now
+    /// follow it into the array, restoring "no live hash entry at the append
+    /// key". Each migrated entry leaves a tombstone, exactly as a removal does,
+    /// so no cached hash index moves; the tombstones are compacted once they
+    /// outnumber the live entries.
+    fn migrate_from_hash(&mut self) {
+        if self.hash_live_len() == 0 {
+            return;
+        }
+        let mut migrated = false;
+        loop {
+            let next = Val::Num((self.array.len() + 1) as f64);
+            match self.hash_remove(&next) {
+                Some(value) => {
+                    self.array.push(value);
+                    migrated = true;
+                }
+                None => break,
+            }
+        }
+        if migrated && self.dead_count >= self.hash_live_len() && self.compact_dead() {
+            self.bump_version();
+        }
+    }
+
+    fn hash_live_len(&self) -> usize {
+        let occupied = match &self.storage {
+            TableStorage::Inline { len, .. } => *len as usize,
+            TableStorage::Map(map) => map.len(),
+        };
+        occupied - self.dead_count
     }
 
     fn insert_into_map_with_tombstones(&mut self, key: Val, value: Val) {
@@ -579,30 +745,18 @@ impl Table {
         }
     }
 
-    /// Ensure storage is Map (for operations that need IndexMap's shift_remove).
-    #[hotpath::measure]
-    fn ensure_map(&mut self) {
-        debug_assert_eq!(self.dead_count, 0);
-        // Only convert if currently Inline
-        if matches!(self.storage, TableStorage::Inline { .. })
-            && let TableStorage::Inline { mut entries, len } = std::mem::take(&mut self.storage)
-        {
-            let mut map = IndexMap::with_capacity(len as usize);
-            for entry in entries.iter_mut().take(len as usize) {
-                let (k, v) = std::mem::take(entry);
-                map.insert(k, v);
-            }
-            self.storage = TableStorage::Map(map);
-        }
-    }
-
     /// Remove a key and return its value (if any).
     #[hotpath::measure]
     fn remove(&mut self, key: &Val) -> Option<Val> {
-        if Self::is_array_key(key) {
-            self.cached_array_len.set(None);
+        if let Some(slot) = self.array_slot(key) {
+            let removed = std::mem::replace(&mut self.array[slot], Val::Nil);
+            return (!matches!(removed, Val::Nil)).then_some(removed);
         }
+        self.hash_remove(key)
+    }
 
+    /// Tombstone a hash-part key and return its value (if any).
+    fn hash_remove(&mut self, key: &Val) -> Option<Val> {
         match &mut self.storage {
             TableStorage::Inline { entries, len } => {
                 for (entry_key, entry_value) in entries.iter_mut().take(*len as usize) {
@@ -630,7 +784,7 @@ impl Table {
         }
     }
 
-    /// Stably remove logically absent slots. The caller owns version changes.
+    /// Stably remove logically absent hash slots. The caller owns version changes.
     fn compact_dead(&mut self) -> bool {
         if self.dead_count == 0 {
             return false;
@@ -658,93 +812,84 @@ impl Table {
         true
     }
 
+    /// Stores the values of a table constructor's positional fields at keys
+    /// `first..`. Like reference Lua, which presizes the array part for them,
+    /// a nil positional value still occupies its array slot, so
+    /// `#{1, nil, 3}` is 3.
+    #[hotpath::measure]
+    pub(super) fn set_list(&mut self, first: usize, values: Vec<Val>) -> Result<()> {
+        for (key, value) in (first..).zip(values) {
+            if key == self.array.len() + 1 {
+                self.array.push(value);
+                self.migrate_from_hash();
+            } else {
+                self.insert(Val::Num(key as f64), value)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Inserts a value at the given array position, shifting elements up.
-    /// Position should be 1-based (Lua-style).
+    /// Position is 1-based and must lie in `1..=array_len() + 1`.
+    ///
+    /// The border always lies inside the array part, so the shift is one
+    /// memmove of the elements after `pos`. No slot moves to another key's
+    /// index, so the version is untouched.
     #[hotpath::measure]
     pub(super) fn array_insert(&mut self, pos: usize, value: Val) {
         let len = self.array_len();
-        let value_is_nil = matches!(value, Val::Nil);
-        self.compact_dead();
-        let mut carry = value;
-        for key in pos..=len {
-            let key = Val::Num(key as f64);
-            let old = self.get(&key);
-            self.insert(key, carry)
+        debug_assert!(
+            (1..=len + 1).contains(&pos),
+            "insert position {pos} outside 1..={len}+1"
+        );
+        if len < self.array.len() {
+            // Slot `len` (key len + 1) exists and is nil: rotate it to `pos`.
+            self.array[pos - 1..=len].rotate_right(1);
+            self.array[pos - 1] = value;
+        } else if pos == len + 1 {
+            // Appending; nil is a no-op, as `t[#t + 1] = nil` is.
+            self.insert(Val::Num(pos as f64), value)
                 .expect("array_insert: integer key insert cannot fail");
-            carry = old;
-        }
-        self.insert(Val::Num((len + 1) as f64), carry)
-            .expect("array_insert: integer key insert cannot fail");
-        self.bump_version();
-        if value_is_nil || !matches!(self.get(&Val::Num((len + 2) as f64)), Val::Nil) {
-            self.cached_array_len.set(None);
         } else {
-            self.cached_array_len.set(Some(len + 1));
+            self.array.insert(pos - 1, value);
+            self.migrate_from_hash();
         }
     }
 
-    /// Removes and returns the value at the given array position, shifting elements down.
-    /// Position should be 1-based (Lua-style).
+    /// Removes and returns the value at the given position, shifting later
+    /// elements down, with reference Lua's `tremove` semantics: for a
+    /// position outside `1..=array_len()` (only 0 for an empty sequence, or
+    /// `array_len() + 1`) it returns `t[pos]` and clears it.
     #[hotpath::measure]
     pub(super) fn array_remove(&mut self, pos: usize) -> Val {
         let len = self.array_len();
-        if pos > len || pos == 0 {
-            return Val::Nil;
+        if (1..=len).contains(&pos) {
+            let removed = self.array[pos - 1];
+            self.array.copy_within(pos..len, pos - 1);
+            self.array[len - 1] = Val::Nil;
+            return removed;
         }
-        self.compact_dead();
-        // For shift operations, ensure we're using Map storage
-        self.ensure_map();
-        let removed = if let TableStorage::Map(map) = &mut self.storage {
-            // Get the value to return
-            let key = Val::Num(pos as f64);
-            let removed = map.shift_remove(&key).unwrap_or(Val::Nil);
-            // Shift elements down
-            for i in pos..len {
-                let next_key = Val::Num((i + 1) as f64);
-                let curr_key = Val::Num(i as f64);
-                if let Some(v) = map.shift_remove(&next_key) {
-                    map.insert(curr_key, v);
-                }
-            }
-            removed
-        } else {
-            Val::Nil
-        };
-        self.bump_version();
-        // Update cache: new length is old length - 1
-        self.cached_array_len.set(Some(len - 1));
+        let key = Val::Num(pos as f64);
+        let removed = self.get(&key);
+        self.remove(&key);
         removed
     }
 
-    /// Returns the array portion of the table as a Vec for sorting.
-    /// Array indices are 1-based in Lua.
+    /// Returns the sequence `t[1..=#t]` as a Vec for sorting.
     #[hotpath::measure]
     pub(super) fn get_array(&self) -> Vec<Val> {
-        let len = self.array_len();
-        (1..=len)
-            .map(|i| {
-                let key = Val::Num(i as f64);
-                self.get(&key)
-            })
-            .collect()
+        self.array[..self.array_len()].to_vec()
     }
 
-    /// Replaces the array portion of the table with the given values.
+    /// Writes sorted values back to keys `1..=values.len()`. Entries beyond
+    /// the original sort range survive even if a comparator added them.
+    /// Each write is O(1), so the writeback is linear in the sorted range.
     #[hotpath::measure]
     pub(super) fn set_array(&mut self, values: Vec<Val>) {
-        // First remove old array elements
-        let old_len = self.array_len();
-        for i in 1..=old_len {
-            self.remove(&Val::Num(i as f64));
-        }
-        // Insert new values and update cache directly (we know the new length)
-        let new_len = values.len();
         for (i, v) in values.into_iter().enumerate() {
-            // Use insert which handles both storage types
             self.insert(Val::Num((i + 1) as f64), v)
                 .expect("set_array: integer key insert cannot fail");
         }
-        self.cached_array_len.set(Some(new_len));
     }
 
     /// Returns the metatable of this table, if any.
@@ -757,14 +902,33 @@ impl Table {
         self.metatable = mt;
     }
 
-    /// Scan physical storage from `index`, skipping nil-valued tombstones.
-    fn next_live_from(&self, index: usize) -> TableNextWithIndex {
+    /// Scan from `position` in iteration order, skipping nil slots.
+    fn next_live_from(&self, position: Position) -> TableNextWithIndex {
+        let hash_start = match position {
+            Position::Array(start) => {
+                if let Some((slot, value)) = self
+                    .array
+                    .iter()
+                    .enumerate()
+                    .skip(start)
+                    .find(|(_, value)| !matches!(value, Val::Nil))
+                {
+                    return TableNextWithIndex::Pair {
+                        index: ARRAY_SLOT_TAG | slot,
+                        key: Val::Num((slot + 1) as f64),
+                        value: *value,
+                    };
+                }
+                0
+            }
+            Position::Hash(start) => start,
+        };
         match &self.storage {
             TableStorage::Inline { entries, len } => entries
                 .iter()
                 .take(*len as usize)
                 .enumerate()
-                .skip(index)
+                .skip(hash_start)
                 .find(|(_, (_, value))| !matches!(value, Val::Nil))
                 .map_or(TableNextWithIndex::End, |(index, (key, value))| {
                     TableNextWithIndex::Pair {
@@ -776,7 +940,7 @@ impl Table {
             TableStorage::Map(map) => map
                 .iter()
                 .enumerate()
-                .skip(index)
+                .skip(hash_start)
                 .find(|(_, (_, value))| !matches!(value, Val::Nil))
                 .map_or(TableNextWithIndex::End, |(index, (key, value))| {
                     TableNextWithIndex::Pair {
@@ -795,7 +959,10 @@ impl Table {
             return TableNextWithIndex::InvalidKey;
         }
         if matches!(control, Val::Nil) {
-            return self.next_live_from(0);
+            return self.next_live_from(Position::Array(0));
+        }
+        if let Some(slot) = self.array_slot(control) {
+            return self.next_live_from(Position::Array(slot + 1));
         }
         let index = match &self.storage {
             TableStorage::Inline { entries, len } => entries
@@ -805,7 +972,7 @@ impl Table {
             TableStorage::Map(map) => map.get_index_of(control),
         };
         index.map_or(TableNextWithIndex::InvalidKey, |index| {
-            self.next_live_from(index.saturating_add(1))
+            self.next_live_from(Position::Hash(index.saturating_add(1)))
         })
     }
 
@@ -819,6 +986,14 @@ impl Table {
         if matches!(control, Val::Num(n) if n.is_nan()) {
             return TableNextWithIndex::InvalidKey;
         }
+        if index & ARRAY_SLOT_TAG != 0 {
+            let slot = index & !ARRAY_SLOT_TAG;
+            return if self.array_slot(control) == Some(slot) {
+                self.next_live_from(Position::Array(slot + 1))
+            } else {
+                TableNextWithIndex::InvalidKey
+            };
+        }
         let matches = match &self.storage {
             TableStorage::Inline { entries, len } => {
                 index < *len as usize && entries[index].0 == *control
@@ -828,7 +1003,7 @@ impl Table {
                 .is_some_and(|(key, _)| *key == *control),
         };
         if matches {
-            self.next_live_from(index.saturating_add(1))
+            self.next_live_from(Position::Hash(index.saturating_add(1)))
         } else {
             TableNextWithIndex::InvalidKey
         }
@@ -852,6 +1027,9 @@ impl Table {
     /// Called by the GC during the mark phase.
     #[hotpath::measure]
     pub(super) fn mark_values(&self, heap: &GcHeap, worklist: &mut Vec<ObjectPtr>) {
+        for value in &self.array {
+            value.mark_reachable(heap, worklist);
+        }
         match &self.storage {
             TableStorage::Inline { entries, len } => {
                 for (key, value) in entries.iter().take(*len as usize) {
@@ -888,10 +1066,31 @@ mod tests {
         Val::Num(x as f64)
     }
 
+    /// A number key that can never live in the array part.
+    fn h(x: usize) -> Val {
+        Val::Num(x as f64 + 0.5)
+    }
+
     fn fill(t: &mut Table, range: std::ops::RangeInclusive<usize>) {
         for i in range {
             t.insert(n(i), Val::Bool(true)).unwrap();
         }
+    }
+
+    fn fill_hash(t: &mut Table, range: std::ops::RangeInclusive<usize>) {
+        for i in range {
+            t.insert(h(i), Val::Bool(true)).unwrap();
+        }
+    }
+
+    fn keys(t: &Table) -> Vec<Val> {
+        let mut control = Val::Nil;
+        let mut keys = Vec::new();
+        while let TableNext::Pair(key, _) = t.next(&control) {
+            keys.push(key);
+            control = key;
+        }
+        keys
     }
 
     fn is_border(t: &Table, len: usize) -> bool {
@@ -903,32 +1102,29 @@ mod tests {
     #[test]
     fn empty_table_has_border_zero() {
         let t = Table::default();
-        assert_eq!(t.compute_array_len(), 0);
+        assert_eq!(t.array_len(), 0);
     }
 
     #[test]
-    fn dense_inline_returns_exact_length() {
-        // INLINE_CAPACITY entries, no holes.
+    fn small_dense_array_returns_exact_length() {
         let mut t = Table::default();
         fill(&mut t, 1..=INLINE_CAPACITY);
-        assert_eq!(t.compute_array_len(), INLINE_CAPACITY);
+        assert_eq!(t.array_len(), INLINE_CAPACITY);
     }
 
     #[test]
-    fn dense_map_returns_exact_length() {
+    fn large_dense_array_returns_exact_length() {
         let mut t = Table::default();
         fill(&mut t, 1..=500);
-        assert_eq!(t.compute_array_len(), 500);
+        assert_eq!(t.array_len(), 500);
     }
 
     #[test]
-    fn cache_invalidated_on_insert() {
+    fn length_tracks_inserts_beyond_the_border() {
         let mut t = Table::default();
         fill(&mut t, 1..=10);
         assert_eq!(t.array_len(), 10);
-        // Add an out-of-range key; current invalidation policy clears the cache.
         t.insert(n(20), Val::Bool(true)).unwrap();
-        // Length is still a valid border (either 10 or 20).
         let len = t.array_len();
         assert!(is_border(&t, len), "len={len} is not a border");
     }
@@ -940,18 +1136,29 @@ mod tests {
         let mut t = Table::default();
         fill(&mut t, 1..=1000);
         t.insert(n(500), Val::Nil).unwrap();
-        let len = t.compute_array_len();
-        assert!(len == 499 || len == 1000, "len={len} is not a valid border");
-        assert_eq!(len, 1000, "binary-search algorithm overshoots holes");
+        assert_eq!(t.array_len(), 1000);
+    }
+
+    #[test]
+    fn trailing_holes_binary_search_to_a_border() {
+        let mut t = Table::default();
+        fill(&mut t, 1..=100);
+        for key in 40..=100 {
+            t.insert(n(key), Val::Nil).unwrap();
+        }
+        assert_eq!(t.array_len(), 39);
+        t.insert(n(1), Val::Nil).unwrap();
+        let len = t.array_len();
+        assert!(is_border(&t, len), "len={len} is not a border");
     }
 
     #[test]
     fn two_dense_runs_returns_a_border() {
-        // 1..=3 dense, gap at 4, 5..=7 dense. Borders: 0, 3, 7.
+        // 1..=3 dense, gap at 4, 5..=7 dense. Borders: 3 and 7.
         let mut t = Table::default();
         fill(&mut t, 1..=3);
         fill(&mut t, 5..=7);
-        let len = t.compute_array_len();
+        let len = t.array_len();
         assert!(is_border(&t, len), "len={len} is not a border");
     }
 
@@ -960,37 +1167,121 @@ mod tests {
         let mut t = Table::default();
         t.insert(n(2), Val::Bool(true)).unwrap();
         t.insert(n(3), Val::Bool(true)).unwrap();
-        // t[1] is nil; the only valid border below 2 is 0.
-        assert_eq!(t.compute_array_len(), 0);
+        assert_eq!(t.array_len(), 0);
+    }
+
+    #[test]
+    fn appending_the_gap_migrates_later_hash_keys() {
+        let mut t = Table::default();
+        t.insert(Val::Bool(true), Val::Bool(true)).unwrap();
+        t.insert(n(3), Val::Num(3.0)).unwrap();
+        t.insert(n(2), Val::Num(2.0)).unwrap();
+        t.insert(n(5), Val::Num(5.0)).unwrap();
+        assert_eq!(t.array_len(), 0);
+        t.insert(n(1), Val::Num(1.0)).unwrap();
+        assert_eq!(t.array_len(), 3);
+        assert_eq!(t.array, vec![Val::Num(1.0), Val::Num(2.0), Val::Num(3.0)]);
+        assert_eq!(keys(&t), vec![n(1), n(2), n(3), Val::Bool(true), n(5)]);
+        // The migrated keys left tombstones; once they outnumbered the live
+        // hash entries the part was compacted, which moves hash indices.
+        assert_eq!(t.dead_count, 0);
+        assert_eq!(t.version(), 1);
     }
 
     #[test]
     fn single_element_returns_one() {
         let mut t = Table::default();
         t.insert(n(1), Val::Bool(true)).unwrap();
-        assert_eq!(t.compute_array_len(), 1);
+        assert_eq!(t.array_len(), 1);
     }
 
     #[test]
     fn power_of_two_boundary() {
-        // 1..=8 dense (the doubling search lands exactly on hi=16 → t[16] nil → bisect).
         let mut t = Table::default();
         fill(&mut t, 1..=8);
-        assert_eq!(t.compute_array_len(), 8);
+        assert_eq!(t.array_len(), 8);
     }
 
     #[test]
-    fn cache_returns_consistent_value() {
+    fn set_list_keeps_nil_positional_slots_in_the_array() {
         let mut t = Table::default();
-        fill(&mut t, 1..=64);
-        let first = t.array_len();
-        let second = t.array_len();
-        assert_eq!(first, second);
-        assert_eq!(first, 64);
+        t.set_list(1, vec![Val::Num(1.0), Val::Nil, Val::Num(3.0)])
+            .unwrap();
+        assert_eq!(t.array.len(), 3);
+        assert_eq!(t.array_len(), 3);
+        t.set_list(1, vec![Val::Num(1.0), Val::Nil]).unwrap();
+        t.insert(n(3), Val::Nil).unwrap();
+        assert_eq!(t.array_len(), 1);
     }
 
     #[test]
-    fn next_distinguishes_end_from_invalid_key_inline() {
+    fn array_remove_shifts_in_place_without_reordering() {
+        let mut t = Table::default();
+        t.insert(Val::Bool(false), Val::Bool(true)).unwrap();
+        fill(&mut t, 1..=1000);
+        for i in 1..=1000 {
+            t.insert(n(i), Val::Num(i as f64)).unwrap();
+        }
+        let version = t.version();
+        assert_eq!(t.array_remove(1), Val::Num(1.0));
+        assert_eq!(t.array_len(), 999);
+        assert_eq!(t.get(&n(1)), Val::Num(2.0));
+        assert_eq!(t.get(&n(999)), Val::Num(1000.0));
+        assert_eq!(t.get(&n(1000)), Val::Nil);
+        assert_eq!(t.version(), version);
+        let order = keys(&t);
+        assert_eq!(order.first(), Some(&n(1)));
+        assert_eq!(order.last(), Some(&Val::Bool(false)));
+        // Queue idiom: push at the border, pop the front.
+        t.array_insert(1000, Val::Num(-1.0));
+        assert_eq!(t.array.len(), 1000);
+        assert_eq!(t.array_len(), 1000);
+        assert_eq!(t.array_remove(1000), Val::Num(-1.0));
+    }
+
+    #[test]
+    fn array_remove_outside_the_sequence_reads_and_clears_the_key() {
+        let mut t = Table::default();
+        t.insert(n(0), Val::Bool(true)).unwrap();
+        assert_eq!(t.array_remove(0), Val::Bool(true));
+        assert_eq!(t.get(&n(0)), Val::Nil);
+        assert_eq!(t.array_remove(0), Val::Nil);
+    }
+
+    #[test]
+    fn array_insert_shifts_up_and_migrates() {
+        let mut t = Table::default();
+        fill(&mut t, 1..=3);
+        t.insert(n(5), Val::Num(5.0)).unwrap();
+        t.array_insert(1, Val::Num(0.0));
+        assert_eq!(t.array_len(), 5);
+        assert_eq!(t.get(&n(1)), Val::Num(0.0));
+        assert_eq!(t.get(&n(5)), Val::Num(5.0));
+        assert_eq!(keys(&t), (1..=5).map(n).collect::<Vec<_>>());
+        // Appending nil is a no-op.
+        t.array_insert(6, Val::Nil);
+        assert_eq!(t.array.len(), 5);
+    }
+
+    #[test]
+    fn set_array_writes_back_in_place() {
+        let mut t = Table::default();
+        t.insert(Val::Bool(true), Val::Bool(true)).unwrap();
+        for i in 1..=5 {
+            t.insert(n(i), Val::Num((6 - i) as f64)).unwrap();
+        }
+        let mut values = t.get_array();
+        values.reverse();
+        t.set_array(values);
+        assert_eq!(t.get(&n(1)), Val::Num(1.0));
+        assert_eq!(t.get(&n(5)), Val::Num(5.0));
+        assert_eq!(t.dead_count, 0);
+        assert_eq!(t.version(), 0);
+        assert_eq!(keys(&t).last(), Some(&Val::Bool(true)));
+    }
+
+    #[test]
+    fn next_distinguishes_end_from_invalid_key_array() {
         let mut t = Table::default();
         fill(&mut t, 1..=3);
 
@@ -1010,28 +1301,29 @@ mod tests {
     #[test]
     fn next_distinguishes_end_from_invalid_key_map() {
         let mut t = Table::default();
-        fill(&mut t, 1..=5);
+        fill_hash(&mut t, 1..=5);
 
         assert!(matches!(
             t.next(&Val::Nil),
-            TableNext::Pair(Val::Num(1.0), Val::Bool(true))
+            TableNext::Pair(Val::Num(1.5), _)
         ));
-        assert!(matches!(
-            t.next(&n(3)),
-            TableNext::Pair(Val::Num(4.0), Val::Bool(true))
-        ));
-        assert!(matches!(t.next(&n(5)), TableNext::End));
-        assert!(matches!(t.next(&n(6)), TableNext::InvalidKey));
+        assert!(matches!(t.next(&h(3)), TableNext::Pair(Val::Num(4.5), _)));
+        assert!(matches!(t.next(&h(5)), TableNext::End));
+        assert!(matches!(t.next(&h(6)), TableNext::InvalidKey));
         assert!(matches!(t.next(&Val::Num(f64::NAN)), TableNext::InvalidKey));
     }
 
     #[test]
-    fn indexed_next_is_the_next_oracle_for_both_storage_variants() {
+    fn indexed_next_is_the_next_oracle_for_every_storage_variant() {
+        // Array part plus an inline hash part, and plus a map hash part.
         for count in [4, 5] {
             let mut table = Table::default();
             fill(&mut table, 1..=count);
+            fill_hash(&mut table, 1..=count);
             table.remove(&n(1));
             table.remove(&n(3));
+            table.remove(&h(1));
+            table.remove(&h(3));
 
             let mut control = Val::Nil;
             let mut expected = Vec::new();
@@ -1046,11 +1338,21 @@ mod tests {
                     TableNext::InvalidKey => panic!("control from next must stay valid"),
                 }
             }
+            let live_keys: Vec<_> = (1..=count)
+                .filter(|key| *key != 1 && *key != 3)
+                .map(n)
+                .chain((1..=count).filter(|key| *key != 1 && *key != 3).map(h))
+                .collect();
+            assert_eq!(
+                expected.iter().map(|(key, _)| *key).collect::<Vec<_>>(),
+                live_keys
+            );
             control = Val::Nil;
             loop {
                 match table.next_with_index(&control) {
                     TableNextWithIndex::Pair { index, key, value } => {
                         indexed.push((index, key, value));
+                        assert_eq!(table.get_index(index), Some((key, value)));
                         match table.next_from_matching_index(index, &key) {
                             TableNextWithIndex::Pair {
                                 key: next, value, ..
@@ -1085,7 +1387,7 @@ mod tests {
                 TableNextWithIndex::Pair { .. }
             ));
             assert!(matches!(
-                table.next_with_index(&n(count + 1)),
+                table.next_with_index(&h(count + 1)),
                 TableNextWithIndex::InvalidKey
             ));
             assert!(matches!(
@@ -1100,44 +1402,74 @@ mod tests {
         // count 3 stays Inline; count 5 exercises Map storage.
         for count in [3, 5] {
             let mut table = Table::default();
-            fill(&mut table, 1..=count);
-            table.remove(&n(2));
-            let control_index = match table.next_with_index(&n(1)) {
+            fill_hash(&mut table, 1..=count);
+            table.remove(&h(2));
+            let control_index = match table.next_with_index(&h(1)) {
                 TableNextWithIndex::Pair {
                     index,
-                    key: Val::Num(3.0),
+                    key: Val::Num(3.5),
                     ..
                 } => index,
                 _ => panic!("expected the live successor"),
             };
-            // A tombstoned control (key 2, dead at index 1) must validate and
-            // step to the live successor - filter-in-place iteration depends
-            // on it.
+            // A tombstoned control (key 2.5, dead at index 1) must validate
+            // and step to the live successor - filter-in-place iteration
+            // depends on it.
             assert!(matches!(
-                table.next_from_matching_index(1, &n(2)),
+                table.next_from_matching_index(1, &h(2)),
                 TableNextWithIndex::Pair {
-                    key: Val::Num(3.0),
+                    key: Val::Num(3.5),
                     ..
                 }
             ));
-            // Stepping from key 3 continues (count 5) or ends (count 3).
-            match table.next_from_matching_index(control_index, &n(3)) {
+            match table.next_from_matching_index(control_index, &h(3)) {
                 TableNextWithIndex::Pair {
                     key: Val::Num(next),
                     ..
-                } if count == 5 => assert_eq!(next, 4.0),
+                } if count == 5 => assert_eq!(next, 4.5),
                 TableNextWithIndex::End if count == 3 => {}
-                other => panic!("unexpected successor of key 3 (count {count}): {other:?}"),
+                other => panic!("unexpected successor of key 3.5 (count {count}): {other:?}"),
             }
-            // Tail End from the actual last key, on both storage variants.
-            let last_index = match table.next_with_index(&n(count - 1)) {
+            let last_index = match table.next_with_index(&h(count - 1)) {
                 TableNextWithIndex::Pair { index, .. } => index,
                 _ => panic!("expected the last live entry"),
             };
             assert!(matches!(
-                table.next_from_matching_index(last_index, &n(count)),
+                table.next_from_matching_index(last_index, &h(count)),
                 TableNextWithIndex::End
             ));
+        }
+    }
+
+    #[test]
+    fn clearing_array_keys_during_traversal_keeps_cursors_valid() {
+        for hash_count in [3, 5] {
+            let mut t = Table::default();
+            fill(&mut t, 1..=6);
+            fill_hash(&mut t, 1..=hash_count);
+            let mut next = t.next_with_index(&Val::Nil);
+            let mut visited = Vec::new();
+            loop {
+                let (index, key) = match next {
+                    TableNextWithIndex::Pair { index, key, .. } => (index, key),
+                    TableNextWithIndex::End => break,
+                    TableNextWithIndex::InvalidKey => panic!("cleared control must stay valid"),
+                };
+                t.insert(key, Val::Nil).unwrap();
+                visited.push(key);
+                // Follow the indexed successor itself, including the boundary
+                // into each hash storage variant, without a lookup fallback.
+                next = t.next_from_matching_index(index, &key);
+            }
+            assert_eq!(
+                visited,
+                (1..=6)
+                    .map(n)
+                    .chain((1..=hash_count).map(h))
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(t.array_len(), 0);
+            assert!(matches!(t.next(&Val::Nil), TableNext::End));
         }
     }
 
@@ -1154,7 +1486,7 @@ mod tests {
 
         for preset in [0, 5] {
             let mut t = Table::default();
-            fill(&mut t, 1..=preset);
+            fill_hash(&mut t, 1..=preset);
             let before = (1..=preset).count();
 
             let key = Val::RustFn(probe);
@@ -1165,15 +1497,8 @@ mod tests {
                 .expect("second insert succeeds");
             assert_eq!(t.get(&key), Val::Num(2.0));
 
-            // Exactly one entry was added across both inserts.
-            let mut entries = 0;
-            let mut control = Val::Nil;
-            while let TableNext::Pair(k, _) = t.next(&control) {
-                entries += 1;
-                control = k;
-            }
             assert_eq!(
-                entries,
+                keys(&t).len(),
                 before + 1,
                 "reassigning a RustFn key appended a duplicate (preset {preset})"
             );
@@ -1184,39 +1509,48 @@ mod tests {
     fn tombstones_advance_iteration_and_hide_indexed_access() {
         for count in [3, 6] {
             let mut t = Table::default();
-            fill(&mut t, 1..=count);
+            fill_hash(&mut t, 1..=count);
             assert_eq!(t.version(), 0);
-            assert_eq!(t.remove(&n(2)), Some(Val::Bool(true)));
+            assert_eq!(t.remove(&h(2)), Some(Val::Bool(true)));
             assert_eq!(t.version(), 0);
-            assert!(matches!(t.next(&n(1)), TableNext::Pair(Val::Num(3.0), _)));
-            assert!(matches!(t.next(&n(2)), TableNext::Pair(Val::Num(3.0), _)));
-            assert!(matches!(t.next(&n(count + 1)), TableNext::InvalidKey));
-            assert_eq!(t.get_with_index(&n(2)), None);
+            assert!(matches!(t.next(&h(1)), TableNext::Pair(Val::Num(3.5), _)));
+            assert!(matches!(t.next(&h(2)), TableNext::Pair(Val::Num(3.5), _)));
+            assert!(matches!(t.next(&h(count + 1)), TableNext::InvalidKey));
+            assert_eq!(t.get_with_index(&h(2)), None);
             assert_eq!(t.get_index(1), None);
             assert!(!t.set_at_index(1, Val::Bool(false)));
         }
     }
 
     #[test]
+    fn array_slots_are_cache_stable() {
+        let mut t = Table::default();
+        fill(&mut t, 1..=3);
+        let (index, _) = t.get_with_index(&n(2)).unwrap();
+        fill(&mut t, 4..=100);
+        assert_eq!(t.get_index(index), Some((n(2), Val::Bool(true))));
+        assert!(t.set_at_index(index, Val::Bool(false)));
+        assert_eq!(t.get(&n(2)), Val::Bool(false));
+        t.insert(n(2), Val::Nil).unwrap();
+        assert_eq!(t.get_index(index), None);
+        assert!(!t.set_at_index(index, Val::Bool(true)));
+        assert_eq!(t.version(), 0);
+    }
+
+    #[test]
     fn reinserted_tombstone_moves_to_back_and_bumps_once() {
         for count in [3, 5] {
             let mut t = Table::default();
-            fill(&mut t, 1..=count);
-            t.remove(&n(2));
-            t.insert(n(2), Val::Bool(false)).unwrap();
+            fill_hash(&mut t, 1..=count);
+            t.remove(&h(2));
+            t.insert(h(2), Val::Bool(false)).unwrap();
             assert_eq!(t.version(), 1);
-            let mut control = Val::Nil;
-            let mut keys = Vec::new();
-            while let TableNext::Pair(key, _) = t.next(&control) {
-                keys.push(key);
-                control = key;
-            }
             assert_eq!(
-                keys,
+                keys(&t),
                 (1..=count)
                     .filter(|key| *key != 2)
-                    .map(n)
-                    .chain(std::iter::once(n(2)))
+                    .map(h)
+                    .chain(std::iter::once(h(2)))
                     .collect::<Vec<_>>()
             );
         }
@@ -1226,42 +1560,72 @@ mod tests {
     #[test]
     fn rebuild_moves_version_past_the_old_value() {
         let mut t = Table::default();
-        fill(&mut t, 1..=3);
+        fill_hash(&mut t, 1..=3);
         assert_eq!(t.version(), 0);
         t.clear_and_insert_entries(vec![
-            (n(3), Val::Bool(true)),
-            (n(1), Val::Bool(true)),
-            (n(2), Val::Bool(true)),
+            (h(3), Val::Bool(true)),
+            (h(1), Val::Bool(true)),
+            (h(2), Val::Bool(true)),
         ])
         .unwrap();
         assert_eq!(t.version(), 1);
-        assert_eq!(t.get_index(0).map(|(key, _)| key), Some(n(3)));
-        t.clear_and_insert_entries(vec![(n(1), Val::Bool(true))])
+        assert_eq!(t.get_index(0).map(|(key, _)| key), Some(h(3)));
+        t.clear_and_insert_entries(vec![(h(1), Val::Bool(true))])
             .unwrap();
         assert_eq!(t.version(), 2);
-        assert_eq!(t.get_index(0).map(|(key, _)| key), Some(n(1)));
+        assert_eq!(t.get_index(0).map(|(key, _)| key), Some(h(1)));
+    }
+
+    #[cfg(feature = "snapshot")]
+    #[test]
+    fn snapshot_round_trip_preserves_array_holes() {
+        let mut t = Table::default();
+        fill(&mut t, 1..=4);
+        t.insert(Val::Bool(true), Val::Bool(true)).unwrap();
+        t.insert(n(2), Val::Nil).unwrap();
+        t.insert(n(3), Val::Nil).unwrap();
+        let (array_len, entries) = t.snapshot_entries();
+        assert_eq!(array_len, 4);
+        let mut loaded = Table::default();
+        loaded.rebuild_from_snapshot(array_len, entries).unwrap();
+        // Writing a hole must land in the array on both sides.
+        t.insert(n(3), Val::Num(3.0)).unwrap();
+        loaded.insert(n(3), Val::Num(3.0)).unwrap();
+        assert_eq!(keys(&t), keys(&loaded));
+        assert_eq!(keys(&loaded), vec![n(1), n(3), n(4), Val::Bool(true)]);
+        assert_eq!(t.array_len(), loaded.array_len());
+
+        let mut bad = Table::default();
+        assert!(
+            bad.rebuild_from_snapshot(1, vec![(n(1), Val::Nil), (n(2), Val::Bool(true))])
+                .is_err()
+        );
+        assert!(
+            bad.rebuild_from_snapshot(1, vec![(n(2), Val::Nil)])
+                .is_err()
+        );
     }
 
     #[test]
     fn duplicate_template_keys_do_not_create_phantom_tombstones() {
-        let literals = [n(7)];
+        let literals = [h(7)];
         let mut t = Table::with_template_keys(&[0, 0], &literals);
         assert_eq!(t.dead_count, 1);
-        t.insert(n(7), Val::Bool(true)).unwrap();
+        t.insert(h(7), Val::Bool(true)).unwrap();
         assert_eq!(t.dead_count, 0);
-        t.insert(n(8), Val::Bool(true)).unwrap();
-        assert_eq!(t.get(&n(8)), Val::Bool(true));
+        t.insert(h(8), Val::Bool(true)).unwrap();
+        assert_eq!(t.get(&h(8)), Val::Bool(true));
     }
 
     #[test]
     fn dense_tombstones_compact_once_before_append() {
         let mut t = Table::default();
-        fill(&mut t, 1..=4);
-        t.remove(&n(2));
-        t.remove(&n(3));
-        assert!(matches!(t.next(&n(1)), TableNext::Pair(Val::Num(4.0), _)));
-        t.insert(n(5), Val::Bool(true)).unwrap();
+        fill_hash(&mut t, 1..=4);
+        t.remove(&h(2));
+        t.remove(&h(3));
+        assert!(matches!(t.next(&h(1)), TableNext::Pair(Val::Num(4.5), _)));
+        t.insert(h(5), Val::Bool(true)).unwrap();
         assert_eq!(t.version(), 1);
-        assert!(matches!(t.next(&n(4)), TableNext::Pair(Val::Num(5.0), _)));
+        assert!(matches!(t.next(&h(4)), TableNext::Pair(Val::Num(5.5), _)));
     }
 }

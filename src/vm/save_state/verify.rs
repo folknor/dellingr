@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::compiler::verify::{self, BytecodeView};
 use crate::limits::MAX_CHUNK_NESTING;
@@ -261,6 +261,58 @@ fn validate_environment_deltas(payload: &SavePayload) -> Result<(), LoadError> {
                 ));
             }
         }
+        for value in delta.array.iter().flatten() {
+            validate_value(value, payload)?;
+        }
+        // The array describes shape, not a second independent set of writes.
+        // Require its live slots to agree with the upserts. Canonical library
+        // baselines contain only named fields, so every live numeric array
+        // slot is an upsert, including one added by host setup before saving.
+        let array = delta.array.as_deref().unwrap_or_default();
+        let mut array_upserts = BTreeMap::new();
+        for (entry_index, (key, value)) in delta.upserts.iter().enumerate() {
+            if let super::SavedVal::Num(bits) = key {
+                if *bits == ((array.len() + 1) as f64).to_bits() {
+                    return Err(corrupt(
+                        "environment hash entry belongs in the array",
+                        entry_index,
+                    ));
+                }
+                let n = f64::from_bits(*bits);
+                if n >= 1.0 && n <= array.len() as f64 && n.fract().to_bits() << 1 == 0 {
+                    array_upserts.insert(n as usize - 1, value);
+                }
+            }
+        }
+        for (slot, value) in array.iter().enumerate() {
+            let upsert = array_upserts.get(&slot).copied();
+            if (matches!(value, super::SavedVal::Nil) && upsert.is_some())
+                || (!matches!(value, super::SavedVal::Nil) && upsert != Some(value))
+            {
+                return Err(corrupt("environment array disagrees with upserts", slot));
+            }
+        }
+        if let Some(order) = &delta.order {
+            let mut ordered = order.iter();
+            for (slot, value) in array.iter().enumerate() {
+                if !matches!(value, super::SavedVal::Nil)
+                    && ordered.next() != Some(&super::SavedVal::Num(((slot + 1) as f64).to_bits()))
+                {
+                    return Err(corrupt("environment order disagrees with array", slot));
+                }
+            }
+            for key in ordered {
+                if let super::SavedVal::Num(bits) = key {
+                    let n = f64::from_bits(*bits);
+                    if n >= 1.0 && n <= (array.len() + 1) as f64 && n.fract().to_bits() << 1 == 0 {
+                        return Err(corrupt(
+                            "environment hash order belongs in the array",
+                            delta_index,
+                        ));
+                    }
+                }
+            }
+        }
         if let super::SavedMetatableDelta::Set(value) = &delta.metatable {
             if !matches!(value, super::SavedVal::Obj(_) | super::SavedVal::EnvObj(_)) {
                 return Err(corrupt(
@@ -336,16 +388,46 @@ fn validate_references(payload: &SavePayload) -> Result<(), LoadError> {
         validate_value(value, payload)?;
     }
     for object in &payload.objects {
-        if let SavedObject::Table { entries, metatable } = object {
+        if let SavedObject::Table {
+            array_len,
+            entries,
+            metatable,
+        } = object
+        {
+            let array_len = *array_len as usize;
+            if array_len > entries.len() {
+                return Err(corrupt(
+                    "saved table array length exceeds its entries",
+                    array_len,
+                ));
+            }
             let mut keys = BTreeSet::new();
             for (entry_index, (key, value)) in entries.iter().enumerate() {
                 validate_value(key, payload)?;
                 validate_value(value, payload)?;
+                if entry_index < array_len {
+                    // Array slots carry their implied key, and may be empty.
+                    if *key != super::SavedVal::Num(((entry_index + 1) as f64).to_bits()) {
+                        return Err(corrupt(
+                            "saved table array slot has the wrong key",
+                            entry_index,
+                        ));
+                    }
+                } else {
+                    if matches!(value, super::SavedVal::Nil) {
+                        return Err(corrupt("saved table entry stores nil", entry_index));
+                    }
+                    // A live hash entry at the array's append key would have
+                    // migrated into the array, so no engine save holds one.
+                    if *key == super::SavedVal::Num(((array_len + 1) as f64).to_bits()) {
+                        return Err(corrupt(
+                            "saved table hash entry belongs in the array",
+                            entry_index,
+                        ));
+                    }
+                }
                 let key = resolve_key(key, payload, entry_index)?;
                 insert_unique(&mut keys, key, "duplicate saved table key", entry_index)?;
-                if matches!(value, super::SavedVal::Nil) {
-                    return Err(corrupt("saved table entry stores nil", entry_index));
-                }
             }
             if let Some(value) = metatable {
                 validate_value(value, payload)?;
@@ -643,6 +725,7 @@ mod tests {
             ],
             objects: vec![
                 super::super::SavedObject::Table {
+                    array_len: 0,
                     entries,
                     metatable: None,
                 },
@@ -669,6 +752,7 @@ mod tests {
                 super::super::SavedVal::Bool(true),
             )],
             order: None,
+            array: None,
             metatable: unchanged.clone(),
         };
         assert!(matches!(
@@ -684,6 +768,7 @@ mod tests {
                 super::super::SavedVal::Bool(true),
             )],
             order: None,
+            array: None,
             metatable: unchanged.clone(),
         };
         assert!(matches!(
@@ -699,12 +784,63 @@ mod tests {
                 super::super::SavedVal::Nil,
             )],
             order: Some(Vec::new()),
+            array: None,
             metatable: unchanged,
         };
         assert!(matches!(
             verify_payload(payload(invalid_order)),
             Err(LoadError::CorruptArena { .. })
         ));
+    }
+
+    #[test]
+    fn environment_array_must_agree_with_delta_membership_values_and_order() {
+        let num = |n: f64| super::super::SavedVal::Num(n.to_bits());
+        let live = super::super::SavedVal::Bool(true);
+        let valid = super::super::SavedEnvDelta {
+            token: "math".into(),
+            deleted: Vec::new(),
+            upserts: vec![(num(1.0), live.clone()), (num(3.0), live.clone())],
+            order: Some(vec![num(1.0), num(3.0)]),
+            array: Some(vec![
+                live.clone(),
+                super::super::SavedVal::Nil,
+                live.clone(),
+            ]),
+            metatable: super::super::SavedMetatableDelta::Unchanged,
+        };
+        assert!(verify_payload(payload(valid.clone())).is_ok());
+
+        let mut missing = valid.clone();
+        missing.upserts.remove(0);
+        let mut wrong_value = valid.clone();
+        wrong_value.upserts[0].1 = super::super::SavedVal::Bool(false);
+        let mut hole_upsert = valid.clone();
+        hole_upsert.upserts.push((num(2.0), live.clone()));
+        hole_upsert.order = None;
+        let mut append_upsert = valid.clone();
+        append_upsert.upserts.push((num(4.0), live.clone()));
+        append_upsert.order = None;
+        let mut wrong_order = valid.clone();
+        wrong_order.order = Some(vec![num(3.0), num(1.0)]);
+        let mut hole_order = valid.clone();
+        hole_order.order = Some(vec![num(1.0), num(3.0), num(2.0)]);
+        let mut no_array = valid;
+        no_array.array = None;
+        for delta in [
+            missing,
+            wrong_value,
+            hole_upsert,
+            append_upsert,
+            wrong_order,
+            hole_order,
+            no_array,
+        ] {
+            assert!(matches!(
+                verify_payload(payload(delta)),
+                Err(LoadError::CorruptArena { .. })
+            ));
+        }
     }
 
     #[test]
@@ -737,6 +873,54 @@ mod tests {
     }
 
     #[test]
+    fn saved_table_array_prefix_is_checked() {
+        let num = |n: f64| super::super::SavedVal::Num(n.to_bits());
+        let with_table =
+            |array_len: u32, entries: Vec<(super::super::SavedVal, super::super::SavedVal)>| {
+                let mut payload = gmatch_payload(false, num(1.0));
+                payload.objects = vec![super::super::SavedObject::Table {
+                    array_len,
+                    entries,
+                    metatable: None,
+                }];
+                payload.upvalues = Vec::new();
+                payload
+            };
+        let nil = super::super::SavedVal::Nil;
+        let live = super::super::SavedVal::Bool(true);
+        // Empty array slots are legal; a gap key in the hash part is too.
+        assert!(
+            validate_references(&with_table(
+                2,
+                vec![
+                    (num(1.0), nil.clone()),
+                    (num(2.0), live.clone()),
+                    (num(4.0), live.clone())
+                ]
+            ))
+            .is_ok()
+        );
+        for (array_len, entries) in [
+            // Longer than its entries.
+            (2, vec![(num(1.0), live.clone())]),
+            // Array slot with the wrong key.
+            (1, vec![(num(2.0), live.clone())]),
+            // Live hash entry at the append key.
+            (1, vec![(num(1.0), live.clone()), (num(2.0), live.clone())]),
+            (0, vec![(num(1.0), live.clone())]),
+            // Nil outside the array prefix.
+            (0, vec![(num(5.0), nil.clone())]),
+            // Array key repeated in the hash part.
+            (1, vec![(num(1.0), nil.clone()), (num(1.0), live.clone())]),
+        ] {
+            assert!(matches!(
+                validate_references(&with_table(array_len, entries)),
+                Err(LoadError::CorruptArena { .. })
+            ));
+        }
+    }
+
+    #[test]
     fn saved_metatables_must_be_tables() {
         // Object 0 is a table whose metatable is object `mt`; object 1 is a
         // table, object 2 a closure.
@@ -744,10 +928,12 @@ mod tests {
             let mut payload = gmatch_payload(false, super::super::SavedVal::Num(1.0f64.to_bits()));
             payload.objects = vec![
                 super::super::SavedObject::Table {
+                    array_len: 0,
                     entries: Vec::new(),
                     metatable: Some(mt),
                 },
                 super::super::SavedObject::Table {
+                    array_len: 0,
                     entries: Vec::new(),
                     metatable: None,
                 },
@@ -782,6 +968,7 @@ mod tests {
             deleted: Vec::new(),
             upserts: Vec::new(),
             order: None,
+            array: None,
             metatable: super::super::SavedMetatableDelta::Set(super::super::SavedVal::Obj(0)),
         });
         env.objects = vec![super::super::SavedObject::Closure {

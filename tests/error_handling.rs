@@ -842,6 +842,22 @@ fn table_sort_heap_comparator_is_bounded_and_reentrant() {
 }
 
 #[test]
+fn table_sort_preserves_entries_added_beyond_the_original_range() {
+    let value = run_number(
+        r#"
+        local t = {3, 1, 2}
+        table.sort(t, function(a, b)
+            t[4] = 40
+            t[5] = 50
+            return a < b
+        end)
+        return t[1] * 10000 + t[2] * 1000 + t[3] * 100 + t[4] + t[5]
+    "#,
+    );
+    assert_eq!(value, 12390.0);
+}
+
+#[test]
 fn table_sort_inconsistent_comparator_terminates_deterministically() {
     let code = r#"
         local t, calls = {1, 2, 3, 4, 5}, 0

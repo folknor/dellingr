@@ -595,6 +595,22 @@ in todo.md's workload-registry entry).
 
 ## Micro / take-or-leave
 
+- **Constructor presize reserves hash space for positional items:**
+  `OP_NEW_TABLE_PRESIZED`/`TRACKED` pass the constructor's total field count
+  to `Table::with_capacity`, which reserves IndexMap space even when every
+  item goes to the array part (`{1,2,3,4,5}`). Split the parser's presize
+  count into array and hash halves, or reserve the array instead.
+
+- **Error-path cost flush costs ~3.6% on `arithmetic`:** charging pending
+  batched cost on runtime errors moved the dispatch loop into an inner
+  `eval_batched` (`src/vm/frame.rs`) that takes `local_cost` as `&mut u64`.
+  Two interleaved `--bench` pairs on bygg, e475e51 (before) vs 8d3151a
+  (after): 2800 / 2900 ms both times, sign-consistent. Not yet separated
+  from layout: run the five-launch same-binary control, then try keeping
+  `local_cost` a by-value local inside the loop and returning it alongside
+  the error (e.g. `Err((e, pending))` from the inner loop) so it can stay in
+  a register.
+
 - **Call-path cleanup worthwhile even if the frame-stack rewrite lands
   later (B-O5):** the return-value half shipped 2026-07-26 (commit
   a96cff4); `eval_closure_frame` now does an in-place `drain`. What remains

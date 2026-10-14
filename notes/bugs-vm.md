@@ -82,77 +82,6 @@ says "Returns the array length for cost charging", but it already calls
 Direction: either validate `1 <= pos <= len+1` and return an error, or make these
 helpers `pub(crate)`.
 
-## VM-008 - `table.sort` writeback and `table.remove(t, 1)` are O(n^2) host work for a cost of n and 1
-
-Source: vm-heap (finding 1) and stdlib (finding 1). The stdlib hunter's account
-of the related `table.insert`, `unpack`, `pack` and `select` charges is in
-STD-006.
-
-Claims broken: the exact cost model. README "Budget": "Data-dependent native work
-in the string, pattern, and table libraries is charged: ... table elements
-visited". The flat-cost comment in `lua_std/table.rs` says the shift is "the
-same per-element work table.move charges one per element for" and "a mid-array
-call shifts every later element one key at a time", both of which assume linear
-work.
-
-- **`Table::set_array`** (the `table.sort` writeback) first calls `remove` on
-  keys `1..=old_len`, leaving `dead_count = old_len` tombstones. It then calls
-  `insert(i, v)` per sorted value. With `dead_count > 0`, every insert goes
-  through `insert_into_map_with_tombstones`, which finds key `i`'s dead slot near
-  the front and calls `map.shift_remove_index(index)`, an O(n) operation. The
-  writeback is O(n^2), while `table_sort` charges `consume_cost(n.max(1))`.
-  Sorting 10^5 elements is about 10^10 element moves for 10^5 cost.
-- **`Table::array_remove`** calls `ensure_map`, then `map.shift_remove(&pos)`,
-  then, for every `i in pos..len`, `map.shift_remove(&(i+1))` and
-  `map.insert(i, v)`. `shift_remove` is O(map size), and each reinsert appends at
-  the end, so the next key to remove is near the front again. One
-  `table.remove(t, 1)` is O(n^2) at a flat cost of 1 (`consume_cost(1)`). A queue
-  idiom (`table.insert(q, x)` / `table.remove(q, 1)`) on 1000 elements does about
-  10^6 map shifts per call, and draining it is cubic in host time. This is a
-  budget bypass.
-- `table.remove(t)` (pop last) is O(entries after key `len` in insertion order),
-  not O(1), whenever hash keys were inserted after the array keys.
-
-Side effects:
-- `ensure_map` permanently promotes small inline tables to `IndexMap` storage on
-  their first `table.remove`.
-- Every remove moves the shifted keys to the end, so `pairs` order changes. It
-  stays deterministic but changes for no reason.
-- The re-append order breaks `Table::get`'s positional fast path
-  (`get_index(n-1)`) for any table with non-array keys before the array part.
-
-Direction (both hunters): the root cause is that there is no array part. All
-integer keys live in one `IndexMap`, which also explains the O(n)
-`array_insert` and `get_array`/`set_array` hashing through `table.sort`. A real
-Lua-style array segment (`Vec<Val>` for `1..=n` next to the hash part) would turn
-`sort`/`insert`/`remove`/`#` into memmove/slice operations, keep `pairs` order
-stable, and remove the positional fast path in `get`, the `compute_array_len`
-binary search and the `cached_array_len` bookkeeping. Interim fixes:
-`set_array` overwrites values in place (the keys already exist), and
-`array_remove` overwrites `t[i] = t[i+1]` in place and removes only the last
-key. If the flat cost is kept, the host work must at least be linear.
-
-Constraint carried over from the `notes/todo.md` entry this replaces: the
-insertion order of surviving keys is replay-visible through `pairs()`, so any
-fix has to pin down what that order becomes and treat a change to it as a
-determinism-visible change. `array_insert` should be checked for the same
-quadratic shape.
-
-## VM-009 - `table.remove` with `pos == 0` returns nil and leaves `t[0]`
-
-Source: vm-heap (finding 2) and stdlib (finding 6).
-
-Claim broken: output matches reference Lua. No `-- DIFF:` marks it.
-
-`lua_std/table.rs` accepts `pos == 0` when `len == 0`, which matches the
-reference argument check. `Table::array_remove` then does
-`if pos > len || pos == 0 { return Val::Nil; }`. Lua 5.2 and 5.4 `tremove` read
-and return `t[pos]` and then set `t[pos] = nil`, even when `size == 0` and
-`pos == 0`. So `local t = {[0] = "x"}; print(table.remove(t))` prints `x` in
-reference and `nil` here, and `t[0]` survives. (`table.remove(t, #t + 1)` with a
-non-nil `t[#t+1]` would diverge in the same way, but that is impossible for a
-border, so only `pos == 0` is reachable.)
-
 ## VM-010 - `tostring` mangles non-UTF-8 bytes returned by `__tostring`
 
 Source: vm-heap (finding 3).
@@ -450,3 +379,15 @@ non-table-metatable check is one more way to fail there) leaves the earlier
 deltas already applied. If a State is still usable after `load_state` returns
 an error, that breaks the all-or-nothing reading of a rejected load.
 
+## VM-036 - Re-adding a deleted hash key is O(table size) for an O(1) charge
+
+Source: lateral finding from the resolution-loop fixer that gave tables an
+array part.
+
+Claim broken: the cost budget bounds host work (README "Budget").
+
+`insert_into_map_with_tombstones` (`src/vm/table.rs`) reuses a key's dead slot
+via `shift_remove_index`, which shifts every later entry. A loop like
+`t.x = nil; t.x = v` on a large table therefore does linear host work per write
+at a constant charge. The array part no longer goes through this path; hash keys
+still do.

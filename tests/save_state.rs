@@ -130,18 +130,18 @@ fn tombstones_are_omitted_from_snapshots() {
     // numbers of operations, so the serialized cost counters legitimately
     // differ - but those fields are fixed-width, so only a leaked entry can
     // change the payload size.
-    // Both storage modes must be covered. A 3-entry table is inline; only a
-    // table past INLINE_CAPACITY (4) reaches the IndexMap arm, and the two arms
-    // filter dead slots independently.
+    // Build with assignments: named-field constructors reserve template slots
+    // in Map storage even at three entries. Assignments keep the smaller hash
+    // part inline and promote the larger one, covering both tombstone filters.
     for (tombstoned, clean, expected_order) in [
         (
-            "t = { a = 1, b = 2, c = 3 }; t.b = nil",
-            "t = { a = 1, c = 3 }",
+            "t = {}; t.a = 1; t.b = 2; t.c = 3; t.b = nil",
+            "t = {}; t.a = 1; t.c = 3",
             "acb",
         ),
         (
-            "t = { a = 1, b = 2, c = 3, d = 4, e = 5, f = 6 }; t.b = nil",
-            "t = { a = 1, c = 3, d = 4, e = 5, f = 6 }",
+            "t = {}; t.a = 1; t.b = 2; t.c = 3; t.d = 4; t.e = 5; t.f = 6; t.b = nil",
+            "t = {}; t.a = 1; t.c = 3; t.d = 4; t.e = 5; t.f = 6",
             "acdefb",
         ),
     ] {
@@ -733,7 +733,7 @@ fn setup_anchor_survives_load_final_gc() {
 fn unsupported_format_versions_fail_before_setup() {
     let state = fresh();
     let save = state.save_state().expect("state saves");
-    for version in [5_u16, 7_u16] {
+    for version in [6_u16, 8_u16] {
         let mut bytes = save.bytes.clone();
         bytes[4..6].copy_from_slice(&version.to_le_bytes());
         let setup_ran = Arc::new(AtomicBool::new(false));
@@ -743,7 +743,7 @@ fn unsupported_format_versions_fail_before_setup() {
                 observed.store(true, Ordering::SeqCst);
                 Ok::<(), std::convert::Infallible>(())
             }),
-            Err(LoadError::UnsupportedVersion { found, expected: 6 }) if found == version
+            Err(LoadError::UnsupportedVersion { found, expected: 7 }) if found == version
         ));
         assert!(!setup_ran.load(Ordering::SeqCst));
     }
@@ -1415,4 +1415,77 @@ fn ordered_table_library_replay_restores_membership() {
     assert_eq!(global_num(&mut loaded, "result"), 31.0);
     assert_eq!(global_num(&mut loaded, "insert_gone"), 1.0);
     assert_eq!(global_num(&mut loaded, "plain_miss"), 1.0);
+}
+
+/// Array-part holes decide where later integer writes land and so the
+/// `pairs()` order and `#`. Continuing after a save/load must match
+/// continuing without one, for user tables and environment tables alike.
+#[test]
+fn array_part_shape_survives_round_trip() {
+    let setup = r#"
+        t = {}
+        for i = 1, 6 do t[i] = i end
+        t.name = "x"
+        t[2] = nil t[3] = nil t[6] = nil
+        for i = 1, 6 do math[i] = i end
+        math[2] = nil math[3] = nil math[6] = nil
+    "#;
+    let after = r#"
+        t[3] = 3 t[6] = 6 math[3] = 3 math[6] = 6
+        local function order(tbl)
+            local out = {}
+            for k in pairs(tbl) do
+                if type(k) == "number" or k == "name" then out[#out + 1] = tostring(k) end
+            end
+            return table.concat(out, ",")
+        end
+        result = order(t) .. "|" .. #t .. "|" .. order(math) .. "|" .. #math
+    "#;
+    let mut original = fresh();
+    run(&mut original, setup);
+    let mut loaded = reload(&original);
+    run(&mut original, after);
+    run(&mut loaded, after);
+    let expected = global_str(&mut original, "result");
+    assert_eq!(expected, "1,3,4,5,6,name|6|1,3,4,5,6|6");
+    assert_eq!(global_str(&mut loaded, "result"), expected);
+}
+
+#[test]
+fn environment_order_replay_preserves_setup_array_holes() {
+    let mut original = fresh();
+    run(&mut original, "math.floor = nil; math.floor = 7");
+    let save = original.save_state().unwrap();
+    let mut loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), |state| {
+        run(
+            state,
+            "math[1] = 1; math[2] = 2; math[3] = 3; math[2] = nil",
+        );
+        Ok::<(), std::convert::Infallible>(())
+    })
+    .expect("order replay preserves setup slots");
+    run(
+        &mut loaded,
+        "math[2] = 2; order = ''; for k in pairs(math) do if type(k) == 'number' then order = order .. k end end",
+    );
+    assert_eq!(global_str(&mut loaded, "order"), "123");
+}
+
+#[test]
+fn environment_array_replay_preserves_setup_append_keys() {
+    let mut original = fresh();
+    run(&mut original, "math[1] = 1; math[2] = 2; math[2] = nil");
+    let save = original.save_state().unwrap();
+    let mut loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), |state| {
+        run(state, "math[3] = 3");
+        Ok::<(), std::convert::Infallible>(())
+    })
+    .expect("setup append key can extend the saved array");
+    run(
+        &mut loaded,
+        "value = math[3]; length = #math; math[2] = 2; order = ''; for k in pairs(math) do if type(k) == 'number' then order = order .. k end end",
+    );
+    assert_eq!(global_num(&mut loaded, "value"), 3.0);
+    assert_eq!(global_num(&mut loaded, "length"), 3.0);
+    assert_eq!(global_str(&mut loaded, "order"), "123");
 }

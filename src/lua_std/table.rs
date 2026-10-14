@@ -14,15 +14,15 @@ fn table_unpack_values(state: &mut State) -> crate::Result<u8> {
 
 // Keep registration order: it determines table iteration and snapshot baselines.
 pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
-    // table.insert(t, [pos,] value) - costs 1
+    // table.insert(t, [pos,] value) - costs one per element shifted, min 1
     // Inserts value at position pos in t, shifting elements up.
     // If pos is omitted, inserts at the end.
     //
-    // The flat cost of insert and remove is a deliberate cost-model choice,
-    // even though a mid-array call shifts every later element one key at a
-    // time - the same per-element work table.move charges one per element for.
-    // Charging by shift distance would change costs for existing scripts and
-    // require a COST_MODEL_VERSION bump.
+    // insert and remove charge by shift distance, like table.move's one per
+    // copied element: an append or pop costs 1. Inserting at the front of an
+    // n-element sequence costs max(n, 1); removing its front costs
+    // max(n - 1, 1). The base 1 is charged before argument checks; the
+    // remainder once the shift is known, before the table is touched.
     ("insert", |state| {
         state.consume_cost(1)?;
         check_type_named(state, 1, LuaType::Table, "insert")?;
@@ -39,6 +39,8 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
             if !(1..=len + 1).contains(&pos) {
                 return Err(position_out_of_bounds(state, "insert"));
             }
+            // Keys pos..=len each move up one.
+            charge_shift_beyond_base(state, len + 1 - pos)?;
             let pos = usize::try_from(pos).expect("validated insertion position is positive");
             state.table_insert_at(1, pos)?;
         } else {
@@ -50,7 +52,7 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         state.set_top(0)?;
         Ok(0)
     }),
-    // table.remove(t [, pos]) - costs 1
+    // table.remove(t [, pos]) - costs one per element shifted, min 1
     // Removes and returns the element at position pos.
     // If pos is omitted, removes the last element.
     ("remove", |state| {
@@ -71,6 +73,12 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         } else {
             len
         };
+        // Keys pos+1..=len each move down one; positions outside the
+        // sequence (0 or len + 1) shift nothing.
+        if (1..=len).contains(&pos) {
+            let pos_i = i64::try_from(pos).expect("a position within the sequence fits in i64");
+            charge_shift_beyond_base(state, len_i - pos_i)?;
+        }
 
         state.set_top(1)?;
         // Stack: [t]
@@ -96,12 +104,12 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     // Returns list[i], list[i+1], ..., list[j].
     // Default: i=1, j=#list
     ("unpack", table_unpack_values),
-    // table.pack(...) - costs 1
+    // table.pack(...) - costs one per stored argument, min 1
     // Returns a new table with all arguments stored into keys 1, 2, etc.
     // and with a field "n" with the total number of arguments.
     ("pack", |state| {
-        state.consume_cost(1)?;
         let num_args = state.get_top();
+        state.consume_cost(num_args.max(1) as u64)?;
 
         // Create new table
         state.new_table()?;
@@ -294,6 +302,15 @@ pub(crate) fn open_table(state: &mut State) -> Result<()> {
 
     // Set the table table as a global
     state.set_global("table")?;
+    Ok(())
+}
+
+/// Charges the part of a `shifted`-element shift that the base cost of 1 does
+/// not already cover.
+fn charge_shift_beyond_base(state: &mut State, shifted: i64) -> Result<()> {
+    if shifted > 1 {
+        state.consume_cost(shifted.unsigned_abs() - 1)?;
+    }
     Ok(())
 }
 

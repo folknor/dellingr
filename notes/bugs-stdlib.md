@@ -83,34 +83,6 @@ Direction: either implement `%.14g` (the existing `format_general` in
 `string_format.rs` could back it) or document the divergence under
 "Compatibility divergences".
 
-## STD-006 - Table and basic library native work the README says is charged, but which is free or flat
-
-Source: stdlib (finding 12). The O(n^2) `table.remove` / `table.sort` cases are
-VM-008 in `notes/bugs-vm.md`.
-
-Claim broken: README "Budget": "Data-dependent native work in the string,
-pattern, and table libraries is charged: ... table elements visited".
-
-- `unpack`/`table.unpack` charge nothing for visiting up to `MAX_RESULTS`
-  elements, each a `get_table` that may call `__index`.
-- `table.pack` charges a flat 1 for up to `MAX_RESULTS` stores.
-- `table.insert` at position 1 shifts n keys for a cost of 1. The code documents
-  this as deliberate, but the README sentence says the opposite.
-- `select(n, ...)` is free and does `n` front `remove(1)` calls, which is O(n^2)
-  stack shuffling. A single truncating move would do.
-
-Direction: either spell out these exceptions in the README sentence, or change
-the charges (with a `COST_MODEL_VERSION` bump).
-
-Carried over from the `notes/todo.md` entry this replaces: the flat 1 for
-`table.insert`/`table.remove` is recorded in a `src/lua_std/table.rs` comment
-as a cost-model choice. The suggested charge is by shift distance
-(`len - pos + 1`), as `table.move` charges per element. That changes
-`cost_used` and invalidates saves, so it should ride a `COST_MODEL_VERSION`
-bump. The version moved to 5 when pending opcode cost started being charged
-on runtime errors; if 5 has not yet shipped in a release, landing this under it
-avoids a second bump.
-
 ## STD-007 - `string.format("%q", n)` matches neither reference for integral numbers
 
 Source: stdlib (finding 5).
@@ -253,3 +225,14 @@ Source: stdlib (finding 15).
 - `string.find`/`match`/`gsub`/`gmatch`/`upper`/... copy the subject into a fresh
   `Vec` on every call (`string_or_number_bytes`). The copy is charged, but it is
   an avoidable allocation on the hottest string paths.
+
+## STD-017 - `table.insert` and `table.remove` read and write raw
+
+Source: lateral finding from the resolution-loop fixer that gave tables an
+array part. Related to STD-003 (`__len` ignored) and STD-011 (`table.move`
+writes raw), but a separate mechanism.
+
+Claim broken: reference output matching, with no `-- DIFF:` marker. Lua 5.4's
+`tinsert`/`tremove` go through `lua_geti`/`lua_seti`, so they honour
+`__index`/`__newindex`. dellingr's `table.insert`/`table.remove` shift the
+storage directly and skip metamethods, so a proxy table behaves differently.

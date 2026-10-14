@@ -64,7 +64,7 @@ mod verify;
 const MAGIC: [u8; 4] = *b"DLGS";
 // Save compatibility is exact-match only. There is no migration path; bump
 // this whenever an older reader would misread any encoded field.
-const FORMAT_VERSION: u16 = 6;
+const FORMAT_VERSION: u16 = 7;
 
 const MAX_ENGINE_VERSION_BYTES: usize = 128;
 const MAX_SAVE_IDENTIFIER_BYTES: usize = 4 * 1024;
@@ -342,6 +342,10 @@ enum SavedVal {
 #[derive(Clone, Debug, PartialEq)]
 enum SavedObject {
     Table {
+        /// The array-part length. The first `array_len` entries are the array
+        /// slots, keys `1..=array_len` in order, with `Nil` values for empty
+        /// slots; the rest are live hash entries in insertion order.
+        array_len: u32,
         entries: Vec<(SavedVal, SavedVal)>,
         /// A metatable can be a user object (`Obj`) or an environment object
         /// (`EnvObj`, e.g. `setmetatable(t, math)`), so it goes through the
@@ -424,6 +428,8 @@ struct SavedEnvDelta {
     deleted: Vec<SavedVal>,
     upserts: Vec<(SavedVal, SavedVal)>,
     order: Option<Vec<SavedVal>>,
+    /// The table's whole array part, `Nil` for empty slots, when it has one.
+    array: Option<Vec<SavedVal>>,
     metatable: SavedMetatableDelta,
 }
 
@@ -497,6 +503,7 @@ struct Breadcrumb {
 }
 enum PendingObject {
     Table {
+        array_len: u32,
         entries: Vec<(Option<SavedVal>, Option<SavedVal>)>,
         metatable: Option<Option<SavedVal>>,
     },
@@ -676,9 +683,30 @@ impl<'a> SaveBuilder<'a> {
                     PathSegment::Global(truncate_utf8(&token, MAX_PATH_GLOBAL_BYTES)),
                 )?),
             };
+            // The array part's shape (its nil slots included) decides where
+            // later integer writes land, so it must round-trip; replaying the
+            // upserts alone would rebuild only its live prefix.
+            let array = if table.array_part().is_empty() {
+                None
+            } else {
+                Some(
+                    table
+                        .array_part()
+                        .to_vec()
+                        .into_iter()
+                        .map(|value| {
+                            self.encode_root(
+                                value,
+                                PathSegment::Global(truncate_utf8(&token, MAX_PATH_GLOBAL_BYTES)),
+                            )
+                        })
+                        .collect::<Result<Vec<_>, SaveError>>()?,
+                )
+            };
             if !deleted.is_empty()
                 || !upserts.is_empty()
                 || order.is_some()
+                || array.is_some()
                 || !matches!(metatable, SavedMetatableDelta::Unchanged)
             {
                 deltas.push(SavedEnvDelta {
@@ -686,6 +714,7 @@ impl<'a> SaveBuilder<'a> {
                     deleted,
                     upserts,
                     order,
+                    array,
                     metatable,
                 });
             }
@@ -865,7 +894,12 @@ impl<'a> SaveBuilder<'a> {
     ) -> Result<(), SaveError> {
         let pending = match &self.state.heap.get(ptr).raw {
             RawObject::Table(table) => {
-                let entries = table.entries();
+                let (array_len, entries) = table.snapshot_entries();
+                let array_len = u32::try_from(array_len).map_err(|_| SaveError::TooLarge {
+                    what: "table array slots",
+                    count: array_len,
+                })?;
+                let entry_count = entries.len();
                 let metatable = table.get_metatable();
                 if let Some(mt) = metatable {
                     tasks.push(EncodeTask::Value {
@@ -893,7 +927,8 @@ impl<'a> SaveBuilder<'a> {
                     });
                 }
                 PendingObject::Table {
-                    entries: vec![(None, None); table.entries().len()],
+                    array_len,
+                    entries: vec![(None, None); entry_count],
                     metatable: metatable.map(|_| None),
                 }
             }
@@ -1025,7 +1060,12 @@ impl<'a> SaveBuilder<'a> {
     }
     fn finish_object(object: PendingObject) -> Result<SavedObject, SaveError> {
         match object {
-            PendingObject::Table { entries, metatable } => Ok(SavedObject::Table {
+            PendingObject::Table {
+                array_len,
+                entries,
+                metatable,
+            } => Ok(SavedObject::Table {
+                array_len,
                 entries: entries
                     .into_iter()
                     .map(|(key, value)| {
@@ -1236,6 +1276,15 @@ fn corrupt_arena(reason: &'static str, index: usize) -> LoadError {
     LoadError::CorruptArena { reason, index }
 }
 
+fn runtime_array_slot(key: Val, array_len: usize) -> Option<usize> {
+    match key {
+        Val::Num(n) if n >= 1.0 && n <= array_len as f64 && n.fract().to_bits() << 1 == 0 => {
+            Some(n as usize - 1)
+        }
+        _ => None,
+    }
+}
+
 fn materialize_payload(
     state: &mut State,
     payload: verify::VerifiedSavePayload,
@@ -1267,7 +1316,7 @@ fn materialize_payload(
     for obj in &payload.objects {
         let ptr = match obj {
             // Tables are filled (and sized) in the second pass via
-            // clear_and_insert_entries, so allocate an empty shell here. None of
+            // rebuild_from_snapshot, so allocate an empty shell here. None of
             // these allocators run GC, which is what keeps the half-built graph
             // alive until the final collect.
             SavedObject::Table { .. } => state.heap.alloc_table(),
@@ -1303,7 +1352,11 @@ fn materialize_payload(
 
     for (idx, saved_obj) in payload.objects.iter().enumerate() {
         match saved_obj {
-            SavedObject::Table { entries, metatable } => {
+            SavedObject::Table {
+                array_len,
+                entries,
+                metatable,
+            } => {
                 let mut runtime_keys = BTreeSet::new();
                 let entries = entries
                     .iter()
@@ -1339,7 +1392,7 @@ fn materialize_payload(
                     corrupt_arena("materialized table object has wrong type", idx)
                 })?;
                 table
-                    .clear_and_insert_entries(entries)
+                    .rebuild_from_snapshot(*array_len as usize, entries)
                     .map_err(|_| corrupt_arena("saved table entries are invalid", idx))?;
                 if metatable.is_some() {
                     table.set_metatable(metatable);
@@ -1419,11 +1472,15 @@ fn materialize_payload(
             }
         }
         if let Some(order) = &delta.order {
-            let (current, metatable) = {
+            let (current, array, metatable) = {
                 let table = state.heap.as_table(ptr).ok_or_else(|| {
                     corrupt_arena("environment token does not resolve to a table", delta_index)
                 })?;
-                (table.entries(), table.get_metatable())
+                (
+                    table.entries(),
+                    table.array_part().to_vec(),
+                    table.get_metatable(),
+                )
             };
             let mut current_by_key = BTreeMap::new();
             for (key_index, (key, value)) in current.iter().copied().enumerate() {
@@ -1459,11 +1516,69 @@ fn materialize_payload(
             let table = state.heap.as_table(ptr).ok_or_else(|| {
                 corrupt_arena("environment token does not resolve to a table", delta_index)
             })?;
-            table
-                .clear_and_insert_entries(ordered)
-                .map_err(|_| corrupt_arena("saved environment order is invalid", delta_index))?;
+            if array.is_empty() {
+                table.clear_and_insert_entries(ordered).map_err(|_| {
+                    corrupt_arena("saved environment order is invalid", delta_index)
+                })?;
+            } else {
+                // Reordering live hash entries must retain setup's array
+                // slots, including holes that are absent from `current`.
+                let mut entries: Vec<_> = array
+                    .iter()
+                    .enumerate()
+                    .map(|(slot, value)| (Val::Num((slot + 1) as f64), *value))
+                    .collect();
+                entries.extend(
+                    ordered
+                        .into_iter()
+                        .filter(|(key, _)| runtime_array_slot(*key, array.len()).is_none()),
+                );
+                table
+                    .rebuild_from_snapshot(array.len(), entries)
+                    .map_err(|_| {
+                        corrupt_arena("saved environment order is invalid", delta_index)
+                    })?;
+            }
             // Rebuilding entries replaces the table shell. An unchanged delta
             // must retain a metatable that setup or a later library installed.
+            table.set_metatable(metatable);
+        }
+        if let Some(array) = &delta.array {
+            // Restore the saved array shape: the saved slots (nil ones
+            // included) first, then every other live entry in its current
+            // order. A live entry for a slot key is superseded by the slot.
+            let mut array = array
+                .iter()
+                .map(|value| decode_val(value, &ctx))
+                .collect::<Result<Vec<_>, LoadError>>()?;
+            let table = state.heap.as_table(ptr).ok_or_else(|| {
+                corrupt_arena("environment token does not resolve to a table", delta_index)
+            })?;
+            let metatable = table.get_metatable();
+            // Setup can have added later slots. Retain their shape and values
+            // beyond the saved range, just like other setup-only entries.
+            let saved_len = array.len();
+            array.extend(table.array_part().iter().skip(saved_len).copied());
+            let append_key = Val::Num((array.len() + 1) as f64);
+            let append_value = table.get(&append_key);
+            let mut entries: Vec<(Val, Val)> = array
+                .iter()
+                .enumerate()
+                .map(|(slot, value)| (Val::Num((slot + 1) as f64), *value))
+                .collect();
+            entries.extend(table.entries().into_iter().filter(|(key, _)| {
+                runtime_array_slot(*key, array.len()).is_none() && *key != append_key
+            }));
+            table
+                .rebuild_from_snapshot(array.len(), entries)
+                .map_err(|_| corrupt_arena("saved environment array is invalid", delta_index))?;
+            // A saved append key is rejected by the verifier. A setup-only
+            // append key is legal and extends the restored shape normally.
+            if !matches!(append_value, Val::Nil) {
+                table.insert(append_key, append_value).map_err(|_| {
+                    corrupt_arena("setup environment append is invalid", delta_index)
+                })?;
+            }
             table.set_metatable(metatable);
         }
         let new_metatable = match &delta.metatable {
@@ -2095,6 +2210,13 @@ impl SavedEnvDelta {
             }
             None => out.write_bool(false),
         }
+        match &self.array {
+            Some(array) => {
+                out.write_bool(true);
+                write_vec(out, array, |out, value| value.encode(out))?;
+            }
+            None => out.write_bool(false),
+        }
         self.metatable.encode(out)
     }
 
@@ -2106,6 +2228,10 @@ impl SavedEnvDelta {
                 Ok((SavedVal::decode(input)?, SavedVal::decode(input)?))
             })?,
             order: input
+                .read_bool()?
+                .then(|| read_vec(input, SavedVal::decode))
+                .transpose()?,
+            array: input
                 .read_bool()?
                 .then(|| read_vec(input, SavedVal::decode))
                 .transpose()?,
@@ -2189,8 +2315,13 @@ impl SavedVal {
 impl SavedObject {
     fn encode(&self, out: &mut Encoder) -> Result<(), SaveError> {
         match self {
-            SavedObject::Table { entries, metatable } => {
+            SavedObject::Table {
+                array_len,
+                entries,
+                metatable,
+            } => {
                 out.write_u8(0);
+                out.write_u32(*array_len);
                 write_vec(out, entries, |out, (key, value)| {
                     key.encode(out)?;
                     value.encode(out)
@@ -2219,6 +2350,7 @@ impl SavedObject {
         let tag_offset = input.pos;
         match input.read_u8()? {
             0 => {
+                let array_len = input.read_u32()?;
                 let entries = read_vec(input, |input| {
                     Ok((SavedVal::decode(input)?, SavedVal::decode(input)?))
                 })?;
@@ -2227,7 +2359,11 @@ impl SavedObject {
                 } else {
                     None
                 };
-                Ok(SavedObject::Table { entries, metatable })
+                Ok(SavedObject::Table {
+                    array_len,
+                    entries,
+                    metatable,
+                })
             }
             1 => Ok(SavedObject::Closure {
                 chunk: input.read_u32()?,
@@ -3331,7 +3467,9 @@ mod tests {
         roundtrip!(
             SavedObject,
             SavedObject::Table {
+                array_len: 1,
                 entries: vec![
+                    (SavedVal::Num(1.0f64.to_bits()), SavedVal::Nil),
                     (SavedVal::Str(0), SavedVal::Num(1.0f64.to_bits())),
                     (SavedVal::Obj(1), SavedVal::Bool(true)),
                 ],
@@ -3341,6 +3479,7 @@ mod tests {
         roundtrip!(
             SavedObject,
             SavedObject::Table {
+                array_len: 0,
                 entries: vec![],
                 metatable: Some(SavedVal::Obj(4)),
             }
@@ -3348,6 +3487,7 @@ mod tests {
         roundtrip!(
             SavedObject,
             SavedObject::Table {
+                array_len: 0,
                 entries: vec![(SavedVal::Str(2), SavedVal::Nil)],
                 metatable: Some(SavedVal::EnvObj("string".to_string())),
             }
@@ -3370,6 +3510,7 @@ mod tests {
                 deleted: vec![SavedVal::Str(1)],
                 upserts: vec![(SavedVal::Str(2), SavedVal::Obj(3))],
                 order: Some(vec![SavedVal::Str(2)]),
+                array: Some(vec![SavedVal::Nil, SavedVal::Bool(true)]),
                 metatable: SavedMetatableDelta::Set(SavedVal::EnvObj("table".to_string())),
             }
         );

@@ -191,6 +191,19 @@ impl State {
         Ok(())
     }
 
+    /// Removes the `count` lowest visible values in one move, shifting the rest
+    /// down. Equivalent to `count` calls of `remove(1)` at the cost of one.
+    pub(crate) fn remove_bottom(&mut self, count: usize) -> Result<()> {
+        if count > self.get_top() {
+            return Err(self.error(ErrorKind::InvalidStackIndex {
+                index: isize::try_from(count).unwrap_or(isize::MAX),
+            }));
+        }
+        let bottom = self.stack_bottom;
+        self.stack.drain(bottom..bottom + count);
+        Ok(())
+    }
+
     /// Pops a value from the stack, then replaces the value at the given index
     /// with that value. If the index points to the top element (e.g., -1),
     /// this is equivalent to a simple pop since we'd be replacing the popped

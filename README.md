@@ -80,7 +80,7 @@ Lua calls recurse on the host thread's native stack. `MAX_CALL_DEPTH` and `MAX_M
 
 There's a few gotchas with the current instruction-cost accounting. For example, `while true do end` is free, which means that a users Lua script could run forever. This is a known trade-off made in the full light of day - the main consumer of dellingr does not want to penalise the user (that is, subtract from their per-gametick budget) for structural semantics. Users should be encouraged to write more code, not less.
 
-Data-dependent native work in the string, pattern, and table libraries is charged: bytes examined or emitted, table elements visited, and matcher primitives each consume budget. Structural semantics remain free by design. A helper extraction, an intermediate name, or another legible refactor should not make a script more expensive, because the budget is a game-design instrument rather than a CPU meter.
+Data-dependent native work in the string, pattern, and table libraries is charged: bytes examined or emitted, table elements visited, and matcher primitives each consume budget. `table.move`, `table.insert`, `table.remove`, `unpack`/`table.unpack` and `table.pack` charge one per element copied, shifted, visited or stored, with a minimum of 1. An append or pop costs 1; inserting at the front of an n-element sequence costs max(n, 1), and removing its front costs max(n - 1, 1). `table.concat` charges for elements visited and bytes copied. `table.sort` charges for the original range; a Lua comparator also incurs its usual execution costs. `select` stays free: it moves its arguments once, as passing `...` along does. Structural semantics remain free by design. A helper extraction, an intermediate name, or another legible refactor should not make a script more expensive, because the budget is a game-design instrument rather than a CPU meter.
 
 This cost model changed in 0.4.0. Embedders must re-measure their tick budgets: the increase depends on string lengths, output expansion, pattern matches and backtracking, and table contents.
 
@@ -101,6 +101,11 @@ last ULP may vary across architectures or libm versions, together with the cross
 contract, are documented with the implementation in
 [`src/lua_std/math.rs`](src/lua_std/math.rs). Replays that must be
 bit-identical across heterogeneous hosts should follow that contract.
+
+`pairs` order is deterministic too: a table's array part (keys `1..n`, grown
+by appending `n + 1`) is visited first in key order, then every other key in
+insertion order. Snapshots preserve the array part's shape, so a loaded state
+continues with the same order and `#` results.
 
 Function labels in argument errors are diagnostic text, not stable identifiers.
 Generic Rust callbacks checked with `State::check_any` or `State::check_type`

@@ -493,11 +493,7 @@ impl State {
 
         match obj_ptr.and_then(|ptr| self.heap.as_table(ptr)) {
             Some(tbl) => {
-                let counter = usize::from(batch) * usize::from(u8::MAX) + 1..;
-                for (i, val) in counter.zip(values) {
-                    let key = Val::Num(i as f64);
-                    tbl.insert(key, val)?;
-                }
+                tbl.set_list(usize::from(batch) * usize::from(u8::MAX) + 1, values)?;
                 // Net-neutral: the table was popped above and is pushed back.
                 self.push_unchecked(tbl_value);
                 Ok(())

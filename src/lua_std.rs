@@ -219,7 +219,8 @@ pub(super) fn opt_integer(
 // The callback ABI accepts 255 results. RetCount's 255 byte is an encoding
 // sentinel for All, not a 254-result runtime cap; keep count validation here
 // independent of the bytecode encoding.
-/// Implements both global `unpack` and `table.unpack`.
+/// Implements both global `unpack` and `table.unpack`. Costs one per element
+/// visited, min 1.
 pub(super) fn unpack_values(state: &mut State) -> Result<u8> {
     check_type_named(state, 1, LuaType::Table, "unpack")?;
     // A table length beyond i64::MAX is unreachable; saturating keeps this infallible.
@@ -230,6 +231,7 @@ pub(super) fn unpack_values(state: &mut State) -> Result<u8> {
 
     state.set_top(1)?;
     if i > j {
+        state.consume_cost(1)?;
         state.set_top(0)?;
         return Ok(0);
     }
@@ -243,7 +245,10 @@ pub(super) fn unpack_values(state: &mut State) -> Result<u8> {
             limit: crate::error::MAX_RESULTS,
         }));
     }
+    // Charge each visit before its lookup: __index can fail, so reserving the
+    // whole range would charge entries the callback never visits.
     for index in i..=j {
+        state.consume_cost(1)?;
         state.push_number(index as f64)?;
         state.get_table(1)?;
     }

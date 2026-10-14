@@ -30,6 +30,31 @@ local t6 = {1, 2, 3}
 local removed6 = table.remove(t6, 1)
 print("Test 6 - table.remove at start: " .. tostring(removed6 == 1 and t6[1] == 2 and t6[2] == 3))
 
+-- Test 6b: table.remove on an empty sequence reads and clears t[0]
+local t6b = {[0] = "zero"}
+local removed6b = table.remove(t6b)
+print("Test 6b - table.remove pos 0: " .. tostring(removed6b == "zero" and t6b[0] == nil))
+
+-- Test 6c: integer keys of the sequence iterate first, in key order
+local t6c = {}
+t6c.name = "n"
+t6c[2] = "b"
+t6c[1] = "a"
+t6c[3] = "c"
+local order6c = {}
+for k in pairs(t6c) do order6c[#order6c + 1] = tostring(k) end
+print("Test 6c - pairs order: " .. tostring(table.concat(order6c, ",") == "1,2,3,name"))
+
+-- Test 6d: queue idiom keeps a sequence
+local q = {}
+for i = 1, 100 do table.insert(q, i) end
+local drained = 0
+while #q > 0 do
+    drained = drained + table.remove(q, 1)
+    if #q % 10 == 5 then table.insert(q, 0) table.remove(q) end
+end
+print("Test 6d - queue drain: " .. tostring(drained == 5050 and #q == 0))
+
 -- Test 7: table.sort (default ascending)
 local t7 = {3, 1, 4, 1, 5, 9, 2, 6}
 table.sort(t7)

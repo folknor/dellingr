@@ -273,10 +273,11 @@ impl State {
     }
 
     /// Inserts a value into a table at a position, shifting elements.
-    /// Stack: [t, value] -> []
+    /// Stack: [t, value] -> [t]
     /// `table_idx` resolves against the entry stack, so a negative index counts
     /// from the top value that will be popped. The value is popped from the
-    /// stack. `pos` has been validated by table.insert.
+    /// stack. `pos` must be in `1..=table_len(table_idx) + 1`; an invalid
+    /// position leaves the stack and table unchanged.
     #[hotpath::measure]
     pub fn table_insert_at(&mut self, table_idx: isize, pos: usize) -> Result<()> {
         // Resolve against the entry stack, including the value to be popped.
@@ -285,6 +286,9 @@ impl State {
         let idx = self.convert_idx(table_idx)?;
         if idx == self.stack.len() - 1 {
             return Err(self.error(ErrorKind::InvalidStackIndex { index: table_idx }));
+        }
+        if !(1..=self.table_len(table_idx) + 1).contains(&pos) {
+            return Err(self.error(ErrorKind::RuntimeError("position out of bounds".into())));
         }
         let value = self.pop_val();
         let obj_ptr = self.stack[idx].as_object_ptr();
@@ -320,7 +324,7 @@ impl State {
 
     /// Sorts the array portion of a table in place.
     /// If has_comp is true, uses the function at stack index 2 as comparator.
-    /// Sort a table's array portion. Returns the array length for cost charging.
+    /// Charges for the original range before sorting and returns its length.
     #[hotpath::measure]
     pub fn table_sort(&mut self, table_idx: isize, has_comp: bool) -> Result<usize> {
         let idx = self.convert_idx(table_idx)?;
