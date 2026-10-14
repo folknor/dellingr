@@ -34,7 +34,7 @@ pub trait HostCallbacks: Send {
     /// Called when Lua's `print()` function is executed.
     ///
     /// # Arguments
-    /// * `source` - The optional source file or chunk name
+    /// * `source` - The active Lua frame source name (`None` for direct native calls)
     /// * `line` - The current line number (0 if unknown)
     /// * `message` - The formatted message (all arguments joined with tabs)
     fn on_print(&mut self, _source: Option<&str>, _line: u32, message: &str) {
@@ -56,7 +56,7 @@ pub trait HostCallbacks: Send {
     /// host observes those solely through the `Result`.
     ///
     /// # Arguments
-    /// * `source` - The source file/chunk name where the error originated
+    /// * `source` - The Lua frame source at first reporting (`None` without a Lua frame)
     /// * `error` - The error that occurred (includes stack trace)
     fn on_error(&mut self, source: Option<&str>, error: &Error) {
         // Default: no-op (host handles via Result)

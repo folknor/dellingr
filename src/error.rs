@@ -19,12 +19,18 @@ pub struct StackFrame {
     pub line: u32,
 }
 
+/// Rarely-set error context, boxed so `Error` stays narrow.
 #[derive(Debug)]
-struct SourceName(String);
+struct ErrorContext {
+    /// Source file or chunk name, if the error came from named source.
+    name: Option<String>,
+    /// Whether `on_error` has already been notified for this error.
+    reported: bool,
+}
 
-impl SourceName {
-    fn as_str(&self) -> &str {
-        &self.0
+impl ErrorContext {
+    fn as_str(&self) -> Option<&str> {
+        self.name.as_deref()
     }
 }
 
@@ -51,7 +57,7 @@ pub struct Error {
     pub column: usize,
     /// The box keeps this optional context to one pointer in each `Error`, which
     /// is carried across recursive VM calls.
-    source_name: Option<Box<SourceName>>,
+    context: Option<Box<ErrorContext>>,
     /// Stack trace at the point of error (innermost frame first).
     pub stack_trace: Vec<StackFrame>,
 }
@@ -135,10 +141,23 @@ pub enum ErrorKind {
         /// Maximum permitted string size.
         limit: usize,
     },
+    /// Source text handed to the compiler exceeded the fixed source-size
+    /// limit. Raised before tokenising, so no partial chunk is produced.
+    SourceSizeExceeded {
+        /// Source length in bytes.
+        size: usize,
+        /// Maximum permitted source length in bytes.
+        limit: usize,
+    },
     /// Invalid stack index passed to a host API.
     InvalidStackIndex {
         /// The bad index, as supplied by the caller.
         index: isize,
+    },
+    /// An embedder registered one stable id for different Rust functions.
+    DuplicateFunctionRegistration {
+        /// The conflicting stable function id.
+        id: String,
     },
     /// Anchor handle is stale (released, generation mismatch) or belongs
     /// to a different `State`. Operations that need a live value return
@@ -307,7 +326,7 @@ impl Error {
             kind: kind.into(),
             line_num,
             column,
-            source_name: None,
+            context: None,
             stack_trace: Vec::new(),
         }
     }
@@ -331,13 +350,33 @@ impl Error {
     }
 
     pub(crate) fn with_source_name(mut self, source_name: Option<String>) -> Self {
-        self.source_name = source_name.map(|source_name| Box::new(SourceName(source_name)));
+        if source_name.is_some() || self.context.is_some() {
+            self.context_mut().name = source_name;
+        }
         self
+    }
+
+    // Keep reporting state in the existing optional box: widening Error adds
+    // stack storage at every level of the bounded recursive Lua call path.
+    fn context_mut(&mut self) -> &mut ErrorContext {
+        self.context.get_or_insert_with(|| {
+            Box::new(ErrorContext {
+                name: None,
+                reported: false,
+            })
+        })
+    }
+
+    pub(crate) fn mark_reported(&mut self) -> bool {
+        let context = self.context_mut();
+        let first_report = !context.reported;
+        context.reported = true;
+        first_report
     }
 
     /// Source file or chunk name attached to this error, if it came from named source.
     pub fn source_name(&self) -> Option<&str> {
-        self.source_name.as_deref().map(SourceName::as_str)
+        self.context.as_deref().and_then(ErrorContext::as_str)
     }
 
     /// 1-based column number where the error surfaced (0 if unknown).
@@ -358,8 +397,21 @@ impl Error {
 }
 
 impl ErrorKind {
+    /// Build a named argument error from a structured validation reason.
+    pub fn argument_detail(arg_number: isize, function_name: &str, detail: ArgDetail) -> Self {
+        Self::ArgError(ArgError {
+            arg_number,
+            func_name: Some(function_name.to_owned()),
+            detail,
+            expected: None,
+            received: None,
+        })
+    }
+
     /// Build a named argument error while preserving its precise diagnostic.
     pub(crate) fn bad_argument(arg_number: isize, function_name: &str, detail: &str) -> Self {
+        // Legacy stdlib callers pass text; preserve their structured results
+        // until they can select ArgDetail directly at validation sites.
         let detail = match detail {
             "number has no integer representation" => ArgDetail::NoInteger,
             "interval is empty" => ArgDetail::IntervalEmpty,
@@ -368,13 +420,7 @@ impl ErrorKind {
             }
             detail => ArgDetail::Custom(detail.to_owned()),
         };
-        Self::ArgError(ArgError {
-            arg_number,
-            func_name: Some(function_name.to_owned()),
-            detail,
-            expected: None,
-            received: None,
-        })
+        Self::argument_detail(arg_number, function_name, detail)
     }
 
     /// Whether the underlying error category is recoverable - see
@@ -494,8 +540,14 @@ impl fmt::Display for ErrorKind {
             StringSizeExceeded { size, limit } => {
                 write!(f, "string size {size} exceeds limit {limit}")
             }
+            SourceSizeExceeded { size, limit } => {
+                write!(f, "source size {size} exceeds limit {limit}")
+            }
             InvalidStackIndex { index } => {
-                write!(f, "internal error: invalid stack index ({index})")
+                write!(f, "invalid stack index ({index})")
+            }
+            DuplicateFunctionRegistration { id } => {
+                write!(f, "duplicate Rust function registration: {id}")
             }
             InvalidAnchor => {
                 write!(

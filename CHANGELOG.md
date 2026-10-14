@@ -8,6 +8,28 @@ All notable changes to dellingr are documented here. The format follows
 
 ### Changed
 
+- **Source size cap.** Source text over 16 MiB is rejected before tokenising
+  with the new `ErrorKind::SourceSizeExceeded { size, limit }`, bounding
+  load-time work for hosts that compile untrusted scripts. Literal-pool
+  deduplication is now a hash lookup rather than a linear scan; the emitted
+  bytecode is unchanged.
+- **`InvalidStackIndex` renders as `invalid stack index (N)`**, no longer
+  prefixed `internal error:` - it is host API misuse, not a VM bug.
+- **Duplicate function registrations keep their id.** A stable-id collision
+  raised through `push_named_rust_fn` or table/stdlib registration is now
+  `ErrorKind::DuplicateFunctionRegistration { id }` instead of an
+  `InternalError` string.
+- **Callback source attribution follows the running frame.**
+  `State::current_source()` and the `source` passed to `on_print`/`on_error`
+  come from the active Lua frame rather than the last loaded chunk. Loading
+  chunk B no longer re-attributes chunk A's prints to B, a rejected load leaves
+  nothing behind, and outside execution (or for a Rust function called directly
+  by the host) the source is `None`.
+- **`on_error` fires once regardless of traceback contents.** A host
+  `RustFunc` returning an error that already carries a stack trace is now
+  reported; previously a non-empty trace suppressed the notification.
+- **`ErrorKind::argument_detail`** builds a named `ArgError` from an `ArgDetail`
+  directly, without classifying diagnostic text.
 - **MSRV raised to Rust 1.99** (`rust-version` in `Cargo.toml`).
 - **`COST_MODEL_VERSION` is 3.** Constant folding and the per-iterator
   `string.gmatch` compile charge (both below) change `cost_used` for identical

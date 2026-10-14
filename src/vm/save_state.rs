@@ -1499,7 +1499,6 @@ fn materialize_payload(
     state.call_chain_depth = 0;
     state.call_depth = 0;
     state.active_rust_fn = None;
-    state.current_source = None;
     state.gc_collect();
     Ok(())
 }

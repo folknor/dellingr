@@ -155,7 +155,7 @@ impl State {
     pub fn push_named_rust_fn(&mut self, id: &str, f: RustFunc) -> Result<()> {
         self.check_stack_slot()?;
         self.register_rust_fn(id, f)
-            .map_err(|err| Error::without_location(ErrorKind::InternalError(err.to_string())))?;
+            .map_err(Self::registration_error)?;
         self.push_unchecked(Val::RustFn(f));
         Ok(())
     }

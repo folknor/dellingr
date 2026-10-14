@@ -151,6 +151,8 @@ impl<'a> Lexer<'a> {
             let tok_start = self.pos;
             // Capture before consuming the body: a string token can consume
             // logical newlines through \z or an escaped physical newline.
+            // The compiler source cap keeps this one-based line count and the
+            // token's byte length below the u32 representational limit.
             let tok_line = self.linebreaks.len() as u32;
             let Some(first_char) = self.next_char() else {
                 return Ok(self.end_of_file(tok_line));

@@ -272,9 +272,6 @@ pub struct State {
     pub(super) call_stack: Vec<CallInfo>,
     /// Host callbacks for print output, error handling, etc.
     pub(super) callbacks: Box<dyn HostCallbacks + Send>,
-    /// Current source name (for callback context).
-    /// Updated when loading a new chunk.
-    pub(super) current_source: Option<String>,
     /// User-defined data that RustFuncs can access.
     /// Use `set_user_data<T>()` and `user_data<T>()` to store/retrieve.
     user_data: Option<Box<dyn std::any::Any + Send>>,
@@ -436,7 +433,6 @@ impl State {
             call_depth: 0,
             call_stack: Vec::with_capacity(64), // Pre-size for call stack
             callbacks,
-            current_source: None,
             user_data: None,
             rng: VmRng::seed_from_u64(0),
             registry: Registry::new(state_id),
@@ -906,19 +902,29 @@ impl State {
             })
             .unwrap_or(0);
 
-        let source = self.current_source.as_deref();
+        let source = self
+            .call_stack
+            .last()
+            .and_then(|info| info.bytecode.source.as_deref());
         self.callbacks.on_print(source, line, message);
     }
 
     /// Called when an error occurs. Notifies host callbacks.
-    pub(crate) fn host_error(&mut self, error: &Error) {
-        let source = self.current_source.as_deref();
-        self.callbacks.on_error(source, error);
+    pub(crate) fn host_error(&mut self, error: &mut Error) {
+        if error.mark_reported() {
+            let source = self
+                .call_stack
+                .last()
+                .and_then(|info| info.bytecode.source.as_deref());
+            self.callbacks.on_error(source, error);
+        }
     }
 
-    /// Returns the current source name (if set).
+    /// Returns the active Lua frame source name, or `None` outside execution.
     pub fn current_source(&self) -> Option<&str> {
-        self.current_source.as_deref()
+        self.call_stack
+            .last()
+            .and_then(|info| info.bytecode.source.as_deref())
     }
 
     /// Pushes onto the stack the value of the global `name`.
@@ -985,10 +991,16 @@ impl State {
         Ok(())
     }
 
+    /// Converts a registration failure into an execution-API error, keeping
+    /// the conflicting id of a duplicate registration structured.
     #[cfg(feature = "snapshot")]
-    pub(crate) fn set_global_stdlib_rust_fn(&mut self, name: &str, id: &str, func: RustFunc) {
-        self.set_global_named_rust_fn(name, id, func)
-            .expect("stdlib Rust function registration cannot fail");
+    pub(crate) fn registration_error(err: SaveError) -> Error {
+        match err {
+            SaveError::DuplicateFunctionRegistration { id } => {
+                Error::without_location(ErrorKind::DuplicateFunctionRegistration { id })
+            }
+            other => Error::without_location(ErrorKind::InternalError(other.to_string())),
+        }
     }
 
     /// Register a Rust function id without installing the function anywhere.
@@ -1002,6 +1014,10 @@ impl State {
         func: RustFunc,
     ) -> std::result::Result<(), save_state::SaveError> {
         let addr = func as usize;
+        // Keep SaveError in this public signature: load setup closures
+        // propagate it. Execution-API wrappers convert it with
+        // `registration_error`, which keeps the id structured. Moving the type
+        // needs a coordinated API migration rather than a local change.
         // The only genuine error is an id collision: one id bound to two
         // different function addresses (an embedder bug). Re-registering the
         // same id->fn pair is idempotent.
@@ -1187,7 +1203,9 @@ impl State {
     /// unwind through a Lua frame - those raised by a host `RustFunc` called
     /// directly - keep a zero position.
     pub fn error(&self, kind: ErrorKind) -> Error {
-        Error::new(kind, 0, 0)
+        // Retain this public compatibility helper. Frame exit supplies the
+        // location; locating here would confuse parser and caller locations.
+        Error::without_location(kind)
     }
 
     pub(super) fn type_error(&self, e: TypeError) -> Error {

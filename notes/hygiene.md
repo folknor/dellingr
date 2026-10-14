@@ -141,61 +141,13 @@ cannot see any of it. Fix: a declarative registration table per library
 a test that every registration has a cost rule; a cost-snapshot test per
 function (fixed inputs, exact `cost_used`).
 
-## HYG-019 - Compile work is uncharged and unbounded
-
-Reported by the compiler hunter.
-
-`find_or_add_string_bytes` and `find_or_add` are linear scans, so building the
-literal pools is quadratic - up to 65536 x 65536 / 2 byte-slice compares per
-function. `analyze_cost` and `load_string` charge nothing for parsing and the
-source length has no cap, so a host loading untrusted scripts can be stalled at
-load time. Fix: an `IndexMap` keyed by bytes for the pools, and a documented,
-configurable maximum source size.
-
 # Errors and diagnostics
-
-## HYG-021 - Cast lints are not yet enforced in the stdlib
-
-Reported by the stdlib hunter; narrowed by a fixer, who routed 21 integer
-argument sites through `arg_integer`/`opt_integer` in lua_std.rs.
-
-Remaining: `clippy::cast_possible_truncation` and `cast_sign_loss` at module
-level for `src/lua_std/` would keep the next argument from bypassing the
-helper. The remaining bounded index and result `as` conversions need an audit
-first.
-
-## HYG-022 - Error kinds are mislabelled, and "no location" has two spellings
-
-Reported by the vm and compiler hunters.
-
-- `InvalidStackIndex` renders as `"internal error: invalid stack index"`
-  (error.rs) but is the documented result of host misuse of public
-  `set_top`/`pop`/`convert_idx`.
-- `push_named_rust_fn` (stack.rs) and table_ops.rs map
-  `SaveError::DuplicateFunctionRegistration` (an embedder bug) to
-  `InternalError` ("VM bug"), stringifying it and losing the id.
-- gmatch maps `PatternError` to `RuntimeError(String)`, shedding structure.
-- vm: `self.error(kind)` and `Error::without_location(kind)` are used
-  interchangeably; `State::error` takes `&self` and ignores it.
-- compiler: internal errors are built three ways - `compiler.rs`
-  `internal_error` (no location), `parser.rs` `parse_chunk`
-  (`error_at(InternalError, 0)`, which renders a false line 1 col 1), and
-  `finalize` (inline `without_location`).
-
-Fix: one helper per kind; `State::error` removed from the public API or made to
-locate.
 
 ## HYG-024 - Aborts on caller-controlled input
 
-Reported by the compiler and vm hunters; BUG-011 is the `get_table` case.
+Reported by the compiler and vm hunters; the compiler half is fixed by a 16 MiB
+source cap.
 
-- Compiler, for sources over 4 GiB (nothing caps source size): `Token.len` is
-  `u32` from `(self.pos - tok_start) as u32` and `tok_line` from
-  `self.linebreaks.len() as u32`; both wrap silently, and a wrapped `len` feeds
-  `substring` (a slice that can land off a char boundary and panic) and
-  `assert!(len >= 2)` in `get_literal_string_contents`. Cap source length at the
-  entry point with a typed error, or use `try_from`. The `peek_equals` `panic!`
-  arms and `unreachable!`s are internal-only.
 - Public API (vm): `check_any`, `check_type`, `is_none_or_nil`
   `assert!(arg_number != 0)` (vm_aux.rs); `Val`'s `Hash` impl hard-asserts
   non-NaN (lua_val.rs), safe only while every insertion path pre-rejects NaN;
@@ -204,54 +156,7 @@ Reported by the compiler and vm hunters; BUG-011 is the `get_table` case.
 - Enforcement idea (vm): `clippy::panic` / `clippy::manual_assert` scoped to the
   public API.
 
-## HYG-025 - The `on_error` once-only rule is an implicit sentinel
-
-Reported by the vm hunter; narrowed by a fixer, who centralised frame-exit
-cleanup in eval.rs.
-
-`call()` fires `on_error` at depth 0 with an empty trace and
-`eval_closure_frame` fires it when it attaches a trace; "empty stack_trace
-means not yet reported" is implicit, now documented by comments at both sites.
-A `reported: bool` on `Error` (error.rs) would be structural.
-
-## HYG-026 - Snapshot error residue
-
-Reported by the surface hunter; mostly fixed (Internal and TooLarge split,
-found/expected versions, CorruptArena reasons, decoder offsets).
-
-- `DuplicateFunctionRegistration` is a `SaveError` raised by
-  `State::register_rust_fn` at registration time, which is why
-  `set_global_stdlib_rust_fn` must `.expect(...)` it; a `RegistrationError` or
-  `error::Error` variant would match when it happens.
-
-## HYG-028 - Registration failures are handled three ways in the stdlib
-
-Reported by the stdlib hunter.
-
-The three `add_fn!` macros `.expect("... registration cannot fail")`, basic.rs
-propagates `?`, and string.rs maps the snapshot `register_rust_fn` failure to
-`InternalError`. `open_libs` is public, and the string.rs mapping shows the
-snapshot registry can fail; if `set_table_str_key_named_rust_fn` can fail the
-same way, the `expect` is a panic on a host-controlled call. The
-`#[cfg(feature = "snapshot")]` named-vs-plain fork is written out six times
-(basic.rs `add` closure, basic.rs `_G` metatable twice, the math/string/table
-`add_fn!` macros differing only in prefix, string.rs
-`push_named_or_plain_rust_fn`). Fix: one `State::register_lib_fn(table_idx,
-lib_prefix, name, func)` doing the cfg internally and returning `Result`, with
-the underlying methods `pub(super)` to vm. Enforceable by visibility.
-
 # State, ordering and ambient dependencies
-
-## HYG-033 - `current_source` is set by load order, not by the running frame
-
-Reported by the surface and compiler hunters.
-
-`State::load` writes `current_source`, which callbacks receive as `source` in
-`on_print`/`on_error`. Load A, load B, then call A's closure, and A's prints
-are attributed to B. `load_string_named` sets it before parsing, so a rejected
-load leaves it pointing at the failed chunk. The running chunk's
-`Bytecode.source` is on the `CallInfo`/frame; derive it from there and delete
-the field.
 
 ## HYG-034 - Several invariants rest on call ordering in one function
 
@@ -309,19 +214,6 @@ function in the parser (`parse_addition`, `parse_multiplication`, `parse_pow`)
 and again in `vm/frame.rs`, guarded only by a comment; an
 `arith_fn(opcode) -> fn(f64, f64) -> f64` in numeral.rs would be the single
 path.
-
-## HYG-038 - The determinism list in math.rs and README names functions that do not exist or are exact
-
-Reported by the stdlib hunter.
-
-math.rs's module doc and README "Determinism" (near-identical copies) list
-`pow` (no `math.pow` is registered) and `sqrt` (IEEE 754 requires correct
-rounding, so it is bit-stable). The list should name what is registered and
-ULP-variable (`sin cos tan asin acos atan atan2 exp log`) and live in one place.
-Relatedly, which reference version each stdlib function tracks is stated per
-site (string_format.rs "5.4 contract", math.rs random "matches 5.4", unpack
-"matches Lua 5.2", README's `math.log` note) with no single per-function
-statement.
 
 ## HYG-039 - Saves embed the crate version, and function identity depends on the host build's code folding
 
@@ -394,12 +286,37 @@ Reported by the vm, surface and compiler hunters.
 
 ## HYG-070 - `ArgDetail` is chosen by matching message text
 
-Reported by the wave 4 reviewer.
+Reported by the wave 4 reviewer; typed `ErrorKind::argument_detail`
+constructors now exist in error.rs.
 
-`ErrorKind::bad_argument` picks the `ArgDetail` variant by string-matching the
-detail text (`"interval is empty"` and so on), so a reworded call site silently
-becomes `Custom`. Typed constructors at the call sites would make the variant
-the owner and the text its rendering.
+The stdlib still goes through the text-matching `bad_argument` path:
+`lua_std.rs` `exact_integer_value`, two `math.random` branches, basic.rs
+`tonumber`/`rawlen`/`select`, string.rs `gsub`, table position validation and
+string_format.rs `format_arg_error`. Convert them, then drop the text matching.
+
+## HYG-073 - Some execution errors bypass the on_error reporting boundaries
+
+Reported by the wave 5 error-kinds fixer; unverified.
+
+Stack preflight failures and result-padding failures are raised outside the
+three boundaries that notify `on_error`, so a host may see the error returned
+without the callback firing. The wave 5 reviewer confirms `eval_closure_frame`
+returns early on `check_stack_space` and vararg `pop` failures without
+`report_frame_error`. Related: the private `reported` flag lives on the `Error`
+value, so a host that stores an error from one `call` and returns the same value
+from a later `RustFunc` gets no `on_error` for the second escape; undocumented.
+
+## HYG-074 - Pattern and compiler-internal errors are still built ad hoc
+
+Reported by the wave 5 reviewer; residue of the mislabelled-error-kinds entry.
+
+- gmatch, match, find and gsub map `PatternError` to
+  `RuntimeError(err.to_string())` at four sites in string.rs, shedding
+  structure.
+- The compiler builds internal errors several ways: `compiler.rs`
+  `internal_error` (no location), `error_at(InternalError, 0)` in parser.rs
+  (renders a false line 1), `finalize`, and a new "outer literal index stack
+  empty" `error_at(..., 0)`. One helper per kind.
 
 ## HYG-071 - Error-message function names depend on the build
 
@@ -419,9 +336,7 @@ Reported by the wave 4 reviewer; perf, unmeasured.
 
 `Table::insert` builds a `TableKeyInput` and runs the full normaliser to reject
 nil and NaN, and `Hash for Val` routes numbers through it. Both should inline to
-the old code; check with the next `tables/*` bench. The parser's chunk-nesting
-check is currently unreachable (syntax depth stops first); limits.rs could say
-so.
+the old code; check with the next `tables/*` bench.
 
 ## HYG-060 - Tool directories are ignored wholesale
 
@@ -432,13 +347,6 @@ Reported by the tooling hunter; the dead ignore entries are fixed.
 intended). `.review.toml` holds only an `[_audit] id`, is read by nothing in the
 tree (the external `review` tool's state), and is listed in Cargo.toml
 `exclude`.
-
-## HYG-047 - gmatch snapshot ids are spelled twice
-
-Reported by the stdlib hunter; the magic-byte half was fixed. The gmatch snapshot
-ids `"string.gmatch.iter"` and `"string.gmatch.empty_iter"` are also spelled at
-the push sites and again in the `register_rust_fn` block; a typo makes a saved
-gmatch closure unloadable. Use consts.
 
 # Output channel and lints
 

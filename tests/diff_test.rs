@@ -120,9 +120,8 @@ fn differential_top_level_examples() {
     run_differential_bucket(
         "top-level",
         &collect_examples(|rel| {
-            top_level_dir(rel).is_none_or(|dir| {
-                !KERNEL_DIRS_A.contains(&dir) && !KERNEL_DIRS_B.contains(&dir)
-            })
+            top_level_dir(rel)
+                .is_none_or(|dir| !KERNEL_DIRS_A.contains(&dir) && !KERNEL_DIRS_B.contains(&dir))
         }),
     );
 }

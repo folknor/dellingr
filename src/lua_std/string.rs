@@ -14,6 +14,8 @@ return function()
     return iter(state)
 end
 "#;
+const GMATCH_ITER_ID: &str = "string.gmatch.iter";
+const GMATCH_EMPTY_ITER_ID: &str = "string.gmatch.empty_iter";
 
 static GMATCH_WRAPPER: OnceLock<Arc<crate::compiler::Bytecode>> = OnceLock::new();
 
@@ -153,7 +155,7 @@ fn push_captures(state: &mut State, bytes: &[u8], pattern: &LuaPattern) -> Resul
         for i in 1..n {
             push_capture_value(state, bytes, pattern.capture(i))?;
         }
-        Ok((n - 1) as u8)
+        crate::error::results_count(n - 1).map_err(|kind| state.error(kind))
     } else {
         push_capture_value(state, bytes, pattern.capture(0))?;
         Ok(1)
@@ -218,7 +220,7 @@ fn append_string_replacement(
                 append_bytes(state, out, b"%")?;
                 i += 2;
             } else if next.is_ascii_digit() {
-                let idx = (next - b'0') as usize;
+                let idx = usize::from(next - b'0');
                 if idx == 0 {
                     append_capture_bytes(state, out, bytes, captures[0])?;
                 } else {
@@ -278,7 +280,7 @@ fn compile_replacement_template(repl: &[u8]) -> Option<ReplTemplate> {
                 if !literal.is_empty() {
                     segments.push(ReplSegment::Literal(std::mem::take(&mut literal)));
                 }
-                segments.push(ReplSegment::Capture((next - b'0') as usize));
+                segments.push(ReplSegment::Capture(usize::from(next - b'0')));
             } else {
                 return None;
             }
@@ -401,10 +403,9 @@ fn append_gsub_replacement(
                 for cap in &captures[1..] {
                     push_capture_value(state, bytes, *cap)?;
                 }
-                state.call(
-                    ArgCount::Fixed((captures.len() - 1) as u8),
-                    RetCount::Fixed(1),
-                )?;
+                let argument_count = crate::error::results_count(captures.len() - 1)
+                    .map_err(|kind| state.error(kind))?;
+                state.call(ArgCount::Fixed(argument_count), RetCount::Fixed(1))?;
             } else {
                 push_capture_value(state, bytes, captures[0])?;
                 state.call(ArgCount::Fixed(1), RetCount::Fixed(1))?;
@@ -439,14 +440,7 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
     // Helper to add a function to the table at stack index -1.
     macro_rules! add_fn {
         ($name:expr, $func:expr) => {
-            #[cfg(feature = "snapshot")]
-            state
-                .set_table_str_key_named_rust_fn(-1, $name, concat!("string.", $name), $func)
-                .expect("string library registration cannot fail");
-            #[cfg(not(feature = "snapshot"))]
-            state
-                .set_table_str_key_rust_fn(-1, $name, $func)
-                .expect("string library registration cannot fail");
+            state.register_lib_fn(-1, "string", $name, $func)?;
         };
     }
 
@@ -536,7 +530,9 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
                             push_capture_value(state, &s, matcher.capture(i))?;
                         }
                     }
-                    Ok(2 + n.saturating_sub(1) as u8)
+                    let capture_returns = u8::try_from(n.saturating_sub(1))
+                        .expect("Lua pattern captures fit the callback result count");
+                    Ok(2 + capture_returns)
                 }
                 false => {
                     state.push_nil()?;
@@ -648,7 +644,7 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
             state.push_number(s.len() as f64)?;
             state.set_table_raw(-3)?;
 
-            return push_gmatch_wrapper(state, "string.gmatch.empty_iter", gmatch_empty_iter);
+            return push_gmatch_wrapper(state, GMATCH_EMPTY_ITER_ID, gmatch_empty_iter);
         }
 
         state.new_table()?;
@@ -668,7 +664,7 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
         state.push_number(0.0)?;
         state.set_table_raw(-3)?;
 
-        push_gmatch_wrapper(state, "string.gmatch.iter", gmatch_iter)
+        push_gmatch_wrapper(state, GMATCH_ITER_ID, gmatch_iter)
     });
 
     // string.gsub(s, pattern, repl [, n])
@@ -834,38 +830,11 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
     // Register the gmatch iterator functions up front so a persisted gmatch
     // closure (which captures one of them as an upvalue) can be resolved on
     // snapshot load, not only after gmatch has run once.
-    #[cfg(feature = "snapshot")]
-    {
-        state
-            .register_rust_fn("string.gmatch.iter", gmatch_iter)
-            .map_err(|err| {
-                crate::error::Error::without_location(ErrorKind::InternalError(err.to_string()))
-            })?;
-        state
-            .register_rust_fn("string.gmatch.empty_iter", gmatch_empty_iter)
-            .map_err(|err| {
-                crate::error::Error::without_location(ErrorKind::InternalError(err.to_string()))
-            })?;
-    }
+    state.register_lib_fn_id(GMATCH_ITER_ID, gmatch_iter)?;
+    state.register_lib_fn_id(GMATCH_EMPTY_ITER_ID, gmatch_empty_iter)?;
 
     // Set the string table as a global
     state.set_global("string");
-    Ok(())
-}
-
-fn push_named_or_plain_rust_fn(
-    state: &mut State,
-    #[cfg_attr(not(feature = "snapshot"), allow(unused_variables))] id: &str,
-    func: fn(&mut State) -> Result<u8>,
-) -> Result<()> {
-    #[cfg(feature = "snapshot")]
-    {
-        state.push_named_rust_fn(id, func)?;
-    }
-    #[cfg(not(feature = "snapshot"))]
-    {
-        state.push_rust_fn(func)?;
-    }
     Ok(())
 }
 
@@ -875,22 +844,31 @@ fn push_gmatch_wrapper(
     iter: fn(&mut State) -> Result<u8>,
 ) -> Result<u8> {
     state.push_chunk(gmatch_wrapper())?;
-    push_named_or_plain_rust_fn(state, iter_id, iter)?;
+    state.push_lib_fn(iter_id, iter)?;
     state.push_value(1)?;
     state.remove(1)?;
     state.call(ArgCount::Fixed(2), RetCount::Fixed(1))?;
     Ok(1)
 }
 
+// The iterator table is private closure state initialized from a string
+// length, so every stored position is a finite, nonnegative integer bounded
+// by MAX_STRING_BYTES plus one. Keep Rust's saturating float-to-integer cast
+// semantics while making that invariant explicit to Clippy.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn gmatch_state_index(number: f64) -> usize {
+    number as usize
+}
+
 fn gmatch_empty_iter(state: &mut State) -> Result<u8> {
     state.push_string("pos")?;
     state.get_table_raw(1)?;
-    let pos = state.to_number(-1).unwrap_or(0.0) as usize;
+    let pos = gmatch_state_index(state.to_number(-1).unwrap_or(0.0));
     state.pop(1)?;
 
     state.push_string("len")?;
     state.get_table_raw(1)?;
-    let len = state.to_number(-1).unwrap_or(0.0) as usize;
+    let len = gmatch_state_index(state.to_number(-1).unwrap_or(0.0));
     state.pop(1)?;
 
     if pos > len {
@@ -918,7 +896,7 @@ fn gmatch_iter(state: &mut State) -> Result<u8> {
 
     state.push_string("pos")?;
     state.get_table_raw(1)?;
-    let pos = state.to_number(-1).unwrap_or(0.0) as usize;
+    let pos = gmatch_state_index(state.to_number(-1).unwrap_or(0.0));
     state.pop(1)?;
 
     state.expect_string_at_named(2, "gmatch")?;
@@ -989,7 +967,7 @@ fn gmatch_iter(state: &mut State) -> Result<u8> {
             for capture in captures.iter().skip(1) {
                 push_gmatch_capture(state, *capture)?;
             }
-            (captures.len() - 1) as u8
+            crate::error::results_count(captures.len() - 1).map_err(|kind| state.error(kind))?
         } else {
             push_gmatch_capture(state, captures[0])?;
             1
@@ -1074,9 +1052,11 @@ mod tests {
             // the same point with identical counters.
             for budget in 0..=total + 1 {
                 let mut fast_state = State::new();
-                fast_state.set_cost_budget(budget as i64);
+                fast_state
+                    .set_cost_budget(i64::try_from(budget).expect("test scan budgets fit in i64"));
                 let mut slow_state = State::new();
-                slow_state.set_cost_budget(budget as i64);
+                slow_state
+                    .set_cost_budget(i64::try_from(budget).expect("test scan budgets fit in i64"));
                 let fast = find_subslice(&mut fast_state, haystack, needle);
                 let slow = naive_find(&mut slow_state, haystack, needle);
                 match (&fast, &slow) {

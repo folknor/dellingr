@@ -82,7 +82,7 @@ impl State {
         func: RustFunc,
     ) -> Result<()> {
         self.register_rust_fn(id, func)
-            .map_err(|err| self.error(ErrorKind::InternalError(err.to_string())))?;
+            .map_err(Self::registration_error)?;
         self.set_table_str_key_value(table_idx, name, Val::RustFn(func))
     }
 

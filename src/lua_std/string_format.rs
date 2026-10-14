@@ -296,13 +296,20 @@ fn invalid_specification(state: &State, raw: &[u8]) -> Error {
     )))
 }
 
+// Lua's unsigned integer conversions preserve the signed value's two's
+// complement bit pattern, matching the former `i64 as u64` conversion.
+fn unsigned_integer_bits(integer: i64) -> u64 {
+    u64::from_ne_bytes(integer.to_ne_bytes())
+}
+
 fn format_argument(state: &mut State, argument: usize, directive: &Directive) -> Result<Vec<u8>> {
-    let idx = argument as isize;
+    let idx = isize::try_from(argument).map_err(|_| invalid_specification(state, &directive.raw))?;
     match directive.conversion {
         Conversion::Percent => Ok(b"%".to_vec()),
         Conversion::Char => {
             let integer = integer_argument(state, idx, argument)?;
-            let byte = integer.rem_euclid(256) as u8;
+            let byte = u8::try_from(integer.rem_euclid(256))
+                .map_err(|_| invalid_specification(state, &directive.raw))?;
             Ok(pad_bytes(&[byte], directive.width, directive.flags.left))
         }
         Conversion::SignedDecimal => {
@@ -312,7 +319,7 @@ fn format_argument(state: &mut State, argument: usize, directive: &Directive) ->
         Conversion::UnsignedDecimal => {
             let integer = integer_argument(state, idx, argument)?;
             Ok(format_unsigned_integer(
-                integer as u64,
+                unsigned_integer_bits(integer),
                 10,
                 false,
                 directive,
@@ -320,12 +327,17 @@ fn format_argument(state: &mut State, argument: usize, directive: &Directive) ->
         }
         Conversion::Octal => {
             let integer = integer_argument(state, idx, argument)?;
-            Ok(format_unsigned_integer(integer as u64, 8, false, directive))
+            Ok(format_unsigned_integer(
+                unsigned_integer_bits(integer),
+                8,
+                false,
+                directive,
+            ))
         }
         Conversion::HexLower => {
             let integer = integer_argument(state, idx, argument)?;
             Ok(format_unsigned_integer(
-                integer as u64,
+                unsigned_integer_bits(integer),
                 16,
                 false,
                 directive,
@@ -333,7 +345,12 @@ fn format_argument(state: &mut State, argument: usize, directive: &Directive) ->
         }
         Conversion::HexUpper => {
             let integer = integer_argument(state, idx, argument)?;
-            Ok(format_unsigned_integer(integer as u64, 16, true, directive))
+            Ok(format_unsigned_integer(
+                unsigned_integer_bits(integer),
+                16,
+                true,
+                directive,
+            ))
         }
         Conversion::ScientificLower
         | Conversion::ScientificUpper
@@ -575,6 +592,8 @@ fn format_general(number: f64, precision: usize, uppercase: bool, alternate: boo
         return special_float(number, uppercase);
     }
     let significant = precision.max(1);
+    let significant_i32 =
+        i32::try_from(significant).expect("format precision is bounded by u8::MAX");
     let probe = format_scientific(number, significant - 1, false, true);
     let marker = probe
         .iter()
@@ -585,10 +604,11 @@ fn format_general(number: f64, precision: usize, uppercase: bool, alternate: boo
         .parse::<i32>()
         .expect("scientific exponent is a decimal integer");
 
-    let mut output = if exponent < -4 || exponent >= significant as i32 {
+    let mut output = if exponent < -4 || exponent >= significant_i32 {
         format_scientific(number, significant - 1, uppercase, alternate)
     } else {
-        let fractional = (significant as i32 - exponent - 1).max(0) as usize;
+        let fractional = usize::try_from((significant_i32 - exponent - 1).max(0))
+            .expect("fractional precision is nonnegative");
         format_fixed(number, fractional, alternate)
     };
     if !alternate {
@@ -638,7 +658,8 @@ fn format_hex_float(
     }
 
     let bits = number.to_bits();
-    let exponent_bits = ((bits >> 52) & 0x7ff) as i32;
+    let exponent_bits =
+        i32::try_from((bits >> 52) & 0x7ff).expect("the f64 exponent field fits in i32");
     let fraction = bits & ((1u64 << 52) - 1);
     let exponent = if exponent_bits == 0 {
         if fraction == 0 { 0 } else { -1022 }
@@ -664,7 +685,8 @@ fn format_hex_float(
                     rounded += 1;
                 }
             }
-            let leading = (rounded >> (digits * 4)) as u8;
+            let leading = u8::try_from(rounded >> (digits * 4))
+                .expect("rounded hexadecimal leading digit fits in u8");
             let fraction_mask = if digits == 0 {
                 0
             } else {
@@ -682,7 +704,8 @@ fn format_hex_float(
         }
         Some(requested) => {
             let digits = usize::from(requested);
-            let leading = (significand >> 52) as u8;
+            let leading =
+                u8::try_from(significand >> 52).expect("hexadecimal leading digit fits in u8");
             let fraction = significand & ((1u128 << 52) - 1);
             let mut text = if uppercase {
                 format!("{fraction:013X}")
@@ -693,7 +716,8 @@ fn format_hex_float(
             (leading, text)
         }
         None => {
-            let leading = (significand >> 52) as u8;
+            let leading =
+                u8::try_from(significand >> 52).expect("hexadecimal leading digit fits in u8");
             let fraction = significand & ((1u128 << 52) - 1);
             let mut text = if uppercase {
                 format!("{fraction:013X}")

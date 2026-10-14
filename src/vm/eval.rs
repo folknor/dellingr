@@ -83,27 +83,16 @@ impl State {
             self.active_rust_fn = previous_rust_fn;
             let num_ret_reported = match result {
                 Ok(n) => n,
-                Err(e) => {
+                Err(mut e) => {
                     self.truncate_call_frame(idx, old_stack_bottom);
-                    // Notify the host of a Rust-function failure it reached
-                    // directly (no Lua frame on the stack). When call_depth > 0,
-                    // an enclosing Lua frame reports it as the error unwinds.
-                    // When call_chain_depth > 0, an enclosing non-function
-                    // __call chain reports it after the chain unwinds. A
-                    // non-empty stack trace means a Lua frame already reported
-                    // the error. An enclosing Rust callback also owns failures
-                    // propagated from its nested calls. These checks keep
-                    // on_error firing once.
-                    // Keep this boundary separate from Lua-frame reporting:
-                    // direct host calls have no Lua frame that can attach a trace.
-                    // Error has no separate report flag, so stack_trace remains
-                    // the existing marker shared with report_frame_error below.
+                    // Enclosing Lua, native, and callable-chain boundaries own
+                    // nested failures. Reporting state belongs to Error, not
+                    // to the presence of a traceback supplied by the host.
                     if self.call_depth == 0
                         && self.call_chain_depth == 0
                         && self.active_rust_fn.is_none()
-                        && e.stack_trace.is_empty()
                     {
-                        self.host_error(&e);
+                        self.host_error(&mut e);
                     }
                     return Err(e);
                 }
@@ -208,7 +197,7 @@ impl State {
                     // the comment on the Lua-function branch above).
                     let handler_is_function = matches!(call_handler, Val::RustFn(_))
                         || call_handler.as_lua_function(&self.heap).is_some();
-                    let result = if handler_is_function {
+                    let mut result = if handler_is_function {
                         self.call(ArgCount::Fixed(combined), num_ret_expected)
                     } else {
                         self.call_chain_depth += 1;
@@ -222,29 +211,26 @@ impl State {
                         self.truncate_call_frame(idx, old_stack_bottom);
                     }
                     if !handler_is_function
-                        && let Err(error) = &result
+                        && let Err(error) = &mut result
                         && self.call_depth == 0
                         && self.call_chain_depth == 0
                         && self.active_rust_fn.is_none()
-                        && error.stack_trace.is_empty()
                     {
                         // Errors from a non-function __call chain can pass
                         // through here without a Lua frame or RustFn reporting
                         // boundary. Only the outermost host call sees the depth
                         // restored to zero, so it reports the error once.
-                        // Errors already reported by a Lua frame retain their
-                        // non-empty trace and are skipped.
                         self.host_error(error);
                     }
                     return result;
                 }
             }
             self.truncate_call_frame(idx, old_stack_bottom);
-            let error = self.type_error(TypeError::FunctionCall(func_val.typ(&self.heap)));
+            let mut error = self.type_error(TypeError::FunctionCall(func_val.typ(&self.heap)));
             // Resolving a callable is execution, even when it has no handler.
             // Nested chains defer to their outer boundary, as Rust failures do.
             if self.call_depth == 0 && self.call_chain_depth == 0 && self.active_rust_fn.is_none() {
-                self.host_error(&error);
+                self.host_error(&mut error);
             }
             return Err(error);
         };
@@ -283,7 +269,6 @@ impl State {
         s: impl AsRef<str>,
         source_name: Option<String>,
     ) -> Result<()> {
-        self.current_source = source_name.clone();
         let bytecode = compiler::parse_str_named(s, source_name)?;
         self.push_chunk(Arc::new(bytecode))?;
         Ok(())
@@ -456,20 +441,13 @@ impl State {
         }
     }
 
-    fn report_frame_error(&mut self, error: Error, frame: &Frame) -> Error {
+    fn report_frame_error(&mut self, mut error: Error, frame: &Frame) -> Error {
         if error.stack_trace.is_empty() {
-            let error = Self::locate_in_frame(error, frame);
-            let trace = self.build_stack_trace(frame);
-            let error = error.with_stack_trace(trace);
-            // A trace marks that this Lua error crossed the reporting boundary.
-            // Nested frames retain it and do not notify the host a second time.
-            // Error has no separate report flag, so this remains the shared
-            // once-only marker used by the direct RustFn boundary above.
-            self.host_error(&error);
-            error
-        } else {
-            error
+            error = Self::locate_in_frame(error, frame);
+            error = error.with_stack_trace(self.build_stack_trace(frame));
         }
+        self.host_error(&mut error);
+        error
     }
 
     fn cleanup_closure_frame(

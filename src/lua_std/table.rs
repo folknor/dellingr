@@ -17,14 +17,7 @@ pub(crate) fn open_table(state: &mut State) -> Result<()> {
     // Helper to add a function to the table at stack index -1.
     macro_rules! add_fn {
         ($name:expr, $func:expr) => {
-            #[cfg(feature = "snapshot")]
-            state
-                .set_table_str_key_named_rust_fn(-1, $name, concat!("table.", $name), $func)
-                .expect("table library registration cannot fail");
-            #[cfg(not(feature = "snapshot"))]
-            state
-                .set_table_str_key_rust_fn(-1, $name, $func)
-                .expect("table library registration cannot fail");
+            state.register_lib_fn(-1, "table", $name, $func)?;
         };
     }
 
@@ -117,12 +110,14 @@ pub(crate) fn open_table(state: &mut State) -> Result<()> {
 
         // Create new table
         state.new_table()?;
-        let table_idx = state.get_top() as isize;
+        let table_idx =
+            isize::try_from(state.get_top()).expect("the value stack limit fits in isize");
 
         // Insert all arguments into the table
         for i in 1..=num_args {
             state.push_number(i as f64)?; // push the index (key)
-            state.push_value(i as isize)?; // push the argument (value)
+            let arg_index = isize::try_from(i).expect("the value stack limit fits in isize");
+            state.push_value(arg_index)?; // push the argument (value)
             state.set_table_raw(table_idx)?;
         }
 
@@ -265,7 +260,7 @@ pub(crate) fn open_table(state: &mut State) -> Result<()> {
         } else {
             // Without a configured limit, reserve the complete deterministic
             // cost once and keep the hot copy loops free of budget checks.
-            state.consume_cost(count as u64)?;
+            state.consume_cost(u64::try_from(count).expect("a nonempty move count is positive"))?;
             if same_table && t > f {
                 for i in (0..count).rev() {
                     let src_key = (f + i) as f64;

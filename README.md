@@ -59,6 +59,8 @@ Some of them might be added later (probably most of them behind a feature gate, 
 
 ## Source limits
 
+Source text is capped at 16 MiB per load. Longer source is rejected with `SourceSizeExceeded` before tokenising, which bounds load-time work for hosts that compile untrusted scripts.
+
 The parser has a budget of 200 recursive syntax entries and raises `chunk has too many syntax levels` when it is exhausted, following the native-stack safeguard in reference Lua's `LUAI_MAXCCALLS`. Without the bound, deeply nested source exhausts the native stack, and a Rust stack overflow aborts the host process rather than returning a catchable error.
 
 One divergence worth knowing: a nested parenthesis costs two levels rather than one, because each level descends through both the expression and unary parsers. Parentheses therefore nest about 99 deep here against reference Lua's ~200. Every other construct - statement blocks, `elseif` chains, table constructors, unary operator runs, field-access chains - gets the full 200. Real code does not come close to either figure.
@@ -90,14 +92,12 @@ Numeric `for` loops with a zero step skip their body in both directions. Lua 5.2
 ## Determinism
 
 Execution is deterministic: the same script and inputs produce the same result
-and the same cost on a given build. `math.random` draws from an in-crate seeded
-RNG (`set_rng_seed`), so it is bit-stable across platforms. The one caveat is
-`math`'s transcendental functions (`sin`, `cos`, `exp`, `log`, `pow`, `sqrt`,
-...), which delegate to the platform `f64`/libm implementation: results are
-deterministic per build+platform but the last ULP may differ across
-architectures or libm versions. Replays that must be bit-identical across
-heterogeneous hosts should avoid depending on exact transcendental results;
-arithmetic, comparisons, and `math.random` are bit-stable everywhere.
+and cost on a given build. `math.random` draws from the in-crate seeded RNG
+(`set_rng_seed`). The registered `math` functions whose last ULP may vary across
+architectures or libm versions, together with the cross-platform bit-stability
+contract, are documented with the implementation in
+[`src/lua_std/math.rs`](src/lua_std/math.rs). Replays that must be
+bit-identical across heterogeneous hosts should follow that contract.
 
 ## Save state
 

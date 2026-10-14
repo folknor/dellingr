@@ -9,9 +9,9 @@ use crate::numeral::parse_lua_numeral;
 
 fn digit_value(byte: u8) -> Option<u32> {
     match byte {
-        b'0'..=b'9' => Some((byte - b'0') as u32),
-        b'a'..=b'z' => Some((byte - b'a' + 10) as u32),
-        b'A'..=b'Z' => Some((byte - b'A' + 10) as u32),
+        b'0'..=b'9' => Some(u32::from(byte - b'0')),
+        b'a'..=b'z' => Some(u32::from(byte - b'a' + 10)),
+        b'A'..=b'Z' => Some(u32::from(byte - b'A' + 10)),
         _ => None,
     }
 }
@@ -116,24 +116,24 @@ pub(crate) fn base_pairs(state: &mut State) -> Result<u8> {
 }
 
 pub(crate) fn open_base(state: &mut State) -> Result<()> {
-    let mut add = |name, func| {
-        #[cfg(feature = "snapshot")]
-        state.set_global_stdlib_rust_fn(name, name, func);
-        #[cfg(not(feature = "snapshot"))]
-        state.set_global_rust_fn(name, func);
-    };
+    macro_rules! add {
+        ($name:expr, $func:expr) => {
+            state.register_lib_global_fn($name, $func)?;
+        };
+    }
 
-    add("ipairs", base_ipairs);
-    add("next", base_next);
-    add("pairs", base_pairs);
+    add!("ipairs", base_ipairs);
+    add!("next", base_next);
+    add!("pairs", base_pairs);
 
     // Receives any number of arguments, and prints their values to `stdout`.
     // Output is routed through host callbacks, allowing the game engine to
     // redirect print output to per-script consoles.
-    add("print", |state| {
+    add!("print", |state| {
         let top = state.get_top();
         let mut message = String::new();
         for i in 1..=top {
+            let stack_index = isize::try_from(i).expect("the value stack limit fits in isize");
             if i != 1 {
                 crate::vm::checked_string_growth(message.len(), 1)?;
                 message.push('\t');
@@ -143,11 +143,11 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
             // expands to three, and a legal 16 MiB string of 0xff would
             // otherwise materialize as a ~48 MiB `String` before the check
             // below could reject it. Other types render to short text.
-            if state.typ(i as isize) == LuaType::String {
-                let raw_len = state.to_bytes(i as isize)?.len();
+            if state.typ(stack_index) == LuaType::String {
+                let raw_len = state.to_bytes(stack_index)?.len();
                 crate::vm::checked_string_growth(message.len(), raw_len)?;
             }
-            let part = state.to_string_with_meta(i as isize)?;
+            let part = state.to_string_with_meta(stack_index)?;
             crate::vm::checked_string_growth(message.len(), part.len())?;
             message.push_str(&part);
         }
@@ -156,7 +156,7 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
     });
 
     // Raises an error with the given message.
-    add("error", |state| {
+    add!("error", |state| {
         let message = if state.get_top() >= 1 {
             state.to_string_with_meta(1)?
         } else {
@@ -181,7 +181,7 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
     });
 
     // Returns the type of its only argument, coded as a string.
-    add("type", |state| {
+    add!("type", |state| {
         check_any_named(state, 1, "type")?;
         let typ = state.typ(1);
         state.set_top(0)?;
@@ -190,7 +190,7 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
     });
 
     // Converts a value to a number, or a string in the given base to a number.
-    add("tonumber", |state| {
+    add!("tonumber", |state| {
         check_any_named(state, 1, "tonumber")?;
         if !state.is_none_or_nil(2) {
             check_type_named(state, 1, LuaType::String, "tonumber")?;
@@ -206,7 +206,9 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
 
             let base = u32::try_from(base).expect("validated tonumber base fits in u32");
             let num = parse_integer_with_base(state.to_bytes(1)?, base);
-            state.pop(state.get_top() as isize)?;
+            let top =
+                isize::try_from(state.get_top()).expect("the value stack limit fits in isize");
+            state.pop(top)?;
             if let Some(num) = num {
                 state.push_number(num)?;
             } else {
@@ -219,7 +221,9 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
         match typ {
             LuaType::Number => {
                 let num = state.to_number(1)?;
-                state.pop(state.get_top() as isize)?;
+                let top =
+                    isize::try_from(state.get_top()).expect("the value stack limit fits in isize");
+                state.pop(top)?;
                 state.push_number(num)?;
                 Ok(1)
             }
@@ -234,7 +238,9 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
                 Ok(1)
             }
             _ => {
-                state.pop(state.get_top() as isize)?;
+                let top =
+                    isize::try_from(state.get_top()).expect("the value stack limit fits in isize");
+                state.pop(top)?;
                 state.push_nil()?;
                 Ok(1)
             }
@@ -242,7 +248,7 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
     });
 
     // Converts any value to its string representation.
-    add("tostring", |state| {
+    add!("tostring", |state| {
         check_any_named(state, 1, "tostring")?;
         if state.typ(1) == LuaType::String {
             state.set_top(1)?;
@@ -258,11 +264,11 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
     //
     // Returns list[i], list[i+1], ..., list[j]. Defaults to 1..#list,
     // matching Lua 5.2's global unpack.
-    add("unpack", base_unpack_values);
+    add!("unpack", base_unpack_values);
 
     // getmetatable(object)
     // Returns the metatable of the given table, or nil if it doesn't have one.
-    add("getmetatable", |state| {
+    add!("getmetatable", |state| {
         check_any_named(state, 1, "getmetatable")?;
         state.set_top(1)?;
         raw_metafield(state, 1)?;
@@ -274,7 +280,7 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
     // setmetatable(table, metatable)
     // Sets the metatable for the given table. metatable can be nil to remove it.
     // Returns the table.
-    add("setmetatable", |state| {
+    add!("setmetatable", |state| {
         check_type_named(state, 1, LuaType::Table, "setmetatable")?;
         check_any_named(state, 2, "setmetatable")?;
         if !matches!(state.typ(2), LuaType::Table | LuaType::Nil) {
@@ -297,7 +303,7 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
 
     // rawget(table, index)
     // Gets the value of table[index] without invoking __index metamethod.
-    add("rawget", |state| {
+    add!("rawget", |state| {
         check_type_named(state, 1, LuaType::Table, "rawget")?;
         check_any_named(state, 2, "rawget")?;
         state.set_top(2)?;
@@ -314,7 +320,7 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
     // rawset(table, index, value)
     // Sets table[index] = value without invoking __newindex metamethod.
     // Returns the table.
-    add("rawset", |state| {
+    add!("rawset", |state| {
         check_type_named(state, 1, LuaType::Table, "rawset")?;
         check_any_named(state, 2, "rawset")?;
         check_any_named(state, 3, "rawset")?;
@@ -327,7 +333,7 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
 
     // rawequal(v1, v2)
     // Returns true if v1 and v2 are primitively equal (without __eq metamethod).
-    add("rawequal", |state| {
+    add!("rawequal", |state| {
         check_any_named(state, 1, "rawequal")?;
         check_any_named(state, 2, "rawequal")?;
         let equal = state.raw_equal(1, 2);
@@ -338,7 +344,7 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
 
     // rawlen(v)
     // Returns the length of a table or string without invoking __len metamethod.
-    add("rawlen", |state| {
+    add!("rawlen", |state| {
         check_any_named(state, 1, "rawlen")?;
         let typ = state.typ(1);
         let len = match typ {
@@ -361,7 +367,7 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
     // select(index, ...)
     // If index is a number, returns all arguments after argument number index.
     // If index is "#", returns the total number of extra arguments.
-    add("select", |state| {
+    add!("select", |state| {
         check_any_named(state, 1, "select")?;
         let num_args = state.get_top();
 
@@ -418,21 +424,10 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
     state.new_table()?; // metatable
 
     // __index: function(t, k) return globals[k] end
-    #[cfg(feature = "snapshot")]
-    state.set_table_str_key_named_rust_fn(-1, "__index", "_G.__index", global_env_index)?;
-    #[cfg(not(feature = "snapshot"))]
-    state.set_table_str_key_rust_fn(-1, "__index", global_env_index)?;
+    state.register_lib_fn(-1, "_G", "__index", global_env_index)?;
 
     // __newindex: function(t, k, v) globals[k] = v end
-    #[cfg(feature = "snapshot")]
-    state.set_table_str_key_named_rust_fn(
-        -1,
-        "__newindex",
-        "_G.__newindex",
-        global_env_newindex,
-    )?;
-    #[cfg(not(feature = "snapshot"))]
-    state.set_table_str_key_rust_fn(-1, "__newindex", global_env_newindex)?;
+    state.register_lib_fn(-1, "_G", "__newindex", global_env_newindex)?;
 
     state.set_metatable_of(1)?;
     state.set_global("_G");

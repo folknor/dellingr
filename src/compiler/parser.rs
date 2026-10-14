@@ -13,10 +13,10 @@ use super::lexer::TokenStream;
 use super::token::Token;
 use super::token::TokenType;
 use crate::instr::{ArgCount, Builtin, RetCount};
-use crate::limits::{MAX_FIXED_ARGS, MAX_LITERALS, MAX_LOCALS, MAX_SYNTAX_DEPTH};
+use crate::limits::{MAX_FIXED_ARGS, MAX_LITERALS, MAX_LOCALS, MAX_SOURCE_BYTES, MAX_SYNTAX_DEPTH};
 use crate::numeral::{hex_value, is_lua_whitespace, is_newline_pair};
 
-use std::borrow::Borrow;
+use indexmap::IndexMap;
 
 mod expr;
 mod func;
@@ -30,10 +30,12 @@ struct Parser<'a> {
     /// The input token stream.
     input: TokenStream<'a>,
     chunk: Bytecode,
+    literal_indices: LiteralPoolIndices,
     nest_level: i32,
     /// Names borrow the source (`'a`), so declarations allocate nothing.
     locals: Vec<(&'a str, i32)>,
     outer_chunks: Vec<Bytecode>,
+    outer_literal_indices: Vec<LiteralPoolIndices>,
     /// Break-jump state for each nested loop.
     loop_breaks: Vec<LoopContext>,
     /// Upvalues for the current function being compiled.
@@ -58,6 +60,16 @@ struct Parser<'a> {
     fold_barrier: usize,
 }
 
+/// Lookup indexes for one chunk's ordered literal vectors.
+///
+/// The vectors remain the canonical bytecode pools. These maps only avoid
+/// rescanning them and always retain the index assigned at first insertion.
+#[derive(Debug, Default)]
+struct LiteralPoolIndices {
+    strings: IndexMap<Vec<u8>, u16>,
+    numbers: IndexMap<u64, u16>,
+}
+
 /// Tracks the break jumps and upvalue-close boundary for one loop.
 #[derive(Debug)]
 struct LoopContext {
@@ -73,6 +85,14 @@ pub(super) fn parse_str(source: &str) -> Result<Bytecode> {
 /// Parses Lua source code into a `Bytecode` with an optional source name.
 #[hotpath::measure]
 pub(super) fn parse_str_named(source: &str, source_name: Option<String>) -> Result<Bytecode> {
+    if source.len() > MAX_SOURCE_BYTES {
+        return Err(Error::without_location(ErrorKind::SourceSizeExceeded {
+            size: source.len(),
+            limit: MAX_SOURCE_BYTES,
+        })
+        .with_source_name(source_name));
+    }
+
     let chunk = Bytecode {
         source: source_name.clone(),
         ..Default::default()
@@ -80,9 +100,11 @@ pub(super) fn parse_str_named(source: &str, source_name: Option<String>) -> Resu
     let parser = Parser {
         input: TokenStream::new(source),
         chunk,
+        literal_indices: LiteralPoolIndices::default(),
         nest_level: 0,
         locals: Vec::new(),
         outer_chunks: Vec::new(),
+        outer_literal_indices: Vec::new(),
         loop_breaks: Vec::new(),
         upvalues: Vec::new(),
         outer_locals: Vec::new(),
@@ -241,29 +263,39 @@ impl<'a> Parser<'a> {
     /// Stores literal string bytes and returns its index.
     fn find_or_add_string_bytes(&mut self, bytes: &[u8]) -> Result<u16> {
         crate::vm::check_string_size(bytes.len()).map_err(|err| self.error_here(err.kind))?;
-        match self
-            .chunk
-            .string_literals
-            .iter()
-            .position(|existing| existing.as_slice() == bytes)
-        {
-            Some(i) => Ok(i as u16),
-            None => {
-                let i = self.chunk.string_literals.len();
-                if i >= MAX_LITERALS {
-                    Err(self.error_here(SyntaxError::TooManyStrings))
-                } else {
-                    self.chunk.string_literals.push(bytes.to_vec());
-                    Ok(i as u16)
-                }
-            }
+        if let Some(index) = self.literal_indices.strings.get(bytes) {
+            return Ok(*index);
         }
+
+        let i = self.chunk.string_literals.len();
+        // MAX_LITERALS keeps indices within u16, so the conversion cannot fail.
+        let index = match u16::try_from(i) {
+            Ok(index) if i < MAX_LITERALS => index,
+            _ => return Err(self.error_here(SyntaxError::TooManyStrings)),
+        };
+        self.chunk.string_literals.push(bytes.to_vec());
+        self.literal_indices.strings.insert(bytes.to_vec(), index);
+        Ok(index)
     }
 
     /// Stores a literal number and returns its index.
     fn find_or_add_number(&mut self, num: f64) -> Result<u16> {
-        find_or_add(&mut self.chunk.number_literals, &num)
-            .ok_or_else(|| self.error_here(SyntaxError::TooManyNumbers))
+        let key = number_literal_key(num);
+        if let Some(index) = key.and_then(|key| self.literal_indices.numbers.get(&key)) {
+            return Ok(*index);
+        }
+
+        let i = self.chunk.number_literals.len();
+        // MAX_LITERALS keeps indices within u16, so the conversion cannot fail.
+        let index = match u16::try_from(i) {
+            Ok(index) if i < MAX_LITERALS => index,
+            _ => return Err(self.error_here(SyntaxError::TooManyNumbers)),
+        };
+        self.chunk.number_literals.push(num);
+        if let Some(key) = key {
+            self.literal_indices.numbers.insert(key, index);
+        }
+        Ok(index)
     }
 
     /// Converts a literal string's offsets into Lua string bytes, processing escape sequences.
@@ -603,6 +635,8 @@ impl<'a> Parser<'a> {
             u8::try_from(params.len()).map_err(|_| self.error_here(SyntaxError::TooManyLocals))?;
         let source = self.chunk.source.clone();
         self.outer_chunks.push(std::mem::take(&mut self.chunk));
+        self.outer_literal_indices
+            .push(std::mem::take(&mut self.literal_indices));
         let outer_fold_barrier = std::mem::take(&mut self.fold_barrier);
         self.chunk.source = source;
         self.chunk.is_vararg = is_vararg;
@@ -634,6 +668,12 @@ impl<'a> Parser<'a> {
             )
         })?;
         let tmp_chunk = std::mem::replace(&mut self.chunk, outer_chunk);
+        self.literal_indices = self.outer_literal_indices.pop().ok_or_else(|| {
+            self.error_at(
+                ErrorKind::InternalError("compiler: outer literal index stack empty".into()),
+                0,
+            )
+        })?;
         self.fold_barrier = outer_fold_barrier;
 
         // Restore outer locals and upvalues
@@ -793,23 +833,18 @@ fn find_last_local(locals: &[(&str, i32)], name: &str) -> Option<usize> {
     None
 }
 
-/// Returns the index of an entry in the literals list, adding it if it does not exist.
-fn find_or_add<T, E>(queue: &mut Vec<T>, x: &E) -> Option<u16>
-where
-    T: Borrow<E> + PartialEq<E>,
-    E: PartialEq<T> + ToOwned<Owned = T> + ?Sized,
-{
-    match queue.iter().position(|y| y == x) {
-        Some(i) => Some(i as u16),
-        None => {
-            let i = queue.len();
-            if i >= MAX_LITERALS {
-                None
-            } else {
-                queue.push(x.to_owned());
-                Some(i as u16)
-            }
-        }
+/// Returns a stable lookup key for values equal under the literal pool's `==` semantics.
+/// NaNs intentionally have no key because `NaN != NaN`; signed zeroes share one key.
+fn number_literal_key(number: f64) -> Option<u64> {
+    if number.is_nan() {
+        return None;
+    }
+
+    let bits = number.to_bits();
+    if bits & !(1_u64 << 63) == 0 {
+        Some(0)
+    } else {
+        Some(bits)
     }
 }
 

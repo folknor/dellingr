@@ -11,8 +11,8 @@ use crate::error::{ErrorKind, SyntaxError};
 use crate::instr::{ArgCount, Builtin, RetCount};
 use crate::limits::{
     MAX_ASSIGNMENT_OFFSET, MAX_CHUNK_NESTING, MAX_EXPRESSIONS, MAX_FIXED_ARGS, MAX_FIXED_RESULTS,
-    MAX_LITERALS, MAX_LOCALS, MAX_NESTED, MAX_TABLE_BATCH_SIZE, MAX_TABLE_TEMPLATE_FIELDS,
-    MAX_TABLE_TEMPLATES,
+    MAX_LITERALS, MAX_LOCALS, MAX_NESTED, MAX_SOURCE_BYTES, MAX_TABLE_BATCH_SIZE,
+    MAX_TABLE_TEMPLATE_FIELDS, MAX_TABLE_TEMPLATES,
 };
 
 /// Recursively clear line_info from a chunk and its nested chunks.
@@ -172,9 +172,11 @@ fn checked_jump_offset_accepts_i16_boundaries_only() {
     let parser = Parser {
         input: TokenStream::new(""),
         chunk: Bytecode::default(),
+        literal_indices: Default::default(),
         nest_level: 0,
         locals: Vec::new(),
         outer_chunks: Vec::new(),
+        outer_literal_indices: Vec::new(),
         loop_breaks: Vec::new(),
         upvalues: Vec::new(),
         outer_locals: Vec::new(),
@@ -1588,9 +1590,11 @@ fn parser_for_limit_test() -> Parser<'static> {
     Parser {
         input: TokenStream::new(""),
         chunk: Bytecode::default(),
+        literal_indices: Default::default(),
         nest_level: 0,
         locals: Vec::new(),
         outer_chunks: Vec::new(),
+        outer_literal_indices: Vec::new(),
         loop_breaks: Vec::new(),
         upvalues: Vec::new(),
         outer_locals: Vec::new(),
@@ -1606,6 +1610,18 @@ fn literal_pool_limits_match_their_error_messages() {
     let max_literal_count = u32::try_from(MAX_LITERALS).expect("MAX_LITERALS fits in u32");
     let mut parser = parser_for_limit_test();
     parser.chunk.number_literals = (0..max_literal_count - 1).map(f64::from).collect();
+    parser.literal_indices.numbers = parser
+        .chunk
+        .number_literals
+        .iter()
+        .enumerate()
+        .map(|(index, number)| {
+            (
+                super::number_literal_key(*number).expect("limit fixture numbers are not NaN"),
+                u16::try_from(index).expect("literal test index fits in u16"),
+            )
+        })
+        .collect();
     assert_eq!(
         parser
             .find_or_add_number(f64::from(max_literal_count - 1))
@@ -1625,6 +1641,18 @@ fn literal_pool_limits_match_their_error_messages() {
     parser.chunk.string_literals = (0..MAX_LITERALS - 1)
         .map(|index| index.to_string().into_bytes())
         .collect();
+    parser.literal_indices.strings = parser
+        .chunk
+        .string_literals
+        .iter()
+        .enumerate()
+        .map(|(index, bytes)| {
+            (
+                bytes.clone(),
+                u16::try_from(index).expect("literal test index fits in u16"),
+            )
+        })
+        .collect();
     assert_eq!(
         parser
             .find_or_add_string_bytes(b"last")
@@ -1639,6 +1667,58 @@ fn literal_pool_limits_match_their_error_messages() {
         ErrorKind::SyntaxError(SyntaxError::TooManyStrings)
     ));
     assert!(error.to_string().contains(&format!("limit {MAX_LITERALS}")));
+}
+
+#[test]
+fn source_size_limit_runs_before_lexing() {
+    let mut source = String::with_capacity(MAX_SOURCE_BYTES + 1);
+    source.push('@');
+    source.push_str(&" ".repeat(MAX_SOURCE_BYTES));
+
+    let error = parse_str(&source).expect_err("source one byte over the limit must be rejected");
+    assert!(matches!(
+        error.kind,
+        ErrorKind::SourceSizeExceeded {
+            size,
+            limit: MAX_SOURCE_BYTES,
+        } if size == MAX_SOURCE_BYTES + 1
+    ));
+
+    source.pop();
+    let error = parse_str(&source).expect_err("the exact-size fixture must reach the lexer");
+    assert!(matches!(
+        error.kind,
+        ErrorKind::SyntaxError(SyntaxError::InvalidCharacter('@'))
+    ));
+}
+
+#[test]
+fn literal_pool_indexes_keep_first_insertion_order() {
+    let chunk = parse_str("return 3, 1, 3, \"b\", \"a\", \"b\"")
+        .expect("literal pool fixture must compile");
+
+    assert_eq!(chunk.number_literals, vec![3.0, 1.0]);
+    assert_eq!(chunk.string_literals, vec![b"b".to_vec(), b"a".to_vec()]);
+}
+
+#[test]
+fn number_literal_index_matches_numeric_equality() {
+    let mut parser = parser_for_limit_test();
+    let positive_zero = parser
+        .find_or_add_number(0.0)
+        .expect("zero must fit in the number pool");
+    let negative_zero = parser
+        .find_or_add_number(-0.0)
+        .expect("negative zero must fit in the number pool");
+    let first_nan = parser
+        .find_or_add_number(f64::NAN)
+        .expect("NaN must fit in the number pool");
+    let second_nan = parser
+        .find_or_add_number(f64::NAN)
+        .expect("a second NaN must fit in the number pool");
+
+    assert_eq!(positive_zero, negative_zero);
+    assert_ne!(first_nan, second_nan);
 }
 
 #[test]

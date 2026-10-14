@@ -1,4 +1,13 @@
-//! Lua's standard library
+//! Lua's standard library.
+//!
+//! Version-sensitive compatibility decisions are per function: `string.format`
+//! follows Lua 5.4, `math.random` follows Lua 5.4's interval and error behavior,
+//! `math.log(x, base)` follows Lua 5.2's general-base calculation, and
+//! `math.atan(y, x)` uses the Lua 5.3+ two-argument form. Global `unpack` follows
+//! Lua 5.2; `table.unpack` uses the same implementation. The `%p` conversion in
+//! `string.format` follows Lua 5.4 and is absent in Lua 5.2.
+
+#![deny(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 
 mod basic;
 mod math;
@@ -39,8 +48,66 @@ pub(crate) fn open_libs(state: &mut State) -> Result<()> {
     table::open_table(state)
 }
 
-// Do not add module-wide cast denies until the remaining bounded index and
-// result conversions here have been audited or replaced.
+impl State {
+    // This stdlib helper centralizes the cfg choices. Enforcing the boundary by
+    // visibility requires moving it into vm before narrowing the table writers
+    // there to pub(super).
+    /// Installs a standard-library function and registers its stable snapshot id.
+    pub(super) fn register_lib_fn(
+        &mut self,
+        table_idx: isize,
+        lib_prefix: &str,
+        name: &str,
+        func: crate::RustFunc,
+    ) -> Result<()> {
+        #[cfg(feature = "snapshot")]
+        {
+            let id = format!("{lib_prefix}.{name}");
+            self.set_table_str_key_named_rust_fn(table_idx, name, &id, func)
+        }
+        #[cfg(not(feature = "snapshot"))]
+        {
+            let _ = lib_prefix;
+            self.set_table_str_key_rust_fn(table_idx, name, func)
+        }
+    }
+
+    /// Registers a standard-library function id without storing the function.
+    pub(super) fn register_lib_fn_id(&mut self, id: &str, func: crate::RustFunc) -> Result<()> {
+        #[cfg(feature = "snapshot")]
+        self.register_rust_fn(id, func)
+            .map_err(Self::registration_error)?;
+        #[cfg(not(feature = "snapshot"))]
+        let _ = (id, func);
+        Ok(())
+    }
+
+    /// Pushes a standard-library function using the active snapshot policy.
+    pub(super) fn push_lib_fn(&mut self, id: &str, func: crate::RustFunc) -> Result<()> {
+        #[cfg(feature = "snapshot")]
+        self.push_named_rust_fn(id, func)?;
+        #[cfg(not(feature = "snapshot"))]
+        {
+            let _ = id;
+            self.push_rust_fn(func)?;
+        }
+        Ok(())
+    }
+
+    /// Installs a standard-library global and registers its stable snapshot id.
+    pub(super) fn register_lib_global_fn(
+        &mut self,
+        name: &str,
+        func: crate::RustFunc,
+    ) -> Result<()> {
+        #[cfg(feature = "snapshot")]
+        self.set_global_named_rust_fn(name, name, func)
+            .map_err(Self::registration_error)?;
+        #[cfg(not(feature = "snapshot"))]
+        self.set_global_rust_fn(name, func);
+        Ok(())
+    }
+}
 
 /// Adds the known standard-library function name to a generic argument error.
 ///
@@ -167,5 +234,11 @@ pub(super) fn unpack_values(state: &mut State) -> Result<u8> {
         state.get_table(1)?;
     }
     state.remove(1)?;
-    crate::error::results_count((span + 1) as usize).map_err(|kind| state.error(kind))
+    // span is nonnegative and below MAX_RESULTS here, so the conversion cannot fail.
+    let result_count = usize::try_from(span + 1).map_err(|_| {
+        state.error(ErrorKind::TooManyResults {
+            limit: crate::error::MAX_RESULTS,
+        })
+    })?;
+    crate::error::results_count(result_count).map_err(|kind| state.error(kind))
 }

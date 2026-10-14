@@ -1,14 +1,12 @@
 //! Lua's Math Library
 //!
-//! Determinism contract: `math.random` is fully deterministic - it draws
-//! from the in-crate seeded `VmRng`, so a fixed seed yields the same stream on
-//! every platform. The transcendental functions (`sin`, `cos`, `exp`, `log`,
-//! `pow`, `sqrt`, ...) delegate to the platform's `f64` / libm implementation.
-//! Their results are deterministic for a given build+platform, but the last
-//! ULP may differ across architectures or libm versions. Replays that must be
-//! bit-identical across heterogeneous hosts should therefore avoid relying on
-//! exact transcendental results (basic arithmetic, comparisons, and
-//! `math.random` are bit-stable everywhere).
+//! `math.random` draws from the in-crate seeded `VmRng`, so a fixed seed yields
+//! the same stream on every platform. The registered functions `sin`, `cos`,
+//! `tan`, `asin`, `acos`, `atan`, `atan2`, `exp`, and `log` delegate to the
+//! platform's `f64` / libm implementation; their last ULP may differ across
+//! architectures or libm versions. `sqrt` is correctly rounded by IEEE 754,
+//! and `pow` is not registered. Basic arithmetic, comparisons, `sqrt`, and
+//! `math.random` are bit-stable across platforms.
 
 use super::{arg_integer, argument_error, check_type_named};
 use crate::LuaType;
@@ -24,14 +22,7 @@ pub(crate) fn open_math(state: &mut State) -> Result<()> {
     // Helper to add a function to the table at stack index -1.
     macro_rules! add_fn {
         ($name:expr, $func:expr) => {
-            #[cfg(feature = "snapshot")]
-            state
-                .set_table_str_key_named_rust_fn(-1, $name, concat!("math.", $name), $func)
-                .expect("math library registration cannot fail");
-            #[cfg(not(feature = "snapshot"))]
-            state
-                .set_table_str_key_rust_fn(-1, $name, $func)
-                .expect("math library registration cannot fail");
+            state.register_lib_fn(-1, "math", $name, $func)?;
         };
     }
 
@@ -90,7 +81,7 @@ pub(crate) fn open_math(state: &mut State) -> Result<()> {
     // math.min(...) - costs 1, returns minimum of all arguments
     add_fn!("min", |state| {
         state.consume_cost(1)?;
-        let n = state.get_top() as isize;
+        let n = isize::try_from(state.get_top()).expect("the value stack limit fits in isize");
         if n == 0 {
             let e = ArgError {
                 arg_number: 1,
@@ -118,7 +109,7 @@ pub(crate) fn open_math(state: &mut State) -> Result<()> {
     // math.max(...) - costs 1, returns maximum of all arguments
     add_fn!("max", |state| {
         state.consume_cost(1)?;
-        let n = state.get_top() as isize;
+        let n = isize::try_from(state.get_top()).expect("the value stack limit fits in isize");
         if n == 0 {
             let e = ArgError {
                 arg_number: 1,

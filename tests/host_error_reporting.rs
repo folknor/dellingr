@@ -204,3 +204,33 @@ fn rust_callback_propagating_nested_rust_failure_notifies_once() {
     assert!(matches!(error.kind, ErrorKind::InternalError(_)));
     assert_eq!(count.load(Ordering::SeqCst), 1);
 }
+
+fn fail_with_trace(_state: &mut State) -> dellingr::Result<u8> {
+    Err(
+        Error::without_location(ErrorKind::RuntimeError("host failure".into())).with_stack_trace(
+            vec![dellingr::error::StackFrame {
+                function_name: Some("host".into()),
+                source: Some("host-source".into()),
+                line: 7,
+            }],
+        ),
+    )
+}
+
+#[test]
+fn host_supplied_trace_does_not_suppress_notification() {
+    for through_lua in [false, true] {
+        let count = Arc::new(AtomicUsize::new(0));
+        let mut state = State::with_callbacks(Box::new(ErrorCounter(Arc::clone(&count))));
+        state.push_rust_fn(fail_with_trace).expect("callback fits");
+        if through_lua {
+            state.set_global("fail");
+            state.load_string("fail()").expect("chunk compiles");
+        }
+        let error = state
+            .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+            .expect_err("callback fails");
+        assert_eq!(error.stack_trace[0].source.as_deref(), Some("host-source"));
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+}
