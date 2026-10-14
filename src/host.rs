@@ -55,6 +55,11 @@ pub trait HostCallbacks: Send {
     /// raises before dispatch (e.g. a malformed argument count from a host); the
     /// host observes those solely through the `Result`.
     ///
+    /// Function labels in displayed argument errors are best-effort diagnostic
+    /// text. Generic Rust callback checks can resolve a label from current
+    /// globals or, with `snapshot`, a registered function id; aliases and build
+    /// settings can affect the result. Do not treat that label as a stable id.
+    ///
     /// # Arguments
     /// * `source` - The Lua frame source at first reporting (`None` without a Lua frame)
     /// * `error` - The error that occurred (includes stack trace)

@@ -51,11 +51,11 @@ fn assert_invalid_next_key(code: &str) {
     }
 }
 
-fn assert_pattern_runtime_error(code: &str, message: &str) {
+fn assert_pattern_error(code: &str, message: &str) {
     let err = expect_error(code);
     match err.kind {
-        ErrorKind::RuntimeError(actual) => assert_eq!(actual, message),
-        kind => panic!("Expected pattern runtime error, got: {kind:?}"),
+        ErrorKind::PatternError(detail) => assert_eq!(detail.to_string(), message),
+        kind => panic!("Expected pattern error, got: {kind:?}"),
     }
 }
 
@@ -110,9 +110,9 @@ fn traceback_call_sites_cover_non_call_dispatch_and_host_calls() {
 }
 
 #[test]
-fn malformed_pattern_capture_errors_are_runtime_errors() {
-    assert_pattern_runtime_error(r#"string.match("aa", "(a)%0")"#, "invalid capture index %0");
-    assert_pattern_runtime_error(r#"string.match("a", ")")"#, "invalid pattern capture");
+fn malformed_pattern_capture_errors_are_pattern_errors() {
+    assert_pattern_error(r#"string.match("aa", "(a)%0")"#, "invalid capture index %0");
+    assert_pattern_error(r#"string.match("a", ")")"#, "invalid pattern capture");
 }
 
 #[test]

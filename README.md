@@ -103,6 +103,15 @@ contract, are documented with the implementation in
 [`src/lua_std/math.rs`](src/lua_std/math.rs). Replays that must be
 bit-identical across heterogeneous hosts should follow that contract.
 
+Function labels in argument errors are diagnostic text, not stable identifiers.
+Generic Rust callbacks checked with `State::check_any` or `State::check_type`
+can get a label from the current global bindings or, with the `snapshot`
+feature, a registered function id. This can make displayed error text differ
+between feature sets or builds. Standard-library argument validators that use
+their named helpers supply explicit names. See
+[`reference/error-reporting.md`](reference/error-reporting.md) for the naming
+rules and limits.
+
 ## Save state
 
 The optional `snapshot` feature adds `State::save_state()` and

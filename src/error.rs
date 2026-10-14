@@ -85,7 +85,8 @@ pub enum PrefixLocation {
 }
 
 /// Top-level error categories. See the type-specific enums (e.g.
-/// [`TypeError`], [`SyntaxError`], [`ArgError`]) for finer-grained variants.
+/// [`TypeError`], [`SyntaxError`], [`ArgError`], [`PatternErrorDetail`]) for
+/// finer-grained variants.
 #[derive(Debug)]
 pub enum ErrorKind {
     /// Operation applied to a value of the wrong Lua type.
@@ -160,6 +161,8 @@ pub enum ErrorKind {
         /// The bad index, as supplied by the caller.
         index: isize,
     },
+    /// Lua pattern compilation or matching failed.
+    PatternError(PatternErrorDetail),
     /// An embedder registered one stable id for different Rust functions.
     DuplicateFunctionRegistration {
         /// The conflicting stable function id.
@@ -173,8 +176,9 @@ pub enum ErrorKind {
     /// use case for a stable handle; embedders that need an "absent" value
     /// should use `Option<Anchor>`.
     AnchorNil,
-    /// A runtime fault detected by the VM or by a library operation - a bad
-    /// pattern, an invalid `next` key and so on. Distinct
+    /// A runtime fault detected by the VM or by a library operation - an
+    /// invalid `next` key and so on. Pattern failures use
+    /// [`ErrorKind::PatternError`]. Distinct
     /// from [`ErrorKind::ScriptError`], which the script raised on purpose,
     /// and from [`ErrorKind::InternalError`], which indicates a VM bug.
     RuntimeError(String),
@@ -197,11 +201,50 @@ pub enum ErrorKind {
     InternalError(String),
 }
 
+/// Structured reason that Lua pattern compilation or matching failed.
+///
+/// The display text matches the Lua pattern diagnostics previously returned
+/// as [`ErrorKind::RuntimeError`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PatternErrorDetail {
+    /// A closing capture delimiter had no matching opening delimiter.
+    InvalidPatternCapture,
+    /// A back-reference names no valid capture. The optional index is the
+    /// zero-based back-reference slot, with `%0` represented as `Some(-1)`;
+    /// `None` means the matcher could not provide an index.
+    InvalidCaptureIndex(Option<i8>),
+    /// A pattern construct was incomplete or malformed.
+    MalformedPattern(MalformedPatternDetail),
+    /// The pattern declares more captures than the matcher supports.
+    TooManyCaptures,
+    /// Matching exceeded the bounded pattern recursion depth.
+    MatchDepthExceeded,
+    /// A capture was still open when matching finished.
+    UnfinishedCapture,
+}
+
+/// The specific malformed Lua pattern construct.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MalformedPatternDetail {
+    /// A pattern ended with an unpaired `%`.
+    EndsWithPercent,
+    /// A `%b` balanced match omitted one or both delimiter arguments.
+    MissingBalancedArguments,
+    /// A character class did not contain a closing `]`.
+    MissingBracket,
+    /// A `%f` frontier pattern omitted its character class bracket.
+    MissingFrontierBracket,
+}
+
 /// Argument error raised by builtins or host functions.
 ///
-/// A missing `func_name` means the caller did not provide a function name. The
-/// VM resolves registered global names only when validation fails; unnamed
-/// callbacks remain anonymous.
+/// A missing `func_name` means no name was supplied or resolved. When
+/// `State::check_any` or `State::check_type` fails inside a Rust callback, the
+/// VM looks the callback up only then: first the first current global bound to
+/// the same function pointer, then, with the `snapshot` feature, the callback's
+/// registered stable id. Callbacks found by neither remain anonymous. The name
+/// is diagnostic text and can differ between builds; see
+/// `reference/error-reporting.md`.
 #[derive(Debug)]
 pub struct ArgError {
     /// 1-based argument index that failed validation. Negative values count
@@ -498,6 +541,35 @@ impl fmt::Display for Error {
     }
 }
 
+impl fmt::Display for PatternErrorDetail {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use PatternErrorDetail::*;
+        match self {
+            InvalidPatternCapture => f.write_str("invalid pattern capture"),
+            InvalidCaptureIndex(None) => f.write_str("invalid capture index"),
+            InvalidCaptureIndex(Some(idx)) => {
+                write!(f, "invalid capture index %{}", i16::from(*idx) + 1)
+            }
+            MalformedPattern(reason) => write!(f, "malformed pattern ({reason})"),
+            TooManyCaptures => f.write_str("too many captures"),
+            MatchDepthExceeded => f.write_str("pattern too complex"),
+            UnfinishedCapture => f.write_str("unfinished capture"),
+        }
+    }
+}
+
+impl fmt::Display for MalformedPatternDetail {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let message = match self {
+            Self::EndsWithPercent => "ends with '%'",
+            Self::MissingBalancedArguments => "missing arguments to '%b'",
+            Self::MissingBracket => "missing ']'",
+            Self::MissingFrontierBracket => "missing '[' after '%f' in pattern",
+        };
+        f.write_str(message)
+    }
+}
+
 impl fmt::Display for ErrorKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use ErrorKind::*;
@@ -540,6 +612,7 @@ impl fmt::Display for ErrorKind {
             InvalidStackIndex { index } => {
                 write!(f, "invalid stack index ({index})")
             }
+            PatternError(detail) => fmt::Display::fmt(detail, f),
             DuplicateFunctionRegistration { id } => {
                 write!(f, "duplicate Rust function registration: {id}")
             }

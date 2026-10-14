@@ -170,6 +170,9 @@ impl State {
 
     /// Moves the top element into the given valid index, shifting up the
     /// elements above this index to open space.
+    /// Returns [`ErrorKind::InvalidStackIndex`] when the index is outside the
+    /// visible stack.
+    #[deny(clippy::panic, clippy::manual_assert)]
     pub fn insert(&mut self, index: isize) -> Result<()> {
         let idx = self.convert_idx(index)?;
         let slice = &mut self.stack[idx..];
@@ -179,6 +182,9 @@ impl State {
 
     /// Removes the element at the given valid index, shifting down the elements
     /// above this index to fill the gap.
+    /// Returns [`ErrorKind::InvalidStackIndex`] when the index is outside the
+    /// visible stack.
+    #[deny(clippy::panic, clippy::manual_assert)]
     pub fn remove(&mut self, i: isize) -> Result<()> {
         let idx = self.convert_idx(i)?;
         self.stack.remove(idx);
@@ -188,9 +194,14 @@ impl State {
     /// Pops a value from the stack, then replaces the value at the given index
     /// with that value. If the index points to the top element (e.g., -1),
     /// this is equivalent to a simple pop since we'd be replacing the popped
-    /// value with itself.
+    /// value with itself. Returns [`ErrorKind::InvalidStackIndex`] when the
+    /// index is outside the visible stack.
+    #[deny(clippy::panic, clippy::manual_assert)]
     pub fn replace(&mut self, i: isize) -> Result<()> {
         let idx = self.convert_idx(i)?;
+        // A successful conversion requires a visible stack value above
+        // stack_bottom, so this pop cannot empty the backing stack. Failure is
+        // an internal VM invariant violation.
         let val = self
             .stack
             .pop()
@@ -272,11 +283,6 @@ impl State {
                 received: Some(val.typ(&self.heap)),
             },
         )))
-    }
-
-    /// Converts any Lua value to bytes using Lua's default string coercion rules.
-    pub(crate) fn bytes_coerce(&mut self, idx: isize) -> Result<Vec<u8>> {
-        self.bytes_with_default_string_coercion(idx)
     }
 
     /// Returns the type of the value in the given acceptable index.

@@ -236,7 +236,7 @@ fn malformed_gmatch_iterator_compiles_once() {
         let error = state
             .call(ArgCount::Fixed(0), RetCount::Fixed(1))
             .expect_err("malformed iterator reports its deferred error");
-        assert!(matches!(error.kind, ErrorKind::RuntimeError(_)));
+        assert!(matches!(error.kind, ErrorKind::PatternError(_)));
     }
     #[cfg(debug_assertions)]
     assert_eq!(state.gmatch_pattern_compilations(), 1);

@@ -608,6 +608,10 @@ impl State {
         self.check_stack_space(1)?;
         let runtime = self.resolve_bytecode_runtime(&bytecode)?;
         let identity = Arc::as_ptr(&bytecode) as usize;
+        // No host callback or fallible operation occurs from this push through
+        // its matching pop. maybe_collect must see the pending identity so its
+        // cache sweep retains the runtime before the closure becomes a root;
+        // alloc_lua_fn itself never collects. Nested captures finish beforehand.
         self.pending_bytecode_caches.push(identity);
         // Check if GC is needed before allocating
         self.maybe_collect();
@@ -624,20 +628,17 @@ impl State {
     /// Find an existing open upvalue for the given stack index, or create a new one.
     #[hotpath::measure]
     pub(super) fn find_or_create_upvalue(&mut self, stack_idx: usize) -> UpvalueRef {
-        // Check if we already have an open upvalue for this stack slot
-        for (idx, uv_ref) in &self.open_upvalues {
-            if *idx == stack_idx {
-                return *uv_ref;
-            }
-        }
-        // Create a new open upvalue in the pool
-        let uv_ref = self.upvalue_pool.alloc(Upvalue::Open(stack_idx));
-        // Insert in order (sorted by stack index ascending, so we can pop from end in O(1))
-        let pos = self
+        // Binary search preserves identity on hits and the exact ascending
+        // insertion/descending close order on misses. Vec insertion still
+        // shifts entries, but changing the close order would change pool reuse.
+        let pos = match self
             .open_upvalues
-            .iter()
-            .position(|(idx, _)| *idx > stack_idx)
-            .unwrap_or(self.open_upvalues.len());
+            .binary_search_by_key(&stack_idx, |(idx, _)| *idx)
+        {
+            Ok(pos) => return self.open_upvalues[pos].1,
+            Err(pos) => pos,
+        };
+        let uv_ref = self.upvalue_pool.alloc(Upvalue::Open(stack_idx));
         self.open_upvalues.insert(pos, (stack_idx, uv_ref));
         uv_ref
     }

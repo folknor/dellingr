@@ -504,16 +504,15 @@ impl State {
     /// Returns a deterministic, state-local identity for pointer-like values.
     pub(crate) fn format_pointer_id(&mut self, idx: isize) -> Result<u64> {
         let val = self.at_index(idx)?;
-        if let Some((_, id)) = self
-            .format_pointer_ids
-            .iter()
-            .find(|(candidate, _)| *candidate == val)
-        {
+        // Callers request identities only for strings, objects and functions;
+        // numbers (including NaN) never enter this map.
+        debug_assert!(matches!(val, Val::Str(_) | Val::Obj(_) | Val::RustFn(_)));
+        if let Some(id) = self.format_pointer_ids.get(&val) {
             return Ok(*id);
         }
         let id = self.next_format_pointer_id;
         self.next_format_pointer_id = self.next_format_pointer_id.wrapping_add(1);
-        self.format_pointer_ids.push((val, id));
+        self.format_pointer_ids.insert(val, id);
         Ok(id)
     }
 

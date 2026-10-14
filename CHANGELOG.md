@@ -39,6 +39,17 @@ All notable changes to dellingr are documented here. The format follows
   bytecode is unchanged.
 - **`InvalidStackIndex` renders as `invalid stack index (N)`**, no longer
   prefixed `internal error:` - it is host API misuse, not a VM bug.
+- **Lua pattern failures have structured errors.** Compilation and matching
+  failures now use `ErrorKind::PatternError(PatternErrorDetail)`, with a
+  `MalformedPatternDetail` subkind where applicable. The rendered pattern
+  diagnostic text is unchanged; exhaustive host matches should add the new
+  variant.
+- **Zero argument indices return `InvalidStackIndex`.** `State::check_any(0)`
+  and `State::check_type(0, ...)` now return a typed error instead of panicking.
+- **Callback boxes are spelled `Box<dyn HostCallbacks>`.** `HostCallbacks`
+  already requires `Send`, so the redundant `+ Send` is gone from
+  `State::with_callbacks`, `Engine::new_state_with_callbacks`,
+  `State::replace_callbacks` (argument and return) and `State::load_state`.
 - **Duplicate function registrations keep their id.** A stable-id collision
   raised through `push_named_rust_fn` or table/stdlib registration is now
   `ErrorKind::DuplicateFunctionRegistration { id }` instead of an

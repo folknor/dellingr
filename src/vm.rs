@@ -180,7 +180,7 @@ pub(super) struct TableLibraryFallbackCache {
     // Private, not pub(super): the fields are reached only from `vm` and its
     // descendant modules (eval_index), and `TableShape` itself is vm-private.
     table: ObjectPtr,
-    names: [Val; 7],
+    names: [Val; State::TABLE_FUNCTION_COUNT],
     shape: TableShape,
 }
 
@@ -280,7 +280,7 @@ pub struct State {
     /// Each entry represents an active Lua function call.
     pub(super) call_stack: Vec<CallInfo>,
     /// Host callbacks for print output, error handling, etc.
-    pub(super) callbacks: Box<dyn HostCallbacks + Send>,
+    pub(super) callbacks: Box<dyn HostCallbacks>,
     /// User-defined data that RustFuncs can access.
     /// Use `set_user_data<T>()` and `user_data<T>()` to store/retrieve.
     user_data: Option<Box<dyn std::any::Any + Send>>,
@@ -295,16 +295,25 @@ pub struct State {
     /// Lazily assigned deterministic identities used by `string.format("%p")`.
     /// These values deliberately are not GC roots; generational keys prevent a
     /// later allocation from aliasing an identity belonging to a freed value.
-    pub(super) format_pointer_ids: Vec<(Val, u64)>,
+    // Insertion order is serialized. Do not prune outside gc_collect: changing
+    // which entries remain must not change snapshot traversal order. With GC
+    // disabled, entries grow with observed objects, just as the heap does.
+    pub(super) format_pointer_ids: IndexMap<Val, u64>,
     pub(super) next_format_pointer_id: u64,
     /// Stable ids for Rust functions that are allowed to survive save/load.
     #[cfg(feature = "snapshot")]
+    // Registrations persist even while unreachable: the host may push the same
+    // function again, and snapshots must still resolve its stable name. An
+    // unregister API needs an explicit host lifetime contract; automatic
+    // pruning would change save success and reverse-name selection.
     pub(super) rust_fns_by_id: BTreeMap<String, RustFunc>,
     /// Reverse address lookup for save-time Rust function naming.
     #[cfg(feature = "snapshot")]
     pub(super) rust_fn_ids_by_addr: BTreeMap<usize, String>,
     /// Canonical environment objects (library tables, `_G`, and `_G`'s
-    /// metatable) captured once at construction, each mapped to its save token.
+    /// metatable) captured after each successful open_libs, each mapped to its
+    /// save token. The public helper refreshes fallback and environment caches
+    /// together, and with_callbacks uses that same helper.
     /// Keyed on the objects `open_libs` built, so user shadowing of a builtin
     /// slot (`math = {}`) cannot make the save classifier mistake a user table
     /// for an environment object. See `vm/save_state.rs`.
@@ -349,7 +358,7 @@ impl State {
     ///
     /// let mut state = State::with_callbacks(Box::new(MyCallbacks { output: vec![] }));
     /// ```
-    pub fn with_callbacks(callbacks: Box<dyn HostCallbacks + Send>) -> Self {
+    pub fn with_callbacks(callbacks: Box<dyn HostCallbacks>) -> Self {
         let mut me = Self::empty_with_callbacks(callbacks);
         me.open_libs()
             .expect("standard library initialization starts with an empty value stack");
@@ -401,7 +410,7 @@ impl State {
     }
 
     /// Creates an empty state with custom callbacks.
-    pub(crate) fn empty_with_callbacks(callbacks: Box<dyn HostCallbacks + Send>) -> Self {
+    pub(crate) fn empty_with_callbacks(callbacks: Box<dyn HostCallbacks>) -> Self {
         let state_id = anchor::next_state_id();
         Self {
             globals: IndexMap::new(),
@@ -438,7 +447,7 @@ impl State {
             user_data: None,
             rng: VmRng::seed_from_u64(0),
             registry: Registry::new(state_id),
-            format_pointer_ids: Vec::new(),
+            format_pointer_ids: IndexMap::new(),
             next_format_pointer_id: 1,
             #[cfg(feature = "snapshot")]
             rust_fns_by_id: BTreeMap::new(),
@@ -542,7 +551,7 @@ impl State {
                 .pattern
                 .as_ref()
                 .map(|_| ())
-                .map_err(|err| self.error(ErrorKind::RuntimeError(err.to_string())));
+                .map_err(|err| self.error(ErrorKind::PatternError(err.into())));
         }
         let pattern_len = val
             .as_string(&self.heap)
@@ -578,7 +587,7 @@ impl State {
             },
         );
         error.map_or(Ok(()), |err| {
-            Err(self.error(ErrorKind::RuntimeError(err.to_string())))
+            Err(self.error(ErrorKind::PatternError(err.into())))
         })
     }
 
@@ -610,6 +619,9 @@ impl State {
         let pattern_ptr = stack[pattern_idx]
             .as_string_ptr()
             .expect("expect_string_at validated the pattern's string type");
+        // The sole caller is gmatch_iter: it memoizes immediately before this
+        // borrow, with no allocation or collection between the two calls.
+        // Recompiling here would change deferred errors and instruction costs.
         // Both of these are caller-ordering invariants rather than script-
         // reachable states: the iterator memoizes before matching, and a cached
         // compilation failure is surfaced before we get here. They are still
@@ -695,8 +707,8 @@ impl State {
     /// Replace the host callbacks with new ones, returning the old callbacks.
     pub fn replace_callbacks(
         &mut self,
-        callbacks: Box<dyn HostCallbacks + Send>,
-    ) -> Box<dyn HostCallbacks + Send> {
+        callbacks: Box<dyn HostCallbacks>,
+    ) -> Box<dyn HostCallbacks> {
         std::mem::replace(&mut self.callbacks, callbacks)
     }
 
@@ -757,6 +769,10 @@ impl State {
     /// This marks all reachable objects and frees unreachable ones.
     #[hotpath::measure]
     pub fn gc_collect(&mut self) {
+        // This is the only production caller of GcHeap::collect. Heap unit
+        // tests collect standalone heaps, which have no State pattern cache.
+        // Clear before freeing interned strings so no cached matcher survives
+        // its key's lifetime; keep this point fixed to preserve cache costs.
         self.gmatch_patterns.clear();
         self.gmatch_pattern_bytes = 0;
         // Mark all roots
@@ -780,9 +796,9 @@ impl State {
         // `format_pointer_ids` entries are deliberately not GC roots; an entry
         // whose value no longer resolves can never be observed again (the
         // generational key cannot alias a future allocation), so drop it to
-        // keep the linear probe bounded by live `%p` usage.
+        // keep identity storage bounded by live `%p` usage.
         self.format_pointer_ids
-            .retain(|(val, _)| self.heap.val_is_live(val));
+            .retain(|val, _| self.heap.val_is_live(val));
     }
 
     /// Run automatic collection before a caller proceeds with a heap
@@ -796,6 +812,8 @@ impl State {
     /// Drop state-local runtime entries which no reachable closure, active
     /// frame, or pending closure shell can use. Removing an entry after roots
     /// were marked intentionally leaves its literals alive for one extra GC.
+    /// Sweeping caches before marking would reclaim those literals sooner and
+    /// change string-slot reuse and future collection thresholds.
     fn sweep_bytecode_caches(&mut self) {
         let mut live = BTreeSet::new();
         for bytecode in self.heap.reachable_lua_bytecodes() {
@@ -1132,6 +1150,10 @@ impl State {
             }
         }
 
+        // The fallback compares its generational table identity with the
+        // current Table builtin before using the cached shape. A hidden or
+        // replaced builtin therefore cannot use it; restoring the same object
+        // makes it usable again without allocating or recapturing names.
         // Swap to restricted environment
         let saved_globals = std::mem::replace(&mut self.globals, restricted_globals);
         let saved_builtins = std::mem::replace(&mut self.builtins, restricted_builtins);
@@ -1372,3 +1394,16 @@ mod runtime_tests {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod table_library_registration_tests {
+    #[test]
+    fn standard_library_captures_table_fallback() {
+        let state = super::State::new();
+        let cache = state
+            .table_library_fallback
+            .as_ref()
+            .expect("standard table registrations must fit the fallback name array");
+        assert_eq!(cache.names.len(), super::State::TABLE_FUNCTION_COUNT);
+    }
+}

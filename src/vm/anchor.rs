@@ -82,6 +82,10 @@ impl Anchor {
 /// a `state_id` plus a `SlotMap`. Generational keys give us
 /// stale-handle detection for free, and slotmap iteration order is
 /// deterministic given identical insert/release history.
+// Host-owned handles intentionally have no automatic eviction: dropping an
+// entry would invalidate a live Anchor and remove a GC root. The host bounds
+// its own anchor count by release_anchor(). This is not GC-managed allocation storage
+// and must not enter heap_size(), which drives existing GC threshold policy.
 pub(crate) struct Registry {
     state_id: NonZeroU64,
     slots: SlotMap<AnchorKey, Val>,

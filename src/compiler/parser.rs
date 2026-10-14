@@ -633,6 +633,10 @@ impl<'a> Parser<'a> {
         }
         let num_params =
             u8::try_from(params.len()).map_err(|_| self.error_here(SyntaxError::TooManyLocals))?;
+        // This clones the diagnostic source name, not the Lua source text.
+        // Sharing it requires changing Bytecode::source together with its
+        // traceback consumers: Frame and Error currently own Option<String>.
+        // Keep those boundaries compatible until that coordinated change.
         let source = self.chunk.source.clone();
         self.outer_chunks.push(std::mem::take(&mut self.chunk));
         self.outer_literal_indices

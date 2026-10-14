@@ -25,8 +25,8 @@
 //!   (`math.sin`, ...) during `open_libs`.
 //! - **Environment objects are rebuilt, not copied.** `math`/`string`/`table`/
 //!   `_G` (and `_G`'s metatable) are reconstructed by `open_libs` on load and
-//!   referenced by token. The object->token map is captured once at
-//!   construction (`State.env_tokens`), not read from the live `builtins`
+//!   referenced by token. The object->token map is refreshed at each successful
+//!   `open_libs` (`State.env_tokens`), not read from the live `builtins`
 //!   slots, so shadowing a builtin global (`math = {}`) can't misclassify the
 //!   user's table as an environment object. Adding `math.foo` in a later build
 //!   therefore doesn't corrupt old saves.
@@ -43,6 +43,8 @@ use std::fmt;
 use std::sync::Arc;
 
 use std::collections::{BTreeMap, BTreeSet};
+
+use indexmap::IndexMap;
 
 use super::lua_val::RustFunc;
 use super::object::{GcHeap, RawObject, StringPtr, Upvalue, UpvalueRef};
@@ -1147,7 +1149,7 @@ impl State {
     /// any saved values.
     pub fn load_state<E>(
         bytes: &[u8],
-        callbacks: Box<dyn HostCallbacks + Send>,
+        callbacks: Box<dyn HostCallbacks>,
         setup: impl FnOnce(&mut State) -> std::result::Result<(), E>,
     ) -> std::result::Result<State, LoadError<E>> {
         let mut decoder = Decoder::new(bytes);
@@ -1179,6 +1181,11 @@ impl State {
     }
 
     fn validate_quiescent(&self) -> Result<(), SaveError> {
+        // Snapshot quiescence is stricter than call/eval entry: hosts may keep
+        // values on the stack and callbacks may re-enter with live outer frames.
+        // Entry/exit assertions of this predicate would reject valid calls.
+        // Keep the full snapshot-only inventory here, including temporary roots
+        // and pending closure caches, whenever adding new in-flight State data.
         if self.stack.is_empty()
             && self.stack_bottom == 0
             && self.pending_bytecode_caches.is_empty()
@@ -1224,6 +1231,13 @@ fn materialize_payload(
     state: &mut State,
     payload: verify::VerifiedSavePayload,
 ) -> Result<(), LoadError> {
+    // All graph allocation below uses GcHeap allocators and UpvaluePool
+    // directly. They do not consult thresholds or collect; the one runtime
+    // resolver used here is explicitly resolve_bytecode_runtime_no_gc.
+    // Do not replace these with State allocation helpers: they may collect
+    // before the temporary strings/objects/upvalues have become State roots.
+    // The only collection is after all globals, deltas and setup anchors are
+    // rooted, at the end of this function.
     let env_forward = build_env_forward(state);
     let fn_forward = state.rust_fns_by_id.clone();
 
@@ -1470,7 +1484,7 @@ fn materialize_payload(
     state.next_format_pointer_id = payload.next_format_pointer_id;
     let mut seen_pointer_values = BTreeSet::new();
     let mut seen_pointer_ids = BTreeSet::new();
-    let mut format_pointer_ids = Vec::with_capacity(payload.format_pointer_ids.len());
+    let mut format_pointer_ids = IndexMap::with_capacity(payload.format_pointer_ids.len());
     for (index, (saved, id)) in payload.format_pointer_ids.iter().enumerate() {
         let value = decode_val(saved, &ctx)?;
         insert_runtime_key(
@@ -1483,7 +1497,7 @@ fn materialize_payload(
         if !seen_pointer_ids.insert(*id) {
             return Err(corrupt_arena("duplicate format pointer id", index));
         }
-        format_pointer_ids.push((value, *id));
+        format_pointer_ids.insert(value, *id);
     }
     state.format_pointer_ids = format_pointer_ids;
     state.stack.clear();

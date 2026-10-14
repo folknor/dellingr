@@ -61,17 +61,6 @@ per-State `Limits` struct (defaulted, fixed at construction for determinism,
 recorded by save/restore) would let tests use small caps and the game tune per
 script.
 
-## HYG-014 - The table-library fast path silently disables itself if the function count changes
-
-Reported by the stdlib hunter.
-
-`TableLibraryFallbackCache.names: [Val; 7]` (vm.rs), and
-`capture_table_library_fallback` does `live_string_keys().try_into()`; any
-other count sets the cache to `None` with no failure and no log. The count's
-owner is `open_table`. Fix: derive the length from table.rs's function list
-(`[Val; TABLE_FUNCTIONS.len()]`), making the coupling a compile error; test
-that the fallback is `Some` after `open_libs`.
-
 ## HYG-016 - Line numbers have two widths
 
 Reported by the compiler hunter.
@@ -115,50 +104,7 @@ function (fixed inputs, exact `cost_used`).
 
 # Errors and diagnostics
 
-## HYG-024 - Aborts on caller-controlled input
-
-Reported by the compiler and vm hunters; the compiler half is fixed by a 16 MiB
-source cap.
-
-- Public API (vm): `check_any`, `check_type`, `is_none_or_nil`
-  `assert!(arg_number != 0)` (vm_aux.rs); `Val`'s `Hash` impl hard-asserts
-  non-NaN (lua_val.rs), safe only while every insertion path pre-rejects NaN;
-  `insert`/`remove`/`replace` accept whatever `convert_idx` accepts and are
-  otherwise unvalidated.
-- Enforcement idea (vm): `clippy::panic` / `clippy::manual_assert` scoped to the
-  public API.
-
 # State, ordering and ambient dependencies
-
-## HYG-034 - Several invariants rest on call ordering in one function
-
-Reported by the vm, surface and stdlib hunters.
-
-- The gmatch cache `gmatch_patterns: IndexMap<StringPtr, _>` (vm.rs) is safe
-  only because `gc_collect`, the sole path that frees strings, clears it first. A
-  second collection entry calling `heap.collect()` directly (object.rs tests do)
-  would leave keys aliasing a new string at a reused slot, running a different
-  pattern. "memoize must precede match" in
-  `gmatch_subject_matcher_and_cost_meter` is the same shape. Fix: key by content
-  or move the clear into sweep; a typestate token from memoize to match.
-- `with_restricted_env` swaps `globals`/`builtins` and bumps `globals_version`
-  but does not refresh `table_library_fallback`; safe because the cache compares
-  the table ObjectPtr, an argument that lives in the cache's doc comment.
-- `State::open_libs` calls `lua_std::open_libs` then
-  `capture_table_library_fallback`; other construction paths
-  (`with_callbacks`) must remember the pair. Make it one function.
-- `pending_bytecode_caches` bridges a GC that may run between
-  `resolve_bytecode_runtime` and `alloc_lua_fn` in `push_closure`; correctness
-  rests on push/pop order in that function.
-- `load_state` clears `registry`, runs `setup`, then `materialize_payload`,
-  whose allocators must "never run GC" (module doc) with no type or assertion. A
-  `debug_assert` on a GC counter or a `NoGc` token would make it structural.
-- `env_tokens` (captured at construction) and `builtins` are two writers of
-  "which object is `math`"; if a host calls public `open_libs` twice they
-  diverge. Check who refreshes `env_tokens`.
-- `validate_quiescent` lists ten fields by hand; a new in-flight vector would
-  not be added. Put "is quiescent" on `State` next to the fields and
-  `debug_assert!` it at `call`/`eval` entry and exit.
 
 ## HYG-036 - Panic safety via `catch_unwind` is half a policy
 
@@ -198,44 +144,15 @@ the flag explicitly.
 
 ## HYG-043 - Unbounded or quadratic growth in the VM and registries
 
-Reported by the vm, surface and compiler hunters.
+Reported by the vm, surface and compiler hunters; the `%p` id map and upvalue
+lookup are fixed, and the anchor, registry and bytecode-cache growth were
+refused with comments at their sites.
 
-- `format_pointer_ids` (a Vec with linear probe) is pruned only in
-  `gc_collect`; with `gc_disable_auto` it grows without bound and each `%p` /
-  `tostring` of a table is O(n). Use an `IndexMap<Val, u64>` and/or prune
-  independently.
-- `open_upvalues` `find_or_create_upvalue` is a linear scan plus sorted
-  `insert`, O(n) per capture; bounded by the stack cap but quadratic.
-- `Registry` (anchors) is embedder-controlled and unbounded, and `heap_size()`
-  does not count it.
-- `rust_fns_by_id` and `rust_fn_ids_by_addr` never shrink; no unregister.
-- Swept `bytecode_caches` entries keep literals alive one extra GC
-  (documented).
-- Every nested function clones `source: Option<String>` (`parse_chunk`); make it
-  `Option<Arc<str>>`.
+Every nested function clones `source: Option<String>` (`parse_chunk`), which
+holds the chunk name. Making it `Option<Arc<str>>` needs coordinated changes in
+vm/frame.rs and error.rs, which consume `Option<String>`.
 
 # Rules duplicated inside the compiler
-
-## HYG-074 - Pattern and compiler-internal errors are still built ad hoc
-
-Reported by the wave 5 reviewer; residue of the mislabelled-error-kinds entry.
-
-Pattern errors are mapped to `RuntimeError(err.to_string())` through one helper
-in string.rs and twice in vm.rs `memoize_gmatch_pattern`, shedding structure.
-Proposed: `ErrorKind::PatternError(PatternErrorDetail)` whose Display delegates
-to the current pattern-error text. The compiler half is fixed.
-
-## HYG-071 - Error-message function names depend on the build
-
-Reported by the wave 4 reviewer.
-
-`active_rust_function_name` matches the running callback by function-pointer
-address against globals, then falls back to the snapshot registry, which exists
-only with `feature = "snapshot"`. LTO or identical-code folding can merge two
-callbacks, and a generic `check_type` inside `math.*` is named in a snapshot
-build but anonymous otherwise. Deterministic within one binary, but replay logs
-compared across builds or feature sets can differ in error text. Document it in
-reference, or name callbacks at registration instead of by address.
 
 ## HYG-072 - Table key normalisation now runs on insert and hash
 
@@ -244,6 +161,17 @@ Reported by the wave 4 reviewer; perf, unmeasured.
 `Table::insert` builds a `TableKeyInput` and runs the full normaliser to reject
 nil and NaN, and `Hash for Val` routes numbers through it. Both should inline to
 the old code; check with the next `tables/*` bench.
+
+## HYG-076 - Wave 7 reviewer laterals
+
+Reported by the wave 7 reviewer.
+
+- `TABLE_LIBRARY_CAPACITY` (lua_std.rs) is still a literal, asserted equal to
+  `table::TABLE_FUNCTIONS.len()`; define it as that length instead.
+- A gsub replacement template's `%2` with too few captures still raises
+  `RuntimeError("invalid capture index ...")`, while the same text from a
+  pattern is now `PatternError`. Decide whether replacement-template errors
+  share the variant, and document it either way.
 
 ## HYG-060 - Tool directories are ignored wholesale
 
@@ -349,14 +277,7 @@ ratios and the composite and parse pairs are scaled differently. The README's
 
 Reported by the vm, surface and stdlib hunters.
 
-- `bytes_coerce` is a pure alias of `bytes_with_default_string_coercion`.
-- String size check duplicated: `check_string_size` (vm.rs) and an inline `len >
-  MAX_STRING_BYTES` building the same error in save_state.rs;
-  `resolve_bytecode_runtime_no_gc` skips the check (relies on load-time
-  validation).
 - The commented-out alternative in `SyntaxError::is_recoverable` (`//
   matches!(self, Self::UnclosedString | Self::UnexpectedEof)`) records an open
   REPL question; move it to notes/todo.md or delete it.
-- `Box<dyn HostCallbacks + Send>` in `Engine::new_state_with_callbacks` and
-  `State::load_state` restates a bound `HostCallbacks: Send` already has.
 - `LuaPattern::matches_bytes` is `cfg(test)` only (documented, fine).

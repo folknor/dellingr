@@ -9,10 +9,14 @@ use crate::lua_std;
 
 impl State {
     /// Verify that the host call has at least `arg_number` arguments on the
-    /// stack. Returns an [`ArgError`] if not. Argument indices are 1-based;
-    /// negative values count from the top of the stack.
+    /// stack. Returns an [`ArgError`] if not, or [`ErrorKind::InvalidStackIndex`]
+    /// if the argument index is zero. Argument indices are 1-based; negative
+    /// values count from the top of the stack.
+    #[deny(clippy::panic, clippy::manual_assert)]
     pub fn check_any(&mut self, arg_number: isize) -> Result<()> {
-        assert!(arg_number != 0);
+        if arg_number == 0 {
+            return Err(self.error(ErrorKind::InvalidStackIndex { index: arg_number }));
+        }
         if self.get_top() < arg_number.unsigned_abs() {
             let e = ArgError {
                 arg_number,
@@ -28,10 +32,15 @@ impl State {
     }
 
     /// Verify that argument `arg_number` is of the given Lua type. Returns
-    /// an [`ArgError`] if missing or of the wrong type. Argument indices are
-    /// 1-based; negative values count from the top of the stack.
+    /// an [`ArgError`] if missing or of the wrong type, or
+    /// [`ErrorKind::InvalidStackIndex`] if the argument index is zero.
+    /// Argument indices are 1-based; negative values count from the top of
+    /// the stack.
+    #[deny(clippy::panic, clippy::manual_assert)]
     pub fn check_type(&mut self, arg_number: isize, expected_type: LuaType) -> Result<()> {
-        assert!(arg_number != 0);
+        if arg_number == 0 {
+            return Err(self.error(ErrorKind::InvalidStackIndex { index: arg_number }));
+        }
         if self.get_top() < arg_number.unsigned_abs() {
             let e = ArgError {
                 arg_number,
@@ -58,6 +67,8 @@ impl State {
 
     /// Returns whether argument `arg_number` is missing or explicitly nil.
     pub(crate) fn is_none_or_nil(&self, arg_number: isize) -> bool {
+        // This private helper receives crate-owned argument positions. A zero
+        // index here indicates an internal caller bug.
         assert!(arg_number != 0);
         self.get_top() < arg_number.unsigned_abs() || self.typ(arg_number) == LuaType::Nil
     }

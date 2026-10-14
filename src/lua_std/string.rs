@@ -6,7 +6,7 @@ use super::{STRING_LIBRARY_CAPACITY, arg_integer, check_any_named, check_type_na
 use crate::compiler;
 use crate::error::{ArgError, Error, ErrorKind};
 use crate::instr::{ArgCount, RetCount};
-use crate::patterns::{LuaCapture, LuaPattern, MatchError};
+use crate::patterns::{LuaCapture, LuaPattern, MatchError, PatternError};
 use crate::{LuaType, Result, State};
 
 const GMATCH_WRAPPER_SRC: &str = r#"local iter, state = ...
@@ -95,11 +95,8 @@ fn match_error(state: &State, error: MatchError) -> Error {
     }
 }
 
-fn pattern_runtime_error(state: &State, error: impl std::fmt::Display) -> Error {
-    // ErrorKind has no pattern-specific variant yet. Preserve the existing
-    // RuntimeError category and exact display text until it can carry the
-    // structured PatternError payload.
-    state.error(ErrorKind::RuntimeError(error.to_string()))
+fn pattern_runtime_error(state: &State, error: PatternError) -> Error {
+    state.error(ErrorKind::PatternError(error.into()))
 }
 
 fn lua_start_index(len: usize, idx: i64) -> usize {
@@ -131,11 +128,12 @@ fn lua_sub_bytes(subject: &[u8], start_idx: i64, end_idx: i64) -> Vec<u8> {
 }
 
 /// Lua's string-library arguments accept strings and numbers, but no other
-/// values. Keep the type gate separate from `bytes_coerce`, whose general
-/// conversion rules are intentionally broader.
+/// values. Keep the type gate separate from
+/// `bytes_with_default_string_coercion`, whose general conversion rules are
+/// intentionally broader.
 fn string_or_number_bytes(state: &mut State, idx: isize, function_name: &str) -> Result<Vec<u8>> {
     match state.typ(idx) {
-        LuaType::String | LuaType::Number => state.bytes_coerce(idx),
+        LuaType::String | LuaType::Number => state.bytes_with_default_string_coercion(idx),
         received => Err(state.error(ErrorKind::ArgError(ArgError {
             arg_number: idx,
             func_name: Some(function_name.to_owned()),
@@ -368,7 +366,7 @@ fn append_gsub_replacement(
                 // errors surfacing at the same point (and not at all for
                 // zero-match calls). A successful first pass proves the
                 // template valid, so later matches use the compiled form.
-                let repl = state.bytes_coerce(3)?;
+                let repl = state.bytes_with_default_string_coercion(3)?;
                 append_string_replacement(state, out, &repl, bytes, captures)?;
                 *template = compile_replacement_template(&repl);
             }
@@ -396,7 +394,7 @@ fn append_gsub_replacement(
                         t.as_str()
                     ))));
                 }
-                let val = state.bytes_coerce(-1)?;
+                let val = state.bytes_with_default_string_coercion(-1)?;
                 state.pop(2)?;
                 append_bytes(state, out, &val)?;
             }
@@ -433,7 +431,7 @@ fn append_gsub_replacement(
                         t.as_str()
                     ))));
                 }
-                let val = state.bytes_coerce(-1)?;
+                let val = state.bytes_with_default_string_coercion(-1)?;
                 state.pop(1)?;
                 append_bytes(state, out, &val)?;
             }

@@ -373,7 +373,7 @@ impl Engine {
     }
 
     /// Create a new `State` configured by this engine with custom callbacks.
-    pub fn new_state_with_callbacks(&self, callbacks: Box<dyn HostCallbacks + Send>) -> State {
+    pub fn new_state_with_callbacks(&self, callbacks: Box<dyn HostCallbacks>) -> State {
         if self.install_stdlib {
             State::with_callbacks(callbacks)
         } else {

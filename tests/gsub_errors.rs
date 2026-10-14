@@ -306,7 +306,7 @@ fn assert_runtime_error(code: &str, expected: &str) {
 }
 
 #[test]
-fn malformed_patterns_are_runtime_errors_in_all_wrappers() {
+fn malformed_patterns_are_pattern_errors_in_all_wrappers() {
     for code in [
         r#"return string.find("abc", "[")"#,
         r#"return string.match("abc", "[")"#,
@@ -314,6 +314,15 @@ fn malformed_patterns_are_runtime_errors_in_all_wrappers() {
         r#"return string.gsub("abc", "[", "x")"#,
     ] {
         assert_runtime_error(code, "malformed pattern");
+        let mut state = State::new();
+        state.load_string(code).unwrap();
+        let err = state
+            .call(ArgCount::Fixed(0), RetCount::Fixed(2))
+            .unwrap_err();
+        assert!(
+            matches!(err.kind, ErrorKind::PatternError(_)),
+            "{code}: {err:?}"
+        );
     }
 }
 

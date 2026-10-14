@@ -122,7 +122,8 @@ impl fmt::Debug for Val {
 // No `Display for Val`. Rendering an object needs the heap for its type and
 // the State for its deterministic identity, so a heap-free impl could only
 // leak the slotmap key's `Debug` form - which is exactly the leak this avoids.
-// User-visible conversion goes through `State::to_string`/`bytes_coerce`.
+// User-visible conversion goes through `State::to_string`/
+// `bytes_with_default_string_coercion`.
 
 /// This is very dangerous, since f64 doesn't implement Eq.
 impl Eq for Val {}
@@ -139,8 +140,18 @@ impl Hash for Val {
                 // snapshot verifier through the shared normalizer.
                 let bits = match normalize_table_key::<(), (), ()>(TableKeyInput::Number(*n)) {
                     Ok(NormalizedTableKey::Number(bits)) => bits,
-                    Err(InvalidTableKey::Nan) => panic!("Cannot use NaN as table key"),
+                    Err(InvalidTableKey::Nan) => {
+                        // Runtime table writes normalize keys, snapshot loads
+                        // validate saved keys before rebuilding tables, table
+                        // reads return before hashing NaN, and pointer-id maps
+                        // accept only strings, objects, or functions. Reaching
+                        // this branch means crate code bypassed those checks.
+                        // Keep the invariant assertion on this hashing path.
+                        panic!("Cannot use NaN as table key");
+                    }
                     Err(InvalidTableKey::Nil) | Ok(_) => {
+                        // This call supplies a number, so nil and non-number
+                        // normalized variants cannot occur here.
                         unreachable!("numeric table keys normalize to numeric keys")
                     }
                 };

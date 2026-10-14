@@ -12,21 +12,12 @@ fn table_unpack_values(state: &mut State) -> crate::Result<u8> {
     super::unpack_values(state)
 }
 
-pub(crate) fn open_table(state: &mut State) -> Result<()> {
-    // Create the table table
-    state.new_table_with_capacity(super::TABLE_LIBRARY_CAPACITY)?;
-
-    // Helper to add a function to the table at stack index -1.
-    macro_rules! add_fn {
-        ($name:expr, $func:expr) => {
-            state.register_lib_fn(-1, "table", $name, $func)?;
-        };
-    }
-
+// Keep registration order: it determines table iteration and snapshot baselines.
+const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     // table.insert(t, [pos,] value) - costs 1
     // Inserts value at position pos in t, shifting elements up.
     // If pos is omitted, inserts at the end.
-    add_fn!("insert", |state| {
+    ("insert", |state| {
         state.consume_cost(1)?;
         check_type_named(state, 1, LuaType::Table, "insert")?;
         let num_args = state.get_top();
@@ -52,12 +43,11 @@ pub(crate) fn open_table(state: &mut State) -> Result<()> {
 
         state.set_top(0)?;
         Ok(0)
-    });
-
+    }),
     // table.remove(t [, pos]) - costs 1
     // Removes and returns the element at position pos.
     // If pos is omitted, removes the last element.
-    add_fn!("remove", |state| {
+    ("remove", |state| {
         state.consume_cost(1)?;
         check_type_named(state, 1, LuaType::Table, "remove")?;
         let len = state.table_len(1);
@@ -82,12 +72,11 @@ pub(crate) fn open_table(state: &mut State) -> Result<()> {
         // Stack: [t, removed_value]
         state.remove(1)?; // Remove table, leave value
         Ok(1)
-    });
-
+    }),
     // table.sort(t [, comp]) - costs n (array length)
     // Sorts the array portion of t in place.
     // comp is an optional comparison function.
-    add_fn!("sort", |state| {
+    ("sort", |state| {
         check_type_named(state, 1, LuaType::Table, "sort")?;
         let has_comp = check_optional_type_named(state, 2, LuaType::Function, "sort")?;
 
@@ -96,17 +85,15 @@ pub(crate) fn open_table(state: &mut State) -> Result<()> {
         state.table_sort(1, has_comp)?;
         state.set_top(0)?;
         Ok(0)
-    });
-
+    }),
     // table.unpack(list [, i [, j]])
     // Returns list[i], list[i+1], ..., list[j].
     // Default: i=1, j=#list
-    add_fn!("unpack", table_unpack_values);
-
+    ("unpack", table_unpack_values),
     // table.pack(...) - costs 1
     // Returns a new table with all arguments stored into keys 1, 2, etc.
     // and with a field "n" with the total number of arguments.
-    add_fn!("pack", |state| {
+    ("pack", |state| {
         state.consume_cost(1)?;
         let num_args = state.get_top();
 
@@ -136,12 +123,11 @@ pub(crate) fn open_table(state: &mut State) -> Result<()> {
         }
 
         Ok(1)
-    });
-
+    }),
     // table.concat(list [, sep [, i [, j]]])
     // Returns list[i]..sep..list[i+1]..sep..list[j].
     // Default: sep="", i=1, j=#list
-    add_fn!("concat", |state| {
+    ("concat", |state| {
         check_type_named(state, 1, LuaType::Table, "concat")?;
         let len = i64::try_from(state.table_len(1)).expect("table length fits in i64");
 
@@ -181,7 +167,7 @@ pub(crate) fn open_table(state: &mut State) -> Result<()> {
             let typ = state.typ(-1);
             match typ {
                 LuaType::String | LuaType::Number => {
-                    let bytes = state.bytes_coerce(-1)?;
+                    let bytes = state.bytes_with_default_string_coercion(-1)?;
                     let next = crate::vm::checked_string_growth(result.len(), bytes.len())?;
                     state.consume_cost(bytes.len() as u64)?;
                     result.reserve(next - result.len());
@@ -195,12 +181,11 @@ pub(crate) fn open_table(state: &mut State) -> Result<()> {
         state.set_top(0)?;
         state.push_bytes(result)?;
         Ok(1)
-    });
-
+    }),
     // table.move(a1, f, e, t [, a2]) - costs one per copied element
     // Moves elements from table a1 to table a2 (or a1 if not given).
     // Copies a1[f..e] to a2[t..t+(e-f)]. Returns a2.
-    add_fn!("move", |state| {
+    ("move", |state| {
         check_type_named(state, 1, LuaType::Table, "move")?;
         let f = arg_integer(state, 2, "move")?;
         let e = arg_integer(state, 3, "move")?;
@@ -292,7 +277,21 @@ pub(crate) fn open_table(state: &mut State) -> Result<()> {
         state.replace(1)?;
         state.set_top(1)?;
         Ok(1)
-    });
+    }),
+];
+
+// Keep the parent module's reservation hint tied to the actual registrations.
+const _: () = assert!(super::TABLE_LIBRARY_CAPACITY == TABLE_FUNCTIONS.len());
+
+impl State {
+    pub(crate) const TABLE_FUNCTION_COUNT: usize = TABLE_FUNCTIONS.len();
+}
+
+pub(crate) fn open_table(state: &mut State) -> Result<()> {
+    state.new_table_with_capacity(TABLE_FUNCTIONS.len())?;
+    for &(name, func) in TABLE_FUNCTIONS {
+        state.register_lib_fn(-1, "table", name, func)?;
+    }
 
     // Set the table table as a global
     state.set_global("table");
