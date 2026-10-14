@@ -6,9 +6,9 @@
 //! `math.atan(y, x)` uses the Lua 5.3+ two-argument form. Global `unpack` is kept
 //! from Lua 5.2 as an alias, but it and `table.unpack` share one implementation
 //! with Lua 5.4 semantics. The table library (`insert`, `remove`, `concat`,
-//! `unpack`, `move`) follows Lua 5.4's metamethod rules: lengths come from
+//! `unpack`, `move`, `sort`) follows Lua 5.4's metamethod rules: lengths come from
 //! `__len`, reads go through `__index` and writes through `__newindex`, where
-//! Lua 5.2 reads raw. `table.sort` is the exception and works on the raw array.
+//! Lua 5.2 reads raw. Sort handler calls have a different order from Lua 5.4.
 //! The `%p` conversion in
 //! `string.format` follows Lua 5.4 and is absent in Lua 5.2.
 //! `string.gsub` and `string.gmatch` follow Lua 5.4's empty-match rule: an
@@ -49,6 +49,8 @@ const TABLE_LIBRARY_CAPACITY: usize = table::TABLE_FUNCTIONS.len();
 /// Reserving up front keeps the operation all-or-nothing: without it, a stack
 /// near the cap could install part of the standard library (and, under
 /// `snapshot`, part of the function registry) before failing partway through.
+/// Under `snapshot`, a separate registry preflight also rejects conflicting
+/// registrations before setup, extending the guarantee to the function registry.
 ///
 /// The per-push checks remain the backstop if a future library ever exceeds
 /// this; they would report the overflow correctly, just without the
@@ -57,11 +59,59 @@ const STDLIB_SETUP_HEADROOM: usize = 4;
 
 pub(crate) fn open_libs(state: &mut State) -> Result<()> {
     state.check_stack_space(STDLIB_SETUP_HEADROOM)?;
+    // Runs before any mutation, so a rejected call leaves the State untouched.
+    #[cfg(feature = "snapshot")]
+    check_registry_compatible(state)?;
+    open_libs_unchecked(state)
+}
+
+/// The installation sequence itself, with no preflight. Shared by `open_libs`
+/// and the registry dry run, so the dry run cannot drift from the real list of
+/// ids and functions.
+fn open_libs_unchecked(state: &mut State) -> Result<()> {
     state.reserve_stdlib_capacity();
     open_base(state)?;
     math::open_math(state)?;
     string::open_string(state)?;
     table::open_table(state)
+}
+
+/// Dry run for the snapshot function registry.
+///
+/// A host that registered an id the standard library also uses (`"print"`,
+/// `"string.find"`, `"string.gmatch.iter"`, ...) for a different function would
+/// otherwise hit `DuplicateFunctionRegistration` partway through setup, with
+/// earlier libraries already installed as globals and their ids registered. The
+/// host can still use the State after that error (`State::empty` followed by
+/// `register_rust_fn` and `open_libs` is the supported route), so it must be
+/// all-or-nothing.
+///
+/// The standard library is opened on a scratch State, and every (id, function)
+/// pair it registered is compared with `state`'s registry. Re-registering the
+/// same id to the same function is idempotent, so reopening the libraries on a
+/// State that already has them passes. A State with an empty registry cannot
+/// conflict and skips the scratch build.
+/// Setup only installs values and registers function pointers: it executes no
+/// Lua or callbacks, including the lazily compiled gmatch wrapper. The scratch
+/// State owns its heap and registry; construction advances the anchor state-id
+/// counter but does not draw from the caller's RNG or alter its environment.
+#[cfg(feature = "snapshot")]
+fn check_registry_compatible(state: &State) -> Result<()> {
+    if state.rust_fns_by_id.is_empty() {
+        return Ok(());
+    }
+    let mut scratch = State::empty();
+    open_libs_unchecked(&mut scratch)?;
+    for (id, func) in &scratch.rust_fns_by_id {
+        if let Some(existing) = state.rust_fns_by_id.get(id)
+            && *existing as usize != *func as usize
+        {
+            return Err(Error::without_location(
+                ErrorKind::DuplicateFunctionRegistration { id: id.clone() },
+            ));
+        }
+    }
+    Ok(())
 }
 
 impl State {

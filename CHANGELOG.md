@@ -31,6 +31,11 @@ identical source - re-measure tick budgets.
   nil slots included.
 - **Field misses on plain tables return nil.** The implicit table-library
   lookup and `t:insert(...)` sugar are gone; use `table.insert(t, ...)`.
+- **Strings share a metatable.** `getmetatable("")` returns it, and string
+  indexing and methods resolve through its current `__index`, independently
+  of the global `string`, including in restricted environments. The metatable
+  is rooted and saved as the `string.metatable` environment token. Changes to
+  method resolution and snapshots are replay-visible.
 - **`ArgError` has a required `detail: ArgDetail` field.**
 - **`State::load_state`'s setup closure returns `Result<(), E>`**, surfaced as
   `LoadError::Setup(E)`; `LoadError` is generic over `E` (default
@@ -116,9 +121,20 @@ identical source - re-measure tick budgets.
 - Rust functions render as `function: 0x<id>` instead of `<function>`, using
   the same stable, state-local identity as `%p`, preserved in snapshots.
 - Retired the `fields/miss` diagnostic probe and its `miss` verdict workload.
+- Static cost analysis labels function-call counts as `Call instructions`,
+  displays them per scope even when its cost is zero, and numbers anonymous
+  scopes among themselves rather than among all sibling functions.
+- The 255-value runtime argument/result cap is documented for Lua functions,
+  dynamic calls and Rust callbacks.
 
 ### Fixed
 
+- `open_libs` rejects conflicting snapshot function registrations before any
+  installation, keeping the stack, globals, heap and registry unchanged.
+- Snapshot loading rejects duplicate saved global names instead of silently
+  replacing an earlier value.
+- `error()` preflights lossy UTF-8 message length against the string cap before
+  building expanded text, including messages returned by `__tostring`.
 - Unterminated long comments raise `SyntaxError::UnfinishedLongComment`
   (`unfinished long comment`) at their opener instead of silently swallowing
   the remaining source.
@@ -161,8 +177,12 @@ identical source - re-measure tick budgets.
   before changing the table or stack.
 - `table.insert`, `remove`, `concat`, `unpack` (including global `unpack`)
   and `move` honour `__len`, `__index` and `__newindex` as in Lua 5.4 where
-  applicable. `table.sort` remains the documented exception, sorting the raw
-  array. Library writes share the VM's metamethod depth limit.
+  applicable. Library writes share the VM's metamethod depth limit.
+- `table.sort` also honours `__len`, `__index` and `__newindex`. It reads all
+  elements, heap-sorts a rooted scratch table, then writes them back; handler
+  call order differs from reference Lua, while stable handlers and a consistent
+  comparator yield the same sorted values (tie order is unspecified). Handler
+  side effects and their execution costs can change game replays.
 - `table.move` rejects nonempty ranges with source or destination endpoints
   beyond +/-2^53, where consecutive f64 integer keys stop being distinct.
   Metamethod-driven `table.insert` and `table.remove` also reject key ranges

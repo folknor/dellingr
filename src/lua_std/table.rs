@@ -99,11 +99,17 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     // table.sort(t [, comp]) - costs n (array length)
     // Sorts the array portion of t in place.
     // comp is an optional comparison function.
-    // Unlike the rest of this library, sort ignores `__len`, `__index` and
-    // `__newindex` (Lua 5.4 honours all three): it sorts the raw array.
+    // Follows Lua 5.4: a table whose metatable defines `__len`, `__index` or
+    // `__newindex` is sorted through them (length, reads, then writes); any
+    // other table takes the raw in-place sort. Both paths charge the length
+    // of the original range (at least 1) before any comparator runs.
     ("sort", |state| {
         check_type_named(state, 1, LuaType::Table, "sort")?;
         let has_comp = check_optional_type_named(state, 2, LuaType::Function, "sort")?;
+
+        if has_sequence_metamethods(state, 1)? {
+            return sort_through_metamethods(state, has_comp);
+        }
 
         // Cost is charged inside table_sort BEFORE the comparator runs / the
         // table is mutated, so an exhausted budget blocks the sort.
@@ -523,6 +529,144 @@ fn remove_through_metamethods(state: &mut State) -> Result<u8> {
     set_index(state, 1)?;
     state.remove(1)?;
     Ok(1)
+}
+
+/// Pushes element `i` (0-based) of the scratch table at stack index `s`.
+fn sort_get(state: &mut State, s: isize, i: usize) -> Result<()> {
+    state.push_number((i + 1) as f64)?;
+    state.get_table_raw(s)
+}
+
+/// Swaps elements `a` and `b` (0-based) of the scratch table at index `s`.
+fn sort_swap(state: &mut State, s: isize, a: usize, b: usize) -> Result<()> {
+    if a == b {
+        return Ok(());
+    }
+    sort_get(state, s, a)?;
+    sort_get(state, s, b)?;
+    // Stack: [va, vb]
+    state.push_number((a + 1) as f64)?;
+    state.push_value(-2)?;
+    state.set_table_raw(s)?;
+    state.pop(1)?;
+    // Stack: [va]
+    state.push_number((b + 1) as f64)?;
+    state.push_value(-2)?;
+    state.set_table_raw(s)?;
+    state.pop(1)
+}
+
+/// The sort order: `comp(a, b)` when a comparator sits at stack index 2,
+/// otherwise the default `<` on two numbers or two strings.
+fn sort_less(state: &mut State, s: isize, a: usize, b: usize, has_comp: bool) -> Result<bool> {
+    if has_comp {
+        state.push_value(2)?;
+        sort_get(state, s, a)?;
+        sort_get(state, s, b)?;
+        state.call(ArgCount::Fixed(2), RetCount::Fixed(1))?;
+        let r = state.to_boolean(-1);
+        state.pop(1)?;
+        return Ok(r);
+    }
+    sort_get(state, s, a)?;
+    sort_get(state, s, b)?;
+    let (ta, tb) = (state.typ(-2), state.typ(-1));
+    let result = match (&ta, &tb) {
+        (LuaType::Number, LuaType::Number) => Some(state.to_number(-2)? < state.to_number(-1)?),
+        (LuaType::String, LuaType::String) => Some(state.to_bytes(-2)? < state.to_bytes(-1)?),
+        _ => None,
+    };
+    match result {
+        Some(r) => {
+            state.pop(2)?;
+            Ok(r)
+        }
+        None => Err(
+            state.error(ErrorKind::TypeError(crate::error::TypeError::Comparison(
+                ta, tb,
+            ))),
+        ),
+    }
+}
+
+fn sort_sift_down(
+    state: &mut State,
+    s: isize,
+    mut root: usize,
+    end: usize,
+    has_comp: bool,
+) -> Result<()> {
+    loop {
+        let left = root * 2 + 1;
+        if left >= end {
+            return Ok(());
+        }
+        let mut smallest = root;
+        if sort_less(state, s, left, smallest, has_comp)? {
+            smallest = left;
+        }
+        let right = left + 1;
+        if right < end && sort_less(state, s, right, smallest, has_comp)? {
+            smallest = right;
+        }
+        if smallest == root {
+            return Ok(());
+        }
+        sort_swap(state, s, root, smallest)?;
+        root = smallest;
+    }
+}
+
+/// `table.sort` for a table with sequence metamethods, following Lua 5.4's
+/// `sort`: length via `__len`, elements read through `__index` and written
+/// back through `__newindex`. The elements are sorted in a scratch table
+/// (rooted on the stack, so a comparator can force a collection) using the
+/// same heap sort as the raw path, so equal inputs order identically, and the
+/// result is written back in one pass. The charge is the original length,
+/// at least 1, paid before any read beyond `__len` or any comparator call.
+fn sort_through_metamethods(state: &mut State, has_comp: bool) -> Result<u8> {
+    let len = sequence_len(state, 1)?;
+    if len >= i64::from(i32::MAX) {
+        return Err(state.error(ErrorKind::RuntimeError("array too big".to_string())));
+    }
+    state.consume_cost(len.max(1).cast_unsigned())?;
+    if len < 2 {
+        state.set_top(0)?;
+        return Ok(0);
+    }
+    let Ok(n) = usize::try_from(len) else {
+        return Err(state.error(ErrorKind::RuntimeError("array too big".to_string())));
+    };
+    state.set_top(if has_comp { 2 } else { 1 })?;
+    state.new_table()?;
+    let s = state.get_top() as isize;
+
+    for i in 1..=len {
+        state.push_number(i as f64)?;
+        state.push_number(i as f64)?;
+        state.get_table(1)?;
+        state.set_table_raw(s)?;
+    }
+
+    for root in (0..n / 2).rev() {
+        sort_sift_down(state, s, root, n, has_comp)?;
+    }
+    for end in (1..n).rev() {
+        sort_swap(state, s, 0, end)?;
+        sort_sift_down(state, s, 0, end, has_comp)?;
+    }
+    for i in 0..n / 2 {
+        sort_swap(state, s, i, n - 1 - i)?;
+    }
+
+    for i in 1..=len {
+        state.push_number(i as f64)?;
+        state.push_number(i as f64)?;
+        state.get_table_raw(s)?;
+        state.set_table(1)?;
+    }
+    state.set_top(0)?;
+    Ok(0)
 }
 
 fn position_out_of_bounds(state: &State, func_name: &str) -> crate::error::Error {

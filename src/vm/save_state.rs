@@ -24,9 +24,10 @@
 //!   unregistered. The stdlib registers itself under dotted paths
 //!   (`math.sin`, ...) during `open_libs`.
 //! - **Environment objects are rebuilt, not copied.** `math`/`string`/`table`/
-//!   `_G` (and `_G`'s metatable) are reconstructed by `open_libs` on load and
-//!   referenced by token. The object->token map is refreshed at each successful
-//!   `open_libs` (`State.env_tokens`), not read from the live `builtins`
+//!   `_G`, `_G`'s metatable and the shared string metatable are reconstructed by
+//!   `open_libs` on load and referenced by token. The object->token map is
+//!   refreshed at each successful `open_libs` (`State.env_tokens`), not read
+//!   from the live `builtins`
 //!   slots, so shadowing a builtin global (`math = {}`) can't misclassify the
 //!   user's table as an environment object. Adding `math.foo` in a later build
 //!   therefore doesn't corrupt old saves.

@@ -101,20 +101,14 @@ pub(super) struct MethodLookupCacheEntry {
 }
 
 /// Cache for `s:method()` style calls where the receiver is a string and
-/// the method is resolved through the `string` global library. Stores the
-/// library's table identity, its version at lookup time, and the method's
-/// index in that library.
+/// the method is resolved through the shared string metatable's `__index`
+/// table. Stores that table's identity, its version at lookup time, and the
+/// method's index. The fast path also validates the live metatable handler.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct StringMethodCacheEntry {
     pub(super) string_lib: ObjectPtr,
     pub(super) version: u64,
     pub(super) index: usize,
-    /// Snapshot of `State::globals_version` when the entry was populated.
-    /// Bumped on `string` rebind / `with_restricted_env` swap, so the
-    /// cached `string_lib` ObjectPtr (which can stay reachable via
-    /// `saved_builtins` even after a sandbox swap) cannot resurrect the
-    /// pre-swap library through this fast path.
-    pub(super) globals_version: u64,
 }
 
 #[derive(Debug, Default)]

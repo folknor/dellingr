@@ -5,11 +5,13 @@ use super::super::compiler::{
     MethodLookupCacheEntry, StringMethodCacheEntry,
 };
 use super::super::error::{ErrorKind, TypeError};
+use super::LuaType;
 use super::Result;
 use super::State;
 use super::Val;
 use super::frame::Frame;
 use super::object::{ObjectPtr, Upvalue};
+use crate::instr::{ArgCount, RetCount};
 
 impl State {
     #[hotpath::measure]
@@ -57,40 +59,37 @@ impl State {
             self.push_unchecked(result);
             Ok(())
         } else if val.as_string_ptr().is_some() {
-            self.get_string_table_field(key, cache, local_cost)
+            self.index_string(val, key, cache, local_cost, &mut false)
         } else {
             Err(self.type_error(TypeError::TableIndex(val.typ(&self.heap))))
         }
     }
 
-    /// Resolves a string index through the current global `string` table.
+    /// Resolves `receiver[key]` for a string receiver and pushes the result.
     ///
-    /// This deliberately differs from reference Lua, which resolves through the
-    /// shared string metatable's `__index` captured when the library opened.
-    /// Consequences: rebinding the global `string` (or hiding it with
-    /// `with_restricted_env`) changes or breaks `s:method()`, and the
-    /// string-method IC is invalidated by `globals_version` for the same
-    /// reason. Fixing it means resolving through a `State`-held string
-    /// metatable instead of `get_global("string")`.
-    pub(super) fn get_string_table_field(
+    /// Strings share one metatable (`State::string_metatable`, built by
+    /// `open_libs` with `__index` = the string library table it created), so
+    /// this follows reference Lua: lookup goes through that metatable's current
+    /// `__index`, never through the global `string`. Rebinding or hiding the
+    /// global (`string = nil`, `with_restricted_env`) leaves `s:method()`
+    /// working, and a script assigning `getmetatable("").__index` redirects
+    /// it. A table `__index` is indexed with its own metamethods, a function is
+    /// called as `__index(receiver, key)`, and a string is indexed again
+    /// (bounded by the metamethod depth limit). Without a string metatable
+    /// (`State::empty`) or with a nil `__index`, indexing a string is the usual
+    /// "attempt to index a string value" error.
+    ///
+    /// Receiver and key are rooted here across dispatch-time interning. The
+    /// final result grows the stack by one slot, and table/function dispatch
+    /// needs additional temporary room; every push is preflighted here.
+    pub(super) fn index_string(
         &mut self,
-        key: Val,
-        cache: Option<&FieldLookupCacheSlot>,
-        local_cost: &mut u64,
-    ) -> Result<()> {
-        self.get_string_table_field_tracking_call(key, cache, local_cost, &mut false)
-    }
-
-    pub(super) fn get_string_table_field_tracking_call(
-        &mut self,
+        receiver: Val,
         key: Val,
         cache: Option<&FieldLookupCacheSlot>,
         local_cost: &mut u64,
         handler_called: &mut bool,
     ) -> Result<()> {
-        // Net-positive by one slot: callers in `metamethod.rs` reach this
-        // without having popped a receiver first, so the check belongs here
-        // rather than at the call sites.
         if let Some(cache) = cache
             && let Some(method) = self.get_cached_string_method(key, cache)
         {
@@ -99,28 +98,99 @@ impl State {
             return Ok(());
         }
 
-        self.get_global("string")?;
-        let string_lib_idx = self.stack.len() - 1;
-        self.get_table_with_key_tracking_call(string_lib_idx, key, local_cost, handler_called)?;
-        let result = self.pop_val();
-        let string_lib = self.pop_val();
+        let Some(mt_ptr) = self.string_metatable else {
+            return Err(self.type_error(TypeError::TableIndex(LuaType::String)));
+        };
 
-        if let Some(cache) = cache
-            && let Some(lib_ptr) = string_lib.as_object_ptr()
-            && let Some(tbl) = self.heap.as_table_ref(lib_ptr)
-            && let Some((index, _)) = tbl.get_with_index(&key)
-        {
-            cache.set_string_method(StringMethodCacheEntry {
-                string_lib: lib_ptr,
-                version: tbl.version(),
-                index,
-                globals_version: self.globals_version,
-            });
+        // Root the receiver and key across the interning allocation, which
+        // can collect.
+        self.check_stack_space(2)?;
+        self.push_unchecked(receiver);
+        self.push_unchecked(key);
+        let index_key = self.alloc_string("__index")?;
+        let key = self.pop_val();
+        let receiver = self.pop_val();
+
+        let (handler, shape) = match self.heap.as_table_ref(mt_ptr) {
+            Some(mt) => match mt.get_with_index(&index_key) {
+                Some((slot, handler)) => (handler, Some((mt.version(), slot))),
+                None => (Val::Nil, None),
+            },
+            None => (Val::Nil, None),
+        };
+
+        match handler {
+            Val::Obj(lib_ptr) if self.heap.as_table_ref(lib_ptr).is_some() => {
+                // Populate the IC from the raw slot before the lookup: when the
+                // key is present raw, the lookup below returns exactly it and
+                // runs no handler that could change the metatable.
+                if let Some(cache) = cache
+                    && let Some(shape) = shape
+                    && let Some(tbl) = self.heap.as_table_ref(lib_ptr)
+                    && let Some((index, _)) = tbl.get_with_index(&key)
+                {
+                    self.string_mt_index_shape = Some(shape);
+                    cache.set_string_method(StringMethodCacheEntry {
+                        string_lib: lib_ptr,
+                        version: tbl.version(),
+                        index,
+                    });
+                }
+                self.check_stack_space(1)?;
+                self.push_unchecked(handler);
+                let handler_idx = self.stack.len() - 1;
+                if let Err(e) = self.get_table_with_key_tracking_call(
+                    handler_idx,
+                    key,
+                    local_cost,
+                    handler_called,
+                ) {
+                    self.stack.truncate(handler_idx);
+                    return Err(e);
+                }
+                let result = self.pop_val();
+                self.pop_val();
+                // Replaces the handler popped above: net-neutral.
+                self.push_unchecked(result);
+                Ok(())
+            }
+            Val::Obj(_) | Val::RustFn(_)
+                if matches!(handler, Val::RustFn(_))
+                    || handler
+                        .as_object_ptr()
+                        .is_some_and(|ptr| self.heap.as_lua_function(ptr).is_some()) =>
+            {
+                self.call_string_index_handler(handler, receiver, key, local_cost, handler_called)
+            }
+            Val::Str(_) => self.with_metamethod_depth(|state| {
+                state.index_string(handler, key, None, local_cost, handler_called)
+            }),
+            Val::Nil => Err(self.type_error(TypeError::TableIndex(LuaType::String))),
+            other => Err(self.type_error(TypeError::TableIndex(other.typ(&self.heap)))),
         }
+    }
 
-        self.check_stack_space(1)?;
-        self.push_unchecked(result);
-        Ok(())
+    /// Calls a function-valued string `__index` as `handler(receiver, key)`.
+    fn call_string_index_handler(
+        &mut self,
+        handler: Val,
+        receiver: Val,
+        key: Val,
+        local_cost: &mut u64,
+        handler_called: &mut bool,
+    ) -> Result<()> {
+        self.with_metamethod_depth(|state| {
+            // Settle batched cost and preflight first, so a rejection leaves
+            // no temporaries behind.
+            Frame::flush_local_cost(state, local_cost)?;
+            state.check_stack_space(3)?;
+            state.push_unchecked(handler);
+            state.push_unchecked(receiver);
+            state.push_unchecked(key);
+            *handler_called = true;
+            state.call(ArgCount::Fixed(2), RetCount::Fixed(1))?;
+            Ok(())
+        })
     }
 
     #[inline(always)]
@@ -156,11 +226,19 @@ impl State {
         cache: &FieldLookupCacheSlot,
     ) -> Option<Val> {
         let entry = cache.get_string_method()?;
-        // Reject the cache when the global `string` binding has been
-        // rebound or swapped via with_restricted_env. Otherwise the
-        // cached `string_lib` ObjectPtr (which may stay alive in
-        // `saved_builtins`) silently bypasses the new binding.
-        if entry.globals_version != self.globals_version {
+        // The cached library must still be the string metatable's `__index`.
+        // A value write (`getmetatable("").__index = t`) does not move the
+        // metatable's shape version, so compare the slot's value; a shape
+        // change (key added, removed or rehashed) misses on the version. The
+        // match also proves `string_lib` is still alive, ruling out a stale
+        // pointer reused by a later allocation.
+        let (mt_version, slot) = self.string_mt_index_shape?;
+        let mt = self.heap.as_table_ref(self.string_metatable?)?;
+        if mt.version() != mt_version {
+            return None;
+        }
+        let (_, index_handler) = mt.get_index(slot)?;
+        if index_handler.as_object_ptr() != Some(entry.string_lib) {
             return None;
         }
         let tbl = self.heap.as_table_ref(entry.string_lib)?;
@@ -176,7 +254,6 @@ impl State {
                 string_lib: entry.string_lib,
                 version,
                 index: entry.index,
-                globals_version: self.globals_version,
             });
             Some(cached_val)
         } else {
@@ -456,10 +533,9 @@ impl State {
     pub(super) fn instr_set_builtin(&mut self, slot: u8) {
         let val = self.pop_val();
         self.builtins[slot as usize] = val;
-        // Bump globals_version so ICs holding a direct ObjectPtr into a
-        // builtin library table (string-method IC, method-lookup IC
-        // reaching the lib via __index) re-resolve through the new
-        // binding instead of resurrecting the old one.
+        // Global lookup caches and conservatively guarded table-method
+        // caches revalidate after a builtin binding changes. String-method
+        // caches instead validate the shared string metatable's handler.
         self.globals_version = self.globals_version.wrapping_add(1);
         // Also update globals for _G compatibility, retaining existing
         // tombstones but avoiding an entry for a never-defined nil builtin.
@@ -510,7 +586,9 @@ impl State {
         let table_idx = self.stack.len() - 1;
         let tbl_val = self.stack[table_idx];
         if tbl_val.as_string_ptr().is_some() {
-            self.get_string_table_field(key, None, local_cost)?;
+            // The receiver stays on the stack (rooted) until the result
+            // replaces it below.
+            self.index_string(tbl_val, key, None, local_cost, &mut false)?;
             let result = self.pop_val();
             self.stack[table_idx] = result;
             return Ok(());

@@ -214,6 +214,10 @@ impl State {
                             return Err(self.report_call_error(error));
                         }
                     };
+                    // The callable was already removed, so inserting handler
+                    // and table is exactly one slot more than the call began
+                    // with; preflighting 2 against the shortened stack is the
+                    // precise bound, not an over-estimate.
                     if let Err(e) = self.check_stack_space(2) {
                         self.truncate_call_frame(idx, old_stack_bottom);
                         return Err(self.report_call_error(e));

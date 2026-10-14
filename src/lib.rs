@@ -92,7 +92,9 @@ pub struct ScopeCost {
     pub table_writes: u64,
     /// Number of array elements initialized
     pub array_elements: u64,
-    /// Number of function calls
+    /// Number of call instructions (`OP_CALL`). Generic-`for` iterator calls
+    /// and metamethod-driven calls are not call instructions and are not
+    /// counted.
     pub function_calls: u64,
     /// Total instruction count
     pub instructions: u64,
@@ -122,10 +124,16 @@ impl ScopeCost {
         }
 
         // Recursively analyze nested functions
-        for (i, nested_chunk) in chunk.nested.iter().enumerate() {
+        // Anonymous functions are numbered among themselves, so a named
+        // function between two anonymous ones does not skew the numbering.
+        let mut anonymous_count = 0usize;
+        for nested_chunk in &chunk.nested {
             let nested_name = match &nested_chunk.name {
                 Some(name) => name.clone(),
-                None => format!("anonymous #{}", i + 1),
+                None => {
+                    anonymous_count += 1;
+                    format!("anonymous #{anonymous_count}")
+                }
             };
             let nested_scope = Self::analyze_chunk(nested_chunk, nested_name);
             scope.nested.push(nested_scope);
@@ -140,7 +148,7 @@ impl ScopeCost {
     fn fmt_indent(&self, f: &mut std::fmt::Formatter<'_>, indent: usize) -> std::fmt::Result {
         let pad = "  ".repeat(indent);
 
-        if self.own_cost == 0 && self.nested.is_empty() {
+        if self.own_cost == 0 && self.nested.is_empty() && self.function_calls == 0 {
             writeln!(f, "{}{}: cost 0 (free)", pad, self.name)?;
             return Ok(());
         }
@@ -156,8 +164,9 @@ impl ScopeCost {
             )?;
         }
 
-        // Breakdown if there's any cost
-        if self.own_cost > 0 {
+        // Calls are statically free but their instruction count still belongs
+        // in the per-scope breakdown.
+        if self.own_cost > 0 || self.function_calls > 0 {
             let inner_pad = "  ".repeat(indent + 1);
             if self.arithmetic_ops > 0 {
                 writeln!(f, "{}arithmetic: {}", inner_pad, self.arithmetic_ops)?;
@@ -173,6 +182,9 @@ impl ScopeCost {
             }
             if self.array_elements > 0 {
                 writeln!(f, "{}array elements: {}", inner_pad, self.array_elements)?;
+            }
+            if self.function_calls > 0 {
+                writeln!(f, "{}call instructions: {}", inner_pad, self.function_calls)?;
             }
         }
 
@@ -278,7 +290,7 @@ impl std::fmt::Display for CostAnalysis {
         writeln!(f, "--- Statistics ---")?;
         writeln!(f, "  Total instructions:   {}", totals.instructions)?;
         writeln!(f, "  Function definitions: {}", totals.function_count)?;
-        writeln!(f, "  Function calls:       {}", totals.function_calls)?;
+        writeln!(f, "  Call instructions:    {}", totals.function_calls)?;
         writeln!(f)?;
         writeln!(f, "--- Per-Scope Breakdown ---")?;
         self.root.fmt_indent(f, 0)?;

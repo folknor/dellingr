@@ -134,6 +134,13 @@ impl Equivalent<HashKey> for Val {
 /// storage for better cache locality and reduced allocation overhead. Larger
 /// parts use IndexMap to maintain insertion order for deterministic `pairs()`
 /// iteration.
+///
+/// Invariant: the key of a dead (nil-valued or vacant) slot may dangle.
+/// `mark_values` only marks keys of live slots, so after a collection a
+/// tombstone's `StringPtr`/`ObjectPtr` key can point at a freed object. Code
+/// that walks raw slots may compare or hash such a key (pointers are
+/// generational) but must never dereference it, for example through
+/// `heap.get_string`; filter out dead slots first, as `entries` does.
 #[derive(Debug)]
 enum TableStorage {
     /// Inline storage for small tables. Stores key-value pairs directly.

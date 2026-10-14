@@ -1,0 +1,95 @@
+# Compatibility with reference Lua
+
+Every deliberate divergence from Lua 5.2 and 5.4. A difference not listed
+here is a bug. Features that are absent altogether are listed in the README
+under "Won't implement".
+
+Reference outputs are compared by `scripts/diff_test.sh`; intentional
+differences carry a `-- DIFF:` comment in the example.
+
+## Numbers
+
+- Numbers are f64 only. There is no integer subtype.
+- `tostring` and `string.format` render numbers with Lua 5.2's `%.14g`
+  (`0.3`, `1e+15`, `-0`). Whole-valued floats print without Lua 5.4's `.0`.
+- NaN prints as `nan` in `tostring` and `string.format`, never `-nan`.
+  C Lua on x86-64 prints `-nan` for `0/0`. `%q` prints `(0/0)`.
+- `tonumber(s, base)` accumulates in floating point, as Lua 5.2 does. Lua 5.4
+  wraps to a 64-bit integer.
+- `math.log(x, 2)` uses Lua 5.2's general-base calculation. The last bit can
+  differ from Lua 5.4 (for example `math.log(3, 2)`).
+- `math.random` uses the in-crate seeded generator, so its stream differs from
+  reference Lua's.
+- Table keys that are integers stop being distinct beyond +/-2^53. See
+  "Table library" below.
+
+## Coercion
+
+String-to-number coercion is not implicit in:
+
+- arithmetic;
+- numeric `for` control expressions;
+- numeric library arguments: `math.*`, `select`, string indices, table
+  positions, `tonumber`'s base, `math.random`.
+
+`string.format`'s numeric conversions accept numeral strings, as reference Lua
+does.
+
+## Control flow and syntax
+
+- A numeric `for` with a zero step skips its body in both directions. Lua 5.2
+  skips an ascending range but loops forever on a descending one. Lua 5.4
+  raises an error.
+- A `(` that starts a later line than the previous token, and would continue
+  the previous expression as a call, is a syntax error (ambiguous call). This
+  holds whether or not a comment sits between them. Lua 5.2 and 5.4 parse it
+  as a call.
+- Semicolons are accepted in some places where Lua 5.4 rejects them.
+- Errors kill the callback. There is no `pcall`, `xpcall` or `assert`.
+
+## Globals and metatables
+
+- Global `unpack` exists, as in Lua 5.2, alongside `table.unpack`.
+- `getmetatable(_G)` returns `false`, not `nil`. `_G` is a proxy over the
+  global table and its metatable is protected: `setmetatable(_G, ...)` raises
+  "cannot change a protected metatable".
+- All strings share one metatable, as in reference Lua.
+  - `getmetatable("")` returns it.
+  - Its `__index` is the string library by default.
+  - Method calls such as `s:upper()` resolve through the metatable's current
+    `__index`, not through the global `string`. Rebinding or clearing the
+    global does not affect them, and they keep working in
+    `with_restricted_env` sandboxes.
+  - `setmetatable` on a string is an error.
+  - Snapshots save the metatable as an environment object (token
+    `string.metatable`). See `save-state.md`.
+- Arithmetic, comparison and concat metamethods are not implemented. Index,
+  newindex, call, len, tostring and metatable-protection fields are. Chains of index, newindex and
+  non-function call steps are bounded by `limits::MAX_METAMETHOD_DEPTH`.
+
+## Table library
+
+- `table.insert`, `remove`, `concat`, `unpack` (global `unpack` too) and
+  `move` honour `__len`, `__index` and `__newindex` as in Lua 5.4. Library
+  writes share the VM's metamethod depth limit.
+- `table.sort` also honours them, but reads every element first, sorts a
+  scratch copy, then writes everything back. Reference Lua interleaves
+  handler reads and writes during its quicksort, so a handler that observes
+  call order sees a different sequence. Stable handlers and a consistent
+  comparator give the same sorted values. Tie order is unspecified.
+- `table.move` rejects nonempty ranges whose source or destination endpoints
+  fall outside +/-2^53, where consecutive f64 integer keys stop being
+  distinct.
+- Metamethod-driven `table.insert` and `table.remove` reject key ranges that
+  would round integer positions.
+- `table.concat` reports a non-string, non-number element with its type and
+  index, in the reference wording.
+- Field misses on plain tables return nil. There is no implicit table-library
+  lookup and no `t:insert(...)` sugar.
+
+## Cost-related differences
+
+These have no reference-Lua analogue. See `budget.md`.
+
+- `while true do end` is free.
+- Native string, pattern and table work is charged per byte or element.

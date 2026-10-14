@@ -435,7 +435,14 @@ fn validate_references(payload: &SavePayload) -> Result<(), LoadError> {
             }
         }
     }
-    for (_, value) in &payload.user_globals {
+    let mut global_names = BTreeSet::new();
+    for (index, (name, value)) in payload.user_globals.iter().enumerate() {
+        insert_unique(
+            &mut global_names,
+            name.as_str(),
+            "duplicate saved global name",
+            index,
+        )?;
         validate_value(value, payload)?;
     }
     Ok(())
@@ -1012,5 +1019,33 @@ mod tests {
                 Err(LoadError::CorruptArena { .. })
             ));
         }
+    }
+
+    #[test]
+    fn duplicate_global_names_are_rejected() {
+        let with_globals = |globals: Vec<(String, super::super::SavedVal)>| SavePayload {
+            has_standard_environment: true,
+            rng_state: 0,
+            cost_remaining: 0,
+            cost_budget: 0,
+            cost_budget_configured: false,
+            cost_used: 0,
+            strings: Vec::new(),
+            bytecode: Vec::new(),
+            upvalues: Vec::new(),
+            objects: Vec::new(),
+            user_globals: globals,
+            env_deltas: Vec::new(),
+            next_format_pointer_id: 0,
+            format_pointer_ids: Vec::new(),
+        };
+        let one = (String::from("a"), super::super::SavedVal::Bool(true));
+        let two = (String::from("a"), super::super::SavedVal::Bool(false));
+        let other = (String::from("b"), super::super::SavedVal::Bool(false));
+        assert!(validate_references(&with_globals(vec![one.clone(), other])).is_ok());
+        assert!(matches!(
+            validate_references(&with_globals(vec![one, two])),
+            Err(LoadError::CorruptArena { .. })
+        ));
     }
 }

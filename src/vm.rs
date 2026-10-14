@@ -62,11 +62,16 @@ use crate::limits::{
 const STDLIB_NON_BUILTIN_GLOBALS: usize = 1;
 // Keep room for a few host-defined globals alongside the standard library.
 const HOST_GLOBAL_CAPACITY_HEADROOM: usize = 4;
-// `_G`, its metatable, and the math, string and table library tables.
-const STDLIB_HEAP_TABLES: usize = 5;
+// `_G`, its metatable, the math, string and table library tables, and the
+// string metatable.
+const STDLIB_HEAP_TABLES: usize = 6;
 // Distinct interned keys across those tables: math's functions plus `pi` and
 // `huge`, the string and table functions, and `_G`'s `__index`/`__newindex`.
 const STDLIB_INTERNED_TABLE_KEYS: usize = 41;
+/// Snapshot environment token of the shared string metatable. Like
+/// `_G.metatable`, it lives in the token namespace, not the global one.
+#[cfg(feature = "snapshot")]
+const STRING_METATABLE_TOKEN: &str = "string.metatable";
 
 struct GmatchPatternEntry {
     pattern: LuaPattern,
@@ -142,6 +147,12 @@ pub(super) fn mark_gc_roots(state: &State, worklist: &mut Vec<ObjectPtr>) {
     }
     state.transient_roots.mark_reachable(&state.heap, worklist);
     state.registry.mark_reachable(&state.heap, worklist);
+    // Strings carry no metatable pointer, so the shared metatable must remain
+    // rooted even when no Lua value explicitly references it. Use `GcHeap::mark`
+    // so the object itself is coloured, not only its children.
+    if let Some(mt) = state.string_metatable {
+        state.heap.mark(mt, worklist);
+    }
     #[cfg(feature = "snapshot")]
     {
         // The canonical environment and its pristine baseline must survive even
@@ -200,6 +211,17 @@ pub struct State {
     pub(super) builtins: [Val; Builtin::COUNT],
     /// Bumped when the whole global environment is swapped.
     pub(super) globals_version: u64,
+    /// The metatable shared by every string, as in reference Lua. Built by
+    /// `open_libs` with `__index` = the string library table it created, so
+    /// string indexing (`s:upper()`) never consults the global `string`.
+    /// `None` in a `State::empty` that never opened the libraries. Not a
+    /// global: `with_restricted_env` leaves it alone. A GC root.
+    pub(super) string_metatable: Option<ObjectPtr>,
+    /// `(shape version, slot)` of `__index` in `string_metatable`, recorded
+    /// by the string-method IC's slow path so its fast path can re-check the
+    /// `__index` value without a hash lookup. Reset when the metatable is
+    /// replaced; a stale entry only causes misses.
+    pub(super) string_mt_index_shape: Option<(u64, usize)>,
     /// The main stack which stores values.
     pub(super) stack: Vec<Val>,
     /// The bottom index of the current frame in the stack.
@@ -291,10 +313,10 @@ pub struct State {
     /// Reverse address lookup for save-time Rust function naming.
     #[cfg(feature = "snapshot")]
     pub(super) rust_fn_ids_by_addr: BTreeMap<usize, String>,
-    /// Canonical environment objects (library tables, `_G`, and `_G`'s
-    /// metatable) captured after each successful open_libs, each mapped to its
-    /// save token. The public `open_libs` refreshes this map, and with_callbacks
-    /// uses that same helper.
+    /// Canonical environment objects (library tables, `_G`, `_G`'s metatable,
+    /// and the shared string metatable) captured after each successful open_libs,
+    /// each mapped to its save token. The public `open_libs` refreshes this map,
+    /// and with_callbacks uses that same helper.
     /// Keyed on the objects `open_libs` built, so user shadowing of a builtin
     /// slot (`math = {}`) cannot make the save classifier mistake a user table
     /// for an environment object. See `vm/save_state.rs`.
@@ -363,6 +385,12 @@ impl State {
                 }
             }
         }
+        // The shared string metatable is rebuilt by `open_libs` too, so a
+        // script holding it (`local mt = getmetatable("")`) reloads it as the
+        // live object, and a change to its `__index` persists as a delta.
+        if let Some(mt) = self.string_metatable {
+            map.insert(mt, STRING_METATABLE_TOKEN.to_string());
+        }
         let baselines = map
             .keys()
             .map(|ptr| {
@@ -397,6 +425,8 @@ impl State {
             globals: IndexMap::default(),
             builtins: std::array::from_fn(|_| Val::Nil),
             globals_version: 0,
+            string_metatable: None,
+            string_mt_index_shape: None,
             stack: Vec::with_capacity(256), // Pre-size for typical function depth * locals
             stack_bottom: 0,
             heap: GcHeap::new(),
@@ -1049,12 +1079,9 @@ impl State {
     }
 
     pub(super) fn set_global_value_owned(&mut self, name: String, val: Val) {
-        // Update builtins array if this is a well-known name. Rebinding a
-        // builtin slot poisons inline caches that hold a direct ObjectPtr
-        // to the previous library table (string-method IC, method-lookup
-        // IC reaching the lib via __index), so bump globals_version to
-        // force re-resolution. User globals don't poison those ICs - the
-        // ICs only key on builtin slots - so the bump stays narrow.
+        // Update the builtins array for well-known names and invalidate global
+        // lookup caches and conservatively guarded table-method caches.
+        // String-method caches validate the shared metatable's handler instead.
         if let Some(slot) = Builtin::from_name(&name) {
             self.builtins[slot as usize] = val;
             self.globals_version = self.globals_version.wrapping_add(1);
@@ -1078,8 +1105,31 @@ impl State {
         self.globals.insert(name, val);
     }
 
+    /// Builds the shared string metatable with `__index` = the table at the
+    /// top of the stack (the string library `open_string` just built) and
+    /// installs it, replacing any earlier one. The stack is left unchanged; on
+    /// error nothing is installed.
+    pub(crate) fn install_string_metatable(&mut self) -> Result<()> {
+        let lib = *self
+            .stack
+            .last()
+            .ok_or_else(|| self.error(ErrorKind::InvalidStackIndex { index: -1 }))?;
+        self.new_table_with_capacity(1)?;
+        if let Err(e) = self.set_table_str_key_value(-1, "__index", lib) {
+            self.pop_val();
+            return Err(e);
+        }
+        let mt = self.pop_val();
+        self.string_metatable = mt.as_object_ptr();
+        self.string_mt_index_shape = None;
+        Ok(())
+    }
+
     /// Execute a function with a restricted global environment.
     /// Only globals in the whitelist are accessible during execution.
+    /// The shared string metatable is not a global and is left in place, so
+    /// `s:upper()` keeps working even when `"string"` is not whitelisted (as
+    /// in reference Lua, where it reaches the library through that metatable).
     /// The original environment is restored after the function completes (or errors).
     pub fn with_restricted_env<F, R>(&mut self, whitelist: &[&str], f: F) -> R
     where

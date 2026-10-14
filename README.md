@@ -51,40 +51,32 @@ Designed for sandboxed embedding, not as a general-purpose Lua replacement. Thes
 - `goto`/labels - simplifies VM, prevents obfuscated control flow
 - `string.rep`, `string.byte`, `string.char`
 - Arithmetic/comparison/concat metamethods
-- Implicit string-to-number coercion in arithmetic, numeric control expressions, and numeric library arguments (`math.*`, `select`, string indices, table positions, `tonumber`'s base, `math.random`); `string.format`'s numeric conversions are the one place that accepts numeral strings, as reference Lua does
+- Implicit string-to-number coercion in arithmetic and numeric control expressions
 - Long strings (`[[...]]`, `[=[...]=]`)
 
 Some of them might be added later (probably most of them behind a feature gate, if so). The lack of the features above make the VM much more suitable for embedded use. Especially in games where the Lua scripting might be exposed to users. In those cases, these 3 string methods - for example - could be used to work around restrictions the game wants to put on the user.
 
 ## Source limits
 
-Source text is capped at `limits::MAX_SOURCE_BYTES` per load. Longer source is rejected with `SourceSizeExceeded` before tokenising, which bounds load-time work for hosts that compile untrusted scripts.
+The parser bounds syntax nesting (`limits::MAX_SYNTAX_DEPTH`) and raises `chunk has too many syntax levels` past that, the way reference Lua does with `LUAI_MAXCCALLS`. Without the bound, deeply nested source exhausts the native stack, and a Rust stack overflow aborts the host process rather than returning a catchable error.
 
-The parser has a budget of `limits::MAX_SYNTAX_DEPTH` recursive syntax entries and raises `chunk has too many syntax levels` when it is exhausted, in the spirit of reference Lua's `LUAI_MAXCCALLS` native-stack safeguard. As in reference Lua, flat chains - `elseif` arms and expression suffixes such as `a.b[c]:m()()` - are parsed iteratively, so their length does not consume the budget; nested contents still do. Without the bound, deeply nested source exhausts the native stack, and a Rust stack overflow aborts the host process rather than returning a catchable error.
+One divergence worth knowing: a nested parenthesis costs two levels rather than one, because each level descends through both the expression and unary parsers. Parentheses therefore nest about half as deep as other constructs. Flat `elseif` chains and expression suffix chains are parsed iteratively and do not consume the budget at all; only what they contain does. Real code does not come close to the limit.
 
-A nested parenthesis consumes two syntax-budget entries because it descends through both the expression and unary parsers. Other constructs consume entries according to their recursive parser calls.
-
-Per-function compile-time caps are exposed in `dellingr::limits`: `MAX_LOCALS`, `MAX_UPVALUES`, `MAX_NESTED`, and `MAX_LITERALS` (per numeric or string pool). Fixed calls and multiple-assignment results use `MAX_FIXED_ARGS` and `MAX_FIXED_RESULTS`; the dynamic-count sentinel is reserved. Violations are syntax errors rather than silent truncation. Table array entries are written in batches; field assignment sites beyond `MAX_TABLE_TEMPLATES` stop being inline-cached rather than being rejected.
+Per-function ceilings (`limits::MAX_LOCALS`, `MAX_UPVALUES` and `MAX_LITERALS` per string or number pool) are reported as syntax errors rather than silently truncated. Table constructors and `t.f = v` assignment sites are effectively unbounded - array entries are written in batches, and assignment sites past `limits::MAX_TABLE_TEMPLATES` simply stop being inline-cached rather than being rejected.
 
 ## Runtime limits
 
-Call depth is capped at `limits::MAX_CALL_DEPTH`. The shared Lua/Rust value stack is capped at `limits::MAX_STACK_SIZE`, and that cap is enforced on every operation that can grow the stack - bytecode operand pushes, frame setup, metamethod dispatch, and the host-facing `push_*` / `new_table` / `get_global` methods alike. Exceeding it produces a catchable `StackOverflow` error rather than an abort, and a rejected operation leaves the stack exactly as it was. The host table methods (`get_table`, `get_table_raw`, `set_table_raw`, `table_next`, `set_metatable_of`, `table_insert_at`, `table_remove_at`) apply the same rule to every rejection they can detect up front - bad index, wrong type, invalid key or position - validating before they pop. An error from calling an `__index` function is the exception: the key is consumed when the call begins.
+Call depth is capped at `limits::MAX_CALL_DEPTH` frames. The shared Lua/Rust value stack is capped at `limits::MAX_STACK_SIZE` values, and that cap is enforced on every operation that can grow the stack - bytecode operand pushes, frame setup, metamethod dispatch, and the host-facing `push_*` / `new_table` / `get_global` methods alike. Exceeding it produces a catchable `StackOverflow` error rather than an abort, and a rejected operation leaves the stack exactly as it was.
 
-This is a bound on the value stack, **not** a total host-memory quota. It stops a runaway script or a looping host callback from growing the stack without limit; it does not stop a host from allocating memory by other means, any more than `limits::MAX_STRING_BYTES` does. Enforcing it charges nothing against the instruction-cost budget.
-
-Lua calls recurse on the host thread's native stack. `MAX_CALL_DEPTH` and `MAX_METAMETHOD_DEPTH` bound logical recursion, but cannot guarantee that a small native stack reaches those limits before a process-aborting stack overflow. Embedders must provision and validate thread stack space for their target, build profile, and callback call paths. The deep-recursion regression runs on a dedicated large thread stack; that is a tested configuration, not a portable minimum. Debug builds consume more native stack per call than optimized builds.
-
-`dellingr::limits` also exposes the gmatch pattern-cache entry and byte caps and the cost-check batching interval. These constants are fixed for the build. Limit errors expose both the observed size or depth and the active limit.
+This is a bound on the value stack, **not** a total host-memory quota. It stops a runaway script or a looping host callback from growing the stack without limit; it does not stop a host from allocating memory by other means, any more than the `limits::MAX_STRING_BYTES` string cap does. Enforcing it charges nothing against the instruction-cost budget.
 
 ## Budget
 
 There's a few gotchas with the current instruction-cost accounting. For example, `while true do end` is free, which means that a users Lua script could run forever. This is a known trade-off made in the full light of day - the main consumer of dellingr does not want to penalise the user (that is, subtract from their per-gametick budget) for structural semantics. Users should be encouraged to write more code, not less.
 
-Data-dependent native work in the string, pattern, and table libraries is charged: bytes examined or emitted, table elements visited, and matcher primitives each consume budget. `table.move` charges one per element copied. `table.insert`, `table.remove` and `table.pack` charge a flat 1 however many elements they shift or store, and `unpack`/`table.unpack` are free; these flat charges are deliberate cost-model choices. `table.concat` charges for elements visited and bytes copied. `table.sort` charges for the original range; a Lua comparator also incurs its usual execution costs. `select` stays free: it moves its arguments once, as passing `...` along does. Structural semantics remain free by design. A helper extraction, an intermediate name, or another legible refactor should not make a script more expensive, because the budget is a game-design instrument rather than a CPU meter.
+Data-dependent native work in the string, pattern, and table libraries is charged: bytes examined or emitted, table elements visited, and matcher primitives each consume budget. Structural semantics remain free by design. A helper extraction, an intermediate name, or another legible refactor should not make a script more expensive, because the budget is a game-design instrument rather than a CPU meter. Per-function charges are listed in [docs/budget.md](docs/budget.md).
 
 This cost model changed in 0.4.0. Embedders must re-measure their tick budgets: the increase depends on string lengths, output expansion, pattern matches and backtracking, and table contents.
-
-`COST_MODEL_VERSION` identifies the cost a given source produces - opcode charges, native charges and compiler emission together. It moves whenever `cost_used` for identical source changes, so it is a valid key for stored cost fingerprints; snapshots load only under an exact match.
 
 ## Compatibility divergences
 
@@ -92,41 +84,21 @@ Numeric `for` loops with a zero step skip their body in both directions. Lua 5.2
 
 `math.log(x, 2)` follows Lua 5.2's general-base calculation. This differs in the last bit from Lua 5.4 for some inputs (for example, `math.log(3, 2)`).
 
-Numbers convert to strings with Lua 5.2's `%.14g` (`0.3`, `1e+15`, `-0`). There is no integer subtype, so whole-valued floats print without Lua 5.4's `.0` suffix.
-
-NaN prints without a sign (`nan`) in `tostring` and `string.format`, where C Lua on x86-64 prints `-nan` for `0/0`, so output is identical across platforms.
-
-`getmetatable(_G)` returns `false` rather than `nil`: `_G` is a proxy over the global table and its metatable is protected, so `setmetatable(_G, ...)` raises "cannot change a protected metatable".
-
-`tonumber(s, base)` accumulates in floating point, as Lua 5.2 does; Lua 5.4 wraps to a 64-bit integer.
-
-A `(` that starts a later line than the previous token, and would continue the previous expression as a call, is rejected as ambiguous, whether or not a comment sits between them. Lua 5.2 and 5.4 accept it as a call.
-
-`table.move` rejects ranges whose keys fall outside +/-2^53, where integer keys stop being distinct in dellingr's f64 numbers. Metamethod-driven `table.insert` and `table.remove` reject key ranges that would round integer positions.
+The full list is in [docs/compatibility.md](docs/compatibility.md).
 
 ## Determinism
 
 Execution is deterministic: the same script and inputs produce the same result
-and cost on a given build. `math.random` draws from the in-crate seeded RNG
-(`set_rng_seed`). The registered `math` functions and the `^` operator, whose
-last ULP may vary across architectures or libm versions, together with the cross-platform bit-stability
-contract, are documented with the implementation in
-[`src/lua_std/math.rs`](src/lua_std/math.rs). Replays that must be
-bit-identical across heterogeneous hosts should follow that contract.
-
-`pairs` order is deterministic too: a table's array part (keys `1..n`, grown
-by appending `n + 1`) is visited first in key order, then every other key in
-insertion order. Snapshots preserve the array part's shape, so a loaded state
-continues with the same order and `#` results.
-
-Function labels in argument errors are diagnostic text, not stable identifiers.
-Generic Rust callbacks checked with `State::check_any` or `State::check_type`
-can get a label from the current global bindings or, with the `snapshot`
-feature, a registered function id. This can make displayed error text differ
-between feature sets or builds. Standard-library argument validators that use
-their named helpers supply explicit names. See
-[`reference/error-reporting.md`](reference/error-reporting.md) for the naming
-rules and limits.
+and the same cost on a given build. `math.random` draws from an in-crate seeded
+RNG (`set_rng_seed`), so it is bit-stable across platforms. The one caveat is
+`math`'s transcendental functions (`sin`, `cos`, `exp`, `log`, ...) and the `^`
+operator, which delegate to the platform `f64`/libm implementation: results are
+deterministic per build+platform but the last ULP may differ across
+architectures or libm versions. Replays that must be bit-identical across
+heterogeneous hosts should avoid depending on exact results of those; basic
+arithmetic, comparisons, `sqrt` and `math.random` are bit-stable everywhere.
+The exact contract lives in [`src/lua_std/math.rs`](src/lua_std/math.rs); see
+also [docs/determinism.md](docs/determinism.md).
 
 ## Save state
 
@@ -145,21 +117,16 @@ the load setup closure do survive it. Hosts recreate
 callbacks and register the same named Rust functions during load setup - a
 reachable `RustFunc` must be registered with a stable id (e.g.
 `set_global_named_rust_fn`) or the save fails fast. The module doc on
-`src/vm/save_state.rs` covers the format and design.
+`src/vm/save_state.rs` covers the format and design; details are in
+[docs/save-state.md](docs/save-state.md).
 
 Save files are user-editable input. Loading restores the saved cost counters,
 so hosts that load user-editable saves must call `set_cost_budget` after a
-successful load. Saves containing a Lua string larger than 16 MiB are rejected
-on load, including ones written by an earlier build using the same snapshot
+successful load. Saves containing a Lua string larger than `limits::MAX_STRING_BYTES`
+are rejected on load, including ones written by an earlier build using the same snapshot
 format version - an older format version is rejected before that, as an
 unsupported version. Save authentication is required if tampering with future
 RNG outcomes matters.
-
-Numbers are saved bit-exact, except that every NaN is saved as one canonical
-NaN, so host differences in NaN sign or payload do not change snapshot bytes. A save
-records the rendered identity (`tostring`, `%p`) of every registered Rust
-function it has printed, including one only the host still holds, so passing it
-back in after a load prints the same `function: 0x...`.
 
 ## Status
 
@@ -180,7 +147,7 @@ dellingr = "0.4"
   once on the engine, load into many states with `state.load(&program)`.
 - `State` (`Send`) - VM instance with cost-bounded execution. Movable
   across threads; pair with `Mutex<State>` if you need to share one.
-- `Anchor` (`Copy + Send`) - retain a Lua value (function, table, etc.)
+- `Anchor` (`Copy + Send + Sync + 'static`) - retain a Lua value (function, table, etc.)
   across host calls without using globals. State-scoped; cross-state
   misuse and use-after-release surface as errors, not silent corruption.
 - `HostCallbacks` trait (`: Send`) - embedders redirect `print`, hook
@@ -205,10 +172,6 @@ cargo run --release -- --analyze path/to/script.lua
 cargo run --release -- --limit 100000 path/to/script.lua
 cargo run --release -- --quiet path/to/script.lua
 ```
-
-Script output goes to stdout. The `Cost used: N` summary (suppressed by
-`--quiet`) and the `--analyze` caveat go to stderr. `--` ends option parsing,
-so a script whose name starts with `-` can still be run.
 
 ## Acknowledgements
 

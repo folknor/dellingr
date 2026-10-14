@@ -7,6 +7,22 @@ use crate::State;
 use crate::error::{ArgDetail, ArgError, ErrorKind, PrefixLocation};
 use crate::numeral::parse_lua_numeral;
 
+/// Byte length of `raw` after lossy UTF-8 conversion: each invalid UTF-8 chunk
+/// becomes one 3-byte U+FFFD. Computed without materializing the
+/// converted text so callers can check it against the string cap first.
+fn lossy_utf8_len(raw: &[u8]) -> usize {
+    raw.utf8_chunks()
+        .map(|chunk| {
+            chunk.valid().len()
+                + if chunk.invalid().is_empty() {
+                    0
+                } else {
+                    char::REPLACEMENT_CHARACTER.len_utf8()
+                }
+        })
+        .sum()
+}
+
 fn digit_value(byte: u8) -> Option<u32> {
     match byte {
         b'0'..=b'9' => Some(u32::from(byte - b'0')),
@@ -164,17 +180,7 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
             // `bytes_with_tostring_meta`, which also covers `__tostring`
             // results that are byte strings.
             let raw = state.bytes_with_tostring_meta(stack_index)?;
-            let lossy_len: usize = raw
-                .utf8_chunks()
-                .map(|chunk| {
-                    chunk.valid().len()
-                        + if chunk.invalid().is_empty() {
-                            0
-                        } else {
-                            char::REPLACEMENT_CHARACTER.len_utf8()
-                        }
-                })
-                .sum();
+            let lossy_len = lossy_utf8_len(&raw);
             crate::vm::checked_string_growth(message.len(), lossy_len)?;
             message.reserve(lossy_len);
             for chunk in raw.utf8_chunks() {
@@ -191,7 +197,15 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
     // Raises an error with the given message.
     add!("error", |state| {
         let message = if state.get_top() >= 1 {
-            state.to_string_with_meta(1)?
+            // `ErrorKind::ScriptError::message` is a `String` (it is rendered
+            // through Display with a location prefix, so the host sees text
+            // either way), hence the lossy conversion. Size the converted text
+            // against the string cap first: each invalid chunk grows to a
+            // 3-byte U+FFFD, so an unchecked conversion could expand a capped
+            // byte string about threefold past the cap.
+            let raw = state.bytes_with_tostring_meta(1)?;
+            crate::vm::checked_string_growth(0, lossy_utf8_len(&raw))?;
+            String::from_utf8_lossy(&raw).into_owned()
         } else {
             "(error raised with no message)".to_string()
         };
@@ -302,7 +316,7 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
     add!("unpack", base_unpack_values);
 
     // getmetatable(object)
-    // Returns the metatable of the given table, or nil if it doesn't have one.
+    // Returns the value's metatable (tables or strings), respecting protection.
     add!("getmetatable", |state| {
         check_any_named(state, 1, "getmetatable")?;
         state.set_top(1)?;

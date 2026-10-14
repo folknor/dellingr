@@ -2,10 +2,10 @@
 
 `dellingr` is an embeddable, deterministic, pure-Rust Lua VM with per-opcode instruction-cost accounting. It is the script host for a game project; the README's "Won't implement" section is load-bearing - `pcall`/`xpcall`, `assert`, coroutines, `io`/`os`/`debug`, `goto`, integer division, bitwise ops, long strings, `string.rep`/`byte`/`char`, and arithmetic/comparison/concat metamethods are deliberately absent. Don't add them without asking. Errors kill the callback by design.
 
-Ground rules that are easy to get wrong (the README has the detail):
+Ground rules that are easy to get wrong (the `docs/` pages have the detail):
 
-- **The cost budget is a game-design instrument, not a CPU meter** (README "Budget"). Charges are design decisions: flat and free charges are often deliberate, and structural semantics are free on purpose. Host work that is out of proportion to its charge is a performance concern, not a cost-model defect.
-- **Deliberate divergences from reference Lua** are listed in README "Compatibility divergences". Check there before treating a difference from lua5.2/lua5.4 as a bug.
+- **The cost budget is a game-design instrument, not a CPU meter** (`docs/budget.md`). Charges are design decisions: flat and free charges are often deliberate, and structural semantics are free on purpose. Host work that is out of proportion to its charge is a performance concern, not a cost-model defect.
+- **Deliberate divergences from reference Lua** are listed in `docs/compatibility.md`. Check there before treating a difference from lua5.2/lua5.4 as a bug.
 - **Replay-visible changes must be called out**, never slipped in: `pairs` order, rendered numbers and strings, the RNG draw sequence, and snapshot contents all feed game replays.
 - Lua written for tests and examples has no `assert`; use `if not cond then error(...) end`.
 
@@ -109,7 +109,7 @@ Compilation pipeline: source to `compiler::parse_str` to bytecode `Chunk` to exe
 - `rng: VmRng` (in-crate SplitMix64) seeded via `set_rng_seed`
 
 `limits::MAX_CALL_DEPTH` and `limits::MAX_STACK_SIZE` bound calls and values.
-Logical recursion limits require sufficient host native stack space; see README Runtime limits.
+Logical recursion limits require sufficient host native stack space; see `docs/limits.md`.
 
 **The stack cap is a real, global invariant, not a documented aspiration.**
 Every path that can grow `State.stack` is either checked (a single
@@ -128,7 +128,7 @@ value stack, not total host memory, and enforcing it charges no cost.
 
 **Standard library**: `src/lua_std/{basic,math,string,string_format,table}.rs`, opened by `lua_std::open_libs(state)` from `State::with_callbacks` (`string_format.rs` is the Lua 5.4 `string.format` engine, registered by `string.rs`). Every `open_*` function pushes builtin functions onto the stack and uses `set_global` / `set_table_raw` to install them. `_G` exists but is wired through a metatable that proxies to `state.globals` (see `basic.rs`); it is not a real table.
 
-**Cost model**: opcodes charge in `vm/eval.rs`'s dispatch; `analyze_cost` (`src/lib.rs`) walks bytecode statically and produces a `ScopeCost` tree (own + nested totals). The README's "Budget" section flags that structural ops like `while true do end` are intentionally free.
+**Cost model**: opcodes charge in `vm/eval.rs`'s dispatch; `analyze_cost` (`src/lib.rs`) walks bytecode statically and produces a `ScopeCost` tree (own + nested totals). `docs/budget.md` flags that structural ops like `while true do end` are intentionally free.
 
 **Patterns**: Lua-pattern matching is an in-crate implementation in `src/patterns/`, not a dependency. `luapat.rs` compiles a pattern once into an item program plus interned 256-bit byte classes (`LuaPattern::new`), then matches over `&[u8]` with absolute subject offsets (`matches_bytes_from(subject, init)` - callers pass the *whole* subject with a start offset, never a re-slice, so `%f` keeps its left context). Recursion depth is passed by value and bounded at `MAXCCALLS = 200` active invocations, matching reference exactly; only capture start/end, `max_expand`/`min_expand` backtracking and the greedy `?` branch recurse, while every other continuation is a loop iteration (reference's `goto init`). Validation is lazy, as in reference Lua: `LuaPattern::new` is infallible; the first malformed point compiles to an `Item::Fail` that `matches_bytes_from` raises only when a match reaches it, and an unclosed capture is returned as `LuaCapture::Unfinished` for the library function that reads it to reject. That placement is contract, asserted by tests. `string.rs` has helpers `is_plain_lua_pattern` (fast path) and `gsub_replacement` (string / table / function replacements with Lua's `%0..%9` capture syntax).
 

@@ -895,6 +895,11 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
     state.register_lib_fn_id(GMATCH_ITER_ID, gmatch_iter)?;
     state.register_lib_fn_id(GMATCH_EMPTY_ITER_ID, gmatch_empty_iter)?;
 
+    // Strings index through a shared metatable whose `__index` is this table,
+    // captured here: rebinding or hiding the global `string` later does not
+    // change what `s:upper()` resolves to, as in reference Lua.
+    state.install_string_metatable()?;
+
     // Set the string table as a global
     state.set_global("string")?;
     Ok(())

@@ -274,21 +274,25 @@ impl State {
     }
 
     /// Gets the metatable of the value at the given index.
-    /// For tables, returns the table's metatable.
-    /// For other types, including strings, returns nil: there are no type
-    /// metatables, so `getmetatable("")` is nil where reference Lua returns the
-    /// shared string metatable (`__index` = the string library). String method
-    /// calls work regardless, through `get_string_table_field` in
-    /// `eval_index.rs`. Adopting a string metatable needs a GC-rooted `State`
-    /// field, a snapshot token and a restricted-environment carve-out.
+    /// For tables, returns the table's metatable. For strings, returns the
+    /// metatable all strings share, as reference Lua does (`__index` = the
+    /// string library table `open_libs` built; nil in a `State::empty` that
+    /// never opened the libraries). It is a real table a script may modify;
+    /// `index_string` in `eval_index.rs` resolves string indexing through it.
+    /// It cannot be replaced: `set_metatable_of` accepts only tables. Every
+    /// other type has no metatable and returns nil.
     #[hotpath::measure]
     pub fn get_metatable_of(&mut self, idx: isize) -> Result<()> {
         let i = self.convert_idx(idx)?;
 
-        let metatable = self.stack[i]
-            .as_object_ptr()
-            .and_then(|ptr| self.heap.as_table_ref(ptr))
-            .and_then(super::table::Table::get_metatable);
+        let val = self.stack[i];
+        let metatable = if val.as_string_ptr().is_some() {
+            self.string_metatable
+        } else {
+            val.as_object_ptr()
+                .and_then(|ptr| self.heap.as_table_ref(ptr))
+                .and_then(super::table::Table::get_metatable)
+        };
 
         match metatable {
             Some(mt) => self.push_val(Val::Obj(mt))?,

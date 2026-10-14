@@ -376,7 +376,7 @@ impl Frame {
                 //
                 // The bytes the operator emits are deliberately uncharged: the
                 // budget is a game-design instrument rather than a CPU meter
-                // (README "Budget"), and `..` is structural syntax that a
+                // (docs/budget.md), and `..` is structural syntax that a
                 // legible refactor must not make more expensive. The size is
                 // still bounded by `checked_string_growth` (MAX_STRING_BYTES),
                 // so the uncharged work is capped. Library calls that emit

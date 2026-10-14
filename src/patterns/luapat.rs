@@ -181,7 +181,7 @@ impl<'a> Compiler<'a> {
 
     /// Loops over all 256 bytes per escape, uncharged; callers charge the
     /// pattern length, so this is bounded structural work (at most 256 steps
-    /// per pattern byte) under the README's "structural work is free" framing.
+    /// per pattern byte) under the "structural work is free" framing of docs/budget.md.
     fn class_for_escape(&mut self, class: u8) -> ClassId {
         let mut result = ByteClass::empty();
         for byte in u8::MIN..=u8::MAX {

@@ -1,7 +1,7 @@
 -- DIFF: zero_for_step - dellingr skips a numeric for with a zero step in both
 -- directions. Lua 5.4 raises "'for' step is zero"; Lua 5.2 skips an ascending
 -- range but runs a descending one forever (the break guard below bounds it).
--- See the README's "Compatibility divergences" section.
+-- See docs/compatibility.md.
 
 local function count(start, limit, step)
     local n = 0

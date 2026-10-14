@@ -17,6 +17,14 @@ use crate::limits::MAX_METAMETHOD_DEPTH;
 impl State {
     /// Run one metamethod step while enforcing the shared recursion limit.
     ///
+    /// `__index` and `__newindex` steps count against the limit even when the
+    /// handler is a function, so a memoising `__index` that recurses through
+    /// its own table stops at `MAX_METAMETHOD_DEPTH` levels. That is deliberate
+    /// and matches reference Lua, whose C stack bounds the same recursion near
+    /// 200. A `__call` function handler is exempt (see `State::call`) because
+    /// guarding it would also cap ordinary recursion through callable objects,
+    /// which reference Lua does not limit this way.
+    ///
     /// The depth counter is restored for every VM error path. A Rust panic
     /// leaves the State unusable, like other interrupted VM execution paths.
     pub(super) fn with_metamethod_depth<T>(
@@ -190,9 +198,7 @@ impl State {
                 self.call(ArgCount::Fixed(2), RetCount::Fixed(1))?;
                 Ok(())
             }
-            Val::Str(_) => {
-                self.get_string_table_field_tracking_call(key, None, local_cost, handler_called)
-            }
+            Val::Str(_) => self.index_string(handler, key, None, local_cost, handler_called),
             _ => Err(self.type_error(super::TypeError::TableIndex(handler.typ(&self.heap)))),
         }
     }

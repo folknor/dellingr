@@ -23,26 +23,6 @@ anything.
    inline instead.
 ```
 
-## VM-019 - Runtime 255-value caps on Lua returns and dynamic calls are documented as Rust-callback limits
-
-Source: vm-exec (finding 6, LOW).
-
-Where: `error.rs` `results_count`; `limits::MAX_RESULTS` and `MAX_ARGUMENTS`.
-
-`results_count` ("Validate a result count against the Rust callback ABI") is also
-applied in `eval_closure_frame` to every Lua `return f()` / `return ...` with
-`RetCount::All`. `call`'s Dynamic arm caps `f(table.unpack(t))` at 255 arguments
-the same way. So `return table.unpack(t)` with 256 or more elements raises
-`TooManyResults` in pure Lua code.
-
-Claims broken: `MAX_RESULTS` is documented only as "Maximum number of values a
-Rust callback can return". README "Runtime limits" lists only the fixed-count
-compile-time caps. Reference Lua accepts these programs.
-
-Direction: either document the runtime cap for Lua frames, or widen the internal
-counts to `usize`. The `u8` exists for the bytecode operand encoding, which these
-dynamic paths do not need.
-
 ## VM-022 - The host `get_table` disagrees with the `t[k]` opcode on string receivers
 
 Source: vm-exec (finding 8, LOW).
@@ -66,89 +46,6 @@ count, not a type or a missing value, and argument #1 is not a Lua argument.
 expected and received") does not fit. `InvalidStackIndex` or `OutOfBounds` would
 be accurate.
 
-## VM-026 - Smaller heap items: dangling tombstone keys, `array_insert` version ordering, quadratic env-delta encoding, allocator GC note
-
-Source: vm-heap (smaller items).
-
-- **Tombstone keys are not GC-marked but stay in storage.** `mark_values` skips
-  the key of a nil-valued slot, so a dead slot's `StringPtr`/`ObjectPtr` key is
-  freed and dangles. Every current consumer only compares or hashes keys (safe
-  with generational keys) or filters dead slots first (`entries`,
-  `live_string_keys`). Future code that walks raw slots and dereferences a key
-  (`heap.get_string(key)`) will panic. The invariant ("dead-slot keys may dangle;
-  never dereference them") is not written down and belongs as a comment on
-  `TableStorage`.
-- **`array_insert` calls `compact_dead()` without bumping `version`.** The later
-  `bump_version()` at the end of the function covers it, but only because nothing
-  reads caches in between. That ordering is fragile, since `compact_dead` says
-  "The caller owns version changes".
-- **`encode_env_deltas` is O(n^2) per environment table**, through linear
-  `iter().any(...)` / `find(...)` across the baseline and live entries. Scripts
-  can grow `string`/`math`/`table` without bound, so save time is quadratic in
-  user additions to library tables.
-- **`GcHeap` allocator note and `is_full` naming.** The allocators carry "Note:
-  Caller must check is_full() and run GC if needed before calling", but
-  `load_state`'s materialization deliberately ignores it, and the
-  `alloc_table_with_capacity` / `with_template` variants lack the note. A typed
-  "allocation without collection" API (a `NoGc` token) would make the load-time
-  exception explicit instead of comment-borne.
-- **Non-ASCII characters in `table.rs` comments.** `≤` ("Small tables (≤4
-  entries)" and similar) and `→` in a test comment. The hunter was unsure whether
-  the gremlins scan covers them. Either way they contradict the spirit of the
-  banned-Unicode rule.
-
-## VM-028 - `__index`/`__newindex` function handlers count against `MAX_METAMETHOD_DEPTH` while `__call` handlers do not
-
-Source: vm-exec (observations; flagged as not a defect against reference).
-
-The comment in `call` explains that guarding `__call` handlers "would cap
-legitimate recursion". `__index`/`__newindex` function handlers still count
-against `MAX_METAMETHOD_DEPTH` (200), so a memoising `__index` that recurses
-through its own table (`fib[300]`) stops at depth 200 even though every level is
-a real Lua frame. Reference 5.4 also stops near 200 (C stack), so the behaviour
-matches the reference, but it contradicts the stated `__call` rationale.
-
-Also noted: the `__call` path in `call` preflights 2 slots after already removing
-the callable, though it needs only +1 net, so a call exactly at the stack cap is
-rejected even though it would fit. The hunter called this harmless.
-
-## VM-029 - Embedding-surface smaller items: `ScopeCost` labels, anonymous scope numbering, README `Anchor` bounds
-
-Source: embedding (smaller items).
-
-- **`ScopeCost` display**: `function_calls` counts only `OP_CALL`, not
-  `OP_TFOR_CALL` or metamethod calls, yet the summary labels it "Function calls".
-  `fmt_indent` never prints a per-scope call count, so the per-scope breakdown
-  and the totals show different fields.
-- **Anonymous scope names** use `anonymous #{i+1}`, where `i` indexes all nested
-  chunks, named ones included. Two anonymous functions with a named one between
-  them become `#1` and `#3`.
-- **README vs anchor doc**: the README lists `Anchor` as `Copy + Send`, while the
-  anchor module doc says `Copy + Send + Sync + 'static`. They do not contradict
-  each other, but the README understates the guarantee.
-
-## VM-030 - String methods resolve through the current global `string`
-
-Source: vm-exec (observations; flagged by the hunter as not a defect because the
-function's doc states it). Related to, but a different mechanism from, STD-012
-(strings have no metatable).
-
-`get_string_table_field` resolves string methods through the current global
-`string`. In a `with_restricted_env` sandbox without `"string"`, `s:upper()`
-raises "attempt to index a nil value", whereas reference Lua uses the string
-metatable. This is sandbox-hostile in the same way as the (since-removed)
-plain-table fallback to the global `table` library was, and the hunter
-recommends making a deliberate decision about it.
-
-## VM-043 - Snapshot verifier accepts duplicate global names
-
-Source: lateral finding from a resolution-loop reviewer.
-
-Claim broken: the load contract that malformed saves are rejected. Duplicate
-table keys and template keys are rejected, but `src/vm/save_state/verify.rs`
-accepts a save that lists the same global name twice; the later value silently
-overwrites the earlier one on load.
-
 ## VM-034 - `set_cost_budget` from inside a callback interacts with the dispatch loop's pending cost
 
 Source: residue of the error-path cost-flush fix, from a resolution-loop fixer.
@@ -160,3 +57,32 @@ interval, which the `COST_CHECK_INTERVAL` doc says it never does. The doc for
 `set_cost_budget` does not say whether a mid-run reset is supported. Either
 flush the pending batch before the reset or document mid-run resets as
 unsupported.
+
+## VM-044 - `encode_env_deltas` is quadratic per environment table
+
+Source: residue of a smaller-heap-items entry from the original hunt; a
+resolution-loop fixer confirmed it still holds.
+
+`encode_env_deltas` (`src/vm/save_state.rs`) runs `live.iter().any(...)` and
+`baseline.entries.iter().find(...)` / `.any(...)` in its deleted-key loop, its
+upsert loop and the `replayed_order` computation, which is O(baseline x live)
+per environment table. Scripts can grow `string`/`math`/`table` without bound,
+so save time is quadratic in user additions to library tables. Fix: build a map
+of baseline entries and a set of live keys once per table, keyed so equality
+matches runtime key equality. Same residue: allocators note that callers must
+check `is_full()` and run GC, while snapshot materialization deliberately
+allocates without collecting. The notes now name that exception, and a typed
+"allocation without collection" token would make it explicit.
+
+## VM-045 - The `to_string_with_meta` host API converts without a size preflight
+
+Source: lateral finding from the fixer that added `print` and `error` size
+preflights.
+
+`State::to_string_with_meta` (`src/vm/table_ops.rs`) calls
+`String::from_utf8_lossy` on the full byte vector. Invalid bytes expand
+threefold to U+FFFD, so the result can exceed `MAX_STRING_BYTES` before anything
+checks it. `print` and `error` now compute the lossy length (`lossy_utf8_len` in
+`src/lua_std/basic.rs`) and check it with `checked_string_growth` before
+converting. The host API should do the same, with the helper moved somewhere
+both can reach.

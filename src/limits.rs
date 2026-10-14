@@ -76,7 +76,15 @@ pub const GMATCH_PATTERN_CACHE_ENTRIES: usize = 256;
 pub const GMATCH_PATTERN_CACHE_BYTES: usize = MAX_STRING_BYTES;
 /// Static cost units batched before checking the cost budget.
 pub const COST_CHECK_INTERVAL: u64 = 64;
-/// Maximum argument count accepted by the runtime call ABI.
+/// Maximum argument count accepted by the runtime call ABI. This is a runtime
+/// cap on every call, not only on Rust callbacks: a dynamic call such as
+/// `f(table.unpack(t))` or `f(...)` with more than this many values raises
+/// `TooManyArguments` in pure Lua code. The count is a `u8` because
+/// `ArgCount::Fixed` and `RetCount::Fixed` carry `u8`, and `RustFunc` returns
+/// `u8`; widening it would change those public APIs, so the cap is deliberate.
 pub const MAX_ARGUMENTS: u8 = u8::MAX;
-/// Maximum number of values a Rust callback can return.
+/// Maximum number of values a call can return. Applies to Rust callbacks and
+/// equally to Lua functions: `return table.unpack(t)` or `return ...` with more
+/// than this many values raises `TooManyResults`. See [`MAX_ARGUMENTS`] for why
+/// the width is fixed.
 pub const MAX_RESULTS: u8 = u8::MAX;

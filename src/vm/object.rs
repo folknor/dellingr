@@ -390,7 +390,9 @@ impl GcHeap {
     // ========================================================================
 
     /// Allocate a new Lua function.
-    /// Note: Caller must check is_full() and run GC if needed before calling.
+    /// Note: Caller must check is_full() and run GC if needed before calling,
+    /// except where collection is deliberately skipped (snapshot load
+    /// materialization allocates without collecting).
     #[hotpath::measure]
     pub(super) fn alloc_lua_fn(
         &mut self,
@@ -417,7 +419,9 @@ impl GcHeap {
     }
 
     /// Allocate a new table.
-    /// Note: Caller must check is_full() and run GC if needed before calling.
+    /// Note: Caller must check is_full() and run GC if needed before calling,
+    /// except where collection is deliberately skipped (snapshot load
+    /// materialization allocates without collecting).
     #[hotpath::measure]
     pub(super) fn alloc_table(&mut self) -> ObjectPtr {
         let raw = RawObject::Table(Table::default());
@@ -428,6 +432,10 @@ impl GcHeap {
         ObjectPtr(self.objects.insert(wrapped))
     }
 
+    /// Allocate a new table with room for `capacity` entries.
+    /// Note: Caller must check is_full() and run GC if needed before calling,
+    /// except where collection is deliberately skipped (snapshot load
+    /// materialization allocates without collecting).
     pub(super) fn alloc_table_with_capacity(&mut self, capacity: usize) -> ObjectPtr {
         let raw = RawObject::Table(Table::with_capacity(capacity));
         let wrapped = WrappedObject {
@@ -437,6 +445,10 @@ impl GcHeap {
         ObjectPtr(self.objects.insert(wrapped))
     }
 
+    /// Allocate a new table pre-filled from a constructor template.
+    /// Note: Caller must check is_full() and run GC if needed before calling,
+    /// except where collection is deliberately skipped (snapshot load
+    /// materialization allocates without collecting).
     pub(super) fn alloc_table_with_template(
         &mut self,
         key_ids: &[u16],
@@ -451,7 +463,9 @@ impl GcHeap {
     }
 
     /// Allocate or intern a string.
-    /// Note: Caller must check is_full() and run GC if needed before calling.
+    /// Note: Caller must check is_full() and run GC if needed before calling,
+    /// except where collection is deliberately skipped (snapshot load
+    /// materialization allocates without collecting).
     #[hotpath::measure]
     pub(super) fn alloc_string(&mut self, bytes: &[u8]) -> StringPtr {
         let hash = StringPool::hash_string(bytes);
