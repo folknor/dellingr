@@ -93,8 +93,8 @@ Numeric `for` loops with a zero step skip their body in both directions. Lua 5.2
 
 Execution is deterministic: the same script and inputs produce the same result
 and cost on a given build. `math.random` draws from the in-crate seeded RNG
-(`set_rng_seed`). The registered `math` functions whose last ULP may vary across
-architectures or libm versions, together with the cross-platform bit-stability
+(`set_rng_seed`). The registered `math` functions and the `^` operator, whose
+last ULP may vary across architectures or libm versions, together with the cross-platform bit-stability
 contract, are documented with the implementation in
 [`src/lua_std/math.rs`](src/lua_std/math.rs). Replays that must be
 bit-identical across heterogeneous hosts should follow that contract.

@@ -4,9 +4,14 @@
 //! the same stream on every platform. The registered functions `sin`, `cos`,
 //! `tan`, `asin`, `acos`, `atan`, `atan2`, `exp`, and `log` delegate to the
 //! platform's `f64` / libm implementation; their last ULP may differ across
-//! architectures or libm versions. `sqrt` is correctly rounded by IEEE 754,
-//! and `pow` is not registered. Basic arithmetic, comparisons, `sqrt`, and
-//! `math.random` are bit-stable across platforms.
+//! architectures or libm versions. `math.pow` is not registered, but the `^`
+//! operator has the same property: the VM evaluates it with the host's
+//! `f64::powf`. The compiler never constant-folds `^` (it does fold the
+//! IEEE-exact `+ - * / %`), so compiled bytecode and snapshots carry no
+//! host-computed `^` results; a replay evaluates every `^` on the replaying
+//! host. `sqrt` is correctly rounded by IEEE 754. Basic arithmetic
+//! (`+ - * / %` and unary minus), comparisons, `sqrt`, and `math.random` are
+//! bit-stable across platforms.
 
 use super::{arg_integer, argument_error, check_type_named};
 use crate::LuaType;

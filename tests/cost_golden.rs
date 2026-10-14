@@ -14,6 +14,7 @@ const CORPUS: &[(&str, &str, u64)] = &[
         "local x = 60 * 1000 + -5 local y = x * 2",
         1,
     ),
+    ("literal_pow", "local x = 2 ^ 10 local y = -3 ^ 2 + 1", 4),
     (
         "loop_and_calls",
         "local function f(a) return a + 1 end local s = 0 for i = 1, 100 do s = f(s) end",

@@ -211,16 +211,19 @@ fn test01() {
 
 #[test]
 fn test02() {
-    // ^ binds tighter than unary minus: 5^2 folds to 25, then negation
-    // folds to -25.
+    // ^ binds tighter than unary minus. `^` is never folded (its result is
+    // host-libm dependent), so the negation has no literal to fold into.
     let text = "x = -5^2";
     let out = Bytecode {
         code: vec![
-            Instr::push_num(3),
+            Instr::push_num(0),
+            Instr::push_num(1),
+            Instr::pow(),
+            Instr::negate(),
             Instr::set_global(0),
             Instr::ret(RetCount::Fixed(0)),
         ],
-        number_literals: vec![5.0, 2.0, 25.0, -25.0],
+        number_literals: vec![5.0, 2.0],
         string_literals: vec!["x".into()],
         ..Bytecode::default()
     };
@@ -287,15 +290,17 @@ fn concat_chain_emits_single_n_ary_concat() {
 
 #[test]
 fn test05() {
-    // -3 folds to a literal, then 2^-3 folds to 0.125.
+    // -3 folds to a literal; the `^` itself is left to runtime.
     let text = "x = 2^-3";
     let output = Bytecode {
         code: vec![
-            Instr::push_num(3),
+            Instr::push_num(0),
+            Instr::push_num(2),
+            Instr::pow(),
             Instr::set_global(0),
             Instr::ret(RetCount::Fixed(0)),
         ],
-        number_literals: vec![2.0, 3.0, -3.0, 0.125],
+        number_literals: vec![2.0, 3.0, -3.0],
         string_literals: vec!["x".into()],
         ..Bytecode::default()
     };
@@ -2009,7 +2014,9 @@ fn constant_folding_collapses_literal_arithmetic() {
     assert_no_opcode("return 10 - 4", Instr::OP_SUBTRACT);
     assert_no_opcode("return 10 / 4", Instr::OP_DIVIDE);
     assert_no_opcode("return 10 % 3", Instr::OP_MOD);
-    assert_no_opcode("return 2 ^ 10", Instr::OP_POW);
+    // `^` evaluates through the host libm, so it is never baked into bytecode.
+    assert_has_opcode("return 2 ^ 10", Instr::OP_POW);
+    assert_has_opcode("return 2 ^ 0.5 + 1", Instr::OP_ADD);
     assert_no_opcode("return -5", Instr::OP_NEGATE);
     assert_no_opcode("return -(2 * 3)", Instr::OP_NEGATE);
 

@@ -8,6 +8,13 @@ All notable changes to dellingr are documented here. The format follows
 
 ### Changed
 
+- **`^` is no longer constant-folded; `COST_MODEL_VERSION` is 4.** `pow`
+  comes from the host libm, which is not bit-identical across targets, so a
+  folded `^` baked the compiling host's result into bytecode and snapshots.
+  Literal `^` (e.g. `2 ^ 10`) now evaluates at runtime and charges like any
+  other `^`; `+ - * /` and `%` still fold. Snapshots saved under version 3 no
+  longer load. `^` results remain a host libm property across hosts, as
+  documented with the `math` determinism contract.
 - **Source size cap.** Source text over 16 MiB is rejected before tokenising
   with the new `ErrorKind::SourceSizeExceeded { size, limit }`, bounding
   load-time work for hosts that compile untrusted scripts. Literal-pool

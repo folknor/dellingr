@@ -12,8 +12,10 @@
 /// and pattern work in addition to bytecode instructions. Version 3 folds
 /// literal arithmetic at compile time (folded operations no longer charge) and
 /// charges `string.gmatch` pattern compilation once per iterator rather than
-/// once per compilation-cache miss.
-pub const COST_MODEL_VERSION: u16 = 3;
+/// once per compilation-cache miss. Version 4 stops folding `^`, so literal
+/// exponentiation charges like any other `^` (its result comes from the host
+/// libm, which must not be baked into portable bytecode).
+pub const COST_MODEL_VERSION: u16 = 4;
 
 /// Tracks costs either without a budget or against a finite budget.
 ///

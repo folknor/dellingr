@@ -303,7 +303,8 @@ fn unsigned_integer_bits(integer: i64) -> u64 {
 }
 
 fn format_argument(state: &mut State, argument: usize, directive: &Directive) -> Result<Vec<u8>> {
-    let idx = isize::try_from(argument).map_err(|_| invalid_specification(state, &directive.raw))?;
+    let idx =
+        isize::try_from(argument).map_err(|_| invalid_specification(state, &directive.raw))?;
     match directive.conversion {
         Conversion::Percent => Ok(b"%".to_vec()),
         Conversion::Char => {

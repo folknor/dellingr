@@ -205,7 +205,16 @@ impl Parser<'_> {
         if self.input.try_pop(TokenType::Caret)?.is_some() {
             exp_desc = ExpDesc::Other;
             self.parse_unary()?;
-            self.push_arith(Instr::pow(), f64::powf);
+            // `^` is deliberately never constant-folded, unlike `+ - * / %`.
+            // Those are IEEE-exact, so a folded literal equals what any host
+            // computes at runtime. `pow` comes from the platform libm, which is
+            // not guaranteed bit-identical across targets; folding would bake
+            // the compiling host's result into bytecode, and a snapshot replayed
+            // on another host would then mix that constant with the replaying
+            // host's runtime `powf`. Leaving it to runtime keeps every `^` on
+            // one implementation per host (literal `^` is charged as a normal
+            // instruction, part of the cost model since version 4).
+            self.push(Instr::pow());
         }
 
         Ok(exp_desc)

@@ -199,17 +199,12 @@ call already leaves the State inconsistent, so the partial guarantees buy
 nothing. Either poison the State on unwind (a flag checked on entry) and drop
 the per-site guards, or make it uniform.
 
-## HYG-037 - Constant folding of `^` writes the host's libm result into bytecode
+## HYG-037 - Fold operators and their runtime functions have two owners
 
-Reported by the compiler hunter.
+Reported by the compiler hunter. (The `^` half - folding baked host libm
+results into bytecode - is resolved: `^` is no longer folded, cost model 4.)
 
-`parse_pow` folds with `f64::powf`, which calls the platform math library and
-is not guaranteed bit-identical across targets or libm versions. The VM uses the
-same function at runtime, so one host agrees with itself, but snapshots carry
-compiled bytecode, so a replay on another host mixes host A's folded constant
-with host B's runtime `powf`. `pow` needs one owned implementation (for example a
-pure-Rust libm port) used by both, or `^` should not be folded; `+ - * / %` are
-IEEE exact. Related fold-ownership point: each fold operator is paired with its
+Each fold operator is paired with its
 function in the parser (`parse_addition`, `parse_multiplication`, `parse_pow`)
 and again in `vm/frame.rs`, guarded only by a comment; an
 `arith_fn(opcode) -> fn(f64, f64) -> f64` in numeral.rs would be the single
