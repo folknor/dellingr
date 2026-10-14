@@ -175,6 +175,13 @@ identical source - re-measure tick budgets.
   Lua does, instead of returning nil.
 - The upvalue pool and the `string.format("%p")` id map grew without bound in
   long-lived States; both are now swept by GC.
+- Re-adding a deleted hash-part key (`t.x = nil; t.x = v`) shifted every later
+  entry, linear host work for a constant charge; it is now O(1) amortised.
+  `pairs` order is unchanged: the re-added key still moves to the back.
+- Every internal hash map used the OS-seeded `RandomState`, so bucket layout
+  varied per process. All maps now use fixed-seed foldhash, which is also
+  cheaper than SipHash on the table hash part. Freeing interned strings no
+  longer costs a shift of the string pool's index per freed bucket.
 
 ## [0.4.0] - 2026-07-27
 

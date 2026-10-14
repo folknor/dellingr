@@ -134,6 +134,40 @@ fn cached_fields_do_not_resurrect_after_deletion() {
 }
 
 #[test]
+fn cached_fields_follow_readded_keys_and_compaction() {
+    expect_ok(
+        r#"
+        local t = { a = 1, b = 2, c = 3, d = 4, e = 5, f = 6 }
+        local function read() return t.b end
+        local function write(v) t.b = v end
+        write(20)
+        if read() ~= 20 then error('warming access failed') end
+
+        t.b = nil
+        t.b = 21
+        if read() ~= 21 then error('read used vacated slot') end
+        write(22)
+        if read() ~= 22 then error('write used vacated slot') end
+        if t.c ~= 3 then error('write overwrote adjacent key') end
+
+        -- Leave b live while deleting enough keys to compact on the next add.
+        t.a = nil
+        t.c = nil
+        t.d = nil
+        t.e = nil
+        t.g = 7
+        if read() ~= 22 then error('read used pre-compaction index') end
+        write(23)
+        if read() ~= 23 then error('write used pre-compaction index') end
+        if t.f ~= 6 or t.g ~= 7 then error('write overwrote compacted key') end
+        local order = ''
+        for key in pairs(t) do order = order .. key end
+        if order ~= 'fbg' then error('wrong order after compaction') end
+    "#,
+    );
+}
+
+#[test]
 fn protected_metatables_hide_and_prevent_replacement() {
     let value = run_number(
         r#"

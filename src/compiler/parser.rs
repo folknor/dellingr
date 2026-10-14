@@ -18,7 +18,7 @@ use crate::instr::{ArgCount, Builtin, RetCount};
 use crate::limits::{MAX_FIXED_ARGS, MAX_LITERALS, MAX_LOCALS, MAX_SOURCE_BYTES, MAX_SYNTAX_DEPTH};
 use crate::numeral::{hex_value, is_lua_whitespace, is_newline_pair};
 
-use indexmap::IndexMap;
+use crate::det_hash::IndexMap;
 
 mod expr;
 mod func;

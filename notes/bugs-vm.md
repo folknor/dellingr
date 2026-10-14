@@ -23,24 +23,6 @@ anything.
    inline instead.
 ```
 
-## VM-013 - Every `IndexMap` in the VM uses the default `RandomState` hasher
-
-Source: vm-heap (finding 7).
-
-Claim broken: the letter of AGENTS.md's lint gate ("`RandomState` and
-`DefaultHasher` are banned"; "Host state is banned"). The gate only catches
-explicit uses. `IndexMap<Val, Val>` (table storage), `globals`,
-`format_pointer_ids`, `StringPool::hash_index` and every other `IndexMap::new()`
-default to `S = RandomState`, which is seeded from OS entropy on each run.
-
-The hunter found no observable output divergence, because iteration follows
-insertion order. Bucket layout, and therefore probe counts, varies per process,
-so performance is not reproducible. Every table lookup also pays for SipHash.
-
-Direction: a crate-wide type alias using a fixed-seed fast hasher (Fx or foldhash
-with a constant seed), which meets the stated rule and speeds up the VM's
-hottest path.
-
 ## VM-019 - Runtime 255-value caps on Lua returns and dynamic calls are documented as Rust-callback limits
 
 Source: vm-exec (finding 6, LOW).
@@ -200,19 +182,6 @@ non-table-metatable check is one more way to fail there) leaves the earlier
 deltas already applied. If a State is still usable after `load_state` returns
 an error, that breaks the all-or-nothing reading of a rejected load.
 
-## VM-036 - Re-adding a deleted hash key is O(table size) for an O(1) charge
-
-Source: lateral finding from the resolution-loop fixer that gave tables an
-array part.
-
-Claim broken: the cost budget bounds host work (README "Budget").
-
-`insert_into_map_with_tombstones` (`src/vm/table.rs`) reuses a key's dead slot
-via `shift_remove_index`, which shifts every later entry. A loop like
-`t.x = nil; t.x = v` on a large table therefore does linear host work per write
-at a constant charge. The array part no longer goes through this path; hash keys
-still do.
-
 ## VM-037 - Snapshots carry the producing host's NaN bits
 
 Source: lateral finding from the resolution-loop fixer that made
@@ -230,6 +199,20 @@ fixer also blamed folded literals; the wave reviewer reports that the parser
 already refuses to fold a NaN result, so only runtime values are affected.) If
 snapshots must be byte-identical across hosts (for example, hashed for replay
 verification), canonicalise NaN when saving.
+
+## VM-042 - Forged bytecode can underflow a table's tombstone count through repeated pinned-field initialization
+
+Source: lateral finding from a resolution-loop reviewer.
+
+Claim broken: the load contract that saved bytecode violating VM structural
+invariants is rejected with `InvalidBytecode`.
+
+`Table::init_at_index` (`src/vm/table.rs`) does not increment `dead_count` when
+it replaces a live value with nil. Forged snapshot bytecode can initialize the
+same pinned template field with a value, then nil, then a value again, which
+underflows the counter (a panic in debug, a wrap in release). The bytecode
+verifier (`src/compiler/verify.rs`) checks stack effects but does not enforce
+that each pinned field is initialized once.
 
 ## VM-038 - A Rust function reachable only through host state loses its rendered identity across save and load
 

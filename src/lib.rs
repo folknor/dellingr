@@ -24,6 +24,7 @@
 
 mod compiler;
 mod cost_meter;
+mod det_hash;
 mod host;
 mod instr;
 pub mod limits;

@@ -8,7 +8,7 @@
 //! Each ObjectPtr contains a generation that is validated on access,
 //! preventing use-after-free bugs.
 
-use indexmap::IndexMap;
+use crate::det_hash::IndexMap;
 use std::cell::Cell;
 use std::fmt;
 use std::sync::Arc;
@@ -713,10 +713,9 @@ pub(crate) struct StringPool {
     strings: SlotMap<StringKey, StringEntry>,
     /// Hash -> bucket of StringKeys for O(1) interner lookup.
     /// Multiple keys per bucket only on hash collision; the typical bucket
-    /// holds a single key. Iterated only during GC sweep, never during a
-    /// program-visible operation, so non-deterministic IndexMap iteration
-    /// order would not affect program output - but we still use IndexMap
-    /// over HashMap to keep determinism honest across hosts.
+    /// holds a single key. Only ever probed by hash, never iterated, so its
+    /// order is unobservable and empty buckets are dropped with an O(1)
+    /// `swap_remove` rather than an O(len) `shift_remove`.
     hash_index: IndexMap<u64, Vec<StringKey>>,
 }
 
@@ -724,7 +723,7 @@ impl StringPool {
     fn new() -> Self {
         Self {
             strings: SlotMap::with_key(),
-            hash_index: IndexMap::new(),
+            hash_index: IndexMap::default(),
         }
     }
 
@@ -830,7 +829,7 @@ impl StringPool {
             if let Some(bucket) = self.hash_index.get_mut(&hash) {
                 bucket.retain(|k| *k != key);
                 if bucket.is_empty() {
-                    self.hash_index.shift_remove(&hash);
+                    self.hash_index.swap_remove(&hash);
                 }
             }
         }
@@ -943,6 +942,36 @@ mod tests {
         // First string should survive
         assert_eq!(heap.get_string(kept), b"keep");
         assert_eq!(heap.string_count(), 1);
+    }
+
+    #[test]
+    fn string_pool_sweep_preserves_moved_and_colliding_buckets() {
+        let mut pool = StringPool::new();
+        // Control the hashes to exercise a partially collected collision
+        // bucket and live buckets moved by removal of an earlier bucket.
+        pool.insert_with_hash(Box::from(&b"dead first"[..]), 1);
+        let kept = pool.insert_with_hash(Box::from(&b"keep"[..]), 2);
+        let collided = pool.insert_with_hash(Box::from(&b"keep collision"[..]), 3);
+        pool.insert_with_hash(Box::from(&b"dead collision"[..]), 3);
+        pool.mark(kept);
+        pool.mark(collided);
+        pool.collect();
+
+        assert_eq!(pool.len(), 2);
+        assert_eq!(pool.find_by_hash(b"dead first", 1), None);
+        assert_eq!(pool.find_by_hash(b"dead collision", 3), None);
+        assert_eq!(pool.find_by_hash(b"keep", 2), Some(kept));
+        assert_eq!(pool.find_by_hash(b"keep collision", 3), Some(collided));
+
+        let replacement = pool.insert_with_hash(Box::from(&b"replacement"[..]), 1);
+        assert_eq!(pool.find_by_hash(b"replacement", 1), Some(replacement));
+        pool.mark(collided);
+        pool.collect();
+        assert_eq!(pool.len(), 1);
+        assert_eq!(pool.find_by_hash(b"keep", 2), None);
+        assert_eq!(pool.find_by_hash(b"replacement", 1), None);
+        assert_eq!(pool.find_by_hash(b"keep collision", 3), Some(collided));
+        assert_eq!(pool.get(collided), b"keep collision");
     }
 
     #[test]

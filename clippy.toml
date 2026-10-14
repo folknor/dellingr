@@ -20,6 +20,11 @@ disallowed-types = [
     { path = "std::collections::hash_set::HashSet", reason = "Non-deterministic iteration order. Use BTreeSet instead." },
     { path = "std::time::Instant", reason = "Host timing must not affect deterministic library behavior." },
     { path = "std::time::SystemTime", reason = "Host time must not affect deterministic library behavior." },
-    { path = "std::hash::RandomState", reason = "Randomized hash seeding breaks determinism. Use IndexMap or BTreeMap instead." },
+    { path = "std::hash::RandomState", reason = "Randomized hash seeding breaks determinism. Use det_hash::IndexMap or BTreeMap instead." },
+    { path = "std::collections::hash_map::RandomState", reason = "Randomized hash seeding breaks determinism. Use det_hash::IndexMap or BTreeMap instead." },
+    { path = "foldhash::fast::RandomState", reason = "Randomized hash seeding breaks determinism. Use det_hash::FixedState.", allow-invalid = true },
+    { path = "foldhash::fast::SeedableRandomState", reason = "Randomized hash seeding breaks determinism. Use det_hash::FixedState.", allow-invalid = true },
+    { path = "foldhash::quality::RandomState", reason = "Randomized hash seeding breaks determinism. Use det_hash::FixedState.", allow-invalid = true },
+    { path = "foldhash::quality::SeedableRandomState", reason = "Randomized hash seeding breaks determinism. Use det_hash::FixedState.", allow-invalid = true },
     { path = "std::hash::DefaultHasher", reason = "The standard hasher is not a stable replay contract. Use a specified deterministic hasher." },
 ]

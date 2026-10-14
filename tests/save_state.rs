@@ -132,7 +132,8 @@ fn tombstones_are_omitted_from_snapshots() {
     // change the payload size.
     // Build with assignments: named-field constructors reserve template slots
     // in Map storage even at three entries. Assignments keep the smaller hash
-    // part inline and promote the larger one, covering both tombstone filters.
+    // part inline and promote the larger ones. The final case re-adds b before
+    // saving, leaving a Vacant slot as well as the live entry at the back.
     for (tombstoned, clean, expected_order) in [
         (
             "t = {}; t.a = 1; t.b = 2; t.c = 3; t.b = nil",
@@ -142,6 +143,11 @@ fn tombstones_are_omitted_from_snapshots() {
         (
             "t = {}; t.a = 1; t.b = 2; t.c = 3; t.d = 4; t.e = 5; t.f = 6; t.b = nil",
             "t = {}; t.a = 1; t.c = 3; t.d = 4; t.e = 5; t.f = 6",
+            "acdefb",
+        ),
+        (
+            "t = {}; t.a = 1; t.b = 2; t.c = 3; t.d = 4; t.e = 5; t.f = 6; t.b = nil; t.b = 2",
+            "t = {}; t.a = 1; t.c = 3; t.d = 4; t.e = 5; t.f = 6; t.b = 2",
             "acdefb",
         ),
     ] {

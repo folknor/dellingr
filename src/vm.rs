@@ -23,7 +23,7 @@ pub use lua_val::RustFunc;
 #[cfg(feature = "snapshot")]
 pub use save_state::{LoadError, SaveDiagnostics, SaveError, SaveState};
 
-use indexmap::IndexMap;
+use crate::det_hash::IndexMap;
 #[cfg(feature = "snapshot")]
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -394,13 +394,13 @@ impl State {
     pub(crate) fn empty_with_callbacks(callbacks: Box<dyn HostCallbacks>) -> Self {
         let state_id = anchor::next_state_id();
         Self {
-            globals: IndexMap::new(),
+            globals: IndexMap::default(),
             builtins: std::array::from_fn(|_| Val::Nil),
             globals_version: 0,
             stack: Vec::with_capacity(256), // Pre-size for typical function depth * locals
             stack_bottom: 0,
             heap: GcHeap::new(),
-            bytecode_caches: IndexMap::new(),
+            bytecode_caches: IndexMap::default(),
             pending_bytecode_caches: Vec::new(),
             transient_roots: TransientRoots {
                 values: Vec::with_capacity(64),
@@ -414,7 +414,7 @@ impl State {
             cost_budget: i64::MAX,
             cost_budget_configured: false,
             cost_used: 0,
-            gmatch_patterns: IndexMap::new(),
+            gmatch_patterns: IndexMap::default(),
             gmatch_pattern_bytes: 0,
             #[cfg(debug_assertions)]
             gmatch_pattern_compilations: 0,
@@ -427,7 +427,7 @@ impl State {
             user_data: None,
             rng: VmRng::seed_from_u64(0),
             registry: Registry::new(state_id),
-            format_pointer_ids: IndexMap::new(),
+            format_pointer_ids: IndexMap::default(),
             next_format_pointer_id: 1,
             #[cfg(feature = "snapshot")]
             rust_fns_by_id: BTreeMap::new(),
@@ -1070,7 +1070,7 @@ impl State {
         F: FnOnce(&mut Self) -> R,
     {
         // Build restricted environment
-        let mut restricted_globals = IndexMap::new();
+        let mut restricted_globals = IndexMap::default();
         let mut restricted_builtins: [Val; Builtin::COUNT] = std::array::from_fn(|_| Val::Nil);
 
         for name in whitelist {

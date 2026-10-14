@@ -85,7 +85,11 @@ dbg_macro = "deny"
 todo = "deny"
 
 [dependencies]
-indexmap = "2.0"
+# Disabling `std` removes indexmap's `RandomState` default in standalone
+# builds. A host can re-enable it through Cargo feature unification, so all
+# maps still use the explicit fixed hasher in `det_hash::IndexMap`.
+indexmap = { version = "2.14", default-features = false }
+foldhash = { version = "0.2", default-features = false }
 slotmap = "1.1"
 # Deliberately non-optional: many internal functions carry the
 # `hotpath::measure` attribute, and without the `hotpath` cargo feature the

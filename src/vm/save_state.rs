@@ -47,7 +47,7 @@ use std::sync::Arc;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use indexmap::IndexMap;
+use crate::det_hash::map_with_capacity;
 
 use super::lua_val::RustFunc;
 use super::object::{GcHeap, RawObject, StringPtr, Upvalue, UpvalueRef};
@@ -1614,7 +1614,7 @@ fn materialize_payload(
     state.next_format_pointer_id = payload.next_format_pointer_id;
     let mut seen_pointer_values = BTreeSet::new();
     let mut seen_pointer_ids = BTreeSet::new();
-    let mut format_pointer_ids = IndexMap::with_capacity(payload.format_pointer_ids.len());
+    let mut format_pointer_ids = map_with_capacity(payload.format_pointer_ids.len());
     for (index, (saved, id)) in payload.format_pointer_ids.iter().enumerate() {
         let value = decode_val(saved, &ctx)?;
         insert_runtime_key(

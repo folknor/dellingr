@@ -1,6 +1,9 @@
 use std::cell::Cell;
+use std::hash::{Hash, Hasher};
 
-use indexmap::IndexMap;
+use indexmap::Equivalent;
+
+use crate::det_hash::{IndexMap, map_with_capacity};
 
 use super::Error;
 use super::Result;
@@ -79,6 +82,54 @@ pub(super) fn normalize_table_key<S, O, F>(
     }
 }
 
+/// A key slot in the map form of the hash part.
+///
+/// `Vacant` marks a slot whose key was re-added elsewhere: re-inserting a
+/// tombstoned key appends a fresh `Live` entry (so the key moves to the back
+/// of `pairs()` order, as an insertion of a new key does) and renames the old
+/// slot in place with `replace_index`, which is O(1). Removing the old slot
+/// instead would shift every later entry, O(table size) per write for an O(1)
+/// charge. A vacant slot always holds a nil value, so it is a tombstone to
+/// every reader, and no `Val` ever compares equal to it. Its payload is its
+/// own index, which keeps vacant keys distinct: map slots only move during
+/// `compact_dead`, which drops every vacant slot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HashKey {
+    Live(Val),
+    Vacant(usize),
+}
+
+impl HashKey {
+    /// The key as a `Val`. Only called on slots with a live value, which are
+    /// never vacant.
+    #[inline]
+    fn live(self) -> Val {
+        match self {
+            HashKey::Live(key) => key,
+            HashKey::Vacant(_) => unreachable!("a vacant hash slot never holds a live value"),
+        }
+    }
+}
+
+impl Hash for HashKey {
+    #[inline]
+    fn hash<H: Hasher>(&self, hasher: &mut H) {
+        // `Live` must hash exactly like the bare `Val`, so `Val` lookups find
+        // it through `Equivalent`.
+        match self {
+            HashKey::Live(key) => key.hash(hasher),
+            HashKey::Vacant(index) => index.hash(hasher),
+        }
+    }
+}
+
+impl Equivalent<HashKey> for Val {
+    #[inline]
+    fn equivalent(&self, key: &HashKey) -> bool {
+        matches!(key, HashKey::Live(live) if live == self)
+    }
+}
+
 /// Storage for the hash part. Small parts (<=4 entries) use inline array
 /// storage for better cache locality and reduced allocation overhead. Larger
 /// parts use IndexMap to maintain insertion order for deterministic `pairs()`
@@ -92,7 +143,7 @@ enum TableStorage {
         len: u8,
     },
     /// IndexMap storage for larger tables. Maintains insertion order.
-    Map(IndexMap<Val, Val>),
+    Map(IndexMap<HashKey, Val>),
 }
 
 /// The result of advancing a table iterator.
@@ -177,17 +228,17 @@ impl Table {
             Self::default()
         } else {
             Self {
-                storage: TableStorage::Map(IndexMap::with_capacity(capacity)),
+                storage: TableStorage::Map(map_with_capacity(capacity)),
                 ..Self::default()
             }
         }
     }
 
     pub(super) fn with_template_keys(key_ids: &[u16], literals: &[Val]) -> Self {
-        let mut map = IndexMap::with_capacity(key_ids.len());
+        let mut map = map_with_capacity(key_ids.len());
         for key_id in key_ids {
             let key = literals[*key_id as usize];
-            map.insert(key, Val::Nil);
+            map.insert(HashKey::Live(key), Val::Nil);
         }
         // Count the slots actually created, not the ids supplied: the bytecode
         // verifier rejects duplicate template keys, but a duplicate that got
@@ -307,9 +358,9 @@ impl Table {
                     None
                 }
             }
-            TableStorage::Map(map) => map
-                .get_index(index)
-                .and_then(|(key, value)| (!matches!(value, Val::Nil)).then_some((*key, *value))),
+            TableStorage::Map(map) => map.get_index(index).and_then(|(key, value)| {
+                (!matches!(value, Val::Nil)).then(|| (key.live(), *value))
+            }),
         }
     }
 
@@ -360,7 +411,7 @@ impl Table {
             TableStorage::Map(map) => out.extend(
                 map.iter()
                     .filter(|(_, value)| !matches!(value, Val::Nil))
-                    .map(|(key, value)| (*key, *value)),
+                    .map(|(key, value)| (key.live(), *value)),
             ),
         }
     }
@@ -504,7 +555,7 @@ impl Table {
                 let Some((existing_key, existing_value)) = map.get_index_mut(index) else {
                     return false;
                 };
-                if *existing_key != key {
+                if !key.equivalent(existing_key) {
                     return false;
                 }
                 let activated = matches!(*existing_value, Val::Nil) && !matches!(value, Val::Nil);
@@ -665,42 +716,32 @@ impl Table {
     }
 
     fn insert_into_map_with_tombstones(&mut self, key: Val, value: Val) {
-        let index = match &self.storage {
-            TableStorage::Map(map) => map.get_index_of(&key),
-            TableStorage::Inline { .. } => unreachable!("map insertion requires map storage"),
+        let TableStorage::Map(map) = &mut self.storage else {
+            unreachable!("map insertion requires map storage");
         };
-        if let Some(index) = index {
-            let was_live = match &mut self.storage {
-                TableStorage::Map(map) => {
-                    let (_, existing) = map
-                        .get_index_mut(index)
-                        .expect("IndexMap index returned by get_index_of must be valid");
-                    if !matches!(*existing, Val::Nil) {
-                        *existing = value;
-                        true
-                    } else {
-                        map.shift_remove_index(index);
-                        false
-                    }
-                }
-                TableStorage::Inline { .. } => unreachable!("map insertion requires map storage"),
-            };
-            if was_live {
+        if let Some((index, _, existing)) = map.get_full_mut(&key) {
+            if !matches!(*existing, Val::Nil) {
+                *existing = value;
                 return;
             }
-            self.dead_count -= 1;
+            // Re-adding a tombstoned key: vacate its old slot in place (it
+            // stays a tombstone, so `dead_count` is unchanged) and append the
+            // key below, moving it to the back of `pairs()` order. The key's
+            // index changes, so caches holding the old one must re-resolve.
+            map.replace_index(index, HashKey::Vacant(index))
+                .expect("no other slot holds the vacant key for this index");
+            // `bump_version` would borrow all of `self` while `map` is live.
+            self.version.set(self.version.get().wrapping_add(1));
+        }
+        // Both a new key and a re-added one add a slot; compacting once the
+        // tombstones (vacated slots included) reach the live count keeps the
+        // part within twice its live size at amortised O(1) per write.
+        let live_count = map.len() - self.dead_count;
+        if self.dead_count >= live_count && self.compact_dead() {
             self.bump_version();
-        } else {
-            let live_count = match &self.storage {
-                TableStorage::Map(map) => map.len() - self.dead_count,
-                TableStorage::Inline { .. } => unreachable!("map insertion requires map storage"),
-            };
-            if self.dead_count >= live_count && self.compact_dead() {
-                self.bump_version();
-            }
         }
         if let TableStorage::Map(map) = &mut self.storage {
-            map.insert(key, value);
+            map.insert(HashKey::Live(key), value);
         }
     }
 
@@ -721,7 +762,7 @@ impl Table {
                 }
             }
             TableStorage::Map(map) => {
-                map.insert(key, value);
+                map.insert(HashKey::Live(key), value);
             }
         }
         Ok(())
@@ -735,12 +776,13 @@ impl Table {
         if let TableStorage::Inline { mut entries, len } = old_storage {
             // INLINE_CAPACITY + 1 would guarantee a rehash almost immediately
             // for a growing table; start at 8 to skip that first rehash.
-            let mut map = IndexMap::with_capacity((INLINE_CAPACITY + 1).next_power_of_two());
+            let mut map: IndexMap<HashKey, Val> =
+                map_with_capacity((INLINE_CAPACITY + 1).next_power_of_two());
             for entry in entries.iter_mut().take(len as usize) {
                 let (k, v) = std::mem::take(entry);
-                map.insert(k, v);
+                map.insert(HashKey::Live(k), v);
             }
-            map.insert(new_key, new_value);
+            map.insert(HashKey::Live(new_key), new_value);
             self.storage = TableStorage::Map(map);
         }
     }
@@ -945,7 +987,7 @@ impl Table {
                 .map_or(TableNextWithIndex::End, |(index, (key, value))| {
                     TableNextWithIndex::Pair {
                         index,
-                        key: *key,
+                        key: key.live(),
                         value: *value,
                     }
                 }),
@@ -1000,7 +1042,7 @@ impl Table {
             }
             TableStorage::Map(map) => map
                 .get_index(index)
-                .is_some_and(|(key, _)| *key == *control),
+                .is_some_and(|(key, _)| control.equivalent(key)),
         };
         if matches {
             self.next_live_from(Position::Hash(index.saturating_add(1)))
@@ -1042,7 +1084,7 @@ impl Table {
             TableStorage::Map(map) => {
                 for (k, v) in map {
                     if !matches!(v, Val::Nil) {
-                        k.mark_reachable(heap, worklist);
+                        k.live().mark_reachable(heap, worklist);
                         v.mark_reachable(heap, worklist);
                     }
                 }
@@ -1615,6 +1657,84 @@ mod tests {
         assert_eq!(t.dead_count, 0);
         t.insert(h(8), Val::Bool(true)).unwrap();
         assert_eq!(t.get(&h(8)), Val::Bool(true));
+    }
+
+    fn map_slots(t: &Table) -> usize {
+        match &t.storage {
+            TableStorage::Map(map) => map.len(),
+            TableStorage::Inline { .. } => panic!("expected map storage"),
+        }
+    }
+
+    #[test]
+    fn readding_tombstoned_keys_vacates_in_place_and_stays_bounded() {
+        // Rotating delete/re-add over every key: each re-add used to
+        // shift_remove the dead slot, O(table size) per write. Now the old
+        // slot is renamed Vacant in place and the key appends, so the order is
+        // still "moved to the back", indices before the vacated slot never
+        // move, and compaction keeps the part within twice its live size.
+        let count = 64;
+        let mut t = Table::default();
+        fill_hash(&mut t, 1..=count);
+        let mut expected: Vec<Val> = (1..=count).map(h).collect();
+        for round in 0..3 {
+            for i in 1..=count {
+                let (before, _) = t.get_with_index(&h(1)).unwrap();
+                t.insert(h(i), Val::Nil).unwrap();
+                t.insert(h(i), Val::Num(round as f64)).unwrap();
+                expected.retain(|key| *key != h(i));
+                expected.push(h(i));
+                assert!(map_slots(&t) <= 2 * count + 1);
+                assert_eq!(t.hash_live_len(), count);
+                if i != 1 {
+                    // Key 1 keeps its appended index until compaction, even
+                    // when an earlier slot is vacated.
+                    let (after, _) = t.get_with_index(&h(1)).unwrap();
+                    assert!(after == before || t.dead_count == 0);
+                }
+            }
+            assert_eq!(keys(&t), expected);
+        }
+        for (pos, key) in expected.iter().enumerate() {
+            assert_eq!(t.get(key), Val::Num(2.0), "key at pairs position {pos}");
+        }
+    }
+
+    #[test]
+    fn readded_key_leaves_a_dead_old_index_and_a_valid_new_one() {
+        let mut t = Table::default();
+        fill_hash(&mut t, 1..=8);
+        let (old, _) = t.get_with_index(&h(3)).unwrap();
+        t.insert(h(3), Val::Nil).unwrap();
+        t.insert(h(5), Val::Nil).unwrap();
+        let version = t.version();
+        // Two vacated slots at once must not collide.
+        t.insert(h(3), Val::Num(3.0)).unwrap();
+        t.insert(h(5), Val::Num(5.0)).unwrap();
+        assert_eq!(t.version(), version + 2);
+        assert_eq!(t.get_index(old), None);
+        assert!(!t.set_at_index(old, Val::Bool(false)));
+        assert!(matches!(
+            t.next_from_matching_index(old, &h(3)),
+            TableNextWithIndex::InvalidKey
+        ));
+        let (new, value) = t.get_with_index(&h(3)).unwrap();
+        assert_eq!(value, Val::Num(3.0));
+        assert_eq!(t.get_index(new), Some((h(3), Val::Num(3.0))));
+        // The cursor walk crosses both vacant slots.
+        assert_eq!(
+            keys(&t),
+            [1, 2, 4, 6, 7, 8, 3, 5]
+                .into_iter()
+                .map(h)
+                .collect::<Vec<_>>()
+        );
+        // Removing again tombstones the new slot; a third add reuses nothing
+        // stale.
+        t.insert(h(3), Val::Nil).unwrap();
+        assert_eq!(t.get(&h(3)), Val::Nil);
+        t.insert(h(3), Val::Bool(true)).unwrap();
+        assert_eq!(keys(&t).last(), Some(&h(3)));
     }
 
     #[test]
