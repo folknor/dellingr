@@ -13,12 +13,10 @@ use super::lexer::TokenStream;
 use super::token::Token;
 use super::token::TokenType;
 use crate::instr::{ArgCount, Builtin, RetCount};
-use crate::limits::{MAX_FIXED_ARGS, MAX_LITERALS, MAX_LOCALS};
+use crate::limits::{MAX_FIXED_ARGS, MAX_LITERALS, MAX_LOCALS, MAX_SYNTAX_DEPTH};
 use crate::numeral::{hex_value, is_lua_whitespace, is_newline_pair};
 
 use std::borrow::Borrow;
-
-pub(crate) const MAX_SYNTAX_DEPTH: u32 = 200;
 
 mod expr;
 mod func;
@@ -509,6 +507,27 @@ impl<'a> Parser<'a> {
         std::mem::replace(slot, instr)
     }
 
+    /// Changes a final call or vararg to provide every requested tail value.
+    /// Returns false when the expression emits exactly one value by default.
+    pub(super) fn open_tail(&mut self, last: &ExpDesc, want: RetCount) -> bool {
+        let (replacement, expected_opcode, expression) = match last {
+            ExpDesc::Vararg => (Instr::vararg(want.to_u8()), Instr::OP_VARARG, "vararg"),
+            ExpDesc::Prefix(PrefixExp::FunctionCall(call)) => (
+                Instr::call(call.num_args(), want),
+                Instr::OP_CALL,
+                "function call",
+            ),
+            _ => return false,
+        };
+        let old = self.replace_last_instr(replacement);
+        assert_eq!(
+            old.opcode(),
+            expected_opcode,
+            "a final {expression} must end with its matching instruction"
+        );
+        true
+    }
+
     /// Updates current line from the lexer stamp on a consumed or peeked token.
     #[hotpath::measure]
     fn update_line(&mut self, token: Token) {
@@ -685,15 +704,7 @@ impl<'a> Parser<'a> {
             }
             PrefixExp::Parenthesized => (),
             PrefixExp::Place(place) => {
-                let instr = match place {
-                    PlaceExp::Local(i) => Instr::get_local(*i),
-                    PlaceExp::Upvalue(i) => Instr::get_upvalue(*i),
-                    PlaceExp::Global(i) => Instr::get_global(*i),
-                    PlaceExp::Builtin(b) => Instr::get_builtin(*b),
-                    PlaceExp::FieldAccess(i) => Instr::get_field(*i),
-                    PlaceExp::TableIndex => Instr::get_table(),
-                };
-                self.push(instr);
+                self.push(place.get_instr());
             }
         }
     }

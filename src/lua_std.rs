@@ -44,12 +44,7 @@ pub(crate) fn open_libs(state: &mut State) -> Result<()> {
 
 /// Adds the known standard-library function name to a generic argument error.
 ///
-/// `State::check_type` is also part of the host API, where no Lua function name
-/// is available. Rust callbacks are not represented in `CallInfo`, so
-/// standard-library call sites that know their registration name must supply it
-/// here instead of trying to infer it from the Lua caller. Automatic lookup
-/// needs a native name in `CallInfo` (`vm.rs`) and must set it around both Rust
-/// callback dispatch paths (`vm/eval.rs` and `vm/eval_control.rs`).
+/// Explicit library names override global aliases and snapshot registration ids.
 fn name_argument_error(mut error: Error, function_name: &str) -> Error {
     if let ErrorKind::ArgError(argument) = &mut error.kind {
         argument.func_name = Some(function_name.to_owned());
@@ -90,11 +85,6 @@ pub(super) fn check_optional_type_named(
 }
 
 /// Formats a standard-library argument error with a named function and detail.
-///
-/// `ArgError` currently represents only one expected Lua type, so errors for
-/// a value with the right type but an invalid value need this runtime-error
-/// path until the error type can carry a structured detail. Adding that detail
-/// to `ArgError` also requires updating its direct constructor in `vm/eval.rs`.
 pub(super) fn argument_error(
     state: &State,
     arg_number: isize,
@@ -145,6 +135,9 @@ pub(super) fn opt_integer(
     }
 }
 
+// The callback ABI accepts 255 results. RetCount's 255 byte is an encoding
+// sentinel for All, not a 254-result runtime cap; keep count validation here
+// independent of the bytecode encoding.
 /// Implements both global `unpack` and `table.unpack`.
 pub(super) fn unpack_values(state: &mut State) -> Result<u8> {
     check_type_named(state, 1, LuaType::Table, "unpack")?;
@@ -159,16 +152,20 @@ pub(super) fn unpack_values(state: &mut State) -> Result<u8> {
         state.set_top(0)?;
         return Ok(0);
     }
-    let span = j
-        .checked_sub(i)
-        .ok_or_else(|| state.error(ErrorKind::RuntimeError("too many results to unpack".into())))?;
-    if span >= 255 {
-        return Err(state.error(ErrorKind::RuntimeError("too many results to unpack".into())));
+    let span = j.checked_sub(i).ok_or_else(|| {
+        state.error(ErrorKind::TooManyResults {
+            limit: crate::error::MAX_RESULTS,
+        })
+    })?;
+    if span >= i64::from(crate::error::MAX_RESULTS) {
+        return Err(state.error(ErrorKind::TooManyResults {
+            limit: crate::error::MAX_RESULTS,
+        }));
     }
     for index in i..=j {
         state.push_number(index as f64)?;
         state.get_table(1)?;
     }
     state.remove(1)?;
-    Ok((span + 1) as u8)
+    crate::error::results_count((span + 1) as usize).map_err(|kind| state.error(kind))
 }

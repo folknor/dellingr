@@ -10,8 +10,9 @@ use crate::compiler::UpvalueDesc;
 use crate::error::{ErrorKind, SyntaxError};
 use crate::instr::{ArgCount, Builtin, RetCount};
 use crate::limits::{
-    MAX_ASSIGNMENT_OFFSET, MAX_EXPRESSIONS, MAX_FIXED_ARGS, MAX_FIXED_RESULTS, MAX_LITERALS,
-    MAX_LOCALS, MAX_NESTED, MAX_TABLE_BATCH_SIZE, MAX_TABLE_TEMPLATE_FIELDS, MAX_TABLE_TEMPLATES,
+    MAX_ASSIGNMENT_OFFSET, MAX_CHUNK_NESTING, MAX_EXPRESSIONS, MAX_FIXED_ARGS, MAX_FIXED_RESULTS,
+    MAX_LITERALS, MAX_LOCALS, MAX_NESTED, MAX_TABLE_BATCH_SIZE, MAX_TABLE_TEMPLATE_FIELDS,
+    MAX_TABLE_TEMPLATES,
 };
 
 /// Recursively clear line_info from a chunk and its nested chunks.
@@ -2054,6 +2055,49 @@ fn constant_folding_respects_jump_targets() {
         eval_number("local n = 0\nwhile 2 * 3 do\n  n = n + 1\n  if n >= 2 then return n end\nend"),
         2.0
     );
+}
+
+fn nested_function_chain(depth: usize) -> String {
+    let nested_functions = depth - 1;
+    // The innermost body stays empty: an expression there would add a syntax
+    // level of its own and hit the syntax depth limit one chunk early.
+    format!(
+        "{}{}",
+        "function f() ".repeat(nested_functions),
+        "end ".repeat(nested_functions)
+    )
+}
+
+#[test]
+fn chunk_nesting_limit_is_enforced_by_the_parser() {
+    std::thread::Builder::new()
+        .stack_size(8 << 20)
+        .spawn(|| {
+            let source = nested_function_chain(MAX_CHUNK_NESTING);
+            let bytecode =
+                parse_str(&source).expect("the deepest allowed chunk chain must compile");
+            let error = parse_str(&nested_function_chain(MAX_CHUNK_NESTING + 1))
+                .expect_err("one more nested chunk must fail in the parser");
+            assert!(matches!(
+                error.kind,
+                ErrorKind::SyntaxError(SyntaxError::TooManySyntaxLevels)
+            ));
+            assert_eq!(chunk_depth(&bytecode), MAX_CHUNK_NESTING);
+        })
+        .expect("spawning the chunk nesting test thread should succeed")
+        .join()
+        .unwrap_or_else(|payload| {
+            let message = payload
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| payload.downcast_ref::<&str>().copied())
+                .unwrap_or("non-string panic payload");
+            panic!("chunk nesting test thread panicked: {message}");
+        });
+}
+
+fn chunk_depth(chunk: &Bytecode) -> usize {
+    1 + chunk.nested.first().map_or(0, |nested| chunk_depth(nested))
 }
 
 #[test]

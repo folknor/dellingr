@@ -18,26 +18,10 @@ impl<'a> Parser<'a> {
         // Check if there's an expression following return
         let n = if self.is_expr_start()? {
             let (n, last_exp) = self.parse_explist()?;
-            // If the last expression is a function call or vararg, adjust to return all values
-            match last_exp {
-                ExpDesc::Prefix(PrefixExp::FunctionCall(call)) => {
-                    let num_args = call.num_args();
-                    let old = *self
-                        .chunk
-                        .code
-                        .last()
-                        .expect("tail function call must emit a call instruction");
-                    if old.opcode() != Instr::OP_CALL {
-                        unreachable!("tail function call but last instruction was {old:?}");
-                    }
-                    self.replace_last_instr(Instr::call(num_args, RetCount::All)); // Emit Call with "return all"
-                    u8::MAX
-                }
-                ExpDesc::Vararg => {
-                    self.replace_last_instr(Instr::vararg(u8::MAX)); // Emit Vararg with "return all"
-                    u8::MAX
-                }
-                _ => n,
+            if self.open_tail(&last_exp, RetCount::All) {
+                u8::MAX
+            } else {
+                n
             }
         } else {
             0
@@ -106,29 +90,17 @@ impl<'a> Parser<'a> {
 
         places.reverse();
         for (i, place_exp) in places.into_iter().enumerate() {
-            let instr = match place_exp {
-                PlaceExp::Local(i) => Instr::set_local(i),
-                PlaceExp::Upvalue(i) => Instr::set_upvalue(i),
-                PlaceExp::Global(i) => Instr::set_global(i),
-                PlaceExp::Builtin(b) => Instr::set_builtin(b),
-                PlaceExp::FieldAccess(literal_id) => {
+            let instr = match &place_exp {
+                PlaceExp::FieldAccess(_) | PlaceExp::TableIndex => {
                     let stack_offset = num_lvals - i - 1;
                     if stack_offset > MAX_ASSIGNMENT_OFFSET {
                         return Err(self.error_here(SyntaxError::AssignmentOffsetTooLarge));
                     }
                     let stack_offset = u8::try_from(stack_offset)
                         .map_err(|_| self.error_here(SyntaxError::AssignmentOffsetTooLarge))?;
-                    Instr::set_field_at(stack_offset, literal_id)
+                    place_exp.set_instr(stack_offset)
                 }
-                PlaceExp::TableIndex => {
-                    let stack_offset = num_lvals - i - 1;
-                    if stack_offset > MAX_ASSIGNMENT_OFFSET {
-                        return Err(self.error_here(SyntaxError::AssignmentOffsetTooLarge));
-                    }
-                    let stack_offset = u8::try_from(stack_offset)
-                        .map_err(|_| self.error_here(SyntaxError::AssignmentOffsetTooLarge))?;
-                    Instr::set_table(stack_offset)
-                }
+                _ => place_exp.set_instr(0),
             };
             self.push(instr);
         }
@@ -401,34 +373,23 @@ impl<'a> Parser<'a> {
         let fixed_prefix = num_exprs - 1;
         let tail_needed = num_targets.saturating_sub(fixed_prefix);
 
-        match last_exp {
-            ExpDesc::Prefix(PrefixExp::FunctionCall(call)) if tail_needed > 1 => {
-                let num_args = call.num_args();
-                let tail_needed = self.checked_multi_assign_width(tail_needed)?;
-                let old =
-                    self.replace_last_instr(Instr::call(num_args, RetCount::Fixed(tail_needed)));
-                debug_assert!(
-                    old.opcode() == Instr::OP_CALL,
-                    "tail function call must end the emitted expression list"
-                );
+        let expandable_tail = matches!(
+            last_exp,
+            ExpDesc::Prefix(PrefixExp::FunctionCall(_)) | ExpDesc::Vararg
+        );
+        if tail_needed > 1 && expandable_tail {
+            let tail_needed = self.checked_multi_assign_width(tail_needed)?;
+            assert!(
+                self.open_tail(last_exp, RetCount::Fixed(tail_needed)),
+                "an expandable assignment tail must be a call or vararg"
+            );
+        } else if num_targets > num_exprs {
+            for _ in num_exprs..num_targets {
+                self.push(Instr::push_nil());
             }
-            ExpDesc::Vararg if tail_needed > 1 => {
-                let tail_needed = self.checked_multi_assign_width(tail_needed)?;
-                let old = self.replace_last_instr(Instr::vararg(tail_needed));
-                debug_assert!(
-                    old.opcode() == Instr::OP_VARARG,
-                    "tail vararg must end the emitted expression list"
-                );
-            }
-            _ if num_targets > num_exprs => {
-                for _ in num_exprs..num_targets {
-                    self.push(Instr::push_nil());
-                }
-            }
-            _ => {
-                for _ in num_targets..num_exprs {
-                    self.push(Instr::pop());
-                }
+        } else {
+            for _ in num_targets..num_exprs {
+                self.push(Instr::pop());
             }
         }
 

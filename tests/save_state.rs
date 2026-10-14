@@ -22,6 +22,10 @@ fn run(state: &mut State, source: &str) {
     state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
 }
 
+fn no_setup(_: &mut State) -> std::result::Result<(), std::convert::Infallible> {
+    Ok(())
+}
+
 #[test]
 fn deep_global_chain_saves_and_loads_iteratively() {
     let mut state = State::new();
@@ -31,7 +35,7 @@ fn deep_global_chain_saves_and_loads_iteratively() {
         "deep = {}\nfor i = 1, 50000 do deep = { next = deep } end",
     );
     let save = state.save_state().expect("deep chain saves");
-    let mut loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), |_| {})
+    let mut loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), no_setup)
         .expect("deep chain loads");
     run(
         &mut loaded,
@@ -45,7 +49,7 @@ fn global_environment_preserves_non_string_key_identity_across_save_load() {
     run(&mut state, "_G[1] = 'number'; _G['1'] = 'string'");
     let save = state.save_state().expect("state saves");
     let mut loaded =
-        State::load_state(&save.bytes, Box::new(DefaultCallbacks), |_| {}).expect("state loads");
+        State::load_state(&save.bytes, Box::new(DefaultCallbacks), no_setup).expect("state loads");
     loaded
         .load_string("return _G[1], _G['1']")
         .expect("query compiles");
@@ -106,7 +110,7 @@ fn round_trip_preserves_data_graph_and_env_references() {
         let lines = Arc::clone(&callbacks.lines);
         (callbacks, lines)
     };
-    let mut loaded = State::load_state(&save.bytes, Box::new(loaded_callbacks), |_| {}).unwrap();
+    let mut loaded = State::load_state(&save.bytes, Box::new(loaded_callbacks), no_setup).unwrap();
     run(&mut loaded, continuation);
 
     assert_eq!(
@@ -158,7 +162,7 @@ fn tombstones_are_omitted_from_snapshots() {
         // And the live entries still round-trip with insertion order intact,
         // with a reinserted key landing at the back.
         let mut loaded =
-            State::load_state(&tombstoned_bytes, Box::new(DefaultCallbacks), |_| {}).unwrap();
+            State::load_state(&tombstoned_bytes, Box::new(DefaultCallbacks), no_setup).unwrap();
         run(
             &mut loaded,
             "t.b = 4; order = ''; for k in pairs(t) do order = order .. k end",
@@ -309,7 +313,7 @@ fn gmatch_closure_survives_save_load() {
     state.pop(1).unwrap();
 
     let save = state.save_state().unwrap();
-    let mut loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), |_| {}).unwrap();
+    let mut loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), no_setup).unwrap();
 
     loaded.get_global("f").unwrap();
     loaded.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
@@ -325,7 +329,7 @@ fn empty_gmatch_closure_survives_save_load() {
     state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
 
     let save = state.save_state().unwrap();
-    let mut loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), |_| {}).unwrap();
+    let mut loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), no_setup).unwrap();
 
     loaded.get_global("g").unwrap();
     loaded.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
@@ -336,7 +340,7 @@ fn empty_gmatch_closure_survives_save_load() {
 fn empty_state_round_trip_stays_empty() {
     let state = State::empty();
     let save = state.save_state().unwrap();
-    let mut loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), |_| {}).unwrap();
+    let mut loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), no_setup).unwrap();
 
     for name in [
         "print",
@@ -374,7 +378,7 @@ fn pairs_iterator_round_trips_after_next_rebinding() {
         "iter, iter_state, iter_key = pairs({ a = 7 })\nnext = 42",
     );
     let save = state.save_state().unwrap();
-    let mut loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), |_| {}).unwrap();
+    let mut loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), no_setup).unwrap();
     loaded
         .load_string("for key, value in iter, iter_state, iter_key do result = value end")
         .unwrap();
@@ -396,7 +400,7 @@ fn dynamic_table_constructor_round_trips_after_completion() {
     "#,
     );
     let save = original.save_state().unwrap();
-    let mut loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), |_| {}).unwrap();
+    let mut loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), no_setup).unwrap();
     run(&mut loaded, "a = #t; b = t[1] + t[2] + t[3] + t[4]");
     loaded.get_global("a").unwrap();
     assert_eq!(loaded.to_number(-1).unwrap(), 4.0);
@@ -429,7 +433,7 @@ fn rng_and_cost_continue_after_load() {
 
     let callbacks = Capture::default();
     let loaded_lines = Arc::clone(&callbacks.lines);
-    let mut loaded = State::load_state(&save.bytes, Box::new(callbacks), |_| {}).unwrap();
+    let mut loaded = State::load_state(&save.bytes, Box::new(callbacks), no_setup).unwrap();
     assert_eq!(loaded.cost_used(), original.cost_used());
     assert_eq!(loaded.cost_remaining(), original.cost_remaining());
     run(
@@ -454,7 +458,7 @@ fn configured_budget_remains_enforced_after_load() {
     let save = original.save_state().expect("state saves");
 
     let mut loaded =
-        State::load_state(&save.bytes, Box::new(DefaultCallbacks), |_| {}).expect("state loads");
+        State::load_state(&save.bytes, Box::new(DefaultCallbacks), no_setup).expect("state loads");
     assert_eq!(loaded.cost_remaining(), 2);
 
     // Invoke the native function directly so the saved two units are consumed
@@ -516,7 +520,7 @@ fn anchor_count_is_diagnostic_not_persisted() {
     let save = state.save_state().unwrap();
     assert_eq!(save.diagnostics.anchor_count, 1);
 
-    let loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), |_| {}).unwrap();
+    let loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), no_setup).unwrap();
     assert_eq!(loaded.anchor_count(), 0);
 
     assert!(state.release_anchor(anchor));
@@ -614,6 +618,7 @@ fn ordered_environment_replay_preserves_setup_additions_and_metatable() {
             state,
             "math.future = 99; local mt = { setup = true }; setmetatable(math, mt)",
         );
+        Ok::<(), std::convert::Infallible>(())
     })
     .expect("state loads with later environment additions");
     run(
@@ -644,6 +649,7 @@ fn unordered_environment_replay_places_setup_additions_before_new_keys() {
     let save = original.save_state().expect("state saves");
     let mut loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), |state| {
         run(state, "math.future = 99");
+        Ok::<(), std::convert::Infallible>(())
     })
     .expect("state loads");
     run(
@@ -660,8 +666,9 @@ fn setup_anchor_survives_load_final_gc() {
     let save = original.save_state().expect("state saves");
     let mut setup_anchor = None;
     let mut loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), |state| {
-        state.push_number(42.0).unwrap();
-        setup_anchor = Some(state.anchor().expect("setup anchor succeeds"));
+        state.push_number(42.0)?;
+        setup_anchor = Some(state.anchor()?);
+        Ok::<(), dellingr::error::Error>(())
     })
     .expect("state loads");
     loaded
@@ -683,6 +690,7 @@ fn unsupported_format_versions_fail_before_setup() {
         assert!(matches!(
             State::load_state(&bytes, Box::new(DefaultCallbacks), move |_| {
                 observed.store(true, Ordering::SeqCst);
+                Ok::<(), std::convert::Infallible>(())
             }),
             Err(LoadError::UnsupportedVersion { found, expected: 6 }) if found == version
         ));
@@ -703,6 +711,7 @@ fn unsupported_cost_model_versions_fail_before_setup() {
         assert!(matches!(
             State::load_state(&bytes, Box::new(DefaultCallbacks), move |_| {
                 observed.store(true, Ordering::SeqCst);
+                Ok::<(), std::convert::Infallible>(())
             }),
             Err(LoadError::UnsupportedCostModelVersion { found, expected })
                 if found == version && expected == dellingr::COST_MODEL_VERSION
@@ -730,7 +739,7 @@ fn wide_literal_indices_and_uncached_slots_round_trip() {
     let mut state = State::new();
     run(&mut state, &source);
     let saved = state.save_state().expect("wide bytecode should save");
-    let mut loaded = State::load_state(&saved.bytes, Box::new(DefaultCallbacks), |_| {})
+    let mut loaded = State::load_state(&saved.bytes, Box::new(DefaultCallbacks), no_setup)
         .expect("wide bytecode should load");
     loaded
         .load_string("return answer")
@@ -754,7 +763,7 @@ fn non_quiescent_save_errors() {
 
 #[test]
 fn bad_or_truncated_bytes_error_without_panicking() {
-    let bad_magic = match State::load_state(b"nope", Box::new(DefaultCallbacks), |_| {}) {
+    let bad_magic = match State::load_state(b"nope", Box::new(DefaultCallbacks), no_setup) {
         Ok(_) => panic!("bad magic load should fail"),
         Err(err) => err,
     };
@@ -763,7 +772,7 @@ fn bad_or_truncated_bytes_error_without_panicking() {
     let state = State::new();
     let mut bytes = state.save_state().unwrap().bytes;
     bytes.pop();
-    let truncated = match State::load_state(&bytes, Box::new(DefaultCallbacks), |_| {}) {
+    let truncated = match State::load_state(&bytes, Box::new(DefaultCallbacks), no_setup) {
         Ok(_) => panic!("truncated load should fail"),
         Err(err) => err,
     };
@@ -782,7 +791,7 @@ fn missing_host_function_registration_errors_on_load() {
         .unwrap();
     let save = state.save_state().unwrap();
 
-    let err = match State::load_state(&save.bytes, Box::new(DefaultCallbacks), |_| {}) {
+    let err = match State::load_state(&save.bytes, Box::new(DefaultCallbacks), no_setup) {
         Ok(_) => panic!("missing host function load should fail"),
         Err(err) => err,
     };
@@ -806,14 +815,45 @@ fn registered_host_function_reconnects_on_load() {
     let callbacks = Capture::default();
     let lines = Arc::clone(&callbacks.lines);
     let mut loaded = State::load_state(&save.bytes, Box::new(callbacks), |state| {
-        state
-            .set_global_named_rust_fn("host_value", "game.host_value", host_value)
-            .unwrap();
+        state.set_global_named_rust_fn("host_value", "game.host_value", host_value)
     })
     .unwrap();
     run(&mut loaded, "print(saved_host_value())");
 
     assert_eq!(*lines.lock().unwrap(), vec!["42".to_string()]);
+}
+
+#[test]
+fn load_setup_registration_errors_are_returned_directly() {
+    fn original_fn(state: &mut State) -> dellingr::Result<u8> {
+        state.push_number(1.0)?;
+        Ok(1)
+    }
+    fn conflicting_fn(state: &mut State) -> dellingr::Result<u8> {
+        state.push_number(2.0)?;
+        Ok(1)
+    }
+
+    let mut state = State::new();
+    state
+        .set_global_named_rust_fn("host_fn", "game.host_fn", original_fn)
+        .unwrap();
+    run(&mut state, "saved_host_fn = host_fn");
+    let save = state.save_state().unwrap();
+
+    let error = match State::load_state(&save.bytes, Box::new(DefaultCallbacks), |state| {
+        state.register_rust_fn("game.host_fn", original_fn)?;
+        state.register_rust_fn("game.host_fn", conflicting_fn)
+    }) {
+        Ok(_) => panic!("conflicting setup registration must fail"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error,
+        LoadError::Setup(SaveError::DuplicateFunctionRegistration {
+            id: "game.host_fn".to_string(),
+        })
+    );
 }
 
 #[test]
@@ -850,7 +890,7 @@ fn fresh() -> State {
 
 fn reload(state: &State) -> State {
     let save = state.save_state().unwrap();
-    State::load_state(&save.bytes, Box::new(DefaultCallbacks), |_| {}).unwrap()
+    State::load_state(&save.bytes, Box::new(DefaultCallbacks), no_setup).unwrap()
 }
 
 fn global_num(state: &mut State, name: &str) -> f64 {
@@ -937,6 +977,34 @@ fn cyclic_metatable_round_trips() {
     );
     assert_eq!(global_num(&mut loaded, "self_mt"), 1.0);
     assert_eq!(global_num(&mut loaded, "direct"), 42.0);
+}
+
+#[test]
+fn closure_capturing_two_tables_round_trips() {
+    // The snapshot verifier used to reject an ordinary Lua closure whose
+    // upvalues are two distinct tables.
+    let mut original = fresh();
+    run(
+        &mut original,
+        r#"
+        function make()
+            local a = { n = 1 }
+            local b = { n = 10 }
+            return function()
+                a.n = a.n + 1
+                b.n = b.n + 10
+                return a.n + b.n
+            end
+        end
+        f = make()
+        first = f()
+    "#,
+    );
+    assert_eq!(global_num(&mut original, "first"), 22.0);
+
+    let mut loaded = reload(&original);
+    run(&mut loaded, "second = f()");
+    assert_eq!(global_num(&mut loaded, "second"), 33.0);
 }
 
 #[test]
@@ -1079,7 +1147,7 @@ fn compiler_produced_save_resaves_byte_for_byte() {
     "#,
     );
     let first = original.save_state().unwrap().bytes;
-    let loaded = State::load_state(&first, Box::new(DefaultCallbacks), |_| {}).unwrap();
+    let loaded = State::load_state(&first, Box::new(DefaultCallbacks), no_setup).unwrap();
     assert_eq!(loaded.save_state().unwrap().bytes, first);
 }
 
@@ -1128,6 +1196,24 @@ fn non_utf8_and_edge_values_round_trip() {
 }
 
 #[test]
+fn snapshot_preserves_first_inserted_negative_zero_table_key() {
+    let mut original = fresh();
+    run(
+        &mut original,
+        "t = {}; t[-0.0] = 1; t[0.0] = 2; for key in pairs(t) do zero_key = tostring(key) end",
+    );
+    assert_eq!(global_str(&mut original, "zero_key"), "-0");
+
+    let mut loaded = reload(&original);
+    run(
+        &mut loaded,
+        "for key in pairs(t) do zero_key_after_load = tostring(key) end; value_after_load = t[0.0]",
+    );
+    assert_eq!(global_str(&mut loaded, "zero_key_after_load"), "-0");
+    assert_eq!(global_num(&mut loaded, "value_after_load"), 2.0);
+}
+
+#[test]
 fn large_table_pairs_order_round_trips() {
     let mut original = fresh();
     run(
@@ -1172,7 +1258,7 @@ fn corruption_sweep_never_panics() {
         ignore(State::load_state(
             &bytes[..len],
             Box::new(DefaultCallbacks),
-            |_| {},
+            no_setup,
         ));
     }
     // A single-byte flip at every offset must load-or-error, never panic.
@@ -1182,7 +1268,7 @@ fn corruption_sweep_never_panics() {
         ignore(State::load_state(
             &corrupted,
             Box::new(DefaultCallbacks),
-            |_| {},
+            no_setup,
         ));
     }
 }

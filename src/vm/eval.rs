@@ -48,11 +48,8 @@ impl State {
                         "dynamic call base is outside the active stack".into(),
                     ))
                 })?;
-                let actual = u8::try_from(actual_len).map_err(|_| {
-                    self.error(ErrorKind::RuntimeError(
-                        "too many arguments (limit 255)".into(),
-                    ))
-                })?;
+                let actual = u8::try_from(actual_len)
+                    .map_err(|_| self.error(ErrorKind::TooManyArguments { limit: u8::MAX }))?;
                 (base, actual)
             }
             ArgCount::Fixed(n) => {
@@ -81,7 +78,9 @@ impl State {
             //
             // The fix: call f(self) without ?, handle the error explicitly to ensure
             // stack_bottom is restored before propagating the error.
+            let previous_rust_fn = self.active_rust_fn.replace(f);
             let result = f(self);
+            self.active_rust_fn = previous_rust_fn;
             let num_ret_reported = match result {
                 Ok(n) => n,
                 Err(e) => {
@@ -92,13 +91,16 @@ impl State {
                     // When call_chain_depth > 0, an enclosing non-function
                     // __call chain reports it after the chain unwinds. A
                     // non-empty stack trace means a Lua frame already reported
-                    // the error. These checks keep on_error firing once.
+                    // the error. An enclosing Rust callback also owns failures
+                    // propagated from its nested calls. These checks keep
+                    // on_error firing once.
                     // Keep this boundary separate from Lua-frame reporting:
                     // direct host calls have no Lua frame that can attach a trace.
                     // Error has no separate report flag, so stack_trace remains
                     // the existing marker shared with report_frame_error below.
                     if self.call_depth == 0
                         && self.call_chain_depth == 0
+                        && self.active_rust_fn.is_none()
                         && e.stack_trace.is_empty()
                     {
                         self.host_error(&e);
@@ -184,9 +186,7 @@ impl State {
                             // (the callable was already removed above) so a direct
                             // host call does not leave the arguments visible.
                             self.truncate_call_frame(idx, old_stack_bottom);
-                            return Err(self.error(ErrorKind::RuntimeError(
-                                "too many arguments (limit 255)".into(),
-                            )));
+                            return Err(self.error(ErrorKind::TooManyArguments { limit: u8::MAX }));
                         }
                     };
                     if let Err(e) = self.check_stack_space(2) {
@@ -225,6 +225,7 @@ impl State {
                         && let Err(error) = &result
                         && self.call_depth == 0
                         && self.call_chain_depth == 0
+                        && self.active_rust_fn.is_none()
                         && error.stack_trace.is_empty()
                     {
                         // Errors from a non-function __call chain can pass
@@ -239,7 +240,13 @@ impl State {
                 }
             }
             self.truncate_call_frame(idx, old_stack_bottom);
-            return Err(self.type_error(TypeError::FunctionCall(func_val.typ(&self.heap))));
+            let error = self.type_error(TypeError::FunctionCall(func_val.typ(&self.heap)));
+            // Resolving a callable is execution, even when it has no handler.
+            // Nested chains defer to their outer boundary, as Rust failures do.
+            if self.call_depth == 0 && self.call_chain_depth == 0 && self.active_rust_fn.is_none() {
+                self.host_error(&error);
+            }
+            return Err(error);
         };
         // RetCount::All means "return all" - don't adjust the stack
         if let RetCount::Fixed(expected) = num_ret_expected {
@@ -292,6 +299,7 @@ impl State {
                 crate::error::ArgError {
                     arg_number: 1,
                     func_name: Some("concat".to_string()),
+                    detail: crate::error::ArgDetail::TypeMismatch,
                     expected: None,
                     received: None,
                 },
@@ -536,12 +544,10 @@ impl State {
                 // Calculate how many values are above the frame's locals
                 let frame_base = self.stack_bottom + num_params as usize + num_locals as usize;
                 let count = self.stack.len() - frame_base;
-                match u8::try_from(count) {
+                match crate::error::results_count(count) {
                     Ok(n) => n,
-                    Err(_) => {
-                        let e = self.error(ErrorKind::RuntimeError(
-                            "too many results (limit 255)".into(),
-                        ));
+                    Err(kind) => {
+                        let e = self.error(kind);
                         let e = self.report_frame_error(e, &frame);
                         self.cleanup_closure_frame(frame_bottom, old_stack_bottom, true);
                         return Err(e);

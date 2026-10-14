@@ -84,8 +84,18 @@ pub enum PrefixLocation {
 pub enum ErrorKind {
     /// Operation applied to a value of the wrong Lua type.
     TypeError(TypeError),
-    /// Wrong number or type of arguments to a builtin or host function.
+    /// Invalid argument type, presence or value for a builtin or host function.
     ArgError(ArgError),
+    /// A call exceeded the runtime argument-count limit.
+    TooManyArguments {
+        /// Maximum supported argument count.
+        limit: u8,
+    },
+    /// A function exceeded the runtime result-count limit.
+    TooManyResults {
+        /// Maximum supported result count.
+        limit: u8,
+    },
     /// Parser rejected the source.
     SyntaxError(SyntaxError),
     /// Script exceeded its cost budget.
@@ -139,7 +149,7 @@ pub enum ErrorKind {
     /// should use `Option<Anchor>`.
     AnchorNil,
     /// A runtime fault detected by the VM or by a library operation - a bad
-    /// pattern, too many results, an invalid `next` key and so on. Distinct
+    /// pattern, an invalid `next` key and so on. Distinct
     /// from [`ErrorKind::ScriptError`], which the script raised on purpose,
     /// and from [`ErrorKind::InternalError`], which indicates a VM bug.
     RuntimeError(String),
@@ -165,8 +175,8 @@ pub enum ErrorKind {
 /// Argument error raised by builtins or host functions.
 ///
 /// A missing `func_name` means the caller did not provide a function name. The
-/// VM currently records only Lua bytecode frames in `CallInfo`, so a generic
-/// argument check cannot recover the name of the Rust callback that is running.
+/// VM resolves registered global names only when validation fails; unnamed
+/// callbacks remain anonymous.
 #[derive(Debug)]
 pub struct ArgError {
     /// 1-based argument index that failed validation. Negative values count
@@ -174,10 +184,35 @@ pub struct ArgError {
     pub arg_number: isize,
     /// Name of the function the argument was passed to (if known).
     pub func_name: Option<String>,
+    /// Reason validation failed.
+    pub detail: ArgDetail,
     /// Expected Lua type for this argument.
     pub expected: Option<LuaType>,
     /// Lua type the caller actually supplied.
     pub received: Option<LuaType>,
+}
+
+/// Maximum number of values a Rust callback can return.
+pub const MAX_RESULTS: u8 = u8::MAX;
+
+/// Validate a result count against the Rust callback ABI.
+pub fn results_count(count: usize) -> Result<u8, ErrorKind> {
+    u8::try_from(count).map_err(|_| ErrorKind::TooManyResults { limit: MAX_RESULTS })
+}
+
+/// Structured reason an argument failed validation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArgDetail {
+    /// Type or presence mismatch, described by `expected` and `received`.
+    TypeMismatch,
+    /// A number cannot be represented as an integer.
+    NoInteger,
+    /// A value lies outside the permitted range, with its precise diagnostic.
+    OutOfBounds(String),
+    /// A random interval contains no values.
+    IntervalEmpty,
+    /// Another validation failure, including a union of expected types.
+    Custom(String),
 }
 
 /// Syntax-level error categories raised by the parser.
@@ -323,15 +358,23 @@ impl Error {
 }
 
 impl ErrorKind {
-    /// Build a named standard-library argument error with a custom detail.
-    ///
-    /// These value-range and union-type failures remain runtime errors until
-    /// `ArgError` can carry structured detail without leaving other internal
-    /// constructors incomplete.
+    /// Build a named argument error while preserving its precise diagnostic.
     pub(crate) fn bad_argument(arg_number: isize, function_name: &str, detail: &str) -> Self {
-        Self::RuntimeError(format!(
-            "bad argument #{arg_number} to '{function_name}' ({detail})"
-        ))
+        let detail = match detail {
+            "number has no integer representation" => ArgDetail::NoInteger,
+            "interval is empty" => ArgDetail::IntervalEmpty,
+            "base out of range" | "index out of range" | "position out of bounds" => {
+                ArgDetail::OutOfBounds(detail.to_owned())
+            }
+            detail => ArgDetail::Custom(detail.to_owned()),
+        };
+        Self::ArgError(ArgError {
+            arg_number,
+            func_name: Some(function_name.to_owned()),
+            detail,
+            expected: None,
+            received: None,
+        })
     }
 
     /// Whether the underlying error category is recoverable - see
@@ -423,6 +466,8 @@ impl fmt::Display for ErrorKind {
         use ErrorKind::*;
         match self {
             ArgError(e) => e.fmt(f),
+            TooManyArguments { limit } => write!(f, "too many arguments (limit {limit})"),
+            TooManyResults { limit } => write!(f, "too many results (limit {limit})"),
             SyntaxError(e) => e.fmt(f),
             TypeError(e) => e.fmt(f),
             BudgetExceeded { used, budget } => {
@@ -476,10 +521,15 @@ impl fmt::Display for ErrorKind {
 impl fmt::Display for ArgError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let func_name = self.func_name.as_deref().unwrap_or("<anonymous>");
-        let extra = match (&self.expected, &self.received) {
-            (Some(expected), Some(got)) => format!("{expected} expected, got {got}"),
-            (Some(expected), None) => format!("{expected} expected, got no value"),
-            (None, _) => "value expected".into(),
+        let extra = match &self.detail {
+            ArgDetail::NoInteger => "number has no integer representation".into(),
+            ArgDetail::IntervalEmpty => "interval is empty".into(),
+            ArgDetail::OutOfBounds(detail) | ArgDetail::Custom(detail) => detail.clone(),
+            ArgDetail::TypeMismatch => match (&self.expected, &self.received) {
+                (Some(expected), Some(got)) => format!("{expected} expected, got {got}"),
+                (Some(expected), None) => format!("{expected} expected, got no value"),
+                (None, _) => "value expected".into(),
+            },
         };
 
         write!(

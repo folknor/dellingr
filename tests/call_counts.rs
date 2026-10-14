@@ -10,16 +10,30 @@ fn run_number(code: &str) -> f64 {
     state.to_number(-1).unwrap()
 }
 
-fn expect_runtime_error(code: &str, expected: &str) {
+fn expect_error(code: &str, expected: &str, kind_matches: fn(&ErrorKind) -> bool) {
     let mut state = State::new();
     state.load_string(code).unwrap();
     let err = state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect_err("script must return an error");
     assert!(
-        matches!(err.kind, ErrorKind::RuntimeError(ref message) if message == expected),
-        "expected RuntimeError({expected:?}), got: {err}"
+        kind_matches(&err.kind),
+        "unexpected error kind: {:?}",
+        err.kind
     );
+    assert_eq!(err.kind.to_string(), expected);
+}
+
+fn too_many_arguments(kind: &ErrorKind) -> bool {
+    matches!(kind, ErrorKind::TooManyArguments { limit: 255 })
+}
+
+fn too_many_results(kind: &ErrorKind) -> bool {
+    matches!(kind, ErrorKind::TooManyResults { limit: 255 })
+}
+
+fn arg_error(kind: &ErrorKind) -> bool {
+    matches!(kind, ErrorKind::ArgError(_))
 }
 
 #[test]
@@ -40,7 +54,7 @@ fn dynamic_call_accepts_255_arguments() {
 
 #[test]
 fn dynamic_call_rejects_256_arguments() {
-    expect_runtime_error(
+    expect_error(
         r##"
         local t = {}
         for i = 1, 255 do t[i] = i end
@@ -48,12 +62,13 @@ fn dynamic_call_rejects_256_arguments() {
         return f(0, table.unpack(t))
     "##,
         "too many arguments (limit 255)",
+        too_many_arguments,
     );
 }
 
 #[test]
 fn lua_return_rejects_256_results() {
-    expect_runtime_error(
+    expect_error(
         r#"
         local t = {}
         for i = 1, 255 do t[i] = i end
@@ -61,12 +76,13 @@ fn lua_return_rejects_256_results() {
         return g()
     "#,
         "too many results (limit 255)",
+        too_many_results,
     );
 }
 
 #[test]
 fn callable_table_rejects_implicit_256th_argument() {
-    expect_runtime_error(
+    expect_error(
         r##"
         local t = {}
         for i = 1, 255 do t[i] = i end
@@ -76,6 +92,7 @@ fn callable_table_rejects_implicit_256th_argument() {
         return callable(table.unpack(t))
     "##,
         "too many arguments (limit 255)",
+        too_many_arguments,
     );
 }
 
@@ -93,7 +110,7 @@ fn unpack_rejects_oversized_range() {
         return table.unpack(t)
         "#,
     ] {
-        expect_runtime_error(code, "too many results to unpack");
+        expect_error(code, "too many results (limit 255)", too_many_results);
     }
 }
 
@@ -104,9 +121,10 @@ fn unpack_rejects_huge_range_without_overflow() {
         "return unpack({}, 0, 1e300)",
         "return table.unpack({}, 0, 1e300)",
     ] {
-        expect_runtime_error(
+        expect_error(
             code,
             "bad argument #3 to 'unpack' (number has no integer representation)",
+            arg_error,
         );
     }
 }
@@ -117,6 +135,6 @@ fn unpack_rejects_i64_span_overflow() {
         "return unpack({}, -9223372036854775808, 9223372036854774784)",
         "return table.unpack({}, -9223372036854775808, 9223372036854774784)",
     ] {
-        expect_runtime_error(code, "too many results to unpack");
+        expect_error(code, "too many results (limit 255)", too_many_results);
     }
 }

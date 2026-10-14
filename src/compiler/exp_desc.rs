@@ -1,7 +1,7 @@
 //! This module holds enums which describe the different types of Lua
 //! expressions.
 
-use crate::instr::{ArgCount, Builtin};
+use crate::instr::{ArgCount, Builtin, Instr};
 
 #[derive(Debug)]
 pub(super) enum ExpDesc {
@@ -89,5 +89,29 @@ impl From<PrefixExp> for ExpDesc {
 impl From<PlaceExp> for PrefixExp {
     fn from(exp: PlaceExp) -> Self {
         Self::Place(exp)
+    }
+}
+
+impl PlaceExp {
+    pub(super) fn get_instr(&self) -> Instr {
+        match self {
+            Self::Local(index) => Instr::get_local(*index),
+            Self::Upvalue(index) => Instr::get_upvalue(*index),
+            Self::Global(index) => Instr::get_global(*index),
+            Self::Builtin(builtin) => Instr::get_builtin(*builtin),
+            Self::FieldAccess(index) => Instr::get_field(*index),
+            Self::TableIndex => Instr::get_table(),
+        }
+    }
+
+    pub(super) fn set_instr(&self, stack_offset: u8) -> Instr {
+        match self {
+            Self::Local(index) => Instr::set_local(*index),
+            Self::Upvalue(index) => Instr::set_upvalue(*index),
+            Self::Global(index) => Instr::set_global(*index),
+            Self::Builtin(builtin) => Instr::set_builtin(*builtin),
+            Self::FieldAccess(index) => Instr::set_field_at(stack_offset, *index),
+            Self::TableIndex => Instr::set_table(stack_offset),
+        }
     }
 }

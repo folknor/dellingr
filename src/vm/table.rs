@@ -12,6 +12,65 @@ use super::object::{GcHeap, Markable, ObjectPtr};
 /// Tables with more entries promote to IndexMap.
 const INLINE_CAPACITY: usize = 4;
 
+/// The table-key forms rejected by Lua before hashing or equality is used.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum InvalidTableKey {
+    Nil,
+    Nan,
+}
+
+/// A table key before applying the VM's canonical numeric equality rule.
+pub(super) enum TableKeyInput<S, O, F> {
+    Nil,
+    Bool(bool),
+    Number(f64),
+    String(S),
+    Object(O),
+    RustFn(F),
+}
+
+/// A table key represented with negative zero canonicalized and invalid keys
+/// removed. The reference payload types are chosen by the caller.
+#[derive(Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(super) enum NormalizedTableKey<S, O, F> {
+    Bool(bool),
+    Number(u64),
+    String(S),
+    Object(O),
+    RustFn(F),
+}
+
+/// Apply the common table-key validity and equality rule.
+///
+/// Tables store the original key value so iteration preserves the first
+/// inserted representation, including negative zero. Load validation uses
+/// the returned key to compare serialized values without duplicating that
+/// rule.
+#[inline]
+pub(super) fn normalize_table_key<S, O, F>(
+    key: TableKeyInput<S, O, F>,
+) -> std::result::Result<NormalizedTableKey<S, O, F>, InvalidTableKey> {
+    match key {
+        TableKeyInput::Nil => Err(InvalidTableKey::Nil),
+        TableKeyInput::Bool(value) => Ok(NormalizedTableKey::Bool(value)),
+        TableKeyInput::Number(value) => {
+            if value.is_nan() {
+                Err(InvalidTableKey::Nan)
+            } else {
+                let bits = value.to_bits();
+                Ok(NormalizedTableKey::Number(if bits << 1 == 0 {
+                    0
+                } else {
+                    bits
+                }))
+            }
+        }
+        TableKeyInput::String(value) => Ok(NormalizedTableKey::String(value)),
+        TableKeyInput::Object(value) => Ok(NormalizedTableKey::Object(value)),
+        TableKeyInput::RustFn(value) => Ok(NormalizedTableKey::RustFn(value)),
+    }
+}
+
 /// Storage for table entries. Small tables (≤4 entries) use inline array storage
 /// for better cache locality and reduced allocation overhead. Larger tables
 /// use IndexMap to maintain insertion order for deterministic `pairs()` iteration.
@@ -396,10 +455,18 @@ impl Table {
 
     #[hotpath::measure]
     pub(super) fn insert(&mut self, key: Val, value: Val) -> Result<()> {
-        match &key {
-            Val::Nil => return Err(Error::new(TypeError::TableKeyNil, 0, 0)),
-            Val::Num(n) if n.is_nan() => return Err(Error::new(TypeError::TableKeyNan, 0, 0)),
-            _ => {}
+        let key_input = match key {
+            Val::Nil => TableKeyInput::Nil,
+            Val::Bool(value) => TableKeyInput::Bool(value),
+            Val::Num(value) => TableKeyInput::Number(value),
+            Val::Str(value) => TableKeyInput::String(value),
+            Val::Obj(value) => TableKeyInput::Object(value),
+            Val::RustFn(value) => TableKeyInput::RustFn(value as usize),
+        };
+        match normalize_table_key(key_input) {
+            Ok(_) => {}
+            Err(InvalidTableKey::Nil) => return Err(Error::new(TypeError::TableKeyNil, 0, 0)),
+            Err(InvalidTableKey::Nan) => return Err(Error::new(TypeError::TableKeyNan, 0, 0)),
         }
 
         // In Lua, assigning nil deletes the key rather than storing a nil value.

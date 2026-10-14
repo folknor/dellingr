@@ -124,8 +124,10 @@ impl Frame {
         self.bytecode.number_literals[i as usize]
     }
 
-    /// How often to flush accumulated cost to the state.
-    /// Higher values reduce overhead but may overshoot budget more.
+    /// Periodic flush interval for accumulated opcode cost.
+    /// A finite budget also flushes before pending cost would exhaust it, so
+    /// this interval does not change the charged prefix or `cost_used` at
+    /// `BudgetExceeded`.
     const COST_CHECK_INTERVAL: u64 = 64;
 
     pub(super) fn flush_local_cost(state: &mut State, local_cost: &mut u64) -> Result<()> {

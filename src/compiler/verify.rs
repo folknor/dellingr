@@ -1,9 +1,8 @@
 use super::Bytecode;
-use super::MAX_SYNTAX_DEPTH;
 use crate::instr::{Builtin, Instr};
 use crate::limits::{
     MAX_FRAME_SLOTS, MAX_LITERALS, MAX_NESTED, MAX_TABLE_TEMPLATE_FIELDS, MAX_TABLE_TEMPLATES,
-    MAX_UPVALUES,
+    MAX_UPVALUES, MAX_VERIFIER_MARKER_DEPTH,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -270,14 +269,14 @@ fn verify_stack_discipline(view: &impl BytecodeView) -> Result<(), BytecodeValid
                 if height < 1 {
                     return Err(err(Some(pc), "call-base marker is below the active frame"));
                 }
-                if next.call_bases.len() >= MAX_SYNTAX_DEPTH as usize {
+                if next.call_bases.len() >= MAX_VERIFIER_MARKER_DEPTH {
                     return Err(err(Some(pc), "call-base marker stack is too deep"));
                 }
                 next.call_bases.push(height - 1);
             }
             Instr::OP_NEW_TABLE_TRACKED => {
                 let height = require_known(&next.height)?;
-                if next.table_bases.len() >= MAX_SYNTAX_DEPTH as usize {
+                if next.table_bases.len() >= MAX_VERIFIER_MARKER_DEPTH {
                     return Err(err(Some(pc), "table-constructor marker stack is too deep"));
                 }
                 next.table_bases.push(height);

@@ -95,6 +95,7 @@ pub(crate) fn open_math(state: &mut State) -> Result<()> {
             let e = ArgError {
                 arg_number: 1,
                 func_name: Some("min".to_string()),
+                detail: crate::error::ArgDetail::TypeMismatch,
                 expected: Some(LuaType::Number),
                 received: None,
             };
@@ -122,6 +123,7 @@ pub(crate) fn open_math(state: &mut State) -> Result<()> {
             let e = ArgError {
                 arg_number: 1,
                 func_name: Some("max".to_string()),
+                detail: crate::error::ArgDetail::TypeMismatch,
                 expected: Some(LuaType::Number),
                 received: None,
             };

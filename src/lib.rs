@@ -197,7 +197,12 @@ pub struct CostAnalysis {
 impl CostAnalysis {
     /// Collect totals across all scopes
     fn totals(&self) -> ScopeTotals {
-        let mut totals = ScopeTotals::default();
+        // analyze_chunk already computed the recursive total for the root.
+        // Reuse it while accumulating the remaining display statistics.
+        let mut totals = ScopeTotals {
+            total_cost: self.root.total_cost,
+            ..ScopeTotals::default()
+        };
         self.root.accumulate(&mut totals);
         totals
     }
@@ -218,7 +223,6 @@ struct ScopeTotals {
 
 impl ScopeCost {
     fn accumulate(&self, totals: &mut ScopeTotals) {
-        totals.total_cost += self.own_cost;
         totals.arithmetic_ops += self.arithmetic_ops;
         totals.negations += self.negations;
         totals.table_creations += self.table_creations;

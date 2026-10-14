@@ -50,7 +50,8 @@ pub trait HostCallbacks: Send {
     /// invoked from Lua, as well as a Rust function that fails when a host calls
     /// it directly (with no Lua frame on the stack). Errors from host-initiated
     /// table `__call` chains are covered too, including cyclic chains that reach
-    /// the metamethod depth limit. It is NOT fired for errors that `call()` itself
+    /// the metamethod depth limit, and direct calls of non-callable values.
+    /// It is NOT fired for errors that `call()` itself
     /// raises before dispatch (e.g. a malformed argument count from a host); the
     /// host observes those solely through the `Result`.
     ///

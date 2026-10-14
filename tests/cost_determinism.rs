@@ -100,8 +100,10 @@ fn gmatch_resume_cost_ignores_fifo_cache_eviction() {
     #[cfg(feature = "snapshot")]
     {
         let mut loaded =
-            State::load_state(&saved.bytes, Box::new(dellingr::DefaultCallbacks), |_| {})
-                .expect("iterator loads");
+            State::load_state(&saved.bytes, Box::new(dellingr::DefaultCallbacks), |_| {
+                Ok::<(), std::convert::Infallible>(())
+            })
+            .expect("iterator loads");
         assert_eq!(evicted, call_iterator(&mut loaded, "iter"));
     }
 }
@@ -118,8 +120,10 @@ fn gmatch_snapshot_preserves_first_use_and_resume_charges() {
         }
         let saved = original.save_state().expect("iterator saves");
         let mut loaded =
-            State::load_state(&saved.bytes, Box::new(dellingr::DefaultCallbacks), |_| {})
-                .expect("iterator loads");
+            State::load_state(&saved.bytes, Box::new(dellingr::DefaultCallbacks), |_| {
+                Ok::<(), std::convert::Infallible>(())
+            })
+            .expect("iterator loads");
         assert_eq!(
             call_iterator(&mut original, "iter"),
             call_iterator(&mut loaded, "iter")

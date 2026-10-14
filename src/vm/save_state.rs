@@ -38,6 +38,7 @@
 //!   capped at remaining bytes. No `serde`/`bincode`. Two saves of the same
 //!   logical state are byte-identical.
 
+use std::convert::Infallible;
 use std::fmt;
 use std::sync::Arc;
 
@@ -46,6 +47,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::lua_val::RustFunc;
 use super::object::{GcHeap, RawObject, StringPtr, Upvalue, UpvalueRef};
 use super::rng::VmRng;
+use super::table::{NormalizedTableKey, TableKeyInput, normalize_table_key};
 use super::{ObjectPtr, State, Val};
 use crate::COST_MODEL_VERSION;
 use crate::compiler::{Bytecode, UpvalueDesc};
@@ -121,7 +123,7 @@ pub enum SaveError {
 
 /// Errors produced while loading a saved [`State`].
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub enum LoadError {
+pub enum LoadError<E = Infallible> {
     /// Save bytes did not start with the dellingr save magic.
     BadMagic,
     /// Save format version is not supported by this build.
@@ -140,6 +142,8 @@ pub enum LoadError {
     },
     /// A saved function id was not registered by the load-time environment.
     UnknownFunction(String),
+    /// The host's load-time setup closure failed.
+    Setup(E),
     /// A saved environment-object token was not present at load time.
     UnknownEnvObject(String),
     /// Binary payload could not be decoded.
@@ -202,7 +206,7 @@ impl fmt::Display for SaveError {
 
 impl std::error::Error for SaveError {}
 
-impl fmt::Display for LoadError {
+impl<E: fmt::Display> fmt::Display for LoadError<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             LoadError::BadMagic => write!(f, "bad save magic"),
@@ -222,6 +226,7 @@ impl fmt::Display for LoadError {
                 f.write_str("unknown saved function id ")?;
                 write_bounded_user_text(f, id)
             }
+            LoadError::Setup(error) => write!(f, "load setup failed: {error}"),
             LoadError::UnknownEnvObject(id) => {
                 f.write_str("unknown saved environment object ")?;
                 write_bounded_user_text(f, id)
@@ -251,7 +256,41 @@ impl fmt::Display for LoadError {
     }
 }
 
-impl std::error::Error for LoadError {}
+impl<E: fmt::Debug + fmt::Display + 'static> std::error::Error for LoadError<E> {}
+
+// Decode and materialization helpers use the default, infallible setup error
+// type. Lift those errors into the caller's setup error type unchanged.
+fn retype_load_error<E>(error: LoadError<Infallible>) -> LoadError<E> {
+    match error {
+        LoadError::BadMagic => LoadError::BadMagic,
+        LoadError::UnsupportedVersion { found, expected } => {
+            LoadError::UnsupportedVersion { found, expected }
+        }
+        LoadError::UnsupportedCostModelVersion { found, expected } => {
+            LoadError::UnsupportedCostModelVersion { found, expected }
+        }
+        LoadError::UnknownFunction(id) => LoadError::UnknownFunction(id),
+        LoadError::Setup(never) => match never {},
+        LoadError::UnknownEnvObject(id) => LoadError::UnknownEnvObject(id),
+        LoadError::DecodeError(error) => LoadError::DecodeError(error),
+        LoadError::FieldSizeExceeded { kind, size, limit } => {
+            LoadError::FieldSizeExceeded { kind, size, limit }
+        }
+        LoadError::StringSizeExceeded { size, limit } => {
+            LoadError::StringSizeExceeded { size, limit }
+        }
+        LoadError::CorruptArena { reason, index } => LoadError::CorruptArena { reason, index },
+        LoadError::InvalidBytecode {
+            chunk,
+            instruction,
+            reason,
+        } => LoadError::InvalidBytecode {
+            chunk,
+            instruction,
+            reason,
+        },
+    }
+}
 
 fn write_bounded_user_text(f: &mut fmt::Formatter<'_>, text: &str) -> fmt::Result {
     let mut written = 0usize;
@@ -1103,21 +1142,28 @@ impl State {
     /// Restore a save into a fresh [`State`].
     ///
     /// The host supplies callbacks and re-runs its environment setup closure so
-    /// registered host functions exist before saved values are resolved.
-    pub fn load_state(
+    /// registered host functions exist before saved values are resolved. A
+    /// setup error is returned as [`LoadError::Setup`] without materializing
+    /// any saved values.
+    pub fn load_state<E>(
         bytes: &[u8],
         callbacks: Box<dyn HostCallbacks + Send>,
-        setup: impl FnOnce(&mut State),
-    ) -> Result<State, LoadError> {
+        setup: impl FnOnce(&mut State) -> std::result::Result<(), E>,
+    ) -> std::result::Result<State, LoadError<E>> {
         let mut decoder = Decoder::new(bytes);
-        decoder.read_magic_and_versions()?;
+        decoder
+            .read_magic_and_versions()
+            .map_err(retype_load_error::<E>)?;
         // Read and discard the diagnostic crate-version string. Compatibility is
         // enforced by the format and cost-model versions in
         // read_magic_and_versions above; this string is metadata, not a compat
         // gate, so it is deliberately not compared.
-        let _engine_version = decoder.read_bytes(ByteField::EngineVersion)?;
-        let payload = verify::verify_payload(SavePayload::decode(&mut decoder)?)?;
-        decoder.finish()?;
+        let _engine_version = decoder
+            .read_bytes(ByteField::EngineVersion)
+            .map_err(retype_load_error::<E>)?;
+        let decoded = SavePayload::decode(&mut decoder).map_err(retype_load_error::<E>)?;
+        let payload = verify::verify_payload(decoded).map_err(retype_load_error::<E>)?;
+        decoder.finish().map_err(retype_load_error::<E>)?;
 
         let mut state = if payload.has_standard_environment() {
             State::with_callbacks(callbacks)
@@ -1127,8 +1173,8 @@ impl State {
         // Drop any inherited anchors before setup; anchors created by setup are
         // deliberately retained and participate in the final collection.
         state.registry.clear();
-        setup(&mut state);
-        materialize_payload(&mut state, payload)?;
+        setup(&mut state).map_err(LoadError::Setup)?;
+        materialize_payload(&mut state, payload).map_err(retype_load_error::<E>)?;
         Ok(state)
     }
 
@@ -1144,6 +1190,7 @@ impl State {
             && self.metamethod_depth == 0
             && self.call_chain_depth == 0
             && self.call_depth == 0
+            && self.active_rust_fn.is_none()
         {
             Ok(())
         } else {
@@ -1451,6 +1498,7 @@ fn materialize_payload(
     state.metamethod_depth = 0;
     state.call_chain_depth = 0;
     state.call_depth = 0;
+    state.active_rust_fn = None;
     state.current_source = None;
     state.gc_collect();
     Ok(())
@@ -1475,34 +1523,22 @@ struct DecodeCtx<'a> {
     fn_forward: &'a BTreeMap<String, RustFunc>,
 }
 
-#[derive(Eq, Ord, PartialEq, PartialOrd)]
-enum RuntimeTableKey {
-    Bool(bool),
-    Num(u64),
-    Str(Vec<u8>),
-    Obj(ObjectPtr),
-    RustFn(usize),
-}
+type RuntimeTableKey = NormalizedTableKey<Vec<u8>, ObjectPtr, usize>;
 
 fn runtime_table_key(
     value: Val,
     heap: &GcHeap,
     index: usize,
 ) -> Result<RuntimeTableKey, LoadError> {
-    // Refusal: table.rs does not expose its key normalizer, so persistence
-    // currently mirrors Val's equality rule here for deterministic ordering.
-    match value {
-        Val::Bool(value) => Ok(RuntimeTableKey::Bool(value)),
-        Val::Num(value) if !value.is_nan() => Ok(RuntimeTableKey::Num(if value == 0.0 {
-            0
-        } else {
-            value.to_bits()
-        })),
-        Val::Str(ptr) => Ok(RuntimeTableKey::Str(heap.get_string(ptr).to_vec())),
-        Val::Obj(ptr) => Ok(RuntimeTableKey::Obj(ptr)),
-        Val::RustFn(func) => Ok(RuntimeTableKey::RustFn(func as usize)),
-        Val::Nil | Val::Num(_) => Err(corrupt_arena("nil or NaN is not a table key", index)),
-    }
+    let key = match value {
+        Val::Nil => TableKeyInput::Nil,
+        Val::Bool(value) => TableKeyInput::Bool(value),
+        Val::Num(value) => TableKeyInput::Number(value),
+        Val::Str(ptr) => TableKeyInput::String(heap.get_string(ptr).to_vec()),
+        Val::Obj(ptr) => TableKeyInput::Object(ptr),
+        Val::RustFn(func) => TableKeyInput::RustFn(func as usize),
+    };
+    normalize_table_key(key).map_err(|_| corrupt_arena("nil or NaN is not a table key", index))
 }
 
 fn insert_runtime_key(
@@ -2267,6 +2303,10 @@ mod tests {
     use super::*;
     use crate::instr::{ArgCount, RetCount};
 
+    fn no_setup(_: &mut State) -> std::result::Result<(), Infallible> {
+        Ok(())
+    }
+
     /// Encode a value, decode it back, and assert round-trip identity with no
     /// trailing bytes left over.
     macro_rules! roundtrip {
@@ -2341,7 +2381,11 @@ mod tests {
         payload
             .encode(&mut encoder)
             .map_err(|error| LoadError::DecodeError(error.to_string()))?;
-        State::load_state(&encoder.finish(), Box::new(crate::DefaultCallbacks), |_| {})
+        State::load_state(
+            &encoder.finish(),
+            Box::new(crate::DefaultCallbacks),
+            no_setup,
+        )
     }
 
     fn rejected_bytecode(bytecode: Vec<SavedBytecode>, objects: Vec<SavedObject>) -> LoadError {
@@ -2848,8 +2892,9 @@ mod tests {
             .call(crate::ArgCount::Fixed(0), crate::RetCount::Fixed(0))
             .expect("factory source runs");
         let save = original.save_state().expect("state saves");
-        let mut loaded = State::load_state(&save.bytes, Box::new(crate::DefaultCallbacks), |_| {})
-            .expect("state loads");
+        let mut loaded =
+            State::load_state(&save.bytes, Box::new(crate::DefaultCallbacks), no_setup)
+                .expect("state loads");
         loaded.get_global("a").expect("a exists");
         let a = loaded
             .pop_val()
@@ -3067,14 +3112,15 @@ mod tests {
 
     #[test]
     fn nested_chunk_depth_is_capped_at_the_parser_limit() {
-        use crate::compiler::MAX_SYNTAX_DEPTH;
+        let max_depth = u32::try_from(crate::limits::MAX_CHUNK_NESTING)
+            .expect("the chunk nesting limit fits a saved chunk id");
 
         // The deepest chain the verifier admits materializes fine; one deeper
         // is rejected before materialization. Materialization itself walks an
         // explicit stack, so it does not depend on this cap for Rust-stack
         // safety - the two layers are independent.
         load_bytecode(
-            chunk_chain(MAX_SYNTAX_DEPTH),
+            chunk_chain(max_depth),
             vec![SavedObject::Closure {
                 chunk: 0,
                 upvalues: Vec::new(),
@@ -3083,8 +3129,8 @@ mod tests {
         .expect("a chain at the parser depth limit is valid save data");
 
         assert_invalid(
-            rejected_bytecode(chunk_chain(MAX_SYNTAX_DEPTH + 1), Vec::new()),
-            MAX_SYNTAX_DEPTH,
+            rejected_bytecode(chunk_chain(max_depth + 1), Vec::new()),
+            max_depth,
             None,
         );
     }
@@ -3103,8 +3149,9 @@ mod tests {
             .call(crate::ArgCount::Fixed(0), crate::RetCount::Fixed(0))
             .expect("chunk runs");
         let save = state.save_state().expect("state saves");
-        let mut loaded = State::load_state(&save.bytes, Box::new(crate::DefaultCallbacks), |_| {})
-            .expect("save containing fused opcodes loads");
+        let mut loaded =
+            State::load_state(&save.bytes, Box::new(crate::DefaultCallbacks), no_setup)
+                .expect("save containing fused opcodes loads");
         loaded.get_global("count").expect("count exists");
         loaded.push_number(5.0).expect("argument fits");
         loaded
@@ -3135,8 +3182,9 @@ mod tests {
             .call(crate::ArgCount::Fixed(0), crate::RetCount::Fixed(0))
             .expect("live-closure chunk runs");
         let save = state.save_state().expect("state saves after slot reuse");
-        let mut loaded = State::load_state(&save.bytes, Box::new(crate::DefaultCallbacks), |_| {})
-            .expect("save loads");
+        let mut loaded =
+            State::load_state(&save.bytes, Box::new(crate::DefaultCallbacks), no_setup)
+                .expect("save loads");
         loaded.get_global("bump").expect("bump exists");
         loaded
             .call(crate::ArgCount::Fixed(0), crate::RetCount::Fixed(1))

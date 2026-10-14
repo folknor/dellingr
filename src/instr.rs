@@ -19,6 +19,10 @@ pub enum ArgCount {
 
 impl ArgCount {
     /// Encode to u8 for instruction storage. Dynamic maps to 255.
+    ///
+    /// # Panics
+    ///
+    /// Panics if this is `Fixed(255)`, which aliases `Dynamic` in bytecode.
     #[inline]
     pub(crate) const fn to_u8(self) -> u8 {
         match self {
@@ -58,6 +62,10 @@ pub enum RetCount {
 
 impl RetCount {
     /// Encode to u8 for instruction storage. All maps to 255.
+    ///
+    /// # Panics
+    ///
+    /// Panics if this is `Fixed(255)`, which aliases `All` in bytecode.
     #[inline]
     pub(crate) const fn to_u8(self) -> u8 {
         match self {

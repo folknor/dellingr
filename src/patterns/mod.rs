@@ -188,7 +188,7 @@ mod tests {
                 b"frodo (1) (2(3)%2)%1".as_slice(),
                 PatternError::InvalidCaptureIndex(Some(1)),
             ),
-            // L14: bounds/argument checks in the validator.
+            // The validator requires both balance delimiters and a bracketed frontier class.
             (
                 b"%b".as_slice(),
                 PatternError::MalformedPattern(MalformedPattern::MissingBalancedArguments),
@@ -230,8 +230,8 @@ mod tests {
     fn class_close_follows_reference_do_while() {
         let mut used = 0;
         let mut meter = count_only(&mut used);
-        // C29: at least one class byte is consumed before ']' can close the
-        // class, so `[]]` is a class containing ']'.
+        // A class consumes at least one byte before ']' can close it, so `[]]`
+        // is a class containing ']'.
         let mut literal_bracket = LuaPattern::from_bytes_try(b"[]]").unwrap();
         assert!(literal_bracket.matches_bytes(b"]", &mut meter).unwrap());
         assert_eq!(literal_bracket.range(), 0..1);
@@ -424,7 +424,8 @@ mod tests {
     fn validator_skips_both_balance_delimiters() {
         let mut used = 0;
         let mut meter = count_only(&mut used);
-        // L14: `%b((` is valid - both `(` are balance delimiters, not captures.
+        // `%b((` is valid because both `(` bytes are balance delimiters, not
+        // captures.
         let mut pattern = LuaPattern::from_bytes_try(b"%b((").unwrap();
         assert!(pattern.matches_bytes(b"((", &mut meter).unwrap());
         assert_eq!(pattern.range(), 0..2);

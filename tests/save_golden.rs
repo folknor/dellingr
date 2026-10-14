@@ -133,8 +133,10 @@ fn save_traversal_order_matches_golden_fixture() {
 #[test]
 fn golden_fixture_round_trips() {
     let bytes = std::fs::read(current_fixture_path()).expect("current fixture is present");
-    let mut loaded =
-        State::load_state(&bytes, Box::new(DefaultCallbacks), |_| {}).expect("fixture loads");
+    let mut loaded = State::load_state(&bytes, Box::new(DefaultCallbacks), |_| {
+        Ok::<(), std::convert::Infallible>(())
+    })
+    .expect("fixture loads");
 
     loaded
         .load_string(

@@ -19,8 +19,16 @@ fn expect_runtime_error(code: &str, expected: &str) {
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect_err("format call must fail");
     assert!(
-        matches!(&error.kind, ErrorKind::RuntimeError(message) if message == expected),
-        "expected RuntimeError({expected:?}), got {error:?}"
+        match &error.kind {
+            ErrorKind::RuntimeError(message) => {
+                !expected.starts_with("bad argument") && message == expected
+            }
+            ErrorKind::ArgError(argument) => {
+                expected.starts_with("bad argument") && argument.to_string() == expected
+            }
+            _ => false,
+        },
+        "expected format error {expected:?}, got {error:?}"
     );
 }
 

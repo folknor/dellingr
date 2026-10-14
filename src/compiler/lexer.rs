@@ -394,7 +394,7 @@ impl<'a> Lexer<'a> {
         // Check for hex values (both 0x and 0X)
         if first_char == '0' && (self.try_next('x') || self.try_next('X')) {
             // Mantissa: hex digits with an optional fraction (Lua 5.2 hex
-            // floats, C30). At least one digit must appear on either side of
+            // floats). At least one digit must appear on either side of
             // the dot: `0x1.8`, `0x1.`, and `0x.8` are valid, `0x.` is not.
             let mut mantissa_digits = self.lex_hex_digits();
             if self.try_next('.') {
@@ -717,7 +717,7 @@ mod tests {
 
     #[test]
     fn hex_float_literals_lex_as_one_token() {
-        // C30: fraction and binary-exponent forms are single hex tokens.
+        // Fractions and binary-exponent forms are single hex tokens.
         check_line("0x1.8p+0", &[(LiteralHexNumber, 0, 8)]);
         check_line("0x1.8P-2", &[(LiteralHexNumber, 0, 8)]);
         check_line("0x.8", &[(LiteralHexNumber, 0, 4)]);

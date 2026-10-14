@@ -59,7 +59,7 @@ Some of them might be added later (probably most of them behind a feature gate, 
 
 ## Source limits
 
-The parser bounds syntax nesting at 200 levels and raises `chunk has too many syntax levels` past that, the way reference Lua does with `LUAI_MAXCCALLS`. Without the bound, deeply nested source exhausts the native stack, and a Rust stack overflow aborts the host process rather than returning a catchable error.
+The parser has a budget of 200 recursive syntax entries and raises `chunk has too many syntax levels` when it is exhausted, following the native-stack safeguard in reference Lua's `LUAI_MAXCCALLS`. Without the bound, deeply nested source exhausts the native stack, and a Rust stack overflow aborts the host process rather than returning a catchable error.
 
 One divergence worth knowing: a nested parenthesis costs two levels rather than one, because each level descends through both the expression and unary parsers. Parentheses therefore nest about 99 deep here against reference Lua's ~200. Every other construct - statement blocks, `elseif` chains, table constructors, unary operator runs, field-access chains - gets the full 200. Real code does not come close to either figure.
 

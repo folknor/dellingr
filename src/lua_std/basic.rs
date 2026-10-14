@@ -410,11 +410,7 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
             state.remove(1)?;
         }
 
-        u8::try_from(count).map_err(|_| {
-            state.error(ErrorKind::RuntimeError(
-                "too many results (limit 255)".into(),
-            ))
-        })
+        crate::error::results_count(count).map_err(|kind| state.error(kind))
     });
 
     // _G - Global environment table (proxy with metamethods)
@@ -471,6 +467,7 @@ fn arg_type_error(
     state.error(ErrorKind::ArgError(ArgError {
         arg_number,
         func_name: Some(func_name.to_string()),
+        detail: crate::error::ArgDetail::TypeMismatch,
         expected: Some(expected),
         received: Some(state.typ(arg_number)),
     }))

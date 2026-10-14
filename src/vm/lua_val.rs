@@ -5,6 +5,8 @@ use super::object::{Closure, GcHeap, ObjectPtr, StringPtr};
 use std::fmt;
 use std::hash::{Hash, Hasher};
 
+use super::table::{InvalidTableKey, NormalizedTableKey, TableKeyInput, normalize_table_key};
+
 /// Signature for a host-provided Rust function callable from Lua.
 ///
 /// The function reads its arguments from the [`State`]'s stack (1-based
@@ -132,13 +134,16 @@ impl Hash for Val {
             Bool(b) => b.hash(hasher),
             Obj(o) => o.hash(hasher),
             Num(n) => {
-                // NaN breaks HashMap invariants (compares unequal to itself but may hash same)
-                // This must be a hard assert, not debug_assert, to prevent undefined behavior
-                assert!(!n.is_nan(), "Cannot use NaN as table key");
-                let mut bits = n.to_bits();
-                if bits == 1 << 63 {
-                    bits = 0;
-                }
+                // NaN is invalid as a table key, and negative zero hashes like
+                // positive zero. Keep this in step with table lookup and the
+                // snapshot verifier through the shared normalizer.
+                let bits = match normalize_table_key::<(), (), ()>(TableKeyInput::Number(*n)) {
+                    Ok(NormalizedTableKey::Number(bits)) => bits,
+                    Err(InvalidTableKey::Nan) => panic!("Cannot use NaN as table key"),
+                    Err(InvalidTableKey::Nil) | Ok(_) => {
+                        unreachable!("numeric table keys normalize to numeric keys")
+                    }
+                };
                 bits.hash(hasher);
             }
             RustFn(func) => (*func as usize).hash(hasher),

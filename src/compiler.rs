@@ -14,8 +14,6 @@ use super::Result;
 use super::error;
 use super::vm::{ObjectPtr, Val};
 
-pub(crate) use parser::MAX_SYNTAX_DEPTH;
-
 /// Describes where an upvalue comes from when creating a closure.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum UpvalueDesc {
@@ -431,9 +429,9 @@ impl RuntimeCaches {
                 .map(|_| SetFieldLookupCacheSlot::default())
                 .collect(),
             // Cursor slots deliberately have no Bytecode count: the three
-            // existing cache counts are snapshot bytes, and a fourth would
-            // change format 6. Verified C operands make this high-water mark
-            // the exact allocation count.
+            // existing cache counts are part of the snapshot format, and a
+            // fourth would change that format. Verified C operands make this
+            // high-water mark the exact allocation count.
             tfor_cursor: (0..bc
                 .code
                 .iter()
@@ -530,6 +528,8 @@ fn finalize(bc: &mut Bytecode) -> Result<()> {
 #[cfg(test)]
 mod runtime_cache_tests {
     use super::*;
+    use crate::error::{ErrorKind, SyntaxError};
+    use crate::limits::{MAX_SYNTAX_DEPTH, MAX_VERIFIER_MARKER_DEPTH};
 
     /// The dynamic shapes the verifier's `Known`/`Dyn` transitions and marker
     /// stacks exist for. If the corpus stops containing one of these, the
@@ -578,10 +578,95 @@ mod runtime_cache_tests {
         }
     }
 
+    fn deepest_accepted_program(source_for_depth: impl Fn(usize) -> String) -> (usize, Bytecode) {
+        let mut deepest = None;
+        let mut first_rejected = None;
+        for depth in 1..=(MAX_SYNTAX_DEPTH as usize + 1) {
+            let source = source_for_depth(depth);
+            match parse_str(&source) {
+                Ok(bytecode) => deepest = Some((depth, bytecode)),
+                Err(error) => {
+                    assert!(matches!(
+                        error.kind,
+                        ErrorKind::SyntaxError(SyntaxError::TooManySyntaxLevels)
+                    ));
+                    first_rejected = Some(depth);
+                    break;
+                }
+            }
+        }
+
+        let (depth, bytecode) = deepest.expect("a simple nested program must compile");
+        assert_eq!(first_rejected, Some(depth + 1));
+        (depth, bytecode)
+    }
+
+    fn marker_peak(
+        bytecode: &Bytecode,
+        open_opcode: u8,
+        closes_marker: impl Fn(&Instr) -> bool,
+    ) -> usize {
+        let mut marker_depth = 0usize;
+        let mut peak_marker_depth = 0usize;
+        for instruction in &bytecode.code {
+            if instruction.opcode() == open_opcode {
+                marker_depth += 1;
+                peak_marker_depth = peak_marker_depth.max(marker_depth);
+            } else if closes_marker(instruction) {
+                assert!(marker_depth > 0, "closing opcodes must have a marker");
+                marker_depth -= 1;
+            }
+        }
+        assert_eq!(marker_depth, 0, "all markers must be closed");
+        peak_marker_depth
+    }
+
+    #[test]
+    fn deepest_nested_programs_fit_verifier_marker_limit() {
+        // Parsing at the syntax depth limit recurses deeply in unoptimized dev
+        // builds, so run on a main-thread-sized stack.
+        std::thread::Builder::new()
+            .stack_size(8 << 20)
+            .spawn(deepest_nested_programs_body)
+            .expect("spawning the marker limit test thread should succeed")
+            .join()
+            .expect("marker limit test thread should not panic");
+    }
+
+    fn deepest_nested_programs_body() {
+        let (call_depth, call_chain) = deepest_accepted_program(|depth| {
+            format!("return {}{}", "f(".repeat(depth), ")".repeat(depth))
+        });
+        let call_marker_peak = marker_peak(&call_chain, Instr::OP_MARK_CALL_BASE, |instruction| {
+            instruction.opcode() == Instr::OP_CALL && instruction.a() == u8::MAX
+        });
+        assert!(
+            call_marker_peak <= MAX_VERIFIER_MARKER_DEPTH,
+            "compiler emitted {call_marker_peak} nested call markers at call depth {call_depth}"
+        );
+
+        let (table_depth, table_chain) = deepest_accepted_program(|depth| {
+            let mut expression = "{g()}".to_string();
+            for _ in 1..depth {
+                expression = format!("{{f({expression})}}");
+            }
+            format!("return {expression}")
+        });
+        let table_marker_peak =
+            marker_peak(&table_chain, Instr::OP_NEW_TABLE_TRACKED, |instruction| {
+                instruction.opcode() == Instr::OP_SET_LIST && instruction.a() == 0
+            });
+        assert!(
+            table_marker_peak <= MAX_VERIFIER_MARKER_DEPTH,
+            "compiler emitted {table_marker_peak} nested table markers at table depth {table_depth}"
+        );
+    }
+
     #[test]
     fn compiler_examples_pass_stack_discipline_verification() {
         let mut paths = Vec::new();
-        collect_lua_sources(std::path::Path::new("examples"), &mut paths);
+        let examples_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+        collect_lua_sources(&examples_dir, &mut paths);
         paths.sort();
         // Without this the corpus proof passes vacuously if the walk finds
         // nothing, which is exactly the failure mode that would let a verifier

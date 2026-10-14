@@ -35,7 +35,27 @@ All notable changes to dellingr are documented here. The format follows
   truncating (`string.sub("abc", 1.5)` was accepted).
 - **Out-of-range argument messages.** `tonumber` base and `select` index out of
   range, and `rawlen` on a non-table non-string, now say so instead of `number
-  expected, got number`; these are `RuntimeError` rather than `ArgError`.
+  expected, got number`. They remain `ArgError`s, with the reason in the new
+  `detail` field.
+- **`ArgError` gains a required `detail: ArgDetail` field** (`TypeMismatch`,
+  `NoInteger`, `OutOfBounds`, `IntervalEmpty`, `Custom`). Hosts constructing
+  `ArgError` directly must supply it; `TypeMismatch` reproduces the old
+  rendering from `expected`/`received`.
+- **Call-count limits have their own error kinds.** `ErrorKind::TooManyArguments
+  { limit }` and `ErrorKind::TooManyResults { limit }` replace the
+  `RuntimeError` strings for calls with more than 255 arguments and functions
+  returning more than 255 values (`error::MAX_RESULTS`, with
+  `error::results_count` for host callbacks). The rendered text is unchanged,
+  except that `unpack`/`table.unpack` overflow now reads `too many results
+  (limit 255)` instead of `too many results to unpack`.
+- **`State::load_state` setup is fallible.** The setup closure is now
+  `FnOnce(&mut State) -> Result<(), E>`, and its error is returned as
+  `LoadError::Setup(E)`; `LoadError` is generic over that type, defaulting to
+  `Infallible`. Existing callers change `|_| {}` to
+  `|_| Ok::<(), std::convert::Infallible>(())` or return their own error.
+- **`save_state` refuses to run inside a Rust callback.** A Rust function
+  executing a direct host call now counts as an in-flight call, so a save from
+  inside it fails with `SaveError::NotQuiescent`.
 - **Concatenation renders negative zero as `"-0"`**, like `tostring` (it was
   `"0"`). The two now share one number renderer. `"-0"` is Lua 5.2's spelling for
   every negative zero; Lua 5.4 splits it by subtype (`-0.0` for floats, `0`
@@ -69,8 +89,9 @@ All notable changes to dellingr are documented here. The format follows
   renders as `bad argument #1 to 'sin' (number expected, got nil)`, matching
   reference Lua's quoting, and the standard library fills in the function name
   for its type and missing-argument checks (they previously read `to
-  <anonymous>`). Host-side `check_type`/`check_any` errors stay anonymous and
-  render `to '<anonymous>'`.
+  <anonymous>`). `check_type`/`check_any` called from a running Rust callback
+  name it after the first global bound to that function; a callback with no
+  global binding stays anonymous and renders `to '<anonymous>'`.
 - **`State::concat`** rejects a count larger than the current frame's values
   with `InvalidStackIndex` instead of panicking.
 
@@ -84,6 +105,10 @@ All notable changes to dellingr are documented here. The format follows
   Errors from such a chain (including the cyclic depth error, or a Rust
   handler at the end of the chain) reached the host only through the `Result`;
   the outermost host call now reports them to `on_error` exactly once.
+- **`on_error` fires for a direct host call of a non-callable value**, once.
+  A Rust callback that propagates a failure from its own nested `call` is now
+  reported once at the callback's boundary rather than twice; a failure the
+  callback swallows is no longer reported at all.
 - **`break` outside a loop reports its real line** instead of always line 1.
 - **`string.find` with `)` in the pattern** no longer takes the plain-text fast
   path.

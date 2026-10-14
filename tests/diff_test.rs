@@ -86,7 +86,43 @@ fn run_differential_bucket(name: &str, examples: &[PathBuf]) {
     );
 }
 
+// The corpus is split so each test stays inside the gate's per-test time
+// budget in the unoptimized test profile; together the buckets cover every
+// example exactly once (the first two name their directories, the third takes
+// the rest).
+const KERNEL_DIRS_A: [&str; 5] = ["alloc", "calls", "fields", "globals", "iter"];
+const KERNEL_DIRS_B: [&str; 5] = ["numerics", "tables", "strings", "composite", "parse"];
+
+fn top_level_dir(rel: &Path) -> Option<&str> {
+    let mut components = rel.components();
+    let first = components.next()?.as_os_str().to_str()?;
+    components.next().map(|_| first)
+}
+
 #[test]
-fn differential_all_examples() {
-    run_differential_bucket("all", &collect_examples(|_| true));
+fn differential_kernel_examples_a() {
+    run_differential_bucket(
+        "kernel-a",
+        &collect_examples(|rel| top_level_dir(rel).is_some_and(|dir| KERNEL_DIRS_A.contains(&dir))),
+    );
+}
+
+#[test]
+fn differential_kernel_examples_b() {
+    run_differential_bucket(
+        "kernel-b",
+        &collect_examples(|rel| top_level_dir(rel).is_some_and(|dir| KERNEL_DIRS_B.contains(&dir))),
+    );
+}
+
+#[test]
+fn differential_top_level_examples() {
+    run_differential_bucket(
+        "top-level",
+        &collect_examples(|rel| {
+            top_level_dir(rel).is_none_or(|dir| {
+                !KERNEL_DIRS_A.contains(&dir) && !KERNEL_DIRS_B.contains(&dir)
+            })
+        }),
+    );
 }

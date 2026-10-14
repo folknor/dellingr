@@ -267,6 +267,7 @@ impl State {
             crate::error::ArgError {
                 arg_number: idx,
                 func_name: function_name.map(ToOwned::to_owned),
+                detail: crate::error::ArgDetail::TypeMismatch,
                 expected: Some(super::LuaType::String),
                 received: Some(val.typ(&self.heap)),
             },

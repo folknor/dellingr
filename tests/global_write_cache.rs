@@ -92,8 +92,10 @@ fn new_save_with_cached_set_global_round_trips() {
     let mut state = State::new();
     run(&mut state, "function writer(v) saved_x = v end; writer(1)");
     let save = state.save_state().expect("state saves");
-    let mut loaded = State::load_state(&save.bytes, Box::new(dellingr::DefaultCallbacks), |_| {})
-        .expect("new save loads");
+    let mut loaded = State::load_state(&save.bytes, Box::new(dellingr::DefaultCallbacks), |_| {
+        Ok::<(), std::convert::Infallible>(())
+    })
+    .expect("new save loads");
     call_writer(&mut loaded, "writer", 2.0);
     assert_eq!(global_number(&mut loaded, "saved_x"), 2.0);
 }

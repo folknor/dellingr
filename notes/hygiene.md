@@ -3,7 +3,7 @@
 Hygiene findings from the hunt over the compiler, vm, surface, stdlib and
 tooling scopes: values with more than one owner, rules implemented more than
 once, and assumptions about the host. Hunter reports, not verified findings:
-each may be wrong. Defects found along the way are in [bugs.md](bugs.md).
+each may be wrong.
 
 1. An entry is removed entirely when completely resolved. No historical record
    stays here.
@@ -40,33 +40,13 @@ what keeps them in step.
 - `assign_cache_slots` counts `tfor_cursor_len` and discards it;
   `RuntimeCaches::new` recomputes it as `max(C)` over the code, because a
   fourth count field would change the snapshot format. The verifier's
-  sequential slot check keeps them in step. The comment hard-codes "format 6";
-  reword to "the snapshot format".
+  sequential slot check keeps them in step.
 - The verifier restates the cache-slot allocation algorithm exactly
   (first-use order for globals, instruction order for fields and set-fields),
   held by `compiler_examples_pass_stack_discipline_verification`. Any policy
   change (for example sharing GET_FIELD slots by name) must change both.
 
 # Limits and tunables
-
-## HYG-009 - `MAX_SYNTAX_DEPTH` carries three meanings
-
-Reported by the compiler and surface hunters.
-
-It bounds parser recursion (parser.rs), the verifier's call-base and
-table-marker stacks (verify.rs, "marker stack is too deep"), and snapshot
-nested-chunk depth (`vm/save_state/verify.rs` `validate_nested_graph`). The
-second and third hold only because the parser spends at least one syntax level
-per marker and per nested function. Each paren spends two (the parser test
-notes an effective paren limit of about 99), so the README's "bounds syntax
-nesting at 200 levels" overstates it for parentheses. If the parser ever
-charges fewer levels, the verifier rejects the compiler's own output. The
-surface hunter calls the snapshot reuse a good single owner but a borrowed
-meaning, and proposes a dedicated `MAX_CHUNK_NESTING` the parser enforces
-directly. Fix: give each meaning its own named constant, derived with a
-comment. Enforceable: a test compiling the deepest accepted program and
-checking the marker depth it reaches against the verifier constant. Reword
-the README to describe the budget rather than a depth.
 
 ## HYG-010 - Runtime limits are private constants, restated as numbers in prose, with no injection point and no list
 
@@ -95,21 +75,6 @@ save/restore) would let tests use small caps and the game tune per script.
 Enforceable: a test that every `const MAX_*` in `src/` is re-exported; a
 doctest asserting README numbers equal the consts.
 
-## HYG-011 - The 255-argument/result runtime limit has several ad hoc spellings and texts
-
-Reported by the vm and stdlib hunters.
-
-`"too many arguments (limit 255)"` twice and `"too many results (limit 255)"`
-once in vm/eval.rs; `select` (basic.rs) uses `u8::try_from(count)` with the
-same "too many results (limit 255)" text; `unpack_values` (lua_std.rs) uses
-`span >= 255` with "too many results to unpack" (twice in one function). These
-are `RuntimeError` strings, while the compiler side has typed variants. The
-real owner is the `u8` return of `RustFunc` and `RetCount`'s width. Fix:
-`ErrorKind::TooManyArguments / TooManyResults { limit }` derived from
-`u8::MAX`, a `MAX_RESULTS` const and `results_count(n) -> Result<u8>` helper
-next to `RetCount`; unit test at 255/256. A brokkr text rule could then reject
-`"limit 255"` literals.
-
 ## HYG-013 - Capacity hints and headroom are hand-counted, and some are already off
 
 Reported by the vm and stdlib hunters.
@@ -134,19 +99,6 @@ other count sets the cache to `None` with no failure and no log. The count's
 owner is `open_table`. Fix: derive the length from table.rs's function list
 (`[Val; TABLE_FUNCTIONS.len()]`), making the coupling a compile error; test
 that the fallback is `Some` after `open_libs`.
-
-## HYG-015 - `COST_CHECK_INTERVAL` may or may not be observable, and nothing says which
-
-Reported by the vm and surface hunters.
-
-`COST_CHECK_INTERVAL = 64` (vm/frame.rs) has no injection point; its doc says
-higher values "may overshoot budget more". The `add_cost!` macro also flushes
-when `remaining - next <= 0`, so the vm hunter reads it as not observable,
-while the surface hunter notes nothing documents whether it can move the point
-`BudgetExceeded` fires (and so `cost_used` at failure). If it can, it is part
-of the determinism contract and belongs with `COST_MODEL_VERSION`; if it
-cannot, a property test should hold that, like the `consume_units` test in
-cost_meter.rs.
 
 ## HYG-016 - Line numbers have two widths
 
@@ -201,21 +153,6 @@ load time. Fix: an `IndexMap` keyed by bytes for the pools, and a documented,
 configurable maximum source size.
 
 # Errors and diagnostics
-
-## HYG-020 - Rust-function names are supplied per call site, and `ArgError` has no detail
-
-Reported by the stdlib hunter; narrowed by a fixer, who quoted names in
-`ArgError`'s Display, added named validation helpers in lua_std.rs used at 62
-stdlib sites, and made error.rs the only owner of "bad argument" text.
-
-Remaining: the stdlib passes its own function name at each site, while a host
-`RustFunc` calling `State::check_type` still gets `<anonymous>`. Recording the
-executing Rust function's registered name in `CallInfo` (vm.rs, set and cleared
-at the Rust dispatch paths in eval.rs and eval_control.rs) would let
-`check_type` fill it. Separately, `ArgError` needs a `detail: ArgDetail` enum
-(TypeMismatch, NoInteger, OutOfBounds, IntervalEmpty, Custom) so range and
-union-type errors stop being `RuntimeError`; eval.rs's `concat` builds the
-remaining out-of-library `ArgError`.
 
 ## HYG-021 - Cast lints are not yet enforced in the stdlib
 
@@ -287,17 +224,6 @@ found/expected versions, CorruptArena reasons, decoder offsets).
   `set_global_stdlib_rust_fn` must `.expect(...)` it; a `RegistrationError` or
   `error::Error` variant would match when it happens.
 
-## HYG-027 - `load_state`'s setup closure cannot fail
-
-Reported by the surface hunter.
-
-The signature is `setup: impl FnOnce(&mut State)`, but what a host does in
-setup is fallible (`register_rust_fn`, `set_global_named_rust_fn`, `push_*`,
-`new_table`, `get_global`, `open_libs`). The host must `expect` (abort during a
-load of user-controlled input) or swallow, and a duplicate-registration bug then
-surfaces as `LoadError::UnknownFunction` naming the wrong cause. Make it
-`FnOnce(&mut State) -> Result<(), E>` with a `LoadError::Setup(E)`.
-
 ## HYG-028 - Registration failures are handled three ways in the stdlib
 
 Reported by the stdlib hunter.
@@ -313,30 +239,6 @@ same way, the `expect` is a panic on a host-controlled call. The
 `push_named_or_plain_rust_fn`). Fix: one `State::register_lib_fn(table_idx,
 lib_prefix, name, func)` doing the cfg internally and returning `Result`, with
 the underlying methods `pub(super)` to vm. Enforceable by visibility.
-
-## HYG-029 - gmatch iterator state is read with `unwrap_or(0.0)`
-
-Reported by the stdlib hunter.
-
-`gmatch_empty_iter` (twice) and `gmatch_iter` read `pos`/`len` with
-`state.to_number(-1).unwrap_or(0.0)`, and `gmatch_empty_iter` does not
-`check_type(1, Table)`. Scripts cannot reach the state table, but README says
-save files are user-editable input, so a doctored save with a non-number `pos`
-silently restarts iteration at 0. Validate in `verify_payload` or make the
-iterator error. Enforceable: add `Result::unwrap_or` /
-`Result::unwrap_or_default` to `clippy.toml` `disallowed-methods`, allowed at
-genuine sites.
-
-## HYG-032 - Table-key equality is re-derived on the load path
-
-Reported by the surface hunter; a fixer confirmed it and left comments at
-`resolve_key` and `runtime_table_key`.
-
-verify.rs `resolve_key` and save_state.rs `runtime_table_key` each normalise
-`-0.0` and reject NaN and nil. The VM has no single canonical key rule to call:
-table.rs rejects nil and NaN on insert, while numeric equality and negative-zero
-hashing live in lua_val.rs. Export one key-normalisation function from the
-table code and have both load-path sites call it.
 
 # State, ordering and ambient dependencies
 
@@ -490,21 +392,36 @@ Reported by the vm, surface and compiler hunters.
 
 # Rules duplicated inside the compiler
 
-## HYG-046 - Codegen sequences copied across the parser
+## HYG-070 - `ArgDetail` is chosen by matching message text
 
-Reported by the compiler hunter.
+Reported by the wave 4 reviewer.
 
-- "Open the multi-value tail" has five implementations: call args and
-  method-call args in expr.rs (two near-identical 25-line blocks), stmt.rs
-  `parse_return`, stmt.rs `adjust_multi_assign`, and table.rs, with three
-  failure styles (`unreachable!`, `debug_assert!`, `debug_assert_eq!`) and the
-  ArgCount spellings (since unified). One `open_tail(&mut self, last:
-  &ExpDesc, want: RetCount)`.
-- PlaceExp get-lowering is written three times (parser.rs `eval_prefix_exp`,
-  func.rs `parse_fndecl_table`, `parse_fndecl_method`) and set-lowering twice
-  (stmt.rs `parse_assign`, func.rs `parse_fndecl_basic`); the func.rs copies end
-  in `unreachable!`. `parse_fndef_named` and `parse_fndef_method` are the same 15
-  lines apart from `params.insert(0, "self")`.
+`ErrorKind::bad_argument` picks the `ArgDetail` variant by string-matching the
+detail text (`"interval is empty"` and so on), so a reworded call site silently
+becomes `Custom`. Typed constructors at the call sites would make the variant
+the owner and the text its rendering.
+
+## HYG-071 - Error-message function names depend on the build
+
+Reported by the wave 4 reviewer.
+
+`active_rust_function_name` matches the running callback by function-pointer
+address against globals, then falls back to the snapshot registry, which exists
+only with `feature = "snapshot"`. LTO or identical-code folding can merge two
+callbacks, and a generic `check_type` inside `math.*` is named in a snapshot
+build but anonymous otherwise. Deterministic within one binary, but replay logs
+compared across builds or feature sets can differ in error text. Document it in
+reference, or name callbacks at registration instead of by address.
+
+## HYG-072 - Table key normalisation now runs on insert and hash
+
+Reported by the wave 4 reviewer; perf, unmeasured.
+
+`Table::insert` builds a `TableKeyInput` and runs the full normaliser to reject
+nil and NaN, and `Hash for Val` routes numbers through it. Both should inline to
+the old code; check with the next `tables/*` bench. The parser's chunk-nesting
+check is currently unreachable (syntax depth stops first); limits.rs could say
+so.
 
 ## HYG-060 - Tool directories are ignored wholesale
 
@@ -515,28 +432,6 @@ Reported by the tooling hunter; the dead ignore entries are fixed.
 intended). `.review.toml` holds only an `[_audit] id`, is read by nothing in the
 tree (the external `review` tool's state), and is listed in Cargo.toml
 `exclude`.
-
-## HYG-069 - Wave 3 reviewer laterals
-
-Reported by the wave 3 reviewer.
-
-- Finding-style ids still in durable comments: lexer.rs (`C30`, twice),
-  parser/table.rs (`lead L3`), patterns/mod.rs (`L14` twice, `C29`).
-- A direct host `call()` of a non-callable value does not fire `on_error`, but
-  the same type error at the end of a non-function `__call` chain now does.
-  host.rs excludes "errors `call()` itself raises before dispatch"; decide
-  whether the chain case belongs under that exclusion.
-- `ArgCount`/`RetCount::to_u8` assert on `Fixed(255)`: a panic in library code
-  reachable only by a compiler bug.
-- `GcHeap::with_threshold` is only used by `GcHeap::new`.
-
-## HYG-068 - Scope cost totals are summed twice
-
-Reported by the opcode-table fixer.
-
-`ScopeCost.total_cost` (computed in `analyze_chunk`) and `CostAnalysis::totals`
-/ `ScopeTotals` each sum `own_cost` over the tree in lib.rs. `ScopeCost` could
-implement `AddAssign` and own the one sum.
 
 ## HYG-047 - gmatch snapshot ids are spelled twice
 
@@ -632,13 +527,6 @@ brokkr.toml could check both files define `_bench` and that their per-call
 `cost` is in a fixed ratio. A fixer notes brokkr.toml declares no expected
 ratios and the composite and parse pairs are scaled differently. The README's
 `benchmark` row may still describe the old `examples/benchmark.lua` kernel.
-
-## HYG-059 - Smaller test-harness drift
-
-Reported by the tooling and compiler hunters; the rest is fixed.
-
-- `compiler_examples_pass_stack_discipline_verification` walks
-  `Path::new("examples")` relative to cwd; use `env!("CARGO_MANIFEST_DIR")`.
 
 # Dead code and stale docs
 

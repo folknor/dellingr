@@ -1,8 +1,11 @@
 use std::collections::{BTreeSet, VecDeque};
 
-use crate::compiler::MAX_SYNTAX_DEPTH;
 use crate::compiler::verify::{self, BytecodeView};
+use crate::limits::MAX_CHUNK_NESTING;
 
+use super::super::table::{
+    InvalidTableKey, NormalizedTableKey, TableKeyInput, normalize_table_key,
+};
 use super::{LoadError, SavePayload, SavedBytecode, SavedObject, SavedUpvalueDesc};
 
 /// A payload whose bytecode and closure references have been structurally checked.
@@ -121,7 +124,7 @@ fn validate_nested_graph(bytecode: &[SavedBytecode]) -> Result<(), LoadError> {
             }
         }
     }
-    let mut depths = vec![0u32; bytecode.len()];
+    let mut depths = vec![0usize; bytecode.len()];
     let mut ready = VecDeque::new();
     for (id, degree) in indegree.iter().enumerate() {
         if *degree == 0 {
@@ -136,7 +139,7 @@ fn validate_nested_graph(bytecode: &[SavedBytecode]) -> Result<(), LoadError> {
             let child = *child as usize;
             let depth = depths[parent] + 1;
             depths[child] = depths[child].max(depth);
-            if depths[child] > MAX_SYNTAX_DEPTH {
+            if depths[child] > MAX_CHUNK_NESTING {
                 return Err(invalid(
                     child,
                     None,
@@ -272,45 +275,39 @@ fn validate_environment_deltas(payload: &SavePayload) -> Result<(), LoadError> {
 }
 
 #[derive(Eq, Ord, PartialEq, PartialOrd)]
-enum ResolvedKey {
-    Bool(bool),
-    Num(u64),
-    Str(Vec<u8>),
-    Obj(u32),
-    Fn(String),
-    EnvObj(String),
+enum SavedObjectKey {
+    Object(u32),
+    EnvironmentObject(String),
 }
+
+type ResolvedKey = NormalizedTableKey<Vec<u8>, SavedObjectKey, String>;
 
 fn resolve_key(
     value: &super::SavedVal,
     payload: &SavePayload,
     index: usize,
 ) -> Result<ResolvedKey, LoadError> {
-    // Refusal: vm/table.rs currently exposes no canonical key helper. It only
-    // rejects nil and NaN on insert, while Val equality/hash implement the
-    // number rule separately. The table owner must export that rule before
-    // this verifier can call it without duplicating semantics.
-    match value {
-        super::SavedVal::Nil => Err(corrupt("nil is not a table key", index)),
-        super::SavedVal::Bool(value) => Ok(ResolvedKey::Bool(*value)),
-        super::SavedVal::Num(bits) => {
-            let number = f64::from_bits(*bits);
-            if number.is_nan() {
-                Err(corrupt("NaN is not a table key", index))
-            } else {
-                Ok(ResolvedKey::Num(if number == 0.0 { 0 } else { *bits }))
-            }
+    let key = match value {
+        super::SavedVal::Nil => TableKeyInput::Nil,
+        super::SavedVal::Bool(value) => TableKeyInput::Bool(*value),
+        super::SavedVal::Num(bits) => TableKeyInput::Number(f64::from_bits(*bits)),
+        super::SavedVal::Str(id) => TableKeyInput::String(
+            payload
+                .strings
+                .get(*id as usize)
+                .cloned()
+                .ok_or_else(|| corrupt("table key string id is out of range", *id as usize))?,
+        ),
+        super::SavedVal::Obj(id) => TableKeyInput::Object(SavedObjectKey::Object(*id)),
+        super::SavedVal::Fn(id) => TableKeyInput::RustFn(id.clone()),
+        super::SavedVal::EnvObj(id) => {
+            TableKeyInput::Object(SavedObjectKey::EnvironmentObject(id.clone()))
         }
-        super::SavedVal::Str(id) => payload
-            .strings
-            .get(*id as usize)
-            .cloned()
-            .map(ResolvedKey::Str)
-            .ok_or_else(|| corrupt("table key string id is out of range", *id as usize)),
-        super::SavedVal::Obj(id) => Ok(ResolvedKey::Obj(*id)),
-        super::SavedVal::Fn(id) => Ok(ResolvedKey::Fn(id.clone())),
-        super::SavedVal::EnvObj(id) => Ok(ResolvedKey::EnvObj(id.clone())),
-    }
+    };
+    normalize_table_key(key).map_err(|error| match error {
+        InvalidTableKey::Nil => corrupt("nil is not a table key", index),
+        InvalidTableKey::Nan => corrupt("NaN is not a table key", index),
+    })
 }
 
 fn validate_references(payload: &SavePayload) -> Result<(), LoadError> {
@@ -336,6 +333,177 @@ fn validate_references(payload: &SavePayload) -> Result<(), LoadError> {
     }
     for (_, value) in &payload.user_globals {
         validate_value(value, payload)?;
+    }
+    Ok(())
+}
+
+fn table_field<'a>(
+    payload: &'a SavePayload,
+    table_id: u32,
+    field: &[u8],
+) -> Option<&'a super::SavedVal> {
+    let Some(super::SavedObject::Table { entries, .. }) = payload.objects.get(table_id as usize)
+    else {
+        return None;
+    };
+    entries.iter().find_map(|(key, value)| {
+        let super::SavedVal::Str(id) = key else {
+            return None;
+        };
+        payload
+            .strings
+            .get(*id as usize)
+            .filter(|bytes| bytes.as_slice() == field)
+            .map(|_| value)
+    })
+}
+
+fn gmatch_integer_field(
+    payload: &SavePayload,
+    table_id: u32,
+    field: &[u8],
+    maximum: usize,
+    reason: &'static str,
+    index: usize,
+) -> Result<usize, LoadError> {
+    let Some(super::SavedVal::Num(bits)) = table_field(payload, table_id, field) else {
+        return Err(corrupt(reason, index));
+    };
+    let value = f64::from_bits(*bits);
+    if !value.is_finite()
+        || value < 0.0
+        || value.fract().to_bits() << 1 != 0
+        || value > maximum as f64
+    {
+        return Err(corrupt(reason, index));
+    }
+    Ok(value as usize)
+}
+
+fn validate_gmatch_state(
+    payload: &SavePayload,
+    table_id: u32,
+    empty_pattern: bool,
+    index: usize,
+) -> Result<(), LoadError> {
+    let maximum_position = super::super::MAX_STRING_BYTES + 1;
+    if empty_pattern {
+        let len = gmatch_integer_field(
+            payload,
+            table_id,
+            b"len",
+            super::super::MAX_STRING_BYTES,
+            "empty gmatch length is missing or invalid",
+            index,
+        )?;
+        let pos = gmatch_integer_field(
+            payload,
+            table_id,
+            b"pos",
+            maximum_position,
+            "empty gmatch position is missing or invalid",
+            index,
+        )?;
+        if pos > len.saturating_add(1) {
+            return Err(corrupt("empty gmatch position exceeds its length", index));
+        }
+        return Ok(());
+    }
+
+    let Some(super::SavedVal::Str(subject_id)) = table_field(payload, table_id, b"s") else {
+        return Err(corrupt("gmatch subject is missing or invalid", index));
+    };
+    let Some(subject) = payload.strings.get(*subject_id as usize) else {
+        return Err(corrupt("gmatch subject string id is out of range", index));
+    };
+    if !matches!(
+        table_field(payload, table_id, b"p"),
+        Some(super::SavedVal::Str(_))
+    ) {
+        return Err(corrupt("gmatch pattern is missing or invalid", index));
+    }
+    let pos = gmatch_integer_field(
+        payload,
+        table_id,
+        b"pos",
+        maximum_position,
+        "gmatch position is missing or invalid",
+        index,
+    )?;
+    if pos > subject.len().saturating_add(1) {
+        return Err(corrupt("gmatch position exceeds its subject", index));
+    }
+    Ok(())
+}
+
+fn validate_gmatch_iterators(payload: &SavePayload) -> Result<(), LoadError> {
+    let mut validated_states = BTreeSet::new();
+    for (closure_index, object) in payload.objects.iter().enumerate() {
+        let super::SavedObject::Closure { upvalues, .. } = object else {
+            continue;
+        };
+        // Ordinary closures may capture any number of objects, so object
+        // multiplicity only matters once a gmatch iterator upvalue is found.
+        let mut iterator_kind = None;
+        let mut state_table = None;
+        let mut multiple_objects = false;
+        for upvalue_id in upvalues {
+            let value = payload
+                .upvalues
+                .get(*upvalue_id as usize)
+                .ok_or_else(|| corrupt("gmatch closure upvalue is out of range", closure_index))?;
+            match value {
+                super::SavedVal::Fn(id) if id == "string.gmatch.iter" => {
+                    if iterator_kind.replace(false).is_some() {
+                        return Err(corrupt(
+                            "gmatch closure captures multiple iterators",
+                            closure_index,
+                        ));
+                    }
+                }
+                super::SavedVal::Fn(id) if id == "string.gmatch.empty_iter" => {
+                    if iterator_kind.replace(true).is_some() {
+                        return Err(corrupt(
+                            "gmatch closure captures multiple iterators",
+                            closure_index,
+                        ));
+                    }
+                }
+                super::SavedVal::Obj(id) => {
+                    if state_table.replace(*id).is_some() {
+                        multiple_objects = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(empty_pattern) = iterator_kind else {
+            continue;
+        };
+        if multiple_objects {
+            return Err(corrupt(
+                "gmatch closure captures multiple state objects",
+                closure_index,
+            ));
+        }
+        let Some(table_id) = state_table else {
+            return Err(corrupt(
+                "gmatch closure state table is missing",
+                closure_index,
+            ));
+        };
+        if !matches!(
+            payload.objects.get(table_id as usize),
+            Some(super::SavedObject::Table { .. })
+        ) {
+            return Err(corrupt(
+                "gmatch closure state is not a table",
+                closure_index,
+            ));
+        }
+        if validated_states.insert((table_id, empty_pattern)) {
+            validate_gmatch_state(payload, table_id, empty_pattern, closure_index)?;
+        }
     }
     Ok(())
 }
@@ -372,6 +540,7 @@ pub(super) fn verify_payload(payload: SavePayload) -> Result<VerifiedSavePayload
     validate_nested_graph(&payload.bytecode)?;
     validate_closures(&payload)?;
     validate_references(&payload)?;
+    validate_gmatch_iterators(&payload)?;
     validate_environment_deltas(&payload)?;
     validate_pointer_ids(&payload)?;
     Ok(VerifiedSavePayload(payload))
@@ -395,6 +564,73 @@ mod tests {
             objects: Vec::new(),
             user_globals: Vec::new(),
             env_deltas: vec![delta],
+            next_format_pointer_id: 1,
+            format_pointer_ids: Vec::new(),
+        }
+    }
+
+    fn gmatch_payload(empty_pattern: bool, position: super::super::SavedVal) -> SavePayload {
+        let (iterator_id, strings, entries) = if empty_pattern {
+            (
+                "string.gmatch.empty_iter",
+                vec![b"pos".to_vec(), b"len".to_vec(), b"bad".to_vec()],
+                vec![
+                    (super::super::SavedVal::Str(0), position),
+                    (
+                        super::super::SavedVal::Str(1),
+                        super::super::SavedVal::Num(2.0f64.to_bits()),
+                    ),
+                ],
+            )
+        } else {
+            (
+                "string.gmatch.iter",
+                vec![
+                    b"s".to_vec(),
+                    b"p".to_vec(),
+                    b"pos".to_vec(),
+                    b"abc".to_vec(),
+                    b"a+".to_vec(),
+                    b"bad".to_vec(),
+                ],
+                vec![
+                    (
+                        super::super::SavedVal::Str(0),
+                        super::super::SavedVal::Str(3),
+                    ),
+                    (
+                        super::super::SavedVal::Str(1),
+                        super::super::SavedVal::Str(4),
+                    ),
+                    (super::super::SavedVal::Str(2), position),
+                ],
+            )
+        };
+        SavePayload {
+            has_standard_environment: true,
+            rng_state: 0,
+            cost_remaining: 0,
+            cost_budget: 0,
+            cost_budget_configured: false,
+            cost_used: 0,
+            strings,
+            bytecode: Vec::new(),
+            upvalues: vec![
+                super::super::SavedVal::Fn(iterator_id.to_string()),
+                super::super::SavedVal::Obj(0),
+            ],
+            objects: vec![
+                super::super::SavedObject::Table {
+                    entries,
+                    metatable: None,
+                },
+                super::super::SavedObject::Closure {
+                    chunk: 0,
+                    upvalues: vec![0, 1],
+                },
+            ],
+            user_globals: Vec::new(),
+            env_deltas: Vec::new(),
             next_format_pointer_id: 1,
             format_pointer_ids: Vec::new(),
         }
@@ -445,6 +681,35 @@ mod tests {
         };
         assert!(matches!(
             verify_payload(payload(invalid_order)),
+            Err(LoadError::CorruptArena { .. })
+        ));
+    }
+
+    #[test]
+    fn gmatch_snapshot_state_requires_valid_numeric_positions() {
+        let valid_number = super::super::SavedVal::Num(1.0f64.to_bits());
+        assert!(validate_gmatch_iterators(&gmatch_payload(false, valid_number.clone())).is_ok());
+        assert!(validate_gmatch_iterators(&gmatch_payload(true, valid_number.clone())).is_ok());
+
+        let malformed = super::super::SavedVal::Str(2);
+        assert!(matches!(
+            validate_gmatch_iterators(&gmatch_payload(false, malformed.clone())),
+            Err(LoadError::CorruptArena { .. })
+        ));
+        assert!(matches!(
+            validate_gmatch_iterators(&gmatch_payload(true, malformed)),
+            Err(LoadError::CorruptArena { .. })
+        ));
+
+        let mut invalid_length = gmatch_payload(true, valid_number);
+        let Some(super::super::SavedObject::Table { entries, .. }) =
+            invalid_length.objects.first_mut()
+        else {
+            panic!("fixture has a state table");
+        };
+        entries[1].1 = super::super::SavedVal::Str(2);
+        assert!(matches!(
+            validate_gmatch_iterators(&invalid_length),
             Err(LoadError::CorruptArena { .. })
         ));
     }

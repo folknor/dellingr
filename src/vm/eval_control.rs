@@ -331,7 +331,9 @@ impl State {
         self.push_unchecked(control);
         self.stack_bottom = call_base;
 
+        let previous_rust_fn = self.active_rust_fn.replace(f);
         let result = f(self);
+        self.active_rust_fn = previous_rust_fn;
         let num_ret_reported = match result {
             Ok(n) => n,
             Err(e) => {

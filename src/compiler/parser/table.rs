@@ -1,4 +1,3 @@
-use super::ArgCount;
 use super::ExpDesc;
 use super::Instr;
 use super::Parser;
@@ -10,13 +9,7 @@ use super::TokenType;
 use crate::limits::{MAX_TABLE_BATCH_SIZE, MAX_TABLE_TEMPLATE_FIELDS, MAX_TABLE_TEMPLATES};
 
 type TableTemplateField = (u16, usize);
-type ParsedTableEntry = (u8, Option<TableTail>, Option<TableTemplateField>);
-
-#[derive(Debug)]
-enum TableTail {
-    Call { instr_idx: usize },
-    Vararg { instr_idx: usize },
-}
+type ParsedTableEntry = (u8, Option<ExpDesc>, Option<TableTemplateField>);
 
 #[derive(Debug)]
 struct TableTemplateCandidate {
@@ -78,7 +71,7 @@ impl Parser<'_> {
         // Skip any leading separators (handles {;} and {,}). This is an
         // INTENTIONAL divergence from Lua 5.2/5.4, which reject a leading or
         // lone separator; see examples/feature_test_extended.lua (tagged
-        // `-- DIFF: semicolon_syntax`). Not a bug (lead L3).
+        // `-- DIFF: semicolon_syntax`). This is intentional syntax behavior.
         while let TokenType::Comma | TokenType::Semi = self.input.peek_type()? {
             self.input.next()?;
         }
@@ -112,18 +105,10 @@ impl Parser<'_> {
             self.expect(TokenType::RCurly)?;
 
             if let Some(tail) = last_tail.as_ref() {
-                match tail {
-                    TableTail::Call { instr_idx } => {
-                        let instr = self.chunk.code[*instr_idx];
-                        debug_assert_eq!(instr.opcode(), Instr::OP_CALL);
-                        self.chunk.code[*instr_idx] =
-                            Instr::call(ArgCount::from_u8(instr.a()), RetCount::All);
-                    }
-                    TableTail::Vararg { instr_idx } => {
-                        debug_assert_eq!(self.chunk.code[*instr_idx].opcode(), Instr::OP_VARARG);
-                        self.chunk.code[*instr_idx] = Instr::vararg(u8::MAX);
-                    }
-                }
+                assert!(
+                    self.open_tail(tail, RetCount::All),
+                    "a table tail candidate must be a call or vararg"
+                );
                 self.chunk.code[table_instr_idx] = Instr::new_table_tracked(field_count);
                 self.push(Instr::set_list_batch(0, batch));
             } else if field_count > 4
@@ -165,13 +150,13 @@ impl Parser<'_> {
             }
             _ => {
                 let expr = self.parse_expr()?;
-                let instr_idx = self.chunk.code.len() - 1;
-                let tail = match expr {
-                    ExpDesc::Prefix(PrefixExp::FunctionCall(_)) => {
-                        Some(TableTail::Call { instr_idx })
-                    }
-                    ExpDesc::Vararg => Some(TableTail::Vararg { instr_idx }),
-                    _ => None,
+                let tail = if matches!(
+                    &expr,
+                    ExpDesc::Prefix(PrefixExp::FunctionCall(_)) | ExpDesc::Vararg
+                ) {
+                    Some(expr)
+                } else {
+                    None
                 };
                 Ok((counter + 1, tail, None))
             }

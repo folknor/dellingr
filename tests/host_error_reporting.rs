@@ -134,3 +134,73 @@ fn host_call_through_direct_rust_call_metamethod_notifies_once() {
     assert!(matches!(error.kind, ErrorKind::InternalError(_)));
     assert_eq!(count.load(Ordering::SeqCst), 1);
 }
+
+#[test]
+fn direct_non_callable_and_terminal_call_chain_notify_once() {
+    for setup in [
+        "callable = 42",
+        "callable = setmetatable({}, { __call = 42 })",
+        "local inner = setmetatable({}, { __call = 42 }); callable = setmetatable({}, { __call = inner })",
+    ] {
+        let count = Arc::new(AtomicUsize::new(0));
+        let mut state = State::with_callbacks(Box::new(ErrorCounter(Arc::clone(&count))));
+        run_setup(&mut state, setup);
+        let error = call_global(&mut state, "callable");
+        assert!(matches!(error.kind, ErrorKind::TypeError(_)));
+        assert!(error.to_string().contains("attempt to call a number value"));
+        assert_eq!(state.get_top(), 0);
+        assert_eq!(count.load(Ordering::SeqCst), 1, "{setup}");
+    }
+}
+
+fn call_non_callable(state: &mut State) -> dellingr::Result<u8> {
+    state.push_number(42.0)?;
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(0))?;
+    Ok(0)
+}
+
+#[test]
+fn rust_callback_propagating_nested_call_failure_notifies_once() {
+    let count = Arc::new(AtomicUsize::new(0));
+    let mut state = State::with_callbacks(Box::new(ErrorCounter(Arc::clone(&count))));
+    state
+        .push_rust_fn(call_non_callable)
+        .expect("callback fits");
+    let error = state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+        .expect_err("the nested non-callable call fails");
+    assert!(matches!(error.kind, ErrorKind::TypeError(_)));
+    assert_eq!(state.get_top(), 0);
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn malformed_host_call_does_not_notify() {
+    let count = Arc::new(AtomicUsize::new(0));
+    let mut state = State::with_callbacks(Box::new(ErrorCounter(Arc::clone(&count))));
+    let error = state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+        .expect_err("a call without a function is malformed");
+    assert!(matches!(error.kind, ErrorKind::InvalidStackIndex { .. }));
+    assert_eq!(count.load(Ordering::SeqCst), 0);
+}
+
+fn call_failing_callback(state: &mut State) -> dellingr::Result<u8> {
+    state.push_rust_fn(fail_fn)?;
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(0))?;
+    Ok(0)
+}
+
+#[test]
+fn rust_callback_propagating_nested_rust_failure_notifies_once() {
+    let count = Arc::new(AtomicUsize::new(0));
+    let mut state = State::with_callbacks(Box::new(ErrorCounter(Arc::clone(&count))));
+    state
+        .push_rust_fn(call_failing_callback)
+        .expect("callback fits");
+    let error = state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+        .expect_err("the nested Rust callback fails");
+    assert!(matches!(error.kind, ErrorKind::InternalError(_)));
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+}

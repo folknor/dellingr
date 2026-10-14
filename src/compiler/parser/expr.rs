@@ -297,29 +297,9 @@ impl Parser<'_> {
                 let mark_idx = self.chunk.code.len();
                 self.push(Instr::mark_call_base(1));
                 let (num_args, last_exp) = self.parse_call_args()?;
-                // If last arg is vararg, adjust to pass all varargs
-                let num_args = if let ExpDesc::Vararg = last_exp {
-                    self.replace_last_instr(Instr::vararg(u8::MAX)); // Push all varargs
-                    ArgCount::Dynamic // Calculate the count from the call-base marker
-                } else if let ExpDesc::Prefix(PrefixExp::FunctionCall(_)) = last_exp {
-                    // Last argument is a function call - adjust it to return all values
-                    let old = *self
-                        .chunk
-                        .code
-                        .last()
-                        .expect("function call expression must end with a call instruction");
-                    let inner_num_args = match old.opcode() {
-                        Instr::OP_CALL => old.a(),
-                        _ => unreachable!(
-                            "PrefixExp::FunctionCall but last instruction was {:?}",
-                            old
-                        ),
-                    };
-                    self.replace_last_instr(Instr::call(
-                        ArgCount::from_u8(inner_num_args),
-                        RetCount::All,
-                    )); // Return all values
-                    ArgCount::Dynamic // Calculate the count from the call-base marker
+                let num_args = if self.open_tail(&last_exp, RetCount::All) {
+                    // The marker supplies the actual count after expanding the tail.
+                    ArgCount::Dynamic
                 } else {
                     // Keep parse-time instruction indices stable. Finalization
                     // strips this free placeholder with one jump remap.
@@ -365,29 +345,9 @@ impl Parser<'_> {
 
                 // Now parse the arguments
                 let (num_args, last_exp) = self.parse_call_args()?;
-                // If last arg is vararg, adjust to pass all varargs
-                let num_args = if let ExpDesc::Vararg = last_exp {
-                    self.replace_last_instr(Instr::vararg(u8::MAX)); // Push all varargs
-                    ArgCount::Dynamic // Calculate the count from the call-base marker
-                } else if let ExpDesc::Prefix(PrefixExp::FunctionCall(_)) = last_exp {
-                    // Last argument is a function call - adjust it to return all values
-                    let old = *self
-                        .chunk
-                        .code
-                        .last()
-                        .expect("function call expression must end with a call instruction");
-                    let inner_num_args = match old.opcode() {
-                        Instr::OP_CALL => old.a(),
-                        _ => unreachable!(
-                            "PrefixExp::FunctionCall but last instruction was {:?}",
-                            old
-                        ),
-                    };
-                    self.replace_last_instr(Instr::call(
-                        ArgCount::from_u8(inner_num_args),
-                        RetCount::All,
-                    )); // Return all values
-                    ArgCount::Dynamic // Calculate the count from the call-base marker
+                let num_args = if self.open_tail(&last_exp, RetCount::All) {
+                    // The marker supplies the actual count after expanding the tail.
+                    ArgCount::Dynamic
                 } else {
                     // Keep parse-time instruction indices stable. Finalization
                     // strips this free placeholder with one jump remap.

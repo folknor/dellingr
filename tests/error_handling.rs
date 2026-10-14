@@ -563,9 +563,9 @@ fn table_concat_rejects_non_integer_endpoints() {
     ] {
         let err = expect_error(code);
         match err.kind {
-            ErrorKind::RuntimeError(message) => {
+            ErrorKind::ArgError(error) => {
                 assert_eq!(
-                    message,
+                    error.to_string(),
                     format!(
                         "bad argument #{argument} to 'concat' (number has no integer representation)"
                     )
@@ -661,10 +661,7 @@ fn table_position_boundaries_and_integer_errors() {
         "table.remove({}, 2)",
     ] {
         let err = expect_error(code);
-        assert!(
-            matches!(err.kind, ErrorKind::RuntimeError(_)),
-            "{code}: {err}"
-        );
+        assert!(matches!(err.kind, ErrorKind::ArgError(_)), "{code}: {err}");
     }
     // A negative position is a valid integer that is simply out of range: it
     // must report "position out of bounds", not "no integer representation".
@@ -695,7 +692,9 @@ fn table_insert_move_and_random_validate_before_mutation() {
     ] {
         let err = expect_error(code);
         assert!(
-            matches!(err.kind, ErrorKind::RuntimeError(_)),
+            matches!(&err.kind, ErrorKind::ArgError(_))
+                || (code == "math.random(1, 2, 3)"
+                    && matches!(&err.kind, ErrorKind::RuntimeError(_))),
             "{code}: {err}"
         );
     }
@@ -1038,8 +1037,11 @@ fn table_move_rejects_overflow_ranges_before_mutating() {
 #[test]
 fn table_move_rejects_out_of_range_numbers_cleanly() {
     let error = expect_error("table.move({}, -1e300, 1e300, 1)");
-    assert!(matches!(error.kind, ErrorKind::RuntimeError(ref message)
-        if message == "bad argument #2 to 'move' (number has no integer representation)"));
+    assert!(matches!(error.kind, ErrorKind::ArgError(_)));
+    assert_eq!(
+        error.kind.to_string(),
+        "bad argument #2 to 'move' (number has no integer representation)"
+    );
 }
 
 fn table_after_budgeted_move(budget: i64) -> (dellingr::error::Error, Vec<f64>) {
@@ -1119,10 +1121,13 @@ fn select_negative_index_counts_from_end() {
 fn select_zero_index_errors() {
     let err = expect_error(r#"select(0, "a", "b")"#);
     match err.kind {
-        ErrorKind::RuntimeError(message) => {
-            assert_eq!(message, "bad argument #1 to 'select' (index out of range)");
+        ErrorKind::ArgError(error) => {
+            assert_eq!(
+                error.to_string(),
+                "bad argument #1 to 'select' (index out of range)"
+            );
         }
-        kind => panic!("Expected out-of-range runtime error, got: {kind:?}"),
+        kind => panic!("Expected out-of-range argument error, got: {kind:?}"),
     }
 }
 
@@ -1130,10 +1135,13 @@ fn select_zero_index_errors() {
 fn select_too_negative_index_errors() {
     let err = expect_error(r#"select(-4, "a", "b", "c")"#);
     match err.kind {
-        ErrorKind::RuntimeError(message) => {
-            assert_eq!(message, "bad argument #1 to 'select' (index out of range)");
+        ErrorKind::ArgError(error) => {
+            assert_eq!(
+                error.to_string(),
+                "bad argument #1 to 'select' (index out of range)"
+            );
         }
-        kind => panic!("Expected out-of-range runtime error, got: {kind:?}"),
+        kind => panic!("Expected out-of-range argument error, got: {kind:?}"),
     }
 }
 
@@ -1164,10 +1172,13 @@ fn tonumber_base_invalid_digit_returns_nil() {
 fn tonumber_base_out_of_range_errors() {
     let err = expect_error(r#"return tonumber("10", 37)"#);
     match err.kind {
-        ErrorKind::RuntimeError(message) => {
-            assert_eq!(message, "bad argument #2 to 'tonumber' (base out of range)");
+        ErrorKind::ArgError(error) => {
+            assert_eq!(
+                error.to_string(),
+                "bad argument #2 to 'tonumber' (base out of range)"
+            );
         }
-        kind => panic!("Expected out-of-range runtime error, got: {kind:?}"),
+        kind => panic!("Expected out-of-range argument error, got: {kind:?}"),
     }
 }
 

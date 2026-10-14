@@ -306,10 +306,17 @@ pub(crate) struct GcHeap {
 impl GcHeap {
     /// Create a heap using the collector's initial threshold policy.
     pub(super) fn new() -> Self {
-        Self::with_threshold(GC_INITIAL_THRESHOLD)
+        Self {
+            objects: SlotMap::with_key(),
+            threshold: GcThreshold::from_value(GC_INITIAL_THRESHOLD),
+            strings: StringPool::new(),
+            mark_worklist: Vec::new(),
+            empty_upvalues: Arc::from([]),
+        }
     }
 
-    /// Create a new heap, with the given initial threshold.
+    /// Create a heap with a chosen threshold for collector tests.
+    #[cfg(test)]
     pub(super) fn with_threshold(threshold: usize) -> Self {
         Self {
             objects: SlotMap::with_key(),

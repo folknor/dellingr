@@ -127,6 +127,7 @@ fn string_or_number_bytes(state: &mut State, idx: isize, function_name: &str) ->
         received => Err(state.error(ErrorKind::ArgError(ArgError {
             arg_number: idx,
             func_name: Some(function_name.to_owned()),
+            detail: crate::error::ArgDetail::TypeMismatch,
             expected: Some(LuaType::String),
             received: Some(received),
         }))),

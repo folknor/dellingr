@@ -263,6 +263,8 @@ pub struct State {
     /// Rust `__index`/`__newindex` handler failing under a host table access
     /// still reports at its own boundary.
     pub(super) call_chain_depth: u32,
+    /// Active native callback, restored across nested Rust calls.
+    pub(super) active_rust_fn: Option<RustFunc>,
     /// Current function call depth. Prevents stack overflow from deep recursion.
     pub(super) call_depth: u32,
     /// Call stack for generating stack traces on errors.
@@ -430,6 +432,7 @@ impl State {
             gmatch_pattern_compilations: 0,
             metamethod_depth: 0,
             call_chain_depth: 0,
+            active_rust_fn: None,
             call_depth: 0,
             call_stack: Vec::with_capacity(64), // Pre-size for call stack
             callbacks,
@@ -936,6 +939,29 @@ impl State {
     pub fn set_global(&mut self, name: &str) {
         let val = self.pop_val();
         self.set_global_value(name, val);
+    }
+
+    // Keep native context out of CallInfo: those entries represent Lua frames,
+    // and widening them would add work and storage to every Lua call. Capture
+    // only a function pointer at Rust dispatch; resolve names on errors only.
+    // RustFn values carry no registration identity. Multiple global aliases
+    // (or functions merged by LTO) therefore use the first installed global
+    // still bound to that address; an unregistered callback stays anonymous.
+    // Snapshot ids are a fallback, not names inferred from the Lua caller.
+    pub(crate) fn active_rust_function_name(&self) -> Option<String> {
+        let function = self.active_rust_fn?;
+        for (name, value) in &self.globals {
+            if let Val::RustFn(candidate) = value
+                && *candidate as usize == function as usize
+            {
+                return Some(name.clone());
+            }
+        }
+        #[cfg(feature = "snapshot")]
+        if let Some(name) = self.rust_fn_ids_by_addr.get(&(function as usize)) {
+            return Some(name.clone());
+        }
+        None
     }
 
     #[cfg(not(feature = "snapshot"))]
