@@ -56,6 +56,8 @@ pub const MAX_STRING_BYTES: usize = 16 * 1024 * 1024;
 
 const GMATCH_PATTERN_CACHE_ENTRIES: usize = 256;
 const GMATCH_PATTERN_CACHE_BYTES: usize = MAX_STRING_BYTES;
+// Keep room for a few host-defined globals alongside the standard library.
+const HOST_GLOBAL_CAPACITY_HEADROOM: usize = 4;
 
 struct GmatchPatternEntry {
     pattern: std::result::Result<LuaPattern, crate::patterns::PatternError>,
@@ -446,7 +448,8 @@ impl State {
     }
 
     pub(crate) fn reserve_stdlib_capacity(&mut self) {
-        self.globals.reserve(Builtin::COUNT + 4);
+        self.globals
+            .reserve(Builtin::COUNT + HOST_GLOBAL_CAPACITY_HEADROOM);
         self.heap.reserve(8, 96);
     }
 
@@ -1209,6 +1212,12 @@ impl Default for State {
 #[cfg(test)]
 mod runtime_tests {
     use super::*;
+
+    #[test]
+    fn standard_library_initialization_populates_every_builtin_slot() {
+        let state = State::new();
+        assert!(state.builtins.iter().all(|value| *value != Val::Nil));
+    }
 
     #[test]
     fn closures_of_one_bytecode_share_runtime_bundle() {

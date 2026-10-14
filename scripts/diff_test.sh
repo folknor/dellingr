@@ -1,64 +1,98 @@
-#!/usr/bin/bash
+#!/usr/bin/env bash
 # Differential test: dellingr vs reference Lua 5.2 and 5.4.
 #
-# Walks `examples/**/*.lua` and runs each script through dellingr, lua5.2,
+# Walks examples/**/*.lua and runs each script through dellingr, lua5.2,
 # and lua5.4. A file passes when its dellingr output matches lua5.4 (or
-# matches lua5.2 - we accept either of the two reference outputs). Files
-# tagged with `-- DIFF: <reason>` may differ from both and still pass.
-# Stress tests and benchmark.lua are skipped (long-running).
+# matches lua5.2 - we accept either of the two reference outputs). Files tagged
+# with -- DIFF: <reason> may differ from both after dellingr exits successfully.
 #
 # Env:
 #   DELLINGR=/path/to/dellingr    use an already-built binary
-#   DELLINGR_SKIP_BUILD=1         do not run cargo build --release first
-#   DELLINGR_SKIP_TIMEOUT=1       do not wrap each VM in timeout(1)
+#   DELLINGR_SKIP_BUILD=1         require DELLINGR and do not build
+#   DELLINGR_DIFF_TIMEOUT=5s      per-process timeout (default 5s)
+#   DELLINGR_SKIP_TIMEOUT=1       legacy switch to disable timeouts
 #
-# Output is intentionally terse: prints "ok" on success, or one
-# "FAIL: <path>" line per failing script. Exit 1 on any failure.
+# Output is intentionally terse: prints "ok" on success, or one failure line
+# per failing script. Exit 1 on any failure.
 
 set -u
 
-# `examples/**/*.lua` and the default binary path are repo-relative, so anchor to
-# the repo root regardless of where this was invoked from. Any script paths
-# passed as arguments are therefore also interpreted relative to the repo root.
-cd "$(dirname "$0")/.." || exit 1
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+cd "$SCRIPT_DIR/.." || exit 1
+ROOT="$(pwd -P)"
+. "$SCRIPT_DIR/lib.sh"
 
-if [ "${DELLINGR_SKIP_BUILD:-0}" != "1" ]
-then
-    cargo build --release --quiet
+for tool in lua5.2 lua5.4
+do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+        echo "missing reference Lua: $tool" >&2
+        exit 1
+    fi
+done
+
+if [ "${DELLINGR_SKIP_TIMEOUT:-0}" != "1" ]; then
+    if command -v timeout >/dev/null 2>&1; then
+        TIMEOUT_BIN="$(command -v timeout)"
+        TIMEOUT_MODE=external
+    elif command -v gtimeout >/dev/null 2>&1; then
+        TIMEOUT_BIN="$(command -v gtimeout)"
+        TIMEOUT_MODE=external
+    elif command -v python3 >/dev/null 2>&1; then
+        TIMEOUT_MODE=python
+    else
+        echo "missing timeout support; install timeout/gtimeout or Python 3, or set DELLINGR_SKIP_TIMEOUT=1" >&2
+        exit 1
+    fi
 fi
+DELLINGR_DIFF_TIMEOUT="${DELLINGR_DIFF_TIMEOUT:-5s}"
 
-OUR_LUA="${DELLINGR:-./target/release/dellingr}"
-if [ ! -x "$OUR_LUA" ]
-then
-    echo "FAIL: build"
+if [ "${DELLINGR_SKIP_BUILD:-0}" = "1" ]; then
+    if [ -z "${DELLINGR:-}" ]; then
+        echo "DELLINGR_SKIP_BUILD=1 requires DELLINGR to name the binary" >&2
+        exit 1
+    fi
+    OUR_LUA="$DELLINGR"
+else
+    OUR_LUA="$(dellingr_bin release)" || exit 1
+fi
+if [ ! -x "$OUR_LUA" ]; then
+    echo "FAIL: dellingr binary is not executable: $OUR_LUA" >&2
     exit 1
 fi
 
-OUR_OUT="$(mktemp "${TMPDIR:-/tmp}/dellingr-diff-our.XXXXXX")" || exit 1
-LUA52_OUT="$(mktemp "${TMPDIR:-/tmp}/dellingr-diff-lua52.XXXXXX")" || {
+SCRATCH_DIR="$ROOT/.scratch"
+if ! mkdir -p "$SCRATCH_DIR"; then
+    echo "FAIL: cannot create project scratch directory: $SCRATCH_DIR" >&2
+    exit 1
+fi
+OUR_OUT="$(mktemp "$SCRATCH_DIR/dellingr-diff-our.XXXXXX")" || exit 1
+LUA52_OUT="$(mktemp "$SCRATCH_DIR/dellingr-diff-lua52.XXXXXX")" || {
     rm -f "$OUR_OUT"
     exit 1
 }
-LUA54_OUT="$(mktemp "${TMPDIR:-/tmp}/dellingr-diff-lua54.XXXXXX")" || {
+LUA54_OUT="$(mktemp "$SCRATCH_DIR/dellingr-diff-lua54.XXXXXX")" || {
     rm -f "$OUR_OUT" "$LUA52_OUT"
     exit 1
 }
 trap 'rm -f "$OUR_OUT" "$LUA52_OUT" "$LUA54_OUT"' EXIT
 
-shopt -s globstar nullglob
-if [ "$#" -gt 0 ]
-then
+scripts=()
+append_lua_files() {
+    local root="$1"
+    local file
+    while IFS= read -r file
+    do
+        scripts+=("$file")
+    done < <(find "$root" -type f -name '*.lua' -print | LC_ALL=C sort)
+}
+
+if [ "$#" -gt 0 ]; then
     scripts=()
     for arg in "$@"
     do
-        if [ -d "$arg" ]
-        then
-            for f in "$arg"/**/*.lua
-            do
-                scripts+=("$f")
-            done
-        elif [ -f "$arg" ]
-        then
+        if [ -d "$arg" ]; then
+            append_lua_files "$arg"
+        elif [ -f "$arg" ]; then
             scripts+=("$arg")
         else
             echo "FAIL: missing $arg"
@@ -66,60 +100,117 @@ then
         fi
     done
 else
-    scripts=(examples/**/*.lua)
+    append_lua_files examples
 fi
-failures=()
+set +u
+script_count="${#scripts[@]}"
+set -u
+if [ "$script_count" -eq 0 ]; then
+    echo "FAIL: no Lua scripts found"
+    exit 1
+fi
 
+failures=()
 run_lua() {
-    if [ "${DELLINGR_SKIP_TIMEOUT:-0}" = "1" ]
-    then
+    if [ "${DELLINGR_SKIP_TIMEOUT:-0}" = "1" ]; then
         "$@"
+    elif [ "$TIMEOUT_MODE" = "python" ]; then
+        python3 -c '
+import math
+import subprocess
+import sys
+
+raw = sys.argv[1]
+units = {"ns": 1e-9, "us": 1e-6, "ms": 1e-3, "s": 1, "m": 60, "h": 3600, "d": 86400}
+unit = next((item for item in sorted(units, key=len, reverse=True) if raw.endswith(item)), "")
+value = raw[:-len(unit)] if unit else raw
+try:
+    seconds = float(value) * units.get(unit, 1)
+except ValueError:
+    print("invalid DELLINGR_DIFF_TIMEOUT: " + raw, file=sys.stderr)
+    sys.exit(125)
+if not math.isfinite(seconds) or seconds < 0:
+    print("invalid DELLINGR_DIFF_TIMEOUT: " + raw, file=sys.stderr)
+    sys.exit(125)
+try:
+    result = subprocess.run(sys.argv[2:], timeout=None if seconds == 0 else seconds)
+except subprocess.TimeoutExpired:
+    sys.exit(124)
+sys.exit(result.returncode if result.returncode >= 0 else 128 - result.returncode)
+' "$DELLINGR_DIFF_TIMEOUT" "$@"
     else
-        timeout 5s "$@"
+        "$TIMEOUT_BIN" "$DELLINGR_DIFF_TIMEOUT" "$@"
     fi
 }
 
 for f in "${scripts[@]}"
 do
-    name=$(realpath --relative-to=examples "$f")
+    case "$f" in
+        "$ROOT/examples/"*) name="${f#"$ROOT/examples/"}" ;;
+        examples/*) name="${f#examples/}" ;;
+        *) name="$f" ;;
+    esac
+
+    if grep -q '^-- SKIP-DIFF: .' "$f"; then
+        continue
+    fi
+
+    # Keep the existing corpus skips until its owners can move these reasons
+    # into the Lua files. No current examples carry SKIP-DIFF markers, and this
+    # scripts-only change cannot add markers to examples/.
     case "$name" in
-        benchmark.lua|stress_*.lua|upvalue_stress.lua)
+        benchmark.lua|stress_gc_stack.lua|stress_rustfn.lua|stress_tables.lua|upvalue_stress.lua)
             continue
             ;;
     esac
 
     has_diff=0
-    if grep -q "^-- DIFF:" "$f"
-    then
+    if grep -q '^-- DIFF:' "$f"; then
         has_diff=1
     fi
 
     run_lua "$OUR_LUA" --quiet "$f" > "$OUR_OUT" 2>&1
-    run_lua lua5.2 "$f" > "$LUA52_OUT" 2>&1
-    run_lua lua5.4 "$f" > "$LUA54_OUT" 2>&1
+    our_status=$?
+    if [ "$our_status" -eq 124 ] && [ "${DELLINGR_SKIP_TIMEOUT:-0}" != "1" ]; then
+        failures+=("TIMEOUT: $name (dellingr)")
+        continue
+    fi
+    if [ "$our_status" -ne 0 ]; then
+        failures+=("FAIL: $name (dellingr exited $our_status)")
+        continue
+    fi
 
-    if diff -q "$OUR_OUT" "$LUA54_OUT" > /dev/null 2>&1
-    then
+    run_lua lua5.2 "$f" > "$LUA52_OUT" 2>&1
+    lua52_status=$?
+    if [ "$lua52_status" -eq 124 ] && [ "${DELLINGR_SKIP_TIMEOUT:-0}" != "1" ]; then
+        failures+=("TIMEOUT: $name (lua5.2)")
         continue
     fi
-    if diff -q "$OUR_OUT" "$LUA52_OUT" > /dev/null 2>&1
-    then
+    run_lua lua5.4 "$f" > "$LUA54_OUT" 2>&1
+    lua54_status=$?
+    if [ "$lua54_status" -eq 124 ] && [ "${DELLINGR_SKIP_TIMEOUT:-0}" != "1" ]; then
+        failures+=("TIMEOUT: $name (lua5.4)")
         continue
     fi
-    if [ "$has_diff" = "1" ]
-    then
+
+    if [ "$has_diff" = "1" ]; then
         continue
     fi
-    failures+=("$name")
+    if diff -q "$OUR_OUT" "$LUA54_OUT" > /dev/null 2>&1; then
+        continue
+    fi
+    if diff -q "$OUR_OUT" "$LUA52_OUT" > /dev/null 2>&1; then
+        continue
+    fi
+    failures+=("FAIL: $name")
 done
 
-if [ "${#failures[@]}" -eq 0 ]
-then
+set +u
+failure_count="${#failures[@]}"
+set -u
+if [ "$failure_count" -eq 0 ]; then
     echo "ok"
 else
-    for fail in "${failures[@]}"
-    do
-        echo "FAIL: $fail"
-    done
+    printf '%s\n' "${failures[@]}"
     exit 1
 fi

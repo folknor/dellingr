@@ -20,7 +20,9 @@ set -u
 
 # Binary and example paths below are repo-relative, so anchor to the repo root
 # regardless of where this was invoked from.
-cd "$(dirname "$0")/.." || exit 1
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+cd "$SCRIPT_DIR/.." || exit 1
+. "$SCRIPT_DIR/lib.sh"
 
 if [ $# -lt 1 ]
 then
@@ -32,8 +34,6 @@ TARGET="$1"
 shift
 FEATURES="${FEATURES:-hotpath}"
 SCRIPT="examples/${TARGET}.lua"
-HOTPATH_BIN="target/release/examples/hotpath"
-DELLINGR_BIN="target/release/dellingr"
 
 if [ ! -f "$SCRIPT" ]
 then
@@ -47,14 +47,16 @@ then
     exit 1
 fi
 
-cargo build --release --quiet
-cargo build --release --example hotpath --features "$FEATURES" --quiet
+DELLINGR_BIN="$(dellingr_bin release)" || exit 1
+HOTPATH_BIN="$(cargo_artifact release hotpath example "$FEATURES")" || exit 1
 
 if [ ! -x "$DELLINGR_BIN" ] || [ ! -x "$HOTPATH_BIN" ]
 then
     echo "build did not produce expected binaries" >&2
     exit 1
 fi
+DELLINGR_COMMAND="$(shell_quote "$DELLINGR_BIN")"
+SCRIPT_COMMAND="$(shell_quote "$SCRIPT")"
 
 echo "==== harness output ===="
 # Everything the harness emits: the phase KVs on stderr, and the hotpath
@@ -65,4 +67,4 @@ echo "==== harness output ===="
 
 echo ""
 echo "==== hyperfine ===="
-hyperfine --warmup 2 -N "$@" -n "$TARGET" "$DELLINGR_BIN $SCRIPT"
+hyperfine --warmup 2 -N "$@" -n "$TARGET" "$DELLINGR_COMMAND $SCRIPT_COMMAND"

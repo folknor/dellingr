@@ -14,6 +14,9 @@ use std::process::exit;
 
 use dellingr::{ArgCount, RetCount, State, analyze_cost};
 
+// The CLI is the host process, so reading its own command line is the point;
+// the ban on process arguments guards the library.
+#[allow(clippy::disallowed_methods)]
 fn main() {
     let args: Vec<String> = args().collect();
 

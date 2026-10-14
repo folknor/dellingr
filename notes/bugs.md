@@ -80,33 +80,14 @@ Reported by the vm hunter.
 read by stdlib `tostring` and `string.format` too. Enforce with a property test
 that `x .. ""` equals `tostring(x)` for all finite and special f64 values.
 
-## BUG-004 - `__call` chains recurse in Rust with no depth guard
+## BUG-012 - A host `State::call` on a cyclic `__call` table may not fire `on_error`
 
-Reported by the vm hunter. Not run; needs a test.
+Reported by the fixer that guarded `__call` depth.
 
-`State::call` (vm/eval.rs, the `__call` branch) re-enters `self.call(..)`
-recursively when the callee is a table whose metatable has `__call`. Neither
-`call_depth` (bumped only in `eval_closure`) nor `metamethod_depth` (only
-`__index`/`__newindex`, vm/metamethod.rs) is touched. `setmetatable(t, {__call
-= t}); t()` recurses natively, growing the value stack one slot per level; the
-1,000,000-slot cap is far beyond what the native stack survives, so this should
-abort the process instead of returning an error, breaking the README's
-"catchable rather than an abort" promise.
-
-Fix: route `__call` through a depth counter, or loop instead of recursing. The
-hunter notes call depth and metamethod depth each hand-roll the counter
-(metamethod.rs has two copies of the inc/check/dec wrapper), so one RAII depth
-guard type would cover all three. Enforce with a regression test.
-
-## BUG-005 - `BreakOutsideLoop` always says "at line 1"
-
-Reported by the surface hunter.
-
-`SyntaxError::BreakOutsideLoop`'s Display in error.rs is
-`"<break> at line 1 not inside a loop"`. Every misplaced `break` reports line
-1, whatever line it is on. The real line is on the enclosing `Error`. Drop "at
-line 1" or carry the line in the variant. A test with `break` on line 3 would
-catch it.
+A host calling a self-referential `__call` table directly through `State::call`
+now gets `MetamethodDepthExceeded`, but if no Lua frame or Rust function is
+entered along the way, `on_error` may never fire. The `on_error` doc calls it
+the single source of telemetry.
 
 ## BUG-006 - gmatch charges pattern-compile cost only on a cache miss, so cost depends on GC schedule and save/load
 
@@ -130,72 +111,15 @@ Fix: charge compile cost per gmatch iterator (a "compiled" flag in the
 iterator's saved state table) regardless of a VM cache hit. Test: same script
 with GC forced between iterations vs not, assert equal `cost_used`.
 
-## BUG-007 - `run_examples.rs` runs the gate's examples against whatever release binary is on disk
+## BUG-010 - Out-of-range argument errors are `RuntimeError`, not `ArgError`
 
-Reported by the tooling hunter.
+Reported by the stdlib hunter; narrowed by a fixer.
 
-`run_example` checks for `target/release/dellingr` relative to cwd first, then
-`CARGO_BIN_EXE_dellingr`, then `cargo run`. The release binary is not a product
-of this test run: `brokkr.toml` sets `[test] debug = true`, so the gate builds
-a debug binary and then runs every example against a release binary left by the
-last release build (diff_test.sh, bench.sh, hotbench.sh or `brokkr run
---release`). A VM change that breaks an example passes while an older correct
-release binary is present, and an old broken one fails a fixed tree. `target/`
-is a symlink into a shared cargo cache, so the stale binary can come from
-another checkout or commit. The `cargo run` fallback is unreachable, because
-cargo always sets `CARGO_BIN_EXE_dellingr` for integration tests of a crate
-with a bin target, and it shells out to raw cargo.
-
-Fix: use `env!("CARGO_BIN_EXE_dellingr")` only. Enforce with a shared
-`tests/common` `dellingr_bin()` helper, or a rule banning `"target"` path
-literals under `tests/`.
-
-## BUG-008 - Seven examples are never executed by `run_examples.rs`, and the diff buckets skip three directories
-
-Reported by the tooling hunter.
-
-`run_examples.rs` lists subdirectory files by hand with `example_file_test!`.
-The list is missing `alloc/gc_churn.lua`, `calls/many_literals.lua`,
-`composite/benchmark.lua`, `fields/miss.lua`, `globals/write.lua`,
-`numerics/constants.lua` and `parse/large_source.lua` - the probes and verdict
-counterparts. AGENTS.md ("runs every `examples/*.lua`") and `generate.py`'s
-docstring ("tests/run_examples.rs executes every examples/*.lua") are false.
-
-`diff_test.rs`'s buckets cover alloc, calls, fields, iter, strings, tables and
-numerics, not `composite/`, `globals/` or `parse/`, so `cargo test` alone never
-diff-tests `composite/benchmark.lua`, `globals/write.lua` or
-`parse/large_source.lua`; only brokkr's `diff-lua` script_check covers them.
-Both files split root files at the literal `"feature_test_extended.lua"`.
-
-Fix: generate per-file tests from the directory (build.rs, or one test that
-walks and reports each file) and drop the hand list. Enforce with a test that
-every `.lua` under `examples/` lands in exactly one bucket, or remove buckets.
-
-## BUG-009 - `diff_test.rs` builds a release binary with nested raw cargo, then runs a binary from a hard-coded path
-
-Reported by the tooling hunter.
-
-`ensure_release_binary` runs `cargo build --release` (fat LTO,
-codegen-units=1) from inside the test process during `brokkr check`, inheriting
-`CARGO_TARGET_DIR` if set. It then calls `scripts/diff_test.sh`, which reads
-`./target/release/dellingr` unless `DELLINGR` is set. With `CARGO_TARGET_DIR`
-pointing elsewhere, the build lands in one place and the script runs a stale or
-missing binary from another ("FAIL: build" when missing). Passing
-`DELLINGR=env!("CARGO_BIN_EXE_dellingr")`, as `diff_gate.sh` does with its own
-debug binary, removes the nested build, the hard-coded path and the `OnceLock`.
-Enforce with the shared helper from BUG-007 and a rule that no `tests/*.rs`
-spawns `cargo`.
-
-## BUG-010 - Nonsense argument-error messages for type-correct but out-of-range values
-
-Reported by the stdlib hunter.
-
-basic.rs `tonumber` (base outside 2..36) and `select` (index 0 or too
-negative) construct `ArgError { expected: Number, received: Number }`, which
-renders `number expected, got number`. Reference says `base out of range` /
-`index out of range`. `rawlen` says `table expected` for what is "table or
-string expected". An `ArgDetail` enum (see the hygiene entry on "bad argument"
-owners) would make a type mismatch where the types match unconstructible.
+`tonumber` (base out of range), `select` (index out of range) and `rawlen`
+("table or string expected") now say the right thing, through a shared
+formatter in lua_std.rs, but as `RuntimeError`: `ArgError` cannot carry a
+custom detail. The fix is the `ArgDetail` enum from the hygiene entry on "bad
+argument" owners, after which these become `ArgError` again.
 
 ## BUG-011 - `get_table` panics when the host passes the key's own index
 

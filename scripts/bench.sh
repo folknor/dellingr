@@ -12,7 +12,9 @@ set -u
 
 # Script paths below are repo-relative, so anchor to the repo root regardless of
 # where this was invoked from.
-cd "$(dirname "$0")/.." || exit 1
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+cd "$SCRIPT_DIR/.." || exit 1
+. "$SCRIPT_DIR/lib.sh"
 
 DRY_RUN=0
 if [ "${1:-}" = "--dry-run" ]
@@ -21,7 +23,6 @@ then
     DRY_RUN=1
 fi
 
-DELLINGR="${DELLINGR:-target/release/dellingr}"
 JSON_FILE=".bench-results.json"
 
 if [ $# -gt 0 ]
@@ -76,11 +77,16 @@ then
     exit 0
 fi
 
-cargo build --release --quiet
+DELLINGR_BIN="$(dellingr_bin release)" || exit 1
+if [ ! -x "$DELLINGR_BIN" ]; then
+    echo "dellingr binary is not executable: $DELLINGR_BIN" >&2
+    exit 1
+fi
+DELLINGR_COMMAND="$(shell_quote "$DELLINGR_BIN")"
 
 echo "==== bench start ===="
 echo "  host:   $(hostname -s)"
-echo "  date:   $(date -Iseconds)"
+echo "  date:   $(date '+%Y-%m-%dT%H:%M:%S%z')"
 echo "  commit: $(git rev-parse HEAD 2>/dev/null)"
 echo "  branch: $(git rev-parse --abbrev-ref HEAD 2>/dev/null)"
 echo "  dirty:  $(git status --porcelain 2>/dev/null | wc -l) file(s)"
@@ -94,13 +100,14 @@ START=$(date +%s)
 for script in "${scripts[@]}"
 do
     rm -f "$JSON_FILE"
+    SCRIPT_COMMAND="$(shell_quote "$script")"
     if ! hyperfine --warmup 2 -N \
         --export-json "$JSON_FILE" \
-        -n dellingr "$DELLINGR $script" \
-        -n lua5.5 "lua5.5 $script" \
-        -n lua5.4 "lua5.4 $script" \
-        -n lua5.2 "lua5.2 $script" \
-        -n luajit "luajit $script" \
+        -n dellingr "$DELLINGR_COMMAND $SCRIPT_COMMAND" \
+        -n lua5.5 "lua5.5 $SCRIPT_COMMAND" \
+        -n lua5.4 "lua5.4 $SCRIPT_COMMAND" \
+        -n lua5.2 "lua5.2 $SCRIPT_COMMAND" \
+        -n luajit "luajit $SCRIPT_COMMAND" \
         >/dev/null 2>&1
     then
         failures+=("$script")

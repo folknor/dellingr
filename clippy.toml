@@ -1,7 +1,15 @@
 disallowed-methods = [
     { path = "core::result::Result::ok", reason = "Silently discards errors. Use `?` to propagate, or handle the error explicitly." },
-    { path = "rand::rng", reason = "Unseeded RNG breaks determinism. Use State.rng (seeded StdRng) instead.", allow-invalid = true },
-    { path = "rand::thread_rng", reason = "Unseeded RNG breaks determinism. Use State.rng (seeded StdRng) instead.", allow-invalid = true },
+    { path = "rand::rng", reason = "Unseeded RNG breaks determinism. Use State.rng, seeded via set_rng_seed.", allow-invalid = true },
+    { path = "rand::thread_rng", reason = "Unseeded RNG breaks determinism. Use State.rng, seeded via set_rng_seed.", allow-invalid = true },
+    { path = "std::env::args", reason = "Reading process arguments makes behavior depend on host process state." },
+    { path = "std::env::args_os", reason = "Reading process arguments makes behavior depend on host process state." },
+    { path = "std::env::var", reason = "Reading host environment makes behavior depend on process state." },
+    { path = "std::env::var_os", reason = "Reading host environment makes behavior depend on process state." },
+    { path = "std::env::vars", reason = "Reading host environment makes behavior depend on process state." },
+    { path = "std::env::vars_os", reason = "Reading host environment makes behavior depend on process state." },
+    { path = "std::time::Instant::now", reason = "Host timing must not affect deterministic library behavior." },
+    { path = "std::time::SystemTime::now", reason = "Host time must not affect deterministic library behavior." },
 ]
 
 # Determinism: ban non-deterministic collections
@@ -10,4 +18,8 @@ disallowed-types = [
     { path = "std::collections::HashSet", reason = "Non-deterministic iteration order. Use BTreeSet instead." },
     { path = "std::collections::hash_map::HashMap", reason = "Non-deterministic iteration order. Use IndexMap or BTreeMap instead." },
     { path = "std::collections::hash_set::HashSet", reason = "Non-deterministic iteration order. Use BTreeSet instead." },
+    { path = "std::time::Instant", reason = "Host timing must not affect deterministic library behavior." },
+    { path = "std::time::SystemTime", reason = "Host time must not affect deterministic library behavior." },
+    { path = "std::hash::RandomState", reason = "Randomized hash seeding breaks determinism. Use IndexMap or BTreeMap instead." },
+    { path = "std::hash::DefaultHasher", reason = "The standard hasher is not a stable replay contract. Use a specified deterministic hasher." },
 ]

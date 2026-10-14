@@ -11,7 +11,7 @@ pub(crate) use basic::{base_ipairs_iter, base_next, open_base};
 use crate::LuaType;
 use crate::Result;
 use crate::State;
-use crate::error::ErrorKind;
+use crate::error::{Error, ErrorKind};
 use crate::numeral::exact_i64;
 
 /// Headroom the library setup needs on the value stack at any one moment.
@@ -39,35 +39,74 @@ pub(crate) fn open_libs(state: &mut State) -> Result<()> {
     table::open_table(state)
 }
 
-/// Converts an already type-checked numeric library argument to an exact i64.
-pub(super) fn exact_integer_argument(
+// Do not add module-wide cast denies until the remaining bounded index and
+// result conversions here have been audited or replaced.
+
+/// Formats a standard-library argument error with a named function and detail.
+///
+/// `ArgError` currently represents only one expected Lua type, so errors for
+/// a value with the right type but an invalid value need this runtime-error
+/// path until the error type can carry a structured detail.
+pub(super) fn argument_error(
+    state: &State,
+    arg_number: isize,
+    function_name: &str,
+    detail: &str,
+) -> Error {
+    state.error(ErrorKind::RuntimeError(format!(
+        "bad argument #{arg_number} to '{function_name}' ({detail})"
+    )))
+}
+
+/// Converts a numeric argument to an exact i64, reporting its argument name.
+pub(super) fn exact_integer_value(
+    state: &State,
+    number: f64,
+    arg_number: isize,
+    function_name: &str,
+) -> Result<i64> {
+    exact_i64(number).ok_or_else(|| {
+        argument_error(
+            state,
+            arg_number,
+            function_name,
+            "number has no integer representation",
+        )
+    })
+}
+
+/// Checks a required numeric argument and converts it to an exact i64.
+pub(super) fn arg_integer(
     state: &mut State,
     arg_number: isize,
     function_name: &str,
 ) -> Result<i64> {
+    state.check_type(arg_number, LuaType::Number)?;
     let number = state.to_number(arg_number)?;
-    exact_i64(number).ok_or_else(|| {
-        state.error(ErrorKind::RuntimeError(format!(
-            "bad argument #{arg_number} to '{function_name}' (number has no integer representation)"
-        )))
-    })
+    exact_integer_value(state, number, arg_number, function_name)
+}
+
+/// Checks an optional numeric argument and converts it to an exact i64.
+pub(super) fn opt_integer(
+    state: &mut State,
+    arg_number: isize,
+    function_name: &str,
+) -> Result<Option<i64>> {
+    if state.check_optional_type(arg_number, LuaType::Number)? {
+        Ok(Some(arg_integer(state, arg_number, function_name)?))
+    } else {
+        Ok(None)
+    }
 }
 
 /// Implements both global `unpack` and `table.unpack`.
 pub(super) fn unpack_values(state: &mut State) -> Result<u8> {
     state.check_type(1, LuaType::Table)?;
-    let len = state.table_len(1) as i64;
+    // A table length beyond i64::MAX is unreachable; saturating keeps this infallible.
+    let len = i64::try_from(state.table_len(1)).unwrap_or(i64::MAX);
 
-    let i = if state.check_optional_type(2, LuaType::Number)? {
-        exact_integer_argument(state, 2, "unpack")?
-    } else {
-        1
-    };
-    let j = if state.check_optional_type(3, LuaType::Number)? {
-        exact_integer_argument(state, 3, "unpack")?
-    } else {
-        len
-    };
+    let i = opt_integer(state, 2, "unpack")?.unwrap_or(1);
+    let j = opt_integer(state, 3, "unpack")?.unwrap_or(len);
 
     state.set_top(1)?;
     if i > j {

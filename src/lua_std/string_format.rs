@@ -1,7 +1,8 @@
 //! Lua 5.4-compatible `string.format`.
 
+use super::exact_integer_value;
 use crate::error::{Error, ErrorKind};
-use crate::numeral::{exact_i64, parse_lua_numeral};
+use crate::numeral::parse_lua_numeral;
 use crate::{LuaType, Result, State};
 
 const MAX_FORMAT_LEN: usize = 22;
@@ -407,8 +408,7 @@ fn number_argument(state: &mut State, idx: isize, argument: usize) -> Result<f64
 
 fn integer_argument(state: &mut State, idx: isize, argument: usize) -> Result<i64> {
     let number = number_argument(state, idx, argument)?;
-    exact_i64(number)
-        .ok_or_else(|| format_arg_error(state, argument, "number has no integer representation"))
+    exact_integer_value(state, number, idx, "format")
 }
 
 fn format_arg_error(state: &State, argument: usize, detail: &str) -> Error {

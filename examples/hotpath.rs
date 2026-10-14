@@ -1,40 +1,42 @@
-#![allow(clippy::unwrap_used)]
 //! Bench harness for dellingr: the binary brokkr invokes for `--bench` /
 //! `--hotpath` / `--alloc` runs, and the KV source for scripts/hotbench.sh.
 //!
 //! Loads a bench script that must define a global `_bench` function, then
 //! runs phases on one `State`:
-//!   - parse   `load_string_named` (parser + codegen)
+//!   - parse   `load_string_named` (parser and codegen)
 //!   - setup   top-level chunk run (registers `_bench`, builds fixtures)
 //!   - cold    first `_bench` invocation
 //!   - warm    N further invocations on the same State (`--iterations N`,
 //!     default 20)
 //!
-//! The script may be given as a path (`examples/numerics/arithmetic.lua`) or
-//! as a bare target name (`numerics/arithmetic`) resolved against the
-//! crate's `examples/` directory. brokkr passes the registered file path;
-//! hotbench.sh and humans may use either.
+//! A script path is required and is resolved from the caller's working
+//! directory. brokkr and hotbench.sh both pass the registered file path.
 //!
 //! Output:
-//!   - KV pairs on stderr - phase timings and heap/object brackets.
+//!   - KV pairs on stderr for phase timings and heap/object brackets.
 //!   - Optionally, the brokkr sidecar stream: when `BROKKR_MARKER_FIFO`
 //!     names a writable path, phase markers (`PARSE_START`/`PARSE_END`,
 //!     `SETUP_*`, `COLD_*`, `WARM_*`, plus batched `WARM_BLOCK_*` sub-spans)
-//!     and `@name=value` counters are written to it. Without the env var
-//!     every emit is a no-op; a full pipe drops writes silently
-//!     (O_NONBLOCK).
+//!     and `@name=value` counters are written to it. Without the env var,
+//!     every emit is a no-op. Open or write failures are reported and fail
+//!     the run so brokkr cannot record an incomplete marker stream.
 //!
 //! Wall time is the benchmarking metric. The cost KVs ride along as a
 //! workload fingerprint - cost is a deterministic property of the script,
 //! so a cost change between runs of the "same" bench means the workload or
 //! the compiler changed, not the VM's speed.
 //!
-//! Run standalone:
-//!     cargo run --release --example hotpath -- numerics/arithmetic
-//!     cargo run --release --example hotpath --features hotpath -- numerics/arithmetic
+//! Run through `scripts/hotbench.sh <category/name>` or a brokkr workload
+//! command. Both pass the script path required by this harness.
+
+// A benchmark harness is a host process: it legitimately reads its own
+// command line, the marker FIFO from the environment, and wall-clock time.
+// The clippy.toml bans on those guard the deterministic library, not this.
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 
 use std::env;
 use std::fs;
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::exit;
 use std::time::Instant;
@@ -51,7 +53,6 @@ use dellingr::{ArgCount, LuaType, RetCount, State};
 static ALLOC: hotpath::CountingAllocator = hotpath::CountingAllocator::new();
 
 const DEFAULT_ITERATIONS: u32 = 20;
-const DEFAULT_TARGET: &str = "numerics/arithmetic";
 /// Upper bound on `WARM_BLOCK` marker pairs per run; keeps the sidecar
 /// stream at tens of spans regardless of the iteration count.
 const MAX_WARM_BLOCKS: u32 = 32;
@@ -61,33 +62,25 @@ const MAX_WARM_BLOCKS: u32 = 32;
 /// Protocol: `<timestamp_us> <name>\n` on the FIFO named by
 /// `BROKKR_MARKER_FIFO`, timestamped in microseconds since the first emit.
 fn emit_marker(name: &str) {
-    use std::io::Write;
-    write_fifo(|f, us| {
-        drop((&*f).write_all(format!("{us} {name}\n").as_bytes()));
-    });
+    write_fifo(|mut f, us| f.write_all(format!("{us} {name}\n").as_bytes()));
 }
 
 /// Emit a named counter value to the brokkr sidecar (if active).
 ///
 /// Protocol: `<timestamp_us> @<name>=<value>\n`.
 fn emit_counter(name: &str, value: i64) {
-    use std::io::Write;
-    write_fifo(|f, us| {
-        drop((&*f).write_all(format!("{us} @{name}={value}\n").as_bytes()));
-    });
+    write_fifo(|mut f, us| f.write_all(format!("{us} @{name}={value}\n").as_bytes()));
 }
 
 /// Shared FIFO write logic for markers and counters. No-op when
-/// `BROKKR_MARKER_FIFO` is unset or the path cannot be opened.
-fn write_fifo(f: impl FnOnce(&std::fs::File, u128)) {
+/// `BROKKR_MARKER_FIFO` is unset. A configured but unusable FIFO fails the run.
+fn write_fifo(f: impl FnOnce(&std::fs::File, u128) -> io::Result<()>) {
     use std::sync::OnceLock;
 
     static STATE: OnceLock<Option<(std::fs::File, Instant)>> = OnceLock::new();
 
     let state = STATE.get_or_init(|| {
-        let Ok(path) = env::var("BROKKR_MARKER_FIFO") else {
-            return None;
-        };
+        let path = env::var_os("BROKKR_MARKER_FIFO")?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
@@ -101,19 +94,31 @@ fn write_fifo(f: impl FnOnce(&std::fs::File, u128)) {
                 .open(&path)
             {
                 Ok(file) => Some((file, Instant::now())),
-                Err(_) => None,
+                Err(error) => {
+                    eprintln!(
+                        "Failed to open BROKKR_MARKER_FIFO {}: {error}",
+                        PathBuf::from(&path).display()
+                    );
+                    exit(1);
+                }
             }
         }
         #[cfg(not(unix))]
         {
-            let _unused = path;
-            None
+            eprintln!(
+                "BROKKR_MARKER_FIFO is unsupported on this platform: {}",
+                PathBuf::from(&path).display()
+            );
+            exit(1);
         }
     });
 
     if let Some((file, start)) = state.as_ref() {
         let us = start.elapsed().as_micros();
-        f(file, us);
+        if let Err(error) = f(file, us) {
+            eprintln!("Failed to write BROKKR_MARKER_FIFO: {error}");
+            exit(1);
+        }
     }
 }
 
@@ -123,48 +128,168 @@ fn counter_value(v: u64) -> i64 {
 
 struct Args {
     script_path: PathBuf,
-    /// Display name for the `target=` KV: the bare target for legacy
-    /// invocations, the given path otherwise.
+    /// Display name for the `target=` KV.
     target: String,
     iterations: u32,
 }
 
-fn parse_args() -> Args {
+fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
     let mut positional: Option<String> = None;
     let mut iterations = DEFAULT_ITERATIONS;
 
-    let mut args = env::args().skip(1);
+    let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         if arg == "--iterations" {
             match args.next().map(|v| v.parse::<u32>()) {
                 Some(Ok(n)) if n > 0 => iterations = n,
-                _ => {
-                    eprintln!("--iterations requires a positive integer");
-                    exit(2);
-                }
+                _ => return Err("--iterations requires a positive integer".to_owned()),
             }
         } else if positional.is_none() {
             positional = Some(arg);
         } else {
-            eprintln!("unexpected argument: {arg}");
-            exit(2);
+            return Err(format!("unexpected argument: {arg}"));
         }
     }
 
-    let raw = positional.unwrap_or_else(|| DEFAULT_TARGET.to_string());
-    if raw.ends_with(".lua") {
-        Args {
-            script_path: PathBuf::from(&raw),
-            target: raw,
-            iterations,
+    let raw =
+        positional.ok_or_else(|| "usage: hotpath <script-path> [--iterations N]".to_owned())?;
+    Ok(Args {
+        script_path: PathBuf::from(&raw),
+        target: raw,
+        iterations,
+    })
+}
+
+fn parse_args() -> Result<Args, String> {
+    parse_args_from(env::args().skip(1))
+}
+
+struct Metric {
+    name: &'static str,
+    value: String,
+    sidecar_counter: Option<i64>,
+}
+
+fn text_metric(name: &'static str, value: String) -> Metric {
+    Metric {
+        name,
+        value,
+        sidecar_counter: None,
+    }
+}
+
+fn integer_metric(name: &'static str, value: u128, sidecar_counter: Option<i64>) -> Metric {
+    Metric {
+        name,
+        value: value.to_string(),
+        sidecar_counter,
+    }
+}
+
+struct RunMetrics<'a> {
+    target: &'a str,
+    state_new_us: u128,
+    parse_us: u128,
+    cold_call_us: u128,
+    cold_cost: u64,
+    warm_iterations: u32,
+    warm_avg_us: f64,
+    warm_avg_cost: u64,
+    cost_per_us: f64,
+    setup_heap_bytes: usize,
+    setup_object_count: usize,
+    final_heap_bytes: usize,
+    final_object_count: usize,
+}
+
+fn run_metrics(run: &RunMetrics<'_>) -> Vec<Metric> {
+    vec![
+        text_metric("target", run.target.to_owned()),
+        integer_metric("state_new_us", run.state_new_us, None),
+        integer_metric("parse_us", run.parse_us, None),
+        integer_metric("cold_call_us", run.cold_call_us, None),
+        integer_metric("cold_cost", u128::from(run.cold_cost), None),
+        integer_metric(
+            "warm_iterations",
+            u128::from(run.warm_iterations),
+            Some(i64::from(run.warm_iterations)),
+        ),
+        text_metric("warm_avg_us", format!("{:.3}", run.warm_avg_us)),
+        integer_metric(
+            "warm_avg_cost",
+            u128::from(run.warm_avg_cost),
+            Some(counter_value(run.warm_avg_cost)),
+        ),
+        text_metric("cost_per_us", format!("{:.2}", run.cost_per_us)),
+        integer_metric(
+            "setup_heap_bytes",
+            run.setup_heap_bytes as u128,
+            Some(counter_value(run.setup_heap_bytes as u64)),
+        ),
+        integer_metric(
+            "setup_object_count",
+            run.setup_object_count as u128,
+            Some(counter_value(run.setup_object_count as u64)),
+        ),
+        integer_metric(
+            "final_heap_bytes",
+            run.final_heap_bytes as u128,
+            Some(counter_value(run.final_heap_bytes as u64)),
+        ),
+        integer_metric(
+            "final_object_count",
+            run.final_object_count as u128,
+            Some(counter_value(run.final_object_count as u64)),
+        ),
+    ]
+}
+
+fn write_kvs(writer: &mut impl Write, metrics: &[Metric]) -> io::Result<()> {
+    for metric in metrics {
+        writeln!(writer, "{}={}", metric.name, metric.value)?;
+    }
+    Ok(())
+}
+
+fn emit_metrics(metrics: &[Metric]) {
+    let stderr = io::stderr();
+    let mut output = stderr.lock();
+    let result = write_kvs(&mut output, metrics);
+    drop(output);
+
+    if let Err(error) = result {
+        eprintln!("Failed to write benchmark metrics to stderr: {error}");
+        exit(1);
+    }
+
+    for metric in metrics {
+        if let Some(value) = metric.sidecar_counter {
+            emit_counter(metric.name, value);
         }
-    } else {
-        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        Args {
-            script_path: manifest_dir.join("examples").join(format!("{raw}.lua")),
-            target: raw,
-            iterations,
-        }
+    }
+}
+
+fn find_bench(state: &mut State, script_path: &std::path::Path, phase: &str) -> Result<(), String> {
+    state.get_global("_bench").map_err(|error| {
+        format!(
+            "Failed to look up `_bench` before the {phase} call in {}: {error}",
+            script_path.display()
+        )
+    })?;
+    let actual_type = state.typ(-1);
+    if actual_type != LuaType::Function {
+        return Err(format!(
+            "Script {} must define a global `_bench` function; found {actual_type}",
+            script_path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn require_bench(state: &mut State, script_path: &std::path::Path, phase: &str) {
+    if let Err(error) = find_bench(state, script_path, phase) {
+        eprintln!("{error}");
+        exit(1);
     }
 }
 
@@ -174,7 +299,13 @@ fn main() {
         .functions_limit(0)
         .build();
 
-    let args = parse_args();
+    let args = match parse_args() {
+        Ok(args) => args,
+        Err(error) => {
+            eprintln!("{error}");
+            exit(2);
+        }
+    };
     let target = &args.target;
 
     let source = match fs::read_to_string(&args.script_path) {
@@ -210,31 +341,9 @@ fn main() {
     let setup_cost = state.cost_used();
     let setup_heap_bytes = state.heap_size();
     let setup_object_count = state.object_count();
-    emit_counter("setup_heap_bytes", counter_value(setup_heap_bytes as u64));
-    emit_counter(
-        "setup_object_count",
-        counter_value(setup_object_count as u64),
-    );
 
     // Phase 3: cold call - first invocation of `_bench`.
-    state.get_global("_bench").unwrap();
-    if state.typ(-1) == LuaType::Nil {
-        state
-            .pop(1)
-            .expect("_bench function lookup leaves one stack value");
-        let final_heap_bytes = state.heap_size();
-        let final_object_count = state.object_count();
-
-        eprintln!("target={target}");
-        eprintln!("state_new_us={state_new_us}");
-        eprintln!("parse_us={parse_us}");
-        eprintln!("setup_cost={setup_cost}");
-        eprintln!("setup_heap_bytes={setup_heap_bytes}");
-        eprintln!("setup_object_count={setup_object_count}");
-        eprintln!("final_heap_bytes={final_heap_bytes}");
-        eprintln!("final_object_count={final_object_count}");
-        return;
-    }
+    require_bench(&mut state, &args.script_path, "cold");
 
     emit_marker("COLD_START");
     let cold_start = Instant::now();
@@ -260,7 +369,7 @@ fn main() {
         let n = block_size.min(iterations - done);
         emit_marker("WARM_BLOCK_START");
         for _ in 0..n {
-            state.get_global("_bench").unwrap();
+            require_bench(&mut state, &args.script_path, "warm");
             if let Err(e) = state.call(ArgCount::Fixed(0), RetCount::Fixed(0)) {
                 eprintln!(
                     "Warm _bench call error in {}: {e}",
@@ -272,39 +381,111 @@ fn main() {
         emit_marker("WARM_BLOCK_END");
         done += n;
     }
-    let warm_total_us = warm_start.elapsed().as_micros();
+    let warm_total_us = warm_start.elapsed().as_secs_f64() * 1_000_000.0;
     emit_marker("WARM_END");
-    let warm_avg_us = warm_total_us / u128::from(iterations);
+    let warm_avg_us = warm_total_us / f64::from(iterations);
     let warm_total_cost = state.cost_used() - setup_cost - cold_cost;
     let warm_avg_cost = warm_total_cost / u64::from(iterations);
 
-    let cost_per_us = if warm_avg_us > 0 {
-        warm_avg_cost as f64 / warm_avg_us as f64
+    let cost_per_us = if warm_avg_us > 0.0 {
+        warm_avg_cost as f64 / warm_avg_us
     } else {
         0.0
     };
 
     let final_heap_bytes = state.heap_size();
     let final_object_count = state.object_count();
-    emit_counter("warm_iterations", i64::from(iterations));
-    emit_counter("warm_avg_cost", counter_value(warm_avg_cost));
-    emit_counter("final_heap_bytes", counter_value(final_heap_bytes as u64));
-    emit_counter(
-        "final_object_count",
-        counter_value(final_object_count as u64),
-    );
+    let metrics = run_metrics(&RunMetrics {
+        target,
+        state_new_us,
+        parse_us,
+        cold_call_us,
+        cold_cost,
+        warm_iterations: iterations,
+        warm_avg_us,
+        warm_avg_cost,
+        cost_per_us,
+        setup_heap_bytes,
+        setup_object_count,
+        final_heap_bytes,
+        final_object_count,
+    });
+    emit_metrics(&metrics);
+}
 
-    eprintln!("target={target}");
-    eprintln!("state_new_us={state_new_us}");
-    eprintln!("parse_us={parse_us}");
-    eprintln!("cold_call_us={cold_call_us}");
-    eprintln!("cold_cost={cold_cost}");
-    eprintln!("warm_iterations={iterations}");
-    eprintln!("warm_avg_us={warm_avg_us}");
-    eprintln!("warm_avg_cost={warm_avg_cost}");
-    eprintln!("cost_per_us={cost_per_us:.2}");
-    eprintln!("setup_heap_bytes={setup_heap_bytes}");
-    eprintln!("setup_object_count={setup_object_count}");
-    eprintln!("final_heap_bytes={final_heap_bytes}");
-    eprintln!("final_object_count={final_object_count}");
+#[cfg(test)]
+mod tests {
+    use super::{RunMetrics, find_bench, parse_args_from, run_metrics, write_kvs};
+    use dellingr::State;
+    use std::path::PathBuf;
+
+    #[test]
+    fn hotpath_requires_a_script_path() {
+        assert!(parse_args_from(Vec::<String>::new()).is_err());
+    }
+
+    #[test]
+    fn hotpath_keeps_the_callers_script_path() {
+        let args = parse_args_from(["examples/numerics/arithmetic.lua".to_owned()])
+            .expect("script path parses");
+        assert_eq!(
+            args.script_path,
+            PathBuf::from("examples/numerics/arithmetic.lua")
+        );
+    }
+
+    #[test]
+    fn missing_bench_function_is_an_error() {
+        let mut state = State::new();
+        assert!(find_bench(&mut state, std::path::Path::new("no_bench.lua"), "cold").is_err());
+    }
+
+    #[test]
+    fn stderr_metrics_have_the_expected_key_set() {
+        let run = RunMetrics {
+            target: "examples/numerics/arithmetic.lua",
+            state_new_us: 1,
+            parse_us: 2,
+            cold_call_us: 3,
+            cold_cost: 4,
+            warm_iterations: 20,
+            warm_avg_us: 5.5,
+            warm_avg_cost: 6,
+            cost_per_us: 1.09,
+            setup_heap_bytes: 7,
+            setup_object_count: 8,
+            final_heap_bytes: 9,
+            final_object_count: 10,
+        };
+        let metrics = run_metrics(&run);
+        let mut stderr = Vec::new();
+        write_kvs(&mut stderr, &metrics).expect("metric output is writable");
+        let output = String::from_utf8(stderr).expect("metric output is UTF-8");
+        let keys = output
+            .lines()
+            .map(|line| {
+                line.split_once('=')
+                    .expect("each metric line has a key separator")
+                    .0
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            keys.as_slice(),
+            &[
+                "target",
+                "state_new_us",
+                "parse_us",
+                "cold_call_us",
+                "cold_cost",
+                "warm_iterations",
+                "warm_avg_us",
+                "warm_avg_cost",
+                "cost_per_us",
+                "setup_heap_bytes",
+                "setup_object_count",
+                "final_heap_bytes",
+                "final_object_count",
+            ]
+        );
+    }
 }

@@ -44,6 +44,8 @@ unreachable_pub = "deny"
 unused = "deny"
 variant_size_differences = "deny"
 
+# Package-wide Clippy policy. Library-only, cfg-dependent lint settings stay in
+# src/lib.rs.
 [lints.clippy]
 disallowed_methods = "deny"
 uninlined_format_args = "deny"

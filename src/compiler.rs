@@ -234,7 +234,10 @@ impl Bytecode {
     /// Walk the instruction stream, rewrite cache-able opcodes with their
     /// allocated slot index, and record per-cache slot counts on the
     /// `Bytecode`. The State allocates one runtime cache bundle per Bytecode
-    /// identity, sized from these counts.
+    /// identity, sized from these counts. Cache operands are persisted as raw
+    /// instruction words, so changing their opcode-specific sentinels requires
+    /// a snapshot format version bump as well as matching verifier and runtime
+    /// changes.
     fn assign_cache_slots(&mut self) -> Result<()> {
         let mut global_cache_indices = vec![None; self.string_literals.len()];
         let mut global_cache_len = 0usize;

@@ -56,6 +56,11 @@ pub(crate) const fn is_lua_whitespace(byte: u8) -> bool {
     matches!(byte, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
 }
 
+/// Returns whether two adjacent newline characters form one Lua line ending.
+pub(crate) const fn is_newline_pair(first: char, second: char) -> bool {
+    matches!((first, second), ('\r', '\n') | ('\n', '\r'))
+}
+
 fn parse_decimal(bytes: &[u8]) -> Option<f64> {
     let (mantissa, exponent) = split_exponent(bytes, b'e', b'E')?;
     let digits = validate_mantissa(mantissa, |byte| byte.is_ascii_digit())?;
@@ -279,7 +284,7 @@ fn validate_signed_digits(bytes: &[u8]) -> Option<()> {
     (!bytes.is_empty() && bytes.iter().all(u8::is_ascii_digit)).then_some(())
 }
 
-fn hex_value(byte: u8) -> Option<u8> {
+pub(crate) const fn hex_value(byte: u8) -> Option<u8> {
     match byte {
         b'0'..=b'9' => Some(byte - b'0'),
         b'a'..=b'f' => Some(byte - b'a' + 10),

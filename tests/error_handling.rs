@@ -1118,19 +1118,23 @@ fn select_negative_index_counts_from_end() {
 #[test]
 fn select_zero_index_errors() {
     let err = expect_error(r#"select(0, "a", "b")"#);
-    assert!(
-        matches!(err.kind, ErrorKind::ArgError(_)),
-        "Expected ArgError, got: {err}"
-    );
+    match err.kind {
+        ErrorKind::RuntimeError(message) => {
+            assert_eq!(message, "bad argument #1 to 'select' (index out of range)");
+        }
+        kind => panic!("Expected out-of-range runtime error, got: {kind:?}"),
+    }
 }
 
 #[test]
 fn select_too_negative_index_errors() {
     let err = expect_error(r#"select(-4, "a", "b", "c")"#);
-    assert!(
-        matches!(err.kind, ErrorKind::ArgError(_)),
-        "Expected ArgError, got: {err}"
-    );
+    match err.kind {
+        ErrorKind::RuntimeError(message) => {
+            assert_eq!(message, "bad argument #1 to 'select' (index out of range)");
+        }
+        kind => panic!("Expected out-of-range runtime error, got: {kind:?}"),
+    }
 }
 
 #[test]
@@ -1159,10 +1163,12 @@ fn tonumber_base_invalid_digit_returns_nil() {
 #[test]
 fn tonumber_base_out_of_range_errors() {
     let err = expect_error(r#"return tonumber("10", 37)"#);
-    assert!(
-        matches!(err.kind, ErrorKind::ArgError(_)),
-        "Expected ArgError, got: {err}"
-    );
+    match err.kind {
+        ErrorKind::RuntimeError(message) => {
+            assert_eq!(message, "bad argument #2 to 'tonumber' (base out of range)");
+        }
+        kind => panic!("Expected out-of-range runtime error, got: {kind:?}"),
+    }
 }
 
 #[test]

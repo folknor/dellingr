@@ -164,17 +164,13 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
         let prefix_location = if state.get_top() < 2 {
             PrefixLocation::Current
         } else {
-            state.check_type(2, LuaType::Number)?;
-            let level = state.to_number(2)?;
-            if !level.is_finite() || level.fract() != 0.0 {
-                return Err(state.error(ErrorKind::RuntimeError(
-                    "bad argument #2 to 'error' (number has no integer representation)".into(),
-                )));
-            }
-            if level <= 0.0 {
+            let level = super::arg_integer(state, 2, "error")?;
+            if level <= 0 {
                 PrefixLocation::Suppressed
             } else {
-                PrefixLocation::TraceFrame((level as u32).saturating_sub(1))
+                PrefixLocation::TraceFrame(
+                    u32::try_from(level).unwrap_or(u32::MAX).saturating_sub(1),
+                )
             }
         };
         Err(state.error(ErrorKind::ScriptError {
@@ -197,23 +193,18 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
         state.check_any(1)?;
         if !state.is_none_or_nil(2) {
             state.check_type(1, LuaType::String)?;
-            state.check_type(2, LuaType::Number)?;
-            let base_num = state.to_number(2)?;
-            let base = base_num as i64;
-            if !base_num.is_finite()
-                || (base_num - base as f64).abs() > f64::EPSILON
-                || !(2..=36).contains(&base)
-            {
-                let e = ArgError {
-                    arg_number: 2,
-                    func_name: Some("tonumber".to_string()),
-                    expected: Some(LuaType::Number),
-                    received: Some(LuaType::Number),
-                };
-                return Err(state.error(ErrorKind::ArgError(e)));
+            let base = super::arg_integer(state, 2, "tonumber")?;
+            if !(2..=36).contains(&base) {
+                return Err(super::argument_error(
+                    state,
+                    2,
+                    "tonumber",
+                    "base out of range",
+                ));
             }
 
-            let num = parse_integer_with_base(state.to_bytes(1)?, base as u32);
+            let base = u32::try_from(base).expect("validated tonumber base fits in u32");
+            let num = parse_integer_with_base(state.to_bytes(1)?, base);
             state.pop(state.get_top() as isize)?;
             if let Some(num) = num {
                 state.push_number(num)?;
@@ -353,13 +344,12 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
             LuaType::String => state.to_bytes(1)?.len(),
             LuaType::Table => state.table_len(1),
             _ => {
-                let e = ArgError {
-                    arg_number: 1,
-                    func_name: Some("rawlen".to_string()),
-                    expected: Some(LuaType::Table),
-                    received: Some(typ),
-                };
-                return Err(state.error(ErrorKind::ArgError(e)));
+                return Err(super::argument_error(
+                    state,
+                    1,
+                    "rawlen",
+                    "table or string expected",
+                ));
             }
         };
         state.set_top(0)?;
@@ -382,39 +372,31 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
             return Ok(1);
         }
 
-        // Otherwise, first arg should be a number
-        state.check_type(1, LuaType::Number)?;
-        let raw_index = state.to_number(1)? as isize;
+        let raw_index = super::arg_integer(state, 1, "select")?;
         let vararg_count = num_args - 1;
-        let index = if raw_index > 0 {
-            raw_index as usize
-        } else if raw_index < 0 {
-            let index = vararg_count as isize + raw_index + 1;
-            if index < 1 {
-                let e = ArgError {
-                    arg_number: 1,
-                    func_name: Some("select".to_string()),
-                    expected: Some(LuaType::Number),
-                    received: Some(LuaType::Number),
-                };
-                return Err(state.error(ErrorKind::ArgError(e)));
-            }
-            index as usize
+        let vararg_count_i64 =
+            i64::try_from(vararg_count).expect("Lua argument stack limit fits in i64");
+        let resolved_index = if raw_index < 0 {
+            vararg_count_i64 + raw_index + 1
         } else {
-            let e = ArgError {
-                arg_number: 1,
-                func_name: Some("select".to_string()),
-                expected: Some(LuaType::Number),
-                received: Some(LuaType::Number),
-            };
-            return Err(state.error(ErrorKind::ArgError(e)));
+            raw_index
         };
+        if raw_index == 0 || (raw_index < 0 && resolved_index < 1) {
+            return Err(super::argument_error(
+                state,
+                1,
+                "select",
+                "index out of range",
+            ));
+        }
 
-        if index > vararg_count {
-            // Index beyond args, return nothing
+        if raw_index > vararg_count_i64 {
+            // A positive index beyond the supplied arguments returns nothing.
             state.set_top(0)?;
             return Ok(0);
         }
+        let index = usize::try_from(resolved_index)
+            .expect("select index is bounded by the argument stack length");
 
         // Return args from index onwards (1-based, so index 1 = first vararg)
         // Stack: [index, arg1, arg2, ..., argN]

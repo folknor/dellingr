@@ -44,14 +44,25 @@ brokkr run --quiet -- script.lua                      # forwards raw to cargo ru
 Differential testing against reference Lua:
 
 ```sh
-./scripts/diff_test.sh        # diff vs lua5.2 / lua5.4 (must be on PATH); prints "ok" on success or "FAIL: <path>" per failing script
-./scripts/test_limited.sh <cmd>  # run <cmd> with a 2GB virtual-memory cap (for stress tests)
+./scripts/diff_test.sh        # diff vs lua5.2 / lua5.4 (must be on PATH); prints "ok", or one FAIL/TIMEOUT line per failing script
+./scripts/test_limited.sh <cmd>  # run <cmd> under a virtual-memory cap (for stress tests)
 ```
 
-Shell scripts live in `scripts/`. Each one anchors itself to the repo root, so
-they can be invoked from anywhere; `test_limited.sh` is the exception, since it
-is a transparent `exec` wrapper that should not move the caller's working
-directory.
+`diff_test.sh` refuses to start without `lua5.2` and `lua5.4`, and requires
+dellingr to exit zero even for `-- DIFF:` files. Environment knobs:
+`DELLINGR=<path>` uses an existing binary instead of building one;
+`DELLINGR_DIFF_TIMEOUT` sets the per-process timeout in `timeout(1)` syntax
+(default `5s`; `0` disables it); `DELLINGR_SKIP_TIMEOUT=1` drops the timeout
+wrapper entirely. Its temporary output lives under the gitignored `.scratch/`.
+`test_limited.sh` reads `DELLINGR_TEST_LIMIT_KB` (a `ulimit -v` value in KiB,
+default 2 GiB).
+
+Shell scripts live in `scripts/` and share `scripts/lib.sh`, which builds a
+cargo target and asks cargo for the artifact path (it needs `python3`), so no
+script hard-codes a `target/` path. Each script anchors itself to the repo
+root, so they can be invoked from anywhere; `test_limited.sh` is the
+exception, since it is a transparent `exec` wrapper that should not move the
+caller's working directory.
 
 Debug-print feature flags: `--features debug_parser`, `debug_vm`, `debug_gc`.
 
@@ -59,12 +70,13 @@ MSRV is the `rust-version` in `Cargo.toml`. Edition 2024.
 
 ## Lint gate (don't disable, fix the code)
 
-`src/lib.rs` denies a long list of clippy lints; `clippy.toml` adds disallowed methods/types. The non-obvious ones:
+`Cargo.toml` `[lints.clippy]` (and `[lints.rust]`) defines package-wide lint levels for every target; `clippy.toml` supplies the disallowed methods and types; `src/lib.rs` additionally denies `clippy::unwrap_used` and `clippy::float_cmp` under `cfg(not(test))` and warns on `missing_docs`, for the library only. The non-obvious ones:
 
-- **`unwrap_used` is denied outside `#[cfg(test)]`.** Use `?`, `expect("reason that explains why this can't fail")`, or proper error handling. The string in `expect` should explain the invariant, not just describe the call.
+- **`unwrap_used` is denied in the library outside `#[cfg(test)]`.** Use `?`, `expect("reason that explains why this can't fail")`, or proper error handling. The string in `expect` should explain the invariant, not just describe the call.
 - **`Result::ok()` is banned.** It silently discards errors. Use `?` or handle the error.
 - **`HashMap` / `HashSet` are banned.** Iteration order is non-deterministic. Use `IndexMap` (already a dep) or `BTreeMap` / `BTreeSet`.
 - **`rand::rng` / `rand::thread_rng` are banned.** Unseeded RNG breaks determinism. The VM RNG is `state.rng`, an in-crate `VmRng` (SplitMix64) seeded via `set_rng_seed` (default seed 0); the `rand` crate is no longer a dependency. The clippy ban stays as a guard against re-introducing unseeded entropy; `allow-invalid = true` keeps it from tripping now that the path is gone.
+- **Host state is banned:** `std::env::args`/`var` and kin, `Instant`/`SystemTime` and their `now`, `RandomState` and `DefaultHasher`. The CLI (`src/main.rs`) and the bench harness (`examples/hotpath.rs`) are hosts and carry scoped `allow(clippy::disallowed_methods, clippy::disallowed_types)` attributes; library code gets none.
 - `dbg_macro`, `todo!`, `await_holding_lock`, `await_holding_refcell_ref` are denied.
 
 Determinism is a product requirement, not a style preference - game replays depend on it.
@@ -114,14 +126,14 @@ value stack, not total host memory, and enforcing it charges no cost.
 
 ## Tests
 
-- `tests/run_examples.rs` - runs every `examples/*.lua` via `cargo run` and fails on nonzero exit OR if the output contains the substring `: false`. Examples that print test results follow the convention `print("test name: " .. tostring(condition))`. Adding a new `examples/foo.lua` that prints `: false` will break this test.
+- `tests/run_examples.rs` - recursively runs every Lua file under `examples/` with the binary cargo built for the test run (`tests/common` owns the path; no test may reference `target/` or spawn cargo), in parallel worker threads. That includes the stress examples and the generated `parse/large_source.lua`. It fails on nonzero exit or if any stdout line ends with `: false`. Examples that print test results follow the convention `print("test name: " .. tostring(condition))`. Adding an example that prints a line ending in `: false` will fail this test.
 - `tests/error_handling.rs`, `gc_upvalues.rs`, `gsub_errors.rs`, `metamethod_errors.rs`, `rustfn_error.rs` - focused integration suites.
-- `tests/diff_test.rs` is a Rust harness; `scripts/diff_test.sh` is the differential shell script that compares output against `lua5.2` and `lua5.4`. Mark intentional divergences with a `-- DIFF: <reason>` comment in the example. `benchmark.lua`, `stress_*.lua`, and `upvalue_stress.lua` are skipped by the diff script.
+- `tests/diff_test.rs` is a Rust harness; `scripts/diff_test.sh` is the differential shell script that compares output against `lua5.2` and `lua5.4`. Mark intentional divergences with a `-- DIFF: <reason>` comment in the example. A file carrying a `-- SKIP-DIFF: <reason>` line is not diffed at all. `benchmark.lua`, the top-level `stress_*.lua` files and `upvalue_stress.lua` are still skipped by name lists in both `diff_test.sh` and `diff_test.rs`, pending conversion to `SKIP-DIFF` markers. The Rust harness fails, rather than skipping, when reference Lua is missing.
 - Unit tests live alongside their modules (e.g. `src/vm/object.rs` has GC tests).
 
 ## Hotpath benchmarks
 
-`examples/hotpath.rs` is a single Rust harness, and the binary brokkr invokes for `--bench` / `--hotpath` / `--alloc` runs. It takes one positional arg - either a script path (`bench/arithmetic.lua`) or a legacy target name (`fields/same_obj_read`, resolved to `examples/{target}.lua`) - and the script must define a global `_bench()` function. `--iterations N` overrides the warm-call count (default 20). When `BROKKR_MARKER_FIFO` names a writable path, the harness also emits brokkr sidecar markers (`PARSE`/`SETUP`/`COLD`/`WARM` START/END pairs, plus up to 32 batched `WARM_BLOCK` sub-spans) and `@name=value` counters; without the env var those emits are no-ops. Probe and correctness bench scripts live in subdirectories of `examples/` alongside correctness tests:
+`examples/hotpath.rs` is a single Rust harness, and the binary brokkr invokes for `--bench` / `--hotpath` / `--alloc` runs. It takes one required positional arg, a script path resolved from the caller's working directory (`bench/arithmetic.lua`, `examples/fields/same_obj_read.lua`), and exits nonzero if the script does not define a global `_bench()` function. `--iterations N` overrides the warm-call count (default 20). When `BROKKR_MARKER_FIFO` names a writable path, the harness also emits brokkr sidecar markers (`PARSE`/`SETUP`/`COLD`/`WARM` START/END pairs, plus up to 32 batched `WARM_BLOCK` sub-spans) and `@name=value` counters; without the env var those emits are no-ops. A configured FIFO that cannot be opened or written fails the run rather than recording a partial marker stream. Probe and correctness bench scripts live in subdirectories of `examples/` alongside correctness tests:
 
 ```
 examples/hotpath.rs        # harness (parse / cold call / warm calls)
@@ -159,7 +171,7 @@ Each bench script is also a standalone-runnable test: top-level setup + a `_benc
 
 `bench/` holds the brokkr *verdict* workloads: seconds-scale ports of the curated examples/ benches - same kernels, wrapped in a repeat loop calibrated so one `_bench()` call is ~100ms, footer fixed at 30 calls, which lands the standalone run at ~3s and the harness warm phase at ~2s with the default 20 iterations. A 20ms-per-launch bench cannot resolve the deltas the optimization backlog targets; a seconds-scale one can. Each `[dellingr.workloads.*]` registration in `brokkr.toml` therefore pins *two* files: `file`/`xxh128` (the bench/ port, for wall-clock verdict runs) and `hotpath_file`/`hotpath_xxh128` (the examples/ counterpart, for instrumented profiling, which only works at the ms scale); editing either file requires re-hashing its pin, which is the deliberate signal that older stored results no longer compare. The pairing is a real constraint when editing either file: the two must stay the same kernel in the same proportions, or per-function distributions measured on the ms file stop describing the seconds-scale walls. `bench/` is intentionally outside every examples/ glob - `run_examples.rs`, the diff gate, and `bench.sh` do not see it - so the fast test/diff/ratio surfaces and the slow verdict surface stay independent.
 
-The harness measures four phases on one State and emits KV pairs to stderr: `parse_us`, `cold_call_us`, `warm_avg_us` (averaged over the warm iterations, default 20), plus the dellingr-specific `cost_used` per phase and the derived `cost_per_us`. Wall time is the benchmarking metric; cost is a deterministic property of the workload and rides along as a fingerprint (a cost change means the script or compiler changed, not the VM's speed). `setup_*` and `final_*` heap/object counts bracket GC pressure. Note the harness runs the script's top level during setup, so the standalone footer's calls execute there - the "cold" call is only cold with respect to what the footer has not already warmed.
+The harness measures four phases on one State and emits KV pairs to stderr: `parse_us`, `cold_call_us`, `warm_avg_us` (averaged over the warm iterations, default 20; fractional, three decimals), plus the dellingr-specific `cold_cost` / `warm_avg_cost` and the derived `cost_per_us`. Wall time is the benchmarking metric; cost is a deterministic property of the workload and rides along as a fingerprint (a cost change means the script or compiler changed, not the VM's speed). `setup_*` and `final_*` heap/object counts bracket GC pressure. Note the harness runs the script's top level during setup, so the standalone footer's calls execute there - the "cold" call is only cold with respect to what the footer has not already warmed.
 
 Roughly ninety internal functions carry `#[hotpath::measure]`, concentrated in `vm/table.rs`, `vm/table_ops.rs`, `vm/eval*.rs`, `vm/object.rs` and the compiler front end. The annotation is a no-op when the `hotpath` cargo feature is off, so it costs nothing in normal builds; it is cheap to add one when a new candidate needs a measurement point, and worth doing at the same time as the bench that will exercise it. **Don't add `#[hotpath::measure]` to `eval_closure` or any function that recurses through the bytecode dispatch loop**: each level adds enough stack-frame bloat to abort the `call_depth_exceeded_error` test (which intentionally recurses to `MAX_CALL_DEPTH = 1000`). A function *called from* the dispatch loop is fine as long as its own frame is popped before the loop recurses - the constraint is about frames that stay live across the recursive descent, not about being on the call path at all. `eval.rs` carries an inline comment at the one site where this is easy to get wrong.
 

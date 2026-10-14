@@ -1,6 +1,6 @@
 //! Lua's Table Library
 
-use super::exact_integer_argument;
+use super::{arg_integer, opt_integer};
 use crate::LuaType;
 use crate::Result;
 use crate::State;
@@ -50,13 +50,13 @@ pub(crate) fn open_table(state: &mut State) -> Result<()> {
             state.table_insert_at(1, len + 1)?;
         } else if num_args == 3 {
             // table.insert(t, pos, value)
-            state.check_type(2, LuaType::Number)?;
-            let pos = exact_integer_argument(state, 2, "insert")?;
-            let len = state.table_len(1) as i64;
+            let pos = arg_integer(state, 2, "insert")?;
+            let len = i64::try_from(state.table_len(1)).expect("table length fits in i64");
             if !(1..=len + 1).contains(&pos) {
                 return Err(position_out_of_bounds(state, "insert"));
             }
-            state.table_insert_at(1, pos as usize)?;
+            let pos = usize::try_from(pos).expect("validated insertion position is positive");
+            state.table_insert_at(1, pos)?;
         } else {
             return Err(state.error(ErrorKind::RuntimeError(
                 "wrong number of arguments to 'insert'".to_string(),
@@ -74,9 +74,8 @@ pub(crate) fn open_table(state: &mut State) -> Result<()> {
         state.consume_cost(1)?;
         state.check_type(1, LuaType::Table)?;
         let len = state.table_len(1);
-        let len_i = len as i64;
-        let pos = if state.check_optional_type(2, LuaType::Number)? {
-            let pos = exact_integer_argument(state, 2, "remove")?;
+        let len_i = i64::try_from(len).expect("table length fits in i64");
+        let pos = if let Some(pos) = opt_integer(state, 2, "remove")? {
             let valid = if len == 0 {
                 pos == 0 || pos == 1
             } else {
@@ -85,7 +84,7 @@ pub(crate) fn open_table(state: &mut State) -> Result<()> {
             if !valid {
                 return Err(position_out_of_bounds(state, "remove"));
             }
-            pos as usize
+            usize::try_from(pos).expect("validated removal position is nonnegative")
         } else {
             len
         };
@@ -165,17 +164,8 @@ pub(crate) fn open_table(state: &mut State) -> Result<()> {
             Vec::new()
         };
 
-        let i = if state.check_optional_type(3, LuaType::Number)? {
-            exact_integer_argument(state, 3, "concat")?
-        } else {
-            1
-        };
-
-        let j = if state.check_optional_type(4, LuaType::Number)? {
-            exact_integer_argument(state, 4, "concat")?
-        } else {
-            len
-        };
+        let i = opt_integer(state, 3, "concat")?.unwrap_or(1);
+        let j = opt_integer(state, 4, "concat")?.unwrap_or(len);
 
         state.set_top(1)?;
 
@@ -223,13 +213,9 @@ pub(crate) fn open_table(state: &mut State) -> Result<()> {
     // Copies a1[f..e] to a2[t..t+(e-f)]. Returns a2.
     add_fn!("move", |state| {
         state.check_type(1, LuaType::Table)?;
-        state.check_type(2, LuaType::Number)?;
-        state.check_type(3, LuaType::Number)?;
-        state.check_type(4, LuaType::Number)?;
-
-        let f = exact_integer_argument(state, 2, "move")?;
-        let e = exact_integer_argument(state, 3, "move")?;
-        let t = exact_integer_argument(state, 4, "move")?;
+        let f = arg_integer(state, 2, "move")?;
+        let e = arg_integer(state, 3, "move")?;
+        let t = arg_integer(state, 4, "move")?;
 
         // Determine destination table (a2 or a1)
         let has_a2 = state.check_optional_type(5, LuaType::Table)?;

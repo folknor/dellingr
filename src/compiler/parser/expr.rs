@@ -408,19 +408,9 @@ impl Parser<'_> {
         let tok = self.input.next()?;
         match tok.typ {
             TokenType::LCurly => self.parse_table()?,
-            TokenType::LiteralNumber => {
-                let text = self.get_text(tok);
-                let number: f64 = text
-                    .parse()
-                    .map_err(|_| self.error_at(SyntaxError::BadNumber, tok.start))?;
-                let idx = self.find_or_add_number(number)?;
-                self.push(Instr::push_num(idx));
-            }
-            TokenType::LiteralHexNumber => {
-                // The shared numeral parser handles integer, fraction, and
-                // binary-exponent hex forms (C30) and rounds oversized
-                // mantissas to the nearest f64 like reference Lua, instead of
-                // erroring past u128 range.
+            TokenType::LiteralNumber | TokenType::LiteralHexNumber => {
+                // The lexer determines token boundaries; this shared parser
+                // owns conversion and validates the complete numeral.
                 let text = self.get_text(tok);
                 let number = crate::numeral::parse_lua_numeral(text.as_bytes())
                     .ok_or_else(|| self.error_at(SyntaxError::BadNumber, tok.start))?;

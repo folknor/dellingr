@@ -10,6 +10,7 @@
 //! exact transcendental results (basic arithmetic, comparisons, and
 //! `math.random` are bit-stable everywhere).
 
+use super::{arg_integer, argument_error};
 use crate::LuaType;
 use crate::Result;
 use crate::State;
@@ -172,30 +173,23 @@ pub(crate) fn open_math(state: &mut State) -> Result<()> {
             }
             1 => {
                 // math.random(n) - returns integer in [1, n]
-                state.check_type(1, LuaType::Number)?;
-                let n = state.to_number(1)? as i64;
+                let n = arg_integer(state, 1, "random")?;
                 if n < 1 {
-                    return Err(state.error(ErrorKind::RuntimeError(
-                        "bad argument #1 to 'random' (interval is empty)".to_string(),
-                    )));
+                    return Err(argument_error(state, 1, "random", "interval is empty"));
                 }
                 state.rng.random_range_i64(1, n) as f64
             }
             2 => {
                 // math.random(m, n) - returns integer in [m, n]
-                state.check_type(1, LuaType::Number)?;
-                state.check_type(2, LuaType::Number)?;
-                let m = state.to_number(1)? as i64;
-                let n = state.to_number(2)? as i64;
+                let m = arg_integer(state, 1, "random")?;
+                let n = arg_integer(state, 2, "random")?;
                 if m > n {
                     // Argument #1 is deliberate and matches 5.4; only 5.2
                     // blames #2. Reading this against 5.2 makes it look like
                     // an off-by-one, so it has been "found" as a bug before -
                     // verified against both interpreters, and changing it to
                     // #2 would introduce a divergence rather than fix one.
-                    return Err(state.error(ErrorKind::RuntimeError(
-                        "bad argument #1 to 'random' (interval is empty)".to_string(),
-                    )));
+                    return Err(argument_error(state, 1, "random", "interval is empty"));
                 }
                 state.rng.random_range_i64(m, n) as f64
             }

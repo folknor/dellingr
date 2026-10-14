@@ -65,9 +65,9 @@ impl State {
                 (self.stack_bottom + offset, n)
             }
         };
+        let old_stack_bottom = self.stack_bottom;
         let func_val = self.stack.remove(idx);
         let num_ret_actual = if let Val::RustFn(f) = func_val {
-            let old_stack_bottom = self.stack_bottom;
             self.stack_bottom = idx;
 
             // IMPORTANT: We must restore stack_bottom on ALL exit paths, including errors.
@@ -85,13 +85,16 @@ impl State {
             let num_ret_reported = match result {
                 Ok(n) => n,
                 Err(e) => {
-                    self.stack.truncate(idx);
-                    self.stack_bottom = old_stack_bottom;
+                    self.truncate_call_frame(idx, old_stack_bottom);
                     // Notify the host of a Rust-function failure it reached
                     // directly (no Lua frame on the stack). When call_depth > 0
                     // an enclosing Lua frame will fire on_error as the error
                     // unwinds; a non-empty stack trace means it already did. This
-                    // guard keeps on_error firing exactly once per error (L6).
+                    // guard keeps on_error firing exactly once per error.
+                    // Keep this boundary separate from Lua-frame reporting:
+                    // direct host calls have no Lua frame that can attach a trace.
+                    // Error has no separate report flag, so stack_trace remains
+                    // the existing marker shared with report_frame_error below.
                     if self.call_depth == 0 && e.stack_trace.is_empty() {
                         self.host_error(&e);
                     }
@@ -104,8 +107,7 @@ impl State {
             match reported.cmp(&num_ret_actual) {
                 Ordering::Greater => {
                     if let Err(e) = self.check_stack_space(reported - num_ret_actual) {
-                        self.stack.truncate(idx);
-                        self.stack_bottom = old_stack_bottom;
+                        self.truncate_call_frame(idx, old_stack_bottom);
                         return Err(e);
                     }
                     for _ in num_ret_actual..reported {
@@ -144,7 +146,7 @@ impl State {
             match result {
                 Ok(n) => n,
                 Err(e) => {
-                    self.stack.truncate(idx);
+                    self.truncate_call_frame(idx, old_stack_bottom);
                     return Err(e);
                 }
             }
@@ -176,23 +178,45 @@ impl State {
                             // Match the other call error paths: clear the frame
                             // (the callable was already removed above) so a direct
                             // host call does not leave the arguments visible.
-                            self.stack.truncate(idx);
+                            self.truncate_call_frame(idx, old_stack_bottom);
                             return Err(self.error(ErrorKind::RuntimeError(
                                 "too many arguments (limit 255)".into(),
                             )));
                         }
                     };
                     if let Err(e) = self.check_stack_space(2) {
-                        self.stack.truncate(idx);
+                        self.truncate_call_frame(idx, old_stack_bottom);
                         return Err(e);
                     }
                     self.stack.insert(idx, func_val);
                     self.stack.insert(idx, call_handler);
-                    // Now call with actual_num_args + 1 (table is first arg)
-                    return self.call(ArgCount::Fixed(combined), num_ret_expected);
+                    // Now call with actual_num_args + 1 (table is first arg).
+                    //
+                    // Only a handler that is itself not a function re-enters
+                    // __call resolution without passing through a Lua or Rust
+                    // frame, so only that case counts against the metamethod
+                    // depth. A function handler is bounded by call_depth like
+                    // any other call; guarding it too would cap legitimate
+                    // recursion through callable objects at
+                    // MAX_METAMETHOD_DEPTH, and would add the guard's closure
+                    // frame to every level of the recursive Lua-call path (see
+                    // the comment on the Lua-function branch above).
+                    let handler_is_function = matches!(call_handler, Val::RustFn(_))
+                        || call_handler.as_lua_function(&self.heap).is_some();
+                    let result = if handler_is_function {
+                        self.call(ArgCount::Fixed(combined), num_ret_expected)
+                    } else {
+                        self.with_metamethod_depth(|state| {
+                            state.call(ArgCount::Fixed(combined), num_ret_expected)
+                        })
+                    };
+                    if result.is_err() {
+                        self.truncate_call_frame(idx, old_stack_bottom);
+                    }
+                    return result;
                 }
             }
-            self.stack.truncate(idx);
+            self.truncate_call_frame(idx, old_stack_bottom);
             return Err(self.type_error(TypeError::FunctionCall(func_val.typ(&self.heap))));
         };
         // RetCount::All means "return all" - don't adjust the stack
@@ -201,11 +225,16 @@ impl State {
             // call's frame on failure like every other error path here, so the
             // caller is not left holding a partial result set.
             if let Err(e) = self.balance_stack(expected as usize, num_ret_actual as usize) {
-                self.stack.truncate(idx);
+                self.truncate_call_frame(idx, old_stack_bottom);
                 return Err(e);
             }
         }
         Ok(())
+    }
+
+    fn truncate_call_frame(&mut self, call_base: usize, old_stack_bottom: usize) {
+        self.stack.truncate(call_base);
+        self.stack_bottom = old_stack_bottom;
     }
 
     /// Loads a string as a Lua chunk. This function uses `load` to load the
@@ -396,6 +425,36 @@ impl State {
         }
     }
 
+    fn report_frame_error(&mut self, error: Error, frame: &Frame) -> Error {
+        if error.stack_trace.is_empty() {
+            let error = Self::locate_in_frame(error, frame);
+            let trace = self.build_stack_trace(frame);
+            let error = error.with_stack_trace(trace);
+            // A trace marks that this Lua error crossed the reporting boundary.
+            // Nested frames retain it and do not notify the host a second time.
+            // Error has no separate report flag, so this remains the shared
+            // once-only marker used by the direct RustFn boundary above.
+            self.host_error(&error);
+            error
+        } else {
+            error
+        }
+    }
+
+    fn cleanup_closure_frame(
+        &mut self,
+        frame_bottom: usize,
+        old_stack_bottom: usize,
+        close_upvalues: bool,
+    ) {
+        if close_upvalues {
+            self.close_upvalues(frame_bottom);
+        }
+        self.stack.truncate(frame_bottom);
+        self.stack_bottom = old_stack_bottom;
+        self.call_stack.pop();
+    }
+
     fn eval_closure_frame(
         &mut self,
         closure: Closure,
@@ -403,6 +462,7 @@ impl State {
         num_args: u8,
         varargs: Vec<Val>,
     ) -> Result<u8> {
+        let frame_bottom = self.stack_bottom;
         let num_params = closure.bytecode.num_params;
         let num_locals = closure.bytecode.num_locals;
         let is_vararg = closure.bytecode.is_vararg;
@@ -413,9 +473,7 @@ impl State {
             0
         };
         if let Err(e) = self.check_stack_space(extra_params + num_locals as usize) {
-            // Must restore stack_bottom before returning error (see comment in RustFn handling)
-            self.stack_bottom = old_stack_bottom;
-            self.call_stack.pop();
+            self.cleanup_closure_frame(frame_bottom, old_stack_bottom, false);
             return Err(e);
         }
 
@@ -426,8 +484,11 @@ impl State {
                 }
             }
             Ordering::Greater => {
-                if !is_vararg {
-                    self.pop((num_args - num_params) as isize)?;
+                if !is_vararg
+                    && let Err(e) = self.pop((num_args - num_params) as isize)
+                {
+                    self.cleanup_closure_frame(frame_bottom, old_stack_bottom, false);
+                    return Err(e);
                 }
                 // If is_vararg, we already collected the extra args above
             }
@@ -442,23 +503,8 @@ impl State {
         let ret_count = match frame.eval(self) {
             Ok(count) => count,
             Err(e) => {
-                // Only attach stack trace if error doesn't already have one
-                // (inner function calls may have already attached the trace)
-                let e = if e.stack_trace.is_empty() {
-                    let e = Self::locate_in_frame(e, &frame);
-                    let trace = self.build_stack_trace(&frame);
-                    let e = e.with_stack_trace(trace);
-                    // Notify host callbacks of the error
-                    self.host_error(&e);
-                    e
-                } else {
-                    e
-                };
-                // Must restore stack_bottom before returning error (see comment in RustFn handling)
-                self.close_upvalues(self.stack_bottom);
-                self.stack.truncate(self.stack_bottom);
-                self.stack_bottom = old_stack_bottom;
-                self.call_stack.pop();
+                let e = self.report_frame_error(e, &frame);
+                self.cleanup_closure_frame(frame_bottom, old_stack_bottom, true);
                 return Err(e);
             }
         };
@@ -475,14 +521,8 @@ impl State {
                         let e = self.error(ErrorKind::RuntimeError(
                             "too many results (limit 255)".into(),
                         ));
-                        let e = Self::locate_in_frame(e, &frame);
-                        let trace = self.build_stack_trace(&frame);
-                        let e = e.with_stack_trace(trace);
-                        self.host_error(&e);
-                        self.close_upvalues(self.stack_bottom);
-                        self.stack.truncate(self.stack_bottom);
-                        self.stack_bottom = old_stack_bottom;
-                        self.call_stack.pop();
+                        let e = self.report_frame_error(e, &frame);
+                        self.cleanup_closure_frame(frame_bottom, old_stack_bottom, true);
                         return Err(e);
                     }
                 }

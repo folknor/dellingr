@@ -69,115 +69,77 @@ impl RetCount {
     }
 }
 
-/// Well-known global names that get fast array-indexed access instead of HashMap lookup.
-///
-/// These are the most commonly accessed globals in typical Lua scripts.
-/// Using a fixed array eliminates string hashing and comparison overhead.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(u8)]
-pub(crate) enum Builtin {
-    // Common functions
-    Print = 0,
-    Type = 1,
-    Tonumber = 2,
-    Tostring = 3,
-    // Iteration
-    Pairs = 4,
-    Ipairs = 5,
-    Next = 6,
-    // Table operations
-    Getmetatable = 7,
-    Setmetatable = 8,
-    Rawget = 9,
-    Rawset = 10,
-    Rawequal = 11,
-    Rawlen = 12,
-    // Vararg helpers
-    Select = 13,
-    Unpack = 14,
-    // Library tables
-    Math = 15,
-    String = 16,
-    Table = 17,
-    // Global environment
-    G = 18, // _G
+macro_rules! define_builtins {
+    ($( $variant:ident => $name:literal ),+ $(,)?) => {
+        /// Well-known global names that get fast array-indexed access instead
+        /// of a string lookup. Declaration order is persisted in builtin bytecode slots.
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        #[repr(u8)]
+        pub(crate) enum Builtin {
+            $( $variant ),+
+        }
+
+        impl Builtin {
+            /// Total number of builtin slots.
+            pub(crate) const COUNT: usize = [$(stringify!($variant)),+].len();
+
+            const ALL: [(Self, &'static str); Self::COUNT] = [
+                $( (Self::$variant, $name) ),+
+            ];
+
+            /// Try to convert a global name to a Builtin slot.
+            #[inline]
+            pub(crate) fn from_name(name: &str) -> Option<Self> {
+                match name {
+                    $( $name => Some(Self::$variant), )+
+                    _ => None,
+                }
+            }
+
+            /// Get the name of this builtin.
+            #[inline]
+            pub(crate) const fn name(self) -> &'static str {
+                match self {
+                    $( Self::$variant => $name ),+
+                }
+            }
+
+            /// Convert to u8 for instruction encoding.
+            #[inline]
+            pub(crate) const fn to_u8(self) -> u8 {
+                self as u8
+            }
+
+            /// Convert from u8. Returns None if out of range.
+            #[inline]
+            pub(crate) fn from_u8(n: u8) -> Option<Self> {
+                Self::ALL.get(usize::from(n)).map(|(builtin, _)| *builtin)
+            }
+        }
+    };
 }
 
-impl Builtin {
-    /// Total number of builtin slots.
-    pub(crate) const COUNT: usize = 19;
-
-    /// Try to convert a global name to a Builtin slot.
-    #[inline]
-    pub(crate) const fn from_name(name: &str) -> Option<Self> {
-        // Use a const-compatible match on bytes
-        let bytes = name.as_bytes();
-        match bytes {
-            b"print" => Some(Builtin::Print),
-            b"type" => Some(Builtin::Type),
-            b"tonumber" => Some(Builtin::Tonumber),
-            b"tostring" => Some(Builtin::Tostring),
-            b"pairs" => Some(Builtin::Pairs),
-            b"ipairs" => Some(Builtin::Ipairs),
-            b"next" => Some(Builtin::Next),
-            b"getmetatable" => Some(Builtin::Getmetatable),
-            b"setmetatable" => Some(Builtin::Setmetatable),
-            b"rawget" => Some(Builtin::Rawget),
-            b"rawset" => Some(Builtin::Rawset),
-            b"rawequal" => Some(Builtin::Rawequal),
-            b"rawlen" => Some(Builtin::Rawlen),
-            b"select" => Some(Builtin::Select),
-            b"unpack" => Some(Builtin::Unpack),
-            b"math" => Some(Builtin::Math),
-            b"string" => Some(Builtin::String),
-            b"table" => Some(Builtin::Table),
-            b"_G" => Some(Builtin::G),
-            _ => None,
-        }
-    }
-
-    /// Get the name of this builtin.
-    #[inline]
-    pub(crate) const fn name(self) -> &'static str {
-        match self {
-            Builtin::Print => "print",
-            Builtin::Type => "type",
-            Builtin::Tonumber => "tonumber",
-            Builtin::Tostring => "tostring",
-            Builtin::Pairs => "pairs",
-            Builtin::Ipairs => "ipairs",
-            Builtin::Next => "next",
-            Builtin::Getmetatable => "getmetatable",
-            Builtin::Setmetatable => "setmetatable",
-            Builtin::Rawget => "rawget",
-            Builtin::Rawset => "rawset",
-            Builtin::Rawequal => "rawequal",
-            Builtin::Rawlen => "rawlen",
-            Builtin::Select => "select",
-            Builtin::Unpack => "unpack",
-            Builtin::Math => "math",
-            Builtin::String => "string",
-            Builtin::Table => "table",
-            Builtin::G => "_G",
-        }
-    }
-
-    /// Convert to u8 for instruction encoding.
-    #[inline]
-    pub(crate) const fn to_u8(self) -> u8 {
-        self as u8
-    }
-
-    /// Convert from u8. Returns None if out of range.
-    #[inline]
-    pub(crate) const fn from_u8(n: u8) -> Option<Self> {
-        if n < Self::COUNT as u8 {
-            // SAFETY: n is in range and repr(u8) ensures valid transmute
-            Some(unsafe { std::mem::transmute::<u8, Self>(n) })
-        } else {
-            None
-        }
-    }
+// Keep this order stable: snapshot bytecode stores builtin indices directly.
+define_builtins! {
+    Print => "print",
+    Type => "type",
+    Tonumber => "tonumber",
+    Tostring => "tostring",
+    Pairs => "pairs",
+    Ipairs => "ipairs",
+    Next => "next",
+    Getmetatable => "getmetatable",
+    Setmetatable => "setmetatable",
+    Rawget => "rawget",
+    Rawset => "rawset",
+    Rawequal => "rawequal",
+    Rawlen => "rawlen",
+    Select => "select",
+    Unpack => "unpack",
+    Math => "math",
+    String => "string",
+    Table => "table",
+    G => "_G",
 }
 
 /// A 32-bit encoded instruction.
@@ -445,6 +407,9 @@ impl Instr {
         Self::op(Self::OP_PUSH_NIL)
     }
 
+    // Cache operands are serialized as raw instruction words. Changing the
+    // opcode-specific sentinel encodings requires a snapshot format version
+    // bump and coordinated updates to the writer, loader, verifier, and VM.
     // Literal-bearing forms: the pool id is a u16 in Bx, and A carries the
     // inline-cache slot (255 = uncached), a stack offset, or is reserved as 0.
     pub(crate) const fn get_global(idx: u16) -> Self {
@@ -456,9 +421,8 @@ impl Instr {
     pub(crate) const fn set_global(idx: u16) -> Self {
         Self::op_a_bx(Self::OP_SET_GLOBAL, 0, idx)
     }
-    /// `SET_GLOBAL` uses a biased cache encoding: zero is uncached (including
-    /// legacy snapshots), while one through 255 name cache slots zero through
-    /// 254. This differs deliberately from `GET_GLOBAL`'s 255 sentinel.
+    /// `SET_GLOBAL` uses a biased cache encoding: zero is uncached, while one through 255 name cache slots zero
+    /// through 254. This differs from `GET_GLOBAL`'s 255 sentinel.
     pub(crate) const fn set_global_cached(idx: u16, cache_idx: u8) -> Self {
         Self::op_a_bx(Self::OP_SET_GLOBAL, cache_idx + 1, idx)
     }
@@ -544,9 +508,8 @@ impl Instr {
     pub(crate) const fn tfor_call(slot: u8, num_vars: u8) -> Self {
         Self::op_ab(Self::OP_TFOR_CALL, slot, num_vars)
     }
-    /// `TFOR_CALL` uses a biased cursor encoding: zero is uncached (including
-    /// legacy snapshots), while one through 255 cursor slots zero through
-    /// 254.
+    /// `TFOR_CALL` uses a biased cursor encoding: zero is uncached, while one through 255 are cursor slots
+    /// zero through 254.
     pub(crate) const fn tfor_call_cached(slot: u8, num_vars: u8, cache_idx: u8) -> Self {
         Self::op_abc(Self::OP_TFOR_CALL, slot, num_vars, cache_idx + 1)
     }
@@ -679,6 +642,29 @@ impl std::fmt::Debug for Instr {
             Self::OP_FOR_LOOP => write!(f, "ForLoop({}, {})", self.a(), self.sbx()),
             Self::OP_TFOR_LOOP => write!(f, "TForLoop({}, {})", self.a(), self.sbx()),
             op => write!(f, "Unknown(op={}, raw={:#x})", op, self.0),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Builtin;
+
+    #[test]
+    fn builtin_slots_round_trip_through_names_and_bytes() {
+        assert_eq!(Builtin::COUNT, Builtin::ALL.len());
+        for (index, (builtin, name)) in Builtin::ALL.iter().enumerate() {
+            assert_eq!(usize::from(builtin.to_u8()), index);
+            assert_eq!(builtin.name(), *name);
+            assert_eq!(Builtin::from_name(name), Some(*builtin));
+        }
+
+        for raw in u8::MIN..=u8::MAX {
+            let builtin = Builtin::from_u8(raw);
+            assert_eq!(
+                builtin.and_then(|builtin| Builtin::from_name(builtin.name())),
+                builtin
+            );
         }
     }
 }

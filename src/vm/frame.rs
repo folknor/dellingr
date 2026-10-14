@@ -218,7 +218,9 @@ impl Frame {
                     state.call(ArgCount::from_u8(inst.a()), RetCount::from_u8(inst.b()))?;
                 }
                 Instr::OP_MARK_CALL_BASE => {
-                    let adjustment = inst.a() as usize;
+                    // The verifier requires the serialized A operand to be 1;
+                    // execution therefore uses the marker's fixed one-slot
+                    // adjustment instead of treating A as a runtime value.
                     // Validate against the CURRENT FRAME, not just against
                     // usize underflow. Checking only `stack.len()` would let a
                     // marker whose base lands below `stack_bottom` through
@@ -228,7 +230,7 @@ impl Frame {
                     let base = state
                         .stack
                         .len()
-                        .checked_sub(adjustment)
+                        .checked_sub(1)
                         .filter(|base| *base >= state.stack_bottom)
                         .ok_or_else(|| {
                             state.error(ErrorKind::InternalError(

@@ -23,8 +23,23 @@ All notable changes to dellingr are documented here. The format follows
   format version is unchanged: an older binary handed a snapshot containing
   the new opcodes rejects it cleanly as `InvalidBytecode` ("unknown
   opcode") rather than misexecuting.
+- **Integer arguments are exact across the stdlib.** `string.sub`, `find`,
+  `match` and `gsub` positions and counts, `math.random` bounds, `select` and
+  `tonumber`'s base now refuse non-integral numbers as Lua 5.4 does, instead of
+  truncating (`string.sub("abc", 1.5)` was accepted).
+- **Out-of-range argument messages.** `tonumber` base and `select` index out of
+  range, and `rawlen` on a non-table non-string, now say so instead of `number
+  expected, got number`; these are `RuntimeError` rather than `ArgError`.
 
 ### Fixed
+
+- **Cyclic `__call` chains no longer abort the process.** A table whose
+  `__call` resolves to a non-function (for example itself) is now bounded by the
+  metamethod depth limit and fails with `MetamethodDepthExceeded`; function
+  handlers remain bounded by the call depth limit.
+- **`break` outside a loop reports its real line** instead of always line 1.
+- **`string.find` with `)` in the pattern** no longer takes the plain-text fast
+  path.
 
 - **Upvalue pool no longer grows monotonically.** Pool slots whose upvalue is
   unreachable are swept onto a free list during `gc_collect` and reused by

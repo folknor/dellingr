@@ -37,6 +37,33 @@ fn assert_too_many_syntax_levels(source: &str) {
     );
 }
 
+#[test]
+fn break_outside_loop_uses_the_source_line() {
+    let err = parse_str("\n\nbreak").expect_err("break outside a loop must fail");
+
+    assert!(matches!(
+        &err.kind,
+        ErrorKind::SyntaxError(SyntaxError::BreakOutsideLoop)
+    ));
+    assert_eq!(err.line_num(), 3);
+    assert_eq!(err.to_string(), "3:6: <break> not inside a loop");
+}
+
+#[test]
+fn decimal_and_hex_literals_use_the_shared_numeral_parser() {
+    for source in ["42", ".5", "1.", "1.e2", "1e-3", "0x1.8p+0"] {
+        let expected = crate::numeral::parse_lua_numeral(source.as_bytes())
+            .expect("literal fixture must be a valid numeral");
+        let chunk = parse_str(&format!("return {source}")).expect("literal fixture must compile");
+        let actual = chunk
+            .number_literals
+            .first()
+            .expect("literal must be stored in the number pool");
+
+        assert_eq!(actual.to_bits(), expected.to_bits(), "{source}");
+    }
+}
+
 fn check_it(input: &str, mut output: Bytecode) {
     // Top-level chunks are always vararg functions
     output.is_vararg = true;

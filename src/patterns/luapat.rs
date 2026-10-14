@@ -11,6 +11,11 @@ pub(super) const LUA_MAXCAPTURES: usize = 32;
 pub(super) const LUA_MAXMATCHES: usize = LUA_MAXCAPTURES + 1;
 const MAXCCALLS: usize = 200;
 const L_ESC: u8 = b'%';
+const PATTERN_MAGIC_BYTES: &[u8] = b"^$*+?.([%-)";
+
+pub(super) fn is_pattern_magic(byte: u8) -> bool {
+    PATTERN_MAGIC_BYTES.contains(&byte)
+}
 
 type Result<T> = result::Result<T, PatternError>;
 type MatchResult<T> = result::Result<T, MatchError>;

@@ -4,6 +4,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod common;
+
 #[test]
 fn run_feature_test_extended_in_process() {
     let source = fs::read_to_string("examples/feature_test_extended.lua")
@@ -33,35 +35,12 @@ fn collect_lua_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-fn top_dir(path: &Path) -> Option<&str> {
-    let rel = path.strip_prefix("examples").unwrap_or(path);
-    let mut components = rel.components();
-    let first = components.next()?.as_os_str().to_str()?;
-    components.next().map(|_| first)
-}
-
 fn run_example(path: &Path) -> std::process::Output {
-    let release_bin = Path::new("target")
-        .join("release")
-        .join(format!("dellingr{}", std::env::consts::EXE_SUFFIX));
-    if release_bin.exists() {
-        Command::new(release_bin)
-            .arg("--quiet")
-            .arg(path)
-            .output()
-            .expect("Failed to execute dellingr binary")
-    } else if let Some(bin) = std::env::var_os("CARGO_BIN_EXE_dellingr") {
-        Command::new(bin)
-            .arg("--quiet")
-            .arg(path)
-            .output()
-            .expect("Failed to execute test dellingr binary")
-    } else {
-        Command::new("cargo")
-            .args(["run", "--quiet", "--", "--quiet", path.to_str().unwrap()])
-            .output()
-            .expect("Failed to execute cargo run")
-    }
+    Command::new(common::dellingr_bin())
+        .arg("--quiet")
+        .arg(path)
+        .output()
+        .expect("Failed to execute test dellingr binary")
 }
 
 fn check_example(path: &Path) -> Option<String> {
@@ -94,14 +73,6 @@ fn check_example(path: &Path) -> Option<String> {
     }
 }
 
-fn run_one_example(path: &str) {
-    let path = Path::new(path);
-    assert!(path.exists(), "example file not found: {}", path.display());
-    if let Some(failure) = check_example(path) {
-        panic!("\n1 example failed:\n\n{failure}");
-    }
-}
-
 fn run_examples_bucket(name: &str, include: impl Fn(&Path) -> bool) {
     let examples_dir = Path::new("examples");
 
@@ -117,13 +88,35 @@ fn run_examples_bucket(name: &str, include: impl Fn(&Path) -> bool) {
         "No .lua files found in examples bucket {name}"
     );
 
-    let mut failures = Vec::new();
-
-    for path in &files {
-        if let Some(failure) = check_example(path) {
-            failures.push(failure);
-        }
-    }
+    // One test covers the whole tree, so run examples on scoped worker
+    // threads to keep gate wall time close to the old per-bucket parallelism.
+    let workers = std::thread::available_parallelism()
+        .map_or(4, std::num::NonZeroUsize::get)
+        .min(files.len());
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let mut failures: Vec<(usize, String)> = std::thread::scope(|scope| {
+        let handles = (0..workers)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut local = Vec::new();
+                    loop {
+                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(path) = files.get(i) else { break };
+                        if let Some(failure) = check_example(path) {
+                            local.push((i, failure));
+                        }
+                    }
+                    local
+                })
+            })
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .flat_map(|handle| handle.join().expect("example worker panicked"))
+            .collect()
+    });
+    failures.sort_by_key(|(i, _)| *i);
+    let failures: Vec<String> = failures.into_iter().map(|(_, failure)| failure).collect();
 
     if !failures.is_empty() {
         panic!(
@@ -136,96 +129,7 @@ fn run_examples_bucket(name: &str, include: impl Fn(&Path) -> bool) {
     println!("\nAll {} examples passed in {name}!", files.len());
 }
 
-macro_rules! example_file_test {
-    ($name:ident, $path:literal) => {
-        #[test]
-        fn $name() {
-            run_one_example($path);
-        }
-    };
-}
-
 #[test]
-fn run_examples_root_a_to_feature() {
-    run_examples_bucket("root_a_to_feature", |path| {
-        top_dir(path).is_none()
-            && path
-                .strip_prefix("examples")
-                .is_ok_and(|rel| rel <= Path::new("feature_test_extended.lua"))
-    });
+fn run_all_examples() {
+    run_examples_bucket("all", |_| true);
 }
-
-#[test]
-fn run_examples_root_rest() {
-    run_examples_bucket("root_rest", |path| {
-        top_dir(path).is_none()
-            && path
-                .strip_prefix("examples")
-                .is_ok_and(|rel| rel > Path::new("feature_test_extended.lua"))
-    });
-}
-
-example_file_test!(run_example_alloc_closure, "examples/alloc/closure.lua");
-example_file_test!(
-    run_example_alloc_record_tables,
-    "examples/alloc/record_tables.lua"
-);
-example_file_test!(
-    run_example_alloc_short_tables,
-    "examples/alloc/short_tables.lua"
-);
-example_file_test!(
-    run_example_calls_factory_closure,
-    "examples/calls/factory_closure.lua"
-);
-example_file_test!(run_example_calls_fixedarg, "examples/calls/fixedarg.lua");
-example_file_test!(run_example_calls_general, "examples/calls/general.lua");
-example_file_test!(run_example_calls_global, "examples/calls/global.lua");
-example_file_test!(run_example_calls_local, "examples/calls/local.lua");
-example_file_test!(run_example_calls_method, "examples/calls/method.lua");
-example_file_test!(
-    run_example_calls_method_cached,
-    "examples/calls/method_cached.lua"
-);
-example_file_test!(
-    run_example_calls_method_chain,
-    "examples/calls/method_chain.lua"
-);
-example_file_test!(run_example_calls_vararg, "examples/calls/vararg.lua");
-example_file_test!(
-    run_example_fields_polymorphic,
-    "examples/fields/polymorphic.lua"
-);
-example_file_test!(
-    run_example_fields_same_obj_cached,
-    "examples/fields/same_obj_cached.lua"
-);
-example_file_test!(
-    run_example_fields_same_obj_read,
-    "examples/fields/same_obj_read.lua"
-);
-example_file_test!(
-    run_example_fields_same_obj_write,
-    "examples/fields/same_obj_write.lua"
-);
-example_file_test!(run_example_iter_ipairs, "examples/iter/ipairs.lua");
-example_file_test!(run_example_iter_pairs, "examples/iter/pairs.lua");
-example_file_test!(
-    run_example_numerics_arithmetic,
-    "examples/numerics/arithmetic.lua"
-);
-example_file_test!(
-    run_example_strings_literal_find,
-    "examples/strings/literal_find.lua"
-);
-example_file_test!(run_example_strings_mixed, "examples/strings/mixed.lua");
-example_file_test!(
-    run_example_strings_patterns,
-    "examples/strings/patterns.lua"
-);
-example_file_test!(run_example_tables_fill, "examples/tables/fill.lua");
-example_file_test!(run_example_tables_mixed, "examples/tables/mixed.lua");
-example_file_test!(
-    run_example_tables_numeric_index,
-    "examples/tables/numeric_index.lua"
-);

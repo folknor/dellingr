@@ -19,9 +19,9 @@ since every top-level definition is a nested chunk of the main chunk. Size
 therefore comes from making each function longer rather than from adding more
 of them.
 
-The generated body must stay cheap to RUN, since tests/run_examples.rs executes
-every examples/*.lua. Only a handful of the generated functions are ever
-called; the rest exist to be parsed.
+The generated body must stay cheap to RUN, since the example runner executes
+every Lua file under examples/. Only a handful of the generated functions are
+ever called; the rest exist to be parsed.
 
 Usage: python3 examples/parse/generate.py
 """

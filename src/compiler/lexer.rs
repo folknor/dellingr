@@ -5,7 +5,7 @@ use super::error::Error;
 use super::error::SyntaxError;
 use super::token::Token;
 use super::token::TokenType::{self, *};
-use crate::numeral::is_lua_whitespace;
+use crate::numeral::{is_lua_whitespace, is_newline_pair};
 
 use std::iter::Peekable;
 use std::slice::SliceIndex;
@@ -263,7 +263,7 @@ impl<'a> Lexer<'a> {
                 // CRLF and LFCR are each one logical newline. Defer the first
                 // member, then record the line start after the second.
                 if matches!(c, '\r' | '\n')
-                    && !matches!(self.peek_char(), Some(next) if next != c && matches!(next, '\r' | '\n'))
+                    && !matches!(self.peek_char(), Some(next) if is_newline_pair(c, next))
                 {
                     self.linebreaks.push(self.pos);
                 }
@@ -374,7 +374,7 @@ impl<'a> Lexer<'a> {
                         self.consume_whitespace();
                     }
                     Some(newline @ ('\r' | '\n')) => {
-                        if matches!(self.peek_char(), Some(next) if next != newline && matches!(next, '\r' | '\n'))
+                        if matches!(self.peek_char(), Some(next) if is_newline_pair(newline, next))
                         {
                             self.next_char();
                         }
@@ -423,9 +423,7 @@ impl<'a> Lexer<'a> {
             }
 
             match self.peek_char() {
-                Some(c) if c.is_ascii_alphanumeric() || c == '_' => {
-                    Err(self.error(SyntaxError::BadNumber))
-                }
+                Some(c) if is_identifier_continue(c) => Err(self.error(SyntaxError::BadNumber)),
                 _ => Ok(LiteralHexNumber),
             }
         } else {
@@ -487,9 +485,7 @@ impl<'a> Lexer<'a> {
             self.lex_digits();
         }
         match self.peek_char() {
-            Some(c) if c.is_ascii_alphanumeric() || c == '_' => {
-                Err(self.error(SyntaxError::BadNumber))
-            }
+            Some(c) if is_identifier_continue(c) => Err(self.error(SyntaxError::BadNumber)),
             _ => Ok(()),
         }
     }
@@ -497,7 +493,7 @@ impl<'a> Lexer<'a> {
     /// Reads a word and returns it as an identifier or keyword.
     fn lex_word(&mut self, tok_start: usize) -> TokenType {
         while let Some(c) = self.peek_char() {
-            if c.is_ascii_alphabetic() || c.is_ascii_digit() || c == '_' {
+            if is_identifier_continue(c) {
                 self.next_char();
             } else {
                 break;
@@ -527,6 +523,10 @@ impl<'a> Lexer<'a> {
             line,
         }
     }
+}
+
+fn is_identifier_continue(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_'
 }
 
 /// Checks if a word is a keyword, then returns the appropriate `TokenType`.

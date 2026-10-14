@@ -109,46 +109,17 @@ an `ArgCount`, and `parse_explist`/`parse_return` check against the fixed-count
 limit. Enforceable by type; also a test that `return` of 255 literals produces
 `ret(Fixed)` or a syntax error.
 
-## HYG-003 - "Uncached" has two encodings, justified by a legacy-snapshot path that strict versioning has removed
+## HYG-003 - "Uncached" has two encodings
 
-Reported by the compiler hunter.
+Reported by the compiler hunter; narrowed by a fixer, who documented the
+encoding contract at the instr.rs, `assign_cache_slots` and verifier sites.
 
 `GET_GLOBAL` and `GET_FIELD`/`SET_FIELD` use 255 for "uncached"; `SET_GLOBAL`
-and `TFOR_CALL` use a +1 bias with 0 for "uncached" (`instr.rs`,
-`assign_cache_slots`). The bias is justified as "including legacy snapshots",
-but `save_state.rs` rejects any snapshot whose version differs from
-`FORMAT_VERSION` with no fallback (CHANGELOG 0.4.0), so no legacy snapshot
-reaches this code. The verifier re-encodes each rule separately (`a !=
-u8::MAX`, `a != 0`, `a as usize - 1`). Fix: one encoding behind a `CacheSlot`
-newtype with `none()`/`slot(i)` used by compiler, verifier and VM. Enforceable
-by type.
-
-## HYG-004 - `mark_call_base(adjustment)` has one legal value
-
-Reported by the compiler hunter.
-
-The verifier rejects anything but `a == 1`, and the compiler only passes 1,
-yet the VM reads `adjustment` and computes with it. Drop the operand, or have
-the VM treat it as the constant the verifier says it is.
-
-## HYG-005 - `Builtin::COUNT` is a hand-kept literal that an `unsafe transmute` depends on
-
-Reported by the compiler and stdlib hunters.
-
-`Builtin::from_u8` is sound only if `COUNT = 19` equals the variant count and
-discriminants are dense. Bump `COUNT` without adding a variant and the
-transmute is UB on a value forged snapshot bytecode can supply (the verifier
-checks only `a < COUNT`). `from_name` and `name` are two more hand-kept lists
-of all 19 names, and basic.rs and the `set_global("math")` calls spell them a
-third time; a mismatch between a registration string and `Builtin` silently
-falls back to the slow hash path. Nothing tests the round trip. `vm.rs`
-reserves `Builtin::COUNT + 4`, a bare magic number.
-
-Fix: generate the enum, `COUNT`, `name` and `from_name` from one list (a
-`const ALL: [(Builtin, &str); COUNT]` or macro), and make `from_u8` a safe
-lookup. Until then, a test that `from_u8(i).map(name).and_then(from_name) ==
-from_u8(i)` for every `i` in 0..=255, and a test that every `Builtin` slot is
-non-nil after `open_libs`.
+and `TFOR_CALL` use a +1 bias with 0 for "uncached". Snapshots store raw
+instruction words, so unifying them behind a `CacheSlot` newtype needs a save
+format bump plus coordinated changes in compiler, verifier, save_state and the
+runtime decoders (`eval_index.rs`, `eval_store.rs`). Worth doing alongside the
+next format bump.
 
 ## HYG-006 - Opcode numbers and builtin indices are part of the save format, but nothing ties them to `FORMAT_VERSION`
 
@@ -417,23 +388,15 @@ renderer. Enforceable: a text rule forbidding the literal `"bad argument`
 outside error.rs; a table-driven test calling every registered stdlib function
 with a wrong-typed argument and asserting the message contains `'<name>'`.
 
-## HYG-021 - Integer-argument policy has one helper that half the library bypasses
+## HYG-021 - Cast lints are not yet enforced in the stdlib
 
-Reported by the stdlib hunter.
+Reported by the stdlib hunter; narrowed by a fixer, who routed 21 integer
+argument sites through `arg_integer`/`opt_integer` in lua_std.rs.
 
-`exact_integer_argument` (lua_std.rs) refuses non-integral floats and is used
-by `unpack`, `table.insert`, `remove`, `concat`, `move`. It is re-implemented
-in string_format.rs (`integer_argument`, calling `exact_i64`) and inline in
-basic.rs `error` (`level.fract() != 0.0`). Everything else truncates with
-`as`: string.rs `sub` (i, j), `find`/`match` init, `gsub` n; math.rs `random`
-(m, n - NaN becomes 0 and reports "interval is empty", 2.5 becomes 2); basic.rs
-`select` index and `tonumber` base (`as i64` plus an `EPSILON` comparison, a
-third spelling of "is integral", which the hunter attributes to working around
-`float_cmp`). So `string.sub("abc", 1.5)` succeeds while `table.insert(t, 1.5,
-v)` refuses; reference 5.4 refuses all of them. Fix: one
-`arg_integer`/`opt_integer` doing type check, exactness and named error.
-Enforceable: `clippy::cast_possible_truncation` and `cast_sign_loss` at module
-level for `src/lua_std/`.
+Remaining: `clippy::cast_possible_truncation` and `cast_sign_loss` at module
+level for `src/lua_std/` would keep the next argument from bypassing the
+helper. The remaining bounded index and result `as` conversions need an audit
+first.
 
 ## HYG-022 - Error kinds are mislabelled, and "no location" has two spellings
 
@@ -493,21 +456,15 @@ Reported by the compiler and vm hunters; BUG-011 is the `get_table` case.
 - Enforcement idea (vm): `clippy::panic` / `clippy::manual_assert` scoped to the
   public API.
 
-## HYG-025 - Frame-exit cleanup on the error path is copied, and the `on_error` once-only rule has two writers
+## HYG-025 - The `on_error` once-only rule is an implicit sentinel
 
-Reported by the vm hunter.
+Reported by the vm hunter; narrowed by a fixer, who centralised frame-exit
+cleanup in eval.rs.
 
-`eval_closure_frame` (eval.rs) has two verbatim copies of locate + trace +
-`host_error` + close_upvalues + truncate + restore bottom + pop call_stack, a
-third partial copy on the `check_stack_space` failure, and `call()`'s RustFn
-path restores `stack_bottom` separately. `self.pop(..)?` in the
-`Ordering::Greater` arm returns without restoring `stack_bottom`/`call_stack`
-(unreachable in practice, but the bug class the long comment in `call` warns
-about). A drop guard or a single `unwind_frame(err)` would make "restore on all
-exit paths" structural. Separately, `call()` fires `on_error` at depth 0 with
-an empty trace and `eval_closure_frame` fires it when it attaches a trace; "empty
-stack_trace means not yet reported" is implicit. A `reported: bool` on `Error`
-would be structural.
+`call()` fires `on_error` at depth 0 with an empty trace and
+`eval_closure_frame` fires it when it attaches a trace; "empty stack_trace
+means not yet reported" is implicit, now documented by comments at both sites.
+A `reported: bool` on `Error` (error.rs) would be structural.
 
 ## HYG-026 - Snapshot errors merge bugs with refusals and shed what an operator needs
 
@@ -789,31 +746,6 @@ Reported by the vm, surface and compiler hunters.
 
 # Rules duplicated inside the compiler
 
-## HYG-044 - The numeral grammar has three owners
-
-Reported by the compiler hunter.
-
-numeral.rs says it is shared by runtime conversions and the constant folder,
-but only hex literals go through `parse_lua_numeral`. Decimal literals in
-`expr.rs` `parse_expr_base` call `str::parse::<f64>` directly, skipping
-`validate_mantissa`/`validate_signed_digits`; safe only because the lexer's own
-acceptance grammar (`lex_full_number`, `lex_exponent`) filters first - a third
-spelling. `hex_value` is defined identically in parser.rs and numeral.rs. Route
-both literal kinds through `parse_lua_numeral` and delete the parser copy.
-Enforceable: a property test that every lexer-accepted number gives the same
-value through the parser and through `tonumber`.
-
-## HYG-045 - Lexical rules written more than once
-
-Reported by the compiler hunter.
-
-The CR/LF-pair rule is written three times (`lexer.rs` `next_char`,
-`lex_string`, and `parser.rs` `get_literal_string_contents`), each with its own
-`next != c && matches!(next, '\r' | '\n')`; extract `is_newline_pair(a, b)` into
-numeral.rs beside `is_lua_whitespace`. The "numeral glued to identifier" check
-(`is_ascii_alphanumeric() || '_'`) appears twice in the lexer (hex path and
-`lex_exponent`) and the identifier class a third time in `lex_word`.
-
 ## HYG-046 - Codegen sequences copied across the parser
 
 Reported by the compiler hunter.
@@ -833,15 +765,9 @@ Reported by the compiler hunter.
   ordering trick (`<=` is `!>`) is spelled in both vm/frame.rs and
   vm/eval_control.rs; the opcode table in HYG-001 could own it.
 
-## HYG-047 - Pattern magic bytes are known in two places
+## HYG-047 - gmatch snapshot ids are spelled twice
 
-Reported by the stdlib hunter.
-
-`is_plain_lua_pattern` (string.rs) lists 12 magic bytes; luapat.rs owns the
-grammar. Reference's set is `^$*+?.([%-`; dellingr adds `]` and `)` (harmless,
-more slow-path patterns). If luapat grows a construct, the fast path will treat
-it as literal. Fix: `patterns::is_plain(bytes)` next to the grammar, with a test
-that every byte the compiler treats specially is in the set. The gmatch snapshot
+Reported by the stdlib hunter; the magic-byte half was fixed. The gmatch snapshot
 ids `"string.gmatch.iter"` and `"string.gmatch.empty_iter"` are also spelled at
 the push sites and again in the `register_rust_fn` block; a typo makes a saved
 gmatch closure unloadable. Use consts.
@@ -877,32 +803,6 @@ default, with main.rs supplying a `StdoutCallbacks`. Enforceable:
 and at feature-gated sites; `[[check]]` entries per feature (a clippy-only pass
 would do) or delete the features.
 
-## HYG-049 - Lint policy has two owners, and AGENTS.md names the wrong one
-
-Reported by the surface and tooling hunters.
-
-AGENTS.md says `src/lib.rs` denies "a long list of clippy lints". lib.rs denies
-only `clippy::unwrap_used` and `clippy::float_cmp` (both `cfg(not(test))`) and
-warns on `missing_docs`; the long list (`dbg_macro`, `todo`, `await_holding_*`,
-...) is `[lints.clippy]` in Cargo.toml. `[lints]` covers every target while
-lib.rs attributes cover only the library, which is probably why both exist, but
-nothing says which is authoritative. Consolidate into `[lints]`, keeping only
-crate-specific `cfg_attr`s in lib.rs, or have the doc name both. Enforceable: a
-text check that lib.rs repeats no deny already in `[lints]`.
-
-## HYG-050 - `clippy.toml`'s bans guard a removed dependency and miss the live hazards
-
-Reported by the surface and tooling hunters.
-
-The `rand::rng`/`thread_rng` reasons say "Use State.rng (seeded StdRng)"; the
-RNG is `VmRng` (SplitMix64) and `rand` is gone. The bans are `allow-invalid`
-tripwires. The reachable determinism hazards are not banned:
-`std::time::Instant`/`SystemTime` in library code, `std::env::var` in library
-code, and `RandomState`/`DefaultHasher` used directly (HashMap's types are
-banned, not the hasher). Fix: reword the reason ("use `State.rng`, seeded via
-`set_rng_seed`") and add those to `disallowed-methods`/`disallowed-types`,
-allowed per site in main.rs and `examples/`.
-
 ## HYG-051 - `hotpath` is a non-optional dependency of the library
 
 Reported by the tooling hunter.
@@ -917,66 +817,19 @@ parser's profile distribution.
 
 # Tooling and test harness
 
-## HYG-052 - Every script and test has its own rule for where the binary is
+## HYG-053 - The differential-test policy has residue
 
-Reported by the tooling hunter; BUG-007 and BUG-009 are the cases that already
-test the wrong binary.
+Reported by the tooling hunter; mostly fixed (reference-Lua preflight, zero
+exit for DIFF files, `DELLINGR_DIFF_TIMEOUT`, `-- SKIP-DIFF:` markers).
 
-`diff_test.sh` `${DELLINGR:-./target/release/dellingr}`; `bench.sh`
-`${DELLINGR:-target/release/dellingr}` (no `./`, unquoted inside a hyperfine
-command string, so `$DELLINGR $script` is word-split); `hotbench.sh`
-`target/release/dellingr` and `target/release/examples/hotpath` with no
-override; `diff_gate.sh` `./target/debug/dellingr`; `run_examples.rs`
-`target/release/dellingr{EXE_SUFFIX}`. None asks cargo (`--message-format=json`
-or `cargo metadata`), so `CARGO_TARGET_DIR`/`build.target-dir` (brokkr's
-`--commit` worktree, CI) breaks them all the same way. `hotbench.sh` also builds
-the `hotpath` example with `--features hotpath` into the same shared target
-name brokkr builds, so whichever ran last leaves its feature set on disk. Fix:
-one `scripts/lib.sh` `dellingr_bin <profile>` that builds and echoes cargo's
-path, with the `DELLINGR` override resolved there. Enforceable: a grep rule
-banning `target/` literals in `scripts/` and `tests/`.
-
-## HYG-053 - The differential-test policy has several owners
-
-Reported by the tooling hunter.
-
-- Skip list spelled three times and already different: `diff_test.sh` `case
-  benchmark.lua|stress_*.lua|upvalue_stress.lua` (in bash `case`, `*` matches
-  `/`, so `stress_x/foo.lua` is skipped too); `diff_test.rs::should_skip`
-  (`stress_` prefix plus `!rel.contains('/')`, top level only, then the script
-  filters again); AGENTS.md prose. Fix: a `-- SKIP-DIFF: reason` marker in the
-  `.lua` file, read only by the script.
-- Missing reference Lua has three policies: `diff_gate.sh` fails loudly;
-  `diff_test.rs` probes `lua5.2 -v`/`lua5.4 -v`, prints "Skipping" and passes
-  green; `diff_test.sh` never checks, so "command not found" becomes the
-  reference output, every untagged file FAILs, and every `-- DIFF:` file passes
-  silently. Fix: one `command -v` preflight in the script (as `bench.sh` does)
-  that refuses by name; the Rust test should fail, not skip.
-- `-- DIFF:` exempts a file from everything, including a crash, timeout or
-  empty output, and the script ignores dellingr's exit status (it merges stdout
-  and stderr and only diffs). `feature_test.lua` and `feature_test_extended.lua`
-  are tagged. Fix: require a zero exit even for DIFF files.
-- `timeout 5s` is hard-coded, with only `DELLINGR_SKIP_TIMEOUT=1` (set by the
-  Rust test) as control, so the two entry points run under different limits; the
-  debug gate gets the same 5 s as release, and exit 124 is reported as a plain
-  FAIL. Fix: `DELLINGR_DIFF_TIMEOUT`, defaulted once, timeouts reported as such.
+- The five corpus skips (`benchmark.lua`, `stress_*.lua`,
+  `upvalue_stress.lua`) are still a fallback list in `diff_test.sh` and
+  `diff_test.rs`; converting them to `-- SKIP-DIFF:` markers in the files
+  retires both lists. Whether the Rust test still skips green on missing
+  reference Lua is unverified.
 - A match against either lua5.2 or lua5.4 passes the whole file, so a regression
   toward 5.2 behaviour in a 5.4-intended feature is invisible; per-file `-- REF:
   5.4` pinning would sharpen it.
-
-## HYG-054 - Scripts assume GNU tools and `/usr/bin/bash`, and write to `/tmp`
-
-Reported by the tooling hunter.
-
-`diff_test.sh`, `diff_gate.sh` and `test_limited.sh` use `#!/usr/bin/bash`;
-`bench.sh` and `hotbench.sh` use `#!/usr/bin/env bash`. `realpath
---relative-to` is GNU-only. On macOS or BSD (the hotpath harness has a macOS
-branch), the result is a refusal at line one, or under bash 3 a silently empty
-`examples/**` glob that `nullglob` turns into "ok" - a silent pass.
-`diff_test.sh` uses `mktemp "${TMPDIR:-/tmp}/..."`, falling back to `/tmp`; put
-scratch under the cargo target tmp dir or a project-owned `.scratch/` (not
-`target/`, which belongs to cargo and is shared). Enforceable: a shebang lint,
-a non-empty-script-list guard, a grep rule banning `/tmp` in `scripts/`.
 
 ## HYG-055 - CLI output, usage and exit codes are ad hoc
 
@@ -1010,41 +863,26 @@ Reported by the tooling hunter.
   hotpath.rs's and has diverged ("through 0.14" vs "0.15"). Delete it or say why
   it is load-bearing.
 
-## HYG-056 - The bench harness fails silently and spells its contract twice
+## HYG-056 - The bench harness has residue
 
-Reported by the tooling hunter.
+Reported by the tooling hunter; mostly fixed (required path argument, nonzero
+exit on missing `_bench` and marker failures, one metric list).
 
-- If `_bench` is nil, the harness prints partial KVs and exits 0, so brokkr
-  records a run with only parse and setup; a typo or a pre-convention script
-  (`examples/benchmark.lua`) benchmarks nothing and passes. Test: harness on a
-  script without `_bench` exits nonzero.
-- With no positional argument it runs `numerics/arithmetic`
-  (`DEFAULT_TARGET`); a brokkr misconfiguration that drops the argument measures
-  the wrong workload. Make the argument required.
-- Bare names resolve against compile-time `env!("CARGO_MANIFEST_DIR")`, tying
-  the binary to its build checkout (brokkr's `--commit` worktree would resolve
-  into that worktree, contradicting "loads the workload from the CURRENT tree");
-  paths resolve against cwd. Two rules picked by a `.lua` suffix. The only
-  remaining user, `hotbench.sh`, passes a path, so the bare-name path looks dead.
-- If `BROKKR_MARKER_FIFO` is set and the open fails (wrong path; ENXIO with no
-  reader under O_NONBLOCK), nothing is emitted and nothing is said; every
-  `write_all` error is dropped, so a full pipe loses markers and a dropped `*_END`
-  corrupts brokkr's span pairing. The marker protocol (`<us> NAME`, `<us> @k=v`)
-  is defined here and parsed in brokkr, with nothing keeping them in step
-  (shared protocol crate or brokkr-side schema test).
 - `O_NONBLOCK` is hand-rolled (`0x800` linux, `0x0004` macos); any other unix is
-  a compile error. Use `libc::O_NONBLOCK` or `rustix`.
-- The KV `eprintln!` block is written twice (no-`_bench` early return and the
-  end), and `emit_counter` names restate a subset; nothing pins the key names
-  brokkr and `hotbench.sh` read. `warm_avg_us` is truncated integer
-  microseconds, so `cost_per_us` uses a truncated denominator and is 0 under
-  1 us. Fix: one `Vec<(&str, Value)>` emitted to both channels; a test parsing
-  stderr for the key set.
-- `#![allow(clippy::unwrap_used)]` covers the file; `.unwrap()` on `get_global`
-  (fallible because of the stack cap) panics naming no subject. Remove the
-  allow.
-- The module doc says "Run standalone: cargo run --release --example hotpath",
-  while AGENTS.md says to use `hotbench.sh` and raw cargo is banned.
+  a compile error. Use `libc::O_NONBLOCK`, which needs `libc` declared as a
+  direct dependency (it is only transitive today).
+- The marker protocol (`<us> NAME`, `<us> @k=v`) is defined here and parsed in
+  brokkr, with nothing keeping them in step (shared protocol crate or
+  brokkr-side schema test).
+- `warm_avg_us` is now printed as fractional text (`{:.3}`); unverified whether
+  brokkr parses it as an integer.
+- The FIFO is opened `O_NONBLOCK` and any write error now exits 1, including
+  EAGAIN on a full pipe, so a slow brokkr reader can kill a bench run that
+  previously lost markers. Retry on WouldBlock.
+- `require_bench` looks up `_bench` inside the timed warm loop, charging a
+  `get_global` per iteration to the timing.
+- The plain-pattern classifier test re-spells the magic-byte literal instead of
+  iterating luapat's constant, so it does not tie the fast path to the grammar.
 
 ## HYG-057 - Workload lists and the harness calibration have several owners
 
@@ -1073,32 +911,11 @@ Reported by the tooling hunter.
   limit as prose and guards `FUNCTION_COUNT = 200` by comment only. A test or
   brokkr script_check diffing generator output would hold it.
 
-## HYG-058 - Fixtures: an orphan, a misleading name, and regeneration via raw cargo
-
-Reported by the surface and tooling hunters.
-
-- `tests/fixtures/save_golden.bin` is tracked, byte-identical to both other
-  fixtures (checked with `cmp`), and referenced by nothing (searched src, tests,
-  README, CHANGELOG, brokkr.toml); probably the pre-rename name. Enforceable: a
-  test that every file in `tests/fixtures/` is named by some test.
-- `save_golden_legacy_v6.bin` is byte-identical to `save_golden_current.bin`, so
-  "legacy" is the current format and the name goes wrong at version 7 unless
-  renamed by hand. The `regenerate` helper writes only the current fixture. Name
-  a legacy fixture after its version only once it diverges, and assert
-  `FORMAT_VERSION` equals the version bytes in the current fixture.
-- The regeneration command is spelled twice in `tests/save_golden.rs` (module
-  doc and `expect` message) as raw `cargo test --features snapshot ...`; the
-  house runner is `brokkr test regenerate`. Because brokkr matches by substring
-  with `--include-ignored`, any test whose name contains "regenerate" rewrites a
-  fixture on a casual run; give the helper an unusual name.
-
 ## HYG-059 - Smaller test-harness drift
 
 Reported by the tooling and compiler hunters.
 
-- `run_examples.rs` checks `line.ends_with(": false")` on stdout only; AGENTS.md
-  says "contains the substring". The code's rule is better (`x: falsey` would
-  otherwise fail); fix the doc. stderr is unchecked.
+- `run_examples.rs` checks stdout only; stderr is unchecked.
 - `run_feature_test_extended_in_process` unwraps the load/call result with no
   message.
 - `cli_limits.rs` scratch files go to `CARGO_TARGET_TMPDIR` (correct), but in
@@ -1106,9 +923,6 @@ Reported by the tooling and compiler hunters.
   failure leaks the file; a drop guard would fix it.
 - `compiler_examples_pass_stack_discipline_verification` walks
   `Path::new("examples")` relative to cwd; use `env!("CARGO_MANIFEST_DIR")`.
-- `test_limited.sh`'s 2 GiB `ulimit -v` has no override and nothing in the tree
-  invokes it; `ulimit -v` counts reserved address space and can refuse under
-  arena-reserving allocators. Possibly dead, superseded by the stack cap.
 
 ## HYG-060 - `.gitignore` and repo-root files for tools that are gone or undocumented
 
@@ -1199,6 +1013,8 @@ Reported by the compiler, vm, surface and stdlib hunters.
   doc says n=0 yields the empty string and n=1 is a no-op.
 - `patterns/mod.rs` says "wrapper around the vendored Lua pattern matcher"; it
   is an in-crate rewrite.
+- error.rs documents `MetamethodDepthExceeded` as covering `__index` and
+  `__newindex`; it now covers `__call` too.
 - The lib.rs crate-level and `Engine` doc examples are `ignore`d, never compiled,
   and look compilable today; make them doctests.
 - `State: Send` has a compile-time witness in lib.rs; `Engine` ("is `Send +

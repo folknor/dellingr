@@ -684,6 +684,8 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
                 ),
             ));
         }
+        // Interpret the opcode-specific cache bytes in the persisted snapshot
+        // representation. A common sentinel requires a format version bump.
         match op {
             Instr::OP_PUSH_NUM => {
                 check_index(pc, bx, view.number_literals_len(), "number literal")?;

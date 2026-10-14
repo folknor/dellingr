@@ -12,12 +12,31 @@ use super::lua_val::Val;
 use crate::error::ErrorKind;
 use crate::instr::{ArgCount, RetCount};
 
-/// Maximum depth for metamethod chains (__index/__newindex).
+/// Maximum depth for metamethod chains (__index/__newindex/__call).
 /// Prevents stack overflow from circular metamethod references.
 /// Lua uses 2000, but 200 is plenty for normal use cases.
 pub(super) const MAX_METAMETHOD_DEPTH: u32 = 200;
 
 impl State {
+    /// Run one metamethod step while enforcing the shared recursion limit.
+    ///
+    /// The depth counter is restored for every VM error path. A Rust panic
+    /// leaves the State unusable, like other interrupted VM execution paths.
+    pub(super) fn with_metamethod_depth<T>(
+        &mut self,
+        operation: impl FnOnce(&mut Self) -> Result<T>,
+    ) -> Result<T> {
+        if self.metamethod_depth >= MAX_METAMETHOD_DEPTH {
+            return Err(self.error(ErrorKind::MetamethodDepthExceeded {
+                depth: self.metamethod_depth,
+            }));
+        }
+        self.metamethod_depth += 1;
+        let result = operation(self);
+        self.metamethod_depth -= 1;
+        result
+    }
+
     /// Internal helper for table access with __index support.
     pub(super) fn get_table_with_key(
         &mut self,
@@ -75,16 +94,9 @@ impl State {
         key: Val,
         local_cost: &mut u64,
     ) -> Result<()> {
-        // Check metamethod depth to prevent infinite recursion
-        if self.metamethod_depth >= MAX_METAMETHOD_DEPTH {
-            return Err(self.error(ErrorKind::MetamethodDepthExceeded {
-                depth: self.metamethod_depth,
-            }));
-        }
-        self.metamethod_depth += 1;
-        let result = self.handle_index_metamethod_inner(handler, table_idx, key, local_cost);
-        self.metamethod_depth -= 1;
-        result
+        self.with_metamethod_depth(|state| {
+            state.handle_index_metamethod_inner(handler, table_idx, key, local_cost)
+        })
     }
 
     fn handle_index_metamethod_inner(
@@ -226,17 +238,9 @@ impl State {
         val: Val,
         local_cost: &mut u64,
     ) -> Result<()> {
-        // Check metamethod depth to prevent infinite recursion
-        if self.metamethod_depth >= MAX_METAMETHOD_DEPTH {
-            return Err(self.error(ErrorKind::MetamethodDepthExceeded {
-                depth: self.metamethod_depth,
-            }));
-        }
-        self.metamethod_depth += 1;
-        let result =
-            self.handle_newindex_metamethod_inner(handler, table_idx, key, val, local_cost);
-        self.metamethod_depth -= 1;
-        result
+        self.with_metamethod_depth(|state| {
+            state.handle_newindex_metamethod_inner(handler, table_idx, key, val, local_cost)
+        })
     }
 
     fn handle_newindex_metamethod_inner(

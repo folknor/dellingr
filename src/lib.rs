@@ -16,6 +16,8 @@
 //! state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
 //! ```
 
+// The package-wide deny set lives in Cargo.toml. These attributes add library
+// documentation warnings and two denies that are disabled for unit tests.
 #![cfg_attr(not(test), deny(clippy::unwrap_used))]
 #![cfg_attr(not(test), deny(clippy::float_cmp))]
 #![warn(missing_docs)]

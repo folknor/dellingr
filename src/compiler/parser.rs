@@ -13,7 +13,7 @@ use super::lexer::TokenStream;
 use super::token::Token;
 use super::token::TokenType;
 use crate::instr::{ArgCount, Builtin, RetCount};
-use crate::numeral::is_lua_whitespace;
+use crate::numeral::{hex_value, is_lua_whitespace, is_newline_pair};
 
 use std::borrow::Borrow;
 
@@ -400,7 +400,7 @@ impl<'a> Parser<'a> {
                         result.push(b'\n');
                         if raw
                             .get(raw_offset)
-                            .is_some_and(|next| *next != newline && matches!(*next, b'\r' | b'\n'))
+                            .is_some_and(|next| is_newline_pair(newline as char, *next as char))
                         {
                             raw_offset += 1;
                         }
@@ -838,17 +838,6 @@ fn find_last_local(locals: &[(&str, i32)], name: &str) -> Option<usize> {
     }
 
     None
-}
-
-/// Converts one ASCII hexadecimal digit into its value.
-#[must_use]
-const fn hex_value(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
 }
 
 /// Returns the index of an entry in the literals list, adding it if it does not exist.

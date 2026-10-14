@@ -79,7 +79,8 @@ pub enum ErrorKind {
         /// The budget that was set.
         budget: i64,
     },
-    /// Metamethod chain (`__index` / `__newindex`) exceeded maximum depth.
+    /// Metamethod chain (`__index` / `__newindex`, or a `__call` chain whose
+    /// handler is itself a non-function callable) exceeded maximum depth.
     MetamethodDepthExceeded {
         /// Recursion depth reached before bailing out.
         depth: u32,
@@ -425,7 +426,9 @@ impl fmt::Display for SyntaxError {
         use SyntaxError::*;
         match self {
             BadNumber => write!(f, "malformed number"),
-            BreakOutsideLoop => write!(f, "<break> at line 1 not inside a loop"),
+            // The source location belongs to the enclosing Error, which
+            // formats the actual line and column for this syntax error.
+            BreakOutsideLoop => write!(f, "<break> not inside a loop"),
             InvalidCharacter(c) => write!(f, "invalid character '{c}'"),
             InvalidEscapeSequence => write!(f, "invalid escape sequence"),
             HexadecimalDigitExpected => write!(f, "hexadecimal digit expected"),

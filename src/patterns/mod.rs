@@ -16,6 +16,21 @@ use self::luapat::{CompiledPattern, LUA_MAXMATCHES, compile, str_match};
 pub(crate) use self::errors::{MatchError, PatternError};
 pub(crate) use self::luapat::LuaCapture;
 
+/// Whether every byte in `pattern` is literal to the Lua pattern compiler.
+pub(crate) fn is_plain(pattern: &[u8]) -> bool {
+    !pattern.iter().any(|byte| luapat::is_pattern_magic(*byte))
+}
+
+/// Whether `string.find` can use a plain search without changing Lua 5.4 behavior.
+///
+/// Lua's `string.find` fast path treats `)` as literal, although the pattern
+/// matcher uses it to close captures. `string.gsub` does not have this quirk.
+pub(crate) fn is_plain_for_find(pattern: &[u8]) -> bool {
+    !pattern
+        .iter()
+        .any(|byte| luapat::is_pattern_magic(*byte) && *byte != b')')
+}
+
 /// A compiled Lua string pattern and the captures from the latest match.
 ///
 /// Compilation copies everything the matcher needs into `compiled`, so the
@@ -88,6 +103,17 @@ mod tests {
 
     fn count_only(used: &mut u64) -> CostMeter<'_> {
         CostMeter::count_only(used)
+    }
+
+    #[test]
+    fn plain_classifier_tracks_pattern_grammar_magic_bytes() {
+        for byte in b"^$*+?.([%-)" {
+            assert!(!is_plain(&[*byte]), "{byte:?} is a pattern construct");
+        }
+        assert!(is_plain_for_find(b")"));
+        assert!(!is_plain_for_find(b")*"));
+        assert!(is_plain(b"]"));
+        assert!(is_plain(b"literal bytes"));
     }
 
     fn assert_exact_finite_cost(pattern: &[u8], subject: &[u8], cost: u64) {
