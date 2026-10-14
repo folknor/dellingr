@@ -2,6 +2,13 @@
 //!
 //! These are build-wide constants, not per-State settings. Native stack space
 //! needed to reach recursion limits depends on the target and build profile.
+//!
+//! They are constants on purpose, with no per-State injection point. Scripts
+//! must behave identically for every embedder and across save/restore, so a
+//! tunable limit would become part of the replay and snapshot contract; the
+//! snapshot format and verifier validate against these values directly. The
+//! cost is that tests of the large limits (call depth, stack cap) exercise the
+//! real values rather than small ones.
 
 // Recursive parser entry points share this budget. Visible nesting costs vary
 // by construct, so this is a recursion budget rather than a source-level depth.

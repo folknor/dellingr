@@ -26,6 +26,10 @@ lto = "fat"
 codegen-units = 1
 
 [features]
+# Developer-only tracing: debug_parser, debug_vm and debug_gc print raw dumps
+# straight to stdout (bypassing HostCallbacks) when enabled. They are opt-in
+# diagnostics for working on the VM itself, never enabled by embedders, and the
+# one-line `println!` sites are deliberate. Not part of the public API.
 debug_parser = []
 debug_vm = []
 debug_gc = []
@@ -83,6 +87,10 @@ todo = "deny"
 [dependencies]
 indexmap = "2.0"
 slotmap = "1.1"
+# Deliberately non-optional: many internal functions carry the
+# `hotpath::measure` attribute, and without the `hotpath` cargo feature the
+# macro expands to nothing, so the dependency costs only compile time. Making
+# it optional would need a `cfg_attr` wrapper at every annotation site.
 hotpath = "0.28.6"
 
 [dev-dependencies]

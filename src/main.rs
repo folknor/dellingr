@@ -173,6 +173,10 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Option<CliArgs
     }))
 }
 
+// Every failure exits 1 on purpose: this CLI is a development tool for running
+// and costing scripts by hand. The game host embeds the library and sees typed
+// errors (error kinds, cost budget exhaustion) through the API, never through
+// this process's exit status, so distinct exit codes would have no consumer.
 fn report_error(error: impl std::fmt::Display) -> ! {
     eprintln!("Error: {error}");
     exit(1);

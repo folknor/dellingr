@@ -1056,6 +1056,12 @@ impl State {
         // Both are behaviorally safe (same code), so we never error here; we
         // keep the lexicographically-smallest id as the reverse name so saves
         // stay deterministic regardless of registration order.
+        // Consequence: distinct host functions folded to one address both save
+        // as the smallest id, so a build that does not fold them loads the
+        // second as the first, and Lua == between them can differ from the
+        // saving build. Embedders needing distinct identity must keep function
+        // bodies observably distinct (as table.unpack keeps its own wrapper).
+        // Refusing shared addresses would break aliasing and release LTO builds.
         match self.rust_fn_ids_by_addr.get(&addr) {
             Some(existing_id) if existing_id.as_str() <= id => {}
             _ => {

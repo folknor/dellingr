@@ -4,12 +4,47 @@ Forward-looking feature/refactor ideas. Not optimizations - those live in
 [optimizations.md](optimizations.md). This is a working backlog; entries
 get deleted as they ship or stop being worth tracking.
 
+## Open findings
+
+### `table.remove` from the front is quadratic
+
+What: `Table::array_remove` (`src/vm/table.rs`) shifts the array down with
+one `IndexMap::shift_remove` plus `insert` per element. `shift_remove` is
+itself O(n) (it moves every later entry), so one `table.remove(t, 1)` on an
+n-element array is O(n^2), and draining a queue from the front is O(n^3).
+`array_insert` should be checked for the same shape.
+
+Sketch: shift values in place over the existing integer-keyed entries
+(read value i+1, write it to i, drop the last key) so each call is one
+pass, or do it as part of the array-part work in optimizations.md.
+Insertion order of the surviving keys must stay as it is today, since
+`pairs()` order is replay-visible.
+
+Signal: already worth measuring - a queue drained with `table.remove(q, 1)`
+is ordinary game-script code.
+
+### `table.insert`/`table.remove` charge a flat 1 for a whole-array shift
+
+What: both charge one cost unit regardless of how many elements they
+shift, so a script can do O(n) (today O(n^2), see above) host work for a
+cost of 1. `table.move` charges per element for the same kind of work. A
+comment in `src/lua_std/table.rs` records the flat charge as a cost-model
+choice.
+
+Sketch: charge by shift distance (`len - pos + 1`), the way `table.move`
+charges per element. This changes `cost_used` for existing scripts, so it
+needs a `COST_MODEL_VERSION` bump and invalidates saves - bundle it with
+the next bump rather than doing it alone.
+
+Signal: budgets being relied on to bound host CPU for untrusted scripts,
+or the next cost-model bump for any other reason.
+
 ## Deferred forward-looking ideas
 
 ### Grow the brokkr workload registry to the full candidate surface
 
-What: `bench/` currently ports the 15 curated benches (+ `large_source`
-registered against its examples/ file). The optimization backlogs name
+What: `bench/` ports only the curated benches registered in brokkr.toml.
+The optimization backlogs name
 more trackers that exist in `examples/` but have no seconds-scale
 verdict port yet: the `calls/` family (`local`, `global`, `method`,
 `method_cached`, `method_chain`, `vararg`, `fixedarg`, `general`,
@@ -25,7 +60,7 @@ larger size), and a Rust-driven snapshot bench
 (optimizations.md "Snapshot path" - needs harness support, not a .lua
 file).
 
-Why deferred: the registry is live with the 16 curated workloads;
+Why deferred: the registry is live with the curated workloads;
 porting the rest before those have proven the recipe would be
 premature batch work.
 
@@ -34,7 +69,7 @@ whose tracker is still examples/-only.
 
 ### Depth limits are not stack-safe in unoptimized builds
 
-What: `MAX_CALL_DEPTH` (1000) and `MAX_SYNTAX_DEPTH` (200) are meant to
+What: `MAX_CALL_DEPTH` and `MAX_SYNTAX_DEPTH` (see `src/limits.rs`) are meant to
 turn runaway recursion into a clean `CallDepthExceeded` /
 `TooManySyntaxLevels` error. In an opt-level 0 build the native frames
 are fat enough that a 2MB thread (the `cargo test` / `std::thread`
@@ -73,7 +108,7 @@ The cost model has two halves, and weights would have to cover both:
   are free. These are the costed categories `analyze_cost` enumerates;
   its `function_calls` and `instructions` counters are informational and
   carry no cost.
-- Native (cost model version 2): the string, pattern, table and math
+- Native: the string, pattern, table and math
   libraries charge data-dependent work - bytes examined or emitted,
   matcher primitives, table elements visited - through `CostMeter` and
   `State::consume_cost`, some per unit, some batched via

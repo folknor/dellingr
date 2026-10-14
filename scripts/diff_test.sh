@@ -6,6 +6,14 @@
 # matches lua5.2 - we accept either of the two reference outputs). Files tagged
 # with -- DIFF: <reason> may differ from both after dellingr exits successfully.
 #
+# Accepting either reference is deliberate: dellingr is a Lua 5.2/5.4 hybrid
+# (the README's "Won't implement" list removes most of what separates the two),
+# and where the references disagree, which one dellingr should follow is a
+# per-feature decision, not a global one. A per-file reference pin would need
+# upkeep on every example for little gain, since a file where both references
+# agree cannot hide a regression, and a deliberate divergence is already
+# marked with -- DIFF:.
+#
 # Env:
 #   DELLINGR=/path/to/dellingr    use an already-built binary
 #   DELLINGR_SKIP_BUILD=1         require DELLINGR and do not build

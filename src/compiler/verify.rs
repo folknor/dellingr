@@ -536,6 +536,13 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
     let mut next_global_slot = 0usize;
     let mut next_field_slot = 0u8;
     let mut next_set_field_slot = 0usize;
+    // This loop deliberately restates the cache-slot allocation policy of
+    // `Bytecode::assign_cache_slots` (first-use order for globals, instruction
+    // order for fields, set-fields and TFOR_CALL cursors). The duplication is
+    // the point: the verifier is the independent check on a snapshot's cached
+    // operands, and a shared helper would let a policy bug validate itself. Any
+    // change to the allocation policy must change both, and the compiler
+    // examples' stack-discipline verification test fails if they drift.
     let mut next_tfor_cursor_slot = 0usize;
     for pc in 0..code_len {
         let inst = Instr::from_raw(view.raw_instruction(pc));

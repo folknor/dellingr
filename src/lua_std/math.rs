@@ -20,6 +20,11 @@ use crate::State;
 use crate::error::{ArgDetail, ArgError, ErrorKind};
 use std::f64::consts::PI;
 
+// Every math function charges a flat 1 through its own `consume_cost(1)`.
+// The repetition is deliberate: the cost is data-independent (no function here
+// does work proportional to its inputs) and is part of the versioned cost
+// model, so it stays visible beside each function rather than behind a shared
+// helper that could drift per-function costs together by accident.
 pub(crate) fn open_math(state: &mut State) -> Result<()> {
     // Create the math table
     state.new_table_with_capacity(MATH_LIBRARY_CAPACITY)?;

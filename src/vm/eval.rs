@@ -406,6 +406,14 @@ impl State {
             // Root from the slice before moving `varargs` into the frame:
             // with_rooted_values copies into transient_roots anyway, so cloning
             // the Vec first would allocate twice per vararg call for nothing.
+            // This guard is not part of a general panic-safety policy: a State
+            // unwound through is discarded (see the note in the call path
+            // above), so no site tries to make a panic recoverable. It exists
+            // only to keep this frame's own root bookkeeping balanced, and it
+            // is affordable here because only vararg frames with extra
+            // arguments pay for the landing pad, never the plain recursive
+            // path. Replacing the per-site guards with a poison flag would put
+            // a check on the hot entry path for no recovery benefit.
             let watermark = self.transient_roots.values.len();
             self.transient_roots.values.extend_from_slice(&varargs);
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

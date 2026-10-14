@@ -6,182 +6,73 @@ All notable changes to dellingr are documented here. The format follows
 
 ## [Unreleased]
 
+Snapshots from earlier builds no longer load, and `cost_used` changes for
+identical source - re-measure tick budgets.
+
+### Changed (breaking)
+
+- **`COST_MODEL_VERSION` is 4.** Literal arithmetic now constant-folds and no
+  longer charges, except `^`, which stays a runtime op because host libm `pow`
+  is not bit-identical across targets. `string.gmatch` charges pattern
+  compilation once per iterator rather than per cache miss. Older snapshots
+  are rejected with `UnsupportedCostModelVersion`.
+- **`ArgError` has a required `detail: ArgDetail` field.**
+- **`State::load_state`'s setup closure returns `Result<(), E>`**, surfaced as
+  `LoadError::Setup(E)`; `LoadError` is generic over `E` (default
+  `Infallible`).
+- **Callback boxes are `Box<dyn HostCallbacks>`**, without the redundant
+  `+ Send`.
+- **New and reshaped error variants:** `SourceSizeExceeded` (16 MiB source
+  cap), `PatternError`, `DuplicateFunctionRegistration`, `TooManyArguments`,
+  `TooManyResults`; `CallDepthExceeded`, `MetamethodDepthExceeded` and
+  `StackOverflow` carry `limit`; `LoadError::UnsupportedVersion` and
+  `UnsupportedCostModelVersion` carry `found`/`expected`, `CorruptArena` a
+  `reason`; `SaveError` gains `Internal` and `TooLarge` (per-field size caps on
+  save and load).
+- **MSRV is Rust 1.99.**
+- **Stdlib integer arguments are exact.** `string.sub`/`find`/`match`/`gsub`,
+  `math.random`, `select` and `tonumber`'s base reject non-integral numbers
+  instead of truncating, as Lua 5.4 does.
+- **Concatenation renders negative zero as `"-0"`**, like `tostring`.
+- **Bad-argument messages** read `bad argument #1 to 'sin' (...)`, with the
+  stdlib function named.
+- **`save_state` fails with `NotQuiescent` inside a Rust callback.**
+- **`State::cost_remaining()` returns `i64::MAX`** when no budget is set.
+- **`table_insert_at`** resolves a negative table index before popping the
+  value, like the other table accessors.
+- **CLI:** `Cost used: N` and the `--analyze` caveat go to stderr; unknown
+  options, a second input file, and `--limit` with `--analyze` are usage
+  errors; non-UTF-8 paths work.
+
 ### Changed
 
-- **Public fixed limits.** `dellingr::limits` exposes runtime and compiler caps,
-  pattern-cache caps, and the cost-check batching interval. `MAX_STRING_BYTES`
-  and `error::MAX_RESULTS` remain available at their existing paths.
-- **Limit errors carry their caps.** `CallDepthExceeded` and
-  `MetamethodDepthExceeded` now have `limit: u32`; `StackOverflow` has
-  `limit: usize`. Their display messages include the limit. Hosts matching or
-  constructing these public variants must account for the new fields.
-- **Execution preflight errors notify `on_error`.** Lua-frame setup, callable
-  argument insertion, Rust result padding, and requested result padding now
-  report escaping errors exactly once. An already reported Error retains its
-  reporting state when returned again by a host callback.
-- **`string.gmatch` wrapper frames are named.** Errors raised inside the
-  internal gmatch wrapper chunk now carry the source name `string.gmatch` in
-  tracebacks and in the `source` passed to `on_error`, instead of none.
-- **Compiler internal errors carry no source position.** Invariant failures
-  in the parser's chunk bookkeeping report `InternalError` without a location,
-  rather than the meaningless start-of-source position they carried before.
-- **`^` is no longer constant-folded; `COST_MODEL_VERSION` is 4.** `pow`
-  comes from the host libm, which is not bit-identical across targets, so a
-  folded `^` baked the compiling host's result into bytecode and snapshots.
-  Literal `^` (e.g. `2 ^ 10`) now evaluates at runtime and charges like any
-  other `^`; `+ - * /` and `%` still fold. Snapshots saved under version 3 no
-  longer load. `^` results remain a host libm property across hosts, as
-  documented with the `math` determinism contract.
-- **Source size cap.** Source text over 16 MiB is rejected before tokenising
-  with the new `ErrorKind::SourceSizeExceeded { size, limit }`, bounding
-  load-time work for hosts that compile untrusted scripts. Literal-pool
-  deduplication is now a hash lookup rather than a linear scan; the emitted
-  bytecode is unchanged.
-- **`InvalidStackIndex` renders as `invalid stack index (N)`**, no longer
-  prefixed `internal error:` - it is host API misuse, not a VM bug.
-- **Lua pattern failures have structured errors.** Compilation and matching
-  failures now use `ErrorKind::PatternError(PatternErrorDetail)`, with a
-  `MalformedPatternDetail` subkind where applicable. The rendered pattern
-  diagnostic text is unchanged; exhaustive host matches should add the new
-  variant.
-- **Zero argument indices return `InvalidStackIndex`.** `State::check_any(0)`
-  and `State::check_type(0, ...)` now return a typed error instead of panicking.
-- **Callback boxes are spelled `Box<dyn HostCallbacks>`.** `HostCallbacks`
-  already requires `Send`, so the redundant `+ Send` is gone from
-  `State::with_callbacks`, `Engine::new_state_with_callbacks`,
-  `State::replace_callbacks` (argument and return) and `State::load_state`.
-- **Duplicate function registrations keep their id.** A stable-id collision
-  raised through `push_named_rust_fn` or table/stdlib registration is now
-  `ErrorKind::DuplicateFunctionRegistration { id }` instead of an
-  `InternalError` string.
-- **Callback source attribution follows the running frame.**
-  `State::current_source()` and the `source` passed to `on_print`/`on_error`
-  come from the active Lua frame rather than the last loaded chunk. Loading
-  chunk B no longer re-attributes chunk A's prints to B, a rejected load leaves
-  nothing behind, and outside execution (or for a Rust function called directly
-  by the host) the source is `None`.
-- **`on_error` fires once regardless of traceback contents.** A host
-  `RustFunc` returning an error that already carries a stack trace is now
-  reported; previously a non-empty trace suppressed the notification.
-- **`ErrorKind::argument_detail`** builds a named `ArgError` from an `ArgDetail`
-  directly, without classifying diagnostic text.
-- **MSRV raised to Rust 1.99** (`rust-version` in `Cargo.toml`).
-- **`COST_MODEL_VERSION` is 3.** Constant folding and the per-iterator
-  `string.gmatch` compile charge (both below) change `cost_used` for identical
-  source. The version now explicitly covers the cost of a given source,
-  compiler emission included, and a golden test pins `cost_used` for a fixed
-  corpus so it cannot drift silently. Snapshots written under version 2 are
-  rejected with `UnsupportedCostModelVersion`.
-- **Constant folding.** Literal arithmetic and unary negation now fold at
-  parse time with reference lcode.c's guards (NaN and -0.0 results stay
-  runtime operations). Folded operations no longer execute or charge cost,
-  so `cost_used` decreases for identical source containing literal
-  arithmetic like `60 * 1000` or `-5` - re-baseline stored cost
-  fingerprints. Runtime results are bit-exact (the folder and the VM share
-  one definition of each operation, floored modulo included).
-- **Compare-and-branch fusion.** A condition ending in a comparison now
-  compiles to one fused compare-and-branch opcode instead of a comparison
-  push plus a BranchFalse pop (six new opcodes, 64-69). Comparisons and
-  branches were both cost-free, so `cost_used` is unaffected. The save
-  format version is unchanged: an older binary handed a snapshot containing
-  the new opcodes rejects it cleanly as `InvalidBytecode` ("unknown
-  opcode") rather than misexecuting.
-- **Integer arguments are exact across the stdlib.** `string.sub`, `find`,
-  `match` and `gsub` positions and counts, `math.random` bounds, `select` and
-  `tonumber`'s base now refuse non-integral numbers as Lua 5.4 does, instead of
-  truncating (`string.sub("abc", 1.5)` was accepted).
-- **Out-of-range argument messages.** `tonumber` base and `select` index out of
-  range, and `rawlen` on a non-table non-string, now say so instead of `number
-  expected, got number`. They remain `ArgError`s, with the reason in the new
-  `detail` field.
-- **`ArgError` gains a required `detail: ArgDetail` field** (`TypeMismatch`,
-  `NoInteger`, `OutOfBounds`, `IntervalEmpty`, `Custom`). Hosts constructing
-  `ArgError` directly must supply it; `TypeMismatch` reproduces the old
-  rendering from `expected`/`received`.
-- **Call-count limits have their own error kinds.** `ErrorKind::TooManyArguments
-  { limit }` and `ErrorKind::TooManyResults { limit }` replace the
-  `RuntimeError` strings for calls with more than 255 arguments and functions
-  returning more than 255 values (`error::MAX_RESULTS`, with
-  `error::results_count` for host callbacks). The rendered text is unchanged,
-  except that `unpack`/`table.unpack` overflow now reads `too many results
-  (limit 255)` instead of `too many results to unpack`.
-- **`State::load_state` setup is fallible.** The setup closure is now
-  `FnOnce(&mut State) -> Result<(), E>`, and its error is returned as
-  `LoadError::Setup(E)`; `LoadError` is generic over that type, defaulting to
-  `Infallible`. Existing callers change `|_| {}` to
-  `|_| Ok::<(), std::convert::Infallible>(())` or return their own error.
-- **`save_state` refuses to run inside a Rust callback.** A Rust function
-  executing a direct host call now counts as an in-flight call, so a save from
-  inside it fails with `SaveError::NotQuiescent`.
-- **Concatenation renders negative zero as `"-0"`**, like `tostring` (it was
-  `"0"`). The two now share one number renderer. `"-0"` is Lua 5.2's spelling for
-  every negative zero; Lua 5.4 splits it by subtype (`-0.0` for floats, `0`
-  for integers like `math.ceil(-0.5)`), which dellingr, having no integer
-  subtype, cannot reproduce with either spelling.
-- **CLI output split.** `Cost used: N` and the `--analyze` caveat now go to
-  stderr, so stdout carries only script output (and the analysis itself).
-  Arguments are read as OS strings (non-UTF-8 paths work), `--` ends option
-  parsing, unknown options and a second input file are usage errors, and
-  `--limit` cannot be combined with `--analyze`.
-- **`State::cost_remaining()` without a budget returns `i64::MAX`.** An
-  unbudgeted State previously reported its raw internal counter.
-- **`string.gmatch` charges pattern compilation once per iterator.** The charge
-  used to fall on every compilation-cache miss, so GC, cache eviction or a
-  snapshot reload could change a script's cost; it is now recorded in the
-  iterator's own state and is deterministic.
-- **Snapshot error shapes.** `LoadError::UnsupportedVersion` and
-  `UnsupportedCostModelVersion` now carry `found` and `expected`;
-  `CorruptArena` carries a `reason`; decode errors name the byte offset;
-  `SaveError` gains `Internal` and `TooLarge`; user-supplied strings in error
-  messages are escaped and length-capped. Every variable-length field has a
-  per-field size cap enforced on both save and load (chunk source names at
-  256 KiB, Lua strings at the 16 MiB string cap); a save that exceeds one fails
-  with `SaveError::TooLarge` rather than producing an unloadable file.
-- **`get_table`, `get_table_raw`, `table_next` and `table_insert_at` return
-  `InvalidStackIndex`** when the table index names the key/value slot itself,
-  instead of panicking. `table_insert_at` now resolves its table index before
-  popping the value, so a negative index counts from the value on top, like
-  the other table accessors.
-- **Bad-argument messages quote and name the function.** `ArgError` now
-  renders as `bad argument #1 to 'sin' (number expected, got nil)`, matching
-  reference Lua's quoting, and the standard library fills in the function name
-  for its type and missing-argument checks (they previously read `to
-  <anonymous>`). `check_type`/`check_any` called from a running Rust callback
-  name it after the first global bound to that function; a callback with no
-  global binding stays anonymous and renders `to '<anonymous>'`.
-- **`State::concat`** rejects a count larger than the current frame's values
-  with `InvalidStackIndex` instead of panicking.
+- `dellingr::limits` exposes the runtime, compiler and pattern-cache caps.
+- `State::current_source()` and the `source` given to `on_print`/`on_error`
+  come from the running Lua frame, not the last loaded chunk.
+- `on_error` fires exactly once for every error escaping to the host,
+  including preflight failures and errors that already carry a traceback.
+- Out-of-range `tonumber` base, `select` index and `rawlen` arguments say so
+  instead of `number expected, got number`.
+- `InvalidStackIndex` no longer renders as an internal error.
+- `check_any(0)`, `check_type(0, ..)`, `State::concat` with too large a count,
+  and table accessors given their own key/value slot return
+  `InvalidStackIndex` instead of panicking.
+- Comparisons in conditions compile to fused compare-and-branch opcodes; cost
+  is unchanged.
 
 ### Fixed
 
-- **`open_libs` with values already on the stack.** `_G` setup addressed its
-  table by absolute stack index 1, so calling `State::open_libs` above a host
-  value gave that value `_G`'s proxy metatable and left `_G` without one.
-- **Cyclic `__call` chains no longer abort the process.** A table whose
-  `__call` resolves to a non-function (for example itself) is now bounded by the
-  metamethod depth limit and fails with `MetamethodDepthExceeded`; function
-  handlers remain bounded by the call depth limit.
-- **`on_error` fires for host calls through non-function `__call` chains.**
-  Errors from such a chain (including the cyclic depth error, or a Rust
-  handler at the end of the chain) reached the host only through the `Result`;
-  the outermost host call now reports them to `on_error` exactly once.
-- **`on_error` fires for a direct host call of a non-callable value**, once.
-  A Rust callback that propagates a failure from its own nested `call` is now
-  reported once at the callback's boundary rather than twice; a failure the
-  callback swallows is no longer reported at all.
-- **`break` outside a loop reports its real line** instead of always line 1.
-- **`string.find` with `)` in the pattern** no longer takes the plain-text fast
-  path.
-
-- **Upvalue pool no longer grows monotonically.** Pool slots whose upvalue is
-  unreachable are swept onto a free list during `gc_collect` and reused by
-  later allocations, so a long-lived State no longer retains one slot for
-  every closure-with-captures ever created. Reuse order is deterministic
-  (LIFO, at deterministic GC points).
-- **`string.format("%p")` identity map is now GC-swept.** Entries whose value
-  no longer resolves on the heap are dropped during collection, bounding the
-  lookup scan by live `%p` usage instead of lifetime-total usage. Assigned ids
-  are never reissued.
+- `open_libs` above existing stack values gave the wrong value `_G`'s
+  metatable.
+- Cyclic `__call` chains aborted the process; they now hit the metamethod
+  depth limit.
+- `on_error` missed errors from non-function `__call` chains and direct calls
+  of non-callable values, and double-reported errors propagated through Rust
+  callbacks.
+- `break` outside a loop reported line 1.
+- `string.find` took the plain-text fast path for patterns containing `)`.
+- The upvalue pool and the `string.format("%p")` id map grew without bound in
+  long-lived States; both are now swept by GC.
 
 ## [0.4.0] - 2026-07-27
 

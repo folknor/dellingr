@@ -17,6 +17,12 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     // table.insert(t, [pos,] value) - costs 1
     // Inserts value at position pos in t, shifting elements up.
     // If pos is omitted, inserts at the end.
+    //
+    // The flat cost of insert and remove is a deliberate cost-model choice,
+    // even though a mid-array call shifts every later element one key at a
+    // time - the same per-element work table.move charges one per element for.
+    // Charging by shift distance would change costs for existing scripts and
+    // require a COST_MODEL_VERSION bump.
     ("insert", |state| {
         state.consume_cost(1)?;
         check_type_named(state, 1, LuaType::Table, "insert")?;

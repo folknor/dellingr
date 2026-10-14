@@ -11,13 +11,13 @@ One loop:
 1. Pick the next target(s) from `notes/optimizations.md` or `notes/todo.md`.
 2. Shallow-verify the target(s) are real by reading the cited code.
 3. Write the problem statement into `notes/work.md`.
-4. Launch `review bare --profile deep` (codex, read-only, xhigh) pointed at
+4. Launch `review bare --profile read` (codex, read-only) pointed at
    `notes/work.md`: verify the targets independently, produce an
    implementation plan.
 5. While 4 runs: read the target code in depth and produce an independent plan.
 6. Consolidate. Argue with the reviewer until the plans agree. Write the agreed
    plan into `notes/work.md`.
-7. Launch `review bare --profile build` (codex, workspace-write) to implement.
+7. Launch `review bare --profile write` (codex, workspace-write) to implement.
 8. Review the diff twice: once directly, once by resuming the deep session from
    step 4 with `--session <ID>`.
 9. Actionable findings get fixed - by a build session (findings written into
@@ -32,7 +32,7 @@ against reference Lua 5.2/5.4 is already covered - do not also run
 
 Notes:
 
-- Steps 4 and 7 are `echo "..." | review bare --profile deep|build`. The
+- Steps 4 and 7 are `echo "..." | review bare --profile read|write`. The
   session ID is printed above the response; keep it for step 8.
 - **Point sessions at `notes/work.md` and nothing else.** Never tell a review
   or build session to read `CLAUDE.md` or `AGENTS.md`. The two files exist for

@@ -480,7 +480,10 @@ impl SyntaxError {
     /// Returns true if this is a SyntaxError that can be fixed by appending
     /// more text to the source code.
     pub fn is_recoverable(&self) -> bool {
-        // matches!(self, Self::UnclosedString | Self::UnexpectedEof)
+        // Deliberately EOF only. An unterminated string is not fixable by
+        // appending text: Lua short strings cannot span lines (and long
+        // strings are unsupported), so a REPL that keeps reading would never
+        // complete it.
         matches!(self, Self::UnexpectedEof)
     }
 }

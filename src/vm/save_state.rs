@@ -36,7 +36,10 @@
 //! - **In-crate codec.** Little-endian, length-prefixed, `f64` by bit pattern
 //!   (NaN / -0.0 exact), explicit enum tags, bounds-checked with reservations
 //!   capped at remaining bytes. No `serde`/`bincode`. Two saves of the same
-//!   logical state are byte-identical.
+//!   logical state are byte-identical when produced by the same crate version,
+//!   because the diagnostic crate-version string is part of the blob. A host
+//!   that content-hashes saves across upgrades must hash the payload after
+//!   the header, or accept that a version bump changes the bytes.
 
 use std::convert::Infallible;
 use std::fmt;
@@ -1147,6 +1150,12 @@ impl State {
     /// registered host functions exist before saved values are resolved. A
     /// setup error is returned as [`LoadError::Setup`] without materializing
     /// any saved values.
+    ///
+    /// Whether the standard library is installed is decided by the save itself,
+    /// not by any [`Engine`](crate::Engine): a save taken from a standard-library
+    /// State loads into one, and a raw save loads into a raw State. There is
+    /// deliberately no engine-level override, so a load can never disagree with
+    /// the environment tokens recorded in the save.
     pub fn load_state<E>(
         bytes: &[u8],
         callbacks: Box<dyn HostCallbacks>,

@@ -31,6 +31,15 @@ fn gmatch_wrapper() -> Arc<crate::compiler::Bytecode> {
     }))
 }
 
+// Native costs in the stdlib are deliberately per-function literals, not a
+// declarative rule table. The numbers are part of the cost model: changing any
+// of them (including the pattern bytes that find/match/gsub charge twice, or
+// the free `string.len`, `tostring` and `select`) changes `cost_used` for
+// existing scripts and replays, so it needs a COST_MODEL_VERSION bump and
+// invalidates saves. A table would only relocate the literals and `analyze_cost`
+// still could not see them, because native calls are opaque to the static
+// walk. The rules are small and local; revisit them only together with an
+// intentional cost-model change.
 fn charge_bytes(state: &mut State, bytes: usize) -> Result<()> {
     state.consume_cost(bytes.max(1) as u64)
 }

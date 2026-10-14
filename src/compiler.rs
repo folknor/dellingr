@@ -241,6 +241,10 @@ impl Bytecode {
         let mut global_cache_len = 0usize;
         let mut field_cache_len = 0usize;
         let mut set_field_cache_len = 0usize;
+        // Counted only to assign cursor slots and deliberately not stored: a
+        // fourth count field would change the snapshot format.
+        // `RuntimeCaches::new` recomputes it as the maximum C operand over the
+        // code, and the verifier's sequential slot check keeps the two in step.
         let mut tfor_cursor_len = 0usize;
 
         for inst in &mut self.code {

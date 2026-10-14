@@ -51,6 +51,13 @@ dellingr's own binary-to-binary band, or an asm/alignment look at
 `Frame::eval` on this host. If the register-codegen rewrite lands, this
 dispatch loop is rebuilt wholesale and the question dissolves.
 
+Second instance (bygg, 2026-10-14): `bench/fill` early WARM_BLOCKs went from
+52 ms at b33d4a1 to a flat 54 ms at 67f07aa (+4%, interleaved, stable across
+launches), a commit whose changes are all off the fill hot path. `--hotpath`
+on both showed identical call counts and unchanged per-function shares, and
+the instrumented build's warm average differed by only 1.3%. Same signature
+as above: a property of the binary, not of the executed path.
+
 ### Residual ~2x in `strings/patterns` - decided not to chase (2026-07-25)
 
 What: the 0.2.0-era README recorded `examples/strings/patterns.lua` at 30ms; it
@@ -282,7 +289,8 @@ Hidden costs that aren't obvious from the outside:
   worsens an existing condition). A SET that triggers an array-hash
   migration does O(N) work invisible to `analyze_cost`. The
   blind-spot category isn't actually new: `Table::array_insert` /
-  `array_remove` already do O(N) shifts charged as 1, `IndexMap`
+  `array_remove` already do whole-array shifts charged as 1 (worse than
+  O(N) today - see todo.md "Open findings"), `IndexMap`
   rehashes on capacity growth, and `lua_std::table.insert` /
   `table.remove` charge O(1) for O(N) work today. The array-part
   proposal extends that gap to plain `t[k] = v`, but doesn't create

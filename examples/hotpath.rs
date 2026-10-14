@@ -38,6 +38,9 @@ use std::env;
 use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
+// Exit status is 1 for every failure and 2 for usage: the only caller is
+// brokkr, which treats any nonzero status as a failed run and reads the stderr
+// message, so finer-grained codes would have no consumer.
 use std::process::exit;
 use std::time::{Duration, Instant};
 
@@ -61,6 +64,9 @@ const MAX_WARM_BLOCKS: u32 = 32;
 ///
 /// Protocol: `<timestamp_us> <name>\n` on the FIFO named by
 /// `BROKKR_MARKER_FIFO`, timestamped in microseconds since the first emit.
+/// Counters use `<timestamp_us> @name=value\n`. The parser lives in brokkr (a
+/// separate repository); the line format is tiny and stable, and a shared
+/// protocol crate for two one-line formats would cost more than it protects.
 fn emit_marker(name: &str) {
     write_fifo(|us| format!("{us} {name}\n"));
 }

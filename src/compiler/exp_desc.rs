@@ -18,9 +18,11 @@ pub(super) enum ExpDesc {
 /// `PrefixExp` is copied throughout expression parsing. Holding the line as a
 /// separate `u32` field beside a `u8` makes that one variant four times the
 /// size of every other, so the two are packed: the line occupies the low 24
-/// bits and the argument count the high 8. 2^24 lines is far past any real
-/// source file, and a longer one saturates rather than reporting a wrong line
-/// from wraparound.
+/// bits and the argument count the high 8. The saturation is unreachable in
+/// practice, so the narrower width versus the `u32` in `line_info` is not a
+/// real divergence: `MAX_SOURCE_BYTES` is 2^24 bytes and a call needs at least
+/// a few bytes, so no call can open on a line at or past 2^24. The `min` is
+/// only a guard against wraparound should that source cap ever be raised.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct CallSite(u32);
 

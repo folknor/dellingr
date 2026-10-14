@@ -38,7 +38,9 @@ pub trait HostCallbacks: Send {
     /// * `line` - The current line number (0 if unknown)
     /// * `message` - The formatted message (all arguments joined with tabs)
     fn on_print(&mut self, _source: Option<&str>, _line: u32, message: &str) {
-        // Default: print to stdout (for CLI usage)
+        // Deliberate default: DefaultCallbacks serves CLI tools and tests.
+        // Embedders that need captured or redirected output override on_print;
+        // making it required would break every existing HostCallbacks impl.
         println!("{message}");
     }
 
