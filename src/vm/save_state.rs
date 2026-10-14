@@ -1003,9 +1003,7 @@ impl<'a> SaveBuilder<'a> {
                 chunk,
                 upvalues: upvalues
                     .into_iter()
-                    .map(|value| {
-                        value.ok_or(SaveError::Internal("unfilled closure upvalue slot"))
-                    })
+                    .map(|value| value.ok_or(SaveError::Internal("unfilled closure upvalue slot")))
                     .collect::<Result<Vec<_>, _>>()?,
             }),
         }

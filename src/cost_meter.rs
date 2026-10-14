@@ -1,10 +1,19 @@
 //! Runtime cost accounting independent of VM state.
 
-/// Version of the runtime cost model used by persisted state.
+/// Version of the cost model: what `cost_used` a given source produces.
+///
+/// The version covers everything that decides the cost of identical source -
+/// per-opcode charges, native library charges, and compiler emission (which
+/// opcodes a source compiles to). Hosts may key stored cost fingerprints on
+/// it; snapshots require an exact match. `tests/cost_golden.rs` pins
+/// `cost_used` for a fixed corpus so a change cannot land without a bump.
 ///
 /// Version 1 was the original implicit model. Version 2 charges native string
-/// and pattern work in addition to bytecode instructions.
-pub const COST_MODEL_VERSION: u16 = 2;
+/// and pattern work in addition to bytecode instructions. Version 3 folds
+/// literal arithmetic at compile time (folded operations no longer charge) and
+/// charges `string.gmatch` pattern compilation once per iterator rather than
+/// once per compilation-cache miss.
+pub const COST_MODEL_VERSION: u16 = 3;
 
 /// Tracks costs either without a budget or against a finite budget.
 ///

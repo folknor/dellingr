@@ -15,13 +15,12 @@ pub type RustFunc = fn(&mut State) -> Result<u8>;
 const RUST_FN_DISPLAY: &str = "<function>";
 
 pub(super) fn number_to_string(number: f64) -> String {
-    // Val has no integer/float subtype, so retain established f64 spellings
-    // except for negative zero, whose Lua 5.4 form is unambiguous.
-    if number == 0.0 && number.is_sign_negative() {
-        "-0.0".to_string()
-    } else {
-        number.to_string()
-    }
+    // Val has no integer/float subtype. Negative zero renders as "-0", Lua
+    // 5.2's spelling for every case. Lua 5.4 splits by subtype ("-0.0" for
+    // floats, "0" for integer results such as math.ceil(-0.5)); either 5.4
+    // spelling would match neither reference for the other half, while "-0"
+    // always matches 5.2. Rust's f64 Display already prints "-0".
+    number.to_string()
 }
 
 #[derive(Clone, Copy, Default)]

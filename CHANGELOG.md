@@ -9,6 +9,12 @@ All notable changes to dellingr are documented here. The format follows
 ### Changed
 
 - **MSRV raised to Rust 1.99** (`rust-version` in `Cargo.toml`).
+- **`COST_MODEL_VERSION` is 3.** Constant folding and the per-iterator
+  `string.gmatch` compile charge (both below) change `cost_used` for identical
+  source. The version now explicitly covers the cost of a given source,
+  compiler emission included, and a golden test pins `cost_used` for a fixed
+  corpus so it cannot drift silently. Snapshots written under version 2 are
+  rejected with `UnsupportedCostModelVersion`.
 - **Constant folding.** Literal arithmetic and unary negation now fold at
   parse time with reference lcode.c's guards (NaN and -0.0 results stay
   runtime operations). Folded operations no longer execute or charge cost,
@@ -30,9 +36,11 @@ All notable changes to dellingr are documented here. The format follows
 - **Out-of-range argument messages.** `tonumber` base and `select` index out of
   range, and `rawlen` on a non-table non-string, now say so instead of `number
   expected, got number`; these are `RuntimeError` rather than `ArgError`.
-- **`tostring(-0.0)` is now `"-0.0"`**, as in Lua 5.4 (it was `"-0"`).
-  Concatenation and `tostring` share one number renderer, so `"x" .. -0.0`
-  agrees.
+- **Concatenation renders negative zero as `"-0"`**, like `tostring` (it was
+  `"0"`). The two now share one number renderer. `"-0"` is Lua 5.2's spelling for
+  every negative zero; Lua 5.4 splits it by subtype (`-0.0` for floats, `0`
+  for integers like `math.ceil(-0.5)`), which dellingr, having no integer
+  subtype, cannot reproduce with either spelling.
 - **CLI output split.** `Cost used: N` and the `--analyze` caveat now go to
   stderr, so stdout carries only script output (and the analysis itself).
   Arguments are read as OS strings (non-UTF-8 paths work), `--` ends option

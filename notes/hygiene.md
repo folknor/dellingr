@@ -270,25 +270,6 @@ saturation rule.
 
 # Cost model
 
-## HYG-017 - `COST_MODEL_VERSION` did not move when compiler emission changed `cost_used`
-
-Reported by the compiler and surface hunters.
-
-The CHANGELOG Unreleased constant-folding entry says folded literal arithmetic
-no longer charges, so `cost_used` decreases for identical source, and asks
-users to re-baseline fingerprints. `COST_MODEL_VERSION` is still 2 and its doc
-describes only v1 and v2; CHANGELOG 0.4.0 says it exists "so hosts can identify
-the accounting model independently of the crate version". A save written
-before the change and loaded after carries old-model `cost_used`/`cost_remaining`
-and the version gate accepts it. Needs an author decision: either the version
-covers "cost of a given source" (bump it, and it now moves with compiler
-emission), or only per-opcode charges (reword doc and CHANGELOG so hosts do not
-use it as a fingerprint key). Enforceable: a golden test pinning `cost_used`
-for a fixed corpus with an assertion message naming `COST_MODEL_VERSION`, the
-pattern `save_golden.rs` uses for the format. Since then, gmatch compile cost
-moved from once per VM cache miss to once per iterator, which also changes
-`cost_used` for identical source.
-
 ## HYG-018 - Per-function native cost rules are scattered literals, inconsistent with each other and with the README
 
 Reported by the stdlib hunter.

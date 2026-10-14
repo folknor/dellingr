@@ -694,7 +694,8 @@ fn unsupported_format_versions_fail_before_setup() {
 fn unsupported_cost_model_versions_fail_before_setup() {
     let state = fresh();
     let save = state.save_state().expect("state saves");
-    for version in [1_u16, 3_u16] {
+    let current = dellingr::COST_MODEL_VERSION;
+    for version in [1_u16, current - 1, current + 1] {
         let mut bytes = save.bytes.clone();
         bytes[6..8].copy_from_slice(&version.to_le_bytes());
         let setup_ran = Arc::new(AtomicBool::new(false));

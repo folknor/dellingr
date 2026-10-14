@@ -55,8 +55,5 @@ fn tostring_preserves_lua_negative_zero_spelling() {
     state
         .push_number(-0.0)
         .expect("the test stack has room for a number");
-    assert_eq!(
-        state.to_string(-1).expect("negative zero is numeric"),
-        "-0.0"
-    );
+    assert_eq!(state.to_string(-1).expect("negative zero is numeric"), "-0");
 }

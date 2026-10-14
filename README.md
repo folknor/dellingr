@@ -79,6 +79,8 @@ Data-dependent native work in the string, pattern, and table libraries is charge
 
 This cost model changed in 0.4.0. Embedders must re-measure their tick budgets: the increase depends on string lengths, output expansion, pattern matches and backtracking, and table contents.
 
+`COST_MODEL_VERSION` identifies the cost a given source produces - opcode charges, native charges and compiler emission together. It moves whenever `cost_used` for identical source changes, so it is a valid key for stored cost fingerprints; snapshots load only under an exact match.
+
 ## Compatibility divergences
 
 Numeric `for` loops with a zero step skip their body in both directions. Lua 5.2 skips an ascending range but loops forever for a descending one; Lua 5.4 raises an error. dellingr deliberately skips the loop to avoid the unbounded execution case.

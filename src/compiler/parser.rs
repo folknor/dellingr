@@ -588,8 +588,8 @@ impl<'a> Parser<'a> {
         if params.len() > MAX_LOCALS {
             return Err(self.error_here(SyntaxError::TooManyLocals));
         }
-        let num_params = u8::try_from(params.len())
-            .map_err(|_| self.error_here(SyntaxError::TooManyLocals))?;
+        let num_params =
+            u8::try_from(params.len()).map_err(|_| self.error_here(SyntaxError::TooManyLocals))?;
         let source = self.chunk.source.clone();
         self.outer_chunks.push(std::mem::take(&mut self.chunk));
         let outer_fold_barrier = std::mem::take(&mut self.fold_barrier);
