@@ -68,7 +68,7 @@ Per-function compile-time caps are exposed in `dellingr::limits`: `MAX_LOCALS`, 
 
 ## Runtime limits
 
-Call depth is capped at `limits::MAX_CALL_DEPTH`. The shared Lua/Rust value stack is capped at `limits::MAX_STACK_SIZE`, and that cap is enforced on every operation that can grow the stack - bytecode operand pushes, frame setup, metamethod dispatch, and the host-facing `push_*` / `new_table` / `get_global` methods alike. Exceeding it produces a catchable `StackOverflow` error rather than an abort, and a rejected operation leaves the stack exactly as it was.
+Call depth is capped at `limits::MAX_CALL_DEPTH`. The shared Lua/Rust value stack is capped at `limits::MAX_STACK_SIZE`, and that cap is enforced on every operation that can grow the stack - bytecode operand pushes, frame setup, metamethod dispatch, and the host-facing `push_*` / `new_table` / `get_global` methods alike. Exceeding it produces a catchable `StackOverflow` error rather than an abort, and a rejected operation leaves the stack exactly as it was. The host table methods (`get_table`, `get_table_raw`, `set_table_raw`, `table_next`, `set_metatable_of`, `table_insert_at`, `table_remove_at`) apply the same rule to every rejection they can detect up front - bad index, wrong type, invalid key or position - validating before they pop. An error from calling an `__index` function is the exception: the key is consumed when the call begins.
 
 This is a bound on the value stack, **not** a total host-memory quota. It stops a runaway script or a looping host callback from growing the stack without limit; it does not stop a host from allocating memory by other means, any more than `limits::MAX_STRING_BYTES` does. Enforcing it charges nothing against the instruction-cost budget.
 
@@ -91,6 +91,12 @@ This cost model changed in 0.4.0. Embedders must re-measure their tick budgets: 
 Numeric `for` loops with a zero step skip their body in both directions. Lua 5.2 skips an ascending range but loops forever for a descending one; Lua 5.4 raises an error. dellingr deliberately skips the loop to avoid the unbounded execution case.
 
 `math.log(x, 2)` follows Lua 5.2's general-base calculation. This differs in the last bit from Lua 5.4 for some inputs (for example, `math.log(3, 2)`).
+
+`string.format` prints NaN without a sign (`nan`), where C Lua on x86-64 prints `-nan` for `0/0`, so output is identical across platforms.
+
+`tonumber(s, base)` accumulates in floating point, as Lua 5.2 does; Lua 5.4 wraps to a 64-bit integer.
+
+`table.move` rejects ranges whose keys fall outside +/-2^53, where integer keys stop being distinct in dellingr's f64 numbers. Metamethod-driven `table.insert` and `table.remove` reject key ranges that would round integer positions.
 
 ## Determinism
 

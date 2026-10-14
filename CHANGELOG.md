@@ -18,7 +18,9 @@ identical source - re-measure tick budgets.
   includes opcode cost pending in the dispatch batch when a runtime error ends
   a frame. `table.insert`/`table.remove` charge one per element shifted,
   `unpack`/`table.unpack` one per element visited and `table.pack` one per
-  argument stored, each with a minimum of 1. Older snapshots are rejected with
+  argument stored, each with a minimum of 1. Sequence-library metamethods
+  incur their usual execution costs; corrected numeric formatting changes
+  output-byte charges. Older snapshots are rejected with
   `UnsupportedCostModelVersion`.
 - **Tables have a real array part, and `pairs` order changed.** Keys `1..n`
   live in a vector beside the insertion-ordered hash part and iterate first,
@@ -59,6 +61,9 @@ identical source - re-measure tick budgets.
   empty match ending where the previous accepted match ended is skipped.
 - **`table_insert_at`** resolves a negative table index before popping the
   value, like the other table accessors.
+- **`State::table_len` and `State::table_sort` are crate-internal.** Hosts use
+  the new fallible `State::raw_len` for table borders or string byte lengths,
+  and call `table.sort` through the stack.
 - **CLI:** `Cost used: N` and the `--analyze` caveat go to stderr; unknown
   options, a second input file, and `--limit` with `--analyze` are usage
   errors; non-UTF-8 paths work.
@@ -89,6 +94,23 @@ identical source - re-measure tick budgets.
 
 ### Fixed
 
+- Host table methods preserve operands on validation and stack preflight
+  failures. Errors from calling an `__index` function still consume the key.
+- `State::table_remove_at` rejects positions outside `table.remove`'s range
+  before changing the table or stack.
+- `table.insert`, `remove`, `concat`, `unpack` (including global `unpack`)
+  and `move` honour `__len`, `__index` and `__newindex` as in Lua 5.4 where
+  applicable. `table.sort` remains the documented exception, sorting the raw
+  array. Library writes share the VM's metamethod depth limit.
+- `table.move` rejects nonempty ranges with source or destination endpoints
+  beyond +/-2^53, where consecutive f64 integer keys stop being distinct.
+  Metamethod-driven `table.insert` and `table.remove` also reject key ranges
+  that would round integer positions before mutating the table.
+- `string.format` prints NaN without its platform-dependent sign on every
+  platform. Explicit `+` and space flags still apply.
+- `string.format("%q", n)` prints integral numbers in i64 range in decimal;
+  negative zero and other finite numbers retain hexadecimal float notation.
+- `tonumber(s, base)` trims vertical tab as well as the other Lua whitespace.
 - Snapshot loading rejects duplicate table-template keys and non-table
   metatables. Rebuilding an environment table on load advances its shape
   version instead of resetting it, invalidating caches warmed during setup.

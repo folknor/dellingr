@@ -36,6 +36,18 @@ const CORPUS: &[(&str, &str, u64)] = &[
         "local n = 0 for w in string.gmatch('one two three four', '%a+') do n = n + #w end for w in string.gmatch('a b', '%a+') do n = n + 1 end",
         103,
     ),
+    (
+        "sequence_len_handler",
+        "local t = setmetatable({}, {__len = function() local n = 1 return n + 1 end}) table.insert(t, 7)",
+        // Two tables, one initializer write, one handler add and one append.
+        5,
+    ),
+    (
+        "quoted_integral",
+        "local s = string.format('%q', 1)",
+        // Two format bytes and one emitted decimal digit.
+        3,
+    ),
 ];
 
 /// Sources that raise a runtime error after executing costed opcodes. The

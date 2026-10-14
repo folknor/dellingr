@@ -3,8 +3,13 @@
 //! Version-sensitive compatibility decisions are per function: `string.format`
 //! follows Lua 5.4, `math.random` follows Lua 5.4's interval and error behavior,
 //! `math.log(x, base)` follows Lua 5.2's general-base calculation, and
-//! `math.atan(y, x)` uses the Lua 5.3+ two-argument form. Global `unpack` follows
-//! Lua 5.2; `table.unpack` uses the same implementation. The `%p` conversion in
+//! `math.atan(y, x)` uses the Lua 5.3+ two-argument form. Global `unpack` is kept
+//! from Lua 5.2 as an alias, but it and `table.unpack` share one implementation
+//! with Lua 5.4 semantics. The table library (`insert`, `remove`, `concat`,
+//! `unpack`, `move`) follows Lua 5.4's metamethod rules: lengths come from
+//! `__len`, reads go through `__index` and writes through `__newindex`, where
+//! Lua 5.2 reads raw. `table.sort` is the exception and works on the raw array.
+//! The `%p` conversion in
 //! `string.format` follows Lua 5.4 and is absent in Lua 5.2.
 //! `string.gsub` and `string.gmatch` follow Lua 5.4's empty-match rule: an
 //! empty match ending where the previous match ended is skipped.
@@ -221,13 +226,19 @@ pub(super) fn opt_integer(
 // independent of the bytecode encoding.
 /// Implements both global `unpack` and `table.unpack`. Costs one per element
 /// visited, min 1.
+///
+/// Follows Lua 5.4 for both names: elements are read through `__index`, and
+/// when `j` is omitted the length comes from `__len`. Lua 5.2's global
+/// `unpack` reads raw.
 pub(super) fn unpack_values(state: &mut State) -> Result<u8> {
     check_type_named(state, 1, LuaType::Table, "unpack")?;
-    // A table length beyond i64::MAX is unreachable; saturating keeps this infallible.
-    let len = i64::try_from(state.table_len(1)).unwrap_or(i64::MAX);
 
     let i = opt_integer(state, 2, "unpack")?.unwrap_or(1);
-    let j = opt_integer(state, 3, "unpack")?.unwrap_or(len);
+    // As in 5.4, `__len` runs only when no explicit end is given.
+    let j = match opt_integer(state, 3, "unpack")? {
+        Some(j) => j,
+        None => table::sequence_len(state, 1)?,
+    };
 
     state.set_top(1)?;
     if i > j {

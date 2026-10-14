@@ -802,9 +802,8 @@ fn table_sort_default_rejects_incomparable_values_without_mutation() {
     let mut state = State::new();
     state.load_string("return {1, 'a', 2}").unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
-    state
-        .table_sort(1, false)
-        .expect_err("mixed default sort must fail");
+    host_table_sort(&mut state).expect_err("mixed default sort must fail");
+    assert_eq!(state.get_top(), 1);
     state.push_number(1.0).unwrap();
     state.get_table(1).unwrap();
     assert_eq!(state.to_number(-1).unwrap(), 1.0);
@@ -812,6 +811,17 @@ fn table_sort_default_rejects_incomparable_values_without_mutation() {
     state.push_number(2.0).unwrap();
     state.get_table(1).unwrap();
     assert_eq!(state.to_string(-1).unwrap(), "a");
+}
+
+/// Calls `table.sort` on the table at stack index 1, the way a host must now
+/// that `State::table_sort` is crate-internal.
+fn host_table_sort(state: &mut State) -> dellingr::Result<()> {
+    state.get_global("table")?;
+    state.push_string("sort")?;
+    state.get_table(-2)?;
+    state.remove(-2)?;
+    state.push_value(1)?;
+    state.call(ArgCount::Fixed(1), RetCount::Fixed(0))
 }
 
 #[test]
@@ -877,10 +887,9 @@ fn table_sort_charges_before_mutating() {
     state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
 
     state.set_cost_budget(0);
-    let err = state
-        .table_sort(1, false)
-        .expect_err("exhausted budget must block the sort");
+    let err = host_table_sort(&mut state).expect_err("exhausted budget must block the sort");
     assert!(matches!(err.kind, ErrorKind::BudgetExceeded { .. }));
+    assert_eq!(state.get_top(), 1);
 
     // Restore budget and confirm the table is untouched: still {3, 1, 2}.
     state.set_cost_budget(i64::MAX);

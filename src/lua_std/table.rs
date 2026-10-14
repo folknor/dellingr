@@ -5,6 +5,8 @@ use crate::LuaType;
 use crate::Result;
 use crate::State;
 use crate::error::{ArgDetail, ErrorKind, TypeError};
+use crate::instr::{ArgCount, RetCount};
+use crate::numeral::{exact_i64, parse_lua_numeral};
 
 // Keep a separate callback address for the `table.unpack` snapshot id. If this
 // aliases global `unpack`, reverse callback-name lookup resolves only one id.
@@ -23,10 +25,20 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     // n-element sequence costs max(n, 1); removing its front costs
     // max(n - 1, 1). The base 1 is charged before argument checks; the
     // remainder once the shift is known, before the table is touched.
+    //
+    // Both follow Lua 5.4: the length comes from `__len` and every read and
+    // write goes through `__index`/`__newindex` (5.4's lua_geti/lua_seti). A
+    // table whose metatable defines none of the three takes the in-place
+    // storage shift instead; the two paths are observably identical there and
+    // charge the same.
     ("insert", |state| {
         state.consume_cost(1)?;
         check_type_named(state, 1, LuaType::Table, "insert")?;
         let num_args = state.get_top();
+
+        if has_sequence_metamethods(state, 1)? {
+            return insert_through_metamethods(state, num_args);
+        }
 
         if num_args == 2 {
             // table.insert(t, value) - append at end
@@ -58,6 +70,9 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     ("remove", |state| {
         state.consume_cost(1)?;
         check_type_named(state, 1, LuaType::Table, "remove")?;
+        if has_sequence_metamethods(state, 1)? {
+            return remove_through_metamethods(state);
+        }
         let len = state.table_len(1);
         let len_i = i64::try_from(len).expect("table length fits in i64");
         let pos = if let Some(pos) = opt_integer(state, 2, "remove")? {
@@ -90,6 +105,8 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     // table.sort(t [, comp]) - costs n (array length)
     // Sorts the array portion of t in place.
     // comp is an optional comparison function.
+    // Unlike the rest of this library, sort ignores `__len`, `__index` and
+    // `__newindex` (Lua 5.4 honours all three): it sorts the raw array.
     ("sort", |state| {
         check_type_named(state, 1, LuaType::Table, "sort")?;
         let has_comp = check_optional_type_named(state, 2, LuaType::Function, "sort")?;
@@ -141,9 +158,12 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     // table.concat(list [, sep [, i [, j]]])
     // Returns list[i]..sep..list[i+1]..sep..list[j].
     // Default: sep="", i=1, j=#list
+    // Follows Lua 5.4: `#list` honours `__len` (evaluated even when j is
+    // given, as 5.4 does) and elements are read through `__index`. Lua 5.2
+    // reads raw.
     ("concat", |state| {
         check_type_named(state, 1, LuaType::Table, "concat")?;
-        let len = i64::try_from(state.table_len(1)).expect("table length fits in i64");
+        let len = sequence_len(state, 1)?;
 
         let sep = if check_optional_type_named(state, 2, LuaType::String, "concat")? {
             let bytes = state.to_bytes(2)?.to_vec();
@@ -199,6 +219,10 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     // table.move(a1, f, e, t [, a2]) - costs one per copied element
     // Moves elements from table a1 to table a2 (or a1 if not given).
     // Copies a1[f..e] to a2[t..t+(e-f)]. Returns a2.
+    // Follows Lua 5.4 (the function is absent in 5.2): reads go through
+    // `__index` and writes through `__newindex`. When neither table's
+    // metatable defines `__len`, `__index` or `__newindex`, both sides are
+    // accessed raw, which is observably the same.
     ("move", |state| {
         check_type_named(state, 1, LuaType::Table, "move")?;
         let f = arg_integer(state, 2, "move")?;
@@ -227,60 +251,53 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
             0
         };
 
+        // dellingr numbers are f64, so integer keys are exact only within
+        // +-2^53. Past that, distinct source or destination positions would
+        // round onto the same key and the copy would silently fold elements
+        // together (Lua 5.4, with real 64-bit integers, keeps them apart).
+        // Refuse such ranges instead. The keys are monotonic in the range, so
+        // checking both ends of each side is enough.
+        if count > 0 {
+            let dest_last = t + (count - 1);
+            let exact = |key: i64| (-MAX_EXACT_KEY..=MAX_EXACT_KEY).contains(&key);
+            if !(exact(f) && exact(e) && exact(t) && exact(dest_last)) {
+                return Err(state.error(ErrorKind::RuntimeError(
+                    "table.move range exceeds the exactly representable integer keys".into(),
+                )));
+            }
+        }
+
+        let honour_meta = count > 0
+            && (has_sequence_metamethods(state, 1)?
+                || (has_a2 && has_sequence_metamethods(state, dest_idx)?));
+
         // Copy elements (if any). Same-table moves that shift the range right
         // must copy backwards so earlier writes do not clobber later reads.
         let same_table = count > 0 && state.raw_equal(1, dest_idx);
+        let backwards = same_table && t > f && t <= e;
         if count == 0 {
             state.consume_cost(1)?;
-        } else if state.cost_budget_configured {
+        } else if state.cost_budget_configured || honour_meta {
             // A configured budget charges immediately before each lookup/write
-            // pair, so exhaustion leaves a deterministic partial mutation.
-            if same_table && t > f {
-                for i in (0..count).rev() {
-                    state.consume_cost(1)?;
-                    let src_key = (f + i) as f64;
-                    let dest_key = (t + i) as f64;
-
-                    state.push_number(dest_key)?;
-                    state.push_number(src_key)?;
-                    state.get_table(1)?;
-                    state.set_table_raw(dest_idx)?;
-                }
-            } else {
-                for i in 0..count {
-                    state.consume_cost(1)?;
-                    let src_key = (f + i) as f64;
-                    let dest_key = (t + i) as f64;
-
-                    state.push_number(dest_key)?;
-                    state.push_number(src_key)?;
-                    state.get_table(1)?;
-                    state.set_table_raw(dest_idx)?;
-                }
+            // pair, so exhaustion leaves a deterministic partial mutation. The
+            // metamethod path charges the same way: a handler can fail, and
+            // reserving the whole range would charge copies that never ran.
+            for step in 0..count {
+                let i = if backwards { count - 1 - step } else { step };
+                state.consume_cost(1)?;
+                move_element(state, f + i, t + i, dest_idx, honour_meta)?;
             }
         } else {
             // Without a configured limit, reserve the complete deterministic
             // cost once and keep the hot copy loops free of budget checks.
             state.consume_cost(u64::try_from(count).expect("a nonempty move count is positive"))?;
-            if same_table && t > f {
+            if backwards {
                 for i in (0..count).rev() {
-                    let src_key = (f + i) as f64;
-                    let dest_key = (t + i) as f64;
-
-                    state.push_number(dest_key)?;
-                    state.push_number(src_key)?;
-                    state.get_table(1)?;
-                    state.set_table_raw(dest_idx)?;
+                    move_element(state, f + i, t + i, dest_idx, false)?;
                 }
             } else {
                 for i in 0..count {
-                    let src_key = (f + i) as f64;
-                    let dest_key = (t + i) as f64;
-
-                    state.push_number(dest_key)?;
-                    state.push_number(src_key)?;
-                    state.get_table(1)?;
-                    state.set_table_raw(dest_idx)?;
+                    move_element(state, f + i, t + i, dest_idx, false)?;
                 }
             }
         }
@@ -303,6 +320,201 @@ pub(crate) fn open_table(state: &mut State) -> Result<()> {
     // Set the table table as a global
     state.set_global("table")?;
     Ok(())
+}
+
+/// Largest magnitude at which every integer is an exact f64, so integer table
+/// keys up to it stay distinct.
+const MAX_EXACT_KEY: i64 = 1 << 53;
+
+/// Reject positions that would round when converted to numeric keys. A
+/// singleton may lie outside +-2^53 if that particular integer is exact;
+/// a range needs every intervening integer to be exact as well.
+fn check_sequence_keys(state: &State, first: i64, last: i64, function: &str) -> Result<()> {
+    let valid = if first == last {
+        exact_i64(first as f64) == Some(first)
+    } else {
+        (-MAX_EXACT_KEY..=MAX_EXACT_KEY).contains(&first)
+            && (-MAX_EXACT_KEY..=MAX_EXACT_KEY).contains(&last)
+    };
+    if !valid {
+        return Err(state.error(ErrorKind::RuntimeError(format!(
+            "{function} range exceeds the exactly representable integer keys"
+        ))));
+    }
+    Ok(())
+}
+
+/// Copies `src[src_key]` into `dest[dest_key]`, where the source table is at
+/// stack index 1 and the destination at `dest_idx`. With `honour_meta` the read
+/// goes through `__index` and the write through `__newindex`; without it both
+/// are raw. Leaves the stack as it found it.
+fn move_element(
+    state: &mut State,
+    src_key: i64,
+    dest_key: i64,
+    dest_idx: isize,
+    honour_meta: bool,
+) -> Result<()> {
+    // Both keys were checked against MAX_EXACT_KEY, so the conversions are exact.
+    state.push_number(dest_key as f64)?;
+    state.push_number(src_key as f64)?;
+    if honour_meta {
+        state.get_table(1)?;
+        set_index(state, dest_idx)
+    } else {
+        state.get_table_raw(1)?;
+        state.set_table_raw(dest_idx)
+    }
+}
+
+/// Whether the table at stack index `idx` has a metatable defining `__len`,
+/// `__index` or `__newindex` - the events that make Lua 5.4's sequence
+/// functions (lua_geti/lua_seti/luaL_len) differ from raw access. Tables
+/// without one take the raw fast paths. `idx` must be a positive index.
+fn has_sequence_metamethods(state: &mut State, idx: isize) -> Result<bool> {
+    state.get_metatable_of(idx)?;
+    if state.typ(-1) == LuaType::Nil {
+        state.pop(1)?;
+        return Ok(false);
+    }
+    let mut found = false;
+    for event in ["__len", "__index", "__newindex"] {
+        state.push_string(event)?;
+        state.get_table_raw(-2)?;
+        found = state.typ(-1) != LuaType::Nil;
+        state.pop(1)?;
+        if found {
+            break;
+        }
+    }
+    state.pop(1)?;
+    Ok(found)
+}
+
+/// Lua 5.4's `luaL_len` for the table at the positive stack index `idx`: calls
+/// `__len` when the metatable defines it, else returns the raw border. The
+/// metamethod's result must be a number or numeral string with an exact
+/// integer value.
+///
+/// This lives here rather than in `State::table_len` (which is raw and used by
+/// raw fast paths); a shared metamethod-aware length belongs beside it in
+/// `vm/table_ops.rs` once more callers need one.
+pub(super) fn sequence_len(state: &mut State, idx: isize) -> Result<i64> {
+    // A table length beyond i64::MAX is unreachable; saturating keeps this infallible.
+    let raw = i64::try_from(state.table_len(idx)).unwrap_or(i64::MAX);
+    state.get_metatable_of(idx)?;
+    if state.typ(-1) == LuaType::Nil {
+        state.pop(1)?;
+        return Ok(raw);
+    }
+    state.push_string("__len")?;
+    state.get_table_raw(-2)?;
+    state.remove(-2)?; // drop the metatable, keep the handler
+    if state.typ(-1) == LuaType::Nil {
+        state.pop(1)?;
+        return Ok(raw);
+    }
+    state.push_value(idx)?;
+    state.push_value(idx)?;
+    state.call(ArgCount::Fixed(2), RetCount::Fixed(1))?;
+    // Lua's length dispatch passes the operand twice, and luaL_len converts
+    // the result with lua_tointegerx, including numeral strings.
+    let len = match state.typ(-1) {
+        LuaType::Number => exact_i64(state.to_number(-1)?),
+        LuaType::String => parse_lua_numeral(state.to_bytes(-1)?).and_then(exact_i64),
+        _ => None,
+    };
+    state.pop(1)?;
+    len.ok_or_else(|| {
+        state.error(ErrorKind::RuntimeError(
+            "object length is not an integer".into(),
+        ))
+    })
+}
+
+/// Lua 5.4's `lua_seti`/`lua_settable` for library code: does `t[k] = v`
+/// with `t` at the positive stack index `table_idx` and `k`, `v` on top of the
+/// stack, honouring `__newindex` (function or table chain). Pops `k` and `v`.
+///
+/// Uses the VM's assignment dispatch so nested library and bytecode handlers
+/// share the same depth limit. Both operands stay rooted until dispatch ends.
+fn set_index(state: &mut State, table_idx: isize) -> Result<()> {
+    state.set_table(table_idx)
+}
+
+/// `table.insert` for a table with sequence metamethods, following Lua 5.4's
+/// `tinsert`: length via `__len`, shifts through `__index`/`__newindex`.
+/// Charges like the raw path: the base 1 is already paid, the rest is one per
+/// shifted element, charged before the table is touched.
+fn insert_through_metamethods(state: &mut State, num_args: usize) -> Result<u8> {
+    let first_empty = sequence_len(state, 1)?.wrapping_add(1);
+    // Lua evaluates the length even when the argument count is invalid.
+    if num_args != 2 && num_args != 3 {
+        return Err(state.error(ErrorKind::RuntimeError(
+            "wrong number of arguments to 'insert'".to_string(),
+        )));
+    }
+    let pos = if num_args == 3 {
+        let pos = arg_integer(state, 2, "insert")?;
+        // 5.4's unsigned check: for nonnegative lengths,
+        // 1 <= pos <= first_empty.
+        if pos.wrapping_sub(1).cast_unsigned() >= first_empty.cast_unsigned() {
+            return Err(position_out_of_bounds(state, "insert"));
+        }
+        pos
+    } else {
+        first_empty
+    };
+    // A negative length can admit pos > first_empty, where only pos is written.
+    check_sequence_keys(state, pos, first_empty.max(pos), "table.insert")?;
+    if first_empty > pos {
+        charge_shift_beyond_base(state, first_empty - pos)?;
+    }
+    let mut i = first_empty;
+    while i > pos {
+        state.push_number(i as f64)?;
+        state.push_number((i - 1) as f64)?;
+        state.get_table(1)?;
+        set_index(state, 1)?;
+        i -= 1;
+    }
+    state.push_number(pos as f64)?;
+    // The value is the last argument: index 3 with a position, else 2.
+    state.push_value(if num_args == 3 { 3 } else { 2 })?;
+    set_index(state, 1)?;
+    state.set_top(0)?;
+    Ok(0)
+}
+
+/// `table.remove` for a table with sequence metamethods, following Lua 5.4's
+/// `tremove`. Charges like the raw path.
+fn remove_through_metamethods(state: &mut State) -> Result<u8> {
+    let size = sequence_len(state, 1)?;
+    let mut pos = opt_integer(state, 2, "remove")?.unwrap_or(size);
+    // 5.4's unsigned check: for nonnegative lengths, pos == size or
+    // 1 <= pos <= size + 1. A negative length also admits negative positions.
+    if pos != size && pos.wrapping_sub(1).cast_unsigned() > size.cast_unsigned() {
+        return Err(position_out_of_bounds(state, "remove"));
+    }
+    check_sequence_keys(state, pos, size.max(pos), "table.remove")?;
+    if pos < size {
+        charge_shift_beyond_base(state, size - pos)?;
+    }
+    state.set_top(1)?;
+    state.push_number(pos as f64)?;
+    state.get_table(1)?; // Stack: [t, removed]
+    while pos < size {
+        state.push_number(pos as f64)?;
+        state.push_number((pos + 1) as f64)?;
+        state.get_table(1)?;
+        set_index(state, 1)?;
+        pos += 1;
+    }
+    state.push_number(pos as f64)?;
+    state.push_nil()?;
+    set_index(state, 1)?;
+    state.remove(1)?;
+    Ok(1)
 }
 
 /// Charges the part of a `shifted`-element shift that the base cost of 1 does

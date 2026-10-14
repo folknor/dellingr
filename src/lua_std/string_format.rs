@@ -2,7 +2,7 @@
 
 use super::exact_integer_value;
 use crate::error::{Error, ErrorKind};
-use crate::numeral::parse_lua_numeral;
+use crate::numeral::{exact_i64, parse_lua_numeral};
 use crate::{LuaType, Result, State};
 
 const MAX_FORMAT_LEN: usize = 22;
@@ -524,7 +524,19 @@ fn format_integer_parts(
 }
 
 fn format_float(number: f64, directive: &Directive) -> Vec<u8> {
-    let negative = number.is_sign_negative();
+    // NaN is canonicalised here, at output, rather than in the arithmetic.
+    // The sign of a hardware-generated NaN is platform-specific (x86-64's
+    // default NaN has the sign bit set, aarch64's does not), and NaNs reach
+    // the VM from many producers: runtime `/` and `%`, `sqrt`,
+    // the libm-backed math functions, `^` via `powf`, and host
+    // `push_number`. No Lua operation can observe a NaN's sign or payload
+    // except this formatter (`tostring` prints `NaN`, `%q` prints `(0/0)`,
+    // NaN never compares equal and cannot be a table key), so dropping the
+    // sign here is the single chokepoint that makes output identical on
+    // every host. Snapshot bytes may still carry host NaN bits; they
+    // restore to behaviourally identical State. Reference C Lua prints
+    // `-nan` for `0/0` on x86-64; dellingr always prints `nan`.
+    let negative = number.is_sign_negative() && !number.is_nan();
     let magnitude = number.abs();
     let uppercase = matches!(
         directive.conversion,
@@ -805,6 +817,14 @@ fn quote_argument(state: &mut State, idx: isize, argument: usize) -> Result<Vec<
                 b"1e9999".to_vec()
             } else if number == f64::NEG_INFINITY {
                 b"-1e9999".to_vec()
+            } else if let Some(integer) =
+                exact_i64(number).filter(|_| number.to_bits() != (-0.0_f64).to_bits())
+            {
+                // With no integer subtype, use decimal for all integral
+                // values in i64 range. Lua 5.4 uses this form for its integer
+                // subtype only. `-0.0` keeps the hex form so the literal
+                // round-trips its sign.
+                integer.to_string().into_bytes()
             } else {
                 let mut bytes = format_hex_float(number.abs(), None, false, false);
                 if number.is_sign_negative() {

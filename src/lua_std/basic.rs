@@ -17,7 +17,17 @@ fn digit_value(byte: u8) -> Option<u32> {
 }
 
 fn parse_integer_with_base(bytes: &[u8], base: u32) -> Option<f64> {
-    let trimmed = bytes.trim_ascii();
+    // Trim with the same `isspace` set as `parse_lua_numeral`; `trim_ascii`
+    // omits `\v`, which reference Lua accepts.
+    let start = bytes
+        .iter()
+        .position(|&b| !crate::numeral::is_lua_whitespace(b))
+        .unwrap_or(bytes.len());
+    let end = bytes
+        .iter()
+        .rposition(|&b| !crate::numeral::is_lua_whitespace(b))
+        .map_or(start, |i| i + 1);
+    let trimmed = &bytes[start..end];
     let (negative, digits) = match trimmed {
         [b'-', rest @ ..] => (true, rest),
         [b'+', rest @ ..] => (false, rest),
@@ -28,6 +38,11 @@ fn parse_integer_with_base(bytes: &[u8], base: u32) -> Option<f64> {
         return None;
     }
 
+    // Accumulate in f64 deliberately. This is Lua 5.2's `luaB_tonumber`
+    // (`n = n * base + digit` in `lua_Number`), so long digit strings round
+    // to a float. Lua 5.4 instead wraps a 64-bit integer, which in a VM with
+    // no integer subtype would turn `tonumber(("f"):rep(18), 16)` into `-1`:
+    // a silently wrong number rather than a rounded one.
     let mut value = 0.0;
     for byte in digits {
         let digit = digit_value(*byte)?;

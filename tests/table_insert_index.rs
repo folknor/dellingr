@@ -38,7 +38,7 @@ fn table_insert_invalid_positions_leave_the_stack_and_table_unchanged() {
             .expect_err("position is invalid for an empty table");
         assert_eq!(state.get_top(), 2);
         assert_eq!(state.to_number(-1).unwrap(), 42.0);
-        assert_eq!(state.table_len(1), 0);
+        assert_eq!(state.raw_len(1).unwrap(), 0);
         state.push_nil().unwrap();
         assert!(
             !state.table_next(1).unwrap(),

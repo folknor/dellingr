@@ -42,6 +42,18 @@ impl State {
         key: Val,
         local_cost: &mut u64,
     ) -> Result<()> {
+        self.get_table_with_key_tracking_call(idx, key, local_cost, &mut false)
+    }
+
+    /// Like bytecode lookup, but records the commit point for host reads:
+    /// only entering a user function can consume the key on failure.
+    pub(super) fn get_table_with_key_tracking_call(
+        &mut self,
+        idx: usize,
+        key: Val,
+        local_cost: &mut u64,
+        handler_called: &mut bool,
+    ) -> Result<()> {
         let table_val = self.stack[idx];
         let obj_ptr = table_val.as_object_ptr();
 
@@ -76,7 +88,13 @@ impl State {
                     .map_or(Val::Nil, |mt| mt.get(&index_key));
 
                 if !matches!(index_handler, Val::Nil) {
-                    return self.handle_index_metamethod(index_handler, idx, key, local_cost);
+                    return self.handle_index_metamethod(
+                        index_handler,
+                        idx,
+                        key,
+                        local_cost,
+                        handler_called,
+                    );
                 }
             }
         }
@@ -93,9 +111,10 @@ impl State {
         table_idx: usize,
         key: Val,
         local_cost: &mut u64,
+        handler_called: &mut bool,
     ) -> Result<()> {
         self.with_metamethod_depth(|state| {
-            state.handle_index_metamethod_inner(handler, table_idx, key, local_cost)
+            state.handle_index_metamethod_inner(handler, table_idx, key, local_cost, handler_called)
         })
     }
 
@@ -105,6 +124,7 @@ impl State {
         table_idx: usize,
         key: Val,
         local_cost: &mut u64,
+        handler_called: &mut bool,
     ) -> Result<()> {
         match handler {
             Val::Obj(ptr) => {
@@ -120,7 +140,12 @@ impl State {
                     // The handler table above is an internal temporary. If the
                     // recursive lookup fails - including on its own cap check -
                     // drop it rather than leaving it visible to the caller.
-                    if let Err(e) = self.get_table_with_key(new_idx, key, local_cost) {
+                    if let Err(e) = self.get_table_with_key_tracking_call(
+                        new_idx,
+                        key,
+                        local_cost,
+                        handler_called,
+                    ) {
                         self.stack.truncate(new_idx);
                         return Err(e);
                     }
@@ -144,6 +169,7 @@ impl State {
                     self.push_unchecked(Val::Obj(ptr));
                     self.push_unchecked(table_val);
                     self.push_unchecked(key);
+                    *handler_called = true;
                     self.call(ArgCount::Fixed(2), RetCount::Fixed(1))?;
                     Ok(())
                 } else {
@@ -160,10 +186,13 @@ impl State {
                 self.push_unchecked(Val::RustFn(f));
                 self.push_unchecked(table_val);
                 self.push_unchecked(key);
+                *handler_called = true;
                 self.call(ArgCount::Fixed(2), RetCount::Fixed(1))?;
                 Ok(())
             }
-            Val::Str(_) => self.get_string_table_field(key, None, local_cost),
+            Val::Str(_) => {
+                self.get_string_table_field_tracking_call(key, None, local_cost, handler_called)
+            }
             _ => Err(self.type_error(super::TypeError::TableIndex(handler.typ(&self.heap)))),
         }
     }

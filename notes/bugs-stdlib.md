@@ -24,40 +24,6 @@ Stdlib findings whose mechanism lives in `src/vm/table.rs` or
    inline instead.
 ```
 
-## STD-003 - Table library ignores `__len`
-
-Source: stdlib (finding 2).
-
-Claim broken: reference output matching. `__len` is implemented for `#`
-(`eval_store.rs`), and both Lua 5.2 (`aux_getn` -> `luaL_len`) and 5.4
-(`aux_getn` with `TAB_R`/`TAB_RW` -> `luaL_len`) honour `__len` in
-`table.insert`, `table.remove`, `table.concat` and `unpack`/`table.unpack`.
-
-`State::table_len` (`vm/table_ops.rs`) returns the raw border, so for a proxy
-table with `__len`/`__index`, `#proxy` returns the metamethod's count but
-`table.unpack(proxy)` returns nothing. No `-- DIFF:` or README entry covers
-this.
-
-## STD-004 - NaN sign leaks through `string.format`, so output differs across platforms
-
-Source: stdlib (finding 3).
-
-Claims broken: determinism. Also `math.rs`'s module doc: "Basic arithmetic
-(`+ - * / %` ...) ... are bit-stable across platforms".
-
-`format_float` (`string_format.rs`) takes the sign from
-`number.is_sign_negative()` before checking for NaN. `0/0` and `math.sqrt(-1)`
-produce the hardware default NaN. On x86-64 it has the sign bit set, so
-`string.format("%f", 0/0)` prints `-nan`. On aarch64 it is positive, so the same
-call prints `nan`. The constant folder runs `lua_div` on the compiling host, so
-a folded `0/0` bakes that host's NaN bits into bytecode and snapshots.
-`%e/%f/%g/%a` make the difference visible. `tostring` hides it, because Rust
-prints `NaN` without a sign, and `%q` prints `(0/0)`.
-
-Direction: canonicalise NaN to one sign in `format_float`, and either narrow the
-`math.rs` bit-stability sentence to exclude NaN payloads and signs, or
-canonicalise NaN in the arithmetic helpers.
-
 ## STD-005 - Number-to-string is Rust `Display`, not `%.14g`, and nothing durable records it
 
 Source: stdlib (finding 4).
@@ -83,22 +49,6 @@ Direction: either implement `%.14g` (the existing `format_general` in
 `string_format.rs` could back it) or document the divergence under
 "Compatibility divergences".
 
-## STD-007 - `string.format("%q", n)` matches neither reference for integral numbers
-
-Source: stdlib (finding 5).
-
-Claim broken: `lua_std.rs` and `string_format.rs` say `string.format` follows
-Lua 5.4.
-
-`quote_argument` always emits a hex float for finite numbers, so
-`string.format("%q", 1)` gives `0x1p+0`. Lua 5.4 gives `1`, because the literal
-is an integer printed with `LUA_INTEGER_FMT`. Lua 5.2 also gives `1`, because
-`%q` coerces with `luaL_checklstring`.
-
-Direction: with no integer subtype, the choice consistent with the rest of the VM
-(see the `number_to_string` comment) is decimal for integral values in i64 range
-and hex float otherwise.
-
 ## STD-008 - `_G` proxy aliases distinct non-UTF-8 string keys; its metatable is exposed and unprotected
 
 Source: stdlib (finding 7).
@@ -118,48 +68,6 @@ Related smell: `getmetatable(_G)` returns the internal proxy metatable rather
 than `nil` (reference `_G` has none). It is unprotected, so
 `setmetatable(_G, nil)` or `getmetatable(_G).__index = f` silently breaks `_G`
 for the rest of the State. Setting `__metatable` on it would close that.
-
-## STD-009 - `tonumber(s, base)` trims different whitespace from `tonumber(s)`
-
-Source: stdlib (finding 8).
-
-Claim broken: reference matching, and consistency with the module's own shared
-helper.
-
-`parse_integer_with_base` (`basic.rs`) uses `<[u8]>::trim_ascii`, which does not
-treat `\v` (0x0B) as whitespace. `parse_lua_numeral` uses
-`numeral::is_lua_whitespace`, which does, as reference `isspace` does. So
-`tonumber("10\v")` is `10` but `tonumber("10\v", 16)` is `nil`, where both
-references give 16. Use `is_lua_whitespace`.
-
-A lesser issue in the same function: accumulation happens in f64, so long digit
-strings give a rounded float where 5.4 wraps a 64-bit integer.
-
-## STD-010 - The module doc says `unpack` follows Lua 5.2, but it honours `__index` (5.4 behaviour)
-
-Source: stdlib (finding 10).
-
-Claim broken: the `lua_std.rs` module doc ("Global `unpack` follows Lua 5.2;
-`table.unpack` uses the same implementation").
-
-`unpack_values` reads with `state.get_table(1)`, which dispatches `__index`. Lua
-5.2's `unpack` uses `lua_rawgeti`. Either the doc or the code is wrong.
-`table.concat` also uses `get_table`, which is 5.4 behaviour (5.2 reads raw).
-
-## STD-011 - `table.move` reads through `__index` but writes raw; keys collapse past 2^53
-
-Source: stdlib (finding 11).
-
-Claim broken: reference matching. `table.move` exists only in 5.3+, and 5.4 uses
-`lua_geti`/`lua_seti` on both sides.
-
-`table.rs` reads with `get_table` (metamethods) and writes with
-`set_table_raw`, so a destination proxy's `__newindex` is bypassed. Integer keys
-are built as `(f + i) as f64`, so beyond 2^53 distinct source and destination
-keys collapse onto the same float key. With no budget configured,
-`table.move(t, 1, 2^62, 2)` records the full count up front and then loops about
-2^62 times. The hunter notes this is consistent with an unbudgeted State, but
-worth knowing.
 
 ## STD-012 - Strings have no metatable, but string method calls work
 
@@ -225,14 +133,38 @@ Source: stdlib (finding 15).
 - `string.find`/`match`/`gsub`/`gmatch`/`upper`/... copy the subject into a fresh
   `Vec` on every call (`string_or_number_bytes`). The copy is charged, but it is
   an avoidable allocation on the hottest string paths.
+- Explicit `table.concat(t, sep, i, j)` / `unpack(t, i, j)` ranges beyond
+  +/-2^53 can still collapse distinct integer keys onto one f64 key, unlike
+  `table.move`, `insert` and `remove`, which now reject such ranges. (Lateral
+  finding from a resolution-loop reviewer.)
 
-## STD-017 - `table.insert` and `table.remove` read and write raw
+## STD-018 - `table.sort` ignores `__len`, `__index` and `__newindex`
 
-Source: lateral finding from the resolution-loop fixer that gave tables an
-array part. Related to STD-003 (`__len` ignored) and STD-011 (`table.move`
-writes raw), but a separate mechanism.
+Source: lateral finding from a resolution-loop fixer.
 
-Claim broken: reference output matching, with no `-- DIFF:` marker. Lua 5.4's
-`tinsert`/`tremove` go through `lua_geti`/`lua_seti`, so they honour
-`__index`/`__newindex`. dellingr's `table.insert`/`table.remove` shift the
-storage directly and skip metamethods, so a proxy table behaves differently.
+Claim broken: the `src/lua_std.rs` module doc now says the table library follows
+Lua 5.4's metamethod rules, with `table.sort` named as the exception that works
+on the raw array. Lua 5.4's `sort` uses `aux_getn` (honouring `__len`) and
+`lua_geti`/`lua_seti`, so a proxy table sorts in reference Lua and not here.
+The exception is documented, but no `-- DIFF:` marker or README entry records
+it. `table.sort` goes through the crate-internal `table_sort` in
+`src/vm/table_ops.rs`. A comment at the sort site in `src/lua_std/table.rs` notes
+the gap. The same fixer suggests that a shared metamethod-aware length helper
+belongs in `table_ops.rs` beside `table_len`, instead of the library-local
+`sequence_len`.
+
+## STD-020 - Bytecode `#` passes only one operand to `__len`
+
+Source: lateral finding from a resolution-loop reviewer.
+
+Lua 5.4 calls `__len(t, t)` (two operands). The table library's length helper
+now does too, but the bytecode `#` operator (`eval_store.rs`) passes only one.
+A `__len` that inspects its second argument behaves differently under `#t` and
+under `table.insert`.
+
+## STD-019 - `string.format` rejects `%F`
+
+Source: lateral finding from a resolution-loop fixer.
+
+Claim broken: `string_format.rs` is "the Lua 5.4 `string.format` engine". Lua
+5.4's `lstrlib` accepts the conversions `aAeEfFgG`. dellingr rejects `%F`.

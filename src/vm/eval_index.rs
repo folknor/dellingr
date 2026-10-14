@@ -70,6 +70,16 @@ impl State {
         cache: Option<&FieldLookupCacheSlot>,
         local_cost: &mut u64,
     ) -> Result<()> {
+        self.get_string_table_field_tracking_call(key, cache, local_cost, &mut false)
+    }
+
+    pub(super) fn get_string_table_field_tracking_call(
+        &mut self,
+        key: Val,
+        cache: Option<&FieldLookupCacheSlot>,
+        local_cost: &mut u64,
+        handler_called: &mut bool,
+    ) -> Result<()> {
         // Net-positive by one slot: callers in `metamethod.rs` reach this
         // without having popped a receiver first, so the check belongs here
         // rather than at the call sites.
@@ -83,7 +93,7 @@ impl State {
 
         self.get_global("string")?;
         let string_lib_idx = self.stack.len() - 1;
-        self.get_table_with_key(string_lib_idx, key, local_cost)?;
+        self.get_table_with_key_tracking_call(string_lib_idx, key, local_cost, handler_called)?;
         let result = self.pop_val();
         let string_lib = self.pop_val();
 

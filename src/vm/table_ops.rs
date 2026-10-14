@@ -101,39 +101,68 @@ impl State {
     /// This function pops the key from the stack (putting the resulting value in
     /// its place). As in Lua, this function may trigger a metamethod for the
     /// "index" event.
+    ///
+    /// Validation and dispatch preflight failures leave the stack unchanged.
+    /// An error from calling an `__index` function is not covered: by then
+    /// the key has been consumed, and a script error kills the callback anyway.
     #[hotpath::measure]
     pub fn get_table(&mut self, i: isize) -> Result<()> {
-        let idx = self.convert_idx(i)?;
-        if idx == self.stack.len() - 1 {
-            return Err(self.error(ErrorKind::InvalidStackIndex { index: i }));
-        }
+        let idx = self.table_operand_below_top(i, 1)?;
+        let top = self.stack.len();
         let key = self.pop_val();
         let mut local_cost = 0;
-        self.get_table_with_key(idx, key, &mut local_cost)
+        let mut handler_called = false;
+        let result =
+            self.get_table_with_key_tracking_call(idx, key, &mut local_cost, &mut handler_called);
+        if result.is_err() && !handler_called {
+            // No user code ran. Dispatch roots the key through its allocations
+            // and can only have added temporary slots above the entry prefix.
+            self.stack.truncate(top - 1);
+            self.push_unchecked(key); // Replaces the key popped above.
+        }
+        result
+    }
+
+    /// Resolves `i` to a table that sits below the top `operands` values, and
+    /// type-checks it, without touching the stack. Host methods that consume
+    /// operands call this first so that every rejection they can foresee
+    /// leaves the stack unchanged (peek, validate, then pop on commit).
+    fn table_operand_below_top(&self, i: isize, operands: usize) -> Result<usize> {
+        let idx = self.convert_idx(i)?;
+        // The operands must sit ABOVE the table, so that popping them leaves
+        // the table itself in place. A host calling with too few visible
+        // values is a mistake, not a VM bug, so it must produce an error
+        // rather than reach the panicking `pop_val`. The error names the
+        // table index, since it is the one that leaves no room above it.
+        if self.stack.len() < idx + 1 + operands {
+            return Err(self.error(ErrorKind::InvalidStackIndex { index: i }));
+        }
+        if self.stack[idx]
+            .as_object_ptr()
+            .and_then(|ptr| self.heap.as_table_ref(ptr))
+            .is_none()
+        {
+            return Err(self.type_error(TypeError::TableIndex(self.stack[idx].typ(&self.heap))));
+        }
+        Ok(idx)
     }
 
     /// Gets `t[k]` without invoking metamethods.
     /// `t` is at the given index, `k` is at the top of the stack.
-    /// Pops the key and pushes the result.
+    /// Pops the key and pushes the result. On error the stack is unchanged.
     #[hotpath::measure]
     pub fn get_table_raw(&mut self, i: isize) -> Result<()> {
-        let idx = self.convert_idx(i)?;
-        if idx == self.stack.len() - 1 {
-            return Err(self.error(ErrorKind::InvalidStackIndex { index: i }));
-        }
-        let key = self.pop_val();
-
-        // Get the ObjectPtr and type for error reporting
-        let obj_ptr = self.stack[idx].as_object_ptr();
-        let typ = self.stack[idx].typ(&self.heap);
-
-        match obj_ptr.and_then(|ptr| self.heap.as_table_ref(ptr)) {
-            Some(t) => {
-                let val = t.get(&key);
-                self.push_val(val)
-            }
-            None => Err(self.type_error(TypeError::TableIndex(typ))),
-        }
+        let idx = self.table_operand_below_top(i, 1)?;
+        let key = self.stack[self.stack.len() - 1];
+        let val = self.stack[idx]
+            .as_object_ptr()
+            .and_then(|ptr| self.heap.as_table_ref(ptr))
+            .expect("table_operand_below_top validated the table")
+            .get(&key);
+        // Replaces the key in place: net-neutral, so no preflight is needed.
+        let top = self.stack.len() - 1;
+        self.stack[top] = val;
+        Ok(())
     }
 
     /// Does the equivalent of `t[k] = v`, where `t` is the value at the given
@@ -141,74 +170,99 @@ impl State {
     /// is the value at the top of the stack.
     ///
     /// This function pops both the key and the value from the stack. Matches
-    /// the reference Lua C API's `lua_rawset`.
+    /// the reference Lua C API's `lua_rawset`. A bad index, a non-table
+    /// target, or a nil/NaN key is rejected before either operand is popped.
     #[hotpath::measure]
     pub fn set_table_raw(&mut self, i: isize) -> Result<()> {
-        let idx = self.convert_idx(i)?;
-        // Both operands must sit ABOVE the table, so that popping them leaves
-        // the table itself in place for the lookup below. A host calling this
-        // with too few visible values is a mistake, not a VM bug, so it must
-        // produce an error rather than reach the panicking `pop_val` - or pop
-        // the table and then index off the end of the stack.
-        if self.stack.len() < idx + 3 {
-            return Err(self.error(ErrorKind::InvalidStackIndex { index: -2 }));
+        let idx = self.table_operand_below_top(i, 2)?;
+        let top = self.stack.len();
+        let key = self.stack[top - 2];
+        let val = self.stack[top - 1];
+        match key {
+            Val::Nil => return Err(self.type_error(TypeError::TableKeyNil)),
+            Val::Num(n) if n.is_nan() => return Err(self.type_error(TypeError::TableKeyNan)),
+            _ => {}
         }
-        let val = self.pop_val();
-        let key = self.pop_val();
+        self.stack[idx]
+            .as_object_ptr()
+            .and_then(|ptr| self.heap.as_table(ptr))
+            .expect("table_operand_below_top validated the table")
+            .insert(key, val)?;
+        self.stack.truncate(top - 2);
+        Ok(())
+    }
 
-        // Get the ObjectPtr and type for error reporting
-        let obj_ptr = self.stack[idx].as_object_ptr();
-        let typ = self.stack[idx].typ(&self.heap);
-
-        match obj_ptr.and_then(|ptr| self.heap.as_table(ptr)) {
-            Some(t) => {
-                t.insert(key, val)?;
-                Ok(())
-            }
-            None => Err(self.type_error(TypeError::TableIndex(typ))),
-        }
+    /// Library assignment with the same `__newindex` dispatch as bytecode.
+    /// Keep the key and value on the stack as GC roots throughout dispatch;
+    /// consume them only after a successful write or handler call.
+    pub(crate) fn set_table(&mut self, i: isize) -> Result<()> {
+        let idx = self.table_operand_below_top(i, 2)?;
+        let top = self.stack.len();
+        let key = self.stack[top - 2];
+        let val = self.stack[top - 1];
+        let mut local_cost = 0;
+        self.set_table_with_key(idx, key, val, &mut local_cost)?;
+        self.stack.truncate(top - 2);
+        Ok(())
     }
 
     /// Returns the next key-value pair from a table, for use with `pairs`.
     /// Takes the table index and pops the key from the stack.
     /// Pushes the next key and value onto the stack (or just nil if done).
+    /// Every failure (bad index, non-table, invalid key, stack overflow) is
+    /// detected before the key is popped, so a host loop can retry or resume.
     #[hotpath::measure]
     pub fn table_next(&mut self, table_idx: isize) -> Result<bool> {
-        let idx = self.convert_idx(table_idx)?;
-        if idx == self.stack.len() - 1 {
-            return Err(self.error(ErrorKind::InvalidStackIndex { index: table_idx }));
-        }
-        let key = self.pop_val();
-
-        let obj_ptr = self.stack[idx].as_object_ptr();
-        let typ = self.stack[idx].typ(&self.heap);
-
-        match obj_ptr.and_then(|ptr| self.heap.as_table_ref(ptr)) {
-            Some(t) => match t.next(&key) {
-                TableNext::Pair(next_key, next_val) => {
-                    // Two values are pushed against the one key popped above,
-                    // so the preflight must cover both of them: measured from
-                    // the current length this needs two free slots, not one.
-                    self.check_stack_space(2)?;
-                    self.push_unchecked(next_key);
-                    self.push_unchecked(next_val);
-                    Ok(true)
-                }
-                TableNext::End => {
-                    self.push_unchecked(Val::Nil); // Replaces the key popped above.
-                    Ok(false)
-                }
-                TableNext::InvalidKey => {
-                    Err(self.error(ErrorKind::RuntimeError("invalid key to 'next'".into())))
-                }
-            },
-            None => Err(self.type_error(TypeError::TableIndex(typ))),
+        let idx = self.table_operand_below_top(table_idx, 1)?;
+        let top = self.stack.len() - 1;
+        let key = self.stack[top];
+        let next = self.stack[idx]
+            .as_object_ptr()
+            .and_then(|ptr| self.heap.as_table_ref(ptr))
+            .expect("table_operand_below_top validated the table")
+            .next(&key);
+        match next {
+            TableNext::Pair(next_key, next_val) => {
+                // The key slot is reused for `next_key`, so only the value
+                // needs a fresh slot. Checked before anything is written.
+                self.check_stack_space(1)?;
+                self.stack[top] = next_key;
+                self.push_unchecked(next_val);
+                Ok(true)
+            }
+            TableNext::End => {
+                self.stack[top] = Val::Nil;
+                Ok(false)
+            }
+            TableNext::InvalidKey => {
+                Err(self.error(ErrorKind::RuntimeError("invalid key to 'next'".into())))
+            }
         }
     }
 
-    /// Returns the array length of the table at the given index.
+    /// Returns the length (border) of the table at a stack index, as the `#`
+    /// operator would without metamethods; for a string, its byte length.
+    /// Matches the reference C API's `lua_rawlen`, except that a value with
+    /// no length is an error rather than 0, so a host bug cannot read as an
+    /// empty table. A bad index is `InvalidStackIndex`.
+    pub fn raw_len(&self, idx: isize) -> Result<usize> {
+        let i = self.convert_idx(idx)?;
+        match self.stack[i] {
+            Val::Str(s) => Ok(self.heap.get_string(s).len()),
+            v => v
+                .as_object_ptr()
+                .and_then(|ptr| self.heap.as_table_ref(ptr))
+                .map(super::table::Table::array_len)
+                .ok_or_else(|| self.type_error(TypeError::Length(v.typ(&self.heap)))),
+        }
+    }
+
+    /// Returns the array length of the table at the given index, or 0 for a
+    /// bad index or a non-table. Crate-internal: stdlib callers have already
+    /// type-checked the argument, so the 0 fallback is unreachable for them.
+    /// Hosts use [`State::raw_len`], which reports both mistakes.
     #[hotpath::measure]
-    pub fn table_len(&self, idx: isize) -> usize {
+    pub(crate) fn table_len(&self, idx: isize) -> usize {
         let i = match self.convert_idx(idx) {
             Ok(i) => i,
             Err(_) => return 0,
@@ -240,93 +294,91 @@ impl State {
 
     /// Sets the metatable of the table at the given index.
     /// The metatable should be at the top of the stack (or nil to remove).
-    /// Pops the metatable from the stack.
+    /// Pops the metatable from the stack. A bad index, a non-table target or
+    /// a metatable that is neither a table nor nil is rejected before the
+    /// pop, leaving the stack unchanged.
     #[hotpath::measure]
     pub fn set_metatable_of(&mut self, table_idx: isize) -> Result<()> {
-        // Validate before popping, so a bad table index or an empty stack leaves
-        // the stack untouched instead of consuming a value or panicking in
-        // `pop_val`.
-        let idx = self.convert_idx(table_idx)?;
-        // The metatable must sit above the table, for the same reason.
-        if self.stack.len() < idx + 2 {
-            return Err(self.error(ErrorKind::InvalidStackIndex { index: -1 }));
-        }
-        let mt_val = self.pop_val();
-        let typ = self.stack[idx].typ(&self.heap);
-
-        let mt = match mt_val {
+        let idx = self.table_operand_below_top(table_idx, 1)?;
+        let mt = match self.stack[self.stack.len() - 1] {
             Val::Nil => None,
             Val::Obj(ptr) if self.heap.as_table_ref(ptr).is_some() => Some(ptr),
             other => return Err(self.type_error(TypeError::TableIndex(other.typ(&self.heap)))),
         };
-
-        match self.stack[idx]
+        self.stack[idx]
             .as_object_ptr()
             .and_then(|ptr| self.heap.as_table(ptr))
-        {
-            Some(t) => {
-                t.set_metatable(mt);
-                Ok(())
-            }
-            None => Err(self.type_error(TypeError::TableIndex(typ))),
-        }
+            .expect("table_operand_below_top validated the table")
+            .set_metatable(mt);
+        self.pop_val();
+        Ok(())
     }
 
     /// Inserts a value into a table at a position, shifting elements.
     /// Stack: [t, value] -> [t]
     /// `table_idx` resolves against the entry stack, so a negative index counts
     /// from the top value that will be popped. The value is popped from the
-    /// stack. `pos` must be in `1..=table_len(table_idx) + 1`; an invalid
-    /// position leaves the stack and table unchanged.
+    /// stack. `pos` must be in `1..=raw_len(table_idx) + 1`; a bad index, a
+    /// non-table or an invalid position leaves the stack and table unchanged.
+    /// Charges no cost; `table.insert` charges its own shift distance.
     #[hotpath::measure]
     pub fn table_insert_at(&mut self, table_idx: isize, pos: usize) -> Result<()> {
         // Resolve against the entry stack, including the value to be popped.
         // This keeps negative indices relative to the caller's visible top and
         // validates the table before mutating the stack.
-        let idx = self.convert_idx(table_idx)?;
-        if idx == self.stack.len() - 1 {
-            return Err(self.error(ErrorKind::InvalidStackIndex { index: table_idx }));
-        }
+        let idx = self.table_operand_below_top(table_idx, 1)?;
         if !(1..=self.table_len(table_idx) + 1).contains(&pos) {
             return Err(self.error(ErrorKind::RuntimeError("position out of bounds".into())));
         }
         let value = self.pop_val();
-        let obj_ptr = self.stack[idx].as_object_ptr();
-        let typ = self.stack[idx].typ(&self.heap);
-
-        match obj_ptr.and_then(|ptr| self.heap.as_table(ptr)) {
-            Some(t) => {
-                t.array_insert(pos, value);
-                Ok(())
-            }
-            None => Err(self.type_error(TypeError::TableIndex(typ))),
-        }
+        self.stack[idx]
+            .as_object_ptr()
+            .and_then(|ptr| self.heap.as_table(ptr))
+            .expect("table_operand_below_top validated the table")
+            .array_insert(pos, value);
+        Ok(())
     }
 
-    /// Removes a value from a table at a position, shifting elements.
-    /// Pushes the removed value onto the stack.
+    /// Removes a value from a table at a position, shifting elements down,
+    /// and pushes the removed value onto the stack.
+    ///
+    /// `pos` must be in `1..=raw_len(table_idx) + 1`, or 0 when the table's
+    /// length is 0 - the range `table.remove` accepts. Positions 0 and
+    /// `len + 1` shift nothing: they return `t[pos]` and clear it, as
+    /// reference `table.remove` does. Any other position is an error that
+    /// leaves the stack and table unchanged; without this check a stray
+    /// position would silently clear an arbitrary key. Charges no cost.
     #[hotpath::measure]
     pub fn table_remove_at(&mut self, table_idx: isize, pos: usize) -> Result<()> {
-        let idx = self.convert_idx(table_idx)?;
-        let obj_ptr = self.stack[idx].as_object_ptr();
-        let typ = self.stack[idx].typ(&self.heap);
+        let idx = self.table_operand_below_top(table_idx, 0)?;
+        let len = self.table_len(table_idx);
+        let valid = (1..=len + 1).contains(&pos) || (len == 0 && pos == 0);
+        if !valid {
+            return Err(self.error(ErrorKind::RuntimeError("position out of bounds".into())));
+        }
 
         // Reserve the result slot *before* mutating the table: failing after
         // `array_remove` would discard the value with no way to return it.
         self.check_stack_space(1)?;
-        let removed = match obj_ptr.and_then(|ptr| self.heap.as_table(ptr)) {
-            Some(t) => t.array_remove(pos),
-            None => return Err(self.type_error(TypeError::TableIndex(typ))),
-        };
+        let removed = self.stack[idx]
+            .as_object_ptr()
+            .and_then(|ptr| self.heap.as_table(ptr))
+            .expect("table_operand_below_top validated the table")
+            .array_remove(pos);
         self.push_unchecked(removed);
         Ok(())
     }
 
-    /// Sorts the array portion of a table in place.
-    /// If has_comp is true, uses the function at stack index 2 as comparator.
-    /// Charges for the original range before sorting and returns its length.
+    /// Sorts the sequence `t[1..=#t]` of the table at `table_idx` in place.
+    /// If `has_comp` is true, the function at frame index 2 is the comparator.
+    /// Charges `max(n, 1)` itself, before the comparator runs or the table is
+    /// mutated, and returns `n`; callers must not charge again.
+    ///
+    /// Crate-internal (VM-007): the comparator slot is `table.sort`'s argument
+    /// layout, a stdlib calling convention a host has no reason to mirror.
+    /// Hosts sort by calling `table.sort` through the stack.
     #[hotpath::measure]
-    pub fn table_sort(&mut self, table_idx: isize, has_comp: bool) -> Result<usize> {
+    pub(crate) fn table_sort(&mut self, table_idx: isize, has_comp: bool) -> Result<usize> {
         let idx = self.convert_idx(table_idx)?;
 
         // Get the array values

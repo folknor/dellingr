@@ -20,7 +20,10 @@
 /// callback counts every executed costed opcode, and charges the table library
 /// per element: `table.insert`/`table.remove` one per element shifted,
 /// `unpack`/`table.unpack` one per element visited and `table.pack` one per
-/// stored argument, each with a minimum of 1.
+/// stored argument, each with a minimum of 1. The table library also runs
+/// sequence-library metamethods with their normal execution costs, and
+/// output-byte charges change through unsigned NaN formatting and decimal
+/// integral `%q` output.
 pub const COST_MODEL_VERSION: u16 = 5;
 
 /// Tracks costs either without a budget or against a finite budget.

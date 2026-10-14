@@ -748,9 +748,9 @@ fn the_cap_does_not_charge_cost() {
 }
 
 #[test]
-fn table_next_preflights_both_of_its_pushes() {
-    // `next` pops one key and pushes two values, so one free slot is not
-    // enough. Checking for only one would let the pair land above the cap.
+fn table_next_preflights_its_net_growth_before_replacing_the_key() {
+    // `next` replaces one key with two values, so it needs one free slot
+    // measured against the entry stack, before the key is consumed.
     let mut state = State::empty();
     state.new_table().expect("room for the table");
     state.push_string("k").expect("room for the key");
@@ -770,6 +770,14 @@ fn table_next_preflights_both_of_its_pushes() {
         "expected StackOverflow, got {:?}",
         err.kind
     );
+    assert_eq!(state.get_top(), MAX_STACK_SIZE);
+    assert_eq!(state.typ(-1), crate::LuaType::Nil);
+
+    state.pop(1).expect("shrinking frees the result slot");
+    assert!(state.table_next(1).expect("one free slot is enough"));
+    assert_eq!(state.get_top(), MAX_STACK_SIZE);
+    assert_eq!(state.to_string(-2).unwrap(), "k");
+    assert_eq!(state.to_number(-1).unwrap(), 1.0);
 }
 
 #[test]

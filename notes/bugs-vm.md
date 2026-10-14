@@ -23,65 +23,6 @@ anything.
    inline instead.
 ```
 
-## VM-006 - Host table and metatable methods consume their operands before they fail
-
-Source: embedding (finding 4) and vm-exec (finding 7, second bullet). vm-exec
-read the README sentence as covering only stack-growth rejections, and so called
-this a smell rather than a broken contract. Embedding argues that `table_next`
-breaks the sentence under either reading.
-
-Claim broken (embedding's reading): README "a rejected operation leaves the
-stack exactly as it was", and the same statement in AGENTS.md for the host API.
-
-- `table_next` pops the key and then runs `check_stack_space(2)`. On
-  `StackOverflow` the key is gone, so a host iteration loop can neither retry nor
-  resume. The same happens on `InvalidKey` and on a non-table type error.
-- `get_table` and `get_table_raw` pop the key before the type check and before
-  `__index` dispatch. Indexing a non-table, or an `__index` error, loses the key.
-- `set_table_raw` pops value and key, then fails on a non-table or on
-  `t.insert` (nil or NaN key). Both operands are lost.
-- `set_metatable_of` pops the metatable, then fails on a non-table target or a
-  non-table metatable.
-- `table_insert_at` pops the value, then fails on a non-table.
-
-`set_metatable_of` and `set_table_raw` carry comments about validating "before
-popping", but they validate only the stack shape, not the types.
-
-Direction: peek, validate everything, and pop only on commit, as
-`concat_helper` already does ("Intern before truncating").
-
-Structural direction (embedding, covering this entry, VM-007 and the
-since-fixed `set_global` / `call_anchor` / host `Dynamic` call cases):
-the host API is a C-API-style set of stack-twiddling methods, each
-re-implementing "validate, then pop" by hand, and the same methods double as
-stdlib internals with stdlib-only preconditions. Split it into a narrow, fully
-validated host facade (frame-relative indexing, peek-then-commit, no `Dynamic`)
-and `pub(crate)` internals (`table_*_at`, `table_sort`, unvalidated
-`set_global`, the dynamic call).
-
-## VM-007 - `table_insert_at`, `table_remove_at` and `table_sort` are public but trust stdlib-validated inputs
-
-Source: embedding (finding 5).
-
-Claim broken: `table_insert_at`'s name and doc ("Inserts a value into a table at
-a position, shifting elements"). Its doc admits "`pos` has been validated by
-table.insert", but an embedder has no such validator.
-
-`Table::array_insert` loops over `pos..=len` and then writes `carry` at `len+1`:
-- For `pos > len + 1` the loop is empty, and the value lands at `len+1`, not at
-  `pos`.
-- For `pos == 0` the value is written at key `0`, and the old `t[0]` is shifted
-  into `t[1]`.
-
-`table_remove_at` silently returns nil for out-of-range positions, which at
-least matches its stdlib caller. `table_sort`'s "uses the function at stack index
-2 as comparator" is a hidden coupling to the stdlib calling convention. Its doc
-says "Returns the array length for cost charging", but it already calls
-`consume_cost` itself, so a host following the doc charges twice.
-
-Direction: either validate `1 <= pos <= len+1` and return an error, or make these
-helpers `pub(crate)`.
-
 ## VM-010 - `tostring` mangles non-UTF-8 bytes returned by `__tostring`
 
 Source: vm-heap (finding 3).
@@ -231,13 +172,6 @@ still comes from the innermost error. With `error(msg, 2)` (`TraceFrame(1)`) and
 an unnamed chunk, the output pairs the caller's line with the callee's column.
 Runtime errors always have column 0 today, so the visible effect is a spurious
 `:0`, but it is the exact splice the comment warns against.
-
-## VM-025 - `table_len` swallows a bad index and returns 0
-
-Source: vm-heap (smaller items).
-
-Every other public index API returns `InvalidStackIndex`. `table_len` takes
-`&self` and returns `usize`, so a host bug reads as "empty table".
 
 ## VM-026 - Smaller heap items: dangling tombstone keys, `array_insert` version ordering, quadratic env-delta encoding, allocator GC note
 
@@ -391,3 +325,21 @@ via `shift_remove_index`, which shifts every later entry. A loop like
 `t.x = nil; t.x = v` on a large table therefore does linear host work per write
 at a constant charge. The array part no longer goes through this path; hash keys
 still do.
+
+## VM-037 - Snapshots and folded literals carry the producing host's NaN bits
+
+Source: lateral finding from the resolution-loop fixer that made
+`string.format` print NaN unsigned.
+
+Claim at stake: determinism across hosts. `0/0`, `math.sqrt(-1)` and similar
+produce the hardware default NaN, which has the sign bit set on x86-64 and clear
+on aarch64. Script output no longer shows the sign: `tostring` prints `NaN`,
+`string.format` now prints an unsigned `nan`, `%q` prints `(0/0)`, and NaN never
+compares equal and cannot be a table key. But `save_state.rs` stores
+`SavedVal::Num` as `to_bits`, so a NaN computed at runtime is saved with the
+producing host's bits. Two hosts running the same script therefore produce
+different snapshot bytes, although the restored States behave identically. (The
+fixer also blamed folded literals; the wave reviewer reports that the parser
+already refuses to fold a NaN result, so only runtime values are affected.) If
+snapshots must be byte-identical across hosts (for example, hashed for replay
+verification), canonicalise NaN when saving.
