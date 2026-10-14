@@ -180,11 +180,18 @@ impl State {
                 }
             }
         } else {
-            // Check for __call metamethod on tables
-            let metatable_ptr = func_val
-                .as_object_ptr()
-                .and_then(|ptr| self.heap.as_table_ref(ptr))
-                .and_then(super::table::Table::get_metatable);
+            // Check for a __call metamethod: a table's own metatable, or the
+            // metatable all strings share (reference Lua makes `("x")(...)`
+            // callable once `getmetatable("").__call` is set). This branch is
+            // already off the function fast paths above.
+            let metatable_ptr = match func_val {
+                Val::Obj(ptr) => self
+                    .heap
+                    .as_table_ref(ptr)
+                    .and_then(super::table::Table::get_metatable),
+                Val::Str(_) => self.string_metatable,
+                _ => None,
+            };
 
             if let Some(mt_ptr) = metatable_ptr {
                 let call_handler = self.with_rooted_value(func_val, |state| {
@@ -198,9 +205,9 @@ impl State {
                 });
 
                 if !matches!(call_handler, Val::Nil) {
-                    // Insert the table as first argument and call the handler
+                    // Insert the receiver as first argument and call the handler
                     // Stack is currently: [arg1, arg2, ..., argN]
-                    // We need: [handler, table, arg1, arg2, ..., argN]
+                    // We need: [handler, receiver, arg1, arg2, ..., argN]
                     let combined = match actual_num_args.checked_add(1) {
                         Some(c) => c,
                         None => {
@@ -215,7 +222,7 @@ impl State {
                         }
                     };
                     // The callable was already removed, so inserting handler
-                    // and table is exactly one slot more than the call began
+                    // and receiver is exactly one slot more than the call began
                     // with; preflighting 2 against the shortened stack is the
                     // precise bound, not an over-estimate.
                     if let Err(e) = self.check_stack_space(2) {
@@ -224,7 +231,7 @@ impl State {
                     }
                     self.stack.insert(idx, func_val);
                     self.stack.insert(idx, call_handler);
-                    // Now call with actual_num_args + 1 (table is first arg).
+                    // Now call with actual_num_args + 1 (receiver is first arg).
                     //
                     // Only a handler that is itself not a function re-enters
                     // __call resolution without passing through a Lua or Rust
@@ -323,22 +330,15 @@ impl State {
     }
 
     /// Pops `n` values from the stack, concatenates them, and pushes the
-    /// result. `n` must be at least 2; smaller counts are rejected with an
-    /// argument error. A count larger than the current frame's values is
-    /// rejected with `InvalidStackIndex`.
+    /// result. `n` must be at least 2; a smaller count, or one larger than the
+    /// current frame's values, is rejected with `InvalidStackIndex` (the same
+    /// kind `pop` uses for a bad count). The error carries `-n`, saturated
+    /// at `isize::MIN` when the count is too large.
     pub fn concat(&mut self, n: usize) -> Result<()> {
-        if n < 2 {
-            return Err(Error::without_location(ErrorKind::ArgError(
-                crate::error::ArgError {
-                    arg_number: 1,
-                    func_name: Some("concat".to_string()),
-                    detail: crate::error::ArgDetail::TypeMismatch,
-                    expected: None,
-                    received: None,
-                },
-            )));
-        }
-        if n > self.stack.len() - self.stack_bottom {
+        // The count is the problem, not a Lua argument, so this is not an
+        // ArgError: `InvalidStackIndex` is what the other count-taking host
+        // APIs return.
+        if n < 2 || n > self.stack.len() - self.stack_bottom {
             return Err(self.error(ErrorKind::InvalidStackIndex {
                 index: isize::try_from(n).map_or(isize::MIN, |n| -n),
             }));

@@ -102,18 +102,33 @@ impl State {
     /// its place). As in Lua, this function may trigger a metamethod for the
     /// "index" event.
     ///
+    /// A string receiver resolves through the shared string metatable exactly
+    /// as the `t[k]` opcode does (`index_string`), so `("abc")["upper"]` gives
+    /// the host what it gives a script.
+    ///
     /// Validation and dispatch preflight failures leave the stack unchanged.
     /// An error from calling an `__index` function is not covered: by then
     /// the key has been consumed, and a script error kills the callback anyway.
     #[hotpath::measure]
     pub fn get_table(&mut self, i: isize) -> Result<()> {
-        let idx = self.table_operand_below_top(i, 1)?;
+        let receiver_idx = self.convert_idx(i)?;
+        let is_string = self.stack.len() >= receiver_idx + 2
+            && self.stack[receiver_idx].as_string_ptr().is_some();
+        let idx = if is_string {
+            receiver_idx
+        } else {
+            self.table_operand_below_top(i, 1)?
+        };
         let top = self.stack.len();
         let key = self.pop_val();
         let mut local_cost = 0;
         let mut handler_called = false;
-        let result =
-            self.get_table_with_key_tracking_call(idx, key, &mut local_cost, &mut handler_called);
+        let result = if is_string {
+            let receiver = self.stack[idx];
+            self.index_string(receiver, key, None, &mut local_cost, &mut handler_called)
+        } else {
+            self.get_table_with_key_tracking_call(idx, key, &mut local_cost, &mut handler_called)
+        };
         if result.is_err() && !handler_called {
             // No user code ran. Dispatch roots the key through its allocations
             // and can only have added temporary slots above the entry prefix.
@@ -509,54 +524,92 @@ impl State {
     /// Converts the value at the given index to a UTF-8 string, checking for
     /// a `__tostring` metamethod. Invalid UTF-8 bytes (from a Lua string or a
     /// `__tostring` result) are converted lossily; use
-    /// [`State::bytes_with_tostring_meta`] for the exact bytes.
+    /// [`State::bytes_with_tostring_meta`] for the exact bytes. A converted
+    /// result over `MAX_STRING_BYTES` is an error, checked before conversion.
     #[hotpath::measure]
     pub fn to_string_with_meta(&mut self, idx: isize) -> Result<String> {
-        Ok(String::from_utf8_lossy(&self.bytes_with_tostring_meta(idx)?).into_owned())
+        let raw = self.bytes_with_tostring_meta(idx)?;
+        Self::lossy_utf8_checked(&raw)
     }
 
     /// Converts a value with `tostring` semantics while preserving arbitrary
     /// bytes returned by a `__tostring` metamethod. This is what the
     /// `tostring` builtin returns.
+    ///
+    /// Strings consult the shared string metatable too, as reference Lua's
+    /// `tostring` does: setting `getmetatable("").__tostring` changes
+    /// `tostring(s)` and `print(s)`.
     pub fn bytes_with_tostring_meta(&mut self, idx: isize) -> Result<Vec<u8>> {
         let i = self.convert_idx(idx)?;
         let val = self.stack[i];
-        let metatable_ptr = val
-            .as_object_ptr()
-            .and_then(|ptr| self.heap.as_table_ref(ptr))
-            .and_then(super::table::Table::get_metatable);
-
-        if let Some(mt_ptr) = metatable_ptr {
-            // Keep this dispatch-time intern at its existing allocation point;
-            // the receiver remains rooted on the stack through collection.
-            // Pre-interning moves that allocation and can change reuse order.
-            let tostring_key = self.alloc_string("__tostring")?;
-            let tostring_handler = self
-                .heap
-                .as_table_ref(mt_ptr)
-                .map_or(Val::Nil, |mt| mt.get(&tostring_key));
-
-            if !matches!(tostring_handler, Val::Nil) {
-                // Handler plus receiver: net-positive by two slots until the
-                // call consumes them.
-                self.check_stack_space(2)?;
-                self.push_unchecked(tostring_handler);
-                self.push_unchecked(val);
-                self.call(ArgCount::Fixed(1), RetCount::Fixed(1))?;
-                let result = self.pop_val();
-                if matches!(
-                    result.typ(&self.heap),
-                    super::LuaType::String | super::LuaType::Number
-                ) {
-                    return Ok(result.to_bytes_with_heap(&self.heap));
-                }
-                return Err(self.error(ErrorKind::RuntimeError(
-                    "'__tostring' must return a string".to_string(),
-                )));
+        let tostring_handler = self.tostring_handler(val)?;
+        if !matches!(tostring_handler, Val::Nil) {
+            // Handler plus receiver: net-positive by two slots until the
+            // call consumes them.
+            self.check_stack_space(2)?;
+            self.push_unchecked(tostring_handler);
+            self.push_unchecked(val);
+            self.call(ArgCount::Fixed(1), RetCount::Fixed(1))?;
+            let result = self.pop_val();
+            if matches!(
+                result.typ(&self.heap),
+                super::LuaType::String | super::LuaType::Number
+            ) {
+                return Ok(result.to_bytes_with_heap(&self.heap));
             }
+            return Err(self.error(ErrorKind::RuntimeError(
+                "'__tostring' must return a string".to_string(),
+            )));
         }
 
         self.bytes_with_default_string_coercion(idx)
+    }
+
+    /// Whether the shared string metatable currently has a non-nil
+    /// `__tostring`; lets `tostring` keep its return-the-argument fast path
+    /// for strings in the default (unset) case, without allocating or GC.
+    pub(crate) fn string_has_tostring(&self) -> bool {
+        !matches!(self.string_tostring_handler(), Val::Nil)
+    }
+
+    fn string_tostring_handler(&self) -> Val {
+        // A live field named __tostring must already have an interned key.
+        // Avoid creating that key just to discover that the field is absent.
+        let Some(key) = self.heap.find_string(b"__tostring") else {
+            return Val::Nil;
+        };
+        self.string_metatable
+            .and_then(|ptr| self.heap.as_table_ref(ptr))
+            .map_or(Val::Nil, |mt| mt.get(&Val::Str(key)))
+    }
+
+    fn metatable_tostring_field(&mut self, mt: Option<super::object::ObjectPtr>) -> Result<Val> {
+        let Some(mt_ptr) = mt else {
+            return Ok(Val::Nil);
+        };
+        // Keep this dispatch-time intern at its existing allocation point;
+        // the receiver remains rooted on the stack through collection.
+        // Pre-interning moves that allocation and can change reuse order.
+        let tostring_key = self.alloc_string("__tostring")?;
+        Ok(self
+            .heap
+            .as_table_ref(mt_ptr)
+            .map_or(Val::Nil, |mt| mt.get(&tostring_key)))
+    }
+
+    /// The `__tostring` field of a table's own or a string's shared metatable.
+    /// The caller must root `val`: table dispatch interns a key and can GC.
+    /// Plain values without a metatable return before interning.
+    fn tostring_handler(&mut self, val: Val) -> Result<Val> {
+        let metatable_ptr = match val {
+            Val::Str(_) => return Ok(self.string_tostring_handler()),
+            Val::Obj(ptr) => self
+                .heap
+                .as_table_ref(ptr)
+                .and_then(super::table::Table::get_metatable),
+            _ => return Ok(Val::Nil),
+        };
+        self.metatable_tostring_field(metatable_ptr)
     }
 
     pub(crate) fn bytes_with_default_string_coercion(&mut self, idx: isize) -> Result<Vec<u8>> {

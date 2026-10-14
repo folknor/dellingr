@@ -367,7 +367,7 @@ fn format_argument(state: &mut State, argument: usize, directive: &Directive) ->
             Ok(format_float(number, directive))
         }
         Conversion::String => {
-            let mut bytes = if state.typ(idx) == LuaType::String {
+            let mut bytes = if state.typ(idx) == LuaType::String && !state.string_has_tostring() {
                 state.to_bytes(idx)?.to_vec()
             } else {
                 state.bytes_with_tostring_meta(idx)?

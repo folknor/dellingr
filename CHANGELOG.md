@@ -36,6 +36,14 @@ identical source - re-measure tick budgets.
   of the global `string`, including in restricted environments. The metatable
   is rooted and saved as the `string.metatable` environment token. Changes to
   method resolution and snapshots are replay-visible.
+- **Strings honour metatable `__call` and `__tostring`.** The latter applies
+  to `tostring`, `print`, `string.format("%s", s)` and host
+  `State::to_string_with_meta`; rendered output and handler costs can change
+  replays. `error(s)` keeps a string message raw.
+- **Host string conversions enforce the cap after lossy UTF-8 expansion.**
+  `State::to_string` and `State::to_string_with_meta` reject output over
+  `MAX_STRING_BYTES` before conversion. `to_string_with_meta` also applies
+  the shared string metatable's `__tostring`.
 - **`ArgError` has a required `detail: ArgDetail` field.**
 - **`State::load_state`'s setup closure returns `Result<(), E>`**, surfaced as
   `LoadError::Setup(E)`; `LoadError` is generic over `E` (default
@@ -90,6 +98,9 @@ identical source - re-measure tick budgets.
 
 ### Changed
 
+- `State::set_cost_budget` supports mid-run resets from Rust callbacks: the
+  caller's pending opcode cost is flushed before entering the callback, and
+  the reset zeroes `cost_used`, which then counts only subsequent work.
 - `dellingr::limits` exposes the runtime, compiler and pattern-cache caps.
 - `State::current_source()` and the `source` given to `on_print`/`on_error`
   come from the running Lua frame, not the last loaded chunk.
@@ -129,6 +140,12 @@ identical source - re-measure tick budgets.
 
 ### Fixed
 
+- Host `State::get_table` on strings follows the shared metatable's
+  `__index`, matching bytecode indexing.
+- `State::concat` counts below 2 return `InvalidStackIndex`, as counts above
+  the visible stack already do, without consuming values.
+- Environment-delta encoding uses per-table membership maps instead of
+  quadratic scans, preserving key equality, emission order and snapshot bytes.
 - `open_libs` rejects conflicting snapshot function registrations before any
   installation, keeping the stack, globals, heap and registry unchanged.
 - Snapshot loading rejects duplicate saved global names instead of silently

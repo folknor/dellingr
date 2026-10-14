@@ -254,9 +254,35 @@ impl State {
     }
 
     /// Converts the value at the given index to a UTF-8 string.
-    /// Lua strings with invalid UTF-8 bytes are converted lossily.
+    /// Lua strings with invalid UTF-8 bytes are converted lossily; a result
+    /// that would exceed `MAX_STRING_BYTES` is rejected before conversion.
     pub fn to_string(&mut self, idx: isize) -> Result<String> {
-        Ok(String::from_utf8_lossy(&self.bytes_with_default_string_coercion(idx)?).into_owned())
+        let raw = self.bytes_with_default_string_coercion(idx)?;
+        Self::lossy_utf8_checked(&raw)
+    }
+
+    /// Byte length of `raw` after lossy UTF-8 conversion: each invalid UTF-8
+    /// chunk becomes one 3-byte U+FFFD. Computed without materializing the
+    /// converted text so callers can check it against the string cap first.
+    pub(crate) fn lossy_utf8_len(raw: &[u8]) -> usize {
+        raw.utf8_chunks()
+            .map(|chunk| {
+                chunk.valid().len()
+                    + if chunk.invalid().is_empty() {
+                        0
+                    } else {
+                        char::REPLACEMENT_CHARACTER.len_utf8()
+                    }
+            })
+            .sum()
+    }
+
+    /// Lossy UTF-8 conversion preflighted against `MAX_STRING_BYTES`: invalid
+    /// bytes expand up to threefold, so a capped Lua string can otherwise
+    /// produce an over-cap Rust `String`.
+    pub(crate) fn lossy_utf8_checked(raw: &[u8]) -> Result<String> {
+        super::checked_string_growth(0, Self::lossy_utf8_len(raw))?;
+        Ok(String::from_utf8_lossy(raw).into_owned())
     }
 
     /// Returns exact Lua string bytes at the given index.

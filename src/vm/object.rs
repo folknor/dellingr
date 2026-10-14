@@ -475,11 +475,26 @@ impl GcHeap {
         self.strings.insert_with_hash(bytes.into(), hash)
     }
 
+    /// Look up an interned string without allocating or collecting.
+    pub(super) fn find_string(&self, bytes: &[u8]) -> Option<StringPtr> {
+        self.strings
+            .find_by_hash(bytes, StringPool::hash_string(bytes))
+    }
+
     // ========================================================================
     // Garbage Collection
     // ========================================================================
 
     /// Check if GC should run.
+    ///
+    /// The allocators deliberately take no "collection already handled"
+    /// token. Collection is a caller-side obligation: the GC root set lives
+    /// in `State`, which the heap cannot see. A freely constructible marker
+    /// would not prove that those roots were marked, so runtime State
+    /// allocation wrappers own the check instead. The runtime exception,
+    /// snapshot materialization, is a bounded sequence of passes that must not
+    /// collect while its half-built graph is unrooted; it is named in each
+    /// allocator's doc note instead.
     #[must_use]
     pub(super) fn is_full(&self) -> bool {
         self.allocation_count() >= self.threshold.value()

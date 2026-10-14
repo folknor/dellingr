@@ -105,6 +105,36 @@ fn flags_width_and_precision_match_lua_54() {
 }
 
 #[test]
+fn string_conversion_honours_the_shared_tostring_handler() {
+    assert_eq!(
+        run_bytes(
+            r#"
+            local mt = getmetatable("")
+            mt.__tostring = function(s) return "[" .. s .. "]" end
+            local result = string.format("%s|%6.2s", "abc", "def")
+            mt.__tostring = nil
+            return result .. "|" .. string.format("%s", "plain")
+            "#
+        ),
+        b"[abc]|    [d|plain"
+    );
+    assert_eq!(
+        run_bytes(
+            r#"
+            getmetatable("").__tostring = function() return "\xff\0x" end
+            return string.format("%s", "ignored")
+            "#
+        ),
+        &[0xff, 0, b'x']
+    );
+    expect_runtime_error(
+        r#"getmetatable("").__tostring = function() return {} end
+            return string.format("%s", "ignored")"#,
+        "'__tostring' must return a string",
+    );
+}
+
+#[test]
 fn numeric_strings_and_percent_are_supported() {
     assert_eq!(
         run_bytes(r#"return string.format("%d|%.1f", "12", "1.5")"#),

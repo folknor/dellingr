@@ -237,3 +237,92 @@ fn cost_used_matches_golden_corpus() {
         drift.join("\n")
     );
 }
+
+/// A Rust callback running under a Lua caller always sees that caller's opcode
+/// cost fully flushed: `OP_CALL` (and every metamethod call out of the
+/// dispatch loop) settles the pending batch first. A mid-run
+/// `set_cost_budget` therefore resets a complete meter, and `cost_used`
+/// afterwards counts only post-reset work, whatever the batching interval
+/// made of the prefix.
+#[test]
+fn mid_run_budget_reset_sees_a_flushed_meter() {
+    fn reset(state: &mut State) -> dellingr::Result<u8> {
+        let expected = *state
+            .user_data::<u64>()
+            .expect("test installed expected cost");
+        assert_eq!(state.cost_used(), expected, "meter before reset");
+        assert_eq!(
+            state.cost_remaining(),
+            1_000_000 - i64::try_from(expected).unwrap_or(i64::MAX)
+        );
+        state.set_cost_budget(1_000_000);
+        Ok(0)
+    }
+
+    let mut results = Vec::new();
+    let interval = dellingr::limits::COST_CHECK_INTERVAL;
+    for (setup, call_site, setup_cost) in [
+        ("", "reset()", 0),
+        (
+            "local t = setmetatable({}, {__index = reset})",
+            "local v = t.x",
+            3,
+        ),
+        (
+            "local t = setmetatable({}, {__index = reset})",
+            "local k = 'x' local v = t[k]",
+            3,
+        ),
+        (
+            "local t = setmetatable({}, {__newindex = reset})",
+            "t.x = 1",
+            4,
+        ),
+        (
+            "local t = setmetatable({}, {__newindex = reset})",
+            "local k = 'x' t[k] = 1",
+            4,
+        ),
+        (
+            "local t = setmetatable({}, {__len = reset})",
+            "local v = #t",
+            3,
+        ),
+        ("local t = setmetatable({}, {__call = reset})", "t()", 3),
+        ("getmetatable('').__call = reset", "local s = 'x' s()", 1),
+        (
+            "getmetatable('').__index = reset",
+            "local v = ('x').missing",
+            1,
+        ),
+        ("", "for v in reset, nil, nil do end", 0),
+    ] {
+        for prefix in [0, 1, 7, interval - 1, interval, interval + 1, 20_000] {
+            let mut state = State::new();
+            state.set_cost_budget(1_000_000);
+            state.set_user_data(prefix + setup_cost);
+            state.push_rust_fn(reset).unwrap();
+            state.set_global("reset").unwrap();
+            state
+                .load_string(format!(
+                    "{setup} local s = 0 for i = 1, {prefix} do s = s + i end \
+                     {call_site} local a = {{}} a.x = 1 a.y = 2 local z = a.x + a.y"
+                ))
+                .unwrap();
+            state
+                .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+                .unwrap_or_else(|error| panic!("{call_site}, prefix {prefix}: {error}"));
+            results.push((state.cost_used(), state.cost_remaining()));
+        }
+    }
+    assert!(
+        results.windows(2).all(|w| w[0] == w[1]),
+        "post-reset cost must not depend on the pre-reset prefix: {results:?}"
+    );
+    let (used, remaining) = results[0];
+    assert_eq!(used, 4, "post-reset table creation, two writes and one add");
+    assert_eq!(
+        remaining,
+        1_000_000 - i64::try_from(used).expect("cost fits in i64")
+    );
+}

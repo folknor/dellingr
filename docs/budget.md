@@ -17,6 +17,9 @@ defect.
   `limits::COST_CHECK_INTERVAL` static units. Opcode work still pending when a
   runtime error ends a frame is charged first, so `cost_used` after a failed
   callback counts every executed costed opcode.
+- `set_cost_budget` also zeroes `cost_used`. Calling it from a Rust callback
+  mid-run is supported: pending opcode cost is flushed before every call out
+  of the dispatch loop, so the reset never races the batch.
 - Loading a snapshot restores the saved counters. Call `set_cost_budget`
   afterwards.
 - Stack-cap enforcement charges nothing.

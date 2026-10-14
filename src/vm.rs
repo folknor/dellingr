@@ -485,6 +485,12 @@ impl State {
     /// Sets the cost budget for this VM.
     /// When the budget is exhausted, operations with cost > 0 will fail.
     /// The action that pushes you over budget always completes before stopping.
+    ///
+    /// Also resets [`State::cost_used`] to zero. Calling it from inside a Rust
+    /// callback (mid-run) is supported: the Lua caller's batched opcode cost is
+    /// always flushed before any call leaves the dispatch loop, so the reset
+    /// sees a complete meter and `cost_used` afterwards counts only work done
+    /// after the reset, independent of the batching interval.
     pub fn set_cost_budget(&mut self, budget: i64) {
         self.cost_budget = budget;
         self.cost_remaining = budget;

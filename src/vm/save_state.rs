@@ -48,7 +48,7 @@ use std::sync::Arc;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::det_hash::map_with_capacity;
+use crate::det_hash::{IndexMap as DetMap, map_with_capacity};
 
 use super::lua_val::RustFunc;
 use super::object::{GcHeap, RawObject, StringPtr, Upvalue, UpvalueRef};
@@ -634,9 +634,23 @@ impl<'a> SaveBuilder<'a> {
                 .get(&ptr)
                 .ok_or(SaveError::Internal("missing environment baseline"))?;
             let live = table.entries();
+            // One membership map per side, built once per table. `Val`'s Hash/Eq
+            // normalise -0.0 to +0.0 (matching runtime key equality), and
+            // table keys are never NaN or nil, so hashing them cannot panic.
+            // `or_insert` keeps the first entry for a repeated key, matching
+            // the `find` the maps replace. Values are still compared with
+            // `Val::eq` directly so a NaN value stays unequal to itself.
+            let mut baseline_values: DetMap<Val, Val> = map_with_capacity(baseline.entries.len());
+            for (key, value) in &baseline.entries {
+                baseline_values.entry(*key).or_insert(*value);
+            }
+            let mut live_keys: DetMap<Val, ()> = map_with_capacity(live.len());
+            for (key, _) in &live {
+                live_keys.insert(*key, ());
+            }
             let mut deleted = Vec::new();
             for (key, _) in &baseline.entries {
-                if !live.iter().any(|(live_key, _)| live_key == key) {
+                if !live_keys.contains_key(key) {
                     deleted.push(self.encode_root(
                         *key,
                         PathSegment::Global(truncate_utf8(&token, MAX_PATH_GLOBAL_BYTES)),
@@ -645,12 +659,8 @@ impl<'a> SaveBuilder<'a> {
             }
             let mut upserts = Vec::new();
             for (key, value) in &live {
-                match baseline
-                    .entries
-                    .iter()
-                    .find(|(base_key, _)| base_key == key)
-                {
-                    Some((_, base_value)) if base_value == value => {}
+                match baseline_values.get(key) {
+                    Some(base_value) if base_value == value => {}
                     _ => upserts.push((
                         self.encode_root(
                             *key,
@@ -663,15 +673,16 @@ impl<'a> SaveBuilder<'a> {
                     )),
                 }
             }
-            let replayed_order: Vec<Val> = baseline
-                .entries
-                .iter()
-                .filter(|(key, _)| live.iter().any(|(live_key, _)| live_key == key))
-                .map(|(key, _)| *key)
-                .chain(live.iter().filter_map(|(key, _)| {
-                    (!baseline.entries.iter().any(|(base_key, _)| base_key == key)).then_some(*key)
-                }))
-                .collect();
+            let replayed_order: Vec<Val> =
+                baseline
+                    .entries
+                    .iter()
+                    .filter(|(key, _)| live_keys.contains_key(key))
+                    .map(|(key, _)| *key)
+                    .chain(live.iter().filter_map(|(key, _)| {
+                        (!baseline_values.contains_key(key)).then_some(*key)
+                    }))
+                    .collect();
             let order = (replayed_order != live.iter().map(|(key, _)| *key).collect::<Vec<_>>())
                 .then(|| {
                     live.iter()

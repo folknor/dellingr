@@ -60,6 +60,10 @@ does.
     `__index`, not through the global `string`. Rebinding or clearing the
     global does not affect them, and they keep working in
     `with_restricted_env` sandboxes.
+  - A `__tostring` set on it applies to `tostring(s)`, `print(s)`,
+    `string.format("%s", s)` and the host's `to_string_with_meta`. A
+    `__call` makes strings callable as `s(...)`; a non-function `__call`
+    chains as in Lua 5.4 (5.2 rejects it).
   - `setmetatable` on a string is an error.
   - Snapshots save the metatable as an environment object (token
     `string.metatable`). See `save-state.md`.
