@@ -183,78 +183,6 @@ fn check_slots(
     }
 }
 
-fn known_opcode(opcode: u8) -> bool {
-    matches!(
-        opcode,
-        Instr::OP_NOP
-            | Instr::OP_POP
-            | Instr::OP_DUP
-            | Instr::OP_SWAP
-            | Instr::OP_NEW_TABLE
-            | Instr::OP_GET_TABLE
-            | Instr::OP_ADD
-            | Instr::OP_SUBTRACT
-            | Instr::OP_MULTIPLY
-            | Instr::OP_DIVIDE
-            | Instr::OP_POW
-            | Instr::OP_MOD
-            | Instr::OP_CONCAT
-            | Instr::OP_LESS
-            | Instr::OP_LESS_EQUAL
-            | Instr::OP_GREATER
-            | Instr::OP_GREATER_EQUAL
-            | Instr::OP_EQUAL
-            | Instr::OP_NOT_EQUAL
-            | Instr::OP_NOT
-            | Instr::OP_LENGTH
-            | Instr::OP_NEGATE
-            | Instr::OP_MARK_CALL_BASE
-            | Instr::OP_PUSH_NIL
-            | Instr::OP_NEW_TABLE_PRESIZED
-            | Instr::OP_NEW_TABLE_TEMPLATE
-            | Instr::OP_NEW_TABLE_TRACKED
-            | Instr::OP_GET_GLOBAL
-            | Instr::OP_SET_GLOBAL
-            | Instr::OP_GET_LOCAL
-            | Instr::OP_SET_LOCAL
-            | Instr::OP_GET_UPVALUE
-            | Instr::OP_SET_UPVALUE
-            | Instr::OP_GET_FIELD
-            | Instr::OP_INIT_INDEX
-            | Instr::OP_PUSH_NUM
-            | Instr::OP_PUSH_STRING
-            | Instr::OP_TFOR_PREP
-            | Instr::OP_RETURN
-            | Instr::OP_CLOSE_UPVALUES
-            | Instr::OP_CLOSURE
-            | Instr::OP_VARARG
-            | Instr::OP_SET_LIST
-            | Instr::OP_SET_TABLE
-            | Instr::OP_PUSH_BOOL
-            | Instr::OP_GET_BUILTIN
-            | Instr::OP_SET_BUILTIN
-            | Instr::OP_SET_FIELD
-            | Instr::OP_INIT_FIELD
-            | Instr::OP_TFOR_CALL
-            | Instr::OP_CALL
-            | Instr::OP_INIT_FIELD_PINNED
-            | Instr::OP_SET_FIELD_AT
-            | Instr::OP_JUMP
-            | Instr::OP_BRANCH_FALSE
-            | Instr::OP_BRANCH_TRUE_KEEP
-            | Instr::OP_BRANCH_FALSE_KEEP
-            | Instr::OP_BRANCH_FALSE_LESS
-            | Instr::OP_BRANCH_FALSE_LESS_EQUAL
-            | Instr::OP_BRANCH_FALSE_GREATER
-            | Instr::OP_BRANCH_FALSE_GREATER_EQUAL
-            | Instr::OP_BRANCH_FALSE_EQUAL
-            | Instr::OP_BRANCH_FALSE_NOT_EQUAL
-            | Instr::OP_FOR_PREP
-            | Instr::OP_FOR_LOOP
-            | Instr::OP_TFOR_LOOP
-    )
-}
-
 fn verify_stack_discipline(view: &impl BytecodeView) -> Result<(), BytecodeValidationError> {
     let code_len = view.code_len();
     let mut states = vec![None; code_len];
@@ -297,6 +225,9 @@ fn verify_stack_discipline(view: &impl BytecodeView) -> Result<(), BytecodeValid
                 .ok_or_else(|| err(Some(pc), "operand stack height overflows"))
         };
 
+        // Stack semantics stay explicit: dynamic calls, list constructors and
+        // marker stacks change abstract state beyond a fixed pop/push count.
+        // Operand encoding and transfer membership come from Instr metadata.
         match op {
             Instr::OP_DUP => {
                 require_at_least(&next.height, 1)?;
@@ -514,24 +445,11 @@ fn verify_stack_discipline(view: &impl BytecodeView) -> Result<(), BytecodeValid
             }
         };
         let mut successors = Vec::with_capacity(2);
-        match op {
-            Instr::OP_JUMP => successors.push(target(inst)?),
-            Instr::OP_BRANCH_FALSE
-            | Instr::OP_BRANCH_TRUE_KEEP
-            | Instr::OP_BRANCH_FALSE_KEEP
-            | Instr::OP_BRANCH_FALSE_LESS
-            | Instr::OP_BRANCH_FALSE_LESS_EQUAL
-            | Instr::OP_BRANCH_FALSE_GREATER
-            | Instr::OP_BRANCH_FALSE_GREATER_EQUAL
-            | Instr::OP_BRANCH_FALSE_EQUAL
-            | Instr::OP_BRANCH_FALSE_NOT_EQUAL
-            | Instr::OP_FOR_PREP
-            | Instr::OP_FOR_LOOP
-            | Instr::OP_TFOR_LOOP => {
-                successors.push(pc + 1);
-                successors.push(target(inst)?);
-            }
-            _ => successors.push(pc + 1),
+        if op != Instr::OP_JUMP {
+            successors.push(pc + 1);
+        }
+        if Instr::is_transfer(op) {
+            successors.push(target(inst)?);
         }
         for successor in successors {
             match &states[successor] {
@@ -623,76 +541,14 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
     for pc in 0..code_len {
         let inst = Instr::from_raw(view.raw_instruction(pc));
         let op = inst.opcode();
-        if !known_opcode(op) {
+        if !Instr::known_opcode(op) {
             return Err(err(Some(pc), "unknown opcode"));
         }
         let a = inst.a();
         let b = inst.b();
         let c = inst.c();
         let bx = inst.bx();
-        let reserved_zero = match op {
-            // These forms use every operand byte. SET_GLOBAL joined the group
-            // when its A byte became the biased cache index (0 = uncached);
-            // TFOR_CALL joined when its C byte became the biased cursor slot.
-            Instr::OP_GET_GLOBAL
-            | Instr::OP_SET_GLOBAL
-            | Instr::OP_TFOR_CALL
-            | Instr::OP_GET_FIELD
-            | Instr::OP_SET_FIELD
-            | Instr::OP_SET_FIELD_AT
-            | Instr::OP_INIT_FIELD
-            | Instr::OP_INIT_FIELD_PINNED
-            | Instr::OP_SET_LIST
-            | Instr::OP_FOR_PREP
-            | Instr::OP_FOR_LOOP
-            | Instr::OP_TFOR_LOOP => true,
-            // Literal loads put the pool id in Bx and reserve A; jumps use B+C
-            // as a signed offset and likewise reserve A.
-            Instr::OP_PUSH_NUM
-            | Instr::OP_PUSH_STRING
-            | Instr::OP_JUMP
-            | Instr::OP_BRANCH_FALSE
-            | Instr::OP_BRANCH_TRUE_KEEP
-            | Instr::OP_BRANCH_FALSE_KEEP
-            | Instr::OP_BRANCH_FALSE_LESS
-            | Instr::OP_BRANCH_FALSE_LESS_EQUAL
-            | Instr::OP_BRANCH_FALSE_GREATER
-            | Instr::OP_BRANCH_FALSE_GREATER_EQUAL
-            | Instr::OP_BRANCH_FALSE_EQUAL
-            | Instr::OP_BRANCH_FALSE_NOT_EQUAL => a == 0,
-            // CALL is the remaining two-byte form that reserves C.
-            Instr::OP_CALL => c == 0,
-            // All remaining known instructions are either operandless or use
-            // only A, and therefore reserve B+C (and A for operandless ops).
-            _ => {
-                let a_is_reserved = matches!(
-                    op,
-                    Instr::OP_NOP
-                        | Instr::OP_POP
-                        | Instr::OP_DUP
-                        | Instr::OP_SWAP
-                        | Instr::OP_NEW_TABLE
-                        | Instr::OP_GET_TABLE
-                        | Instr::OP_ADD
-                        | Instr::OP_SUBTRACT
-                        | Instr::OP_MULTIPLY
-                        | Instr::OP_DIVIDE
-                        | Instr::OP_POW
-                        | Instr::OP_MOD
-                        | Instr::OP_LESS
-                        | Instr::OP_LESS_EQUAL
-                        | Instr::OP_GREATER
-                        | Instr::OP_GREATER_EQUAL
-                        | Instr::OP_EQUAL
-                        | Instr::OP_NOT_EQUAL
-                        | Instr::OP_NOT
-                        | Instr::OP_LENGTH
-                        | Instr::OP_NEGATE
-                        | Instr::OP_PUSH_NIL
-                );
-                (!a_is_reserved || a == 0) && b == 0 && c == 0
-            }
-        };
+        let reserved_zero = inst.reserved_bytes_zero();
         if !reserved_zero {
             return Err(err(
                 Some(pc),
@@ -838,22 +694,7 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
             }
             _ => {}
         }
-        if matches!(
-            op,
-            Instr::OP_JUMP
-                | Instr::OP_BRANCH_FALSE
-                | Instr::OP_BRANCH_TRUE_KEEP
-                | Instr::OP_BRANCH_FALSE_KEEP
-                | Instr::OP_BRANCH_FALSE_LESS
-                | Instr::OP_BRANCH_FALSE_LESS_EQUAL
-                | Instr::OP_BRANCH_FALSE_GREATER
-                | Instr::OP_BRANCH_FALSE_GREATER_EQUAL
-                | Instr::OP_BRANCH_FALSE_EQUAL
-                | Instr::OP_BRANCH_FALSE_NOT_EQUAL
-                | Instr::OP_FOR_PREP
-                | Instr::OP_FOR_LOOP
-                | Instr::OP_TFOR_LOOP
-        ) {
+        if Instr::is_transfer(op) {
             let target = match i64::try_from(pc) {
                 Ok(pc) => pc.checked_add(1),
                 Err(_) => None,

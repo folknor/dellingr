@@ -138,15 +138,10 @@ impl Frame {
 
     /// Start evaluating instructions from the current position.
     ///
-    /// Cost system: Most operations are free. Only arithmetic, table writes,
-    /// and table creation cost points. This rewards thoughtful code organization
-    /// while ensuring every script can do meaningful work.
-    ///
-    /// Free operations: control flow, variable access, comparisons, function calls,
-    /// table reads, string operations, length operator.
-    ///
-    /// Costs 1: arithmetic (+, -, *, /, %, ^, unary -), table creation,
-    /// table writes (including array initialization).
+    /// Fixed opcode charges come from `Instr::static_units`. SET_LIST charges
+    /// its live element count (the analyzer only knows its encoded prefix).
+    /// Calls and access helpers can additionally charge native work, including
+    /// strings, patterns, table traversal and metamethod callbacks.
     pub(super) fn eval(&mut self, state: &mut State) -> Result<RetCount> {
         // Batch cost checking: accumulate locally and flush periodically
         let mut local_cost: u64 = 0;
@@ -298,10 +293,15 @@ impl Frame {
 
                 // Orderings (comparisons are free)
                 // Supports both number and string comparisons
-                Instr::OP_LESS => state.eval_compare(std::cmp::Ordering::Less, false)?,
-                Instr::OP_GREATER => state.eval_compare(std::cmp::Ordering::Greater, false)?,
-                Instr::OP_LESS_EQUAL => state.eval_compare(std::cmp::Ordering::Greater, true)?, // <= is !>
-                Instr::OP_GREATER_EQUAL => state.eval_compare(std::cmp::Ordering::Less, true)?, // >= is !<
+                Instr::OP_LESS => state.eval_compare(Instr::LESS_ORDER.0, Instr::LESS_ORDER.1)?,
+                Instr::OP_GREATER => {
+                    state.eval_compare(Instr::GREATER_ORDER.0, Instr::GREATER_ORDER.1)?;
+                }
+                Instr::OP_LESS_EQUAL => {
+                    state.eval_compare(Instr::LESS_EQUAL_ORDER.0, Instr::LESS_EQUAL_ORDER.1)?;
+                }
+                Instr::OP_GREATER_EQUAL => state
+                    .eval_compare(Instr::GREATER_EQUAL_ORDER.0, Instr::GREATER_EQUAL_ORDER.1)?,
 
                 // Fused comparison + BranchFalse (both halves free): pop two
                 // operands, jump when the comparison is false. One range arm
@@ -324,7 +324,7 @@ impl Frame {
                 }
                 Instr::OP_TFOR_LOOP => state.instr_tfor_loop(self, inst.a(), inst.sbx())?,
 
-                // Length operator is free
+                // Length has no fixed opcode charge; helpers may charge native work
                 Instr::OP_LENGTH => {
                     self.record_call_site(state);
                     state.instr_length(&mut local_cost)?;
@@ -343,7 +343,7 @@ impl Frame {
                     state.instr_get_table(&mut local_cost)?;
                 }
 
-                // String concatenation is free. Operand A is the chain
+                // Concatenation has no fixed opcode charge. Operand A is the chain
                 // length (>= 2). Chained `..` collapses into one OP_CONCAT
                 // so a long concat has only one intermediate allocation.
                 Instr::OP_CONCAT => state.concat_helper(inst.a() as usize)?,
@@ -352,51 +352,95 @@ impl Frame {
 
                 // Arithmetic costs 1
                 Instr::OP_ADD => {
-                    add_cost!(state, local_cost, 1);
+                    add_cost!(
+                        state,
+                        local_cost,
+                        const { Instr::op(Instr::OP_ADD).static_units() }
+                    );
                     state.eval_float_float(<f64 as ops::Add>::add)?;
                 }
                 Instr::OP_SUBTRACT => {
-                    add_cost!(state, local_cost, 1);
+                    add_cost!(
+                        state,
+                        local_cost,
+                        const { Instr::op(Instr::OP_SUBTRACT).static_units() }
+                    );
                     state.eval_float_float(<f64 as ops::Sub>::sub)?;
                 }
                 Instr::OP_MULTIPLY => {
-                    add_cost!(state, local_cost, 1);
+                    add_cost!(
+                        state,
+                        local_cost,
+                        const { Instr::op(Instr::OP_MULTIPLY).static_units() }
+                    );
                     state.eval_float_float(<f64 as ops::Mul>::mul)?;
                 }
                 Instr::OP_DIVIDE => {
-                    add_cost!(state, local_cost, 1);
+                    add_cost!(
+                        state,
+                        local_cost,
+                        const { Instr::op(Instr::OP_DIVIDE).static_units() }
+                    );
                     state.eval_float_float(<f64 as ops::Div>::div)?;
                 }
                 Instr::OP_MOD => {
-                    add_cost!(state, local_cost, 1);
+                    add_cost!(
+                        state,
+                        local_cost,
+                        const { Instr::op(Instr::OP_MOD).static_units() }
+                    );
                     state.eval_float_float(lua_modulo)?;
                 }
                 Instr::OP_POW => {
-                    add_cost!(state, local_cost, 1);
+                    add_cost!(
+                        state,
+                        local_cost,
+                        const { Instr::op(Instr::OP_POW).static_units() }
+                    );
                     state.eval_float_float(f64::powf)?;
                 }
 
                 // Unary negation costs 1
                 Instr::OP_NEGATE => {
-                    add_cost!(state, local_cost, 1);
+                    add_cost!(
+                        state,
+                        local_cost,
+                        const { Instr::op(Instr::OP_NEGATE).static_units() }
+                    );
                     state.instr_negate()?;
                 }
 
                 // Table creation costs 1
                 Instr::OP_NEW_TABLE => {
-                    add_cost!(state, local_cost, 1);
+                    add_cost!(
+                        state,
+                        local_cost,
+                        const { Instr::op(Instr::OP_NEW_TABLE).static_units() }
+                    );
                     state.new_table()?;
                 }
                 Instr::OP_NEW_TABLE_PRESIZED => {
-                    add_cost!(state, local_cost, 1);
+                    add_cost!(
+                        state,
+                        local_cost,
+                        const { Instr::op(Instr::OP_NEW_TABLE_PRESIZED).static_units() }
+                    );
                     state.new_table_with_capacity(inst.a() as usize)?;
                 }
                 Instr::OP_NEW_TABLE_TEMPLATE => {
-                    add_cost!(state, local_cost, 1);
+                    add_cost!(
+                        state,
+                        local_cost,
+                        const { Instr::op(Instr::OP_NEW_TABLE_TEMPLATE).static_units() }
+                    );
                     state.instr_new_table_template(self, inst.a())?;
                 }
                 Instr::OP_NEW_TABLE_TRACKED => {
-                    add_cost!(state, local_cost, 1);
+                    add_cost!(
+                        state,
+                        local_cost,
+                        const { Instr::op(Instr::OP_NEW_TABLE_TRACKED).static_units() }
+                    );
                     let table_idx = state.stack.len();
                     state.new_table_with_capacity(inst.a() as usize)?;
                     state.table_constructor_bases.push(table_idx);
@@ -404,30 +448,54 @@ impl Frame {
 
                 // Table writes cost 1
                 Instr::OP_INIT_FIELD => {
-                    add_cost!(state, local_cost, 1);
+                    add_cost!(
+                        state,
+                        local_cost,
+                        const { Instr::op(Instr::OP_INIT_FIELD).static_units() }
+                    );
                     state.instr_init_field(self, inst.a(), inst.bx())?;
                 }
                 Instr::OP_INIT_FIELD_PINNED => {
-                    add_cost!(state, local_cost, 1);
+                    add_cost!(
+                        state,
+                        local_cost,
+                        const { Instr::op(Instr::OP_INIT_FIELD_PINNED).static_units() }
+                    );
                     state.instr_init_field_pinned(self, inst.bx(), inst.a())?;
                 }
                 Instr::OP_INIT_INDEX => {
-                    add_cost!(state, local_cost, 1);
+                    add_cost!(
+                        state,
+                        local_cost,
+                        const { Instr::op(Instr::OP_INIT_INDEX).static_units() }
+                    );
                     state.instr_init_index(inst.a())?;
                 }
                 Instr::OP_SET_FIELD => {
                     self.record_call_site(state);
-                    add_cost!(state, local_cost, 1);
+                    add_cost!(
+                        state,
+                        local_cost,
+                        const { Instr::op(Instr::OP_SET_FIELD).static_units() }
+                    );
                     state.instr_set_field(self, 0, inst.bx(), inst.a(), &mut local_cost)?;
                 }
                 Instr::OP_SET_FIELD_AT => {
                     self.record_call_site(state);
-                    add_cost!(state, local_cost, 1);
+                    add_cost!(
+                        state,
+                        local_cost,
+                        const { Instr::op(Instr::OP_SET_FIELD_AT).static_units() }
+                    );
                     state.instr_set_field(self, inst.a(), inst.bx(), u8::MAX, &mut local_cost)?;
                 }
                 Instr::OP_SET_TABLE => {
                     self.record_call_site(state);
-                    add_cost!(state, local_cost, 1);
+                    add_cost!(
+                        state,
+                        local_cost,
+                        const { Instr::op(Instr::OP_SET_TABLE).static_units() }
+                    );
                     state.instr_set_table(inst.a(), &mut local_cost)?;
                 }
 

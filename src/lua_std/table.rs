@@ -1,6 +1,6 @@
 //! Lua's Table Library
 
-use super::{arg_integer, opt_integer};
+use super::{arg_integer, check_optional_type_named, check_type_named, opt_integer};
 use crate::LuaType;
 use crate::Result;
 use crate::State;
@@ -33,7 +33,7 @@ pub(crate) fn open_table(state: &mut State) -> Result<()> {
     // If pos is omitted, inserts at the end.
     add_fn!("insert", |state| {
         state.consume_cost(1)?;
-        state.check_type(1, LuaType::Table)?;
+        check_type_named(state, 1, LuaType::Table, "insert")?;
         let num_args = state.get_top();
 
         if num_args == 2 {
@@ -64,7 +64,7 @@ pub(crate) fn open_table(state: &mut State) -> Result<()> {
     // If pos is omitted, removes the last element.
     add_fn!("remove", |state| {
         state.consume_cost(1)?;
-        state.check_type(1, LuaType::Table)?;
+        check_type_named(state, 1, LuaType::Table, "remove")?;
         let len = state.table_len(1);
         let len_i = i64::try_from(len).expect("table length fits in i64");
         let pos = if let Some(pos) = opt_integer(state, 2, "remove")? {
@@ -93,8 +93,8 @@ pub(crate) fn open_table(state: &mut State) -> Result<()> {
     // Sorts the array portion of t in place.
     // comp is an optional comparison function.
     add_fn!("sort", |state| {
-        state.check_type(1, LuaType::Table)?;
-        let has_comp = state.check_optional_type(2, LuaType::Function)?;
+        check_type_named(state, 1, LuaType::Table, "sort")?;
+        let has_comp = check_optional_type_named(state, 2, LuaType::Function, "sort")?;
 
         // Cost is charged inside table_sort BEFORE the comparator runs / the
         // table is mutated, so an exhausted budget blocks the sort.
@@ -145,10 +145,10 @@ pub(crate) fn open_table(state: &mut State) -> Result<()> {
     // Returns list[i]..sep..list[i+1]..sep..list[j].
     // Default: sep="", i=1, j=#list
     add_fn!("concat", |state| {
-        state.check_type(1, LuaType::Table)?;
+        check_type_named(state, 1, LuaType::Table, "concat")?;
         let len = i64::try_from(state.table_len(1)).expect("table length fits in i64");
 
-        let sep = if state.check_optional_type(2, LuaType::String)? {
+        let sep = if check_optional_type_named(state, 2, LuaType::String, "concat")? {
             let bytes = state.to_bytes(2)?.to_vec();
             state.consume_cost(bytes.len() as u64)?;
             bytes
@@ -204,13 +204,13 @@ pub(crate) fn open_table(state: &mut State) -> Result<()> {
     // Moves elements from table a1 to table a2 (or a1 if not given).
     // Copies a1[f..e] to a2[t..t+(e-f)]. Returns a2.
     add_fn!("move", |state| {
-        state.check_type(1, LuaType::Table)?;
+        check_type_named(state, 1, LuaType::Table, "move")?;
         let f = arg_integer(state, 2, "move")?;
         let e = arg_integer(state, 3, "move")?;
         let t = arg_integer(state, 4, "move")?;
 
         // Determine destination table (a2 or a1)
-        let has_a2 = state.check_optional_type(5, LuaType::Table)?;
+        let has_a2 = check_optional_type_named(state, 5, LuaType::Table, "move")?;
         let dest_idx: isize = if has_a2 { 5 } else { 1 };
 
         let count = if f <= e {
@@ -303,7 +303,5 @@ pub(crate) fn open_table(state: &mut State) -> Result<()> {
 }
 
 fn position_out_of_bounds(state: &State, func_name: &str) -> crate::error::Error {
-    state.error(ErrorKind::RuntimeError(format!(
-        "bad argument #2 to '{func_name}' (position out of bounds)"
-    )))
+    super::argument_error(state, 2, func_name, "position out of bounds")
 }

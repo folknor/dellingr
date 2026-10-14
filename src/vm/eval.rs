@@ -87,15 +87,20 @@ impl State {
                 Err(e) => {
                     self.truncate_call_frame(idx, old_stack_bottom);
                     // Notify the host of a Rust-function failure it reached
-                    // directly (no Lua frame on the stack). When call_depth > 0
-                    // an enclosing Lua frame will fire on_error as the error
-                    // unwinds; a non-empty stack trace means it already did. This
-                    // guard keeps on_error firing exactly once per error.
+                    // directly (no Lua frame on the stack). When call_depth > 0,
+                    // an enclosing Lua frame reports it as the error unwinds.
+                    // When call_chain_depth > 0, an enclosing non-function
+                    // __call chain reports it after the chain unwinds. A
+                    // non-empty stack trace means a Lua frame already reported
+                    // the error. These checks keep on_error firing once.
                     // Keep this boundary separate from Lua-frame reporting:
                     // direct host calls have no Lua frame that can attach a trace.
                     // Error has no separate report flag, so stack_trace remains
                     // the existing marker shared with report_frame_error below.
-                    if self.call_depth == 0 && e.stack_trace.is_empty() {
+                    if self.call_depth == 0
+                        && self.call_chain_depth == 0
+                        && e.stack_trace.is_empty()
+                    {
                         self.host_error(&e);
                     }
                     return Err(e);
@@ -206,12 +211,29 @@ impl State {
                     let result = if handler_is_function {
                         self.call(ArgCount::Fixed(combined), num_ret_expected)
                     } else {
-                        self.with_metamethod_depth(|state| {
+                        self.call_chain_depth += 1;
+                        let result = self.with_metamethod_depth(|state| {
                             state.call(ArgCount::Fixed(combined), num_ret_expected)
-                        })
+                        });
+                        self.call_chain_depth -= 1;
+                        result
                     };
                     if result.is_err() {
                         self.truncate_call_frame(idx, old_stack_bottom);
+                    }
+                    if !handler_is_function
+                        && let Err(error) = &result
+                        && self.call_depth == 0
+                        && self.call_chain_depth == 0
+                        && error.stack_trace.is_empty()
+                    {
+                        // Errors from a non-function __call chain can pass
+                        // through here without a Lua frame or RustFn reporting
+                        // boundary. Only the outermost host call sees the depth
+                        // restored to zero, so it reports the error once.
+                        // Errors already reported by a Lua frame retain their
+                        // non-empty trace and are skipped.
+                        self.host_error(error);
                     }
                     return result;
                 }
@@ -579,9 +601,7 @@ impl State {
         let identity = Arc::as_ptr(&bytecode) as usize;
         self.pending_bytecode_caches.push(identity);
         // Check if GC is needed before allocating
-        if self.heap.is_full() {
-            self.gc_collect();
-        }
+        self.maybe_collect();
         let obj = self.heap.alloc_lua_fn(bytecode, runtime, upvalues);
         let pending = self
             .pending_bytecode_caches

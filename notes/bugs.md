@@ -16,15 +16,6 @@ and tooling scopes. Hunter reports, not verified findings: each may be wrong.
    and they are never deduplicated through git history. Carry the context
    inline instead.
 
-## BUG-012 - A host `State::call` on a cyclic `__call` table may not fire `on_error`
-
-Reported by the fixer that guarded `__call` depth; confirmed by the reviewer.
-
-A host calling a self-referential `__call` table directly through `State::call`
-gets `MetamethodDepthExceeded` from the metamethod depth guard, but `call()`'s
-only `host_error` site is in the RustFn branch, so the `__call` branch returns
-the error without notifying `on_error`.
-
 ## BUG-010 - Out-of-range argument errors are `RuntimeError`, not `ArgError`
 
 Reported by the stdlib hunter; narrowed by a fixer.

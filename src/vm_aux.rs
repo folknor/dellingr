@@ -14,6 +14,9 @@ impl State {
     pub fn check_any(&mut self, arg_number: isize) -> Result<()> {
         assert!(arg_number != 0);
         if self.get_top() < arg_number.unsigned_abs() {
+            // This generic State API receives no callee name. The active
+            // CallInfo entries are Lua frames, so their names describe callers
+            // rather than the Rust function validating these args.
             let e = ArgError {
                 arg_number,
                 func_name: None,
@@ -42,6 +45,8 @@ impl State {
         }
         let received_type = self.typ(arg_number);
         if received_type != expected_type {
+            // Keep the generic State API anonymous; stdlib callbacks that
+            // know their registered name attach it at their call site.
             let e = ArgError {
                 arg_number,
                 func_name: None,

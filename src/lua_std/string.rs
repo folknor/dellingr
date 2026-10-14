@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, OnceLock};
 
-use super::{arg_integer, opt_integer};
+use super::{arg_integer, check_any_named, check_type_named, opt_integer};
 use crate::compiler;
 use crate::error::{ArgError, Error, ErrorKind};
 use crate::instr::{ArgCount, RetCount};
@@ -121,12 +121,12 @@ fn lua_sub_bytes(subject: &[u8], start_idx: i64, end_idx: i64) -> Vec<u8> {
 /// Lua's string-library arguments accept strings and numbers, but no other
 /// values. Keep the type gate separate from `bytes_coerce`, whose general
 /// conversion rules are intentionally broader.
-fn string_or_number_bytes(state: &mut State, idx: isize) -> Result<Vec<u8>> {
+fn string_or_number_bytes(state: &mut State, idx: isize, function_name: &str) -> Result<Vec<u8>> {
     match state.typ(idx) {
         LuaType::String | LuaType::Number => state.bytes_coerce(idx),
         received => Err(state.error(ErrorKind::ArgError(ArgError {
             arg_number: idx,
-            func_name: None,
+            func_name: Some(function_name.to_owned()),
             expected: Some(LuaType::String),
             received: Some(received),
         }))),
@@ -456,7 +456,7 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
         let bytes = if state.typ(1) == LuaType::String {
             lua_sub_bytes(state.to_bytes(1)?, i, j)
         } else {
-            let subject = string_or_number_bytes(state, 1)?;
+            let subject = string_or_number_bytes(state, 1, "sub")?;
             lua_sub_bytes(&subject, i, j)
         };
 
@@ -469,8 +469,8 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
 
     // string.find(s, pattern [, init [, plain]])
     add_fn!("find", |state| {
-        let subject = string_or_number_bytes(state, 1)?;
-        let pattern = string_or_number_bytes(state, 2)?;
+        let subject = string_or_number_bytes(state, 1, "find")?;
+        let pattern = string_or_number_bytes(state, 2, "find")?;
         state.consume_cost((subject.len() + pattern.len()).max(1) as u64)?;
         charge_bytes(state, pattern.len())?;
         let num_args = state.get_top();
@@ -552,7 +552,7 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
     add_fn!("len", |state| {
         let len = match state.typ(1) {
             LuaType::String => state.to_bytes(1)?.len(),
-            _ => string_or_number_bytes(state, 1)?.len(),
+            _ => string_or_number_bytes(state, 1, "len")?.len(),
         };
         state.set_top(0)?;
         state.push_number(len as f64)?;
@@ -561,7 +561,7 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
 
     // string.upper(s)
     add_fn!("upper", |state| {
-        let mut s = string_or_number_bytes(state, 1)?;
+        let mut s = string_or_number_bytes(state, 1, "upper")?;
         charge_bytes(state, s.len())?;
         s.make_ascii_uppercase();
         state.set_top(0)?;
@@ -571,7 +571,7 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
 
     // string.lower(s)
     add_fn!("lower", |state| {
-        let mut s = string_or_number_bytes(state, 1)?;
+        let mut s = string_or_number_bytes(state, 1, "lower")?;
         charge_bytes(state, s.len())?;
         s.make_ascii_lowercase();
         state.set_top(0)?;
@@ -581,7 +581,7 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
 
     // string.reverse(s)
     add_fn!("reverse", |state| {
-        let mut s = string_or_number_bytes(state, 1)?;
+        let mut s = string_or_number_bytes(state, 1, "reverse")?;
         charge_bytes(state, s.len())?;
         s.reverse();
         state.set_top(0)?;
@@ -591,8 +591,8 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
 
     // string.match(s, pattern [, init])
     add_fn!("match", |state| {
-        let s = string_or_number_bytes(state, 1)?;
-        let pattern = string_or_number_bytes(state, 2)?;
+        let s = string_or_number_bytes(state, 1, "match")?;
+        let pattern = string_or_number_bytes(state, 2, "match")?;
         state.consume_cost((s.len() + pattern.len()).max(1) as u64)?;
         charge_bytes(state, pattern.len())?;
         let init = opt_integer(state, 3, "match")?.map_or(0, |init| lua_start_index(s.len(), init));
@@ -624,8 +624,8 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
 
     // string.gmatch(s, pattern)
     add_fn!("gmatch", |state| {
-        let s = string_or_number_bytes(state, 1)?;
-        let pattern = string_or_number_bytes(state, 2)?;
+        let s = string_or_number_bytes(state, 1, "gmatch")?;
+        let pattern = string_or_number_bytes(state, 2, "gmatch")?;
         state.consume_cost((s.len() + pattern.len()).max(1) as u64)?;
         let pattern = if pattern.first() == Some(&b'^') {
             let escaped_len = crate::vm::checked_string_growth(pattern.len(), 1)?;
@@ -651,6 +651,12 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
         }
 
         state.new_table()?;
+        // Keep the interned flag key as a value under an integer key. The
+        // iterator can fetch and reuse that string without interning it on
+        // each match.
+        state.push_number(0.0)?;
+        state.push_string("compile_charged")?;
+        state.set_table_raw(-3)?;
         state.push_string("s")?;
         state.push_bytes(&s)?;
         state.set_table_raw(-3)?;
@@ -666,9 +672,9 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
 
     // string.gsub(s, pattern, repl [, n])
     add_fn!("gsub", |state| {
-        state.check_any(3)?;
-        let s = string_or_number_bytes(state, 1)?;
-        let pattern = string_or_number_bytes(state, 2)?;
+        check_any_named(state, 3, "gsub")?;
+        let s = string_or_number_bytes(state, 1, "gsub")?;
+        let pattern = string_or_number_bytes(state, 2, "gsub")?;
         state.consume_cost((s.len() + pattern.len()).max(1) as u64)?;
         charge_bytes(state, pattern.len())?;
         let max_replacements = opt_integer(state, 4, "gsub")?.map(|n| {
@@ -684,9 +690,12 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
             repl_type,
             LuaType::String | LuaType::Number | LuaType::Function | LuaType::Table
         ) {
-            return Err(state.error(ErrorKind::RuntimeError(
-                "bad argument #3 to 'gsub' (string/function/table expected)".into(),
-            )));
+            return Err(super::argument_error(
+                state,
+                3,
+                "gsub",
+                "string/function/table expected",
+            ));
         }
         if max_replacements == Some(0) {
             state.consume_cost(s.len() as u64)?;
@@ -874,12 +883,12 @@ fn push_gmatch_wrapper(
 
 fn gmatch_empty_iter(state: &mut State) -> Result<u8> {
     state.push_string("pos")?;
-    state.get_table(1)?;
+    state.get_table_raw(1)?;
     let pos = state.to_number(-1).unwrap_or(0.0) as usize;
     state.pop(1)?;
 
     state.push_string("len")?;
-    state.get_table(1)?;
+    state.get_table_raw(1)?;
     let len = state.to_number(-1).unwrap_or(0.0) as usize;
     state.pop(1)?;
 
@@ -898,27 +907,41 @@ fn gmatch_empty_iter(state: &mut State) -> Result<u8> {
 }
 
 fn gmatch_iter(state: &mut State) -> Result<u8> {
-    state.check_type(1, LuaType::Table)?;
+    check_type_named(state, 1, LuaType::Table, "gmatch")?;
 
     state.push_string("s")?;
-    state.get_table(1)?;
+    state.get_table_raw(1)?;
 
     state.push_string("p")?;
-    state.get_table(1)?;
+    state.get_table_raw(1)?;
 
     state.push_string("pos")?;
-    state.get_table(1)?;
+    state.get_table_raw(1)?;
     let pos = state.to_number(-1).unwrap_or(0.0) as usize;
     state.pop(1)?;
 
+    state.expect_string_at_named(2, "gmatch")?;
+    state.expect_string_at_named(3, "gmatch")?;
     if pos > state.to_bytes(2)?.len() {
         state.set_top(0)?;
         state.push_nil()?;
         return Ok(1);
     }
 
-    state.push_string("compile_charged")?;
-    state.get_table(1)?;
+    // Older snapshots have no cached key at integer slot 0. Seed it once on
+    // first use, preserving any compile flag already stored by that snapshot.
+    state.push_number(0.0)?;
+    state.get_table_raw(1)?;
+    if state.typ(-1) != LuaType::String {
+        state.pop(1)?;
+        state.push_string("compile_charged")?;
+        state.push_number(0.0)?;
+        state.insert(-2)?;
+        state.set_table_raw(1)?;
+        state.push_number(0.0)?;
+        state.get_table_raw(1)?;
+    }
+    state.get_table_raw(1)?;
     let compile_charged = state.to_boolean(-1);
     state.pop(1)?;
     if !compile_charged {
@@ -927,7 +950,8 @@ fn gmatch_iter(state: &mut State) -> Result<u8> {
         // the deterministic cost of continuing an existing iterator.
         let pattern_len = state.to_bytes(3)?.len();
         charge_bytes(state, pattern_len)?;
-        state.push_string("compile_charged")?;
+        state.push_number(0.0)?;
+        state.get_table_raw(1)?;
         state.push_boolean(true)?;
         state.set_table_raw(1)?;
     }

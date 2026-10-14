@@ -463,15 +463,7 @@ impl<'a> Parser<'a> {
         if len > self.fold_barrier
             && let Some(last) = self.chunk.code.last()
         {
-            let fused: Option<fn(i16) -> Instr> = match last.opcode() {
-                Instr::OP_LESS => Some(Instr::branch_false_less),
-                Instr::OP_LESS_EQUAL => Some(Instr::branch_false_less_equal),
-                Instr::OP_GREATER => Some(Instr::branch_false_greater),
-                Instr::OP_GREATER_EQUAL => Some(Instr::branch_false_greater_equal),
-                Instr::OP_EQUAL => Some(Instr::branch_false_equal),
-                Instr::OP_NOT_EQUAL => Some(Instr::branch_false_not_equal),
-                _ => None,
-            };
+            let fused = Instr::fused_branch_constructor(last.opcode());
             if let Some(constructor) = fused {
                 let idx = len - 1;
                 self.chunk.code[idx] = constructor(0);
@@ -689,10 +681,7 @@ impl<'a> Parser<'a> {
         match exp {
             PrefixExp::FunctionCall(call) => {
                 let (num_args, line) = (call.num_args(), call.line());
-                self.push_at_line(
-                    Instr::call(ArgCount::Fixed(num_args), RetCount::Fixed(1)),
-                    line,
-                );
+                self.push_at_line(Instr::call(num_args, RetCount::Fixed(1)), line);
             }
             PrefixExp::Parenthesized => (),
             PrefixExp::Place(place) => {

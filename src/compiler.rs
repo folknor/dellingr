@@ -315,22 +315,7 @@ fn internal_error(message: impl Into<String>) -> error::Error {
 }
 
 fn transfer_with_offset(inst: Instr, offset: i16) -> Option<Instr> {
-    Some(match inst.opcode() {
-        Instr::OP_JUMP => Instr::jump(offset),
-        Instr::OP_BRANCH_FALSE => Instr::branch_false(offset),
-        Instr::OP_BRANCH_TRUE_KEEP => Instr::branch_true_keep(offset),
-        Instr::OP_BRANCH_FALSE_KEEP => Instr::branch_false_keep(offset),
-        Instr::OP_BRANCH_FALSE_LESS => Instr::branch_false_less(offset),
-        Instr::OP_BRANCH_FALSE_LESS_EQUAL => Instr::branch_false_less_equal(offset),
-        Instr::OP_BRANCH_FALSE_GREATER => Instr::branch_false_greater(offset),
-        Instr::OP_BRANCH_FALSE_GREATER_EQUAL => Instr::branch_false_greater_equal(offset),
-        Instr::OP_BRANCH_FALSE_EQUAL => Instr::branch_false_equal(offset),
-        Instr::OP_BRANCH_FALSE_NOT_EQUAL => Instr::branch_false_not_equal(offset),
-        Instr::OP_FOR_PREP => Instr::for_prep(inst.a(), offset),
-        Instr::OP_FOR_LOOP => Instr::for_loop(inst.a(), offset),
-        Instr::OP_TFOR_LOOP => Instr::tfor_loop(inst.a(), offset),
-        _ => return None,
-    })
+    Instr::is_transfer(inst.opcode()).then(|| Instr::op_a_sbx(inst.opcode(), inst.a(), offset))
 }
 
 fn checked_remapped_offset(offset: i64) -> Result<i16> {
@@ -769,30 +754,22 @@ mod runtime_cache_tests {
     }
 
     fn transfer(opcode: u8, offset: i16) -> Instr {
-        match opcode {
-            Instr::OP_JUMP => Instr::jump(offset),
-            Instr::OP_BRANCH_FALSE => Instr::branch_false(offset),
-            Instr::OP_BRANCH_TRUE_KEEP => Instr::branch_true_keep(offset),
-            Instr::OP_BRANCH_FALSE_KEEP => Instr::branch_false_keep(offset),
-            Instr::OP_FOR_PREP => Instr::for_prep(7, offset),
-            Instr::OP_FOR_LOOP => Instr::for_loop(7, offset),
-            Instr::OP_TFOR_LOOP => Instr::tfor_loop(7, offset),
-            _ => panic!("test fixture requires a transfer opcode"),
-        }
+        assert!(Instr::is_transfer(opcode));
+        let a = if matches!(
+            opcode,
+            Instr::OP_FOR_PREP | Instr::OP_FOR_LOOP | Instr::OP_TFOR_LOOP
+        ) {
+            7
+        } else {
+            0
+        };
+        Instr::op_a_sbx(opcode, a, offset)
     }
 
     #[test]
     fn strip_remaps_every_transfer_forward_and_backward() {
-        let transfer_opcodes = [
-            Instr::OP_JUMP,
-            Instr::OP_BRANCH_FALSE,
-            Instr::OP_BRANCH_TRUE_KEEP,
-            Instr::OP_BRANCH_FALSE_KEEP,
-            Instr::OP_FOR_PREP,
-            Instr::OP_FOR_LOOP,
-            Instr::OP_TFOR_LOOP,
-        ];
-        for opcode in transfer_opcodes {
+        for opcode in (u8::MIN..=u8::MAX).filter(|opcode| Instr::is_transfer(*opcode)) {
+            let expected_a = transfer(opcode, 0).a();
             let mut forward = Bytecode {
                 code: vec![
                     transfer(opcode, 2),
@@ -805,10 +782,7 @@ mod runtime_cache_tests {
             };
             strip_dead_instructions(&mut forward).expect("forward transfer strips");
             assert_eq!(forward.code[0].sbx(), 1, "opcode {opcode}");
-            assert_eq!(
-                forward.code[0].a(),
-                if opcode >= Instr::OP_FOR_PREP { 7 } else { 0 }
-            );
+            assert_eq!(forward.code[0].a(), expected_a);
             assert_eq!(forward.line_info, vec![10, 12, 13]);
 
             let mut backward = Bytecode {
@@ -824,10 +798,7 @@ mod runtime_cache_tests {
             };
             strip_dead_instructions(&mut backward).expect("backward transfer strips");
             assert_eq!(backward.code[2].sbx(), -3, "opcode {opcode}");
-            assert_eq!(
-                backward.code[2].a(),
-                if opcode >= Instr::OP_FOR_PREP { 7 } else { 0 }
-            );
+            assert_eq!(backward.code[2].a(), expected_a);
             assert_eq!(backward.line_info, vec![20, 22, 23, 24]);
         }
     }

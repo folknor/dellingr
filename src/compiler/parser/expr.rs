@@ -300,7 +300,7 @@ impl Parser<'_> {
                 // If last arg is vararg, adjust to pass all varargs
                 let num_args = if let ExpDesc::Vararg = last_exp {
                     self.replace_last_instr(Instr::vararg(u8::MAX)); // Push all varargs
-                    u8::MAX // Signal to VM to calculate arg count from call base
+                    ArgCount::Dynamic // Calculate the count from the call-base marker
                 } else if let ExpDesc::Prefix(PrefixExp::FunctionCall(_)) = last_exp {
                     // Last argument is a function call - adjust it to return all values
                     let old = *self
@@ -316,15 +316,15 @@ impl Parser<'_> {
                         ),
                     };
                     self.replace_last_instr(Instr::call(
-                        ArgCount::Fixed(inner_num_args),
+                        ArgCount::from_u8(inner_num_args),
                         RetCount::All,
                     )); // Return all values
-                    u8::MAX // Signal to VM to calculate arg count from call base
+                    ArgCount::Dynamic // Calculate the count from the call-base marker
                 } else {
                     // Keep parse-time instruction indices stable. Finalization
                     // strips this free placeholder with one jump remap.
                     self.chunk.code[mark_idx] = Instr::nop();
-                    self.checked_fixed_arg_count(num_args as usize, 0)?
+                    ArgCount::Fixed(self.checked_fixed_arg_count(num_args as usize, 0)?)
                 };
                 let prefix = PrefixExp::FunctionCall(CallSite::new(num_args, line));
                 self.parse_prefix_extension(prefix)
@@ -368,7 +368,7 @@ impl Parser<'_> {
                 // If last arg is vararg, adjust to pass all varargs
                 let num_args = if let ExpDesc::Vararg = last_exp {
                     self.replace_last_instr(Instr::vararg(u8::MAX)); // Push all varargs
-                    u8::MAX // Signal to VM to calculate arg count from call base
+                    ArgCount::Dynamic // Calculate the count from the call-base marker
                 } else if let ExpDesc::Prefix(PrefixExp::FunctionCall(_)) = last_exp {
                     // Last argument is a function call - adjust it to return all values
                     let old = *self
@@ -384,15 +384,15 @@ impl Parser<'_> {
                         ),
                     };
                     self.replace_last_instr(Instr::call(
-                        ArgCount::Fixed(inner_num_args),
+                        ArgCount::from_u8(inner_num_args),
                         RetCount::All,
                     )); // Return all values
-                    u8::MAX // Signal to VM to calculate arg count from call base
+                    ArgCount::Dynamic // Calculate the count from the call-base marker
                 } else {
                     // Keep parse-time instruction indices stable. Finalization
                     // strips this free placeholder with one jump remap.
                     self.chunk.code[mark_idx] = Instr::nop();
-                    self.checked_fixed_arg_count(num_args as usize, 1)?
+                    ArgCount::Fixed(self.checked_fixed_arg_count(num_args as usize, 1)?)
                 };
                 // Stack: [method, obj, arg1, arg2, ...]
                 let prefix = PrefixExp::FunctionCall(CallSite::new(num_args, line));

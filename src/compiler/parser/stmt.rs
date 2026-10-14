@@ -1,4 +1,3 @@
-use super::ArgCount;
 use super::ExpDesc;
 use super::Instr;
 use super::Parser;
@@ -31,7 +30,7 @@ impl<'a> Parser<'a> {
                     if old.opcode() != Instr::OP_CALL {
                         unreachable!("tail function call but last instruction was {old:?}");
                     }
-                    self.replace_last_instr(Instr::call(ArgCount::Fixed(num_args), RetCount::All)); // Emit Call with "return all"
+                    self.replace_last_instr(Instr::call(num_args, RetCount::All)); // Emit Call with "return all"
                     u8::MAX
                 }
                 ExpDesc::Vararg => {
@@ -44,7 +43,12 @@ impl<'a> Parser<'a> {
             0
         };
 
-        self.push(Instr::ret(RetCount::Fixed(n)));
+        // At a return statement boundary the operand stack contains exactly
+        // this expression list. 255 fixed expressions deliberately use All:
+        // the bytecode has no fixed-255 encoding, while rejecting this source
+        // would remove an existing accepted program. Tail calls/varargs also
+        // select All explicitly via the same decoded sentinel above.
+        self.push(Instr::ret(RetCount::from_u8(n)));
         self.input.try_pop(TokenType::Semi)?;
         Ok(())
     }
@@ -81,10 +85,7 @@ impl<'a> Parser<'a> {
             }
             PrefixExp::FunctionCall(call) => {
                 let (num_args, line) = (call.num_args(), call.line());
-                self.push_at_line(
-                    Instr::call(ArgCount::Fixed(num_args), RetCount::Fixed(0)),
-                    line,
-                );
+                self.push_at_line(Instr::call(num_args, RetCount::Fixed(0)), line);
                 Ok(())
             }
             PrefixExp::Place(first_place) => self.parse_assign(first_place),
@@ -404,10 +405,8 @@ impl<'a> Parser<'a> {
             ExpDesc::Prefix(PrefixExp::FunctionCall(call)) if tail_needed > 1 => {
                 let num_args = call.num_args();
                 let tail_needed = self.checked_multi_assign_width(tail_needed)?;
-                let old = self.replace_last_instr(Instr::call(
-                    ArgCount::Fixed(num_args),
-                    RetCount::Fixed(tail_needed),
-                ));
+                let old =
+                    self.replace_last_instr(Instr::call(num_args, RetCount::Fixed(tail_needed)));
                 debug_assert!(
                     old.opcode() == Instr::OP_CALL,
                     "tail function call must end the emitted expression list"

@@ -64,7 +64,9 @@ impl State {
         if matches!(val, Val::Nil) {
             // Check for __index metamethod
             if let Some(mt_ptr) = mt_ptr {
-                // Protect key from GC during string allocation
+                // Keep key rooted through this dispatch-time intern. The
+                // allocation can collect, so its current lifetime at this
+                // point is part of the collection behavior.
                 self.check_stack_space(1)?;
                 self.push_unchecked(key);
                 let index_key = self.alloc_string("__index")?;
@@ -195,8 +197,9 @@ impl State {
         if matches!(existing, Val::Nil) {
             // Check for __newindex metamethod
             if let Some(mt_ptr) = mt_ptr {
-                // Protect key and val from GC during string allocation by pushing clones
-                // (clones share the same underlying heap objects, so marking them marks originals)
+                // Keep key and val rooted through this dispatch-time intern.
+                // The allocation can collect, so their current lifetimes at
+                // this point are part of the collection behavior.
                 self.check_stack_space(2)?;
                 self.push_unchecked(key);
                 self.push_unchecked(val);

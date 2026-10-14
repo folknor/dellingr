@@ -108,51 +108,15 @@ impl ScopeCost {
 
         for inst in &chunk.code {
             scope.instructions += 1;
-            match inst.opcode() {
-                // Arithmetic (cost 1 each)
-                Instr::OP_ADD
-                | Instr::OP_SUBTRACT
-                | Instr::OP_MULTIPLY
-                | Instr::OP_DIVIDE
-                | Instr::OP_POW
-                | Instr::OP_MOD => {
-                    scope.arithmetic_ops += 1;
-                    scope.own_cost += 1;
-                }
-                // Unary negation (cost 1)
-                Instr::OP_NEGATE => {
-                    scope.negations += 1;
-                    scope.own_cost += 1;
-                }
-                // Table creation (cost 1)
-                Instr::OP_NEW_TABLE
-                | Instr::OP_NEW_TABLE_PRESIZED
-                | Instr::OP_NEW_TABLE_TEMPLATE
-                | Instr::OP_NEW_TABLE_TRACKED => {
-                    scope.table_creations += 1;
-                    scope.own_cost += 1;
-                }
-                // Table writes (cost 1 each)
-                Instr::OP_INIT_FIELD
-                | Instr::OP_INIT_FIELD_PINNED
-                | Instr::OP_INIT_INDEX
-                | Instr::OP_SET_FIELD
-                | Instr::OP_SET_FIELD_AT
-                | Instr::OP_SET_TABLE => {
-                    scope.table_writes += 1;
-                    scope.own_cost += 1;
-                }
-                // Array initialization (cost = n elements)
-                Instr::OP_SET_LIST => {
-                    let n = u64::from(inst.a());
-                    scope.array_elements += n;
-                    scope.own_cost += n;
-                }
-                // Function calls
-                Instr::OP_CALL => {
-                    scope.function_calls += 1;
-                }
-                _ => {}
+            scope.own_cost += inst.static_units();
+            match Instr::cost_class(inst.opcode()) {
+                instr::OpcodeCost::Arithmetic => scope.arithmetic_ops += 1,
+                instr::OpcodeCost::Negation => scope.negations += 1,
+                instr::OpcodeCost::TableCreation => scope.table_creations += 1,
+                instr::OpcodeCost::TableWrite => scope.table_writes += 1,
+                instr::OpcodeCost::ArrayElements => scope.array_elements += u64::from(inst.a()),
+                instr::OpcodeCost::Call => scope.function_calls += 1,
+                instr::OpcodeCost::Free => {}
             }
         }
 

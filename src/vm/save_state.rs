@@ -1142,6 +1142,7 @@ impl State {
             && self.table_constructor_bases.is_empty()
             && self.call_stack.is_empty()
             && self.metamethod_depth == 0
+            && self.call_chain_depth == 0
             && self.call_depth == 0
         {
             Ok(())
@@ -1448,6 +1449,7 @@ fn materialize_payload(
     state.table_constructor_bases.clear();
     state.call_stack.clear();
     state.metamethod_depth = 0;
+    state.call_chain_depth = 0;
     state.call_depth = 0;
     state.current_source = None;
     state.gc_collect();

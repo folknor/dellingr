@@ -10,7 +10,7 @@
 //! exact transcendental results (basic arithmetic, comparisons, and
 //! `math.random` are bit-stable everywhere).
 
-use super::{arg_integer, argument_error};
+use super::{arg_integer, argument_error, check_type_named};
 use crate::LuaType;
 use crate::Result;
 use crate::State;
@@ -38,7 +38,7 @@ pub(crate) fn open_math(state: &mut State) -> Result<()> {
     // math.sin(x) - costs 1
     add_fn!("sin", |state| {
         state.consume_cost(1)?;
-        state.check_type(1, LuaType::Number)?;
+        check_type_named(state, 1, LuaType::Number, "sin")?;
         let x = state.to_number(1)?;
         state.set_top(0)?;
         state.push_number(x.sin())?;
@@ -48,7 +48,7 @@ pub(crate) fn open_math(state: &mut State) -> Result<()> {
     // math.cos(x) - costs 1
     add_fn!("cos", |state| {
         state.consume_cost(1)?;
-        state.check_type(1, LuaType::Number)?;
+        check_type_named(state, 1, LuaType::Number, "cos")?;
         let x = state.to_number(1)?;
         state.set_top(0)?;
         state.push_number(x.cos())?;
@@ -58,8 +58,8 @@ pub(crate) fn open_math(state: &mut State) -> Result<()> {
     // math.atan2(y, x) - costs 1
     add_fn!("atan2", |state| {
         state.consume_cost(1)?;
-        state.check_type(1, LuaType::Number)?;
-        state.check_type(2, LuaType::Number)?;
+        check_type_named(state, 1, LuaType::Number, "atan2")?;
+        check_type_named(state, 2, LuaType::Number, "atan2")?;
         let y = state.to_number(1)?;
         let x = state.to_number(2)?;
         state.set_top(0)?;
@@ -70,7 +70,7 @@ pub(crate) fn open_math(state: &mut State) -> Result<()> {
     // math.sqrt(x) - costs 1
     add_fn!("sqrt", |state| {
         state.consume_cost(1)?;
-        state.check_type(1, LuaType::Number)?;
+        check_type_named(state, 1, LuaType::Number, "sqrt")?;
         let x = state.to_number(1)?;
         state.set_top(0)?;
         state.push_number(x.sqrt())?;
@@ -80,7 +80,7 @@ pub(crate) fn open_math(state: &mut State) -> Result<()> {
     // math.abs(x) - costs 1
     add_fn!("abs", |state| {
         state.consume_cost(1)?;
-        state.check_type(1, LuaType::Number)?;
+        check_type_named(state, 1, LuaType::Number, "abs")?;
         let x = state.to_number(1)?;
         state.set_top(0)?;
         state.push_number(x.abs())?;
@@ -100,10 +100,10 @@ pub(crate) fn open_math(state: &mut State) -> Result<()> {
             };
             return Err(state.error(ErrorKind::ArgError(e)));
         }
-        state.check_type(1, LuaType::Number)?;
+        check_type_named(state, 1, LuaType::Number, "min")?;
         let mut result = state.to_number(1)?;
         for i in 2..=n {
-            state.check_type(i, LuaType::Number)?;
+            check_type_named(state, i, LuaType::Number, "min")?;
             let v = state.to_number(i)?;
             if v < result {
                 result = v;
@@ -127,10 +127,10 @@ pub(crate) fn open_math(state: &mut State) -> Result<()> {
             };
             return Err(state.error(ErrorKind::ArgError(e)));
         }
-        state.check_type(1, LuaType::Number)?;
+        check_type_named(state, 1, LuaType::Number, "max")?;
         let mut result = state.to_number(1)?;
         for i in 2..=n {
-            state.check_type(i, LuaType::Number)?;
+            check_type_named(state, i, LuaType::Number, "max")?;
             let v = state.to_number(i)?;
             if v > result {
                 result = v;
@@ -144,7 +144,7 @@ pub(crate) fn open_math(state: &mut State) -> Result<()> {
     // math.floor(x) - costs 1
     add_fn!("floor", |state| {
         state.consume_cost(1)?;
-        state.check_type(1, LuaType::Number)?;
+        check_type_named(state, 1, LuaType::Number, "floor")?;
         let x = state.to_number(1)?;
         state.set_top(0)?;
         state.push_number(x.floor())?;
@@ -154,7 +154,7 @@ pub(crate) fn open_math(state: &mut State) -> Result<()> {
     // math.ceil(x) - costs 1
     add_fn!("ceil", |state| {
         state.consume_cost(1)?;
-        state.check_type(1, LuaType::Number)?;
+        check_type_named(state, 1, LuaType::Number, "ceil")?;
         let x = state.to_number(1)?;
         state.set_top(0)?;
         state.push_number(x.ceil())?;
@@ -208,7 +208,7 @@ pub(crate) fn open_math(state: &mut State) -> Result<()> {
     // math.tan(x) - costs 1
     add_fn!("tan", |state| {
         state.consume_cost(1)?;
-        state.check_type(1, LuaType::Number)?;
+        check_type_named(state, 1, LuaType::Number, "tan")?;
         let x = state.to_number(1)?;
         state.set_top(0)?;
         state.push_number(x.tan())?;
@@ -218,7 +218,7 @@ pub(crate) fn open_math(state: &mut State) -> Result<()> {
     // math.acos(x) - costs 1
     add_fn!("acos", |state| {
         state.consume_cost(1)?;
-        state.check_type(1, LuaType::Number)?;
+        check_type_named(state, 1, LuaType::Number, "acos")?;
         let x = state.to_number(1)?;
         state.set_top(0)?;
         state.push_number(x.acos())?;
@@ -228,7 +228,7 @@ pub(crate) fn open_math(state: &mut State) -> Result<()> {
     // math.asin(x) - costs 1
     add_fn!("asin", |state| {
         state.consume_cost(1)?;
-        state.check_type(1, LuaType::Number)?;
+        check_type_named(state, 1, LuaType::Number, "asin")?;
         let x = state.to_number(1)?;
         state.set_top(0)?;
         state.push_number(x.asin())?;
@@ -240,10 +240,10 @@ pub(crate) fn open_math(state: &mut State) -> Result<()> {
     // With two args: returns atan2(y, x)
     add_fn!("atan", |state| {
         state.consume_cost(1)?;
-        state.check_type(1, LuaType::Number)?;
+        check_type_named(state, 1, LuaType::Number, "atan")?;
         let y = state.to_number(1)?;
         let result = if state.get_top() >= 2 {
-            state.check_type(2, LuaType::Number)?;
+            check_type_named(state, 2, LuaType::Number, "atan")?;
             let x = state.to_number(2)?;
             y.atan2(x)
         } else {
@@ -257,7 +257,7 @@ pub(crate) fn open_math(state: &mut State) -> Result<()> {
     // math.deg(x) - radians to degrees - costs 1
     add_fn!("deg", |state| {
         state.consume_cost(1)?;
-        state.check_type(1, LuaType::Number)?;
+        check_type_named(state, 1, LuaType::Number, "deg")?;
         let x = state.to_number(1)?;
         state.set_top(0)?;
         state.push_number(x.to_degrees())?;
@@ -267,7 +267,7 @@ pub(crate) fn open_math(state: &mut State) -> Result<()> {
     // math.rad(x) - degrees to radians - costs 1
     add_fn!("rad", |state| {
         state.consume_cost(1)?;
-        state.check_type(1, LuaType::Number)?;
+        check_type_named(state, 1, LuaType::Number, "rad")?;
         let x = state.to_number(1)?;
         state.set_top(0)?;
         state.push_number(x.to_radians())?;
@@ -277,7 +277,7 @@ pub(crate) fn open_math(state: &mut State) -> Result<()> {
     // math.exp(x) - e^x - costs 1
     add_fn!("exp", |state| {
         state.consume_cost(1)?;
-        state.check_type(1, LuaType::Number)?;
+        check_type_named(state, 1, LuaType::Number, "exp")?;
         let x = state.to_number(1)?;
         state.set_top(0)?;
         state.push_number(x.exp())?;
@@ -287,10 +287,10 @@ pub(crate) fn open_math(state: &mut State) -> Result<()> {
     // math.log(x [, base]) - natural log, or log with base - costs 1
     add_fn!("log", |state| {
         state.consume_cost(1)?;
-        state.check_type(1, LuaType::Number)?;
+        check_type_named(state, 1, LuaType::Number, "log")?;
         let x = state.to_number(1)?;
         let result = if state.get_top() >= 2 {
-            state.check_type(2, LuaType::Number)?;
+            check_type_named(state, 2, LuaType::Number, "log")?;
             let base = state.to_number(2)?;
             // Reference special-cases base 10 with log10, which makes
             // math.log(1000, 10) exactly 3 rather than 2.9999999999999996.
@@ -310,8 +310,8 @@ pub(crate) fn open_math(state: &mut State) -> Result<()> {
     // math.fmod(x, y) - float modulo (same sign as x) - costs 1
     add_fn!("fmod", |state| {
         state.consume_cost(1)?;
-        state.check_type(1, LuaType::Number)?;
-        state.check_type(2, LuaType::Number)?;
+        check_type_named(state, 1, LuaType::Number, "fmod")?;
+        check_type_named(state, 2, LuaType::Number, "fmod")?;
         let x = state.to_number(1)?;
         let y = state.to_number(2)?;
         state.set_top(0)?;
@@ -322,7 +322,7 @@ pub(crate) fn open_math(state: &mut State) -> Result<()> {
     // math.modf(x) - returns integer and fractional parts - costs 1
     add_fn!("modf", |state| {
         state.consume_cost(1)?;
-        state.check_type(1, LuaType::Number)?;
+        check_type_named(state, 1, LuaType::Number, "modf")?;
         let x = state.to_number(1)?;
         let integral = x.trunc();
         let fractional = if matches!(x.partial_cmp(&integral), Some(std::cmp::Ordering::Equal)) {

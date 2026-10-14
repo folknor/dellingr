@@ -20,95 +20,6 @@ each may be wrong. Defects found along the way are in [bugs.md](bugs.md).
 
 # Opcode and encoding ownership
 
-## HYG-001 - The opcode set has no single owner, and static and runtime cost are two copies of one table
-
-Reported by the compiler and surface hunters.
-
-`src/instr.rs` defines each opcode as a bare `pub(crate) const OP_X: u8`. Every
-other fact about an opcode is a hand-kept full list elsewhere:
-
-| Fact | Where it is spelled |
-|---|---|
-| number | `instr.rs` consts |
-| known opcode | `verify.rs` `known_opcode` (a 60-arm `matches!`) |
-| operand bytes that must be zero | `verify.rs` `reserved_zero`, three hand-kept groups plus a nested "A is reserved" list |
-| operand-stack effect | `verify.rs` `verify_stack_discipline` |
-| control transfer and target | `verify.rs` successor match, the jump-target range check (a second list in the same file), `compiler.rs` `transfer_with_offset`, VM dispatch in `vm/frame.rs` |
-| display name | `instr.rs` `impl Debug` |
-| cost class | `lib.rs` `ScopeCost::analyze_chunk` (static) and the `add_cost!` sites in `vm/frame.rs` (runtime) |
-| constructor shape | the `Instr::xxx()` helpers |
-
-Drift already present:
-
-- `Debug` prints `Concat` with no count and `MarkCallBase` with no adjustment,
-  so a `debug_parser` dump loses information the verifier depends on.
-- The strip-remap test fixture (`strip_remaps_every_transfer_forward_and_backward`
-  in compiler.rs) lists 7 transfer opcodes; `transfer_with_offset` handles 13.
-  The six fused `BRANCH_FALSE_*` opcodes (64-69) are covered only indirectly
-  through the example corpus.
-- The dispatch range `OP_BRANCH_FALSE_LESS..=OP_BRANCH_FALSE_NOT_EQUAL` in
-  `vm/frame.rs` works only because 64-69 are contiguous. The fallback arm in
-  `eval_control.rs` `instr_branch_fused` turns a violation into a runtime
-  `InternalError`, not a build failure.
-- The static cost match in `analyze_chunk` (arith, negate, four
-  `OP_NEW_TABLE*`, six table-write forms, `OP_SET_LIST`) restates the runtime
-  `add_cost!` sites. Only `stripping_preserves_costs...` and a few lib.rs cost
-  tests keep them in step. A new costed opcode would charge at runtime and be
-  silently free in `analyze_cost`.
-- Prose copies have drifted: the `Frame::eval` doc comment still lists "string
-  operations" (and length) as free, which predates cost model 2's native
-  charging. README "Budget" is a fourth copy.
-- Lateral (surface): `CostAnalysis::totals` re-sums `own_cost` across the tree
-  while `ScopeCost.total_cost` is computed separately in `analyze_chunk`, a
-  third copy of the same sum. `ScopeTotals` mirrors `ScopeCost` field for field
-  only to sum them; `ScopeCost` could implement `AddAssign`.
-
-Proposed fix (compiler): one declarative table, a `macro_rules!` taking `(NAME,
-number, operand shape, stack effect, transfer kind, cost class, debug
-format)`, emitting the consts, `known_opcode`, the reserved-byte mask,
-`is_transfer`/`with_offset`, `Debug` and the static cost class. The verifier's
-stack-effect match can stay hand-written for dynamic opcodes. Proposed fix
-(surface): a `const fn static_cost(opcode) -> Option<CostClass>` that dispatch
-charges and the analyzer sums, ideally an exhaustive `match` over an opcode
-enum. Enforceable: an exhaustive generated table makes a missing entry a
-compile error; add a `const _: () = assert!(...)` that 64..=69 is exactly the
-fused group; drive the strip fixture from `is_transfer` over all 256 byte
-values; a test compiling a one-instruction chunk per opcode and comparing
-analyzer and runtime cost.
-
-## HYG-002 - `Fixed(255)` silently encodes to the `All`/`Dynamic` sentinel
-
-Reported by the compiler hunter; the vm and stdlib hunters raise the same
-aliasing at the runtime edge.
-
-`to_u8` maps `Fixed(n)` to `n`, so `RetCount::Fixed(255)` and
-`ArgCount::Fixed(255)` encode to the sentinel byte. Compiler sites depend on
-this on purpose or by accident:
-
-- `parse_explist` allows 255 expressions and `parse_return` then emits
-  `Instr::ret(RetCount::Fixed(255))`, so `return e1, ..., e255` compiles to
-  "return all". It gives the same answer only because the operand stack holds
-  exactly those values at a statement boundary. Fixed returns and the runtime
-  `RetCount::All` path ("too many results (limit 255)" in vm/eval.rs) are not
-  the same rule.
-- `expr.rs` (call and method-call tails), `stmt.rs` `parse_return` and
-  `adjust_multi_assign` rebuild an inner call as `ArgCount::Fixed(call.num_args())`
-  / `Fixed(old.a())`; a dynamic inner call stays dynamic only because
-  `Fixed(255)` aliases `Dynamic`. `table.rs` uses `ArgCount::from_u8(instr.a())`,
-  the correct spelling of the same operation.
-- `CallSite` stores `num_args: u8` with 255 meaning dynamic and no type saying
-  so.
-- vm: the `__call` path computes `combined = actual + 1`, which can reach 255;
-  harmless as an enum today but worth a test.
-- stdlib: `unpack` deliberately allows 255 results (`span >= 255` rejects
-  256+); whether a Rust function returning exactly 255 values collides with the
-  `All` sentinel is worth checking.
-
-Fix: `Fixed` holds a newtype whose constructor rejects 255, `CallSite` stores
-an `ArgCount`, and `parse_explist`/`parse_return` check against the fixed-count
-limit. Enforceable by type; also a test that `return` of 255 literals produces
-`ret(Fixed)` or a syntax error.
-
 ## HYG-003 - "Uncached" has two encodings
 
 Reported by the compiler hunter; narrowed by a fixer, who documented the
@@ -120,16 +31,6 @@ instruction words, so unifying them behind a `CacheSlot` newtype needs a save
 format bump plus coordinated changes in compiler, verifier, save_state and the
 runtime decoders (`eval_index.rs`, `eval_store.rs`). Worth doing alongside the
 next format bump.
-
-## HYG-006 - Opcode numbers and builtin indices are part of the save format, but nothing ties them to `FORMAT_VERSION`
-
-Reported by the compiler hunter.
-
-Snapshots store raw `u32` instructions and builtin slots by index.
-Renumbering either changes what an existing snapshot means without moving
-`FORMAT_VERSION`. The fused-branch CHANGELOG entry relies on "unknown opcode"
-rejection, which covers additions only. Enforceable: a golden test pinning the
-opcode-number and builtin-index tables next to `FORMAT_VERSION`.
 
 ## HYG-007 - Cache-slot allocation and the tfor-cursor count are each derived twice
 
@@ -208,18 +109,6 @@ real owner is the `u8` return of `RustFunc` and `RetCount`'s width. Fix:
 `u8::MAX`, a `MAX_RESULTS` const and `results_count(n) -> Result<u8>` helper
 next to `RetCount`; unit test at 255/256. A brokkr text rule could then reject
 `"limit 255"` literals.
-
-## HYG-012 - GC policy and the auto-GC sentinel have two owners
-
-Reported by the vm hunter.
-
-`State::GC_INITIAL_THRESHOLD = 20` (vm.rs) and a literal `.max(20)` in
-`GcHeap::collect` (vm/object.rs), with the growth factor `2` inline there;
-tests restate `>= 20` and `gc_set_threshold(20)`. `usize::MAX` as "auto-GC
-disabled" is spelled in `gc_disable_auto`, in `GcHeap::collect`, and in doc
-comments. Fix: initial, floor and growth as named consts or a `GcPolicy` in
-`GcHeap`; `Option<usize>` or an enum threshold so the sentinel is
-unrepresentable.
 
 ## HYG-013 - Capacity hints and headroom are hand-counted, and some are already off
 
@@ -313,35 +202,20 @@ configurable maximum source size.
 
 # Errors and diagnostics
 
-## HYG-020 - "bad argument" has five owners and two formats, and type checks name no function
+## HYG-020 - Rust-function names are supplied per call site, and `ArgError` has no detail
 
-Reported by the stdlib hunter; the vm hunter reports the hand-built `ArgError`
-sites.
+Reported by the stdlib hunter; narrowed by a fixer, who quoted names in
+`ArgError`'s Display, added named validation helpers in lua_std.rs used at 62
+stdlib sites, and made error.rs the only owner of "bad argument" text.
 
-`State::check_type` (vm_aux.rs) builds `ArgError { func_name: None, .. }`, and
-`ArgError`'s Display (error.rs) renders `None` as `<anonymous>` and `Some(name)`
-unquoted. Nearly every library type check goes through it, so `math.sin("x")`,
-`string.sub("a", {})` and `table.insert(1, 2)` say `to <anonymous>`; reference
-says `to 'sin'`. Hand-written messages in the same library quote:
-`exact_integer_argument` (lua_std.rs), `position_out_of_bounds` (table.rs),
-`format_arg_error` (string_format.rs, which also re-spells "X expected, got Y"),
-and literals in math.rs (3), basic.rs `error` and string.rs `gsub`. So one
-function can say `to 'insert'` or `to <anonymous>` depending on which argument
-was wrong; no test pins `<anonymous>`. `ArgError` is also hand-built with
-`func_name: None` in vm.rs (2), vm/stack.rs (2) and string.rs
-`string_or_number_bytes`. Arg-count policy is per function too: `table.insert`
-and `math.random` each spell `"wrong number of arguments to '<name>'"`, and
-`math.min`/`max` hand-build a zero-arg `ArgError` that `check_type(1, Number)`
-would produce identically. The `unpack` wrappers mean `unpack` and
-`table.unpack` both say `'unpack'`.
-
-Fix: record the executing Rust function's registered name in its CallInfo
-(snapshot builds already carry `"math.sin"`), have `check_type` fill
-`func_name`, quote it in Display, and give `ArgError` a `detail: ArgDetail`
-enum (TypeMismatch, NoInteger, OutOfBounds, IntervalEmpty, Custom) with one
-renderer. Enforceable: a text rule forbidding the literal `"bad argument`
-outside error.rs; a table-driven test calling every registered stdlib function
-with a wrong-typed argument and asserting the message contains `'<name>'`.
+Remaining: the stdlib passes its own function name at each site, while a host
+`RustFunc` calling `State::check_type` still gets `<anonymous>`. Recording the
+executing Rust function's registered name in `CallInfo` (vm.rs, set and cleared
+at the Rust dispatch paths in eval.rs and eval_control.rs) would let
+`check_type` fill it. Separately, `ArgError` needs a `detail: ArgDetail` enum
+(TypeMismatch, NoInteger, OutOfBounds, IntervalEmpty, Custom) so range and
+union-type errors stop being `RuntimeError`; eval.rs's `concat` builds the
+remaining out-of-library `ArgError`.
 
 ## HYG-021 - Cast lints are not yet enforced in the stdlib
 
@@ -464,27 +338,6 @@ table.rs rejects nil and NaN on insert, while numeric equality and negative-zero
 hashing live in lua_val.rs. Export one key-normalisation function from the
 table code and have both load-path sites call it.
 
-## HYG-066 - gmatch iterator re-interns its state keys every iteration
-
-Reported by the wave 2 reviewer.
-
-`gmatch_iter` reads its private state table with metamethod-capable
-`get_table` and interns `"compile_charged"` on every call (twice on the first).
-The table is never script-visible, so `get_table_raw` states the intent, and a
-pre-interned key would take the intern off the per-match hot path. Related: an
-iterator restored from a snapshot written before the flag existed lacks it and
-pays the compile charge once more; the format version did not move.
-
-## HYG-067 - `table_insert_at` resolves a negative index against a different stack
-
-Reported by the wave 2 reviewer; recorded in CHANGELOG.
-
-To validate before mutating, `table_insert_at` now resolves `table_idx` before
-popping the value, so a negative index counts from the value on top instead of
-from the stack after the pop. Internal callers pass `1`. Decide whether the
-public contract should be the old one (resolve after pop, validate without
-popping) and document it on the method either way.
-
 # State, ordering and ambient dependencies
 
 ## HYG-033 - `current_source` is set by load order, not by the running frame
@@ -527,26 +380,6 @@ Reported by the vm, surface and stdlib hunters.
 - `validate_quiescent` lists ten fields by hand; a new in-flight vector would
   not be added. Put "is quiescent" on `State` next to the fields and
   `debug_assert!` it at `call`/`eval` entry and exit.
-
-## HYG-035 - GC triggering and temporary rooting are policy per call site
-
-Reported by the vm hunter.
-
-`if self.heap.is_full() { self.gc_collect() }` is copied in `alloc_string`
-(vm.rs), `alloc_table`, `alloc_table_with_capacity` (table_ops.rs) and
-`push_closure` (eval.rs); one `maybe_collect()` would own it, and allocators
-could require a token proving the check ran. Rooting a temporary across
-allocation has at least four idioms: push/pop on the value stack (metamethod.rs
-`__index`/`__newindex`), `with_rooted_value` (`__call`), manual
-`transient_roots` push/pop (the Lua-call path, `resolve_bytecode_runtime`), and
-watermark plus `catch_unwind` (`eval_closure_inner` varargs).
-`bytes_with_tostring_meta` interns `"__tostring"` without rooting `val` (safe
-only because `val` is still on the stack). Metamethod names `"__index"`,
-`"__newindex"`, `"__call"`, `"__len"`, `"__tostring"` are interned at each use
-site on every dispatch (and `"__index"`/`"__newindex"`/`"__metatable"` again in
-basic.rs), with four copies of `.expect("fixed metamethod name is far below
-MAX_STRING_BYTES")`. Pre-interning a rooted `MetaName` set per State, like
-`Builtin`, removes most of these sites.
 
 ## HYG-036 - Panic safety via `catch_unwind` is half a policy
 
@@ -665,16 +498,45 @@ Reported by the compiler hunter.
   method-call args in expr.rs (two near-identical 25-line blocks), stmt.rs
   `parse_return`, stmt.rs `adjust_multi_assign`, and table.rs, with three
   failure styles (`unreachable!`, `debug_assert!`, `debug_assert_eq!`) and the
-  two ArgCount spellings from HYG-002. One `open_tail(&mut self, last:
+  ArgCount spellings (since unified). One `open_tail(&mut self, last:
   &ExpDesc, want: RetCount)`.
 - PlaceExp get-lowering is written three times (parser.rs `eval_prefix_exp`,
   func.rs `parse_fndecl_table`, `parse_fndecl_method`) and set-lowering twice
   (stmt.rs `parse_assign`, func.rs `parse_fndecl_basic`); the func.rs copies end
   in `unreachable!`. `parse_fndef_named` and `parse_fndef_method` are the same 15
   lines apart from `params.insert(0, "self")`.
-- The comparison-to-fused-branch mapping is in `push_branch_false`, and the
-  ordering trick (`<=` is `!>`) is spelled in both vm/frame.rs and
-  vm/eval_control.rs; the opcode table in HYG-001 could own it.
+
+## HYG-060 - Tool directories are ignored wholesale
+
+Reported by the tooling hunter; the dead ignore entries are fixed.
+
+`.agents`, `.codex` and `.claude` are ignored wholesale, so
+`.claude/settings.local.json` changes are invisible to review (possibly
+intended). `.review.toml` holds only an `[_audit] id`, is read by nothing in the
+tree (the external `review` tool's state), and is listed in Cargo.toml
+`exclude`.
+
+## HYG-069 - Wave 3 reviewer laterals
+
+Reported by the wave 3 reviewer.
+
+- Finding-style ids still in durable comments: lexer.rs (`C30`, twice),
+  parser/table.rs (`lead L3`), patterns/mod.rs (`L14` twice, `C29`).
+- A direct host `call()` of a non-callable value does not fire `on_error`, but
+  the same type error at the end of a non-function `__call` chain now does.
+  host.rs excludes "errors `call()` itself raises before dispatch"; decide
+  whether the chain case belongs under that exclusion.
+- `ArgCount`/`RetCount::to_u8` assert on `Fixed(255)`: a panic in library code
+  reachable only by a compiler bug.
+- `GcHeap::with_threshold` is only used by `GcHeap::new`.
+
+## HYG-068 - Scope cost totals are summed twice
+
+Reported by the opcode-table fixer.
+
+`ScopeCost.total_cost` (computed in `analyze_chunk`) and `CostAnalysis::totals`
+/ `ScopeTotals` each sum `own_cost` over the tree in lib.rs. `ScopeCost` could
+implement `AddAssign` and own the one sum.
 
 ## HYG-047 - gmatch snapshot ids are spelled twice
 
@@ -778,38 +640,7 @@ Reported by the tooling and compiler hunters; the rest is fixed.
 - `compiler_examples_pass_stack_discipline_verification` walks
   `Path::new("examples")` relative to cwd; use `env!("CARGO_MANIFEST_DIR")`.
 
-## HYG-060 - `.gitignore` and repo-root files for tools that are gone or undocumented
-
-Reported by the tooling hunter.
-
-`.plans` (the `plans/` folder is retired), `overnight.sh`, `overnight-logs` and
-`.diff_test_*.out` (no producer since scratch moved to `mktemp`) are ignored with
-nothing in the tree producing them, which hides whatever later lands under those
-names. `.agents`, `.codex` and `.claude` are ignored wholesale, so
-`.claude/settings.local.json` changes are invisible to review (possibly
-intended). `.review.toml` holds only an `[_audit] id`, is read by nothing in
-the tree (presumably the external `review` tool's state), and is listed in
-Cargo.toml `exclude`; undocumented tool state in the root.
-
 # Dead code and stale docs
-
-## HYG-061 - Code comments cite audit ids that resolve nowhere
-
-Reported by the vm, surface and stdlib hunters.
-
-`(L5)`, `(L6)`, `(L8)`, `(L10)`, `(L11)`, `(L17)`, `(L18)` appear in eval.rs,
-vm.rs, table_ops.rs, lexer.rs, math.rs, table.rs and save_state.rs (two in
-`save_state`/`load_state`). They reference a findings list not in the tree -
-durable code citing a transient note. The comment text is self-sufficient; drop
-the ids.
-
-## HYG-062 - Dead or one-valued code in the compiler
-
-Reported by the compiler hunter.
-
-`#[allow(dead_code)]` on `Instr::c()` is stale (used by the verifier,
-`RuntimeCaches::new` and `TFOR_CALL` dispatch); removing it lets the `unused`
-deny catch future disuse. The rest of the entry is fixed.
 
 ## HYG-063 - Dead or redundant code in the VM, surface and stdlib
 
@@ -832,14 +663,3 @@ Reported by the vm, surface and stdlib hunters.
   one-line wrappers around `unpack_values`; if they exist for distinct fn
   addresses in the snapshot registry, say so in a comment.
 - `LuaPattern::matches_bytes` is `cfg(test)` only (documented, fine).
-
-## HYG-064 - Doc comments that state stale or contradicted facts
-
-Reported by the compiler, vm, surface and stdlib hunters.
-
-- `State.globals` doc: "May be changed to an actual Table in the future".
-- vm.rs: orphan comment "State marking is done through mark_gc_roots() which
-  has direct heap access".
-- `load_string_named` doc mentions `"[fleet:123]"`.
-- Public `concat` rejects `n < 2` with an ArgError naming `"concat"`, while its
-  doc says n=0 yields the empty string and n=1 is a no-op.

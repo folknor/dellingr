@@ -2055,3 +2055,31 @@ fn constant_folding_respects_jump_targets() {
         2.0
     );
 }
+
+#[test]
+fn return_255_literals_uses_explicit_all_encoding() {
+    let source = format!("return {}", vec!["1"; 255].join(","));
+    let bytecode = parse_str(&source).expect("255 literal returns remain accepted");
+    assert_eq!(bytecode.code[255], Instr::ret(RetCount::All));
+    assert_eq!(
+        bytecode
+            .code
+            .iter()
+            .filter(|inst| inst.opcode() == Instr::OP_PUSH_NUM)
+            .count(),
+        255
+    );
+}
+
+#[test]
+fn nested_dynamic_call_arguments_survive_tail_rewrites() {
+    for source in [
+        "local function f(...) return ... end; return f(f(f(1, 2, 3)))",
+        "local t = {}; function t:f(...) return ... end; return t:f(t:f(t:f(1, 2, 3)))",
+    ] {
+        let bytecode = parse_str(source).expect("nested dynamic calls compile");
+        assert!(bytecode.code.iter().any(|inst| {
+            inst.opcode() == Instr::OP_CALL && inst.a() == u8::MAX && inst.b() == u8::MAX
+        }));
+    }
+}

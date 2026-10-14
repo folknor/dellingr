@@ -6,7 +6,7 @@ use super::State;
 use super::Val;
 use super::frame::Frame;
 use super::lua_val::RustFunc;
-use crate::instr::{ArgCount, RetCount};
+use crate::instr::{ArgCount, Instr, RetCount};
 use crate::lua_std::{base_ipairs_iter, base_next};
 
 impl State {
@@ -42,19 +42,18 @@ impl State {
         opcode: u8,
         offset: i16,
     ) -> Result<()> {
-        use std::cmp::Ordering;
         let condition = match opcode {
             crate::instr::Instr::OP_BRANCH_FALSE_LESS => {
-                self.eval_compare_bool(Ordering::Less, false)?
+                self.eval_compare_bool(Instr::LESS_ORDER.0, Instr::LESS_ORDER.1)?
             }
             crate::instr::Instr::OP_BRANCH_FALSE_GREATER => {
-                self.eval_compare_bool(Ordering::Greater, false)?
+                self.eval_compare_bool(Instr::GREATER_ORDER.0, Instr::GREATER_ORDER.1)?
             }
             crate::instr::Instr::OP_BRANCH_FALSE_LESS_EQUAL => {
-                self.eval_compare_bool(Ordering::Greater, true)?
+                self.eval_compare_bool(Instr::LESS_EQUAL_ORDER.0, Instr::LESS_EQUAL_ORDER.1)?
             }
             crate::instr::Instr::OP_BRANCH_FALSE_GREATER_EQUAL => {
-                self.eval_compare_bool(Ordering::Less, true)?
+                self.eval_compare_bool(Instr::GREATER_EQUAL_ORDER.0, Instr::GREATER_EQUAL_ORDER.1)?
             }
             crate::instr::Instr::OP_BRANCH_FALSE_EQUAL => {
                 let val2 = self.pop_val();

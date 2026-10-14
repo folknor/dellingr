@@ -65,6 +65,12 @@ All notable changes to dellingr are documented here. The format follows
   instead of panicking. `table_insert_at` now resolves its table index before
   popping the value, so a negative index counts from the value on top, like
   the other table accessors.
+- **Bad-argument messages quote and name the function.** `ArgError` now
+  renders as `bad argument #1 to 'sin' (number expected, got nil)`, matching
+  reference Lua's quoting, and the standard library fills in the function name
+  for its type and missing-argument checks (they previously read `to
+  <anonymous>`). Host-side `check_type`/`check_any` errors stay anonymous and
+  render `to '<anonymous>'`.
 - **`State::concat`** rejects a count larger than the current frame's values
   with `InvalidStackIndex` instead of panicking.
 
@@ -74,6 +80,10 @@ All notable changes to dellingr are documented here. The format follows
   `__call` resolves to a non-function (for example itself) is now bounded by the
   metamethod depth limit and fails with `MetamethodDepthExceeded`; function
   handlers remain bounded by the call depth limit.
+- **`on_error` fires for host calls through non-function `__call` chains.**
+  Errors from such a chain (including the cyclic depth error, or a Rust
+  handler at the end of the chain) reached the host only through the `Result`;
+  the outermost host call now reports them to `on_error` exactly once.
 - **`break` outside a loop reports its real line** instead of always line 1.
 - **`string.find` with `)` in the pattern** no longer takes the plain-text fast
   path.

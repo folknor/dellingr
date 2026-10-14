@@ -257,6 +257,12 @@ pub struct State {
     /// Current metamethod call depth (for __index/__newindex chains).
     /// Prevents stack overflow from circular metamethod references.
     pub(super) metamethod_depth: u32,
+    /// Nesting of non-function `__call` handler resolution. Only the outermost
+    /// level of such a chain reports trace-less errors to `on_error`; nested
+    /// Rust callbacks defer to it. Kept separate from `metamethod_depth` so a
+    /// Rust `__index`/`__newindex` handler failing under a host table access
+    /// still reports at its own boundary.
+    pub(super) call_chain_depth: u32,
     /// Current function call depth. Prevents stack overflow from deep recursion.
     pub(super) call_depth: u32,
     /// Call stack for generating stack traces on errors.
@@ -323,8 +329,6 @@ const MAX_STACK_SIZE: usize = 1_000_000;
 // the stack using 1-based indexing, but Lua code uses 0-based indexing.
 
 impl State {
-    const GC_INITIAL_THRESHOLD: usize = 20;
-
     /// Creates a new, independent state with default callbacks (stdout).
     pub fn new() -> Self {
         Self::with_callbacks(Box::new(DefaultCallbacks))
@@ -405,7 +409,7 @@ impl State {
             table_library_fallback: None,
             stack: Vec::with_capacity(256), // Pre-size for typical function depth * locals
             stack_bottom: 0,
-            heap: GcHeap::with_threshold(Self::GC_INITIAL_THRESHOLD),
+            heap: GcHeap::new(),
             bytecode_caches: IndexMap::new(),
             pending_bytecode_caches: Vec::new(),
             transient_roots: TransientRoots {
@@ -425,6 +429,7 @@ impl State {
             #[cfg(debug_assertions)]
             gmatch_pattern_compilations: 0,
             metamethod_depth: 0,
+            call_chain_depth: 0,
             call_depth: 0,
             call_stack: Vec::with_capacity(64), // Pre-size for call stack
             callbacks,
@@ -733,18 +738,17 @@ impl State {
     /// interned strings). Collection triggers before allocation when
     /// `heap_size() >= threshold`; each collection recomputes the threshold
     /// from survivors.
-    /// Set to `usize::MAX` to disable automatic GC: that value is a sentinel
-    /// that collections preserve instead of recomputing.
+    /// Set to `usize::MAX` to disable automatic GC. `gc_threshold()` reports
+    /// `usize::MAX` while automatic collection is disabled.
     pub fn gc_set_threshold(&mut self, threshold: usize) {
         self.heap.set_threshold(threshold);
     }
 
-    /// Disables automatic GC by setting threshold to usize::MAX.
-    /// After calling this, GC only runs when you explicitly call `gc_collect()`;
-    /// explicit collections keep automatic GC disabled. Re-enable it with
+    /// Disables automatic GC while preserving explicit `gc_collect()` calls.
+    /// Explicit collections keep automatic GC disabled. Re-enable it with
     /// `gc_set_threshold`.
     pub fn gc_disable_auto(&mut self) {
-        self.heap.set_threshold(usize::MAX);
+        self.heap.disable_auto_gc();
     }
 
     /// Forces a full garbage collection cycle.
@@ -777,6 +781,14 @@ impl State {
         // keep the linear probe bounded by live `%p` usage.
         self.format_pointer_ids
             .retain(|(val, _)| self.heap.val_is_live(val));
+    }
+
+    /// Run automatic collection before a caller proceeds with a heap
+    /// allocation, using the caller's current roots.
+    pub(super) fn maybe_collect(&mut self) {
+        if self.heap.is_full() {
+            self.gc_collect();
+        }
     }
 
     /// Drop state-local runtime entries which no reachable closure, active
@@ -1120,6 +1132,8 @@ impl State {
     where
         F: FnOnce(&mut Self) -> R,
     {
+        // Preserve roots owned by any outer operation while this callback can
+        // allocate, call Lua, or re-enter the host.
         let watermark = self.transient_roots.values.len();
         self.transient_roots.values.extend_from_slice(values);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self)));
@@ -1134,10 +1148,7 @@ impl State {
     #[hotpath::measure]
     pub(super) fn alloc_string(&mut self, bytes: impl AsRef<[u8]>) -> Result<Val> {
         check_string_size(bytes.as_ref().len())?;
-        // Check if GC is needed before allocating
-        if self.heap.is_full() {
-            self.gc_collect();
-        }
+        self.maybe_collect();
         let ptr = self.heap.alloc_string(bytes.as_ref());
         Ok(Val::Str(ptr))
     }

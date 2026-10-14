@@ -163,6 +163,10 @@ pub enum ErrorKind {
 }
 
 /// Argument error raised by builtins or host functions.
+///
+/// A missing `func_name` means the caller did not provide a function name. The
+/// VM currently records only Lua bytecode frames in `CallInfo`, so a generic
+/// argument check cannot recover the name of the Rust callback that is running.
 #[derive(Debug)]
 pub struct ArgError {
     /// 1-based argument index that failed validation. Negative values count
@@ -319,6 +323,17 @@ impl Error {
 }
 
 impl ErrorKind {
+    /// Build a named standard-library argument error with a custom detail.
+    ///
+    /// These value-range and union-type failures remain runtime errors until
+    /// `ArgError` can carry structured detail without leaving other internal
+    /// constructors incomplete.
+    pub(crate) fn bad_argument(arg_number: isize, function_name: &str, detail: &str) -> Self {
+        Self::RuntimeError(format!(
+            "bad argument #{arg_number} to '{function_name}' ({detail})"
+        ))
+    }
+
     /// Whether the underlying error category is recoverable - see
     /// [`Error::is_recoverable`].
     pub fn is_recoverable(&self) -> bool {
@@ -460,10 +475,7 @@ impl fmt::Display for ErrorKind {
 
 impl fmt::Display for ArgError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let func_name = match &self.func_name {
-            Some(s) => s.as_str(),
-            None => "<anonymous>",
-        };
+        let func_name = self.func_name.as_deref().unwrap_or("<anonymous>");
         let extra = match (&self.expected, &self.received) {
             (Some(expected), Some(got)) => format!("{expected} expected, got {got}"),
             (Some(expected), None) => format!("{expected} expected, got no value"),
@@ -472,7 +484,7 @@ impl fmt::Display for ArgError {
 
         write!(
             f,
-            "bad argument #{} to {} ({})",
+            "bad argument #{} to '{}' ({})",
             self.arg_number, func_name, extra
         )
     }

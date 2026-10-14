@@ -1,7 +1,7 @@
 //! This module holds enums which describe the different types of Lua
 //! expressions.
 
-use crate::instr::Builtin;
+use crate::instr::{ArgCount, Builtin};
 
 #[derive(Debug)]
 pub(super) enum ExpDesc {
@@ -12,6 +12,8 @@ pub(super) enum ExpDesc {
 }
 
 /// A call's argument count and opening line, packed into four bytes.
+/// The accessor boundary uses ArgCount so dynamic calls are decoded rather
+/// than disguised as Fixed(255). The packed representation is parser-local.
 ///
 /// `PrefixExp` is copied throughout expression parsing. Holding the line as a
 /// separate `u32` field beside a `u8` makes that one variant four times the
@@ -25,12 +27,12 @@ pub(super) struct CallSite(u32);
 impl CallSite {
     const LINE_MASK: u32 = (1 << 24) - 1;
 
-    pub(super) fn new(num_args: u8, line: u32) -> Self {
-        Self((u32::from(num_args) << 24) | line.min(Self::LINE_MASK))
+    pub(super) fn new(num_args: ArgCount, line: u32) -> Self {
+        Self((u32::from(num_args.to_u8()) << 24) | line.min(Self::LINE_MASK))
     }
 
-    pub(super) fn num_args(self) -> u8 {
-        (self.0 >> 24) as u8
+    pub(super) fn num_args(self) -> ArgCount {
+        ArgCount::from_u8((self.0 >> 24) as u8)
     }
 
     pub(super) fn line(self) -> u32 {

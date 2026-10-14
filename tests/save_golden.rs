@@ -87,6 +87,8 @@ fn deliberately_rewrite_snapshot_fixture_file() {
 #[test]
 fn every_save_fixture_is_declared_and_referenced() {
     let fixture_dir = fixture_path("");
+    // Only save fixtures (.bin) are governed here; the directory also holds
+    // other fixture kinds, such as the opcode encoding table.
     let mut actual = std::fs::read_dir(&fixture_dir)
         .expect("fixture directory exists")
         .map(|entry| {
@@ -96,6 +98,7 @@ fn every_save_fixture_is_declared_and_referenced() {
                 .to_string_lossy()
                 .into_owned()
         })
+        .filter(|name| name.ends_with(".bin"))
         .collect::<Vec<_>>();
     actual.sort();
 

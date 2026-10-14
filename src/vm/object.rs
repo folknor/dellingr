@@ -256,6 +256,35 @@ impl ObjectPtr {
 // GcHeap - SlotMap-based garbage collected heap
 // ============================================================================
 
+const GC_MIN_THRESHOLD: usize = 20;
+const GC_INITIAL_THRESHOLD: usize = GC_MIN_THRESHOLD;
+const GC_THRESHOLD_GROWTH_FACTOR: usize = 2;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GcThreshold {
+    Automatic(usize),
+    Disabled,
+}
+
+impl GcThreshold {
+    // `usize::MAX` is accepted only at the public threshold boundary; heap
+    // policy stores disabled mode as a separate variant.
+    fn from_value(value: usize) -> Self {
+        if value == usize::MAX {
+            Self::Disabled
+        } else {
+            Self::Automatic(value)
+        }
+    }
+
+    fn value(self) -> usize {
+        match self {
+            Self::Automatic(value) => value,
+            Self::Disabled => usize::MAX,
+        }
+    }
+}
+
 /// A collection of objects which need to be garbage-collected.
 /// Uses slotmap for safe, generational access to objects.
 pub(crate) struct GcHeap {
@@ -263,7 +292,7 @@ pub(crate) struct GcHeap {
     objects: SlotMap<ObjectKey, WrappedObject>,
     /// When total heap allocations (objects plus distinct interned strings)
     /// reach this threshold, run the GC.
-    threshold: usize,
+    threshold: GcThreshold,
     /// Pool for interned strings.
     strings: StringPool,
     /// Reused scratch space for the iterative GC mark phase.
@@ -275,11 +304,16 @@ pub(crate) struct GcHeap {
 }
 
 impl GcHeap {
+    /// Create a heap using the collector's initial threshold policy.
+    pub(super) fn new() -> Self {
+        Self::with_threshold(GC_INITIAL_THRESHOLD)
+    }
+
     /// Create a new heap, with the given initial threshold.
     pub(super) fn with_threshold(threshold: usize) -> Self {
         Self {
             objects: SlotMap::with_key(),
-            threshold,
+            threshold: GcThreshold::from_value(threshold),
             strings: StringPool::new(),
             mark_worklist: Vec::new(),
             empty_upvalues: Arc::from([]),
@@ -427,7 +461,7 @@ impl GcHeap {
     /// Check if GC should run.
     #[must_use]
     pub(super) fn is_full(&self) -> bool {
-        self.allocation_count() >= self.threshold
+        self.allocation_count() >= self.threshold.value()
     }
 
     /// Mark an object as reachable. Call this for all root objects.
@@ -530,12 +564,14 @@ impl GcHeap {
         // String collection
         self.strings.collect();
 
-        // Dynamic threshold: double the surviving allocation count (min 20).
-        // A usize::MAX threshold is the auto-GC-disabled sentinel
-        // (gc_disable_auto / gc_set_threshold(usize::MAX)); preserve it so an
-        // explicit collect does not silently re-enable automatic GC.
-        if self.threshold != usize::MAX {
-            self.threshold = self.allocation_count().saturating_mul(2).max(20);
+        // Preserve disabled mode across explicit collections. The collection
+        // schedule and threshold update are owned by the heap policy.
+        if matches!(self.threshold, GcThreshold::Automatic(_)) {
+            self.threshold = GcThreshold::Automatic(
+                self.allocation_count()
+                    .saturating_mul(GC_THRESHOLD_GROWTH_FACTOR)
+                    .max(GC_MIN_THRESHOLD),
+            );
         }
 
         #[cfg(feature = "debug_gc")]
@@ -587,12 +623,17 @@ impl GcHeap {
 
     /// Current GC threshold.
     pub(super) fn threshold(&self) -> usize {
-        self.threshold
+        self.threshold.value()
     }
 
     /// Set the GC threshold.
     pub(super) fn set_threshold(&mut self, threshold: usize) {
-        self.threshold = threshold;
+        self.threshold = GcThreshold::from_value(threshold);
+    }
+
+    /// Disable automatic collection while preserving explicit collection.
+    pub(super) fn disable_auto_gc(&mut self) {
+        self.threshold = GcThreshold::Disabled;
     }
 }
 

@@ -35,9 +35,7 @@ impl State {
         literals: &[Val],
     ) -> Result<()> {
         self.check_stack_space(1)?;
-        if self.heap.is_full() {
-            self.gc_collect();
-        }
+        self.maybe_collect();
         let obj = self.heap.alloc_table_with_template(key_ids, literals);
         self.push_unchecked(Val::Obj(obj));
         Ok(())
@@ -276,9 +274,14 @@ impl State {
 
     /// Inserts a value into a table at a position, shifting elements.
     /// Stack: [t, value] -> []
-    /// The value is popped from the stack. `pos` has been validated by table.insert.
+    /// `table_idx` resolves against the entry stack, so a negative index counts
+    /// from the top value that will be popped. The value is popped from the
+    /// stack. `pos` has been validated by table.insert.
     #[hotpath::measure]
     pub fn table_insert_at(&mut self, table_idx: isize, pos: usize) -> Result<()> {
+        // Resolve against the entry stack, including the value to be popped.
+        // This keeps negative indices relative to the caller's visible top and
+        // validates the table before mutating the stack.
         let idx = self.convert_idx(table_idx)?;
         if idx == self.stack.len() - 1 {
             return Err(self.error(ErrorKind::InvalidStackIndex { index: table_idx }));
@@ -456,6 +459,9 @@ impl State {
             .and_then(super::table::Table::get_metatable);
 
         if let Some(mt_ptr) = metatable_ptr {
+            // Keep this dispatch-time intern at its existing allocation point;
+            // the receiver remains rooted on the stack through collection.
+            // Pre-interning moves that allocation and can change reuse order.
             let tostring_key = self.alloc_string("__tostring")?;
             let tostring_handler = self
                 .heap
@@ -514,18 +520,13 @@ impl State {
     /// Allocates a new table on the heap.
     #[hotpath::measure]
     pub(super) fn alloc_table(&mut self) -> Val {
-        // Check if GC is needed before allocating
-        if self.heap.is_full() {
-            self.gc_collect();
-        }
+        self.maybe_collect();
         let obj = self.heap.alloc_table();
         Val::Obj(obj)
     }
 
     pub(super) fn alloc_table_with_capacity(&mut self, capacity: usize) -> Val {
-        if self.heap.is_full() {
-            self.gc_collect();
-        }
+        self.maybe_collect();
         let obj = self.heap.alloc_table_with_capacity(capacity);
         Val::Obj(obj)
     }

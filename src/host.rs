@@ -48,9 +48,11 @@ pub trait HostCallbacks: Send {
     ///
     /// This covers errors raised in Lua bytecode and failures of Rust functions
     /// invoked from Lua, as well as a Rust function that fails when a host calls
-    /// it directly (with no Lua frame on the stack). It is NOT fired for errors
-    /// that `call()` itself raises before dispatch (e.g. a malformed argument
-    /// count from a host); the host observes those solely through the `Result`.
+    /// it directly (with no Lua frame on the stack). Errors from host-initiated
+    /// table `__call` chains are covered too, including cyclic chains that reach
+    /// the metamethod depth limit. It is NOT fired for errors that `call()` itself
+    /// raises before dispatch (e.g. a malformed argument count from a host); the
+    /// host observes those solely through the `Result`.
     ///
     /// # Arguments
     /// * `source` - The source file/chunk name where the error originated

@@ -5,10 +5,13 @@
 
 /// Argument count for function calls.
 ///
-/// Either a fixed count (0-254) or dynamic (calculated from vararg call base).
+/// Bytecode supports fixed counts 0-254 or a dynamic count. Host calls can
+/// also use `Fixed(255)`; that runtime count cannot be encoded in bytecode.
+/// Keeping the runtime count is necessary when `__call` adds a receiver to
+/// 254 arguments. Only instruction encoding rejects the sentinel alias.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ArgCount {
-    /// Fixed number of arguments (0-254).
+    /// Fixed number of arguments (0-254 in bytecode, 0-255 at runtime).
     Fixed(u8),
     /// Dynamic: calculate from vararg_call_bases stack.
     Dynamic,
@@ -19,7 +22,13 @@ impl ArgCount {
     #[inline]
     pub(crate) const fn to_u8(self) -> u8 {
         match self {
-            ArgCount::Fixed(n) => n,
+            ArgCount::Fixed(n) => {
+                assert!(
+                    n < u8::MAX,
+                    "fixed bytecode argument count must be below 255"
+                );
+                n
+            }
             ArgCount::Dynamic => u8::MAX,
         }
     }
@@ -37,10 +46,11 @@ impl ArgCount {
 
 /// Return count for function calls and returns.
 ///
-/// Either a fixed count (0-254) or all available values.
+/// Bytecode supports fixed counts 0-254 or all available values. Host calls
+/// can also request `Fixed(255)`; that count cannot be encoded in bytecode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RetCount {
-    /// Fixed number of return values (0-254).
+    /// Fixed number of return values (0-254 in bytecode, 0-255 at runtime).
     Fixed(u8),
     /// Return/expect all available values.
     All,
@@ -51,7 +61,10 @@ impl RetCount {
     #[inline]
     pub(crate) const fn to_u8(self) -> u8 {
         match self {
-            RetCount::Fixed(n) => n,
+            RetCount::Fixed(n) => {
+                assert!(n < u8::MAX, "fixed bytecode result count must be below 255");
+                n
+            }
             RetCount::All => u8::MAX,
         }
     }
@@ -145,88 +158,288 @@ define_builtins! {
 #[repr(transparent)]
 pub(crate) struct Instr(u32);
 
-// Opcode constants
-impl Instr {
-    // No operands
-    pub(crate) const OP_POP: u8 = 0;
-    pub(crate) const OP_DUP: u8 = 1;
-    pub(crate) const OP_SWAP: u8 = 2;
-    pub(crate) const OP_NEW_TABLE: u8 = 3;
-    pub(crate) const OP_GET_TABLE: u8 = 4;
-    pub(crate) const OP_ADD: u8 = 5;
-    pub(crate) const OP_SUBTRACT: u8 = 6;
-    pub(crate) const OP_MULTIPLY: u8 = 7;
-    pub(crate) const OP_DIVIDE: u8 = 8;
-    pub(crate) const OP_POW: u8 = 9;
-    pub(crate) const OP_MOD: u8 = 10;
-    pub(crate) const OP_CONCAT: u8 = 11;
-    pub(crate) const OP_LESS: u8 = 12;
-    pub(crate) const OP_LESS_EQUAL: u8 = 13;
-    pub(crate) const OP_GREATER: u8 = 14;
-    pub(crate) const OP_GREATER_EQUAL: u8 = 15;
-    pub(crate) const OP_EQUAL: u8 = 16;
-    pub(crate) const OP_NOT_EQUAL: u8 = 17;
-    pub(crate) const OP_NOT: u8 = 18;
-    pub(crate) const OP_LENGTH: u8 = 19;
-    pub(crate) const OP_NEGATE: u8 = 20;
-    pub(crate) const OP_MARK_CALL_BASE: u8 = 21;
-    pub(crate) const OP_PUSH_NIL: u8 = 22;
-    pub(crate) const OP_NEW_TABLE_PRESIZED: u8 = 23; // A=expected constructor fields
-    pub(crate) const OP_NEW_TABLE_TEMPLATE: u8 = 24; // A=table template index
-    pub(crate) const OP_NEW_TABLE_TRACKED: u8 = 25; // A=expected constructor fields
-    pub(crate) const OP_NOP: u8 = 26;
-
-    // One u8 operand (in A slot)
-    pub(crate) const OP_GET_GLOBAL: u8 = 30;
-    pub(crate) const OP_SET_GLOBAL: u8 = 31;
-    pub(crate) const OP_GET_LOCAL: u8 = 32;
-    pub(crate) const OP_SET_LOCAL: u8 = 33;
-    pub(crate) const OP_GET_UPVALUE: u8 = 34;
-    pub(crate) const OP_SET_UPVALUE: u8 = 35;
-    pub(crate) const OP_GET_FIELD: u8 = 36;
-    pub(crate) const OP_INIT_INDEX: u8 = 37;
-    pub(crate) const OP_PUSH_NUM: u8 = 38;
-    pub(crate) const OP_PUSH_STRING: u8 = 39;
-    pub(crate) const OP_TFOR_PREP: u8 = 40;
-    pub(crate) const OP_RETURN: u8 = 41;
-    pub(crate) const OP_CLOSE_UPVALUES: u8 = 42;
-    pub(crate) const OP_CLOSURE: u8 = 43;
-    pub(crate) const OP_VARARG: u8 = 44;
-    pub(crate) const OP_SET_LIST: u8 = 45;
-    pub(crate) const OP_SET_TABLE: u8 = 46;
-    pub(crate) const OP_PUSH_BOOL: u8 = 47; // A=0 for false, A=1 for true
-    pub(crate) const OP_GET_BUILTIN: u8 = 48; // A=builtin slot index
-    pub(crate) const OP_SET_BUILTIN: u8 = 49; // A=builtin slot index
-
-    // Two u8 operands (in A and B slots)
-    pub(crate) const OP_SET_FIELD: u8 = 50;
-    pub(crate) const OP_INIT_FIELD: u8 = 51;
-    pub(crate) const OP_TFOR_CALL: u8 = 52;
-    pub(crate) const OP_CALL: u8 = 53;
-    pub(crate) const OP_INIT_FIELD_PINNED: u8 = 54;
-    pub(crate) const OP_SET_FIELD_AT: u8 = 55;
-
-    // Jump instructions (signed 16-bit offset in B+C slots)
-    pub(crate) const OP_JUMP: u8 = 60;
-    pub(crate) const OP_BRANCH_FALSE: u8 = 61;
-    pub(crate) const OP_BRANCH_TRUE_KEEP: u8 = 62;
-    pub(crate) const OP_BRANCH_FALSE_KEEP: u8 = 63;
-    // Fused comparison + BranchFalse: pop two operands, jump when the
-    // comparison is false. Emitted by the parser when a condition ends in a
-    // comparison; halves the dispatch on hot loop headers and if-conditions.
-    pub(crate) const OP_BRANCH_FALSE_LESS: u8 = 64;
-    pub(crate) const OP_BRANCH_FALSE_LESS_EQUAL: u8 = 65;
-    pub(crate) const OP_BRANCH_FALSE_GREATER: u8 = 66;
-    pub(crate) const OP_BRANCH_FALSE_GREATER_EQUAL: u8 = 67;
-    pub(crate) const OP_BRANCH_FALSE_EQUAL: u8 = 68;
-    pub(crate) const OP_BRANCH_FALSE_NOT_EQUAL: u8 = 69;
-
-    // u8 + signed 16-bit offset (A slot + sBx)
-    pub(crate) const OP_FOR_PREP: u8 = 70;
-    pub(crate) const OP_FOR_LOOP: u8 = 71;
-    pub(crate) const OP_TFOR_LOOP: u8 = 72;
+/// Static opcode charge categories. Native work is charged separately by its helpers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OpcodeCost {
+    Free,
+    Arithmetic,
+    Negation,
+    TableCreation,
+    TableWrite,
+    ArrayElements,
+    Call,
 }
 
+#[derive(Clone, Copy)]
+struct OpcodeMetadata {
+    reserved: u32,
+    transfer: bool,
+    cost: OpcodeCost,
+}
+
+macro_rules! define_opcodes {
+    ($this:ident, $inst:ident, $f:ident; $( $name:ident = $number:literal, $reserved:literal,
+        $transfer:literal, $cost:ident, $debug:expr; )+) => {
+        impl Instr {
+            $( pub(crate) const $name: u8 = $number; )+
+
+            const OPCODES: [Option<OpcodeMetadata>; 256] = {
+                let mut entries = [None; 256];
+                $(
+                    assert!(entries[$number].is_none());
+                    entries[$number] = Some(OpcodeMetadata {
+                        reserved: $reserved,
+                        transfer: $transfer,
+                        cost: OpcodeCost::$cost,
+                    });
+                )+
+                entries
+            };
+
+            pub(crate) const fn known_opcode(opcode: u8) -> bool {
+                Self::OPCODES[opcode as usize].is_some()
+            }
+
+            pub(crate) const fn reserved_bytes_zero(self) -> bool {
+                match Self::OPCODES[self.opcode() as usize] {
+                    Some(metadata) => self.0 & metadata.reserved == 0,
+                    None => false,
+                }
+            }
+
+            pub(crate) const fn is_transfer(opcode: u8) -> bool {
+                match Self::OPCODES[opcode as usize] {
+                    Some(metadata) => metadata.transfer,
+                    None => false,
+                }
+            }
+
+            pub(crate) const fn cost_class(opcode: u8) -> OpcodeCost {
+                match Self::OPCODES[opcode as usize] {
+                    Some(metadata) => metadata.cost,
+                    None => OpcodeCost::Free,
+                }
+            }
+
+            /// Fixed opcode units, or the encoded list length for static analysis.
+            /// A dynamic SET_LIST has A=0: analysis counts zero, execution uses
+            /// the live list length instead. Native charges are not included.
+            pub(crate) const fn static_units(self) -> u64 {
+                match Self::cost_class(self.opcode()) {
+                    OpcodeCost::Arithmetic | OpcodeCost::Negation
+                    | OpcodeCost::TableCreation | OpcodeCost::TableWrite => 1,
+                    OpcodeCost::ArrayElements => self.a() as u64,
+                    OpcodeCost::Free | OpcodeCost::Call => 0,
+                }
+            }
+
+            #[cfg(test)]
+            const OPCODE_NAMES: &'static [(u8, &'static str)] = &[
+                $( (Self::$name, stringify!($name)), )+
+            ];
+        }
+
+        impl std::fmt::Debug for Instr {
+            fn fmt(&$this, $f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                let $inst = $this;
+                match $inst.opcode() {
+                    $( Self::$name => $debug, )+
+                    op => write!($f, "Unknown(op={}, raw={:#x})", op, $inst.0),
+                }
+            }
+        }
+    };
+}
+
+// Explicit numbers are snapshot data. Every opcode declares its reserved-bit
+// mask, transfer status, static charge and diagnostic operands here. Dynamic
+// stack effects and dispatch bodies remain explicit: they encode execution
+// semantics, not just operand shape, and must not introduce dispatch lookups.
+define_opcodes! { self, this, f;
+    OP_POP = 0, 0xffffff, false, Free,
+        write!(f, "Pop");
+    OP_DUP = 1, 0xffffff, false, Free,
+        write!(f, "Dup");
+    OP_SWAP = 2, 0xffffff, false, Free,
+        write!(f, "Swap");
+    OP_NEW_TABLE = 3, 0xffffff, false, TableCreation,
+        write!(f, "NewTable");
+    OP_GET_TABLE = 4, 0xffffff, false, Free,
+        write!(f, "GetTable");
+    OP_ADD = 5, 0xffffff, false, Arithmetic,
+        write!(f, "Add");
+    OP_SUBTRACT = 6, 0xffffff, false, Arithmetic,
+        write!(f, "Subtract");
+    OP_MULTIPLY = 7, 0xffffff, false, Arithmetic,
+        write!(f, "Multiply");
+    OP_DIVIDE = 8, 0xffffff, false, Arithmetic,
+        write!(f, "Divide");
+    OP_POW = 9, 0xffffff, false, Arithmetic,
+        write!(f, "Pow");
+    OP_MOD = 10, 0xffffff, false, Arithmetic,
+        write!(f, "Mod");
+    OP_CONCAT = 11, 0x00ffff, false, Free,
+        write!(f, "Concat({})", this.a());
+    OP_LESS = 12, 0xffffff, false, Free,
+        write!(f, "Less");
+    OP_LESS_EQUAL = 13, 0xffffff, false, Free,
+        write!(f, "LessEqual");
+    OP_GREATER = 14, 0xffffff, false, Free,
+        write!(f, "Greater");
+    OP_GREATER_EQUAL = 15, 0xffffff, false, Free,
+        write!(f, "GreaterEqual");
+    OP_EQUAL = 16, 0xffffff, false, Free,
+        write!(f, "Equal");
+    OP_NOT_EQUAL = 17, 0xffffff, false, Free,
+        write!(f, "NotEqual");
+    OP_NOT = 18, 0xffffff, false, Free,
+        write!(f, "Not");
+    OP_LENGTH = 19, 0xffffff, false, Free,
+        write!(f, "Length");
+    OP_NEGATE = 20, 0xffffff, false, Negation,
+        write!(f, "Negate");
+    OP_MARK_CALL_BASE = 21, 0x00ffff, false, Free,
+        write!(f, "MarkCallBase({})", this.a());
+    OP_PUSH_NIL = 22, 0xffffff, false, Free,
+        write!(f, "PushNil");
+    OP_NEW_TABLE_PRESIZED = 23, 0x00ffff, false, TableCreation,
+        write!(f, "NewTablePresized({})", this.a());
+    OP_NEW_TABLE_TEMPLATE = 24, 0x00ffff, false, TableCreation,
+        write!(f, "NewTableTemplate({})", this.a());
+    OP_NEW_TABLE_TRACKED = 25, 0x00ffff, false, TableCreation,
+        write!(f, "NewTableTracked({})", this.a());
+    OP_NOP = 26, 0xffffff, false, Free,
+        write!(f, "Nop");
+    OP_GET_GLOBAL = 30, 0x000000, false, Free,
+        write!(f, "GetGlobal({}, {})", this.a(), this.bx());
+    OP_SET_GLOBAL = 31, 0x000000, false, Free,
+        write!(f, "SetGlobal({}, {})", this.a(), this.bx());
+    OP_GET_LOCAL = 32, 0x00ffff, false, Free,
+        write!(f, "GetLocal({})", this.a());
+    OP_SET_LOCAL = 33, 0x00ffff, false, Free,
+        write!(f, "SetLocal({})", this.a());
+    OP_GET_UPVALUE = 34, 0x00ffff, false, Free,
+        write!(f, "GetUpvalue({})", this.a());
+    OP_SET_UPVALUE = 35, 0x00ffff, false, Free,
+        write!(f, "SetUpvalue({})", this.a());
+    OP_GET_FIELD = 36, 0x000000, false, Free,
+        write!(f, "GetField({}, {})", this.a(), this.bx());
+    OP_INIT_INDEX = 37, 0x00ffff, false, TableWrite,
+        write!(f, "InitIndex({})", this.a());
+    OP_PUSH_NUM = 38, 0xff0000, false, Free,
+        write!(f, "PushNum({})", this.bx());
+    OP_PUSH_STRING = 39, 0xff0000, false, Free,
+        write!(f, "PushString({})", this.bx());
+    OP_TFOR_PREP = 40, 0x00ffff, false, Free,
+        write!(f, "TForPrep({})", this.a());
+    OP_RETURN = 41, 0x00ffff, false, Free,
+        write!(f, "Return({:?})", RetCount::from_u8(this.a()));
+    OP_CLOSE_UPVALUES = 42, 0x00ffff, false, Free,
+        write!(f, "CloseUpvalues({})", this.a());
+    OP_CLOSURE = 43, 0x00ffff, false, Free,
+        write!(f, "Closure({})", this.a());
+    OP_VARARG = 44, 0x00ffff, false, Free,
+        write!(f, "Vararg({})", this.a());
+    OP_SET_LIST = 45, 0x000000, false, ArrayElements,
+        write!(f, "SetList({}, {})", this.a(), this.bx());
+    OP_SET_TABLE = 46, 0x00ffff, false, TableWrite,
+        write!(f, "SetTable({})", this.a());
+    OP_PUSH_BOOL = 47, 0x00ffff, false, Free,
+        write!(f, "PushBool({})", this.a() != 0);
+    OP_GET_BUILTIN = 48, 0x00ffff, false, Free,
+        write!(f, "GetBuiltin({:?})", Builtin::from_u8(this.a()));
+    OP_SET_BUILTIN = 49, 0x00ffff, false, Free,
+        write!(f, "SetBuiltin({:?})", Builtin::from_u8(this.a()));
+    OP_SET_FIELD = 50, 0x000000, false, TableWrite,
+        write!(f, "SetField({}, {})", this.a(), this.bx());
+    OP_INIT_FIELD = 51, 0x000000, false, TableWrite,
+        write!(f, "InitField({}, {})", this.a(), this.bx());
+    OP_TFOR_CALL = 52, 0x000000, false, Free,
+        write!(f, "TForCall({}, {}, {})", this.a(), this.b(), this.c());
+    OP_CALL = 53, 0x0000ff, false, Call,
+        write!(f, "Call({:?}, {:?})",
+            ArgCount::from_u8(this.a()), RetCount::from_u8(this.b()));
+    OP_INIT_FIELD_PINNED = 54, 0x000000, false, TableWrite,
+        write!(f, "InitFieldPinned({}, {})", this.a(), this.bx());
+    OP_SET_FIELD_AT = 55, 0x000000, false, TableWrite,
+        write!(f, "SetFieldAt({}, {})", this.a(), this.bx());
+    OP_JUMP = 60, 0xff0000, true, Free,
+        write!(f, "Jump({})", this.sbx());
+    OP_BRANCH_FALSE = 61, 0xff0000, true, Free,
+        write!(f, "BranchFalse({})", this.sbx());
+    OP_BRANCH_TRUE_KEEP = 62, 0xff0000, true, Free,
+        write!(f, "BranchTrueKeep({})", this.sbx());
+    OP_BRANCH_FALSE_KEEP = 63, 0xff0000, true, Free,
+        write!(f, "BranchFalseKeep({})", this.sbx());
+    OP_BRANCH_FALSE_LESS = 64, 0xff0000, true, Free,
+        write!(f, "BranchFalseLess({})", this.sbx());
+    OP_BRANCH_FALSE_LESS_EQUAL = 65, 0xff0000, true, Free,
+        write!(f, "BranchFalseLessEqual({})", this.sbx());
+    OP_BRANCH_FALSE_GREATER = 66, 0xff0000, true, Free,
+        write!(f, "BranchFalseGreater({})", this.sbx());
+    OP_BRANCH_FALSE_GREATER_EQUAL = 67, 0xff0000, true, Free,
+        write!(f, "BranchFalseGreaterEqual({})", this.sbx());
+    OP_BRANCH_FALSE_EQUAL = 68, 0xff0000, true, Free,
+        write!(f, "BranchFalseEqual({})", this.sbx());
+    OP_BRANCH_FALSE_NOT_EQUAL = 69, 0xff0000, true, Free,
+        write!(f, "BranchFalseNotEqual({})", this.sbx());
+    OP_FOR_PREP = 70, 0x000000, true, Free,
+        write!(f, "ForPrep({}, {})", this.a(), this.sbx());
+    OP_FOR_LOOP = 71, 0x000000, true, Free,
+        write!(f, "ForLoop({}, {})", this.a(), this.sbx());
+    OP_TFOR_LOOP = 72, 0x000000, true, Free,
+        write!(f, "TForLoop({}, {})", this.a(), this.sbx());
+}
+
+macro_rules! define_comparisons {
+    ($( $plain:ident => $fused:ident, $constructor:ident
+        $(, $rule:ident = ($ordering:ident, $negate:literal))?; )+) => {
+        impl Instr {
+            $( $(pub(crate) const $rule: (std::cmp::Ordering, bool) =
+                (std::cmp::Ordering::$ordering, $negate);)? )+
+
+            pub(crate) fn fused_branch_constructor(opcode: u8) -> Option<fn(i16) -> Self> {
+                match opcode {
+                    $( Self::$plain => Some(Self::$constructor), )+
+                    _ => None,
+                }
+            }
+        }
+
+        // The dispatch range must contain exactly these variants, with no
+        // holes or duplicates. Keep its one-range-arm code generation intact.
+        const _: () = {
+            let variants = [$( Instr::$fused ),+];
+            let first = Instr::OP_BRANCH_FALSE_LESS;
+            let last = Instr::OP_BRANCH_FALSE_NOT_EQUAL;
+            assert!(variants.len() == (last - first + 1) as usize);
+            let mut seen = [false; 256];
+            let mut i = 0;
+            while i < variants.len() {
+                let opcode = variants[i];
+                assert!(opcode >= first && opcode <= last);
+                assert!(!seen[opcode as usize]);
+                seen[opcode as usize] = true;
+                i += 1;
+            }
+        };
+    };
+}
+
+// Inclusive ordering deliberately negates the opposite strict ordering. Both
+// ordinary and fused dispatch consume these constants without a lookup.
+define_comparisons! {
+    OP_LESS => OP_BRANCH_FALSE_LESS, branch_false_less, LESS_ORDER = (Less, false);
+    OP_LESS_EQUAL => OP_BRANCH_FALSE_LESS_EQUAL, branch_false_less_equal, LESS_EQUAL_ORDER = (Greater, true);
+    OP_GREATER => OP_BRANCH_FALSE_GREATER, branch_false_greater, GREATER_ORDER = (Greater, false);
+    OP_GREATER_EQUAL => OP_BRANCH_FALSE_GREATER_EQUAL, branch_false_greater_equal, GREATER_EQUAL_ORDER = (Less, true);
+    OP_EQUAL => OP_BRANCH_FALSE_EQUAL, branch_false_equal;
+    OP_NOT_EQUAL => OP_BRANCH_FALSE_NOT_EQUAL, branch_false_not_equal;
+}
+
+// Typed constructors remain explicit: boolean conversion, count sentinels,
+// biased cache operands and signed offsets are distinct encoding contracts.
+// The declaration table owns reserved bits; it must not infer these values.
 impl Instr {
     /// Create an instruction with no operands.
     #[inline]
@@ -558,94 +771,84 @@ impl Instr {
     }
 }
 
-impl std::fmt::Debug for Instr {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.opcode() {
-            Self::OP_NOP => write!(f, "Nop"),
-            Self::OP_POP => write!(f, "Pop"),
-            Self::OP_DUP => write!(f, "Dup"),
-            Self::OP_SWAP => write!(f, "Swap"),
-            Self::OP_NEW_TABLE => write!(f, "NewTable"),
-            Self::OP_NEW_TABLE_PRESIZED => write!(f, "NewTablePresized({})", self.a()),
-            Self::OP_NEW_TABLE_TEMPLATE => write!(f, "NewTableTemplate({})", self.a()),
-            Self::OP_NEW_TABLE_TRACKED => write!(f, "NewTableTracked({})", self.a()),
-            Self::OP_GET_TABLE => write!(f, "GetTable"),
-            Self::OP_ADD => write!(f, "Add"),
-            Self::OP_SUBTRACT => write!(f, "Subtract"),
-            Self::OP_MULTIPLY => write!(f, "Multiply"),
-            Self::OP_DIVIDE => write!(f, "Divide"),
-            Self::OP_POW => write!(f, "Pow"),
-            Self::OP_MOD => write!(f, "Mod"),
-            Self::OP_CONCAT => write!(f, "Concat"),
-            Self::OP_LESS => write!(f, "Less"),
-            Self::OP_LESS_EQUAL => write!(f, "LessEqual"),
-            Self::OP_GREATER => write!(f, "Greater"),
-            Self::OP_GREATER_EQUAL => write!(f, "GreaterEqual"),
-            Self::OP_EQUAL => write!(f, "Equal"),
-            Self::OP_NOT_EQUAL => write!(f, "NotEqual"),
-            Self::OP_NOT => write!(f, "Not"),
-            Self::OP_LENGTH => write!(f, "Length"),
-            Self::OP_NEGATE => write!(f, "Negate"),
-            Self::OP_MARK_CALL_BASE => write!(f, "MarkCallBase"),
-            Self::OP_PUSH_NIL => write!(f, "PushNil"),
-            Self::OP_GET_GLOBAL => write!(f, "GetGlobal({}, {})", self.a(), self.bx()),
-            Self::OP_SET_GLOBAL => write!(f, "SetGlobal({}, {})", self.a(), self.bx()),
-            Self::OP_GET_LOCAL => write!(f, "GetLocal({})", self.a()),
-            Self::OP_SET_LOCAL => write!(f, "SetLocal({})", self.a()),
-            Self::OP_GET_UPVALUE => write!(f, "GetUpvalue({})", self.a()),
-            Self::OP_SET_UPVALUE => write!(f, "SetUpvalue({})", self.a()),
-            Self::OP_GET_FIELD => write!(f, "GetField({}, {})", self.a(), self.bx()),
-            Self::OP_INIT_INDEX => write!(f, "InitIndex({})", self.a()),
-            Self::OP_PUSH_NUM => write!(f, "PushNum({})", self.bx()),
-            Self::OP_PUSH_STRING => write!(f, "PushString({})", self.bx()),
-            Self::OP_TFOR_PREP => write!(f, "TForPrep({})", self.a()),
-            Self::OP_RETURN => write!(f, "Return({:?})", RetCount::from_u8(self.a())),
-            Self::OP_CLOSE_UPVALUES => write!(f, "CloseUpvalues({})", self.a()),
-            Self::OP_CLOSURE => write!(f, "Closure({})", self.a()),
-            Self::OP_VARARG => write!(f, "Vararg({})", self.a()),
-            Self::OP_SET_LIST => write!(f, "SetList({}, {})", self.a(), self.bx()),
-            Self::OP_SET_TABLE => write!(f, "SetTable({})", self.a()),
-            Self::OP_PUSH_BOOL => write!(f, "PushBool({})", self.a() != 0),
-            Self::OP_GET_BUILTIN => write!(f, "GetBuiltin({:?})", Builtin::from_u8(self.a())),
-            Self::OP_SET_BUILTIN => write!(f, "SetBuiltin({:?})", Builtin::from_u8(self.a())),
-            Self::OP_SET_FIELD => write!(f, "SetField({}, {})", self.a(), self.bx()),
-            Self::OP_SET_FIELD_AT => write!(f, "SetFieldAt({}, {})", self.a(), self.bx()),
-            Self::OP_INIT_FIELD => write!(f, "InitField({}, {})", self.a(), self.bx()),
-            Self::OP_INIT_FIELD_PINNED => write!(f, "InitFieldPinned({}, {})", self.a(), self.bx()),
-            Self::OP_TFOR_CALL => write!(f, "TForCall({}, {}, {})", self.a(), self.b(), self.c()),
-            Self::OP_CALL => write!(
-                f,
-                "Call({:?}, {:?})",
-                ArgCount::from_u8(self.a()),
-                RetCount::from_u8(self.b())
-            ),
-            Self::OP_JUMP => write!(f, "Jump({})", self.sbx()),
-            Self::OP_BRANCH_FALSE => write!(f, "BranchFalse({})", self.sbx()),
-            Self::OP_BRANCH_TRUE_KEEP => write!(f, "BranchTrueKeep({})", self.sbx()),
-            Self::OP_BRANCH_FALSE_KEEP => write!(f, "BranchFalseKeep({})", self.sbx()),
-            Self::OP_BRANCH_FALSE_LESS => write!(f, "BranchFalseLess({})", self.sbx()),
-            Self::OP_BRANCH_FALSE_LESS_EQUAL => {
-                write!(f, "BranchFalseLessEqual({})", self.sbx())
-            }
-            Self::OP_BRANCH_FALSE_GREATER => write!(f, "BranchFalseGreater({})", self.sbx()),
-            Self::OP_BRANCH_FALSE_GREATER_EQUAL => {
-                write!(f, "BranchFalseGreaterEqual({})", self.sbx())
-            }
-            Self::OP_BRANCH_FALSE_EQUAL => write!(f, "BranchFalseEqual({})", self.sbx()),
-            Self::OP_BRANCH_FALSE_NOT_EQUAL => {
-                write!(f, "BranchFalseNotEqual({})", self.sbx())
-            }
-            Self::OP_FOR_PREP => write!(f, "ForPrep({}, {})", self.a(), self.sbx()),
-            Self::OP_FOR_LOOP => write!(f, "ForLoop({}, {})", self.a(), self.sbx()),
-            Self::OP_TFOR_LOOP => write!(f, "TForLoop({}, {})", self.a(), self.sbx()),
-            op => write!(f, "Unknown(op={}, raw={:#x})", op, self.0),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::Builtin;
+    use super::{ArgCount, Builtin, Instr, RetCount};
+
+    // This fixture is deliberately independent of the declaration tables.
+    // Snapshot version changes must review this entire encoding contract,
+    // including holes and builtin slots, rather than blessing reordered data.
+    #[test]
+    fn persisted_encodings_match_fixture() {
+        use std::fmt::Write;
+
+        let golden = include_str!("../tests/fixtures/opcode_encoding.txt");
+        let (version, expected) = golden.split_once('\n').expect("fixture has a version line");
+        assert_eq!(version, "format=6");
+        let mut actual = String::new();
+        for (opcode, name) in Instr::OPCODE_NAMES {
+            writeln!(actual, "{name}={opcode}").expect("writing into String cannot fail");
+        }
+        for (builtin, name) in Builtin::ALL {
+            writeln!(actual, "builtin:{name}={}", builtin.to_u8())
+                .expect("writing into String cannot fail");
+        }
+        assert_eq!(
+            actual, expected,
+            "snapshot opcode or builtin encoding changed"
+        );
+
+        #[cfg(feature = "snapshot")]
+        {
+            let saved = crate::State::new()
+                .save_state()
+                .expect("fresh state can be saved");
+            assert_eq!(&saved.bytes[..4], b"DLGS");
+            let format = u16::from_le_bytes([saved.bytes[4], saved.bytes[5]]);
+            assert_eq!(
+                format!("format={format}"),
+                version,
+                "review the encoding fixture when changing the snapshot format"
+            );
+        }
+    }
+
+    #[test]
+    fn count_encoding_round_trips_without_fixed_sentinel_aliases() {
+        for n in 0..u8::MAX {
+            assert_eq!(
+                ArgCount::from_u8(ArgCount::Fixed(n).to_u8()),
+                ArgCount::Fixed(n)
+            );
+            assert_eq!(
+                RetCount::from_u8(RetCount::Fixed(n).to_u8()),
+                RetCount::Fixed(n)
+            );
+        }
+        assert_eq!(ArgCount::from_u8(u8::MAX), ArgCount::Dynamic);
+        assert_eq!(RetCount::from_u8(u8::MAX), RetCount::All);
+    }
+
+    #[test]
+    #[should_panic(expected = "fixed bytecode argument count must be below 255")]
+    fn fixed_sentinel_argument_cannot_be_encoded() {
+        let _ = Instr::call(ArgCount::Fixed(255), RetCount::Fixed(0));
+    }
+
+    #[test]
+    #[should_panic(expected = "fixed bytecode result count must be below 255")]
+    fn fixed_sentinel_result_cannot_be_encoded() {
+        let _ = Instr::ret(RetCount::Fixed(255));
+    }
+
+    #[test]
+    fn diagnostic_operands_include_counts_and_marker_adjustments() {
+        assert_eq!(
+            format!("{:?}", Instr::op_a(Instr::OP_CONCAT, 3)),
+            "Concat(3)"
+        );
+        assert_eq!(format!("{:?}", Instr::mark_call_base(1)), "MarkCallBase(1)");
+    }
 
     #[test]
     fn builtin_slots_round_trip_through_names_and_bytes() {
