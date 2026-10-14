@@ -142,16 +142,6 @@ An `Engine::raw()` user loading a stdlib save gets a stdlib State with no
 refusal. If intended, `load_state` should live on `Engine` and check or override
 the flag explicitly.
 
-## HYG-043 - Unbounded or quadratic growth in the VM and registries
-
-Reported by the vm, surface and compiler hunters; the `%p` id map and upvalue
-lookup are fixed, and the anchor, registry and bytecode-cache growth were
-refused with comments at their sites.
-
-Every nested function clones `source: Option<String>` (`parse_chunk`), which
-holds the chunk name. Making it `Option<Arc<str>>` needs coordinated changes in
-vm/frame.rs and error.rs, which consume `Option<String>`.
-
 # Rules duplicated inside the compiler
 
 ## HYG-072 - Table key normalisation now runs on insert and hash
@@ -161,17 +151,6 @@ Reported by the wave 4 reviewer; perf, unmeasured.
 `Table::insert` builds a `TableKeyInput` and runs the full normaliser to reject
 nil and NaN, and `Hash for Val` routes numbers through it. Both should inline to
 the old code; check with the next `tables/*` bench.
-
-## HYG-076 - Wave 7 reviewer laterals
-
-Reported by the wave 7 reviewer.
-
-- `TABLE_LIBRARY_CAPACITY` (lua_std.rs) is still a literal, asserted equal to
-  `table::TABLE_FUNCTIONS.len()`; define it as that length instead.
-- A gsub replacement template's `%2` with too few captures still raises
-  `RuntimeError("invalid capture index ...")`, while the same text from a
-  pattern is now `PatternError`. Decide whether replacement-template errors
-  share the variant, and document it either way.
 
 ## HYG-060 - Tool directories are ignored wholesale
 

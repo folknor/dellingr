@@ -13,7 +13,7 @@ fn table_unpack_values(state: &mut State) -> crate::Result<u8> {
 }
 
 // Keep registration order: it determines table iteration and snapshot baselines.
-const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
+pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     // table.insert(t, [pos,] value) - costs 1
     // Inserts value at position pos in t, shifting elements up.
     // If pos is omitted, inserts at the end.
@@ -280,15 +280,12 @@ const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     }),
 ];
 
-// Keep the parent module's reservation hint tied to the actual registrations.
-const _: () = assert!(super::TABLE_LIBRARY_CAPACITY == TABLE_FUNCTIONS.len());
-
 impl State {
     pub(crate) const TABLE_FUNCTION_COUNT: usize = TABLE_FUNCTIONS.len();
 }
 
 pub(crate) fn open_table(state: &mut State) -> Result<()> {
-    state.new_table_with_capacity(TABLE_FUNCTIONS.len())?;
+    state.new_table_with_capacity(super::TABLE_LIBRARY_CAPACITY)?;
     for &(name, func) in TABLE_FUNCTIONS {
         state.register_lib_fn(-1, "table", name, func)?;
     }

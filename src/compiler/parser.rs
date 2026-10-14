@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use super::Bytecode;
 use super::Instr;
 use super::Result;
@@ -85,6 +87,7 @@ pub(super) fn parse_str(source: &str) -> Result<Bytecode> {
 /// Parses Lua source code into a `Bytecode` with an optional source name.
 #[hotpath::measure]
 pub(super) fn parse_str_named(source: &str, source_name: Option<String>) -> Result<Bytecode> {
+    let source_name = source_name.map(Arc::<str>::from);
     if source.len() > MAX_SOURCE_BYTES {
         return Err(Error::without_location(ErrorKind::SourceSizeExceeded {
             size: source.len(),
@@ -633,10 +636,7 @@ impl<'a> Parser<'a> {
         }
         let num_params =
             u8::try_from(params.len()).map_err(|_| self.error_here(SyntaxError::TooManyLocals))?;
-        // This clones the diagnostic source name, not the Lua source text.
-        // Sharing it requires changing Bytecode::source together with its
-        // traceback consumers: Frame and Error currently own Option<String>.
-        // Keep those boundaries compatible until that coordinated change.
+        // Nested chunks share the diagnostic source name through Arc.
         let source = self.chunk.source.clone();
         self.outer_chunks.push(std::mem::take(&mut self.chunk));
         self.outer_literal_indices

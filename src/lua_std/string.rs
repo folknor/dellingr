@@ -212,6 +212,13 @@ fn append_bytes(state: &mut State, out: &mut Vec<u8>, bytes: &[u8]) -> Result<()
     Ok(())
 }
 
+fn invalid_gsub_capture_error(state: &State) -> Error {
+    // Replacement-template errors stay runtime errors: PatternError describes
+    // pattern compilation or matching, and its index-less detail means the
+    // matcher could not provide an index, while this parser knows the digit.
+    state.error(ErrorKind::RuntimeError("invalid capture index".into()))
+}
+
 fn append_string_replacement(
     state: &mut State,
     out: &mut Vec<u8>,
@@ -235,9 +242,9 @@ fn append_string_replacement(
                     let capture = if captures.len() == 1 && idx == 1 {
                         captures[0]
                     } else {
-                        *captures.get(idx).ok_or_else(|| {
-                            state.error(ErrorKind::RuntimeError("invalid capture index".into()))
-                        })?
+                        *captures
+                            .get(idx)
+                            .ok_or_else(|| invalid_gsub_capture_error(state))?
                     };
                     append_capture_bytes(state, out, bytes, capture)?;
                 }
@@ -338,9 +345,9 @@ fn append_templated_replacement(
                 let capture = if *idx == 0 || (captures.len() == 1 && *idx == 1) {
                     captures[0]
                 } else {
-                    *captures.get(*idx).ok_or_else(|| {
-                        state.error(ErrorKind::RuntimeError("invalid capture index".into()))
-                    })?
+                    *captures
+                        .get(*idx)
+                        .ok_or_else(|| invalid_gsub_capture_error(state))?
                 };
                 append_capture_bytes(state, out, bytes, capture)?;
             }

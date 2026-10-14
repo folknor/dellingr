@@ -366,7 +366,7 @@ struct SavedBytecode {
     upvalues: Vec<SavedUpvalueDesc>,
     is_vararg: bool,
     name: Option<String>,
-    source: Option<String>,
+    source: Option<Arc<str>>,
     line_info: Vec<u32>,
 }
 
@@ -1598,15 +1598,33 @@ fn materialize_bytecode(
     payload: &verify::VerifiedSavePayload,
 ) -> Result<Vec<Arc<Bytecode>>, LoadError> {
     let saved = payload.bytecode();
+    let source_names = intern_bytecode_sources(saved);
     let mut out: Vec<Option<Arc<Bytecode>>> = vec![None; saved.len()];
     let mut visiting = vec![false; saved.len()];
     for idx in 0..saved.len() {
-        build_bytecode_tree(idx, saved, &mut out, &mut visiting)?;
+        build_bytecode_tree(idx, saved, &source_names, &mut out, &mut visiting)?;
     }
     out.into_iter()
         .enumerate()
         .map(|(index, bc)| {
             bc.ok_or_else(|| corrupt_arena("bytecode chunk was not materialized", index))
+        })
+        .collect()
+}
+
+fn intern_bytecode_sources(saved: &[SavedBytecode]) -> Vec<Option<Arc<str>>> {
+    // The save format stores each chunk's source field; share equal names again after loading.
+    let mut source_pool = BTreeMap::<&str, Arc<str>>::new();
+    saved
+        .iter()
+        .map(|bytecode| {
+            bytecode.source.as_deref().map(|source| {
+                Arc::clone(
+                    source_pool
+                        .entry(source)
+                        .or_insert_with(|| Arc::<str>::from(source)),
+                )
+            })
         })
         .collect()
 }
@@ -1621,6 +1639,7 @@ fn materialize_bytecode(
 fn build_bytecode_tree(
     root: usize,
     saved: &[SavedBytecode],
+    source_names: &[Option<Arc<str>>],
     out: &mut [Option<Arc<Bytecode>>],
     visiting: &mut [bool],
 ) -> Result<(), LoadError> {
@@ -1666,14 +1685,22 @@ fn build_bytecode_tree(
                     })
             })
             .collect::<Result<Vec<_>, LoadError>>()?;
-        out[idx] = Some(build_bytecode_node(src, nested));
+        let source = source_names
+            .get(idx)
+            .cloned()
+            .ok_or_else(|| corrupt_arena("bytecode source name was not materialized", idx))?;
+        out[idx] = Some(build_bytecode_node(src, nested, source));
         visiting[idx] = false;
         stack.pop();
     }
     Ok(())
 }
 
-fn build_bytecode_node(src: &SavedBytecode, nested: Vec<Arc<Bytecode>>) -> Arc<Bytecode> {
+fn build_bytecode_node(
+    src: &SavedBytecode,
+    nested: Vec<Arc<Bytecode>>,
+    source: Option<Arc<str>>,
+) -> Arc<Bytecode> {
     Arc::new(Bytecode {
         code: src.code.iter().map(|raw| Instr::from_raw(*raw)).collect(),
         number_literals: src
@@ -1699,7 +1726,7 @@ fn build_bytecode_node(src: &SavedBytecode, nested: Vec<Arc<Bytecode>>) -> Arc<B
             .collect(),
         is_vararg: src.is_vararg,
         name: src.name.clone(),
-        source: src.source.clone(),
+        source,
         line_info: src.line_info.clone(),
     })
 }
@@ -1822,11 +1849,7 @@ impl Encoder {
         self.write_bytes(s.as_bytes(), field)
     }
 
-    fn write_option_string(
-        &mut self,
-        s: &Option<String>,
-        field: ByteField,
-    ) -> Result<(), SaveError> {
+    fn write_option_string(&mut self, s: Option<&str>, field: ByteField) -> Result<(), SaveError> {
         match s {
             Some(s) => {
                 self.write_bool(true);
@@ -2230,8 +2253,8 @@ impl SavedBytecode {
         })?;
         write_vec(out, &self.upvalues, |out, item| item.encode(out))?;
         out.write_bool(self.is_vararg);
-        out.write_option_string(&self.name, ByteField::ChunkName)?;
-        out.write_option_string(&self.source, ByteField::ChunkSource)?;
+        out.write_option_string(self.name.as_deref(), ByteField::ChunkName)?;
+        out.write_option_string(self.source.as_deref(), ByteField::ChunkSource)?;
         write_vec(out, &self.line_info, |out, line| {
             out.write_u32(*line);
             Ok(())
@@ -2254,7 +2277,9 @@ impl SavedBytecode {
             upvalues: read_vec(input, SavedUpvalueDesc::decode)?,
             is_vararg: input.read_bool()?,
             name: input.read_option_string(ByteField::ChunkName)?,
-            source: input.read_option_string(ByteField::ChunkSource)?,
+            source: input
+                .read_option_string(ByteField::ChunkSource)?
+                .map(Arc::<str>::from),
             line_info: read_vec(input, Decoder::read_u32)?,
         })
     }

@@ -221,8 +221,8 @@ pub(crate) struct Bytecode {
     pub(crate) is_vararg: bool,
     /// Optional function name (for debugging/analysis).
     pub(crate) name: Option<String>,
-    /// Source name (file path or chunk identifier like "[string]").
-    pub(crate) source: Option<String>,
+    /// Shared source name (file path or chunk identifier like "[string]").
+    pub(crate) source: Option<Arc<str>>,
     /// Maps instruction index to source line number.
     /// line_info[i] is the line number for code[i].
     pub(crate) line_info: Vec<u32>,

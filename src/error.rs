@@ -1,4 +1,5 @@
 use std::fmt;
+use std::sync::Arc;
 
 use crate::LuaType;
 use crate::limits::{
@@ -23,7 +24,7 @@ pub struct StackFrame {
 #[derive(Debug)]
 struct ErrorContext {
     /// Source file or chunk name, if the error came from named source.
-    name: Option<String>,
+    name: Option<Arc<str>>,
     /// Whether `on_error` has already been notified for this error.
     reported: bool,
 }
@@ -398,7 +399,7 @@ impl Error {
         self
     }
 
-    pub(crate) fn with_source_name(mut self, source_name: Option<String>) -> Self {
+    pub(crate) fn with_source_name(mut self, source_name: Option<Arc<str>>) -> Self {
         if source_name.is_some() || self.context.is_some() {
             self.context_mut().name = source_name;
         }

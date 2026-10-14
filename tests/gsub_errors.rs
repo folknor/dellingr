@@ -334,10 +334,21 @@ fn gsub_validates_replacement_grammar_only_for_actual_replacements() {
             "invalid use of '%'",
         );
     }
-    assert_runtime_error(
-        r#"return string.gsub("a", "(a)", "%2")"#,
-        "invalid capture index",
+    let mut state = State::new();
+    state
+        .load_string(r#"return string.gsub("a", "(a)", "%2")"#)
+        .unwrap();
+    let err = state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(2))
+        .unwrap_err();
+    assert!(
+        matches!(
+            &err.kind,
+            ErrorKind::RuntimeError(message) if message == "invalid capture index"
+        ),
+        "expected runtime invalid capture index error, got {err:?}"
     );
+    assert_eq!(err.kind.to_string(), "invalid capture index");
 
     // A bad replacement is not validated when there is no match or the
     // substitution limit is zero. Bind each gsub's two results to locals so all

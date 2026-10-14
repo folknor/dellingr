@@ -30,7 +30,7 @@ use crate::numeral::exact_i64;
 /// four slots before any library has been installed.
 const MATH_LIBRARY_CAPACITY: usize = 22;
 const STRING_LIBRARY_CAPACITY: usize = 10;
-const TABLE_LIBRARY_CAPACITY: usize = 7;
+const TABLE_LIBRARY_CAPACITY: usize = table::TABLE_FUNCTIONS.len();
 
 /// Headroom the library setup reserves on the value stack.
 ///
