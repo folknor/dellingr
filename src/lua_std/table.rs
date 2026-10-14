@@ -286,10 +286,6 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     }),
 ];
 
-impl State {
-    pub(crate) const TABLE_FUNCTION_COUNT: usize = TABLE_FUNCTIONS.len();
-}
-
 pub(crate) fn open_table(state: &mut State) -> Result<()> {
     state.new_table_with_capacity(super::TABLE_LIBRARY_CAPACITY)?;
     for &(name, func) in TABLE_FUNCTIONS {

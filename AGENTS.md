@@ -140,7 +140,7 @@ value stack, not total host memory, and enforcing it charges no cost.
 examples/hotpath.rs        # harness (parse / cold call / warm calls)
 examples/numerics/         # arithmetic, constants
 examples/calls/            # global, local, method, vararg, fixedarg, many_literals, ...
-examples/fields/           # same_obj_read, same_obj_write, polymorphic, miss, ...
+examples/fields/           # same_obj_read, same_obj_write, polymorphic, ...
 examples/globals/          # write
 examples/iter/             # pairs, ipairs
 examples/tables/           # fill, mixed, numeric_index
@@ -155,7 +155,7 @@ Benches come in two flavours, and the distinction matters when reading the
 README table. Most are *workload* benches, meant to look like plausible script
 code. A few are *diagnostic probes* written to isolate one known-unoptimized
 path so that a candidate optimization has something to measure against;
-`numerics/constants`, `fields/miss`, `globals/write`, `calls/many_literals`,
+`numerics/constants`, `globals/write`, `calls/many_literals`,
 `alloc/gc_churn` and `parse/large_source` are all probes. Their ratios against
 reference Lua are worst cases by construction, not representative numbers, and
 each carries a header comment naming the candidate it exists to measure and the

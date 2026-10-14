@@ -26,7 +26,6 @@ Run `./scripts/bench.sh` to reproduce on your own host. Sample run on AMD Ryzen 
 | `strings/patterns`       |     60ms |    22ms |     3.48x |     3.45x |     3.34x |     5.27x |
 | `strings/literal_find`   |     21ms |       - |     3.31x |     3.41x |     2.42x |     6.23x |
 | `fields/same_obj_read`   |    169ms |    61ms |     6.01x |     7.16x |     3.81x |    46.27x |
-| `fields/miss` *          |     77ms |       - |     3.46x |     4.00x |     2.36x |    54.34x |
 | `globals/write` *        |     32ms |       - |     1.62x |     2.04x |     1.10x |    27.12x |
 | `calls/many_literals` *  |     57ms |       - |     4.40x |     4.39x |     2.70x |    61.03x |
 | `alloc/closure`          |     81ms |   126ms |     2.20x |     2.21x |     1.83x |     2.80x |

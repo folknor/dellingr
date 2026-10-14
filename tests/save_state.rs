@@ -654,6 +654,38 @@ fn ordered_environment_replay_preserves_setup_additions_and_metatable() {
 }
 
 #[test]
+fn ordered_environment_replay_invalidates_setup_field_caches() {
+    let mut original = fresh();
+    // Moving a stock key to the end forces ordered replay. Other stock keys
+    // then move to different indices, even though their values stay unchanged.
+    run(&mut original, "math.floor = nil; math.floor = 7");
+    let save = original.save_state().expect("state saves");
+    let mut probe = None;
+    let mut loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), |state| {
+        // Capture the canonical table in a setup closure, warm its field cache
+        // at version 0 and retain the same closure across materialization.
+        state.load_string("local m = math return function() return m.floor end")?;
+        state.call(ArgCount::Fixed(0), RetCount::Fixed(1))?;
+        let anchor = state.anchor_function()?;
+        state.call_anchor(anchor, ArgCount::Fixed(0), RetCount::Fixed(1))?;
+        assert_eq!(state.typ(-1), LuaType::Function);
+        state.pop(1)?;
+        probe = Some(anchor);
+        Ok::<(), dellingr::error::Error>(())
+    })
+    .expect("state loads after warming a cache in setup");
+    loaded
+        .call_anchor(
+            probe.expect("setup retained the probe"),
+            ArgCount::Fixed(0),
+            RetCount::Fixed(1),
+        )
+        .expect("retained probe runs after ordered replay");
+    assert_eq!(loaded.to_number(-1).expect("saved floor is numeric"), 7.0);
+    loaded.pop(1).unwrap();
+}
+
+#[test]
 fn unordered_environment_replay_places_setup_additions_before_new_keys() {
     // The counterpart to the test above: when replay reproduces the saved order
     // naturally, no order vector is emitted and a setup-added key simply sits
@@ -1326,7 +1358,7 @@ fn table_library_extension_survives_snapshot() {
     let mut original = fresh();
     run(&mut original, "table.custom = function(t) return 17 end");
     let mut loaded = reload(&original);
-    run(&mut loaded, "result = ({}):custom()");
+    run(&mut loaded, "result = table.custom({})");
     assert_eq!(global_num(&mut loaded, "result"), 17.0);
 }
 
@@ -1338,12 +1370,12 @@ fn rebound_table_library_survives_snapshot() {
         "table = { custom = function(t) return 23 end }",
     );
     let mut loaded = reload(&original);
-    run(&mut loaded, "result = ({}):custom()");
+    run(&mut loaded, "result = table.custom({})");
     assert_eq!(global_num(&mut loaded, "result"), 23.0);
 }
 
 #[test]
-fn table_library_metatable_fallback_survives_snapshot() {
+fn table_library_metatable_survives_snapshot() {
     let mut original = fresh();
     run(
         &mut original,
@@ -1354,20 +1386,14 @@ fn table_library_metatable_fallback_survives_snapshot() {
         "#,
     );
     let mut loaded = reload(&original);
-    run(&mut loaded, "result = ({}):custom()");
+    run(&mut loaded, "result = table.custom()");
     assert_eq!(global_num(&mut loaded, "result"), 29.0);
 }
 
 #[test]
-fn ordered_table_library_replay_drops_the_pristine_fallback_cache() {
-    // The final library must have exactly SEVEN live keys - the pristine
-    // slot count - with different membership, and a forced reorder so the
-    // load path takes the ordered `clear_and_insert_entries` replay. An
-    // eight-key table would fail the shape guard on slot count alone and
-    // never exercise the explicit cache drop this test exists to pin:
-    // without the drop, a seven-key rebuild can coincidentally restore
-    // pristine-looking shape fields while `custom` has replaced `insert`,
-    // and the gate would answer nil for a key the table actually has.
+fn ordered_table_library_replay_restores_membership() {
+    // Seven live keys with different membership plus a forced reorder, so the
+    // load path takes the ordered `clear_and_insert_entries` replay.
     let mut original = fresh();
     run(
         &mut original,
@@ -1382,9 +1408,11 @@ fn ordered_table_library_replay_drops_the_pristine_fallback_cache() {
     let mut loaded = reload(&original);
     run(
         &mut loaded,
-        "result = ({}):custom() \
-         insert_gone = (({}).insert == nil) and 1 or 0",
+        "result = table.custom() \
+         insert_gone = (table.insert == nil) and 1 or 0 \
+         plain_miss = (({}).custom == nil) and 1 or 0",
     );
     assert_eq!(global_num(&mut loaded, "result"), 31.0);
     assert_eq!(global_num(&mut loaded, "insert_gone"), 1.0);
+    assert_eq!(global_num(&mut loaded, "plain_miss"), 1.0);
 }

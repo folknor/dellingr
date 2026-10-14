@@ -522,11 +522,22 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
         return Err(err(Some(code_len - 1), "code does not end in return"));
     }
     for (template_idx, template) in view.table_templates().iter().enumerate() {
+        // Keys are compared by content, not id: two equal-content string
+        // literals intern to one runtime key, and `Table::with_template_keys`
+        // relies on every template key being distinct (the parser guarantees
+        // it; a forged snapshot must not get past this check without it).
+        let mut seen: std::collections::BTreeSet<&[u8]> = std::collections::BTreeSet::new();
         for key in template {
-            if (*key as usize) >= view.string_literals().len() {
+            let Some(bytes) = view.string_literals().get(*key as usize) else {
                 return Err(err(
                     None,
                     format!("table template {template_idx} has an invalid string key"),
+                ));
+            };
+            if !seen.insert(bytes.as_slice()) {
+                return Err(err(
+                    None,
+                    format!("table template {template_idx} has a duplicate key"),
                 ));
             }
         }

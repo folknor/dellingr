@@ -177,10 +177,10 @@ impl State {
                 if !matches!(len_handler, Val::Nil) {
                     // Call __len(table). Two values pushed against the one
                     // popped above, so this is net-positive by one slot.
+                    Frame::flush_local_cost(self, local_cost)?;
                     self.check_stack_space(2)?;
                     self.push_unchecked(len_handler);
                     self.push_unchecked(val);
-                    Frame::flush_local_cost(self, local_cost)?;
                     self.call(ArgCount::Fixed(1), RetCount::Fixed(1))?;
                     return Ok(());
                 }
@@ -393,9 +393,9 @@ impl State {
                 ))
             },
         )?;
-        // Builtins must keep using the central setter: it bumps the version and
-        // preserves the table-library fallback rebind hook. They never seed a
-        // SET_GLOBAL cache slot.
+        // Builtins must keep using the central setter: it updates the builtin
+        // slot and bumps the environment version. They never seed a SET_GLOBAL
+        // cache slot.
         if Builtin::from_name(name).is_some() {
             self.set_global_value_owned(name.to_owned(), val);
         } else if let Some(index) = self.globals.get_index_of(name) {

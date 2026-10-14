@@ -131,7 +131,9 @@ impl Frame {
     /// Periodic flush interval for accumulated opcode cost.
     /// A finite budget also flushes before pending cost would exhaust it, so
     /// this interval does not change the charged prefix or `cost_used` at
-    /// `BudgetExceeded`.
+    /// `BudgetExceeded`. Any other error settles the pending batch in
+    /// [`Frame::eval`], so `cost_used` after a runtime error is independent of
+    /// the interval too.
     const COST_CHECK_INTERVAL: u64 = crate::limits::COST_CHECK_INTERVAL;
 
     pub(super) fn flush_local_cost(state: &mut State, local_cost: &mut u64) -> Result<()> {
@@ -150,19 +152,38 @@ impl Frame {
     /// strings, patterns, table traversal and metamethod callbacks.
     pub(super) fn eval(&mut self, state: &mut State) -> Result<RetCount> {
         // Batch cost checking: accumulate locally and flush periodically
-        let mut local_cost: u64 = 0;
+        let mut pending: u64 = 0;
+        let result = self.eval_batched(state, &mut pending);
+        if result.is_err() && pending > 0 {
+            // An error leaving the dispatch loop must still charge the work
+            // that already executed, or `cost_used` after a failed callback
+            // would depend on the batching interval rather than on the
+            // script. Pending cost never reaches the budget edge (add_cost!
+            // flushes first when it would), so for any error other than
+            // BudgetExceeded this charge is admitted. For BudgetExceeded the
+            // meter is already at or below zero and refuses it without
+            // mutating anything, which keeps that path's `cost_used`
+            // unchanged. Either way the original error is what propagates.
+            let _admitted = state.cost_meter().consume(pending);
+        }
+        result
+    }
 
+    /// Dispatch loop body for [`Frame::eval`]. `local_cost` holds accrued but
+    /// not yet flushed opcode cost; the caller settles it on error.
+    #[inline(always)]
+    fn eval_batched(&mut self, state: &mut State, local_cost: &mut u64) -> Result<RetCount> {
         /// Macro to accumulate cost and flush when threshold is reached
         macro_rules! add_cost {
             ($state:expr, $local:expr, $cost:expr) => {{
-                let next = $local.saturating_add($cost);
+                let next = (*$local).saturating_add($cost);
                 // This decides when to flush, not whether to accept a charge.
                 // consume_cost owns the runtime meter's admission rule.
                 if next >= Self::COST_CHECK_INTERVAL || $state.cost_batch_needs_flush(next) {
                     $state.consume_cost(next)?;
-                    $local = 0;
+                    *$local = 0;
                 } else {
-                    $local = next;
+                    *$local = next;
                 }
             }};
         }
@@ -215,7 +236,7 @@ impl Frame {
                 Instr::OP_CLOSURE => state.instr_closure(self, inst.a())?,
                 Instr::OP_CALL => {
                     self.record_call_site(state);
-                    Self::flush_local_cost(state, &mut local_cost)?;
+                    Self::flush_local_cost(state, local_cost)?;
                     state.call_op(ArgCount::from_u8(inst.a()), RetCount::from_u8(inst.b()))?;
                 }
                 Instr::OP_MARK_CALL_BASE => {
@@ -248,7 +269,7 @@ impl Frame {
                 }
                 Instr::OP_RETURN => {
                     // Flush any remaining accumulated cost before returning
-                    Self::flush_local_cost(state, &mut local_cost)?;
+                    Self::flush_local_cost(state, local_cost)?;
                     return Ok(RetCount::from_u8(inst.a()));
                 }
                 Instr::OP_VARARG => {
@@ -325,7 +346,7 @@ impl Frame {
                 Instr::OP_TFOR_PREP => state.instr_tfor_prep(inst.a()),
                 Instr::OP_TFOR_CALL => {
                     self.record_call_site(state);
-                    Self::flush_local_cost(state, &mut local_cost)?;
+                    Self::flush_local_cost(state, local_cost)?;
                     state.instr_tfor_call(inst.a(), inst.b(), inst.c(), &self.runtime.caches)?;
                 }
                 Instr::OP_TFOR_LOOP => state.instr_tfor_loop(self, inst.a(), inst.sbx())?,
@@ -333,7 +354,7 @@ impl Frame {
                 // Length has no fixed opcode charge; helpers may charge native work
                 Instr::OP_LENGTH => {
                     self.record_call_site(state);
-                    state.instr_length(&mut local_cost)?;
+                    state.instr_length(local_cost)?;
                 }
 
                 // Logical not is free
@@ -342,11 +363,11 @@ impl Frame {
                 // Table reads are free
                 Instr::OP_GET_FIELD => {
                     self.record_call_site(state);
-                    state.instr_get_field(self, inst.bx(), inst.a(), &mut local_cost)?;
+                    state.instr_get_field(self, inst.bx(), inst.a(), local_cost)?;
                 }
                 Instr::OP_GET_TABLE => {
                     self.record_call_site(state);
-                    state.instr_get_table(&mut local_cost)?;
+                    state.instr_get_table(local_cost)?;
                 }
 
                 // Concatenation has no fixed opcode charge. Operand A is the chain
@@ -484,7 +505,7 @@ impl Frame {
                         local_cost,
                         const { Instr::op(Instr::OP_SET_FIELD).static_units() }
                     );
-                    state.instr_set_field(self, 0, inst.bx(), inst.a(), &mut local_cost)?;
+                    state.instr_set_field(self, 0, inst.bx(), inst.a(), local_cost)?;
                 }
                 Instr::OP_SET_FIELD_AT => {
                     self.record_call_site(state);
@@ -493,7 +514,7 @@ impl Frame {
                         local_cost,
                         const { Instr::op(Instr::OP_SET_FIELD_AT).static_units() }
                     );
-                    state.instr_set_field(self, inst.a(), inst.bx(), u8::MAX, &mut local_cost)?;
+                    state.instr_set_field(self, inst.a(), inst.bx(), u8::MAX, local_cost)?;
                 }
                 Instr::OP_SET_TABLE => {
                     self.record_call_site(state);
@@ -502,7 +523,7 @@ impl Frame {
                         local_cost,
                         const { Instr::op(Instr::OP_SET_TABLE).static_units() }
                     );
-                    state.instr_set_table(inst.a(), &mut local_cost)?;
+                    state.instr_set_table(inst.a(), local_cost)?;
                 }
 
                 // Array initialization: cost per element

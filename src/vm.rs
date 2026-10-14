@@ -49,7 +49,7 @@ pub(super) use lua_val::Val;
 pub(super) use object::ObjectPtr;
 use object::{GcHeap, Markable, StringPtr, UpvaluePool, UpvalueRef};
 use rng::VmRng;
-use table::{Table, TableShape};
+use table::Table;
 
 pub use crate::limits::MAX_STRING_BYTES;
 use crate::limits::{
@@ -142,9 +142,6 @@ pub(super) fn mark_gc_roots(state: &State, worklist: &mut Vec<ObjectPtr>) {
     }
     state.transient_roots.mark_reachable(&state.heap, worklist);
     state.registry.mark_reachable(&state.heap, worklist);
-    if let Some(cache) = &state.table_library_fallback {
-        cache.names.mark_reachable(&state.heap, worklist);
-    }
     #[cfg(feature = "snapshot")]
     {
         // The canonical environment and its pristine baseline must survive even
@@ -169,19 +166,6 @@ pub(super) fn mark_gc_roots(state: &State, worklist: &mut Vec<ObjectPtr>) {
     }
     // Note: open upvalues point to stack (already marked), closed upvalues
     // are marked transitively through the closures that reference them
-}
-
-/// Cached proof that the installed table library has no extension keys.
-///
-/// `table` deliberately remains unrooted: rebinding invalidates this cache,
-/// and ObjectPtr's generational identity makes a collected slot safe to compare
-/// before it is ever dereferenced.
-pub(super) struct TableLibraryFallbackCache {
-    // Private, not pub(super): the fields are reached only from `vm` and its
-    // descendant modules (eval_index), and `TableShape` itself is vm-private.
-    table: ObjectPtr,
-    names: [Val; State::TABLE_FUNCTION_COUNT],
-    shape: TableShape,
 }
 
 /// Information about an active function call, used for stack traces.
@@ -216,9 +200,6 @@ pub struct State {
     pub(super) builtins: [Val; Builtin::COUNT],
     /// Bumped when the whole global environment is swapped.
     pub(super) globals_version: u64,
-    /// Pristine table-library identity, member names, and shape for rejecting
-    /// unknown plain-table field misses without probing the library.
-    pub(super) table_library_fallback: Option<TableLibraryFallbackCache>,
     /// The main stack which stores values.
     pub(super) stack: Vec<Val>,
     /// The bottom index of the current frame in the stack.
@@ -312,8 +293,8 @@ pub struct State {
     pub(super) rust_fn_ids_by_addr: BTreeMap<usize, String>,
     /// Canonical environment objects (library tables, `_G`, and `_G`'s
     /// metatable) captured after each successful open_libs, each mapped to its
-    /// save token. The public helper refreshes fallback and environment caches
-    /// together, and with_callbacks uses that same helper.
+    /// save token. The public `open_libs` refreshes this map, and with_callbacks
+    /// uses that same helper.
     /// Keyed on the objects `open_libs` built, so user shadowing of a builtin
     /// slot (`math = {}`) cannot make the save classifier mistake a user table
     /// for an environment object. See `vm/save_state.rs`.
@@ -416,7 +397,6 @@ impl State {
             globals: IndexMap::new(),
             builtins: std::array::from_fn(|_| Val::Nil),
             globals_version: 0,
-            table_library_fallback: None,
             stack: Vec::with_capacity(256), // Pre-size for typical function depth * locals
             stack_bottom: 0,
             heap: GcHeap::new(),
@@ -1094,53 +1074,8 @@ impl State {
         if let Some(slot) = Builtin::from_name(&name) {
             self.builtins[slot as usize] = val;
             self.globals_version = self.globals_version.wrapping_add(1);
-            if slot == Builtin::Table {
-                self.invalidate_table_library_fallback_rebind(val);
-            }
         }
         self.globals.insert(name, val);
-    }
-
-    pub(super) fn capture_table_library_fallback(&mut self) {
-        let Some(table) = self.builtins[Builtin::Table as usize].as_object_ptr() else {
-            self.table_library_fallback = None;
-            return;
-        };
-        let Some(library) = self.heap.as_table_ref(table) else {
-            self.table_library_fallback = None;
-            return;
-        };
-        if library.get_metatable().is_some() {
-            self.table_library_fallback = None;
-            return;
-        }
-        let Ok(names) = library.live_string_keys().try_into() else {
-            self.table_library_fallback = None;
-            return;
-        };
-        self.table_library_fallback = Some(TableLibraryFallbackCache {
-            table,
-            names,
-            shape: library.fallback_shape(),
-        });
-    }
-
-    pub(super) fn invalidate_table_library_fallback_rebind(&mut self, val: Val) {
-        if self
-            .table_library_fallback
-            .as_ref()
-            .is_some_and(|cache| val.as_object_ptr() != Some(cache.table))
-        {
-            self.table_library_fallback = None;
-        }
-    }
-
-    /// Only the snapshot load path needs an unconditional drop: an ordered
-    /// `"table"` environment replay rebuilds the canonical object in place,
-    /// which could coincidentally restore pristine-looking shape fields.
-    #[cfg(feature = "snapshot")]
-    pub(super) fn drop_table_library_fallback(&mut self) {
-        self.table_library_fallback = None;
     }
 
     /// Execute a function with a restricted global environment.
@@ -1165,10 +1100,6 @@ impl State {
             }
         }
 
-        // The fallback compares its generational table identity with the
-        // current Table builtin before using the cached shape. A hidden or
-        // replaced builtin therefore cannot use it; restoring the same object
-        // makes it usable again without allocating or recapturing names.
         // Swap to restricted environment
         let saved_globals = std::mem::replace(&mut self.globals, restricted_globals);
         let saved_builtins = std::mem::replace(&mut self.builtins, restricted_builtins);
@@ -1409,16 +1340,3 @@ mod runtime_tests {
 
 #[cfg(test)]
 mod tests;
-
-#[cfg(test)]
-mod table_library_registration_tests {
-    #[test]
-    fn standard_library_captures_table_fallback() {
-        let state = super::State::new();
-        let cache = state
-            .table_library_fallback
-            .as_ref()
-            .expect("standard table registrations must fit the fallback name array");
-        assert_eq!(cache.names.len(), super::State::TABLE_FUNCTION_COUNT);
-    }
-}

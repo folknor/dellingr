@@ -26,9 +26,9 @@ impl State {
 
         let cache = frame.runtime.caches.field_lookup.get(cache_idx as usize);
 
-        // Every push below is balanced against the receiver popped above, so
-        // this path never exceeds the height it was entered at and needs no
-        // preflight.
+        // Direct results replace the receiver popped above and need no
+        // preflight. Metamethod and string-library helpers check their own
+        // temporary stack growth.
         if let Some(ptr) = val.as_object_ptr()
             && let Some((direct, has_metatable)) = self.get_table_field_direct(ptr, key, cache)
         {
@@ -38,7 +38,10 @@ impl State {
             }
 
             if !has_metatable {
-                return self.push_table_library_field(key, local_cost);
+                // A miss on a plain table is nil, exactly as `t["k"]` and
+                // `rawget` see it.
+                self.push_unchecked(Val::Nil);
+                return Ok(());
             }
 
             if let Some(result) = self.get_index_table_field_direct(val, ptr, key, cache) {
@@ -51,13 +54,8 @@ impl State {
             self.get_table_with_key(table_idx, key, local_cost)?;
             let result = self.pop_val();
             self.pop_val();
-
-            if matches!(result, Val::Nil) {
-                self.push_table_library_field(key, local_cost)
-            } else {
-                self.push_unchecked(result);
-                Ok(())
-            }
+            self.push_unchecked(result);
+            Ok(())
         } else if val.as_string_ptr().is_some() {
             self.get_string_table_field(key, cache, local_cost)
         } else {
@@ -377,52 +375,6 @@ impl State {
         Some(index_key)
     }
 
-    #[inline(always)]
-    #[hotpath::measure]
-    pub(super) fn push_table_library_field(
-        &mut self,
-        key: Val,
-        local_cost: &mut u64,
-    ) -> Result<()> {
-        if let Some(cache) = &self.table_library_fallback {
-            if key.as_string_ptr().is_some_and(|key_ptr| {
-                cache
-                    .names
-                    .iter()
-                    .any(|name| name.as_string_ptr() == Some(key_ptr))
-            }) {
-                return self.push_table_library_field_slow(key, local_cost);
-            }
-
-            if self.builtins[crate::instr::Builtin::Table as usize].as_object_ptr()
-                == Some(cache.table)
-                && self
-                    .heap
-                    .as_table_ref(cache.table)
-                    .is_some_and(|table| table.fallback_shape() == cache.shape)
-            {
-                // The normal fallback temporarily pushes the library and its
-                // result, so preflight its two-slot high-water mark even though
-                // this proven-nil path only pushes the final replacement value.
-                self.check_stack_space(2)?;
-                self.push_unchecked(Val::Nil);
-                return Ok(());
-            }
-        }
-        self.push_table_library_field_slow(key, local_cost)
-    }
-
-    fn push_table_library_field_slow(&mut self, key: Val, local_cost: &mut u64) -> Result<()> {
-        self.get_global("table")?;
-        let table_lib_idx = self.stack.len() - 1;
-        self.get_table_with_key(table_lib_idx, key, local_cost)?;
-        let result = self.pop_val();
-        self.pop_val();
-        // Net-negative from here: two values popped, one pushed back.
-        self.push_unchecked(result);
-        Ok(())
-    }
-
     pub(super) fn instr_get_global(
         &mut self,
         frame: &Frame,
@@ -491,9 +443,6 @@ impl State {
         // reaching the lib via __index) re-resolve through the new
         // binding instead of resurrecting the old one.
         self.globals_version = self.globals_version.wrapping_add(1);
-        if crate::instr::Builtin::from_u8(slot) == Some(crate::instr::Builtin::Table) {
-            self.invalidate_table_library_fallback_rebind(val);
-        }
         // Also update globals for _G compatibility
         if let Some(builtin) = crate::instr::Builtin::from_u8(slot) {
             self.globals.insert(builtin.name().to_string(), val);

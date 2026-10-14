@@ -106,8 +106,10 @@ Carried over from the `notes/todo.md` entry this replaces: the flat 1 for
 `table.insert`/`table.remove` is recorded in a `src/lua_std/table.rs` comment
 as a cost-model choice. The suggested charge is by shift distance
 (`len - pos + 1`), as `table.move` charges per element. That changes
-`cost_used` and invalidates saves, so it should be bundled with any other
-pending `COST_MODEL_VERSION` bump (see VM-002) rather than shipped alone.
+`cost_used` and invalidates saves, so it should ride a `COST_MODEL_VERSION`
+bump. The version moved to 5 when pending opcode cost started being charged
+on runtime errors; if 5 has not yet shipped in a release, landing this under it
+avoids a second bump.
 
 ## STD-007 - `string.format("%q", n)` matches neither reference for integral numbers
 

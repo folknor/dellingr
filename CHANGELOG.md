@@ -11,11 +11,14 @@ identical source - re-measure tick budgets.
 
 ### Changed (breaking)
 
-- **`COST_MODEL_VERSION` is 4.** Literal arithmetic now constant-folds and no
+- **`COST_MODEL_VERSION` is 5.** Literal arithmetic now constant-folds and no
   longer charges, except `^`, which stays a runtime op because host libm `pow`
   is not bit-identical across targets. `string.gmatch` charges pattern
-  compilation once per iterator rather than per cache miss. Older snapshots
-  are rejected with `UnsupportedCostModelVersion`.
+  compilation once per iterator rather than per cache miss. `cost_used` now
+  includes opcode cost pending in the dispatch batch when a runtime error ends
+  a frame. Older snapshots are rejected with `UnsupportedCostModelVersion`.
+- **Field misses on plain tables return nil.** The implicit table-library
+  lookup and `t:insert(...)` sugar are gone; use `table.insert(t, ...)`.
 - **`ArgError` has a required `detail: ArgDetail` field.**
 - **`State::load_state`'s setup closure returns `Result<(), E>`**, surfaced as
   `LoadError::Setup(E)`; `LoadError` is generic over `E` (default
@@ -72,9 +75,13 @@ identical source - re-measure tick budgets.
   raise only when matching reaches them, and unfinished captures raise only
   when a library function reads them.
 - `string.gmatch` accepts Lua 5.4's optional `init` argument.
+- Retired the `fields/miss` diagnostic probe and its `miss` verdict workload.
 
 ### Fixed
 
+- Snapshot loading rejects duplicate table-template keys and non-table
+  metatables. Rebuilding an environment table on load advances its shape
+  version instead of resetting it, invalidating caches warmed during setup.
 - `open_libs` above existing stack values gave the wrong value `_G`'s
   metatable.
 - Cyclic `__call` chains aborted the process; they now hit the metamethod

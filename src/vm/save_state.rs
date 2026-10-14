@@ -1320,6 +1320,20 @@ fn materialize_payload(
                         Ok((key, decode_val(value, &ctx)?))
                     })
                     .collect::<Result<Vec<_>, LoadError>>()?;
+                // A metatable must be a table; the verifier checks saved `Obj`
+                // ids, and this also covers `EnvObj` tokens, whose runtime
+                // object is only known here.
+                let metatable = match metatable {
+                    None => None,
+                    Some(mt) => match decode_val(mt, &ctx)? {
+                        Val::Obj(mt_ptr) if state.heap.as_table_ref(mt_ptr).is_some() => {
+                            Some(mt_ptr)
+                        }
+                        _ => {
+                            return Err(corrupt_arena("saved table metatable is not a table", idx));
+                        }
+                    },
+                };
                 let ptr = objects[idx];
                 let table = state.heap.as_table(ptr).ok_or_else(|| {
                     corrupt_arena("materialized table object has wrong type", idx)
@@ -1327,16 +1341,8 @@ fn materialize_payload(
                 table
                     .clear_and_insert_entries(entries)
                     .map_err(|_| corrupt_arena("saved table entries are invalid", idx))?;
-                if let Some(mt) = metatable {
-                    match decode_val(mt, &ctx)? {
-                        Val::Obj(ptr) => table.set_metatable(Some(ptr)),
-                        _ => {
-                            return Err(corrupt_arena(
-                                "saved table metatable is not an object",
-                                idx,
-                            ));
-                        }
-                    }
+                if metatable.is_some() {
+                    table.set_metatable(metatable);
                 }
             }
             SavedObject::Closure { .. } => {}
@@ -1450,9 +1456,6 @@ fn materialize_payload(
                     ordered.push((key, value));
                 }
             }
-            if delta.token == "table" {
-                state.drop_table_library_fallback();
-            }
             let table = state.heap.as_table(ptr).ok_or_else(|| {
                 corrupt_arena("environment token does not resolve to a table", delta_index)
             })?;
@@ -1463,21 +1466,24 @@ fn materialize_payload(
             // must retain a metatable that setup or a later library installed.
             table.set_metatable(metatable);
         }
-        let table = state.heap.as_table(ptr).ok_or_else(|| {
-            corrupt_arena("environment token does not resolve to a table", delta_index)
-        })?;
-        match &delta.metatable {
-            SavedMetatableDelta::Unchanged => {}
-            SavedMetatableDelta::Cleared => table.set_metatable(None),
+        let new_metatable = match &delta.metatable {
+            SavedMetatableDelta::Unchanged => None,
+            SavedMetatableDelta::Cleared => Some(None),
             SavedMetatableDelta::Set(saved) => match decode_val(saved, &ctx)? {
-                Val::Obj(ptr) => table.set_metatable(Some(ptr)),
+                Val::Obj(mt_ptr) if state.heap.as_table_ref(mt_ptr).is_some() => Some(Some(mt_ptr)),
                 _ => {
                     return Err(corrupt_arena(
-                        "saved environment metatable is not an object",
+                        "saved environment metatable is not a table",
                         delta_index,
                     ));
                 }
             },
+        };
+        let table = state.heap.as_table(ptr).ok_or_else(|| {
+            corrupt_arena("environment token does not resolve to a table", delta_index)
+        })?;
+        if let Some(metatable) = new_metatable {
+            table.set_metatable(metatable);
         }
     }
 
@@ -3069,6 +3075,21 @@ mod tests {
             0,
             None,
         );
+
+        // Template keys must be distinct by content: a repeated id and two
+        // equal-content literals both collapse to one runtime key.
+        for duplicate in [[0u16, 0], [0, 1]] {
+            let mut duplicate_template_key = valid_saved_bytecode();
+            duplicate_template_key.string_literals = vec![b"k".to_vec(), b"k".to_vec()];
+            duplicate_template_key
+                .table_templates
+                .push(duplicate.to_vec());
+            assert_invalid(
+                rejected_bytecode(vec![duplicate_template_key], Vec::new()),
+                0,
+                None,
+            );
+        }
 
         let mut bad_local = valid_saved_bytecode();
         bad_local.code.insert(0, Instr::get_local(0).raw());

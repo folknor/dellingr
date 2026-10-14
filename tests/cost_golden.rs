@@ -6,6 +6,7 @@
 //! identical source changed: bump `COST_MODEL_VERSION`, document the new
 //! version in `src/cost_meter.rs`, and update the expected values here.
 
+use dellingr::error::ErrorKind;
 use dellingr::{ArgCount, COST_MODEL_VERSION, RetCount, State};
 
 const CORPUS: &[(&str, &str, u64)] = &[
@@ -36,6 +37,87 @@ const CORPUS: &[(&str, &str, u64)] = &[
         103,
     ),
 ];
+
+/// Sources that raise a runtime error after executing costed opcodes. The
+/// expected value counts every costed opcode that ran before the error, so it
+/// must not depend on the dispatch loop's cost batching interval.
+const ERROR_CORPUS: &[(&str, &str, u64)] = &[
+    (
+        "arith_error_after_add",
+        "local a, b = 1, nil local x = a + a local y = a + b",
+        // Two adds, including the failing one.
+        2,
+    ),
+    (
+        "index_nil_after_add",
+        "x = 2 local a = 1 + x local t = nil local b = t.k",
+        // One add; global writes and field reads are free.
+        1,
+    ),
+    (
+        "write_nil_after_add",
+        "local a = 1 local x = a + a local t = nil t.k = x",
+        // One add and the failing field write.
+        2,
+    ),
+    (
+        "nested_arith_error",
+        "local function f(a) local x = a + a return x + nil end local a = 1 local x = a + a f(x)",
+        // One caller add, one successful callee add and one failing add.
+        3,
+    ),
+    (
+        "arith_error_after_batch_flush",
+        "local n = 0 for i = 1, 65 do n = n + 1 end return n + nil",
+        // 65 loop adds and the failing add, spanning the 64-unit batch boundary.
+        66,
+    ),
+    (
+        "index_handler_error",
+        "local t = setmetatable({}, { __index = function(_, k) local n = 1 return n + k end }) local n = 1 local x = n + n local y = t.missing",
+        // Two tables, one initializer write, one caller add and one failing add.
+        5,
+    ),
+    (
+        "newindex_handler_error",
+        "local t = setmetatable({}, { __newindex = function(_, k, v) return v + k end }) local n = 1 local x = n + n t.missing = x",
+        // As above, plus the field write that invokes __newindex.
+        6,
+    ),
+    (
+        "length_handler_error",
+        "local t = setmetatable({}, { __len = function(t) local n = 1 return n + t end }) local n = 1 local x = n + n local y = #t",
+        // Two tables, one initializer write, one caller add and one failing add.
+        5,
+    ),
+];
+
+#[test]
+fn cost_used_after_runtime_error_matches_golden_corpus() {
+    for &(name, source, expected) in ERROR_CORPUS {
+        let exact_budget = i64::try_from(expected).expect("golden cost fits in i64");
+        for budget in [None, Some(exact_budget), Some(1_000)] {
+            let mut state = State::new();
+            if let Some(budget) = budget {
+                state.set_cost_budget(budget);
+            }
+            state.load_string(source).expect("golden source compiles");
+            let error = state
+                .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+                .expect_err("golden error source must fail at runtime");
+            assert!(
+                matches!(error.kind, ErrorKind::TypeError(_)),
+                "{name} (budget {budget:?}): expected a type error, got {error:?}"
+            );
+            assert_eq!(
+                state.cost_used(),
+                expected,
+                "{name} (budget {budget:?}): cost_used after a runtime error must count \
+                 the executed costed opcodes; a change here needs a COST_MODEL_VERSION bump"
+            );
+        }
+    }
+}
 
 #[test]
 fn cost_used_matches_golden_corpus() {

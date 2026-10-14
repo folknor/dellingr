@@ -94,7 +94,6 @@ impl State {
     #[hotpath::measure]
     pub fn open_libs(&mut self) -> Result<()> {
         lua_std::open_libs(self)?;
-        self.capture_table_library_fallback();
         #[cfg(feature = "snapshot")]
         self.capture_env_tokens();
         Ok(())

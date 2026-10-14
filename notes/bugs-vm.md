@@ -23,100 +23,6 @@ anything.
    inline instead.
 ```
 
-## VM-001 - A field miss on a plain table reads from the global `table` library, and errors when `table` is not a table
-
-Source: vm-exec (hunter's label: HIGH).
-
-Where: `eval_index.rs` `instr_get_field` -> `push_table_library_field` /
-`push_table_library_field_slow`.
-
-`GET_FIELD` (`t.k`, `t:k(...)`) on a table first looks up the key in the table.
-If the key is missing and there is no metatable, or the `__index` chain yields
-nil, it falls through to `get_global("table")` and looks the key up there.
-
-- **Wrong values.** `local t = {} print(t.insert)` prints a function, where
-  reference prints `nil`. The same goes for `remove`, `sort`, `concat`,
-  `unpack` and every other table-library name, and for objects whose class
-  `__index` lacks the name. So `if obj.remove then obj:remove() end` calls
-  `table.remove(obj)`. Through the `_G` proxy (its `__index` function returns
-  nil, so the fallback runs), `_G.insert` is also non-nil.
-- **Inconsistent indexing.** `t["insert"]` (`GET_TABLE`), `rawget`, the host
-  `State::get_table` and `pairs` all see nil, while `t.insert` sees a function.
-  So `t.k` and `t["k"]` are no longer the same expression.
-- **Errors on ordinary code.** If the global `table` is not a table, every field
-  miss on any plain table errors: the VM pushes `get_global("table")`, and
-  `get_table_with_key` on a non-table returns `TypeError::TableIndex`. Two ways
-  to get there:
-  - The script does `table = nil` (or `= 5`).
-    `invalidate_table_library_fallback_rebind` drops the cache, so every miss
-    takes the slow path, and `local t = {} if t.x then end` fails with "attempt
-    to index a nil value".
-  - The host uses `State::with_restricted_env` with a whitelist that omits
-    `"table"`. The Table builtin becomes Nil, the fast-path check
-    `builtins[Table] == cache.table` fails, and every plain-table field miss in
-    the sandbox errors.
-
-Claim broken: output matches reference Lua except for divergences marked
-`-- DIFF:`. No example marks this, and neither the README nor `reference/`
-mentions it. The only description is the header of `examples/fields/miss.lua`
-("exists only to support `t:insert(...)` sugar"). The error case also breaks
-`with_restricted_env`'s purpose: restricting the environment should hide
-globals, not make indexing fail.
-
-Hunter's direction: delete the fallback. If the `t:insert` sugar is a product
-requirement, document it in the README as a DIFF and make it never error, so a
-missing or non-table `table` global means "no fallback". The `fields/miss` probe
-bench and the `table_library_fallback` cache machinery exist only to make the
-fallback cheap, and both go with it.
-
-## VM-002 - A runtime error discards pending batched opcode cost
-
-Source: vm-exec (MEDIUM) and embedding (finding 6). Both describe the same
-mechanism.
-
-Where: `frame.rs` `Frame::eval`, where `local_cost` is a stack local.
-
-Costed opcodes add to `local_cost`, which is flushed only at the
-`COST_CHECK_INTERVAL` (64), near budget exhaustion, before `OP_CALL`,
-`OP_TFOR_CALL` or a metamethod call, and at `OP_RETURN`. Any other `Err`
-leaving `eval` discards the pending amount, up to 63 units of already-executed
-work. Examples are an arithmetic type error, indexing nil, a stack overflow, a
-string-size error, an `error()` reached without a flush, or a concat failure.
-
-Repros given:
-- `local a, b = 1, nil  local x = a + a  local y = a + b` charges 2 units, but
-  `cost_used()` after the error reports 0 (vm-exec).
-- `local a = 1 + x; local b = nil .. 1` with `x = 2` reports `cost_used() == 0`
-  even though the add ran (embedding).
-
-Claims broken:
-- The exact cost model.
-- `cost_used()`: "total cost consumed since the last budget reset".
-- `COST_MODEL_VERSION`: "moves whenever `cost_used` for identical source
-  changes". Changing the public `limits::COST_CHECK_INTERVAL` changes
-  `cost_used` for erroring scripts without a version bump.
-- The `Frame::COST_CHECK_INTERVAL` doc promises the interval does not change
-  `cost_used`. It argues this only for `BudgetExceeded`.
-
-Consequences: hosts that bill a killed callback's `cost_used()` undercharge, by
-an amount that depends on a batching constant rather than on the script. The CLI
-prints the undercounted `Cost used` for every failing script, and a snapshot
-taken after a killed callback persists the undercount. `tests/cost_golden.rs`
-pins only successful runs.
-
-Related (embedding): `set_cost_budget` called from inside a callback resets
-`cost_used` to 0 while the outer `Frame::eval` still holds unflushed
-`local_cost`, which is then charged against the new budget. So `cost_used`
-around a mid-run budget reset also depends on batching. The doc does not say
-whether mid-run resets are supported.
-
-Direction (both hunters): flush `local_cost` on `eval`'s error exit, either with
-a guard in `eval` or by passing it out to `eval_closure_frame`'s / the
-`report_frame_error` caller's `Err` arm. Use a plain `saturating_add` with no
-admission check, so the error path stays cold. The failing opcode was already
-admitted and executed, so charging it is consistent with "the action that pushes
-you over budget completes".
-
 ## VM-006 - Host table and metatable methods consume their operands before they fail
 
 Source: embedding (finding 4) and vm-exec (finding 7, second bullet). vm-exec
@@ -262,31 +168,6 @@ then `push_string`. A `__tostring` returning `"\xff"` produces `"\u{FFFD}"`
 exists, but the builtin bypasses it. `to_string_with_meta` is also public API,
 and its `String` return type forces the same loss on hosts.
 
-## VM-011 - Rebuilding a table in `clear_and_insert_entries` resets `version` to 0, so on load an inline cache can return the wrong field
-
-Source: vm-heap (finding 5).
-
-Claim broken: the table `version` contract ("Shape version for key/index
-stability"), which every field, method and string-method inline cache relies on.
-`get_cached_field`, `get_cached_index_table_field` and
-`get_cached_string_method` return `get_index(entry.index)` without checking the
-key when the versions match.
-
-`clear_and_insert_entries` does `*self = Table::with_capacity(..)`, which resets
-`version` to 0, and the re-inserts do not bump it because `dead_count == 0`.
-During `load_state`, the env-delta `order` path rebuilds an environment table
-(`math`, `string`, ...) in a different physical order, still at version 0. The
-`setup` closure runs before materialization, can execute Lua, and can create
-anchors, which are deliberately kept. If setup warmed an IC on that table at
-version 0 (any unmodified library table is at version 0), the cached index now
-points at a different key. A later call through the anchored function silently
-returns the wrong library member. Only the `table` token's fallback cache is
-dropped explicitly.
-
-Direction: a rebuild keeps the old counter and bumps it past the old value
-instead of resetting it. More generally, a per-State monotonic "shape epoch"
-would make version collisions impossible by construction.
-
 ## VM-013 - Every `IndexMap` in the VM uses the default `RandomState` hasher
 
 Source: vm-heap (finding 7).
@@ -304,44 +185,6 @@ so performance is not reproducible. Every table lookup also pays for SipHash.
 Direction: a crate-wide type alias using a fixed-seed fast hasher (Fx or foldhash
 with a constant seed), which meets the stated rule and speeds up the VM's
 hottest path.
-
-## VM-014 - Snapshot verifier accepts duplicate table-template keys, which corrupts `Table::dead_count`
-
-Source: vm-heap (finding 8).
-
-Claim broken: the load contract that a saved bytecode program violating VM
-structural invariants is rejected with `InvalidBytecode`.
-
-`compiler/verify.rs` only range-checks template key ids. The parser guarantees
-uniqueness (`try_use_table_template` refuses `template.contains(key_id)`), but a
-forged save can supply `[0, 0]`, or two equal-content string literals `[0, 1]`
-that intern to one `StringPtr`. `Table::with_template_keys` then builds a map
-with one entry and `dead_count = 2`. From there:
-- `insert_into_map_with_tombstones` computes `map.len() - self.dead_count`,
-  which underflows: a panic in debug and test builds, a wrap in release.
-- `init_at_index` and `remove` carry the phantom tombstone count, which
-  suppresses compaction and skews `fallback_shape`.
-
-Direction: the verifier rejects duplicate resolved template keys, and
-`with_template_keys` sets `dead_count = map.len()` rather than
-`key_ids.len()`.
-
-## VM-015 - A saved table's metatable may resolve to a closure
-
-Source: vm-heap (finding 9).
-
-Claim broken: a table's metatable is always a table. `set_metatable_of` rejects
-anything else with a type error, and `getmetatable` and every metamethod lookup
-assume it.
-
-`verify::validate_references` only range-checks the metatable `SavedVal`, and
-`materialize_payload` only checks that it decodes to `Val::Obj(_)`. The
-`SavedMetatableDelta::Set` path has the same gap. A save whose metatable is
-`Obj(id)` with `objects[id]` a `SavedObject::Closure` loads without error.
-`getmetatable(t)` then returns a function, and `as_table_ref(mt)` silently yields
-`None` in the metamethod paths.
-
-Direction: require `SavedObject::Table` (or an `EnvObj`) during verification.
 
 ## VM-016 - `next_format_pointer_id` is not validated against the saved ids
 
@@ -413,18 +256,6 @@ compile-time caps. Reference Lua accepts these programs.
 Direction: either document the runtime cap for Lua frames, or widen the internal
 counts to `usize`. The `u8` exists for the bytecode operand encoding, which these
 dynamic paths do not need.
-
-## VM-020 - Metamethod function handlers flush cost after pushing their temporaries
-
-Source: vm-exec (finding 7, first bullet).
-
-`metamethod.rs` `handle_index_metamethod_inner` and
-`handle_newindex_metamethod_inner` (function handlers) push the handler, table,
-key and value, and only then call `Frame::flush_local_cost(..)?`. When reached
-from bytecode, a flush failure leaves 3-4 temporaries on the stack. That is
-harmless today because the frame unwinds, but the ordering contradicts the
-"preflight before any mutation" comment directly above it. Flushing before the
-pushes makes the path strictly all-or-nothing.
 
 ## VM-021 - `ArgCount::Fixed(255)` is accepted by `call` but collides with the `Dynamic` sentinel
 
@@ -559,7 +390,8 @@ function's doc states it). Related to, but a different mechanism from, STD-012
 `get_string_table_field` resolves string methods through the current global
 `string`. In a `with_restricted_env` sandbox without `"string"`, `s:upper()`
 raises "attempt to index a nil value", whereas reference Lua uses the string
-metatable. This is sandbox-hostile in the same way as VM-001, and the hunter
+metatable. This is sandbox-hostile in the same way as the (since-removed)
+plain-table fallback to the global `table` library was, and the hunter
 recommends making a deliberate decision about it.
 
 ## VM-031 - Globals set to nil are never removed from `globals`
@@ -594,3 +426,27 @@ returns `Ok`. It keeps its `Result` signature only so callers outside the
 patterns module kept compiling. `src/vm.rs` (around `memoize_gmatch_pattern`)
 still caches a compile error that cannot occur. Make the compile infallible and
 delete the dead error path.
+
+## VM-034 - `set_cost_budget` from inside a callback interacts with the dispatch loop's pending cost
+
+Source: residue of the error-path cost-flush fix, from a resolution-loop fixer.
+
+`set_cost_budget` resets `cost_used` to 0 while an outer `Frame::eval` still
+holds unflushed batched opcode cost, which is then charged against the new
+budget. So `cost_used` around a mid-run budget reset depends on the batching
+interval, which the `COST_CHECK_INTERVAL` doc says it never does. The doc for
+`set_cost_budget` does not say whether a mid-run reset is supported. Either
+flush the pending batch before the reset or document mid-run resets as
+unsupported.
+
+## VM-035 - A snapshot load that fails partway through env deltas leaves earlier deltas applied
+
+Source: lateral finding from a resolution-loop fixer (unverified whether the
+State remains usable after a failed load).
+
+Env deltas are applied to live library tables one at a time in
+`src/vm/save_state.rs`. A corrupt delta that fails partway (the new
+non-table-metatable check is one more way to fail there) leaves the earlier
+deltas already applied. If a State is still usable after `load_state` returns
+an error, that breaks the all-or-nothing reading of a rejected load.
+

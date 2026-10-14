@@ -14,8 +14,11 @@
 /// charges `string.gmatch` pattern compilation once per iterator rather than
 /// once per compilation-cache miss. Version 4 stops folding `^`, so literal
 /// exponentiation charges like any other `^` (its result comes from the host
-/// libm, which must not be baked into portable bytecode).
-pub const COST_MODEL_VERSION: u16 = 4;
+/// libm, which must not be baked into portable bytecode). Version 5 charges
+/// opcode work still pending in the dispatch loop's batch when a runtime error
+/// (other than budget exhaustion) ends a frame, so `cost_used` after a failed
+/// callback counts every executed costed opcode.
+pub const COST_MODEL_VERSION: u16 = 5;
 
 /// Tracks costs either without a budget or against a finite budget.
 ///

@@ -269,9 +269,30 @@ fn validate_environment_deltas(payload: &SavePayload) -> Result<(), LoadError> {
                 ));
             }
             validate_value(value, payload)?;
+            validate_metatable(value, payload, "environment metatable is not a table")?;
         }
     }
     Ok(())
+}
+
+/// A metatable is always a table at runtime (`setmetatable` refuses anything
+/// else, and `getmetatable` plus every metamethod lookup assume it). A saved
+/// `Obj` metatable must therefore name a saved table, not a closure.
+/// `EnvObj` tokens are resolved, and their runtime type checked, at
+/// materialization, since the environment is not part of the payload.
+fn validate_metatable(
+    value: &super::SavedVal,
+    payload: &SavePayload,
+    reason: &'static str,
+) -> Result<(), LoadError> {
+    match value {
+        super::SavedVal::Obj(id) => match payload.objects.get(*id as usize) {
+            Some(SavedObject::Table { .. }) => Ok(()),
+            _ => Err(corrupt(reason, *id as usize)),
+        },
+        super::SavedVal::EnvObj(_) => Ok(()),
+        _ => Err(corrupt(reason, 0)),
+    }
 }
 
 #[derive(Eq, Ord, PartialEq, PartialOrd)]
@@ -328,6 +349,7 @@ fn validate_references(payload: &SavePayload) -> Result<(), LoadError> {
             }
             if let Some(value) = metatable {
                 validate_value(value, payload)?;
+                validate_metatable(value, payload, "saved table metatable is not a table")?;
             }
         }
     }
@@ -710,6 +732,64 @@ mod tests {
         entries[1].1 = super::super::SavedVal::Str(2);
         assert!(matches!(
             validate_gmatch_iterators(&invalid_length),
+            Err(LoadError::CorruptArena { .. })
+        ));
+    }
+
+    #[test]
+    fn saved_metatables_must_be_tables() {
+        // Object 0 is a table whose metatable is object `mt`; object 1 is a
+        // table, object 2 a closure.
+        let with_metatable = |mt: super::super::SavedVal| {
+            let mut payload = gmatch_payload(false, super::super::SavedVal::Num(1.0f64.to_bits()));
+            payload.objects = vec![
+                super::super::SavedObject::Table {
+                    entries: Vec::new(),
+                    metatable: Some(mt),
+                },
+                super::super::SavedObject::Table {
+                    entries: Vec::new(),
+                    metatable: None,
+                },
+                super::super::SavedObject::Closure {
+                    chunk: 0,
+                    upvalues: Vec::new(),
+                },
+            ];
+            payload.upvalues = Vec::new();
+            payload
+        };
+        assert!(validate_references(&with_metatable(super::super::SavedVal::Obj(1))).is_ok());
+        assert!(
+            validate_references(&with_metatable(super::super::SavedVal::EnvObj(
+                "math".to_string()
+            )))
+            .is_ok()
+        );
+        for bad in [
+            super::super::SavedVal::Obj(2),
+            super::super::SavedVal::Bool(true),
+            super::super::SavedVal::Str(0),
+        ] {
+            assert!(matches!(
+                validate_references(&with_metatable(bad)),
+                Err(LoadError::CorruptArena { .. })
+            ));
+        }
+
+        let mut env = payload(super::super::SavedEnvDelta {
+            token: "math".to_string(),
+            deleted: Vec::new(),
+            upserts: Vec::new(),
+            order: None,
+            metatable: super::super::SavedMetatableDelta::Set(super::super::SavedVal::Obj(0)),
+        });
+        env.objects = vec![super::super::SavedObject::Closure {
+            chunk: 0,
+            upvalues: Vec::new(),
+        }];
+        assert!(matches!(
+            validate_environment_deltas(&env),
             Err(LoadError::CorruptArena { .. })
         ));
     }

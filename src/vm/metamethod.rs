@@ -136,12 +136,14 @@ impl State {
                     // __index is a function: call it with (table, key).
                     // Net-positive by three slots; preflight so a rejection
                     // leaves the operand stack exactly as it was.
+                    // Settle batched cost first too, so a budget failure
+                    // also leaves no temporaries behind.
+                    Frame::flush_local_cost(self, local_cost)?;
                     let table_val = self.stack[table_idx];
                     self.check_stack_space(3)?;
                     self.push_unchecked(Val::Obj(ptr));
                     self.push_unchecked(table_val);
                     self.push_unchecked(key);
-                    Frame::flush_local_cost(self, local_cost)?;
                     self.call(ArgCount::Fixed(2), RetCount::Fixed(1))?;
                     Ok(())
                 } else {
@@ -152,12 +154,12 @@ impl State {
             Val::RustFn(f) => {
                 // __index is a Rust function: call it with (table, key).
                 // Net-positive by three slots; preflight before any mutation.
+                Frame::flush_local_cost(self, local_cost)?;
                 let table_val = self.stack[table_idx];
                 self.check_stack_space(3)?;
                 self.push_unchecked(Val::RustFn(f));
                 self.push_unchecked(table_val);
                 self.push_unchecked(key);
-                Frame::flush_local_cost(self, local_cost)?;
                 self.call(ArgCount::Fixed(2), RetCount::Fixed(1))?;
                 Ok(())
             }
@@ -273,13 +275,15 @@ impl State {
                 } else if is_function {
                     // __newindex is a function: call it with (table, key, value).
                     // Net-positive by four slots; preflight before any mutation.
+                    // Settle batched cost first too, so a budget failure
+                    // also leaves no temporaries behind.
+                    Frame::flush_local_cost(self, local_cost)?;
                     let table_val = self.stack[table_idx];
                     self.check_stack_space(4)?;
                     self.push_unchecked(Val::Obj(ptr));
                     self.push_unchecked(table_val);
                     self.push_unchecked(key);
                     self.push_unchecked(val);
-                    Frame::flush_local_cost(self, local_cost)?;
                     self.call(ArgCount::Fixed(3), RetCount::Fixed(0))?;
                     Ok(())
                 } else {
@@ -290,13 +294,13 @@ impl State {
             Val::RustFn(f) => {
                 // __newindex is a Rust function: call it with (table, key, value).
                 // Net-positive by four slots; preflight before any mutation.
+                Frame::flush_local_cost(self, local_cost)?;
                 let table_val = self.stack[table_idx];
                 self.check_stack_space(4)?;
                 self.push_unchecked(Val::RustFn(f));
                 self.push_unchecked(table_val);
                 self.push_unchecked(key);
                 self.push_unchecked(val);
-                Frame::flush_local_cost(self, local_cost)?;
                 self.call(ArgCount::Fixed(3), RetCount::Fixed(0))?;
                 Ok(())
             }

@@ -128,16 +128,6 @@ pub(super) struct Table {
     dead_count: usize,
 }
 
-/// The table properties that prove a pristine table cannot contain an
-/// unrecognised table-library fallback key.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct TableShape {
-    version: u64,
-    slots: usize,
-    dead_count: usize,
-    metatable: Option<ObjectPtr>,
-}
-
 impl Default for Table {
     fn default() -> Self {
         Self {
@@ -171,12 +161,17 @@ impl Table {
             let key = literals[*key_id as usize];
             map.insert(key, Val::Nil);
         }
+        // Count the slots actually created, not the ids supplied: the bytecode
+        // verifier rejects duplicate template keys, but a duplicate that got
+        // through would otherwise leave phantom tombstones and underflow
+        // `map.len() - dead_count`.
+        let dead_count = map.len();
         Self {
             storage: TableStorage::Map(map),
             metatable: None,
             version: Cell::new(0),
             cached_array_len: Cell::new(None),
-            dead_count: key_ids.len(),
+            dead_count,
         }
     }
 
@@ -194,39 +189,6 @@ impl Table {
     #[inline]
     pub(super) fn version(&self) -> u64 {
         self.version.get()
-    }
-
-    /// Returns the shape properties that change when a new fallback key could
-    /// become visible without replacing an existing table-library member.
-    pub(super) fn fallback_shape(&self) -> TableShape {
-        let slots = match &self.storage {
-            TableStorage::Inline { len, .. } => *len as usize,
-            TableStorage::Map(map) => map.len(),
-        };
-        TableShape {
-            version: self.version(),
-            slots,
-            dead_count: self.dead_count,
-            metatable: self.metatable,
-        }
-    }
-
-    /// Returns the live string keys in insertion order for init-only library
-    /// cache capture. Callers validate the expected registration count.
-    pub(super) fn live_string_keys(&self) -> Vec<Val> {
-        match &self.storage {
-            TableStorage::Inline { entries, len } => entries
-                .iter()
-                .take(*len as usize)
-                .filter(|(key, value)| key.as_string_ptr().is_some() && !matches!(value, Val::Nil))
-                .map(|(key, _)| *key)
-                .collect(),
-            TableStorage::Map(map) => map
-                .iter()
-                .filter(|(key, value)| key.as_string_ptr().is_some() && !matches!(value, Val::Nil))
-                .map(|(key, _)| *key)
-                .collect(),
-        }
     }
 
     #[inline]
@@ -328,10 +290,19 @@ impl Table {
         // Reset to a shell sized for the incoming entries, then re-insert in
         // order so `pairs()` iteration order round-trips. with_capacity picks
         // inline vs map storage from the count.
+        //
+        // The rebuild may move keys to new indices, so the version must move
+        // past every value an inline cache could have captured for this table
+        // (load setup can run Lua against environment tables before this).
+        // Resetting it to 0 would let a cache warmed at version 0 return the
+        // wrong slot. A per-table bump suffices: caches key on table identity,
+        // which the rebuild preserves.
+        let next_version = self.version().wrapping_add(1);
         *self = Table::with_capacity(entries.len());
         for (key, value) in entries {
             self.insert(key, value)?;
         }
+        self.version.set(next_version);
         Ok(())
     }
 
@@ -1251,6 +1222,37 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "snapshot")]
+    #[test]
+    fn rebuild_moves_version_past_the_old_value() {
+        let mut t = Table::default();
+        fill(&mut t, 1..=3);
+        assert_eq!(t.version(), 0);
+        t.clear_and_insert_entries(vec![
+            (n(3), Val::Bool(true)),
+            (n(1), Val::Bool(true)),
+            (n(2), Val::Bool(true)),
+        ])
+        .unwrap();
+        assert_eq!(t.version(), 1);
+        assert_eq!(t.get_index(0).map(|(key, _)| key), Some(n(3)));
+        t.clear_and_insert_entries(vec![(n(1), Val::Bool(true))])
+            .unwrap();
+        assert_eq!(t.version(), 2);
+        assert_eq!(t.get_index(0).map(|(key, _)| key), Some(n(1)));
+    }
+
+    #[test]
+    fn duplicate_template_keys_do_not_create_phantom_tombstones() {
+        let literals = [n(7)];
+        let mut t = Table::with_template_keys(&[0, 0], &literals);
+        assert_eq!(t.dead_count, 1);
+        t.insert(n(7), Val::Bool(true)).unwrap();
+        assert_eq!(t.dead_count, 0);
+        t.insert(n(8), Val::Bool(true)).unwrap();
+        assert_eq!(t.get(&n(8)), Val::Bool(true));
+    }
+
     #[test]
     fn dense_tombstones_compact_once_before_append() {
         let mut t = Table::default();
@@ -1261,44 +1263,5 @@ mod tests {
         t.insert(n(5), Val::Bool(true)).unwrap();
         assert_eq!(t.version(), 1);
         assert!(matches!(t.next(&n(4)), TableNext::Pair(Val::Num(5.0), _)));
-    }
-
-    #[test]
-    fn fallback_shape_rejects_appended_key() {
-        let mut table = Table::default();
-        let pristine = table.fallback_shape();
-        table.insert(n(1), Val::Bool(true)).unwrap();
-        assert_ne!(table.fallback_shape(), pristine);
-    }
-
-    #[test]
-    fn fallback_shape_rejects_tombstone_delete() {
-        let mut table = Table::default();
-        table.insert(n(1), Val::Bool(true)).unwrap();
-        let pristine = table.fallback_shape();
-        table.insert(n(1), Val::Nil).unwrap();
-        assert_ne!(table.fallback_shape(), pristine);
-    }
-
-    #[test]
-    fn fallback_shape_rejects_compaction() {
-        let mut table = Table::default();
-        fill(&mut table, 1..=5);
-        let pristine = table.fallback_shape();
-        for key in 1..=4 {
-            table.insert(n(key), Val::Nil).unwrap();
-        }
-        table.insert(n(6), Val::Bool(true)).unwrap();
-        assert_ne!(table.fallback_shape(), pristine);
-    }
-
-    #[test]
-    fn fallback_shape_rejects_metatable_install() {
-        let mut heap = GcHeap::with_threshold(20);
-        let metatable = heap.alloc_table();
-        let mut table = Table::default();
-        let pristine = table.fallback_shape();
-        table.set_metatable(Some(metatable));
-        assert_ne!(table.fallback_shape(), pristine);
     }
 }

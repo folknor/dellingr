@@ -61,16 +61,17 @@ fn append_and_g_proxy_writes_do_not_displace_a_warmed_global() {
 }
 
 #[test]
-fn builtin_rebind_invalidates_its_fallback_without_disturbing_a_writer() {
+fn builtin_rebind_does_not_disturb_a_warmed_writer() {
     let mut state = State::new();
     run(&mut state, "x = 0; function writer(v) x = v end");
     call_writer(&mut state, "writer", 1.0);
     run(
         &mut state,
-        "table = { marker = 7 }; fallback_marker = ({}).marker",
+        "table = { marker = 7 }; builtin_marker = table.marker; proxy_marker = _G.table.marker",
     );
     call_writer(&mut state, "writer", 2.0);
-    assert_eq!(global_number(&mut state, "fallback_marker"), 7.0);
+    assert_eq!(global_number(&mut state, "builtin_marker"), 7.0);
+    assert_eq!(global_number(&mut state, "proxy_marker"), 7.0);
     assert_eq!(global_number(&mut state, "x"), 2.0);
 }
 
