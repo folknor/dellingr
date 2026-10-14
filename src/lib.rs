@@ -329,101 +329,6 @@ pub fn analyze_cost(source: &str) -> Result<CostAnalysis> {
     Ok(CostAnalysis { root })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn dynamic_set_list_has_zero_minimum_cost_when_empty() {
-        let analysis = analyze_cost("local function f(...) return {...} end\nf()")
-            .expect("variadic table constructor should parse");
-        let nested = &analysis.root.nested[0];
-
-        assert_eq!(nested.own_cost, 1);
-        assert_eq!(nested.array_elements, 0);
-        assert_eq!(analysis.root.total_cost, 1);
-
-        let mut state = State::new();
-        state
-            .load_string("local function f(...) return {...} end\nf()")
-            .expect("variadic table constructor should load");
-        state
-            .call(ArgCount::Fixed(0), RetCount::Fixed(0))
-            .expect("no-argument variadic call should run");
-        assert_eq!(state.cost_used(), 1);
-
-        let fixed = analyze_cost("return {1, 2}").expect("fixed table constructor should parse");
-        assert_eq!(fixed.root.own_cost, 3);
-        assert_eq!(fixed.root.array_elements, 2);
-    }
-
-    #[test]
-    fn static_analysis_excludes_data_dependent_native_work() {
-        let analysis =
-            analyze_cost("return string.upper('abcd')").expect("string.upper program should parse");
-        assert_eq!(analysis.root.total_cost, 0);
-
-        let mut state = State::new();
-        state
-            .load_string("return string.upper('abcd')")
-            .expect("string.upper program should load");
-        state
-            .call(ArgCount::Fixed(0), RetCount::Fixed(1))
-            .expect("string.upper program should run");
-        assert_eq!(state.cost_used(), 4);
-    }
-
-    #[test]
-    fn stripping_changes_only_static_instruction_counts() {
-        let closure_free = analyze_cost(
-            "local x = 0; for i = 1, 3 do do local y = i; x = x + y end end; return x",
-        )
-        .expect("closure-free loop should parse");
-        // Static analysis counts the loop body's single OP_ADD once; the
-        // runtime sweep below observes it three times.
-        assert_eq!(closure_free.root.own_cost, 1);
-        assert_eq!(closure_free.root.total_cost, 1);
-        assert_eq!(closure_free.root.instructions, 16);
-
-        let dynamic = analyze_cost("local function f(...) return ... end; return f(1, f())")
-            .expect("dynamic-call program should parse");
-        assert_eq!(dynamic.root.own_cost, 0);
-        assert_eq!(dynamic.root.total_cost, 0);
-
-        let capture = analyze_cost(
-            "local function make() local x = 1; return function() return x end end; return make()()",
-        )
-        .expect("closure-capture program should parse");
-        assert_eq!(capture.root.own_cost, 0);
-        assert_eq!(capture.root.total_cost, 0);
-
-        for (source, returns, expected_cost) in [
-            (
-                "local x = 0; for i = 1, 3 do do local y = i; x = x + y end end; return x",
-                RetCount::Fixed(1),
-                3,
-            ),
-            (
-                "local function f(...) return ... end; return f(1, f())",
-                RetCount::All,
-                0,
-            ),
-            (
-                "local function make() local x = 1; return function() return x end end; return make()()",
-                RetCount::Fixed(1),
-                0,
-            ),
-        ] {
-            let mut state = State::new();
-            state.load_string(source).expect("cost fixture should load");
-            state
-                .call(ArgCount::Fixed(0), returns)
-                .expect("cost fixture should run");
-            assert_eq!(state.cost_used(), expected_cost, "{source}");
-        }
-    }
-}
-
 /// A factory for compiling Lua source and creating new `State`s.
 ///
 /// `Engine` is `Send + Sync`: a single instance can be shared across worker
@@ -525,5 +430,100 @@ impl State {
         self.current_source = program.0.source.clone();
         self.push_chunk(Arc::clone(&program.0))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dynamic_set_list_has_zero_minimum_cost_when_empty() {
+        let analysis = analyze_cost("local function f(...) return {...} end\nf()")
+            .expect("variadic table constructor should parse");
+        let nested = &analysis.root.nested[0];
+
+        assert_eq!(nested.own_cost, 1);
+        assert_eq!(nested.array_elements, 0);
+        assert_eq!(analysis.root.total_cost, 1);
+
+        let mut state = State::new();
+        state
+            .load_string("local function f(...) return {...} end\nf()")
+            .expect("variadic table constructor should load");
+        state
+            .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+            .expect("no-argument variadic call should run");
+        assert_eq!(state.cost_used(), 1);
+
+        let fixed = analyze_cost("return {1, 2}").expect("fixed table constructor should parse");
+        assert_eq!(fixed.root.own_cost, 3);
+        assert_eq!(fixed.root.array_elements, 2);
+    }
+
+    #[test]
+    fn static_analysis_excludes_data_dependent_native_work() {
+        let analysis =
+            analyze_cost("return string.upper('abcd')").expect("string.upper program should parse");
+        assert_eq!(analysis.root.total_cost, 0);
+
+        let mut state = State::new();
+        state
+            .load_string("return string.upper('abcd')")
+            .expect("string.upper program should load");
+        state
+            .call(ArgCount::Fixed(0), RetCount::Fixed(1))
+            .expect("string.upper program should run");
+        assert_eq!(state.cost_used(), 4);
+    }
+
+    #[test]
+    fn stripping_changes_only_static_instruction_counts() {
+        let closure_free = analyze_cost(
+            "local x = 0; for i = 1, 3 do do local y = i; x = x + y end end; return x",
+        )
+        .expect("closure-free loop should parse");
+        // Static analysis counts the loop body's single OP_ADD once; the
+        // runtime sweep below observes it three times.
+        assert_eq!(closure_free.root.own_cost, 1);
+        assert_eq!(closure_free.root.total_cost, 1);
+        assert_eq!(closure_free.root.instructions, 16);
+
+        let dynamic = analyze_cost("local function f(...) return ... end; return f(1, f())")
+            .expect("dynamic-call program should parse");
+        assert_eq!(dynamic.root.own_cost, 0);
+        assert_eq!(dynamic.root.total_cost, 0);
+
+        let capture = analyze_cost(
+            "local function make() local x = 1; return function() return x end end; return make()()",
+        )
+        .expect("closure-capture program should parse");
+        assert_eq!(capture.root.own_cost, 0);
+        assert_eq!(capture.root.total_cost, 0);
+
+        for (source, returns, expected_cost) in [
+            (
+                "local x = 0; for i = 1, 3 do do local y = i; x = x + y end end; return x",
+                RetCount::Fixed(1),
+                3,
+            ),
+            (
+                "local function f(...) return ... end; return f(1, f())",
+                RetCount::All,
+                0,
+            ),
+            (
+                "local function make() local x = 1; return function() return x end end; return make()()",
+                RetCount::Fixed(1),
+                0,
+            ),
+        ] {
+            let mut state = State::new();
+            state.load_string(source).expect("cost fixture should load");
+            state
+                .call(ArgCount::Fixed(0), returns)
+                .expect("cost fixture should run");
+            assert_eq!(state.cost_used(), expected_cost, "{source}");
+        }
     }
 }

@@ -1537,6 +1537,18 @@ fn too_many_upvalues_errors() {
 
 #[test]
 fn syntax_depth_limit() {
+    // Reaching MAX_SYNTAX_DEPTH and unwinding its error overflows the 2MB
+    // default test-thread stack in unoptimized dev builds, so run on a
+    // main-thread-sized stack.
+    std::thread::Builder::new()
+        .stack_size(8 << 20)
+        .spawn(syntax_depth_limit_body)
+        .expect("spawning the test thread should succeed")
+        .join()
+        .expect("syntax depth test thread should not panic");
+}
+
+fn syntax_depth_limit_body() {
     let depth = 10_000;
     assert_too_many_syntax_levels(&format!("{}1{}", "(".repeat(depth), ")".repeat(depth)));
     assert_too_many_syntax_levels(&format!("{}{}", "do ".repeat(depth), "end ".repeat(depth)));

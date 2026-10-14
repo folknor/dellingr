@@ -399,18 +399,33 @@ fn budget_flushes_pending_caller_cost_before_nested_call() {
 
 #[test]
 fn call_depth_exceeded_error() {
-    let err = expect_error(
-        r#"
-        local function recurse(n)
-            return recurse(n + 1)
-        end
-        recurse(0)
-    "#,
-    );
-    assert!(
-        matches!(err.kind, ErrorKind::CallDepthExceeded { .. }),
-        "Expected CallDepthExceeded, got: {err}"
-    );
+    on_deep_stack(|| {
+        let err = expect_error(
+            r#"
+            local function recurse(n)
+                return recurse(n + 1)
+            end
+            recurse(0)
+        "#,
+        );
+        assert!(
+            matches!(err.kind, ErrorKind::CallDepthExceeded { .. }),
+            "Expected CallDepthExceeded, got: {err}"
+        );
+    });
+}
+
+/// Runs `f` on a dedicated thread with a generous stack. MAX_CALL_DEPTH Lua
+/// frames recurse natively through the dispatch loop, and unoptimized dev
+/// builds spend more than 8KB of native stack per Lua call, overflowing the
+/// 2MB default test-thread stack before the depth limit is reached.
+fn on_deep_stack(f: impl FnOnce() + Send + 'static) {
+    std::thread::Builder::new()
+        .stack_size(64 << 20)
+        .spawn(f)
+        .expect("spawning the test thread should succeed")
+        .join()
+        .expect("deep-stack test thread should not panic");
 }
 
 // -- Table operation tests --
@@ -1403,10 +1418,12 @@ fn dotted_method_declaration_is_supported() {
 
 #[test]
 fn error_msg_call_depth_shows_overflow() {
-    let err = expect_error("local function r(n) return r(n+1) end\nr(0)");
-    let msg = format!("{err}");
-    assert!(
-        msg.contains("call stack overflow") || msg.contains("depth"),
-        "Call depth error should mention overflow/depth, got: {msg}"
-    );
+    on_deep_stack(|| {
+        let err = expect_error("local function r(n) return r(n+1) end\nr(0)");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("call stack overflow") || msg.contains("depth"),
+            "Call depth error should mention overflow/depth, got: {msg}"
+        );
+    });
 }

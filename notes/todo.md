@@ -32,6 +32,32 @@ premature batch work.
 Signal that would promote it: active work starting on any candidate
 whose tracker is still examples/-only.
 
+### Depth limits are not stack-safe in unoptimized builds
+
+What: `MAX_CALL_DEPTH` (1000) and `MAX_SYNTAX_DEPTH` (200) are meant to
+turn runaway recursion into a clean `CallDepthExceeded` /
+`TooManySyntaxLevels` error. In an opt-level 0 build the native frames
+are fat enough that a 2MB thread (the `cargo test` / `std::thread`
+default) overflows its stack before either limit trips: the call-depth
+recursion needs more than 8KB of native stack per Lua call. Release
+builds are fine. A host running scripts on a default-sized thread in a
+debug build gets a process abort instead of a script error.
+
+Today the three affected tests (`call_depth_exceeded_error`,
+`error_msg_call_depth_shows_overflow`, `syntax_depth_limit`) run on
+dedicated large-stack threads, which hides the problem rather than
+fixing it.
+
+Options: shrink the recursive frames (move bulky locals out of
+`eval_closure` and the parser's expression ladder, box rarely-used
+state); make the call path non-recursive for Lua-to-Lua calls; or
+document a minimum stack size for embedders and pick the limits to fit
+it. A cheap guard would be a regression test that hits each limit on a
+plain 2MB thread in the dev profile.
+
+Signal that would promote it: the game host (or any embedder) running
+scripts off the main thread in debug builds.
+
 ### Configurable per-category cost weights
 
 What: let library consumers set their own cost per category rather than

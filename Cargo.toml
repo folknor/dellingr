@@ -81,7 +81,7 @@ todo = "deny"
 [dependencies]
 indexmap = "2.0"
 slotmap = "1.1"
-hotpath = "0.27.0"
+hotpath = "0.28.6"
 
 [[example]]
 name = "hotpath"
