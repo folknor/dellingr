@@ -275,7 +275,12 @@ impl State {
 
     /// Gets the metatable of the value at the given index.
     /// For tables, returns the table's metatable.
-    /// For other types, returns nil (we don't support type metatables yet).
+    /// For other types, including strings, returns nil: there are no type
+    /// metatables, so `getmetatable("")` is nil where reference Lua returns the
+    /// shared string metatable (`__index` = the string library). String method
+    /// calls work regardless, through `get_string_table_field` in
+    /// `eval_index.rs`. Adopting a string metatable needs a GC-rooted `State`
+    /// field, a snapshot token and a restricted-environment carve-out.
     #[hotpath::measure]
     pub fn get_metatable_of(&mut self, idx: isize) -> Result<()> {
         let i = self.convert_idx(idx)?;
@@ -320,7 +325,7 @@ impl State {
     /// from the top value that will be popped. The value is popped from the
     /// stack. `pos` must be in `1..=raw_len(table_idx) + 1`; a bad index, a
     /// non-table or an invalid position leaves the stack and table unchanged.
-    /// Charges no cost; `table.insert` charges its own shift distance.
+    /// Charges no cost; the Lua `table.insert` wrapper charges a flat 1.
     #[hotpath::measure]
     pub fn table_insert_at(&mut self, table_idx: isize, pos: usize) -> Result<()> {
         // Resolve against the entry stack, including the value to be popped.

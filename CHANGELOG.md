@@ -16,9 +16,9 @@ identical source - re-measure tick budgets.
   is not bit-identical across targets. `string.gmatch` charges pattern
   compilation once per iterator rather than per cache miss. `cost_used` now
   includes opcode cost pending in the dispatch batch when a runtime error ends
-  a frame. `table.insert`/`table.remove` charge one per element shifted,
-  `unpack`/`table.unpack` one per element visited and `table.pack` one per
-  argument stored, each with a minimum of 1. Sequence-library metamethods
+  a frame. `table.insert`, `table.remove` and `table.pack` keep a flat charge
+  of 1, and `unpack`/`table.unpack` stay free, regardless of element count.
+  These are deliberate game-design choices. Sequence-library metamethods
   incur their usual execution costs; corrected numeric formatting changes
   output-byte charges. Older snapshots are rejected with
   `UnsupportedCostModelVersion`.
@@ -49,6 +49,15 @@ identical source - re-measure tick budgets.
   `math.random`, `select` and `tonumber`'s base reject non-integral numbers
   instead of truncating, as Lua 5.4 does.
 - **Concatenation renders negative zero as `"-0"`**, like `tostring`.
+- **Number-to-string conversion uses Lua 5.2's `%.14g`.** `0.1 + 0.2`
+  prints `0.3`, `1e15` prints `1e+15`, and every NaN prints `nan`.
+  This affects `tostring`, `print`, concatenation and numeric string coercions;
+  rendered output and output-byte charges are replay-visible changes.
+- **Snapshots canonicalise NaN sign and payload.** Snapshots that differ
+  only in host-produced NaN bits are now byte-identical across hosts. This
+  changes replay-visible snapshot bytes; other numbers remain bit-exact.
+- **`_G`'s metatable is protected.** `getmetatable(_G)` returns `false`, and
+  `setmetatable(_G, ...)` raises an error instead of detaching the proxy.
 - **Bad-argument messages** read `bad argument #1 to 'sin' (...)`, with the
   stdlib function named.
 - **`save_state` fails with `NotQuiescent` inside a Rust callback.**
@@ -133,6 +142,17 @@ identical source - re-measure tick budgets.
 - `tostring` preserves non-UTF-8 bytes returned by `__tostring`.
 - Snapshot loading rejects pointer ids at or above the saved next id. An
   exhausted pointer-id counter raises an error instead of wrapping.
+- Registered Rust functions keep their rendered identity across save/load
+  even when only the host holds them. Loading skips a saved identity whose
+  function is no longer registered by setup, keeping its number retired;
+  a reachable unregistered function still fails to load.
+- Forged snapshot bytecode can no longer underflow a table's tombstone count
+  by repeatedly initializing the same pinned field with live and nil values.
+- `_G` string keys are byte-exact: non-UTF-8 keys no longer alias one another
+  or a valid UTF-8 global name through lossy conversion. Proxy keys survive
+  save/load.
+- Assigning nil to an unknown global creates no entry. Existing nil global
+  tombstones retain their insertion order and survive save/load.
 - The length operator passes two copies of its operand to `__len`, as Lua
   5.2 and 5.4 do.
 - Host table methods preserve operands on validation and stack preflight

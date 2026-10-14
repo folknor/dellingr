@@ -1,6 +1,13 @@
 # What this is
 
-`dellingr` is an embeddable, deterministic, pure-Rust Lua VM with per-opcode instruction-cost accounting. It is the script host for a game project; the README's "Won't implement" section is load-bearing - `pcall`/`xpcall`, coroutines, `io`/`os`/`debug`, `goto`, integer division, bitwise ops, long strings, `string.rep`/`byte`/`char`, and arithmetic/comparison/concat metamethods are deliberately absent. Don't add them without asking. Errors kill the callback by design.
+`dellingr` is an embeddable, deterministic, pure-Rust Lua VM with per-opcode instruction-cost accounting. It is the script host for a game project; the README's "Won't implement" section is load-bearing - `pcall`/`xpcall`, `assert`, coroutines, `io`/`os`/`debug`, `goto`, integer division, bitwise ops, long strings, `string.rep`/`byte`/`char`, and arithmetic/comparison/concat metamethods are deliberately absent. Don't add them without asking. Errors kill the callback by design.
+
+Ground rules that are easy to get wrong (the README has the detail):
+
+- **The cost budget is a game-design instrument, not a CPU meter** (README "Budget"). Charges are design decisions: flat and free charges are often deliberate, and structural semantics are free on purpose. Host work that is out of proportion to its charge is a performance concern, not a cost-model defect.
+- **Deliberate divergences from reference Lua** are listed in README "Compatibility divergences". Check there before treating a difference from lua5.2/lua5.4 as a bug.
+- **Replay-visible changes must be called out**, never slipped in: `pairs` order, rendered numbers and strings, the RNG draw sequence, and snapshot contents all feed game replays.
+- Lua written for tests and examples has no `assert`; use `if not cond then error(...) end`.
 
 The crate ships both a library (`State`, `HostCallbacks`, `RustFunc`, `analyze_cost`, `ArgCount`, `RetCount`) and a thin CLI binary (`src/main.rs`). The public API is pre-1.0 and not stable.
 

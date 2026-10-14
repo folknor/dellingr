@@ -60,6 +60,33 @@ fn global_environment_preserves_non_string_key_identity_across_save_load() {
     assert_eq!(loaded.to_string(-1).unwrap(), "string");
 }
 
+#[test]
+fn global_environment_preserves_non_utf8_keys_across_save_load() {
+    let mut state = State::new();
+    run(
+        &mut state,
+        r#"_G["\xff"] = { value = "\xfe" }; _G["\xfe"] = "other";
+            _G["\xef\xbf\xbd"] = "utf8"; _G["\xff"].env = _G"#,
+    );
+    state.gc_collect();
+    let save = state.save_state().expect("byte-keyed proxy saves");
+    let mut loaded =
+        State::load_state(&save.bytes, Box::new(DefaultCallbacks), no_setup).expect("proxy loads");
+    loaded.gc_collect();
+    assert_eq!(loaded.save_state().unwrap().bytes, save.bytes);
+    run(
+        &mut loaded,
+        r#"if _G["\xff"].value ~= "\xfe" then error("byte value lost") end
+            if _G["\xff"].env ~= _G then error("proxy cycle lost") end
+            if _G["\xfe"] ~= "other" then error("byte key aliased") end
+            if _G["\xef\xbf\xbd"] ~= "utf8" then error("UTF-8 key aliased") end
+            if getmetatable(_G) ~= false then error("protection lost") end
+            _G["\xff"] = nil
+            if _G["\xff"] ~= nil then error("byte key not cleared") end
+            if _G["\xfe"] ~= "other" then error("other key changed") end"#,
+    );
+}
+
 fn new_capture_state() -> (State, Arc<Mutex<Vec<String>>>) {
     let callbacks = Capture::default();
     let lines = Arc::clone(&callbacks.lines);
@@ -595,14 +622,18 @@ fn environment_deltas_preserve_mutations_cycles_order_and_metatables() {
 #[test]
 fn pointer_identities_and_counter_survive_save_load() {
     let mut original = fresh();
+    expose_global_env_metatable(&mut original);
     run(
         &mut original,
-        "t = {}; s = 'reachable'; saved_identity = tostring(t); saved_percent_p = string.format('%p', t); saved_string_p = string.format('%p', s); saved_rust_fn_p = string.format('%p', print); saved_env_child_p = string.format('%p', getmetatable(_G)); dead = {}; tostring(dead); dead = nil",
+        "t = {}; s = 'reachable'; saved_identity = tostring(t); saved_percent_p = string.format('%p', t); saved_string_p = string.format('%p', s); saved_rust_fn_p = string.format('%p', print); saved_env_child_p = string.format('%p', env_child); dead = {}; tostring(dead); dead = nil",
     );
     let mut loaded = reload(&original);
+    // Re-fetch from the live `_G` so the comparison reads the rebuilt
+    // environment child, not just the restored global.
+    expose_global_env_metatable(&mut loaded);
     run(
         &mut loaded,
-        "loaded_identity = tostring(t); loaded_percent_p = string.format('%p', t); loaded_string_p = string.format('%p', s); loaded_rust_fn_p = string.format('%p', print); loaded_env_child_p = string.format('%p', getmetatable(_G)); later = {}; later_identity = tostring(later)",
+        "loaded_identity = tostring(t); loaded_percent_p = string.format('%p', t); loaded_string_p = string.format('%p', s); loaded_rust_fn_p = string.format('%p', print); loaded_env_child_p = string.format('%p', env_child); later = {}; later_identity = tostring(later)",
     );
     assert_eq!(
         global_str(&mut loaded, "loaded_identity"),
@@ -940,6 +971,16 @@ fn rust_function_save_id_is_independent_of_registration_order() {
 // ---------------------------------------------------------------------------
 // Helpers for reading back globals after a load.
 // ---------------------------------------------------------------------------
+
+/// `_G`'s metatable is protected from scripts (`getmetatable(_G)` is
+/// `false`), so the host API binds it to the global `env_child` for tests
+/// that need a script-visible environment child.
+fn expose_global_env_metatable(state: &mut State) {
+    state.get_global("_G").expect("push _G");
+    state.get_metatable_of(-1).expect("push _G metatable");
+    state.set_global("env_child").expect("bind env_child");
+    state.pop(1).expect("pop _G");
+}
 
 fn fresh() -> State {
     State::new()

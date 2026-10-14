@@ -1059,6 +1059,22 @@ impl State {
             self.builtins[slot as usize] = val;
             self.globals_version = self.globals_version.wrapping_add(1);
         }
+        if matches!(val, Val::Nil) && !self.globals.contains_key(&name) {
+            // Assigning nil to a global that has never existed is a no-op:
+            // reads of an absent name already yield nil, and no inline cache
+            // can hold an index for it.
+            return;
+        }
+        // A global that already exists keeps its entry when set to nil (a
+        // tombstone) instead of being removed. Removing would shift or swap
+        // IndexMap indices, so every removal would have to bump
+        // globals_version and invalidate every GET/SET_GLOBAL inline cache in
+        // the State - a loop doing `g = nil; g = 1` would then thrash them -
+        // and the cached SET_GLOBAL fast path writes nil in place without
+        // reaching here, so removal would depend on cache state. It would
+        // also move a re-set name to the end of `globals`, changing snapshot
+        // order. The cost of keeping tombstones is bounded by the number of
+        // distinct names a script has ever given a non-nil value.
         self.globals.insert(name, val);
     }
 

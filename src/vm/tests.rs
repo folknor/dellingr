@@ -66,6 +66,21 @@ fn vm_test01() {
 }
 
 #[test]
+fn nil_assignment_does_not_create_unknown_globals_including_builtins() {
+    let mut state = State::empty();
+    state.load_string("never_set = nil; print = nil").unwrap();
+    state
+        .call(crate::instr::ArgCount::Fixed(0), RetCount::Fixed(0))
+        .unwrap();
+    assert!(state.globals.is_empty());
+    for name in ["never_set", "print"] {
+        state.push_nil().unwrap();
+        state.set_global(name).unwrap();
+    }
+    assert!(state.globals.is_empty());
+}
+
+#[test]
 fn vm_test02() {
     let mut state = State::new();
     let input = Bytecode {
@@ -813,11 +828,9 @@ fn open_libs_is_all_or_nothing_against_the_cap() {
     let mut state = State::empty();
     assert!(state.globals.is_empty(), "empty() starts with no globals");
 
-    // Deliberately leave a few slots free - fewer than the setup's headroom,
-    // but enough that the one-push-at-a-time installs would each succeed. This
-    // is the case that distinguishes an up-front reservation from a per-push
-    // check: without the reservation every library would install, since no
-    // setup step holds more than the `_G` table and its metatable at once.
+    // Three free slots allow early global installs but not the four values
+    // needed for `_G`'s protection field. Without the up-front reservation,
+    // a per-push check would fail after globals were already installed.
     state
         .set_top((MAX_STACK_SIZE - 3) as isize)
         .expect("filling to just below the cap");
@@ -827,6 +840,19 @@ fn open_libs_is_all_or_nothing_against_the_cap() {
         state.globals.is_empty(),
         "a rejected open_libs must not install any globals"
     );
+}
+
+#[test]
+fn open_libs_succeeds_with_exactly_four_slots_of_headroom() {
+    let mut state = State::empty();
+    state.set_top((MAX_STACK_SIZE - 4) as isize).unwrap();
+    state.open_libs().expect("four slots cover the full setup");
+    assert_eq!(state.get_top(), MAX_STACK_SIZE - 4);
+    state.get_global("_G").unwrap();
+    state.get_metatable_of(-1).unwrap();
+    state.push_string("__metatable").unwrap();
+    state.get_table_raw(-2).unwrap();
+    assert_eq!(state.stack.last(), Some(&Val::Bool(false)));
 }
 
 #[test]

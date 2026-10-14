@@ -1,5 +1,5 @@
 -- Test math library
--- DIFF: number_format - Rust formats floats differently (precision, trailing zeros)
+-- DIFF: number_format - no float subtype, so 5.4's "0.0"/"1.0" print as 5.2's "0"/"1"; math.random uses dellingr's own seeded generator
 
 print("=== Testing math library ===")
 

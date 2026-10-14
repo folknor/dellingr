@@ -16,15 +16,15 @@ fn table_unpack_values(state: &mut State) -> crate::Result<u8> {
 
 // Keep registration order: it determines table iteration and snapshot baselines.
 pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
-    // table.insert(t, [pos,] value) - costs one per element shifted, min 1
+    // table.insert(t, [pos,] value) - costs 1
     // Inserts value at position pos in t, shifting elements up.
     // If pos is omitted, inserts at the end.
     //
-    // insert and remove charge by shift distance, like table.move's one per
-    // copied element: an append or pop costs 1. Inserting at the front of an
-    // n-element sequence costs max(n, 1); removing its front costs
-    // max(n - 1, 1). The base 1 is charged before argument checks; the
-    // remainder once the shift is known, before the table is touched.
+    // The flat cost of insert and remove is a deliberate game-design choice
+    // of the cost model (the budget is not a CPU meter), even though a
+    // mid-array call shifts every later element. Charging
+    // by shift distance would change costs for existing scripts and require a
+    // COST_MODEL_VERSION bump. The metamethod path charges the same flat 1.
     //
     // Both follow Lua 5.4: the length comes from `__len` and every read and
     // write goes through `__index`/`__newindex` (5.4's lua_geti/lua_seti). A
@@ -51,8 +51,6 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
             if !(1..=len + 1).contains(&pos) {
                 return Err(position_out_of_bounds(state, "insert"));
             }
-            // Keys pos..=len each move up one.
-            charge_shift_beyond_base(state, len + 1 - pos)?;
             let pos = usize::try_from(pos).expect("validated insertion position is positive");
             state.table_insert_at(1, pos)?;
         } else {
@@ -64,9 +62,11 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         state.set_top(0)?;
         Ok(0)
     }),
-    // table.remove(t [, pos]) - costs one per element shifted, min 1
+    // table.remove(t [, pos]) - costs 1
     // Removes and returns the element at position pos.
     // If pos is omitted, removes the last element.
+    //
+    // Flat charge: see table.insert.
     ("remove", |state| {
         state.consume_cost(1)?;
         check_type_named(state, 1, LuaType::Table, "remove")?;
@@ -88,12 +88,6 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         } else {
             len
         };
-        // Keys pos+1..=len each move down one; positions outside the
-        // sequence (0 or len + 1) shift nothing.
-        if (1..=len).contains(&pos) {
-            let pos_i = i64::try_from(pos).expect("a position within the sequence fits in i64");
-            charge_shift_beyond_base(state, len_i - pos_i)?;
-        }
 
         state.set_top(1)?;
         // Stack: [t]
@@ -121,12 +115,16 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     // Returns list[i], list[i+1], ..., list[j].
     // Default: i=1, j=#list
     ("unpack", table_unpack_values),
-    // table.pack(...) - costs one per stored argument, min 1
+    // table.pack(...) - costs 1
     // Returns a new table with all arguments stored into keys 1, 2, etc.
     // and with a field "n" with the total number of arguments.
+    //
+    // The flat charge is a deliberate game-design choice of the cost model
+    // (the budget is not a CPU meter), not an oversight: do not charge per
+    // argument.
     ("pack", |state| {
+        state.consume_cost(1)?;
         let num_args = state.get_top();
-        state.consume_cost(num_args.max(1) as u64)?;
 
         // Create new table
         state.new_table()?;
@@ -189,7 +187,7 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
 
         // Keys past +-2^53 would round onto each other as f64 keys; refuse
         // such ranges as table.move, insert and remove do.
-        check_sequence_keys(state, i, j, "table.concat")?;
+        check_sequence_keys(state, i, j, "concat")?;
 
         let mut result = Vec::new();
         for idx in i..=j {
@@ -274,7 +272,7 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
             let exact = |key: i64| (-MAX_EXACT_KEY..=MAX_EXACT_KEY).contains(&key);
             if !(exact(f) && exact(e) && exact(t) && exact(dest_last)) {
                 return Err(state.error(ErrorKind::RuntimeError(
-                    "table.move range exceeds the exactly representable integer keys".into(),
+                    "move range exceeds the exactly representable integer keys".into(),
                 )));
             }
         }
@@ -461,8 +459,7 @@ fn set_index(state: &mut State, table_idx: isize) -> Result<()> {
 
 /// `table.insert` for a table with sequence metamethods, following Lua 5.4's
 /// `tinsert`: length via `__len`, shifts through `__index`/`__newindex`.
-/// Charges like the raw path: the base 1 is already paid, the rest is one per
-/// shifted element, charged before the table is touched.
+/// Charges like the raw path: the flat 1 already paid by the caller.
 fn insert_through_metamethods(state: &mut State, num_args: usize) -> Result<u8> {
     let first_empty = sequence_len(state, 1)?.wrapping_add(1);
     // Lua evaluates the length even when the argument count is invalid.
@@ -483,10 +480,7 @@ fn insert_through_metamethods(state: &mut State, num_args: usize) -> Result<u8> 
         first_empty
     };
     // A negative length can admit pos > first_empty, where only pos is written.
-    check_sequence_keys(state, pos, first_empty.max(pos), "table.insert")?;
-    if first_empty > pos {
-        charge_shift_beyond_base(state, first_empty - pos)?;
-    }
+    check_sequence_keys(state, pos, first_empty.max(pos), "insert")?;
     let mut i = first_empty;
     while i > pos {
         state.push_number(i as f64)?;
@@ -513,10 +507,7 @@ fn remove_through_metamethods(state: &mut State) -> Result<u8> {
     if pos != size && pos.wrapping_sub(1).cast_unsigned() > size.cast_unsigned() {
         return Err(position_out_of_bounds(state, "remove"));
     }
-    check_sequence_keys(state, pos, size.max(pos), "table.remove")?;
-    if pos < size {
-        charge_shift_beyond_base(state, size - pos)?;
-    }
+    check_sequence_keys(state, pos, size.max(pos), "remove")?;
     state.set_top(1)?;
     state.push_number(pos as f64)?;
     state.get_table(1)?; // Stack: [t, removed]
@@ -532,15 +523,6 @@ fn remove_through_metamethods(state: &mut State) -> Result<u8> {
     set_index(state, 1)?;
     state.remove(1)?;
     Ok(1)
-}
-
-/// Charges the part of a `shifted`-element shift that the base cost of 1 does
-/// not already cover.
-fn charge_shift_beyond_base(state: &mut State, shifted: i64) -> Result<()> {
-    if shifted > 1 {
-        state.consume_cost(shifted.unsigned_abs() - 1)?;
-    }
-    Ok(())
 }
 
 fn position_out_of_bounds(state: &State, func_name: &str) -> crate::error::Error {

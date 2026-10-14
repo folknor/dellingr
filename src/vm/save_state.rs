@@ -34,9 +34,9 @@
 //!   `EnvObj`/`Fn` token; a *shadow* (`print = ...`) is preserved as the user's
 //!   value. Skipping builtin names would silently drop shadows.
 //! - **In-crate codec.** Little-endian, length-prefixed, `f64` by bit pattern
-//!   (NaN / -0.0 exact), explicit enum tags, bounds-checked with reservations
-//!   capped at remaining bytes. No `serde`/`bincode`. Two saves of the same
-//!   logical state are byte-identical when produced by the same crate version,
+//!   (NaNs canonicalized, -0.0 exact), explicit enum tags, bounds-checked with
+//!   reservations capped at remaining bytes. No `serde`/`bincode`. Two saves of
+//!   the same logical state are byte-identical with the same crate version,
 //!   because the diagnostic crate-version string is part of the blob. A host
 //!   that content-hashes saves across upgrades must hash the payload after
 //!   the header, or accept that a version bump changes the bytes.
@@ -552,8 +552,16 @@ impl<'a> SaveBuilder<'a> {
         let pointer_ids = self.state.format_pointer_ids.clone();
         let mut format_pointer_ids = Vec::new();
         for (val, id) in pointer_ids {
+            // A heap value unreachable from saved state cannot survive the
+            // load, so its id is dropped. A registered Rust function is
+            // different: it is not a heap object, the host can hold it and
+            // pass it back in after load, and it resolves by its stable
+            // registration id. Keep its rendered identity whether or not the
+            // saved graph reaches it (load skips one setup no longer
+            // registers, see `materialize_payload`).
             if let Some(saved) = self.saved_reachable_pointer_value(val)
-                && self.reachable_pointer_values.contains_key(&saved)
+                && (matches!(saved, SavedVal::Fn(_))
+                    || self.reachable_pointer_values.contains_key(&saved))
             {
                 format_pointer_ids.push((saved, id));
             }
@@ -747,7 +755,7 @@ impl<'a> SaveBuilder<'a> {
                     let saved = match val {
                         Val::Nil => Ok(SavedVal::Nil),
                         Val::Bool(b) => Ok(SavedVal::Bool(b)),
-                        Val::Num(n) => Ok(SavedVal::Num(n.to_bits())),
+                        Val::Num(n) => Ok(SavedVal::Num(saved_num_bits(n))),
                         Val::Str(ptr) => {
                             let id = if let Some(id) = self.string_ids.get(&ptr) {
                                 *id
@@ -1130,7 +1138,11 @@ impl<'a> SaveBuilder<'a> {
         }
         self.bytecode[id as usize] = SavedBytecode {
             code: bc.code.iter().map(|inst| inst.raw()).collect(),
-            number_literals: bc.number_literals.iter().map(|n| n.to_bits()).collect(),
+            number_literals: bc
+                .number_literals
+                .iter()
+                .map(|n| saved_num_bits(*n))
+                .collect(),
             string_literals: bc.string_literals.clone(),
             table_templates: bc.table_templates.clone(),
             global_cache_slots: bc.global_cache_slots,
@@ -1190,6 +1202,13 @@ impl State {
     /// registered host functions exist before saved values are resolved. A
     /// setup error is returned as [`LoadError::Setup`] without materializing
     /// any saved values.
+    ///
+    /// A load is all-or-nothing by construction: the State is built here and
+    /// only returned on success. Any error drops it, so a failure partway
+    /// through materialization (for example after some environment deltas were
+    /// applied to the fresh library tables) is never observable. Rollback of
+    /// partial work is therefore deliberately absent; keep the State private
+    /// to this function until materialization has fully succeeded.
     ///
     /// Whether the standard library is installed is decided by the save itself,
     /// not by any [`Engine`](crate::Engine): a save taken from a standard-library
@@ -1270,6 +1289,20 @@ fn build_env_forward(state: &State) -> BTreeMap<String, ObjectPtr> {
         .iter()
         .map(|(ptr, token)| (token.clone(), *ptr))
         .collect()
+}
+
+/// Bit pattern a number is saved as. Every NaN is written as the one canonical
+/// quiet NaN: hardware default NaNs differ by host (sign bit set on x86-64,
+/// clear on aarch64), and those differences must not affect snapshot bytes.
+/// No script can observe the difference - NaN prints unsigned,
+/// never compares equal and cannot be a table key - so canonicalising loses
+/// nothing. Every other value, `-0.0` included, keeps its exact bits.
+fn saved_num_bits(n: f64) -> u64 {
+    if n.is_nan() {
+        0x7ff8_0000_0000_0000
+    } else {
+        n.to_bits()
+    }
 }
 
 fn corrupt_arena(reason: &'static str, index: usize) -> LoadError {
@@ -1604,6 +1637,12 @@ fn materialize_payload(
 
     for (name, saved) in payload.user_globals {
         let val = decode_val(&saved, &ctx)?;
+        // A saved nil is an existing global's tombstone, not a new nil
+        // assignment. Restore its entry even when setup did not create it:
+        // its position affects snapshot bytes and later non-nil writes.
+        if matches!(val, Val::Nil) && !state.globals.contains_key(&name) {
+            state.globals.insert(name.clone(), Val::Nil);
+        }
         state.set_global_value_owned(name, val);
     }
     state.rng = VmRng::from_state(payload.rng_state);
@@ -1616,6 +1655,19 @@ fn materialize_payload(
     let mut seen_pointer_ids = BTreeSet::new();
     let mut format_pointer_ids = map_with_capacity(payload.format_pointer_ids.len());
     for (index, (saved, id)) in payload.format_pointer_ids.iter().enumerate() {
+        // Save records the id of every registered Rust function that was
+        // rendered, reachable or not. One the load-time setup no longer
+        // registers cannot be reached by any script or host value, so its
+        // id is simply retired (it stays below next_format_pointer_id and is
+        // never reissued) instead of failing the load.
+        if let SavedVal::Fn(name) = saved
+            && !ctx.fn_forward.contains_key(name)
+        {
+            if !seen_pointer_ids.insert(*id) {
+                return Err(corrupt_arena("duplicate format pointer id", index));
+            }
+            continue;
+        }
         let value = decode_val(saved, &ctx)?;
         insert_runtime_key(
             &mut seen_pointer_values,
@@ -2494,6 +2546,47 @@ mod tests {
 
     fn no_setup(_: &mut State) -> std::result::Result<(), Infallible> {
         Ok(())
+    }
+
+    #[test]
+    fn bytecode_nan_literals_are_saved_with_fixed_canonical_bits() {
+        let mut canonical = None;
+        for bits in [
+            0x7ff8_0000_0000_0000,
+            0xfff8_0000_0000_0000,
+            0x7ff0_0000_0000_0001,
+        ] {
+            let mut bytecode = valid_saved_bytecode();
+            bytecode.code = vec![
+                Instr::push_num(0).raw(),
+                Instr::ret(RetCount::Fixed(1)).raw(),
+            ];
+            bytecode.line_info = vec![1; bytecode.code.len()];
+            bytecode.number_literals = vec![bits];
+            let state = load_bytecode_with_globals(
+                vec![bytecode],
+                vec![SavedObject::Closure {
+                    chunk: 0,
+                    upvalues: Vec::new(),
+                }],
+                vec![("f".to_string(), SavedVal::Obj(0))],
+            )
+            .unwrap();
+            let save = state.save_state().unwrap();
+            match &canonical {
+                Some(bytes) => assert_eq!(&save.bytes, bytes),
+                None => canonical = Some(save.bytes.clone()),
+            }
+            let mut loaded =
+                State::load_state(&save.bytes, Box::new(crate::DefaultCallbacks), no_setup)
+                    .unwrap();
+            loaded.get_global("f").unwrap();
+            loaded.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
+            assert_eq!(
+                loaded.to_number(-1).unwrap().to_bits(),
+                0x7ff8_0000_0000_0000
+            );
+        }
     }
 
     /// Encode a value, decode it back, and assert round-trip identity with no

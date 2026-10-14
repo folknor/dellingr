@@ -541,15 +541,21 @@ impl Table {
         if index & ARRAY_SLOT_TAG != 0 {
             return false;
         }
-        let activated = match &mut self.storage {
+        // Account for both transitions. Compiled code initializes each pinned
+        // slot once, so only nil -> live occurs there, but forged snapshot
+        // bytecode can initialize the same slot live -> nil -> live; counting
+        // only activations would underflow `dead_count`. Keeping the counter
+        // exact for any sequence makes this safe without the verifier having
+        // to prove single initialization.
+        let (was_live, now_live) = match &mut self.storage {
             TableStorage::Inline { entries, len } if index < *len as usize => {
                 let (existing_key, existing_value) = &mut entries[index];
                 if *existing_key != key {
                     return false;
                 }
-                let activated = matches!(*existing_value, Val::Nil) && !matches!(value, Val::Nil);
+                let was_live = !matches!(*existing_value, Val::Nil);
                 *existing_value = value;
-                activated
+                (was_live, !matches!(value, Val::Nil))
             }
             TableStorage::Map(map) => {
                 let Some((existing_key, existing_value)) = map.get_index_mut(index) else {
@@ -558,14 +564,16 @@ impl Table {
                 if !key.equivalent(existing_key) {
                     return false;
                 }
-                let activated = matches!(*existing_value, Val::Nil) && !matches!(value, Val::Nil);
+                let was_live = !matches!(*existing_value, Val::Nil);
                 *existing_value = value;
-                activated
+                (was_live, !matches!(value, Val::Nil))
             }
             TableStorage::Inline { .. } => return false,
         };
-        if activated {
-            self.dead_count -= 1;
+        match (was_live, now_live) {
+            (false, true) => self.dead_count -= 1,
+            (true, false) => self.dead_count += 1,
+            _ => {}
         }
         true
     }
@@ -1657,6 +1665,31 @@ mod tests {
         assert_eq!(t.dead_count, 0);
         t.insert(h(8), Val::Bool(true)).unwrap();
         assert_eq!(t.get(&h(8)), Val::Bool(true));
+    }
+
+    #[test]
+    fn repeated_template_init_keeps_dead_count_exact() {
+        // Forged bytecode can initialize one pinned slot live -> nil -> live.
+        let literals = [h(7)];
+        let mut inline = Table::default();
+        inline.insert(h(7), Val::Bool(true)).unwrap();
+        inline.remove(&h(7));
+        for mut t in [Table::with_template_keys(&[0], &literals), inline] {
+            assert_eq!(t.dead_count, 1);
+            assert!(t.init_at_index(0, h(7), Val::Nil));
+            assert_eq!(t.dead_count, 1);
+            assert!(t.init_at_index(0, h(7), Val::Bool(true)));
+            assert_eq!(t.dead_count, 0);
+            assert!(t.init_at_index(0, h(7), Val::Nil));
+            assert_eq!(t.dead_count, 1);
+            assert!(t.init_at_index(0, h(7), Val::Bool(true)));
+            assert_eq!(t.dead_count, 0);
+            assert!(t.init_at_index(0, h(7), Val::Bool(false)));
+            assert_eq!(t.dead_count, 0);
+            assert_eq!(t.get(&h(7)), Val::Bool(false));
+            assert!(!t.init_at_index(0, h(8), Val::Nil));
+            assert_eq!(t.dead_count, 0);
+        }
     }
 
     fn map_slots(t: &Table) -> usize {

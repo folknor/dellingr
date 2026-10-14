@@ -44,8 +44,8 @@ const TABLE_LIBRARY_CAPACITY: usize = table::TABLE_FUNCTIONS.len();
 ///
 /// `open_libs` is reachable from the public `State::open_libs`, so the
 /// preflight accounts for values already on the stack. The largest setup
-/// overlap is `_G` in `open_base`, which holds its table and metatable at once.
-/// Four slots leave room for two temporary values if that path grows.
+/// overlap is `_G` in `open_base`: its table, metatable, `__metatable` key
+/// and protection value occupy exactly four slots at once.
 /// Reserving up front keeps the operation all-or-nothing: without it, a stack
 /// near the cap could install part of the standard library (and, under
 /// `snapshot`, part of the function registry) before failing partway through.
@@ -224,8 +224,8 @@ pub(super) fn opt_integer(
 // The callback ABI accepts 255 results. RetCount's 255 byte is an encoding
 // sentinel for All, not a 254-result runtime cap; keep count validation here
 // independent of the bytecode encoding.
-/// Implements both global `unpack` and `table.unpack`. Costs one per element
-/// visited, min 1.
+/// Implements both global `unpack` and `table.unpack`. Free of charge by
+/// design (see the charge comment below).
 ///
 /// Follows Lua 5.4 for both names: elements are read through `__index`, and
 /// when `j` is omitted the length comes from `__len`. Lua 5.2's global
@@ -245,7 +245,6 @@ pub(super) fn unpack_values(state: &mut State) -> Result<u8> {
 
     state.set_top(1)?;
     if i > j {
-        state.consume_cost(1)?;
         state.set_top(0)?;
         return Ok(0);
     }
@@ -259,10 +258,10 @@ pub(super) fn unpack_values(state: &mut State) -> Result<u8> {
             limit: crate::error::MAX_RESULTS,
         }));
     }
-    // Charge each visit before its lookup: __index can fail, so reserving the
-    // whole range would charge entries the callback never visits.
+    // Unpack charges nothing, however many elements it visits: a deliberate
+    // game-design choice of the cost model (the budget is not a CPU meter),
+    // like `select`. Do not add a per-element charge.
     for index in i..=j {
-        state.consume_cost(1)?;
         state.push_number(index as f64)?;
         state.get_table(1)?;
     }

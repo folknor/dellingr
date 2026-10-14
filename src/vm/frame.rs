@@ -373,6 +373,15 @@ impl Frame {
                 // Concatenation has no fixed opcode charge. Operand A is the chain
                 // length (>= 2). Chained `..` collapses into one OP_CONCAT
                 // so a long concat has only one intermediate allocation.
+                //
+                // The bytes the operator emits are deliberately uncharged: the
+                // budget is a game-design instrument rather than a CPU meter
+                // (README "Budget"), and `..` is structural syntax that a
+                // legible refactor must not make more expensive. The size is
+                // still bounded by `checked_string_growth` (MAX_STRING_BYTES),
+                // so the uncharged work is capped. Library calls that emit
+                // bytes (`table.concat`, `string.format`, ...) charge them;
+                // the operator does not.
                 Instr::OP_CONCAT => state.concat_helper(inst.a() as usize)?,
 
                 // === COSTED OPERATIONS (cost 1) ===

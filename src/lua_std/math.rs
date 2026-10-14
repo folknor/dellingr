@@ -13,8 +13,8 @@
 //! (`+ - * / %` and unary minus), comparisons, `sqrt`, and `math.random` are
 //! bit-stable across platforms, except for the sign and payload of a NaN they
 //! produce (x86-64's default NaN is negative, aarch64's positive). No Lua
-//! operation observes those bits: `string.format` canonicalises NaN to an
-//! unsigned `nan`, `tostring` prints `NaN`, and `%q` prints `(0/0)`.
+//! operation observes those bits: `string.format` and `tostring` both
+//! canonicalise NaN to an unsigned `nan`, and `%q` prints `(0/0)`.
 
 use super::{MATH_LIBRARY_CAPACITY, arg_integer, check_type_named};
 use crate::LuaType;

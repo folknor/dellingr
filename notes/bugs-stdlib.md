@@ -24,51 +24,6 @@ Stdlib findings whose mechanism lives in `src/vm/table.rs` or
    inline instead.
 ```
 
-## STD-005 - Number-to-string is Rust `Display`, not `%.14g`, and nothing durable records it
-
-Source: stdlib (finding 4).
-
-Claim broken: output matches reference except for `-- DIFF:` divergences. The
-README's "Compatibility divergences" section lists only the zero-step `for` and
-`math.log`, according to this hunter.
-
-`vm/lua_val.rs::number_to_string` is `number.to_string()`, and every stdlib
-coercion goes through it: `tostring`, `print`, `..` in `table.concat`, `%s`,
-`string.len`/`upper`/`sub`/... on numbers, and `gsub` with a numeric
-replacement. So `0.1+0.2` renders `0.30000000000000004` (reference `0.3`),
-`1/3` renders `0.3333333333333333` (reference `0.33333333333333`), `1e15`
-renders `1000000000000000` (reference `1e+15`), `1e300` renders as a
-301-character integer string, and NaN renders as `NaN`. As a result,
-`string.len(1/3)` returns 18 instead of 16, and string-keyed lookups built from
-`tostring(x)` differ from reference. `examples/math.lua` carries
-`-- DIFF: number_format` and `edge_cases.lua` has `nan_format`, so the test
-surface knows. But this is the largest user-visible divergence, and no durable
-document states it.
-
-Direction: either implement `%.14g` (the existing `format_general` in
-`string_format.rs` could back it) or document the divergence under
-"Compatibility divergences".
-
-## STD-008 - `_G` proxy aliases distinct non-UTF-8 string keys; its metatable is exposed and unprotected
-
-Source: stdlib (finding 7).
-
-Claim broken: string keys are byte strings everywhere else (the
-`LuaType::String` doc says arbitrary byte strings, and `to_bytes` is exact).
-
-`global_env_index`/`global_env_newindex` (`basic.rs`) convert the key with
-`state.to_string(2)`, which is `String::from_utf8_lossy`, and `globals` is an
-`IndexMap<String, Val>`. So `_G["\xff"] = 1`, `_G["\xfe"]` and `_G["\u{FFFD}"]`
-all name the same global.
-
-Direction: key `globals` by interned string pointer or `Vec<u8>`, or route
-non-UTF-8 keys to the raw proxy path the way non-string keys already are.
-
-Related smell: `getmetatable(_G)` returns the internal proxy metatable rather
-than `nil` (reference `_G` has none). It is unprotected, so
-`setmetatable(_G, nil)` or `getmetatable(_G).__index = f` silently breaks `_G`
-for the rest of the State. Setting `__metatable` on it would close that.
-
 ## STD-012 - Strings have no metatable, but string method calls work
 
 Source: stdlib (finding 14). Related to VM-030 in `notes/bugs-vm.md` (string
@@ -80,6 +35,28 @@ Claim broken: reference matching. There is no `-- DIFF:` and no README entry.
 metatables yet") returns nil for strings. So `getmetatable("")` is `nil`, and
 the common `getmetatable("").__index` idiom errors, even though `("x"):upper()`
 works through the string-method IC.
+
+Design from a resolution-loop fixer, verified against lua5.4. It fixes this
+entry and VM-030 together, but it needs `src/vm.rs` and snapshot code, which
+that wave could not touch:
+1. `State` gains `string_metatable: Option<ObjectPtr>`, rooted in
+   `mark_gc_roots` with `GcHeap::mark` and created in `open_libs` right after
+   the string library table is built, as a table with
+   `__index = <string lib table>`. `with_restricted_env` leaves it alone.
+2. `get_string_table_field_tracking_call` (`src/vm/eval_index.rs`) reads
+   `string_metatable.__index` instead of `get_global("string")`. It keeps the
+   table fast path, falls back to generic indexing when `__index` is a
+   function, and rekeys `StringMethodCacheEntry` on the metatable's version
+   instead of `globals_version`.
+3. `get_metatable_of` (`src/vm/table_ops.rs`) returns `string_metatable` for
+   strings.
+4. Snapshots: `capture_env_tokens` adds the string metatable as a canonical env
+   token (like `_G.metatable`), so it reloads as the same object. A script
+   change to its `__index` needs a delta.
+Reference facts: `getmetatable("").__index == string`; `setmetatable("x", {})`
+errors (dellingr already refuses); `string = nil` does not break `("x"):upper()`;
+assigning `getmetatable("").__index` takes effect. Both doc comments now state
+the current behaviour.
 
 ## STD-013 - `open_libs` is all-or-nothing only for stack overflow
 
@@ -131,12 +108,3 @@ The wave reviewer adds that `error()` and the public `to_string_with_meta()` als
 build the lossy-expanded string without the size preflight `print` now does, so
 invalid bytes can expand about threefold past the string cap before anything
 checks it.
-
-## STD-022 - Library range errors name functions inconsistently
-
-Source: lateral finding from a resolution-loop fixer.
-
-`check_sequence_keys` in `src/lua_std/table.rs` produces messages that name
-functions as `table.insert` / `table.concat`, while argument errors use the bare
-reference-style names (`'concat'`). One library raises both kinds of message for
-the same call.

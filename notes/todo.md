@@ -6,6 +6,15 @@ get deleted as they ship or stop being worth tracking.
 
 ## Deferred forward-looking ideas
 
+### `\u{XXX}` string escapes
+
+What: Lua 5.3+ accepts `\u{XXX}` UTF-8 escapes in string literals; dellingr's
+lexer does not, and nothing documents the gap (tests write UTF-8 as `\x`
+bytes). Either add the escape or list it under the README's won't-implement
+or divergences sections.
+
+Signal: a script author reaching for it.
+
 ### CLI: read the script from stdin on `-`
 
 What: `parse_args` in `src/main.rs` special-cases `"-"` so it is not

@@ -64,6 +64,14 @@ impl State {
     }
 
     /// Resolves a string index through the current global `string` table.
+    ///
+    /// This deliberately differs from reference Lua, which resolves through the
+    /// shared string metatable's `__index` captured when the library opened.
+    /// Consequences: rebinding the global `string` (or hiding it with
+    /// `with_restricted_env`) changes or breaks `s:method()`, and the
+    /// string-method IC is invalidated by `globals_version` for the same
+    /// reason. Fixing it means resolving through a `State`-held string
+    /// metatable instead of `get_global("string")`.
     pub(super) fn get_string_table_field(
         &mut self,
         key: Val,
@@ -453,8 +461,11 @@ impl State {
         // reaching the lib via __index) re-resolve through the new
         // binding instead of resurrecting the old one.
         self.globals_version = self.globals_version.wrapping_add(1);
-        // Also update globals for _G compatibility
-        if let Some(builtin) = crate::instr::Builtin::from_u8(slot) {
+        // Also update globals for _G compatibility, retaining existing
+        // tombstones but avoiding an entry for a never-defined nil builtin.
+        if let Some(builtin) = crate::instr::Builtin::from_u8(slot)
+            && (!matches!(val, Val::Nil) || self.globals.contains_key(builtin.name()))
+        {
             self.globals.insert(builtin.name().to_string(), val);
         }
     }

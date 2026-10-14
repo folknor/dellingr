@@ -1,6 +1,6 @@
 -- Edge Case Tests
 -- Tests for various edge cases and correct Lua semantics
--- DIFF: nan_format - Rust formats NaN differently than Lua
+-- DIFF: nan_format - dellingr prints every NaN as unsigned "nan" on every host; C Lua prints "-nan" for 0/0 on x86-64
 
 print("=== Edge Case Tests ===")
 print("")

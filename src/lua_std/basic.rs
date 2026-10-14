@@ -465,6 +465,17 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
     // __newindex: function(t, k, v) globals[k] = v end
     state.register_lib_fn(-1, "_G", "__newindex", global_env_newindex)?;
 
+    // Protect the proxy metatable. It is the only thing connecting `_G` to
+    // `globals`; unprotected, `setmetatable(_G, nil)` or
+    // `getmetatable(_G).__index = f` silently detached `_G` from the real
+    // globals for the rest of the State. Reference `_G` has no metatable, so
+    // `getmetatable(_G)` is nil there and false here (both falsy), and
+    // `setmetatable(_G, mt)` - which reference allows - now errors loudly
+    // instead of silently breaking `_G`.
+    state.push_string("__metatable")?;
+    state.push_boolean(false)?;
+    state.set_table_raw(-3)?;
+
     // Address the _G table relative to the top: a host may call open_libs
     // with values already on the stack, so absolute index 1 is not ours.
     state.set_metatable_of(-2)?;
@@ -506,10 +517,27 @@ fn arg_type_error(
     }))
 }
 
+/// The `globals` name for the `_G` key at stack index 2, if it has one.
+///
+/// `globals` is keyed by Rust `String`, so only string keys that are valid
+/// UTF-8 can name a global. Any other key - including a non-UTF-8 byte
+/// string - lives in the proxy table itself, the same way non-string keys
+/// do. Converting lossily instead would make `_G["\xff"]`, `_G["\xfe"]` and
+/// `_G["\u{FFFD}"]` alias one global. No identifier the lexer accepts is
+/// non-UTF-8, so such a key is never reachable as a bare global name anyway.
+fn utf8_global_key(state: &State) -> Result<Option<String>> {
+    if state.typ(2) != LuaType::String {
+        return Ok(None);
+    }
+    match str::from_utf8(state.to_bytes(2)?) {
+        Ok(name) => Ok(Some(name.to_owned())),
+        Err(_) => Ok(None),
+    }
+}
+
 fn global_env_index(state: &mut State) -> Result<u8> {
     check_any_named(state, 2, "_G.__index")?;
-    if state.typ(2) == LuaType::String {
-        let key = state.to_string(2)?;
+    if let Some(key) = utf8_global_key(state)? {
         state.set_top(0)?;
         state.get_global(&key)?;
     } else {
@@ -522,8 +550,7 @@ fn global_env_index(state: &mut State) -> Result<u8> {
 fn global_env_newindex(state: &mut State) -> Result<u8> {
     check_any_named(state, 2, "_G.__newindex")?;
     check_any_named(state, 3, "_G.__newindex")?;
-    if state.typ(2) == LuaType::String {
-        let key = state.to_string(2)?;
+    if let Some(key) = utf8_global_key(state)? {
         state.push_value(3)?;
         state.set_global(&key)?;
     } else {

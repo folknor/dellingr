@@ -97,16 +97,6 @@ Source: vm-heap (smaller items).
   the gremlins scan covers them. Either way they contradict the spirit of the
   banned-Unicode rule.
 
-## VM-027 - Concat charges nothing for the bytes it emits
-
-Source: vm-exec (observations; flagged by the hunter as probably deliberate).
-
-`OP_CONCAT` charges nothing for the bytes it emits, while README "Budget" says
-data-dependent string work ("bytes examined or emitted") is charged for the
-string and table libraries. `..` is an operator, not a library call, but a
-`s = s .. s` doubling loop is bounded only by `MAX_STRING_BYTES` at the price of
-one `OP_CONCAT` per step. The hunter recommends a README sentence either way.
-
 ## VM-028 - `__index`/`__newindex` function handlers count against `MAX_METAMETHOD_DEPTH` while `__call` handlers do not
 
 Source: vm-exec (observations; flagged as not a defect against reference).
@@ -150,14 +140,14 @@ metatable. This is sandbox-hostile in the same way as the (since-removed)
 plain-table fallback to the global `table` library was, and the hunter
 recommends making a deliberate decision about it.
 
-## VM-031 - Globals set to nil are never removed from `globals`
+## VM-043 - Snapshot verifier accepts duplicate global names
 
-Source: stdlib (finding 7, related smells; the hunter flagged it as outside
-stdlib scope).
+Source: lateral finding from a resolution-loop reviewer.
 
-`_G.k = nil` (or any global set to nil) inserts a `Nil` entry into `globals`
-through `set_global_value_owned` and never removes it. A script cycling through
-generated global names grows the map without bound.
+Claim broken: the load contract that malformed saves are rejected. Duplicate
+table keys and template keys are rejected, but `src/vm/save_state/verify.rs`
+accepts a save that lists the same global name twice; the later value silently
+overwrites the earlier one on load.
 
 ## VM-034 - `set_cost_budget` from inside a callback interacts with the dispatch loop's pending cost
 
@@ -170,58 +160,3 @@ interval, which the `COST_CHECK_INTERVAL` doc says it never does. The doc for
 `set_cost_budget` does not say whether a mid-run reset is supported. Either
 flush the pending batch before the reset or document mid-run resets as
 unsupported.
-
-## VM-035 - A snapshot load that fails partway through env deltas leaves earlier deltas applied
-
-Source: lateral finding from a resolution-loop fixer (unverified whether the
-State remains usable after a failed load).
-
-Env deltas are applied to live library tables one at a time in
-`src/vm/save_state.rs`. A corrupt delta that fails partway (the new
-non-table-metatable check is one more way to fail there) leaves the earlier
-deltas already applied. If a State is still usable after `load_state` returns
-an error, that breaks the all-or-nothing reading of a rejected load.
-
-## VM-037 - Snapshots carry the producing host's NaN bits
-
-Source: lateral finding from the resolution-loop fixer that made
-`string.format` print NaN unsigned.
-
-Claim at stake: determinism across hosts. `0/0`, `math.sqrt(-1)` and similar
-produce the hardware default NaN, which has the sign bit set on x86-64 and clear
-on aarch64. Script output no longer shows the sign: `tostring` prints `NaN`,
-`string.format` now prints an unsigned `nan`, `%q` prints `(0/0)`, and NaN never
-compares equal and cannot be a table key. But `save_state.rs` stores
-`SavedVal::Num` as `to_bits`, so a NaN computed at runtime is saved with the
-producing host's bits. Two hosts running the same script therefore produce
-different snapshot bytes, although the restored States behave identically. (The
-fixer also blamed folded literals; the wave reviewer reports that the parser
-already refuses to fold a NaN result, so only runtime values are affected.) If
-snapshots must be byte-identical across hosts (for example, hashed for replay
-verification), canonicalise NaN when saving.
-
-## VM-042 - Forged bytecode can underflow a table's tombstone count through repeated pinned-field initialization
-
-Source: lateral finding from a resolution-loop reviewer.
-
-Claim broken: the load contract that saved bytecode violating VM structural
-invariants is rejected with `InvalidBytecode`.
-
-`Table::init_at_index` (`src/vm/table.rs`) does not increment `dead_count` when
-it replaces a live value with nil. Forged snapshot bytecode can initialize the
-same pinned template field with a value, then nil, then a value again, which
-underflows the counter (a panic in debug, a wrap in release). The bytecode
-verifier (`src/compiler/verify.rs`) checks stack effects but does not enforce
-that each pinned field is initialized once.
-
-## VM-038 - A Rust function reachable only through host state loses its rendered identity across save and load
-
-Source: lateral finding from the resolution-loop fixer that gave Rust functions
-`tostring` identities.
-
-`tostring(f)` and `%p` render a Rust function as `function: 0x<id>`, with the id
-held in `format_pointer_ids`, which snapshots save. The save walk reaches Rust
-functions through globals and environment tables. One reachable only from host
-state (a value the host holds and passes back in) is not walked, so its id is
-dropped on save, and after load it gets a fresh id. The same script then renders
-the same function differently before and after a save. `%p` has the same gap.

@@ -80,7 +80,7 @@ Lua calls recurse on the host thread's native stack. `MAX_CALL_DEPTH` and `MAX_M
 
 There's a few gotchas with the current instruction-cost accounting. For example, `while true do end` is free, which means that a users Lua script could run forever. This is a known trade-off made in the full light of day - the main consumer of dellingr does not want to penalise the user (that is, subtract from their per-gametick budget) for structural semantics. Users should be encouraged to write more code, not less.
 
-Data-dependent native work in the string, pattern, and table libraries is charged: bytes examined or emitted, table elements visited, and matcher primitives each consume budget. `table.move`, `table.insert`, `table.remove`, `unpack`/`table.unpack` and `table.pack` charge one per element copied, shifted, visited or stored, with a minimum of 1. An append or pop costs 1; inserting at the front of an n-element sequence costs max(n, 1), and removing its front costs max(n - 1, 1). `table.concat` charges for elements visited and bytes copied. `table.sort` charges for the original range; a Lua comparator also incurs its usual execution costs. `select` stays free: it moves its arguments once, as passing `...` along does. Structural semantics remain free by design. A helper extraction, an intermediate name, or another legible refactor should not make a script more expensive, because the budget is a game-design instrument rather than a CPU meter.
+Data-dependent native work in the string, pattern, and table libraries is charged: bytes examined or emitted, table elements visited, and matcher primitives each consume budget. `table.move` charges one per element copied. `table.insert`, `table.remove` and `table.pack` charge a flat 1 however many elements they shift or store, and `unpack`/`table.unpack` are free; these flat charges are deliberate cost-model choices. `table.concat` charges for elements visited and bytes copied. `table.sort` charges for the original range; a Lua comparator also incurs its usual execution costs. `select` stays free: it moves its arguments once, as passing `...` along does. Structural semantics remain free by design. A helper extraction, an intermediate name, or another legible refactor should not make a script more expensive, because the budget is a game-design instrument rather than a CPU meter.
 
 This cost model changed in 0.4.0. Embedders must re-measure their tick budgets: the increase depends on string lengths, output expansion, pattern matches and backtracking, and table contents.
 
@@ -92,7 +92,11 @@ Numeric `for` loops with a zero step skip their body in both directions. Lua 5.2
 
 `math.log(x, 2)` follows Lua 5.2's general-base calculation. This differs in the last bit from Lua 5.4 for some inputs (for example, `math.log(3, 2)`).
 
-`string.format` prints NaN without a sign (`nan`), where C Lua on x86-64 prints `-nan` for `0/0`, so output is identical across platforms.
+Numbers convert to strings with Lua 5.2's `%.14g` (`0.3`, `1e+15`, `-0`). There is no integer subtype, so whole-valued floats print without Lua 5.4's `.0` suffix.
+
+NaN prints without a sign (`nan`) in `tostring` and `string.format`, where C Lua on x86-64 prints `-nan` for `0/0`, so output is identical across platforms.
+
+`getmetatable(_G)` returns `false` rather than `nil`: `_G` is a proxy over the global table and its metatable is protected, so `setmetatable(_G, ...)` raises "cannot change a protected metatable".
 
 `tonumber(s, base)` accumulates in floating point, as Lua 5.2 does; Lua 5.4 wraps to a 64-bit integer.
 
@@ -150,6 +154,12 @@ on load, including ones written by an earlier build using the same snapshot
 format version - an older format version is rejected before that, as an
 unsupported version. Save authentication is required if tampering with future
 RNG outcomes matters.
+
+Numbers are saved bit-exact, except that every NaN is saved as one canonical
+NaN, so host differences in NaN sign or payload do not change snapshot bytes. A save
+records the rendered identity (`tostring`, `%p`) of every registered Rust
+function it has printed, including one only the host still holds, so passing it
+back in after a load prints the same `function: 0x...`.
 
 ## Status
 

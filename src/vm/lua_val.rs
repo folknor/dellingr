@@ -16,13 +16,82 @@ pub type RustFunc = fn(&mut State) -> Result<u8>;
 
 const RUST_FN_DISPLAY: &str = "<function>";
 
+/// Render a number the way reference Lua 5.2's `tostring` does: C `%.14g`
+/// (`LUAI_NUMFFORMAT`). Every coercion goes through here - `tostring`,
+/// `print`, `..`, `table.concat`, `%s`, string functions on numbers - so the
+/// spelling is replay-visible and must be identical on every host.
+///
+/// Val has no integer/float subtype, so the 5.2 rule (one `%.14g` for every
+/// number) is the one dellingr can follow exactly: integral values print
+/// without a decimal point (`3`, which 5.4 also prints for integers), large
+/// ones switch to exponent form (`1e+15`, `9.007199254741e+15`), and negative
+/// zero prints `-0`. Lua 5.4 splits by subtype (`3.0`/`-0.0` for floats, `3`/
+/// `0` for integers); either 5.4 spelling would match neither reference for
+/// the other half, while 5.2's always matches 5.2.
+///
+/// NaN always prints `nan`, never `-nan`: a hardware NaN's sign differs by
+/// architecture (x86-64's default NaN is negative, aarch64's positive), so
+/// printing it would make output host-dependent. `string.format` drops the
+/// sign at the same point for the same reason. Reference C Lua prints `-nan`
+/// for `0/0` on x86-64 glibc.
 pub(super) fn number_to_string(number: f64) -> String {
-    // Val has no integer/float subtype. Negative zero renders as "-0", Lua
-    // 5.2's spelling for every case. Lua 5.4 splits by subtype ("-0.0" for
-    // floats, "0" for integer results such as math.ceil(-0.5)); either 5.4
-    // spelling would match neither reference for the other half, while "-0"
-    // always matches 5.2. Rust's f64 Display already prints "-0".
-    number.to_string()
+    if number.is_nan() {
+        return "nan".to_string();
+    }
+    if number.is_infinite() {
+        return if number > 0.0 { "inf" } else { "-inf" }.to_string();
+    }
+    // Fast exact path: an integral value of at most 14 digits is exactly its
+    // `%.14g` spelling, and i64 formatting avoids the float-to-decimal
+    // conversion entirely. This covers loop counters, indices and most
+    // numbers that reach concat and print.
+    if number.abs() < 1e14 && number.fract().to_bits() << 1 == 0 {
+        if number.to_bits() == (-0.0_f64).to_bits() {
+            return "-0".to_string();
+        }
+        let integer = number as i64; // Exact: integral and below 1e14 in magnitude.
+        return integer.to_string();
+    }
+    format_g14(number)
+}
+
+/// C `%.14g` for a finite number. Rust's float formatting is exact
+/// (correctly rounded from the binary value), like glibc's, so both the
+/// exponent probe and the final rendering round exactly as C does.
+fn format_g14(number: f64) -> String {
+    const PRECISION: i32 = 14;
+    let scientific = format!("{number:.13e}");
+    let (mantissa, exponent) = scientific
+        .split_once('e')
+        .expect("Rust scientific formatting always contains an exponent");
+    let exponent: i32 = exponent
+        .parse()
+        .expect("Rust scientific formatting emits a decimal exponent");
+    if !(-4..PRECISION).contains(&exponent) {
+        let mut out = strip_fraction_zeros(mantissa).to_string();
+        out.push('e');
+        out.push(if exponent < 0 { '-' } else { '+' });
+        let magnitude = exponent.unsigned_abs();
+        if magnitude < 10 {
+            out.push('0');
+        }
+        out.push_str(&magnitude.to_string());
+        out
+    } else {
+        let fraction = usize::try_from(PRECISION - 1 - exponent)
+            .expect("exponent is below the precision in fixed form");
+        let fixed = format!("{number:.fraction$}");
+        strip_fraction_zeros(&fixed).to_string()
+    }
+}
+
+/// `%g` without `#`: drop trailing fractional zeros, then a bare point.
+fn strip_fraction_zeros(text: &str) -> &str {
+    if text.contains('.') {
+        text.trim_end_matches('0').trim_end_matches('.')
+    } else {
+        text
+    }
 }
 
 #[derive(Clone, Copy, Default)]

@@ -532,12 +532,10 @@ fn format_float(number: f64, directive: &Directive) -> Vec<u8> {
     // default NaN has the sign bit set, aarch64's does not), and NaNs reach
     // the VM from many producers: runtime `/` and `%`, `sqrt`,
     // the libm-backed math functions, `^` via `powf`, and host
-    // `push_number`. No Lua operation can observe a NaN's sign or payload
-    // except this formatter (`tostring` prints `NaN`, `%q` prints `(0/0)`,
-    // NaN never compares equal and cannot be a table key), so dropping the
-    // sign here is the single chokepoint that makes output identical on
-    // every host. Snapshot bytes may still carry host NaN bits; they
-    // restore to behaviourally identical State. Reference C Lua prints
+    // `push_number`. Dropping the sign here makes formatted NaNs identical
+    // on every host. `tostring` also prints unsigned `nan`, `%q` prints
+    // `(0/0)`, NaN never compares equal and cannot be a table key, and
+    // snapshots canonicalise its bits. Reference C Lua prints
     // `-nan` for `0/0` on x86-64; dellingr always prints `nan`.
     let negative = number.is_sign_negative() && !number.is_nan();
     let magnitude = number.abs();
