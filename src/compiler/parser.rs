@@ -741,7 +741,7 @@ impl<'a> Parser<'a> {
             self.update_line(stmt_start);
 
             match self.input.peek_type()? {
-                TokenType::Identifier | TokenType::LParen | TokenType::LParenLineStart => {
+                TokenType::Identifier | TokenType::LParen => {
                     self.parse_assign_or_call()?;
                 }
                 TokenType::If => self.parse_if_arm()?,

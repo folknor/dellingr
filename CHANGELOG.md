@@ -4,241 +4,113 @@ All notable changes to dellingr are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 [Semantic Versioning](https://semver.org/) once 1.0 lands.
 
-## [Unreleased]
+## [0.5.0] - 2026-10-14
 
-Snapshots from earlier builds no longer load, and `cost_used` changes for
-identical source - re-measure tick budgets.
+Saves and replays from 0.4.0 do not carry over. Re-measure tick budgets and
+re-record replays.
 
 ### Changed (breaking)
 
-- **`COST_MODEL_VERSION` is 5.** Literal arithmetic now constant-folds and no
-  longer charges, except `^`, which stays a runtime op because host libm `pow`
-  is not bit-identical across targets. `string.gmatch` charges pattern
-  compilation once per iterator rather than per cache miss. `cost_used` now
-  includes opcode cost pending in the dispatch batch when a runtime error ends
-  a frame. `table.insert`, `table.remove` and `table.pack` keep a flat charge
-  of 1, and `unpack`/`table.unpack` stay free, regardless of element count.
-  These are deliberate game-design choices. Sequence-library metamethods
-  incur their usual execution costs; corrected numeric formatting changes
-  output-byte charges. Older snapshots are rejected with
-  `UnsupportedCostModelVersion`.
-- **Tables have a real array part, and `pairs` order changed.** Keys `1..n`
-  live in a vector beside the insertion-ordered hash part and iterate first,
-  in key order, then the remaining keys in insertion order (previously all
-  keys in insertion order). `#` searches for a border in the array part;
-  positional nil slots in constructors are retained (`#{1, nil, 3}` is 3).
-  The snapshot format is version 7: it records each table's array length,
-  nil slots included.
-- **Field misses on plain tables return nil.** The implicit table-library
-  lookup and `t:insert(...)` sugar are gone; use `table.insert(t, ...)`.
-- **Strings share a metatable.** `getmetatable("")` returns it, and string
-  indexing and methods resolve through its current `__index`, independently
-  of the global `string`, including in restricted environments. The metatable
-  is rooted and saved as the `string.metatable` environment token. Changes to
-  method resolution and snapshots are replay-visible.
-- **Strings honour metatable `__call` and `__tostring`.** The latter applies
-  to `tostring`, `print`, `string.format("%s", s)` and host
-  `State::to_string_with_meta`; rendered output and handler costs can change
-  replays. `error(s)` keeps a string message raw.
-- **Host string conversions enforce the cap after lossy UTF-8 expansion.**
-  `State::to_string` and `State::to_string_with_meta` reject output over
-  `MAX_STRING_BYTES` before conversion. `to_string_with_meta` also applies
-  the shared string metatable's `__tostring`.
-- **`ArgError` has a required `detail: ArgDetail` field.**
-- **`State::load_state`'s setup closure returns `Result<(), E>`**, surfaced as
-  `LoadError::Setup(E)`; `LoadError` is generic over `E` (default
-  `Infallible`).
-- **Callback boxes are `Box<dyn HostCallbacks>`**, without the redundant
-  `+ Send`.
-- **New and reshaped error variants:** `SourceSizeExceeded` (16 MiB source
-  cap), `PatternError`, `DuplicateFunctionRegistration`, `TooManyArguments`,
-  `TooManyResults`; `CallDepthExceeded`, `MetamethodDepthExceeded` and
-  `StackOverflow` carry `limit`; `LoadError::UnsupportedVersion` and
-  `UnsupportedCostModelVersion` carry `found`/`expected`, `CorruptArena` a
-  `reason`; `SaveError` gains `Internal` and `TooLarge` (per-field size caps on
-  save and load).
-- **MSRV is Rust 1.99.**
-- **Stdlib integer arguments are exact.** `string.sub`/`find`/`match`/`gsub`,
-  `math.random`, `select` and `tonumber`'s base reject non-integral numbers
-  instead of truncating, as Lua 5.4 does.
-- **Concatenation renders negative zero as `"-0"`**, like `tostring`.
-- **Number-to-string conversion uses Lua 5.2's `%.14g`.** `0.1 + 0.2`
-  prints `0.3`, `1e15` prints `1e+15`, and every NaN prints `nan`.
-  This affects `tostring`, `print`, concatenation and numeric string coercions;
-  rendered output and output-byte charges are replay-visible changes.
-- **Snapshots canonicalise NaN sign and payload.** Snapshots that differ
-  only in host-produced NaN bits are now byte-identical across hosts. This
-  changes replay-visible snapshot bytes; other numbers remain bit-exact.
-- **`_G`'s metatable is protected.** `getmetatable(_G)` returns `false`, and
-  `setmetatable(_G, ...)` raises an error instead of detaching the proxy.
-- **Bad-argument messages** read `bad argument #1 to 'sin' (...)`, with the
-  stdlib function named.
-- **`save_state` fails with `NotQuiescent` inside a Rust callback.**
-- **`State::cost_remaining()` returns `i64::MAX`** when no budget is set.
-- **`State::set_global` returns `Result<()>`.** An empty visible frame returns
-  `InvalidStackIndex` without changing the stack or global.
-- **Host `State::call` rejects `ArgCount::Dynamic`.** Hosts must supply
-  `ArgCount::Fixed`; dynamic counts are reserved for bytecode calls.
-- **`SyntaxError::UnfinishedLongComment` is a new public variant.**
-  Exhaustive matches must handle it; the error is recoverable by appending
-  the closing delimiter.
-- **`math.random` uses rejection sampling to remove modulo bias.** Rejected
-  draws advance the deterministic RNG stream, so replays from earlier builds
-  can diverge at those draws. Wide integer results still round to f64.
-- **`string.gsub` and `string.gmatch` use Lua 5.4's empty-match rule.** An
-  empty match ending where the previous accepted match ended is skipped.
-- **`table_insert_at`** resolves a negative table index before popping the
-  value, like the other table accessors.
-- **`State::table_len` and `State::table_sort` are crate-internal.** Hosts use
-  the new fallible `State::raw_len` for table borders or string byte lengths,
-  and call `table.sort` through the stack.
-- **CLI:** `Cost used: N` and the `--analyze` caveat go to stderr; unknown
-  options, a second input file, and `--limit` with `--analyze` are usage
-  errors; non-UTF-8 paths work.
+- `COST_MODEL_VERSION` is 5. Literal arithmetic is constant-folded and free,
+  except `^`. `string.gmatch` charges pattern compilation once per iterator.
+  `cost_used` includes cost pending when a runtime error ends a frame.
+- Snapshot `FORMAT_VERSION` is 7; older saves are rejected. Loading also
+  rejects duplicate globals, duplicate template keys, non-table metatables and
+  out-of-range pointer ids.
+- Tables have an array part. `pairs` visits keys `1..n` first, then the rest in
+  insertion order. Constructors keep nil slots: `#{1, nil, 3}` is 3.
+- Numbers print with `%.14g`: `0.1 + 0.2` is `0.3`, `1e15` is `1e+15`, NaN is
+  `nan`, negative zero is `-0`. `%q` prints integral numbers in decimal.
+- Snapshots save every NaN as one canonical value.
+- `math.random` uses rejection sampling; the stream differs at rejected draws.
+- `string.gsub` and `string.gmatch` follow Lua 5.4's empty-match rule.
+- A field miss on a plain table returns nil. `t:insert(...)` no longer reaches
+  `table.insert`.
+- Strings share a metatable. `getmetatable("")` returns it; methods resolve
+  through its `__index`, not the global `string`. Its `__call` and
+  `__tostring` are honoured.
+- Rust functions render as `function: 0x<id>`, stable across save and load.
+- Stdlib integer arguments reject non-integral numbers instead of truncating.
+- `getmetatable(_G)` returns `false`; `setmetatable(_G, ...)` errors.
+- Bad-argument messages name the function: `bad argument #1 to 'sin' (...)`.
+- Host API:
+  - `State::set_global` returns `Result<()>`.
+  - `State::call` rejects `ArgCount::Dynamic`.
+  - `State::cost_remaining()` returns `i64::MAX` with no budget set.
+  - `State::table_len` and `State::table_sort` are crate-internal; use
+    `State::raw_len` and call `table.sort` through the stack.
+  - `State::table_remove_at` rejects positions outside `table.remove`'s range.
+  - `State::to_string` and `to_string_with_meta` reject output over
+    `MAX_STRING_BYTES`; `to_string_with_meta` honours a string `__tostring`.
+  - The `load_state` setup closure returns `Result<(), E>`, surfaced as
+    `LoadError::Setup(E)`.
+  - `save_state` fails with `NotQuiescent` inside a Rust callback.
+  - `HostCallbacks` boxes drop `+ Send`.
+  - `ArgError` has a required `detail: ArgDetail` field.
+- Error types: new `SourceSizeExceeded`, `PatternError`,
+  `DuplicateFunctionRegistration`, `TooManyArguments`, `TooManyResults` and
+  `SyntaxError::UnfinishedLongComment`. `SyntaxError::LParenLineStart` is
+  removed. Limit errors carry `limit`; version errors carry `found` and
+  `expected`; `CorruptArena` carries `reason`; `SaveError` gains `Internal`
+  and `TooLarge`.
+- `on_error` fires once for every error after a call dispatches. Host misuse
+  rejected before dispatch returns an error without notifying.
+- `State::current_source()` and the `source` passed to `on_print` / `on_error`
+  name the running frame's chunk.
+- A `(` on a new line continues the previous expression as a call.
+- Pattern errors are raised only when matching reaches the malformed part.
+- MSRV is Rust 1.99.
+- CLI: `Cost used` and the `--analyze` caveat go to stderr; unknown options,
+  extra input files and `--limit` with `--analyze` are usage errors.
+
+### Added
+
+- `State::raw_len` and `State::bytes_with_tostring_meta`.
+- `dellingr::limits` exposes the runtime, compiler and pattern-cache caps.
+- `string.gmatch` accepts Lua 5.4's `init` argument.
 
 ### Changed
 
-- `State::set_cost_budget` supports mid-run resets from Rust callbacks: the
-  caller's pending opcode cost is flushed before entering the callback, and
-  the reset zeroes `cost_used`, which then counts only subsequent work.
-- `dellingr::limits` exposes the runtime, compiler and pattern-cache caps.
-- `State::current_source()` and the `source` given to `on_print`/`on_error`
-  come from the running Lua frame, not the last loaded chunk.
-- `on_error` fires exactly once for every error raised once a call has
-  dispatched, including frame-setup failures and errors that already carry a
-  traceback; host API misuse rejected before dispatch (`ArgCount::Dynamic`,
-  too few arguments, a dead anchor) is returned without notifying.
-  `call_anchor` also returns failure to insert the callee into a full stack
-  without notifying.
-- Out-of-range `tonumber` base, `select` index and `rawlen` arguments say so
-  instead of `number expected, got number`.
-- `InvalidStackIndex` no longer renders as an internal error.
-- `check_any(0)`, `check_type(0, ..)`, `State::concat` with too large a count,
-  and table accessors given their own key/value slot return
-  `InvalidStackIndex` instead of panicking.
-- Comparisons in conditions compile to fused compare-and-branch opcodes; cost
-  is unchanged.
-- Flat `elseif` and expression suffix chains are parsed iteratively, so their
-  length no longer counts against the syntax-depth budget. Nested expressions
-  still do.
-- Pattern validation is lazy, as in reference Lua: malformed pattern parts
-  raise only when matching reaches them, and unfinished captures raise only
-  when a library function reads them.
-- The internal `LuaPattern::new` replaces `from_bytes_try`, making infallible
-  pattern compilation explicit; the `gmatch` cache stores only matchers.
-- `string.gmatch` accepts Lua 5.4's optional `init` argument.
-- `State::bytes_with_tostring_meta` is public for byte-exact conversion with
-  `__tostring` semantics.
-- Rust functions render as `function: 0x<id>` instead of `<function>`, using
-  the same stable, state-local identity as `%p`, preserved in snapshots.
-- Retired the `fields/miss` diagnostic probe and its `miss` verdict workload.
-- Static cost analysis labels function-call counts as `Call instructions`,
-  displays them per scope even when its cost is zero, and numbers anonymous
-  scopes among themselves rather than among all sibling functions.
-- The 255-value runtime argument/result cap is documented for Lua functions,
-  dynamic calls and Rust callbacks.
+- The table library, `table.sort` included, honours `__len`, `__index` and
+  `__newindex` as in Lua 5.4. `table.sort` reads all elements before writing
+  any back, so handlers see a different call order than in reference Lua.
+- `elseif` and expression suffix chains no longer count against the
+  syntax-depth limit.
+- `analyze_cost` reports `Call instructions` per scope.
 
 ### Fixed
 
-- Host `State::get_table` on strings follows the shared metatable's
-  `__index`, matching bytecode indexing.
-- `State::concat` counts below 2 return `InvalidStackIndex`, as counts above
-  the visible stack already do, without consuming values.
-- Environment-delta encoding uses per-table membership maps instead of
-  quadratic scans, preserving key equality, emission order and snapshot bytes.
-- `open_libs` rejects conflicting snapshot function registrations before any
-  installation, keeping the stack, globals, heap and registry unchanged.
-- Snapshot loading rejects duplicate saved global names instead of silently
-  replacing an earlier value.
-- `error()` preflights lossy UTF-8 message length against the string cap before
-  building expanded text, including messages returned by `__tostring`.
-- Unterminated long comments raise `SyntaxError::UnfinishedLongComment`
-  (`unfinished long comment`) at their opener instead of silently swallowing
-  the remaining source.
-- Mixed newline sequences such as CR LF CR count as two line breaks, rather
-  than overlapping newline pairs and undercounting source lines.
-- A call's opening `(` on a later line is rejected as ambiguous even across
-  comments; previously an intervening comment could make it a call. The
-  message now reads `ambiguous syntax (function call x new statement): '(' on
-  a new line`.
-- Error display uses column 0 for a selected caller frame or a frame whose
-  line differs from the error's own line, instead of borrowing the innermost
-  column. A selected frame with an unknown line keeps its unknown location.
-- `string.sub` validates argument 1 before its index arguments.
-- `table.concat` reports `invalid value (T) at index N in table for 'concat'`
-  for invalid elements, preserving their type and index.
-- `table.concat`, global `unpack` and `table.unpack` reject nonempty ranges
-  beyond +/-2^53, where consecutive f64 integer keys stop being distinct.
-  Exactly representable singleton keys and empty ranges remain accepted.
-- `print` measures lossy UTF-8 expansion and rejects output over the string
-  cap before building the expanded text, including `__tostring` results.
-- `tostring` preserves non-UTF-8 bytes returned by `__tostring`.
-- Snapshot loading rejects pointer ids at or above the saved next id. An
-  exhausted pointer-id counter raises an error instead of wrapping.
-- Registered Rust functions keep their rendered identity across save/load
-  even when only the host holds them. Loading skips a saved identity whose
-  function is no longer registered by setup, keeping its number retired;
-  a reachable unregistered function still fails to load.
-- Forged snapshot bytecode can no longer underflow a table's tombstone count
-  by repeatedly initializing the same pinned field with live and nil values.
-- `_G` string keys are byte-exact: non-UTF-8 keys no longer alias one another
-  or a valid UTF-8 global name through lossy conversion. Proxy keys survive
-  save/load.
-- Assigning nil to an unknown global creates no entry. Existing nil global
-  tombstones retain their insertion order and survive save/load.
-- The length operator passes two copies of its operand to `__len`, as Lua
-  5.2 and 5.4 do.
-- Host table methods preserve operands on validation and stack preflight
-  failures. Errors from calling an `__index` function still consume the key.
-- `State::table_remove_at` rejects positions outside `table.remove`'s range
-  before changing the table or stack.
-- `table.insert`, `remove`, `concat`, `unpack` (including global `unpack`)
-  and `move` honour `__len`, `__index` and `__newindex` as in Lua 5.4 where
-  applicable. Library writes share the VM's metamethod depth limit.
-- `table.sort` also honours `__len`, `__index` and `__newindex`. It reads all
-  elements, heap-sorts a rooted scratch table, then writes them back; handler
-  call order differs from reference Lua, while stable handlers and a consistent
-  comparator yield the same sorted values (tie order is unspecified). Handler
-  side effects and their execution costs can change game replays.
-- `table.move` rejects nonempty ranges with source or destination endpoints
-  beyond +/-2^53, where consecutive f64 integer keys stop being distinct.
-  Metamethod-driven `table.insert` and `table.remove` also reject key ranges
-  that would round integer positions before mutating the table.
-- `string.format` prints NaN without its platform-dependent sign on every
-  platform. Explicit `+` and space flags still apply.
-- `string.format("%q", n)` prints integral numbers in i64 range in decimal;
-  negative zero and other finite numbers retain hexadecimal float notation.
-- `tonumber(s, base)` trims vertical tab as well as the other Lua whitespace.
-- Snapshot loading rejects duplicate table-template keys and non-table
-  metatables. Rebuilding an environment table on load advances its shape
-  version instead of resetting it, invalidating caches warmed during setup.
-- `open_libs` above existing stack values gave the wrong value `_G`'s
-  metatable.
-- Cyclic `__call` chains aborted the process; they now hit the metamethod
-  depth limit.
-- `on_error` missed errors from non-function `__call` chains and direct calls
-  of non-callable values, and double-reported errors propagated through Rust
-  callbacks.
-- `break` outside a loop reported line 1.
-- `break` inside a nested function could bind to an enclosing function's loop;
-  it now raises a compile error unless the nested function has its own loop.
-- `State::call_anchor` validates argument counts against the visible frame
-  before inserting the callee, so missing arguments leave the stack untouched.
-- `string.find` took the plain-text fast path for patterns containing `)`.
-- `table.remove(t, 1)` and the `table.sort` writeback did quadratic host work
-  for a linear or flat charge; both are now a single in-place shift or write.
-  `select(n, ...)` dropped its leading arguments one at a time.
-- `table.remove` on an empty sequence returns and clears `t[0]`, as reference
-  Lua does, instead of returning nil.
-- The upvalue pool and the `string.format("%p")` id map grew without bound in
-  long-lived States; both are now swept by GC.
-- Re-adding a deleted hash-part key (`t.x = nil; t.x = v`) shifted every later
-  entry, linear host work for a constant charge; it is now O(1) amortised.
-  `pairs` order is unchanged: the re-added key still moves to the back.
-- Every internal hash map used the OS-seeded `RandomState`, so bucket layout
-  varied per process. All maps now use fixed-seed foldhash, which is also
-  cheaper than SipHash on the table hash part. Freeing interned strings no
-  longer costs a shift of the string pool's index per freed bucket.
+- `break` inside a nested function no longer binds to the enclosing loop.
+- Unterminated long comments are an error, not a silent end of file.
+- CR LF CR counts as two line breaks.
+- Cyclic `__call` chains no longer abort the process.
+- `open_libs` with a conflicting function registration changes nothing.
+- `_G` keys are byte-exact; non-UTF-8 keys no longer alias.
+- Assigning nil to an unknown global creates no entry.
+- Forged snapshot bytecode can no longer underflow a table's tombstone count.
+- Host table methods keep their operands when they reject a call, and return
+  `InvalidStackIndex` instead of panicking on bad indices.
+- `State::get_table` on a string follows the string metatable.
+- `State::call_anchor` validates its argument count before touching the stack.
+- `print` and `error` reject oversized lossy UTF-8 output before building it.
+- `tostring` keeps non-UTF-8 bytes returned by `__tostring`.
+- `#` passes two operands to `__len`.
+- Table-library ranges beyond +/-2^53 are rejected.
+- `table.remove` on an empty sequence returns and clears `t[0]`.
+- `table.concat` reports the reference invalid-value message.
+- `string.find` no longer treats patterns containing `)` as plain text.
+- `tonumber(s, base)` trims vertical tab.
+- The upvalue pool and `%p` id map no longer grow without bound.
+- Hash maps use a fixed seed instead of the OS-seeded `RandomState`.
+
+### Performance
+
+- `table.remove(t, 1)` and the `table.sort` writeback are linear, not
+  quadratic.
+- Re-adding a deleted hash key is O(1).
+- Snapshot environment-delta encoding is no longer quadratic.
+- Conditions compile to fused compare-and-branch opcodes.
+- foldhash replaces SipHash on the table hash part.
 
 ## [0.4.0] - 2026-07-27
 

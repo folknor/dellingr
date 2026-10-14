@@ -55,13 +55,11 @@ fn unfinished_long_comment_has_its_own_message() {
 }
 
 #[test]
-fn ambiguous_call_message_names_the_line_break() {
-    let err = load_error("local f = print\nlocal x = f\n(1)");
-    assert!(matches!(
-        err.kind,
-        ErrorKind::SyntaxError(SyntaxError::LParenLineStart)
-    ));
-    assert!(format!("{err}").contains("'(' on a new line"), "{err}");
+fn lparen_on_a_new_line_compiles_as_a_call() {
+    let mut state = State::new();
+    state
+        .load_string("local f = print\nlocal x = f\n(1)")
+        .expect("a `(` on a new line continues the call, as in reference Lua");
 }
 
 #[test]

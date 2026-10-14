@@ -345,10 +345,6 @@ pub enum SyntaxError {
     },
     /// `...` was used outside a vararg function.
     VarargOutsideVarargFunction,
-    /// A line started with an open parenthesis, which is ambiguous in Lua
-    /// (could continue the previous statement). dellingr rejects this rather
-    /// than guessing.
-    LParenLineStart,
 }
 
 /// Type errors raised by arithmetic, comparison, indexing, and concat.
@@ -732,12 +728,6 @@ impl fmt::Display for SyntaxError {
             VarargOutsideVarargFunction => {
                 write!(f, "cannot use '...' outside a vararg function")
             }
-            // Name the cause: the call is ambiguous only because the `(` sits
-            // on a later line than the expression it would call.
-            LParenLineStart => write!(
-                f,
-                "ambiguous syntax (function call x new statement): '(' on a new line"
-            ),
         }
     }
 }

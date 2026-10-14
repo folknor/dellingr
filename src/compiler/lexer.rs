@@ -152,13 +152,6 @@ impl<'a> Lexer<'a> {
         // Loop rather than recurse on comments: a comment skips its body and
         // continues the loop, so a long run of consecutive comments cannot
         // exhaust the stack the way tail-recursing into `next_token` did.
-        //
-        // The line the previous token ended on. A `(` on any later line is
-        // `LParenLineStart`, however the newline was consumed - plain
-        // whitespace, a line comment's terminator, or a multi-line long
-        // comment - so a comment between `f` and `(g)` cannot change whether
-        // the parser reads a call or rejects the ambiguity.
-        let prev_token_end_line = self.linebreaks.len();
         loop {
             self.consume_whitespace();
             let tok_start = self.pos;
@@ -180,7 +173,6 @@ impl<'a> Lexer<'a> {
                 ';' => Semi,
                 ':' => Colon,
                 ',' => Comma,
-                '(' if tok_line as usize > prev_token_end_line => LParenLineStart,
                 '(' => LParen,
                 ')' => RParen,
                 '{' => LCurly,
@@ -721,14 +713,14 @@ mod tests {
     }
 
     #[test]
-    fn bare_cr_marks_lparen_as_line_start() {
+    fn bare_cr_counts_as_a_line_break_before_lparen() {
         let source = "f\r(g)";
         assert_eq!(source.as_bytes()[1], b'\r');
         check(
             source,
             &[
                 (Identifier, 0, 1),
-                (LParenLineStart, 2, 1),
+                (LParen, 2, 1),
                 (Identifier, 3, 1),
                 (RParen, 4, 1),
             ],
@@ -860,7 +852,7 @@ mod tests {
             (Identifier, 0, 5),
             (LParen, 5, 1),
             (RParen, 6, 1),
-            (LParenLineStart, 8, 1),
+            (LParen, 8, 1),
             (Identifier, 9, 19),
             (RParen, 28, 1),
             (LParen, 29, 1),
@@ -941,10 +933,13 @@ mod tests {
     }
 
     #[test]
-    fn lparen_line_start_ignores_intervening_comments() {
-        // Any newline between the previous token and `(` marks it, however
-        // the newline was consumed.
+    fn lparen_is_plain_whatever_precedes_it() {
+        // A `(` is always an ordinary `LParen`, on the same line or a later
+        // one, with or without comments between: the parser reads it as a
+        // call continuation, as reference Lua does.
         for input in [
+            "f(g)",
+            "f (g)",
             "f\n(g)",
             "f -- note\n(g)",
             "f\n-- note\n(g)",
@@ -953,26 +948,16 @@ mod tests {
             "f -- note\r\n(g)",
             "f -- note\n\r(g)",
             "f --[=[ a\rb ]=] --[[ c ]] (g)",
+            "f --[[ note ]] (g)",
         ] {
-            let mut lexer = Lexer::new(input);
-            assert_eq!(lexer.next_token().unwrap().typ, Identifier);
-            assert_eq!(
-                lexer.next_token().unwrap().typ,
-                LParenLineStart,
-                "{input:?}"
-            );
-        }
-        // Same-line comments leave a plain call paren.
-        for input in ["f --[[ note ]] (g)", "f(g)", "f (g)"] {
             let mut lexer = Lexer::new(input);
             assert_eq!(lexer.next_token().unwrap().typ, Identifier);
             assert_eq!(lexer.next_token().unwrap().typ, LParen, "{input:?}");
         }
-        // Two-token lookahead must keep the same comment boundary decision.
         let mut tokens = TokenStream::new("f -- note\n(g)");
-        assert_eq!(tokens.peek2().unwrap().typ, LParenLineStart);
+        assert_eq!(tokens.peek2().unwrap().typ, LParen);
         assert_eq!(tokens.next().unwrap().typ, Identifier);
-        assert_eq!(tokens.next().unwrap().typ, LParenLineStart);
+        assert_eq!(tokens.next().unwrap().typ, LParen);
     }
 
     #[test]

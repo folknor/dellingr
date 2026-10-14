@@ -97,7 +97,7 @@ impl<'a> Parser<'a> {
     fn parse_params(&mut self) -> Result<(Vec<&'a str>, bool)> {
         let lparen_tok = self.input.next()?;
         match lparen_tok.typ {
-            TokenType::LParen | TokenType::LParenLineStart => (),
+            TokenType::LParen => (),
             _ => return Err(self.err_unexpected(lparen_tok, TokenType::LParen)),
         }
         let mut args = Vec::new();

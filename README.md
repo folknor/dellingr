@@ -136,7 +136,7 @@ toolchain check.
 
 ```toml
 [dependencies]
-dellingr = "0.4"
+dellingr = "0.5"
 ```
 
 ## Library usage/VM

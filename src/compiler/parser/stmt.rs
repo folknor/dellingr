@@ -43,7 +43,6 @@ impl<'a> Parser<'a> {
             self.input.peek_type()?,
             TokenType::Identifier
                 | TokenType::LParen
-                | TokenType::LParenLineStart
                 | TokenType::LCurly
                 | TokenType::LiteralNumber
                 | TokenType::LiteralHexNumber

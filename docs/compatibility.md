@@ -40,10 +40,6 @@ does.
 - A numeric `for` with a zero step skips its body in both directions. Lua 5.2
   skips an ascending range but loops forever on a descending one. Lua 5.4
   raises an error.
-- A `(` that starts a later line than the previous token, and would continue
-  the previous expression as a call, is a syntax error (ambiguous call). This
-  holds whether or not a comment sits between them. Lua 5.2 and 5.4 parse it
-  as a call.
 - Semicolons are accepted in some places where Lua 5.4 rejects them.
 - Errors kill the callback. There is no `pcall`, `xpcall` or `assert`.
 

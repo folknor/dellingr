@@ -21,7 +21,7 @@ pub(super) enum TokenType {
     // Comparisons
     Equal, NotEqual, LessEqual, GreaterEqual, Less, Greater,
     // L/R stuff
-    LParen, LParenLineStart, RParen, LCurly, RCurly, LSquare, RSquare,
+    LParen, RParen, LCurly, RCurly, LSquare, RSquare,
     // Other symbols
     Semi, Colon, Comma, Dot, DotDot, DotDotDot, Assign,
     // Others
@@ -102,7 +102,7 @@ impl TokenType {
             Self::GreaterEqual => ">=",
             Self::Less => "<",
             Self::Greater => ">",
-            Self::LParen | Self::LParenLineStart => "(",
+            Self::LParen => "(",
             Self::RParen => ")",
             Self::LCurly => "{",
             Self::RCurly => "}",

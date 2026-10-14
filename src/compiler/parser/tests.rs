@@ -1251,25 +1251,17 @@ fn test32() {
 
 #[test]
 fn test33() {
-    use super::*;
+    // A `(` on a new line continues the previous expression as a call, as in
+    // reference Lua: the program is `print()(foo)()`.
+    let expected = parse_str("print()(foo)()").expect("same-line form compiles");
     for text in [
         "print()\n(foo)()\n",
         "print()\r(foo)()\r",
         "print()\r\n(foo)()\r\n",
         "print()\n\r(foo)()\n\r",
     ] {
-        match parse_str(text) {
-            Err(Error {
-                kind: ErrorKind::SyntaxError(SyntaxError::LParenLineStart),
-                line_num,
-                column,
-                ..
-            }) => {
-                assert_eq!(line_num, 2, "{text:?}");
-                assert_eq!(column, 1, "{text:?}");
-            }
-            _ => panic!("Should detect ambiguous function call because of linebreak: {text:?}"),
-        }
+        let chunk = parse_str(text).unwrap_or_else(|e| panic!("{text:?}: {e:?}"));
+        assert_eq!(chunk.code, expected.code, "{text:?}");
     }
 }
 
@@ -2343,23 +2335,18 @@ fn unfinished_long_comment_is_a_syntax_error() {
 }
 
 #[test]
-fn lparen_on_a_later_line_is_ambiguous_regardless_of_comments() {
+fn lparen_on_a_later_line_continues_the_call_regardless_of_comments() {
+    let expected = parse_str("f() (g)()").expect("same-line form compiles");
     for source in [
         "f()\n(g)()",
         "f() -- note\n(g)()",
         "f()\n-- note\n(g)()",
         "f() --[[ a\nb ]] (g)()",
+        "f() --[[ same line ]] (g)()",
     ] {
-        let err = parse_str(source).expect_err("a `(` on a later line must be rejected");
-        assert!(
-            matches!(
-                err.kind,
-                ErrorKind::SyntaxError(SyntaxError::LParenLineStart)
-            ),
-            "{source:?}: {err:?}"
-        );
+        let chunk = parse_str(source).unwrap_or_else(|e| panic!("{source:?}: {e:?}"));
+        assert_eq!(chunk.code, expected.code, "{source:?}");
     }
-    parse_str("f() --[[ same line ]] (g)()").expect("a same-line `(` is a call");
 }
 
 #[test]

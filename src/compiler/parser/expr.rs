@@ -220,7 +220,7 @@ impl Parser<'_> {
     /// Parses a 'primary' expression. See `parse_prefix_exp` and `parse_expr_base` for details.
     fn parse_primary(&mut self) -> Result<ExpDesc> {
         match self.input.peek_type()? {
-            TokenType::Identifier | TokenType::LParen | TokenType::LParenLineStart => {
+            TokenType::Identifier | TokenType::LParen => {
                 let prefix = self.parse_prefix_exp()?;
                 self.eval_prefix_exp(&prefix);
                 Ok(prefix.into())
@@ -241,7 +241,7 @@ impl Parser<'_> {
                 let place = self.parse_prefix_identifier(text)?;
                 place.into()
             }
-            TokenType::LParen | TokenType::LParenLineStart => {
+            TokenType::LParen => {
                 self.parse_expr()?;
                 self.expect(TokenType::RParen)?;
                 PrefixExp::Parenthesized
@@ -341,10 +341,6 @@ impl Parser<'_> {
                     ArgCount::Fixed(self.checked_fixed_arg_count(num_args as usize, 0)?)
                 };
                 PrefixExp::FunctionCall(CallSite::new(num_args, line))
-            }
-            TokenType::LParenLineStart => {
-                let pos = self.input.next()?.start;
-                return Err(self.error_at(SyntaxError::LParenLineStart, pos));
             }
             TokenType::Colon => {
                 let line = self.input.peek()?.line;
