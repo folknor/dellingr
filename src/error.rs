@@ -14,8 +14,8 @@ use crate::limits::{
 pub struct StackFrame {
     /// Function name (if known).
     pub function_name: Option<String>,
-    /// Source file or chunk name.
-    pub source: Option<String>,
+    /// Source file or chunk name, shared with the chunk that executed.
+    pub source: Option<Arc<str>>,
     /// Line number where the call occurred (1-indexed).
     pub line: u32,
 }

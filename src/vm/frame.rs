@@ -199,7 +199,7 @@ impl Frame {
     pub(super) fn to_stack_frame(&self) -> StackFrame {
         StackFrame {
             function_name: self.bytecode.name.clone(),
-            source: self.bytecode.source.as_deref().map(str::to_owned),
+            source: self.bytecode.source.clone(),
             line: self.current_line(),
         }
     }

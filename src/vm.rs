@@ -1317,7 +1317,7 @@ impl State {
             };
             trace.push(StackFrame {
                 function_name: call_info.bytecode.name.clone(),
-                source: call_info.bytecode.source.as_deref().map(str::to_owned),
+                source: call_info.bytecode.source.clone(),
                 line,
             });
         }

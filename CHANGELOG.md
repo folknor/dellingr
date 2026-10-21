@@ -8,6 +8,9 @@ All notable changes to dellingr are documented here. The format follows
 
 ### Changed (breaking)
 
+- `error::StackFrame::source` is `Option<Arc<str>>` instead of
+  `Option<String>`: trace frames share the chunk's source-name allocation
+  rather than copying it per frame per error. `as_deref()` reads it as before.
 - `limits::GMATCH_PATTERN_CACHE_ENTRIES` and `limits::GMATCH_PATTERN_CACHE_BYTES`
   are renamed `limits::PATTERN_CACHE_ENTRIES` and `limits::PATTERN_CACHE_BYTES`
   (same values): the per-State compiled-pattern cache they bound now also
@@ -136,6 +139,12 @@ All notable changes to dellingr are documented here. The format follows
   name; the snapshot format is unchanged. `State::string_count` counts the
   six names from construction on, and they count toward the adaptive GC
   threshold.
+- **Replay-visible (snapshot contents only):** the compiler no longer emits
+  upvalue-close instructions for block and loop scopes whose locals no closure
+  captures, so the same source compiles to fewer instructions in functions
+  that create closures, and snapshots of such states contain that shorter
+  bytecode. Results and cost charges are unchanged, the snapshot format is
+  unchanged, and older saved bytecode still loads and runs.
 - Metatable lookups for `__index`, `__newindex` and string `__index` no
   longer reserve temporary stack slots, so near `MAX_STACK_SIZE` an access
   that used to fail with a stack overflow may now succeed.

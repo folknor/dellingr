@@ -74,3 +74,30 @@ fn nested_chunks_restore_source_and_attribute_error_to_running_frame() {
     );
     assert_eq!(events.errors, vec![Some("A".into())]);
 }
+
+#[test]
+fn trace_frames_share_the_chunk_source_and_outlive_the_state() {
+    let mut state = State::new();
+    load_and_run(
+        &mut state,
+        "function inner()\n error('boom')\nend\nfunction outer()\n inner()\nend",
+        "shared",
+    );
+    state.get_global("outer").expect("outer is installed");
+    let error = state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+        .expect_err("outer fails");
+    let before = error.to_string();
+    drop(state);
+    let trace = error.stack_trace();
+    // The current frame (built from the executing frame) and the caller frame
+    // (built from the call stack) both hand out the chunk's own allocation.
+    let current = trace[0]
+        .source
+        .as_ref()
+        .expect("current frame has a source");
+    let caller = trace[1].source.as_ref().expect("caller frame has a source");
+    assert_eq!(&**current, "shared");
+    assert!(Arc::ptr_eq(current, caller));
+    assert_eq!(error.to_string(), before);
+}

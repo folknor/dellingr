@@ -171,15 +171,6 @@ for `with_rooted_value` on the recursive path - or a plain struct that every
 remove. Revisit only with a native-stack-per-level measurement of the
 recursive path showing the closure form is frame-neutral.
 
-## BUG-008 - Traceback frames copy the source name per frame
-
-Narrowed in wave 2 to its growth residue (name limits are now enforced at
-registration and compile time). `StackFrame.source` is still a fresh `String`
-per frame per error, so a long source name times `MAX_CALL_DEPTH` frames is
-copied on every error, while chunks already hold it as `Arc<str>`. Fix: make
-`StackFrame.source` an `Arc<str>` (touches `vm/frame.rs` traceback
-construction and existing tests).
-
 ## HYG-033 - Verifier and finalize cost scales badly with source size
 
 Reported by the compiler hunter.
