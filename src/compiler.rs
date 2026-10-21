@@ -342,7 +342,7 @@ fn finalize_at_depth(bc: &mut Bytecode, depth: usize) -> Result<()> {
 mod runtime_cache_tests {
     use super::*;
     use crate::error::{ErrorKind, SyntaxError};
-    use crate::limits::{MAX_SYNTAX_DEPTH, MAX_VERIFIER_MARKER_DEPTH};
+    use crate::limits::{MAX_SYNTAX_DEPTH, MAX_VERIFIER_MARKER_DEPTH, SYNTAX_SUFFIX_COST};
 
     /// The dynamic shapes the verifier's `Known`/`Dyn` transitions and marker
     /// stacks exist for. If the corpus stops containing one of these, the
@@ -431,10 +431,8 @@ mod runtime_cache_tests {
 
     #[test]
     fn deepest_nested_programs_fit_verifier_marker_limit() {
-        // Parsing at the syntax depth limit recurses deeply in unoptimized dev
-        // builds, so run on a main-thread-sized stack.
         std::thread::Builder::new()
-            .stack_size(8 << 20)
+            .stack_size(parser::DEEP_PARSE_TEST_STACK_BYTES)
             .spawn(deepest_nested_programs_body)
             .expect("spawning the marker limit test thread should succeed")
             .join()
@@ -445,6 +443,14 @@ mod runtime_cache_tests {
         let (call_depth, call_chain) = deepest_accepted_program(|depth| {
             format!("return {}{}", "f(".repeat(depth), ")".repeat(depth))
         });
+        // The root statement list charges one unit; each call level charges
+        // its expression and unary units plus the suffix charge. The innermost
+        // call has no arguments, so it adds no expression units of its own.
+        assert_eq!(
+            call_depth,
+            (MAX_SYNTAX_DEPTH as usize - 1) / (2 + SYNTAX_SUFFIX_COST as usize),
+            "the call chain must stop where the syntax budget says it does"
+        );
         let call_marker_peak = marker_peak(&call_chain, Instr::OP_MARK_CALL_BASE, |instruction| {
             instruction.opcode() == Instr::OP_CALL && instruction.a() == u8::MAX
         });

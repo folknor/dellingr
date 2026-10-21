@@ -11,7 +11,7 @@ use super::TailKind;
 use super::TokenType;
 use crate::compiler::exp_desc::CallSite;
 use crate::error::ParserFault;
-use crate::limits::MAX_EXPRESSIONS;
+use crate::limits::{MAX_EXPRESSIONS, SYNTAX_SUFFIX_COST};
 
 impl Parser<'_> {
     /// Parses a comma-separated list of expressions. Trailing and leading
@@ -270,16 +270,15 @@ impl Parser<'_> {
             // descending into expressions. Keep their previous depth charge:
             // without it, nested calls and indexes allow more native frames
             // per syntax-budget tick than parenthesized expressions do. The
-            // charge is two ticks, not one: the suffix parser's frame is fat
-            // enough in debug builds that a single tick left nested calls
-            // overflowing a default 2MB test thread before the limit hit
-            // (syntax_depth_headroom).
+            // charge size and its reason live on SYNTAX_SUFFIX_COST.
             let nested = matches!(
                 self.input.peek_type()?,
                 TokenType::LSquare | TokenType::LParen | TokenType::LCurly | TokenType::Colon
             );
             let result = if nested {
-                self.with_syntax_level(2, |parser| parser.parse_prefix_suffix(&expr))
+                self.with_syntax_level(SYNTAX_SUFFIX_COST, |parser| {
+                    parser.parse_prefix_suffix(&expr)
+                })
             } else {
                 self.parse_prefix_suffix(&expr)
             };

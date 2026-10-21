@@ -12,10 +12,28 @@ Violations are reported as errors at load time, never silently truncated.
 
 - `MAX_SOURCE_BYTES`: source text per load. Longer source is rejected with
   `SourceSizeExceeded` before tokenising.
-- `MAX_SYNTAX_DEPTH`: budget of active recursive parser entries. When it is
-  exhausted the parser raises `chunk has too many syntax levels`.
-  - It is a recursion budget, not a source nesting depth.
-  - A nested parenthesis consumes two entries (expression and unary parsers).
+- `MAX_SYNTAX_DEPTH`: budget, in units, charged by active recursive parsers.
+  When it is exhausted the parser raises `chunk has too many syntax levels`.
+  - It is a recursion budget, not a source nesting depth. The statement,
+    `if`, expression and unary parsers each charge one unit while active.
+  - `SYNTAX_SUFFIX_COST`: extra units charged while the contents of a call,
+    index or method-call suffix are parsed. It keeps native stack per unit
+    below the parenthesis cycle in debug builds.
+  - Units added per nesting level, by construct (the root statement list
+    charges one more, and the innermost leaf needs its own headroom):
+
+    | Construct | Units per level |
+    |---|---|
+    | parenthesis, `(x)` | 2 |
+    | table constructor in a field, `{ {x} }` | 2 |
+    | call argument or index, `f(f(x))`, `a[a[x]]` | 2 + `SYNTAX_SUFFIX_COST` |
+    | unary operator, `- - x` | 1 |
+    | right operand of `^` | 1 |
+    | `if` body | 2 |
+    | `do`, loop or named `function` body | 1 |
+
+    So `local x = ((...1...))` compiles up to 98 parentheses and
+    `return f(f(...f()...))` up to 49 calls.
   - `elseif` arms and expression suffixes such as `a.b[c]:m()()` are parsed
     iteratively. Their length consumes nothing; their contents still do.
 - `MAX_CHUNK_NESTING`: function nesting depth, root included. It shares the
@@ -109,6 +127,9 @@ across replay runs.
   fallible for this reason.
 - The cap bounds the shared value stack, not total host memory. Enforcing it
   charges no cost.
+- A stack at the cap holds about 16 MB of values on a 64-bit host. Tests that
+  push to `MAX_STACK_SIZE` pay that per State, inside the fixed virtual-memory
+  cap `scripts/test_limited.sh` applies (`TEST_LIMIT_KB` in `scripts/lib.sh`).
 
 ## Host table methods
 

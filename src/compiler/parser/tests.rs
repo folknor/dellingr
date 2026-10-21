@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use super::Bytecode;
+use super::DEEP_PARSE_TEST_STACK_BYTES;
 use super::Instr;
 use super::Parser;
 use super::TokenStream;
@@ -12,7 +13,7 @@ use crate::instr::{ArgCount, Builtin, RetCount};
 use crate::limits::{
     MAX_ASSIGNMENT_OFFSET, MAX_CHUNK_NESTING, MAX_EXPRESSIONS, MAX_FIXED_ARGS, MAX_FIXED_RESULTS,
     MAX_LITERALS, MAX_LOCALS, MAX_NESTED, MAX_SOURCE_BYTES, MAX_TABLE_BATCH_SIZE,
-    MAX_TABLE_TEMPLATE_FIELDS, MAX_TABLE_TEMPLATES,
+    MAX_TABLE_TEMPLATE_FIELDS, MAX_TABLE_TEMPLATES, SYNTAX_SUFFIX_COST,
 };
 
 /// Recursively clear line_info from a chunk and its nested chunks.
@@ -1880,11 +1881,8 @@ fn too_many_upvalues_errors() {
 
 #[test]
 fn syntax_depth_limit() {
-    // Reaching MAX_SYNTAX_DEPTH and unwinding its error overflows the 2MB
-    // default test-thread stack in unoptimized dev builds, so run on a
-    // main-thread-sized stack.
     std::thread::Builder::new()
-        .stack_size(8 << 20)
+        .stack_size(DEEP_PARSE_TEST_STACK_BYTES)
         .spawn(syntax_depth_limit_body)
         .expect("spawning the test thread should succeed")
         .join()
@@ -2044,8 +2042,8 @@ fn syntax_depth_headroom() {
     // Nested parens are the worst case: each level descends through both the
     // parse_expr and parse_unary wrappers plus the whole precedence ladder, so
     // it burns ~13 native frames per level and charges 2 depth ticks. Two ticks
-    // per paren is why the effective paren limit is ~99 rather than 200; 95 is
-    // the deepest round number that still compiles.
+    // per paren is why `local x = (...(1)...)` tops out at 98 levels rather
+    // than 200; 95 is the deepest round number that still compiles.
     let paren_depth = 95;
     parse_str(&format!(
         "local x = {}1{}",
@@ -2055,10 +2053,10 @@ fn syntax_depth_headroom() {
     .expect("paren nesting below the limit must compile");
 
     // Nested call arguments and indexes retain additional suffix-parser
-    // frames. Their active contents charge two extra ticks (four per level) to
+    // frames. Their active contents charge SYNTAX_SUFFIX_COST extra ticks to
     // keep native-stack usage per budget tick below the parenthesis cycle
-    // above; 63 levels at three ticks overflowed a 2MB thread.
-    let suffix_depth = depth / 4;
+    // above; 63 levels at three ticks per level overflowed a 2MB thread.
+    let suffix_depth = depth / (2 + SYNTAX_SUFFIX_COST as usize);
     parse_str(&format!(
         "local x = {}1{}",
         "f(".repeat(suffix_depth),
@@ -2359,7 +2357,7 @@ fn nested_function_chain(depth: usize) -> String {
 #[test]
 fn chunk_nesting_limit_is_enforced_by_the_parser() {
     std::thread::Builder::new()
-        .stack_size(8 << 20)
+        .stack_size(DEEP_PARSE_TEST_STACK_BYTES)
         .spawn(|| {
             let source = nested_function_chain(MAX_CHUNK_NESTING);
             let bytecode =

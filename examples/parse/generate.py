@@ -11,11 +11,12 @@ closure, and plenty of identifiers, so lexing, statement parsing, call
 emission and nested-chunk finalization all get exercised at scale.
 
 Functions are globals rather than `local function` on purpose: hundreds of
-top-level locals would blow Lua's 200-local-per-function limit in the main
-chunk. Every top-level function is a nested chunk, so the executable guard
-below keeps FUNCTION_COUNT within the parser's nested-function limit. Size
-therefore comes from making each function longer rather than from adding more
-of them.
+top-level locals would exceed the per-function local limit (`MAX_LOCALS` in
+src/limits.rs, and reference Lua's own 200) in the main chunk. Every top-level
+function is a nested chunk of the main chunk, so the executable guard below
+keeps them within `MAX_NESTED`, read from src/limits.rs on every run
+(including --check) so the two cannot drift. Size therefore comes from making
+each function longer rather than from adding more of them.
 
 The generated body must stay cheap to RUN, since the example runner executes
 every Lua file under examples/. Only a handful of the generated functions are
@@ -25,11 +26,37 @@ Usage: python3 examples/parse/generate.py [--check]
 """
 
 import pathlib
+import re
 import sys
 
 FUNCTION_COUNT = 200
-MAX_NESTED_FUNCTIONS = (1 << 8) - 1  # parser/func.rs stores the count in u8
+# Top-level functions besides the generated nodes: mix, scale, tag, _bench.
+EXTRA_TOP_LEVEL_FUNCTIONS = 4
+# The footer calls node_100_step.
+MIN_FUNCTION_COUNT = 100
 OUT = pathlib.Path(__file__).with_name("large_source.lua")
+LIMITS = pathlib.Path(__file__).resolve().parents[2] / "src" / "limits.rs"
+
+INTEGER_MAX = {"u8": (1 << 8) - 1, "u16": (1 << 16) - 1, "u32": (1 << 32) - 1}
+
+
+def read_limit(name):
+    """Evaluate `pub const NAME: usize = ...;` from src/limits.rs.
+
+    Only an integer literal or `uN::MAX as usize` is understood; anything else
+    fails loudly rather than guessing.
+    """
+    text = LIMITS.read_text(encoding="utf-8")
+    match = re.search(rf"^pub const {name}: usize = (.+);$", text, re.MULTILINE)
+    if match is None:
+        raise SystemExit(f"{LIMITS}: no `pub const {name}: usize` declaration")
+    expr = match.group(1).strip()
+    if re.fullmatch(r"[0-9_]+", expr):
+        return int(expr.replace("_", ""))
+    max_match = re.fullmatch(r"(u8|u16|u32)::MAX as usize", expr)
+    if max_match:
+        return INTEGER_MAX[max_match.group(1)]
+    raise SystemExit(f"{LIMITS}: cannot evaluate {name} = {expr}")
 
 HEADER = '''-- GENERATED FILE - do not edit by hand.
 -- Regenerate with: python3 examples/parse/generate.py
@@ -102,8 +129,11 @@ print("parse/large_source: true")
 
 
 def main():
-    if not 0 < FUNCTION_COUNT <= MAX_NESTED_FUNCTIONS:
-        raise SystemExit("FUNCTION_COUNT exceeds the parser's nested-function limit")
+    max_nested = read_limit("MAX_NESTED")
+    if FUNCTION_COUNT + EXTRA_TOP_LEVEL_FUNCTIONS > max_nested:
+        raise SystemExit(f"top-level functions exceed MAX_NESTED ({max_nested})")
+    if FUNCTION_COUNT < MIN_FUNCTION_COUNT:
+        raise SystemExit(f"FUNCTION_COUNT must be at least {MIN_FUNCTION_COUNT}")
 
     parts = [HEADER.format(count=FUNCTION_COUNT)]
     for i in range(1, FUNCTION_COUNT + 1):

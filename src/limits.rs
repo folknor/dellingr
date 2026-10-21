@@ -27,8 +27,22 @@ pub const GMATCH_PATTERN_CACHE_BYTES: usize = tuning::GMATCH_PATTERN_CACHE_BYTES
 
 // Recursive parser entry points share this budget. Visible nesting costs vary
 // by construct, so this is a recursion budget rather than a source-level depth.
-/// Maximum active recursive parser entries, rather than source nesting levels.
+// The statement, `if`, expression and unary parsers each charge one unit while
+// active; a call or index suffix whose contents recurse also charges
+// SYNTAX_SUFFIX_COST. docs/limits.md tabulates the per-construct totals.
+/// Syntax budget, in units charged by active recursive parsers, rather than a
+/// count of source nesting levels.
 pub const MAX_SYNTAX_DEPTH: u32 = 200;
+
+// The suffix loop and suffix parser stay live while their contents recurse,
+// and in debug builds those frames are large enough that a one-unit charge let
+// nested calls overflow a default 2MB test thread before the budget ran out.
+// With the expression and unary units, one nested call or index level costs
+// 2 + SYNTAX_SUFFIX_COST. Changing this value changes which sources compile.
+/// Additional syntax-budget units charged while the contents of a call
+/// argument list, index, table-call or method-call suffix are parsed. This is
+/// a parse-time budget, unrelated to runtime instruction cost.
+pub const SYNTAX_SUFFIX_COST: u32 = 2;
 
 // Bound compile-time scanning and line-index storage. This build-time policy
 // cap also keeps lexer token lengths and one-based line numbers within u32.

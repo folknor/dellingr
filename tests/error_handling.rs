@@ -7,6 +7,9 @@ use dellingr::error::ErrorKind;
 use dellingr::limits::MAX_STRING_BYTES;
 use dellingr::{ArgCount, LuaType, RetCount, State};
 
+#[path = "common/stack.rs"]
+mod stack;
+
 #[test]
 fn host_string_limit_is_inclusive_and_leaves_stack_unchanged() {
     let mut state = State::new();
@@ -422,7 +425,7 @@ fn call_depth_exceeded_error() {
 /// 2MB default test-thread stack before the depth limit is reached.
 fn on_deep_stack(f: impl FnOnce() + Send + 'static) {
     std::thread::Builder::new()
-        .stack_size(64 << 20)
+        .stack_size(stack::DEEP_RECURSION_TEST_STACK_BYTES)
         .spawn(f)
         .expect("spawning the test thread should succeed")
         .join()

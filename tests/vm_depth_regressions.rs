@@ -1,6 +1,9 @@
 use dellingr::error::ErrorKind;
 use dellingr::{ArgCount, RetCount, State};
 
+#[path = "common/stack.rs"]
+mod stack;
+
 #[test]
 fn cyclic_call_metamethod_returns_depth_error_and_state_recovers() {
     let mut state = State::new();
@@ -33,10 +36,8 @@ fn cyclic_call_metamethod_returns_depth_error_and_state_recovers() {
 
 #[test]
 fn recursion_through_a_function_valued_call_metamethod_is_not_capped_at_metamethod_depth() {
-    // Unoptimized builds use far more native stack per Lua call than the 2MB
-    // default test-thread stack allows, so run on a dedicated deep stack.
     std::thread::Builder::new()
-        .stack_size(64 << 20)
+        .stack_size(stack::DEEP_RECURSION_TEST_STACK_BYTES)
         .spawn(function_valued_call_recursion)
         .expect("spawning the test thread should succeed")
         .join()

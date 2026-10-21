@@ -83,12 +83,11 @@ small-stack embedder thread deep recursion aborts instead of returning
 stack-remaining probe such as `stacker`/`psm`, no per-State override). The
 `eval.rs` rules (no `catch_unwind`, no hotpath on the recursive path) show
 per-frame bytes are already load-bearing. `call_depth_exceeded_error` enforces it
-only at the test thread's stack size. The compiler test
-`deepest_nested_programs_fit_verifier_marker_limit` spawns an 8 MiB thread sized
-for today's debug frames; bigger frames fail as an abort, not an assertion (same
-class as `syntax_depth_headroom`); derive the size from a named constant. Several
-`vm/tests.rs` tests push `MAX_STACK_SIZE` values (~16 MB per test thread), worth
-knowing under `test_limited.sh`'s cap.
+only at the test thread's stack size. Test thread stacks are now named constants
+(`DEEP_PARSE_TEST_STACK_BYTES`, `DEEP_RECURSION_TEST_STACK_BYTES`), but frames
+outgrowing them still fail as an abort, not an assertion. What remains is
+detection or configurability: a stack-remaining probe or a per-State
+native-stack setting, which widens the embedding surface.
 
 ## Replay- or cost-visible changes
 
@@ -282,18 +281,6 @@ snapshots and become per-State `BytecodeRuntime.literals` slots. Fix: compact in
 `finalize` (remap `PUSH_NUM` Bx); changes snapshot contents of identical source,
 so needs a note but not a format bump.
 
-## HYG-017 - Call/index suffixes charge two syntax levels, a hidden multiplier on `MAX_SYNTAX_DEPTH`
-
-Reported by the compiler hunter.
-
-`expr.rs` calls `enter_syntax_level` twice per call/index suffix (justified by
-debug-build frame size), so nested calls get 100 levels and parentheses 200.
-Neither `limits.rs` nor `docs/limits.md` says so. Reference `LUAI_MAXCCALLS` is
-also per-construct, so it may be acceptable, but it is undocumented. Fix:
-`limits::SYNTAX_COST_SUFFIX = 2` (or a `SyntaxCost` enum) and document it; the
-`deepest_nested_programs_fit_verifier_marker_limit` test already depends on the
-ratio and could read the constant.
-
 ## HYG-055 - Duplicate-key and disjointness validation runs twice on two key representations
 
 Reported by the heap hunter.
@@ -358,18 +345,6 @@ every host: a deliberate and correct divergence from reference (which follows
 gate only agrees with reference under a locale where `isalpha` is ASCII-only, so a
 host with a Latin-1 locale could produce spurious diff failures on bytes
 0x80..0xFF.
-
-## HYG-095 - Generator restates compiler limits
-
-Reported by the tooling hunter.
-
-`examples/parse/generate.py` has `MAX_NESTED_FUNCTIONS = (1 << 8) - 1`
-duplicating `limits::MAX_NESTED`; its docstring cites reference Lua's 200-local
-limit while dellingr's `MAX_LOCALS` is 255, and says "parser/func.rs stores the
-count in u8" when the limit lives in `limits.rs`. The duplication is forced
-(Python cannot import Rust); `run_examples` failing to parse an over-limit file is
-what keeps them in step. Fix: cite `limits.rs`, or have `--check` read the
-constant from it.
 
 ## HYG-096 - Exit-code vocabulary is an unstated cross-file assumption
 

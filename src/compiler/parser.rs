@@ -730,6 +730,12 @@ fn number_literal_key(number: f64) -> Option<NumberLiteralKey> {
     }
 }
 
+/// Thread stack for unit tests that parse at the syntax-budget limit. Parsing
+/// there and unwinding the limit error overflows the 2MB default test-thread
+/// stack in unoptimized dev builds; 8MB matches a typical main-thread stack.
+#[cfg(test)]
+pub(crate) const DEEP_PARSE_TEST_STACK_BYTES: usize = 8 << 20;
+
 #[cfg(test)]
 mod tests;
 
