@@ -2,8 +2,8 @@
 //!
 //! This is the differential gate: `brokkr check` runs it once per `[[check]]`
 //! feature shape in `brokkr.toml`, so the corpus is checked against the CLI
-//! build of that shape. Each script process is bounded by the 5s
-//! `DELLINGR_DIFF_TIMEOUT` passed to `scripts/diff_test.sh`.
+//! build of that shape. Each script process is bounded by the default
+//! per-process timeout of `scripts/diff_test.sh` (set in `scripts/lib.sh`).
 //!
 //! The corpus tests are compiled out under the `hotpath` feature: it
 //! instruments every call in the CLI binary, which pushes the corpus past the
@@ -26,7 +26,7 @@ fn manifest_path(relative: &str) -> PathBuf {
 fn malformed_timeout_is_rejected_once_before_other_checks() {
     let output = Command::new("bash")
         .arg(manifest_path("scripts/diff_test.sh"))
-        .env("DELLINGR_DIFF_TIMEOUT", "5 s")
+        .args(["--timeout", "5 s"])
         .output()
         .expect("bash should be available to check timeout validation");
 
@@ -38,7 +38,7 @@ fn malformed_timeout_is_rejected_once_before_other_checks() {
     );
     assert_eq!(
         stderr.lines().collect::<Vec<_>>(),
-        vec!["invalid DELLINGR_DIFF_TIMEOUT: 5 s"],
+        vec!["invalid --timeout: 5 s"],
         "malformed timeout should produce one refusal line"
     );
     assert!(
@@ -162,9 +162,9 @@ fn run_differential_bucket(name: &str, examples: &[PathBuf]) {
     // is missing, so a host without them fails here rather than skipping.
     let output = Command::new("bash")
         .arg(manifest_path("scripts/diff_test.sh"))
-        .env("DELLINGR", common::dellingr_bin())
-        .env("DELLINGR_SKIP_BUILD", "1")
-        .env("DELLINGR_DIFF_TIMEOUT", "5s")
+        .arg("--bin")
+        .arg(common::dellingr_bin())
+        .arg("--")
         .args(examples)
         .output()
         .expect("bash should be available to run scripts/diff_test.sh");

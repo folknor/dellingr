@@ -130,10 +130,12 @@ snapshot_in_flight! {
 }
 
 const MAGIC: [u8; 4] = *b"DLGS";
-const MAX_PATH_GLOBAL_BYTES: usize = 96;
-const MAX_RENDERED_PATH_SEGMENTS: usize = 32;
-const MAX_RENDERED_PATH_BYTES: usize = 512;
-const MAX_LOGGED_USER_TEXT_BYTES: usize = 128;
+use crate::limits::tuning::{
+    SAVE_LOGGED_USER_TEXT_BYTES as MAX_LOGGED_USER_TEXT_BYTES,
+    SAVE_PATH_GLOBAL_BYTES as MAX_PATH_GLOBAL_BYTES,
+    SAVE_RENDERED_PATH_BYTES as MAX_RENDERED_PATH_BYTES,
+    SAVE_RENDERED_PATH_SEGMENTS as MAX_RENDERED_PATH_SEGMENTS,
+};
 
 /// Bytes produced by [`State::save_state`] plus non-fatal save diagnostics.
 #[derive(Debug, Clone, Eq, PartialEq)]

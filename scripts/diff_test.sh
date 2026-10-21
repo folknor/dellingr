@@ -14,11 +14,10 @@
 # agree cannot hide a regression, and a deliberate divergence is already
 # marked with -- DIFF: <reason>.
 #
-# Env:
-#   DELLINGR=/path/to/dellingr    use an already-built binary
-#   DELLINGR_SKIP_BUILD=1         require DELLINGR and do not build
-#   DELLINGR_DIFF_TIMEOUT=<time>  per-process timeout (default is in lib.sh)
-#   DELLINGR_DIFF_TIMEOUT=0       disable the per-process timeout
+# Usage: diff_test.sh [--bin <path>] [--timeout <time>] [file-or-dir...]
+#   --bin <path>                  use an already-built binary instead of building
+#   --timeout <time>              per-process timeout in timeout(1) syntax
+#                                 (default is in lib.sh); 0 disables it
 #
 # Internal input mode:
 #   --list-examples               print the default example paths and exit
@@ -51,41 +50,60 @@ if [ "$#" -eq 1 ] && [ "$1" = "--list-examples" ]; then
     exit 0
 fi
 
+OUR_LUA=""
+DIFF_TIMEOUT="$DEFAULT_DIFF_TIMEOUT"
+while [ "$#" -gt 0 ]
+do
+    case "$1" in
+        --bin|--timeout)
+            if [ "$#" -lt 2 ]; then
+                echo "$1 requires a value" >&2
+                exit 2
+            fi
+            if [ "$1" = --bin ]; then
+                OUR_LUA="$2"
+            else
+                DIFF_TIMEOUT="$2"
+            fi
+            shift 2
+            ;;
+        --)
+            shift
+            break
+            ;;
+        *) break ;;
+    esac
+done
+
 DURATION_RE='^\+?([0-9]+([.][0-9]*)?|[.][0-9]+)([smhd])?$'
-if [[ ! "$DELLINGR_DIFF_TIMEOUT" =~ $DURATION_RE ]]; then
-    echo "invalid DELLINGR_DIFF_TIMEOUT: $DELLINGR_DIFF_TIMEOUT" >&2
+if [[ ! "$DIFF_TIMEOUT" =~ $DURATION_RE ]]; then
+    echo "invalid --timeout: $DIFF_TIMEOUT" >&2
     exit 2
 fi
 
 TIMEOUT_MODE=""
 TIMEOUT_BIN=""
 ZERO_DURATION_RE='^\+?(0+([.]0*)?|[.]0+)[smhd]?$'
-if [[ "$DELLINGR_DIFF_TIMEOUT" =~ $ZERO_DURATION_RE ]]; then
+if [[ "$DIFF_TIMEOUT" =~ $ZERO_DURATION_RE ]]; then
     TIMEOUT_MODE=none
 elif command -v timeout >/dev/null 2>&1; then
     TIMEOUT_BIN="$(command -v timeout)"
     TIMEOUT_MODE=external
 else
-    echo "missing timeout support; install GNU coreutils or set DELLINGR_DIFF_TIMEOUT=0" >&2
+    echo "missing timeout support; install GNU coreutils or pass --timeout 0" >&2
     exit 1
 fi
 
 if [ "$TIMEOUT_MODE" = external ]; then
     timeout_status=0
-    "$TIMEOUT_BIN" "$DELLINGR_DIFF_TIMEOUT" true >/dev/null 2>&1 || timeout_status=$?
+    "$TIMEOUT_BIN" "$DIFF_TIMEOUT" true >/dev/null 2>&1 || timeout_status=$?
     if [ "$timeout_status" -ne 0 ] && [ "$timeout_status" -ne 124 ]; then
-        echo "invalid DELLINGR_DIFF_TIMEOUT: $DELLINGR_DIFF_TIMEOUT" >&2
+        echo "invalid --timeout: $DIFF_TIMEOUT" >&2
         exit 2
     fi
 fi
 
-if [ "$DELLINGR_SKIP_BUILD" = "1" ]; then
-    if [ -z "${DELLINGR:-}" ]; then
-        echo "DELLINGR_SKIP_BUILD=1 requires DELLINGR to name the binary" >&2
-        exit 1
-    fi
-    OUR_LUA="$DELLINGR"
-else
+if [ -z "$OUR_LUA" ]; then
     OUR_LUA="$(dellingr_bin release)" || exit 1
 fi
 if [ ! -x "$OUR_LUA" ]; then
@@ -139,7 +157,7 @@ run_lua() {
     if [ "$TIMEOUT_MODE" = none ]; then
         "$@"
     else
-        "$TIMEOUT_BIN" "$DELLINGR_DIFF_TIMEOUT" "$@"
+        "$TIMEOUT_BIN" "$DIFF_TIMEOUT" "$@"
     fi
 }
 

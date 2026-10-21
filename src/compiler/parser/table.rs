@@ -6,9 +6,8 @@ use super::RetCount;
 use super::SyntaxError;
 use super::TailKind;
 use super::TokenType;
+use crate::limits::tuning::INLINE_TEMPLATE_FIELDS;
 use crate::limits::{MAX_TABLE_BATCH_SIZE, MAX_TABLE_TEMPLATE_FIELDS, MAX_TABLE_TEMPLATES};
-
-const INLINE_TEMPLATE_FIELDS: usize = 4;
 
 type TableTemplateField = (u16, usize);
 type ParsedTableEntry = (u8, Option<TailKind>, Option<TableTemplateField>);

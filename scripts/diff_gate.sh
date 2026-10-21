@@ -15,4 +15,4 @@ cd "$SCRIPT_DIR/.." || exit 1
 . "$SCRIPT_DIR/lib.sh"
 
 DEBUG_BIN="$(dellingr_bin debug)" || exit 1
-exec env DELLINGR="$DEBUG_BIN" DELLINGR_SKIP_BUILD=1 bash "$SCRIPT_DIR/diff_test.sh" "$@"
+exec bash "$SCRIPT_DIR/diff_test.sh" --bin "$DEBUG_BIN" "$@"

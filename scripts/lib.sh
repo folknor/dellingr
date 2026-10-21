@@ -1,15 +1,14 @@
 #!/usr/bin/env bash
 # Shared build and command-line helpers for the repository scripts.
 #
-# Script environment inputs:
-#   DELLINGR                    use an existing dellingr binary
-#   DELLINGR_SKIP_BUILD         diff_test.sh requires DELLINGR when set to 1
-#   DELLINGR_DIFF_TIMEOUT       per-process timeout for diff_test.sh (default 5s)
-# DELLINGR_TEST_LIMIT_KB is consumed by test_limited.sh. BROKKR_MARKER_FIFO is
-# consumed by the hotpath harness and brokkr.
+# The scripts read no environment variables; their tunables are the constants
+# below, and per-run choices are command-line flags. The one environment input
+# in the repository is BROKKR_MARKER_FIFO, set by brokkr for the hotpath harness.
 
-: "${DELLINGR_SKIP_BUILD:=0}"
-: "${DELLINGR_DIFF_TIMEOUT:=5s}"
+# Per-process timeout for diff_test.sh, in timeout(1) syntax.
+readonly DEFAULT_DIFF_TIMEOUT=5s
+# Virtual-memory cap applied by test_limited.sh, in KiB (2 GiB).
+readonly TEST_LIMIT_KB=2097152
 readonly HYPERFINE_WARMUP=2
 REFERENCE_LUAS=("lua5.2" "lua5.4")
 REFERENCE_LUA_LABELS=("Lua 5.2" "Lua 5.4")
@@ -118,10 +117,6 @@ dellingr_bin() {
     if [ "$#" -ne 1 ]; then
         echo "usage: dellingr_bin <debug|release>" >&2
         return 2
-    fi
-    if [ -n "${DELLINGR:-}" ]; then
-        printf '%s\n' "$DELLINGR"
-        return 0
     fi
     dellingr_bin_built "$1"
 }

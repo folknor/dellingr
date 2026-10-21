@@ -62,21 +62,21 @@ skip both reference runs after dellingr succeeds. Both `-- DIFF:` and
 `-- SKIP-DIFF:` require a nonempty reason. For each failure it also prints
 detail to stderr: the captured output of a process that failed or timed out,
 or unified diffs of dellingr's output against both references.
-Environment knobs:
-`DELLINGR=<path>` uses an existing binary instead of building one;
-`DELLINGR_SKIP_BUILD=1` refuses to build and requires `DELLINGR`;
-`DELLINGR_DIFF_TIMEOUT` sets the per-process timeout in `timeout(1)` syntax
-(default `5s`). A nonzero timeout requires GNU `timeout` (coreutils) on PATH;
-there is no other fallback. `0` disables the timeout and needs no timeout
-utility. Invalid values are rejected once at startup with exit code 2. Its
-temporary output lives under the gitignored `.scratch/`. The reference tools
-are fixed as `lua5.2` and `lua5.4`.
-`test_limited.sh` reads `DELLINGR_TEST_LIMIT_KB` as a positive integer
-`ulimit -v` value in KiB (default 2 GiB). If that limit cannot be applied, the
-command fails with exit code 2.
+Flags (before any paths):
+`--bin <path>` uses an existing binary instead of building one;
+`--timeout <time>` sets the per-process timeout in `timeout(1)` syntax
+(default in `scripts/lib.sh`). A nonzero timeout requires GNU `timeout`
+(coreutils) on PATH; there is no other fallback. `0` disables the timeout and
+needs no timeout utility. Invalid values are rejected once at startup with exit
+code 2. Its temporary output lives under the gitignored `.scratch/`. The
+reference tools are fixed as `lua5.2` and `lua5.4`.
+`test_limited.sh` applies the fixed `TEST_LIMIT_KB` `ulimit -v` cap from
+`scripts/lib.sh`. If that limit cannot be applied, the command fails with exit
+code 2.
 
-`BROKKR_MARKER_FIFO` is read by the hotpath harness and brokkr. The remaining
-script defaults are set in `scripts/lib.sh`; hyperfine uses a fixed warmup of
+The scripts read no environment variables. `BROKKR_MARKER_FIFO`, read by the
+hotpath harness and set by brokkr, is the only environment input in the
+repository. Script constants live in `scripts/lib.sh`; hyperfine uses a fixed warmup of
 2 runs.
 
 `scripts/notes_drop.py` and `scripts/notes_move.py` are maintainer helpers for
@@ -152,7 +152,7 @@ value stack, not total host memory, and enforcing it charges no cost.
 
 ## Tests
 
-- `tests/run_examples.rs` - runs every regular Lua file under `examples/` with the binary cargo built for the test run (`tests/common` owns the binary path and the shared, manifest-rooted example list; no test may reference `target/` or spawn cargo), in parallel worker threads. The shared list skips symlinks and orders relative paths by encoded bytes to match `find -type f` and `LC_ALL=C sort`. That includes the stress examples and the generated `parse/large_source.lua`. Each example runs under `scripts/test_limited.sh` (so `DELLINGR_TEST_LIMIT_KB` applies) with a fixed 60-second timeout. The runner uses at most eight workers, bounded by available parallelism and the number of examples. It fails on timeout, nonzero exit, unexpected stderr, if any stdout line ends with `: false`, or if a file defining `_bench()` prints no line ending in `: true`. Examples that print test results follow the convention `print("test name: " .. tostring(condition))`. Adding an example that prints a line ending in `: false` will fail this test.
+- `tests/run_examples.rs` - runs every regular Lua file under `examples/` with the binary cargo built for the test run (`tests/common` owns the binary path and the shared, manifest-rooted example list; no test may reference `target/` or spawn cargo), in parallel worker threads. The shared list skips symlinks and orders relative paths by encoded bytes to match `find -type f` and `LC_ALL=C sort`. That includes the stress examples and the generated `parse/large_source.lua`. Each example runs under `scripts/test_limited.sh` (so its memory cap applies) with a fixed 60-second timeout. The runner uses at most eight workers, bounded by available parallelism and the number of examples. It fails on timeout, nonzero exit, unexpected stderr, if any stdout line ends with `: false`, or if a file defining `_bench()` prints no line ending in `: true`. Examples that print test results follow the convention `print("test name: " .. tostring(condition))`. Adding an example that prints a line ending in `: false` will fail this test.
 - `tests/error_handling.rs`, `gc_upvalues.rs`, `gsub_errors.rs`, `metamethod_errors.rs`, `rustfn_error.rs` - focused integration suites.
 - `tests/diff_test.rs` is the differential gate: it uses the same shared example list, and checks that its ordered paths match `scripts/diff_test.sh --list-examples`. It drives the shell gate over the whole corpus in time-bounded partitions, once per `[[check]]` feature shape in `brokkr.toml` (there is no separate brokkr script check for it), and also checks malformed timeout rejection and nonempty marker reasons. The corpus partitions are compiled out under the `hotpath` feature. `scripts/diff_gate.sh` is an optional debug-build wrapper around `diff_test.sh` for direct runs; nothing in `brokkr check` invokes it. Mark intentional divergences with a `-- DIFF: <reason>` comment; dellingr must still succeed, but the references are skipped. A file carrying a `-- SKIP-DIFF: <reason>` line is not run by the differential gate. Reference Lua is required for unmarked examples; the test leaves that check, and its error message, to `diff_test.sh`.
 - `tests/bench_scripts.rs` checks the bench/ footer contract and that each `brokkr.toml` workload's `file` and `hotpath_file` give their `kernel` and shared helper functions matching `analyze_cost` fingerprints, which guards the same-kernel pairing described under Hotpath benchmarks.

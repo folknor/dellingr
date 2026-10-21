@@ -21,8 +21,8 @@ then
     DRY_RUN=1
 fi
 
-DELLINGR="${DELLINGR:-target/release/dellingr}"
-LUARS="${LUARS:-research/lua-rs/target/release/lua-rs}"
+DELLINGR="target/release/dellingr"
+LUARS="research/lua-rs/target/release/lua-rs"
 JSON_FILE=".bench-luars.json"
 
 if [ $# -gt 0 ]

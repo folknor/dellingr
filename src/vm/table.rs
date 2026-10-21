@@ -16,9 +16,7 @@ use super::object::{GcHeap, Markable, ObjectPtr};
 #[cfg(feature = "snapshot")]
 use crate::error::{InternalFault, SnapshotTableFault};
 
-/// Maximum number of entries for inline storage.
-/// Tables with more entries promote to IndexMap.
-const INLINE_CAPACITY: usize = 4;
+use crate::limits::tuning::TABLE_INLINE_CAPACITY as INLINE_CAPACITY;
 
 /// Tag bit marking a slot index (as handed to inline caches and the `pairs`
 /// cursor) as an array-part slot. Untagged indices are hash-part positions.
@@ -541,11 +539,8 @@ impl Table {
                 dead_count
             }
             TableStorage::Map(map) => {
-                // The full walk is O(n) per mutation, which makes hash-heavy
-                // scripts quadratic in debug builds. Past a small size, check
-                // only the O(1) counter bound.
-                const FULL_WALK_LIMIT: usize = 16;
-                if map.len() > FULL_WALK_LIMIT {
+                // Past a small size, check only the O(1) counter bound.
+                if map.len() > crate::limits::tuning::TABLE_DEBUG_FULL_WALK_LIMIT {
                     debug_assert!(
                         self.dead_count <= map.len(),
                         "dead_count must equal the number of nil-valued hash slots"
