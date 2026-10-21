@@ -725,9 +725,8 @@ impl State {
         let Some(mt_ptr) = mt else {
             return Ok(Val::Nil);
         };
-        // Keep this dispatch-time intern at its existing allocation point;
-        // the receiver remains rooted on the stack through collection.
-        // Pre-interning moves that allocation and can change reuse order.
+        // This intern may collect; the receiver remains rooted on the stack
+        // through collection.
         let tostring_key = self.alloc_string("__tostring")?;
         Ok(self
             .heap

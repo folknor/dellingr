@@ -58,8 +58,8 @@ Every metatable miss on a read allocates and may collect.
 Fix: a `MetaEvent`/`MetaName` enum with names interned once per State as roots in
 `mark_gc_roots`, read as `meta_names[MetaName::Index]`: removes dispatch-time
 allocation, rooting dances and the expect/`?` split. Changes GC timing (and `%p`
-ids), deterministic but snapshot-visible, so call it out; see HYG-038 on whether
-timing is contract. Enforceable by a text rule banning `alloc_string("__` /
+ids of rebuilt strings); decided not to be a cross-version contract
+(`docs/determinism.md`), so it ships as a changelog-called-out change. Enforceable by a text rule banning `alloc_string("__` /
 `"__[a-z]+"` literals outside the enum's module.
 
 ## Heap, tables, persistence

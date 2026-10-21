@@ -820,9 +820,10 @@ impl State {
 
     /// Drop state-local runtime entries which no reachable closure, active
     /// frame, or pending closure shell can use. Removing an entry after roots
-    /// were marked intentionally leaves its literals alive for one extra GC.
-    /// Sweeping caches before marking would reclaim those literals sooner and
-    /// change string-slot reuse and future collection thresholds.
+    /// were marked leaves its literals alive for one extra GC. Sweeping caches
+    /// before marking would reclaim them sooner; collection timing is not a
+    /// cross-version contract (`docs/determinism.md`), so that is allowed as
+    /// a called-out change.
     fn sweep_bytecode_caches(&mut self) {
         let mut live = BTreeSet::new();
         for bytecode in self.heap.reachable_lua_bytecodes() {

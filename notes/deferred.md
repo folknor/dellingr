@@ -384,20 +384,6 @@ notification only.
 
 ## Decisions for the user
 
-## HYG-038 - GC schedule and string-slot reuse preserved as if they were replay contract
-
-Reported by the heap hunter (and implied by the VM-core hunter's note that
-per-site GC timing "is part of the collection behavior").
-
-Comments in `vm.rs` (`sweep_bytecode_caches`: would change string-slot reuse and
-future thresholds) and `table_ops.rs` (`metatable_tostring_field`: pre-interning
-can change reuse order) treat allocation order and collection timing as
-must-not-change. The heap hunter found nothing in scope that makes either
-observable (`pairs` order is insertion-based, pointer ids are counters, snapshot
-ids are first-encounter order, `ObjectPtr`-keyed maps are only probed). If they
-are contract, `docs/determinism.md` should say so with the reason; if not, the
-comments freeze code for nothing and block HYG-037. Needs an explicit decision.
-
 ## HYG-045 - Cleanup-on-error and panic-safety decided per site
 
 Reported by the VM-core hunter.

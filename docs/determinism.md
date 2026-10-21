@@ -46,6 +46,18 @@ are hosts and are exempt.
 identity, not an address. It is stable across a snapshot round trip. Rust
 functions render as `function: 0x<id>`.
 
+Identities are never reused. Strings are interned and also get a `%p`
+identity, so a string that is dropped and later rebuilt with the same bytes
+keeps its id only if no collection ran in between.
+
+## Garbage collection timing
+
+Collections fire on allocation-count thresholds, so their timing is
+deterministic for a given build. It is not a cross-version contract: a release
+may move allocation points or collection thresholds, which can change `%p` ids
+of rebuilt strings and `State::object_count()`. Such changes are called out in
+the changelog, like other replay-visible changes.
+
 ## Error labels
 
 Function labels in argument errors are diagnostic text, not stable

@@ -43,6 +43,7 @@ pub(crate) const TABLE_INLINE_CAPACITY: usize = 4;
 /// Hash-part size above which debug builds check a table's dead-slot counter
 /// against its O(1) bound instead of walking every slot. The full walk is O(n)
 /// per mutation, which makes hash-heavy scripts quadratic in debug builds.
+#[cfg(debug_assertions)]
 pub(crate) const TABLE_DEBUG_FULL_WALK_LIMIT: usize = 16;
 
 /// Named fields a table-constructor template stores inline in the parser
