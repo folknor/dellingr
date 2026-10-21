@@ -62,7 +62,13 @@ struct NumberLiteralKey(u64);
 #[derive(Debug)]
 struct LoopContext {
     close_slot: u8,
+    /// `FuncState::captures` length when the loop scope was entered.
+    capture_mark: usize,
     break_jumps: Vec<usize>,
+    /// The CloseUpvalues emitted before each break. A capture textually after
+    /// a break can still be live at it on a later iteration, so whether these
+    /// are needed is decided only at loop exit, once the whole body is known.
+    break_closes: Vec<usize>,
 }
 
 /// Parses Lua source code into a `Bytecode`.
@@ -331,17 +337,35 @@ impl<'a> Parser<'a> {
     /// Starts a block at the next available local slot.
     fn level_up(&mut self) {
         let base = self.funcs.locals.len();
-        self.funcs.block_starts.push(base);
+        let mark = self.funcs.captures.len();
+        self.funcs.block_starts.push((base, mark));
+    }
+
+    /// Whether a nested function captured a local at or above `slot` since
+    /// the capture log had length `mark`. Only such a capture can leave an
+    /// open upvalue for a scope's CloseUpvalues to close.
+    fn captured_since(&self, mark: usize, slot: usize) -> bool {
+        self.funcs.captures[mark..]
+            .iter()
+            .any(|&captured| usize::from(captured) >= slot)
+    }
+
+    /// Whether the innermost loop's body locals may hold an open upvalue at
+    /// the end of an iteration.
+    fn loop_body_captured(&self) -> bool {
+        self.funcs.loop_breaks.last().is_none_or(|context| {
+            self.captured_since(context.capture_mark, usize::from(context.close_slot))
+        })
     }
 
     /// Closes and discards exactly the locals declared in this block.
     fn level_down(&mut self) -> Result<()> {
-        let Some(block_base) = self.funcs.block_starts.pop() else {
+        let Some((block_base, mark)) = self.funcs.block_starts.pop() else {
             return Err(self.internal_error(ParserFault::BlockExitWithoutEntry));
         };
         let before = self.funcs.locals.len();
         self.funcs.locals.truncate(block_base);
-        if block_base < before {
+        if block_base < before && self.captured_since(mark, block_base) {
             let slot = self.bounded_u8(block_base, MAX_LOCALS, SyntaxError::TooManyLocals)?;
             self.push(Instr::close_upvalues(slot));
         }
@@ -493,9 +517,12 @@ impl<'a> Parser<'a> {
 
     /// Called when entering a loop to track break statements.
     fn enter_loop(&mut self, close_slot: u8) {
+        let capture_mark = self.funcs.captures.len();
         self.funcs.loop_breaks.push(LoopContext {
             close_slot,
+            capture_mark,
             break_jumps: Vec::new(),
+            break_closes: Vec::new(),
         });
     }
 
@@ -505,6 +532,13 @@ impl<'a> Parser<'a> {
         let Some(context) = self.funcs.loop_breaks.pop() else {
             return Err(self.internal_error(ParserFault::LoopExitWithoutEntry));
         };
+        if !self.captured_since(context.capture_mark, usize::from(context.close_slot)) {
+            // No open upvalue can exist above the boundary. In-place NOPs keep
+            // every recorded jump index valid; finalize strips and remaps them.
+            for close_idx in &context.break_closes {
+                self.funcs.chunk.code[*close_idx] = Instr::nop();
+            }
+        }
         let loop_end = self.funcs.chunk.code.len();
         for break_idx in context.break_jumps {
             // The break instruction is a Jump with placeholder offset.
@@ -522,12 +556,14 @@ impl<'a> Parser<'a> {
             .last()
             .map(|context| context.close_slot)
         {
+            let close_idx = self.funcs.chunk.code.len();
             self.push(Instr::close_upvalues(close_slot));
             // Record the index where we'll emit the Jump instruction.
             let idx = self.funcs.chunk.code.len();
             let Some(context) = self.funcs.loop_breaks.last_mut() else {
                 return Err(self.internal_error(ParserFault::BreakEmissionLostLoopContext));
             };
+            context.break_closes.push(close_idx);
             context.break_jumps.push(idx);
             // Emit a placeholder Jump that will be patched by exit_loop
             self.push(Instr::jump(0));

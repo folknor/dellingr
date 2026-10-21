@@ -494,17 +494,15 @@ fn test14() {
 
 #[test]
 fn test15() {
-    // repeat local x = 5 until a == b - body locals get CloseUpvalues before jump
+    // repeat local x = 5 until a == b - uncaptured body locals need no
+    // CloseUpvalues, so the comparison fuses with the backward branch
     let text = "repeat local x = 5 until a == b y = 4";
     let code = vec![
         Instr::push_num(0),
         Instr::set_local(0),
         Instr::get_global(0),
         Instr::get_global(1),
-        Instr::equal(),
-        Instr::close_upvalues(0), // close body-local x before potential jump back
-        Instr::branch_false(-7),
-        Instr::close_upvalues(0),
+        Instr::branch_false_equal(-5),
         Instr::push_num(1),
         Instr::set_global(2),
         Instr::ret(RetCount::Fixed(0)),
@@ -572,7 +570,6 @@ fn test18() {
         Instr::set_local(1),
         Instr::get_local(1),
         Instr::set_global(0),
-        Instr::close_upvalues(1),
         Instr::get_local(0),
         Instr::set_global(0),
         Instr::ret(RetCount::Fixed(0)),
@@ -594,7 +591,6 @@ fn test19() {
         Instr::set_local(0),
         Instr::get_local(0),
         Instr::set_global(0),
-        Instr::close_upvalues(0),
         Instr::get_global(1),
         Instr::set_global(0),
         Instr::ret(RetCount::Fixed(0)),
@@ -615,10 +611,9 @@ fn test20() {
         Instr::push_nil(),
         Instr::set_local(0),
         Instr::push_bool(false),
-        Instr::branch_false(4),
+        Instr::branch_false(3),
         Instr::push_nil(),
         Instr::set_local(1),
-        Instr::close_upvalues(1),
         Instr::jump(2),
         Instr::get_local(0),
         Instr::set_global(0),
@@ -640,12 +635,10 @@ fn test21() {
         Instr::push_num(0),
         Instr::push_num(1),
         Instr::push_num(0),
-        Instr::for_prep(0, 4),
+        Instr::for_prep(0, 3),
         Instr::get_local(3),
         Instr::set_global(0),
-        Instr::close_upvalues(3),
-        Instr::for_loop(0, -4),
-        Instr::close_upvalues(0),
+        Instr::for_loop(0, -3),
         Instr::ret(RetCount::Fixed(0)),
     ];
     let chunk = Bytecode {
@@ -668,12 +661,10 @@ fn generic_for_bytecode_keeps_control_and_visible_slots() {
         Instr::call(ArgCount::Fixed(1), RetCount::Fixed(3)),
         Instr::tfor_prep(0),
         Instr::tfor_call(0, 2),
-        Instr::tfor_loop(0, 4),
+        Instr::tfor_loop(0, 3),
         Instr::get_local(3),
         Instr::set_global(1),
-        Instr::close_upvalues(3),
-        Instr::jump(-6),
-        Instr::close_upvalues(0),
+        Instr::jump(-5),
         Instr::ret(RetCount::Fixed(0)),
     ];
     let chunk = Bytecode {
@@ -1302,16 +1293,14 @@ fn break_allows_semicolons_and_following_statements() {
 
 #[test]
 fn test34() {
-    // while false do local b end - body locals get CloseUpvalues before jump
+    // while false do local b end - an uncaptured body local needs no close
     let text = "while false do local b end b()";
     let code = vec![
         Instr::push_bool(false),
-        Instr::branch_false(4),
+        Instr::branch_false(3),
         Instr::push_nil(),
         Instr::set_local(0),
-        Instr::close_upvalues(0), // close body-local b before jump back
-        Instr::jump(-6),
-        Instr::close_upvalues(0),
+        Instr::jump(-5),
         Instr::get_global(0),
         Instr::nop(),
         Instr::call(ArgCount::Fixed(0), RetCount::Fixed(0)),

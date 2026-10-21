@@ -166,20 +166,14 @@ fn checked_remapped_offset(offset: i64) -> Result<i16> {
         .map_err(|_| internal_error(error::CompilerFault::RemappedJumpOffsetOutOfRange))
 }
 
-/// Remove compiler-only no-ops and close-upvalue instructions that cannot
-/// observe any open upvalues, then remap every control-transfer offset.
+/// Remove compiler-only no-ops, then remap every control-transfer offset.
+/// Close-upvalue instructions that cannot observe an open upvalue are never
+/// emitted (or are NOP'd at loop exit) by the parser's per-scope capture log.
 fn strip_dead_instructions(bc: &mut Bytecode) -> Result<()> {
-    let has_closure = bc
-        .code
-        .iter()
-        .any(|inst| inst.opcode() == Instr::OP_CLOSURE);
     let remove: Vec<bool> = bc
         .code
         .iter()
-        .map(|inst| {
-            inst.opcode() == Instr::OP_NOP
-                || (!has_closure && inst.opcode() == Instr::OP_CLOSE_UPVALUES)
-        })
+        .map(|inst| inst.opcode() == Instr::OP_NOP)
         .collect();
     if !remove.iter().any(|removed| *removed) {
         return Ok(());
@@ -678,12 +672,12 @@ mod runtime_cache_tests {
     }
 
     #[test]
-    fn strip_handles_removed_targets_consecutive_regions_and_close_upvalues() {
+    fn strip_handles_removed_targets_and_consecutive_regions() {
         let mut bytecode = Bytecode {
             code: vec![
                 Instr::jump(2),
                 Instr::nop(),
-                Instr::close_upvalues(0),
+                Instr::nop(),
                 Instr::push_nil(),
                 Instr::ret(crate::RetCount::Fixed(0)),
             ],
@@ -732,19 +726,18 @@ mod runtime_cache_tests {
         assert_eq!(removal_before_endpoints.code[1], Instr::jump(1));
         assert_eq!(removal_before_endpoints.line_info, vec![12, 13, 14, 15]);
 
-        let mut containing_closure = Bytecode {
+        let mut close_kept = Bytecode {
             code: vec![
                 Instr::close_upvalues(0),
                 Instr::nop(),
-                Instr::closure(0),
                 Instr::ret(crate::RetCount::Fixed(0)),
             ],
-            line_info: vec![1, 2, 3, 4],
+            line_info: vec![1, 2, 3],
             ..Bytecode::default()
         };
-        strip_dead_instructions(&mut containing_closure).expect("nop strips around closure");
-        assert_eq!(containing_closure.code[0], Instr::close_upvalues(0));
-        assert_eq!(containing_closure.line_info, vec![1, 3, 4]);
+        strip_dead_instructions(&mut close_kept).expect("nop strips beside a close");
+        assert_eq!(close_kept.code[0], Instr::close_upvalues(0));
+        assert_eq!(close_kept.line_info, vec![1, 3]);
     }
 
     #[test]
@@ -810,36 +803,56 @@ mod runtime_cache_tests {
     }
 
     #[test]
-    fn finalize_strips_close_upvalues_per_chunk_independently() {
-        let raw = parser::parse_str(
-            "local function plain() do local x = 1 end end; local function captures() do local x = 1; f = function() return x end end end",
-        )
-        .expect("raw nested functions compile");
-        assert!(
-            raw.nested[0]
-                .code
-                .iter()
-                .any(|inst| inst.opcode() == Instr::OP_CLOSE_UPVALUES)
-        );
-
+    fn close_upvalues_kept_only_for_scopes_with_captures() {
+        // `captures` also makes a closure, so a per-chunk rule could not drop
+        // its uncaptured loop's closes; the per-scope capture log does.
         let finalized = parse_str(
-            "local function plain() do local x = 1 end end; local function captures() do local x = 1; f = function() return x end end end",
+            "local function plain() do local x = 1 end end; local function captures() for i = 1, 2 do local s = i end; for i = 1, 2 do if i then break end end; do local x = 1; f = function() return x end end end",
         )
         .expect("finalized nested functions compile");
         assert_no_opcode_in_tree(&finalized.nested[0], Instr::OP_CLOSE_UPVALUES);
+        let closes: Vec<Instr> = finalized.nested[1]
+            .code
+            .iter()
+            .copied()
+            .filter(|inst| inst.opcode() == Instr::OP_CLOSE_UPVALUES)
+            .collect();
+        assert_eq!(closes, vec![Instr::close_upvalues(0)]);
+    }
+
+    #[test]
+    fn break_close_is_decided_at_loop_exit() {
+        // The break precedes the loop's only capture textually, so deciding at
+        // break emission would drop it; deciding at loop exit keeps it.
+        let raw = parser::parse_str(
+            "while true do local z = 1; if z then break end; f = function() return z end end",
+        )
+        .expect("break fixture compiles");
+        let closes: Vec<usize> = raw
+            .code
+            .iter()
+            .enumerate()
+            .filter(|(_, inst)| inst.opcode() == Instr::OP_CLOSE_UPVALUES)
+            .map(|(index, _)| index)
+            .collect();
+        let first_closure = raw
+            .code
+            .iter()
+            .position(|inst| inst.opcode() == Instr::OP_CLOSURE)
+            .expect("fixture makes a closure");
         assert!(
-            finalized.nested[1]
-                .code
-                .iter()
-                .any(|inst| inst.opcode() == Instr::OP_CLOSE_UPVALUES)
+            closes.iter().any(|&index| index < first_closure),
+            "break close before the capture must be retained"
         );
     }
 
     #[test]
     fn stripping_preserves_costs_and_decreases_only_instruction_counts() {
-        let mut raw =
-            parser::parse_str("local x = 0; for i = 1, 3 do do local y = i; x = x + y end end")
-                .expect("raw cost fixture compiles");
+        // The uncaptured loop's break close is NOP'd by the parser.
+        let mut raw = parser::parse_str(
+            "local x = 0; for i = 1, 3 do if i == 2 then break end; x = x + i end",
+        )
+        .expect("raw cost fixture compiles");
         let before = crate::ScopeCost::analyze_chunk(&raw, "main".to_string());
         finalize(&mut raw).expect("cost fixture finalizes");
         let after = crate::ScopeCost::analyze_chunk(&raw, "main".to_string());

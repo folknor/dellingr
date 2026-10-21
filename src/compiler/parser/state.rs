@@ -14,8 +14,15 @@ pub(super) struct FuncState<'a> {
     pub(super) upvalues: Vec<(&'a str, UpvalueDesc)>,
     /// A nested function must never see an enclosing function's break targets.
     pub(super) loop_breaks: Vec<LoopContext>,
-    /// Local count at each block entry, excluding the function's base scope.
-    pub(super) block_starts: Vec<usize>,
+    /// Local count at each block entry, excluding the function's base scope,
+    /// paired with the `captures` length at that entry.
+    pub(super) block_starts: Vec<(usize, usize)>,
+    /// Append-only log of this function's local slots captured by a nested
+    /// function, one entry per first capture by each nested function. A scope
+    /// whose log suffix holds no slot at or above its close boundary cannot
+    /// have an open upvalue there, so its `CloseUpvalues` is omitted. Never
+    /// deduplicate by slot: a later local reusing a slot needs its own entry.
+    pub(super) captures: Vec<u8>,
     /// Folding cannot merge operands across a patched forward-jump target.
     /// The boundary is exclusive: landing on the first operand is safe, but
     /// landing on the second must still execute that operand independently.
@@ -36,6 +43,7 @@ impl FuncState<'_> {
             upvalues: Vec::new(),
             loop_breaks: Vec::new(),
             block_starts: Vec::new(),
+            captures: Vec::new(),
             fold_barrier: 0,
         }
     }

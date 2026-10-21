@@ -30,6 +30,11 @@ impl<'a> Parser<'a> {
         let Some(desc) = self.resolve_in(level - 1, name)? else {
             return Ok(None);
         };
+        if let UpvalueDesc::Local(slot) = desc {
+            // Recorded in the frame that owns the local, so its scopes keep
+            // the CloseUpvalues that gives this capture its own lifetime.
+            self.funcs.frames[level - 1].captures.push(slot);
+        }
         let len = self.funcs.frames[level].upvalues.len();
         if len >= MAX_UPVALUES {
             return Err(self.error_here(SyntaxError::TooManyUpvalues));

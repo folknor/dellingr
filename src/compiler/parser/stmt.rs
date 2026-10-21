@@ -255,8 +255,12 @@ impl<'a> Parser<'a> {
         self.parse_statements()?;
         self.expect(TokenType::End)?;
 
-        // Close the visible loop variable and body locals before its slot is reused.
-        self.push(Instr::close_upvalues(current_local_slot + 3));
+        // Close the visible loop variable and body locals before its slot is
+        // reused, giving a captured loop variable a fresh upvalue per iteration.
+        // Omitted when nothing in the loop scope was captured.
+        if self.loop_body_captured() {
+            self.push(Instr::close_upvalues(current_local_slot + 3));
+        }
 
         let loop_end = self.funcs.chunk.code.len();
         let body_length = self.checked_jump_offset(loop_start_instr_index, loop_end + 1)?;
@@ -352,7 +356,10 @@ impl<'a> Parser<'a> {
         self.expect(TokenType::End)?;
 
         // Close the visible loop variables and body locals before their slots are reused.
-        self.push(Instr::close_upvalues(base_slot + 3));
+        // Omitted when nothing in the loop scope was captured.
+        if self.loop_body_captured() {
+            self.push(Instr::close_upvalues(base_slot + 3));
+        }
 
         // Jump back to TForCall
         let body_end = self.funcs.chunk.code.len();
@@ -432,8 +439,9 @@ impl<'a> Parser<'a> {
         self.parse_expr()?;
 
         // Close upvalues for any locals declared inside the loop body
-        // (before the conditional jump back)
-        if self.local_slot_count()? > body_locals_start {
+        // (before the conditional jump back). Decided after the `until`
+        // expression, which may itself capture a body local.
+        if self.local_slot_count()? > body_locals_start && self.loop_body_captured() {
             self.push(Instr::close_upvalues(body_locals_start));
         }
 
@@ -467,8 +475,8 @@ impl<'a> Parser<'a> {
         self.parse_statements()?;
         self.expect(TokenType::End)?;
 
-        // Close upvalues for any locals declared inside the loop body
-        if self.local_slot_count()? > body_locals_start {
+        // Close upvalues for any captured locals declared inside the loop body
+        if self.local_slot_count()? > body_locals_start && self.loop_body_captured() {
             self.push(Instr::close_upvalues(body_locals_start));
         }
 
