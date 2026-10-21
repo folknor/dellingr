@@ -371,6 +371,8 @@ impl State {
     /// load (token -> object) resolve through this snapshot.
     #[cfg(feature = "snapshot")]
     pub(crate) fn capture_env_tokens(&mut self) {
+        // Later writes can alias a captured environment object; saves use its
+        // existing token instead of rebuilding this map from live builtin slots.
         let mut map = BTreeMap::new();
         for &(slot, token) in save_state::BUILTIN_ENV_TOKENS {
             if let Val::Obj(ptr) = self.global_env.builtin(slot as u8) {
@@ -545,11 +547,7 @@ impl State {
     ///
     /// The iterator charges compilation once on first use. Malformed pattern
     /// points are encoded in the compiled matcher and raise only when reached.
-    pub(crate) fn memoize_gmatch_pattern(&mut self, idx: isize) -> Result<()> {
-        // Preserve the caller's relative argument number even inside a nested
-        // native frame. Wrong types in saved iterator state use the same
-        // argument-type contract as to_bytes, not a cache-ordering error.
-        let idx = self.expect_string_at(idx)?;
+    fn memoize_gmatch_pattern_at(&mut self, idx: usize) -> Result<()> {
         let val = &self.stack[idx];
         let ptr = val
             .as_string_ptr()
@@ -592,17 +590,60 @@ impl State {
         Ok(())
     }
 
-    /// Returns a gmatch subject borrow, its cached matcher, and a cost meter.
+    /// Run a gmatch search while its compiled matcher is borrowed from cache.
     ///
-    /// These values come from disjoint `State` fields. Keeping the split here
-    /// lets the iterator match directly against the stack-resident subject.
+    /// Memoization and borrowing stay in one operation so no VM operation can
+    /// allocate, collect, or evict the matcher between those steps.
+    pub(crate) fn with_gmatch_matcher<T>(
+        &mut self,
+        subject_idx: isize,
+        pattern_idx: isize,
+        operation: impl FnOnce(&[u8], &mut LuaPattern, CostMeter<'_>) -> T,
+    ) -> Result<T> {
+        // Preserve the argument-type contract before touching the cache.
+        let subject_idx = self.expect_string_at(subject_idx)?;
+        let pattern_idx = self.expect_string_at(pattern_idx)?;
+        self.memoize_gmatch_pattern_at(pattern_idx)?;
+
+        let State {
+            stack,
+            heap,
+            cost,
+            gmatch_patterns,
+            ..
+        } = self;
+        let subject = stack[subject_idx]
+            .as_string(heap)
+            .expect("expect_string_at validated the subject's string type");
+        let pattern_ptr = stack[pattern_idx]
+            .as_string_ptr()
+            .expect("expect_string_at validated the pattern's string type");
+        let entry = gmatch_patterns.get_mut(&pattern_ptr).ok_or_else(|| {
+            Error::without_location(ErrorKind::InternalError(
+                "gmatch pattern was not memoized before matching".into(),
+            ))
+        })?;
+        let matcher = &mut entry.pattern;
+        let meter = cost.meter();
+        Ok(operation(subject, matcher, meter))
+    }
+
+    // These wrappers retain argument-contract coverage in the unit tests. The
+    // runtime iterator uses with_gmatch_matcher so cache ordering is structural.
+    /// Test-only access to the pattern compilation argument validation.
+    #[cfg(test)]
+    pub(crate) fn memoize_gmatch_pattern(&mut self, idx: isize) -> Result<()> {
+        let idx = self.expect_string_at(idx)?;
+        self.memoize_gmatch_pattern_at(idx)
+    }
+
+    /// Test-only access to the subject and pattern argument validation.
+    #[cfg(test)]
     pub(crate) fn gmatch_subject_matcher_and_cost_meter(
         &mut self,
         subject_idx: isize,
         pattern_idx: isize,
     ) -> Result<(&[u8], &mut LuaPattern, CostMeter<'_>)> {
-        // Type failures describe supplied iterator state, not cache ordering.
-        // Validate before converting frame-relative indexes to absolute slots.
         let subject_idx = self.expect_string_at(subject_idx)?;
         let pattern_idx = self.expect_string_at(pattern_idx)?;
         let State {
@@ -618,11 +659,6 @@ impl State {
         let pattern_ptr = stack[pattern_idx]
             .as_string_ptr()
             .expect("expect_string_at validated the pattern's string type");
-        // The sole caller is gmatch_iter: it memoizes immediately before this
-        // borrow, with no allocation or collection between the two calls.
-        // A missing entry is a caller-ordering failure rather than a script-
-        // reachable state. Report it instead of asserting, so a future caller
-        // that gets the order wrong sees an error instead of a host panic.
         let entry = gmatch_patterns.get_mut(&pattern_ptr).ok_or_else(|| {
             Error::without_location(ErrorKind::InternalError(
                 "gmatch pattern was not memoized before matching".into(),
@@ -1320,6 +1356,51 @@ mod runtime_tests {
         state.pop_val();
         state.gc_collect();
         assert!(state.bytecode_caches.is_empty());
+    }
+}
+
+#[cfg(all(test, feature = "snapshot"))]
+mod snapshot_env_alias_tests {
+    use super::{Builtin, DefaultCallbacks, State, Val};
+    use crate::instr::{ArgCount, RetCount};
+    use std::convert::Infallible;
+
+    #[test]
+    fn aliased_builtin_slots_use_last_environment_token_on_load() {
+        let mut state = State::new();
+        state.get_global("math").expect("math builtin exists");
+        state
+            .set_global("string")
+            .expect("string builtin can be rebound");
+
+        let Val::Obj(shared_table) = state.global_env.builtin(Builtin::Math as u8) else {
+            panic!("math builtin is a table");
+        };
+        assert_eq!(
+            state.global_env.builtin(Builtin::String as u8),
+            Val::Obj(shared_table)
+        );
+
+        state.capture_env_tokens();
+        assert_eq!(
+            state.env_tokens.get(&shared_table).map(String::as_str),
+            Some("string")
+        );
+
+        let save = state.save_state().expect("aliased environment saves");
+        let mut loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), |_| {
+            Ok::<(), Infallible>(())
+        })
+        .expect("aliased environment loads");
+        loaded
+            .load_string(
+                "if math ~= string then error('builtin alias changed') end; \
+                 if math.match == nil then error('last token did not resolve') end",
+            )
+            .expect("alias check compiles");
+        loaded
+            .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+            .expect("alias check runs");
     }
 }
 

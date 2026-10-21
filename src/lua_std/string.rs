@@ -1114,45 +1114,42 @@ fn gmatch_iter(state: &mut State) -> Result<u8> {
         state.push_boolean(true)?;
         state.set_table_raw(1)?;
     }
-    // Memoization primes the cache read by the next call; keep the calls
-    // adjacent so no allocation can invalidate that transient matcher state.
-    state.memoize_gmatch_pattern(3)?;
-    let (matched, range, captures) = {
-        let (subject, matcher, mut meter) = state.gmatch_subject_matcher_and_cost_meter(2, 3)?;
-        // Lua 5.4 semantics: an empty match ending where the previous accepted
-        // match ended is rejected and the scan resumes one byte later, so
-        // `gmatch("abc", "%a*")` yields only "abc", not 5.2's "abc" then "".
-        // Only a match starting at `pos` can be rejected, so this retries at
-        // most once.
-        let mut search = pos;
-        let matched = loop {
-            match matcher.matches_bytes_from(subject, search, &mut meter) {
-                Ok(true) => {
-                    let found = matcher.range();
-                    if found.start == found.end && lastmatch == Some(found.end) {
-                        if search == subject.len() {
-                            break Ok(false);
+    let (matched, range, captures) =
+        state.with_gmatch_matcher(2, 3, |subject, matcher, mut meter| {
+            // Lua 5.4 semantics: an empty match ending where the previous accepted
+            // match ended is rejected and the scan resumes one byte later, so
+            // `gmatch("abc", "%a*")` yields only "abc", not 5.2's "abc" then "".
+            // Only a match starting at `pos` can be rejected, so this retries at
+            // most once.
+            let mut search = pos;
+            let matched = loop {
+                match matcher.matches_bytes_from(subject, search, &mut meter) {
+                    Ok(true) => {
+                        let found = matcher.range();
+                        if found.start == found.end && lastmatch == Some(found.end) {
+                            if search == subject.len() {
+                                break Ok(false);
+                            }
+                            search += 1;
+                            continue;
                         }
-                        search += 1;
-                        continue;
+                        break Ok(true);
                     }
-                    break Ok(true);
+                    other => break other,
                 }
-                other => break other,
-            }
-        };
-        let (range, captures) = if matches!(&matched, Ok(true)) {
-            (
-                matcher.range(),
-                (0..matcher.num_matches())
-                    .map(|i| matcher.capture(i))
-                    .collect(),
-            )
-        } else {
-            (0..0, Vec::new())
-        };
-        (matched, range, captures)
-    };
+            };
+            let (range, captures) = if matches!(&matched, Ok(true)) {
+                (
+                    matcher.range(),
+                    (0..matcher.num_matches())
+                        .map(|i| matcher.capture(i))
+                        .collect(),
+                )
+            } else {
+                (0..0, Vec::new())
+            };
+            (matched, range, captures)
+        })?;
     let matched = matched.map_err(|err| match_error(state, StringPatternFunction::Gmatch, err))?;
     if matched {
         let returned = if captures.len() > 1 {

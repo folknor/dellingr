@@ -1,5 +1,3 @@
-use std::str;
-
 use super::super::error::{ErrorKind, TypeError};
 use super::Result;
 use super::State;
@@ -79,15 +77,7 @@ impl State {
         frame: &Frame,
         template_id: u8,
     ) -> Result<()> {
-        let template = frame
-            .bytecode()
-            .table_templates
-            .get(template_id as usize)
-            .ok_or_else(|| {
-                self.error(ErrorKind::InternalError(format!(
-                    "NewTableTemplate: invalid template {template_id}"
-                )))
-            })?;
+        let template = &frame.bytecode().table_templates[template_id as usize];
         self.new_table_with_template(template, &frame.runtime.literals)?;
         Ok(())
     }
@@ -384,13 +374,9 @@ impl State {
             return Ok(());
         }
 
-        let name = str::from_utf8(&frame.bytecode().string_literals[string_num as usize]).map_err(
-            |_| {
-                self.error(ErrorKind::InternalError(
-                    "compiler emitted non-UTF-8 global name".to_string(),
-                ))
-            },
-        )?;
+        let name = super::eval_index::verified_global_name(
+            &frame.bytecode().string_literals[string_num as usize],
+        );
         self.global_env.write_named(name, val, cache);
         Ok(())
     }
@@ -401,16 +387,11 @@ impl State {
     }
 
     fn constructor_base(&self, frame: &Frame) -> Result<usize> {
-        let table_idx = frame.constructor_base(self).ok_or_else(|| {
-            self.error(ErrorKind::InternalError(
-                "SetList(0): no constructor base".to_string(),
-            ))
-        })?;
-        if table_idx < self.stack_bottom || table_idx >= self.stack.len() {
-            return Err(self.error(ErrorKind::InternalError(
-                "SetList(0): base out of frame".to_string(),
-            )));
-        }
+        let table_idx = frame
+            .constructor_base(self)
+            .expect("verified dynamic set-list owns a pending constructor base");
+        // Verification tracks stack shape, not value types. A valid chunk can
+        // replace the marked value, so the table check remains fallible.
         let is_table = self.stack[table_idx]
             .as_object_ptr()
             .and_then(|ptr| self.heap.as_table_ref(ptr))

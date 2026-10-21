@@ -23,7 +23,7 @@ impl State {
         let val = self.pop_val();
         let truthy = val.truthy();
         if cond == truthy {
-            frame.jump(offset)?;
+            frame.jump(offset);
         }
         if keep_cond {
             self.push_unchecked(val); // Replaces the condition popped above.
@@ -65,14 +65,10 @@ impl State {
                 let val1 = self.pop_val();
                 val1 != val2
             }
-            _ => {
-                return Err(self.error(crate::error::ErrorKind::InternalError(
-                    "fused branch dispatched with a non-fused opcode".into(),
-                )));
-            }
+            _ => unreachable!("fused branch dispatched with a non-fused opcode"),
         };
         if !condition {
-            frame.jump(offset)?;
+            frame.jump(offset);
         }
         Ok(())
     }
@@ -125,7 +121,7 @@ impl State {
                 self.stack[local_slot] = Val::Num(n);
             }
         } else {
-            frame.jump(body_len)?;
+            frame.jump(body_len);
         }
         Ok(())
     }
@@ -151,7 +147,7 @@ impl State {
         if check_numeric_for_condition(var, limit, step) {
             self.stack[slot] = Val::Num(var);
             self.stack[slot + 3] = Val::Num(var);
-            frame.jump(offset)?;
+            frame.jump(offset);
         }
         Ok(())
     }
@@ -394,7 +390,7 @@ impl State {
 
         if matches!(first_var, Val::Nil) {
             // Exit loop
-            frame.jump(offset)?;
+            frame.jump(offset);
         } else {
             // Update control variable with first loop variable
             self.stack[base + 2] = self.stack[base + 3];

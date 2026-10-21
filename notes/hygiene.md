@@ -64,90 +64,27 @@ timing is contract. Enforceable by a text rule banning `alloc_string("__` /
 
 ## HYG-039 - `InternalError(String)` assembled ad hoc; `InvalidJump` is a second "VM bug" kind
 
-Reported by the VM-core and host-surface hunters.
+Reported by the VM-core and host-surface hunters; narrowed in wave 8 (VM faults
+carry a typed `VmFault` with opcode and location through `Error::vm_fault()`,
+both kinds share one prefix, dispatch no longer emits `InvalidJump`, and VM
+`InternalError` sites fell from about 20 to 9).
 
-About 20 VM sites write free text ("SetList(0): no constructor base", "call-base
-marker is below the active frame", "unknown opcode: N", "InitField: expected
-table, got {typ}"); none carries opcode, ip or chunk as data; `locate_in_frame`
-adds a line only. `ErrorKind::InvalidJump { ip, offset }` also means "compiler bug
-or corrupt bytecode" and hand-copies the `"internal error: "` prefix. Fix:
-`ErrorKind::VmInvariant { opcode, ip, what: &'static str }` (or
-`InternalDetail::InvalidJump {..}` etc.) with one prefix owner, filled at the
-frame boundary. Enforceable by type.
-
-## HYG-040 - VM panics on bytecode-controlled conditions; defensive checks applied inconsistently
-
-Reported by the VM-core hunter.
-
-Safe only because the verifier ran, with nothing in the types saying so:
-`OP_SWAP` `stack.swap(len-1, len-2)` underflows; `OP_DUP` `.expect`; `pop_val`
-`expect("VM bug")` (OP_POP, OP_EQUAL, every binary op); unchecked
-`stack[base + n]` in `instr_set_local`/`get_local`/`tfor_*`; unchecked
-`frame.upvalues[idx]`, `bytecode.nested[i]`, `number_literals[i]`,
-`string_literals[n]`. If the snapshot load path ever skips verification for a
-chunk (not verified), a corrupt save becomes a host panic where `LoadError` was
-owed. Meanwhile `Frame::jump` and `instr_set_list_count` keep defensive checks "so
-a verifier regression returns a VM error". The unreachable
-`"fused branch dispatched with a non-fused opcode"` and `"unknown opcode"` errors
-belong to the same question. Fix: a `VerifiedBytecode` newtype only the verifier
-constructs, `Frame` accepts only that; then drop defensive checks everywhere or
-keep them everywhere. Enforceable by signature.
+Still open: the nine remaining `InternalError(String)` sites carry free text,
+including host misuse of a dynamic argument count; the public `InvalidJump`
+variant is kept for compatibility though nothing in dispatch produces it.
 
 ## Heap, tables, persistence
 
-## HYG-052 - gmatch matcher ordering invariant and env-token schema have no structural owner
+## HYG-053 - `table.rs` still returns the crate `Error`
 
-Reported by the heap and stdlib hunters; narrowed in wave 1 (ids and keys now
-live in `src/gmatch_schema.rs`, reads are strict, the dead branch is gone).
-
-- Ordering invariant: `gmatch_subject_matcher_and_cost_meter` depends on
-  `memoize_gmatch_pattern` running immediately before with no allocation between,
-  guarded by an `InternalError`; a single `with_gmatch_matcher(.., |subject,
-  matcher, meter| ..)` would make it structural.
-- The `_G` proxy metatable and string metatable are likewise library-installed
-  state the VM tracks as env tokens without a schema owner.
-
-- No test saves and reloads a live gmatch iterator.
-
-Fix: `with_gmatch_matcher`; a schema owner for the env tokens; the save/reload
-test.
-
-## HYG-053 - `table.rs` still returns the crate `Error`; gmatch corruption errors name the closure
-
-Reported by the heap hunter; narrowed in waves 6 and 7 (every snapshot
-corruption error carries a typed location).
+Reported by the heap hunter; narrowed in waves 6 to 8 (every snapshot
+corruption error carries a typed location, and gmatch state errors name the
+state table).
 
 Still open: `Table::insert`, `set_list`, `rebuild*` and
 `clear_and_insert_entries` return `Result<(), Error>`; a table-local key error
 would need wrapping at about 11 caller sites (a comment above the import says
-so). Separately, most gmatch corruption errors in `verify.rs` report the
-closure's index under `Objects`, not the gmatch state table's.
-
-## HYG-105 - Env token aliasing depends on schema order held by a comment
-
-Reported by the wave 7 reconciler.
-
-`capture_env_tokens` classifies aliased tables by the last captured token, so
-`BUILTIN_ENV_TOKENS` order is a schema invariant held only by a comment. A test
-that two builtin slots aliasing one table resolve to the same token on save and
-load would pin it.
-
-## HYG-059 - Snapshot encoder holds a breadcrumb per encoded value
-
-Reported by the heap hunter.
-
-`SaveBuilder::breadcrumbs` pushes a `Breadcrumb` (a `String` for globals) per
-key, value, metatable and upvalue, only so `UnregisteredFunction` can render a
-path: a second copy of the graph's size for the whole save. `encode_env_deltas`
-pushes a fresh root breadcrumb with a newly truncated token copy per key and
-value. Fix: record nothing on the happy path; on failure re-walk from roots. Also
-`SaveBuilder::push_path` truncates every `PathSegment::Global` to
-`MAX_PATH_GLOBAL_BYTES`, and all eight call sites (`finish`, `encode_env_deltas`
-x7) already truncate before constructing; delete the call-site copies and make
-`PathSegment::global(&str)` the only constructor.
-
-
----
+so).
 
 ## Stdlib and patterns
 

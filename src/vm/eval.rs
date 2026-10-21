@@ -448,7 +448,12 @@ impl State {
         }
     }
 
+    #[cold]
+    #[inline(never)]
     fn report_frame_error(&mut self, mut error: Error, frame: &Frame) -> Error {
+        // Preserve the innermost fault even when a callback already attached a
+        // traceback. Allocate metadata only here, outside recursive dispatch.
+        error = frame.locate_fault(error);
         if error.stack_trace().is_empty() {
             error = Self::locate_in_frame(error, frame);
             error = error.with_stack_trace(self.build_stack_trace(frame));

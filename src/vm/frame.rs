@@ -86,7 +86,8 @@ pub(super) struct Frame {
 }
 
 impl Frame {
-    /// Create a new Frame.
+    /// Create a frame from bytecode admitted by compilation or snapshot load.
+    /// No verification is repeated here: this runs on every recursive call.
     #[must_use]
     pub(super) fn new(
         bytecode: Arc<Bytecode>,
@@ -118,11 +119,18 @@ impl Frame {
             .copied()
     }
 
-    /// Pop this frame's innermost pending constructor base; never a caller's.
+    /// Pop this frame's innermost pending constructor base. Verified marker
+    /// pairing guarantees the top marker belongs to this frame, never a caller.
     pub(super) fn pop_constructor_base(&self, state: &mut State) {
-        if state.pending_bases.constructors.len() > self.pending_floor.constructors {
-            let _base = state.pending_bases.constructors.pop();
-        }
+        debug_assert!(
+            state.pending_bases.constructors.len() > self.pending_floor.constructors,
+            "set-list would pop a caller's constructor marker"
+        );
+        let _base = state
+            .pending_bases
+            .constructors
+            .pop()
+            .expect("verified set-list consumes its frame's constructor marker");
     }
 
     fn call_args(&self, state: &mut State, args: ArgCount) -> Result<u8> {
@@ -135,16 +143,8 @@ impl Frame {
                 } else {
                     None
                 };
-                let base = owned.ok_or_else(|| {
-                    state.error(ErrorKind::InternalError(
-                        "call with Dynamic args but no call base pending in this frame".into(),
-                    ))
-                })?;
-                let actual_len = state.stack.len().checked_sub(base + 1).ok_or_else(|| {
-                    state.error(ErrorKind::InternalError(
-                        "dynamic call base is outside the active stack".into(),
-                    ))
-                })?;
+                let base = owned.expect("verified dynamic call owns a pending base");
+                let actual_len = state.stack.len() - base - 1;
                 u8::try_from(actual_len).map_err(|_| {
                     state.error(ErrorKind::TooManyArguments {
                         limit: crate::limits::MAX_ARGUMENTS,
@@ -162,6 +162,18 @@ impl Frame {
 
     pub(super) fn literal(&self, i: u16) -> Val {
         self.runtime.literals[i as usize]
+    }
+
+    #[cold]
+    #[inline(never)]
+    pub(super) fn locate_fault(&self, error: Error) -> Error {
+        let Some(instruction) = self.ip.checked_sub(1) else {
+            return error;
+        };
+        let Some(inst) = self.bytecode.code.get(instruction) else {
+            return error;
+        };
+        error.with_vm_fault(instruction, inst.opcode(), self.bytecode.name.as_deref())
     }
 
     /// Get the current line number (1-indexed), or 0 if unknown.
@@ -192,31 +204,17 @@ impl Frame {
         }
     }
 
-    // Verification normally excludes bad jumps. Retain this defensive check
-    // and its structured instruction/offset diagnostic: a verifier regression
-    // must return a VM error rather than cause an unchecked instruction fetch.
-    /// Jump forward/back by `offset` instructions.
-    pub(super) fn jump(&mut self, offset: i16) -> Result<()> {
-        let new_ip = if offset >= 0 {
-            self.ip.checked_add(offset as usize)
+    // Static bytecode contracts are checked at compile/load admission, not
+    // again during dispatch. Like literal/local indexing and stack pops, a
+    // verifier regression here is a VM bug and may panic. Runtime values,
+    // host API inputs and resource limits still require fallible checks.
+    /// Jump forward/back by a verified `offset` in instructions.
+    pub(super) fn jump(&mut self, offset: i16) {
+        self.ip = if offset >= 0 {
+            self.ip + offset as usize
         } else {
-            self.ip.checked_sub(offset.unsigned_abs() as usize)
+            self.ip - offset.unsigned_abs() as usize
         };
-        match new_ip {
-            Some(ip) if ip < self.bytecode.code.len() => {
-                self.ip = ip;
-                Ok(())
-            }
-            _ => {
-                // This helper has no State argument; State::error currently
-                // delegates to this same constructor. Keep jump validation
-                // standalone so the successful dispatch path stays unchanged.
-                Err(Error::without_location(ErrorKind::InvalidJump {
-                    ip: self.ip,
-                    offset: offset as isize,
-                }))
-            }
-        }
     }
 
     /// Get the instruction at the instruction pointer, and advance the
@@ -378,7 +376,7 @@ impl Frame {
                     let len = state.stack.len();
                     state.stack.swap(len - 1, len - 2);
                 }
-                Instr::OP_JUMP => self.jump(inst.sbx())?,
+                Instr::OP_JUMP => self.jump(inst.sbx()),
                 Instr::OP_BRANCH_FALSE => state.instr_branch(self, false, inst.sbx(), false)?,
                 Instr::OP_BRANCH_FALSE_KEEP => state.instr_branch(self, false, inst.sbx(), true)?,
                 Instr::OP_BRANCH_TRUE_KEEP => state.instr_branch(self, true, inst.sbx(), true)?,
@@ -408,25 +406,9 @@ impl Frame {
                     state.call_op(args, RetCount::from_u8(inst.b()))?;
                 }
                 Instr::OP_MARK_CALL_BASE => {
-                    // The verifier requires the serialized A operand to be 1;
-                    // execution therefore uses the marker's fixed one-slot
-                    // adjustment instead of treating A as a runtime value.
-                    // Validate against the CURRENT FRAME, not just against
-                    // usize underflow. Checking only `stack.len()` would let a
-                    // marker whose base lands below `stack_bottom` through
-                    // whenever the absolute stack happens to be deep enough,
-                    // and the dynamic-call path would then treat a caller-owned
-                    // slot as this call's callee.
-                    let base = state
-                        .stack
-                        .len()
-                        .checked_sub(1)
-                        .filter(|base| *base >= state.stack_bottom)
-                        .ok_or_else(|| {
-                            state.error(ErrorKind::InternalError(
-                                "call-base marker is below the active frame".into(),
-                            ))
-                        })?;
+                    // Verification proves a callee exists above this frame's
+                    // floor and the fixed adjustment is one slot.
+                    let base = state.stack.len() - 1;
                     state.pending_bases.calls.push(base);
                 }
                 Instr::OP_CLOSE_UPVALUES => {
@@ -677,13 +659,8 @@ impl Frame {
                     state.instr_set_list(self, n, inst.bx())?;
                 }
 
-                // Unknown opcode
-                _ => {
-                    return Err(state.error(ErrorKind::InternalError(format!(
-                        "unknown opcode: {}",
-                        inst.opcode()
-                    ))));
-                }
+                // Admission rejects unknown opcodes, including dead code.
+                _ => unreachable!("verified bytecode contains an unknown opcode"),
             }
         }
     }
@@ -725,36 +702,24 @@ mod tests {
         );
         frame.ip = i16::MIN.unsigned_abs() as usize;
 
-        frame
-            .jump(i16::MIN)
-            .expect("minimum offset should be valid");
+        frame.jump(i16::MIN);
         assert_eq!(frame.ip, 0);
     }
 
     #[test]
-    fn jump_rejects_end_of_bytecode() {
-        let bytecode = Arc::new(Bytecode {
-            code: vec![Instr::ret(RetCount::Fixed(0))],
+    fn verifier_rejects_end_of_bytecode_jump() {
+        let bytecode = Bytecode {
+            code: vec![
+                Instr::op_a_sbx(Instr::OP_JUMP, 0, 1),
+                Instr::ret(RetCount::Fixed(0)),
+            ],
+            line_info: vec![1, 1],
             ..Bytecode::default()
-        });
-        let runtime = Arc::new(BytecodeRuntime {
-            literals: Box::new([]),
-            caches: crate::vm::caches::RuntimeCaches::new(&bytecode),
-        });
-        let mut frame = Frame::new(
-            bytecode,
-            runtime,
-            Arc::from([]),
-            Vec::new(),
-            0,
-            PendingFloor::default(),
-        );
-
-        let error = frame.jump(1).expect_err("jump to end must be rejected");
-        assert!(matches!(
-            error.kind(),
-            ErrorKind::InvalidJump { ip: 0, offset: 1 }
-        ));
+        };
+        let error = crate::compiler::verify::validate_bytecode(&bytecode)
+            .expect_err("jump to end must be rejected before dispatch");
+        assert_eq!(error.instruction, Some(0));
+        assert_eq!(error.reason, "jump target is out of range");
     }
 
     #[test]

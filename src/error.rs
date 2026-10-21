@@ -20,6 +20,20 @@ pub struct StackFrame {
     pub line: u32,
 }
 
+/// Instruction context for an internal error escaping Lua dispatch.
+///
+/// The error kind retains its original detail and display text. Host API and
+/// compiler errors have no executing instruction and do not carry this record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VmFault {
+    /// Zero-based instruction index in the executing chunk.
+    pub instruction: usize,
+    /// Opcode byte at that instruction.
+    pub opcode: u8,
+    /// Diagnostic function name, if the chunk has one.
+    pub function_name: Option<String>,
+}
+
 /// Rarely-set error context, boxed so `Error` stays narrow. Structured library
 /// details live here so existing rendered messages and `ErrorKind` matches
 /// remain stable while hosts can inspect the operation that failed.
@@ -34,6 +48,7 @@ struct ErrorContext {
     library_error: Option<LibraryError>,
     /// Standard-library function responsible for a non-library error, if any.
     library_function: Option<LibraryFunction>,
+    vm_fault: Option<VmFault>,
 }
 
 // Keep typed metadata behind accessors so Error's existing Debug output stays stable.
@@ -144,6 +159,8 @@ pub enum ErrorKind {
         limit: u32,
     },
     /// Invalid jump target (compiler bug or corrupt bytecode).
+    /// Retained for API compatibility. Execution trusts verified jump targets;
+    /// new dispatch failures share instruction context via [`Error::vm_fault`].
     InvalidJump {
         /// Bytecode index where the bad jump originated.
         ip: usize,
@@ -229,7 +246,10 @@ pub enum ErrorKind {
         prefix: PrefixLocation,
     },
     /// Internal error (corrupt bytecode or VM bug). The string is a
-    /// human-readable description; report these as bugs.
+    /// human-readable description; report these as bugs. Some host preflight
+    /// and compiler failures also use this legacy kind and have no opcode.
+    /// Dispatch attaches structured instruction context via [`Error::vm_fault`]
+    /// without widening `Error` on the recursive evaluation path.
     InternalError(String),
 }
 
@@ -630,6 +650,7 @@ impl Error {
                 pattern_function: None,
                 library_error: None,
                 library_function: None,
+                vm_fault: None,
             })
         })
     }
@@ -704,6 +725,34 @@ impl Error {
 
     pub(crate) fn with_library_function(mut self, function: LibraryFunction) -> Self {
         self.context_mut().library_function = Some(function);
+        self
+    }
+
+    /// Instruction context shared by internal dispatch failures, regardless of
+    /// whether the legacy kind is `InternalError` or `InvalidJump`.
+    pub fn vm_fault(&self) -> Option<&VmFault> {
+        self.context
+            .as_deref()
+            .and_then(|context| context.vm_fault.as_ref())
+    }
+
+    pub(crate) fn with_vm_fault(
+        mut self,
+        instruction: usize,
+        opcode: u8,
+        function_name: Option<&str>,
+    ) -> Self {
+        if matches!(
+            self.kind,
+            ErrorKind::InternalError(_) | ErrorKind::InvalidJump { .. }
+        ) && self.vm_fault().is_none()
+        {
+            self.context_mut().vm_fault = Some(VmFault {
+                instruction,
+                opcode,
+                function_name: function_name.map(str::to_owned),
+            });
+        }
         self
     }
 
@@ -922,6 +971,10 @@ impl fmt::Display for MalformedPatternDetail {
 impl fmt::Display for ErrorKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use ErrorKind::*;
+        // One prefix owner for both legacy internal-error representations.
+        if matches!(self, InternalError(_) | InvalidJump { .. }) {
+            f.write_str("internal error: ")?;
+        }
         match self {
             ArgError(e) => e.fmt(f),
             TooManyArguments { limit } => write!(f, "too many arguments (limit {limit})"),
@@ -941,10 +994,7 @@ impl fmt::Display for ErrorKind {
                 )
             }
             InvalidJump { ip, offset } => {
-                write!(
-                    f,
-                    "internal error: invalid jump (instruction {ip}, offset {offset})"
-                )
+                write!(f, "invalid jump (instruction {ip}, offset {offset})")
             }
             CallDepthExceeded { depth, limit } => {
                 write!(f, "call stack overflow (depth {depth}, limit {limit})")
@@ -981,9 +1031,8 @@ impl fmt::Display for ErrorKind {
             // identically, exactly as reference does. The variants are distinct
             // so hosts can tell deliberate script termination from a VM-detected
             // fault, which is not a rendering difference.
-            RuntimeError(msg) | ScriptError { message: msg, .. } => write!(f, "{msg}"),
-            InternalError(msg) => {
-                write!(f, "internal error: {msg}")
+            RuntimeError(msg) | ScriptError { message: msg, .. } | InternalError(msg) => {
+                write!(f, "{msg}")
             }
         }
     }

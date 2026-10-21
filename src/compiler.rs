@@ -28,6 +28,12 @@ pub(crate) enum UpvalueDesc {
 
 /// Compiled, immutable bytecode for a single Lua function (chunk).
 ///
+/// Execution trusts the static contracts checked by finalization and snapshot
+/// admission. This raw representation is also needed by the parser, verifier
+/// fixtures and snapshot reconstruction. Wrapping only Frame's Arc would not
+/// prove those producers verified a chunk; such a capability must cover all
+/// producers and the nested graph, rather than revalidate on recursive calls.
+///
 /// `Bytecode` is `Send + Sync` and `Arc`-shareable: it holds no per-execution
 /// state, only the instructions, literal pools, and static metadata. The
 /// per-`State` lookup caches live in the State's per-Bytecode runtime bundle.

@@ -510,6 +510,11 @@ fn verify_stack_discipline(view: &impl BytecodeView) -> Result<(), BytecodeValid
     Ok(())
 }
 
+// Dispatch policy: verify static operand bounds, stack shape, marker pairing
+// and control flow here at admission, then trust them during execution. This
+// does not prove runtime value types: constructor operands, numeric loop values,
+// callable handlers and host/resource limits still need fallible runtime checks.
+// A regression in these static proofs is a VM bug, not a recoverable Lua error.
 // The verifier also accepts valid caller-built and snapshot bytecode forms
 // that compiler finalization normalizes: it strips `OP_NOP` and rewrites
 // `OP_SET_FIELD_AT` with A=0 to a cached `OP_SET_FIELD`.

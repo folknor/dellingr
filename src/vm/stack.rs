@@ -76,6 +76,8 @@ impl State {
 
     /// Pop a value from the stack (internal helper).
     /// Panics if stack is empty - this indicates a VM bug, not a user error.
+    /// Bytecode admission proves operand availability; public stack operations
+    /// preflight their inputs. Dispatch does not recheck static stack effects.
     #[inline(always)]
     pub(super) fn pop_val(&mut self) -> Val {
         self.stack.pop().expect("VM bug: pop from empty stack")

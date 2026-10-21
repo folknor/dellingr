@@ -538,20 +538,19 @@ fn gmatch_integer_field(
     field: &[u8],
     maximum: usize,
     reason: &'static str,
-    index: usize,
 ) -> Result<usize, LoadError> {
     let Some(super::SavedVal::Num(bits)) = table_field(payload, table_id, field) else {
-        return Err(corrupt(reason, index, SaveLocation::Objects));
+        return Err(corrupt(reason, table_id as usize, SaveLocation::Objects));
     };
     let value = f64::from_bits(*bits);
-    integer_index(value, maximum).ok_or_else(|| corrupt(reason, index, SaveLocation::Objects))
+    integer_index(value, maximum)
+        .ok_or_else(|| corrupt(reason, table_id as usize, SaveLocation::Objects))
 }
 
 fn validate_gmatch_last_match(
     payload: &SavePayload,
     table_id: u32,
     subject_len: usize,
-    index: usize,
 ) -> Result<(), LoadError> {
     if table_field(
         payload,
@@ -566,37 +565,32 @@ fn validate_gmatch_last_match(
             gmatch_schema::LAST_MATCH_FIELD.as_bytes(),
             subject_len,
             "gmatch last match is invalid",
-            index,
         )?;
     }
     Ok(())
 }
 
-fn validate_gmatch_compile_state(
-    payload: &SavePayload,
-    table_id: u32,
-    index: usize,
-) -> Result<(), LoadError> {
+fn validate_gmatch_compile_state(payload: &SavePayload, table_id: u32) -> Result<(), LoadError> {
     let Some(super::SavedVal::Str(cache_key_id)) =
         table_numeric_field(payload, table_id, gmatch_schema::COMPILE_CHARGED_SLOT)
     else {
         return Err(corrupt(
             "gmatch compile flag key is missing",
-            index,
+            table_id as usize,
             SaveLocation::Objects,
         ));
     };
     let Some(cache_key) = payload.strings.get(*cache_key_id as usize) else {
         return Err(corrupt(
             "gmatch compile flag key is out of range",
-            index,
+            table_id as usize,
             SaveLocation::Objects,
         ));
     };
     if cache_key.as_slice() != gmatch_schema::COMPILE_CHARGED_FIELD.as_bytes() {
         return Err(corrupt(
             "gmatch compile flag key is invalid",
-            index,
+            table_id as usize,
             SaveLocation::Objects,
         ));
     }
@@ -610,7 +604,7 @@ fn validate_gmatch_compile_state(
     ) {
         return Err(corrupt(
             "gmatch compile flag is invalid",
-            index,
+            table_id as usize,
             SaveLocation::Objects,
         ));
     }
@@ -621,7 +615,6 @@ fn validate_gmatch_state(
     payload: &SavePayload,
     table_id: u32,
     empty_pattern: bool,
-    index: usize,
 ) -> Result<(), LoadError> {
     let maximum_position = crate::limits::MAX_STRING_BYTES + 1;
     if empty_pattern {
@@ -631,7 +624,6 @@ fn validate_gmatch_state(
             gmatch_schema::LENGTH_FIELD.as_bytes(),
             crate::limits::MAX_STRING_BYTES,
             "empty gmatch length is missing or invalid",
-            index,
         )?;
         let pos = gmatch_integer_field(
             payload,
@@ -639,12 +631,11 @@ fn validate_gmatch_state(
             gmatch_schema::POSITION_FIELD.as_bytes(),
             maximum_position,
             "empty gmatch position is missing or invalid",
-            index,
         )?;
         if pos > len.saturating_add(1) {
             return Err(corrupt(
                 "empty gmatch position exceeds its length",
-                index,
+                table_id as usize,
                 SaveLocation::Objects,
             ));
         }
@@ -656,7 +647,7 @@ fn validate_gmatch_state(
     else {
         return Err(corrupt(
             "gmatch subject is missing or invalid",
-            index,
+            table_id as usize,
             SaveLocation::Objects,
         ));
     };
@@ -673,7 +664,7 @@ fn validate_gmatch_state(
     ) {
         return Err(corrupt(
             "gmatch pattern is missing or invalid",
-            index,
+            table_id as usize,
             SaveLocation::Objects,
         ));
     }
@@ -683,17 +674,16 @@ fn validate_gmatch_state(
         gmatch_schema::POSITION_FIELD.as_bytes(),
         maximum_position,
         "gmatch position is missing or invalid",
-        index,
     )?;
     if pos > subject.len().saturating_add(1) {
         return Err(corrupt(
             "gmatch position exceeds its subject",
-            index,
+            table_id as usize,
             SaveLocation::Objects,
         ));
     }
-    validate_gmatch_last_match(payload, table_id, subject.len(), index)?;
-    validate_gmatch_compile_state(payload, table_id, index)?;
+    validate_gmatch_last_match(payload, table_id, subject.len())?;
+    validate_gmatch_compile_state(payload, table_id)?;
     Ok(())
 }
 
@@ -766,12 +756,12 @@ fn validate_gmatch_iterators(payload: &SavePayload) -> Result<(), LoadError> {
         ) {
             return Err(corrupt(
                 "gmatch closure state is not a table",
-                closure_index,
+                table_id as usize,
                 SaveLocation::Objects,
             ));
         }
         if validated_states.insert((table_id, empty_pattern)) {
-            validate_gmatch_state(payload, table_id, empty_pattern, closure_index)?;
+            validate_gmatch_state(payload, table_id, empty_pattern)?;
         }
     }
     Ok(())
@@ -1048,11 +1038,19 @@ mod tests {
         let malformed = super::super::SavedVal::Str(2);
         assert!(matches!(
             validate_gmatch_iterators(&gmatch_payload(false, malformed.clone())),
-            Err(LoadError::CorruptArena { .. })
+            Err(LoadError::CorruptArena {
+                reason: "gmatch position is missing or invalid",
+                index: 0,
+                location: SaveLocation::Objects,
+            })
         ));
         assert!(matches!(
             validate_gmatch_iterators(&gmatch_payload(true, malformed)),
-            Err(LoadError::CorruptArena { .. })
+            Err(LoadError::CorruptArena {
+                reason: "empty gmatch position is missing or invalid",
+                index: 0,
+                location: SaveLocation::Objects,
+            })
         ));
 
         let mut invalid_length = gmatch_payload(true, valid_number);
@@ -1064,7 +1062,11 @@ mod tests {
         entries[1].1 = super::super::SavedVal::Str(2);
         assert!(matches!(
             validate_gmatch_iterators(&invalid_length),
-            Err(LoadError::CorruptArena { .. })
+            Err(LoadError::CorruptArena {
+                reason: "empty gmatch length is missing or invalid",
+                index: 0,
+                location: SaveLocation::Objects,
+            })
         ));
     }
 

@@ -1,6 +1,6 @@
 use std::str;
 
-use super::super::error::{ErrorKind, TypeError};
+use super::super::error::TypeError;
 use super::LuaType;
 use super::Result;
 use super::State;
@@ -12,6 +12,11 @@ use super::caches::{
 use super::frame::Frame;
 use super::object::{ObjectPtr, Upvalue};
 use crate::instr::{ArgCount, RetCount};
+
+/// Global names are verified UTF-8 at load time; this is not fallible host input.
+pub(super) fn verified_global_name(bytes: &[u8]) -> &str {
+    str::from_utf8(bytes).expect("verified global name is UTF-8")
+}
 
 impl MethodLookupCacheEntry {
     fn new(
@@ -507,11 +512,7 @@ impl State {
             return Ok(());
         }
 
-        let name = str::from_utf8(s).map_err(|_| {
-            self.error(ErrorKind::InternalError(
-                "compiler emitted non-UTF-8 global name".to_string(),
-            ))
-        })?;
+        let name = verified_global_name(s);
         let val = self.global_env.read(name, cache);
         self.check_stack_space(1)?;
         self.push_unchecked(val);

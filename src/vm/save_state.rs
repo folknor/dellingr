@@ -624,7 +624,6 @@ struct SaveBuilder<'a> {
     objects: Vec<Option<PendingObject>>,
     object_ids: BTreeMap<ObjectPtr, u32>,
     roots: Vec<Option<SavedVal>>,
-    breadcrumbs: Vec<Breadcrumb>,
     reachable_pointer_values: BTreeMap<SavedVal, ()>,
     expanded_environment_objects: BTreeMap<ObjectPtr, ()>,
 }
@@ -641,17 +640,14 @@ enum ValueDestination {
 enum EncodeTask {
     Value {
         val: Val,
-        path: PathId,
         destination: ValueDestination,
     },
     Object {
         ptr: ObjectPtr,
         id: u32,
-        path: PathId,
     },
     Upvalue {
         upvalue: UpvalueRef,
-        path: PathId,
         object: u32,
         index: usize,
     },
@@ -664,10 +660,240 @@ enum PathSegment {
     Metatable,
     Upvalue(usize),
 }
+
+impl PathSegment {
+    fn global(name: &str) -> Self {
+        Self::Global(truncate_utf8(name, MAX_PATH_GLOBAL_BYTES))
+    }
+}
+
 struct Breadcrumb {
     parent: Option<PathId>,
     segment: PathSegment,
 }
+
+enum PathTask {
+    Value { val: Val, path: PathId },
+    Object { ptr: ObjectPtr, path: PathId },
+    Upvalue { upvalue: UpvalueRef, path: PathId },
+}
+
+enum PathObjectChildren {
+    Table {
+        entries: Vec<(Val, Val)>,
+        metatable: Option<ObjectPtr>,
+    },
+    Closure(std::sync::Arc<[UpvalueRef]>),
+}
+
+// Save tasks carry no path data. Rewalk a root only after finding an
+// unregistered function, preserving the encoder's LIFO order for diagnostics.
+// Earlier roots have encoded successfully, so a shared object cannot hide the
+// first unregistered function from this root's fresh visited sets.
+struct PathFinder<'a> {
+    state: &'a State,
+    env_reverse: &'a BTreeMap<ObjectPtr, String>,
+    breadcrumbs: Vec<Breadcrumb>,
+    objects: BTreeSet<ObjectPtr>,
+    environment_objects: BTreeSet<ObjectPtr>,
+    upvalues: BTreeSet<usize>,
+}
+
+impl<'a> PathFinder<'a> {
+    fn new(state: &'a State, env_reverse: &'a BTreeMap<ObjectPtr, String>) -> Self {
+        Self {
+            state,
+            env_reverse,
+            breadcrumbs: Vec::new(),
+            objects: BTreeSet::new(),
+            environment_objects: BTreeSet::new(),
+            upvalues: BTreeSet::new(),
+        }
+    }
+
+    fn find(mut self, root: Val, global: &str, target_function: RustFunc) -> Option<String> {
+        let root_path = push_path(&mut self.breadcrumbs, None, PathSegment::global(global));
+        let mut tasks = vec![PathTask::Value {
+            val: root,
+            path: root_path,
+        }];
+        let target_address = target_function as usize;
+
+        while let Some(task) = tasks.pop() {
+            match task {
+                PathTask::Value { val, path } => match val {
+                    Val::RustFn(function) if function as usize == target_address => {
+                        return Some(render_path(&self.breadcrumbs, path));
+                    }
+                    Val::Obj(ptr) if self.env_reverse.contains_key(&ptr) => {
+                        if self.environment_objects.insert(ptr) {
+                            let table = self.state.heap.as_table_ref(ptr)?;
+                            let metatable = table.get_metatable();
+                            let entries = table.entries();
+                            if let Some(metatable) = metatable {
+                                let child_path = push_path(
+                                    &mut self.breadcrumbs,
+                                    Some(path),
+                                    PathSegment::Metatable,
+                                );
+                                tasks.push(PathTask::Value {
+                                    val: Val::Obj(metatable),
+                                    path: child_path,
+                                });
+                            }
+                            for (index, (key, value)) in entries.into_iter().enumerate().rev() {
+                                let value_path = push_path(
+                                    &mut self.breadcrumbs,
+                                    Some(path),
+                                    PathSegment::TableValue(index),
+                                );
+                                tasks.push(PathTask::Value {
+                                    val: value,
+                                    path: value_path,
+                                });
+                                let key_path = push_path(
+                                    &mut self.breadcrumbs,
+                                    Some(path),
+                                    PathSegment::TableKey(index),
+                                );
+                                tasks.push(PathTask::Value {
+                                    val: key,
+                                    path: key_path,
+                                });
+                            }
+                        }
+                    }
+                    Val::Obj(ptr) if self.objects.insert(ptr) => {
+                        tasks.push(PathTask::Object { ptr, path });
+                    }
+                    _ => {}
+                },
+                PathTask::Object { ptr, path } => {
+                    let children = match &self.state.heap.get(ptr).raw {
+                        RawObject::Table(table) => {
+                            let (_, entries) = table.snapshot_entries();
+                            PathObjectChildren::Table {
+                                entries,
+                                metatable: table.get_metatable(),
+                            }
+                        }
+                        RawObject::LuaFn(closure) => {
+                            PathObjectChildren::Closure(std::sync::Arc::clone(&closure.upvalues))
+                        }
+                    };
+                    match children {
+                        PathObjectChildren::Table { entries, metatable } => {
+                            if let Some(metatable) = metatable {
+                                let child_path = push_path(
+                                    &mut self.breadcrumbs,
+                                    Some(path),
+                                    PathSegment::Metatable,
+                                );
+                                tasks.push(PathTask::Value {
+                                    val: Val::Obj(metatable),
+                                    path: child_path,
+                                });
+                            }
+                            for (index, (key, value)) in entries.into_iter().enumerate().rev() {
+                                let value_path = push_path(
+                                    &mut self.breadcrumbs,
+                                    Some(path),
+                                    PathSegment::TableValue(index),
+                                );
+                                tasks.push(PathTask::Value {
+                                    val: value,
+                                    path: value_path,
+                                });
+                                let key_path = push_path(
+                                    &mut self.breadcrumbs,
+                                    Some(path),
+                                    PathSegment::TableKey(index),
+                                );
+                                tasks.push(PathTask::Value {
+                                    val: key,
+                                    path: key_path,
+                                });
+                            }
+                        }
+                        PathObjectChildren::Closure(upvalues) => {
+                            for (index, upvalue) in upvalues.iter().enumerate().rev() {
+                                let child_path = push_path(
+                                    &mut self.breadcrumbs,
+                                    Some(path),
+                                    PathSegment::Upvalue(index),
+                                );
+                                tasks.push(PathTask::Upvalue {
+                                    upvalue: *upvalue,
+                                    path: child_path,
+                                });
+                            }
+                        }
+                    }
+                }
+                PathTask::Upvalue { upvalue, path } => {
+                    if self.upvalues.insert(upvalue.index())
+                        && let Upvalue::Closed(value) = self.state.upvalue_pool.get(upvalue)
+                    {
+                        tasks.push(PathTask::Value { val: *value, path });
+                    }
+                }
+            }
+        }
+        None
+    }
+}
+
+fn push_path(
+    breadcrumbs: &mut Vec<Breadcrumb>,
+    parent: Option<PathId>,
+    segment: PathSegment,
+) -> PathId {
+    let id = breadcrumbs.len();
+    breadcrumbs.push(Breadcrumb { parent, segment });
+    id
+}
+
+fn render_path(breadcrumbs: &[Breadcrumb], path: PathId) -> String {
+    let mut ids = Vec::with_capacity(MAX_RENDERED_PATH_SEGMENTS);
+    let mut current = Some(path);
+    let mut global_name = None;
+    let mut skipped = false;
+    while let Some(id) = current {
+        let breadcrumb = &breadcrumbs[id];
+        if let PathSegment::Global(name) = &breadcrumb.segment {
+            global_name = Some(name.as_str());
+        }
+        if ids.len() < MAX_RENDERED_PATH_SEGMENTS {
+            ids.push(id);
+        } else {
+            skipped = true;
+        }
+        current = breadcrumb.parent;
+    }
+    let mut text = String::new();
+    if let Some(name) = global_name {
+        text.push_str("global ");
+        text.push_str(name);
+    }
+    if skipped {
+        text.push_str("...");
+    }
+    for id in ids.into_iter().rev() {
+        match &breadcrumbs[id].segment {
+            PathSegment::Global(_) => {}
+            PathSegment::TableKey(index) => text.push_str(&format!(".key[{index}]")),
+            PathSegment::TableValue(index) => text.push_str(&format!("[{index}]")),
+            PathSegment::Metatable => text.push_str(".metatable"),
+            PathSegment::Upvalue(index) => text.push_str(&format!(".upvalue[{index}]")),
+        }
+    }
+    if text.len() > MAX_RENDERED_PATH_BYTES {
+        text = truncate_utf8(&text, MAX_RENDERED_PATH_BYTES.saturating_sub(3));
+        text.push_str("...");
+    }
+    text
+}
+
 enum PendingObject {
     Table {
         array_len: u32,
@@ -694,7 +920,6 @@ impl<'a> SaveBuilder<'a> {
             objects: Vec::new(),
             object_ids: BTreeMap::new(),
             roots: Vec::new(),
-            breadcrumbs: Vec::new(),
             reachable_pointer_values: BTreeMap::new(),
             expanded_environment_objects: BTreeMap::new(),
         }
@@ -709,10 +934,7 @@ impl<'a> SaveBuilder<'a> {
         // under a builtin name but no longer hold the canonical value.
         let mut user_globals = Vec::new();
         for (name, val) in self.state.global_env.iter() {
-            let saved = self.encode_root(
-                *val,
-                PathSegment::Global(truncate_utf8(name, MAX_PATH_GLOBAL_BYTES)),
-            )?;
+            let saved = self.encode_root(*val, name)?;
             user_globals.push((name.clone(), saved));
         }
         let env_deltas = self.encode_env_deltas()?;
@@ -818,10 +1040,7 @@ impl<'a> SaveBuilder<'a> {
             let mut deleted = Vec::new();
             for (key, _) in &baseline.entries {
                 if !live_keys.contains_key(&TableKey::from_prevalidated(*key)) {
-                    deleted.push(self.encode_root(
-                        *key,
-                        PathSegment::Global(truncate_utf8(&token, MAX_PATH_GLOBAL_BYTES)),
-                    )?);
+                    deleted.push(self.encode_root(*key, &token)?);
                 }
             }
             let mut upserts = Vec::new();
@@ -829,14 +1048,8 @@ impl<'a> SaveBuilder<'a> {
                 match baseline_values.get(&TableKey::from_prevalidated(*key)) {
                     Some(base_value) if base_value == value => {}
                     _ => upserts.push((
-                        self.encode_root(
-                            *key,
-                            PathSegment::Global(truncate_utf8(&token, MAX_PATH_GLOBAL_BYTES)),
-                        )?,
-                        self.encode_root(
-                            *value,
-                            PathSegment::Global(truncate_utf8(&token, MAX_PATH_GLOBAL_BYTES)),
-                        )?,
+                        self.encode_root(*key, &token)?,
+                        self.encode_root(*value, &token)?,
                     )),
                 }
             }
@@ -853,22 +1066,14 @@ impl<'a> SaveBuilder<'a> {
             let order = (replayed_order != live.iter().map(|(key, _)| *key).collect::<Vec<_>>())
                 .then(|| {
                     live.iter()
-                        .map(|(key, _)| {
-                            self.encode_root(
-                                *key,
-                                PathSegment::Global(truncate_utf8(&token, MAX_PATH_GLOBAL_BYTES)),
-                            )
-                        })
+                        .map(|(key, _)| self.encode_root(*key, &token))
                         .collect::<Result<Vec<_>, SaveError>>()
                 })
                 .transpose()?;
             let metatable = match (baseline.metatable, table.get_metatable().map(Val::Obj)) {
                 (before, after) if before == after => SavedMetatableDelta::Unchanged,
                 (_, None) => SavedMetatableDelta::Cleared,
-                (_, Some(value)) => SavedMetatableDelta::Set(self.encode_root(
-                    value,
-                    PathSegment::Global(truncate_utf8(&token, MAX_PATH_GLOBAL_BYTES)),
-                )?),
+                (_, Some(value)) => SavedMetatableDelta::Set(self.encode_root(value, &token)?),
             };
             // The array part's shape (its nil slots included) decides where
             // later integer writes land, so it must round-trip; replaying the
@@ -881,12 +1086,7 @@ impl<'a> SaveBuilder<'a> {
                         .array_part()
                         .to_vec()
                         .into_iter()
-                        .map(|value| {
-                            self.encode_root(
-                                value,
-                                PathSegment::Global(truncate_utf8(&token, MAX_PATH_GLOBAL_BYTES)),
-                            )
-                        })
+                        .map(|value| self.encode_root(value, &token))
                         .collect::<Result<Vec<_>, SaveError>>()?,
                 )
             };
@@ -909,28 +1109,23 @@ impl<'a> SaveBuilder<'a> {
         Ok(deltas)
     }
 
-    fn encode_root(&mut self, val: Val, segment: PathSegment) -> Result<SavedVal, SaveError> {
+    fn encode_root(&mut self, val: Val, global: &str) -> Result<SavedVal, SaveError> {
         let root = self.roots.len();
         self.roots.push(None);
-        let path = self.push_path(None, segment);
-        self.run_tasks(vec![EncodeTask::Value {
-            val,
-            path,
-            destination: ValueDestination::Root(root),
-        }])?;
+        self.run_tasks(val, global, root)?;
         self.roots[root]
             .take()
             .ok_or(SaveError::Internal("unfilled root slot"))
     }
 
-    fn run_tasks(&mut self, mut tasks: Vec<EncodeTask>) -> Result<(), SaveError> {
+    fn run_tasks(&mut self, root: Val, global: &str, root_slot: usize) -> Result<(), SaveError> {
+        let mut tasks = vec![EncodeTask::Value {
+            val: root,
+            destination: ValueDestination::Root(root_slot),
+        }];
         while let Some(task) = tasks.pop() {
             match task {
-                EncodeTask::Value {
-                    val,
-                    path,
-                    destination,
-                } => {
+                EncodeTask::Value { val, destination } => {
                     let saved = match val {
                         Val::Nil => Ok(SavedVal::Nil),
                         Val::Bool(b) => Ok(SavedVal::Bool(b)),
@@ -954,19 +1149,21 @@ impl<'a> SaveBuilder<'a> {
                         }
                         Val::RustFn(func) => {
                             let addr = func as usize;
-                            let id =
-                                self.state.rust_fn_ids_by_addr.get(&addr).ok_or_else(|| {
-                                    SaveError::UnregisteredFunction {
-                                        reachable_from: self.render_path(path),
-                                    }
-                                })?;
+                            let Some(id) = self.state.rust_fn_ids_by_addr.get(&addr) else {
+                                let reachable_from = PathFinder::new(self.state, &self.env_reverse)
+                                    .find(root, global, func)
+                                    .ok_or(SaveError::Internal(
+                                        "unregistered function path was not found from its root",
+                                    ))?;
+                                return Err(SaveError::UnregisteredFunction { reachable_from });
+                            };
                             Ok(SavedVal::Fn(id.clone()))
                         }
                         Val::Obj(ptr) => {
                             if let Some(token) = self.env_reverse.get(&ptr) {
                                 Ok(SavedVal::EnvObj(token.clone()))
                             } else {
-                                let id = self.object_id(ptr, path, &mut tasks)?;
+                                let id = self.object_id(ptr, &mut tasks)?;
                                 Ok(SavedVal::Obj(id))
                             }
                         }
@@ -986,31 +1183,27 @@ impl<'a> SaveBuilder<'a> {
                         if let Some(metatable) = table.get_metatable() {
                             tasks.push(EncodeTask::Value {
                                 val: Val::Obj(metatable),
-                                path: self.push_path(Some(path), PathSegment::Metatable),
                                 destination: ValueDestination::Discard,
                             });
                         }
-                        for (idx, (key, value)) in table.entries().into_iter().enumerate().rev() {
+                        for (key, value) in table.entries().into_iter().rev() {
                             tasks.push(EncodeTask::Value {
                                 val: value,
-                                path: self.push_path(Some(path), PathSegment::TableValue(idx)),
                                 destination: ValueDestination::Discard,
                             });
                             tasks.push(EncodeTask::Value {
                                 val: key,
-                                path: self.push_path(Some(path), PathSegment::TableKey(idx)),
                                 destination: ValueDestination::Discard,
                             });
                         }
                     }
                     self.write_value(destination, saved)?;
                 }
-                EncodeTask::Object { ptr, id, path } => {
-                    self.expand_object(ptr, id, path, &mut tasks)?;
+                EncodeTask::Object { ptr, id } => {
+                    self.expand_object(ptr, id, &mut tasks)?;
                 }
                 EncodeTask::Upvalue {
                     upvalue,
-                    path,
                     object,
                     index,
                 } => {
@@ -1029,7 +1222,6 @@ impl<'a> SaveBuilder<'a> {
                         match self.state.upvalue_pool.get(upvalue) {
                             Upvalue::Closed(val) => tasks.push(EncodeTask::Value {
                                 val: *val,
-                                path,
                                 destination: ValueDestination::Upvalue(id),
                             }),
                             Upvalue::Open(_) => return Err(SaveError::OpenUpvalueReachable),
@@ -1053,12 +1245,7 @@ impl<'a> SaveBuilder<'a> {
         Ok(())
     }
 
-    fn object_id(
-        &mut self,
-        ptr: ObjectPtr,
-        path: PathId,
-        tasks: &mut Vec<EncodeTask>,
-    ) -> Result<u32, SaveError> {
+    fn object_id(&mut self, ptr: ObjectPtr, tasks: &mut Vec<EncodeTask>) -> Result<u32, SaveError> {
         if let Some(id) = self.object_ids.get(&ptr) {
             return Ok(*id);
         }
@@ -1068,7 +1255,7 @@ impl<'a> SaveBuilder<'a> {
         })?;
         self.object_ids.insert(ptr, id);
         self.objects.push(None);
-        tasks.push(EncodeTask::Object { ptr, id, path });
+        tasks.push(EncodeTask::Object { ptr, id });
         Ok(id)
     }
 
@@ -1076,7 +1263,6 @@ impl<'a> SaveBuilder<'a> {
         &mut self,
         ptr: ObjectPtr,
         id: u32,
-        path: PathId,
         tasks: &mut Vec<EncodeTask>,
     ) -> Result<(), SaveError> {
         let pending = match &self.state.heap.get(ptr).raw {
@@ -1091,14 +1277,12 @@ impl<'a> SaveBuilder<'a> {
                 if let Some(mt) = metatable {
                     tasks.push(EncodeTask::Value {
                         val: Val::Obj(mt),
-                        path: self.push_path(Some(path), PathSegment::Metatable),
                         destination: ValueDestination::Metatable { object: id },
                     });
                 }
                 for (idx, (key, value)) in entries.into_iter().enumerate().rev() {
                     tasks.push(EncodeTask::Value {
                         val: value,
-                        path: self.push_path(Some(path), PathSegment::TableValue(idx)),
                         destination: ValueDestination::TableValue {
                             object: id,
                             entry: idx,
@@ -1106,7 +1290,6 @@ impl<'a> SaveBuilder<'a> {
                     });
                     tasks.push(EncodeTask::Value {
                         val: key,
-                        path: self.push_path(Some(path), PathSegment::TableKey(idx)),
                         destination: ValueDestination::TableKey {
                             object: id,
                             entry: idx,
@@ -1124,7 +1307,6 @@ impl<'a> SaveBuilder<'a> {
                 for (idx, uv_ref) in closure.upvalues.iter().copied().enumerate().rev() {
                     tasks.push(EncodeTask::Upvalue {
                         upvalue: uv_ref,
-                        path: self.push_path(Some(path), PathSegment::Upvalue(idx)),
                         object: id,
                         index: idx,
                     });
@@ -1194,57 +1376,6 @@ impl<'a> SaveBuilder<'a> {
         Ok(())
     }
 
-    fn push_path(&mut self, parent: Option<PathId>, segment: PathSegment) -> PathId {
-        let id = self.breadcrumbs.len();
-        let segment = match segment {
-            PathSegment::Global(name) => {
-                PathSegment::Global(truncate_utf8(&name, MAX_PATH_GLOBAL_BYTES))
-            }
-            other => other,
-        };
-        self.breadcrumbs.push(Breadcrumb { parent, segment });
-        id
-    }
-    fn render_path(&self, path: PathId) -> String {
-        let mut ids = Vec::with_capacity(MAX_RENDERED_PATH_SEGMENTS);
-        let mut current = Some(path);
-        let mut global_name = None;
-        let mut skipped = false;
-        while let Some(id) = current {
-            let breadcrumb = &self.breadcrumbs[id];
-            if let PathSegment::Global(name) = &breadcrumb.segment {
-                global_name = Some(name.as_str());
-            }
-            if ids.len() < MAX_RENDERED_PATH_SEGMENTS {
-                ids.push(id);
-            } else {
-                skipped = true;
-            }
-            current = breadcrumb.parent;
-        }
-        let mut text = String::new();
-        if let Some(name) = global_name {
-            text.push_str("global ");
-            text.push_str(name);
-        }
-        if skipped {
-            text.push_str("...");
-        }
-        for id in ids.into_iter().rev() {
-            match &self.breadcrumbs[id].segment {
-                PathSegment::Global(_) => {}
-                PathSegment::TableKey(index) => text.push_str(&format!(".key[{index}]")),
-                PathSegment::TableValue(index) => text.push_str(&format!("[{index}]")),
-                PathSegment::Metatable => text.push_str(".metatable"),
-                PathSegment::Upvalue(index) => text.push_str(&format!(".upvalue[{index}]")),
-            }
-        }
-        if text.len() > MAX_RENDERED_PATH_BYTES {
-            text = truncate_utf8(&text, MAX_RENDERED_PATH_BYTES.saturating_sub(3));
-            text.push_str("...");
-        }
-        text
-    }
     fn finish_object(object: PendingObject) -> Result<SavedObject, SaveError> {
         match object {
             PendingObject::Table {
