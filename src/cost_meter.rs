@@ -5,8 +5,8 @@
 /// The version covers everything that decides the cost of identical source -
 /// per-opcode charges, native library charges, and compiler emission (which
 /// opcodes a source compiles to). Hosts may key stored cost fingerprints on
-/// it; snapshots require an exact match. `tests/cost_golden.rs` pins
-/// `cost_used` for a fixed corpus so a change cannot land without a bump.
+/// it; snapshots require an exact match. `tests/cost_golden.rs` checks a
+/// fixed corpus and fingerprints its sources, expected costs, and this version.
 ///
 /// Version 1 was the original implicit model. Version 2 charges native string
 /// and pattern work in addition to bytecode instructions. Version 3 folds
@@ -22,6 +22,11 @@
 /// output-byte charges change through unsigned NaN formatting and decimal
 /// integral `%q` output.
 pub const COST_MODEL_VERSION: u16 = 5;
+
+/// Fingerprint of the fixed source and cost corpus in `tests/cost_golden.rs`,
+/// including `COST_MODEL_VERSION`.
+#[doc(hidden)]
+pub const COST_MODEL_GOLDEN_FINGERPRINT: u64 = 0xec0d_1c77_2501_886a;
 
 /// Tracks costs either without a budget or against a finite budget.
 ///

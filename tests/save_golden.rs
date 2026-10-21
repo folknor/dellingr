@@ -15,9 +15,12 @@
 //! closure, its bytecode and then its upvalues in vector order.
 //!
 //! To refresh deliberately after an intentional format change, run the ignored
-//! test `deliberately_rewrite_snapshot_fixture_file` with the `snapshot`
-//! feature enabled. Its name is chosen to share no likely substring with a
-//! casual test filter, because the runner includes ignored tests.
+//! helper with `DELLINGR_REGENERATE_GOLDEN=1` and the `snapshot` feature enabled.
+//! Without that explicit opt-in it panics before writing, since the test runner
+//! includes ignored tests for substring filters.
+
+#[path = "common/save_fixture.rs"]
+mod save_fixture;
 
 use std::path::PathBuf;
 
@@ -77,11 +80,8 @@ fn current_fixture_path() -> PathBuf {
 #[test]
 #[ignore = "regeneration helper; run explicitly after an intentional format change"]
 fn deliberately_rewrite_snapshot_fixture_file() {
-    let path = current_fixture_path();
-    std::fs::create_dir_all(path.parent().expect("fixture path has a parent"))
-        .expect("fixture directory is writable");
-    std::fs::write(&path, golden_bytes()).expect("fixture is writable");
-    println!("wrote {}", path.display());
+    save_fixture::rewrite_save_golden_fixture(&golden_bytes());
+    println!("wrote {}", current_fixture_path().display());
 }
 
 #[test]
@@ -114,7 +114,7 @@ fn every_save_fixture_is_declared_and_referenced() {
 fn save_traversal_order_matches_golden_fixture() {
     let expected = std::fs::read(current_fixture_path()).expect(
         "golden fixture missing; refresh it after an intentional format change with \
-         `brokkr test deliberately_rewrite_snapshot_fixture_file`",
+         `DELLINGR_REGENERATE_GOLDEN=1 brokkr test deliberately_rewrite_snapshot_fixture_file`",
     );
     let actual = golden_bytes();
     assert_eq!(

@@ -25,8 +25,9 @@ One loop:
 10. Delete the shipped entry from its backlog, run `brokkr fmt` +
     `brokkr check`, commit.
 
-`brokkr check` is the whole gate. Its `diff-lua` script_check runs
-`scripts/diff_gate.sh` at `stage = "post-test"`, so the differential comparison
+`brokkr check` is the whole gate. Its test phase includes `tests/diff_test.rs`,
+which runs the whole corpus through `scripts/diff_test.sh` for every feature
+shape, so the differential comparison
 against reference Lua 5.2/5.4 is already covered - do not also run
 `./scripts/diff_test.sh`.
 

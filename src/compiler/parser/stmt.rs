@@ -127,7 +127,7 @@ impl<'a> Parser<'a> {
             return self.parse_local_function();
         }
 
-        let old_local_count = self.locals.len() as u8;
+        let old_local_count = self.funcs.locals.len() as u8;
 
         let names = self.parse_namelist()?;
 
@@ -167,7 +167,7 @@ impl<'a> Parser<'a> {
     fn parse_local_function(&mut self) -> Result<()> {
         self.input.next()?; // `function` keyword
         let name = self.expect_identifier()?;
-        let local_slot = self.locals.len() as u8;
+        let local_slot = self.funcs.locals.len() as u8;
 
         // Add the local FIRST so it's in scope within the function body
         // (this allows recursive calls like `local function fib(n) ... fib(n-1) ... end`)
@@ -196,7 +196,7 @@ impl<'a> Parser<'a> {
     pub(super) fn parse_for(&mut self) -> Result<()> {
         self.input.next()?; // `for` keyword
         let first_name = self.expect_identifier()?;
-        self.nest_level += 1;
+        self.level_up();
 
         // Check what follows the first identifier to determine loop type
         match self.input.peek_type()? {
@@ -221,7 +221,7 @@ impl<'a> Parser<'a> {
     /// Parses a numeric `for` loop, starting with the first expression after the `=`.
     fn parse_numeric_for(&mut self, name: &'a str) -> Result<()> {
         // The start(current), stop and step are stored in three "hidden" local slots.
-        let current_local_slot = self.locals.len() as u8;
+        let current_local_slot = self.funcs.locals.len() as u8;
 
         // Control expressions are evaluated in the enclosing scope, before the
         // loop variable exists. Check capacity now so its error precedence is
@@ -245,7 +245,7 @@ impl<'a> Parser<'a> {
 
         // The ForPrep command pulls three values off the stack and places them
         // into locals to use in the loop.
-        let loop_start_instr_index = self.chunk.code.len();
+        let loop_start_instr_index = self.funcs.chunk.code.len();
         self.push(Instr::for_prep(current_local_slot, -1));
 
         // body
@@ -256,7 +256,7 @@ impl<'a> Parser<'a> {
         // Close the visible loop variable and body locals before its slot is reused.
         self.push(Instr::close_upvalues(current_local_slot + 3));
 
-        let loop_end = self.chunk.code.len();
+        let loop_end = self.funcs.chunk.code.len();
         let body_length = self.checked_jump_offset(loop_start_instr_index, loop_end + 1)?;
         self.push(Instr::for_loop(current_local_slot, -body_length));
 
@@ -304,7 +304,7 @@ impl<'a> Parser<'a> {
             .ok_or_else(|| self.error_here(SyntaxError::TooManyLocals))?;
 
         // The hidden control variables: iterator function, state, control var
-        let base_slot = self.locals.len() as u8;
+        let base_slot = self.funcs.locals.len() as u8;
 
         // The expressions run in the enclosing scope. Preserve the existing
         // local-limit error without declaring the future loop locals early.
@@ -336,9 +336,9 @@ impl<'a> Parser<'a> {
         // body
         // Jump back to TForCall
 
-        let loop_start = self.chunk.code.len();
+        let loop_start = self.funcs.chunk.code.len();
         self.push(Instr::tfor_call(base_slot, num_loop_vars));
-        let tforloop_index = self.chunk.code.len();
+        let tforloop_index = self.funcs.chunk.code.len();
         self.push(Instr::tfor_loop(base_slot, 0)); // placeholder offset
 
         // body
@@ -350,11 +350,11 @@ impl<'a> Parser<'a> {
         self.push(Instr::close_upvalues(base_slot + 3));
 
         // Jump back to TForCall
-        let body_end = self.chunk.code.len();
+        let body_end = self.funcs.chunk.code.len();
         self.push(Instr::jump(self.checked_jump_offset(body_end, loop_start)?));
 
         // Patch the TForLoop to jump past the body
-        self.patch_jump(tforloop_index, self.chunk.code.len(), |offset| {
+        self.patch_jump(tforloop_index, self.funcs.chunk.code.len(), |offset| {
             Instr::tfor_loop(base_slot, offset)
         })?;
 
@@ -410,7 +410,7 @@ impl<'a> Parser<'a> {
     /// Parses a `do ... end` statement.
     pub(super) fn parse_do(&mut self) -> Result<()> {
         self.input.next()?; // `do` keyword
-        self.nest_level += 1;
+        self.level_up();
         self.parse_statements()?;
         self.expect(TokenType::End)?;
         self.level_down();
@@ -420,12 +420,12 @@ impl<'a> Parser<'a> {
     /// Parses a `repeat ... until` statement.
     pub(super) fn parse_repeat(&mut self) -> Result<()> {
         self.input.next()?; // `repeat` keyword
-        self.nest_level += 1;
+        self.level_up();
 
         // Track locals before body
-        let body_locals_start = self.locals.len() as u8;
+        let body_locals_start = self.funcs.locals.len() as u8;
 
-        let body_start = self.chunk.code.len();
+        let body_start = self.funcs.chunk.code.len();
         self.enter_loop(body_locals_start);
         self.parse_statements()?;
         self.expect(TokenType::Until)?;
@@ -433,7 +433,7 @@ impl<'a> Parser<'a> {
 
         // Close upvalues for any locals declared inside the loop body
         // (before the conditional jump back)
-        if self.locals.len() as u8 > body_locals_start {
+        if self.funcs.locals.len() as u8 > body_locals_start {
             self.push(Instr::close_upvalues(body_locals_start));
         }
 
@@ -453,31 +453,31 @@ impl<'a> Parser<'a> {
         // - CloseUpvalues for body-local variables
         // - `Jump` back to condition start
         self.input.next()?;
-        self.nest_level += 1;
-        let condition_start = self.chunk.code.len();
+        self.level_up();
+        let condition_start = self.funcs.chunk.code.len();
         self.parse_expr()?;
         self.expect(TokenType::Do)?;
 
         let (test_position, test_constructor) = self.push_branch_false();
 
         // Track locals before body
-        let body_locals_start = self.locals.len() as u8;
+        let body_locals_start = self.funcs.locals.len() as u8;
 
         self.enter_loop(body_locals_start);
         self.parse_statements()?;
         self.expect(TokenType::End)?;
 
         // Close upvalues for any locals declared inside the loop body
-        if self.locals.len() as u8 > body_locals_start {
+        if self.funcs.locals.len() as u8 > body_locals_start {
             self.push(Instr::close_upvalues(body_locals_start));
         }
 
-        let body_end = self.chunk.code.len();
+        let body_end = self.funcs.chunk.code.len();
         self.push(Instr::jump(
             self.checked_jump_offset(body_end, condition_start)?,
         ));
 
-        self.patch_jump(test_position, self.chunk.code.len(), test_constructor)?;
+        self.patch_jump(test_position, self.funcs.chunk.code.len(), test_constructor)?;
 
         self.exit_loop()?;
         self.level_down();
@@ -507,7 +507,7 @@ impl<'a> Parser<'a> {
             self.input.next()?; // `if` or `elseif` keyword
             self.parse_expr()?;
             self.expect(TokenType::Then)?;
-            self.nest_level += 1;
+            self.level_up();
 
             let (branch_instr_index, branch_constructor) = self.push_branch_false();
 
@@ -522,11 +522,11 @@ impl<'a> Parser<'a> {
 
             let next = self.input.peek_type()?;
             if !arm_returns && matches!(next, TokenType::ElseIf | TokenType::Else) {
-                end_jumps.push(self.chunk.code.len());
+                end_jumps.push(self.funcs.chunk.code.len());
                 self.push(Instr::jump(0));
             }
             // A false condition lands on the next arm (or past the statement).
-            let next_arm_index = self.chunk.code.len();
+            let next_arm_index = self.funcs.chunk.code.len();
             self.patch_jump(branch_instr_index, next_arm_index, branch_constructor)?;
             match next {
                 TokenType::ElseIf => {}
@@ -540,7 +540,7 @@ impl<'a> Parser<'a> {
                 }
             }
         }
-        let end = self.chunk.code.len();
+        let end = self.funcs.chunk.code.len();
         for jump_instr_index in end_jumps {
             self.patch_jump(jump_instr_index, end, Instr::jump)?;
         }
@@ -549,7 +549,7 @@ impl<'a> Parser<'a> {
 
     /// Parses an `else` block.
     fn parse_else(&mut self) -> Result<()> {
-        self.nest_level += 1;
+        self.level_up();
         self.input.next()?; // `else` keyword
         self.parse_statements()?;
         self.expect(TokenType::End)?;

@@ -30,19 +30,13 @@ then
     scripts=("$@")
 else
     scripts=()
+    default_scripts="$(workload_hotpath_files)" || exit 1
     while IFS= read -r script
     do
-        scripts+=("$script")
-    done < <(python3 -c '
-from pathlib import Path
-
-for line in Path("brokkr.toml").read_text(encoding="utf-8").splitlines():
-    key, separator, value = line.partition("=")
-    if separator and key.strip() == "hotpath_file":
-        value = value.strip()
-        if len(value) >= 2 and value[0] == chr(34) and value[-1] == chr(34):
-            print(value[1:-1])
-')
+        if [ -n "$script" ]; then
+            scripts+=("$script")
+        fi
+    done <<< "$default_scripts"
 fi
 
 # Validate before doing anything expensive.
@@ -78,7 +72,7 @@ then
     exit 0
 fi
 
-DELLINGR_BIN="$(dellingr_bin release)" || exit 1
+DELLINGR_BIN="$(dellingr_bin_built release)" || exit 1
 if [ ! -x "$DELLINGR_BIN" ]; then
     echo "dellingr binary is not executable: $DELLINGR_BIN" >&2
     exit 1
@@ -115,6 +109,36 @@ then
     echo "cannot create benchmark results directory: $results_dir" >&2
     exit 1
 fi
+
+# Benchmark run files are scratch output; retain only the ten newest runs.
+prune_bench_results() {
+    local results_root="$1"
+    local keep="$2"
+    local count=0
+    local modified name
+    while read -r modified name
+    do
+        if [[ ! "$name" =~ ^[0-9]{8}T[0-9]{6}[+-][0-9]{4}-[0-9]+$ ]]
+        then
+            continue
+        fi
+        count=$((count + 1))
+        if [ "$count" -gt "$keep" ]
+        then
+            if ! rm -rf -- "$results_root/$name"
+            then
+                echo "cannot remove old benchmark results: $results_root/$name" >&2
+                return 1
+            fi
+        fi
+    done < <(find "$results_root" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %f\n' | sort -rn)
+}
+
+if ! prune_bench_results ".scratch/bench-results" 10
+then
+    exit 1
+fi
+
 run_index=0
 for script in "${scripts[@]}"
 do

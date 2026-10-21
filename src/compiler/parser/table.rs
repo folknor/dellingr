@@ -66,7 +66,7 @@ impl Parser<'_> {
     /// Parses a table constructor.
     #[hotpath::measure]
     pub(super) fn parse_table(&mut self) -> Result<()> {
-        let table_instr_idx = self.chunk.code.len();
+        let table_instr_idx = self.funcs.chunk.code.len();
         self.push(Instr::new_table());
         // Skip any leading separators (handles {;} and {,}). This is an
         // INTENTIONAL divergence from Lua 5.2/5.4, which reject a leading or
@@ -109,14 +109,14 @@ impl Parser<'_> {
                     self.open_tail(tail, RetCount::All),
                     "a table tail candidate must be a call or vararg"
                 );
-                self.chunk.code[table_instr_idx] = Instr::new_table_tracked(field_count);
+                self.funcs.chunk.code[table_instr_idx] = Instr::new_table_tracked(field_count);
                 self.push(Instr::set_list_batch(0, batch));
             } else if field_count > 4
                 && !template_candidate
                     .fields_for_template(field_count)
                     .is_some_and(|fields| self.try_use_table_template(table_instr_idx, fields))
             {
-                self.chunk.code[table_instr_idx] = Instr::new_table_presized(field_count);
+                self.funcs.chunk.code[table_instr_idx] = Instr::new_table_presized(field_count);
             }
 
             if last_tail.is_none() && i > 0 {
@@ -135,7 +135,7 @@ impl Parser<'_> {
                 let index = self.expect_identifier_id()?;
                 self.expect(TokenType::Assign)?;
                 self.parse_expr()?;
-                let instr_idx = self.chunk.code.len();
+                let instr_idx = self.funcs.chunk.code.len();
                 self.push(Instr::init_field(counter, index));
                 Ok((counter, None, Some((index, instr_idx))))
             }
@@ -168,7 +168,7 @@ impl Parser<'_> {
         table_instr_idx: usize,
         fields: &[TableTemplateField],
     ) -> bool {
-        if fields.is_empty() || self.chunk.table_templates.len() >= MAX_TABLE_TEMPLATES {
+        if fields.is_empty() || self.funcs.chunk.table_templates.len() >= MAX_TABLE_TEMPLATES {
             return false;
         }
 
@@ -189,11 +189,11 @@ impl Parser<'_> {
             field_indices.push(entry_idx);
         }
 
-        let template_idx = self.chunk.table_templates.len() as u8;
-        self.chunk.table_templates.push(template);
-        self.chunk.code[table_instr_idx] = Instr::new_table_template(template_idx);
+        let template_idx = self.funcs.chunk.table_templates.len() as u8;
+        self.funcs.chunk.table_templates.push(template);
+        self.funcs.chunk.code[table_instr_idx] = Instr::new_table_template(template_idx);
         for ((key_id, instr_idx), entry_idx) in fields.iter().zip(field_indices) {
-            self.chunk.code[*instr_idx] = Instr::init_field_pinned(*key_id, entry_idx);
+            self.funcs.chunk.code[*instr_idx] = Instr::init_field_pinned(*key_id, entry_idx);
         }
         true
     }

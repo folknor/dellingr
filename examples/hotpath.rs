@@ -26,8 +26,9 @@
 //! so a cost change between runs of the "same" bench means the workload or
 //! the compiler changed, not the VM's speed.
 //!
-//! Run through `scripts/hotbench.sh <category/name>` or a brokkr workload
-//! command. Both pass the script path required by this harness.
+//! Run through `scripts/hotbench.sh <workload-name>` or a brokkr workload
+//! command; both resolve a `brokkr.toml` workload registration to the script
+//! path this harness requires.
 
 // A benchmark harness is a host process: it legitimately reads its own
 // command line, the marker FIFO from the environment, and wall-clock time.
@@ -56,9 +57,12 @@ use dellingr::{ArgCount, LuaType, RetCount, State};
 static ALLOC: hotpath::CountingAllocator = hotpath::CountingAllocator::new();
 
 const DEFAULT_ITERATIONS: u32 = 20;
+const BENCH_FUNCTION: &str = "_bench";
 /// Upper bound on `WARM_BLOCK` marker pairs per run; keeps the sidecar
 /// stream at tens of spans regardless of the iteration count.
 const MAX_WARM_BLOCKS: u32 = 32;
+/// Maximum time to wait for room in the marker FIFO for one line.
+const FIFO_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Emit a named phase marker to the brokkr sidecar (if active).
 ///
@@ -80,7 +84,7 @@ fn emit_counter(name: &str, value: i64) {
 
 /// Shared FIFO write logic for markers and counters. No-op when
 /// `BROKKR_MARKER_FIFO` is unset. A configured but unusable FIFO fails the run;
-/// a full FIFO is retried until the reader makes room.
+/// a full FIFO is retried for at most `FIFO_WRITE_TIMEOUT`.
 fn write_fifo(line: impl FnOnce(u128) -> String) {
     use std::sync::OnceLock;
 
@@ -127,14 +131,22 @@ fn write_fifo(line: impl FnOnce(u128) -> String) {
 }
 
 fn write_fifo_all(mut file: &fs::File, bytes: &[u8]) -> io::Result<()> {
+    let deadline = Instant::now() + FIFO_WRITE_TIMEOUT;
     let mut written = 0;
     while written < bytes.len() {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "timed out waiting for marker FIFO space",
+            ));
+        }
         match file.write(&bytes[written..]) {
             Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
             Ok(count) => written += count,
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                std::thread::sleep(Duration::from_millis(1));
+                std::thread::sleep(Duration::from_millis(1).min(remaining));
             }
             Err(error) => return Err(error),
         }
@@ -291,16 +303,16 @@ fn emit_metrics(metrics: &[Metric]) {
 }
 
 fn find_bench(state: &mut State, script_path: &std::path::Path, phase: &str) -> Result<(), String> {
-    state.get_global("_bench").map_err(|error| {
+    state.get_global(BENCH_FUNCTION).map_err(|error| {
         format!(
-            "Failed to look up `_bench` before the {phase} call in {}: {error}",
+            "Failed to look up `{BENCH_FUNCTION}` before the {phase} call in {}: {error}",
             script_path.display()
         )
     })?;
     let actual_type = state.typ(-1);
     if actual_type != LuaType::Function {
         return Err(format!(
-            "Script {} must define a global `_bench` function; found {actual_type}",
+            "Script {} must define a global `{BENCH_FUNCTION}` function; found {actual_type}",
             script_path.display()
         ));
     }
@@ -312,6 +324,34 @@ fn require_bench(state: &mut State, script_path: &std::path::Path, phase: &str) 
         eprintln!("{error}");
         exit(1);
     }
+}
+
+/// Runs `n` warm calls of the cached bench function on top of the stack and
+/// returns the time spent in the calls alone.
+fn run_warm_block(
+    state: &mut State,
+    script_path: &std::path::Path,
+    n: u32,
+) -> Result<Duration, String> {
+    let block_start = Instant::now();
+    for _ in 0..n {
+        // Keep the resolved function rooted and copy it for each call.
+        state.push_value(-1).map_err(|error| {
+            format!(
+                "Failed to copy cached `{BENCH_FUNCTION}` for a warm call in {}: {error}",
+                script_path.display()
+            )
+        })?;
+        state
+            .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+            .map_err(|error| {
+                format!(
+                    "Warm `{BENCH_FUNCTION}` call error in {}: {error}",
+                    script_path.display()
+                )
+            })?;
+    }
+    Ok(block_start.elapsed())
 }
 
 fn main() {
@@ -370,7 +410,7 @@ fn main() {
     let cold_start = Instant::now();
     if let Err(e) = state.call(ArgCount::Fixed(0), RetCount::Fixed(0)) {
         eprintln!(
-            "Cold _bench call error in {}: {e}",
+            "Cold `{BENCH_FUNCTION}` call error in {}: {e}",
             args.script_path.display()
         );
         exit(1);
@@ -385,35 +425,27 @@ fn main() {
     require_bench(&mut state, &args.script_path, "warm");
     let block_size = (iterations / MAX_WARM_BLOCKS).max(1);
     emit_marker("WARM_START");
-    let warm_start = Instant::now();
+    let mut warm_elapsed = Duration::ZERO;
     let mut done = 0u32;
     while done < iterations {
         let n = block_size.min(iterations - done);
         emit_marker("WARM_BLOCK_START");
-        for _ in 0..n {
-            // Keep the resolved function rooted and copy it for each call.
-            if let Err(error) = state.push_value(-1) {
-                eprintln!(
-                    "Failed to copy cached `_bench` for a warm call in {}: {error}",
-                    args.script_path.display()
-                );
-                exit(1);
-            }
-            if let Err(e) = state.call(ArgCount::Fixed(0), RetCount::Fixed(0)) {
-                eprintln!(
-                    "Warm _bench call error in {}: {e}",
-                    args.script_path.display()
-                );
+        // Measure only the calls. FIFO writes can wait on the reader, so their
+        // time stays outside the summed warm duration.
+        match run_warm_block(&mut state, &args.script_path, n) {
+            Ok(elapsed) => warm_elapsed += elapsed,
+            Err(error) => {
+                eprintln!("{error}");
                 exit(1);
             }
         }
         emit_marker("WARM_BLOCK_END");
         done += n;
     }
-    let warm_total_us = warm_start.elapsed().as_secs_f64() * 1_000_000.0;
+    let warm_total_us = warm_elapsed.as_secs_f64() * 1_000_000.0;
     if let Err(error) = state.pop(1) {
         eprintln!(
-            "Failed to release cached `_bench` after warm calls in {}: {error}",
+            "Failed to release cached `{BENCH_FUNCTION}` after warm calls in {}: {error}",
             args.script_path.display()
         );
         exit(1);

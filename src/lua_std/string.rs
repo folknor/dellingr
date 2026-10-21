@@ -9,13 +9,13 @@ use crate::instr::{ArgCount, RetCount};
 use crate::patterns::{LuaCapture, LuaPattern, MatchError, PatternError};
 use crate::{LuaType, Result, State};
 
+use crate::gmatch_schema;
+
 const GMATCH_WRAPPER_SRC: &str = r#"local iter, state = ...
 return function()
     return iter(state)
 end
 "#;
-const GMATCH_ITER_ID: &str = "string.gmatch.iter";
-const GMATCH_EMPTY_ITER_ID: &str = "string.gmatch.empty_iter";
 
 // This chunk is immutable. Runtime caches are State-local, and snapshot bytecode
 // ids are assigned per save, so sharing the Arc does not share mutable state.
@@ -256,90 +256,63 @@ fn append_bytes(state: &mut State, out: &mut Vec<u8>, bytes: &[u8]) -> Result<()
 fn invalid_gsub_capture_error(state: &State) -> Error {
     // Replacement-template errors stay runtime errors: PatternError describes
     // errors in the pattern, while this index refers to a replacement template.
+    // Keep capture-index failures on one constructor for every template reference.
     state.error(ErrorKind::RuntimeError("invalid capture index".into()))
 }
 
-fn append_string_replacement(
-    state: &mut State,
-    out: &mut Vec<u8>,
-    repl: &[u8],
-    bytes: &[u8],
-    captures: &[LuaCapture],
-) -> Result<()> {
-    state.consume_cost(repl.len() as u64)?;
-    let mut i = 0usize;
-    while i < repl.len() {
-        if repl[i] == b'%' && i + 1 < repl.len() {
-            let next = repl[i + 1];
-            if next == b'%' {
-                append_bytes(state, out, b"%")?;
-                i += 2;
-            } else if next.is_ascii_digit() {
-                let idx = usize::from(next - b'0');
-                if idx == 0 {
-                    append_capture_bytes(state, out, bytes, captures[0])?;
-                } else {
-                    let capture = if captures.len() == 1 && idx == 1 {
-                        captures[0]
-                    } else {
-                        *captures
-                            .get(idx)
-                            .ok_or_else(|| invalid_gsub_capture_error(state))?
-                    };
-                    append_capture_bytes(state, out, bytes, capture)?;
-                }
-                i += 2;
-            } else {
-                return Err(state.error(ErrorKind::RuntimeError(
-                    "invalid use of '%' in replacement string".into(),
-                )));
-            }
-        } else if repl[i] == b'%' {
-            return Err(state.error(ErrorKind::RuntimeError(
-                "invalid use of '%' in replacement string".into(),
-            )));
-        } else {
-            append_bytes(state, out, &repl[i..=i])?;
-            i += 1;
-        }
-    }
-    Ok(())
+fn gsub_replacement_keeps_original(state: &State, index: isize) -> bool {
+    state.typ(index) == LuaType::Nil
+        || (state.typ(index) == LuaType::Boolean && !state.to_boolean(index))
+}
+
+fn invalid_gsub_escape_error(state: &State) -> Error {
+    state.error(ErrorKind::RuntimeError(
+        "invalid use of '%' in replacement string".into(),
+    ))
 }
 
 /// A string replacement parsed once: literal runs (with `%%` unescaped) and
-/// `%N` capture references. Compiled lazily after the first successful
-/// replacement, so a malformed template still errors (or, with zero matches,
-/// never errors) exactly where the per-match parser did.
+/// `%N` capture references. Compiled on the first match. Invalid escapes
+/// remain failure segments, so a malformed template errors only when
+/// replacement reaches that position.
 enum ReplSegment {
     Literal(Vec<u8>),
     Capture(usize),
+    InvalidEscape,
 }
 
 struct ReplTemplate {
     segments: Vec<ReplSegment>,
-    /// Original template length; each application charges it up front,
-    /// mirroring `append_string_replacement`.
+    /// Original template length; each application charges it up front.
     repl_len: usize,
 }
 
-fn compile_replacement_template(repl: &[u8]) -> Option<ReplTemplate> {
+fn compile_replacement_template(repl: &[u8]) -> ReplTemplate {
     let mut segments = Vec::new();
     let mut literal = Vec::new();
     let mut i = 0usize;
     while i < repl.len() {
         if repl[i] == b'%' {
-            let next = *repl.get(i + 1)?;
-            if next == b'%' {
-                literal.push(b'%');
-            } else if next.is_ascii_digit() {
-                if !literal.is_empty() {
-                    segments.push(ReplSegment::Literal(std::mem::take(&mut literal)));
+            match repl.get(i + 1) {
+                Some(&b'%') => {
+                    literal.push(b'%');
+                    i += 2;
                 }
-                segments.push(ReplSegment::Capture(usize::from(next - b'0')));
-            } else {
-                return None;
+                Some(next) if next.is_ascii_digit() => {
+                    if !literal.is_empty() {
+                        segments.push(ReplSegment::Literal(std::mem::take(&mut literal)));
+                    }
+                    segments.push(ReplSegment::Capture(usize::from(*next - b'0')));
+                    i += 2;
+                }
+                _ => {
+                    if !literal.is_empty() {
+                        segments.push(ReplSegment::Literal(std::mem::take(&mut literal)));
+                    }
+                    segments.push(ReplSegment::InvalidEscape);
+                    break;
+                }
             }
-            i += 2;
         } else {
             literal.push(repl[i]);
             i += 1;
@@ -348,10 +321,10 @@ fn compile_replacement_template(repl: &[u8]) -> Option<ReplTemplate> {
     if !literal.is_empty() {
         segments.push(ReplSegment::Literal(literal));
     }
-    Some(ReplTemplate {
+    ReplTemplate {
         segments,
         repl_len: repl.len(),
-    })
+    }
 }
 
 /// Append literal bytes, charging 1 per byte with unit-exact batching. Falls
@@ -376,11 +349,21 @@ fn append_templated_replacement(
     template: &ReplTemplate,
     bytes: &[u8],
     captures: &[LuaCapture],
+    first_application: bool,
 ) -> Result<()> {
-    state.consume_cost(template.repl_len as u64)?;
+    if !first_application {
+        state.consume_cost(template.repl_len as u64)?;
+    }
     for segment in &template.segments {
         match segment {
-            ReplSegment::Literal(literal) => append_bytes_units(state, out, literal)?,
+            ReplSegment::Literal(literal) if !first_application => {
+                append_bytes_units(state, out, literal)?;
+            }
+            ReplSegment::Literal(literal) => {
+                for byte in literal {
+                    append_bytes(state, out, std::slice::from_ref(byte))?;
+                }
+            }
             ReplSegment::Capture(idx) => {
                 let capture = if *idx == 0 || (captures.len() == 1 && *idx == 1) {
                     captures[0]
@@ -391,6 +374,7 @@ fn append_templated_replacement(
                 };
                 append_capture_bytes(state, out, bytes, capture)?;
             }
+            ReplSegment::InvalidEscape => return Err(invalid_gsub_escape_error(state)),
         }
     }
     Ok(())
@@ -406,17 +390,29 @@ fn append_gsub_replacement(
 ) -> Result<()> {
     match repl_type {
         LuaType::String | LuaType::Number => {
-            if let Some(template) = template {
-                append_templated_replacement(state, out, template, bytes, captures)?;
-            } else {
-                // First replacement: the per-match parser keeps template
-                // errors surfacing at the same point (and not at all for
-                // zero-match calls). A successful first pass proves the
-                // template valid, so later matches use the compiled form.
+            let first_application = if template.is_none() {
+                // Parse once when a match exists, but keep the first result's
+                // byte-at-a-time charges and lazy error position.
                 let repl = state.bytes_with_default_string_coercion(3)?;
-                append_string_replacement(state, out, &repl, bytes, captures)?;
-                *template = compile_replacement_template(&repl);
-            }
+                state.consume_cost(repl.len() as u64)?;
+                *template = Some(compile_replacement_template(&repl));
+                true
+            } else {
+                false
+            };
+            let replacement_template = template.as_ref().ok_or_else(|| {
+                state.error(ErrorKind::InternalError(
+                    "gsub replacement template was not initialized".into(),
+                ))
+            })?;
+            append_templated_replacement(
+                state,
+                out,
+                replacement_template,
+                bytes,
+                captures,
+                first_application,
+            )?;
         }
         LuaType::Table => {
             let key = if captures.len() > 1 {
@@ -428,8 +424,7 @@ fn append_gsub_replacement(
             state.push_value(3)?;
             push_capture_value(state, bytes, key)?;
             state.get_table(-2)?;
-            let keep_original = state.typ(-1) == LuaType::Nil
-                || (state.typ(-1) == LuaType::Boolean && !state.to_boolean(-1));
+            let keep_original = gsub_replacement_keeps_original(state, -1);
             if keep_original {
                 state.pop(2)?;
                 append_capture_bytes(state, out, bytes, captures[0])?;
@@ -465,8 +460,7 @@ fn append_gsub_replacement(
                 push_capture_value(state, bytes, captures[0])?;
                 state.call(ArgCount::Fixed(1), RetCount::Fixed(1))?;
             }
-            let keep_original = state.typ(-1) == LuaType::Nil
-                || (state.typ(-1) == LuaType::Boolean && !state.to_boolean(-1));
+            let keep_original = gsub_replacement_keeps_original(state, -1);
             if keep_original {
                 state.pop(1)?;
                 append_capture_bytes(state, out, bytes, captures[0])?;
@@ -697,34 +691,34 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
 
         if pattern.is_empty() {
             state.new_table()?;
-            state.push_string("pos")?;
+            state.push_string(gmatch_schema::POSITION_FIELD)?;
             state.push_number(init as f64)?;
             state.set_table_raw(-3)?;
-            state.push_string("len")?;
+            state.push_string(gmatch_schema::LENGTH_FIELD)?;
             state.push_number(s.len() as f64)?;
             state.set_table_raw(-3)?;
 
-            return push_gmatch_wrapper(state, GMATCH_EMPTY_ITER_ID, gmatch_empty_iter);
+            return push_gmatch_wrapper(state, gmatch_schema::EMPTY_ITERATOR_ID, gmatch_empty_iter);
         }
 
         state.new_table()?;
         // Keep the interned flag key as a value under an integer key. The
         // iterator can fetch and reuse that string without interning it on
         // each match.
-        state.push_number(0.0)?;
-        state.push_string("compile_charged")?;
+        state.push_number(gmatch_schema::COMPILE_CHARGED_SLOT)?;
+        state.push_string(gmatch_schema::COMPILE_CHARGED_FIELD)?;
         state.set_table_raw(-3)?;
-        state.push_string("s")?;
+        state.push_string(gmatch_schema::SUBJECT_FIELD)?;
         state.push_bytes(&s)?;
         state.set_table_raw(-3)?;
-        state.push_string("p")?;
+        state.push_string(gmatch_schema::PATTERN_FIELD)?;
         state.push_bytes(&pattern)?;
         state.set_table_raw(-3)?;
-        state.push_string("pos")?;
+        state.push_string(gmatch_schema::POSITION_FIELD)?;
         state.push_number(init as f64)?;
         state.set_table_raw(-3)?;
 
-        push_gmatch_wrapper(state, GMATCH_ITER_ID, gmatch_iter)
+        push_gmatch_wrapper(state, gmatch_schema::ITERATOR_ID, gmatch_iter)
     });
 
     // string.gsub(s, pattern, repl [, n])
@@ -892,8 +886,8 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
     // Register the gmatch iterator functions up front so a persisted gmatch
     // closure (which captures one of them as an upvalue) can be resolved on
     // snapshot load, not only after gmatch has run once.
-    state.register_lib_fn_id(GMATCH_ITER_ID, gmatch_iter)?;
-    state.register_lib_fn_id(GMATCH_EMPTY_ITER_ID, gmatch_empty_iter)?;
+    state.register_lib_fn_id(gmatch_schema::ITERATOR_ID, gmatch_iter)?;
+    state.register_lib_fn_id(gmatch_schema::EMPTY_ITERATOR_ID, gmatch_empty_iter)?;
 
     // Strings index through a shared metatable whose `__index` is this table,
     // captured here: rebinding or hiding the global `string` later does not
@@ -918,33 +912,91 @@ fn push_gmatch_wrapper(
     Ok(1)
 }
 
-// The iterator table is private closure state initialized from a string
-// length, so every stored position is a finite, nonnegative integer bounded
-// by MAX_STRING_BYTES plus one. Keep Rust's saturating float-to-integer cast
-// semantics while making that invariant explicit to Clippy.
+fn invalid_gmatch_state(state: &State, reason: impl Into<String>) -> Error {
+    state.error(ErrorKind::InternalError(format!(
+        "invalid gmatch iterator state: {}",
+        reason.into()
+    )))
+}
+
+fn push_gmatch_string_field(state: &mut State, field: &str) -> Result<()> {
+    state.push_string(field)?;
+    state.get_table_raw(1)?;
+    if state.typ(-1) != LuaType::String {
+        return Err(invalid_gmatch_state(
+            state,
+            format!("field '{field}' is missing or is not a string"),
+        ));
+    }
+    Ok(())
+}
+
+// Gmatch tables are private closure state. Save verification checks their
+// serialized form, and runtime reads repeat the invariant so an absent,
+// mistyped, or out-of-range field cannot silently restart an iterator.
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-fn gmatch_state_index(number: f64) -> usize {
-    number as usize
+fn gmatch_state_index(
+    state: &State,
+    stack_index: isize,
+    field: &str,
+    maximum: usize,
+) -> Result<usize> {
+    if state.typ(stack_index) != LuaType::Number {
+        return Err(invalid_gmatch_state(
+            state,
+            format!("field '{field}' is missing or is not a number"),
+        ));
+    }
+    let number = state.to_number(stack_index)?;
+    if !number.is_finite()
+        || number < 0.0
+        || number.fract().to_bits() << 1 != 0
+        || number > maximum as f64
+    {
+        return Err(invalid_gmatch_state(
+            state,
+            format!("field '{field}' is outside its valid range"),
+        ));
+    }
+    Ok(number as usize)
 }
 
 fn gmatch_empty_iter(state: &mut State) -> Result<u8> {
-    state.push_string("pos")?;
+    check_type_named(state, 1, LuaType::Table, "gmatch")?;
+
+    state.push_string(gmatch_schema::POSITION_FIELD)?;
     state.get_table_raw(1)?;
-    let pos = gmatch_state_index(state.to_number(-1).unwrap_or(0.0));
+    let pos = gmatch_state_index(
+        state,
+        -1,
+        gmatch_schema::POSITION_FIELD,
+        crate::vm::MAX_STRING_BYTES + 1,
+    )?;
     state.pop(1)?;
 
-    state.push_string("len")?;
+    state.push_string(gmatch_schema::LENGTH_FIELD)?;
     state.get_table_raw(1)?;
-    let len = gmatch_state_index(state.to_number(-1).unwrap_or(0.0));
+    let len = gmatch_state_index(
+        state,
+        -1,
+        gmatch_schema::LENGTH_FIELD,
+        crate::vm::MAX_STRING_BYTES,
+    )?;
     state.pop(1)?;
 
+    if pos > len.saturating_add(1) {
+        return Err(invalid_gmatch_state(
+            state,
+            "position exceeds the stored subject length",
+        ));
+    }
     if pos > len {
         state.set_top(0)?;
         state.push_nil()?;
         return Ok(1);
     }
 
-    state.push_string("pos")?;
+    state.push_string(gmatch_schema::POSITION_FIELD)?;
     state.push_number((pos + 1) as f64)?;
     state.set_table_raw(1)?;
     state.set_top(0)?;
@@ -955,51 +1007,93 @@ fn gmatch_empty_iter(state: &mut State) -> Result<u8> {
 fn gmatch_iter(state: &mut State) -> Result<u8> {
     check_type_named(state, 1, LuaType::Table, "gmatch")?;
 
-    state.push_string("s")?;
-    state.get_table_raw(1)?;
+    push_gmatch_string_field(state, gmatch_schema::SUBJECT_FIELD)?;
+    push_gmatch_string_field(state, gmatch_schema::PATTERN_FIELD)?;
 
-    state.push_string("p")?;
+    state.push_string(gmatch_schema::POSITION_FIELD)?;
     state.get_table_raw(1)?;
-
-    state.push_string("pos")?;
-    state.get_table_raw(1)?;
-    let pos = gmatch_state_index(state.to_number(-1).unwrap_or(0.0));
+    let pos = gmatch_state_index(
+        state,
+        -1,
+        gmatch_schema::POSITION_FIELD,
+        crate::vm::MAX_STRING_BYTES + 1,
+    )?;
     state.pop(1)?;
 
     // End of the previous accepted match, for Lua 5.4's empty-match rule.
     // A fresh iterator has none.
-    state.push_string("lastmatch")?;
+    state.push_string(gmatch_schema::LAST_MATCH_FIELD)?;
     state.get_table_raw(1)?;
-    let lastmatch = if state.typ(-1) == LuaType::Number {
-        Some(gmatch_state_index(state.to_number(-1)?))
-    } else {
-        None
+    let lastmatch = match state.typ(-1) {
+        LuaType::Nil => None,
+        LuaType::Number => Some(gmatch_state_index(
+            state,
+            -1,
+            gmatch_schema::LAST_MATCH_FIELD,
+            crate::vm::MAX_STRING_BYTES,
+        )?),
+        _ => {
+            return Err(invalid_gmatch_state(
+                state,
+                format!(
+                    "field '{}' is not a number or nil",
+                    gmatch_schema::LAST_MATCH_FIELD
+                ),
+            ));
+        }
     };
     state.pop(1)?;
 
-    state.expect_string_at_named(2, "gmatch")?;
-    state.expect_string_at_named(3, "gmatch")?;
-    if pos > state.to_bytes(2)?.len() {
+    let subject_len = state.to_bytes(2)?.len();
+    if pos > subject_len.saturating_add(1) {
+        return Err(invalid_gmatch_state(
+            state,
+            "position exceeds the stored subject length",
+        ));
+    }
+    if lastmatch.is_some_and(|last| last > subject_len) {
+        return Err(invalid_gmatch_state(
+            state,
+            "last match exceeds the stored subject length",
+        ));
+    }
+    if pos > subject_len {
         state.set_top(0)?;
         state.push_nil()?;
         return Ok(1);
     }
 
-    // Older snapshots have no cached key at integer slot 0. Seed it once on
-    // first use, preserving any compile flag already stored by that snapshot.
-    state.push_number(0.0)?;
+    state.push_number(gmatch_schema::COMPILE_CHARGED_SLOT)?;
     state.get_table_raw(1)?;
-    if state.typ(-1) != LuaType::String {
-        state.pop(1)?;
-        state.push_string("compile_charged")?;
-        state.push_number(0.0)?;
-        state.insert(-2)?;
-        state.set_table_raw(1)?;
-        state.push_number(0.0)?;
-        state.get_table_raw(1)?;
+    let cache_key_matches = if state.typ(-1) == LuaType::String {
+        state
+            .to_bytes(-1)?
+            .iter()
+            .copied()
+            .eq(gmatch_schema::COMPILE_CHARGED_FIELD
+                .as_bytes()
+                .iter()
+                .copied())
+    } else {
+        false
+    };
+    if !cache_key_matches {
+        return Err(invalid_gmatch_state(
+            state,
+            "compile flag key is missing from integer slot 0",
+        ));
     }
     state.get_table_raw(1)?;
-    let compile_charged = state.to_boolean(-1);
+    let compile_charged = match state.typ(-1) {
+        LuaType::Nil => false,
+        LuaType::Boolean if state.to_boolean(-1) => true,
+        _ => {
+            return Err(invalid_gmatch_state(
+                state,
+                "compile flag is not a boolean or nil",
+            ));
+        }
+    };
     state.pop(1)?;
     if !compile_charged {
         // Charge once per iterator, not per cache miss. This flag is part of
@@ -1007,11 +1101,13 @@ fn gmatch_iter(state: &mut State) -> Result<u8> {
         // the deterministic cost of continuing an existing iterator.
         let pattern_len = state.to_bytes(3)?.len();
         charge_bytes(state, pattern_len)?;
-        state.push_number(0.0)?;
+        state.push_number(gmatch_schema::COMPILE_CHARGED_SLOT)?;
         state.get_table_raw(1)?;
         state.push_boolean(true)?;
         state.set_table_raw(1)?;
     }
+    // Memoization primes the cache read by the next call; keep the calls
+    // adjacent so no allocation can invalidate that transient matcher state.
     state.memoize_gmatch_pattern(3)?;
     let (matched, range, captures) = {
         let (subject, matcher, mut meter) = state.gmatch_subject_matcher_and_cost_meter(2, 3)?;
@@ -1057,10 +1153,10 @@ fn gmatch_iter(state: &mut State) -> Result<u8> {
             &captures[..1]
         };
         preflight_capture_bytes(state, returned.iter().copied())?;
-        state.push_string("pos")?;
+        state.push_string(gmatch_schema::POSITION_FIELD)?;
         state.push_number(range.end as f64)?;
         state.set_table_raw(1)?;
-        state.push_string("lastmatch")?;
+        state.push_string(gmatch_schema::LAST_MATCH_FIELD)?;
         state.push_number(range.end as f64)?;
         state.set_table_raw(1)?;
 

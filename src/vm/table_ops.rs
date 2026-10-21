@@ -10,6 +10,122 @@ use super::{Result, State, TypeError};
 use crate::error::ErrorKind;
 use crate::instr::{ArgCount, RetCount};
 
+trait TableSortAccess {
+    fn get(&mut self, state: &mut State, index: usize) -> Result<Val>;
+    fn set(&mut self, state: &mut State, index: usize, value: Val) -> Result<()>;
+}
+
+struct VecSortAccess<'a> {
+    values: &'a mut [Val],
+}
+
+impl TableSortAccess for VecSortAccess<'_> {
+    fn get(&mut self, _state: &mut State, index: usize) -> Result<Val> {
+        Ok(self.values[index])
+    }
+
+    fn set(&mut self, _state: &mut State, index: usize, value: Val) -> Result<()> {
+        self.values[index] = value;
+        Ok(())
+    }
+}
+
+struct ScratchTableSortAccess {
+    table_idx: usize,
+}
+
+impl TableSortAccess for ScratchTableSortAccess {
+    fn get(&mut self, state: &mut State, index: usize) -> Result<Val> {
+        let ptr = state.stack[self.table_idx]
+            .as_object_ptr()
+            .expect("scratch sort stack slot holds a table");
+        let table = state
+            .heap
+            .as_table_ref(ptr)
+            .expect("scratch sort object is a table");
+        Ok(table.get(&Val::Num((index + 1) as f64)))
+    }
+
+    fn set(&mut self, state: &mut State, index: usize, value: Val) -> Result<()> {
+        let ptr = state.stack[self.table_idx]
+            .as_object_ptr()
+            .expect("scratch sort stack slot holds a table");
+        let table = state
+            .heap
+            .as_table(ptr)
+            .expect("scratch sort object is a table");
+        table.insert(Val::Num((index + 1) as f64), value)
+    }
+}
+
+fn table_sort_heap<A: TableSortAccess>(
+    state: &mut State,
+    access: &mut A,
+    n: usize,
+    comp_idx: Option<usize>,
+) -> Result<()> {
+    for root in (0..n / 2).rev() {
+        table_sort_sift_down(state, access, root, n, comp_idx)?;
+    }
+    for end in (1..n).rev() {
+        table_sort_swap(state, access, 0, end)?;
+        table_sort_sift_down(state, access, 0, end, comp_idx)?;
+    }
+    for index in 0..n / 2 {
+        table_sort_swap(state, access, index, n - 1 - index)?;
+    }
+    Ok(())
+}
+
+fn table_sort_sift_down<A: TableSortAccess>(
+    state: &mut State,
+    access: &mut A,
+    mut root: usize,
+    end: usize,
+    comp_idx: Option<usize>,
+) -> Result<()> {
+    loop {
+        let left = root * 2 + 1;
+        if left >= end {
+            return Ok(());
+        }
+        let mut smallest = root;
+        let left_value = access.get(state, left)?;
+        let smallest_value = access.get(state, smallest)?;
+        if state.table_sort_less(left_value, smallest_value, comp_idx)? {
+            smallest = left;
+        }
+        let right = left + 1;
+        if right < end {
+            let right_value = access.get(state, right)?;
+            let smallest_value = access.get(state, smallest)?;
+            if state.table_sort_less(right_value, smallest_value, comp_idx)? {
+                smallest = right;
+            }
+        }
+        if smallest == root {
+            return Ok(());
+        }
+        table_sort_swap(state, access, root, smallest)?;
+        root = smallest;
+    }
+}
+
+fn table_sort_swap<A: TableSortAccess>(
+    state: &mut State,
+    access: &mut A,
+    a: usize,
+    b: usize,
+) -> Result<()> {
+    if a == b {
+        return Ok(());
+    }
+    let a_value = access.get(state, a)?;
+    let b_value = access.get(state, b)?;
+    access.set(state, a, b_value)?;
+    access.set(state, b, a_value)
+}
+
 impl State {
     /// Creates a new empty table and pushes it onto the stack.
     #[hotpath::measure]
@@ -405,20 +521,32 @@ impl State {
     pub(crate) fn table_sort(&mut self, table_idx: isize, has_comp: bool) -> Result<usize> {
         let idx = self.convert_idx(table_idx)?;
 
-        // Get the array values
+        // Check the raw array length before cloning it, so the same size rule
+        // guards both raw and metamethod-backed sorts.
         let obj_ptr = self.stack[idx].as_object_ptr();
         let typ = self.stack[idx].typ(&self.heap);
 
-        let mut arr = match obj_ptr.and_then(|ptr| self.heap.as_table_ref(ptr)) {
-            Some(t) => t.get_array(),
+        let table_ptr = match obj_ptr.and_then(|ptr| self.heap.as_table_ref(ptr).map(|_| ptr)) {
+            Some(ptr) => ptr,
             None => return Err(self.type_error(TypeError::TableIndex(typ))),
         };
+        let array_len = self
+            .heap
+            .as_table_ref(table_ptr)
+            .expect("validated object pointer is a table")
+            .array_len();
+        let len = i64::try_from(array_len).unwrap_or(i64::MAX);
+        let n = self.checked_table_sort_len(len)?;
+        let mut arr = self
+            .heap
+            .as_table_ref(table_ptr)
+            .expect("validated object pointer is a table")
+            .get_array();
 
         // Charge cost BEFORE running the comparator or mutating the table, so an
         // exhausted budget blocks the sort rather than letting it complete and
         // only then failing the charge. `arr` is a detached copy here, so
         // nothing has been mutated yet. Empty sorts still cost 1.
-        let n = arr.len();
         self.consume_cost(n.max(1) as u64)?;
 
         if arr.is_empty() {
@@ -430,18 +558,6 @@ impl State {
         // Heap sort remains bounded and deterministic even when a Lua
         // comparator is inconsistent. Unlike reference quicksort, it does not
         // diagnose that incidental invalid-order case.
-        let sort = |state: &mut Self, arr: &mut Vec<Val>| -> Result<()> {
-            for root in (0..n / 2).rev() {
-                state.table_sort_sift_down(arr, root, n, comp_idx)?;
-            }
-            for end in (1..n).rev() {
-                arr.swap(0, end);
-                state.table_sort_sift_down(arr, 0, end, comp_idx)?;
-            }
-            arr.reverse();
-            Ok(())
-        };
-
         match comp_idx {
             // A comparator can re-enter Lua and force a collection, and `arr` is
             // a detached `Vec<Val>` that GC cannot see, so the whole array has
@@ -450,13 +566,15 @@ impl State {
             // source table before collecting.
             Some(_) => {
                 let roots = arr.clone();
-                self.with_rooted_values(&roots, |state| sort(state, &mut arr))?;
+                self.with_rooted_values(&roots, |state| {
+                    state.table_sort_values(&mut arr, comp_idx)
+                })?;
             }
             // The default comparison only reads numbers and already-interned
             // string bytes: it cannot call Lua, allocate, or trigger GC, and the
             // source table holds every element until writeback. Rooting here
             // would just copy the array twice more for nothing.
-            None => sort(self, &mut arr)?,
+            None => self.table_sort_values(&mut arr, comp_idx)?,
         }
 
         // Put sorted array back - need to look up the table again since we may have
@@ -471,32 +589,35 @@ impl State {
         }
     }
 
-    fn table_sort_sift_down(
+    pub(crate) fn table_sort_scratch(
         &mut self,
-        arr: &mut [Val],
-        mut root: usize,
-        end: usize,
-        comp_idx: Option<usize>,
+        table_idx: isize,
+        n: usize,
+        has_comp: bool,
     ) -> Result<()> {
-        loop {
-            let left = root * 2 + 1;
-            if left >= end {
-                return Ok(());
-            }
-            let mut smallest = root;
-            if self.table_sort_less(arr[left], arr[smallest], comp_idx)? {
-                smallest = left;
-            }
-            let right = left + 1;
-            if right < end && self.table_sort_less(arr[right], arr[smallest], comp_idx)? {
-                smallest = right;
-            }
-            if smallest == root {
-                return Ok(());
-            }
-            arr.swap(root, smallest);
-            root = smallest;
+        let table_idx = self.convert_idx(table_idx)?;
+        let comp_idx = has_comp.then(|| self.convert_idx(2)).transpose()?;
+        table_sort_heap(self, &mut ScratchTableSortAccess { table_idx }, n, comp_idx)
+    }
+
+    fn table_sort_values(&mut self, values: &mut [Val], comp_idx: Option<usize>) -> Result<()> {
+        let n = values.len();
+        let mut access = VecSortAccess { values };
+        table_sort_heap(self, &mut access, n, comp_idx)
+    }
+
+    pub(crate) fn checked_table_sort_len(&self, len: i64) -> Result<usize> {
+        if len >= i64::from(i32::MAX) {
+            Err(self.table_sort_too_big_error())
+        } else if len < 0 {
+            Ok(0)
+        } else {
+            usize::try_from(len).map_err(|_| self.table_sort_too_big_error())
         }
+    }
+
+    fn table_sort_too_big_error(&self) -> crate::error::Error {
+        self.error(ErrorKind::RuntimeError("array too big".to_string()))
     }
 
     fn table_sort_less(&mut self, a: Val, b: Val, comp_idx: Option<usize>) -> Result<bool> {

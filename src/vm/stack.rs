@@ -298,11 +298,6 @@ impl State {
         self.expect_string_at_inner(idx, None)
     }
 
-    /// Validate a string argument when the native caller's name is known.
-    pub(crate) fn expect_string_at_named(&self, idx: isize, function_name: &str) -> Result<usize> {
-        self.expect_string_at_inner(idx, Some(function_name))
-    }
-
     fn expect_string_at_inner(&self, idx: isize, function_name: Option<&str>) -> Result<usize> {
         let i = self.convert_idx(idx)?;
         let val = &self.stack[i];

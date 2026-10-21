@@ -8,6 +8,8 @@ use super::super::table::{
 };
 use super::{LoadError, SavePayload, SavedBytecode, SavedObject, SavedUpvalueDesc};
 
+use crate::gmatch_schema;
+
 /// A payload whose bytecode and closure references have been structurally checked.
 ///
 /// This type intentionally has no constructor outside this module.
@@ -469,6 +471,24 @@ fn table_field<'a>(
     })
 }
 
+fn table_numeric_field(
+    payload: &SavePayload,
+    table_id: u32,
+    field: f64,
+) -> Option<&super::SavedVal> {
+    let Some(super::SavedObject::Table { entries, .. }) = payload.objects.get(table_id as usize)
+    else {
+        return None;
+    };
+    let field_bits = field.to_bits();
+    entries.iter().find_map(|(key, value)| {
+        let super::SavedVal::Num(bits) = key else {
+            return None;
+        };
+        (*bits == field_bits).then_some(value)
+    })
+}
+
 fn gmatch_integer_field(
     payload: &SavePayload,
     table_id: u32,
@@ -491,6 +511,60 @@ fn gmatch_integer_field(
     Ok(value as usize)
 }
 
+fn validate_gmatch_last_match(
+    payload: &SavePayload,
+    table_id: u32,
+    subject_len: usize,
+    index: usize,
+) -> Result<(), LoadError> {
+    if table_field(
+        payload,
+        table_id,
+        gmatch_schema::LAST_MATCH_FIELD.as_bytes(),
+    )
+    .is_some()
+    {
+        gmatch_integer_field(
+            payload,
+            table_id,
+            gmatch_schema::LAST_MATCH_FIELD.as_bytes(),
+            subject_len,
+            "gmatch last match is invalid",
+            index,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_gmatch_compile_state(
+    payload: &SavePayload,
+    table_id: u32,
+    index: usize,
+) -> Result<(), LoadError> {
+    let Some(super::SavedVal::Str(cache_key_id)) =
+        table_numeric_field(payload, table_id, gmatch_schema::COMPILE_CHARGED_SLOT)
+    else {
+        return Err(corrupt("gmatch compile flag key is missing", index));
+    };
+    let Some(cache_key) = payload.strings.get(*cache_key_id as usize) else {
+        return Err(corrupt("gmatch compile flag key is out of range", index));
+    };
+    if cache_key.as_slice() != gmatch_schema::COMPILE_CHARGED_FIELD.as_bytes() {
+        return Err(corrupt("gmatch compile flag key is invalid", index));
+    }
+    if !matches!(
+        table_field(
+            payload,
+            table_id,
+            gmatch_schema::COMPILE_CHARGED_FIELD.as_bytes(),
+        ),
+        None | Some(super::SavedVal::Bool(true))
+    ) {
+        return Err(corrupt("gmatch compile flag is invalid", index));
+    }
+    Ok(())
+}
+
 fn validate_gmatch_state(
     payload: &SavePayload,
     table_id: u32,
@@ -502,7 +576,7 @@ fn validate_gmatch_state(
         let len = gmatch_integer_field(
             payload,
             table_id,
-            b"len",
+            gmatch_schema::LENGTH_FIELD.as_bytes(),
             super::super::MAX_STRING_BYTES,
             "empty gmatch length is missing or invalid",
             index,
@@ -510,7 +584,7 @@ fn validate_gmatch_state(
         let pos = gmatch_integer_field(
             payload,
             table_id,
-            b"pos",
+            gmatch_schema::POSITION_FIELD.as_bytes(),
             maximum_position,
             "empty gmatch position is missing or invalid",
             index,
@@ -521,14 +595,16 @@ fn validate_gmatch_state(
         return Ok(());
     }
 
-    let Some(super::SavedVal::Str(subject_id)) = table_field(payload, table_id, b"s") else {
+    let Some(super::SavedVal::Str(subject_id)) =
+        table_field(payload, table_id, gmatch_schema::SUBJECT_FIELD.as_bytes())
+    else {
         return Err(corrupt("gmatch subject is missing or invalid", index));
     };
     let Some(subject) = payload.strings.get(*subject_id as usize) else {
         return Err(corrupt("gmatch subject string id is out of range", index));
     };
     if !matches!(
-        table_field(payload, table_id, b"p"),
+        table_field(payload, table_id, gmatch_schema::PATTERN_FIELD.as_bytes(),),
         Some(super::SavedVal::Str(_))
     ) {
         return Err(corrupt("gmatch pattern is missing or invalid", index));
@@ -536,7 +612,7 @@ fn validate_gmatch_state(
     let pos = gmatch_integer_field(
         payload,
         table_id,
-        b"pos",
+        gmatch_schema::POSITION_FIELD.as_bytes(),
         maximum_position,
         "gmatch position is missing or invalid",
         index,
@@ -544,6 +620,8 @@ fn validate_gmatch_state(
     if pos > subject.len().saturating_add(1) {
         return Err(corrupt("gmatch position exceeds its subject", index));
     }
+    validate_gmatch_last_match(payload, table_id, subject.len(), index)?;
+    validate_gmatch_compile_state(payload, table_id, index)?;
     Ok(())
 }
 
@@ -564,7 +642,7 @@ fn validate_gmatch_iterators(payload: &SavePayload) -> Result<(), LoadError> {
                 .get(*upvalue_id as usize)
                 .ok_or_else(|| corrupt("gmatch closure upvalue is out of range", closure_index))?;
             match value {
-                super::SavedVal::Fn(id) if id == "string.gmatch.iter" => {
+                super::SavedVal::Fn(id) if id == gmatch_schema::ITERATOR_ID => {
                     if iterator_kind.replace(false).is_some() {
                         return Err(corrupt(
                             "gmatch closure captures multiple iterators",
@@ -572,7 +650,7 @@ fn validate_gmatch_iterators(payload: &SavePayload) -> Result<(), LoadError> {
                         ));
                     }
                 }
-                super::SavedVal::Fn(id) if id == "string.gmatch.empty_iter" => {
+                super::SavedVal::Fn(id) if id == gmatch_schema::EMPTY_ITERATOR_ID => {
                     if iterator_kind.replace(true).is_some() {
                         return Err(corrupt(
                             "gmatch closure captures multiple iterators",
@@ -689,8 +767,12 @@ mod tests {
     fn gmatch_payload(empty_pattern: bool, position: super::super::SavedVal) -> SavePayload {
         let (iterator_id, strings, entries) = if empty_pattern {
             (
-                "string.gmatch.empty_iter",
-                vec![b"pos".to_vec(), b"len".to_vec(), b"bad".to_vec()],
+                gmatch_schema::EMPTY_ITERATOR_ID,
+                vec![
+                    gmatch_schema::POSITION_FIELD.as_bytes().to_vec(),
+                    gmatch_schema::LENGTH_FIELD.as_bytes().to_vec(),
+                    b"bad".to_vec(),
+                ],
                 vec![
                     (super::super::SavedVal::Str(0), position),
                     (
@@ -701,14 +783,15 @@ mod tests {
             )
         } else {
             (
-                "string.gmatch.iter",
+                gmatch_schema::ITERATOR_ID,
                 vec![
-                    b"s".to_vec(),
-                    b"p".to_vec(),
-                    b"pos".to_vec(),
+                    gmatch_schema::SUBJECT_FIELD.as_bytes().to_vec(),
+                    gmatch_schema::PATTERN_FIELD.as_bytes().to_vec(),
+                    gmatch_schema::POSITION_FIELD.as_bytes().to_vec(),
                     b"abc".to_vec(),
                     b"a+".to_vec(),
                     b"bad".to_vec(),
+                    gmatch_schema::COMPILE_CHARGED_FIELD.as_bytes().to_vec(),
                 ],
                 vec![
                     (
@@ -720,6 +803,10 @@ mod tests {
                         super::super::SavedVal::Str(4),
                     ),
                     (super::super::SavedVal::Str(2), position),
+                    (
+                        super::super::SavedVal::Num(gmatch_schema::COMPILE_CHARGED_SLOT.to_bits()),
+                        super::super::SavedVal::Str(6),
+                    ),
                 ],
             )
         };

@@ -10,6 +10,7 @@ use super::Val;
 use super::frame::Frame;
 use super::object::ObjectPtr;
 use crate::instr::{ArgCount, Builtin, RetCount};
+use crate::limits::MAX_TABLE_BATCH_SIZE;
 
 impl State {
     #[inline(always)]
@@ -496,7 +497,10 @@ impl State {
 
         match obj_ptr.and_then(|ptr| self.heap.as_table(ptr)) {
             Some(tbl) => {
-                tbl.set_list(usize::from(batch) * usize::from(u8::MAX) + 1, values)?;
+                tbl.set_list(
+                    usize::from(batch) * usize::from(MAX_TABLE_BATCH_SIZE) + 1,
+                    values,
+                )?;
                 // Net-neutral: the table was popped above and is pushed back.
                 self.push_unchecked(tbl_value);
                 Ok(())

@@ -26,7 +26,7 @@ use crate::error::Error;
 /// Trait for host-provided callbacks.
 ///
 /// Implement this trait to customize how the VM interacts with your application.
-/// The default implementation prints to stdout, suitable for CLI usage.
+/// [`DefaultCallbacks`] prints to stdout, suitable for CLI usage.
 ///
 /// `Send` is required because `State` is `Send`; the host callbacks travel
 /// with the State and must be safe to move across threads.
@@ -37,12 +37,7 @@ pub trait HostCallbacks: Send {
     /// * `source` - The active Lua frame source name (`None` for direct native calls)
     /// * `line` - The current line number (0 if unknown)
     /// * `message` - The formatted message (all arguments joined with tabs)
-    fn on_print(&mut self, _source: Option<&str>, _line: u32, message: &str) {
-        // Deliberate default: DefaultCallbacks serves CLI tools and tests.
-        // Embedders that need captured or redirected output override on_print;
-        // making it required would break every existing HostCallbacks impl.
-        println!("{message}");
-    }
+    fn on_print(&mut self, source: Option<&str>, line: u32, message: &str);
 
     /// Called when an error is raised while executing code reached through
     /// `call()`. Fired exactly once per error, in addition to that error being
@@ -77,7 +72,16 @@ pub trait HostCallbacks: Send {
 /// Default callbacks that print to stdout.
 ///
 /// This is used when no custom callbacks are provided, suitable for CLI tools.
+/// Since `on_print` cannot return an I/O error, a failed stdout write is ignored.
 #[derive(Default)]
 pub struct DefaultCallbacks;
 
-impl HostCallbacks for DefaultCallbacks {}
+impl HostCallbacks for DefaultCallbacks {
+    fn on_print(&mut self, _source: Option<&str>, _line: u32, message: &str) {
+        use std::io::Write;
+
+        // Deliberately discarded: on_print has no error channel (see above).
+        #[allow(clippy::let_underscore_must_use)]
+        let _ = writeln!(std::io::stdout().lock(), "{message}");
+    }
+}

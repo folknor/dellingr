@@ -10,7 +10,6 @@
 
 use crate::det_hash::IndexMap;
 use std::cell::Cell;
-use std::fmt;
 use std::sync::Arc;
 
 use slotmap::{SlotMap, new_key_type};
@@ -727,13 +726,6 @@ struct StringEntry {
 /// - Accessing with an old key panics instead of causing memory corruption
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) struct StringPtr(StringKey);
-
-impl fmt::Display for StringPtr {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Without heap access, we can only show the key
-        write!(f, "string: {:?}", self.0)
-    }
-}
 
 /// String pool using SlotMap for safe generational access.
 /// Provides string interning with use-after-free detection.

@@ -4,6 +4,27 @@ All notable changes to dellingr are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 [Semantic Versioning](https://semver.org/) once 1.0 lands.
 
+## [Unreleased]
+
+### Changed (breaking)
+
+- `HostCallbacks::on_print` has no default body; every implementation must
+  define it. `DefaultCallbacks` writes to stdout and drops write errors instead
+  of panicking.
+- `Error`'s `Display` no longer ends with a newline after the traceback.
+- Snapshot loading rejects gmatch iterator state that lacks its cached pattern
+  key, has a non-`true` compile flag, or an out-of-range `lastmatch`.
+
+### Fixed
+
+- A reachable `ipairs` iterator can be saved (registered as `ipairs.iter`).
+- `table.move` charges and copies identically with and without a budget; a
+  budget that runs out mid-move keeps the prefix it paid for.
+- `table.move` accepts an exact singleton key above 2^53, like the other table
+  functions.
+- The CLI exits quietly with status 0 when stdout is a closed pipe instead of
+  panicking with exit 101.
+
 ## [0.5.0] - 2026-10-14
 
 Saves and replays from 0.4.0 do not carry over. Re-measure tick budgets and

@@ -58,15 +58,11 @@ use super::{ObjectPtr, State, Val};
 use crate::COST_MODEL_VERSION;
 use crate::compiler::{Bytecode, UpvalueDesc};
 use crate::host::HostCallbacks;
-use crate::instr::Instr;
+use crate::instr::{FORMAT_VERSION, Instr};
 
 mod verify;
 
 const MAGIC: [u8; 4] = *b"DLGS";
-// Save compatibility is exact-match only. There is no migration path; bump
-// this whenever an older reader would misread any encoded field.
-const FORMAT_VERSION: u16 = 7;
-
 const MAX_ENGINE_VERSION_BYTES: usize = 128;
 const MAX_SAVE_IDENTIFIER_BYTES: usize = 4 * 1024;
 const MAX_ENVIRONMENT_TOKEN_BYTES: usize = 256;

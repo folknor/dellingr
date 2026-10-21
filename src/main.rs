@@ -11,9 +11,10 @@ static ALLOC: hotpath::CountingAllocator = hotpath::CountingAllocator::new();
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs;
+use std::io::{self, Write};
 use std::process::exit;
 
-use dellingr::{ArgCount, RetCount, State, analyze_cost};
+use dellingr::{ArgCount, HostCallbacks, RetCount, State, analyze_cost};
 
 #[derive(Clone, Copy)]
 enum OptionKind {
@@ -173,19 +174,63 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Option<CliArgs
     }))
 }
 
-// Every failure exits 1 on purpose: this CLI is a development tool for running
-// and costing scripts by hand. The game host embeds the library and sees typed
+// CLI input, parse and runtime failures exit 1. A broken stdout pipe exits
+// quietly with status 0 because there is no reader for additional output. This
+// CLI is a development tool; the game host embeds the library and sees typed
 // errors (error kinds, cost budget exhaustion) through the API, never through
-// this process's exit status, so distinct exit codes would have no consumer.
+// this process's exit status, so distinct error codes would have no consumer.
 fn report_error(error: impl std::fmt::Display) -> ! {
-    eprintln!("Error: {error}");
+    write_stderr(&format!("Error: {error}\n"));
     exit(1);
 }
 
 fn report_usage_error(error: &str) -> ! {
-    eprintln!("Error: {error}");
-    eprintln!("{}", usage_line());
+    write_stderr(&format!("Error: {error}\n{}\n", usage_line()));
     exit(1);
+}
+
+fn write_stdout(output: &str) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    stdout.write_all(output.as_bytes())?;
+    stdout.flush()
+}
+
+fn write_stdout_or_exit(output: &str) {
+    if let Err(error) = write_stdout(output) {
+        exit_for_stdout_error(&error);
+    }
+}
+
+fn write_stdout_line_or_exit(line: &str) {
+    let mut stdout = io::stdout().lock();
+    if let Err(error) = writeln!(stdout, "{line}").and_then(|()| stdout.flush()) {
+        exit_for_stdout_error(&error);
+    }
+}
+
+fn exit_for_stdout_error(error: &io::Error) -> ! {
+    if error.kind() == io::ErrorKind::BrokenPipe {
+        exit(0);
+    }
+    report_error(format!("writing stdout: {error}"));
+}
+
+/// Writes diagnostics to stderr. A failure here is deliberately discarded:
+/// stderr is the last channel the CLI has, so there is nowhere to report it.
+fn write_stderr(output: &str) {
+    let mut stderr = io::stderr().lock();
+    #[allow(clippy::let_underscore_must_use)]
+    let _ = stderr
+        .write_all(output.as_bytes())
+        .and_then(|()| stderr.flush());
+}
+
+struct CliCallbacks;
+
+impl HostCallbacks for CliCallbacks {
+    fn on_print(&mut self, _source: Option<&str>, _line: u32, message: &str) {
+        write_stdout_line_or_exit(message);
+    }
 }
 
 // The CLI is the host process, so reading its own command line is the point;
@@ -195,7 +240,7 @@ fn main() {
     let args = match parse_args(env::args_os().skip(1)) {
         Ok(Some(args)) => args,
         Ok(None) => {
-            print!("{}", help_text());
+            write_stdout_or_exit(&help_text());
             return;
         }
         Err(error) => report_usage_error(&error),
@@ -209,9 +254,9 @@ fn main() {
     if args.analyze {
         match analyze_cost(&source) {
             Ok(analysis) => {
-                println!("{analysis}");
-                eprintln!(
-                    "Warning: analyze_cost accounts only for static bytecode and excludes all data-dependent native string, pattern, and table work; it is not a runtime bound or native-cost estimate."
+                write_stdout_or_exit(&format!("{analysis}\n"));
+                write_stderr(
+                    "Warning: analyze_cost accounts only for static bytecode and excludes all data-dependent native string, pattern, and table work; it is not a runtime bound or native-cost estimate.\n",
                 );
             }
             Err(error) => report_error(format!("parsing source: {error}")),
@@ -219,7 +264,7 @@ fn main() {
         return;
     }
 
-    let mut state = State::new();
+    let mut state = State::with_callbacks(Box::new(CliCallbacks));
     if let Some(limit) = args.limit {
         state.set_cost_budget(limit);
     }
@@ -230,7 +275,7 @@ fn main() {
         .and_then(|()| state.call(ArgCount::Fixed(0), RetCount::Fixed(0)));
 
     if !args.quiet {
-        eprintln!("Cost used: {}", state.cost_used());
+        write_stderr(&format!("Cost used: {}\n", state.cost_used()));
     }
 
     if let Err(error) = result {

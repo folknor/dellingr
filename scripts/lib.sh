@@ -85,6 +85,14 @@ print(artifact_path)
     printf '%s\n' "$artifact"
 }
 
+dellingr_bin_built() {
+    if [ "$#" -ne 1 ]; then
+        echo "usage: dellingr_bin_built <debug|release>" >&2
+        return 2
+    fi
+    cargo_artifact "$1" dellingr bin
+}
+
 dellingr_bin() {
     if [ "$#" -ne 1 ]; then
         echo "usage: dellingr_bin <debug|release>" >&2
@@ -94,7 +102,76 @@ dellingr_bin() {
         printf '%s\n' "$DELLINGR"
         return 0
     fi
-    cargo_artifact "$1" dellingr bin
+    dellingr_bin_built "$1"
+}
+
+workload_hotpath_files() {
+    if [ "$#" -gt 1 ]; then
+        echo "usage: workload_hotpath_files [workload-name]" >&2
+        return 2
+    fi
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "missing tool: python3 (needed to read brokkr.toml)" >&2
+        return 1
+    fi
+
+    python3 - "$@" <<'PY'
+import sys
+
+if sys.version_info < (3, 11):
+    print("Python 3.11 or newer is required to read brokkr.toml", file=sys.stderr)
+    raise SystemExit(1)
+
+import tomllib
+from pathlib import Path
+
+try:
+    with Path("brokkr.toml").open("rb") as registry_file:
+        registry = tomllib.load(registry_file)
+except OSError as error:
+    print(f"cannot read brokkr.toml: {error}", file=sys.stderr)
+    raise SystemExit(1)
+except tomllib.TOMLDecodeError as error:
+    print(f"cannot parse brokkr.toml: {error}", file=sys.stderr)
+    raise SystemExit(1)
+
+workloads = registry.get("dellingr", {}).get("workloads")
+if not isinstance(workloads, dict) or not workloads:
+    print("no workloads found in brokkr.toml", file=sys.stderr)
+    raise SystemExit(1)
+
+def hotpath_file(name, workload):
+    if not isinstance(workload, dict):
+        print(f"invalid workload entry in brokkr.toml: {name}", file=sys.stderr)
+        raise SystemExit(1)
+    path = workload.get("hotpath_file")
+    if not isinstance(path, str):
+        print(f"workload has no hotpath_file: {name}", file=sys.stderr)
+        raise SystemExit(1)
+    parts = path.split("/")
+    if (
+        not path.startswith("examples/")
+        or not path.endswith(".lua")
+        or any(part in ("", ".", "..") for part in parts)
+    ):
+        print(
+            f"workload hotpath_file must be a Lua file under examples/: {name}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    return path
+
+if len(sys.argv) == 1:
+    for name, workload in workloads.items():
+        print(hotpath_file(name, workload))
+else:
+    name = sys.argv[1]
+    if name not in workloads:
+        print(f"unknown workload: {name}", file=sys.stderr)
+        print("available workloads: " + ", ".join(workloads), file=sys.stderr)
+        raise SystemExit(1)
+    print(hotpath_file(name, workloads[name]))
+PY
 }
 
 shell_quote() {

@@ -175,6 +175,12 @@ define_builtins! {
 #[repr(transparent)]
 pub(crate) struct Instr(u32);
 
+/// Snapshot header version. Compatibility is exact-match only, so bump this
+/// whenever an older reader would misread any encoded field. Keep it available
+/// when the codec is disabled so the fixture can check it in every build.
+#[cfg_attr(not(feature = "snapshot"), allow(dead_code))]
+pub(crate) const FORMAT_VERSION: u16 = 7;
+
 /// Static opcode charge categories. Native work is charged separately by its helpers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum OpcodeCost {
@@ -801,7 +807,7 @@ mod tests {
 
         let golden = include_str!("../tests/fixtures/opcode_encoding.txt");
         let (version, expected) = golden.split_once('\n').expect("fixture has a version line");
-        assert_eq!(version, "format=7");
+        assert_eq!(version, format!("format={}", super::FORMAT_VERSION));
         let mut actual = String::new();
         for (opcode, name) in Instr::OPCODE_NAMES {
             writeln!(actual, "{name}={opcode}").expect("writing into String cannot fail");

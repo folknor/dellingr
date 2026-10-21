@@ -50,14 +50,14 @@ impl Parser<'_> {
 
         while self.input.try_pop(TokenType::Or)?.is_some() {
             exp_desc = ExpDesc::Other;
-            let branch_instr_index = self.chunk.code.len();
+            let branch_instr_index = self.funcs.chunk.code.len();
             self.push(Instr::branch_true_keep(0));
             // If we don't short-circuit, pop the left-hand expression
             self.push(Instr::pop());
             self.parse_and()?;
             self.patch_jump(
                 branch_instr_index,
-                self.chunk.code.len(),
+                self.funcs.chunk.code.len(),
                 Instr::branch_true_keep,
             )?;
         }
@@ -71,14 +71,14 @@ impl Parser<'_> {
 
         while self.input.try_pop(TokenType::And)?.is_some() {
             exp_desc = ExpDesc::Other;
-            let branch_instr_index = self.chunk.code.len();
+            let branch_instr_index = self.funcs.chunk.code.len();
             self.push(Instr::branch_false_keep(0));
             // If we don't short-circuit, pop the left-hand expression
             self.push(Instr::pop());
             self.parse_comparison()?;
             self.patch_jump(
                 branch_instr_index,
-                self.chunk.code.len(),
+                self.funcs.chunk.code.len(),
                 Instr::branch_false_keep,
             )?;
         }
@@ -328,7 +328,7 @@ impl Parser<'_> {
                 self.eval_prefix_exp(base_expr);
                 // Always mark call base - needed when last arg is vararg or a
                 // function call, both of which make the argument count dynamic.
-                let mark_idx = self.chunk.code.len();
+                let mark_idx = self.funcs.chunk.code.len();
                 self.push(Instr::mark_call_base(1));
                 let (num_args, last_exp) = self.parse_call_args()?;
                 let num_args = if self.open_tail(&last_exp, RetCount::All) {
@@ -337,7 +337,7 @@ impl Parser<'_> {
                 } else {
                     // Keep parse-time instruction indices stable. Finalization
                     // strips this free placeholder with one jump remap.
-                    self.chunk.code[mark_idx] = Instr::nop();
+                    self.funcs.chunk.code[mark_idx] = Instr::nop();
                     ArgCount::Fixed(self.checked_fixed_arg_count(num_args as usize, 0)?)
                 };
                 PrefixExp::FunctionCall(CallSite::new(num_args, line))
@@ -355,7 +355,7 @@ impl Parser<'_> {
                 self.eval_prefix_exp(base_expr);
                 // Always mark call base - needed when last arg is vararg or a
                 // function call, both of which make the argument count dynamic.
-                let mark_idx = self.chunk.code.len();
+                let mark_idx = self.funcs.chunk.code.len();
                 self.push(Instr::mark_call_base(1));
                 self.input.next()?; // consume ':'
                 let method_name = self.expect_identifier()?;
@@ -380,7 +380,7 @@ impl Parser<'_> {
                 } else {
                     // Keep parse-time instruction indices stable. Finalization
                     // strips this free placeholder with one jump remap.
-                    self.chunk.code[mark_idx] = Instr::nop();
+                    self.funcs.chunk.code[mark_idx] = Instr::nop();
                     ArgCount::Fixed(self.checked_fixed_arg_count(num_args as usize, 1)?)
                 };
                 // Stack: [method, obj, arg1, arg2, ...]
@@ -420,7 +420,7 @@ impl Parser<'_> {
             TokenType::True => self.push(Instr::push_bool(true)),
             TokenType::DotDotDot => {
                 // Check if we're in a vararg function
-                if !self.chunk.is_vararg {
+                if !self.funcs.chunk.is_vararg {
                     return Err(self.error_here(SyntaxError::VarargOutsideVarargFunction));
                 }
                 // Default: push 1 value (will be adjusted if in tail position)

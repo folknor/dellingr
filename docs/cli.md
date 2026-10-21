@@ -12,6 +12,12 @@ Short forms: `-l`, `-a`, `-q`, `-h`.
 - stderr: the `Cost used: N` summary, the `--analyze` caveat and all errors.
   `--quiet` suppresses the cost summary.
 
+If a CLI stdout write for help, `--analyze` or script `print()` encounters a
+closed pipe, the CLI stops quietly with status 0. Library users of
+`DefaultCallbacks` get nonpanicking writes; that infallible callback ignores
+write errors. Stderr write failures do not panic; the command retains its
+normal result.
+
 The `--analyze` caveat states that the analysis covers static bytecode only
 and excludes data-dependent native string, pattern and table work.
 
@@ -26,7 +32,8 @@ and excludes data-dependent native string, pattern and table work.
 
 ## Exit status
 
-Every failure exits 1: bad arguments, unreadable file, parse error, runtime
-error, budget exhaustion. The cost summary is still printed before a runtime
-error is reported. The CLI is a development tool; hosts embed the library and
-see typed errors through the API.
+Bad arguments, unreadable files, parse errors, runtime errors and budget
+exhaustion exit 1. The cost summary is still attempted before a runtime error
+is reported. A closed stdout pipe during CLI output exits quietly with status
+0. The CLI is a development tool; hosts embed the library and see typed errors
+through the API.

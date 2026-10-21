@@ -143,20 +143,18 @@ impl<'a> Parser<'a> {
         if method {
             params.insert(0, "self");
         }
-        if self.chunk.nested.len() >= MAX_NESTED {
+        if self.funcs.chunk.nested.len() >= MAX_NESTED {
             return Err(self.error_here(SyntaxError::TooManyNestedFunctions));
         }
-        if self.outer_funcs.len() >= MAX_CHUNK_NESTING {
+        if self.funcs.frames.len() >= MAX_CHUNK_NESTING {
             return Err(self.error_here(SyntaxError::TooManySyntaxLevels));
         }
 
-        self.nest_level += 1;
         let mut new_chunk = self.parse_chunk(&params, is_vararg)?;
         new_chunk.name = name;
-        self.level_down();
 
-        self.chunk.nested.push(Arc::new(new_chunk));
-        self.push(Instr::closure(self.chunk.nested.len() as u8 - 1));
+        self.funcs.chunk.nested.push(Arc::new(new_chunk));
+        self.push(Instr::closure(self.funcs.chunk.nested.len() as u8 - 1));
         self.expect(TokenType::End)?;
         Ok(())
     }

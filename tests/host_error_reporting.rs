@@ -9,6 +9,8 @@ use dellingr::{ArgCount, HostCallbacks, RetCount, State};
 struct ErrorCounter(Arc<AtomicUsize>);
 
 impl HostCallbacks for ErrorCounter {
+    fn on_print(&mut self, _source: Option<&str>, _line: u32, _message: &str) {}
+
     fn on_error(&mut self, _source: Option<&str>, _error: &Error) {
         self.0.fetch_add(1, Ordering::SeqCst);
     }

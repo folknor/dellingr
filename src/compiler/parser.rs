@@ -20,8 +20,11 @@ use crate::numeral::{hex_value, is_lua_whitespace, is_newline_pair};
 
 use crate::det_hash::IndexMap;
 
+use state::FunctionStack;
+
 mod expr;
 mod func;
+mod state;
 mod stmt;
 mod table;
 mod upvalue;
@@ -31,51 +34,13 @@ mod upvalue;
 struct Parser<'a> {
     /// The input token stream.
     input: TokenStream<'a>,
-    chunk: Bytecode,
-    literal_indices: LiteralPoolIndices,
-    nest_level: i32,
-    /// Names borrow the source (`'a`), so declarations allocate nothing.
-    locals: Vec<(&'a str, i32)>,
-    /// Break-jump state for each loop enclosing the current position *within
-    /// the current function*. Per-function: a `break` inside a function
-    /// literal must never see the enclosing function's loops.
-    loop_breaks: Vec<LoopContext>,
-    /// Upvalues for the current function being compiled.
-    /// Each entry is (name, descriptor).
-    upvalues: Vec<(&'a str, UpvalueDesc)>,
-    /// Suspended state of every enclosing function, outermost first. Pushed
-    /// and popped as a unit by `parse_chunk`; see `FuncState`.
-    outer_funcs: Vec<FuncState<'a>>,
+    /// Every active function, outermost first; field access selects the last.
+    funcs: FunctionStack<'a>,
+    source_name: Option<Arc<str>>,
     /// Current line number for instruction emission.
     current_line: u32,
     /// Current nesting depth across recursive parser entry points.
     syntax_depth: u32,
-    /// Constant folding is forbidden on instructions below this code index.
-    /// Raised to every patched forward-jump target: a fold merges the two
-    /// operand pushes into one, and a jump landing between them (e.g. the
-    /// `or`-skip in `(a or 2) * 3`) must keep executing exactly the second
-    /// push. A backward target *at* the first operand is fine - the folded
-    /// push computes the same value the landing site would have - so the
-    /// barrier is exclusive of the first operand index. Per-chunk, saved and
-    /// reset across `parse_chunk`.
-    fold_barrier: usize,
-}
-
-/// The per-function slice of `Parser` state, saved while a nested function
-/// literal is compiled. Every `Parser` field whose meaning is scoped to one
-/// function belongs here: `take_func_state` and `restore_func_state` move
-/// all of them as one unit, so a field cannot be saved without also being
-/// reset. (`loop_breaks` once sat outside that unit, which let a `break` in a
-/// function literal bind to the enclosing function's loop and patch the
-/// outer chunk with a nested-chunk index.)
-#[derive(Debug, Default)]
-struct FuncState<'a> {
-    chunk: Bytecode,
-    literal_indices: LiteralPoolIndices,
-    locals: Vec<(&'a str, i32)>,
-    upvalues: Vec<(&'a str, UpvalueDesc)>,
-    loop_breaks: Vec<LoopContext>,
-    fold_barrier: usize,
 }
 
 /// Lookup indexes for one chunk's ordered literal vectors.
@@ -112,22 +77,12 @@ pub(super) fn parse_str_named(source: &str, source_name: Option<String>) -> Resu
         .with_source_name(source_name));
     }
 
-    let chunk = Bytecode {
-        source: source_name.clone(),
-        ..Default::default()
-    };
     let parser = Parser {
         input: TokenStream::new(source),
-        chunk,
-        literal_indices: LiteralPoolIndices::default(),
-        nest_level: 0,
-        locals: Vec::new(),
-        loop_breaks: Vec::new(),
-        upvalues: Vec::new(),
-        outer_funcs: Vec::new(),
+        funcs: FunctionStack::default(),
+        source_name: source_name.clone(),
         current_line: 1,
         syntax_depth: 0,
-        fold_barrier: 0,
     };
     parser
         .parse_all()
@@ -137,22 +92,22 @@ pub(super) fn parse_str_named(source: &str, source_name: Option<String>) -> Resu
 impl<'a> Parser<'a> {
     // Helper functions
 
-    /// Creates a new local slot at the current nest_level.
+    /// Creates a new local slot in the current block.
     /// Fails if we have exceeded the maximum number of locals.
     fn add_local(&mut self, name: &'a str) -> Result<()> {
-        if self.locals.len() == MAX_LOCALS {
+        if self.funcs.locals.len() == MAX_LOCALS {
             Err(self.error_here(SyntaxError::TooManyLocals))
         } else {
-            self.locals.push((name, self.nest_level));
-            let non_param_locals = self.locals.len() - self.chunk.num_params as usize;
-            self.chunk.num_locals = self.chunk.num_locals.max(non_param_locals as u8);
+            self.funcs.locals.push(name);
+            let non_param_locals = self.funcs.locals.len() - self.funcs.chunk.num_params as usize;
+            self.funcs.chunk.num_locals = self.funcs.chunk.num_locals.max(non_param_locals as u8);
             Ok(())
         }
     }
 
     /// Checks whether this scope can accommodate more locals without changing it.
     fn ensure_local_capacity(&self, additional: usize) -> Result<()> {
-        if additional > MAX_LOCALS - self.locals.len() {
+        if additional > MAX_LOCALS - self.funcs.locals.len() {
             Err(self.error_here(SyntaxError::TooManyLocals))
         } else {
             Ok(())
@@ -204,10 +159,10 @@ impl<'a> Parser<'a> {
         target: usize,
         constructor: impl FnOnce(i16) -> Instr,
     ) -> Result<()> {
-        self.chunk.code[from] = constructor(self.checked_jump_offset(from, target)?);
+        self.funcs.chunk.code[from] = constructor(self.checked_jump_offset(from, target)?);
         // A patched landing site must keep executing exactly the instruction
         // it points at; see `fold_barrier`.
-        self.fold_barrier = self.fold_barrier.max(target);
+        self.funcs.fold_barrier = self.funcs.fold_barrier.max(target);
         Ok(())
     }
 
@@ -279,37 +234,40 @@ impl<'a> Parser<'a> {
     /// Stores literal string bytes and returns its index.
     fn find_or_add_string_bytes(&mut self, bytes: &[u8]) -> Result<u16> {
         crate::vm::check_string_size(bytes.len()).map_err(|err| self.error_here(err.kind))?;
-        if let Some(index) = self.literal_indices.strings.get(bytes) {
+        if let Some(index) = self.funcs.literal_indices.strings.get(bytes) {
             return Ok(*index);
         }
 
-        let i = self.chunk.string_literals.len();
+        let i = self.funcs.chunk.string_literals.len();
         // MAX_LITERALS keeps indices within u16, so the conversion cannot fail.
         let index = match u16::try_from(i) {
             Ok(index) if i < MAX_LITERALS => index,
             _ => return Err(self.error_here(SyntaxError::TooManyStrings)),
         };
-        self.chunk.string_literals.push(bytes.to_vec());
-        self.literal_indices.strings.insert(bytes.to_vec(), index);
+        self.funcs.chunk.string_literals.push(bytes.to_vec());
+        self.funcs
+            .literal_indices
+            .strings
+            .insert(bytes.to_vec(), index);
         Ok(index)
     }
 
     /// Stores a literal number and returns its index.
     fn find_or_add_number(&mut self, num: f64) -> Result<u16> {
         let key = number_literal_key(num);
-        if let Some(index) = key.and_then(|key| self.literal_indices.numbers.get(&key)) {
+        if let Some(index) = key.and_then(|key| self.funcs.literal_indices.numbers.get(&key)) {
             return Ok(*index);
         }
 
-        let i = self.chunk.number_literals.len();
+        let i = self.funcs.chunk.number_literals.len();
         // MAX_LITERALS keeps indices within u16, so the conversion cannot fail.
         let index = match u16::try_from(i) {
             Ok(index) if i < MAX_LITERALS => index,
             _ => return Err(self.error_here(SyntaxError::TooManyNumbers)),
         };
-        self.chunk.number_literals.push(num);
+        self.funcs.chunk.number_literals.push(num);
         if let Some(key) = key {
-            self.literal_indices.numbers.insert(key, index);
+            self.funcs.literal_indices.numbers.insert(key, index);
         }
         Ok(index)
     }
@@ -425,44 +383,47 @@ impl<'a> Parser<'a> {
         self.input.substring(token.range())
     }
 
-    /// Lowers the nesting level by one, closing and discarding its locals.
+    /// Starts a block at the next available local slot.
+    fn level_up(&mut self) {
+        let base = self.funcs.locals.len();
+        self.funcs.block_starts.push(base);
+    }
+
+    /// Closes and discards exactly the locals declared in this block.
     fn level_down(&mut self) {
-        let before = self.locals.len();
-        while let Some((_, lvl)) = self.locals.last() {
-            if *lvl == self.nest_level {
-                self.locals.pop();
-            } else {
-                break;
-            }
-        }
-        let block_base = self.locals.len();
+        let block_base = self
+            .funcs
+            .block_starts
+            .pop()
+            .expect("every block exit follows a block entry");
+        let before = self.funcs.locals.len();
+        self.funcs.locals.truncate(block_base);
         if block_base < before {
             self.push(Instr::close_upvalues(block_base as u8));
         }
-        self.nest_level -= 1;
     }
 
     /// Adds an instruction to the output with line number tracking.
     fn push(&mut self, instr: Instr) {
-        self.chunk.code.push(instr);
-        self.chunk.line_info.push(self.current_line);
+        self.funcs.chunk.code.push(instr);
+        self.funcs.chunk.line_info.push(self.current_line);
     }
 
     /// The values of the two trailing instructions when both are `PushNum`
     /// and no patched jump target forbids merging them (`fold_barrier`).
     fn foldable_binary_operands(&self) -> Option<(f64, f64)> {
-        let first = self.chunk.code.len().checked_sub(2)?;
-        if first < self.fold_barrier {
+        let first = self.funcs.chunk.code.len().checked_sub(2)?;
+        if first < self.funcs.fold_barrier {
             return None;
         }
-        let lhs = self.chunk.code[first];
-        let rhs = self.chunk.code[first + 1];
+        let lhs = self.funcs.chunk.code[first];
+        let rhs = self.funcs.chunk.code[first + 1];
         if lhs.opcode() != Instr::OP_PUSH_NUM || rhs.opcode() != Instr::OP_PUSH_NUM {
             return None;
         }
         Some((
-            self.chunk.number_literals[lhs.bx() as usize],
-            self.chunk.number_literals[rhs.bx() as usize],
+            self.funcs.chunk.number_literals[lhs.bx() as usize],
+            self.funcs.chunk.number_literals[rhs.bx() as usize],
         ))
     }
 
@@ -487,8 +448,8 @@ impl<'a> Parser<'a> {
             if Self::fold_result_allowed(result)
                 && let Ok(idx) = self.find_or_add_number(result)
             {
-                self.chunk.code.pop();
-                self.chunk.line_info.pop();
+                self.funcs.chunk.code.pop();
+                self.funcs.chunk.line_info.pop();
                 self.replace_last_instr(Instr::push_num(idx));
                 return;
             }
@@ -507,14 +468,14 @@ impl<'a> Parser<'a> {
     /// two. A target at the comparison itself is fine - the fused form has
     /// the same stack effect and control flow from that entry point.
     fn push_branch_false(&mut self) -> (usize, fn(i16) -> Instr) {
-        let len = self.chunk.code.len();
-        if len > self.fold_barrier
-            && let Some(last) = self.chunk.code.last()
+        let len = self.funcs.chunk.code.len();
+        if len > self.funcs.fold_barrier
+            && let Some(last) = self.funcs.chunk.code.last()
         {
             let fused = Instr::fused_branch_constructor(last.opcode());
             if let Some(constructor) = fused {
                 let idx = len - 1;
-                self.chunk.code[idx] = constructor(0);
+                self.funcs.chunk.code[idx] = constructor(0);
                 return (idx, constructor);
             }
         }
@@ -526,11 +487,11 @@ impl<'a> Parser<'a> {
     /// Replacing in place is safe even at a jump target: the landing site
     /// still computes the same value.
     fn push_negate(&mut self) {
-        if self.chunk.code.len() > self.fold_barrier
-            && let Some(last) = self.chunk.code.last()
+        if self.funcs.chunk.code.len() > self.funcs.fold_barrier
+            && let Some(last) = self.funcs.chunk.code.last()
             && last.opcode() == Instr::OP_PUSH_NUM
         {
-            let value = -self.chunk.number_literals[last.bx() as usize];
+            let value = -self.funcs.chunk.number_literals[last.bx() as usize];
             if Self::fold_result_allowed(value)
                 && let Ok(idx) = self.find_or_add_number(value)
             {
@@ -543,13 +504,14 @@ impl<'a> Parser<'a> {
 
     /// Adds an instruction with an explicit source line.
     fn push_at_line(&mut self, instr: Instr, line: u32) {
-        self.chunk.code.push(instr);
-        self.chunk.line_info.push(line);
+        self.funcs.chunk.code.push(instr);
+        self.funcs.chunk.line_info.push(line);
     }
 
     /// Overwrites the last emitted instruction in place, returning the old one.
     fn replace_last_instr(&mut self, instr: Instr) -> Instr {
         let slot = self
+            .funcs
             .chunk
             .code
             .last_mut()
@@ -586,7 +548,7 @@ impl<'a> Parser<'a> {
 
     /// Called when entering a loop to track break statements.
     fn enter_loop(&mut self, close_slot: u8) {
-        self.loop_breaks.push(LoopContext {
+        self.funcs.loop_breaks.push(LoopContext {
             close_slot,
             break_jumps: Vec::new(),
         });
@@ -596,10 +558,11 @@ impl<'a> Parser<'a> {
     /// current instruction position (the instruction after the loop).
     fn exit_loop(&mut self) -> Result<()> {
         let context = self
+            .funcs
             .loop_breaks
             .pop()
             .expect("exit_loop called without enter_loop");
-        let loop_end = self.chunk.code.len();
+        let loop_end = self.funcs.chunk.code.len();
         for break_idx in context.break_jumps {
             // The break instruction is a Jump with placeholder offset.
             // Patch it to jump to the end of the loop.
@@ -610,11 +573,17 @@ impl<'a> Parser<'a> {
 
     /// Records a break statement. Returns an error if not inside a loop.
     fn add_break(&mut self) -> Result<()> {
-        if let Some(close_slot) = self.loop_breaks.last().map(|context| context.close_slot) {
+        if let Some(close_slot) = self
+            .funcs
+            .loop_breaks
+            .last()
+            .map(|context| context.close_slot)
+        {
             self.push(Instr::close_upvalues(close_slot));
             // Record the index where we'll emit the Jump instruction.
-            let idx = self.chunk.code.len();
-            self.loop_breaks
+            let idx = self.funcs.chunk.code.len();
+            self.funcs
+                .loop_breaks
                 .last_mut()
                 .expect("loop context existed before emitting break close")
                 .break_jumps
@@ -627,39 +596,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Moves the current function's state out, leaving fresh defaults.
-    fn take_func_state(&mut self) -> FuncState<'a> {
-        FuncState {
-            chunk: std::mem::take(&mut self.chunk),
-            literal_indices: std::mem::take(&mut self.literal_indices),
-            locals: std::mem::take(&mut self.locals),
-            upvalues: std::mem::take(&mut self.upvalues),
-            loop_breaks: std::mem::take(&mut self.loop_breaks),
-            fold_barrier: std::mem::take(&mut self.fold_barrier),
-        }
-    }
-
-    /// Reinstates `saved` as the current function's state and returns the
-    /// state it displaces (the just-finished function).
-    fn restore_func_state(&mut self, saved: FuncState<'a>) -> FuncState<'a> {
-        let FuncState {
-            chunk,
-            literal_indices,
-            locals,
-            upvalues,
-            loop_breaks,
-            fold_barrier,
-        } = saved;
-        FuncState {
-            chunk: std::mem::replace(&mut self.chunk, chunk),
-            literal_indices: std::mem::replace(&mut self.literal_indices, literal_indices),
-            locals: std::mem::replace(&mut self.locals, locals),
-            upvalues: std::mem::replace(&mut self.upvalues, upvalues),
-            loop_breaks: std::mem::replace(&mut self.loop_breaks, loop_breaks),
-            fold_barrier: std::mem::replace(&mut self.fold_barrier, fold_barrier),
-        }
-    }
-
     // Actual parsing
 
     /// The main entry point for the parser. This parses the entire input.
@@ -668,7 +604,7 @@ impl<'a> Parser<'a> {
         // The top-level chunk is a vararg function (can receive command-line args)
         let c = self.parse_chunk(&[], true)?;
         let token = self.input.next()?;
-        assert_eq!(self.nest_level, 0);
+        debug_assert!(self.funcs.frames.is_empty());
         if let TokenType::EndOfFile = token.typ {
             Ok(c)
         } else {
@@ -684,35 +620,36 @@ impl<'a> Parser<'a> {
         }
         let num_params =
             u8::try_from(params.len()).map_err(|_| self.error_here(SyntaxError::TooManyLocals))?;
-        // Nested chunks share the diagnostic source name through Arc.
-        let source = self.chunk.source.clone();
-        // Suspend the enclosing function: its chunk, literal pools, locals
-        // (each function's slots start at 0), upvalues, loops and fold
-        // barrier all start fresh for the nested one.
-        let outer = self.take_func_state();
-        self.outer_funcs.push(outer);
-        self.chunk.source = source;
-        self.chunk.is_vararg = is_vararg;
-        self.chunk.num_params = num_params;
+        // The root is a real frame too; no placeholder chunk participates in
+        // name lookup or the function-depth limit.
+        self.funcs.frames.push(state::FuncState::new(
+            self.source_name.clone(),
+            num_params,
+            is_vararg,
+        ));
 
         for &param in params {
-            self.locals.push((param, self.nest_level));
+            self.funcs.locals.push(param);
         }
 
         self.parse_statements()?;
         self.push(Instr::ret(RetCount::Fixed(0)));
 
         // Copy upvalues to chunk
-        self.chunk.upvalues = self.upvalues.iter().map(|(_, desc)| *desc).collect();
+        self.funcs.chunk.upvalues = self.funcs.upvalues.iter().map(|(_, desc)| *desc).collect();
 
-        let outer = self
-            .outer_funcs
+        let finished = self
+            .funcs
+            .frames
             .pop()
-            .ok_or_else(|| super::internal_error("compiler: outer function stack empty"))?;
-        let finished = self.restore_func_state(outer);
+            .expect("parse_chunk pushed its function frame before parsing");
         debug_assert!(
             finished.loop_breaks.is_empty(),
             "every loop entered in a function is exited before its chunk ends"
+        );
+        debug_assert!(
+            finished.block_starts.is_empty(),
+            "every block entered in a function is exited before its chunk ends"
         );
         let tmp_chunk = finished.chunk;
 
@@ -780,19 +717,12 @@ impl<'a> Parser<'a> {
 
     /// Parses a variable's name. Returns Local, Upvalue, or Global.
     fn parse_prefix_identifier(&mut self, name: &'a str) -> Result<PlaceExp> {
-        // First check if it's a local in the current function
-        if let Some(i) = find_last_local(&self.locals, name) {
-            return Ok(PlaceExp::Local(i as u8));
-        }
-
-        // Check if it's already an upvalue
-        if let Some(i) = self.find_upvalue(name) {
-            return Ok(PlaceExp::Upvalue(i));
-        }
-
-        // Try to resolve as an upvalue from outer scopes
-        if let Some(i) = self.resolve_upvalue(name)? {
-            return Ok(PlaceExp::Upvalue(i));
+        let level = self.funcs.frames.len() - 1;
+        if let Some(binding) = self.resolve_in(level, name)? {
+            return Ok(match binding {
+                UpvalueDesc::Local(index) => PlaceExp::Local(index),
+                UpvalueDesc::Upvalue(index) => PlaceExp::Upvalue(index),
+            });
         }
 
         // Check if it's a well-known builtin for fast access
@@ -850,11 +780,11 @@ impl<'a> Parser<'a> {
 
 /// Finds the index of the last local entry which matches `name`.
 #[must_use]
-fn find_last_local(locals: &[(&str, i32)], name: &str) -> Option<usize> {
+fn find_last_local(locals: &[&str], name: &str) -> Option<usize> {
     let mut i = locals.len();
     while i > 0 {
         i -= 1;
-        if locals[i].0 == name {
+        if locals[i] == name {
             return Some(i);
         }
     }

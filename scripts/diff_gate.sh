@@ -1,16 +1,13 @@
 #!/usr/bin/env bash
-# Differential gate for `brokkr check`'s script-check phase.
+# Optional debug-build wrapper for the differential corpus.
 #
-# Same comparison as diff_test.sh (every examples/**/*.lua vs reference Lua 5.2
-# and 5.4), but built in DEBUG so the gate stays cheap - it runs on every
-# `brokkr check`, and a release LTO build each time would dominate. Debug vs
-# release does not change the behavior under test (identical VM semantics, only
-# speed). Reuses diff_test.sh via its DELLINGR / DELLINGR_SKIP_BUILD env hooks.
+# `brokkr check` runs the corpus through `tests/diff_test.rs` for each feature
+# shape. This wrapper supports direct runs with a DEBUG binary; debug vs release
+# does not change the behavior under test (identical VM semantics, only speed).
 #
-# Reference Lua (lua5.2 AND lua5.4 on PATH) is a required dellingr dev
-# dependency; a host without them is a broken environment, so this fails loudly
-# rather than skipping. Emits diff_test.sh's own "ok" / failure sentinel on
-# stdout; brokkr.toml matches the last line against "ok".
+# Reference Lua (lua5.2 AND lua5.4 on PATH) is required for unmarked examples;
+# a host without them fails loudly rather than skipping those comparisons.
+# Forwards diff_test.sh's terse output for direct use.
 
 set -u
 
@@ -19,4 +16,4 @@ cd "$SCRIPT_DIR/.." || exit 1
 . "$SCRIPT_DIR/lib.sh"
 
 DEBUG_BIN="$(dellingr_bin debug)" || exit 1
-exec env DELLINGR="$DEBUG_BIN" DELLINGR_SKIP_BUILD=1 "$SCRIPT_DIR/diff_test.sh" "$@"
+exec env DELLINGR="$DEBUG_BIN" DELLINGR_SKIP_BUILD=1 bash "$SCRIPT_DIR/diff_test.sh" "$@"

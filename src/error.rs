@@ -549,10 +549,9 @@ impl fmt::Display for Error {
             }
         }
         if !self.stack_trace.is_empty() {
-            writeln!(f)?;
-            writeln!(f, "stack traceback:")?;
+            write!(f, "\nstack traceback:")?;
             for frame in &self.stack_trace {
-                writeln!(f, "\t{frame}")?;
+                write!(f, "\n\t{frame}")?;
             }
         }
         Ok(())

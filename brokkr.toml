@@ -164,20 +164,6 @@ xxh128 = "4df913d61046b591ea1f67ce6381e776"
 hotpath_file = "examples/parse/large_source.lua"
 hotpath_xxh128 = "4df913d61046b591ea1f67ce6381e776"
 
-# Differential gate: run every examples/**/*.lua through dellingr and reference
-# Lua 5.2/5.4 and require the output to match (see scripts/diff_gate.sh - debug
-# build, so the gate is cheap on every check). It prints "ok" on success or
-# "FAIL: <path>" per divergent script, so an exact last-line match on "ok" is
-# the pass condition. Reference Lua is a required dev dependency; a host without
-# it fails this loudly rather than skipping.
-[[script_check]]
-name = "diff-lua"
-command = "bash scripts/diff_gate.sh"
-expect = "ok"
-match = "last-line"
-stream = "stdout"
-stage = "post-test"
-
 [[script_check]]
 name = "generated-large-source"
 command = "python3 examples/parse/generate.py --check"

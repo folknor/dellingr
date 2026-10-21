@@ -2,9 +2,8 @@
 # Hotpath bench: phase KVs from the hotpath harness + hyperfine wall-time
 # from the regular dellingr binary on the same target's standalone runner.
 #
-# Usage: ./scripts/hotbench.sh <category/name> [hyperfine-args...]
-#   ./scripts/hotbench.sh tables/numeric_index
-#   ./scripts/hotbench.sh tables/numeric_index --runs 20
+# Usage: ./scripts/hotbench.sh <workload-name> [hyperfine-args...]
+#   The workload name is resolved to its hotpath_file in brokkr.toml.
 #
 # Why two binaries:
 #   The hotpath feature instruments every traced fn and prints a stats
@@ -26,14 +25,14 @@ cd "$SCRIPT_DIR/.." || exit 1
 
 if [ $# -lt 1 ]
 then
-    echo "usage: $0 <category/name> [hyperfine-args...]" >&2
+    echo "usage: $0 <workload-name> [hyperfine-args...]" >&2
     exit 2
 fi
 
 TARGET="$1"
 shift
 FEATURES="${FEATURES:-hotpath}"
-SCRIPT="examples/${TARGET}.lua"
+SCRIPT="$(workload_hotpath_files "$TARGET")" || exit 1
 
 if [ ! -f "$SCRIPT" ]
 then
@@ -47,7 +46,7 @@ then
     exit 1
 fi
 
-DELLINGR_BIN="$(dellingr_bin release)" || exit 1
+DELLINGR_BIN="$(dellingr_bin_built release)" || exit 1
 HOTPATH_BIN="$(cargo_artifact release hotpath example "$FEATURES")" || exit 1
 
 if [ ! -x "$DELLINGR_BIN" ] || [ ! -x "$HOTPATH_BIN" ]

@@ -455,7 +455,7 @@ impl State {
             call_stack: Vec::with_capacity(64), // Pre-size for call stack
             callbacks,
             user_data: None,
-            rng: VmRng::seed_from_u64(0),
+            rng: VmRng::seed_from_u64(VmRng::DEFAULT_SEED),
             registry: Registry::new(state_id),
             format_pointer_ids: IndexMap::default(),
             next_format_pointer_id: 1,

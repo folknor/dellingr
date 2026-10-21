@@ -45,8 +45,9 @@ callbacks, host user-data. Saving is valid only while the VM is quiescent.
 
 - A reachable `RustFunc` is saved by its registered stable id. An unregistered
   one fails the save.
-- The standard library registers itself under dotted paths (`math.sin`, ...)
-  during `open_libs`. `open_libs` rejects conflicting registrations before
+- The standard library registers itself under dotted paths (`math.sin`,
+  `ipairs.iter`, ...) during `open_libs`, including iterator callbacks returned
+  by library functions. `open_libs` rejects conflicting registrations before
   installing anything, leaving the stack, globals, heap and registry unchanged.
 - A save records the rendered identity (`tostring`, `%p`) of every registered
   Rust function that has been printed, including one only the host still

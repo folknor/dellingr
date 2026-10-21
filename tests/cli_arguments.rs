@@ -1,80 +1,13 @@
+#[path = "common/cli.rs"]
+mod cli;
+mod common;
+#[path = "common/scratch.rs"]
+mod scratch;
+
 use std::ffi::OsString;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
 
-struct ScratchDirectory {
-    path: PathBuf,
-}
-
-impl ScratchDirectory {
-    fn new(name: &str) -> Self {
-        let path = Path::new(env!("CARGO_TARGET_TMPDIR"))
-            .join(format!("dellingr-cli-{name}-{}", std::process::id()));
-        fs::create_dir(&path).expect("test directory should be created");
-        Self { path }
-    }
-
-    fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for ScratchDirectory {
-    fn drop(&mut self) {
-        if let Err(error) = fs::remove_dir(&self.path)
-            && error.kind() != std::io::ErrorKind::NotFound
-            && !std::thread::panicking()
-        {
-            panic!("test directory should be removed: {error}");
-        }
-    }
-}
-
-struct ScratchScript {
-    path: PathBuf,
-}
-
-impl ScratchScript {
-    fn new(name: &str, source: &str) -> Self {
-        let path = Path::new(env!("CARGO_TARGET_TMPDIR"))
-            .join(format!("dellingr-cli-{name}-{}.lua", std::process::id()));
-        Self::at(path, source)
-    }
-
-    fn at(path: PathBuf, source: &str) -> Self {
-        let script = Self { path };
-        fs::write(&script.path, source).expect("test script should be written");
-        script
-    }
-
-    fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for ScratchScript {
-    fn drop(&mut self) {
-        if let Err(error) = fs::remove_file(&self.path)
-            && error.kind() != std::io::ErrorKind::NotFound
-            && !std::thread::panicking()
-        {
-            panic!("test script should be removed: {error}");
-        }
-    }
-}
-
-fn run(args: impl IntoIterator<Item = OsString>) -> Output {
-    run_from(Path::new("."), args)
-}
-
-fn run_from(directory: &Path, args: impl IntoIterator<Item = OsString>) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_dellingr"))
-        .current_dir(directory)
-        .args(args)
-        .output()
-        .expect("dellingr CLI should run")
-}
+use cli::{run, run_from};
+use scratch::{ScratchDirectory, ScratchScript};
 
 fn strings(args: &[&str]) -> Vec<OsString> {
     args.iter().map(OsString::from).collect()
@@ -151,10 +84,10 @@ fn help_and_usage_errors_share_the_generated_usage_line() {
 fn accepts_non_utf8_script_paths() {
     use std::os::unix::ffi::OsStringExt;
 
-    let mut name = b"dellingr-cli-non-utf8-".to_vec();
-    name.push(0xff);
-    name.extend_from_slice(format!("-{}.lua", std::process::id()).as_bytes());
-    let path = Path::new(env!("CARGO_TARGET_TMPDIR")).join(OsString::from_vec(name));
+    let directory = ScratchDirectory::new("non-utf8");
+    let path = directory
+        .path()
+        .join(OsString::from_vec(b"script-\xff.lua".to_vec()));
     let script = ScratchScript::at(path, "print('ran')\n");
     let output = run([script.path().as_os_str().to_os_string()]);
 

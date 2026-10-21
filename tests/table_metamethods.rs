@@ -89,8 +89,12 @@ fn move_rejects_keys_past_exact_integer_range() {
     // keys past 2^53 rounded onto each other.
     let err = run("local t = {1, 2}\ntable.move(t, 1, 2^62, 2)").unwrap_err();
     assert!(err.to_string().contains("exactly representable"), "{err}");
-    let err = run("local t = {1}\ntable.move(t, 1, 1, 2^53 + 2)").unwrap_err();
+    // A destination range that crosses 2^53 would fold keys together.
+    let err = run("local t = {1, 2}\ntable.move(t, 1, 2, 2^53)").unwrap_err();
     assert!(err.to_string().contains("exactly representable"), "{err}");
+    // A singleton above 2^53 is still an exact f64 key, so it is accepted.
+    run("local t = {1}\ntable.move(t, 1, 1, 2^53 + 2)\nif t[2^53 + 2] ~= 1 then error(\"lost\") end")
+        .unwrap();
     // The boundary itself is still exact.
     run("local t = {1}\ntable.move(t, 1, 1, 2^53)\nif t[2^53] ~= 1 then error(\"lost\") end")
         .unwrap();

@@ -25,6 +25,7 @@
 mod compiler;
 mod cost_meter;
 mod det_hash;
+mod gmatch_schema;
 mod host;
 mod instr;
 pub mod limits;
@@ -38,6 +39,8 @@ mod vm_aux;
 /// Error types returned by the VM and parser. Surfaced through [`Result`].
 pub mod error;
 
+#[doc(hidden)]
+pub use cost_meter::COST_MODEL_GOLDEN_FINGERPRINT;
 pub use cost_meter::COST_MODEL_VERSION;
 pub use host::{DefaultCallbacks, HostCallbacks};
 pub use instr::{ArgCount, RetCount};
@@ -82,6 +85,9 @@ pub struct ScopeCost {
     /// invoked. A structural estimate of all reachable code, not a runtime
     /// prediction.
     pub total_cost: u64,
+    // The category counters below, ScopeTotals and both renderers mirror the
+    // non-free variants of instr::OpcodeCost; a new variant needs a counter
+    // here, a match arm in analyze_chunk, and a line in each renderer.
     /// Number of arithmetic operations (+, -, *, /, %, ^)
     pub arithmetic_ops: u64,
     /// Number of unary negation operations

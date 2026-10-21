@@ -171,16 +171,12 @@ fn literal_string_escape_errors_use_the_backslash_position() {
 fn checked_jump_offset_accepts_i16_boundaries_only() {
     let parser = Parser {
         input: TokenStream::new(""),
-        chunk: Bytecode::default(),
-        literal_indices: Default::default(),
-        nest_level: 0,
-        locals: Vec::new(),
-        loop_breaks: Vec::new(),
-        upvalues: Vec::new(),
-        outer_funcs: Vec::new(),
+        funcs: super::FunctionStack {
+            frames: vec![super::state::FuncState::new(None, 0, false)],
+        },
+        source_name: None,
         current_line: 1,
         syntax_depth: 0,
-        fold_barrier: 0,
     };
 
     assert_eq!(parser.checked_jump_offset(0, 32_768).unwrap(), i16::MAX);
@@ -1583,16 +1579,12 @@ fn named_table_fields(count: usize) -> String {
 fn parser_for_limit_test() -> Parser<'static> {
     Parser {
         input: TokenStream::new(""),
-        chunk: Bytecode::default(),
-        literal_indices: Default::default(),
-        nest_level: 0,
-        locals: Vec::new(),
-        loop_breaks: Vec::new(),
-        upvalues: Vec::new(),
-        outer_funcs: Vec::new(),
+        funcs: super::FunctionStack {
+            frames: vec![super::state::FuncState::new(None, 0, false)],
+        },
+        source_name: None,
         current_line: 1,
         syntax_depth: 0,
-        fold_barrier: 0,
     }
 }
 
@@ -1600,8 +1592,9 @@ fn parser_for_limit_test() -> Parser<'static> {
 fn literal_pool_limits_match_their_error_messages() {
     let max_literal_count = u32::try_from(MAX_LITERALS).expect("MAX_LITERALS fits in u32");
     let mut parser = parser_for_limit_test();
-    parser.chunk.number_literals = (0..max_literal_count - 1).map(f64::from).collect();
-    parser.literal_indices.numbers = parser
+    parser.funcs.chunk.number_literals = (0..max_literal_count - 1).map(f64::from).collect();
+    parser.funcs.literal_indices.numbers = parser
+        .funcs
         .chunk
         .number_literals
         .iter()
@@ -1629,10 +1622,11 @@ fn literal_pool_limits_match_their_error_messages() {
     assert!(error.to_string().contains(&format!("limit {MAX_LITERALS}")));
 
     let mut parser = parser_for_limit_test();
-    parser.chunk.string_literals = (0..MAX_LITERALS - 1)
+    parser.funcs.chunk.string_literals = (0..MAX_LITERALS - 1)
         .map(|index| index.to_string().into_bytes())
         .collect();
-    parser.literal_indices.strings = parser
+    parser.funcs.literal_indices.strings = parser
+        .funcs
         .chunk
         .string_literals
         .iter()
@@ -2435,4 +2429,47 @@ fn nested_dynamic_call_arguments_survive_tail_rewrites() {
             inst.opcode() == Instr::OP_CALL && inst.a() == u8::MAX && inst.b() == u8::MAX
         }));
     }
+}
+
+#[test]
+fn transitive_capture_indices_follow_first_reference_order() {
+    let chunk = parse_str("local a, b; return function() return function() return b, a, b end end")
+        .expect("transitive capture fixture must compile");
+    let middle = &chunk.nested[0];
+    let inner = &middle.nested[0];
+    assert_eq!(
+        middle.upvalues,
+        vec![UpvalueDesc::Local(1), UpvalueDesc::Local(0)]
+    );
+    assert_eq!(
+        inner.upvalues,
+        vec![UpvalueDesc::Upvalue(0), UpvalueDesc::Upvalue(1)]
+    );
+    assert!(chunk.upvalues.is_empty());
+}
+
+#[test]
+fn block_exit_restores_shadowed_capture_slot_without_closing_parent_on_function_exit() {
+    let chunk = parse_str(
+        "local x; do local x; first = function() return x end end; \
+         second = function() return x end",
+    )
+    .expect("shadowed capture fixture must compile");
+    assert_eq!(chunk.nested[0].upvalues, vec![UpvalueDesc::Local(1)]);
+    assert_eq!(chunk.nested[1].upvalues, vec![UpvalueDesc::Local(0)]);
+    assert_eq!(
+        chunk.code,
+        vec![
+            Instr::push_nil(),
+            Instr::set_local(0),
+            Instr::push_nil(),
+            Instr::set_local(1),
+            Instr::closure(0),
+            Instr::set_global(0),
+            Instr::close_upvalues(1),
+            Instr::closure(1),
+            Instr::set_global(1),
+            Instr::ret(RetCount::Fixed(0)),
+        ]
+    );
 }

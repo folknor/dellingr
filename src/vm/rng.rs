@@ -2,18 +2,23 @@
 ///
 /// This uses SplitMix64. It is not cryptographic; it exists so `math.random`
 /// has a deterministic stream whose complete state is owned by this crate.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub(crate) struct VmRng {
     state: u64,
 }
 
 impl VmRng {
+    /// Seed used for a new state's deterministic random stream.
+    pub(crate) const DEFAULT_SEED: u64 = 0;
+
+    // Initial seeds and restored stream positions are distinct inputs that
+    // both initialize the same SplitMix64 state word.
     pub(super) const fn seed_from_u64(seed: u64) -> Self {
         Self { state: seed }
     }
 
     #[cfg(feature = "snapshot")]
-    pub(crate) const fn state(self) -> u64 {
+    pub(crate) const fn state(&self) -> u64 {
         self.state
     }
 
@@ -81,7 +86,7 @@ mod tests {
         // The RNG is part of the deterministic save/replay contract. Pin the
         // exact SplitMix64 stream for seed 0 so a change to the generator can
         // never slip through silently.
-        let mut rng = VmRng::seed_from_u64(0);
+        let mut rng = VmRng::seed_from_u64(VmRng::DEFAULT_SEED);
         let seq = [
             rng.next_u64(),
             rng.next_u64(),
@@ -100,7 +105,7 @@ mod tests {
 
         // These pinned draws all exceed the threshold (2^64 mod 6 = 4), so
         // they map to the same offsets as the earlier `% span` implementation.
-        let mut ranged = VmRng::seed_from_u64(0);
+        let mut ranged = VmRng::seed_from_u64(VmRng::DEFAULT_SEED);
         for &raw in &seq {
             assert_eq!(ranged.random_range_i64(1, 6), 1 + (raw % 6) as i64);
         }
@@ -109,7 +114,7 @@ mod tests {
         // 0x0700..., which rejects the third raw draw (0x06C4...) and uses
         // the fourth (0xF88B..., below span, so it maps to itself).
         let span: u64 = 0xF900_0000_0000_0000;
-        let mut rejecting = VmRng::seed_from_u64(0);
+        let mut rejecting = VmRng::seed_from_u64(VmRng::DEFAULT_SEED);
         rejecting.next_u64();
         rejecting.next_u64();
         let end = (i128::from(i64::MIN) + i128::from(span) - 1) as i64;
@@ -118,7 +123,7 @@ mod tests {
             (i128::from(i64::MIN) + i128::from(seq[3])) as i64
         );
         assert_eq!(rejecting, {
-            let mut after = VmRng::seed_from_u64(0);
+            let mut after = VmRng::seed_from_u64(VmRng::DEFAULT_SEED);
             for _ in 0..4 {
                 after.next_u64();
             }
@@ -126,21 +131,21 @@ mod tests {
         });
 
         // The widest span a Lua script can request stays in range.
-        let mut wide = VmRng::seed_from_u64(0);
+        let mut wide = VmRng::seed_from_u64(VmRng::DEFAULT_SEED);
         let lo = i64::MIN;
         let hi = 9_223_372_036_854_774_784; // largest f64 below 2^63
         for _ in 0..64 {
             let v = wide.random_range_i64(lo, hi);
             assert!((lo..=hi).contains(&v));
         }
-        let mut full = VmRng::seed_from_u64(0);
+        let mut full = VmRng::seed_from_u64(VmRng::DEFAULT_SEED);
         assert_eq!(
             full.random_range_i64(i64::MIN, i64::MAX),
             (i128::from(i64::MIN) + i128::from(seq[0])) as i64
         );
 
         // Same seed reproduces the same stream.
-        let mut again = VmRng::seed_from_u64(0);
+        let mut again = VmRng::seed_from_u64(VmRng::DEFAULT_SEED);
         for &expected in &seq {
             assert_eq!(again.next_u64(), expected);
         }

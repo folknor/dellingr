@@ -7,7 +7,7 @@
 //! version in `src/cost_meter.rs`, and update the expected values here.
 
 use dellingr::error::ErrorKind;
-use dellingr::{ArgCount, COST_MODEL_VERSION, RetCount, State};
+use dellingr::{ArgCount, COST_MODEL_GOLDEN_FINGERPRINT, COST_MODEL_VERSION, RetCount, State};
 
 const CORPUS: &[(&str, &str, u64)] = &[
     (
@@ -235,6 +235,33 @@ fn cost_used_matches_golden_corpus() {
         "cost_used for identical source changed under COST_MODEL_VERSION {COST_MODEL_VERSION}; \
          bump COST_MODEL_VERSION, document the new version, and update this table:\n{}",
         drift.join("\n")
+    );
+}
+
+fn fingerprint_bytes(fingerprint: &mut u64, bytes: &[u8]) {
+    for byte in bytes {
+        *fingerprint = (*fingerprint ^ u64::from(*byte)).wrapping_mul(0x100_0000_01b3);
+    }
+}
+
+fn golden_corpus_fingerprint() -> u64 {
+    let mut fingerprint = 0xcbf2_9ce4_8422_2325;
+    fingerprint_bytes(&mut fingerprint, &COST_MODEL_VERSION.to_le_bytes());
+    for &(_, source, expected) in CORPUS.iter().chain(ERROR_CORPUS.iter()) {
+        fingerprint_bytes(&mut fingerprint, source.as_bytes());
+        fingerprint_bytes(&mut fingerprint, &[0]);
+        fingerprint_bytes(&mut fingerprint, &expected.to_le_bytes());
+    }
+    fingerprint
+}
+
+#[test]
+fn golden_corpus_fingerprint_matches_cost_model_version() {
+    assert_eq!(
+        golden_corpus_fingerprint(),
+        COST_MODEL_GOLDEN_FINGERPRINT,
+        "golden sources, expected costs, or COST_MODEL_VERSION changed; review the expected costs, \
+         bump the version for cost changes, and refresh the fingerprint in src/cost_meter.rs"
     );
 }
 

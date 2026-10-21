@@ -8,8 +8,9 @@ are hosts and are exempt.
 ## Math
 
 - `math.random` draws from the in-crate `VmRng` (SplitMix64), seeded by
-  `set_rng_seed` (default seed 0). A fixed seed gives the same stream on every
-  platform.
+  `set_rng_seed` (default `VmRng::DEFAULT_SEED`, which is 0). A fixed seed gives
+  the same stream on every platform. Rust ownership keeps the stream single
+  owner within each state and prevents accidental generator forks.
 - Basic arithmetic, comparisons, `sqrt` and `math.random` are bit-stable
   across platforms.
 - `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `exp`, `log` and the

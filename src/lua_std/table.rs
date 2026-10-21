@@ -267,16 +267,11 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
             0
         };
 
-        // dellingr numbers are f64, so integer keys are exact only within
-        // +-2^53. Past that, distinct source or destination positions would
-        // round onto the same key and the copy would silently fold elements
-        // together (Lua 5.4, with real 64-bit integers, keeps them apart).
-        // Refuse such ranges instead. The keys are monotonic in the range, so
-        // checking both ends of each side is enough.
+        // dellingr numbers are f64, so a range is representable only if every
+        // key in it stays distinct. A singleton can still be exact above 2^53.
         if count > 0 {
             let dest_last = t + (count - 1);
-            let exact = |key: i64| (-MAX_EXACT_KEY..=MAX_EXACT_KEY).contains(&key);
-            if !(exact(f) && exact(e) && exact(t) && exact(dest_last)) {
+            if !(check_integer_key_range(f, e) && check_integer_key_range(t, dest_last)) {
                 return Err(state.error(ErrorKind::RuntimeError(
                     "move range exceeds the exactly representable integer keys".into(),
                 )));
@@ -293,28 +288,44 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         let backwards = same_table && t > f && t <= e;
         if count == 0 {
             state.consume_cost(1)?;
-        } else if state.cost_budget_configured || honour_meta {
-            // A configured budget charges immediately before each lookup/write
-            // pair, so exhaustion leaves a deterministic partial mutation. The
-            // metamethod path charges the same way: a handler can fail, and
-            // reserving the whole range would charge copies that never ran.
+        } else if honour_meta {
+            // A handler can fail during a read or write, so charge each
+            // attempted metamethod copy immediately before dispatch.
             for step in 0..count {
                 let i = if backwards { count - 1 - step } else { step };
                 state.consume_cost(1)?;
                 move_element(state, f + i, t + i, dest_idx, honour_meta)?;
             }
         } else {
-            // Without a configured limit, reserve the complete deterministic
-            // cost once and keep the hot copy loops free of budget checks.
-            state.consume_cost(u64::try_from(count).expect("a nonempty move count is positive"))?;
+            // Charge raw copies in one batch for both finite and unlimited
+            // budgets, with the outcome of charging 1 per copy: a budget that
+            // runs out mid-range still copies the elements it paid for (in
+            // copy order) before failing, exactly as the per-element loop
+            // would. cost_used and the partial mutation therefore do not
+            // depend on whether a budget is configured, and the hot copy loop
+            // carries no budget checks.
+            let used_before = state.cost_used();
+            let paid_all = state
+                .cost_meter()
+                .consume_units(u64::try_from(count).expect("a nonempty move count is positive"));
+            let paid = if paid_all {
+                count
+            } else {
+                i64::try_from(state.cost_used() - used_before)
+                    .expect("a partial charge is below the i64 move count")
+            };
             if backwards {
-                for i in (0..count).rev() {
+                for step in 0..paid {
+                    let i = count - 1 - step;
                     move_element(state, f + i, t + i, dest_idx, false)?;
                 }
             } else {
-                for i in 0..count {
+                for i in 0..paid {
                     move_element(state, f + i, t + i, dest_idx, false)?;
                 }
+            }
+            if !paid_all {
+                return Err(state.budget_exceeded_error());
             }
         }
 
@@ -338,9 +349,20 @@ pub(crate) fn open_table(state: &mut State) -> Result<()> {
     Ok(())
 }
 
-/// Largest magnitude at which every integer is an exact f64, so integer table
-/// keys up to it stay distinct.
+/// Largest magnitude for a contiguous range of distinct integer f64 keys.
 const MAX_EXACT_KEY: i64 = 1 << 53;
+
+/// Check a sequence of integer keys that will be converted to f64. A single
+/// key can be exact above 2^53, while a longer range must stay within the
+/// largest interval where every integer is exactly representable.
+fn check_integer_key_range(first: i64, last: i64) -> bool {
+    if first == last {
+        exact_i64(first as f64) == Some(first)
+    } else {
+        (-MAX_EXACT_KEY..=MAX_EXACT_KEY).contains(&first)
+            && (-MAX_EXACT_KEY..=MAX_EXACT_KEY).contains(&last)
+    }
+}
 
 /// Reject positions that would round when converted to numeric keys. A
 /// singleton may lie outside +-2^53 if that particular integer is exact;
@@ -351,13 +373,7 @@ pub(super) fn check_sequence_keys(
     last: i64,
     function: &str,
 ) -> Result<()> {
-    let valid = if first == last {
-        exact_i64(first as f64) == Some(first)
-    } else {
-        (-MAX_EXACT_KEY..=MAX_EXACT_KEY).contains(&first)
-            && (-MAX_EXACT_KEY..=MAX_EXACT_KEY).contains(&last)
-    };
-    if !valid {
+    if !check_integer_key_range(first, last) {
         return Err(state.error(ErrorKind::RuntimeError(format!(
             "{function} range exceeds the exactly representable integer keys"
         ))));
@@ -376,7 +392,7 @@ fn move_element(
     dest_idx: isize,
     honour_meta: bool,
 ) -> Result<()> {
-    // Both keys were checked against MAX_EXACT_KEY, so the conversions are exact.
+    // Both keys were checked for exact f64 representation before this call.
     state.push_number(dest_key as f64)?;
     state.push_number(src_key as f64)?;
     if honour_meta {
@@ -531,112 +547,21 @@ fn remove_through_metamethods(state: &mut State) -> Result<u8> {
     Ok(1)
 }
 
-/// Pushes element `i` (0-based) of the scratch table at stack index `s`.
-fn sort_get(state: &mut State, s: isize, i: usize) -> Result<()> {
-    state.push_number((i + 1) as f64)?;
-    state.get_table_raw(s)
-}
-
-/// Swaps elements `a` and `b` (0-based) of the scratch table at index `s`.
-fn sort_swap(state: &mut State, s: isize, a: usize, b: usize) -> Result<()> {
-    if a == b {
-        return Ok(());
-    }
-    sort_get(state, s, a)?;
-    sort_get(state, s, b)?;
-    // Stack: [va, vb]
-    state.push_number((a + 1) as f64)?;
-    state.push_value(-2)?;
-    state.set_table_raw(s)?;
-    state.pop(1)?;
-    // Stack: [va]
-    state.push_number((b + 1) as f64)?;
-    state.push_value(-2)?;
-    state.set_table_raw(s)?;
-    state.pop(1)
-}
-
-/// The sort order: `comp(a, b)` when a comparator sits at stack index 2,
-/// otherwise the default `<` on two numbers or two strings.
-fn sort_less(state: &mut State, s: isize, a: usize, b: usize, has_comp: bool) -> Result<bool> {
-    if has_comp {
-        state.push_value(2)?;
-        sort_get(state, s, a)?;
-        sort_get(state, s, b)?;
-        state.call(ArgCount::Fixed(2), RetCount::Fixed(1))?;
-        let r = state.to_boolean(-1);
-        state.pop(1)?;
-        return Ok(r);
-    }
-    sort_get(state, s, a)?;
-    sort_get(state, s, b)?;
-    let (ta, tb) = (state.typ(-2), state.typ(-1));
-    let result = match (&ta, &tb) {
-        (LuaType::Number, LuaType::Number) => Some(state.to_number(-2)? < state.to_number(-1)?),
-        (LuaType::String, LuaType::String) => Some(state.to_bytes(-2)? < state.to_bytes(-1)?),
-        _ => None,
-    };
-    match result {
-        Some(r) => {
-            state.pop(2)?;
-            Ok(r)
-        }
-        None => Err(
-            state.error(ErrorKind::TypeError(crate::error::TypeError::Comparison(
-                ta, tb,
-            ))),
-        ),
-    }
-}
-
-fn sort_sift_down(
-    state: &mut State,
-    s: isize,
-    mut root: usize,
-    end: usize,
-    has_comp: bool,
-) -> Result<()> {
-    loop {
-        let left = root * 2 + 1;
-        if left >= end {
-            return Ok(());
-        }
-        let mut smallest = root;
-        if sort_less(state, s, left, smallest, has_comp)? {
-            smallest = left;
-        }
-        let right = left + 1;
-        if right < end && sort_less(state, s, right, smallest, has_comp)? {
-            smallest = right;
-        }
-        if smallest == root {
-            return Ok(());
-        }
-        sort_swap(state, s, root, smallest)?;
-        root = smallest;
-    }
-}
-
 /// `table.sort` for a table with sequence metamethods, following Lua 5.4's
 /// `sort`: length via `__len`, elements read through `__index` and written
 /// back through `__newindex`. The elements are sorted in a scratch table
-/// (rooted on the stack, so a comparator can force a collection) using the
-/// same heap sort as the raw path, so equal inputs order identically, and the
-/// result is written back in one pass. The charge is the original length,
-/// at least 1, paid before any read beyond `__len` or any comparator call.
+/// rooted on the stack, so a comparator can force a collection. Both paths
+/// use the same heap sort and comparison routine, so equal inputs have the
+/// same order and comparator call sequence. The charge is the original
+/// length, at least 1, paid before any read beyond `__len` or comparator call.
 fn sort_through_metamethods(state: &mut State, has_comp: bool) -> Result<u8> {
     let len = sequence_len(state, 1)?;
-    if len >= i64::from(i32::MAX) {
-        return Err(state.error(ErrorKind::RuntimeError("array too big".to_string())));
-    }
+    let n = state.checked_table_sort_len(len)?;
     state.consume_cost(len.max(1).cast_unsigned())?;
     if len < 2 {
         state.set_top(0)?;
         return Ok(0);
     }
-    let Ok(n) = usize::try_from(len) else {
-        return Err(state.error(ErrorKind::RuntimeError("array too big".to_string())));
-    };
     state.set_top(if has_comp { 2 } else { 1 })?;
     state.new_table()?;
     let s = state.get_top() as isize;
@@ -648,16 +573,7 @@ fn sort_through_metamethods(state: &mut State, has_comp: bool) -> Result<u8> {
         state.set_table_raw(s)?;
     }
 
-    for root in (0..n / 2).rev() {
-        sort_sift_down(state, s, root, n, has_comp)?;
-    }
-    for end in (1..n).rev() {
-        sort_swap(state, s, 0, end)?;
-        sort_sift_down(state, s, 0, end, has_comp)?;
-    }
-    for i in 0..n / 2 {
-        sort_swap(state, s, i, n - 1 - i)?;
-    }
+    state.table_sort_scratch(s, n, has_comp)?;
 
     for i in 1..=len {
         state.push_number(i as f64)?;

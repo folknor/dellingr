@@ -64,7 +64,7 @@ fn base_unpack_values(state: &mut State) -> Result<u8> {
 pub(crate) fn base_ipairs(state: &mut State) -> Result<u8> {
     check_type_named(state, 1, LuaType::Table, "ipairs")?;
     state.set_top(1)?;
-    state.push_rust_fn(base_ipairs_iter)?;
+    state.push_lib_fn("ipairs.iter", base_ipairs_iter)?;
     // Swap the table and function
     state.push_value(1)?;
     state.remove(1)?;
@@ -139,6 +139,7 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
         };
     }
 
+    state.register_lib_fn_id("ipairs.iter", base_ipairs_iter)?;
     add!("ipairs", base_ipairs);
     add!("next", base_next);
     add!("pairs", base_pairs);
