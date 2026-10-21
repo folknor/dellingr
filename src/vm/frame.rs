@@ -570,11 +570,11 @@ impl Frame {
                         local_cost,
                         const { Instr::op(Instr::OP_NEW_TABLE_PRESIZED).static_units() }
                     );
-                    // The parser encodes its total field count here, including
-                    // keyed fields. This allocator uses it for hash capacity;
-                    // array presizing needs a separate list count and a
-                    // two-part capacity contract through the parser and
-                    // allocator/table path.
+                    // A is a hash-capacity hint: the parser encodes the
+                    // constructor's keyed-field count. The array part is
+                    // reserved per SET_LIST batch instead. Bytecode from older
+                    // compilers encoded the total field count; it is still a
+                    // valid (oversized) hint.
                     state.new_table_with_capacity(inst.a() as usize)?;
                 }
                 Instr::OP_NEW_TABLE_TEMPLATE => {

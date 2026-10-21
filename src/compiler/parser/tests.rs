@@ -893,7 +893,7 @@ fn table_constructor_expands_only_final_bare_call_or_vararg() {
         final_call
             .code
             .iter()
-            .any(|instr| instr == &Instr::new_table_tracked(2))
+            .any(|instr| instr == &Instr::new_table_tracked(0))
     );
     assert!(
         final_call
@@ -933,7 +933,7 @@ fn table_constructor_expands_only_final_bare_call_or_vararg() {
         final_vararg
             .code
             .iter()
-            .any(|instr| instr == &Instr::new_table_tracked(2))
+            .any(|instr| instr == &Instr::new_table_tracked(0))
     );
     assert!(
         final_vararg
@@ -990,7 +990,7 @@ fn table_constructor_keyed_final_field_prevents_expansion() {
         call_last
             .code
             .iter()
-            .any(|instr| instr == &Instr::new_table_tracked(2))
+            .any(|instr| instr == &Instr::new_table_tracked(1))
     );
     assert!(
         call_last
@@ -1007,12 +1007,28 @@ fn table_constructor_keyed_final_field_prevents_expansion() {
             .any(|instr| { instr == &Instr::call(ArgCount::Dynamic, RetCount::All) })
     );
 
-    let capacity = parse_str("y = {1, 2, 3, 4, f()}").unwrap();
+    // The tracked hint counts named and computed keys, never positional ones.
+    let capacity = parse_str("y = {1, 2, a = 1, [k] = 2, f()}").unwrap();
     assert!(
         capacity
             .code
             .iter()
-            .any(|instr| instr == &Instr::new_table_tracked(5))
+            .any(|instr| instr == &Instr::new_table_tracked(2))
+    );
+
+    // Positional fields alone need no hash hint; SET_LIST reserves the array.
+    let positional = parse_str("y = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10}").unwrap();
+    assert!(
+        positional
+            .code
+            .iter()
+            .any(|instr| instr == &Instr::new_table())
+    );
+    assert!(
+        !positional
+            .code
+            .iter()
+            .any(|instr| instr.opcode() == Instr::OP_NEW_TABLE_PRESIZED)
     );
 }
 

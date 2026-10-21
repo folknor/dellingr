@@ -6,7 +6,7 @@ use super::RetCount;
 use super::SyntaxError;
 use super::TailKind;
 use super::TokenType;
-use crate::limits::tuning::INLINE_TEMPLATE_FIELDS;
+use crate::limits::tuning::{INLINE_TEMPLATE_FIELDS, TABLE_INLINE_CAPACITY};
 use crate::limits::{MAX_TABLE_BATCH_SIZE, MAX_TABLE_TEMPLATE_FIELDS, MAX_TABLE_TEMPLATES};
 
 type TableTemplateField = (u16, usize);
@@ -80,6 +80,10 @@ impl Parser<'_> {
             let mut i = 0;
             let mut batch = 0u16;
             let mut field_count = 0u8;
+            // Named and computed-key fields: the hash-capacity hint. The
+            // positional part needs no hint, because each SET_LIST batch
+            // reserves the array for itself.
+            let mut keyed_count = 0u8;
             let mut template_candidate = TableTemplateCandidate::new();
             let last_tail = loop {
                 if i == MAX_TABLE_BATCH_SIZE {
@@ -90,6 +94,9 @@ impl Parser<'_> {
                         .ok_or_else(|| self.error_here(SyntaxError::TooManyTableFields))?;
                 }
                 let (new_i, tail, named_field) = self.parse_table_entry(i)?;
+                if new_i == i {
+                    keyed_count = keyed_count.saturating_add(1);
+                }
                 i = new_i;
                 field_count = field_count.saturating_add(1);
                 template_candidate.push(named_field);
@@ -106,14 +113,15 @@ impl Parser<'_> {
 
             if let Some(tail) = last_tail.as_ref() {
                 self.open_tail(*tail, RetCount::All)?;
-                self.funcs.chunk.code[table_instr_idx] = Instr::new_table_tracked(field_count);
+                self.funcs.chunk.code[table_instr_idx] = Instr::new_table_tracked(keyed_count);
                 self.push(Instr::set_list_batch(0, batch));
             } else if usize::from(field_count) > INLINE_TEMPLATE_FIELDS
                 && !template_candidate
                     .fields_for_template(field_count)
                     .is_some_and(|fields| self.try_use_table_template(table_instr_idx, fields))
+                && usize::from(keyed_count) > TABLE_INLINE_CAPACITY
             {
-                self.funcs.chunk.code[table_instr_idx] = Instr::new_table_presized(field_count);
+                self.funcs.chunk.code[table_instr_idx] = Instr::new_table_presized(keyed_count);
             }
 
             if last_tail.is_none() && i > 0 {

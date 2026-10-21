@@ -423,25 +423,27 @@ impl State {
     pub(super) fn instr_set_list(&mut self, frame: &Frame, count: u8, batch: u16) -> Result<()> {
         // Find the table on the stack (it's below the values)
         // count=0 means "use all values above the table"
-        let values = if count == 0 {
+        let first_value = if count == 0 {
             let table_idx = self.constructor_base(frame)?;
             frame.pop_constructor_base(self);
-            self.stack.split_off(table_idx + 1)
+            table_idx + 1
         } else {
-            self.stack.split_off(self.stack.len() - count as usize)
+            self.stack.len() - count as usize
         };
-        let tbl_value = self.pop_val();
+        let tbl_value = self.stack[first_value - 1];
         let obj_ptr = tbl_value.as_object_ptr();
         let typ = tbl_value.typ(&self.heap);
 
         match obj_ptr.and_then(|ptr| self.heap.as_table(ptr)) {
             Some(tbl) => {
+                // The values move straight from the stack into the table,
+                // which stays in its slot. Nothing in `set_list` can enter
+                // the collector or a callback, so the drained values need no
+                // rooting while they are off the stack.
                 tbl.set_list(
                     usize::from(batch) * usize::from(MAX_TABLE_BATCH_SIZE) + 1,
-                    values,
+                    self.stack.drain(first_value..),
                 )?;
-                // Net-neutral: the table was popped above and is pushed back.
-                self.push_unchecked(tbl_value);
                 Ok(())
             }
             None => Err(super::Error::internal_fault(

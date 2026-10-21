@@ -180,15 +180,6 @@ copied on every error, while chunks already hold it as `Arc<str>`. Fix: make
 `StackFrame.source` an `Arc<str>` (touches `vm/frame.rs` traceback
 construction and existing tests).
 
-## HYG-064 - `OP_NEW_TABLE_PRESIZED` never presizes the array part
-
-Narrowed in wave 2. The parser encodes the total field count (positional plus
-keyed) in `A`; `frame.rs` passes it to `new_table_with_capacity`, which presizes
-only the hash map, so `{1, ..., 10}` reserves an unused 10-slot map and grows the
-array by doubling. A fix needs separate positional and keyed counts (parser,
-allocator, table storage, possibly `instr.rs`) and must keep `pairs` order, `#`
-and snapshot bytes unchanged. A comment at the dispatch site records this.
-
 ## HYG-033 - Verifier and finalize cost scales badly with source size
 
 Reported by the compiler hunter.

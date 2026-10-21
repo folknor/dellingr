@@ -1209,12 +1209,24 @@ impl Table {
     /// `first..`. Like reference Lua, which presizes the array part for them,
     /// a nil positional value still occupies its array slot, so
     /// `#{1, nil, 3}` is 3.
+    ///
+    /// When the batch reaches the append position, the array reserves room
+    /// for the batch's last key up front, so a constructor's positional part
+    /// costs one allocation rather than a doubling sequence. The reservation
+    /// is capacity only: the per-key loop below still decides, key by key,
+    /// between appending (nil included) and a hash insert, and migration after
+    /// each append can extend the array past the reservation.
     #[hotpath::measure]
     pub(super) fn set_list(
         &mut self,
         first: usize,
-        values: Vec<Val>,
+        values: impl ExactSizeIterator<Item = Val>,
     ) -> std::result::Result<(), TableError> {
+        let count = values.len();
+        if count > 0 && first <= self.array.len() + 1 {
+            let last = first.saturating_add(count - 1);
+            self.array.reserve(last.saturating_sub(self.array.len()));
+        }
         for (key, value) in (first..).zip(values) {
             if key == self.array.len() + 1 {
                 self.array.push(value);
@@ -1637,11 +1649,12 @@ mod tests {
     #[test]
     fn set_list_keeps_nil_positional_slots_in_the_array() {
         let mut t = Table::default();
-        t.set_list(1, vec![Val::Num(1.0), Val::Nil, Val::Num(3.0)])
+        t.set_list(1, [Val::Num(1.0), Val::Nil, Val::Num(3.0)].into_iter())
             .unwrap();
         assert_eq!(t.array.len(), 3);
         assert_eq!(t.array_len(), 3);
-        t.set_list(1, vec![Val::Num(1.0), Val::Nil]).unwrap();
+        t.set_list(1, [Val::Num(1.0), Val::Nil].into_iter())
+            .unwrap();
         t.insert(n(3), Val::Nil).unwrap();
         assert_eq!(t.array_len(), 1);
     }
