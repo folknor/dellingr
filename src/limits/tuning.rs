@@ -7,11 +7,11 @@
 pub(crate) const COST_CHECK_INTERVAL: u64 = 64;
 
 /// Maximum cached patterns per State, forwarded through the public `limits` module.
-pub(crate) const GMATCH_PATTERN_CACHE_ENTRIES: usize = 256;
+pub(crate) const PATTERN_CACHE_ENTRIES: usize = 256;
 
 /// Maximum source-pattern bytes cached per State, forwarded through the public
 /// `limits` module.
-pub(crate) const GMATCH_PATTERN_CACHE_BYTES: usize = crate::limits::MAX_STRING_BYTES;
+pub(crate) const PATTERN_CACHE_BYTES: usize = crate::limits::MAX_STRING_BYTES;
 
 /// Default lower bound for automatic GC thresholds.
 pub(crate) const DEFAULT_GC_MIN_THRESHOLD: usize = 20;

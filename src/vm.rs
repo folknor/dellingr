@@ -39,12 +39,11 @@ use super::compiler::Bytecode;
 use super::cost_meter::{CostMeter, CostState};
 use super::error::Error;
 use super::error::ErrorKind;
-use super::error::InternalFault;
 use super::error::StackFrame;
 use super::error::TypeError;
 use super::host::{DefaultCallbacks, HostCallbacks};
 use super::instr::{ArgCount, Builtin, RetCount};
-use super::patterns::LuaPattern;
+use super::patterns::{LuaPattern, SharedPattern};
 
 use anchor::Registry;
 use global_env::GlobalEnv;
@@ -60,8 +59,8 @@ use table::Table;
 pub(crate) use table::integer_index;
 
 use crate::limits::{
-    GMATCH_PATTERN_CACHE_BYTES, GMATCH_PATTERN_CACHE_ENTRIES, MAX_CALL_DEPTH, MAX_STACK_SIZE,
-    check_string_size, tuning,
+    MAX_CALL_DEPTH, MAX_STACK_SIZE, PATTERN_CACHE_BYTES, PATTERN_CACHE_ENTRIES, check_string_size,
+    tuning,
 };
 use caches::RuntimeCaches;
 // Standard-library capacity counts stay beside their registration lists.
@@ -73,8 +72,8 @@ const STDLIB_INTERNED_TABLE_KEYS: usize = crate::lua_std::STDLIB_INTERNED_TABLE_
 #[cfg(feature = "snapshot")]
 const STRING_METATABLE_TOKEN: &str = save_state::STRING_METATABLE_TOKEN;
 
-struct GmatchPatternEntry {
-    pattern: LuaPattern,
+struct PatternCacheEntry {
+    pattern: SharedPattern,
     byte_len: usize,
 }
 
@@ -215,16 +214,20 @@ pub struct State {
     pub(in crate::vm) pending_bases: frame::PendingBases,
     /// Runtime cost accounting and optional budget.
     pub(super) cost: CostState,
-    /// Compiled patterns retained for active `string.gmatch` iterators.
+    /// Compiled pattern programs shared by `string.find`, `string.match`,
+    /// `string.gsub` and `string.gmatch` iterators.
     ///
     /// Keys are interned string pointers, so cache lookup does not compare
     /// pattern bytes. Insertion order makes eviction deterministic.
-    /// It is an implementation cache only: iterator state remains entirely in
-    /// Lua values and a snapshot simply rebuilds entries on later iteration.
-    gmatch_patterns: IndexMap<StringPtr, GmatchPatternEntry>,
-    gmatch_pattern_bytes: usize,
+    /// It is an implementation cache only: no charge depends on residency,
+    /// iterator state remains entirely in Lua values, and a snapshot simply
+    /// rebuilds entries on later use. Entries are reference-counted, so an
+    /// operation that calls back into Lua (a gsub replacement function) keeps
+    /// its program alive across GC clearing or eviction.
+    patterns: IndexMap<StringPtr, PatternCacheEntry>,
+    pattern_bytes: usize,
     #[cfg(debug_assertions)]
-    gmatch_pattern_compilations: u64,
+    pattern_compilations: u64,
     /// Current metamethod call depth (for __index/__newindex chains).
     /// Prevents stack overflow from circular metamethod references.
     pub(super) metamethod_depth: u32,
@@ -474,10 +477,10 @@ impl State {
             open_upvalues: Vec::new(),
             pending_bases: frame::PendingBases::default(),
             cost: CostState::default(),
-            gmatch_patterns: IndexMap::default(),
-            gmatch_pattern_bytes: 0,
+            patterns: IndexMap::default(),
+            pattern_bytes: 0,
             #[cfg(debug_assertions)]
-            gmatch_pattern_compilations: 0,
+            pattern_compilations: 0,
             metamethod_depth: 0,
             call_chain_depth: 0,
             active_rust_fn: None,
@@ -542,11 +545,11 @@ impl State {
         self.cost.remaining()
     }
 
-    /// Test instrumentation for the gmatch compilation cache.
+    /// Test instrumentation for the compiled-pattern cache.
     #[cfg(debug_assertions)]
     #[doc(hidden)]
-    pub fn gmatch_pattern_compilations(&self) -> u64 {
-        self.gmatch_pattern_compilations
+    pub fn pattern_compilations(&self) -> u64 {
+        self.pattern_compilations
     }
 
     /// Consume cost from the budget. Returns an error if budget is exhausted
@@ -581,57 +584,59 @@ impl State {
         self.cost.batch_needs_flush(pending)
     }
 
-    /// Compile and retain a `string.gmatch` pattern on its first iteration.
+    /// The compiled program for the interned pattern string at stack slot `idx`,
+    /// compiling and retaining it on a cache miss.
     ///
-    /// The iterator charges compilation once on first use. Malformed pattern
-    /// points are encoded in the compiled matcher and raise only when reached.
-    fn memoize_gmatch_pattern_at(&mut self, idx: usize) -> Result<()> {
+    /// No caller charges for compilation itself, so residency is invisible to
+    /// the cost model. Malformed pattern points are encoded in the program and
+    /// raise only when a match reaches them, cached or not.
+    fn cached_pattern_at(&mut self, idx: usize) -> SharedPattern {
         let val = &self.stack[idx];
         let ptr = val
             .as_string_ptr()
             .expect("expect_string_at validated the value's string type");
-        if self.gmatch_patterns.contains_key(&ptr) {
-            return Ok(());
+        if let Some(entry) = self.patterns.get(&ptr) {
+            return entry.pattern.clone();
         }
-        let pattern_len = val
+        let bytes = val
             .as_string(&self.heap)
-            .expect("string pointer came from a string value")
-            .len();
-        // Compilation is an implementation cache effect. The iterator charges
-        // its first use once in saved Lua state, regardless of cache residency.
+            .expect("string pointer came from a string value");
+        let pattern_len = bytes.len();
+        let compiled = SharedPattern::compile(bytes);
         #[cfg(debug_assertions)]
         {
-            self.gmatch_pattern_compilations = self.gmatch_pattern_compilations.saturating_add(1);
+            self.pattern_compilations = self.pattern_compilations.saturating_add(1);
         }
-        let compiled = LuaPattern::new(
-            self.stack[idx]
-                .as_string(&self.heap)
-                .expect("string pointer came from a string value"),
-        );
-        while self.gmatch_patterns.len() >= GMATCH_PATTERN_CACHE_ENTRIES
-            || self.gmatch_pattern_bytes.saturating_add(pattern_len) > GMATCH_PATTERN_CACHE_BYTES
+        while self.patterns.len() >= PATTERN_CACHE_ENTRIES
+            || self.pattern_bytes.saturating_add(pattern_len) > PATTERN_CACHE_BYTES
         {
             let (_, evicted) = self
-                .gmatch_patterns
+                .patterns
                 .shift_remove_index(0)
-                .expect("a nonempty gmatch cache has an oldest entry");
-            self.gmatch_pattern_bytes = self.gmatch_pattern_bytes.saturating_sub(evicted.byte_len);
+                .expect("a nonempty pattern cache has an oldest entry");
+            self.pattern_bytes = self.pattern_bytes.saturating_sub(evicted.byte_len);
         }
-        self.gmatch_pattern_bytes = self.gmatch_pattern_bytes.saturating_add(pattern_len);
-        self.gmatch_patterns.insert(
+        self.pattern_bytes = self.pattern_bytes.saturating_add(pattern_len);
+        self.patterns.insert(
             ptr,
-            GmatchPatternEntry {
-                pattern: compiled,
+            PatternCacheEntry {
+                pattern: compiled.clone(),
                 byte_len: pattern_len,
             },
         );
-        Ok(())
+        compiled
     }
 
-    /// Run a gmatch search while its compiled matcher is borrowed from cache.
+    /// A matcher for the string pattern at 1-based stack index `idx`, from cache.
     ///
-    /// Memoization and borrowing stay in one operation so no VM operation can
-    /// allocate, collect, or evict the matcher between those steps.
+    /// The matcher owns a reference to its program, so the caller may run Lua
+    /// (and so allocate, collect or evict) while holding it.
+    pub(crate) fn cached_pattern_matcher(&mut self, idx: isize) -> Result<LuaPattern> {
+        let idx = self.expect_string_at(idx)?;
+        Ok(self.cached_pattern_at(idx).matcher())
+    }
+
+    /// Run a gmatch search with the cached matcher for its pattern.
     pub(crate) fn with_gmatch_matcher<T>(
         &mut self,
         subject_idx: isize,
@@ -641,66 +646,14 @@ impl State {
         // Preserve the argument-type contract before touching the cache.
         let subject_idx = self.expect_string_at(subject_idx)?;
         let pattern_idx = self.expect_string_at(pattern_idx)?;
-        self.memoize_gmatch_pattern_at(pattern_idx)?;
-
+        let mut matcher = self.cached_pattern_at(pattern_idx).matcher();
         let State {
-            stack,
-            heap,
-            cost,
-            gmatch_patterns,
-            ..
+            stack, heap, cost, ..
         } = self;
         let subject = stack[subject_idx]
             .as_string(heap)
             .expect("expect_string_at validated the subject's string type");
-        let pattern_ptr = stack[pattern_idx]
-            .as_string_ptr()
-            .expect("expect_string_at validated the pattern's string type");
-        let entry = gmatch_patterns
-            .get_mut(&pattern_ptr)
-            .ok_or_else(|| Error::internal_fault(InternalFault::GmatchPatternNotMemoized))?;
-        let matcher = &mut entry.pattern;
-        let meter = cost.meter();
-        Ok(operation(subject, matcher, meter))
-    }
-
-    // These wrappers retain argument-contract coverage in the unit tests. The
-    // runtime iterator uses with_gmatch_matcher so cache ordering is structural.
-    /// Test-only access to the pattern compilation argument validation.
-    #[cfg(test)]
-    pub(crate) fn memoize_gmatch_pattern(&mut self, idx: isize) -> Result<()> {
-        let idx = self.expect_string_at(idx)?;
-        self.memoize_gmatch_pattern_at(idx)
-    }
-
-    /// Test-only access to the subject and pattern argument validation.
-    #[cfg(test)]
-    pub(crate) fn gmatch_subject_matcher_and_cost_meter(
-        &mut self,
-        subject_idx: isize,
-        pattern_idx: isize,
-    ) -> Result<(&[u8], &mut LuaPattern, CostMeter<'_>)> {
-        let subject_idx = self.expect_string_at(subject_idx)?;
-        let pattern_idx = self.expect_string_at(pattern_idx)?;
-        let State {
-            stack,
-            heap,
-            cost,
-            gmatch_patterns,
-            ..
-        } = self;
-        let subject = stack[subject_idx]
-            .as_string(heap)
-            .expect("expect_string_at validated the subject's string type");
-        let pattern_ptr = stack[pattern_idx]
-            .as_string_ptr()
-            .expect("expect_string_at validated the pattern's string type");
-        let entry = gmatch_patterns
-            .get_mut(&pattern_ptr)
-            .ok_or_else(|| Error::internal_fault(InternalFault::GmatchPatternNotMemoized))?;
-        let matcher = &mut entry.pattern;
-        let meter = cost.meter();
-        Ok((subject, matcher, meter))
+        Ok(operation(subject, &mut matcher, cost.meter()))
     }
 
     pub(crate) fn budget_exceeded_error(&self) -> Error {
@@ -1075,7 +1028,9 @@ impl State {
             SaveError::DuplicateFunctionRegistration { id } => {
                 Error::without_location(ErrorKind::DuplicateFunctionRegistration { id })
             }
-            other => Error::internal_fault(InternalFault::SaveStateFailure(other.to_string())),
+            other => Error::internal_fault(super::error::InternalFault::SaveStateFailure(
+                other.to_string(),
+            )),
         }
     }
 

@@ -88,11 +88,11 @@ impl State {
     #[hotpath::measure]
     fn collect_garbage(&mut self) {
         // This is the only production caller of the heap sweep. Clear the
-        // gmatch pattern cache before freeing interned strings so no cached
-        // matcher survives its key's lifetime; keep this point fixed to
-        // preserve cache costs.
-        self.gmatch_patterns.clear();
-        self.gmatch_pattern_bytes = 0;
+        // pattern cache before freeing interned strings so no cached program
+        // survives its key's lifetime. A matcher already handed out keeps its
+        // own reference to the program.
+        self.patterns.clear();
+        self.pattern_bytes = 0;
         // Mark all roots
         let mut worklist = self.heap.take_mark_worklist();
         mark_gc_roots(self, &mut worklist);

@@ -8,6 +8,11 @@ All notable changes to dellingr are documented here. The format follows
 
 ### Changed (breaking)
 
+- `limits::GMATCH_PATTERN_CACHE_ENTRIES` and `limits::GMATCH_PATTERN_CACHE_BYTES`
+  are renamed `limits::PATTERN_CACHE_ENTRIES` and `limits::PATTERN_CACHE_BYTES`
+  (same values): the per-State compiled-pattern cache they bound now also
+  serves `string.find`, `string.match` and `string.gsub`, not only
+  `string.gmatch`. Costs, results and errors are unchanged.
 - A panic that unwinds through a State's execution (a panicking `RustFunc`
   or `on_error`, a panic inside `with_restricted_env`, or a VM-internal
   panic) now poisons the State. Every later `Result`-returning public method

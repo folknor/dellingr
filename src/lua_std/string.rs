@@ -571,13 +571,13 @@ pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         } else {
             let s = subject;
 
-            state.set_top(0)?;
-
             if init > s.len() {
+                state.set_top(0)?;
                 state.push_nil()?;
                 return Ok(1);
             }
-            let mut matcher = LuaPattern::new(&pattern);
+            let mut matcher = pattern_matcher(state, &pattern)?;
+            state.set_top(0)?;
             let matched = {
                 let mut meter = state.cost_meter();
                 matcher.matches_bytes_from(&s, init, &mut meter)
@@ -665,17 +665,18 @@ pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         charge_bytes(state, pattern.len())?;
         let init = opt_integer(state, 3, "match")?.map_or(0, |init| lua_start_index(s.len(), init));
 
-        state.set_top(0)?;
-
         if init > s.len() {
+            state.set_top(0)?;
             state.push_nil()?;
             return Ok(1);
         }
         if pattern.is_empty() {
+            state.set_top(0)?;
             state.push_bytes(b"")?;
             return Ok(1);
         }
-        let mut matcher = LuaPattern::new(&pattern);
+        let mut matcher = pattern_matcher(state, &pattern)?;
+        state.set_top(0)?;
         let matched = {
             let mut meter = state.cost_meter();
             matcher.matches_bytes_from(&s, init, &mut meter)
@@ -838,7 +839,7 @@ pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
             return Ok(2);
         }
 
-        let mut matcher = LuaPattern::new(&pattern);
+        let mut matcher = pattern_matcher(state, &pattern)?;
         let mut result = Vec::with_capacity(s.len());
         let mut captures = Vec::new();
         let mut pos = 0usize;
@@ -896,6 +897,20 @@ pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         Ok(2)
     }),
 ];
+
+/// The matcher for argument 2 of `find`, `match` or `gsub`.
+///
+/// A string pattern comes from the State's compiled-pattern cache; a number
+/// coerced to `pattern` has no interned key and compiles fresh. Compilation
+/// is free in the cost model either way, and a cached program raises its lazy
+/// malformed-pattern errors at exactly the points a fresh one would.
+fn pattern_matcher(state: &mut State, pattern: &[u8]) -> Result<LuaPattern> {
+    if state.typ(2) == LuaType::String {
+        state.cached_pattern_matcher(2)
+    } else {
+        Ok(LuaPattern::new(pattern))
+    }
+}
 
 pub(crate) fn open_string(state: &mut State) -> Result<()> {
     // Create the string table

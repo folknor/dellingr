@@ -55,7 +55,7 @@ fn gmatch_full_scan_is_linear_in_its_subject() {
         state
             .call(ArgCount::Fixed(0), RetCount::Fixed(0))
             .expect("test program runs");
-        (state.cost_used(), state.gmatch_pattern_compilations())
+        (state.cost_used(), state.pattern_compilations())
     }
 
     let (short, short_compilations) = cost(128);
@@ -239,7 +239,52 @@ fn malformed_gmatch_iterator_compiles_once() {
         assert!(matches!(error.kind(), ErrorKind::PatternError(_)));
     }
     #[cfg(debug_assertions)]
-    assert_eq!(state.gmatch_pattern_compilations(), 1);
+    assert_eq!(state.pattern_compilations(), 1);
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn find_match_and_gsub_share_one_compiled_pattern() {
+    let mut state = State::new();
+    state
+        .load_string(
+            "local s = 'alpha beta gamma'
+             for _ = 1, 50 do
+                 string.find(s, '%a+')
+                 string.match(s, '%a+')
+                 string.gsub(s, '%a+', 'x')
+             end
+             for _ in string.gmatch(s, '%a+') do end",
+        )
+        .expect("test program compiles");
+    state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+        .expect("test program runs");
+    assert_eq!(state.pattern_compilations(), 1);
+}
+
+#[test]
+fn gsub_keeps_its_pattern_across_collections_in_its_replacement() {
+    let mut state = State::new();
+    state
+        .load_string(
+            "local junk
+             local out, n = string.gsub('a1b2c3d4e5f6', '(%a)(%d)',
+                 function(a, d)
+                     for i = 1, 200 do junk = {i, tostring(i)} end
+                     local inner = string.gsub(a .. d, '(%a)(%d)', '%2%1')
+                     return inner
+                 end)
+             return out .. ':' .. n",
+        )
+        .expect("test program compiles");
+    state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(1))
+        .expect("test program runs");
+    assert_eq!(
+        state.to_string(-1).expect("gsub result is a string"),
+        "1a2b3c4d5e6f:6"
+    );
 }
 
 #[test]

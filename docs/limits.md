@@ -83,9 +83,10 @@ These values preserve the current Lua library behavior and error paths:
 
 ## Compatibility exports for implementation tuning
 
-`GMATCH_PATTERN_CACHE_ENTRIES`, `GMATCH_PATTERN_CACHE_BYTES`, and
-`COST_CHECK_INTERVAL` remain available through `dellingr::limits` for existing
-host code. The cache values bound per-State `string.gmatch` cache storage.
+`PATTERN_CACHE_ENTRIES`, `PATTERN_CACHE_BYTES`, and `COST_CHECK_INTERVAL`
+are available through `dellingr::limits`. The cache values bound the per-State
+compiled-pattern cache shared by `string.find`, `string.match`, `string.gsub`
+and `string.gmatch`.
 `COST_CHECK_INTERVAL` is the internal opcode-cost batching interval. These are
 implementation tuning values, not additional script-level resource limits.
 

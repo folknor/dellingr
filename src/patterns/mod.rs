@@ -3,6 +3,7 @@
 //! Lua patterns operate on bytes. Dellingr only needs the byte matching core.
 
 use core::ops;
+use std::sync::Arc;
 
 use crate::cost_meter::CostMeter;
 
@@ -31,17 +32,45 @@ pub(crate) fn is_plain_for_find(pattern: &[u8]) -> bool {
         .any(|byte| luapat::is_pattern_magic(*byte) && *byte != b')')
 }
 
+/// An immutable compiled pattern program, shareable between matchers.
+///
+/// Matching never mutates the program: every search builds fresh scratch
+/// state, so a cached program behaves exactly like a freshly compiled one,
+/// including where lazily encoded malformed points raise.
+#[derive(Clone)]
+pub(crate) struct SharedPattern(Arc<CompiledPattern>);
+
+impl SharedPattern {
+    /// Compile `bytes` into a shareable program. Compilation cannot fail.
+    pub(crate) fn compile(bytes: &[u8]) -> SharedPattern {
+        SharedPattern(Arc::new(compile(bytes)))
+    }
+
+    /// A matcher over this program with empty capture output.
+    pub(crate) fn matcher(&self) -> LuaPattern {
+        LuaPattern::from_compiled(Arc::clone(&self.0))
+    }
+}
+
 /// A compiled Lua string pattern and the captures from the latest match.
 ///
 /// Compilation copies everything the matcher needs into `compiled`, so the
 /// pattern bytes are not borrowed past construction.
 pub(crate) struct LuaPattern {
-    compiled: CompiledPattern,
+    compiled: Arc<CompiledPattern>,
     matches: [LuaCapture; LUA_MAXMATCHES],
     n_match: usize,
 }
 
 impl LuaPattern {
+    fn from_compiled(compiled: Arc<CompiledPattern>) -> LuaPattern {
+        LuaPattern {
+            compiled,
+            matches: [LuaCapture::Bytes { start: 0, end: 0 }; LUA_MAXMATCHES],
+            n_match: 0,
+        }
+    }
+
     /// Compile a Lua pattern from a slice of bytes. Compilation cannot fail.
     ///
     /// Reference Lua validates a pattern lazily, only as far as a match
@@ -51,11 +80,7 @@ impl LuaPattern {
     /// An unclosed capture is reported as
     /// `LuaCapture::Unfinished` for the consumer to reject.
     pub(crate) fn new(bytes: &[u8]) -> LuaPattern {
-        LuaPattern {
-            compiled: compile(bytes),
-            matches: [LuaCapture::Bytes { start: 0, end: 0 }; LUA_MAXMATCHES],
-            n_match: 0,
-        }
+        LuaPattern::from_compiled(Arc::new(compile(bytes)))
     }
 
     /// Match a slice of bytes with this pattern, searching from the start.

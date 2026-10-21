@@ -9,7 +9,7 @@
 //! format and verifier validate against these values directly. Internal
 //! batching, cache, GC-default, and allocation-capacity tuning lives in the
 //! crate-private `tuning` module. The existing public paths for its cost-batch
-//! interval and gmatch-cache capacities remain as forwarding constants below.
+//! interval and pattern-cache capacities remain as forwarding constants below.
 
 use crate::Result;
 use crate::error::{Error, ErrorKind};
@@ -19,11 +19,11 @@ pub(crate) mod tuning;
 /// Static cost units batched before checking the cost budget.
 pub const COST_CHECK_INTERVAL: u64 = tuning::COST_CHECK_INTERVAL;
 
-/// Maximum cached gmatch patterns per State.
-pub const GMATCH_PATTERN_CACHE_ENTRIES: usize = tuning::GMATCH_PATTERN_CACHE_ENTRIES;
+/// Maximum cached compiled string patterns per State.
+pub const PATTERN_CACHE_ENTRIES: usize = tuning::PATTERN_CACHE_ENTRIES;
 
-/// Maximum total source-pattern bytes cached by gmatch per State.
-pub const GMATCH_PATTERN_CACHE_BYTES: usize = tuning::GMATCH_PATTERN_CACHE_BYTES;
+/// Maximum total source-pattern bytes in the compiled-pattern cache per State.
+pub const PATTERN_CACHE_BYTES: usize = tuning::PATTERN_CACHE_BYTES;
 
 // Recursive parser entry points share this budget. Visible nesting costs vary
 // by construct, so this is a recursion budget rather than a source-level depth.

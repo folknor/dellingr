@@ -43,7 +43,6 @@ pub(crate) enum InternalFault {
         detail: String,
     },
     GsubReplacementTemplateMissing,
-    GmatchPatternNotMemoized,
     GmatchState(GmatchStateFault),
     #[cfg(feature = "snapshot")]
     SnapshotTable(SnapshotTableFault),
@@ -126,9 +125,6 @@ impl InternalFault {
             }
             Self::GsubReplacementTemplateMissing => {
                 "gsub replacement template was not initialized".to_owned()
-            }
-            Self::GmatchPatternNotMemoized => {
-                "gmatch pattern was not memoized before matching".to_owned()
             }
             Self::GmatchState(fault) => format!("invalid gmatch iterator state: {fault}"),
             #[cfg(feature = "snapshot")]
