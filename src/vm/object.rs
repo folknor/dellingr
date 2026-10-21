@@ -596,12 +596,6 @@ impl GcHeap {
     /// Call this after marking all roots.
     #[hotpath::measure(label = "object::heap_collect")]
     fn collect(&mut self) {
-        #[cfg(feature = "debug_gc")]
-        {
-            println!("Running garbage collector");
-            println!("Initial size: {}", self.objects.len());
-        }
-
         // Sweep phase: remove unmarked objects
         self.objects.retain(|_, obj| match obj.color.get() {
             Color::Reachable => {
@@ -623,9 +617,6 @@ impl GcHeap {
                     .max(self.policy.minimum_threshold),
             );
         }
-
-        #[cfg(feature = "debug_gc")]
-        println!("Final size: {}", self.objects.len());
     }
 
     pub(super) fn reachable_lua_bytecodes(&self) -> Vec<Arc<Bytecode>> {

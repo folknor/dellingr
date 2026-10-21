@@ -21,10 +21,15 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used))]
 #![cfg_attr(not(test), deny(clippy::float_cmp))]
 #![warn(missing_docs)]
+// Library output goes through `HostCallbacks`, never straight to a process
+// stream. These catch the printing macros; `std::io::stdout`/`stderr` are
+// banned in clippy.toml, with a scoped allow on `DefaultCallbacks::on_print`.
+#![deny(clippy::print_stdout, clippy::print_stderr)]
 
 mod compiler;
 mod cost_meter;
 mod det_hash;
+mod disassemble;
 mod gmatch_schema;
 mod host;
 mod instr;
@@ -42,6 +47,7 @@ pub mod error;
 #[doc(hidden)]
 pub use cost_meter::COST_MODEL_GOLDEN_FINGERPRINT;
 pub use cost_meter::COST_MODEL_VERSION;
+pub use disassemble::Disassembly;
 pub use host::{DefaultCallbacks, HostCallbacks};
 pub use instr::{ArgCount, RetCount};
 pub use vm::Anchor;
@@ -438,6 +444,18 @@ impl Program {
     /// Returns the optional source name attached at compile time.
     pub fn source_name(&self) -> Option<&str> {
         self.0.source.as_deref()
+    }
+
+    /// A human-readable listing of the compiled bytecode: every function
+    /// (`main`, then nested functions as `main/0`, `main/0/1`, ... by their
+    /// `Closure` index) with its literal pools, cache-slot counts and one
+    /// annotated line per instruction.
+    ///
+    /// This is the finalized bytecode that executes. The text is deterministic
+    /// for a given compiled program but is diagnostic only: its format may
+    /// change between versions and it is not replay data.
+    pub fn disassemble(&self) -> Disassembly<'_> {
+        Disassembly::new(&self.0)
     }
 }
 

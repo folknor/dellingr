@@ -12,6 +12,8 @@ disallowed-methods = [
     { path = "std::env::vars_os", reason = "Reading host environment makes behavior depend on process state." },
     { path = "std::time::Instant::now", reason = "Host timing must not affect deterministic library behavior." },
     { path = "std::time::SystemTime::now", reason = "Host time must not affect deterministic library behavior." },
+    { path = "std::io::stdout", reason = "Library output goes through HostCallbacks. Hosts and harnesses whose job is printing use a scoped allow." },
+    { path = "std::io::stderr", reason = "Library output goes through HostCallbacks. Hosts and harnesses whose job is printing use a scoped allow." },
 ]
 
 # Determinism: ban non-deterministic collections

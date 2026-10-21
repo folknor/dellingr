@@ -8,6 +8,12 @@ All notable changes to dellingr are documented here. The format follows
 
 ### Changed (breaking)
 
+- A `RustFunc` that returns `Ok(n)` with fewer than `n` values in its frame
+  now fails the call with the new `ErrorKind::ResultCountExceedsStack`
+  instead of having the missing results padded with nil. This applies to
+  host `State::call`, Lua calls and generic-`for` iterators alike. Callers
+  that request more results than a callback returns are still padded with
+  nil as before.
 - `ErrorKind::InvalidJump` is removed. Verified bytecode execution reports
   internal dispatch failures as `InternalError`, with instruction context
   available through `Error::vm_fault()`.
@@ -70,9 +76,16 @@ All notable changes to dellingr are documented here. The format follows
   `EnvironmentArray` and `EnvironmentMetatable`. A non-object metatable value
   now reports its owner's index (the saved table's object index, or the
   environment delta's index) rather than 0.
+- The `debug_parser`, `debug_vm` and `debug_gc` cargo features are removed.
+  They printed straight to stdout, bypassing `HostCallbacks`. Use the CLI's
+  `--dump-bytecode` or `Program::disassemble` to inspect compiled bytecode.
 
 ### Added
 
+- `Program::disassemble`, returning a displayable `Disassembly` listing of the
+  finalized bytecode, and the CLI flag `--dump-bytecode`, which prints that
+  listing without executing the script. The listing format is diagnostic and
+  may change between versions.
 - `LoadError::InvalidTable` and its `TableLoadLocation` (`#[non_exhaustive]`),
   exported beside `LoadError`.
 - Per-State GC policy: `State::with_gc_policy`,

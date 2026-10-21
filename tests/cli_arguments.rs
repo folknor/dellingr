@@ -72,6 +72,51 @@ fn analyze_rejects_limit_and_sends_its_warning_to_stderr() {
 }
 
 #[test]
+fn dump_bytecode_lists_the_program_without_running_it() {
+    let source = "print('ran', answer)\nlocal function f() return 1 end\n";
+    let script = ScratchScript::new("dump", source);
+    let script_path = script.path().to_str().expect("temp path is UTF-8");
+    let output = run(strings(&["--dump-bytecode", script_path]));
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains("ran\n"), "the script must not execute");
+    assert!(stdout.starts_with("function main "));
+    assert!(stdout.contains("\nfunction main/0 "));
+    assert!(stdout.contains("; \"answer\""));
+    assert!(output.stderr.is_empty(), "no cost summary or warning");
+
+    // Same bytes as the library listing for the same source and name.
+    let program = dellingr::Engine::new()
+        .compile_named(source, script_path)
+        .expect("source should compile");
+    assert_eq!(stdout, program.disassemble().to_string());
+
+    let quiet = run(strings(&["--quiet", "--dump-bytecode", script_path]));
+    assert!(quiet.status.success());
+    assert_eq!(quiet.stdout, output.stdout);
+
+    for conflict in [
+        ["--limit", "10", "--dump-bytecode"].as_slice(),
+        ["--analyze", "--dump-bytecode"].as_slice(),
+    ] {
+        let mut args = conflict.to_vec();
+        args.push(script_path);
+        let rejected = run(strings(&args));
+        assert_eq!(rejected.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&rejected.stderr).contains("--dump-bytecode"));
+        assert!(rejected.stdout.is_empty());
+    }
+
+    let broken = ScratchScript::new("dump-broken", "local = \n");
+    let broken_path = broken.path().to_str().expect("temp path is UTF-8");
+    let failed = run(strings(&["--dump-bytecode", broken_path]));
+    assert_eq!(failed.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&failed.stderr).starts_with("Error: "));
+    assert!(failed.stdout.is_empty());
+}
+
+#[test]
 fn help_and_usage_errors_share_the_generated_usage_line() {
     let help = run(strings(&["--help"]));
     let missing_file = run(Vec::<OsString>::new());

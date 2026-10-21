@@ -325,48 +325,13 @@ impl State {
         control: Val,
         num_vars: u8,
     ) -> Result<()> {
-        let old_stack_bottom = self.stack_bottom;
         let call_base = self.stack.len();
 
         self.check_stack_space(2)?;
         self.push_unchecked(state);
         self.push_unchecked(control);
-        self.stack_bottom = call_base;
 
-        let previous_rust_fn = self.active_rust_fn.replace(f);
-        let result = f(self);
-        self.active_rust_fn = previous_rust_fn;
-        let num_ret_reported = match result {
-            Ok(n) => n,
-            Err(e) => {
-                self.stack.truncate(call_base);
-                self.stack_bottom = old_stack_bottom;
-                return Err(e);
-            }
-        };
-
-        let num_ret_actual = self.get_top();
-        let reported = usize::from(num_ret_reported);
-        match reported.cmp(&num_ret_actual) {
-            std::cmp::Ordering::Greater => {
-                if let Err(e) = self.check_stack_space(reported - num_ret_actual) {
-                    self.stack.truncate(call_base);
-                    self.stack_bottom = old_stack_bottom;
-                    return Err(e);
-                }
-                for _ in num_ret_actual..reported {
-                    self.push_unchecked(Val::Nil);
-                }
-            }
-            std::cmp::Ordering::Less => {
-                let slc = &mut self.stack[self.stack_bottom..];
-                slc.rotate_right(reported);
-                let new_len = self.stack.len() - num_ret_actual + reported;
-                self.stack.truncate(new_len);
-            }
-            std::cmp::Ordering::Equal => (),
-        }
-        self.stack_bottom = old_stack_bottom;
+        let num_ret_reported = self.invoke_rust_fn(f, call_base)?;
 
         if let Err(e) = self.balance_stack(num_vars as usize, num_ret_reported as usize) {
             self.stack.truncate(call_base);

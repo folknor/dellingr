@@ -271,34 +271,3 @@ reuse is supported. Fix: a poison flag checked at public entry points (one branc
 per host call, not per opcode, which answers `eval.rs`'s hot-path objection), or
 remove the three guards. Enforceable by a test that panics in a RustFn under
 `catch_unwind` and asserts the next `call` refuses.
-
-## HYG-042 - Rust-function call ABI implemented twice and already diverged on error reporting
-
-Reported by the VM-core hunter.
-
-`eval.rs::call_op` (RustFn branch) and `eval_control.rs::instr_tfor_call_rust_fn`
-each set `stack_bottom`, save/restore `active_rust_fn`, call, truncate and
-restore on error, normalise the return count (pad nil / `rotate_right`), and
-restore `stack_bottom`. `call_op` routes errors through `report_call_error`; the
-tfor copy returns them raw and relies on the enclosing frame. Lateral: `call_op`
-pads with nils when a RustFn reports more results than it pushed (`Ok(3)` after one
-push gives `v, nil, nil`), a leniency not listed in `docs/compatibility.md`
-(as far as the hunter checked); list it or make it an error. Fix: one
-`invoke_rust_fn(f, call_base, nargs)`. Enforceable: afterwards
-`active_rust_fn.replace` appears once.
-
-## HYG-081 - `debug_parser`, `debug_vm` and `debug_gc` print straight to stdout
-
-Reported by the compiler, VM-core and heap hunters.
-
-`parser.rs` `parse_chunk` (`println!("Compiled chunk: {tmp_chunk:#?}")`),
-`vm/frame.rs` (`println!("{inst:?}")`), `vm/object.rs::collect` print to stdout
-under their features, bypassing `HostCallbacks` and interleaving with
-`DefaultCallbacks::on_print`; an embedder's capture sees neither. The `debug_vm`
-line omits ip, frame and source; `debug_gc` reports object counts only (no
-strings, threshold, freed). Nothing in brokkr.toml, scripts or tests enables
-`debug_vm`. Fix: one `trace!` implementation to stderr or a
-`HostCallbacks::on_trace`/`debug` hook with ip and `bytecode.name`; or drop them
-for hotpath instrumentation and a `--dump-bytecode` CLI flag. Enforceable:
-`clippy::print_stdout`/`print_stderr` denied in the library, allowed in `main.rs`,
-`examples/hotpath.rs`, the trace macro and the default print.

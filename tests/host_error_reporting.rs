@@ -240,8 +240,8 @@ fn host_supplied_trace_does_not_suppress_notification() {
     }
 }
 
-fn report_missing_results(_state: &mut State) -> dellingr::Result<u8> {
-    Ok(dellingr::limits::MAX_RESULTS)
+fn return_nothing(_state: &mut State) -> dellingr::Result<u8> {
+    Ok(0)
 }
 
 #[test]
@@ -257,9 +257,7 @@ fn execution_stack_preflights_notify_once() {
                 );
             }
             1 => {
-                state
-                    .push_rust_fn(report_missing_results)
-                    .expect("callback fits");
+                state.push_rust_fn(return_nothing).expect("callback fits");
                 state.set_global("target").unwrap();
             }
             2 => {
@@ -282,7 +280,9 @@ fn execution_stack_preflights_notify_once() {
         state
             .get_global("target")
             .expect("callable fits at the cap");
-        let expected = if case == 2 {
+        // Cases 1 and 2 return no values into a fixed two-result call, so the
+        // caller-side nil padding is what exceeds the cap.
+        let expected = if case == 1 || case == 2 {
             RetCount::Fixed(2)
         } else {
             RetCount::Fixed(0)

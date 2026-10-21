@@ -15,12 +15,13 @@ use std::io::{self, Write};
 use std::process::exit;
 
 use dellingr::cli::{ANALYSIS_WARNING_PREFIX, COST_USED_PREFIX, ERROR_PREFIX};
-use dellingr::{ArgCount, CostAnalysis, HostCallbacks, RetCount, State, analyze_cost};
+use dellingr::{ArgCount, CostAnalysis, Engine, HostCallbacks, RetCount, State, analyze_cost};
 
 #[derive(Clone, Copy)]
 enum OptionKind {
     Limit,
     Analyze,
+    DumpBytecode,
     Quiet,
     Help,
 }
@@ -49,6 +50,13 @@ const OPTIONS: &[OptionSpec] = &[
         kind: OptionKind::Analyze,
     },
     OptionSpec {
+        short: None,
+        long: "--dump-bytecode",
+        value: None,
+        description: "Print the compiled bytecode without executing",
+        kind: OptionKind::DumpBytecode,
+    },
+    OptionSpec {
         short: Some("-q"),
         long: "--quiet",
         value: None,
@@ -68,6 +76,7 @@ struct CliArgs {
     filename: OsString,
     limit: Option<i64>,
     analyze: bool,
+    dump_bytecode: bool,
     quiet: bool,
 }
 
@@ -113,6 +122,7 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Option<CliArgs
     let mut filename = None;
     let mut limit = None;
     let mut analyze = false;
+    let mut dump_bytecode = false;
     let mut quiet = false;
     let mut options_ended = false;
 
@@ -142,6 +152,7 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Option<CliArgs
                         })?);
                     }
                     OptionKind::Analyze => analyze = true,
+                    OptionKind::DumpBytecode => dump_bytecode = true,
                     OptionKind::Quiet => quiet = true,
                     OptionKind::Help => return Ok(None),
                 }
@@ -165,12 +176,19 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Option<CliArgs
     if analyze && limit.is_some() {
         return Err("--limit cannot be used with --analyze".to_owned());
     }
+    if dump_bytecode && limit.is_some() {
+        return Err("--limit cannot be used with --dump-bytecode".to_owned());
+    }
+    if dump_bytecode && analyze {
+        return Err("--analyze cannot be used with --dump-bytecode".to_owned());
+    }
 
     let filename = filename.ok_or_else(|| "an input file is required".to_owned())?;
     Ok(Some(CliArgs {
         filename,
         limit,
         analyze,
+        dump_bytecode,
         quiet,
     }))
 }
@@ -190,6 +208,8 @@ fn report_usage_error(error: &str) -> ! {
     exit(1);
 }
 
+// The CLI is the host process; printing is its job.
+#[allow(clippy::disallowed_methods)]
 fn write_stdout(output: &str) -> io::Result<()> {
     let mut stdout = io::stdout().lock();
     stdout.write_all(output.as_bytes())?;
@@ -202,6 +222,7 @@ fn write_stdout_or_exit(output: &str) {
     }
 }
 
+#[allow(clippy::disallowed_methods)]
 fn write_stdout_line_or_exit(line: &str) {
     let mut stdout = io::stdout().lock();
     if let Err(error) = writeln!(stdout, "{line}").and_then(|()| stdout.flush()) {
@@ -218,6 +239,7 @@ fn exit_for_stdout_error(error: &io::Error) -> ! {
 
 /// Writes diagnostics to stderr. A failure here is deliberately discarded:
 /// stderr is the last channel the CLI has, so there is nowhere to report it.
+#[allow(clippy::disallowed_methods)]
 fn write_stderr(output: &str) {
     let mut stderr = io::stderr().lock();
     #[allow(clippy::let_underscore_must_use)]
@@ -262,6 +284,15 @@ fn main() {
                 ));
             }
             Err(error) => report_error(format!("parsing source: {error}")),
+        }
+        return;
+    }
+
+    if args.dump_bytecode {
+        let filename = args.filename.to_string_lossy().into_owned();
+        match Engine::new().compile_named(&source, filename) {
+            Ok(program) => write_stdout_or_exit(&program.disassemble().to_string()),
+            Err(error) => report_error(error),
         }
         return;
     }

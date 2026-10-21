@@ -302,6 +302,8 @@ fn write_kvs(writer: &mut impl Write, metrics: &[Metric]) -> io::Result<()> {
     Ok(())
 }
 
+// Writing the KV report to stderr is this harness's job.
+#[allow(clippy::disallowed_methods)]
 fn emit_metrics(metrics: &[Metric]) {
     let stderr = io::stderr();
     let mut output = stderr.lock();

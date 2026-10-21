@@ -89,7 +89,12 @@ root, so they can be invoked from anywhere; `test_limited.sh` is the
 exception, since it is a transparent `exec` wrapper that should not move the
 caller's working directory.
 
-Debug-print feature flags: `--features debug_parser`, `debug_vm`, `debug_gc`.
+To inspect compiled bytecode, `brokkr run --release -- --dump-bytecode path/to/script.lua`
+(prints the listing without executing; the library entry is `Program::disassemble`).
+Library code never prints: `clippy::print_stdout`/`print_stderr` are denied in
+`src/lib.rs` and `std::io::stdout`/`stderr` are banned in `clippy.toml`, with scoped
+allows only where printing is the job (`DefaultCallbacks::on_print`, the CLI, the
+hotpath harness).
 
 MSRV is the `rust-version` in `Cargo.toml`. Edition 2024.
 

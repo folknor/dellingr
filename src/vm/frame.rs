@@ -355,8 +355,6 @@ impl Frame {
 
         loop {
             let inst = self.get_instr();
-            #[cfg(feature = "debug_vm")]
-            println!("{inst:?}");
             match inst.opcode() {
                 // === Dispatch operations ===
 

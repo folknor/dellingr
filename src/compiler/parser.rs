@@ -590,10 +590,6 @@ impl<'a> Parser<'a> {
         // Keep one copy of each string while parsing, then build the canonical
         // bytecode pool in the same first-insertion order.
         tmp_chunk.string_literals = finished.literal_indices.strings.into_iter().collect();
-
-        #[cfg(feature = "debug_parser")]
-        println!("Compiled chunk: {tmp_chunk:#?}");
-
         Ok(tmp_chunk)
     }
 

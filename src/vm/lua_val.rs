@@ -10,6 +10,13 @@ use std::hash::{Hash, Hasher};
 /// The function reads its arguments from the [`State`]'s stack (1-based
 /// indexing for host calls), pushes any return values, and returns the
 /// number of return values (or an error).
+///
+/// The returned count `n` selects the top `n` values of the function's frame
+/// (arguments count, so returning an argument without pushing it is valid);
+/// anything below them is discarded. A count larger than the number of values
+/// in the frame is a host bug and fails the call with
+/// [`ErrorKind::ResultCountExceedsStack`](crate::error::ErrorKind::ResultCountExceedsStack);
+/// the missing results are not padded with nil.
 pub type RustFunc = fn(&mut State) -> Result<u8>;
 
 const RUST_FN_DISPLAY: &str = "<function>";

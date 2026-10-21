@@ -7,7 +7,7 @@ use std::cmp::Ordering;
 use std::sync::Arc;
 
 use super::frame::Frame;
-use super::lua_val::Val;
+use super::lua_val::{RustFunc, Val};
 use super::object::{Closure, Upvalue, UpvalueRef};
 use super::{
     Bytecode, CallInfo, Error, ErrorKind, MAX_CALL_DEPTH, Result, State, TypeError, compiler,
@@ -74,46 +74,7 @@ impl State {
         let old_stack_bottom = self.stack_bottom;
         let func_val = self.stack.remove(idx);
         let num_ret_actual = if let Val::RustFn(f) = func_val {
-            self.stack_bottom = idx;
-
-            // Invariant: the caller's active Rust function and stack_bottom
-            // are both restored before a callback error propagates. Every
-            // stack index and get_top() after this call is relative to
-            // stack_bottom, so the callback result is handled explicitly
-            // rather than with `?`.
-            let previous_rust_fn = self.active_rust_fn.replace(f);
-            let result = f(self);
-            self.active_rust_fn = previous_rust_fn;
-            let num_ret_reported = match result {
-                Ok(n) => n,
-                Err(e) => {
-                    self.truncate_call_frame(idx, old_stack_bottom);
-                    return Err(self.report_call_error(e));
-                }
-            };
-
-            let num_ret_actual = self.get_top();
-            let reported = usize::from(num_ret_reported);
-            match reported.cmp(&num_ret_actual) {
-                Ordering::Greater => {
-                    if let Err(e) = self.check_stack_space(reported - num_ret_actual) {
-                        self.truncate_call_frame(idx, old_stack_bottom);
-                        return Err(self.report_call_error(e));
-                    }
-                    for _ in num_ret_actual..reported {
-                        self.push_unchecked(Val::Nil);
-                    }
-                }
-                Ordering::Less => {
-                    let slc = &mut self.stack[self.stack_bottom..];
-                    slc.rotate_right(reported);
-                    let new_len = self.stack.len() - num_ret_actual + reported;
-                    self.stack.truncate(new_len);
-                }
-                Ordering::Equal => (),
-            }
-            self.stack_bottom = old_stack_bottom;
-            num_ret_reported
+            self.invoke_rust_fn(f, idx)?
         } else if let Some(closure) = func_val.as_lua_function(&self.heap) {
             // Deliberately a manual push/pop rather than `with_rooted_value`.
             // This is the recursive Lua-call path, and the helper's closure plus
@@ -247,6 +208,64 @@ impl State {
             }
         }
         Ok(())
+    }
+
+    /// The one place a Rust callback is invoked. Every RustFn call - `call_op`
+    /// and the generic-for fast path alike - goes through here, so the
+    /// callback ABI (frame boundary, active function, result validation and
+    /// error reporting) has a single implementation.
+    ///
+    /// Precondition: the callee's arguments occupy `stack[call_base..]` and
+    /// the function value itself is no longer on the stack. On success the
+    /// callback's `n` results occupy `stack[call_base..call_base + n]`, the
+    /// caller's `stack_bottom` is restored, and `n` is returned. On error the
+    /// stack is truncated to `call_base`, `stack_bottom` and the active Rust
+    /// function are restored, and the error has passed through
+    /// `report_call_error`.
+    ///
+    /// A callback that reports more results than its frame holds is rejected
+    /// with `ResultCountExceedsStack` rather than padded with nil: the count
+    /// is a host bug, and padding would hide it.
+    ///
+    /// Kept out of line so the Rust-call machinery does not enlarge
+    /// `call_op`'s frame on the recursive Lua call path.
+    #[inline(never)]
+    pub(super) fn invoke_rust_fn(&mut self, f: RustFunc, call_base: usize) -> Result<u8> {
+        let old_stack_bottom = self.stack_bottom;
+        self.stack_bottom = call_base;
+
+        // Invariant: the caller's active Rust function and stack_bottom are
+        // both restored before a callback error propagates. Every stack index
+        // and get_top() after this call is relative to stack_bottom, so the
+        // callback result is handled explicitly rather than with `?`.
+        let previous_rust_fn = self.active_rust_fn.replace(f);
+        let result = f(self);
+        self.active_rust_fn = previous_rust_fn;
+        let num_ret_reported = match result {
+            Ok(n) => n,
+            Err(e) => {
+                self.truncate_call_frame(call_base, old_stack_bottom);
+                return Err(self.report_call_error(e));
+            }
+        };
+
+        let available = self.get_top();
+        let reported = usize::from(num_ret_reported);
+        if reported > available {
+            self.truncate_call_frame(call_base, old_stack_bottom);
+            let error = self.error(ErrorKind::ResultCountExceedsStack {
+                reported: num_ret_reported,
+                available,
+            });
+            return Err(self.report_call_error(error));
+        }
+        if reported < available {
+            // Keep the top `reported` values, in order, at call_base.
+            self.stack[call_base..].rotate_right(reported);
+            self.stack.truncate(call_base + reported);
+        }
+        self.stack_bottom = old_stack_bottom;
+        Ok(num_ret_reported)
     }
 
     // Used only on error exits, never in the bytecode dispatch loop.

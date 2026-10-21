@@ -26,13 +26,6 @@ lto = "fat"
 codegen-units = 1
 
 [features]
-# Developer-only tracing: debug_parser, debug_vm and debug_gc print raw dumps
-# straight to stdout (bypassing HostCallbacks) when enabled. They are opt-in
-# diagnostics for working on the VM itself, never enabled by embedders, and the
-# one-line `println!` sites are deliberate. Not part of the public API.
-debug_parser = []
-debug_vm = []
-debug_gc = []
 hotpath = ["hotpath/hotpath"]
 hotpath-alloc = ["hotpath/hotpath", "hotpath/hotpath-alloc"]
 snapshot = []

@@ -76,6 +76,9 @@ pub trait HostCallbacks: Send {
 pub struct DefaultCallbacks;
 
 impl HostCallbacks for DefaultCallbacks {
+    // Printing to stdout is this callback's job; the library-wide stream ban
+    // exists so that nothing else does.
+    #[allow(clippy::disallowed_methods)]
     fn on_print(&mut self, _source: Option<&str>, _line: u32, message: &str) {
         use std::io::Write;
 

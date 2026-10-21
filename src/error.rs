@@ -363,6 +363,15 @@ pub enum ErrorKind {
         /// Maximum supported result count.
         limit: u8,
     },
+    /// A Rust function returned `Ok(n)` with fewer than `n` values in its
+    /// frame. This is a host bug in the callback; the VM does not pad the
+    /// missing results with nil.
+    ResultCountExceedsStack {
+        /// Result count the callback returned.
+        reported: u8,
+        /// Values actually in the callback's frame when it returned.
+        available: usize,
+    },
     /// Parser rejected the source.
     SyntaxError(SyntaxError),
     /// Script exceeded its cost budget.
@@ -1200,6 +1209,13 @@ impl fmt::Display for ErrorKind {
             ArgError(e) => e.fmt(f),
             TooManyArguments { limit } => write!(f, "too many arguments (limit {limit})"),
             TooManyResults { limit } => write!(f, "too many results (limit {limit})"),
+            ResultCountExceedsStack {
+                reported,
+                available,
+            } => write!(
+                f,
+                "Rust function reported {reported} results but its frame holds {available} values"
+            ),
             SyntaxError(e) => e.fmt(f),
             TypeError(e) => e.fmt(f),
             BudgetExceeded { used, budget } => {
