@@ -33,12 +33,26 @@ use crate::numeral::exact_i64;
 
 /// Capacity reservations for the standard-library setup path.
 ///
-/// Keep the per-library counts aligned with all entries added to each table.
 /// Math includes its `pi` and `huge` constants. The setup preflight reserves
 /// four slots before any library has been installed.
-const MATH_LIBRARY_CAPACITY: usize = 22;
-const STRING_LIBRARY_CAPACITY: usize = 10;
+const MATH_LIBRARY_CAPACITY: usize = math::MATH_FUNCTIONS.len() + math::MATH_CONSTANTS.len();
+const STRING_LIBRARY_CAPACITY: usize = string::STRING_FUNCTIONS.len();
 const TABLE_LIBRARY_CAPACITY: usize = table::TABLE_FUNCTIONS.len();
+
+// `Builtin::COUNT` covers all standard globals except `error`.
+pub(crate) const STDLIB_NON_BUILTIN_GLOBALS: usize = basic::NON_BUILTIN_GLOBALS.len();
+
+// `_G`, its metatable, the math, string and table library tables, and the
+// string metatable.
+pub(crate) const STDLIB_HEAP_TABLES: usize = 6;
+
+// Function and constant keys in the library tables, plus the `_G` metamethod
+// and protection keys. Keep the count next to the lists that define its inputs.
+pub(crate) const STDLIB_INTERNED_TABLE_KEYS: usize = MATH_LIBRARY_CAPACITY
+    + STRING_LIBRARY_CAPACITY
+    + TABLE_LIBRARY_CAPACITY
+    + basic::GLOBAL_ENV_METAMETHODS.len()
+    + basic::GLOBAL_ENV_PROTECTION_FIELDS.len();
 
 /// Headroom the library setup reserves on the value stack.
 ///
@@ -297,12 +311,12 @@ pub(super) fn unpack_values(state: &mut State) -> Result<u8> {
     }
     let span = j.checked_sub(i).ok_or_else(|| {
         state.error(ErrorKind::TooManyResults {
-            limit: crate::error::MAX_RESULTS,
+            limit: crate::limits::MAX_RESULTS,
         })
     })?;
-    if span >= i64::from(crate::error::MAX_RESULTS) {
+    if span >= i64::from(crate::limits::MAX_RESULTS) {
         return Err(state.error(ErrorKind::TooManyResults {
-            limit: crate::error::MAX_RESULTS,
+            limit: crate::limits::MAX_RESULTS,
         }));
     }
     // Unpack charges nothing, however many elements it visits: a deliberate
@@ -316,7 +330,7 @@ pub(super) fn unpack_values(state: &mut State) -> Result<u8> {
     // span is nonnegative and below MAX_RESULTS here, so the conversion cannot fail.
     let result_count = usize::try_from(span + 1).map_err(|_| {
         state.error(ErrorKind::TooManyResults {
-            limit: crate::error::MAX_RESULTS,
+            limit: crate::limits::MAX_RESULTS,
         })
     })?;
     crate::error::results_count(result_count).map_err(|kind| state.error(kind))

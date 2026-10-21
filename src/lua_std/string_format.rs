@@ -36,6 +36,14 @@ enum Conversion {
     Octal,
     HexLower,
     HexUpper,
+    Float(FloatKind),
+    String,
+    Quoted,
+    Pointer,
+}
+
+#[derive(Clone, Copy)]
+enum FloatKind {
     ScientificLower,
     ScientificUpper,
     Fixed,
@@ -43,9 +51,6 @@ enum Conversion {
     GeneralUpper,
     HexFloatLower,
     HexFloatUpper,
-    String,
-    Quoted,
-    Pointer,
 }
 
 pub(crate) fn format(state: &mut State) -> Result<u8> {
@@ -96,7 +101,7 @@ pub(crate) fn format(state: &mut State) -> Result<u8> {
 }
 
 fn append_output(state: &mut State, output: &mut Vec<u8>, bytes: &[u8]) -> Result<()> {
-    let next = crate::vm::checked_string_growth(output.len(), bytes.len())?;
+    let next = crate::limits::checked_string_growth(output.len(), bytes.len())?;
     state.consume_cost(bytes.len() as u64)?;
     output.reserve(next - output.len());
     output.extend_from_slice(bytes);
@@ -215,16 +220,16 @@ fn classify_conversion(byte: u8) -> Option<Conversion> {
         b'o' => Conversion::Octal,
         b'x' => Conversion::HexLower,
         b'X' => Conversion::HexUpper,
-        b'e' => Conversion::ScientificLower,
-        b'E' => Conversion::ScientificUpper,
+        b'e' => Conversion::Float(FloatKind::ScientificLower),
+        b'E' => Conversion::Float(FloatKind::ScientificUpper),
         // No `F`: reference lstrlib rejects it too (5.4: "invalid conversion
         // '%F' to 'format'"; 5.2: "invalid option"), so it falls to the
         // invalid-conversion arm below on purpose.
-        b'f' => Conversion::Fixed,
-        b'g' => Conversion::GeneralLower,
-        b'G' => Conversion::GeneralUpper,
-        b'a' => Conversion::HexFloatLower,
-        b'A' => Conversion::HexFloatUpper,
+        b'f' => Conversion::Float(FloatKind::Fixed),
+        b'g' => Conversion::Float(FloatKind::GeneralLower),
+        b'G' => Conversion::Float(FloatKind::GeneralUpper),
+        b'a' => Conversion::Float(FloatKind::HexFloatLower),
+        b'A' => Conversion::Float(FloatKind::HexFloatUpper),
         b's' => Conversion::String,
         b'q' => Conversion::Quoted,
         // %p is 5.4-only; 5.2 rejects it with "invalid option". Accepting it
@@ -242,15 +247,7 @@ fn validate_directive(state: &State, directive: &Directive) -> Result<()> {
 
     let flags = directive.flags;
     let flags_valid = match directive.conversion {
-        Conversion::ScientificLower
-        | Conversion::ScientificUpper
-        | Conversion::Fixed
-        | Conversion::GeneralLower
-        | Conversion::GeneralUpper
-        | Conversion::HexFloatLower
-        | Conversion::HexFloatUpper
-        | Conversion::Quoted
-        | Conversion::Percent => true,
+        Conversion::Float(_) | Conversion::Quoted | Conversion::Percent => true,
         Conversion::SignedDecimal => !flags.alternate,
         Conversion::UnsignedDecimal => !flags.plus && !flags.space && !flags.alternate,
         Conversion::Octal | Conversion::HexLower | Conversion::HexUpper => {
@@ -343,15 +340,9 @@ fn format_argument(state: &mut State, argument: usize, directive: &Directive) ->
                 directive,
             ))
         }
-        Conversion::ScientificLower
-        | Conversion::ScientificUpper
-        | Conversion::Fixed
-        | Conversion::GeneralLower
-        | Conversion::GeneralUpper
-        | Conversion::HexFloatLower
-        | Conversion::HexFloatUpper => {
+        Conversion::Float(kind) => {
             let number = number_argument(state, idx, argument)?;
-            Ok(format_float(number, directive))
+            Ok(format_float(number, directive, kind))
         }
         Conversion::String => {
             let mut bytes = if state.typ(idx) == LuaType::String && !state.string_has_tostring() {
@@ -528,7 +519,7 @@ fn format_integer_parts(
     output
 }
 
-fn format_float(number: f64, directive: &Directive) -> Vec<u8> {
+fn format_float(number: f64, directive: &Directive, kind: FloatKind) -> Vec<u8> {
     // NaN is canonicalised here, at output, rather than in the arithmetic.
     // The sign of a hardware-generated NaN is platform-specific (x86-64's
     // default NaN has the sign bit set, aarch64's does not), and NaNs reach
@@ -542,25 +533,24 @@ fn format_float(number: f64, directive: &Directive) -> Vec<u8> {
     let negative = number.is_sign_negative() && !number.is_nan();
     let magnitude = number.abs();
     let uppercase = matches!(
-        directive.conversion,
-        Conversion::ScientificUpper | Conversion::GeneralUpper | Conversion::HexFloatUpper
+        kind,
+        FloatKind::ScientificUpper | FloatKind::GeneralUpper | FloatKind::HexFloatUpper
     );
     let precision = usize::from(directive.precision.unwrap_or(6));
-    let mut body = match directive.conversion {
-        Conversion::ScientificLower | Conversion::ScientificUpper => {
+    let mut body = match kind {
+        FloatKind::ScientificLower | FloatKind::ScientificUpper => {
             format_scientific(magnitude, precision, uppercase, directive.flags.alternate)
         }
-        Conversion::Fixed => format_fixed(magnitude, precision, directive.flags.alternate),
-        Conversion::GeneralLower | Conversion::GeneralUpper => {
+        FloatKind::Fixed => format_fixed(magnitude, precision, directive.flags.alternate),
+        FloatKind::GeneralLower | FloatKind::GeneralUpper => {
             format_general(magnitude, precision, uppercase, directive.flags.alternate)
         }
-        Conversion::HexFloatLower | Conversion::HexFloatUpper => format_hex_float(
+        FloatKind::HexFloatLower | FloatKind::HexFloatUpper => format_hex_float(
             magnitude,
             directive.precision,
             uppercase,
             directive.flags.alternate,
         ),
-        _ => unreachable!("format_float called for a non-floating conversion"),
     };
     if uppercase {
         body.make_ascii_uppercase();
@@ -852,18 +842,18 @@ fn quote_argument(state: &mut State, idx: isize, argument: usize) -> Result<Vec<
 }
 
 fn quote_string(bytes: &[u8]) -> Result<Vec<u8>> {
-    let capacity = crate::vm::checked_string_growth(bytes.len(), 2)?;
+    let capacity = crate::limits::checked_string_growth(bytes.len(), 2)?;
     let mut output = Vec::with_capacity(capacity);
     output.push(b'"');
     for (index, byte) in bytes.iter().copied().enumerate() {
         match byte {
             b'"' | b'\\' => {
-                crate::vm::checked_string_growth(output.len(), 2)?;
+                crate::limits::checked_string_growth(output.len(), 2)?;
                 output.push(b'\\');
                 output.push(byte);
             }
             b'\n' => {
-                crate::vm::checked_string_growth(output.len(), 2)?;
+                crate::limits::checked_string_growth(output.len(), 2)?;
                 output.push(b'\\');
                 output.push(b'\n');
             }
@@ -871,23 +861,23 @@ fn quote_string(bytes: &[u8]) -> Result<Vec<u8>> {
                 let next_is_digit = bytes.get(index + 1).is_some_and(u8::is_ascii_digit);
                 if next_is_digit {
                     let escaped = format!("{byte:03}");
-                    crate::vm::checked_string_growth(output.len(), escaped.len() + 1)?;
+                    crate::limits::checked_string_growth(output.len(), escaped.len() + 1)?;
                     output.push(b'\\');
                     output.extend_from_slice(escaped.as_bytes());
                 } else {
                     let escaped = byte.to_string();
-                    crate::vm::checked_string_growth(output.len(), escaped.len() + 1)?;
+                    crate::limits::checked_string_growth(output.len(), escaped.len() + 1)?;
                     output.push(b'\\');
                     output.extend_from_slice(escaped.as_bytes());
                 }
             }
             _ => {
-                crate::vm::checked_string_growth(output.len(), 1)?;
+                crate::limits::checked_string_growth(output.len(), 1)?;
                 output.push(byte);
             }
         }
     }
-    crate::vm::checked_string_growth(output.len(), 1)?;
+    crate::limits::checked_string_growth(output.len(), 1)?;
     output.push(b'"');
     Ok(output)
 }

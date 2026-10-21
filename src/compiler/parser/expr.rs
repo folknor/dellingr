@@ -213,7 +213,7 @@ impl Parser<'_> {
             // on another host would then mix that constant with the replaying
             // host's runtime `powf`. Leaving it to runtime keeps every `^` on
             // one implementation per host (literal `^` is charged as a normal
-            // instruction, part of the cost model since version 4).
+            // instruction).
             self.push_at_line(Instr::pow(), token.line);
         }
 

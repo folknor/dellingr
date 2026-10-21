@@ -3,7 +3,8 @@
 //! the size preflight on lossy host string conversion.
 
 use dellingr::error::ErrorKind;
-use dellingr::{ArgCount, LuaType, MAX_STRING_BYTES, RetCount, State};
+use dellingr::limits::MAX_STRING_BYTES;
+use dellingr::{ArgCount, LuaType, RetCount, State};
 
 fn run(state: &mut State, source: &str) {
     state.load_string(source).unwrap();

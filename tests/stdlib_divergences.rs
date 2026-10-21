@@ -5,7 +5,8 @@
 use std::sync::{Arc, Mutex};
 
 use dellingr::error::{Error, ErrorKind};
-use dellingr::{ArgCount, HostCallbacks, LuaType, MAX_STRING_BYTES, RetCount, State};
+use dellingr::limits::MAX_STRING_BYTES;
+use dellingr::{ArgCount, HostCallbacks, LuaType, RetCount, State};
 
 struct Prints(Arc<Mutex<Vec<String>>>);
 

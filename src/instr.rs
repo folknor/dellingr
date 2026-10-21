@@ -3,6 +3,8 @@
 //! Format: [opcode:8][A:8][B:8][C:8] or [opcode:8][A:8][sBx:16]
 //! Each instruction is stored in one `u32`.
 
+use crate::numeral::{lua_add, lua_div, lua_modulo, lua_mul, lua_sub};
+
 /// Argument count for function calls.
 ///
 /// Bytecode supports fixed counts 0-254 or a dynamic count. Host calls can
@@ -298,11 +300,20 @@ struct OpcodeMetadata {
     reserved: u32,
     transfer: bool,
     cost: OpcodeCost,
+    arithmetic: Option<fn(f64, f64) -> f64>,
+    foldable: bool,
 }
 
 macro_rules! define_opcodes {
-    ($this:ident, $inst:ident, $f:ident; $( $name:ident = $number:literal, $reserved:literal,
-        $transfer:literal, $cost:ident, $debug:expr; )+) => {
+    (
+        $this:ident, $inst:ident, $f:ident;
+        $(
+            $name:ident = $number:literal, $reserved:literal,
+            $transfer:literal, $cost:ident
+                $([$arithmetic:path, $foldable:literal])?,
+            $debug:expr;
+        )+
+    ) => {
         impl Instr {
             $( pub(crate) const $name: u8 = $number; )+
 
@@ -310,10 +321,14 @@ macro_rules! define_opcodes {
                 let mut entries = [None; 256];
                 $(
                     assert!(entries[$number].is_none());
+                    let (arithmetic, foldable) =
+                        opcode_arithmetic!($($arithmetic, $foldable)?);
                     entries[$number] = Some(OpcodeMetadata {
                         reserved: $reserved,
                         transfer: $transfer,
                         cost: OpcodeCost::$cost,
+                        arithmetic,
+                        foldable,
                     });
                 )+
                 entries
@@ -341,6 +356,13 @@ macro_rules! define_opcodes {
                 match Self::OPCODES[opcode as usize] {
                     Some(metadata) => metadata.cost,
                     None => OpcodeCost::Free,
+                }
+            }
+
+            pub(crate) fn arithmetic_fn(opcode: u8) -> Option<fn(f64, f64) -> f64> {
+                match Self::OPCODES[opcode as usize] {
+                    Some(metadata) if metadata.foldable => metadata.arithmetic,
+                    _ => None,
                 }
             }
 
@@ -374,145 +396,164 @@ macro_rules! define_opcodes {
     };
 }
 
-// Explicit numbers are snapshot data. Every opcode declares its reserved-bit
-// mask, transfer status, static charge and diagnostic operands here. Dynamic
-// stack effects and dispatch bodies remain explicit: they encode execution
-// semantics, not just operand shape, and must not introduce dispatch lookups.
-define_opcodes! { self, this, f;
-    OP_POP = 0, 0xffffff, false, Free,
-        write!(f, "Pop");
-    OP_DUP = 1, 0xffffff, false, Free,
-        write!(f, "Dup");
-    OP_SWAP = 2, 0xffffff, false, Free,
-        write!(f, "Swap");
-    OP_NEW_TABLE = 3, 0xffffff, false, TableCreation,
-        write!(f, "NewTable");
-    OP_GET_TABLE = 4, 0xffffff, false, Free,
-        write!(f, "GetTable");
-    OP_ADD = 5, 0xffffff, false, Arithmetic,
-        write!(f, "Add");
-    OP_SUBTRACT = 6, 0xffffff, false, Arithmetic,
-        write!(f, "Subtract");
-    OP_MULTIPLY = 7, 0xffffff, false, Arithmetic,
-        write!(f, "Multiply");
-    OP_DIVIDE = 8, 0xffffff, false, Arithmetic,
-        write!(f, "Divide");
-    OP_POW = 9, 0xffffff, false, Arithmetic,
-        write!(f, "Pow");
-    OP_MOD = 10, 0xffffff, false, Arithmetic,
-        write!(f, "Mod");
-    OP_CONCAT = 11, 0x00ffff, false, Free,
-        write!(f, "Concat({})", this.a());
-    OP_LESS = 12, 0xffffff, false, Free,
-        write!(f, "Less");
-    OP_LESS_EQUAL = 13, 0xffffff, false, Free,
-        write!(f, "LessEqual");
-    OP_GREATER = 14, 0xffffff, false, Free,
-        write!(f, "Greater");
-    OP_GREATER_EQUAL = 15, 0xffffff, false, Free,
-        write!(f, "GreaterEqual");
-    OP_EQUAL = 16, 0xffffff, false, Free,
-        write!(f, "Equal");
-    OP_NOT_EQUAL = 17, 0xffffff, false, Free,
-        write!(f, "NotEqual");
-    OP_NOT = 18, 0xffffff, false, Free,
-        write!(f, "Not");
-    OP_LENGTH = 19, 0xffffff, false, Free,
-        write!(f, "Length");
-    OP_NEGATE = 20, 0xffffff, false, Negation,
-        write!(f, "Negate");
-    OP_MARK_CALL_BASE = 21, 0x00ffff, false, Free,
-        write!(f, "MarkCallBase({})", this.a());
-    OP_PUSH_NIL = 22, 0xffffff, false, Free,
-        write!(f, "PushNil");
-    OP_NEW_TABLE_PRESIZED = 23, 0x00ffff, false, TableCreation,
-        write!(f, "NewTablePresized({})", this.a());
-    OP_NEW_TABLE_TEMPLATE = 24, 0x00ffff, false, TableCreation,
-        write!(f, "NewTableTemplate({})", this.a());
-    OP_NEW_TABLE_TRACKED = 25, 0x00ffff, false, TableCreation,
-        write!(f, "NewTableTracked({})", this.a());
-    OP_NOP = 26, 0xffffff, false, Free,
-        write!(f, "Nop");
-    OP_GET_GLOBAL = 30, 0x000000, false, Free,
-        write!(f, "GetGlobal({}, {})", this.a(), this.bx());
-    OP_SET_GLOBAL = 31, 0x000000, false, Free,
-        write!(f, "SetGlobal({}, {})", this.a(), this.bx());
-    OP_GET_LOCAL = 32, 0x00ffff, false, Free,
-        write!(f, "GetLocal({})", this.a());
-    OP_SET_LOCAL = 33, 0x00ffff, false, Free,
-        write!(f, "SetLocal({})", this.a());
-    OP_GET_UPVALUE = 34, 0x00ffff, false, Free,
-        write!(f, "GetUpvalue({})", this.a());
-    OP_SET_UPVALUE = 35, 0x00ffff, false, Free,
-        write!(f, "SetUpvalue({})", this.a());
-    OP_GET_FIELD = 36, 0x000000, false, Free,
-        write!(f, "GetField({}, {})", this.a(), this.bx());
-    OP_INIT_INDEX = 37, 0x00ffff, false, TableWrite,
-        write!(f, "InitIndex({})", this.a());
-    OP_PUSH_NUM = 38, 0xff0000, false, Free,
-        write!(f, "PushNum({})", this.bx());
-    OP_PUSH_STRING = 39, 0xff0000, false, Free,
-        write!(f, "PushString({})", this.bx());
-    OP_TFOR_PREP = 40, 0x00ffff, false, Free,
-        write!(f, "TForPrep({})", this.a());
-    OP_RETURN = 41, 0x00ffff, false, Free,
-        write!(f, "Return({:?})", RetCount::from_u8(this.a()));
-    OP_CLOSE_UPVALUES = 42, 0x00ffff, false, Free,
-        write!(f, "CloseUpvalues({})", this.a());
-    OP_CLOSURE = 43, 0x00ffff, false, Free,
-        write!(f, "Closure({})", this.a());
-    OP_VARARG = 44, 0x00ffff, false, Free,
-        write!(f, "Vararg({})", this.a());
-    OP_SET_LIST = 45, 0x000000, false, ArrayElements,
-        write!(f, "SetList({}, {})", this.a(), this.bx());
-    OP_SET_TABLE = 46, 0x00ffff, false, TableWrite,
-        write!(f, "SetTable({})", this.a());
-    OP_PUSH_BOOL = 47, 0x00ffff, false, Free,
-        write!(f, "PushBool({})", this.a() != 0);
-    OP_GET_BUILTIN = 48, 0x00ffff, false, Free,
-        write!(f, "GetBuiltin({:?})", Builtin::from_u8(this.a()));
-    OP_SET_BUILTIN = 49, 0x00ffff, false, Free,
-        write!(f, "SetBuiltin({:?})", Builtin::from_u8(this.a()));
-    OP_SET_FIELD = 50, 0x000000, false, TableWrite,
-        write!(f, "SetField({}, {})", this.a(), this.bx());
-    OP_INIT_FIELD = 51, 0x000000, false, TableWrite,
-        write!(f, "InitField({}, {})", this.a(), this.bx());
-    OP_TFOR_CALL = 52, 0x000000, false, Free,
-        write!(f, "TForCall({}, {}, {})", this.a(), this.b(), this.c());
-    OP_CALL = 53, 0x0000ff, false, Call,
-        write!(f, "Call({:?}, {:?})",
-            ArgCount::from_u8(this.a()), RetCount::from_u8(this.b()));
-    OP_INIT_FIELD_PINNED = 54, 0x000000, false, TableWrite,
-        write!(f, "InitFieldPinned({}, {})", this.a(), this.bx());
-    OP_SET_FIELD_AT = 55, 0x000000, false, TableWrite,
-        write!(f, "SetFieldAt({}, {})", this.a(), this.bx());
-    OP_JUMP = 60, 0xff0000, true, Free,
-        write!(f, "Jump({})", this.sbx());
-    OP_BRANCH_FALSE = 61, 0xff0000, true, Free,
-        write!(f, "BranchFalse({})", this.sbx());
-    OP_BRANCH_TRUE_KEEP = 62, 0xff0000, true, Free,
-        write!(f, "BranchTrueKeep({})", this.sbx());
-    OP_BRANCH_FALSE_KEEP = 63, 0xff0000, true, Free,
-        write!(f, "BranchFalseKeep({})", this.sbx());
-    OP_BRANCH_FALSE_LESS = 64, 0xff0000, true, Free,
-        write!(f, "BranchFalseLess({})", this.sbx());
-    OP_BRANCH_FALSE_LESS_EQUAL = 65, 0xff0000, true, Free,
-        write!(f, "BranchFalseLessEqual({})", this.sbx());
-    OP_BRANCH_FALSE_GREATER = 66, 0xff0000, true, Free,
-        write!(f, "BranchFalseGreater({})", this.sbx());
-    OP_BRANCH_FALSE_GREATER_EQUAL = 67, 0xff0000, true, Free,
-        write!(f, "BranchFalseGreaterEqual({})", this.sbx());
-    OP_BRANCH_FALSE_EQUAL = 68, 0xff0000, true, Free,
-        write!(f, "BranchFalseEqual({})", this.sbx());
-    OP_BRANCH_FALSE_NOT_EQUAL = 69, 0xff0000, true, Free,
-        write!(f, "BranchFalseNotEqual({})", this.sbx());
-    OP_FOR_PREP = 70, 0x000000, true, Free,
-        write!(f, "ForPrep({}, {})", this.a(), this.sbx());
-    OP_FOR_LOOP = 71, 0x000000, true, Free,
-        write!(f, "ForLoop({}, {})", this.a(), this.sbx());
-    OP_TFOR_LOOP = 72, 0x000000, true, Free,
-        write!(f, "TForLoop({}, {})", this.a(), this.sbx());
+macro_rules! opcode_arithmetic {
+    () => {
+        (None, false)
+    };
+    ($arithmetic:path, $foldable:literal) => {{
+        let arithmetic: fn(f64, f64) -> f64 = $arithmetic;
+        (Some(arithmetic), $foldable)
+    }};
 }
+
+// Explicit numbers are snapshot data. Every opcode declares its reserved-bit
+// mask, transfer status, static charge and diagnostic operands here. The
+// arithmetic function is also declared here so the folder and direct runtime
+// dispatch share one mapping. Dynamic stack effects remain explicit.
+
+macro_rules! opcode_rows {
+    ($callback:ident, ($($prefix:tt)*), $inst:ident, $f:ident) => {
+        $callback! {
+            $($prefix)*;
+            OP_POP = 0, 0xffffff, false, Free,
+                write!($f, "Pop");
+            OP_DUP = 1, 0xffffff, false, Free,
+                write!($f, "Dup");
+            OP_SWAP = 2, 0xffffff, false, Free,
+                write!($f, "Swap");
+            OP_NEW_TABLE = 3, 0xffffff, false, TableCreation,
+                write!($f, "NewTable");
+            OP_GET_TABLE = 4, 0xffffff, false, Free,
+                write!($f, "GetTable");
+            OP_ADD = 5, 0xffffff, false, Arithmetic [lua_add, true],
+                write!($f, "Add");
+            OP_SUBTRACT = 6, 0xffffff, false, Arithmetic [lua_sub, true],
+                write!($f, "Subtract");
+            OP_MULTIPLY = 7, 0xffffff, false, Arithmetic [lua_mul, true],
+                write!($f, "Multiply");
+            OP_DIVIDE = 8, 0xffffff, false, Arithmetic [lua_div, true],
+                write!($f, "Divide");
+            OP_POW = 9, 0xffffff, false, Arithmetic [f64::powf, false],
+                write!($f, "Pow");
+            OP_MOD = 10, 0xffffff, false, Arithmetic [lua_modulo, true],
+                write!($f, "Mod");
+            OP_CONCAT = 11, 0x00ffff, false, Free,
+                write!($f, "Concat({})", $inst.a());
+            OP_LESS = 12, 0xffffff, false, Free,
+                write!($f, "Less");
+            OP_LESS_EQUAL = 13, 0xffffff, false, Free,
+                write!($f, "LessEqual");
+            OP_GREATER = 14, 0xffffff, false, Free,
+                write!($f, "Greater");
+            OP_GREATER_EQUAL = 15, 0xffffff, false, Free,
+                write!($f, "GreaterEqual");
+            OP_EQUAL = 16, 0xffffff, false, Free,
+                write!($f, "Equal");
+            OP_NOT_EQUAL = 17, 0xffffff, false, Free,
+                write!($f, "NotEqual");
+            OP_NOT = 18, 0xffffff, false, Free,
+                write!($f, "Not");
+            OP_LENGTH = 19, 0xffffff, false, Free,
+                write!($f, "Length");
+            OP_NEGATE = 20, 0xffffff, false, Negation,
+                write!($f, "Negate");
+            OP_MARK_CALL_BASE = 21, 0x00ffff, false, Free,
+                write!($f, "MarkCallBase({})", $inst.a());
+            OP_PUSH_NIL = 22, 0xffffff, false, Free,
+                write!($f, "PushNil");
+            OP_NEW_TABLE_PRESIZED = 23, 0x00ffff, false, TableCreation,
+                write!($f, "NewTablePresized({})", $inst.a());
+            OP_NEW_TABLE_TEMPLATE = 24, 0x00ffff, false, TableCreation,
+                write!($f, "NewTableTemplate({})", $inst.a());
+            OP_NEW_TABLE_TRACKED = 25, 0x00ffff, false, TableCreation,
+                write!($f, "NewTableTracked({})", $inst.a());
+            OP_NOP = 26, 0xffffff, false, Free,
+                write!($f, "Nop");
+            OP_GET_GLOBAL = 30, 0x000000, false, Free,
+                write!($f, "GetGlobal({}, {})", $inst.a(), $inst.bx());
+            OP_SET_GLOBAL = 31, 0x000000, false, Free,
+                write!($f, "SetGlobal({}, {})", $inst.a(), $inst.bx());
+            OP_GET_LOCAL = 32, 0x00ffff, false, Free,
+                write!($f, "GetLocal({})", $inst.a());
+            OP_SET_LOCAL = 33, 0x00ffff, false, Free,
+                write!($f, "SetLocal({})", $inst.a());
+            OP_GET_UPVALUE = 34, 0x00ffff, false, Free,
+                write!($f, "GetUpvalue({})", $inst.a());
+            OP_SET_UPVALUE = 35, 0x00ffff, false, Free,
+                write!($f, "SetUpvalue({})", $inst.a());
+            OP_GET_FIELD = 36, 0x000000, false, Free,
+                write!($f, "GetField({}, {})", $inst.a(), $inst.bx());
+            OP_INIT_INDEX = 37, 0x00ffff, false, TableWrite,
+                write!($f, "InitIndex({})", $inst.a());
+            OP_PUSH_NUM = 38, 0xff0000, false, Free,
+                write!($f, "PushNum({})", $inst.bx());
+            OP_PUSH_STRING = 39, 0xff0000, false, Free,
+                write!($f, "PushString({})", $inst.bx());
+            OP_TFOR_PREP = 40, 0x00ffff, false, Free,
+                write!($f, "TForPrep({})", $inst.a());
+            OP_RETURN = 41, 0x00ffff, false, Free,
+                write!($f, "Return({:?})", RetCount::from_u8($inst.a()));
+            OP_CLOSE_UPVALUES = 42, 0x00ffff, false, Free,
+                write!($f, "CloseUpvalues({})", $inst.a());
+            OP_CLOSURE = 43, 0x00ffff, false, Free,
+                write!($f, "Closure({})", $inst.a());
+            OP_VARARG = 44, 0x00ffff, false, Free,
+                write!($f, "Vararg({})", $inst.a());
+            OP_SET_LIST = 45, 0x000000, false, ArrayElements,
+                write!($f, "SetList({}, {})", $inst.a(), $inst.bx());
+            OP_SET_TABLE = 46, 0x00ffff, false, TableWrite,
+                write!($f, "SetTable({})", $inst.a());
+            OP_PUSH_BOOL = 47, 0x00ffff, false, Free,
+                write!($f, "PushBool({})", $inst.a() != 0);
+            OP_GET_BUILTIN = 48, 0x00ffff, false, Free,
+                write!($f, "GetBuiltin({:?})", Builtin::from_u8($inst.a()));
+            OP_SET_BUILTIN = 49, 0x00ffff, false, Free,
+                write!($f, "SetBuiltin({:?})", Builtin::from_u8($inst.a()));
+            OP_SET_FIELD = 50, 0x000000, false, TableWrite,
+                write!($f, "SetField({}, {})", $inst.a(), $inst.bx());
+            OP_INIT_FIELD = 51, 0x000000, false, TableWrite,
+                write!($f, "InitField({}, {})", $inst.a(), $inst.bx());
+            OP_TFOR_CALL = 52, 0x000000, false, Free,
+                write!($f, "TForCall({}, {}, {})", $inst.a(), $inst.b(), $inst.c());
+            OP_CALL = 53, 0x0000ff, false, Call,
+                write!($f, "Call({:?}, {:?})",
+                    ArgCount::from_u8($inst.a()), RetCount::from_u8($inst.b()));
+            OP_INIT_FIELD_PINNED = 54, 0x000000, false, TableWrite,
+                write!($f, "InitFieldPinned({}, {})", $inst.a(), $inst.bx());
+            OP_SET_FIELD_AT = 55, 0x000000, false, TableWrite,
+                write!($f, "SetFieldAt({}, {})", $inst.a(), $inst.bx());
+            OP_JUMP = 60, 0xff0000, true, Free,
+                write!($f, "Jump({})", $inst.sbx());
+            OP_BRANCH_FALSE = 61, 0xff0000, true, Free,
+                write!($f, "BranchFalse({})", $inst.sbx());
+            OP_BRANCH_TRUE_KEEP = 62, 0xff0000, true, Free,
+                write!($f, "BranchTrueKeep({})", $inst.sbx());
+            OP_BRANCH_FALSE_KEEP = 63, 0xff0000, true, Free,
+                write!($f, "BranchFalseKeep({})", $inst.sbx());
+            OP_BRANCH_FALSE_LESS = 64, 0xff0000, true, Free,
+                write!($f, "BranchFalseLess({})", $inst.sbx());
+            OP_BRANCH_FALSE_LESS_EQUAL = 65, 0xff0000, true, Free,
+                write!($f, "BranchFalseLessEqual({})", $inst.sbx());
+            OP_BRANCH_FALSE_GREATER = 66, 0xff0000, true, Free,
+                write!($f, "BranchFalseGreater({})", $inst.sbx());
+            OP_BRANCH_FALSE_GREATER_EQUAL = 67, 0xff0000, true, Free,
+                write!($f, "BranchFalseGreaterEqual({})", $inst.sbx());
+            OP_BRANCH_FALSE_EQUAL = 68, 0xff0000, true, Free,
+                write!($f, "BranchFalseEqual({})", $inst.sbx());
+            OP_BRANCH_FALSE_NOT_EQUAL = 69, 0xff0000, true, Free,
+                write!($f, "BranchFalseNotEqual({})", $inst.sbx());
+            OP_FOR_PREP = 70, 0x000000, true, Free,
+                write!($f, "ForPrep({}, {})", $inst.a(), $inst.sbx());
+            OP_FOR_LOOP = 71, 0x000000, true, Free,
+                write!($f, "ForLoop({}, {})", $inst.a(), $inst.sbx());
+            OP_TFOR_LOOP = 72, 0x000000, true, Free,
+                write!($f, "TForLoop({}, {})", $inst.a(), $inst.sbx());
+        }
+    };
+}
+pub(crate) use opcode_rows;
+
+opcode_rows!(define_opcodes, (self, this, f), this, f);
 
 macro_rules! define_comparisons {
     ($( $plain:ident => $fused:ident, $constructor:ident
@@ -953,6 +994,28 @@ mod tests {
         }
         assert_eq!(ArgCount::from_u8(u8::MAX), ArgCount::Dynamic);
         assert_eq!(RetCount::from_u8(u8::MAX), RetCount::All);
+    }
+
+    #[test]
+    fn arithmetic_functions_come_from_opcode_rows() {
+        type ArithFn = fn(f64, f64) -> f64;
+        let expected: [(u8, ArithFn); 5] = [
+            (Instr::OP_ADD, crate::numeral::lua_add),
+            (Instr::OP_SUBTRACT, crate::numeral::lua_sub),
+            (Instr::OP_MULTIPLY, crate::numeral::lua_mul),
+            (Instr::OP_DIVIDE, crate::numeral::lua_div),
+            (Instr::OP_MOD, crate::numeral::lua_modulo),
+        ];
+        for (opcode, expected_fn) in expected {
+            let actual_fn = Instr::arithmetic_fn(opcode)
+                .expect("foldable arithmetic opcode declares a function");
+            assert_eq!(
+                actual_fn(4.5, -2.0).to_bits(),
+                expected_fn(4.5, -2.0).to_bits()
+            );
+        }
+        assert!(Instr::arithmetic_fn(Instr::OP_POW).is_none());
+        assert!(Instr::arithmetic_fn(Instr::OP_NEGATE).is_none());
     }
 
     #[test]

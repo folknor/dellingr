@@ -53,7 +53,7 @@ use crate::det_hash::{IndexMap as DetMap, map_with_capacity};
 use super::lua_val::RustFunc;
 use super::object::{GcHeap, RawObject, StringPtr, Upvalue, UpvalueRef};
 use super::rng::VmRng;
-use super::table::{NormalizedTableKey, TableKeyInput, normalize_table_key};
+use super::table::{NormalizedTableKey, array_index};
 use super::{ObjectPtr, State, Val};
 use crate::COST_MODEL_VERSION;
 use crate::compiler::{Bytecode, UpvalueDesc};
@@ -176,6 +176,13 @@ pub enum LoadError<E = Infallible> {
         /// Index associated with the invalid entry.
         index: usize,
     },
+    /// A runtime table rejected entries while restoring a save.
+    InvalidTable {
+        /// Object arena index, or environment delta token and local operation index.
+        location: TableLoadLocation,
+        /// Operation and the underlying table failure.
+        reason: String,
+    },
     /// A saved bytecode program violates VM structural invariants.
     InvalidBytecode {
         /// Saved bytecode arena id.
@@ -185,6 +192,37 @@ pub enum LoadError<E = Infallible> {
         /// Deterministic explanation for diagnostics.
         reason: String,
     },
+}
+
+/// The table being restored when materialization rejects its entries.
+#[derive(Debug, Clone, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum TableLoadLocation {
+    /// A table in the saved object arena.
+    Object(usize),
+    /// A library or host environment table.
+    Environment {
+        /// Stable environment-object token.
+        token: String,
+        /// Entry index for a deletion or upsert; absent for a whole-table rebuild.
+        entry: Option<usize>,
+    },
+}
+
+impl fmt::Display for TableLoadLocation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Object(index) => write!(f, "object[{index}]"),
+            Self::Environment { token, entry } => {
+                f.write_str("environment ")?;
+                write_bounded_user_text(f, token)?;
+                if let Some(entry) = entry {
+                    write!(f, " entry[{entry}]")?;
+                }
+                Ok(())
+            }
+        }
+    }
 }
 
 impl fmt::Display for SaveError {
@@ -246,6 +284,9 @@ impl<E: fmt::Display> fmt::Display for LoadError<E> {
             LoadError::CorruptArena { reason, index } => {
                 write!(f, "corrupt save arena at index {index}: {reason}")
             }
+            LoadError::InvalidTable { location, reason } => {
+                write!(f, "invalid saved table at {location}: {reason}")
+            }
             LoadError::InvalidBytecode {
                 chunk,
                 instruction,
@@ -285,6 +326,9 @@ fn retype_load_error<E>(error: LoadError<Infallible>) -> LoadError<E> {
             LoadError::StringSizeExceeded { size, limit }
         }
         LoadError::CorruptArena { reason, index } => LoadError::CorruptArena { reason, index },
+        LoadError::InvalidTable { location, reason } => {
+            LoadError::InvalidTable { location, reason }
+        }
         LoadError::InvalidBytecode {
             chunk,
             instruction,
@@ -1306,11 +1350,26 @@ fn corrupt_arena(reason: &'static str, index: usize) -> LoadError {
     LoadError::CorruptArena { reason, index }
 }
 
+// Retain the table's precise failure as well as the environment token. The
+// optional entry index belongs to the deletion or upsert collection.
+fn invalid_environment_table(
+    token: &str,
+    entry: Option<usize>,
+    operation: &str,
+    error: impl fmt::Display,
+) -> LoadError {
+    LoadError::InvalidTable {
+        location: TableLoadLocation::Environment {
+            token: token.to_owned(),
+            entry,
+        },
+        reason: format!("{operation}: {error}"),
+    }
+}
+
 fn runtime_array_slot(key: Val, array_len: usize) -> Option<usize> {
     match key {
-        Val::Num(n) if n >= 1.0 && n <= array_len as f64 && n.fract().to_bits() << 1 == 0 => {
-            Some(n as usize - 1)
-        }
+        Val::Num(n) => array_index(n, array_len),
         _ => None,
     }
 }
@@ -1319,10 +1378,10 @@ fn materialize_payload(
     state: &mut State,
     payload: verify::VerifiedSavePayload,
 ) -> Result<(), LoadError> {
-    // All graph allocation below uses GcHeap allocators and UpvaluePool
-    // directly. They do not consult thresholds or collect; the one runtime
-    // resolver used here is explicitly resolve_bytecode_runtime_no_gc.
-    // Do not replace these with State allocation helpers: they may collect
+    // All graph allocation below uses the heap's no-collection allocator and
+    // UpvaluePool directly. They do not consult thresholds or collect; the one
+    // runtime resolver used here is explicitly resolve_bytecode_runtime_no_gc.
+    // Do not replace these with `State::allocator`: it may collect
     // before the temporary strings/objects/upvalues have become State roots.
     // The only collection is after all globals, deltas and setup anchors are
     // rooted, at the end of this function.
@@ -1334,7 +1393,7 @@ fn materialize_payload(
 
     let mut strings = Vec::with_capacity(payload.strings.len());
     for bytes in &payload.strings {
-        strings.push(state.heap.alloc_string(bytes));
+        strings.push(state.heap.no_gc_allocator().alloc_string(bytes));
     }
 
     let mut upvalues = Vec::with_capacity(payload.upvalues.len());
@@ -1349,7 +1408,7 @@ fn materialize_payload(
             // rebuild_from_snapshot, so allocate an empty shell here. None of
             // these allocators run GC, which is what keeps the half-built graph
             // alive until the final collect.
-            SavedObject::Table { .. } => state.heap.alloc_table(),
+            SavedObject::Table { .. } => state.heap.no_gc_allocator().alloc_table(),
             SavedObject::Closure {
                 chunk,
                 upvalues: saved_upvalues,
@@ -1362,7 +1421,7 @@ fn materialize_payload(
                     refs.push(*upvalues_ref(&upvalues, *uv_id)?);
                 }
                 let runtime = state.resolve_bytecode_runtime_no_gc(&bc);
-                state.heap.alloc_lua_fn(bc, runtime, refs)
+                state.heap.no_gc_allocator().alloc_lua_fn(bc, runtime, refs)
             }
         };
         objects.push(ptr);
@@ -1423,7 +1482,10 @@ fn materialize_payload(
                 })?;
                 table
                     .rebuild_from_snapshot(*array_len as usize, entries)
-                    .map_err(|_| corrupt_arena("saved table entries are invalid", idx))?;
+                    .map_err(|error| LoadError::InvalidTable {
+                        location: TableLoadLocation::Object(idx),
+                        reason: error.to_string(),
+                    })?;
                 if metatable.is_some() {
                     table.set_metatable(metatable);
                 }
@@ -1493,12 +1555,26 @@ fn materialize_payload(
             for (key_index, key) in delta.deleted.iter().enumerate() {
                 table
                     .insert(decode_val(key, &ctx)?, Val::Nil)
-                    .map_err(|_| corrupt_arena("deleted environment key is invalid", key_index))?;
+                    .map_err(|error| {
+                        invalid_environment_table(
+                            &delta.token,
+                            Some(key_index),
+                            "deleted environment key is invalid",
+                            error,
+                        )
+                    })?;
             }
             for (entry_index, (key, value)) in delta.upserts.iter().enumerate() {
                 table
                     .insert(decode_val(key, &ctx)?, decode_val(value, &ctx)?)
-                    .map_err(|_| corrupt_arena("environment upsert is invalid", entry_index))?;
+                    .map_err(|error| {
+                        invalid_environment_table(
+                            &delta.token,
+                            Some(entry_index),
+                            "environment upsert is invalid",
+                            error,
+                        )
+                    })?;
             }
         }
         if let Some(order) = &delta.order {
@@ -1547,8 +1623,13 @@ fn materialize_payload(
                 corrupt_arena("environment token does not resolve to a table", delta_index)
             })?;
             if array.is_empty() {
-                table.clear_and_insert_entries(ordered).map_err(|_| {
-                    corrupt_arena("saved environment order is invalid", delta_index)
+                table.clear_and_insert_entries(ordered).map_err(|error| {
+                    invalid_environment_table(
+                        &delta.token,
+                        None,
+                        "saved environment order is invalid",
+                        error,
+                    )
                 })?;
             } else {
                 // Reordering live hash entries must retain setup's array
@@ -1565,8 +1646,13 @@ fn materialize_payload(
                 );
                 table
                     .rebuild_from_snapshot(array.len(), entries)
-                    .map_err(|_| {
-                        corrupt_arena("saved environment order is invalid", delta_index)
+                    .map_err(|error| {
+                        invalid_environment_table(
+                            &delta.token,
+                            None,
+                            "saved environment order is invalid",
+                            error,
+                        )
                     })?;
             }
             // Rebuilding entries replaces the table shell. An unchanged delta
@@ -1601,12 +1687,24 @@ fn materialize_payload(
             }));
             table
                 .rebuild_from_snapshot(array.len(), entries)
-                .map_err(|_| corrupt_arena("saved environment array is invalid", delta_index))?;
+                .map_err(|error| {
+                    invalid_environment_table(
+                        &delta.token,
+                        None,
+                        "saved environment array is invalid",
+                        error,
+                    )
+                })?;
             // A saved append key is rejected by the verifier. A setup-only
             // append key is legal and extends the restored shape normally.
             if !matches!(append_value, Val::Nil) {
-                table.insert(append_key, append_value).map_err(|_| {
-                    corrupt_arena("setup environment append is invalid", delta_index)
+                table.insert(append_key, append_value).map_err(|error| {
+                    invalid_environment_table(
+                        &delta.token,
+                        None,
+                        "setup environment append is invalid",
+                        error,
+                    )
                 })?;
             }
             table.set_metatable(metatable);
@@ -1712,15 +1810,19 @@ fn runtime_table_key(
     heap: &GcHeap,
     index: usize,
 ) -> Result<RuntimeTableKey, LoadError> {
-    let key = match value {
-        Val::Nil => TableKeyInput::Nil,
-        Val::Bool(value) => TableKeyInput::Bool(value),
-        Val::Num(value) => TableKeyInput::Number(value),
-        Val::Str(ptr) => TableKeyInput::String(heap.get_string(ptr).to_vec()),
-        Val::Obj(ptr) => TableKeyInput::Object(ptr),
-        Val::RustFn(func) => TableKeyInput::RustFn(func as usize),
-    };
-    normalize_table_key(key).map_err(|_| corrupt_arena("nil or NaN is not a table key", index))
+    let key = value.table_key().map_err(|error| match error {
+        super::table::InvalidTableKey::Nil => corrupt_arena("nil is not a table key", index),
+        super::table::InvalidTableKey::Nan => corrupt_arena("NaN is not a table key", index),
+    })?;
+    Ok(match key {
+        NormalizedTableKey::Bool(value) => NormalizedTableKey::Bool(value),
+        NormalizedTableKey::Number(value) => NormalizedTableKey::Number(value),
+        NormalizedTableKey::String(ptr) => {
+            NormalizedTableKey::String(heap.get_string(ptr).to_vec())
+        }
+        NormalizedTableKey::Object(ptr) => NormalizedTableKey::Object(ptr),
+        NormalizedTableKey::RustFn(func) => NormalizedTableKey::RustFn(func),
+    })
 }
 
 fn insert_runtime_key(
@@ -1927,7 +2029,7 @@ impl ByteField {
     const fn limit(self) -> usize {
         match self {
             Self::EngineVersion => MAX_ENGINE_VERSION_BYTES,
-            Self::LuaString | Self::GlobalName => super::MAX_STRING_BYTES,
+            Self::LuaString | Self::GlobalName => crate::limits::MAX_STRING_BYTES,
             Self::FunctionId => MAX_SAVE_IDENTIFIER_BYTES,
             Self::EnvironmentToken => MAX_ENVIRONMENT_TOKEN_BYTES,
             Self::ChunkName => MAX_CHUNK_NAME_BYTES,
@@ -3213,7 +3315,7 @@ mod tests {
         let mut oversized = valid_saved_bytecode();
         oversized
             .string_literals
-            .push(vec![b'a'; crate::vm::MAX_STRING_BYTES + 1]);
+            .push(vec![b'a'; crate::limits::MAX_STRING_BYTES + 1]);
         assert!(matches!(
             rejected_bytecode(vec![oversized], Vec::new()),
             LoadError::StringSizeExceeded { .. }

@@ -1,12 +1,10 @@
 use std::str;
 
-use super::super::compiler::{
-    FieldLookupCacheEntry, GlobalLookupCacheSlot, SetFieldLookupCacheSlot,
-};
 use super::super::error::{ErrorKind, TypeError};
 use super::Result;
 use super::State;
 use super::Val;
+use super::caches::{FieldLookupCacheEntry, GlobalLookupCacheSlot, SetFieldLookupCacheSlot};
 use super::frame::Frame;
 use super::object::ObjectPtr;
 use crate::instr::{ArgCount, RetCount};

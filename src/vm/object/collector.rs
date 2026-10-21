@@ -1,0 +1,100 @@
+//! State collection protocol and explicit allocation modes.
+
+use super::{GcHeap, ObjectPtr, StringPtr, UpvalueRef};
+use crate::compiler::Bytecode;
+use crate::vm::{BytecodeRuntime, State, Val, mark_gc_roots};
+use std::sync::Arc;
+
+/// A single allocation which cannot collect while graph edges are installed.
+/// Runtime callers obtain this through `State::allocator`; snapshot graph
+/// assembly explicitly borrows it from the heap. Consuming the handle ensures
+/// runtime callers check the policy again for every allocation.
+pub(in crate::vm) struct NoGcAllocator<'a> {
+    heap: &'a mut GcHeap,
+}
+
+impl GcHeap {
+    /// Begin an explicit no-collection allocation. Snapshot graph assembly and
+    /// runtime-literal materialization use this while their partial results
+    /// are not yet reachable from the State roots.
+    pub(in crate::vm) fn no_gc_allocator(&mut self) -> NoGcAllocator<'_> {
+        NoGcAllocator { heap: self }
+    }
+}
+
+impl NoGcAllocator<'_> {
+    pub(in crate::vm) fn alloc_lua_fn(
+        self,
+        bytecode: Arc<Bytecode>,
+        runtime: Arc<BytecodeRuntime>,
+        upvalues: Vec<UpvalueRef>,
+    ) -> ObjectPtr {
+        self.heap.alloc_lua_fn_raw(bytecode, runtime, upvalues)
+    }
+
+    pub(in crate::vm) fn alloc_table(self) -> ObjectPtr {
+        self.heap.alloc_table_raw()
+    }
+
+    pub(in crate::vm) fn alloc_table_with_capacity(self, capacity: usize) -> ObjectPtr {
+        self.heap.alloc_table_with_capacity_raw(capacity)
+    }
+
+    pub(in crate::vm) fn alloc_table_with_template(
+        self,
+        key_ids: &[u16],
+        literals: &[Val],
+    ) -> ObjectPtr {
+        self.heap.alloc_table_with_template_raw(key_ids, literals)
+    }
+
+    pub(in crate::vm) fn alloc_string(self, bytes: &[u8]) -> StringPtr {
+        self.heap.alloc_string_raw(bytes)
+    }
+}
+
+impl State {
+    /// Check the State policy exactly once before the next heap allocation.
+    /// The caller's current roots must already reach everything it holds.
+    pub(in crate::vm) fn allocator(&mut self) -> NoGcAllocator<'_> {
+        self.maybe_collect();
+        self.heap.no_gc_allocator()
+    }
+
+    /// Run automatic collection using the complete State root set.
+    fn maybe_collect(&mut self) {
+        if self.heap.is_full() {
+            self.gc_collect();
+        }
+    }
+
+    /// Forces a full garbage collection cycle.
+    /// This marks all reachable objects and frees unreachable ones.
+    #[hotpath::measure]
+    pub fn gc_collect(&mut self) {
+        // This is the only production caller of the heap sweep. Clear the
+        // gmatch pattern cache before freeing interned strings so no cached
+        // matcher survives its key's lifetime; keep this point fixed to
+        // preserve cache costs.
+        self.gmatch_patterns.clear();
+        self.gmatch_pattern_bytes = 0;
+        // Mark all roots
+        let mut worklist = self.heap.take_mark_worklist();
+        mark_gc_roots(self, &mut worklist);
+        self.heap
+            .drain_mark_worklist(&mut worklist, &self.upvalue_pool);
+        self.heap.restore_mark_worklist(worklist);
+        self.sweep_bytecode_caches();
+        // Sweep unmarked objects
+        self.heap.collect();
+        // Pool slots not marked via a reachable closure or an open-upvalue
+        // entry can never be read again; recycle them.
+        self.upvalue_pool.sweep();
+        // `format_pointer_ids` entries are deliberately not GC roots; an entry
+        // whose value no longer resolves can never be observed again (the
+        // generational key cannot alias a future allocation), so drop it to
+        // keep identity storage bounded by live `%p` usage.
+        self.format_pointer_ids
+            .retain(|val, _| self.heap.val_is_live(val));
+    }
+}

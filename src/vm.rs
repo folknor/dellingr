@@ -2,6 +2,7 @@
 //! components of the VM.
 
 mod anchor;
+mod caches;
 mod eval;
 mod eval_control;
 mod eval_index;
@@ -22,7 +23,7 @@ pub use anchor::Anchor;
 pub use lua_val::LuaType;
 pub use lua_val::RustFunc;
 #[cfg(feature = "snapshot")]
-pub use save_state::{LoadError, SaveDiagnostics, SaveError, SaveState};
+pub use save_state::{LoadError, SaveDiagnostics, SaveError, SaveState, TableLoadLocation};
 
 use crate::det_hash::IndexMap;
 #[cfg(feature = "snapshot")]
@@ -34,7 +35,6 @@ use super::Instr;
 use super::Result;
 use super::compiler;
 use super::compiler::Bytecode;
-use super::compiler::RuntimeCaches;
 use super::cost_meter::{CostMeter, CostState};
 use super::error::Error;
 use super::error::ErrorKind;
@@ -52,24 +52,21 @@ pub(super) use object::ObjectPtr;
 use object::{GcHeap, GcPolicy, Markable, StringPtr, UpvaluePool, UpvalueRef};
 use rng::VmRng;
 use table::Table;
+pub(crate) use table::integer_index;
 
-pub use crate::limits::MAX_STRING_BYTES;
 use crate::limits::{
     GMATCH_PATTERN_CACHE_BYTES, GMATCH_PATTERN_CACHE_ENTRIES, MAX_CALL_DEPTH, MAX_STACK_SIZE,
+    check_string_size,
 };
+use caches::RuntimeCaches;
 // Capacity hints for `reserve_stdlib_capacity`; they size allocations only and
-// never affect behaviour or iteration order. Keep them in step with the
-// registrations in `lua_std`. Every builtin slot is also a global, and `error`
-// is the one standard-library global without a builtin slot.
-const STDLIB_NON_BUILTIN_GLOBALS: usize = 1;
+// never affect behaviour or iteration order. The stdlib-specific hints live
+// beside their registration lists in `lua_std`.
+const STDLIB_NON_BUILTIN_GLOBALS: usize = crate::lua_std::STDLIB_NON_BUILTIN_GLOBALS;
 // Keep room for a few host-defined globals alongside the standard library.
 const HOST_GLOBAL_CAPACITY_HEADROOM: usize = 4;
-// `_G`, its metatable, the math, string and table library tables, and the
-// string metatable.
-const STDLIB_HEAP_TABLES: usize = 6;
-// Distinct interned keys across those tables: math's functions plus `pi` and
-// `huge`, the string and table functions, and `_G`'s `__index`/`__newindex`.
-const STDLIB_INTERNED_TABLE_KEYS: usize = 41;
+const STDLIB_HEAP_TABLES: usize = crate::lua_std::STDLIB_HEAP_TABLES;
+const STDLIB_INTERNED_TABLE_KEYS: usize = crate::lua_std::STDLIB_INTERNED_TABLE_KEYS;
 /// Snapshot environment token of the shared string metatable. Like
 /// `_G.metatable`, it lives in the token namespace, not the global one.
 #[cfg(feature = "snapshot")]
@@ -78,25 +75,6 @@ const STRING_METATABLE_TOKEN: &str = "string.metatable";
 struct GmatchPatternEntry {
     pattern: LuaPattern,
     byte_len: usize,
-}
-
-pub(crate) fn check_string_size(size: usize) -> Result<()> {
-    if size > MAX_STRING_BYTES {
-        return Err(Error::without_location(ErrorKind::StringSizeExceeded {
-            size,
-            limit: MAX_STRING_BYTES,
-        }));
-    }
-    Ok(())
-}
-
-pub(crate) fn checked_string_growth(current: usize, additional: usize) -> Result<usize> {
-    // Saturating rather than wrapping: an overflowing total is reported as
-    // usize::MAX, which is above the cap and so rejected, instead of wrapping
-    // to a small value that would pass the check.
-    let size = current.saturating_add(additional);
-    check_string_size(size)?;
-    Ok(size)
 }
 
 /// Values temporarily held outside the visible VM stack.
@@ -164,8 +142,12 @@ pub(super) fn mark_gc_roots(state: &State, worklist: &mut Vec<ObjectPtr>) {
             }
         }
     }
-    // Note: open upvalues point to stack (already marked), closed upvalues
-    // are marked transitively through the closures that reference them
+    // Open upvalues point at live stack slots but may not yet be held by
+    // any closure (mid-capture in instr_closure); their pool slots are
+    // roots for the pool sweep even though they hold no heap reference.
+    for (_, uv_ref) in &state.open_upvalues {
+        state.upvalue_pool.mark_slot(*uv_ref);
+    }
 }
 
 /// Information about an active function call, used for stack traces.
@@ -179,9 +161,9 @@ pub(super) struct CallInfo {
 
 /// State-local runtime data for one immutable bytecode chunk.
 #[derive(Debug)]
-pub(super) struct BytecodeRuntime {
-    pub(super) literals: Box<[Val]>,
-    pub(super) caches: RuntimeCaches,
+struct BytecodeRuntime {
+    literals: Box<[Val]>,
+    caches: RuntimeCaches,
 }
 
 struct BytecodeCacheEntry {
@@ -805,50 +787,6 @@ impl State {
         self.heap.disable_auto_gc();
     }
 
-    /// Forces a full garbage collection cycle.
-    /// This marks all reachable objects and frees unreachable ones.
-    #[hotpath::measure]
-    pub fn gc_collect(&mut self) {
-        // This is the only production caller of GcHeap::collect. Heap unit
-        // tests collect standalone heaps, which have no State pattern cache.
-        // Clear before freeing interned strings so no cached matcher survives
-        // its key's lifetime; keep this point fixed to preserve cache costs.
-        self.gmatch_patterns.clear();
-        self.gmatch_pattern_bytes = 0;
-        // Mark all roots
-        let mut worklist = self.heap.take_mark_worklist();
-        mark_gc_roots(self, &mut worklist);
-        // Open upvalues point at live stack slots but may not yet be held by
-        // any closure (mid-capture in instr_closure); their pool slots are
-        // roots for the pool sweep even though they hold no heap reference.
-        for (_, uv_ref) in &self.open_upvalues {
-            self.upvalue_pool.mark_slot(*uv_ref);
-        }
-        self.heap
-            .drain_mark_worklist(&mut worklist, &self.upvalue_pool);
-        self.heap.restore_mark_worklist(worklist);
-        self.sweep_bytecode_caches();
-        // Sweep unmarked objects
-        self.heap.collect();
-        // Pool slots not marked via a reachable closure or an open-upvalue
-        // entry can never be read again; recycle them.
-        self.upvalue_pool.sweep();
-        // `format_pointer_ids` entries are deliberately not GC roots; an entry
-        // whose value no longer resolves can never be observed again (the
-        // generational key cannot alias a future allocation), so drop it to
-        // keep identity storage bounded by live `%p` usage.
-        self.format_pointer_ids
-            .retain(|val, _| self.heap.val_is_live(val));
-    }
-
-    /// Run automatic collection before a caller proceeds with a heap
-    /// allocation, using the caller's current roots.
-    pub(super) fn maybe_collect(&mut self) {
-        if self.heap.is_full() {
-            self.gc_collect();
-        }
-    }
-
     /// Drop state-local runtime entries which no reachable closure, active
     /// frame, or pending closure shell can use. Removing an entry after roots
     /// were marked intentionally leaves its literals alive for one extra GC.
@@ -879,7 +817,7 @@ impl State {
     /// Resolve the State-local runtime bundle. Prevalidation happens before
     /// mutating the string pool; each completed intern is transiently rooted so
     /// an allocation-triggered GC cannot collect an earlier literal.
-    pub(super) fn resolve_bytecode_runtime(
+    fn resolve_bytecode_runtime(
         &mut self,
         bytecode: &Arc<Bytecode>,
     ) -> Result<Arc<BytecodeRuntime>> {
@@ -916,10 +854,7 @@ impl State {
     }
 
     #[cfg(feature = "snapshot")]
-    pub(super) fn resolve_bytecode_runtime_no_gc(
-        &mut self,
-        bytecode: &Arc<Bytecode>,
-    ) -> Arc<BytecodeRuntime> {
+    fn resolve_bytecode_runtime_no_gc(&mut self, bytecode: &Arc<Bytecode>) -> Arc<BytecodeRuntime> {
         let identity = Arc::as_ptr(bytecode) as usize;
         if let Some(entry) = self.bytecode_caches.get(&identity) {
             return Arc::clone(&entry.runtime);
@@ -927,7 +862,7 @@ impl State {
         let literals = bytecode
             .string_literals
             .iter()
-            .map(|literal| Val::Str(self.heap.alloc_string(literal)))
+            .map(|literal| Val::Str(self.heap.no_gc_allocator().alloc_string(literal)))
             .collect::<Vec<_>>()
             .into_boxed_slice();
         let runtime = Arc::new(BytecodeRuntime {
@@ -1214,8 +1149,7 @@ impl State {
     #[hotpath::measure]
     pub(super) fn alloc_string(&mut self, bytes: impl AsRef<[u8]>) -> Result<Val> {
         check_string_size(bytes.as_ref().len())?;
-        self.maybe_collect();
-        let ptr = self.heap.alloc_string(bytes.as_ref());
+        let ptr = self.allocator().alloc_string(bytes.as_ref());
         Ok(Val::Str(ptr))
     }
 

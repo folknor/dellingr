@@ -28,6 +28,8 @@ debug = false
 
 [test]
 default_package = "dellingr"
+# Without a per-sweep profile, this selects the dev profile by default for
+# focused tests; explicit profile flags take precedence.
 debug = true
 
 [gremlins]
@@ -44,7 +46,7 @@ exclude = ["tests/string_bytes.rs"]
 # longer compare against new ones. Not hostname-keyed: these files are in
 # git, identical on every host.
 #
-# Each workload registers two files, one per mode family:
+# Each workload registers an input for both mode families:
 #
 # - `file`/`xxh128`: the bench/ seconds-scale port, resolved by --bench
 #   (and plain runs). Seconds-scale so wall deltas resolve above launch
@@ -57,13 +59,10 @@ exclude = ["tests/string_bytes.rs"]
 #   (observed 2026-07-26 on plantasjen). brokkr REFUSES --hotpath/--alloc
 #   on a workload without the pair.
 #
-# Both files carry the same kernel, so hotpath percentages read across to
-# the bench walls. Exceptions: large_source is a parse-time probe (the
-# parse phase is the measurement, standalone duration is irrelevant), so
-# both modes resolve the same examples/ file; benchmark's hotpath variant
-# is examples/composite/benchmark.lua, a ~1/100 restatement written for
-# this registry because examples/benchmark.lua predates the _bench
-# convention.
+# Paired files carry the same kernel, so hotpath percentages read across to
+# the bench walls. `large_source` is a parse/codegen probe, not an execution
+# workload; interpret its timing as a parse/codegen diagnostic, so both modes
+# use the same generated source.
 #
 # The pairing is kept by hand and by the hash pins, not by a test: the pairs are
 # scaled differently (the composite is ~1/100, the seconds-scale loops are

@@ -430,12 +430,11 @@ pub struct ArgError {
     received: Option<LuaType>,
 }
 
-/// Maximum number of values a call can return (Rust callbacks and Lua
-/// functions alike).
-pub use crate::limits::MAX_RESULTS;
+use crate::limits::MAX_RESULTS;
 
-/// Validate a result count against the call ABI. Applied to Rust callback
-/// returns and to every Lua `return` with a dynamic result count.
+/// Validate a result count against the call ABI, whose cap is
+/// [`crate::limits::MAX_RESULTS`]. Applied to Rust callback returns and to
+/// every Lua `return` with a dynamic result count.
 pub fn results_count(count: usize) -> Result<u8, ErrorKind> {
     u8::try_from(count).map_err(|_| ErrorKind::TooManyResults { limit: MAX_RESULTS })
 }

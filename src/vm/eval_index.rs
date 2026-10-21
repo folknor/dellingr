@@ -1,14 +1,14 @@
 use std::str;
 
-use super::super::compiler::{
-    FieldLookupCacheEntry, FieldLookupCacheSlot, GlobalLookupCacheSlot, MethodLookupCacheEntry,
-    StringMethodCacheEntry,
-};
 use super::super::error::{ErrorKind, TypeError};
 use super::LuaType;
 use super::Result;
 use super::State;
 use super::Val;
+use super::caches::{
+    FieldLookupCacheEntry, FieldLookupCacheSlot, GlobalLookupCacheSlot, MethodLookupCacheEntry,
+    StringMethodCacheEntry,
+};
 use super::frame::Frame;
 use super::object::{ObjectPtr, Upvalue};
 use crate::instr::{ArgCount, RetCount};

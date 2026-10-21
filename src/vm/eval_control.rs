@@ -1,9 +1,9 @@
 use super::super::compiler::UpvalueDesc;
-use super::super::compiler::{RuntimeCaches, TforCursorEntry, TforCursorSlot};
 use super::super::error::TypeError;
 use super::Result;
 use super::State;
 use super::Val;
+use super::caches::{RuntimeCaches, TforCursorEntry, TforCursorSlot};
 use super::frame::Frame;
 use super::lua_val::RustFunc;
 use crate::instr::{ArgCount, Instr, RetCount};

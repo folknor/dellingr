@@ -95,11 +95,20 @@ impl State {
     }
 
     /// Returns whether argument `arg_number` is missing or explicitly nil.
-    pub(crate) fn is_none_or_nil(&self, arg_number: isize) -> bool {
-        // This private helper receives crate-owned argument positions. A zero
-        // index here indicates an internal caller bug.
-        assert!(arg_number != 0);
-        self.get_top() < arg_number.unsigned_abs() || self.typ(arg_number) == LuaType::Nil
+    /// Index zero returns [`ErrorKind::InvalidStackIndex`].
+    pub(crate) fn is_none_or_nil(&self, arg_number: isize) -> Result<bool> {
+        if arg_number == 0 {
+            return Err(self.error(ErrorKind::InvalidStackIndex { index: arg_number }));
+        }
+        Ok(self.get_top() < arg_number.unsigned_abs() || self.typ(arg_number) == LuaType::Nil)
+    }
+
+    /// Returns the current stack top as a signed index.
+    ///
+    /// The stack cap is lower than `isize::MAX`, so every valid top has this
+    /// representation.
+    pub(crate) fn top_isize(&self) -> isize {
+        isize::try_from(self.get_top()).expect("the value stack limit fits in isize")
     }
 
     /// Verifies an optional argument's type.
@@ -112,7 +121,7 @@ impl State {
         arg_number: isize,
         expected_type: LuaType,
     ) -> Result<bool> {
-        if self.is_none_or_nil(arg_number) {
+        if self.is_none_or_nil(arg_number)? {
             return Ok(false);
         }
         self.check_type(arg_number, expected_type)?;

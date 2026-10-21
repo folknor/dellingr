@@ -32,16 +32,6 @@ to `brokkr check`.
 
 ## Encodings and operands
 
-## HYG-004 - Two opcode-to-function tables for arithmetic
-
-Reported by the compiler hunter; narrowed in wave 4 (`arith_fn` returns
-`Option` and its parser callers report `InternalError`).
-
-`numeral::arith_fn` and the `vm/frame.rs` dispatch arms still map the five
-arithmetic opcodes independently. Fix: carry the function in the
-`define_opcodes!` row in `instr.rs`, keeping dispatch on direct, inlineable
-calls.
-
 ## HYG-005 - Snapshot environment token names spelled at more than one site
 
 Reported by the VM-core hunter.
@@ -92,57 +82,9 @@ Fix: `limits` (public, script-observable caps, everything that produces an
 hints). Drop the `Frame` alias. Enforceable: the module split itself; not by
 lint.
 
-## HYG-007 - Stdlib capacity counts are hand-maintained in two modules, two ways
-
-Reported by the VM-core, heap and stdlib hunters.
-
-`lua_std.rs`: `MATH_LIBRARY_CAPACITY = 22`, `STRING_LIBRARY_CAPACITY = 10` are
-hand counts while `TABLE_LIBRARY_CAPACITY = TABLE_FUNCTIONS.len()` is derived.
-`vm.rs`: `STDLIB_INTERNED_TABLE_KEYS = 41` (22 + 10 + 7 + `__index`/`__newindex`),
-`STDLIB_HEAP_TABLES = 6`, `STDLIB_NON_BUILTIN_GLOBALS = 1`, each "keep in step
-with lua_std". The stdlib hunter counted and found them in agreement today; drift
-costs a reallocation only, which is why nothing would notice.
-
-Fix: `MATH_FUNCTIONS` / `STRING_FUNCTIONS` slices like `table.rs`, every count
-derived (VM constants become const sums or go). Interim: a test opening the libs
-and asserting counts. Group the other `vm.rs` capacity literals next to them.
-Enforceable structurally once counts are `.len()`.
-
-## HYG-009 - `MAX_STRING_BYTES` and `MAX_RESULTS` reachable through several paths; string-size policy lives in `vm`
-
-Reported by the compiler and host-surface hunters.
-
-`MAX_STRING_BYTES` is `limits::`, re-exported from `vm.rs`, re-exported again
-from `lib.rs`; the parser uses `crate::vm::MAX_STRING_BYTES`,
-`crate::vm::check_string_size` and `checked_string_growth`;
-`save_state/verify.rs` uses `super::super::MAX_STRING_BYTES`. `MAX_RESULTS` is
-both `limits::` and `error::`. The check functions live in `vm`, so the compiler
-depends on the VM for a limit check. Fix: one public path (`limits::`), move the
-check functions beside the constant, drop the re-exports. Enforcement is deleting
-them (no lint catches const re-exports); a dependency rule (HYG-027) holds the
-compiler side.
-
 ## Cost model
 
 ## Compiler front end
-
-## HYG-027 - Compiler depends on the VM; runtime cache types and `unsafe impl Sync` live in the compiler
-
-Reported by the compiler hunter.
-
-`compiler.rs` imports `vm::{ObjectPtr, Val}` to define the
-`*LookupCacheEntry`/`*Slot` types, `TforCursorEntry` and `RuntimeCaches`, none of
-which is compiler output; every consumer is in `vm/`. The parser also calls
-`crate::vm::check_string_size` (HYG-009). `unsafe impl Sync for RuntimeCaches`
-argues "every access goes through `&mut State`", but `RuntimeCaches` sits in
-`Arc<BytecodeRuntime>`, cloned into heap closures and frames; soundness rests on
-no `Arc<BytecodeRuntime>` escaping the State, held by convention.
-
-Fix: move the cache types to `vm/caches.rs` (compiler exposes slot counts only);
-keep `BytecodeRuntime` private to `vm` and state the real obligation in the
-SAFETY comment, or replace `Sync` with a Send-only handle. Enforceable: a
-`brokkr check` grep that `src/compiler/**` contains no `crate::vm`/`super::vm`
-(nothing like it exists); partly by visibility.
 
 ## VM execution core
 
@@ -229,35 +171,17 @@ each opcode against a metatable'd operand asserting traceback line and
 
 ## Heap, tables, persistence
 
-## HYG-050 - The "integer key in 1..=n" rule spelled seven times in three dialects
-
-Reported by the heap hunter.
-
-`Table::array_slot` (`n >= 1.0 && n <= len as f64 && n == n.floor()`),
-`is_array_append_key` (`== (len + 1) as f64`), `Table::rebuild` (bit-exact),
-`save_state::runtime_array_slot` (`fract().to_bits() << 1 == 0`),
-`verify.rs::validate_environment_deltas` (the `fract` form twice plus bit-exact
-append and order tests), `validate_references` (`SavedVal::Num` equality twice),
-`gmatch_integer_field` (non-negative integer). They agree on every input today
-only because array keys are `>= 1`; the verifier is where disagreement becomes
-"valid save rejected" or "forged shape accepted". Fix: one `array_index(n, len)`
-and `is_append_key` in `table.rs` on `f64`, imported by the verifier as it
-already imports `normalize_table_key`. Enforceable by structure and a grep for
-`fract().to_bits()` outside `table.rs`.
-
 ## HYG-051 - Val-to-table-key mapping written three times; nil/NaN refusal written five times
 
-Reported by the heap hunter.
+Reported by the heap hunter; narrowed in wave 6 (`Val::table_key` is the one
+runtime mapping, used by table storage, raw assignment and snapshot keys).
 
-`normalize_table_key` is the documented owner, but its input mapping is
-re-spelled in `Table::insert`, `save_state::runtime_table_key`,
-`verify::resolve_key`, and `Val::hash` (calls it with `()` payloads then panics on
-branches the type admits). The nil/NaN refusal is hand-written in
-`Table::hash_get`, `get_with_index`, `next_with_index`,
-`next_from_matching_index`, and `State::set_table_raw` (which pre-checks only to
-get a located error, see HYG-053). Fix: `Val::table_key() -> Result<
-NormalizedTableKey<..>, InvalidTableKey>` plus a `SavedVal` twin; make
-`TableKeyInput` private to `table.rs`.
+Still open: `Val`'s `Hash` numeric arm calls `normalize_table_key` through
+`TableKeyInput::Number` directly, which keeps `TableKeyInput` visible outside
+`table.rs`; `verify::resolve_key` keeps its own mapping for `SavedVal`; and
+`Table::hash_get` / `get_with_index` now normalize the whole key just to refuse
+nil and NaN, where two pattern checks used to suffice (table read path; worth a
+cheap `is_valid_table_key`).
 
 ## HYG-052 - gmatch matcher ordering invariant and env-token schema have no structural owner
 
@@ -278,22 +202,15 @@ test.
 
 ## HYG-053 - Table and snapshot errors shed their location and reason
 
-Reported by the heap hunter.
+Reported by the heap hunter; narrowed in wave 6 (table materialization failures
+keep their reason through `LoadError::InvalidTable` with a typed
+`TableLoadLocation`; runtime locations are already filled by `locate_in_frame`).
 
-`Table::insert` returns `Error::new(TableKeyNil/TableKeyNan, 0, 0)` and
-`Table::rebuild` returns `InternalError` the same way; callers propagating with
-`?` (`set_table_str_key_value`, `set_list`, `table_ops` dispatch) hand the
-operator an error naming no line, which is why `set_table_raw` pre-checks. In
-materialization, `rebuild_from_snapshot(..).map_err(|_| corrupt_arena(..))` and
-five `table.insert(..).map_err(|_| ..)` sites discard which rule failed.
-`LoadError::CorruptArena { reason, index }` does not record which arena the index
-belongs to: env-delta checks report `key_index` or `delta_index` inconsistently,
-`validate_metatable` reports `0` meaninglessly, `materialize_payload` mixes them
-for the same delta. Fix: `Table` returns its own `InvalidTableKey` and the State
-layer adds location (removes `Error` as a table-module dependency);
-`CorruptArena` carries a typed location (`Object(u32) | EnvDelta { token, entry }
-| Global(name) | ..`) and the inner reason. Enforceable structurally (`table.rs`
-cannot import `Error`) and by type.
+Still open: the verifier's `LoadError::CorruptArena { reason, index }` does not
+say which arena the index belongs to (env-delta checks report `key_index` or
+`delta_index` inconsistently, `validate_metatable` reports `0`), and
+`table.rs` still depends on `Error`. Fix: a typed location on `CorruptArena`;
+`Table` returns its own key error and the State layer wraps it.
 
 ## HYG-054 - Snapshot in-flight inventory and load-time reset are two hand-maintained lists
 
@@ -305,23 +222,6 @@ separately where the validator calls `is_empty()`); `State::new` is a third
 writer. The validator's comment asks to keep the inventory updated by memory. Fix:
 an `InFlight` struct with `is_quiescent()` and `reset()`, destructured without
 `..` so a new field fails to compile. Enforceable by type.
-
-## HYG-056 - GC allocation and collection protocol held by comment
-
-Reported by the heap hunter.
-
-Every `GcHeap::alloc_*` carries the same "caller must check `is_full()` ...
-except snapshot materialization" doc, and `State::alloc_table`,
-`alloc_table_with_capacity`, `new_table_with_template` call `maybe_collect()` by
-hand. `GcHeap::collect` is `pub(super)` with "gc_collect is the only production
-caller" as the guard; a full collection is clear gmatch cache, mark roots, mark
-open-upvalue slots, drain, sweep bytecode caches, sweep heap, sweep upvalue pool,
-prune `format_pointer_ids`. `mark_gc_roots` claims to be the single source of
-roots, but open-upvalue slots and `pending_bytecode_caches` are rooted in
-`gc_collect`. Fix: a State-level allocator that always collects plus a
-`NoGcAllocator<'a>` borrowed from `&mut GcHeap` only materialization can
-construct; heap `collect` private to a collector module owning the side sweeps;
-fold the extra roots into `mark_gc_roots`. Enforceable by visibility.
 
 ## HYG-059 - Snapshot encoder holds a breadcrumb per encoded value
 
@@ -342,74 +242,6 @@ x7) already truncate before constructing; delete the call-site copies and make
 
 ## Stdlib and patterns
 
-## HYG-076 - Stdlib invariant panics restated per site
-
-Reported by the stdlib hunter.
-
-`vm_aux.rs::is_none_or_nil` asserts `arg_number != 0` while public siblings
-`check_any`/`check_type` return `InvalidStackIndex` for 0; make it the same.
-`isize::try_from(state.get_top()).expect("the value stack limit fits in isize")`
-appears three times in `tonumber` and again in `print`, `math.min`/`max`,
-`table.pack` (about 8 copies); a `State::top_isize()` would own it.
-`string.find`'s `u8::try_from(n - 1).expect(..)` relies on `LUA_MAXMATCHES <= 255`
-asserted in `string.rs`; put `const _: () = assert!(..)` beside the constant.
-`string_format.rs::format_float`'s `unreachable!` becomes unrepresentable with
-`Conversion::Float(FloatKind)`.
-
----
-
 ## Host surface and CLI
 
 ## Tooling, tests and harnesses
-
-## HYG-098 - Stale and drifting comments and docs
-
-Reported by every hunter, at different sites.
-
-- `examples/hotpath.rs` refers to "hotpath 0.15 ... as of 0.16" while Cargo.toml
-  pins 0.28.x; reword without versions. Its `use std::process::exit` comment says
-  brokkr is the only caller, contradicting the module doc and AGENTS.md
-  (`hotbench.sh` also calls it). Its module doc says `--iterations N, default 20`,
-  duplicating `DEFAULT_ITERATIONS`.
-- brokkr.toml says `[test] debug = true` while AGENTS.md says `brokkr test` always
-  passes `--release`; one is stale or the key means something else. brokkr.toml
-  says diff_gate prints `FAIL: <path>`; actual lines are `FAIL: <name>`,
-  `FAIL: <name> (dellingr exited N)`, `TIMEOUT: ...`; reword without enumerating.
-- `large_source` registers its ms-scale file for `--bench`; the documented
-  rationale for bench/ does not hold for its verdict walls (only `parse_us` is
-  meaningful) and nothing in the results flow marks that. The harness exits on
-  error paths without dropping the hotpath guard (intended), so a late `--alloc`
-  failure reports nothing about where it was.
-- `table.rs` (compiler) comment cites an example file and DIFF tag for the
-  leading-separator divergence; `docs/compatibility.md` is the durable owner.
-- `exp_desc.rs` comment cites "the capacity findings", transient-document language
-  in a durable comment.
-- `parse_pow` comment says "part of the cost model since version 4"; drop the
-  drifting specific or point at `COST_MODEL_VERSION`'s history.
-- `call_op`'s historical-bug narration ("Previously, using `f(self)?` here caused
-  a bug ... segfaults") describes code that no longer exists and claims segfaults
-  the current safe code cannot produce; replace with the invariant.
-- `verify.rs`'s comment names only the corpus test as the guard while `finalize`
-  validates every compile (HYG-001).
-- AGENTS.md says the CLI carries both `disallowed_methods` and `disallowed_types`
-  allows; `main` carries only the first. Reword to "scoped allows as needed".
-
-## HYG-104 - Two invariants held only by reasoning
-
-Reported by the wave 5 reconciler.
-
-- `numeral::scale_finite_by_power_of_two` lost its subnormal branches on the
-  argument that its only caller never passes an exponent below
-  `MIN_NORMAL_EXPONENT`; nothing checks that. A `debug_assert!` would make the
-  claim self-checking.
-- `call_op` still has an `ArgCount::Dynamic` arm that frames now always resolve
-  first; taking a fixed `u8` would make it a type guarantee.
-
-## HYG-099 - `#[hotpath::measure]` on trivial functions distorts the distribution
-
-Reported by the compiler and VM-core hunters.
-
-`Parser::update_line` (a one-field setter called per token) and
-`State::get_string_constant` (a one-line forward) carry measurement points; under
-instrumentation they inflate the event queue and mostly measure themselves. Remove
-them.

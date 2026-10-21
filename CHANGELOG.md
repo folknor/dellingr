@@ -50,9 +50,17 @@ All notable changes to dellingr are documented here. The format follows
 - `LibraryError` gains `InvalidNextKey`, `PositionOutOfBounds`, `ArrayTooBig`,
   `TostringMustReturnString` and `FormatPointerIdentitySpaceExhausted`; those
   runtime errors keep their message text.
+- The root re-export `dellingr::MAX_STRING_BYTES` is removed; use
+  `dellingr::limits::MAX_STRING_BYTES`. Likewise `dellingr::error::MAX_RESULTS`
+  is removed in favour of `dellingr::limits::MAX_RESULTS`.
+- Snapshot loading reports a saved table whose entries the runtime table
+  rejects as `LoadError::InvalidTable`, naming the table and the underlying
+  failure, where it previously reported `LoadError::CorruptArena`.
 
 ### Added
 
+- `LoadError::InvalidTable` and its `TableLoadLocation` (`#[non_exhaustive]`),
+  exported beside `LoadError`.
 - Per-State GC policy: `State::with_gc_policy`,
   `State::with_callbacks_and_gc_policy`, `gc_set_policy` and
   `gc_set_auto_threshold`.

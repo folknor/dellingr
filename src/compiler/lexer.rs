@@ -496,10 +496,10 @@ impl<'a> Lexer<'a> {
         current_len: usize,
     ) -> std::result::Result<(), LiteralStringFailure> {
         let size = current_len.saturating_add(1);
-        if size > crate::vm::MAX_STRING_BYTES {
+        if size > crate::limits::MAX_STRING_BYTES {
             Err(LiteralStringFailure::StringSizeExceeded {
                 size,
-                limit: crate::vm::MAX_STRING_BYTES,
+                limit: crate::limits::MAX_STRING_BYTES,
             })
         } else {
             Ok(())

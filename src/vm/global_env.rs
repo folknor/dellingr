@@ -2,11 +2,11 @@
 
 use std::borrow::Cow;
 
-use crate::compiler::{GlobalLookupCacheEntry, GlobalLookupCacheSlot};
 use crate::det_hash::IndexMap;
 use crate::instr::Builtin;
 
 use super::Val;
+use super::caches::{GlobalLookupCacheEntry, GlobalLookupCacheSlot};
 use super::object::{GcHeap, Markable, ObjectPtr};
 
 pub(super) struct GlobalEnv {

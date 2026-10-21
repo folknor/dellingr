@@ -28,39 +28,37 @@ use std::f64::consts::PI;
 // does work proportional to its inputs) and is part of the versioned cost
 // model, so it stays visible beside each function rather than behind a shared
 // helper that could drift per-function costs together by accident.
-pub(crate) fn open_math(state: &mut State) -> Result<()> {
-    // Create the math table
-    state.new_table_with_capacity(MATH_LIBRARY_CAPACITY)?;
+// Keep registration order stable: it determines table iteration order and
+// snapshot baselines.
+// The constants follow the functions in the math table; keep their order stable.
+pub(super) const MATH_CONSTANTS: &[(&str, f64)] = &[
+    // math.pi (constant)
+    ("pi", PI),
+    // math.huge (infinity constant)
+    ("huge", f64::INFINITY),
+];
 
-    // Helper to add a function to the table at stack index -1.
-    macro_rules! add_fn {
-        ($name:expr, $func:expr) => {
-            state.register_lib_fn(-1, "math", $name, $func)?;
-        };
-    }
-
+pub(super) const MATH_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     // math.sin(x) - costs 1
-    add_fn!("sin", |state| {
+    ("sin", |state| {
         state.consume_cost(1)?;
         check_type_named(state, 1, LuaType::Number, "sin")?;
         let x = state.to_number(1)?;
         state.set_top(0)?;
         state.push_number(x.sin())?;
         Ok(1)
-    });
-
+    }),
     // math.cos(x) - costs 1
-    add_fn!("cos", |state| {
+    ("cos", |state| {
         state.consume_cost(1)?;
         check_type_named(state, 1, LuaType::Number, "cos")?;
         let x = state.to_number(1)?;
         state.set_top(0)?;
         state.push_number(x.cos())?;
         Ok(1)
-    });
-
+    }),
     // math.atan2(y, x) - costs 1
-    add_fn!("atan2", |state| {
+    ("atan2", |state| {
         state.consume_cost(1)?;
         check_type_named(state, 1, LuaType::Number, "atan2")?;
         check_type_named(state, 2, LuaType::Number, "atan2")?;
@@ -69,32 +67,29 @@ pub(crate) fn open_math(state: &mut State) -> Result<()> {
         state.set_top(0)?;
         state.push_number(y.atan2(x))?;
         Ok(1)
-    });
-
+    }),
     // math.sqrt(x) - costs 1
-    add_fn!("sqrt", |state| {
+    ("sqrt", |state| {
         state.consume_cost(1)?;
         check_type_named(state, 1, LuaType::Number, "sqrt")?;
         let x = state.to_number(1)?;
         state.set_top(0)?;
         state.push_number(x.sqrt())?;
         Ok(1)
-    });
-
+    }),
     // math.abs(x) - costs 1
-    add_fn!("abs", |state| {
+    ("abs", |state| {
         state.consume_cost(1)?;
         check_type_named(state, 1, LuaType::Number, "abs")?;
         let x = state.to_number(1)?;
         state.set_top(0)?;
         state.push_number(x.abs())?;
         Ok(1)
-    });
-
+    }),
     // math.min(...) - costs 1, returns minimum of all arguments
-    add_fn!("min", |state| {
+    ("min", |state| {
         state.consume_cost(1)?;
-        let n = isize::try_from(state.get_top()).expect("the value stack limit fits in isize");
+        let n = state.top_isize();
         check_type_named(state, 1, LuaType::Number, "min")?;
         let mut result = state.to_number(1)?;
         for i in 2..=n {
@@ -107,12 +102,11 @@ pub(crate) fn open_math(state: &mut State) -> Result<()> {
         state.set_top(0)?;
         state.push_number(result)?;
         Ok(1)
-    });
-
+    }),
     // math.max(...) - costs 1, returns maximum of all arguments
-    add_fn!("max", |state| {
+    ("max", |state| {
         state.consume_cost(1)?;
-        let n = isize::try_from(state.get_top()).expect("the value stack limit fits in isize");
+        let n = state.top_isize();
         check_type_named(state, 1, LuaType::Number, "max")?;
         let mut result = state.to_number(1)?;
         for i in 2..=n {
@@ -125,30 +119,27 @@ pub(crate) fn open_math(state: &mut State) -> Result<()> {
         state.set_top(0)?;
         state.push_number(result)?;
         Ok(1)
-    });
-
+    }),
     // math.floor(x) - costs 1
-    add_fn!("floor", |state| {
+    ("floor", |state| {
         state.consume_cost(1)?;
         check_type_named(state, 1, LuaType::Number, "floor")?;
         let x = state.to_number(1)?;
         state.set_top(0)?;
         state.push_number(x.floor())?;
         Ok(1)
-    });
-
+    }),
     // math.ceil(x) - costs 1
-    add_fn!("ceil", |state| {
+    ("ceil", |state| {
         state.consume_cost(1)?;
         check_type_named(state, 1, LuaType::Number, "ceil")?;
         let x = state.to_number(1)?;
         state.set_top(0)?;
         state.push_number(x.ceil())?;
         Ok(1)
-    });
-
+    }),
     // math.random() / math.random(n) / math.random(m, n) - costs 1
-    add_fn!("random", |state| {
+    ("random", |state| {
         state.consume_cost(1)?;
         let num_args = state.get_top();
 
@@ -204,42 +195,38 @@ pub(crate) fn open_math(state: &mut State) -> Result<()> {
         state.set_top(0)?;
         state.push_number(result)?;
         Ok(1)
-    });
-
+    }),
     // math.tan(x) - costs 1
-    add_fn!("tan", |state| {
+    ("tan", |state| {
         state.consume_cost(1)?;
         check_type_named(state, 1, LuaType::Number, "tan")?;
         let x = state.to_number(1)?;
         state.set_top(0)?;
         state.push_number(x.tan())?;
         Ok(1)
-    });
-
+    }),
     // math.acos(x) - costs 1
-    add_fn!("acos", |state| {
+    ("acos", |state| {
         state.consume_cost(1)?;
         check_type_named(state, 1, LuaType::Number, "acos")?;
         let x = state.to_number(1)?;
         state.set_top(0)?;
         state.push_number(x.acos())?;
         Ok(1)
-    });
-
+    }),
     // math.asin(x) - costs 1
-    add_fn!("asin", |state| {
+    ("asin", |state| {
         state.consume_cost(1)?;
         check_type_named(state, 1, LuaType::Number, "asin")?;
         let x = state.to_number(1)?;
         state.set_top(0)?;
         state.push_number(x.asin())?;
         Ok(1)
-    });
-
+    }),
     // math.atan(y [, x]) - Lua 5.3+ style - costs 1
     // With one arg: returns atan(y)
     // With two args: returns atan2(y, x)
-    add_fn!("atan", |state| {
+    ("atan", |state| {
         state.consume_cost(1)?;
         check_type_named(state, 1, LuaType::Number, "atan")?;
         let y = state.to_number(1)?;
@@ -253,40 +240,36 @@ pub(crate) fn open_math(state: &mut State) -> Result<()> {
         state.set_top(0)?;
         state.push_number(result)?;
         Ok(1)
-    });
-
+    }),
     // math.deg(x) - radians to degrees - costs 1
-    add_fn!("deg", |state| {
+    ("deg", |state| {
         state.consume_cost(1)?;
         check_type_named(state, 1, LuaType::Number, "deg")?;
         let x = state.to_number(1)?;
         state.set_top(0)?;
         state.push_number(x.to_degrees())?;
         Ok(1)
-    });
-
+    }),
     // math.rad(x) - degrees to radians - costs 1
-    add_fn!("rad", |state| {
+    ("rad", |state| {
         state.consume_cost(1)?;
         check_type_named(state, 1, LuaType::Number, "rad")?;
         let x = state.to_number(1)?;
         state.set_top(0)?;
         state.push_number(x.to_radians())?;
         Ok(1)
-    });
-
+    }),
     // math.exp(x) - e^x - costs 1
-    add_fn!("exp", |state| {
+    ("exp", |state| {
         state.consume_cost(1)?;
         check_type_named(state, 1, LuaType::Number, "exp")?;
         let x = state.to_number(1)?;
         state.set_top(0)?;
         state.push_number(x.exp())?;
         Ok(1)
-    });
-
+    }),
     // math.log(x [, base]) - natural log, or log with base - costs 1
-    add_fn!("log", |state| {
+    ("log", |state| {
         state.consume_cost(1)?;
         check_type_named(state, 1, LuaType::Number, "log")?;
         let x = state.to_number(1)?;
@@ -306,10 +289,9 @@ pub(crate) fn open_math(state: &mut State) -> Result<()> {
         state.set_top(0)?;
         state.push_number(result)?;
         Ok(1)
-    });
-
+    }),
     // math.fmod(x, y) - float modulo (same sign as x) - costs 1
-    add_fn!("fmod", |state| {
+    ("fmod", |state| {
         state.consume_cost(1)?;
         check_type_named(state, 1, LuaType::Number, "fmod")?;
         check_type_named(state, 2, LuaType::Number, "fmod")?;
@@ -318,10 +300,9 @@ pub(crate) fn open_math(state: &mut State) -> Result<()> {
         state.set_top(0)?;
         state.push_number(x % y)?;
         Ok(1)
-    });
-
+    }),
     // math.modf(x) - returns integer and fractional parts - costs 1
-    add_fn!("modf", |state| {
+    ("modf", |state| {
         state.consume_cost(1)?;
         check_type_named(state, 1, LuaType::Number, "modf")?;
         let x = state.to_number(1)?;
@@ -335,13 +316,20 @@ pub(crate) fn open_math(state: &mut State) -> Result<()> {
         state.push_number(integral)?;
         state.push_number(fractional)?;
         Ok(2)
-    });
+    }),
+];
 
-    // math.pi (constant)
-    state.set_table_str_key_number(-1, "pi", PI)?;
+pub(crate) fn open_math(state: &mut State) -> Result<()> {
+    // Create the math table
+    state.new_table_with_capacity(MATH_LIBRARY_CAPACITY)?;
 
-    // math.huge (infinity constant)
-    state.set_table_str_key_number(-1, "huge", f64::INFINITY)?;
+    for &(name, func) in MATH_FUNCTIONS {
+        state.register_lib_fn(-1, "math", name, func)?;
+    }
+
+    for &(name, value) in MATH_CONSTANTS {
+        state.set_table_str_key_number(-1, name, value)?;
+    }
 
     // Set the math table as a global
     state.set_global("math")?;

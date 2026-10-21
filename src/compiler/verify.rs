@@ -593,8 +593,9 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
     // order for fields, set-fields and TFOR_CALL cursors). The duplication is
     // the point: the verifier is the independent check on a snapshot's cached
     // operands, and a shared helper would let a policy bug validate itself. Any
-    // change to the allocation policy must change both, and the compiler
-    // examples' stack-discipline verification test fails if they drift.
+    // change to the allocation policy must change both. Compiler finalization
+    // runs this validation on every compile, and the examples corpus test
+    // checks that the two policies stay aligned.
     let mut next_tfor_cursor_slot = 0usize;
     for pc in 0..code_len {
         let inst = Instr::from_raw(view.raw_instruction(pc));

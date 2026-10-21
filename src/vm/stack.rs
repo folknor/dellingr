@@ -288,7 +288,7 @@ impl State {
     /// bytes expand up to threefold, so a capped Lua string can otherwise
     /// produce an over-cap Rust `String`.
     pub(crate) fn lossy_utf8_checked(raw: &[u8]) -> Result<String> {
-        super::checked_string_growth(0, Self::lossy_utf8_len(raw))?;
+        crate::limits::checked_string_growth(0, Self::lossy_utf8_len(raw))?;
         Ok(String::from_utf8_lossy(raw).into_owned())
     }
 

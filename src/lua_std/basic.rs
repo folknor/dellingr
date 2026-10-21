@@ -140,55 +140,18 @@ pub(crate) fn base_pairs(state: &mut State) -> Result<u8> {
     Ok(3)
 }
 
-pub(crate) fn open_base(state: &mut State) -> Result<()> {
-    macro_rules! add {
-        ($name:expr, $func:expr) => {
-            state.register_lib_global_fn($name, $func)?;
-        };
-    }
+// Keep _G's metatable entries in their historical insertion order.
+pub(super) const GLOBAL_ENV_METAMETHODS: &[(&str, crate::RustFunc)] = &[
+    ("__index", global_env_index),
+    ("__newindex", global_env_newindex),
+];
 
-    state.register_lib_fn_id("ipairs.iter", base_ipairs_iter)?;
-    add!("ipairs", base_ipairs);
-    add!("next", base_next);
-    add!("pairs", base_pairs);
+// This field is installed after the proxy metamethods.
+pub(super) const GLOBAL_ENV_PROTECTION_FIELDS: &[(&str, bool)] = &[("__metatable", false)];
 
-    // Receives any number of arguments, and prints their values to `stdout`.
-    // Output is routed through host callbacks, allowing the game engine to
-    // redirect print output to per-script consoles.
-    add!("print", |state| {
-        let top = state.get_top();
-        let mut message = String::new();
-        for i in 1..=top {
-            let stack_index = isize::try_from(i).expect("the value stack limit fits in isize");
-            if i != 1 {
-                crate::vm::checked_string_growth(message.len(), 1)?;
-                message.push('\t');
-            }
-            // The host receives `&str`, so each part is converted lossily:
-            // every maximal invalid UTF-8 subsequence becomes one 3-byte
-            // U+FFFD. Measure the converted length from the raw bytes first
-            // and check it against the cap before materializing expanded text.
-            // Conversion keeps an already capped raw value plus a `message`
-            // whose length never exceeds the cap. The raw bytes come from
-            // `bytes_with_tostring_meta`, which also covers `__tostring`
-            // results that are byte strings.
-            let raw = state.bytes_with_tostring_meta(stack_index)?;
-            let lossy_len = State::lossy_utf8_len(&raw);
-            crate::vm::checked_string_growth(message.len(), lossy_len)?;
-            message.reserve(lossy_len);
-            for chunk in raw.utf8_chunks() {
-                message.push_str(chunk.valid());
-                if !chunk.invalid().is_empty() {
-                    message.push(char::REPLACEMENT_CHARACTER);
-                }
-            }
-        }
-        state.host_print(&message);
-        Ok(0)
-    });
-
+pub(super) const NON_BUILTIN_GLOBALS: &[(&str, crate::RustFunc)] = &[
     // Raises an error with the given message.
-    add!("error", |state| {
+    ("error", |state| {
         let message = if state.get_top() >= 1 {
             // `ErrorKind::ScriptError::message` is a `String` (it is rendered
             // through Display with a location prefix, so the host sees text
@@ -223,7 +186,58 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
             message,
             prefix: prefix_location,
         }))
+    }),
+];
+
+pub(crate) fn open_base(state: &mut State) -> Result<()> {
+    macro_rules! add {
+        ($name:expr, $func:expr) => {
+            state.register_lib_global_fn($name, $func)?;
+        };
+    }
+
+    state.register_lib_fn_id("ipairs.iter", base_ipairs_iter)?;
+    add!("ipairs", base_ipairs);
+    add!("next", base_next);
+    add!("pairs", base_pairs);
+
+    // Receives any number of arguments, and prints their values to `stdout`.
+    // Output is routed through host callbacks, allowing the game engine to
+    // redirect print output to per-script consoles.
+    add!("print", |state| {
+        let top = state.top_isize();
+        let mut message = String::new();
+        for stack_index in 1..=top {
+            if stack_index != 1 {
+                crate::limits::checked_string_growth(message.len(), 1)?;
+                message.push('\t');
+            }
+            // The host receives `&str`, so each part is converted lossily:
+            // every maximal invalid UTF-8 subsequence becomes one 3-byte
+            // U+FFFD. Measure the converted length from the raw bytes first
+            // and check it against the cap before materializing expanded text.
+            // Conversion keeps an already capped raw value plus a `message`
+            // whose length never exceeds the cap. The raw bytes come from
+            // `bytes_with_tostring_meta`, which also covers `__tostring`
+            // results that are byte strings.
+            let raw = state.bytes_with_tostring_meta(stack_index)?;
+            let lossy_len = State::lossy_utf8_len(&raw);
+            crate::limits::checked_string_growth(message.len(), lossy_len)?;
+            message.reserve(lossy_len);
+            for chunk in raw.utf8_chunks() {
+                message.push_str(chunk.valid());
+                if !chunk.invalid().is_empty() {
+                    message.push(char::REPLACEMENT_CHARACTER);
+                }
+            }
+        }
+        state.host_print(&message);
+        Ok(0)
     });
+
+    for &(name, func) in NON_BUILTIN_GLOBALS {
+        state.register_lib_global_fn(name, func)?;
+    }
 
     // Returns the type of its only argument, coded as a string.
     add!("type", |state| {
@@ -237,7 +251,7 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
     // Converts a value to a number, or a string in the given base to a number.
     add!("tonumber", |state| {
         check_any_named(state, 1, "tonumber")?;
-        if !state.is_none_or_nil(2) {
+        if !state.is_none_or_nil(2)? {
             check_type_named(state, 1, LuaType::String, "tonumber")?;
             let base = super::arg_integer(state, 2, "tonumber")?;
             if !(2..=36).contains(&base) {
@@ -251,8 +265,7 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
 
             let base = u32::try_from(base).expect("validated tonumber base fits in u32");
             let num = parse_integer_with_base(state.to_bytes(1)?, base);
-            let top =
-                isize::try_from(state.get_top()).expect("the value stack limit fits in isize");
+            let top = state.top_isize();
             state.pop(top)?;
             if let Some(num) = num {
                 state.push_number(num)?;
@@ -266,8 +279,7 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
         match typ {
             LuaType::Number => {
                 let num = state.to_number(1)?;
-                let top =
-                    isize::try_from(state.get_top()).expect("the value stack limit fits in isize");
+                let top = state.top_isize();
                 state.pop(top)?;
                 state.push_number(num)?;
                 Ok(1)
@@ -283,8 +295,7 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
                 Ok(1)
             }
             _ => {
-                let top =
-                    isize::try_from(state.get_top()).expect("the value stack limit fits in isize");
+                let top = state.top_isize();
                 state.pop(top)?;
                 state.push_nil()?;
                 Ok(1)
@@ -469,11 +480,9 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
     state.new_table()?; // _G table
     state.new_table()?; // metatable
 
-    // __index: function(t, k) return globals[k] end
-    state.register_lib_fn(-1, "_G", "__index", global_env_index)?;
-
-    // __newindex: function(t, k, v) globals[k] = v end
-    state.register_lib_fn(-1, "_G", "__newindex", global_env_newindex)?;
+    for &(name, func) in GLOBAL_ENV_METAMETHODS {
+        state.register_lib_fn(-1, "_G", name, func)?;
+    }
 
     // Protect the proxy metatable. It is the only thing connecting `_G` to
     // `globals`; unprotected, `setmetatable(_G, nil)` or
@@ -482,9 +491,11 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
     // `getmetatable(_G)` is nil there and false here (both falsy), and
     // `setmetatable(_G, mt)` - which reference allows - now errors loudly
     // instead of silently breaking `_G`.
-    state.push_string("__metatable")?;
-    state.push_boolean(false)?;
-    state.set_table_raw(-3)?;
+    for &(name, value) in GLOBAL_ENV_PROTECTION_FIELDS {
+        state.push_string(name)?;
+        state.push_boolean(value)?;
+        state.set_table_raw(-3)?;
+    }
 
     // Address the _G table relative to the top: a host may call open_libs
     // with values already on the stack, so absolute index 1 is not ours.

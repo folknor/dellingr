@@ -151,8 +151,9 @@ impl State {
         literals: &[Val],
     ) -> Result<()> {
         self.check_stack_space(1)?;
-        self.maybe_collect();
-        let obj = self.heap.alloc_table_with_template(key_ids, literals);
+        let obj = self
+            .allocator()
+            .alloc_table_with_template(key_ids, literals);
         self.push_unchecked(Val::Obj(obj));
         Ok(())
     }
@@ -309,11 +310,10 @@ impl State {
         let top = self.stack.len();
         let key = self.stack[top - 2];
         let val = self.stack[top - 1];
-        match key {
-            Val::Nil => return Err(self.type_error(TypeError::TableKeyNil)),
-            Val::Num(n) if n.is_nan() => return Err(self.type_error(TypeError::TableKeyNan)),
-            _ => {}
-        }
+        key.table_key().map_err(|error| match error {
+            super::table::InvalidTableKey::Nil => self.type_error(TypeError::TableKeyNil),
+            super::table::InvalidTableKey::Nan => self.type_error(TypeError::TableKeyNan),
+        })?;
         self.stack[idx]
             .as_object_ptr()
             .and_then(|ptr| self.heap.as_table(ptr))
@@ -782,14 +782,12 @@ impl State {
     /// Allocates a new table on the heap.
     #[hotpath::measure]
     pub(super) fn alloc_table(&mut self) -> Val {
-        self.maybe_collect();
-        let obj = self.heap.alloc_table();
+        let obj = self.allocator().alloc_table();
         Val::Obj(obj)
     }
 
     pub(super) fn alloc_table_with_capacity(&mut self, capacity: usize) -> Val {
-        self.maybe_collect();
-        let obj = self.heap.alloc_table_with_capacity(capacity);
+        let obj = self.allocator().alloc_table_with_capacity(capacity);
         Val::Obj(obj)
     }
 }

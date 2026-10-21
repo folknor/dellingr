@@ -9,6 +9,9 @@ use super::errors::*;
 
 pub(super) const LUA_MAXCAPTURES: usize = 32;
 pub(super) const LUA_MAXMATCHES: usize = LUA_MAXCAPTURES + 1;
+// string.find returns the start, the end and every capture through the u8
+// callback result count; this keeps that conversion infallible.
+const _: () = assert!(LUA_MAXMATCHES < u8::MAX as usize);
 const MAXCCALLS: usize = 200;
 const L_ESC: u8 = b'%';
 const PATTERN_MAGIC_BYTES: &[u8] = b"^$*+?.([%-)";

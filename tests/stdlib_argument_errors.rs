@@ -156,7 +156,8 @@ fn host_argument_checks_name_direct_lua_and_iterator_callbacks() {
 
 #[test]
 fn runtime_result_limit_accepts_255_and_rejects_256() {
-    use dellingr::error::{MAX_RESULTS, results_count};
+    use dellingr::error::results_count;
+    use dellingr::limits::MAX_RESULTS;
 
     assert_eq!(MAX_RESULTS, u8::MAX);
     assert_eq!(results_count(255).expect("255 fits the callback ABI"), 255);

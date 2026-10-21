@@ -8,6 +8,8 @@
 //! Each ObjectPtr contains a generation that is validated on access,
 //! preventing use-after-free bugs.
 
+mod collector;
+
 use crate::det_hash::IndexMap;
 use std::cell::Cell;
 use std::fmt;
@@ -439,11 +441,8 @@ impl GcHeap {
     // ========================================================================
 
     /// Allocate a new Lua function.
-    /// Note: Caller must check is_full() and run GC if needed before calling,
-    /// except where collection is deliberately skipped (snapshot load
-    /// materialization allocates without collecting).
     #[hotpath::measure]
-    pub(super) fn alloc_lua_fn(
+    fn alloc_lua_fn_raw(
         &mut self,
         bytecode: Arc<Bytecode>,
         runtime: Arc<BytecodeRuntime>,
@@ -468,11 +467,8 @@ impl GcHeap {
     }
 
     /// Allocate a new table.
-    /// Note: Caller must check is_full() and run GC if needed before calling,
-    /// except where collection is deliberately skipped (snapshot load
-    /// materialization allocates without collecting).
     #[hotpath::measure]
-    pub(super) fn alloc_table(&mut self) -> ObjectPtr {
+    fn alloc_table_raw(&mut self) -> ObjectPtr {
         let raw = RawObject::Table(Table::default());
         let wrapped = WrappedObject {
             raw,
@@ -482,10 +478,7 @@ impl GcHeap {
     }
 
     /// Allocate a new table with room for `capacity` entries.
-    /// Note: Caller must check is_full() and run GC if needed before calling,
-    /// except where collection is deliberately skipped (snapshot load
-    /// materialization allocates without collecting).
-    pub(super) fn alloc_table_with_capacity(&mut self, capacity: usize) -> ObjectPtr {
+    fn alloc_table_with_capacity_raw(&mut self, capacity: usize) -> ObjectPtr {
         let raw = RawObject::Table(Table::with_capacity(capacity));
         let wrapped = WrappedObject {
             raw,
@@ -495,14 +488,7 @@ impl GcHeap {
     }
 
     /// Allocate a new table pre-filled from a constructor template.
-    /// Note: Caller must check is_full() and run GC if needed before calling,
-    /// except where collection is deliberately skipped (snapshot load
-    /// materialization allocates without collecting).
-    pub(super) fn alloc_table_with_template(
-        &mut self,
-        key_ids: &[u16],
-        literals: &[Val],
-    ) -> ObjectPtr {
+    fn alloc_table_with_template_raw(&mut self, key_ids: &[u16], literals: &[Val]) -> ObjectPtr {
         let raw = RawObject::Table(Table::with_template_keys(key_ids, literals));
         let wrapped = WrappedObject {
             raw,
@@ -512,11 +498,8 @@ impl GcHeap {
     }
 
     /// Allocate or intern a string.
-    /// Note: Caller must check is_full() and run GC if needed before calling,
-    /// except where collection is deliberately skipped (snapshot load
-    /// materialization allocates without collecting).
     #[hotpath::measure]
-    pub(super) fn alloc_string(&mut self, bytes: &[u8]) -> StringPtr {
+    fn alloc_string_raw(&mut self, bytes: &[u8]) -> StringPtr {
         let hash = StringPool::hash_string(bytes);
         if let Some(ptr) = self.strings.find_by_hash(bytes, hash) {
             return ptr;
@@ -534,16 +517,7 @@ impl GcHeap {
     // Garbage Collection
     // ========================================================================
 
-    /// Check if GC should run.
-    ///
-    /// The allocators deliberately take no "collection already handled"
-    /// token. Collection is a caller-side obligation: the GC root set lives
-    /// in `State`, which the heap cannot see. A freely constructible marker
-    /// would not prove that those roots were marked, so runtime State
-    /// allocation wrappers own the check instead. The runtime exception,
-    /// snapshot materialization, is a bounded sequence of passes that must not
-    /// collect while its half-built graph is unrooted; it is named in each
-    /// allocator's doc note instead.
+    /// Check whether the configured allocation threshold has been reached.
     #[must_use]
     pub(super) fn is_full(&self) -> bool {
         self.allocation_count() >= self.threshold.value()
@@ -630,7 +604,7 @@ impl GcHeap {
     /// Run the garbage collector sweep phase.
     /// Call this after marking all roots.
     #[hotpath::measure(label = "object::heap_collect")]
-    pub(super) fn collect(&mut self) {
+    fn collect(&mut self) {
         #[cfg(feature = "debug_gc")]
         {
             println!("Running garbage collector");
@@ -930,8 +904,8 @@ mod tests {
     #[test]
     fn test_basic_allocation() {
         let mut heap = GcHeap::with_threshold(100);
-        let t1 = heap.alloc_table();
-        let t2 = heap.alloc_table();
+        let t1 = heap.no_gc_allocator().alloc_table();
+        let t2 = heap.no_gc_allocator().alloc_table();
 
         assert!(heap.as_table_ref(t1).is_some());
         assert!(heap.as_table_ref(t2).is_some());
@@ -941,8 +915,8 @@ mod tests {
     #[test]
     fn test_gc_collect() {
         let mut heap = GcHeap::with_threshold(100);
-        let kept = heap.alloc_table();
-        let _freed = heap.alloc_table();
+        let kept = heap.no_gc_allocator().alloc_table();
+        let _freed = heap.no_gc_allocator().alloc_table();
 
         // Mark only the first table
         let mut worklist = heap.take_mark_worklist();
@@ -959,9 +933,9 @@ mod tests {
     #[test]
     fn deep_table_chain_marks_iteratively_and_reuses_the_empty_worklist() {
         let mut heap = GcHeap::with_threshold(100);
-        let mut root = heap.alloc_table();
+        let mut root = heap.no_gc_allocator().alloc_table();
         for _ in 0..100_000 {
-            let next = heap.alloc_table();
+            let next = heap.no_gc_allocator().alloc_table();
             heap.as_table(next)
                 .expect("newly allocated object is a table")
                 .insert(Val::Num(1.0), Val::Obj(root))
@@ -984,7 +958,7 @@ mod tests {
     #[should_panic(expected = "use-after-free")]
     fn test_use_after_free_detection() {
         let mut heap = GcHeap::with_threshold(100);
-        let ptr = heap.alloc_table();
+        let ptr = heap.no_gc_allocator().alloc_table();
 
         // Don't mark it, then collect
         heap.collect();
@@ -996,9 +970,9 @@ mod tests {
     #[test]
     fn test_string_allocation() {
         let mut heap = GcHeap::with_threshold(100);
-        let s1 = heap.alloc_string(b"hello");
-        let s2 = heap.alloc_string(b"world");
-        let s3 = heap.alloc_string(b"hello"); // Should return same ptr as s1 (interned)
+        let s1 = heap.no_gc_allocator().alloc_string(b"hello");
+        let s2 = heap.no_gc_allocator().alloc_string(b"world");
+        let s3 = heap.no_gc_allocator().alloc_string(b"hello"); // Should return same ptr as s1 (interned)
 
         assert_eq!(heap.get_string(s1), b"hello");
         assert_eq!(heap.get_string(s2), b"world");
@@ -1015,8 +989,8 @@ mod tests {
     #[test]
     fn test_string_gc_collect() {
         let mut heap = GcHeap::with_threshold(100);
-        let kept = heap.alloc_string(b"keep");
-        let _freed = heap.alloc_string(b"free");
+        let kept = heap.no_gc_allocator().alloc_string(b"keep");
+        let _freed = heap.no_gc_allocator().alloc_string(b"free");
 
         // Mark only the first string
         heap.mark_string(kept);
@@ -1061,7 +1035,7 @@ mod tests {
     #[should_panic(expected = "use-after-free")]
     fn test_string_use_after_free_detection() {
         let mut heap = GcHeap::with_threshold(100);
-        let ptr = heap.alloc_string(b"test");
+        let ptr = heap.no_gc_allocator().alloc_string(b"test");
 
         // Don't mark it, then collect
         heap.collect();

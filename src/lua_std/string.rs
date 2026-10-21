@@ -266,7 +266,7 @@ fn append_capture_bytes(
 }
 
 fn append_bytes(state: &mut State, out: &mut Vec<u8>, bytes: &[u8]) -> Result<()> {
-    let next = crate::vm::checked_string_growth(out.len(), bytes.len())?;
+    let next = crate::limits::checked_string_growth(out.len(), bytes.len())?;
     state.consume_cost(bytes.len() as u64)?;
     out.reserve(next - out.len());
     out.extend_from_slice(bytes);
@@ -349,7 +349,7 @@ fn compile_replacement_template(repl: &[u8]) -> ReplTemplate {
 /// back to the byte-at-a-time appender when the result would cross the string
 /// size cap, so cap-boundary charging matches the unbatched path too.
 fn append_bytes_units(state: &mut State, out: &mut Vec<u8>, bytes: &[u8]) -> Result<()> {
-    let Ok(next) = crate::vm::checked_string_growth(out.len(), bytes.len()) else {
+    let Ok(next) = crate::limits::checked_string_growth(out.len(), bytes.len()) else {
         for byte in bytes {
             append_bytes(state, out, std::slice::from_ref(byte))?;
         }
@@ -502,19 +502,11 @@ fn append_gsub_replacement(
     Ok(())
 }
 
-pub(crate) fn open_string(state: &mut State) -> Result<()> {
-    // Create the string table
-    state.new_table_with_capacity(STRING_LIBRARY_CAPACITY)?;
-
-    // Helper to add a function to the table at stack index -1.
-    macro_rules! add_fn {
-        ($name:expr, $func:expr) => {
-            state.register_lib_fn(-1, "string", $name, $func)?;
-        };
-    }
-
+// Keep registration order stable: it determines table iteration order and
+// snapshot baselines.
+pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     // string.sub(s, i [, j])
-    add_fn!("sub", |state| {
+    ("sub", |state| {
         // Argument #1 is validated first, as in the reference.
         check_string_or_number(state, 1, "sub")?;
         let i = arg_integer(state, 2, "sub")?;
@@ -531,10 +523,9 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
         state.set_top(0)?;
         state.push_bytes(bytes)?;
         Ok(1)
-    });
-
+    }),
     // string.find(s, pattern [, init [, plain]])
-    add_fn!("find", |state| {
+    ("find", |state| {
         let subject = string_or_number_bytes(state, 1, "find")?;
         let pattern = string_or_number_bytes(state, 2, "find")?;
         state.consume_cost((subject.len() + pattern.len()).max(1) as u64)?;
@@ -609,6 +600,8 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
                             )?;
                         }
                     }
+                    // The pattern module asserts at compile time that its
+                    // match limit plus the two positions fits a u8.
                     let capture_returns = u8::try_from(n.saturating_sub(1))
                         .expect("Lua pattern captures fit the callback result count");
                     Ok(2 + capture_returns)
@@ -619,13 +612,11 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
                 }
             }
         }
-    });
-
+    }),
     // string.format(formatstring, ...)
-    add_fn!("format", super::string_format::format);
-
+    ("format", super::string_format::format),
     // string.len(s)
-    add_fn!("len", |state| {
+    ("len", |state| {
         let len = match state.typ(1) {
             LuaType::String => state.to_bytes(1)?.len(),
             _ => string_or_number_bytes(state, 1, "len")?.len(),
@@ -633,40 +624,36 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
         state.set_top(0)?;
         state.push_number(len as f64)?;
         Ok(1)
-    });
-
+    }),
     // string.upper(s)
-    add_fn!("upper", |state| {
+    ("upper", |state| {
         let mut s = string_or_number_bytes(state, 1, "upper")?;
         charge_bytes(state, s.len())?;
         s.make_ascii_uppercase();
         state.set_top(0)?;
         state.push_bytes(s)?;
         Ok(1)
-    });
-
+    }),
     // string.lower(s)
-    add_fn!("lower", |state| {
+    ("lower", |state| {
         let mut s = string_or_number_bytes(state, 1, "lower")?;
         charge_bytes(state, s.len())?;
         s.make_ascii_lowercase();
         state.set_top(0)?;
         state.push_bytes(s)?;
         Ok(1)
-    });
-
+    }),
     // string.reverse(s)
-    add_fn!("reverse", |state| {
+    ("reverse", |state| {
         let mut s = string_or_number_bytes(state, 1, "reverse")?;
         charge_bytes(state, s.len())?;
         s.reverse();
         state.set_top(0)?;
         state.push_bytes(s)?;
         Ok(1)
-    });
-
+    }),
     // string.match(s, pattern [, init])
-    add_fn!("match", |state| {
+    ("match", |state| {
         let s = string_or_number_bytes(state, 1, "match")?;
         let pattern = string_or_number_bytes(state, 2, "match")?;
         state.consume_cost((s.len() + pattern.len()).max(1) as u64)?;
@@ -695,10 +682,9 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
             state.push_nil()?;
             Ok(1)
         }
-    });
-
+    }),
     // string.gmatch(s, pattern [, init])
-    add_fn!("gmatch", |state| {
+    ("gmatch", |state| {
         let s = string_or_number_bytes(state, 1, "gmatch")?;
         let pattern = string_or_number_bytes(state, 2, "gmatch")?;
         state.consume_cost((s.len() + pattern.len()).max(1) as u64)?;
@@ -708,7 +694,7 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
             .map_or(0, |init| lua_start_index(s.len(), init))
             .min(s.len() + 1);
         let pattern = if pattern.first() == Some(&b'^') {
-            let escaped_len = crate::vm::checked_string_growth(pattern.len(), 1)?;
+            let escaped_len = crate::limits::checked_string_growth(pattern.len(), 1)?;
             let mut escaped = Vec::with_capacity(escaped_len);
             escaped.extend_from_slice(b"%^");
             escaped.extend_from_slice(&pattern[1..]);
@@ -748,10 +734,9 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
         state.set_table_raw(-3)?;
 
         push_gmatch_wrapper(state, gmatch_schema::ITERATOR_ID, gmatch_iter)
-    });
-
+    }),
     // string.gsub(s, pattern, repl [, n])
-    add_fn!("gsub", |state| {
+    ("gsub", |state| {
         check_any_named(state, 3, "gsub")?;
         let s = string_or_number_bytes(state, 1, "gsub")?;
         let pattern = string_or_number_bytes(state, 2, "gsub")?;
@@ -904,7 +889,16 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
         state.push_bytes(result)?;
         state.push_number(count as f64)?;
         Ok(2)
-    });
+    }),
+];
+
+pub(crate) fn open_string(state: &mut State) -> Result<()> {
+    // Create the string table
+    state.new_table_with_capacity(STRING_LIBRARY_CAPACITY)?;
+
+    for &(name, func) in STRING_FUNCTIONS {
+        state.register_lib_fn(-1, "string", name, func)?;
+    }
 
     // Register the gmatch iterator functions up front so a persisted gmatch
     // closure (which captures one of them as an upvalue) can be resolved on
@@ -957,7 +951,6 @@ fn push_gmatch_string_field(state: &mut State, field: &str) -> Result<()> {
 // Gmatch tables are private closure state. Save verification checks their
 // serialized form, and runtime reads repeat the invariant so an absent,
 // mistyped, or out-of-range field cannot silently restart an iterator.
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn gmatch_state_index(
     state: &State,
     stack_index: isize,
@@ -971,17 +964,9 @@ fn gmatch_state_index(
         ));
     }
     let number = state.to_number(stack_index)?;
-    if !number.is_finite()
-        || number < 0.0
-        || number.fract().to_bits() << 1 != 0
-        || number > maximum as f64
-    {
-        return Err(invalid_gmatch_state(
-            state,
-            format!("field '{field}' is outside its valid range"),
-        ));
-    }
-    Ok(number as usize)
+    crate::vm::integer_index(number, maximum).ok_or_else(|| {
+        invalid_gmatch_state(state, format!("field '{field}' is outside its valid range"))
+    })
 }
 
 fn gmatch_empty_iter(state: &mut State) -> Result<u8> {
@@ -993,7 +978,7 @@ fn gmatch_empty_iter(state: &mut State) -> Result<u8> {
         state,
         -1,
         gmatch_schema::POSITION_FIELD,
-        crate::vm::MAX_STRING_BYTES + 1,
+        crate::limits::MAX_STRING_BYTES + 1,
     )?;
     state.pop(1)?;
 
@@ -1003,7 +988,7 @@ fn gmatch_empty_iter(state: &mut State) -> Result<u8> {
         state,
         -1,
         gmatch_schema::LENGTH_FIELD,
-        crate::vm::MAX_STRING_BYTES,
+        crate::limits::MAX_STRING_BYTES,
     )?;
     state.pop(1)?;
 
@@ -1039,7 +1024,7 @@ fn gmatch_iter(state: &mut State) -> Result<u8> {
         state,
         -1,
         gmatch_schema::POSITION_FIELD,
-        crate::vm::MAX_STRING_BYTES + 1,
+        crate::limits::MAX_STRING_BYTES + 1,
     )?;
     state.pop(1)?;
 
@@ -1053,7 +1038,7 @@ fn gmatch_iter(state: &mut State) -> Result<u8> {
             state,
             -1,
             gmatch_schema::LAST_MATCH_FIELD,
-            crate::vm::MAX_STRING_BYTES,
+            crate::limits::MAX_STRING_BYTES,
         )?),
         _ => {
             return Err(invalid_gmatch_state(

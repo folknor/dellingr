@@ -40,7 +40,8 @@ does.
 - A numeric `for` with a zero step skips its body in both directions. Lua 5.2
   skips an ascending range but loops forever on a descending one. Lua 5.4
   raises an error.
-- Semicolons are accepted in some places where Lua 5.4 rejects them.
+- Table constructors accept leading and lone comma or semicolon separators,
+  for example `{,}` and `{;}`. Lua 5.2 and 5.4 reject those forms.
 - Errors kill the callback. There is no `pcall`, `xpcall` or `assert`.
 
 ## Globals and metatables

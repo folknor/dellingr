@@ -33,7 +33,7 @@ Run `./scripts/bench.sh` to reproduce on your own host. Sample run on AMD Ryzen 
 | `alloc/gc_churn` *       |     20ms |       - |     1.31x |     1.26x |     1.10x |     1.77x |
 | `parse/large_source` *   |      8ms |       - |     2.28x |     2.30x |     2.04x |     3.19x |
 
-<sub>Rows marked `*` are diagnostic probes, not representative workloads. Each one deliberately isolates a single path that was unoptimized when the probe was written, so its ratio tracks one specific optimization target rather than what typical scripts see. Several of those paths have since been optimized, which is why some probes now sit among the cheaper rows. `calls/many_literals` calls a function carrying 32 string constants that returns from its first branch, concentrating its runtime in per-call literal handling. `parse/large_source` measures parse and codegen on a 5000-line chunk rather than execution.</sub>
+<sub>Rows marked `*` are diagnostic probes, not representative workloads. Each one deliberately isolates a single path that was unoptimized when the probe was written, so its ratio tracks one specific optimization target rather than what typical scripts see. Several of those paths have since been optimized, which is why some probes now sit among the cheaper rows. `calls/many_literals` calls a function carrying 32 string constants that returns from its first branch, concentrating its runtime in per-call literal handling. `parse/large_source` is a parse and codegen probe on generated source; its timing is a parse/codegen diagnostic rather than an execution benchmark.</sub>
 
 <sub>The `lua-rs` column was captured 2026-06-02 against [ianm199/lua-rs](https://github.com/ianm199/lua-rs) at commit [`98bd6bd`](https://github.com/ianm199/lua-rs/commit/98bd6bd); rows added since carry no `lua-rs` figure. Every other column was captured 2026-07-27 at commit `abf7c7b` on host `plantasjen`.</sub>
 
@@ -54,7 +54,7 @@ Designed for sandboxed embedding, not as a general-purpose Lua replacement. Thes
 - Implicit string-to-number coercion in arithmetic and numeric control expressions
 - Long strings (`[[...]]`, `[=[...]=]`)
 
-Some of them might be added later (probably most of them behind a feature gate, if so). The lack of the features above make the VM much more suitable for embedded use. Especially in games where the Lua scripting might be exposed to users. In those cases, these 3 string methods - for example - could be used to work around restrictions the game wants to put on the user.
+Keeping these features out makes the VM more suitable for embedded use, especially in games that expose scripting to users. Their absence helps hosts enforce the constraints they choose for those scripts.
 
 ## Source limits
 

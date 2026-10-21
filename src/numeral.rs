@@ -37,21 +37,15 @@ pub(crate) fn lua_div(a: f64, b: f64) -> f64 {
 }
 
 /// Returns the numeric function the VM dispatch uses for an arithmetic opcode
-/// that is safe to fold, or `None` for other opcodes. The dispatch keeps direct function
-/// items so its calls remain statically dispatched and inlinable.
+/// that is safe to fold, or `None` for other opcodes. Opcode rows own this
+/// mapping, and both the folder and runtime dispatch use the same function
+/// items.
 ///
 /// Exponentiation is deliberately excluded: its result depends on the host
 /// `powf` implementation, so folding it would bake a platform-specific result
 /// into bytecode.
 pub(crate) fn arith_fn(opcode: u8) -> Option<fn(f64, f64) -> f64> {
-    Some(match opcode {
-        Instr::OP_ADD => lua_add,
-        Instr::OP_SUBTRACT => lua_sub,
-        Instr::OP_MULTIPLY => lua_mul,
-        Instr::OP_DIVIDE => lua_div,
-        Instr::OP_MOD => lua_modulo,
-        _ => return None,
-    })
+    Instr::arithmetic_fn(opcode)
 }
 
 /// Lua 5.4 floored modulo, including its special floating-point cases.
@@ -291,7 +285,11 @@ fn scale_finite_by_power_of_two(value: f64, scale: i64) -> f64 {
     // rounding carries. Its exponent is therefore `top_exponent` or one above.
     // `finish_hex` calls this only when `top_exponent` is at least
     // `MIN_NORMAL_EXPONENT`; subnormals use `round_hex_subnormal` instead.
-    let exponent = exponent.clamp(MIN_NORMAL_EXPONENT, MAX_NORMAL_EXPONENT) as i32;
+    debug_assert!(
+        exponent >= MIN_NORMAL_EXPONENT,
+        "normal hex scaling must not receive a subnormal exponent"
+    );
+    let exponent = exponent as i32;
     normalized * 2_f64.powi(exponent)
 }
 

@@ -1,8 +1,7 @@
 use std::sync::Arc;
 
-// The constant folder reaches these same functions through `numeral::arith_fn`.
-// Keep the dispatch arms' explicit mapping to direct function items so each
-// generic call stays statically dispatched and inlinable.
+// The constant folder and runtime dispatch use the arithmetic functions
+// declared with each opcode in `instr.rs`.
 use crate::numeral::{lua_add, lua_div, lua_modulo, lua_mul, lua_sub};
 
 use super::super::error::{Error, ErrorKind, StackFrame};
@@ -125,34 +124,34 @@ impl Frame {
         }
     }
 
-    fn call_args(&self, state: &mut State, args: ArgCount) -> Result<ArgCount> {
-        let args = if args == ArgCount::Dynamic {
-            let calls = &mut state.pending_bases.calls;
-            let owned = if calls.len() > self.pending_floor.calls {
-                calls.pop()
-            } else {
-                None
-            };
-            let base = owned.ok_or_else(|| {
-                state.error(ErrorKind::InternalError(
-                    "call with Dynamic args but no call base pending in this frame".into(),
-                ))
-            })?;
-            let actual_len = state.stack.len().checked_sub(base + 1).ok_or_else(|| {
-                state.error(ErrorKind::InternalError(
-                    "dynamic call base is outside the active stack".into(),
-                ))
-            })?;
-            let actual = u8::try_from(actual_len).map_err(|_| {
-                state.error(ErrorKind::TooManyArguments {
-                    limit: crate::limits::MAX_ARGUMENTS,
-                })
-            })?;
-            ArgCount::Fixed(actual)
-        } else {
-            args
+    fn call_args(&self, state: &mut State, args: ArgCount) -> Result<u8> {
+        let actual = match args {
+            ArgCount::Fixed(actual) => actual,
+            ArgCount::Dynamic => {
+                let calls = &mut state.pending_bases.calls;
+                let owned = if calls.len() > self.pending_floor.calls {
+                    calls.pop()
+                } else {
+                    None
+                };
+                let base = owned.ok_or_else(|| {
+                    state.error(ErrorKind::InternalError(
+                        "call with Dynamic args but no call base pending in this frame".into(),
+                    ))
+                })?;
+                let actual_len = state.stack.len().checked_sub(base + 1).ok_or_else(|| {
+                    state.error(ErrorKind::InternalError(
+                        "dynamic call base is outside the active stack".into(),
+                    ))
+                })?;
+                u8::try_from(actual_len).map_err(|_| {
+                    state.error(ErrorKind::TooManyArguments {
+                        limit: crate::limits::MAX_ARGUMENTS,
+                    })
+                })?
+            }
         };
-        Ok(args)
+        Ok(actual)
     }
 
     /// Get the bytecode being executed.
@@ -292,6 +291,66 @@ impl Frame {
                     *$local = next;
                 }
             }};
+        }
+
+        // Match arms cannot come from a macro, so the opcode rows feed two
+        // expansions: the or-pattern selecting every arithmetic opcode, and
+        // the inner match giving each one its direct function-item call.
+        macro_rules! arithmetic_opcode_pattern {
+            (@ [$($names:ident)*];
+                $name:ident = $number:literal, $reserved:literal, $transfer:literal,
+                    $cost:ident [$arithmetic:path, $foldable:literal], $debug:expr;
+                $($rest:tt)*) => {
+                arithmetic_opcode_pattern!(@ [$($names)* $name]; $($rest)*)
+            };
+            (@ [$($names:ident)*];
+                $name:ident = $number:literal, $reserved:literal, $transfer:literal,
+                    $cost:ident, $debug:expr;
+                $($rest:tt)*) => {
+                arithmetic_opcode_pattern!(@ [$($names)*]; $($rest)*)
+            };
+            (@ [$($names:ident)+];) => {
+                $(Instr::$names)|+
+            };
+            (; $($rows:tt)*) => {
+                arithmetic_opcode_pattern!(@ []; $($rows)*)
+            };
+        }
+
+        macro_rules! arithmetic_dispatch {
+            (@ $state:ident, $local:ident, $opcode:ident; [$($names:ident => $fns:path,)*];
+                $name:ident = $number:literal, $reserved:literal, $transfer:literal,
+                    $cost:ident [$arithmetic:path, $foldable:literal], $debug:expr;
+                $($rest:tt)*) => {
+                arithmetic_dispatch!(
+                    @ $state, $local, $opcode; [$($names => $fns,)* $name => $arithmetic,];
+                    $($rest)*
+                )
+            };
+            (@ $state:ident, $local:ident, $opcode:ident; [$($names:ident => $fns:path,)*];
+                $name:ident = $number:literal, $reserved:literal, $transfer:literal,
+                    $cost:ident, $debug:expr;
+                $($rest:tt)*) => {
+                arithmetic_dispatch!(@ $state, $local, $opcode; [$($names => $fns,)*]; $($rest)*)
+            };
+            (@ $state:ident, $local:ident, $opcode:ident; [$($names:ident => $fns:path,)+];) => {
+                match $opcode.opcode() {
+                    $(
+                        Instr::$names => {
+                            add_cost!(
+                                $state,
+                                $local,
+                                const { Instr::op(Instr::$names).static_units() }
+                            );
+                            $state.eval_float_float($fns)?;
+                        }
+                    )+
+                    _ => unreachable!("arithmetic dispatch received a non-arithmetic opcode"),
+                }
+            };
+            ($state:ident, $local:ident, $opcode:ident; $($rows:tt)*) => {
+                arithmetic_dispatch!(@ $state, $local, $opcode; []; $($rows)*)
+            };
         }
 
         loop {
@@ -493,54 +552,15 @@ impl Frame {
 
                 // === Fixed-charge operations ===
 
-                // Arithmetic
-                Instr::OP_ADD => {
-                    add_cost!(
-                        state,
-                        local_cost,
-                        const { Instr::op(Instr::OP_ADD).static_units() }
+                // Arithmetic expands from the opcode rows, keeping each
+                // operation a direct call to its function item.
+                crate::instr::opcode_rows!(arithmetic_opcode_pattern, (), inst, f) => {
+                    crate::instr::opcode_rows!(
+                        arithmetic_dispatch,
+                        (state, local_cost, inst),
+                        inst,
+                        f
                     );
-                    state.eval_float_float(lua_add)?;
-                }
-                Instr::OP_SUBTRACT => {
-                    add_cost!(
-                        state,
-                        local_cost,
-                        const { Instr::op(Instr::OP_SUBTRACT).static_units() }
-                    );
-                    state.eval_float_float(lua_sub)?;
-                }
-                Instr::OP_MULTIPLY => {
-                    add_cost!(
-                        state,
-                        local_cost,
-                        const { Instr::op(Instr::OP_MULTIPLY).static_units() }
-                    );
-                    state.eval_float_float(lua_mul)?;
-                }
-                Instr::OP_DIVIDE => {
-                    add_cost!(
-                        state,
-                        local_cost,
-                        const { Instr::op(Instr::OP_DIVIDE).static_units() }
-                    );
-                    state.eval_float_float(lua_div)?;
-                }
-                Instr::OP_MOD => {
-                    add_cost!(
-                        state,
-                        local_cost,
-                        const { Instr::op(Instr::OP_MOD).static_units() }
-                    );
-                    state.eval_float_float(lua_modulo)?;
-                }
-                Instr::OP_POW => {
-                    add_cost!(
-                        state,
-                        local_cost,
-                        const { Instr::op(Instr::OP_POW).static_units() }
-                    );
-                    state.eval_float_float(f64::powf)?;
                 }
 
                 // Unary negation
@@ -691,7 +711,7 @@ mod tests {
         });
         let runtime = Arc::new(BytecodeRuntime {
             literals: Box::new([]),
-            caches: super::super::compiler::RuntimeCaches::new(&bytecode),
+            caches: crate::vm::caches::RuntimeCaches::new(&bytecode),
         });
         let mut frame = Frame::new(
             bytecode,
@@ -717,7 +737,7 @@ mod tests {
         });
         let runtime = Arc::new(BytecodeRuntime {
             literals: Box::new([]),
-            caches: super::super::compiler::RuntimeCaches::new(&bytecode),
+            caches: crate::vm::caches::RuntimeCaches::new(&bytecode),
         });
         let mut frame = Frame::new(
             bytecode,

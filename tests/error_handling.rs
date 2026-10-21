@@ -4,7 +4,8 @@
 //! when it encounters unexpected types or corrupt state.
 
 use dellingr::error::ErrorKind;
-use dellingr::{ArgCount, LuaType, MAX_STRING_BYTES, RetCount, State};
+use dellingr::limits::MAX_STRING_BYTES;
+use dellingr::{ArgCount, LuaType, RetCount, State};
 
 #[test]
 fn host_string_limit_is_inclusive_and_leaves_stack_unchanged() {

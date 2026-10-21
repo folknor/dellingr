@@ -10,6 +10,9 @@
 //! cost is that tests of the large limits (call depth, stack cap) exercise the
 //! real values rather than small ones.
 
+use crate::Result;
+use crate::error::{Error, ErrorKind};
+
 // Recursive parser entry points share this budget. Visible nesting costs vary
 // by construct, so this is a recursion budget rather than a source-level depth.
 /// Maximum active recursive parser entries, rather than source nesting levels.
@@ -81,6 +84,28 @@ pub const MAX_FRAME_SLOTS: usize = u8::MAX as usize;
 
 /// Maximum size in bytes of any Lua string.
 pub const MAX_STRING_BYTES: usize = 16 * 1024 * 1024;
+
+/// Reject a string whose byte length exceeds the fixed VM limit.
+pub(crate) fn check_string_size(size: usize) -> Result<()> {
+    if size > MAX_STRING_BYTES {
+        return Err(Error::without_location(ErrorKind::StringSizeExceeded {
+            size,
+            limit: MAX_STRING_BYTES,
+        }));
+    }
+    Ok(())
+}
+
+/// Add to a string length without allowing overflow or exceeding its limit.
+pub(crate) fn checked_string_growth(current: usize, additional: usize) -> Result<usize> {
+    // Saturating rather than wrapping: an overflowing total is reported as
+    // usize::MAX, which is above the cap and so rejected instead of wrapping
+    // to a small value that would pass the check.
+    let size = current.saturating_add(additional);
+    check_string_size(size)?;
+    Ok(size)
+}
+
 /// Maximum simultaneously active Lua calls; not a native-stack guarantee.
 pub const MAX_CALL_DEPTH: u32 = 1000;
 /// Maximum values on the shared Lua/Rust stack, not a host-memory quota.

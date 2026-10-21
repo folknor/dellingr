@@ -6,8 +6,8 @@
 //!   - parse   `load_string_named` (parser and codegen)
 //!   - setup   top-level chunk run (registers `_bench`, builds fixtures)
 //!   - cold    first `_bench` invocation
-//!   - warm    N further invocations on the same State (`--iterations N`,
-//!     default 20)
+//!   - warm    N further invocations on the same State, controlled by
+//!     `--iterations N`
 //!
 //! A script path is required and is resolved from the caller's working
 //! directory. brokkr and hotbench.sh both pass the registered file path.
@@ -39,19 +39,16 @@ use std::env;
 use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
-// Exit status is 1 for every failure and 2 for usage: the only caller is
-// brokkr, which treats any nonzero status as a failed run and reads the stderr
-// message, so finer-grained codes would have no consumer.
+// Exit status is 1 for a failed run and 2 for a usage error. The process
+// status lets the harness caller distinguish a complete run from a failure.
 use std::process::exit;
 use std::time::{Duration, Instant};
 
 use dellingr::{ArgCount, LuaType, RetCount, State};
 
-// hotpath 0.15 installed CountingAllocator internally under hotpath-alloc; as
-// of 0.16 it is a plain generic type the consumer must declare - the crate no
-// longer wires it up on its own. Without this, hotpath-alloc builds fall back
-// to the system allocator and track_alloc/track_dealloc never fire, so every
-// function silently reports 0 bytes.
+// Install the counting allocator in this instrumented binary so
+// hotpath-alloc runs observe allocation traffic. Without it, allocations use
+// the system allocator and the per-function allocation counters stay empty.
 #[cfg(feature = "hotpath-alloc")]
 #[global_allocator]
 static ALLOC: hotpath::CountingAllocator = hotpath::CountingAllocator::new();

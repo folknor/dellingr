@@ -61,8 +61,8 @@ impl CallSite {
 /// lint exists to catch enums bloated by one large variant, which this is not.
 /// Every alternative is worse: boxing costs a heap allocation per prefix
 /// expression on the parser's hot path, and narrowing the line to `u16` would
-/// saturate traceback lines in generated data scripts past 65k lines - which is
-/// precisely the workload the capacity findings are about.
+/// saturate traceback lines in generated data scripts past 65k lines, and large
+/// generated scripts are a supported workload.
 #[allow(variant_size_differences)]
 #[derive(Clone, Debug)]
 pub(super) enum PrefixExp {

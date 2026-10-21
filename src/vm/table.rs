@@ -30,7 +30,33 @@ pub(super) enum InvalidTableKey {
     Nan,
 }
 
+/// A non-negative integral number bounded by a collection's maximum index.
+#[inline]
+#[allow(clippy::float_cmp)]
+pub(crate) fn integer_index(value: f64, maximum: usize) -> Option<usize> {
+    (value >= 0.0 && value <= maximum as f64 && value == value.floor()).then_some(value as usize)
+}
+
+/// Convert a Lua array key in `1..=len` to a zero-based slot.
+#[inline]
+pub(super) fn array_index(value: f64, len: usize) -> Option<usize> {
+    if value >= 1.0 {
+        integer_index(value, len).map(|index| index - 1)
+    } else {
+        None
+    }
+}
+
+/// Whether a numeric key extends an array of the given length.
+#[inline]
+#[allow(clippy::float_cmp)]
+pub(super) fn is_append_key(value: f64, len: usize) -> bool {
+    value == (len + 1) as f64
+}
+
 /// A table key before applying the VM's canonical numeric equality rule.
+// The value hasher also consumes this input type. Keep it visible until that
+// caller uses the runtime key normalizer; snapshot keys have distinct payloads.
 pub(super) enum TableKeyInput<S, O, F> {
     Nil,
     Bool(bool),
@@ -82,6 +108,28 @@ pub(super) fn normalize_table_key<S, O, F>(
     }
 }
 
+impl Val {
+    /// Validate and normalize a runtime table key without dereferencing it.
+    #[inline]
+    pub(super) fn table_key(
+        self,
+    ) -> std::result::Result<
+        NormalizedTableKey<super::object::StringPtr, ObjectPtr, usize>,
+        InvalidTableKey,
+    > {
+        let value = self;
+        let input = match value {
+            Val::Nil => TableKeyInput::Nil,
+            Val::Bool(value) => TableKeyInput::Bool(value),
+            Val::Num(value) => TableKeyInput::Number(value),
+            Val::Str(value) => TableKeyInput::String(value),
+            Val::Obj(value) => TableKeyInput::Object(value),
+            Val::RustFn(value) => TableKeyInput::RustFn(value as usize),
+        };
+        normalize_table_key(input)
+    }
+}
+
 /// Payload for a table key slot. Live keys carry a value validated by the
 /// common normalizer; vacant slots retain only their unique physical index.
 /// A vacant slot marks a key that was re-added elsewhere. The new live key
@@ -104,15 +152,7 @@ struct TableKey(TableKeyKind);
 impl TableKey {
     #[inline]
     fn new(value: Val) -> std::result::Result<Self, InvalidTableKey> {
-        let input = match value {
-            Val::Nil => TableKeyInput::Nil,
-            Val::Bool(value) => TableKeyInput::Bool(value),
-            Val::Num(value) => TableKeyInput::Number(value),
-            Val::Str(value) => TableKeyInput::String(value),
-            Val::Obj(value) => TableKeyInput::Object(value),
-            Val::RustFn(value) => TableKeyInput::RustFn(value as usize),
-        };
-        normalize_table_key(input).map(|_| Self(TableKeyKind::Live(value)))
+        value.table_key().map(|_| Self(TableKeyKind::Live(value)))
     }
 
     /// Wrap a key already validated by the bytecode verifier or by an earlier
@@ -363,24 +403,17 @@ impl Table {
     /// The array slot holding `key`, if `key` is an integer in
     /// `1..=array.len()`.
     #[inline]
-    #[allow(clippy::float_cmp)]
     fn array_slot(&self, key: &Val) -> Option<usize> {
-        if let Val::Num(n) = *key
-            && n >= 1.0
-            && n <= self.array.len() as f64
-            && n == n.floor()
-        {
-            Some(n as usize - 1)
-        } else {
-            None
+        match *key {
+            Val::Num(n) => array_index(n, self.array.len()),
+            _ => None,
         }
     }
 
     /// Whether `key` is `array.len() + 1`, the key that extends the array.
     #[inline]
-    #[allow(clippy::float_cmp)]
     fn is_array_append_key(&self, key: &Val) -> bool {
-        matches!(key, Val::Num(n) if *n == (self.array.len() + 1) as f64)
+        matches!(key, Val::Num(n) if is_append_key(*n, self.array.len()))
     }
 
     #[inline]
@@ -469,8 +502,7 @@ impl Table {
     #[inline]
     fn hash_get(&self, key: &Val) -> Val {
         match key {
-            Val::Nil => Val::Nil,
-            Val::Num(n) if n.is_nan() => Val::Nil,
+            _ if key.table_key().is_err() => Val::Nil,
             _ => match &self.storage {
                 TableStorage::Inline { entries, len } => {
                     for (entry_key, entry_value) in entries.iter().take(*len as usize) {
@@ -492,8 +524,7 @@ impl Table {
             return (!matches!(value, Val::Nil)).then_some((ARRAY_SLOT_TAG | slot, value));
         }
         match key {
-            Val::Nil => None,
-            Val::Num(n) if n.is_nan() => None,
+            _ if key.table_key().is_err() => None,
             _ => match &self.storage {
                 TableStorage::Inline { entries, len } => {
                     for (idx, (entry_key, entry_value)) in
@@ -641,7 +672,7 @@ impl Table {
         let mut entries = entries.into_iter();
         let mut array = Vec::with_capacity(array_len);
         for (slot, (key, value)) in entries.by_ref().take(array_len).enumerate() {
-            if !matches!(key, Val::Num(n) if n.to_bits() == ((slot + 1) as f64).to_bits()) {
+            if !matches!(key, Val::Num(n) if array_index(n, array_len) == Some(slot)) {
                 return Err(Error::new(
                     ErrorKind::InternalError("snapshot array slot has the wrong key".into()),
                     0,
@@ -809,6 +840,8 @@ impl Table {
             return Ok(());
         }
 
+        // Frame exit supplies source context for VM errors; direct host calls
+        // have no Lua source location. Keep the table's error text unchanged.
         let table_key = match TableKey::new(key) {
             Ok(key) => key,
             Err(InvalidTableKey::Nil) => return Err(Error::new(TypeError::TableKeyNil, 0, 0)),
@@ -1253,11 +1286,11 @@ impl Table {
     /// Advance from `control`, retaining physical storage indices. A dead
     /// control slot remains valid, matching Lua's `next` behaviour here.
     pub(super) fn next_with_index(&self, control: &Val) -> TableNextWithIndex {
-        if matches!(control, Val::Num(n) if n.is_nan()) {
-            return TableNextWithIndex::InvalidKey;
-        }
         if matches!(control, Val::Nil) {
             return self.next_live_from(Position::Array(0));
+        }
+        if control.table_key().is_err() {
+            return TableNextWithIndex::InvalidKey;
         }
         if let Some(slot) = self.array_slot(control) {
             return self.next_live_from(Position::Array(slot + 1));
@@ -1281,7 +1314,7 @@ impl Table {
         index: usize,
         control: &Val,
     ) -> TableNextWithIndex {
-        if matches!(control, Val::Num(n) if n.is_nan()) {
+        if control.table_key().is_err() {
             return TableNextWithIndex::InvalidKey;
         }
         if index & ARRAY_SLOT_TAG != 0 {
@@ -2051,5 +2084,25 @@ mod tests {
             .expect("numeric table key is valid");
         table.array.push(Val::Nil);
         table.debug_assert_invariants();
+    }
+}
+
+#[cfg(test)]
+mod key_rule_tests {
+    use super::{array_index, integer_index, is_append_key};
+
+    #[test]
+    fn numeric_key_boundaries() {
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0, 0.5, 4.0] {
+            assert_eq!(array_index(value, 3), None);
+        }
+        assert_eq!(integer_index(-0.0, 3), Some(0));
+        assert_eq!(array_index(-0.0, 3), None);
+        assert_eq!(array_index(1.0, 3), Some(0));
+        assert_eq!(array_index(3.0, 3), Some(2));
+        assert_eq!(array_index(1.0, 0), None);
+        assert!(is_append_key(1.0, 0));
+        assert!(is_append_key(4.0, 3));
+        assert!(!is_append_key(3.5, 3));
     }
 }

@@ -32,7 +32,8 @@ mod upvalue;
 /// Tracks the current state, to make parsing easier.
 #[derive(Debug)]
 struct Parser<'a> {
-    /// The input token stream.
+    // The token stream owns consumed-token line state, so the parser does not
+    // keep a second line field or update it for each token.
     input: TokenStream<'a>,
     /// Every active function, outermost first; field access selects the last.
     funcs: FunctionStack<'a>,
@@ -258,7 +259,7 @@ impl<'a> Parser<'a> {
 
     /// Stores literal string bytes and returns its index.
     fn find_or_add_string_bytes(&mut self, bytes: &[u8]) -> Result<u16> {
-        crate::vm::check_string_size(bytes.len())
+        crate::limits::check_string_size(bytes.len())
             .map_err(|err| self.error_here(err.into_kind()))?;
         if let Some(index) = self.funcs.literal_indices.strings.get_index_of(bytes) {
             return u16::try_from(index).map_err(|_| self.error_here(SyntaxError::TooManyStrings));

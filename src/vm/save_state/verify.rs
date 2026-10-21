@@ -3,7 +3,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use crate::compiler::verify::{self, BytecodeView};
 
 use super::super::table::{
-    InvalidTableKey, NormalizedTableKey, TableKeyInput, normalize_table_key,
+    InvalidTableKey, NormalizedTableKey, TableKeyInput, array_index, integer_index, is_append_key,
+    normalize_table_key,
 };
 use super::{LoadError, SavePayload, SavedBytecode, SavedObject};
 
@@ -260,15 +261,15 @@ fn validate_environment_deltas(payload: &SavePayload) -> Result<(), LoadError> {
         let mut array_upserts = BTreeMap::new();
         for (entry_index, (key, value)) in delta.upserts.iter().enumerate() {
             if let super::SavedVal::Num(bits) = key {
-                if *bits == ((array.len() + 1) as f64).to_bits() {
+                if is_append_key(f64::from_bits(*bits), array.len()) {
                     return Err(corrupt(
                         "environment hash entry belongs in the array",
                         entry_index,
                     ));
                 }
                 let n = f64::from_bits(*bits);
-                if n >= 1.0 && n <= array.len() as f64 && n.fract().to_bits() << 1 == 0 {
-                    array_upserts.insert(n as usize - 1, value);
+                if let Some(slot) = array_index(n, array.len()) {
+                    array_upserts.insert(slot, value);
                 }
             }
         }
@@ -292,7 +293,7 @@ fn validate_environment_deltas(payload: &SavePayload) -> Result<(), LoadError> {
             for key in ordered {
                 if let super::SavedVal::Num(bits) = key {
                     let n = f64::from_bits(*bits);
-                    if n >= 1.0 && n <= (array.len() + 1) as f64 && n.fract().to_bits() << 1 == 0 {
+                    if array_index(n, array.len()).is_some() || is_append_key(n, array.len()) {
                         return Err(corrupt(
                             "environment hash order belongs in the array",
                             delta_index,
@@ -395,7 +396,8 @@ fn validate_references(payload: &SavePayload) -> Result<(), LoadError> {
                 validate_value(value, payload)?;
                 if entry_index < array_len {
                     // Array slots carry their implied key, and may be empty.
-                    if *key != super::SavedVal::Num(((entry_index + 1) as f64).to_bits()) {
+                    if !matches!(key, super::SavedVal::Num(bits) if array_index(f64::from_bits(*bits), array_len) == Some(entry_index))
+                    {
                         return Err(corrupt(
                             "saved table array slot has the wrong key",
                             entry_index,
@@ -407,7 +409,8 @@ fn validate_references(payload: &SavePayload) -> Result<(), LoadError> {
                     }
                     // A live hash entry at the array's append key would have
                     // migrated into the array, so no engine save holds one.
-                    if *key == super::SavedVal::Num(((array_len + 1) as f64).to_bits()) {
+                    if matches!(key, super::SavedVal::Num(bits) if is_append_key(f64::from_bits(*bits), array_len))
+                    {
                         return Err(corrupt(
                             "saved table hash entry belongs in the array",
                             entry_index,
@@ -487,14 +490,7 @@ fn gmatch_integer_field(
         return Err(corrupt(reason, index));
     };
     let value = f64::from_bits(*bits);
-    if !value.is_finite()
-        || value < 0.0
-        || value.fract().to_bits() << 1 != 0
-        || value > maximum as f64
-    {
-        return Err(corrupt(reason, index));
-    }
-    Ok(value as usize)
+    integer_index(value, maximum).ok_or_else(|| corrupt(reason, index))
 }
 
 fn validate_gmatch_last_match(
@@ -557,13 +553,13 @@ fn validate_gmatch_state(
     empty_pattern: bool,
     index: usize,
 ) -> Result<(), LoadError> {
-    let maximum_position = super::super::MAX_STRING_BYTES + 1;
+    let maximum_position = crate::limits::MAX_STRING_BYTES + 1;
     if empty_pattern {
         let len = gmatch_integer_field(
             payload,
             table_id,
             gmatch_schema::LENGTH_FIELD.as_bytes(),
-            super::super::MAX_STRING_BYTES,
+            crate::limits::MAX_STRING_BYTES,
             "empty gmatch length is missing or invalid",
             index,
         )?;

@@ -45,11 +45,14 @@ impl State {
         // notifying on_error: they are host misuse detected before anything
         // executes, which the on_error doc in host.rs excludes by contract.
         // Every failure after dispatch reaches an error-reporting boundary.
-        if num_args == ArgCount::Dynamic {
-            return Err(self.error(ErrorKind::InternalError(
-                "call does not support ArgCount::Dynamic; use ArgCount::Fixed".into(),
-            )));
-        }
+        let num_args = match num_args {
+            ArgCount::Fixed(num_args) => num_args,
+            ArgCount::Dynamic => {
+                return Err(self.error(ErrorKind::InternalError(
+                    "call does not support ArgCount::Dynamic; use ArgCount::Fixed".into(),
+                )));
+            }
+        };
         self.call_op(num_args, num_ret_expected)
     }
 
@@ -60,39 +63,25 @@ impl State {
     /// nested Lua locals and temporaries are also placed above it. Returning
     /// restores the caller's slot positions even if pushes reallocate the
     /// buffer. Captured locals can still be written through explicit upvalues.
-    pub(super) fn call_op(&mut self, num_args: ArgCount, num_ret_expected: RetCount) -> Result<()> {
-        let (idx, actual_num_args) = match num_args {
-            ArgCount::Dynamic => {
-                return Err(self.error(ErrorKind::InternalError(
-                    "call_op received Dynamic args the calling frame did not resolve".into(),
-                )));
-            }
-            ArgCount::Fixed(n) => {
-                let required = usize::from(n) + 1;
-                let offset = self.get_top().checked_sub(required).ok_or_else(|| {
-                    self.error(ErrorKind::InvalidStackIndex {
-                        index: -isize::from(n) - 1,
-                    })
-                })?;
-                (self.stack_bottom + offset, n)
-            }
-        };
+    pub(super) fn call_op(&mut self, num_args: u8, num_ret_expected: RetCount) -> Result<()> {
+        let required = usize::from(num_args) + 1;
+        let offset = self.get_top().checked_sub(required).ok_or_else(|| {
+            self.error(ErrorKind::InvalidStackIndex {
+                index: -isize::from(num_args) - 1,
+            })
+        })?;
+        let idx = self.stack_bottom + offset;
+        let actual_num_args = num_args;
         let old_stack_bottom = self.stack_bottom;
         let func_val = self.stack.remove(idx);
         let num_ret_actual = if let Val::RustFn(f) = func_val {
             self.stack_bottom = idx;
 
-            // IMPORTANT: We must restore stack_bottom on ALL exit paths, including errors.
-            // Previously, using `f(self)?` here caused a bug: if f() returned Err, the ?
-            // operator would propagate the error immediately, skipping the restoration of
-            // stack_bottom at the end of this block. This left stack_bottom pointing to
-            // `idx` instead of `old_stack_bottom`, corrupting all subsequent stack operations:
-            // - get_top() would return wrong values (often 0, thinking the stack is empty)
-            // - Stack index calculations would be wrong, causing InvalidStackIndex errors
-            // - In release builds, this led to segfaults from out-of-bounds memory access
-            //
-            // The fix: call f(self) without ?, handle the error explicitly to ensure
-            // stack_bottom is restored before propagating the error.
+            // Invariant: the caller's active Rust function and stack_bottom
+            // are both restored before a callback error propagates. Every
+            // stack index and get_top() after this call is relative to
+            // stack_bottom, so the callback result is handled explicitly
+            // rather than with `?`.
             let previous_rust_fn = self.active_rust_fn.replace(f);
             let result = f(self);
             self.active_rust_fn = previous_rust_fn;
@@ -338,11 +327,11 @@ impl State {
         let mut rendered_numbers = Vec::new();
         for val in &self.stack[idx..] {
             if let Some(s) = val.as_string(&self.heap) {
-                total_len = super::checked_string_growth(total_len, s.len())?;
+                total_len = crate::limits::checked_string_growth(total_len, s.len())?;
             } else if let Some(num) = val.as_num() {
                 // Use the same spelling as tostring and default coercion.
                 let rendered = super::lua_val::number_to_string(num);
-                total_len = super::checked_string_growth(total_len, rendered.len())?;
+                total_len = crate::limits::checked_string_growth(total_len, rendered.len())?;
                 rendered_numbers.push(rendered);
             } else {
                 return Err(self.type_error(TypeError::Concat(val.typ(&self.heap))));
@@ -625,13 +614,12 @@ impl State {
         let runtime = self.resolve_bytecode_runtime(&bytecode)?;
         let identity = Arc::as_ptr(&bytecode) as usize;
         // No host callback or fallible operation occurs from this push through
-        // its matching pop. maybe_collect must see the pending identity so its
-        // cache sweep retains the runtime before the closure becomes a root;
-        // alloc_lua_fn itself never collects. Nested captures finish beforehand.
+        // its matching pop. The allocator's collection check must see the
+        // pending identity so its cache sweep retains the runtime before the
+        // closure becomes a root; the allocation itself never collects.
+        // Nested captures finish beforehand.
         self.pending_bytecode_caches.push(identity);
-        // Check if GC is needed before allocating
-        self.maybe_collect();
-        let obj = self.heap.alloc_lua_fn(bytecode, runtime, upvalues);
+        let obj = self.allocator().alloc_lua_fn(bytecode, runtime, upvalues);
         let pending = self
             .pending_bytecode_caches
             .pop()

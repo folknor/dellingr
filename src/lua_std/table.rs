@@ -130,18 +130,16 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     // argument.
     ("pack", |state| {
         state.consume_cost(1)?;
-        let num_args = state.get_top();
+        let num_args = state.top_isize();
 
         // Create new table
         state.new_table()?;
-        let table_idx =
-            isize::try_from(state.get_top()).expect("the value stack limit fits in isize");
+        let table_idx = num_args + 1;
 
         // Insert all arguments into the table
         for i in 1..=num_args {
             state.push_number(i as f64)?; // push the index (key)
-            let arg_index = isize::try_from(i).expect("the value stack limit fits in isize");
-            state.push_value(arg_index)?; // push the argument (value)
+            state.push_value(i)?; // push the argument (value)
             state.set_table_raw(table_idx)?;
         }
 
@@ -198,7 +196,7 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         let mut result = Vec::new();
         for idx in i..=j {
             if idx > i {
-                let next = crate::vm::checked_string_growth(result.len(), sep.len())?;
+                let next = crate::limits::checked_string_growth(result.len(), sep.len())?;
                 state.consume_cost(sep.len() as u64)?;
                 result.reserve(next - result.len());
                 result.extend_from_slice(&sep);
@@ -210,7 +208,7 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
             match typ {
                 LuaType::String | LuaType::Number => {
                     let bytes = state.bytes_with_default_string_coercion(-1)?;
-                    let next = crate::vm::checked_string_growth(result.len(), bytes.len())?;
+                    let next = crate::limits::checked_string_growth(result.len(), bytes.len())?;
                     state.consume_cost(bytes.len() as u64)?;
                     result.reserve(next - result.len());
                     result.extend_from_slice(&bytes);
