@@ -2,10 +2,9 @@
 
 use super::exact_integer_value;
 use crate::error::{ArgDetail, ArgError, Error, ErrorKind, LibraryError};
+use crate::limits::{MAX_FORMAT_FIELD_DIGITS, MAX_FORMAT_LEN};
 use crate::numeral::{exact_i64, parse_lua_numeral};
 use crate::{LuaType, Result, State};
-
-const MAX_FORMAT_LEN: usize = 22;
 
 #[derive(Clone, Copy, Default)]
 struct FormatFlags {
@@ -263,8 +262,8 @@ fn validate_directive(state: &State, directive: &Directive) -> Result<()> {
     );
     if !flags_valid
         || (!precision_valid && directive.precision.is_some())
-        || directive.width_digits > 2
-        || directive.precision_digits > 2
+        || directive.width_digits > MAX_FORMAT_FIELD_DIGITS
+        || directive.precision_digits > MAX_FORMAT_FIELD_DIGITS
     {
         return Err(invalid_specification(state, &directive.raw));
     }

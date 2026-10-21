@@ -95,6 +95,6 @@ impl State {
         // generational key cannot alias a future allocation), so drop it to
         // keep identity storage bounded by live `%p` usage.
         self.format_pointer_ids
-            .retain(|val, _| self.heap.val_is_live(val));
+            .retain(|key, _| self.heap.val_is_live(&key.as_val()));
     }
 }

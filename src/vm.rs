@@ -47,6 +47,7 @@ use super::patterns::LuaPattern;
 use anchor::Registry;
 use global_env::GlobalEnv;
 
+pub(super) use lua_val::PointerIdKey;
 pub(super) use lua_val::Val;
 pub(super) use object::ObjectPtr;
 use object::{GcHeap, GcPolicy, Markable, StringPtr, UpvaluePool, UpvalueRef};
@@ -56,21 +57,17 @@ pub(crate) use table::integer_index;
 
 use crate::limits::{
     GMATCH_PATTERN_CACHE_BYTES, GMATCH_PATTERN_CACHE_ENTRIES, MAX_CALL_DEPTH, MAX_STACK_SIZE,
-    check_string_size,
+    check_string_size, tuning,
 };
 use caches::RuntimeCaches;
-// Capacity hints for `reserve_stdlib_capacity`; they size allocations only and
-// never affect behaviour or iteration order. The stdlib-specific hints live
-// beside their registration lists in `lua_std`.
+// Standard-library capacity counts stay beside their registration lists.
 const STDLIB_NON_BUILTIN_GLOBALS: usize = crate::lua_std::STDLIB_NON_BUILTIN_GLOBALS;
-// Keep room for a few host-defined globals alongside the standard library.
-const HOST_GLOBAL_CAPACITY_HEADROOM: usize = 4;
 const STDLIB_HEAP_TABLES: usize = crate::lua_std::STDLIB_HEAP_TABLES;
 const STDLIB_INTERNED_TABLE_KEYS: usize = crate::lua_std::STDLIB_INTERNED_TABLE_KEYS;
 /// Snapshot environment token of the shared string metatable. Like
 /// `_G.metatable`, it lives in the token namespace, not the global one.
 #[cfg(feature = "snapshot")]
-const STRING_METATABLE_TOKEN: &str = "string.metatable";
+const STRING_METATABLE_TOKEN: &str = save_state::STRING_METATABLE_TOKEN;
 
 struct GmatchPatternEntry {
     pattern: LuaPattern,
@@ -255,7 +252,7 @@ pub struct State {
     // Insertion order is serialized. Do not prune outside gc_collect: changing
     // which entries remain must not change snapshot traversal order. With GC
     // disabled, entries grow with observed objects, just as the heap does.
-    pub(super) format_pointer_ids: IndexMap<Val, u64>,
+    pub(super) format_pointer_ids: IndexMap<PointerIdKey, u64>,
     pub(super) next_format_pointer_id: u64,
     /// Stable ids for Rust functions that are allowed to survive save/load.
     #[cfg(feature = "snapshot")]
@@ -375,14 +372,14 @@ impl State {
     #[cfg(feature = "snapshot")]
     pub(crate) fn capture_env_tokens(&mut self) {
         let mut map = BTreeMap::new();
-        for slot in [Builtin::Math, Builtin::String, Builtin::Table, Builtin::G] {
+        for &(slot, token) in save_state::BUILTIN_ENV_TOKENS {
             if let Val::Obj(ptr) = self.global_env.builtin(slot as u8) {
-                map.insert(ptr, slot.name().to_string());
+                map.insert(ptr, token.to_string());
                 if slot == Builtin::G
                     && let Some(table) = self.heap.as_table_ref(ptr)
                     && let Some(mt) = table.get_metatable()
                 {
-                    map.insert(mt, "_G.metatable".to_string());
+                    map.insert(mt, save_state::GLOBAL_METATABLE_TOKEN.to_string());
                 }
             }
         }
@@ -433,13 +430,13 @@ impl State {
             global_env: GlobalEnv::new(),
             string_metatable: None,
             string_mt_index_shape: None,
-            stack: Vec::with_capacity(256), // Pre-size for typical function depth * locals
+            stack: Vec::with_capacity(tuning::INITIAL_VM_STACK_CAPACITY),
             stack_bottom: 0,
             heap: GcHeap::with_policy(gc_policy),
             bytecode_caches: IndexMap::default(),
             pending_bytecode_caches: Vec::new(),
             transient_roots: TransientRoots {
-                values: Vec::with_capacity(64),
+                values: Vec::with_capacity(tuning::INITIAL_TRANSIENT_ROOT_VALUES_CAPACITY),
                 suspended_envs: Vec::new(),
             },
             upvalue_pool: UpvaluePool::new(),
@@ -454,7 +451,7 @@ impl State {
             call_chain_depth: 0,
             active_rust_fn: None,
             call_depth: 0,
-            call_stack: Vec::with_capacity(64), // Pre-size for call stack
+            call_stack: Vec::with_capacity(tuning::INITIAL_CALL_STACK_CAPACITY),
             callbacks,
             user_data: None,
             rng: VmRng::seed_from_u64(VmRng::DEFAULT_SEED),
@@ -473,8 +470,9 @@ impl State {
     }
 
     pub(crate) fn reserve_stdlib_capacity(&mut self) {
-        self.global_env
-            .reserve(Builtin::COUNT + STDLIB_NON_BUILTIN_GLOBALS + HOST_GLOBAL_CAPACITY_HEADROOM);
+        self.global_env.reserve(
+            Builtin::COUNT + STDLIB_NON_BUILTIN_GLOBALS + tuning::HOST_GLOBAL_CAPACITY_HEADROOM,
+        );
         self.heap
             .reserve(STDLIB_HEAP_TABLES, STDLIB_INTERNED_TABLE_KEYS);
     }

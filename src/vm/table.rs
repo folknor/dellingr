@@ -5,6 +5,10 @@ use indexmap::Equivalent;
 
 use crate::det_hash::{IndexMap, map_with_capacity};
 
+// Table still reports invalid keys and malformed snapshot shapes as VM
+// `Error`s; callers in eval, metamethod, table_ops and snapshot loading
+// propagate them with `?`. A table-local error type would need each of those
+// sites to wrap it.
 use super::Error;
 use super::Result;
 use super::TypeError;
@@ -55,8 +59,7 @@ pub(super) fn is_append_key(value: f64, len: usize) -> bool {
 }
 
 /// A table key before applying the VM's canonical numeric equality rule.
-// The value hasher also consumes this input type. Keep it visible until that
-// caller uses the runtime key normalizer; snapshot keys have distinct payloads.
+// Snapshot keys use different payload types but share the same normalizer.
 pub(super) enum TableKeyInput<S, O, F> {
     Nil,
     Bool(bool),
@@ -135,7 +138,7 @@ impl Val {
 /// A vacant slot marks a key that was re-added elsewhere. The new live key
 /// appends to preserve `pairs()` order, while renaming the old slot in place
 /// keeps later physical indices stable. Compaction drops all vacant slots.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum TableKeyKind {
     Live(Val),
     Vacant(usize),
@@ -146,12 +149,18 @@ enum TableKeyKind {
 /// The transparent wrapper preserves the old slot representation. Live keys
 /// keep their original `Val` for iteration, including negative zero.
 #[repr(transparent)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct TableKey(TableKeyKind);
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct TableKey(TableKeyKind);
+
+// `Val` is only `PartialEq` because NaN is unequal to itself. A live
+// `TableKey` has passed the table-key normalizer, so it is never NaN, and
+// vacant slots compare by their index; equality here is reflexive.
+impl Eq for TableKey {}
 
 impl TableKey {
+    /// Validate a runtime value and wrap it as a table-storage key.
     #[inline]
-    fn new(value: Val) -> std::result::Result<Self, InvalidTableKey> {
+    pub(super) fn new(value: Val) -> std::result::Result<Self, InvalidTableKey> {
         value.table_key().map(|_| Self(TableKeyKind::Live(value)))
     }
 
@@ -159,7 +168,7 @@ impl TableKey {
     /// table insertion. The debug assertion checks that proof without adding
     /// work to release template construction or inline-table promotion.
     #[inline]
-    fn from_prevalidated(value: Val) -> Self {
+    pub(super) fn from_prevalidated(value: Val) -> Self {
         debug_assert!(
             Self::new(value).is_ok(),
             "prevalidated table keys must satisfy the table-key normalizer"
@@ -172,8 +181,9 @@ impl TableKey {
         Self(TableKeyKind::Vacant(index))
     }
 
+    /// Return the live value carried by this key.
     #[inline]
-    fn value(self) -> Val {
+    pub(super) fn value(self) -> Val {
         match self.0 {
             TableKeyKind::Live(value) => value,
             TableKeyKind::Vacant(_) => {
@@ -192,20 +202,66 @@ impl TableKey {
     }
 }
 
+/// Hash a table key consistently with `Val` equality: numeric keys hash their
+/// normalized bits (so -0.0 and +0.0 collide), and other key types hash their
+/// pointer or scalar payload directly. `Val` deliberately has no `Hash` impl;
+/// this is the only hash of runtime key values.
+#[inline]
+fn hash_table_key_value<H: Hasher>(value: Val, hasher: &mut H) {
+    match value {
+        Val::Nil => (),
+        Val::Bool(value) => value.hash(hasher),
+        Val::Num(number) => {
+            let bits = match normalize_table_key::<(), (), ()>(TableKeyInput::Number(number)) {
+                Ok(NormalizedTableKey::Number(bits)) => bits,
+                Err(InvalidTableKey::Nan) => {
+                    crate::numeral::CANONICAL_NAN_BITS.hash(hasher);
+                    return;
+                }
+                Err(InvalidTableKey::Nil) | Ok(_) => {
+                    unreachable!("numeric table keys normalize to numeric keys")
+                }
+            };
+            bits.hash(hasher);
+        }
+        Val::Str(ptr) => ptr.hash(hasher),
+        Val::Obj(ptr) => ptr.hash(hasher),
+        Val::RustFn(func) => (func as usize).hash(hasher),
+    }
+}
+
+/// A borrowed lookup query for `TableKey` maps that does not give `Val` a
+/// general-purpose `Hash` implementation.
+#[derive(Clone, Copy)]
+struct TableLookupKey(Val);
+
+impl Hash for TableLookupKey {
+    fn hash<H: Hasher>(&self, hasher: &mut H) {
+        hash_table_key_value(self.0, hasher);
+    }
+}
+
+impl Equivalent<TableKey> for TableLookupKey {
+    #[inline]
+    fn equivalent(&self, key: &TableKey) -> bool {
+        matches!(key.0, TableKeyKind::Live(live) if live == self.0)
+    }
+}
+
+/// Cheap rejection for the only runtime values that cannot be table keys.
+/// Valid keys are hashed and compared using the shared table-key semantics.
+#[inline]
+fn is_valid_table_key(value: &Val) -> bool {
+    !matches!(value, Val::Nil) && !matches!(value, Val::Num(number) if number.is_nan())
+}
+
 impl Hash for TableKey {
     #[inline]
     fn hash<H: Hasher>(&self, hasher: &mut H) {
         match self.0 {
-            TableKeyKind::Live(value) => value.hash(hasher),
+            TableKeyKind::Live(value) => hash_table_key_value(value, hasher),
             TableKeyKind::Vacant(index) => index.hash(hasher),
         }
-    }
-}
-
-impl Equivalent<TableKey> for Val {
-    #[inline]
-    fn equivalent(&self, key: &TableKey) -> bool {
-        matches!(key.0, TableKeyKind::Live(live) if live == *self)
     }
 }
 
@@ -501,19 +557,19 @@ impl Table {
 
     #[inline]
     fn hash_get(&self, key: &Val) -> Val {
-        match key {
-            _ if key.table_key().is_err() => Val::Nil,
-            _ => match &self.storage {
-                TableStorage::Inline { entries, len } => {
-                    for (entry_key, entry_value) in entries.iter().take(*len as usize) {
-                        if entry_key == key {
-                            return *entry_value;
-                        }
+        if !is_valid_table_key(key) {
+            return Val::Nil;
+        }
+        match &self.storage {
+            TableStorage::Inline { entries, len } => {
+                for (entry_key, entry_value) in entries.iter().take(*len as usize) {
+                    if entry_key == key {
+                        return *entry_value;
                     }
-                    Val::Nil
                 }
-                TableStorage::Map(map) => map.get(key).copied().unwrap_or_default(),
-            },
+                Val::Nil
+            }
+            TableStorage::Map(map) => map.get(&TableLookupKey(*key)).copied().unwrap_or_default(),
         }
     }
 
@@ -523,25 +579,24 @@ impl Table {
             let value = self.array[slot];
             return (!matches!(value, Val::Nil)).then_some((ARRAY_SLOT_TAG | slot, value));
         }
-        match key {
-            _ if key.table_key().is_err() => None,
-            _ => match &self.storage {
-                TableStorage::Inline { entries, len } => {
-                    for (idx, (entry_key, entry_value)) in
-                        entries.iter().take(*len as usize).enumerate()
-                    {
-                        if entry_key == key {
-                            return (!matches!(entry_value, Val::Nil))
-                                .then_some((idx, *entry_value));
-                        }
+        if !is_valid_table_key(key) {
+            return None;
+        }
+        match &self.storage {
+            TableStorage::Inline { entries, len } => {
+                for (idx, (entry_key, entry_value)) in
+                    entries.iter().take(*len as usize).enumerate()
+                {
+                    if entry_key == key {
+                        return (!matches!(entry_value, Val::Nil)).then_some((idx, *entry_value));
                     }
-                    None
                 }
-                TableStorage::Map(map) => {
-                    let (idx, _, value) = map.get_full(key)?;
-                    (!matches!(value, Val::Nil)).then_some((idx, *value))
-                }
-            },
+                None
+            }
+            TableStorage::Map(map) => {
+                let (idx, _, value) = map.get_full(&TableLookupKey(*key))?;
+                (!matches!(value, Val::Nil)).then_some((idx, *value))
+            }
         }
     }
 
@@ -780,7 +835,7 @@ impl Table {
                 let Some((existing_key, existing_value)) = map.get_index_mut(index) else {
                     return false;
                 };
-                if !key.equivalent(existing_key) {
+                if !TableLookupKey(key).equivalent(existing_key) {
                     return false;
                 }
                 let was_live = !matches!(*existing_value, Val::Nil);
@@ -1084,7 +1139,7 @@ impl Table {
                 removed
             }
             TableStorage::Map(map) => {
-                let value = map.get_mut(key)?;
+                let value = map.get_mut(&TableLookupKey(*key))?;
                 let removed = std::mem::replace(value, Val::Nil);
                 if matches!(removed, Val::Nil) {
                     None
@@ -1289,7 +1344,7 @@ impl Table {
         if matches!(control, Val::Nil) {
             return self.next_live_from(Position::Array(0));
         }
-        if control.table_key().is_err() {
+        if !is_valid_table_key(control) {
             return TableNextWithIndex::InvalidKey;
         }
         if let Some(slot) = self.array_slot(control) {
@@ -1300,7 +1355,7 @@ impl Table {
                 .iter()
                 .take(*len as usize)
                 .position(|(key, _)| key == control),
-            TableStorage::Map(map) => map.get_index_of(control),
+            TableStorage::Map(map) => map.get_index_of(&TableLookupKey(*control)),
         };
         index.map_or(TableNextWithIndex::InvalidKey, |index| {
             self.next_live_from(Position::Hash(index.saturating_add(1)))
@@ -1314,7 +1369,7 @@ impl Table {
         index: usize,
         control: &Val,
     ) -> TableNextWithIndex {
-        if control.table_key().is_err() {
+        if !is_valid_table_key(control) {
             return TableNextWithIndex::InvalidKey;
         }
         if index & ARRAY_SLOT_TAG != 0 {
@@ -1331,7 +1386,7 @@ impl Table {
             }
             TableStorage::Map(map) => map
                 .get_index(index)
-                .is_some_and(|(key, _)| control.equivalent(key)),
+                .is_some_and(|(key, _)| TableLookupKey(*control).equivalent(key)),
         };
         if matches {
             self.next_live_from(Position::Hash(index.saturating_add(1)))
@@ -1412,6 +1467,29 @@ mod tests {
         for i in range {
             t.insert(h(i), Val::Bool(true)).unwrap();
         }
+    }
+
+    #[test]
+    fn nil_and_nan_reads_are_rejected_on_the_hash_path() {
+        let mut table = Table::default();
+        fill_hash(&mut table, 1..=6);
+
+        for key in [Val::Nil, Val::Num(f64::NAN)] {
+            assert!(!is_valid_table_key(&key));
+            assert!(key.table_key().is_err());
+            assert_eq!(table.get(&key), Val::Nil);
+            assert_eq!(table.get_with_index(&key), None);
+        }
+
+        assert!(matches!(
+            table.next_with_index(&Val::Num(f64::NAN)),
+            TableNextWithIndex::InvalidKey
+        ));
+        let (index, _) = table.get_with_index(&h(1)).expect("hash key exists");
+        assert!(matches!(
+            table.next_from_matching_index(index, &Val::Num(f64::NAN)),
+            TableNextWithIndex::InvalidKey
+        ));
     }
 
     fn keys(t: &Table) -> Vec<Val> {

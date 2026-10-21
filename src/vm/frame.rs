@@ -13,6 +13,7 @@ use super::State;
 use super::Val;
 use super::object::UpvalueRef;
 use crate::instr::{ArgCount, RetCount};
+use crate::limits::tuning;
 
 /// Stack positions pushed by `OP_MARK_CALL_BASE` and `OP_NEW_TABLE_TRACKED`
 /// and awaiting their Dynamic `OP_CALL` or `SetList(0)`.
@@ -172,6 +173,9 @@ impl Frame {
 
     /// Record the instruction currently dispatching a call into the active
     /// call-stack entry, so outer traceback frames name the right call site.
+    /// Every opcode that can enter Lua through a call or metamethod must record
+    /// its instruction here before handing off; the regression test pins those
+    /// caller lines.
     #[inline]
     fn record_call_site(&self, state: &mut State) {
         if let Some(call_info) = state.call_stack.last_mut() {
@@ -233,14 +237,8 @@ impl Frame {
         self.bytecode.number_literals[i as usize]
     }
 
-    /// Periodic flush interval for accumulated opcode cost.
-    /// A finite budget also flushes before pending cost would exhaust it, so
-    /// this interval does not change the charged prefix or `cost_used` at
-    /// `BudgetExceeded`. Any other error settles the pending batch in
-    /// [`Frame::eval`], so `cost_used` after a runtime error is independent of
-    /// the interval too.
-    const COST_CHECK_INTERVAL: u64 = crate::limits::COST_CHECK_INTERVAL;
-
+    /// Settle this frame's accrued cost before control can re-enter Lua. Table
+    /// helpers call this only after a direct access path has been ruled out.
     pub(super) fn flush_local_cost(state: &mut State, local_cost: &mut u64) -> Result<()> {
         if *local_cost > 0 {
             state.consume_cost(*local_cost)?;
@@ -283,8 +281,12 @@ impl Frame {
             ($state:expr, $local:expr, $cost:expr) => {{
                 let next = (*$local).saturating_add($cost);
                 // This decides when to flush, not whether to accept a charge.
-                // consume_cost owns the runtime meter's admission rule.
-                if next >= Self::COST_CHECK_INTERVAL || $state.cost_batch_needs_flush(next) {
+                // consume_cost owns the runtime meter's admission rule. A
+                // finite budget also flushes before pending cost would exhaust
+                // it, so the interval does not change the charged prefix or
+                // `cost_used` at `BudgetExceeded`; any other error settles the
+                // pending batch in `Frame::eval`.
+                if next >= tuning::COST_CHECK_INTERVAL || $state.cost_batch_needs_flush(next) {
                     $state.consume_cost(next)?;
                     *$local = 0;
                 } else {
@@ -805,5 +807,61 @@ mod tests {
             .count();
         assert_eq!(documented_rows, classes.len() + 1);
         assert_eq!(Instr::set_list(0).static_units(), 0);
+    }
+
+    #[test]
+    fn reentry_accounting_sources_cover_the_intended_dispatch_opcodes() {
+        let cases = [
+            ("callable()", Instr::OP_CALL, None, "CALL"),
+            (
+                "for item in iterator do end",
+                Instr::OP_TFOR_CALL,
+                None,
+                "TFOR_CALL",
+            ),
+            ("local result = #lengthy", Instr::OP_LENGTH, None, "LENGTH"),
+            (
+                "local result = indexed.field",
+                Instr::OP_GET_FIELD,
+                None,
+                "GET_FIELD",
+            ),
+            (
+                "local result = indexed[left]",
+                Instr::OP_GET_TABLE,
+                None,
+                "GET_TABLE",
+            ),
+            (
+                "new_indexed.field = right",
+                Instr::OP_SET_FIELD,
+                None,
+                "SET_FIELD",
+            ),
+            (
+                "other.field, new_indexed.field = left, right",
+                Instr::OP_SET_FIELD_AT,
+                Some(1),
+                "SET_FIELD_AT",
+            ),
+            (
+                "new_indexed[left] = right",
+                Instr::OP_SET_TABLE,
+                None,
+                "SET_TABLE",
+            ),
+        ];
+
+        for (source, expected_opcode, expected_a, name) in cases {
+            let bytecode = crate::compiler::parse_str(source)
+                .unwrap_or_else(|error| panic!("{name} source compiles: {error}"));
+            assert!(
+                bytecode.code.iter().any(|instruction| {
+                    instruction.opcode() == expected_opcode
+                        && expected_a.is_none_or(|a| instruction.a() == a)
+                }),
+                "{name} source must exercise its dispatch opcode"
+            );
+        }
     }
 }

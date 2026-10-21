@@ -56,6 +56,15 @@ All notable changes to dellingr are documented here. The format follows
 - Snapshot loading reports a saved table whose entries the runtime table
   rejects as `LoadError::InvalidTable`, naming the table and the underlying
   failure, where it previously reported `LoadError::CorruptArena`.
+- `LoadError::CorruptArena` gains a `location: TableLoadLocation` field naming
+  the arena or nested collection its `index` refers to, and its message reads
+  `corrupt save <location> at index ...` instead of `corrupt save arena at
+  index ...`. `TableLoadLocation` gains `Strings`, `Objects`, `Bytecode`,
+  `Upvalues`, `Globals`, `PointerIds`, `TableEntries`, `EnvironmentDeltas`,
+  `EnvironmentDeleted`, `EnvironmentUpserts`, `EnvironmentOrder`,
+  `EnvironmentArray` and `EnvironmentMetatable`. A non-object metatable value
+  now reports its owner's index (the saved table's object index, or the
+  environment delta's index) rather than 0.
 
 ### Added
 
@@ -67,6 +76,10 @@ All notable changes to dellingr are documented here. The format follows
 - `State::try_to_boolean`, `try_typ` and `try_raw_equal` report an invalid
   stack index; the existing forms keep reading it as `nil`.
 - The snapshot byte limits are public in `limits`.
+- Reference-pinned library limits are public in `limits`: `MAXCCALLS`,
+  `LUA_MAXCAPTURES`, `MAX_FORMAT_LEN`, `MAX_FORMAT_FIELD_DIGITS`,
+  `TONUMBER_BASE_MIN`, `TONUMBER_BASE_MAX` and `TABLE_SORT_MAX_LEN`. Values
+  and error paths are unchanged.
 - Typed library error context: `LibraryError`, `LibraryFunction` and
   `StringPatternFunction`, read through `Error::library_error`,
   `Error::library_function` and `Error::pattern_function`. Message text is

@@ -1,17 +1,29 @@
-//! Fixed resource and encoding limits.
+//! Fixed resource, encoding, and reference-pinned library limits.
 //!
 //! These are build-wide constants, not per-State settings. Native stack space
 //! needed to reach recursion limits depends on the target and build profile.
 //!
-//! They are constants on purpose, with no per-State injection point. Scripts
-//! must behave identically for every embedder and across save/restore, so a
-//! tunable limit would become part of the replay and snapshot contract; the
-//! snapshot format and verifier validate against these values directly. The
-//! cost is that tests of the large limits (call depth, stack cap) exercise the
-//! real values rather than small ones.
+//! Fixed limits have no per-State injection point. Scripts must behave
+//! identically for every embedder and across save/restore, so changing a
+//! script-visible limit changes the replay and snapshot contract. The snapshot
+//! format and verifier validate against these values directly. Internal
+//! batching, cache, GC-default, and allocation-capacity tuning lives in the
+//! crate-private `tuning` module. The existing public paths for its cost-batch
+//! interval and gmatch-cache capacities remain as forwarding constants below.
 
 use crate::Result;
 use crate::error::{Error, ErrorKind};
+
+pub(crate) mod tuning;
+
+/// Static cost units batched before checking the cost budget.
+pub const COST_CHECK_INTERVAL: u64 = tuning::COST_CHECK_INTERVAL;
+
+/// Maximum cached gmatch patterns per State.
+pub const GMATCH_PATTERN_CACHE_ENTRIES: usize = tuning::GMATCH_PATTERN_CACHE_ENTRIES;
+
+/// Maximum total source-pattern bytes cached by gmatch per State.
+pub const GMATCH_PATTERN_CACHE_BYTES: usize = tuning::GMATCH_PATTERN_CACHE_BYTES;
 
 // Recursive parser entry points share this budget. Visible nesting costs vary
 // by construct, so this is a recursion budget rather than a source-level depth.
@@ -112,12 +124,6 @@ pub const MAX_CALL_DEPTH: u32 = 1000;
 pub const MAX_STACK_SIZE: usize = 1_000_000;
 /// Maximum active steps in an index, newindex, or non-function call chain.
 pub const MAX_METAMETHOD_DEPTH: u32 = 200;
-/// Maximum cached gmatch patterns per State.
-pub const GMATCH_PATTERN_CACHE_ENTRIES: usize = 256;
-/// Maximum total source-pattern bytes cached by gmatch per State.
-pub const GMATCH_PATTERN_CACHE_BYTES: usize = MAX_STRING_BYTES;
-/// Static cost units batched before checking the cost budget.
-pub const COST_CHECK_INTERVAL: u64 = 64;
 /// Maximum argument count accepted by the runtime call ABI. This is a runtime
 /// cap on every call, not only on Rust callbacks: a dynamic call such as
 /// `f(table.unpack(t))` or `f(...)` with more than this many values raises
@@ -130,3 +136,34 @@ pub const MAX_ARGUMENTS: u8 = u8::MAX;
 /// than this many values raises `TooManyResults`. See [`MAX_ARGUMENTS`] for why
 /// the width is fixed.
 pub const MAX_RESULTS: u8 = u8::MAX;
+
+// Reference-pinned library limits. Keep these values and their error paths
+// aligned with the selected Lua library behavior.
+/// Reference Lua pattern matcher's maximum recursive call count.
+///
+/// Reaching this active depth raises the existing `pattern too complex`
+/// pattern error. This is Lua's `MAXCCALLS` guard, not a VM call-depth limit.
+pub const MAXCCALLS: usize = 200;
+
+/// Maximum captures accepted by the Lua pattern compiler, including position
+/// captures such as `()`.
+///
+/// The next capture raises the existing `too many captures` pattern error.
+pub const LUA_MAXCAPTURES: usize = 32;
+
+/// Maximum bytes in one `string.format` directive, matching Lua 5.4's
+/// `lstrlib` `MAX_FORMAT - 10` bound.
+pub const MAX_FORMAT_LEN: usize = 22;
+
+/// Maximum decimal digits accepted in a `string.format` width or precision.
+pub const MAX_FORMAT_FIELD_DIGITS: usize = 2;
+
+/// Smallest base accepted by `tonumber(value, base)`.
+pub const TONUMBER_BASE_MIN: i64 = 2;
+
+/// Largest base accepted by `tonumber(value, base)`.
+pub const TONUMBER_BASE_MAX: i64 = 36;
+
+/// Exclusive upper bound on the length `table.sort` accepts, matching Lua
+/// 5.4's `INT_MAX` check. A length at or above it raises `array too big`.
+pub const TABLE_SORT_MAX_LEN: i64 = i32::MAX as i64;

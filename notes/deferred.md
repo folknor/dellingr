@@ -287,7 +287,7 @@ ratio and could read the constant.
 Reported by the heap hunter.
 
 The verifier checks duplicate saved keys, deleted/upserted disjointness and
-order-contains-upserts via `resolve_key` on `SavedVal`s; `materialize_payload`
+order-contains-upserts via `SavedVal::table_key`; `materialize_payload`
 repeats every check via `insert_runtime_key` on runtime `Val`s. The second pass is
 genuinely needed (two `Fn` ids can resolve to one address under ICF, two env
 tokens to one object), but neither site says why, and the reason strings differ

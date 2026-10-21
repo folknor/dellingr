@@ -3,8 +3,7 @@
 //! This module contains methods for creating and manipulating Lua tables,
 //! including metamethod-aware operations.
 
-use super::lua_val::RustFunc;
-use super::lua_val::Val;
+use super::lua_val::{PointerIdKey, RustFunc, Val};
 use super::table::TableNext;
 use super::{Result, State, TypeError};
 use crate::error::{ErrorKind, LibraryError};
@@ -610,7 +609,7 @@ impl State {
     }
 
     pub(crate) fn checked_table_sort_len(&self, len: i64) -> Result<usize> {
-        if len >= i64::from(i32::MAX) {
+        if len >= crate::limits::TABLE_SORT_MAX_LEN {
             Err(self.table_sort_too_big_error())
         } else if len < 0 {
             Ok(0)
@@ -761,10 +760,10 @@ impl State {
     /// pointer representation. Numbers, including NaN, never enter the map.
     pub(crate) fn format_pointer_id(&mut self, idx: isize) -> Result<Option<u64>> {
         let val = self.at_index(idx)?;
-        if !matches!(val, Val::Str(_) | Val::Obj(_) | Val::RustFn(_)) {
+        let Some(key) = PointerIdKey::from_val(val) else {
             return Ok(None);
-        }
-        if let Some(id) = self.format_pointer_ids.get(&val) {
+        };
+        if let Some(id) = self.format_pointer_ids.get(&key) {
             return Ok(Some(*id));
         }
         let id = self.next_format_pointer_id;
@@ -775,7 +774,7 @@ impl State {
             .checked_add(1)
             .ok_or_else(|| self.library_error(LibraryError::FormatPointerIdentitySpaceExhausted))?;
         self.next_format_pointer_id = next;
-        self.format_pointer_ids.insert(val, id);
+        self.format_pointer_ids.insert(key, id);
         Ok(Some(id))
     }
 

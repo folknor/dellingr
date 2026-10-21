@@ -32,55 +32,7 @@ to `brokkr check`.
 
 ## Encodings and operands
 
-## HYG-005 - Snapshot environment token names spelled at more than one site
-
-Reported by the VM-core hunter.
-
-`capture_env_tokens` names one token through `STRING_METATABLE_TOKEN` and another
-as the inline literal `"_G.metatable"`; builtin tokens come from `slot.name()`;
-the loader in `save_state` must spell the same strings. Fix: one token table
-owned by save_state.
-
----
-
 ## Limits, tunables and where they live
-
-## HYG-006 - No single home for limits and tunables
-
-Reported by the stdlib, host-surface, heap and VM-core hunters.
-
-`limits.rs` claims to be the home of fixed resource and encoding limits and says
-the snapshot format validates against them, but replay-visible limits live
-elsewhere:
-
-- `patterns/luapat.rs`: `MAXCCALLS = 200` (`MatchDepthExceeded`),
-  `LUA_MAXCAPTURES = 32`.
-- `string_format.rs`: `MAX_FORMAT_LEN = 22` with no note that it is lstrlib's
-  `MAX_FORMAT - 10`; width/precision digit cap is a bare `> 2`.
-- `basic.rs`: `tonumber` base range `2..=36` inline.
-- `vm/table_ops.rs`: the shared sort's `len >= i32::MAX` "array too big" rule.
-- `vm/object.rs`: GC policy defaults.
-- `compiler/parser/table.rs`: inline-template threshold `4` (HYG-016); the
-  doubled syntax-level charge per call/index suffix (HYG-017); `numeral.rs`
-  `MAX_SIGNIFICANT_HEX_DIGITS` and the `+2048` exponent clamp (correctness
-  parameters, not tunables, but undocumented as such).
-- `vm.rs` capacity hints (HYG-007) and `Vec::with_capacity(256/64)` in
-  `empty_with_callbacks`; `HOST_GLOBAL_CAPACITY_HEADROOM`.
-
-Conversely `limits.rs` holds non-limits as `pub`: `COST_CHECK_INTERVAL` (a
-batching knob `set_cost_budget` promises is unobservable) and
-`GMATCH_PATTERN_CACHE_*`, advertising internals as contract.
-`Frame::COST_CHECK_INTERVAL` re-aliases the limits constant with its own
-docstring (VM-core and host hunters). Three independent `200`s
-(`MAX_SYNTAX_DEPTH`, `MAX_METAMETHOD_DEPTH`, `MAXCCALLS`) look related and are
-not; `MAXCCALLS` is reference-pinned. The VM-core hunter judged `limits.rs`'s "no
-injection point" rationale (replay contract) a real answer, not a finding.
-
-Fix: `limits` (public, script-observable caps, everything that produces an
-`ErrorKind`, with a "reference-pinned library limits" heading) plus a
-`pub(crate) tuning` module (batch interval, cache sizes, GC thresholds, capacity
-hints). Drop the `Frame` alias. Enforceable: the module split itself; not by
-lint.
 
 ## Cost model
 
@@ -141,47 +93,7 @@ belong to the same question. Fix: a `VerifiedBytecode` newtype only the verifier
 constructs, `Frame` accepts only that; then drop defensive checks everywhere or
 keep them everywhere. Enforceable by signature.
 
-## HYG-041 - `Val` is `Eq` and `Hash` although NaN is not reflexive
-
-Reported by the VM-core and heap hunters; narrowed in wave 4 (`Val::hash` is
-total, `to_bytes_with_heap` returns `Option`, `format_pointer_id` is total, map
-slots are a `TableKey` newtype, and `live_hash_entries` skips dead slots).
-
-`Val` still implements `Eq`, and `Val::hash` maps NaN to a fixed token, so a NaN
-used as a key in any `Val`-keyed map (the pointer-id index is one) is stored but
-never found. No known path reaches it today. `TableKey::new` also repeats the
-`Val` to `TableKeyInput` mapping that `save_state.rs::runtime_table_key` does
-(see HYG-051). Fix: key the pointer-id index by a pointer-only type and drop
-`Hash`/`Eq` from `Val`.
-
-## HYG-044 - Call-site recording and cost flushing placed by hand per opcode
-
-Reported by the VM-core hunter.
-
-`record_call_site` is called before `OP_CALL`, `TFOR_CALL`, `LENGTH`,
-`GET_FIELD`, `GET_TABLE`, `SET_FIELD`, `SET_FIELD_AT`, `SET_TABLE`: any opcode
-that can re-enter Lua. `flush_local_cost` is called by hand in each metamethod
-helper (`metamethod.rs` x4, `eval_index.rs`, `eval_store.rs`). A new opcode that
-forgets either gets a wrong traceback line or a `cost_used` that depends on the
-batch interval (replay-visible). Fix options: `State::call` flushes itself; record
-the ip into `CallInfo` unconditionally on every call out (one store); or an
-`Instr::may_reenter()` table cross-checked by a test. Enforceable by a test running
-each opcode against a metatable'd operand asserting traceback line and
-`cost_used`.
-
 ## Heap, tables, persistence
-
-## HYG-051 - Val-to-table-key mapping written three times; nil/NaN refusal written five times
-
-Reported by the heap hunter; narrowed in wave 6 (`Val::table_key` is the one
-runtime mapping, used by table storage, raw assignment and snapshot keys).
-
-Still open: `Val`'s `Hash` numeric arm calls `normalize_table_key` through
-`TableKeyInput::Number` directly, which keeps `TableKeyInput` visible outside
-`table.rs`; `verify::resolve_key` keeps its own mapping for `SavedVal`; and
-`Table::hash_get` / `get_with_index` now normalize the whole key just to refuse
-nil and NaN, where two pattern checks used to suffice (table read path; worth a
-cheap `is_valid_table_key`).
 
 ## HYG-052 - gmatch matcher ordering invariant and env-token schema have no structural owner
 
@@ -200,28 +112,25 @@ live in `src/gmatch_schema.rs`, reads are strict, the dead branch is gone).
 Fix: `with_gmatch_matcher`; a schema owner for the env tokens; the save/reload
 test.
 
-## HYG-053 - Table and snapshot errors shed their location and reason
+## HYG-053 - `table.rs` still returns the crate `Error`; gmatch corruption errors name the closure
 
-Reported by the heap hunter; narrowed in wave 6 (table materialization failures
-keep their reason through `LoadError::InvalidTable` with a typed
-`TableLoadLocation`; runtime locations are already filled by `locate_in_frame`).
+Reported by the heap hunter; narrowed in waves 6 and 7 (every snapshot
+corruption error carries a typed location).
 
-Still open: the verifier's `LoadError::CorruptArena { reason, index }` does not
-say which arena the index belongs to (env-delta checks report `key_index` or
-`delta_index` inconsistently, `validate_metatable` reports `0`), and
-`table.rs` still depends on `Error`. Fix: a typed location on `CorruptArena`;
-`Table` returns its own key error and the State layer wraps it.
+Still open: `Table::insert`, `set_list`, `rebuild*` and
+`clear_and_insert_entries` return `Result<(), Error>`; a table-local key error
+would need wrapping at about 11 caller sites (a comment above the import says
+so). Separately, most gmatch corruption errors in `verify.rs` report the
+closure's index under `Objects`, not the gmatch state table's.
 
-## HYG-054 - Snapshot in-flight inventory and load-time reset are two hand-maintained lists
+## HYG-105 - Env token aliasing depends on schema order held by a comment
 
-Reported by the heap hunter.
+Reported by the wave 7 reconciler.
 
-`State::validate_quiescent` enumerates 12 fields that must be empty;
-`materialize_payload` clears 14 (`transient_roots.values` and `.suspended_envs`
-separately where the validator calls `is_empty()`); `State::new` is a third
-writer. The validator's comment asks to keep the inventory updated by memory. Fix:
-an `InFlight` struct with `is_quiescent()` and `reset()`, destructured without
-`..` so a new field fails to compile. Enforceable by type.
+`capture_env_tokens` classifies aliased tables by the last captured token, so
+`BUILTIN_ENV_TOKENS` order is a schema invariant held only by a comment. A test
+that two builtin slots aliasing one table resolve to the same token on save and
+load would pin it.
 
 ## HYG-059 - Snapshot encoder holds a breadcrumb per encoded value
 

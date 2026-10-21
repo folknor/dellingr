@@ -11,6 +11,7 @@
 mod collector;
 
 use crate::det_hash::IndexMap;
+use crate::limits::tuning;
 use std::cell::Cell;
 use std::fmt;
 use std::sync::Arc;
@@ -84,8 +85,8 @@ impl Default for UpvaluePool {
 impl UpvaluePool {
     pub(super) fn new() -> Self {
         Self {
-            slots: Vec::with_capacity(64),
-            colors: Vec::with_capacity(64),
+            slots: Vec::with_capacity(tuning::INITIAL_UPVALUE_POOL_CAPACITY),
+            colors: Vec::with_capacity(tuning::INITIAL_UPVALUE_POOL_CAPACITY),
             free: Vec::new(),
         }
     }
@@ -265,10 +266,6 @@ impl ObjectPtr {
 // GcHeap - SlotMap-based garbage collected heap
 // ============================================================================
 
-const GC_MIN_THRESHOLD: usize = 20;
-const GC_INITIAL_THRESHOLD: usize = GC_MIN_THRESHOLD;
-const GC_THRESHOLD_GROWTH_FACTOR: usize = 2;
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct GcPolicy {
     initial_threshold: usize,
@@ -293,9 +290,9 @@ impl GcPolicy {
 impl Default for GcPolicy {
     fn default() -> Self {
         Self::new(
-            GC_INITIAL_THRESHOLD,
-            GC_MIN_THRESHOLD,
-            GC_THRESHOLD_GROWTH_FACTOR,
+            tuning::DEFAULT_GC_INITIAL_THRESHOLD,
+            tuning::DEFAULT_GC_MIN_THRESHOLD,
+            tuning::DEFAULT_GC_THRESHOLD_GROWTH_FACTOR,
         )
     }
 }

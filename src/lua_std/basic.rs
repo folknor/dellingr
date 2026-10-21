@@ -5,6 +5,7 @@ use crate::LuaType;
 use crate::Result;
 use crate::State;
 use crate::error::{ArgDetail, ErrorKind, LibraryError, PrefixLocation};
+use crate::limits::{TONUMBER_BASE_MAX, TONUMBER_BASE_MIN};
 use crate::numeral::parse_lua_numeral;
 
 fn digit_value(byte: u8) -> Option<u32> {
@@ -254,7 +255,7 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
         if !state.is_none_or_nil(2)? {
             check_type_named(state, 1, LuaType::String, "tonumber")?;
             let base = super::arg_integer(state, 2, "tonumber")?;
-            if !(2..=36).contains(&base) {
+            if !(TONUMBER_BASE_MIN..=TONUMBER_BASE_MAX).contains(&base) {
                 return Err(super::argument_error(
                     state,
                     2,

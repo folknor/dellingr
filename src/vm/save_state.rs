@@ -53,8 +53,10 @@ use crate::det_hash::{IndexMap as DetMap, map_with_capacity};
 use super::lua_val::RustFunc;
 use super::object::{GcHeap, RawObject, StringPtr, Upvalue, UpvalueRef};
 use super::rng::VmRng;
-use super::table::{NormalizedTableKey, array_index};
-use super::{ObjectPtr, State, Val};
+use super::table::{
+    InvalidTableKey, NormalizedTableKey, TableKey, TableKeyInput, array_index, normalize_table_key,
+};
+use super::{ObjectPtr, PointerIdKey, State, Val};
 use crate::COST_MODEL_VERSION;
 use crate::compiler::{Bytecode, UpvalueDesc};
 use crate::cost_meter::CostState;
@@ -66,7 +68,66 @@ use crate::limits::{
     MAX_SAVE_IDENTIFIER_BYTES, MAX_SOURCE_NAME_BYTES,
 };
 
+#[cfg(test)]
+mod integrity_tests;
 mod verify;
+
+// Token spellings belong to the snapshot schema, not the global-name API.
+// Keep the order stable: aliases are classified by the last captured token.
+pub(super) const BUILTIN_ENV_TOKENS: &[(crate::instr::Builtin, &str)] = &[
+    (crate::instr::Builtin::Math, "math"),
+    (crate::instr::Builtin::String, "string"),
+    (crate::instr::Builtin::Table, "table"),
+    (crate::instr::Builtin::G, "_G"),
+];
+pub(super) const GLOBAL_METATABLE_TOKEN: &str = "_G.metatable";
+pub(super) const STRING_METATABLE_TOKEN: &str = "string.metatable";
+
+// One inventory generates both snapshot-only operations. State keeps its
+// existing fields so execution and GC can access them without a second owner.
+// Snapshot quiescence is stricter than call/eval entry: host stack values and
+// reentrant callbacks with live outer frames are legal outside saving.
+// New execution-lifetime State fields still need classification here; keeping
+// State's existing layout does not make that classification exhaustive.
+macro_rules! snapshot_in_flight {
+    (
+        collections: [$($collection:ident),*],
+        scalars: [$($scalar:ident = $zero:expr),*],
+        optionals: [$($optional:ident),*],
+        roots: $roots:ident
+    ) => {
+        impl State {
+            fn validate_quiescent(&self) -> Result<(), SaveError> {
+                if $(self.$collection.is_empty() &&)*
+                    $(self.$scalar == $zero &&)*
+                    $(self.$optional.is_none() &&)* self.$roots.is_empty()
+                {
+                    Ok(())
+                } else {
+                    Err(SaveError::NotQuiescent)
+                }
+            }
+
+            fn reset_in_flight(&mut self) {
+                $(self.$collection.clear();)*
+                $(self.$scalar = $zero;)*
+                $(self.$optional = None;)*
+                // Exhaustive: another transient root class must be reset too.
+                let super::TransientRoots { values, suspended_envs } = &mut self.$roots;
+                values.clear();
+                suspended_envs.clear();
+            }
+        }
+    };
+}
+
+snapshot_in_flight! {
+    collections: [stack, pending_bytecode_caches, open_upvalues, pending_bases, call_stack],
+    scalars: [stack_bottom = 0, metamethod_depth = 0, call_chain_depth = 0,
+        call_depth = 0],
+    optionals: [active_rust_fn],
+    roots: transient_roots
+}
 
 const MAGIC: [u8; 4] = *b"DLGS";
 const MAX_PATH_GLOBAL_BYTES: usize = 96;
@@ -173,8 +234,10 @@ pub enum LoadError<E = Infallible> {
     CorruptArena {
         /// Saved arena or collection invariant that failed.
         reason: &'static str,
-        /// Index associated with the invalid entry.
+        /// Index within the collection identified by `location`.
         index: usize,
+        /// Arena or nested collection containing the invalid entry.
+        location: TableLoadLocation,
     },
     /// A runtime table rejected entries while restoring a save.
     InvalidTable {
@@ -194,10 +257,42 @@ pub enum LoadError<E = Infallible> {
     },
 }
 
-/// The table being restored when materialization rejects its entries.
+/// Location of a table restoration failure or corrupt snapshot collection.
+///
+/// `Object` and `Environment` identify materialized tables; the other variants
+/// qualify the separate entry index in [`LoadError::CorruptArena`].
 #[derive(Debug, Clone, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum TableLoadLocation {
+    /// Interned string arena.
+    Strings,
+    /// Saved object arena.
+    Objects,
+    /// Saved bytecode arena.
+    Bytecode,
+    /// Closed upvalue arena.
+    Upvalues,
+    /// Ordered user globals.
+    Globals,
+    /// Rendered pointer identity records.
+    PointerIds,
+    /// Entries of a saved table object.
+    TableEntries {
+        /// Owner in the object arena.
+        object: usize,
+    },
+    /// Ordered environment deltas.
+    EnvironmentDeltas,
+    /// Deleted keys of the environment delta at this index.
+    EnvironmentDeleted(usize),
+    /// Upserts of the environment delta at this index.
+    EnvironmentUpserts(usize),
+    /// Key order of the environment delta at this index.
+    EnvironmentOrder(usize),
+    /// Array slots of the environment delta at this index.
+    EnvironmentArray(usize),
+    /// Metatable of the environment delta at this index.
+    EnvironmentMetatable(usize),
     /// A table in the saved object arena.
     Object(usize),
     /// A library or host environment table.
@@ -208,6 +303,10 @@ pub enum TableLoadLocation {
         entry: Option<usize>,
     },
 }
+
+// The existing exported location type also covers corruption diagnostics.
+// Keep one public location vocabulary for both snapshot failure paths.
+type SaveLocation = TableLoadLocation;
 
 impl fmt::Display for TableLoadLocation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -220,6 +319,21 @@ impl fmt::Display for TableLoadLocation {
                     write!(f, " entry[{entry}]")?;
                 }
                 Ok(())
+            }
+            Self::Strings => f.write_str("string arena"),
+            Self::Objects => f.write_str("object arena"),
+            Self::Bytecode => f.write_str("bytecode arena"),
+            Self::Upvalues => f.write_str("upvalue arena"),
+            Self::Globals => f.write_str("globals"),
+            Self::PointerIds => f.write_str("format pointer ids"),
+            Self::TableEntries { object } => write!(f, "object[{object}] entries"),
+            Self::EnvironmentDeltas => f.write_str("environment deltas"),
+            Self::EnvironmentDeleted(delta) => write!(f, "environment delta[{delta}] deleted keys"),
+            Self::EnvironmentUpserts(delta) => write!(f, "environment delta[{delta}] upserts"),
+            Self::EnvironmentOrder(delta) => write!(f, "environment delta[{delta}] order"),
+            Self::EnvironmentArray(delta) => write!(f, "environment delta[{delta}] array"),
+            Self::EnvironmentMetatable(delta) => {
+                write!(f, "environment delta[{delta}] metatable")
             }
         }
     }
@@ -281,8 +395,12 @@ impl<E: fmt::Display> fmt::Display for LoadError<E> {
             LoadError::StringSizeExceeded { size, limit } => {
                 write!(f, "string size {size} exceeds limit {limit}")
             }
-            LoadError::CorruptArena { reason, index } => {
-                write!(f, "corrupt save arena at index {index}: {reason}")
+            LoadError::CorruptArena {
+                reason,
+                index,
+                location,
+            } => {
+                write!(f, "corrupt save {location} at index {index}: {reason}")
             }
             LoadError::InvalidTable { location, reason } => {
                 write!(f, "invalid saved table at {location}: {reason}")
@@ -325,7 +443,15 @@ fn retype_load_error<E>(error: LoadError<Infallible>) -> LoadError<E> {
         LoadError::StringSizeExceeded { size, limit } => {
             LoadError::StringSizeExceeded { size, limit }
         }
-        LoadError::CorruptArena { reason, index } => LoadError::CorruptArena { reason, index },
+        LoadError::CorruptArena {
+            reason,
+            index,
+            location,
+        } => LoadError::CorruptArena {
+            reason,
+            index,
+            location,
+        },
         LoadError::InvalidTable { location, reason } => {
             LoadError::InvalidTable { location, reason }
         }
@@ -592,7 +718,8 @@ impl<'a> SaveBuilder<'a> {
         let env_deltas = self.encode_env_deltas()?;
         let pointer_ids = self.state.format_pointer_ids.clone();
         let mut format_pointer_ids = Vec::new();
-        for (val, id) in pointer_ids {
+        for (key, id) in pointer_ids {
+            let val = key.as_val();
             // A heap value unreachable from saved state cannot survive the
             // load, so its id is dropped. A registered Rust function is
             // different: it is not a heap object, the host can hold it and
@@ -671,23 +798,26 @@ impl<'a> SaveBuilder<'a> {
                 .get(&ptr)
                 .ok_or(SaveError::Internal("missing environment baseline"))?;
             let live = table.entries();
-            // One membership map per side, built once per table. `Val`'s Hash/Eq
-            // normalise -0.0 to +0.0 (matching runtime key equality), and
-            // table keys are never NaN or nil, so hashing them cannot panic.
-            // `or_insert` keeps the first entry for a repeated key, matching
-            // the `find` the maps replace. Values are still compared with
-            // `Val::eq` directly so a NaN value stays unequal to itself.
-            let mut baseline_values: DetMap<Val, Val> = map_with_capacity(baseline.entries.len());
+            // One membership map per side, built once per table. `TableKey`
+            // hashes and compares with runtime key equality (-0.0 equals
+            // +0.0), and both sides come from table entries, so every key is
+            // already a valid table key. `or_insert` keeps the first entry for
+            // a repeated key. Values are still compared with `Val::eq`
+            // directly so a NaN value stays unequal to itself.
+            let mut baseline_values: DetMap<TableKey, Val> =
+                map_with_capacity(baseline.entries.len());
             for (key, value) in &baseline.entries {
-                baseline_values.entry(*key).or_insert(*value);
+                baseline_values
+                    .entry(TableKey::from_prevalidated(*key))
+                    .or_insert(*value);
             }
-            let mut live_keys: DetMap<Val, ()> = map_with_capacity(live.len());
+            let mut live_keys: DetMap<TableKey, ()> = map_with_capacity(live.len());
             for (key, _) in &live {
-                live_keys.insert(*key, ());
+                live_keys.insert(TableKey::from_prevalidated(*key), ());
             }
             let mut deleted = Vec::new();
             for (key, _) in &baseline.entries {
-                if !live_keys.contains_key(key) {
+                if !live_keys.contains_key(&TableKey::from_prevalidated(*key)) {
                     deleted.push(self.encode_root(
                         *key,
                         PathSegment::Global(truncate_utf8(&token, MAX_PATH_GLOBAL_BYTES)),
@@ -696,7 +826,7 @@ impl<'a> SaveBuilder<'a> {
             }
             let mut upserts = Vec::new();
             for (key, value) in &live {
-                match baseline_values.get(key) {
+                match baseline_values.get(&TableKey::from_prevalidated(*key)) {
                     Some(base_value) if base_value == value => {}
                     _ => upserts.push((
                         self.encode_root(
@@ -710,16 +840,16 @@ impl<'a> SaveBuilder<'a> {
                     )),
                 }
             }
-            let replayed_order: Vec<Val> =
-                baseline
-                    .entries
-                    .iter()
-                    .filter(|(key, _)| live_keys.contains_key(key))
-                    .map(|(key, _)| *key)
-                    .chain(live.iter().filter_map(|(key, _)| {
-                        (!baseline_values.contains_key(key)).then_some(*key)
-                    }))
-                    .collect();
+            let replayed_order: Vec<Val> = baseline
+                .entries
+                .iter()
+                .filter(|(key, _)| live_keys.contains_key(&TableKey::from_prevalidated(*key)))
+                .map(|(key, _)| *key)
+                .chain(live.iter().filter_map(|(key, _)| {
+                    (!baseline_values.contains_key(&TableKey::from_prevalidated(*key)))
+                        .then_some(*key)
+                }))
+                .collect();
             let order = (replayed_order != live.iter().map(|(key, _)| *key).collect::<Vec<_>>())
                 .then(|| {
                     live.iter()
@@ -1289,30 +1419,6 @@ impl State {
         materialize_payload(&mut state, payload).map_err(retype_load_error::<E>)?;
         Ok(state)
     }
-
-    fn validate_quiescent(&self) -> Result<(), SaveError> {
-        // Snapshot quiescence is stricter than call/eval entry: hosts may keep
-        // values on the stack and callbacks may re-enter with live outer frames.
-        // Entry/exit assertions of this predicate would reject valid calls.
-        // Keep the full snapshot-only inventory here, including temporary roots
-        // and pending closure caches, whenever adding new in-flight State data.
-        if self.stack.is_empty()
-            && self.stack_bottom == 0
-            && self.pending_bytecode_caches.is_empty()
-            && self.transient_roots.is_empty()
-            && self.open_upvalues.is_empty()
-            && self.pending_bases.is_empty()
-            && self.call_stack.is_empty()
-            && self.metamethod_depth == 0
-            && self.call_chain_depth == 0
-            && self.call_depth == 0
-            && self.active_rust_fn.is_none()
-        {
-            Ok(())
-        } else {
-            Err(SaveError::NotQuiescent)
-        }
-    }
 }
 
 /// Object -> token map for the save-time environment. Sourced from the
@@ -1324,6 +1430,8 @@ fn build_env_reverse(state: &State) -> BTreeMap<ObjectPtr, String> {
 
 /// Token -> object map for the load-time environment, inverting the freshly
 /// rebuilt snapshot so saved `EnvObj` tokens resolve to the new objects.
+/// Loading does not reconstruct token names from builtin names or literals;
+/// capture uses this module's token schema on both sides of the round trip.
 fn build_env_forward(state: &State) -> BTreeMap<String, ObjectPtr> {
     state
         .env_tokens
@@ -1346,8 +1454,12 @@ fn saved_num_bits(n: f64) -> u64 {
     }
 }
 
-fn corrupt_arena(reason: &'static str, index: usize) -> LoadError {
-    LoadError::CorruptArena { reason, index }
+fn corrupt_arena(reason: &'static str, index: usize, location: SaveLocation) -> LoadError {
+    LoadError::CorruptArena {
+        reason,
+        index,
+        location,
+    }
 }
 
 // Retain the table's precise failure as well as the environment token. The
@@ -1414,7 +1526,11 @@ fn materialize_payload(
                 upvalues: saved_upvalues,
             } => {
                 let bc = Arc::clone(bytecode.get(*chunk as usize).ok_or_else(|| {
-                    corrupt_arena("closure chunk id is out of range", *chunk as usize)
+                    corrupt_arena(
+                        "closure chunk id is out of range",
+                        *chunk as usize,
+                        SaveLocation::Bytecode,
+                    )
                 })?);
                 let mut refs = Vec::with_capacity(saved_upvalues.len());
                 for uv_id in saved_upvalues {
@@ -1458,6 +1574,7 @@ fn materialize_payload(
                             &state.heap,
                             entry_index,
                             "duplicate materialized table key",
+                            SaveLocation::TableEntries { object: idx },
                         )?;
                         Ok((key, decode_val(value, &ctx)?))
                     })
@@ -1472,13 +1589,21 @@ fn materialize_payload(
                             Some(mt_ptr)
                         }
                         _ => {
-                            return Err(corrupt_arena("saved table metatable is not a table", idx));
+                            return Err(corrupt_arena(
+                                "saved table metatable is not a table",
+                                idx,
+                                SaveLocation::Objects,
+                            ));
                         }
                     },
                 };
                 let ptr = objects[idx];
                 let table = state.heap.as_table(ptr).ok_or_else(|| {
-                    corrupt_arena("materialized table object has wrong type", idx)
+                    corrupt_arena(
+                        "materialized table object has wrong type",
+                        idx,
+                        SaveLocation::Objects,
+                    )
                 })?;
                 table
                     .rebuild_from_snapshot(*array_len as usize, entries)
@@ -1506,6 +1631,7 @@ fn materialize_payload(
                 &state.heap,
                 key_index,
                 "duplicate materialized deleted key",
+                SaveLocation::EnvironmentDeleted(delta_index),
             )?;
         }
         let mut upsert_keys = BTreeSet::new();
@@ -1516,12 +1642,14 @@ fn materialize_payload(
                 &state.heap,
                 entry_index,
                 "duplicate materialized upsert key",
+                SaveLocation::EnvironmentUpserts(delta_index),
             )?;
         }
         if !deleted_keys.is_disjoint(&upsert_keys) {
             return Err(corrupt_arena(
                 "materialized key is both deleted and upserted",
                 delta_index,
+                SaveLocation::EnvironmentDeltas,
             ));
         }
         if let Some(order) = &delta.order {
@@ -1533,24 +1661,31 @@ fn materialize_payload(
                     &state.heap,
                     key_index,
                     "duplicate materialized environment order key",
+                    SaveLocation::EnvironmentOrder(delta_index),
                 )?;
             }
             if !deleted_keys.is_disjoint(&order_keys) {
                 return Err(corrupt_arena(
                     "materialized environment order contains a deleted key",
                     delta_index,
+                    SaveLocation::EnvironmentDeltas,
                 ));
             }
             if !upsert_keys.is_subset(&order_keys) {
                 return Err(corrupt_arena(
                     "materialized environment order omits an upserted key",
                     delta_index,
+                    SaveLocation::EnvironmentDeltas,
                 ));
             }
         }
         {
             let table = state.heap.as_table(ptr).ok_or_else(|| {
-                corrupt_arena("environment token does not resolve to a table", delta_index)
+                corrupt_arena(
+                    "environment token does not resolve to a table",
+                    delta_index,
+                    SaveLocation::EnvironmentDeltas,
+                )
             })?;
             for (key_index, key) in delta.deleted.iter().enumerate() {
                 table
@@ -1580,7 +1715,11 @@ fn materialize_payload(
         if let Some(order) = &delta.order {
             let (current, array, metatable) = {
                 let table = state.heap.as_table(ptr).ok_or_else(|| {
-                    corrupt_arena("environment token does not resolve to a table", delta_index)
+                    corrupt_arena(
+                        "environment token does not resolve to a table",
+                        delta_index,
+                        SaveLocation::EnvironmentDeltas,
+                    )
                 })?;
                 (
                     table.entries(),
@@ -1591,19 +1730,28 @@ fn materialize_payload(
             let mut current_by_key = BTreeMap::new();
             for (key_index, (key, value)) in current.iter().copied().enumerate() {
                 current_by_key.insert(
-                    runtime_table_key(key, &state.heap, key_index)?,
+                    runtime_table_key(
+                        key,
+                        &state.heap,
+                        key_index,
+                        SaveLocation::EnvironmentOrder(delta_index),
+                    )?,
                     (key, value),
                 );
             }
             let mut ordered = Vec::with_capacity(current.len());
             for (key_index, key) in order.iter().enumerate() {
                 let key = decode_val(key, &ctx)?;
-                let Some((current_key, value)) =
-                    current_by_key.remove(&runtime_table_key(key, &state.heap, key_index)?)
-                else {
+                let Some((current_key, value)) = current_by_key.remove(&runtime_table_key(
+                    key,
+                    &state.heap,
+                    key_index,
+                    SaveLocation::EnvironmentOrder(delta_index),
+                )?) else {
                     return Err(corrupt_arena(
                         "environment order key is absent from the table",
                         key_index,
+                        SaveLocation::EnvironmentOrder(delta_index),
                     ));
                 };
                 ordered.push((current_key, value));
@@ -1613,14 +1761,23 @@ fn materialize_payload(
             // insertion order.
             for (key_index, (key, value)) in current.into_iter().enumerate() {
                 if current_by_key
-                    .remove(&runtime_table_key(key, &state.heap, key_index)?)
+                    .remove(&runtime_table_key(
+                        key,
+                        &state.heap,
+                        key_index,
+                        SaveLocation::EnvironmentOrder(delta_index),
+                    )?)
                     .is_some()
                 {
                     ordered.push((key, value));
                 }
             }
             let table = state.heap.as_table(ptr).ok_or_else(|| {
-                corrupt_arena("environment token does not resolve to a table", delta_index)
+                corrupt_arena(
+                    "environment token does not resolve to a table",
+                    delta_index,
+                    SaveLocation::EnvironmentDeltas,
+                )
             })?;
             if array.is_empty() {
                 table.clear_and_insert_entries(ordered).map_err(|error| {
@@ -1668,7 +1825,11 @@ fn materialize_payload(
                 .map(|value| decode_val(value, &ctx))
                 .collect::<Result<Vec<_>, LoadError>>()?;
             let table = state.heap.as_table(ptr).ok_or_else(|| {
-                corrupt_arena("environment token does not resolve to a table", delta_index)
+                corrupt_arena(
+                    "environment token does not resolve to a table",
+                    delta_index,
+                    SaveLocation::EnvironmentDeltas,
+                )
             })?;
             let metatable = table.get_metatable();
             // Setup can have added later slots. Retain their shape and values
@@ -1718,12 +1879,17 @@ fn materialize_payload(
                     return Err(corrupt_arena(
                         "saved environment metatable is not a table",
                         delta_index,
+                        SaveLocation::EnvironmentDeltas,
                     ));
                 }
             },
         };
         let table = state.heap.as_table(ptr).ok_or_else(|| {
-            corrupt_arena("environment token does not resolve to a table", delta_index)
+            corrupt_arena(
+                "environment token does not resolve to a table",
+                delta_index,
+                SaveLocation::EnvironmentDeltas,
+            )
         })?;
         if let Some(metatable) = new_metatable {
             table.set_metatable(metatable);
@@ -1750,7 +1916,11 @@ fn materialize_payload(
             && !ctx.fn_forward.contains_key(name)
         {
             if !seen_pointer_ids.insert(*id) {
-                return Err(corrupt_arena("duplicate format pointer id", index));
+                return Err(corrupt_arena(
+                    "duplicate format pointer id",
+                    index,
+                    SaveLocation::PointerIds,
+                ));
             }
             continue;
         }
@@ -1761,39 +1931,49 @@ fn materialize_payload(
             &state.heap,
             index,
             "duplicate materialized format pointer value",
+            SaveLocation::PointerIds,
         )?;
         if !seen_pointer_ids.insert(*id) {
-            return Err(corrupt_arena("duplicate format pointer id", index));
+            return Err(corrupt_arena(
+                "duplicate format pointer id",
+                index,
+                SaveLocation::PointerIds,
+            ));
         }
-        format_pointer_ids.insert(value, *id);
+        // The verifier admits only pointer-like saved values here.
+        let key = PointerIdKey::from_val(value).ok_or_else(|| {
+            corrupt_arena(
+                "invalid format pointer value",
+                index,
+                SaveLocation::PointerIds,
+            )
+        })?;
+        format_pointer_ids.insert(key, *id);
     }
     state.format_pointer_ids = format_pointer_ids;
-    state.stack.clear();
-    state.stack_bottom = 0;
-    state.pending_bytecode_caches.clear();
-    state.transient_roots.values.clear();
-    state.transient_roots.suspended_envs.clear();
-    state.open_upvalues.clear();
-    state.pending_bases.clear();
-    state.call_stack.clear();
-    state.metamethod_depth = 0;
-    state.call_chain_depth = 0;
-    state.call_depth = 0;
-    state.active_rust_fn = None;
+    state.reset_in_flight();
     state.gc_collect();
     Ok(())
 }
 
 fn upvalues_ref(upvalues: &[UpvalueRef], id: u32) -> Result<&UpvalueRef, LoadError> {
-    upvalues
-        .get(id as usize)
-        .ok_or_else(|| corrupt_arena("upvalue id is out of range", id as usize))
+    upvalues.get(id as usize).ok_or_else(|| {
+        corrupt_arena(
+            "upvalue id is out of range",
+            id as usize,
+            SaveLocation::Upvalues,
+        )
+    })
 }
 
 fn object_ref(objects: &[ObjectPtr], id: u32) -> Result<&ObjectPtr, LoadError> {
-    objects
-        .get(id as usize)
-        .ok_or_else(|| corrupt_arena("object id is out of range", id as usize))
+    objects.get(id as usize).ok_or_else(|| {
+        corrupt_arena(
+            "object id is out of range",
+            id as usize,
+            SaveLocation::Objects,
+        )
+    })
 }
 
 struct DecodeCtx<'a> {
@@ -1803,17 +1983,65 @@ struct DecodeCtx<'a> {
     fn_forward: &'a BTreeMap<String, RustFunc>,
 }
 
+#[derive(Eq, Ord, PartialEq, PartialOrd)]
+enum SavedObjectKey {
+    Object(u32),
+    EnvironmentObject(String),
+}
+
+type ResolvedKey = NormalizedTableKey<Vec<u8>, SavedObjectKey, String>;
+
+impl SavedVal {
+    /// Snapshot counterpart of `Val::table_key`. Reference payloads differ, but
+    /// numeric equality and nil/NaN rejection come from the same normalizer.
+    fn table_key(
+        &self,
+        strings: &[Vec<u8>],
+        index: usize,
+        location: SaveLocation,
+    ) -> Result<ResolvedKey, LoadError> {
+        let key = match self {
+            SavedVal::Nil => TableKeyInput::Nil,
+            SavedVal::Bool(value) => TableKeyInput::Bool(*value),
+            SavedVal::Num(bits) => TableKeyInput::Number(f64::from_bits(*bits)),
+            SavedVal::Str(id) => {
+                TableKeyInput::String(strings.get(*id as usize).cloned().ok_or_else(|| {
+                    corrupt_arena(
+                        "table key string id is out of range",
+                        *id as usize,
+                        SaveLocation::Strings,
+                    )
+                })?)
+            }
+            SavedVal::Obj(id) => TableKeyInput::Object(SavedObjectKey::Object(*id)),
+            SavedVal::Fn(id) => TableKeyInput::RustFn(id.clone()),
+            SavedVal::EnvObj(id) => {
+                TableKeyInput::Object(SavedObjectKey::EnvironmentObject(id.clone()))
+            }
+        };
+        normalize_table_key(key).map_err(|error| invalid_key_error(error, index, location))
+    }
+}
+
+/// The corruption error for a key the shared normalizer rejected.
+fn invalid_key_error(error: InvalidTableKey, index: usize, location: SaveLocation) -> LoadError {
+    match error {
+        InvalidTableKey::Nil => corrupt_arena("nil is not a table key", index, location),
+        InvalidTableKey::Nan => corrupt_arena("NaN is not a table key", index, location),
+    }
+}
+
 type RuntimeTableKey = NormalizedTableKey<Vec<u8>, ObjectPtr, usize>;
 
 fn runtime_table_key(
     value: Val,
     heap: &GcHeap,
     index: usize,
+    location: SaveLocation,
 ) -> Result<RuntimeTableKey, LoadError> {
-    let key = value.table_key().map_err(|error| match error {
-        super::table::InvalidTableKey::Nil => corrupt_arena("nil is not a table key", index),
-        super::table::InvalidTableKey::Nan => corrupt_arena("NaN is not a table key", index),
-    })?;
+    let key = value
+        .table_key()
+        .map_err(|error| invalid_key_error(error, index, location))?;
     Ok(match key {
         NormalizedTableKey::Bool(value) => NormalizedTableKey::Bool(value),
         NormalizedTableKey::Number(value) => NormalizedTableKey::Number(value),
@@ -1831,11 +2059,12 @@ fn insert_runtime_key(
     heap: &GcHeap,
     index: usize,
     reason: &'static str,
+    location: SaveLocation,
 ) -> Result<(), LoadError> {
-    if keys.insert(runtime_table_key(value, heap, index)?) {
+    if keys.insert(runtime_table_key(value, heap, index, location.clone())?) {
         Ok(())
     } else {
-        Err(corrupt_arena(reason, index))
+        Err(corrupt_arena(reason, index, location))
     }
 }
 
@@ -1844,11 +2073,15 @@ fn decode_val(saved: &SavedVal, ctx: &DecodeCtx<'_>) -> Result<Val, LoadError> {
         SavedVal::Nil => Ok(Val::Nil),
         SavedVal::Bool(b) => Ok(Val::Bool(*b)),
         SavedVal::Num(bits) => Ok(Val::Num(f64::from_bits(*bits))),
-        SavedVal::Str(id) => {
-            Ok(Val::Str(*ctx.strings.get(*id as usize).ok_or_else(
-                || corrupt_arena("string id is out of range", *id as usize),
-            )?))
-        }
+        SavedVal::Str(id) => Ok(Val::Str(*ctx.strings.get(*id as usize).ok_or_else(
+            || {
+                corrupt_arena(
+                    "string id is out of range",
+                    *id as usize,
+                    SaveLocation::Strings,
+                )
+            },
+        )?)),
         SavedVal::Obj(id) => Ok(Val::Obj(*object_ref(ctx.objects, *id)?)),
         SavedVal::Fn(id) => ctx
             .fn_forward
@@ -1878,7 +2111,13 @@ fn materialize_bytecode(
     out.into_iter()
         .enumerate()
         .map(|(index, bc)| {
-            bc.ok_or_else(|| corrupt_arena("bytecode chunk was not materialized", index))
+            bc.ok_or_else(|| {
+                corrupt_arena(
+                    "bytecode chunk was not materialized",
+                    index,
+                    SaveLocation::Bytecode,
+                )
+            })
         })
         .collect()
 }
@@ -1921,21 +2160,35 @@ fn build_bytecode_tree(
     let mut stack: Vec<(usize, usize)> = vec![(root, 0)];
     while let Some((idx, cursor)) = stack.last_mut() {
         let idx = *idx;
-        let src = saved
-            .get(idx)
-            .ok_or_else(|| corrupt_arena("bytecode chunk id is out of range", idx))?;
+        let src = saved.get(idx).ok_or_else(|| {
+            corrupt_arena(
+                "bytecode chunk id is out of range",
+                idx,
+                SaveLocation::Bytecode,
+            )
+        })?;
         if let Some(child) = src.nested.get(*cursor) {
             *cursor += 1;
             let child = *child as usize;
             if out
                 .get(child)
-                .ok_or_else(|| corrupt_arena("nested chunk id is out of range", child))?
+                .ok_or_else(|| {
+                    corrupt_arena(
+                        "nested chunk id is out of range",
+                        child,
+                        SaveLocation::Bytecode,
+                    )
+                })?
                 .is_some()
             {
                 continue;
             }
             if visiting[child] {
-                return Err(corrupt_arena("nested chunk graph contains a cycle", child));
+                return Err(corrupt_arena(
+                    "nested chunk graph contains a cycle",
+                    child,
+                    SaveLocation::Bytecode,
+                ));
             }
             visiting[child] = true;
             stack.push((child, 0));
@@ -1952,14 +2205,18 @@ fn build_bytecode_tree(
                         corrupt_arena(
                             "nested bytecode chunk was not materialized",
                             *child as usize,
+                            SaveLocation::Bytecode,
                         )
                     })
             })
             .collect::<Result<Vec<_>, LoadError>>()?;
-        let source = source_names
-            .get(idx)
-            .cloned()
-            .ok_or_else(|| corrupt_arena("bytecode source name was not materialized", idx))?;
+        let source = source_names.get(idx).cloned().ok_or_else(|| {
+            corrupt_arena(
+                "bytecode source name was not materialized",
+                idx,
+                SaveLocation::Bytecode,
+            )
+        })?;
         out[idx] = Some(build_bytecode_node(src, nested, source));
         visiting[idx] = false;
         stack.pop();
@@ -3331,6 +3588,7 @@ mod tests {
             LoadError::CorruptArena {
                 reason: "nested chunk id is out of range",
                 index: 1,
+                location: SaveLocation::Bytecode,
             }
         );
 

@@ -1,9 +1,10 @@
 # Limits
 
-All limits are build-wide constants in `dellingr::limits`. They are not
-per-State settings: scripts must behave identically for every embedder and
-across save/restore. Read the constants for current values. Limit errors carry
-both the observed size or depth and the active limit.
+Fixed resource, encoding, and reference-pinned library limits are constants in
+`dellingr::limits`. They have no per-State override, so scripts behave the same
+for every embedder and across save/restore. Limit errors carry the observed
+size or depth and the active limit when they include numeric details. The GC
+policy is a separate per-State setting, described below.
 
 ## Source limits
 
@@ -43,18 +44,41 @@ Violations are reported as errors at load time, never silently truncated.
   non-function call chain. Table-library writes through metamethods share it.
 - `MAX_ARGUMENTS`, `MAX_RESULTS`: values carried by one call or return.
   See below.
-- `GMATCH_PATTERN_CACHE_ENTRIES`, `GMATCH_PATTERN_CACHE_BYTES`: per-State
-  `string.gmatch` pattern cache.
-- `COST_CHECK_INTERVAL`: static cost units batched before the budget is
-  checked.
+
+## Reference-pinned library limits
+
+These values preserve the current Lua library behavior and error paths:
+
+- `MAXCCALLS`: pattern matching raises `pattern too complex` when recursive
+  matching reaches 200 active calls.
+- `LUA_MAXCAPTURES`: patterns allow 32 captures, including position captures.
+  The next capture raises `too many captures`.
+- `MAX_FORMAT_LEN`: one `string.format` directive is limited to 22 bytes. This
+  follows Lua 5.4 `lstrlib`'s `MAX_FORMAT - 10` bound and raises
+  `FormatDirectiveTooLong` when exceeded.
+- `MAX_FORMAT_FIELD_DIGITS`: width and precision each accept at most two
+  decimal digits. More digits raise `InvalidFormatSpecification`.
+- `TONUMBER_BASE_MIN`, `TONUMBER_BASE_MAX`: `tonumber(value, base)` accepts
+  bases from 2 through 36. Other values raise `BaseOutOfRange`.
+- `TABLE_SORT_MAX_LEN`: `table.sort` rejects a length at or above `i32::MAX`
+  (Lua's `INT_MAX`) with `ArrayTooBig`.
+
+## Compatibility exports for implementation tuning
+
+`GMATCH_PATTERN_CACHE_ENTRIES`, `GMATCH_PATTERN_CACHE_BYTES`, and
+`COST_CHECK_INTERVAL` remain available through `dellingr::limits` for existing
+host code. The cache values bound per-State `string.gmatch` cache storage.
+`COST_CHECK_INTERVAL` is the internal opcode-cost batching interval. These are
+implementation tuning values, not additional script-level resource limits.
 
 ## Garbage collection policy
 
 The heap counts GC-managed objects plus distinct interned strings. It checks
 that count before each heap allocation and collects when the count is at least
 the current threshold. The default automatic policy is an initial threshold of
-20 allocations, a minimum threshold of 20, and a growth factor of 2. After an
-automatic collection, the next threshold is
+20 allocations, a minimum threshold of 20, and a growth factor of 2. Each State
+stores its own policy; these are the defaults used when a State is created.
+After an automatic collection, the next threshold is
 `max(live_allocations * growth_factor, minimum_threshold)`, using saturating
 multiplication.
 

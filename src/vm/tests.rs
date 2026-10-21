@@ -1118,7 +1118,7 @@ fn gc_drops_format_pointer_ids_for_dead_values() {
         state
             .format_pointer_ids
             .iter()
-            .any(|(val, _)| live_table(&state, *val)),
+            .any(|(key, _)| live_table(&state, key.as_val())),
         "the reachable value's identity entry must survive"
     );
 }

@@ -5,8 +5,6 @@ use super::object::{Closure, GcHeap, ObjectPtr, StringPtr};
 use std::fmt;
 use std::hash::{Hash, Hasher};
 
-use super::table::{InvalidTableKey, NormalizedTableKey, TableKeyInput, normalize_table_key};
-
 /// Signature for a host-provided Rust function callable from Lua.
 ///
 /// The function reads its arguments from the [`State`]'s stack (1-based
@@ -200,46 +198,9 @@ impl fmt::Debug for Val {
 // User-visible conversion goes through `State::to_string`/
 // `bytes_with_default_string_coercion`.
 
-/// This is very dangerous, since f64 doesn't implement Eq.
-impl Eq for Val {}
-
-// `Val` is also used by internal identity indexes, so its `Hash` implementation
-// must remain total even for values that cannot be Lua table keys. Lua table
-// storage wraps validated keys in `TableKey`.
-impl Hash for Val {
-    fn hash<H: Hasher>(&self, hasher: &mut H) {
-        match self {
-            Nil => (),
-            Bool(b) => b.hash(hasher),
-            Obj(o) => o.hash(hasher),
-            Num(n) => {
-                // NaN is invalid as a table key, and negative zero hashes like
-                // positive zero. Keep this in step with table lookup and the
-                // snapshot verifier through the shared normalizer.
-                let bits = match normalize_table_key::<(), (), ()>(TableKeyInput::Number(*n)) {
-                    Ok(NormalizedTableKey::Number(bits)) => bits,
-                    Err(InvalidTableKey::Nan) => {
-                        // NaN never compares equal, including to itself, so
-                        // any deterministic hash is valid under Hash's
-                        // equality contract. Use one stable token so the hash
-                        // stays host-independent for the invalid key value.
-                        crate::numeral::CANONICAL_NAN_BITS.hash(hasher);
-                        return;
-                    }
-                    Err(InvalidTableKey::Nil) | Ok(_) => {
-                        // This call supplies a number, so nil and non-number
-                        // normalized variants cannot occur here.
-                        unreachable!("numeric table keys normalize to numeric keys")
-                    }
-                };
-                bits.hash(hasher);
-            }
-            RustFn(func) => (*func as usize).hash(hasher),
-            Str(s) => s.hash(hasher),
-        }
-    }
-}
-
+// `Val` equality keeps Lua's NaN behavior, so it is deliberately not `Eq` and
+// has no `Hash`. Table storage keys use the validated `TableKey` wrapper and
+// the `%p` identity index uses `PointerIdKey`.
 impl PartialEq for Val {
     fn eq(&self, other: &Val) -> bool {
         match (self, other) {
@@ -251,6 +212,63 @@ impl PartialEq for Val {
             // String pointer equality works because strings are interned
             (Str(a), Str(b)) => a == b,
             _ => false,
+        }
+    }
+}
+
+/// A pointer-like runtime value used as the key of the `%p` identity index.
+/// Primitive values cannot be represented, which keeps invalid table keys such
+/// as NaN out of this map by construction.
+#[derive(Clone, Copy)]
+pub(crate) enum PointerIdKey {
+    /// An interned string identity.
+    String(StringPtr),
+    /// A garbage-collected object identity.
+    Object(ObjectPtr),
+    /// A host-provided function identity.
+    RustFn(RustFunc),
+}
+
+impl PointerIdKey {
+    /// Convert a pointer-like value to an index key.
+    pub(crate) fn from_val(value: Val) -> Option<Self> {
+        match value {
+            Val::Str(ptr) => Some(Self::String(ptr)),
+            Val::Obj(ptr) => Some(Self::Object(ptr)),
+            Val::RustFn(func) => Some(Self::RustFn(func)),
+            Val::Nil | Val::Bool(_) | Val::Num(_) => None,
+        }
+    }
+
+    /// Recreate the runtime value represented by this identity key.
+    pub(crate) fn as_val(self) -> Val {
+        match self {
+            Self::String(ptr) => Val::Str(ptr),
+            Self::Object(ptr) => Val::Obj(ptr),
+            Self::RustFn(func) => Val::RustFn(func),
+        }
+    }
+}
+
+impl PartialEq for PointerIdKey {
+    fn eq(&self, other: &Self) -> bool {
+        match (*self, *other) {
+            (Self::String(a), Self::String(b)) => a == b,
+            (Self::Object(a), Self::Object(b)) => a == b,
+            (Self::RustFn(a), Self::RustFn(b)) => std::ptr::fn_addr_eq(a, b),
+            _ => false,
+        }
+    }
+}
+
+impl Eq for PointerIdKey {}
+
+impl Hash for PointerIdKey {
+    fn hash<H: Hasher>(&self, hasher: &mut H) {
+        match self {
+            Self::String(ptr) => ptr.hash(hasher),
+            Self::Object(ptr) => ptr.hash(hasher),
+            Self::RustFn(func) => (*func as usize).hash(hasher),
         }
     }
 }
@@ -327,6 +345,9 @@ mod tests {
         let second = Val::RustFn(first_callback);
         assert_eq!(first, second);
 
+        let first = PointerIdKey::from_val(first).expect("Rust functions have pointer identity");
+        let second = PointerIdKey::from_val(second).expect("Rust functions have pointer identity");
+        assert!(first == second);
         let mut first_hash = RecordingHasher::default();
         let mut second_hash = RecordingHasher::default();
         first.hash(&mut first_hash);

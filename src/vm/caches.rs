@@ -57,7 +57,7 @@ pub(super) struct FieldLookupCacheEntry {
     pub(super) index: usize,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct MethodLookupCacheEntry {
     pub(super) receiver_metatable: ObjectPtr,
     pub(super) index_key: Val,
