@@ -5,6 +5,7 @@
 //! - A key is accessed but doesn't exist in the table (__index)
 //! - A new key is being assigned to the table (__newindex)
 
+use super::MetaName;
 use super::Result;
 use super::State;
 use super::frame::Frame;
@@ -82,14 +83,7 @@ impl State {
         if matches!(val, Val::Nil) {
             // Check for __index metamethod
             if let Some(mt_ptr) = mt_ptr {
-                // Keep key rooted through this dispatch-time intern. The
-                // allocation can collect, so its current lifetime at this
-                // point is part of the collection behavior.
-                self.check_stack_space(1)?;
-                self.push_unchecked(key);
-                let index_key = self.alloc_string("__index")?;
-                let key = self.pop_val();
-
+                let index_key = self.meta_names.get(MetaName::Index);
                 let index_handler = self
                     .heap
                     .as_table_ref(mt_ptr)
@@ -235,15 +229,7 @@ impl State {
         if matches!(existing, Val::Nil) {
             // Check for __newindex metamethod
             if let Some(mt_ptr) = mt_ptr {
-                // Keep key and val rooted through this dispatch-time intern.
-                // The allocation can collect, so their current lifetimes at
-                // this point are part of the collection behavior.
-                self.check_stack_space(2)?;
-                self.push_unchecked(key);
-                self.push_unchecked(val);
-                let newindex_key = self.alloc_string("__newindex")?;
-                self.pop(2)?; // Discard protections
-
+                let newindex_key = self.meta_names.get(MetaName::NewIndex);
                 let newindex_handler = self
                     .heap
                     .as_table_ref(mt_ptr)

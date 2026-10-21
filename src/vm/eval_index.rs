@@ -2,6 +2,7 @@ use std::str;
 
 use super::super::error::TypeError;
 use super::LuaType;
+use super::MetaName;
 use super::Result;
 use super::State;
 use super::Val;
@@ -21,7 +22,6 @@ pub(super) fn verified_global_name(bytes: &[u8]) -> &str {
 impl MethodLookupCacheEntry {
     fn new(
         receiver_metatable: ObjectPtr,
-        index_key: Val,
         index_field_index: usize,
         index_handler: Val,
         method_table_version: u64,
@@ -30,7 +30,6 @@ impl MethodLookupCacheEntry {
     ) -> Self {
         Self {
             receiver_metatable,
-            index_key,
             index_field_index,
             index_handler,
             method_table_version,
@@ -73,7 +72,7 @@ impl State {
                 return Ok(());
             }
 
-            if let Some(result) = self.get_index_table_field_direct(val, ptr, key, cache) {
+            if let Some(result) = self.get_index_table_field_direct(ptr, key, cache) {
                 self.push_unchecked(result);
                 return Ok(());
             }
@@ -129,15 +128,7 @@ impl State {
             return Err(self.type_error(TypeError::TableIndex(LuaType::String)));
         };
 
-        // Root the receiver and key across the interning allocation, which
-        // can collect.
-        self.check_stack_space(2)?;
-        self.push_unchecked(receiver);
-        self.push_unchecked(key);
-        let index_key = self.alloc_string("__index")?;
-        let key = self.pop_val();
-        let receiver = self.pop_val();
-
+        let index_key = self.meta_names.get(MetaName::Index);
         let (handler, shape) = match self.heap.as_table_ref(mt_ptr) {
             Some(mt) => match mt.get_with_index(&index_key) {
                 Some((slot, handler)) => (handler, Some((mt.version(), slot))),
@@ -319,8 +310,7 @@ impl State {
 
     #[inline(always)]
     pub(super) fn get_index_table_field_direct(
-        &mut self,
-        receiver: Val,
+        &self,
         ptr: ObjectPtr,
         key: Val,
         cache: Option<&FieldLookupCacheSlot>,
@@ -338,7 +328,7 @@ impl State {
             return cached;
         }
 
-        let index_key = self.protected_index_key(receiver, key)?;
+        let index_key = self.meta_names.get(MetaName::Index);
         let receiver_table = self.heap.as_table_ref(ptr)?;
         let receiver_metatable = receiver_table.get_metatable()?;
         let metatable = self.heap.as_table_ref(receiver_metatable)?;
@@ -347,7 +337,6 @@ impl State {
             if let Some(cache) = cache {
                 cache.set_method(MethodLookupCacheEntry::new(
                     receiver_metatable,
-                    index_key,
                     index_field_index,
                     index_handler,
                     0,
@@ -361,7 +350,6 @@ impl State {
             if let Some(cache) = cache {
                 cache.set_method(MethodLookupCacheEntry::new(
                     receiver_metatable,
-                    index_key,
                     index_field_index,
                     index_handler,
                     0,
@@ -376,7 +364,6 @@ impl State {
             if let Some(cache) = cache {
                 cache.set_method(MethodLookupCacheEntry::new(
                     receiver_metatable,
-                    index_key,
                     index_field_index,
                     index_handler,
                     method_table_version,
@@ -390,7 +377,6 @@ impl State {
         if let Some(cache) = cache {
             cache.set_method(MethodLookupCacheEntry::new(
                 receiver_metatable,
-                index_key,
                 index_field_index,
                 index_handler,
                 method_table_version,
@@ -428,7 +414,8 @@ impl State {
 
         let metatable = self.heap.as_table_ref(entry.receiver_metatable)?;
         let (index_key, index_handler) = metatable.get_index(entry.index_field_index)?;
-        if index_key != entry.index_key || index_handler != entry.index_handler {
+        if index_key != self.meta_names.get(MetaName::Index) || index_handler != entry.index_handler
+        {
             return None;
         }
 
@@ -457,7 +444,6 @@ impl State {
         if cached_key == key {
             cache.set_method(MethodLookupCacheEntry::new(
                 entry.receiver_metatable,
-                entry.index_key,
                 entry.index_field_index,
                 entry.index_handler,
                 method_table_version,
@@ -468,33 +454,6 @@ impl State {
         } else {
             None
         }
-    }
-
-    #[inline(always)]
-    /// Interns `"__index"` while keeping `receiver` and `key` reachable for the
-    /// GC across the allocation.
-    ///
-    /// This pushes its two protection values *before* popping anything, so it
-    /// is net-positive while it runs and must respect the cap like any other
-    /// growth path. It sits on an `Option`-returning inline-cache fast path, so
-    /// exhaustion is reported as `None`: the caller then falls through to the
-    /// slow lookup, which performs the same work through checked pushes and
-    /// surfaces a proper `StackOverflow`.
-    pub(super) fn protected_index_key(&mut self, receiver: Val, key: Val) -> Option<Val> {
-        if self.check_stack_space(2).is_err() {
-            return None;
-        }
-        self.push_unchecked(receiver);
-        self.push_unchecked(key);
-        let index_key = self
-            .alloc_string("__index")
-            .expect("fixed metamethod key is below the string size limit");
-        // Internal invariant, not host input: exactly the two values pushed
-        // above are removed, so this uses the panicking form rather than the
-        // now-fallible public `pop`.
-        self.pop_val();
-        self.pop_val();
-        Some(index_key)
     }
 
     pub(super) fn instr_get_global(

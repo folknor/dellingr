@@ -7,6 +7,7 @@ use crate::State;
 use crate::error::{ArgDetail, ErrorKind, LibraryError, PrefixLocation};
 use crate::limits::{TONUMBER_BASE_MAX, TONUMBER_BASE_MIN};
 use crate::numeral::parse_lua_numeral;
+use crate::vm::MetaName;
 
 fn digit_value(byte: u8) -> Option<u32> {
     match byte {
@@ -143,12 +144,13 @@ pub(crate) fn base_pairs(state: &mut State) -> Result<u8> {
 
 // Keep _G's metatable entries in their historical insertion order.
 pub(super) const GLOBAL_ENV_METAMETHODS: &[(&str, crate::RustFunc)] = &[
-    ("__index", global_env_index),
-    ("__newindex", global_env_newindex),
+    (MetaName::Index.as_str(), global_env_index),
+    (MetaName::NewIndex.as_str(), global_env_newindex),
 ];
 
 // This field is installed after the proxy metamethods.
-pub(super) const GLOBAL_ENV_PROTECTION_FIELDS: &[(&str, bool)] = &[("__metatable", false)];
+pub(super) const GLOBAL_ENV_PROTECTION_FIELDS: &[(&str, bool)] =
+    &[(MetaName::Metatable.as_str(), false)];
 
 pub(super) const NON_BUILTIN_GLOBALS: &[(&str, crate::RustFunc)] = &[
     // Raises an error with the given message.
@@ -512,7 +514,7 @@ fn raw_metafield(state: &mut State, idx: isize) -> Result<bool> {
         return Ok(false);
     }
     state.push_value(-1)?;
-    state.push_string("__metatable")?;
+    state.push_meta_name(MetaName::Metatable)?;
     state.get_table_raw(-2)?;
     if state.typ(-1) != LuaType::Nil {
         state.remove(-2)?;

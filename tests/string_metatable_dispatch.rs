@@ -123,6 +123,24 @@ fn default_string_conversion_does_not_intern_a_metamethod_key() {
 }
 
 #[test]
+fn metatable_misses_do_not_intern_event_names() {
+    let mut state = State::new();
+    state.gc_disable_auto();
+    run(
+        &mut state,
+        "t = setmetatable({}, {})
+         probe = function() local _ = t.missing; t.fresh = nil; return #t, t[1] end
+         probe()",
+    );
+    state.gc_collect();
+    let strings = state.string_count();
+    // Call through the host so no new chunk interns its literals.
+    state.get_global("probe").unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
+    assert_eq!(state.string_count(), strings);
+}
+
+#[test]
 fn string_call_roots_the_receiver_and_active_handler_during_gc() {
     fn collect(state: &mut State) -> dellingr::Result<u8> {
         state.gc_collect();

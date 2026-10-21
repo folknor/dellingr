@@ -88,7 +88,8 @@ fn string_literals_are_reclaimed_one_collection_after_runtime_cache_sweep() {
     let mut state = State::empty();
     state.gc_disable_auto();
 
-    assert_eq!(state.string_count(), 0);
+    // A fresh State already holds its permanent interned strings.
+    let baseline = state.string_count();
     state
         .load_string(
             r#"
@@ -98,14 +99,14 @@ fn string_literals_are_reclaimed_one_collection_after_runtime_cache_sweep() {
         .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
 
-    assert!(state.string_count() > 0);
+    assert!(state.string_count() > baseline);
     state.gc_collect();
     // The sweep drops the dead runtime bundle after root marking, so its
     // literals intentionally survive this collection and disappear on the
     // next one.
-    assert!(state.string_count() > 0);
+    assert!(state.string_count() > baseline);
     state.gc_collect();
-    assert_eq!(state.string_count(), 0);
+    assert_eq!(state.string_count(), baseline);
 }
 
 #[test]

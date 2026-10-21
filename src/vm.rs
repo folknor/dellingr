@@ -10,6 +10,7 @@ mod eval_store;
 mod frame;
 mod global_env;
 mod lua_val;
+mod meta_name;
 mod metamethod;
 mod object;
 mod rng;
@@ -47,6 +48,8 @@ use super::patterns::LuaPattern;
 
 use anchor::Registry;
 use global_env::GlobalEnv;
+pub(crate) use meta_name::MetaName;
+use meta_name::MetaNames;
 
 pub(super) use lua_val::PointerIdKey;
 pub(super) use lua_val::Val;
@@ -112,6 +115,8 @@ pub(super) fn mark_gc_roots(state: &State, worklist: &mut Vec<ObjectPtr>) {
     }
     state.transient_roots.mark_reachable(&state.heap, worklist);
     state.registry.mark_reachable(&state.heap, worklist);
+    // Event names live for the whole State so dispatch never interns them.
+    state.meta_names.mark(&state.heap);
     // Strings carry no metatable pointer, so the shared metatable must remain
     // rooted even when no Lua value explicitly references it. Use `GcHeap::mark`
     // so the object itself is coloured, not only its children.
@@ -185,6 +190,8 @@ pub struct State {
     /// `__index` value without a hash lookup. Reset when the metatable is
     /// replaced; a stale entry only causes misses.
     pub(super) string_mt_index_shape: Option<(u64, usize)>,
+    /// Metamethod event keys, interned at construction and always rooted.
+    meta_names: MetaNames,
     /// The main stack which stores values.
     pub(super) stack: Vec<Val>,
     /// The bottom index of the current frame in the stack.
@@ -429,13 +436,16 @@ impl State {
         gc_policy: GcPolicy,
     ) -> Self {
         let state_id = anchor::next_state_id();
+        let mut heap = GcHeap::with_policy(gc_policy);
+        let meta_names = MetaNames::intern(&mut heap);
         Self {
             global_env: GlobalEnv::new(),
             string_metatable: None,
             string_mt_index_shape: None,
+            meta_names,
             stack: Vec::with_capacity(tuning::INITIAL_VM_STACK_CAPACITY),
             stack_bottom: 0,
-            heap: GcHeap::with_policy(gc_policy),
+            heap,
             bytecode_caches: IndexMap::default(),
             pending_bytecode_caches: Vec::new(),
             transient_roots: TransientRoots {
@@ -1110,7 +1120,7 @@ impl State {
             .last()
             .ok_or_else(|| self.error(ErrorKind::InvalidStackIndex { index: -1 }))?;
         self.new_table_with_capacity(1)?;
-        if let Err(e) = self.set_table_str_key_value(-1, "__index", lib) {
+        if let Err(e) = self.set_table_str_key_value(-1, MetaName::Index.as_str(), lib) {
             self.pop_val();
             return Err(e);
         }
@@ -1328,9 +1338,11 @@ mod runtime_tests {
         state.gc_collect();
         assert!(state.bytecode_caches.is_empty());
         // Removed entries were roots for the collection that removed them.
-        assert_eq!(state.string_count(), 1);
+        // The interned metamethod names are permanent roots on top of that.
+        let names = MetaName::ALL.len();
+        assert_eq!(state.string_count(), names + 1);
         state.gc_collect();
-        assert_eq!(state.string_count(), 0);
+        assert_eq!(state.string_count(), names);
     }
 
     #[test]

@@ -7,6 +7,7 @@ use crate::State;
 use crate::error::{ArgDetail, ErrorKind, LibraryError, LibraryFunction, TypeError};
 use crate::instr::{ArgCount, RetCount};
 use crate::numeral::{MAX_EXACT_INTEGER, exact_i64, parse_lua_numeral};
+use crate::vm::MetaName;
 
 // Keep a separate callback address for the `table.unpack` snapshot id. If this
 // aliases global `unpack`, reverse callback-name lookup resolves only one id.
@@ -408,8 +409,8 @@ fn has_sequence_metamethods(state: &mut State, idx: isize) -> Result<bool> {
         return Ok(false);
     }
     let mut found = false;
-    for event in ["__len", "__index", "__newindex"] {
-        state.push_string(event)?;
+    for event in [MetaName::Len, MetaName::Index, MetaName::NewIndex] {
+        state.push_meta_name(event)?;
         state.get_table_raw(-2)?;
         found = state.typ(-1) != LuaType::Nil;
         state.pop(1)?;
@@ -437,7 +438,7 @@ pub(super) fn sequence_len(state: &mut State, idx: isize) -> Result<i64> {
         state.pop(1)?;
         return Ok(raw);
     }
-    state.push_string("__len")?;
+    state.push_meta_name(MetaName::Len)?;
     state.get_table_raw(-2)?;
     state.remove(-2)?; // drop the metatable, keep the handler
     if state.typ(-1) == LuaType::Nil {

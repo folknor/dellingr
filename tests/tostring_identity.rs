@@ -81,3 +81,35 @@ fn rust_function_identity_survives_save_and_load() {
     eval_one(&mut loaded, probe);
     assert!(loaded.to_boolean(-1));
 }
+
+/// Metamethod event names are permanent State strings, so an identity given
+/// to one survives collection even when no saved value reaches it. The
+/// snapshot must carry that identity, or the loaded State renders anew.
+#[cfg(feature = "snapshot")]
+#[test]
+fn metamethod_name_identity_survives_collection_save_and_load() {
+    use dellingr::DefaultCallbacks;
+    // Built by concatenation so no bytecode literal holds the name.
+    let render = "return string.format('%p', '__c' .. 'all')";
+    let mut state = State::new();
+    eval_one(&mut state, render);
+    let before = state.to_string(-1).unwrap();
+    state.pop(1).unwrap();
+    state.gc_collect();
+    eval_one(&mut state, render);
+    assert_eq!(state.to_string(-1).unwrap(), before);
+    state.pop(1).unwrap();
+    state.gc_collect();
+
+    let save = state.save_state().expect("state saves");
+    let mut loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), |_| {
+        Ok::<(), std::convert::Infallible>(())
+    })
+    .expect("state loads");
+    assert_eq!(
+        loaded.save_state().expect("loaded state resaves").bytes,
+        save.bytes
+    );
+    eval_one(&mut loaded, render);
+    assert_eq!(loaded.to_string(-1).unwrap(), before);
+}

@@ -92,6 +92,23 @@ All notable changes to dellingr are documented here. The format follows
 - `CostAnalysis::caveat()` and a `dellingr::cli` module with the CLI's output
   prefixes. The `--analyze` warning now prints that caveat, with new wording.
 
+### Changed
+
+- **Replay-visible:** the metamethod event names (`__index`, `__newindex`,
+  `__call`, `__len`, `__tostring`, `__metatable`) are interned once when a
+  State is built and stay live for its lifetime, instead of being interned at
+  each metatable lookup. Lookups no longer allocate, so collections can run at
+  different points than before (GC timing is not a cross-version contract;
+  see `docs/determinism.md`), and a `%p` id given to one of these names no
+  longer changes when the string would previously have been collected and
+  rebuilt. Snapshots carry such an id even when no saved value reaches the
+  name; the snapshot format is unchanged. `State::string_count` counts the
+  six names from construction on, and they count toward the adaptive GC
+  threshold.
+- Metatable lookups for `__index`, `__newindex` and string `__index` no
+  longer reserve temporary stack slots, so near `MAX_STACK_SIZE` an access
+  that used to fail with a stack overflow may now succeed.
+
 ### Fixed
 
 - A reachable `ipairs` iterator can be saved (registered as `ipairs.iter`).

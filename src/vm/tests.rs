@@ -10,11 +10,6 @@ fn force_gc(state: &mut State) -> crate::Result<u8> {
     Ok(0)
 }
 
-fn arm_gc(state: &mut State) -> crate::Result<u8> {
-    state.gc_set_threshold(state.heap_size());
-    Ok(0)
-}
-
 #[test]
 fn auto_gc_marks_a_deep_lua_table_chain_iteratively() {
     let mut state = State::new();
@@ -410,35 +405,6 @@ fn gc_preserves_frame_varargs() {
 }
 
 #[test]
-fn length_receiver_survives_lookup_collection() {
-    let mut state = State::new();
-    state.set_global_value("arm_gc", Val::RustFn(arm_gc));
-    let input = parse_str(
-        r#"
-        local function make()
-            -- Garbage the armed collection frees, so the pinned threshold is
-            -- no longer reached afterwards.
-            for i = 1, 50 do local junk = { i } end
-            local t = {}
-            setmetatable(t, { __len = function() return 77 end })
-            arm_gc()
-            return t
-        end
-        return #make()
-        "#,
-    )
-    .expect("length script must parse");
-    state
-        .eval_chunk(input, 0)
-        .expect("length receiver must survive GC");
-    assert_eq!(state.to_number(-1).expect("return must be numeric"), 77.0);
-    assert!(
-        !state.gc_should_run(),
-        "armed allocation must have collected"
-    );
-}
-
-#[test]
 fn table_sort_array_survives_comparator_collection() {
     let mut state = State::new();
     state.set_global_value("force_gc", Val::RustFn(force_gc));
@@ -522,8 +488,9 @@ fn string_allocations_drive_automatic_gc_threshold() {
     // An automatic policy, not a fixed host threshold, so collection adapts.
     state.gc_set_policy(20, 20, 2);
 
-    // Keep enough distinct strings rooted to reach the threshold.
-    for i in 0..20 {
+    // Keep enough distinct strings rooted to reach the threshold. The State's
+    // interned metamethod names are live strings from construction on.
+    for i in 0..20 - super::MetaName::ALL.len() {
         state
             .push_string(format!("live-{i}"))
             .expect("short test string fits");

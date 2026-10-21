@@ -155,15 +155,11 @@ impl State {
             };
 
             if let Some(mt_ptr) = metatable_ptr {
-                let call_handler = self.with_rooted_value(func_val, |state| {
-                    let call_key = state
-                        .alloc_string("__call")
-                        .expect("a fixed metamethod name is far below MAX_STRING_BYTES");
-                    state
-                        .heap
-                        .as_table_ref(mt_ptr)
-                        .map_or(Val::Nil, |mt| mt.get(&call_key))
-                });
+                let call_key = self.meta_names.get(super::MetaName::Call);
+                let call_handler = self
+                    .heap
+                    .as_table_ref(mt_ptr)
+                    .map_or(Val::Nil, |mt| mt.get(&call_key));
 
                 if !matches!(call_handler, Val::Nil) {
                     // Insert the receiver as first argument and call the handler

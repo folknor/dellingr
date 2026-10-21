@@ -60,7 +60,8 @@ pub(super) struct FieldLookupCacheEntry {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct MethodLookupCacheEntry {
     pub(super) receiver_metatable: ObjectPtr,
-    pub(super) index_key: Val,
+    /// Slot of `__index` in `receiver_metatable`; the key it must still hold
+    /// is the State's interned `MetaName::Index`.
     pub(super) index_field_index: usize,
     pub(super) index_handler: Val,
     pub(super) method_table_version: u64,

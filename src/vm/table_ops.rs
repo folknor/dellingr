@@ -681,7 +681,7 @@ impl State {
     pub fn bytes_with_tostring_meta(&mut self, idx: isize) -> Result<Vec<u8>> {
         let i = self.convert_idx(idx)?;
         let val = self.stack[i];
-        let tostring_handler = self.tostring_handler(val)?;
+        let tostring_handler = self.tostring_handler(val);
         if !matches!(tostring_handler, Val::Nil) {
             // Handler plus receiver: net-positive by two slots until the
             // call consumes them.
@@ -711,40 +711,25 @@ impl State {
     }
 
     fn string_tostring_handler(&self) -> Val {
-        // A live field named __tostring must already have an interned key.
-        // Avoid creating that key just to discover that the field is absent.
-        let Some(key) = self.heap.find_string(b"__tostring") else {
-            return Val::Nil;
-        };
-        self.string_metatable
-            .and_then(|ptr| self.heap.as_table_ref(ptr))
-            .map_or(Val::Nil, |mt| mt.get(&Val::Str(key)))
+        self.metatable_tostring_field(self.string_metatable)
     }
 
-    fn metatable_tostring_field(&mut self, mt: Option<super::object::ObjectPtr>) -> Result<Val> {
-        let Some(mt_ptr) = mt else {
-            return Ok(Val::Nil);
-        };
-        // This intern may collect; the receiver remains rooted on the stack
-        // through collection.
-        let tostring_key = self.alloc_string("__tostring")?;
-        Ok(self
-            .heap
-            .as_table_ref(mt_ptr)
-            .map_or(Val::Nil, |mt| mt.get(&tostring_key)))
+    fn metatable_tostring_field(&self, mt: Option<super::object::ObjectPtr>) -> Val {
+        let key = self.meta_names.get(super::MetaName::ToString);
+        mt.and_then(|ptr| self.heap.as_table_ref(ptr))
+            .map_or(Val::Nil, |mt| mt.get(&key))
     }
 
     /// The `__tostring` field of a table's own or a string's shared metatable.
-    /// The caller must root `val`: table dispatch interns a key and can GC.
-    /// Plain values without a metatable return before interning.
-    fn tostring_handler(&mut self, val: Val) -> Result<Val> {
+    /// Reads the State's interned key, so it neither allocates nor collects.
+    fn tostring_handler(&self, val: Val) -> Val {
         let metatable_ptr = match val {
-            Val::Str(_) => return Ok(self.string_tostring_handler()),
+            Val::Str(_) => self.string_metatable,
             Val::Obj(ptr) => self
                 .heap
                 .as_table_ref(ptr)
                 .and_then(super::table::Table::get_metatable),
-            _ => return Ok(Val::Nil),
+            _ => None,
         };
         self.metatable_tostring_field(metatable_ptr)
     }

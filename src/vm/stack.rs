@@ -113,6 +113,14 @@ impl State {
         Ok(())
     }
 
+    /// Pushes the State's interned key for a metamethod event. Unlike
+    /// `push_string` it never allocates, so it cannot collect.
+    pub(crate) fn push_meta_name(&mut self, name: super::MetaName) -> Result<()> {
+        self.check_stack_slot()?;
+        self.push_unchecked(self.meta_names.get(name));
+        Ok(())
+    }
+
     /// Pushes the given raw Lua string bytes onto the stack.
     pub fn push_bytes(&mut self, bytes: impl AsRef<[u8]>) -> Result<()> {
         self.check_stack_slot()?;

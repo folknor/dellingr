@@ -48,7 +48,10 @@ functions render as `function: 0x<id>`.
 
 Identities are never reused. Strings are interned and also get a `%p`
 identity, so a string that is dropped and later rebuilt with the same bytes
-keeps its id only if no collection ran in between.
+keeps its id only if no collection ran in between. The metamethod event names
+(`__index`, `__newindex`, `__call`, `__len`, `__tostring`, `__metatable`) are
+never collected, so their ids are stable for the State's lifetime and across a
+snapshot round trip.
 
 ## Garbage collection timing
 

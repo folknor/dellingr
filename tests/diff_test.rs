@@ -12,7 +12,9 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
+#[cfg(not(feature = "hotpath"))]
+use std::process::Stdio;
 
 mod common;
 #[path = "common/examples.rs"]

@@ -940,6 +940,19 @@ impl<'a> SaveBuilder<'a> {
             user_globals.push((name.clone(), saved));
         }
         let env_deltas = self.encode_env_deltas()?;
+        // Metamethod event names are State roots for its whole lifetime, so a
+        // `%p` identity on one stays observable even when the saved graph does
+        // not reach the string. Carry such identities through the arena; names
+        // without an identity add nothing to the payload.
+        for name in self.state.meta_names.iter() {
+            if let Val::Str(ptr) = name
+                && let Some(key) = PointerIdKey::from_val(name)
+                && self.state.format_pointer_ids.contains_key(&key)
+            {
+                let id = self.string_id(ptr)?;
+                self.reachable_pointer_values.insert(SavedVal::Str(id), ());
+            }
+        }
         let pointer_ids = self.state.format_pointer_ids.clone();
         let mut format_pointer_ids = Vec::new();
         for (key, id) in pointer_ids {
@@ -1111,6 +1124,20 @@ impl<'a> SaveBuilder<'a> {
         Ok(deltas)
     }
 
+    /// The string-arena id of `ptr`, adding its single content copy on first use.
+    fn string_id(&mut self, ptr: StringPtr) -> Result<u32, SaveError> {
+        if let Some(id) = self.string_ids.get(&ptr) {
+            return Ok(*id);
+        }
+        let id = u32::try_from(self.strings.len()).map_err(|_| SaveError::TooLarge {
+            what: "strings",
+            count: self.strings.len(),
+        })?;
+        self.strings.push(self.state.heap.get_string(ptr).to_vec());
+        self.string_ids.insert(ptr, id);
+        Ok(id)
+    }
+
     fn encode_root(&mut self, val: Val, global: &str) -> Result<SavedVal, SaveError> {
         let root = self.roots.len();
         self.roots.push(None);
@@ -1132,23 +1159,7 @@ impl<'a> SaveBuilder<'a> {
                         Val::Nil => Ok(SavedVal::Nil),
                         Val::Bool(b) => Ok(SavedVal::Bool(b)),
                         Val::Num(n) => Ok(SavedVal::Num(saved_num_bits(n))),
-                        Val::Str(ptr) => {
-                            let id = if let Some(id) = self.string_ids.get(&ptr) {
-                                *id
-                            } else {
-                                let id = u32::try_from(self.strings.len()).map_err(|_| {
-                                    SaveError::TooLarge {
-                                        what: "strings",
-                                        count: self.strings.len(),
-                                    }
-                                })?;
-                                // The single content copy per distinct string.
-                                self.strings.push(self.state.heap.get_string(ptr).to_vec());
-                                self.string_ids.insert(ptr, id);
-                                id
-                            };
-                            Ok(SavedVal::Str(id))
-                        }
+                        Val::Str(ptr) => self.string_id(ptr).map(SavedVal::Str),
                         Val::RustFn(func) => {
                             let addr = func as usize;
                             let Some(id) = self.state.rust_fn_ids_by_addr.get(&addr) else {

@@ -504,12 +504,6 @@ impl GcHeap {
         self.strings.insert_with_hash(bytes.into(), hash)
     }
 
-    /// Look up an interned string without allocating or collecting.
-    pub(super) fn find_string(&self, bytes: &[u8]) -> Option<StringPtr> {
-        self.strings
-            .find_by_hash(bytes, StringPool::hash_string(bytes))
-    }
-
     // ========================================================================
     // Garbage Collection
     // ========================================================================
