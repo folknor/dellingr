@@ -64,14 +64,29 @@ impl State {
     /// Run automatic collection using the complete State root set.
     fn maybe_collect(&mut self) {
         if self.heap.is_full() {
-            self.gc_collect();
+            self.collect_garbage();
         }
     }
 
     /// Forces a full garbage collection cycle.
     /// This marks all reachable objects and frees unreachable ones.
-    #[hotpath::measure]
+    ///
+    /// A no-op on a poisoned State: its root set no longer describes the
+    /// abandoned frames, and the State is only fit to be dropped, which needs
+    /// no collection.
     pub fn gc_collect(&mut self) {
+        if self.poisoned {
+            return;
+        }
+        self.collect_garbage();
+    }
+
+    /// The collection cycle behind [`State::gc_collect`], without the poison
+    /// check: automatic collection from allocation (and so from dispatch)
+    /// calls this directly. A poisoned State never reaches it that way,
+    /// because its execution is abandoned and every public entry refuses.
+    #[hotpath::measure]
+    fn collect_garbage(&mut self) {
         // This is the only production caller of the heap sweep. Clear the
         // gmatch pattern cache before freeing interned strings so no cached
         // matcher survives its key's lifetime; keep this point fixed to

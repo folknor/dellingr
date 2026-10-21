@@ -204,7 +204,7 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
             }
             state.consume_cost(1)?;
             state.push_number(idx as f64)?;
-            state.get_table(1)?;
+            state.get_table_unguarded(1)?;
             let typ = state.typ(-1);
             match typ {
                 LuaType::String | LuaType::Number => {
@@ -390,7 +390,7 @@ fn move_element(
     state.push_number(dest_key as f64)?;
     state.push_number(src_key as f64)?;
     if honour_meta {
-        state.get_table(1)?;
+        state.get_table_unguarded(1)?;
         set_index(state, dest_idx)
     } else {
         state.get_table_raw(1)?;
@@ -447,7 +447,7 @@ pub(super) fn sequence_len(state: &mut State, idx: isize) -> Result<i64> {
     }
     state.push_value(idx)?;
     state.push_value(idx)?;
-    state.call(ArgCount::Fixed(2), RetCount::Fixed(1))?;
+    state.call_unguarded(ArgCount::Fixed(2), RetCount::Fixed(1))?;
     // Lua's length dispatch passes the operand twice, and luaL_len converts
     // the result with lua_tointegerx, including numeral strings.
     let len = match state.typ(-1) {
@@ -497,7 +497,7 @@ fn insert_through_metamethods(state: &mut State, num_args: usize) -> Result<u8> 
     while i > pos {
         state.push_number(i as f64)?;
         state.push_number((i - 1) as f64)?;
-        state.get_table(1)?;
+        state.get_table_unguarded(1)?;
         set_index(state, 1)?;
         i -= 1;
     }
@@ -522,11 +522,11 @@ fn remove_through_metamethods(state: &mut State) -> Result<u8> {
     check_sequence_keys(state, pos, size.max(pos), "remove")?;
     state.set_top(1)?;
     state.push_number(pos as f64)?;
-    state.get_table(1)?; // Stack: [t, removed]
+    state.get_table_unguarded(1)?; // Stack: [t, removed]
     while pos < size {
         state.push_number(pos as f64)?;
         state.push_number((pos + 1) as f64)?;
-        state.get_table(1)?;
+        state.get_table_unguarded(1)?;
         set_index(state, 1)?;
         pos += 1;
     }
@@ -559,7 +559,7 @@ fn sort_through_metamethods(state: &mut State, has_comp: bool) -> Result<u8> {
     for i in 1..=len {
         state.push_number(i as f64)?;
         state.push_number(i as f64)?;
-        state.get_table(1)?;
+        state.get_table_unguarded(1)?;
         state.set_table_raw(s)?;
     }
 

@@ -22,6 +22,7 @@ impl State {
     /// values count from the top of the stack.
     #[deny(clippy::panic, clippy::manual_assert)]
     pub fn check_any(&mut self, arg_number: isize) -> Result<()> {
+        self.check_poisoned()?;
         if arg_number == 0 {
             return Err(self.error(ErrorKind::InvalidStackIndex { index: arg_number }));
         }
@@ -41,6 +42,7 @@ impl State {
     /// the stack.
     #[deny(clippy::panic, clippy::manual_assert)]
     pub fn check_type(&mut self, arg_number: isize, expected_type: LuaType) -> Result<()> {
+        self.check_poisoned()?;
         if arg_number == 0 {
             return Err(self.error(ErrorKind::InvalidStackIndex { index: arg_number }));
         }
@@ -131,6 +133,7 @@ impl State {
     /// Opens all standard Lua libraries.
     #[hotpath::measure]
     pub fn open_libs(&mut self) -> Result<()> {
+        self.check_poisoned()?;
         lua_std::open_libs(self)?;
         #[cfg(feature = "snapshot")]
         self.capture_env_tokens();

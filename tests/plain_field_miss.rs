@@ -120,15 +120,17 @@ fn misses_survive_a_restricted_environment_without_table() {
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect("setup runs");
-    let restricted = state.with_restricted_env(&["probe"], |state| {
-        state
-            .get_global("probe")
-            .expect("entry point is whitelisted");
-        state.call(ArgCount::Fixed(0), RetCount::Fixed(1))?;
-        let result = state.to_boolean(-1);
-        state.pop(1).expect("result is present on the stack");
-        dellingr::Result::Ok(result)
-    });
+    let restricted = state
+        .with_restricted_env(&["probe"], |state| {
+            state
+                .get_global("probe")
+                .expect("entry point is whitelisted");
+            state.call(ArgCount::Fixed(0), RetCount::Fixed(1))?;
+            let result = state.to_boolean(-1);
+            state.pop(1).expect("result is present on the stack");
+            dellingr::Result::Ok(result)
+        })
+        .and_then(std::convert::identity);
     assert!(restricted.expect("plain-table miss must not error in a sandbox"));
 }
 

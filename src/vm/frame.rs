@@ -239,7 +239,7 @@ impl Frame {
     /// helpers call this only after a direct access path has been ruled out.
     pub(super) fn flush_local_cost(state: &mut State, local_cost: &mut u64) -> Result<()> {
         if *local_cost > 0 {
-            state.consume_cost(*local_cost)?;
+            state.charge_cost(*local_cost)?;
             *local_cost = 0;
         }
         Ok(())
@@ -285,7 +285,7 @@ impl Frame {
                 // `cost_used` at `BudgetExceeded`; any other error settles the
                 // pending batch in `Frame::eval`.
                 if next >= tuning::COST_CHECK_INTERVAL || $state.cost_batch_needs_flush(next) {
-                    $state.consume_cost(next)?;
+                    $state.charge_cost(next)?;
                     *$local = 0;
                 } else {
                     *$local = next;
@@ -443,11 +443,11 @@ impl Frame {
                 }
 
                 // Literals
-                Instr::OP_PUSH_NIL => state.push_nil()?,
-                Instr::OP_PUSH_BOOL => state.push_boolean(inst.a() != 0)?,
+                Instr::OP_PUSH_NIL => state.push_val(Val::Nil)?,
+                Instr::OP_PUSH_BOOL => state.push_val(Val::Bool(inst.a() != 0))?,
                 Instr::OP_PUSH_NUM => {
                     let n = self.get_number_constant(inst.bx());
-                    state.push_number(n)?;
+                    state.push_val(Val::Num(n))?;
                 }
                 Instr::OP_PUSH_STRING => {
                     let val = self.literal(inst.bx());
@@ -562,7 +562,7 @@ impl Frame {
                         local_cost,
                         const { Instr::op(Instr::OP_NEW_TABLE).static_units() }
                     );
-                    state.new_table()?;
+                    state.push_new_table()?;
                 }
                 Instr::OP_NEW_TABLE_PRESIZED => {
                     add_cost!(

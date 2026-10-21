@@ -372,6 +372,10 @@ pub enum ErrorKind {
         /// Values actually in the callback's frame when it returned.
         available: usize,
     },
+    /// A panic unwound through this State's execution, leaving its internal
+    /// bookkeeping inconsistent. The State refuses every further operation;
+    /// drop it and build a new one.
+    StatePoisoned,
     /// Parser rejected the source.
     SyntaxError(SyntaxError),
     /// Script exceeded its cost budget.
@@ -1215,6 +1219,9 @@ impl fmt::Display for ErrorKind {
             } => write!(
                 f,
                 "Rust function reported {reported} results but its frame holds {available} values"
+            ),
+            StatePoisoned => f.write_str(
+                "state poisoned: a panic unwound through it, so it can no longer be used",
             ),
             SyntaxError(e) => e.fmt(f),
             TypeError(e) => e.fmt(f),

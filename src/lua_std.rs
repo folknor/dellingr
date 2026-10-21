@@ -328,7 +328,7 @@ pub(super) fn unpack_values(state: &mut State) -> Result<u8> {
     // like `select`. Do not add a per-element charge.
     for index in i..=j {
         state.push_number(index as f64)?;
-        state.get_table(1)?;
+        state.get_table_unguarded(1)?;
     }
     state.remove(1)?;
     // span is nonnegative and below MAX_RESULTS here, so the conversion cannot fail.

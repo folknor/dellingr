@@ -446,7 +446,7 @@ fn append_gsub_replacement(
             preflight_capture_bytes(state, [key], StringPatternFunction::Gsub)?;
             state.push_value(3)?;
             push_capture_value(state, bytes, key, StringPatternFunction::Gsub)?;
-            state.get_table(-2)?;
+            state.get_table_unguarded(-2)?;
             let keep_original = gsub_replacement_keeps_original(state, -1);
             if keep_original {
                 state.pop(2)?;
@@ -479,10 +479,10 @@ fn append_gsub_replacement(
                 }
                 let argument_count = crate::error::results_count(captures.len() - 1)
                     .map_err(|kind| state.error(kind))?;
-                state.call(ArgCount::Fixed(argument_count), RetCount::Fixed(1))?;
+                state.call_unguarded(ArgCount::Fixed(argument_count), RetCount::Fixed(1))?;
             } else {
                 push_capture_value(state, bytes, captures[0], StringPatternFunction::Gsub)?;
-                state.call(ArgCount::Fixed(1), RetCount::Fixed(1))?;
+                state.call_unguarded(ArgCount::Fixed(1), RetCount::Fixed(1))?;
             }
             let keep_original = gsub_replacement_keeps_original(state, -1);
             if keep_original {
@@ -930,7 +930,7 @@ fn push_gmatch_wrapper(
     state.push_lib_fn(iter_id, iter)?;
     state.push_value(1)?;
     state.remove(1)?;
-    state.call(ArgCount::Fixed(2), RetCount::Fixed(1))?;
+    state.call_unguarded(ArgCount::Fixed(2), RetCount::Fixed(1))?;
     Ok(1)
 }
 

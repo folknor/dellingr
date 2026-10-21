@@ -207,7 +207,7 @@ impl State {
         self.push_unchecked(control);
 
         // Call with 2 args (state, control), expecting num_vars returns
-        self.call(ArgCount::Fixed(2), RetCount::Fixed(num_vars))?;
+        self.call_unguarded(ArgCount::Fixed(2), RetCount::Fixed(num_vars))?;
 
         // The call preserves caller slot positions (see call_op); user code
         // may change captured values, but cannot remove these loop slots.

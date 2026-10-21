@@ -238,6 +238,12 @@ pub struct State {
     pub(super) active_rust_fn: Option<RustFunc>,
     /// Current function call depth. Prevents stack overflow from deep recursion.
     pub(super) call_depth: u32,
+    /// Set once a panic has unwound through VM execution. A panic skips every
+    /// pop and restore on its way out, so call_stack, stack_bottom, the
+    /// pending bases, transient roots and open upvalues no longer describe
+    /// the live frames; a poisoned State refuses further use (see
+    /// `ErrorKind::StatePoisoned`). Never cleared.
+    pub(super) poisoned: bool,
     /// Call stack for generating stack traces on errors.
     /// Each entry represents an active Lua function call.
     pub(super) call_stack: Vec<CallInfo>,
@@ -290,6 +296,14 @@ pub struct State {
     #[cfg(feature = "snapshot")]
     pub(super) env_baselines: BTreeMap<ObjectPtr, EnvBaseline>,
 }
+
+/// Unwind payload that abandons execution on a State poisoned by a panic a
+/// host callback caught and swallowed. Unwinding, rather than returning an
+/// error, is what keeps the still-live outer Lua frames from running their
+/// ordinary cleanup (stack truncation, upvalue closing, root pops) against
+/// bookkeeping the swallowed panic left inconsistent. `State::guarded`
+/// turns it into `ErrorKind::StatePoisoned` at the host boundary.
+pub(crate) struct PoisonUnwind;
 
 #[cfg(feature = "snapshot")]
 pub(super) struct EnvBaseline {
@@ -468,6 +482,7 @@ impl State {
             call_chain_depth: 0,
             active_rust_fn: None,
             call_depth: 0,
+            poisoned: false,
             call_stack: Vec::with_capacity(tuning::INITIAL_CALL_STACK_CAPACITY),
             callbacks,
             user_data: None,
@@ -541,6 +556,14 @@ impl State {
     /// Use this in RustFuncs to charge for expensive operations.
     #[inline(always)]
     pub fn consume_cost(&mut self, cost: u64) -> Result<()> {
+        self.check_poisoned()?;
+        self.charge_cost(cost)
+    }
+
+    /// [`State::consume_cost`] without the poison check: the dispatch loop's
+    /// cost settlement uses this, so poisoning adds nothing per opcode.
+    #[inline(always)]
+    pub(crate) fn charge_cost(&mut self, cost: u64) -> Result<()> {
         if self.cost_meter().consume(cost) {
             Ok(())
         } else {
@@ -973,6 +996,7 @@ impl State {
     /// Pushes onto the stack the value of the global `name`.
     #[hotpath::measure]
     pub fn get_global(&mut self, name: &str) -> Result<()> {
+        self.check_poisoned()?;
         let val = self.global_env.read(name, None);
         self.push_val(val)
     }
@@ -987,6 +1011,7 @@ impl State {
     /// calling Lua frame.
     #[hotpath::measure]
     pub fn set_global(&mut self, name: &str) -> Result<()> {
+        self.check_poisoned()?;
         if self.get_top() == 0 {
             return Err(self.error(ErrorKind::InvalidStackIndex { index: -1 }));
         }
@@ -1034,6 +1059,9 @@ impl State {
         id: &str,
         func: RustFunc,
     ) -> std::result::Result<(), SaveError> {
+        if self.poisoned {
+            return Err(SaveError::StatePoisoned);
+        }
         self.register_rust_fn(id, func)?;
         self.set_global_value(name, Val::RustFn(func));
         Ok(())
@@ -1063,6 +1091,9 @@ impl State {
         id: &str,
         func: RustFunc,
     ) -> std::result::Result<(), save_state::SaveError> {
+        if self.poisoned {
+            return Err(save_state::SaveError::StatePoisoned);
+        }
         if id.len() > crate::limits::MAX_SAVE_IDENTIFIER_BYTES {
             return Err(save_state::SaveError::TooLarge {
                 what: "function id",
@@ -1147,31 +1178,108 @@ impl State {
     /// `s:upper()` keeps working even when `"string"` is not whitelisted (as
     /// in reference Lua, where it reaches the library through that metatable).
     /// The original environment is restored after the function completes (or errors).
-    pub fn with_restricted_env<F, R>(&mut self, whitelist: &[&str], f: F) -> R
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorKind::StatePoisoned`] without running `f` if the State
+    /// is already poisoned, or after `f` returns if it poisoned the State
+    /// (for example by catching a panic from a nested `call`). A panic out of
+    /// `f` poisons the State and is resumed; the environment is still
+    /// restored on the way out, but that does not make the State reusable.
+    pub fn with_restricted_env<F, R>(&mut self, whitelist: &[&str], f: F) -> Result<R>
     where
         F: FnOnce(&mut Self) -> R,
     {
-        let saved = self.global_env.restrict(whitelist);
-        self.transient_roots.suspended_envs.push(saved);
+        self.guarded(|state| {
+            let saved = state.global_env.restrict(whitelist);
+            state.transient_roots.suspended_envs.push(saved);
 
-        // Execute the function under an unwind guard so a panic in `f` still
-        // restores the original environment before propagating. Without
-        // this, an embedder that catches the panic and reuses the State would
-        // find it stuck in the restricted environment. (Under panic=abort
-        // catch_unwind never returns, but reuse is moot there.)
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self)));
+            // Restore the environment on unwind too. This keeps the global
+            // bindings coherent for whatever the host still reads before it
+            // drops the State; it is not a reuse guarantee, since the State
+            // is poisoned by the panic either way.
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(state)));
 
-        // Restore original environment (on both normal return and unwind)
-        let saved = self
-            .transient_roots
-            .suspended_envs
-            .pop()
-            .expect("suspended environment missing during restoration");
-        self.global_env.replace(saved);
+            let saved = state
+                .transient_roots
+                .suspended_envs
+                .pop()
+                .expect("suspended environment missing during restoration");
+            state.global_env.replace(saved);
 
-        match result {
-            Ok(r) => r,
-            Err(payload) => std::panic::resume_unwind(payload),
+            match result {
+                Ok(r) => Ok(r),
+                Err(payload) => {
+                    state.poisoned = true;
+                    std::panic::resume_unwind(payload)
+                }
+            }
+        })
+    }
+
+    /// Refuse use of a poisoned State. One predictable branch; the error
+    /// construction is out of line.
+    #[inline(always)]
+    pub(crate) fn check_poisoned(&self) -> Result<()> {
+        if self.poisoned {
+            return Err(Self::poisoned_error());
+        }
+        Ok(())
+    }
+
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn poisoned_error() -> Error {
+        Error::without_location(ErrorKind::StatePoisoned)
+    }
+
+    /// Whether a panic has unwound through this State's execution. A
+    /// poisoned State refuses every operation with
+    /// [`ErrorKind::StatePoisoned`]; the only thing left to do with it is
+    /// drop it, which is always safe.
+    pub fn is_poisoned(&self) -> bool {
+        self.poisoned
+    }
+
+    /// The boundary for public entry points that execute Lua, metamethods
+    /// or host callbacks.
+    ///
+    /// Refuses a poisoned State. Any unwind out of `f` poisons the State
+    /// before anything else happens. The internal [`PoisonUnwind`] marker
+    /// (raised by `invoke_rust_fn` when a callback swallowed a panic) is
+    /// translated into `Err(StatePoisoned)` here; any other payload is
+    /// resumed unchanged so the host sees its own panic. A normal return
+    /// from `f` on a State that became poisoned meanwhile is also refused.
+    ///
+    /// Translating the marker into an error is only correct because this
+    /// guard returns straight to host code: no interrupted VM frame sits
+    /// between it and its caller whose ordinary error cleanup would then run
+    /// against abandoned bookkeeping. VM-internal callers must therefore use
+    /// the unguarded bodies (`call_unguarded` and kin), never the public
+    /// guarded entry points. A RustFn that calls a guarded entry gets the
+    /// error back, and `invoke_rust_fn` re-raises the marker when that
+    /// callback returns.
+    pub(crate) fn guarded<R>(&mut self, f: impl FnOnce(&mut Self) -> Result<R>) -> Result<R> {
+        self.check_poisoned()?;
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self))) {
+            Ok(result) => {
+                if self.poisoned {
+                    drop(result);
+                    return Err(Self::poisoned_error());
+                }
+                result
+            }
+            Err(payload) => {
+                // Poison unconditionally: even a marker payload may come from
+                // a different State whose panic a host resumed inside this
+                // one, and it abandoned this State's frames all the same.
+                self.poisoned = true;
+                if payload.is::<PoisonUnwind>() {
+                    Err(Self::poisoned_error())
+                } else {
+                    std::panic::resume_unwind(payload)
+                }
+            }
         }
     }
 
@@ -1187,14 +1295,19 @@ impl State {
         F: FnOnce(&mut Self) -> R,
     {
         // Preserve roots owned by any outer operation while this callback can
-        // allocate, call Lua, or re-enter the host.
+        // allocate, call Lua, or re-enter the host. The unwind guard keeps
+        // this helper's own root bookkeeping balanced and poisons the State;
+        // it does not make the State reusable after a panic.
         let watermark = self.transient_roots.values.len();
         self.transient_roots.values.extend_from_slice(values);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self)));
         self.transient_roots.values.truncate(watermark);
         match result {
             Ok(result) => result,
-            Err(payload) => std::panic::resume_unwind(payload),
+            Err(payload) => {
+                self.poisoned = true;
+                std::panic::resume_unwind(payload)
+            }
         }
     }
 

@@ -91,7 +91,7 @@ pub(crate) fn base_ipairs_iter(state: &mut State) -> Result<u8> {
     let new_index = old_index + 1.0;
     state.pop(1)?; // pop the old number
     state.push_number(new_index)?;
-    state.get_table(1)?;
+    state.get_table_unguarded(1)?;
     // ipairs stops only on nil, not on false
     if state.typ(-1) != LuaType::Nil {
         state.push_number(new_index)?;
@@ -169,7 +169,7 @@ pub(super) const NON_BUILTIN_GLOBALS: &[(&str, crate::RustFunc)] = &[
             let raw = if state.typ(1) == LuaType::String {
                 state.to_bytes(1)?.to_vec()
             } else {
-                state.bytes_with_tostring_meta(1)?
+                state.bytes_with_tostring_meta_unguarded(1)?
             };
             State::lossy_utf8_checked(&raw)?
         } else {
@@ -223,7 +223,7 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
             // whose length never exceeds the cap. The raw bytes come from
             // `bytes_with_tostring_meta`, which also covers `__tostring`
             // results that are byte strings.
-            let raw = state.bytes_with_tostring_meta(stack_index)?;
+            let raw = state.bytes_with_tostring_meta_unguarded(stack_index)?;
             let lossy_len = State::lossy_utf8_len(&raw);
             crate::limits::checked_string_growth(message.len(), lossy_len)?;
             message.reserve(lossy_len);
@@ -316,7 +316,7 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
         } else {
             // Byte-exact: a `__tostring` result may hold non-UTF-8 bytes,
             // which reference Lua returns unchanged.
-            let bytes = state.bytes_with_tostring_meta(1)?;
+            let bytes = state.bytes_with_tostring_meta_unguarded(1)?;
             state.set_top(0)?;
             state.push_bytes(bytes)?;
         }

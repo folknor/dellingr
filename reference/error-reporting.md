@@ -47,3 +47,34 @@ unnamed frame is displayed as `main chunk`. Rust callbacks are not traceback
 frames, so a callback called by Lua appears only through its Lua caller frames.
 This traceback naming is separate from the optional function name in an
 `ArgError`.
+
+## Panics and poisoning
+
+Errors are values; a panic is not an error and is never recoverable. A panic
+that unwinds through VM execution skips every pop and restore on its way out,
+so the call stack, stack bottom, pending bases, transient roots and open
+upvalues stop describing the live frames. The State marks itself poisoned
+instead of trying to make each site unwind-safe:
+
+- Marking happens in `invoke_rust_fn` (every Rust callback), in the unwind
+  guards of `with_rooted_values`, `with_restricted_env` and the vararg frame,
+  and in `State::guarded`, the boundary of every public entry point that can
+  execute Lua, metamethods or host callbacks (`call`, `call_anchor`,
+  `get_table`, `to_string_with_meta`, `bytes_with_tostring_meta`,
+  `with_restricted_env`). Nothing is added to the dispatch loop or the
+  recursive Lua call path.
+- A poisoned State refuses every public `Result`-returning operation with
+  `ErrorKind::StatePoisoned` (`SaveError::StatePoisoned` for `save_state` and
+  function registration, `LoadError::StatePoisoned` when a `load_state` setup
+  closure returns success after a panic). `gc_collect` becomes a no-op.
+  Dropping a poisoned State is always safe. Panics from caller-supplied
+  `AsRef` arguments or `user_data` destructors touch no VM bookkeeping and do
+  not poison.
+- A callback that catches a panic and returns normally does not get its
+  result processed. `invoke_rust_fn` unwinds with a private marker payload so
+  that the still-live outer frames run none of their ordinary error cleanup
+  against the abandoned bookkeeping; `State::guarded` turns the marker into
+  `StatePoisoned` for the host. That translation is only correct because the
+  guard returns straight to host code, so VM-internal callers use the
+  unguarded bodies (`call_unguarded` and kin), never the public entry points.
+- Under `panic = "abort"` there is no unwind and nothing to mark.

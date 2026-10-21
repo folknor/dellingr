@@ -85,15 +85,17 @@ fn factory_closures_share_caches_without_semantic_drift() {
         "#,
     );
     assert_eq!(global_num(&mut state, "gv"), 5.0);
-    let restricted_miss = state.with_restricted_env(&["g1"], |state| {
-        state.get_global("g1").expect("g1 is whitelisted");
-        state
-            .call(ArgCount::Fixed(0), RetCount::Fixed(1))
-            .expect("g1 runs inside the restricted env");
-        let is_nil = state.typ(-1) == LuaType::Nil;
-        state.pop(1).expect("result was pushed");
-        is_nil
-    });
+    let restricted_miss = state
+        .with_restricted_env(&["g1"], |state| {
+            state.get_global("g1").expect("g1 is whitelisted");
+            state
+                .call(ArgCount::Fixed(0), RetCount::Fixed(1))
+                .expect("g1 runs inside the restricted env");
+            let is_nil = state.typ(-1) == LuaType::Nil;
+            state.pop(1).expect("result was pushed");
+            is_nil
+        })
+        .expect("state is not poisoned");
     assert!(
         restricted_miss,
         "warmed global IC must not leak into the sandbox"

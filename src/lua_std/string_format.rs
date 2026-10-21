@@ -347,7 +347,7 @@ fn format_argument(state: &mut State, argument: usize, directive: &Directive) ->
             let mut bytes = if state.typ(idx) == LuaType::String && !state.string_has_tostring() {
                 state.to_bytes(idx)?.to_vec()
             } else {
-                state.bytes_with_tostring_meta(idx)?
+                state.bytes_with_tostring_meta_unguarded(idx)?
             };
             state.consume_cost(bytes.len() as u64)?;
             if directive.has_modifiers && bytes.contains(&0) {

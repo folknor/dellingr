@@ -143,8 +143,14 @@ fn table_sort_swap<A: TableSortAccess>(
 
 impl State {
     /// Creates a new empty table and pushes it onto the stack.
-    #[hotpath::measure]
     pub fn new_table(&mut self) -> Result<()> {
+        self.check_poisoned()?;
+        self.push_new_table()
+    }
+
+    /// [`State::new_table`] without the poison check, for the dispatch loop.
+    #[hotpath::measure]
+    pub(super) fn push_new_table(&mut self) -> Result<()> {
         self.check_stack_space(1)?;
         let val = self.alloc_table();
         self.push_unchecked(val);
@@ -241,8 +247,17 @@ impl State {
     /// Validation and dispatch preflight failures leave the stack unchanged.
     /// An error from calling an `__index` function is not covered: by then
     /// the key has been consumed, and a script error kills the callback anyway.
-    #[hotpath::measure]
+    ///
+    /// Guarded like [`State::call`]: refused on a poisoned State, and a
+    /// panic out of a metamethod poisons it.
     pub fn get_table(&mut self, i: isize) -> Result<()> {
+        self.guarded(|state| state.get_table_unguarded(i))
+    }
+
+    /// [`State::get_table`] without the poison boundary, for the standard
+    /// library and other VM-internal callers.
+    #[hotpath::measure]
+    pub(crate) fn get_table_unguarded(&mut self, i: isize) -> Result<()> {
         let receiver_idx = self.convert_idx(i)?;
         let is_string = self.stack.len() >= receiver_idx + 2
             && self.stack[receiver_idx].as_string_ptr().is_some();
@@ -299,6 +314,7 @@ impl State {
     /// Pops the key and pushes the result. On error the stack is unchanged.
     #[hotpath::measure]
     pub fn get_table_raw(&mut self, i: isize) -> Result<()> {
+        self.check_poisoned()?;
         let idx = self.table_operand_below_top(i, 1)?;
         let key = self.stack[self.stack.len() - 1];
         let val = self.stack[idx]
@@ -321,6 +337,7 @@ impl State {
     /// target, or a nil/NaN key is rejected before either operand is popped.
     #[hotpath::measure]
     pub fn set_table_raw(&mut self, i: isize) -> Result<()> {
+        self.check_poisoned()?;
         let idx = self.table_operand_below_top(i, 2)?;
         let top = self.stack.len();
         let key = self.stack[top - 2];
@@ -359,6 +376,7 @@ impl State {
     /// detected before the key is popped, so a host loop can retry or resume.
     #[hotpath::measure]
     pub fn table_next(&mut self, table_idx: isize) -> Result<bool> {
+        self.check_poisoned()?;
         let idx = self.table_operand_below_top(table_idx, 1)?;
         let top = self.stack.len() - 1;
         let key = self.stack[top];
@@ -390,6 +408,7 @@ impl State {
     /// no length is an error rather than 0, so a host bug cannot read as an
     /// empty table. A bad index is `InvalidStackIndex`.
     pub fn raw_len(&self, idx: isize) -> Result<usize> {
+        self.check_poisoned()?;
         let i = self.convert_idx(idx)?;
         match self.stack[i] {
             Val::Str(s) => Ok(self.heap.get_string(s).len()),
@@ -431,6 +450,7 @@ impl State {
     /// other type has no metatable and returns nil.
     #[hotpath::measure]
     pub fn get_metatable_of(&mut self, idx: isize) -> Result<()> {
+        self.check_poisoned()?;
         let i = self.convert_idx(idx)?;
 
         let val = self.stack[i];
@@ -456,6 +476,7 @@ impl State {
     /// pop, leaving the stack unchanged.
     #[hotpath::measure]
     pub fn set_metatable_of(&mut self, table_idx: isize) -> Result<()> {
+        self.check_poisoned()?;
         let idx = self.table_operand_below_top(table_idx, 1)?;
         let mt = match self.stack[self.stack.len() - 1] {
             Val::Nil => None,
@@ -480,6 +501,7 @@ impl State {
     /// Charges no cost; the Lua `table.insert` wrapper charges a flat 1.
     #[hotpath::measure]
     pub fn table_insert_at(&mut self, table_idx: isize, pos: usize) -> Result<()> {
+        self.check_poisoned()?;
         // Resolve against the entry stack, including the value to be popped.
         // This keeps negative indices relative to the caller's visible top and
         // validates the table before mutating the stack.
@@ -507,6 +529,7 @@ impl State {
     /// position would silently clear an arbitrary key. Charges no cost.
     #[hotpath::measure]
     pub fn table_remove_at(&mut self, table_idx: isize, pos: usize) -> Result<()> {
+        self.check_poisoned()?;
         let idx = self.table_operand_below_top(table_idx, 0)?;
         let len = self.table_array_len_at(idx);
         let valid = (1..=len + 1).contains(&pos) || (len == 0 && pos == 0);
@@ -646,7 +669,7 @@ impl State {
             self.push_unchecked(self.stack[comp_idx]);
             self.push_unchecked(a);
             self.push_unchecked(b);
-            self.call(ArgCount::Fixed(2), RetCount::Fixed(1))?;
+            self.call_unguarded(ArgCount::Fixed(2), RetCount::Fixed(1))?;
             return Ok(self.pop_val().truthy());
         }
 
@@ -666,6 +689,9 @@ impl State {
     /// [`State::bytes_with_tostring_meta`] for the exact bytes. A converted
     /// result over `MAX_STRING_BYTES` is an error, checked before conversion.
     #[hotpath::measure]
+    ///
+    /// Guarded like [`State::call`]: refused on a poisoned State, and a
+    /// panic out of `__tostring` poisons it.
     pub fn to_string_with_meta(&mut self, idx: isize) -> Result<String> {
         let raw = self.bytes_with_tostring_meta(idx)?;
         Self::lossy_utf8_checked(&raw)
@@ -678,7 +704,16 @@ impl State {
     /// Strings consult the shared string metatable too, as reference Lua's
     /// `tostring` does: setting `getmetatable("").__tostring` changes
     /// `tostring(s)` and `print(s)`.
+    ///
+    /// Guarded like [`State::call`]: refused on a poisoned State, and a
+    /// panic out of `__tostring` poisons it.
     pub fn bytes_with_tostring_meta(&mut self, idx: isize) -> Result<Vec<u8>> {
+        self.guarded(|state| state.bytes_with_tostring_meta_unguarded(idx))
+    }
+
+    /// [`State::bytes_with_tostring_meta`] without the poison boundary, for
+    /// the standard library.
+    pub(crate) fn bytes_with_tostring_meta_unguarded(&mut self, idx: isize) -> Result<Vec<u8>> {
         let i = self.convert_idx(idx)?;
         let val = self.stack[i];
         let tostring_handler = self.tostring_handler(val);
@@ -688,7 +723,7 @@ impl State {
             self.check_stack_space(2)?;
             self.push_unchecked(tostring_handler);
             self.push_unchecked(val);
-            self.call(ArgCount::Fixed(1), RetCount::Fixed(1))?;
+            self.call_unguarded(ArgCount::Fixed(1), RetCount::Fixed(1))?;
             let result = self.pop_val();
             if matches!(
                 result.typ(&self.heap),

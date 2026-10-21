@@ -37,7 +37,24 @@ impl State {
     /// host. Argument and result counts are bounded by `limits::MAX_ARGUMENTS` and
     /// `limits::MAX_RESULTS`. Reporting state follows the Error value: returning
     /// an already reported Error from a later callback does not report it again.
+    ///
+    /// A poisoned State (see [`State::is_poisoned`]) is refused with
+    /// `StatePoisoned`. A panic out of the callee poisons the State and
+    /// propagates; a callback that catches a panic and returns normally gets
+    /// its execution abandoned, and this call returns `StatePoisoned`.
     pub fn call(&mut self, num_args: ArgCount, num_ret_expected: RetCount) -> Result<()> {
+        self.guarded(|state| state.call_unguarded(num_args, num_ret_expected))
+    }
+
+    /// The body of [`State::call`] without the poison boundary. Every
+    /// VM-internal caller (metamethod dispatch, the generic-for iterator
+    /// call, the standard library) uses this one; see `State::guarded` for
+    /// why the boundary must only face host code.
+    pub(crate) fn call_unguarded(
+        &mut self,
+        num_args: ArgCount,
+        num_ret_expected: RetCount,
+    ) -> Result<()> {
         // ArgCount::Dynamic is resolved by the executing Lua Frame against
         // its own pending base. Hosts never own such a base, so the public
         // entry point rejects Dynamic before touching any state.
@@ -84,8 +101,11 @@ impl State {
             // #[hotpath::measure] on this path). A Rust panic unwinding through
             // here therefore leaks this root - but it also leaves call_stack,
             // string_literals, stack_bottom and the pending bases inconsistent,
-            // none of which are unwound either. A State that has been unwound
-            // through must be discarded, not reused.
+            // none of which are unwound either. That is why a panic poisons
+            // the State (marked by `invoke_rust_fn`, the unwind guards and the
+            // public `State::guarded` boundary) and every public entry point
+            // then refuses it: nothing here needs to be unwind-safe, and the
+            // recursive path carries no landing pad.
             self.transient_roots.values.push(func_val);
             let result = self.eval_closure(closure, actual_num_args);
             let popped = self
@@ -163,11 +183,11 @@ impl State {
                     let handler_is_function = matches!(call_handler, Val::RustFn(_))
                         || call_handler.as_lua_function(&self.heap).is_some();
                     let mut result = if handler_is_function {
-                        self.call(ArgCount::Fixed(combined), num_ret_expected)
+                        self.call_unguarded(ArgCount::Fixed(combined), num_ret_expected)
                     } else {
                         self.call_chain_depth += 1;
                         let result = self.with_metamethod_depth(|state| {
-                            state.call(ArgCount::Fixed(combined), num_ret_expected)
+                            state.call_unguarded(ArgCount::Fixed(combined), num_ret_expected)
                         });
                         self.call_chain_depth -= 1;
                         result
@@ -227,6 +247,15 @@ impl State {
     /// with `ResultCountExceedsStack` rather than padded with nil: the count
     /// is a host bug, and padding would hide it.
     ///
+    /// Panics: a callback that panics poisons the State and the panic is
+    /// resumed unchanged. A callback that returns (`Ok` or `Err`) on a State
+    /// that became poisoned while it ran - it caught a panic from a nested
+    /// call and swallowed it - does not get its result processed: execution
+    /// is abandoned by unwinding with the `PoisonUnwind` marker, so no outer
+    /// frame runs its ordinary cleanup against the abandoned bookkeeping.
+    /// The public `State::guarded` boundary turns the marker into
+    /// `StatePoisoned`.
+    ///
     /// Kept out of line so the Rust-call machinery does not enlarge
     /// `call_op`'s frame on the recursive Lua call path.
     #[inline(never)]
@@ -239,7 +268,16 @@ impl State {
         // and get_top() after this call is relative to stack_bottom, so the
         // callback result is handled explicitly rather than with `?`.
         let previous_rust_fn = self.active_rust_fn.replace(f);
-        let result = f(self);
+        let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self))) {
+            Ok(result) => result,
+            Err(payload) => {
+                self.poisoned = true;
+                std::panic::resume_unwind(payload)
+            }
+        };
+        if self.poisoned {
+            Self::abandon_poisoned();
+        }
         self.active_rust_fn = previous_rust_fn;
         let num_ret_reported = match result {
             Ok(n) => n,
@@ -266,6 +304,12 @@ impl State {
         }
         self.stack_bottom = old_stack_bottom;
         Ok(num_ret_reported)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn abandon_poisoned() -> ! {
+        std::panic::resume_unwind(Box::new(super::PoisonUnwind))
     }
 
     // Used only on error exits, never in the bytecode dispatch loop.
@@ -303,6 +347,7 @@ impl State {
         s: impl AsRef<str>,
         source_name: Option<String>,
     ) -> Result<()> {
+        self.check_poisoned()?;
         let bytecode = compiler::parse_str_named(s, source_name)?;
         self.push_chunk(Arc::new(bytecode))?;
         Ok(())
@@ -317,6 +362,7 @@ impl State {
         // The count is the problem, not a Lua argument, so this is not an
         // ArgError: `InvalidStackIndex` is what the other count-taking host
         // APIs return.
+        self.check_poisoned()?;
         if n < 2 || n > self.get_top() {
             return Err(self.error(ErrorKind::InvalidStackIndex {
                 index: isize::try_from(n).map_or(isize::MIN, |n| -n),
@@ -411,14 +457,12 @@ impl State {
             // Root from the slice before moving `varargs` into the frame:
             // with_rooted_values copies into transient_roots anyway, so cloning
             // the Vec first would allocate twice per vararg call for nothing.
-            // This guard is not part of a general panic-safety policy: a State
-            // unwound through is discarded (see the note in the call path
-            // above), so no site tries to make a panic recoverable. It exists
-            // only to keep this frame's own root bookkeeping balanced, and it
-            // is affordable here because only vararg frames with extra
-            // arguments pay for the landing pad, never the plain recursive
-            // path. Replacing the per-site guards with a poison flag would put
-            // a check on the hot entry path for no recovery benefit.
+            // This guard does not make a panic recoverable: a panic poisons
+            // the State (see `State::guarded`), which then refuses every
+            // public entry point. The guard only keeps this frame's own root
+            // bookkeeping balanced and marks the poison, and it is affordable
+            // here because only vararg frames with extra arguments pay for the
+            // landing pad, never the plain recursive path.
             let watermark = self.transient_roots.values.len();
             self.transient_roots.values.extend_from_slice(&varargs);
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -427,7 +471,10 @@ impl State {
             self.transient_roots.values.truncate(watermark);
             return match result {
                 Ok(result) => result,
-                Err(payload) => std::panic::resume_unwind(payload),
+                Err(payload) => {
+                    self.poisoned = true;
+                    std::panic::resume_unwind(payload)
+                }
             };
         }
 
@@ -535,7 +582,7 @@ impl State {
                 // A public fixed call prevalidates these argument slots, so
                 // this pop cannot fail through the host API. Keep reporting
                 // here for a future internal caller that violates that invariant.
-                if !is_vararg && let Err(e) = self.pop((num_args - num_params) as isize) {
+                if !is_vararg && let Err(e) = self.pop_n((num_args - num_params) as isize) {
                     let e = self.report_setup_error(e, closure, varargs);
                     self.cleanup_closure_frame(frame_bottom, old_stack_bottom, false);
                     return Err(e);

@@ -261,11 +261,13 @@ fn anchor_invisible_to_with_restricted_env() {
     let a = state.anchor().unwrap();
 
     // Run a restricted-env block; the anchor is still valid inside.
-    state.with_restricted_env(&[], |state| {
-        state.push_anchor(a).unwrap();
-        assert_eq!(state.to_number(-1).unwrap(), 1234.0);
-        state.pop(1).unwrap();
-    });
+    state
+        .with_restricted_env(&[], |state| {
+            state.push_anchor(a).unwrap();
+            assert_eq!(state.to_number(-1).unwrap(), 1234.0);
+            state.pop(1).unwrap();
+        })
+        .expect("state is not poisoned");
 
     // And still valid outside.
     state.push_anchor(a).unwrap();

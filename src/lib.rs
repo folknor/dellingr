@@ -467,6 +467,7 @@ impl State {
     /// concurrently from different threads (each State holds its own caches
     /// and heap; only the immutable bytecode is shared).
     pub fn load(&mut self, program: &Program) -> Result<()> {
+        self.check_poisoned()?;
         self.push_chunk(Arc::clone(&program.0))?;
         Ok(())
     }

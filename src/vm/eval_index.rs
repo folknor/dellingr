@@ -206,7 +206,7 @@ impl State {
             state.push_unchecked(receiver);
             state.push_unchecked(key);
             *handler_called = true;
-            state.call(ArgCount::Fixed(2), RetCount::Fixed(1))?;
+            state.call_unguarded(ArgCount::Fixed(2), RetCount::Fixed(1))?;
             Ok(())
         })
     }

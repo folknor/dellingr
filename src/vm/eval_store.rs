@@ -178,7 +178,7 @@ impl State {
                     self.push_unchecked(len_handler);
                     self.push_unchecked(val);
                     self.push_unchecked(val);
-                    self.call(ArgCount::Fixed(2), RetCount::Fixed(1))?;
+                    self.call_unguarded(ArgCount::Fixed(2), RetCount::Fixed(1))?;
                     return Ok(());
                 }
             }

@@ -419,6 +419,31 @@ fn call_depth_exceeded_error() {
     });
 }
 
+/// The same limit reached through Lua -> RustFn -> Lua recursion, so every
+/// level keeps a Rust callback frame (its unwind guard included) live on the
+/// native stack.
+#[test]
+fn call_depth_exceeded_through_rust_callbacks() {
+    on_deep_stack(|| {
+        let err = expect_error(
+            r#"
+            local function recurse(n)
+                local t = {2, 1}
+                table.sort(t, function(a, b)
+                    recurse(n + 1)
+                    return a < b
+                end)
+            end
+            recurse(0)
+        "#,
+        );
+        assert!(
+            matches!(err.kind(), ErrorKind::CallDepthExceeded { .. }),
+            "Expected CallDepthExceeded, got: {err}"
+        );
+    });
+}
+
 /// Runs `f` on a dedicated thread with a generous stack. MAX_CALL_DEPTH Lua
 /// frames recurse natively through the dispatch loop, and unoptimized dev
 /// builds spend more than 8KB of native stack per Lua call, overflowing the
@@ -1349,47 +1374,20 @@ fn global_lookup_cache_respects_restricted_env() {
     assert_eq!(state.to_number(-1).unwrap(), 1.0);
     state.pop(1).unwrap();
 
-    let restricted = state.with_restricted_env(&["read_x"], |state| {
-        state.get_global("read_x").unwrap();
-        state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
-        let result = state.to_number(-1).unwrap();
-        state.pop(1).unwrap();
-        result
-    });
+    let restricted = state
+        .with_restricted_env(&["read_x"], |state| {
+            state.get_global("read_x").unwrap();
+            state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
+            let result = state.to_number(-1).unwrap();
+            state.pop(1).unwrap();
+            result
+        })
+        .expect("state is not poisoned");
     assert_eq!(restricted, 2.0);
 
     state.get_global("read_x").unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
     assert_eq!(state.to_number(-1).unwrap(), 1.0);
-}
-
-#[test]
-fn restricted_env_restored_after_panic() {
-    // A panic inside the closure must still restore the full environment (L11),
-    // so a caller that catches the panic can reuse the State. `math` is not in
-    // the whitelist, so it is nil during the closure but must be back after.
-    let mut state = State::new();
-    state.new_table().unwrap();
-    state.set_global("saved_object").unwrap();
-
-    let prev_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {})); // silence the expected panic
-    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        state.with_restricted_env(&["print"], |state| {
-            state.gc_collect();
-            panic!("boom inside restricted env");
-        })
-    }));
-    std::panic::set_hook(prev_hook);
-    assert!(caught.is_err(), "the panic must propagate");
-
-    // Environment restored: a non-whitelisted global is available again.
-    state.get_global("math").unwrap();
-    assert_eq!(state.typ(-1), LuaType::Table);
-    state.pop(1).unwrap();
-    state.get_global("saved_object").unwrap();
-    assert_eq!(state.typ(-1), LuaType::Table);
-    state.pop(1).unwrap();
 }
 
 #[test]

@@ -8,6 +8,19 @@ All notable changes to dellingr are documented here. The format follows
 
 ### Changed (breaking)
 
+- A panic that unwinds through a State's execution (a panicking `RustFunc`
+  or `on_error`, a panic inside `with_restricted_env`, or a VM-internal
+  panic) now poisons the State. Every later `Result`-returning public method
+  refuses with the new `ErrorKind::StatePoisoned` (`SaveError::StatePoisoned`
+  from `save_state` and function registration, `LoadError::StatePoisoned`
+  when a `load_state` setup closure returns success after catching a panic);
+  `gc_collect` becomes a no-op and `State::is_poisoned` reports the flag.
+  Reusing a State after catching a panic was never sound, despite the old
+  `with_restricted_env` documentation. A callback that catches a panic and
+  returns normally has its enclosing execution abandoned, and the host call
+  returns `StatePoisoned`.
+- `State::with_restricted_env` returns `Result<R>`, refusing a poisoned State
+  without running the closure.
 - A `RustFunc` that returns `Ok(n)` with fewer than `n` values in its frame
   now fails the call with the new `ErrorKind::ResultCountExceedsStack`
   instead of having the missing results padded with nil. This applies to

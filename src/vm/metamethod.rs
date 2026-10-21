@@ -154,7 +154,7 @@ impl State {
                     // Stack: [... __index_table, result]
                     // Remove the __index table, keep the result
                     let val = self.pop_val();
-                    self.pop(1)?;
+                    self.pop_n(1)?;
                     // Net-negative: two values popped above, one pushed back,
                     // so this cannot cross the cap and needs no preflight.
                     self.push_unchecked(val);
@@ -175,7 +175,7 @@ impl State {
                     self.push_unchecked(table_val);
                     self.push_unchecked(key);
                     *handler_called = true;
-                    self.call(ArgCount::Fixed(2), RetCount::Fixed(1))?;
+                    self.call_unguarded(ArgCount::Fixed(2), RetCount::Fixed(1))?;
                     Ok(())
                 } else {
                     Err(self
@@ -192,7 +192,7 @@ impl State {
                 self.push_unchecked(table_val);
                 self.push_unchecked(key);
                 *handler_called = true;
-                self.call(ArgCount::Fixed(2), RetCount::Fixed(1))?;
+                self.call_unguarded(ArgCount::Fixed(2), RetCount::Fixed(1))?;
                 Ok(())
             }
             Val::Str(_) => self.index_string(handler, key, None, local_cost, handler_called),
@@ -294,7 +294,7 @@ impl State {
                         self.stack.truncate(new_idx);
                         return Err(e);
                     }
-                    self.pop(1)?; // Remove the __newindex table
+                    self.pop_n(1)?; // Remove the __newindex table
                     Ok(())
                 } else if is_function {
                     // __newindex is a function: call it with (table, key, value).
@@ -308,7 +308,7 @@ impl State {
                     self.push_unchecked(table_val);
                     self.push_unchecked(key);
                     self.push_unchecked(val);
-                    self.call(ArgCount::Fixed(3), RetCount::Fixed(0))?;
+                    self.call_unguarded(ArgCount::Fixed(3), RetCount::Fixed(0))?;
                     Ok(())
                 } else {
                     Err(self
@@ -325,7 +325,7 @@ impl State {
                 self.push_unchecked(table_val);
                 self.push_unchecked(key);
                 self.push_unchecked(val);
-                self.call(ArgCount::Fixed(3), RetCount::Fixed(0))?;
+                self.call_unguarded(ArgCount::Fixed(3), RetCount::Fixed(0))?;
                 Ok(())
             }
             _ => Err(self.type_error(super::TypeError::TableIndex(handler.typ(&self.heap)))),

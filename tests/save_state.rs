@@ -292,7 +292,9 @@ fn state_is_quiescent_after_error_in_restricted_environment() {
         state.load_string("return nil + 1")?;
         state.call(ArgCount::Fixed(0), RetCount::Fixed(0))
     });
-    result.expect_err("restricted callback must error");
+    result
+        .expect("state is not poisoned")
+        .expect_err("restricted callback must error");
     state
         .save_state()
         .expect("suspended environment must be restored after an error");
@@ -301,9 +303,11 @@ fn state_is_quiescent_after_error_in_restricted_environment() {
 #[test]
 fn save_state_rejects_suspended_environment() {
     let mut state = State::new();
-    state.with_restricted_env(&[], |state| {
-        assert!(matches!(state.save_state(), Err(SaveError::NotQuiescent)));
-    });
+    state
+        .with_restricted_env(&[], |state| {
+            assert!(matches!(state.save_state(), Err(SaveError::NotQuiescent)));
+        })
+        .expect("state is not poisoned");
 }
 
 #[test]

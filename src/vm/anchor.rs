@@ -154,6 +154,7 @@ impl State {
     /// GC weight and has no use case for a stable handle). The stack is
     /// only popped on success - errors leave it untouched.
     pub fn anchor(&mut self) -> Result<Anchor> {
+        self.check_poisoned()?;
         // Surface "stack empty" as an embedder error rather than the
         // VM-bug panic in pop_val. Validate before popping so the stack
         // is untouched on error - matches `anchor_at` and the rest of
@@ -170,6 +171,7 @@ impl State {
     /// Like `anchor`, but reads the value at `idx` without popping. The
     /// stack is left untouched on both success and error.
     pub fn anchor_at(&mut self, idx: isize) -> Result<Anchor> {
+        self.check_poisoned()?;
         let val = self.at_index(idx)?;
         if matches!(val, Val::Nil) {
             return Err(self.error(ErrorKind::AnchorNil));
@@ -185,6 +187,7 @@ impl State {
     /// callable table, use `anchor` and let the existing dispatch handle
     /// `__call` at call time.
     pub fn anchor_function(&mut self) -> Result<Anchor> {
+        self.check_poisoned()?;
         let val = self.at_index(-1)?;
         let typ = val.typ(&self.heap);
         if typ != LuaType::Function {
@@ -198,6 +201,7 @@ impl State {
     /// Like `anchor_at`, but additionally requires the value to be a
     /// function. See `anchor_function` for the strictness note.
     pub fn anchor_function_at(&mut self, idx: isize) -> Result<Anchor> {
+        self.check_poisoned()?;
         let val = self.at_index(idx)?;
         let typ = val.typ(&self.heap);
         if typ != LuaType::Function {
@@ -210,6 +214,7 @@ impl State {
     /// `ErrorKind::InvalidAnchor` if the handle is stale, released, or
     /// belongs to a different `State`.
     pub fn push_anchor(&mut self, a: Anchor) -> Result<()> {
+        self.check_poisoned()?;
         match self.registry.get(a) {
             Some(val) => self.push_val(val),
             None => Err(self.error(ErrorKind::InvalidAnchor)),
@@ -231,7 +236,13 @@ impl State {
     /// API misuse: they are returned but do not fire
     /// [`HostCallbacks::on_error`](crate::HostCallbacks::on_error). Errors
     /// from the dispatched call notify exactly as for `call`.
+    ///
+    /// Guarded like [`State::call`]: refused on a poisoned State.
     pub fn call_anchor(&mut self, a: Anchor, args: ArgCount, rets: RetCount) -> Result<()> {
+        self.guarded(|state| state.call_anchor_unguarded(a, args, rets))
+    }
+
+    fn call_anchor_unguarded(&mut self, a: Anchor, args: ArgCount, rets: RetCount) -> Result<()> {
         // Hosts push only the arguments. Insert the anchored function below
         // them to provide call's callee-then-arguments stack layout.
         //
@@ -268,7 +279,7 @@ impl State {
         let insert_at = self.stack.len() - n_args;
         self.check_stack_space(1)?;
         self.stack.insert(insert_at, val);
-        self.call(args, rets)
+        self.call_unguarded(args, rets)
     }
 
     /// Release an anchor. Returns `true` if the handle was live and the

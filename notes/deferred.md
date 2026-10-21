@@ -156,6 +156,21 @@ handles an empty item list).
 
 ## Unmeasured performance
 
+## HYG-045 - Error-path cleanup decided per site
+
+Reported by the VM-core hunter; the panic-safety half shipped as the poison
+flag. Remaining: `call_op` restores its frame with several
+`truncate_call_frame` calls, `eval_closure_frame` with several
+`cleanup_closure_frame` calls, and `handle_index_metamethod_inner` and
+`index_string` truncate temporaries by hand. A guard or `frame_scope` helper
+would make "every exit restores" structural. Not done because it cannot be
+a Drop guard (the guard would hold `&mut State` while the body uses it), so
+it is either a closure helper - the frame bloat `call_op` already rejected
+for `with_rooted_value` on the recursive path - or a plain struct that every
+`Ok` exit must disarm by hand, which keeps the per-site count it was meant to
+remove. Revisit only with a native-stack-per-level measurement of the
+recursive path showing the closure form is frame-neutral.
+
 ## BUG-008 - Traceback frames copy the source name per frame
 
 Narrowed in wave 2 to its growth residue (name limits are now enforced at
@@ -252,22 +267,3 @@ the `u64` map; drop the pin test's stability claim if nothing needs it. Related:
 ## Comment or doc only
 
 ## Decisions for the user
-
-## HYG-045 - Cleanup-on-error and panic-safety decided per site
-
-Reported by the VM-core hunter.
-
-Cleanup: `call_op` has 6 `truncate_call_frame` calls, `eval_closure_frame` 3
-`cleanup_closure_frame`, `handle_index_metamethod_inner` and `index_string`
-truncate temporaries by hand; a guard or `frame_scope` helper would make "every
-exit restores" structural (measure frame bloat on the recursive path before
-rejecting; a non-closure struct with plain-store drops adds no landing pad).
-Panic safety: `eval.rs` says a State unwound through must be discarded, and the
-main path has no guard, yet `with_restricted_env` (whose comment says it exists
-"so an embedder that catches the panic and reuses the State" works),
-`with_rooted_values` and the vararg path of `eval_closure_inner` use
-`catch_unwind`/`resume_unwind`. A host reading `with_restricted_env` concludes
-reuse is supported. Fix: a poison flag checked at public entry points (one branch
-per host call, not per opcode, which answers `eval.rs`'s hot-path objection), or
-remove the three guards. Enforceable by a test that panics in a RustFn under
-`catch_unwind` and asserts the next `call` refuses.

@@ -40,10 +40,12 @@ fn writer_repopulates_across_restricted_environment_swaps() {
     let mut state = State::new();
     run(&mut state, "x = 0; function writer(v) x = v end");
     call_writer(&mut state, "writer", 1.0);
-    state.with_restricted_env(&["writer"], |restricted| {
-        call_writer(restricted, "writer", 2.0);
-        assert_eq!(global_number(restricted, "x"), 2.0);
-    });
+    state
+        .with_restricted_env(&["writer"], |restricted| {
+            call_writer(restricted, "writer", 2.0);
+            assert_eq!(global_number(restricted, "x"), 2.0);
+        })
+        .expect("state is not poisoned");
     assert_eq!(global_number(&mut state, "x"), 1.0);
     call_writer(&mut state, "writer", 3.0);
     assert_eq!(global_number(&mut state, "x"), 3.0);

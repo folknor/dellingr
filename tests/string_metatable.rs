@@ -210,22 +210,26 @@ fn restricted_env_without_string_keeps_method_syntax() {
     assert_eq!(state.to_string(-1).unwrap(), "HI");
     state.pop(1).unwrap();
     for _ in 0..2 {
-        let result = state.with_restricted_env(&["call_upper"], |state| {
-            state.get_global("call_upper").unwrap();
-            state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
-            let s = state.to_string(-1).unwrap();
-            state.pop(1).unwrap();
-            s
-        });
+        let result = state
+            .with_restricted_env(&["call_upper"], |state| {
+                state.get_global("call_upper").unwrap();
+                state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
+                let s = state.to_string(-1).unwrap();
+                state.pop(1).unwrap();
+                s
+            })
+            .expect("state is not poisoned");
         assert_eq!(result, "HI");
     }
     // The global `string` is still hidden inside the sandbox.
-    let hidden = state.with_restricted_env(&[], |state| {
-        state.get_global("string").unwrap();
-        let nil = state.typ(-1) == dellingr::LuaType::Nil;
-        state.pop(1).unwrap();
-        nil
-    });
+    let hidden = state
+        .with_restricted_env(&[], |state| {
+            state.get_global("string").unwrap();
+            let nil = state.typ(-1) == dellingr::LuaType::Nil;
+            state.pop(1).unwrap();
+            nil
+        })
+        .expect("state is not poisoned");
     assert!(hidden);
 }
 

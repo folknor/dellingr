@@ -341,27 +341,31 @@ fn gc_preserves_nested_suspended_environments() {
     let original = state.pop_val();
     state.set_global_value("original", original);
 
-    state.with_restricted_env(&[], |state| {
-        state.new_table().unwrap();
-        let outer = state.pop_val();
-        state.set_global_value("outer", outer);
+    state
+        .with_restricted_env(&[], |state| {
+            state.new_table().unwrap();
+            let outer = state.pop_val();
+            state.set_global_value("outer", outer);
 
-        state.with_restricted_env(&[], |state| {
-            state.gc_collect();
-        });
+            state
+                .with_restricted_env(&[], |state| {
+                    state.gc_collect();
+                })
+                .expect("state is not poisoned");
 
-        let outer = *state
-            .global_env
-            .get("outer")
-            .expect("outer restricted value must be restored");
-        // Dereference through the heap. `as_object_ptr().is_some()` only
-        // inspects the Val variant, so a swept generational pointer still
-        // returns Some and the assertion could not fail.
-        assert!(
-            live_table(state, outer),
-            "outer restricted value was collected"
-        );
-    });
+            let outer = *state
+                .global_env
+                .get("outer")
+                .expect("outer restricted value must be restored");
+            // Dereference through the heap. `as_object_ptr().is_some()` only
+            // inspects the Val variant, so a swept generational pointer still
+            // returns Some and the assertion could not fail.
+            assert!(
+                live_table(state, outer),
+                "outer restricted value was collected"
+            );
+        })
+        .expect("state is not poisoned");
 
     let original = *state
         .global_env

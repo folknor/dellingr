@@ -162,6 +162,9 @@ pub struct SaveDiagnostics {
 pub enum SaveError {
     /// The VM has an active stack/call frame/open upvalue and cannot be snapshotted.
     NotQuiescent,
+    /// A panic unwound through the State, so its contents no longer
+    /// describe a consistent VM and are not snapshotted.
+    StatePoisoned,
     /// A reachable Rust function has no stable save/load id.
     UnregisteredFunction {
         /// Best-effort path to the value that made the function reachable.
@@ -212,6 +215,10 @@ pub enum LoadError<E = Infallible> {
     UnknownFunction(String),
     /// The host's load-time setup closure failed.
     Setup(E),
+    /// The load-time setup closure returned success on a State a panic had
+    /// unwound through (it caught the panic), so the snapshot is not loaded
+    /// into it.
+    StatePoisoned,
     /// A saved environment-object token was not present at load time.
     UnknownEnvObject(String),
     /// Binary payload could not be decoded.
@@ -345,6 +352,7 @@ impl fmt::Display for SaveError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             SaveError::NotQuiescent => write!(f, "state is not quiescent"),
+            SaveError::StatePoisoned => write!(f, "state poisoned by a panic"),
             SaveError::UnregisteredFunction { reachable_from } => {
                 f.write_str("unregistered Rust function reachable from ")?;
                 write_bounded_user_text(f, reachable_from)
@@ -386,6 +394,7 @@ impl<E: fmt::Display> fmt::Display for LoadError<E> {
                 write_bounded_user_text(f, id)
             }
             LoadError::Setup(error) => write!(f, "load setup failed: {error}"),
+            LoadError::StatePoisoned => write!(f, "load setup left the state poisoned by a panic"),
             LoadError::UnknownEnvObject(id) => {
                 f.write_str("unknown saved environment object ")?;
                 write_bounded_user_text(f, id)
@@ -437,6 +446,7 @@ fn retype_load_error<E>(error: LoadError<Infallible>) -> LoadError<E> {
         }
         LoadError::UnknownFunction(id) => LoadError::UnknownFunction(id),
         LoadError::Setup(never) => match never {},
+        LoadError::StatePoisoned => LoadError::StatePoisoned,
         LoadError::UnknownEnvObject(id) => LoadError::UnknownEnvObject(id),
         LoadError::DecodeError(error) => LoadError::DecodeError(error),
         LoadError::FieldSizeExceeded { kind, size, limit } => {
@@ -1498,7 +1508,13 @@ impl State {
     /// The VM must be quiescent: no Lua/Rust call can be in flight. Anchors are
     /// process-local and are not serialized, but their count is returned in
     /// [`SaveDiagnostics`].
+    ///
+    /// A poisoned State (see [`State::is_poisoned`]) is refused with
+    /// [`SaveError::StatePoisoned`].
     pub fn save_state(&self) -> Result<SaveState, SaveError> {
+        if self.poisoned {
+            return Err(SaveError::StatePoisoned);
+        }
         self.validate_quiescent()?;
         let payload = SaveBuilder::new(self).finish()?;
         let mut encoder = Encoder::with_capacity(payload.encoded_size_estimate());
@@ -1525,7 +1541,9 @@ impl State {
     /// The host supplies callbacks and re-runs its environment setup closure so
     /// registered host functions exist before saved values are resolved. A
     /// setup error is returned as [`LoadError::Setup`] without materializing
-    /// any saved values.
+    /// any saved values. A setup that returns success after a panic unwound
+    /// through the State (it caught the panic) gets
+    /// [`LoadError::StatePoisoned`].
     ///
     /// A load is all-or-nothing by construction: the State is built here and
     /// only returned on success. Any error drops it, so a failure partway
@@ -1568,6 +1586,9 @@ impl State {
         // deliberately retained and participate in the final collection.
         state.registry.clear();
         setup(&mut state).map_err(LoadError::Setup)?;
+        if state.poisoned {
+            return Err(LoadError::StatePoisoned);
+        }
         materialize_payload(&mut state, payload).map_err(retype_load_error::<E>)?;
         Ok(state)
     }
