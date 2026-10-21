@@ -1775,6 +1775,12 @@ fn materialize_payload(
         let ptr = *env_forward
             .get(&delta.token)
             .ok_or_else(|| LoadError::UnknownEnvObject(delta.token.clone()))?;
+        // Deliberately repeats the verifier's duplicate and disjointness
+        // checks, now on resolved runtime values. The verifier compares saved
+        // keys, which can differ while naming the same runtime key: two `Fn`
+        // ids that resolve to one address (identical-code folding) or two
+        // environment tokens for one object. The reason strings differ because
+        // this pass reports the materialized form.
         let mut deleted_keys = BTreeSet::new();
         for (key_index, key) in delta.deleted.iter().enumerate() {
             insert_runtime_key(

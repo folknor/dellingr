@@ -27,6 +27,11 @@
 
 set -u
 
+# dellingr's character classes are fixed ASCII; reference Lua follows the
+# locale. Pin the C locale so a Latin-1 host locale cannot make the references
+# disagree on bytes 0x80..0xFF.
+export LC_ALL=C
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 cd "$SCRIPT_DIR/.." || exit 1
 ROOT="$(pwd -P)"
@@ -194,6 +199,9 @@ do
 
     run_lua "$OUR_LUA" --quiet "$f" > "$OUR_OUT" 2>&1
     our_status=$?
+    # 124 is timeout(1)'s "timed out" status. It is unambiguous only because
+    # the dellingr CLI never exits 124: src/main.rs exits 0 or 1 (see its exit
+    # policy comment). Giving the CLI a new exit code means rechecking this.
     if [ "$our_status" -eq 124 ] && [ "$TIMEOUT_MODE" != none ]; then
         failures+=("TIMEOUT: $name (dellingr)")
         report_capture "dellingr" "$OUR_OUT"

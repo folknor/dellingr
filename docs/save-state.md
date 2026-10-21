@@ -53,6 +53,12 @@ callbacks, host user-data. Saving is valid only while the VM is quiescent.
   Rust function that has been printed, including one only the host still
   holds. Passing it back in after a load prints the same `function: 0x...`.
 - On load, a recorded function that setup no longer registers is skipped.
+- Rust function identity is by code address. When several ids share one
+  address (intentional aliases, or identical-code folding in a release/LTO
+  build), the lexicographically smallest id is written. A build that folds
+  functions can therefore write different `Fn` ids than one that does not, so
+  snapshot bytes are only guaranteed identical across the same build, and a
+  folded pair loads back as the smaller id's function.
 
 ## Load
 

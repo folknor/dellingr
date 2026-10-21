@@ -107,8 +107,12 @@ fn open_libs_unchecked(state: &mut State) -> Result<()> {
 /// conflict and skips the scratch build.
 /// Setup only installs values and registers function pointers: it executes no
 /// Lua or callbacks, including the lazily compiled gmatch wrapper. The scratch
-/// State owns its heap and registry; construction advances the anchor state-id
-/// counter but does not draw from the caller's RNG or alter its environment.
+/// State owns its heap and registry; construction advances the process-global
+/// anchor state-id counter (observable only through `Anchor`'s `Debug` and
+/// `Hash`, which are documented as non-deterministic) but does not draw from the
+/// caller's RNG or alter its environment. Listing the library's (id, function)
+/// pairs as data would remove the scratch State, at the cost of a second list
+/// that must track the `open_*` functions; it was not worth that drift risk.
 #[cfg(feature = "snapshot")]
 fn check_registry_compatible(state: &State) -> Result<()> {
     if state.rust_fns_by_id.is_empty() {

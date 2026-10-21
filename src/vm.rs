@@ -270,6 +270,10 @@ pub struct State {
     // pruning would change save success and reverse-name selection.
     pub(super) rust_fns_by_id: BTreeMap<String, RustFunc>,
     /// Reverse address lookup for save-time Rust function naming.
+    ///
+    /// Keyed by function address, which is ASLR-dependent: probe it only
+    /// (`get`/`insert`). Never iterate it or derive an order from it, since
+    /// that order would differ between processes and leak into snapshot bytes.
     #[cfg(feature = "snapshot")]
     pub(super) rust_fn_ids_by_addr: BTreeMap<usize, String>,
     /// Canonical environment objects (library tables, `_G`, `_G`'s metatable,
@@ -1093,6 +1097,13 @@ impl State {
         // saving build. Embedders needing distinct identity must keep function
         // bodies observably distinct (as table.unpack keeps its own wrapper).
         // Refusing shared addresses would break aliasing and release LTO builds.
+        // Rust function identity is by address everywhere: `Val` equality
+        // (script-visible `f == g`), the TFORCALL fast paths for next and the
+        // ipairs iterator, the active-function name, and this reverse map. That
+        // is why table.unpack and base unpack keep separate callbacks. The
+        // smallest-id rule makes `Fn` ids in save bytes depend on whether the
+        // build folded functions, so cross-build snapshot bytes are only
+        // guaranteed identical for the same build (see docs/save-state.md).
         match self.rust_fn_ids_by_addr.get(&addr) {
             Some(existing_id) if existing_id.as_str() <= id => {}
             _ => {

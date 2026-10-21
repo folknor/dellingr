@@ -23,6 +23,10 @@ end
 // This chunk is immutable. Runtime caches are State-local, and snapshot bytecode
 // ids are assigned per save, so sharing the Arc does not share mutable state.
 // Its source name keeps errors raised in the wrapper identifiable in traces.
+// It is process-global and compiled on the first gmatch in the process,
+// whichever State that is (a RustFunc cannot carry upvalues, hence the shim).
+// Compilation is deterministic and charges no cost, so which State pays for it
+// is not observable; the only effect is one-time host work.
 static GMATCH_WRAPPER: OnceLock<Arc<crate::compiler::Bytecode>> = OnceLock::new();
 
 fn gmatch_wrapper() -> Arc<crate::compiler::Bytecode> {

@@ -37,6 +37,14 @@ new_key_type! {
 /// its owning State's id so cross-State misuse is detected. A `u64`
 /// counter cannot wrap in any realistic process lifetime, so cross-State
 /// protection is guaranteed even for long-running embedders.
+///
+/// This is deliberately process-global: ids must be unique across every State
+/// in the process for the cross-State check to work. The cost is that State
+/// creation order (including across threads, and the scratch State the stdlib
+/// registry check builds) is observable through an `Anchor`'s `Debug` and
+/// `Hash`. That is accepted: the id never reaches scripts, snapshots, the
+/// RNG or the cost meter, so no replay-visible behavior depends on it. Hosts
+/// must not persist or compare anchors across processes.
 static NEXT_STATE_ID: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) fn next_state_id() -> NonZeroU64 {

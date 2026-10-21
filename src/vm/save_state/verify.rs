@@ -206,6 +206,11 @@ fn validate_environment_deltas(payload: &SavePayload) -> Result<(), LoadError> {
             delta_index,
             SaveLocation::EnvironmentDeltas,
         )?;
+        // This pass checks the saved representation (`Fn` ids, environment
+        // tokens). It cannot be the only check: two distinct ids can resolve
+        // to one function address (identical-code folding) and two tokens to
+        // one object, so `materialize_payload` repeats the checks on runtime
+        // values and its failures are the ones that catch those cases.
         let mut deleted = BTreeSet::new();
         for (key_index, key) in delta.deleted.iter().enumerate() {
             validate_value(key, payload)?;

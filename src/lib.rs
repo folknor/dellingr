@@ -3,7 +3,7 @@
 //! # Features
 //!
 //! - **Cost budgets**: Control script execution with configurable operation costs
-//! - **Host callbacks**: Redirect print output and handle errors
+//! - **Host callbacks**: Redirect print output and receive error notifications (`on_error` observes failures; it cannot handle or suppress them)
 //! - **Stack traces**: Detailed error messages with source locations
 //!
 //! # Example

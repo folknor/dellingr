@@ -36,5 +36,7 @@ presenting an analysis.
 Bad arguments, unreadable files, parse errors, runtime errors and budget
 exhaustion exit 1. The cost summary is still attempted before a runtime error
 is reported. A closed stdout pipe during CLI output exits quietly with status
-0. The CLI is a development tool; hosts embed the library and see typed errors
+0. The CLI only ever exits 0 or 1 (never 124, which `timeout(1)` uses for a
+timeout), so wrappers such as `scripts/diff_test.sh` can read 124 as a timeout
+unambiguously. The CLI is a development tool; hosts embed the library and see typed errors
 through the API.

@@ -182,6 +182,10 @@ impl State {
         let control = self.stack[base + 2];
 
         if let Val::RustFn(f) = iterator {
+            // Identity is by function address (the same contract as `Val`
+            // equality and snapshot naming). The fast paths are semantically
+            // transparent: if identical-code folding made another function
+            // share these addresses, it would be identical code anyway.
             let base_next_fn: RustFunc = base_next;
             let base_ipairs_iter_fn: RustFunc = base_ipairs_iter;
             if std::ptr::fn_addr_eq(f, base_next_fn)

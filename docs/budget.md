@@ -7,6 +7,15 @@ any other legible refactor must not make a script more expensive. Host work
 out of proportion to its charge is a performance concern, not a cost-model
 defect.
 
+There is one deliberate exception: constant folding. The compiler evaluates
+`+ - * / %` over two number literals, and negation of a literal, at compile
+time, so `60 * 1000` costs nothing while `local k = 60; x = k * 1000` is
+charged for the multiplication. `^` is never folded and is always charged, as
+is any operation whose result would be NaN or negative zero, or that finds the
+literal pool full.
+Folding is a compile-time optimization the cost model does not undo; the
+operand literals also stay in the chunk's literal pool as unused entries.
+
 ## Mechanics
 
 - `cost_used` counts everything charged. `set_cost_budget` sets a finite

@@ -46,6 +46,11 @@ are hosts and are exempt.
 identity, not an address. It is stable across a snapshot round trip. Rust
 functions render as `function: 0x<id>`.
 
+Rust functions are compared by code address, so `f == g` on host functions
+depends on the build: identical-code folding can make two distinct functions
+equal. Addresses themselves never reach output or ordering. See
+`compatibility.md` and `save-state.md`.
+
 Identities are never reused. Strings are interned and also get a `%p`
 identity, so a string that is dropped and later rebuilt with the same bytes
 keeps its id only if no collection ran in between. The metamethod event names

@@ -400,6 +400,9 @@ impl<'a> Compiler<'a> {
     }
 }
 
+/// Character classes are fixed ASCII (the C locale), identical on every host.
+/// Reference Lua follows `setlocale`, so bytes 0x80..0xFF can classify
+/// differently there; this divergence is deliberate for determinism.
 fn match_class(ch: u8, class: u8) -> bool {
     let result = match class.to_ascii_lowercase() {
         b'a' => ch.is_ascii_alphabetic(),

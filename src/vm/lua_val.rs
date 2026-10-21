@@ -268,6 +268,9 @@ impl Hash for PointerIdKey {
         match self {
             Self::String(ptr) => ptr.hash(hasher),
             Self::Object(ptr) => ptr.hash(hasher),
+            // The address is ASLR-dependent. It may only feed hash-bucket
+            // layout; never replace a deterministic order with a hash-ordered
+            // container keyed on this.
             Self::RustFn(func) => (*func as usize).hash(hasher),
         }
     }

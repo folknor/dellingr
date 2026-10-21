@@ -374,6 +374,14 @@ impl<'a> Parser<'a> {
 
     /// Folding must preserve signed zero and NaN behavior, and a full pool
     /// must leave otherwise valid source compilable using runtime arithmetic.
+    ///
+    /// Folding is a deliberate, documented exception to "naming an intermediate
+    /// must not make a script more expensive": the folded expression charges
+    /// nothing, while the same arithmetic over locals is charged at runtime. The
+    /// operand literals stay in `number_literals` as dead entries (they count
+    /// toward the literal limit, are serialized into snapshots and occupy
+    /// runtime literal slots). They are not compacted away because that would
+    /// change snapshot contents for identical source, which is replay-visible.
     fn try_fold_literal(&mut self, value: f64) -> Result<Option<u16>> {
         if value.is_nan() || (value == 0.0 && value.is_sign_negative()) {
             return Ok(None);

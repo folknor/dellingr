@@ -668,7 +668,8 @@ use crate::limits::MAX_RESULTS;
 
 /// Validate a result count against the call ABI, whose cap is
 /// [`crate::limits::MAX_RESULTS`]. Applied to Rust callback returns and to
-/// every Lua `return` with a dynamic result count.
+/// every Lua `return` with a dynamic result count. Public so `RustFunc`
+/// authors returning a computed count can apply the same check the VM does.
 pub fn results_count(count: usize) -> Result<u8, ErrorKind> {
     u8::try_from(count).map_err(|_| ErrorKind::TooManyResults { limit: MAX_RESULTS })
 }
@@ -829,7 +830,10 @@ impl Error {
         Self::without_location(ErrorKind::InternalError(fault.into_message()))
     }
 
-    /// Attach a stack trace to this error.
+    /// Attach a stack trace to this error. The VM attaches the real trace when
+    /// an error unwinds out of a call; a host-supplied trace is reported to
+    /// `on_error` as given. Public chiefly so hosts and tests can build errors
+    /// with known traces.
     pub fn with_stack_trace(mut self, trace: Vec<StackFrame>) -> Self {
         self.stack_trace = trace;
         self
@@ -980,7 +984,10 @@ impl Error {
     }
 
     /// Whether the host can plausibly retry the operation after handling the
-    /// error. Currently only some [`SyntaxError`] variants are recoverable.
+    /// error. Currently only some [`SyntaxError`] variants are recoverable:
+    /// those that appending more source text can fix. Intended for host REPLs
+    /// that keep reading lines until a chunk is complete; the crate's own CLI
+    /// has no REPL and does not call it.
     pub fn is_recoverable(&self) -> bool {
         self.kind.is_recoverable()
     }
@@ -988,6 +995,8 @@ impl Error {
 
 impl ErrorKind {
     /// Build a named argument error from a structured validation reason.
+    /// Public for `RustFunc` authors who want their argument failures to render
+    /// and compare like the standard library's.
     pub fn argument_detail(arg_number: isize, function_name: &str, detail: ArgDetail) -> Self {
         Self::ArgError(ArgError {
             arg_number,

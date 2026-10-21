@@ -68,6 +68,23 @@ does.
   newindex, call, len, tostring and metatable-protection fields are. Chains of index, newindex and
   non-function call steps are bounded by `limits::MAX_METAMETHOD_DEPTH`.
 
+## Character classes and locale
+
+- Pattern classes (`%a`, `%l`, `%s`, `%w`, ...) and number-parsing whitespace
+  are fixed ASCII, the same on every host. Reference Lua follows `setlocale`,
+  so under a Latin-1 or similar locale it can classify bytes 0x80..0xFF as
+  letters where dellingr never does. Compare against reference under an
+  ASCII-only locale such as `C`.
+
+## Function identity
+
+- Host (Rust) functions are equal when they share a code address, so `f == g`
+  between two host functions whose code the linker folded (identical-code
+  folding, typical of release LTO builds) can differ from a build that does not
+  fold them. Aliases registered under several ids are equal by design.
+  Embedders that need distinct identity keep function bodies observably
+  distinct.
+
 ## Table library
 
 - `table.insert`, `remove`, `concat`, `unpack` (global `unpack` too) and
