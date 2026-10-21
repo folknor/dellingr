@@ -56,7 +56,10 @@ Violations are reported as errors at load time, never silently truncated.
 ## Runtime limits
 
 - `MAX_STRING_BYTES`: size of any Lua string.
-- `MAX_CALL_DEPTH`: simultaneously active Lua calls.
+- `MAX_CALL_DEPTH`: simultaneously active Lua function calls. Only Lua
+  frames count: a Rust callback that calls another Rust function through
+  the host API recurses without consuming this budget, so it does not bound
+  all calls. See "Native stack" below.
 - `MAX_STACK_SIZE`: values on the shared Lua/Rust value stack.
 - `MAX_METAMETHOD_DEPTH`: active steps in an index, newindex or
   non-function call chain. Table-library writes through metamethods share it.
@@ -118,6 +121,39 @@ affects when dead heap objects and interned strings are reclaimed, and can
 affect rendered identities and snapshot contents. Keep the policy consistent
 across replay runs.
 
+## State-local growth
+
+Beyond the limits above, these per-State structures have no fixed cap, and
+no charge tracks their size. Their slot and map storage keeps its high-water
+capacity; what a collection frees is the payloads and entries it removes.
+
+- Reclaimed only by a collection, so with automatic collection disabled they
+  grow until an explicit `gc_collect`:
+  - dead heap objects and interned strings;
+  - the runtime bundle (interned literals, inline caches) of each chunk that
+    has been instantiated as a closure. A bundle also pins its chunk's
+    bytecode, including nested chunks. Its literals are marked before unused
+    bundles are dropped, so they are reclaimed one collection later;
+  - the identity table behind rendered `tostring` and `%p` ids;
+  - upvalue slots, which return to the pool's free list only at a
+    collection: creating and discarding capturing closures grows the pool
+    even when the number of live closures stays constant.
+- Reclaimed only by the host:
+  - anchors stay registered, and rooted, until `release_anchor`; dropping an
+    `Anchor` handle does not release it;
+  - each `with_restricted_env` nesting level retains its environment until
+    the call returns.
+- Never reclaimed while reachable: a live table's storage. The array part
+  never shrinks, and a collection does not compact a live table, so one
+  rooted table can retain large storage while counting as one heap object.
+- Never reclaimed for the life of the environment: every global name that
+  has held a non-nil value keeps its binding slot after being set to nil,
+  since removing it would change iteration and snapshot order. A script that
+  writes computed names through `_G` grows this without bound. Bindings
+  created inside `with_restricted_env` go away with that environment.
+- Never reclaimed: with the `snapshot` feature, Rust function registrations
+  persist while unreachable, one per registered id.
+
 ## Value stack
 
 - Every path that can grow the stack is checked, batch-preflighted, or
@@ -162,6 +198,9 @@ Lua calls recurse on the host thread's native stack.
 - `MAX_CALL_DEPTH` and `MAX_METAMETHOD_DEPTH` bound logical recursion. They
   cannot guarantee that a small native stack reaches those limits before a
   process-aborting stack overflow.
+- Rust callbacks that call Rust functions through the host API, directly or
+  mutually, recurse with no VM-side depth limit. Bounding that recursion is
+  the embedder's responsibility.
 - Embedders must provision and validate thread stack space for their target,
   build profile and callback call paths.
 - Debug builds use more native stack per call than optimized builds.

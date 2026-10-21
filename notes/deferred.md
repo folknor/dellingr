@@ -171,22 +171,6 @@ for `with_rooted_value` on the recursive path - or a plain struct that every
 remove. Revisit only with a native-stack-per-level measurement of the
 recursive path showing the closure form is frame-neutral.
 
-## HYG-049 - Unbounded or super-linear VM growth paths
-
-Reported by the VM-core and heap hunters.
-
-- `bytecode_caches`: each `load_string` adds an `Arc<Bytecode>` entry swept only by
-  GC; with `gc_disable_auto()` repeated loads grow without bound. Same for
-  `format_pointer_ids` (documented), pruned only in `gc_collect`. Neither appears
-  in `docs/limits.md`'s growth list (not verified).
-- `open_upvalues` uses sorted `Vec::insert`: bounded by `MAX_STACK_SIZE`, but O(n)
-  per insert, so capturing many locals in a deep frame is quadratic, uncharged (a
-  performance concern per the budget doc).
-- RustFn re-entrancy (a RustFn calling `state.call` on another RustFn) recurses on
-  the native stack without touching `call_depth`; `docs/limits.md`'s "active Lua
-  calls" is accurate but easy to misread as bounding all calls.
-- Upvalue pool `slots`/`colors` never shrink; free-listed, bounded by peak. Noted.
-
 ## HYG-077 - Small stdlib duplications and unreachable checks
 
 Reported by the stdlib hunter.

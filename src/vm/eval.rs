@@ -174,8 +174,10 @@ impl State {
                     // Only a handler that is itself not a function re-enters
                     // __call resolution without passing through a Lua or Rust
                     // frame, so only that case counts against the metamethod
-                    // depth. A function handler is bounded by call_depth like
-                    // any other call; guarding it too would cap legitimate
+                    // depth. A Lua function handler is bounded by call_depth
+                    // like any other Lua call; a Rust handler is bounded only
+                    // where its recursion passes through a Lua frame, as for
+                    // every Rust callback. Guarding them too would cap legitimate
                     // recursion through callable objects at
                     // MAX_METAMETHOD_DEPTH, and would add the guard's closure
                     // frame to every level of the recursive Lua-call path (see
@@ -701,6 +703,10 @@ impl State {
         // Binary search preserves identity on hits and the exact ascending
         // insertion/descending close order on misses. Vec insertion still
         // shifts entries, but changing the close order would change pool reuse.
+        // The shift is bounded by the frame width, not by call depth: only the
+        // executing frame captures new locals, every frame exit closes what it
+        // opened, so entries above the insertion point are this frame's own
+        // (at most MAX_FRAME_SLOTS - 1 of them).
         let pos = match self
             .open_upvalues
             .binary_search_by_key(&stack_idx, |(idx, _)| *idx)
