@@ -118,6 +118,10 @@ All notable changes to dellingr are documented here. The format follows
   functions.
 - The CLI exits quietly with status 0 when stdout is a closed pipe instead of
   panicking with exit 101.
+- **Replay-visible:** a string literal reachable only through a saved
+  closure's code keeps its `%p` id across save and load, instead of rendering
+  a fresh id after load. Snapshots of such states carry the literal's id; the
+  snapshot format is unchanged.
 
 ## [0.5.0] - 2026-10-14
 

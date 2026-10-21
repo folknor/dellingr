@@ -82,6 +82,37 @@ fn rust_function_identity_survives_save_and_load() {
     assert!(loaded.to_boolean(-1));
 }
 
+/// A string literal reachable only through a saved closure's literal pool keeps
+/// its `%p` identity across save and load.
+#[cfg(feature = "snapshot")]
+#[test]
+fn closure_literal_identity_survives_save_and_load() {
+    use dellingr::DefaultCallbacks;
+    let mut state = State::new();
+    state
+        .load_string(
+            "render = function() return string.format('%p', 'only_in_bytecode') end
+             before = render()",
+        )
+        .unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
+
+    let save = state.save_state().expect("state saves");
+    let mut loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), |_| {
+        Ok::<(), std::convert::Infallible>(())
+    })
+    .expect("state loads");
+    assert_eq!(
+        loaded.save_state().expect("loaded state resaves").bytes,
+        save.bytes
+    );
+    eval_one(&mut loaded, "return render() == before");
+    assert!(
+        loaded.to_boolean(-1),
+        "a closure literal rendered a fresh identity after load"
+    );
+}
+
 /// Metamethod event names are permanent State strings, so an identity given
 /// to one survives collection even when no saved value reaches it. The
 /// snapshot must carry that identity, or the loaded State renders anew.

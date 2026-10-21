@@ -91,18 +91,6 @@ native-stack setting, which widens the embedding surface.
 
 ## Replay- or cost-visible changes
 
-## BUG-011 - A literal held only by closure bytecode loses its `%p` identity across save/load
-
-Source: found while interning metamethod names (880ff5a), agreed by a codex
-review; no test yet.
-
-`encode_bytecode` writes string literals as raw bytes and never registers them
-in the save's `string_ids`, so `SaveBuilder::finish` drops the `%p` id of a
-string that only a live closure's literal pool reaches. After load the same
-literal formats with a fresh id. The fix should cover identity-bearing literals
-of serialized closures, not every bytecode cache. Replay-visible; changes
-snapshot contents for affected states.
-
 ## HYG-058 - Array part never shrinks, so queue-style tables grow with history
 
 Reported by the heap hunter.

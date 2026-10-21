@@ -940,13 +940,21 @@ impl<'a> SaveBuilder<'a> {
             user_globals.push((name.clone(), saved));
         }
         let env_deltas = self.encode_env_deltas()?;
-        // Metamethod event names are State roots for its whole lifetime, so a
-        // `%p` identity on one stays observable even when the saved graph does
-        // not reach the string. Carry such identities through the arena; names
-        // without an identity add nothing to the payload.
-        for name in self.state.meta_names.iter() {
-            if let Val::Str(ptr) = name
-                && let Some(key) = PointerIdKey::from_val(name)
+        // Some strings stay observable without the saved graph reaching them
+        // as values: metamethod event names are State roots for its whole
+        // lifetime, and a string literal of a saved chunk is re-interned on
+        // load to the same string a script reads through that chunk. Carry a
+        // `%p` identity on either through the arena; strings without an
+        // identity add nothing to the payload.
+        let mut identity_strings: Vec<Val> = self.state.meta_names.iter().collect();
+        for key in self.bytecode_ids.keys() {
+            if let Some(entry) = self.state.bytecode_caches.get(key) {
+                identity_strings.extend(entry.runtime.literals.iter().copied());
+            }
+        }
+        for value in identity_strings {
+            if let Val::Str(ptr) = value
+                && let Some(key) = PointerIdKey::from_val(value)
                 && self.state.format_pointer_ids.contains_key(&key)
             {
                 let id = self.string_id(ptr)?;
