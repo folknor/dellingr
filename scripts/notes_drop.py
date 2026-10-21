@@ -5,6 +5,7 @@ Usage: scripts/notes_drop.py <file> <ID> [<ID> ...]
 
 A section runs from its `## ` heading to the next `## ` heading or EOF.
 Fails if any named ID has no section, so a typo never silently no-ops.
+This is a standalone maintainer helper and is invoked directly when needed.
 """
 import re
 import sys

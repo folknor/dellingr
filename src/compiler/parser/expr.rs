@@ -1,5 +1,4 @@
 use super::ArgCount;
-use super::CallSite;
 use super::ExpDesc;
 use super::Instr;
 use super::Parser;
@@ -8,7 +7,9 @@ use super::PrefixExp;
 use super::Result;
 use super::RetCount;
 use super::SyntaxError;
+use super::TailKind;
 use super::TokenType;
+use crate::compiler::exp_desc::CallSite;
 use crate::limits::MAX_EXPRESSIONS;
 
 impl Parser<'_> {
@@ -34,10 +35,7 @@ impl Parser<'_> {
     /// Parses a single expression.
     #[hotpath::measure]
     pub(super) fn parse_expr(&mut self) -> Result<ExpDesc> {
-        self.enter_syntax_level()?;
-        let result = self.parse_expr_inner();
-        self.exit_syntax_level();
-        result
+        self.with_syntax_level(1, Self::parse_expr_inner)
     }
 
     fn parse_expr_inner(&mut self) -> Result<ExpDesc> {
@@ -169,10 +167,7 @@ impl Parser<'_> {
 
     /// Parses a unary expression (`not`, `#`, `-`). Precedence 2.
     fn parse_unary(&mut self) -> Result<ExpDesc> {
-        self.enter_syntax_level()?;
-        let result = self.parse_unary_inner();
-        self.exit_syntax_level();
-        result
+        self.with_syntax_level(1, Self::parse_unary_inner)
     }
 
     fn parse_unary_inner(&mut self) -> Result<ExpDesc> {
@@ -274,15 +269,11 @@ impl Parser<'_> {
                 self.input.peek_type()?,
                 TokenType::LSquare | TokenType::LParen | TokenType::LCurly | TokenType::Colon
             );
-            if nested {
-                self.enter_syntax_level()?;
-                self.enter_syntax_level()?;
-            }
-            let result = self.parse_prefix_suffix(&expr);
-            if nested {
-                self.exit_syntax_level();
-                self.exit_syntax_level();
-            }
+            let result = if nested {
+                self.with_syntax_level(2, |parser| parser.parse_prefix_suffix(&expr))
+            } else {
+                self.parse_prefix_suffix(&expr)
+            };
             match result? {
                 Some(extended) => expr = extended,
                 None => break,
@@ -326,21 +317,8 @@ impl Parser<'_> {
                 // call - the base then pointed at the receiver and the VM
                 // called that instead of the callee.
                 self.eval_prefix_exp(base_expr);
-                // Always mark call base - needed when last arg is vararg or a
-                // function call, both of which make the argument count dynamic.
-                let mark_idx = self.funcs.chunk.code.len();
-                self.push(Instr::mark_call_base(1));
-                let (num_args, last_exp) = self.parse_call_args()?;
-                let num_args = if self.open_tail(&last_exp, RetCount::All) {
-                    // The marker supplies the actual count after expanding the tail.
-                    ArgCount::Dynamic
-                } else {
-                    // Keep parse-time instruction indices stable. Finalization
-                    // strips this free placeholder with one jump remap.
-                    self.funcs.chunk.code[mark_idx] = Instr::nop();
-                    ArgCount::Fixed(self.checked_fixed_arg_count(num_args as usize, 0)?)
-                };
-                PrefixExp::FunctionCall(CallSite::new(num_args, line))
+                let mark_idx = self.mark_call_base();
+                self.finish_call(mark_idx, 0, line)?
             }
             TokenType::Colon => {
                 let line = self.input.peek()?.line;
@@ -353,10 +331,7 @@ impl Parser<'_> {
                 // that marked slot with the receiver above it, which is exactly
                 // the [callee, args...] layout the call expects.
                 self.eval_prefix_exp(base_expr);
-                // Always mark call base - needed when last arg is vararg or a
-                // function call, both of which make the argument count dynamic.
-                let mark_idx = self.funcs.chunk.code.len();
-                self.push(Instr::mark_call_base(1));
+                let mark_idx = self.mark_call_base();
                 self.input.next()?; // consume ':'
                 let method_name = self.expect_identifier()?;
                 let name_idx = self.find_or_add_string(method_name)?;
@@ -372,23 +347,45 @@ impl Parser<'_> {
                 self.push(Instr::swap());
                 // Stack: [method, obj]
 
-                // Now parse the arguments
-                let (num_args, last_exp) = self.parse_call_args()?;
-                let num_args = if self.open_tail(&last_exp, RetCount::All) {
-                    // The marker supplies the actual count after expanding the tail.
-                    ArgCount::Dynamic
-                } else {
-                    // Keep parse-time instruction indices stable. Finalization
-                    // strips this free placeholder with one jump remap.
-                    self.funcs.chunk.code[mark_idx] = Instr::nop();
-                    ArgCount::Fixed(self.checked_fixed_arg_count(num_args as usize, 1)?)
-                };
+                let call = self.finish_call(mark_idx, 1, line)?;
                 // Stack: [method, obj, arg1, arg2, ...]
-                PrefixExp::FunctionCall(CallSite::new(num_args, line))
+                call
             }
             _ => return Ok(None),
         };
         Ok(Some(next))
+    }
+
+    /// Emits the marker shared by normal and method calls after evaluating
+    /// their callee or receiver.
+    fn mark_call_base(&mut self) -> usize {
+        let mark_idx = self.funcs.chunk.code.len();
+        self.push(Instr::mark_call_base(1));
+        mark_idx
+    }
+
+    /// Parses arguments and patches the call marker for a fixed or expandable
+    /// final argument list.
+    fn finish_call(
+        &mut self,
+        mark_idx: usize,
+        implicit_args: usize,
+        line: u32,
+    ) -> Result<PrefixExp> {
+        let (num_args, last_exp) = self.parse_call_args()?;
+        let num_args = match last_exp {
+            ExpDesc::MultiTail(tail) => {
+                self.open_tail(tail, RetCount::All);
+                ArgCount::Dynamic
+            }
+            _ => {
+                // Keep parse-time instruction indices stable. Finalization
+                // strips this free placeholder with one jump remap.
+                self.funcs.chunk.code[mark_idx] = Instr::nop();
+                ArgCount::Fixed(self.checked_fixed_arg_count(num_args as usize, implicit_args)?)
+            }
+        };
+        Ok(PrefixExp::FunctionCall(CallSite::new(num_args, line)))
     }
 
     /// Parses a 'base' expression, after eliminating any operators. This can be:
@@ -402,7 +399,7 @@ impl Parser<'_> {
         let tok = self.input.next()?;
         match tok.typ {
             TokenType::LCurly => self.parse_table()?,
-            TokenType::LiteralNumber | TokenType::LiteralHexNumber => {
+            TokenType::LiteralNumber => {
                 // The lexer determines token boundaries; this shared parser
                 // owns conversion and validates the complete numeral.
                 let text = self.get_text(tok);
@@ -425,7 +422,7 @@ impl Parser<'_> {
                 }
                 // Default: push 1 value (will be adjusted if in tail position)
                 self.push(Instr::vararg(1));
-                return Ok(ExpDesc::Vararg);
+                return Ok(ExpDesc::MultiTail(TailKind::Vararg));
             }
             _ => {
                 return Err(self.err_unexpected(tok, TokenType::Nil));

@@ -1,5 +1,7 @@
 disallowed-methods = [
     { path = "core::result::Result::ok", reason = "Silently discards errors. Use `?` to propagate, or handle the error explicitly." },
+    { path = "core::result::Result::unwrap_or", reason = "Silently discards errors. Handle the error explicitly, or use a scoped allow for an intentional fallback." },
+    { path = "core::result::Result::unwrap_or_default", reason = "Silently discards errors. Handle the error explicitly, or use a scoped allow for an intentional fallback." },
     { path = "rand::rng", reason = "Unseeded RNG breaks determinism. Use State.rng, seeded via set_rng_seed.", allow-invalid = true },
     { path = "rand::thread_rng", reason = "Unseeded RNG breaks determinism. Use State.rng, seeded via set_rng_seed.", allow-invalid = true },
     { path = "std::env::args", reason = "Reading process arguments makes behavior depend on host process state." },

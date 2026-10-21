@@ -1,20 +1,22 @@
 use super::ExpDesc;
 use super::Instr;
 use super::Parser;
-use super::PrefixExp;
 use super::Result;
 use super::RetCount;
 use super::SyntaxError;
+use super::TailKind;
 use super::TokenType;
 use crate::limits::{MAX_TABLE_BATCH_SIZE, MAX_TABLE_TEMPLATE_FIELDS, MAX_TABLE_TEMPLATES};
 
+const INLINE_TEMPLATE_FIELDS: usize = 4;
+
 type TableTemplateField = (u16, usize);
-type ParsedTableEntry = (u8, Option<ExpDesc>, Option<TableTemplateField>);
+type ParsedTableEntry = (u8, Option<TailKind>, Option<TableTemplateField>);
 
 #[derive(Debug)]
 struct TableTemplateCandidate {
     pure_named: bool,
-    inline: [TableTemplateField; 4],
+    inline: [TableTemplateField; INLINE_TEMPLATE_FIELDS],
     inline_len: u8,
     fields: Option<Vec<TableTemplateField>>,
 }
@@ -23,7 +25,7 @@ impl TableTemplateCandidate {
     fn new() -> Self {
         Self {
             pure_named: true,
-            inline: [(0, 0); 4],
+            inline: [(0, 0); INLINE_TEMPLATE_FIELDS],
             inline_len: 0,
             fields: None,
         }
@@ -42,11 +44,11 @@ impl TableTemplateCandidate {
 
         if let Some(fields) = self.fields.as_mut() {
             fields.push(field);
-        } else if (self.inline_len as usize) < self.inline.len() {
-            self.inline[self.inline_len as usize] = field;
+        } else if usize::from(self.inline_len) < INLINE_TEMPLATE_FIELDS {
+            self.inline[usize::from(self.inline_len)] = field;
             self.inline_len += 1;
         } else {
-            let mut fields = Vec::with_capacity(self.inline.len() + 1);
+            let mut fields = Vec::with_capacity(INLINE_TEMPLATE_FIELDS + 1);
             fields.extend_from_slice(&self.inline);
             fields.push(field);
             self.fields = Some(fields);
@@ -54,7 +56,7 @@ impl TableTemplateCandidate {
     }
 
     fn fields_for_template(&self, field_count: u8) -> Option<&[TableTemplateField]> {
-        if self.pure_named && field_count > self.inline.len() as u8 {
+        if self.pure_named && usize::from(field_count) > INLINE_TEMPLATE_FIELDS {
             self.fields.as_deref()
         } else {
             None
@@ -105,13 +107,10 @@ impl Parser<'_> {
             self.expect(TokenType::RCurly)?;
 
             if let Some(tail) = last_tail.as_ref() {
-                assert!(
-                    self.open_tail(tail, RetCount::All),
-                    "a table tail candidate must be a call or vararg"
-                );
+                self.open_tail(*tail, RetCount::All);
                 self.funcs.chunk.code[table_instr_idx] = Instr::new_table_tracked(field_count);
                 self.push(Instr::set_list_batch(0, batch));
-            } else if field_count > 4
+            } else if usize::from(field_count) > INLINE_TEMPLATE_FIELDS
                 && !template_candidate
                     .fields_for_template(field_count)
                     .is_some_and(|fields| self.try_use_table_template(table_instr_idx, fields))
@@ -150,13 +149,9 @@ impl Parser<'_> {
             }
             _ => {
                 let expr = self.parse_expr()?;
-                let tail = if matches!(
-                    &expr,
-                    ExpDesc::Prefix(PrefixExp::FunctionCall(_)) | ExpDesc::Vararg
-                ) {
-                    Some(expr)
-                } else {
-                    None
+                let tail = match expr {
+                    ExpDesc::MultiTail(tail) => Some(tail),
+                    _ => None,
                 };
                 Ok((counter + 1, tail, None))
             }

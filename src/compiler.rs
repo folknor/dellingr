@@ -455,6 +455,16 @@ pub(super) fn parse_str_named(
     source: impl AsRef<str>,
     source_name: Option<String>,
 ) -> Result<Bytecode> {
+    if let Some(name) = &source_name
+        && name.len() > crate::limits::MAX_SOURCE_NAME_BYTES
+    {
+        return Err(error::Error::without_location(
+            error::ErrorKind::SourceNameSizeExceeded {
+                size: name.len(),
+                limit: crate::limits::MAX_SOURCE_NAME_BYTES,
+            },
+        ));
+    }
     let mut bc = parser::parse_str_named(source.as_ref(), source_name)?;
     finalize(&mut bc)?;
     Ok(bc)
@@ -462,6 +472,17 @@ pub(super) fn parse_str_named(
 
 /// Finalize a freshly-parsed `Bytecode` tree before it ships to the runtime.
 fn finalize(bc: &mut Bytecode) -> Result<()> {
+    // Diagnostic names are not identifiers used by execution. Bound them at
+    // compilation so every emitted chunk fits the unchanged snapshot field.
+    if let Some(name) = &mut bc.name
+        && name.len() > crate::limits::MAX_CHUNK_NAME_BYTES
+    {
+        let mut end = crate::limits::MAX_CHUNK_NAME_BYTES;
+        while !name.is_char_boundary(end) {
+            end -= 1;
+        }
+        name.truncate(end);
+    }
     debug_assert_eq!(
         bc.code.len(),
         bc.line_info.len(),

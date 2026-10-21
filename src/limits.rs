@@ -17,8 +17,25 @@ pub const MAX_SYNTAX_DEPTH: u32 = 200;
 
 // Bound compile-time scanning and line-index storage. This build-time policy
 // cap also keeps lexer token lengths and one-based line numbers within u32.
-/// Maximum source bytes accepted by one compilation.
-pub const MAX_SOURCE_BYTES: usize = 16 * 1024 * 1024;
+/// Maximum source bytes accepted by one compilation. Matches the Lua string
+/// limit so `load` can compile any otherwise valid VM string.
+pub const MAX_SOURCE_BYTES: usize = MAX_STRING_BYTES;
+
+// Token lengths and the EOF line (at most source bytes + 1) must fit u32.
+const _: () = assert!(MAX_SOURCE_BYTES < u32::MAX as usize);
+// Call sites pack lines into 24 bits; the compiler asserts this cap against
+// that field's mask where the field is defined.
+
+/// Maximum UTF-8 source-name bytes attached to a compiled chunk.
+pub const MAX_SOURCE_NAME_BYTES: usize = 256 * 1024;
+/// Maximum UTF-8 bytes retained in a diagnostic function name.
+pub const MAX_CHUNK_NAME_BYTES: usize = 4 * 1024;
+/// Maximum UTF-8 bytes in a registered snapshot function identifier.
+pub const MAX_SAVE_IDENTIFIER_BYTES: usize = 4 * 1024;
+/// Maximum engine-version bytes in a snapshot.
+pub const MAX_ENGINE_VERSION_BYTES: usize = 128;
+/// Maximum external-environment token bytes in a snapshot.
+pub const MAX_ENVIRONMENT_TOKEN_BYTES: usize = 256;
 
 // Each verifier marker stack can grow at most once per parser syntax-budget
 // entry. Keep that cap explicit so the verifier does not borrow the parser's

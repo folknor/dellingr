@@ -328,8 +328,8 @@ fn gc_collect_preserves_disabled_auto_gc() {
     assert_eq!(state.gc_threshold(), usize::MAX);
     assert!(!state.gc_should_run());
 
-    // Re-enabling via a finite threshold restores adaptive recomputation.
-    state.gc_set_threshold(1);
+    // Resuming the automatic policy restores adaptive recomputation.
+    state.gc_set_auto_threshold();
     state.gc_collect();
     assert_ne!(state.gc_threshold(), usize::MAX);
     assert!(state.gc_threshold() >= 20);
@@ -412,6 +412,9 @@ fn length_receiver_survives_lookup_collection() {
     let input = parse_str(
         r#"
         local function make()
+            -- Garbage the armed collection frees, so the pinned threshold is
+            -- no longer reached afterwards.
+            for i = 1, 50 do local junk = { i } end
             local t = {}
             setmetatable(t, { __len = function() return 77 end })
             arm_gc()
@@ -512,7 +515,8 @@ fn gc_threshold_control() {
 #[test]
 fn string_allocations_drive_automatic_gc_threshold() {
     let mut state = State::empty();
-    state.gc_set_threshold(20);
+    // An automatic policy, not a fixed host threshold, so collection adapts.
+    state.gc_set_policy(20, 20, 2);
 
     // Keep enough distinct strings rooted to reach the threshold.
     for i in 0..20 {
@@ -804,7 +808,7 @@ fn table_remove_at_does_not_mutate_when_the_result_has_nowhere_to_go() {
     state.push_number(1.0).expect("room for the key");
     state.push_number(42.0).expect("room for the value");
     state.set_table_raw(1).expect("populating the array part");
-    assert_eq!(state.table_len(1), 1);
+    assert_eq!(state.table_len(1).expect("index 1 holds the table"), 1);
 
     state
         .set_top(MAX_STACK_SIZE as isize)
@@ -815,7 +819,7 @@ fn table_remove_at_does_not_mutate_when_the_result_has_nowhere_to_go() {
         "there is no slot for the removed value"
     );
     assert_eq!(
-        state.table_len(1),
+        state.table_len(1).expect("index 1 holds the table"),
         1,
         "the element must survive a rejected removal"
     );

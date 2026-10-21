@@ -6,7 +6,7 @@
 use std::cmp::Ordering;
 
 use super::lua_val::{RustFunc, Val};
-use super::{Error, ErrorKind, MAX_STACK_SIZE, Result, State};
+use super::{ErrorKind, MAX_STACK_SIZE, Result, State};
 
 impl State {
     /// Returns the index of the top element in the stack. Because indices start
@@ -63,14 +63,12 @@ impl State {
     /// Returns [`ErrorKind::InvalidStackIndex`] when `n` is negative or exceeds
     /// the visible stack size.
     pub fn pop(&mut self, n: isize) -> Result<()> {
-        let n = usize::try_from(n)
+        let count = usize::try_from(n)
             .map_err(|_| self.error(ErrorKind::InvalidStackIndex { index: n }))?;
-        if n > self.get_top() {
-            return Err(self.error(ErrorKind::InvalidStackIndex {
-                index: isize::try_from(n).unwrap_or(isize::MAX),
-            }));
+        if count > self.get_top() {
+            return Err(self.error(ErrorKind::InvalidStackIndex { index: n }));
         }
-        for _ in 0..n {
+        for _ in 0..count {
             self.pop_val();
         }
         Ok(())
@@ -135,7 +133,7 @@ impl State {
         match bytes.get(range) {
             Some(slice) => copied.extend_from_slice(slice),
             None => {
-                return Err(Error::without_location(ErrorKind::InternalError(
+                return Err(self.error(ErrorKind::InternalError(
                     "capture range outside the source string".into(),
                 )));
             }
@@ -193,6 +191,8 @@ impl State {
 
     /// Removes the `count` lowest visible values in one move, shifting the rest
     /// down. Equivalent to `count` calls of `remove(1)` at the cost of one.
+    // The error index is diagnostic only; a count past isize::MAX saturates.
+    #[allow(clippy::disallowed_methods)]
     pub(crate) fn remove_bottom(&mut self, count: usize) -> Result<()> {
         if count > self.get_top() {
             return Err(self.error(ErrorKind::InvalidStackIndex {
@@ -237,12 +237,19 @@ impl State {
     }
 
     /// Returns whether the value at the given index is not `false` or `nil`.
-    /// Returns false if the index is invalid.
+    ///
+    /// Follows Lua's acceptable-index rule: an index outside the current
+    /// frame reads as `nil`, so this returns false. Standard library
+    /// functions rely on that for optional trailing arguments. Use
+    /// [`State::try_to_boolean`] to have an invalid index reported instead.
     pub fn to_boolean(&self, idx: isize) -> bool {
-        match self.at_index(idx) {
-            Ok(val) => val.truthy(),
-            Err(_) => false,
-        }
+        matches!(self.try_to_boolean(idx), Ok(true))
+    }
+
+    /// Like [`State::to_boolean`], but returns
+    /// [`ErrorKind::InvalidStackIndex`] when the index is invalid.
+    pub fn try_to_boolean(&self, idx: isize) -> Result<bool> {
+        self.at_index(idx).map(|v| v.truthy())
     }
 
     /// Attempts to convert the value at the given index to a number.
@@ -308,35 +315,47 @@ impl State {
         // including when a snapshot supplies a wrong type. Reserve internal
         // errors for missing cache entries and failed-compilation ordering;
         // neither changes the argument index or the expected value type.
-        Err(Error::without_location(ErrorKind::ArgError(
-            crate::error::ArgError {
-                arg_number: idx,
-                func_name: function_name.map(ToOwned::to_owned),
-                detail: crate::error::ArgDetail::TypeMismatch,
-                expected: Some(super::LuaType::String),
-                received: Some(val.typ(&self.heap)),
-            },
-        )))
+        Err(self.error(ErrorKind::ArgError(crate::error::ArgError {
+            arg_number: idx,
+            func_name: function_name.map(ToOwned::to_owned),
+            detail: crate::error::ArgDetail::TypeMismatch,
+            expected: Some(super::LuaType::String),
+            received: Some(val.typ(&self.heap)),
+        })))
     }
 
-    /// Returns the type of the value in the given acceptable index.
-    /// Returns Nil type if the index is invalid.
-    /// Note: For objects (tables/functions), this returns the correct type
-    /// by looking up the object in the heap.
+    /// Returns the type of the value at the given acceptable index.
+    ///
+    /// Follows Lua's acceptable-index rule: an index outside the current
+    /// frame reads as `nil`, so this returns [`super::LuaType::Nil`].
+    /// Standard library functions rely on that for optional trailing
+    /// arguments. Use [`State::try_typ`] to have an invalid index reported.
+    /// For objects (tables/functions), the type is looked up in the heap.
     pub fn typ(&self, idx: isize) -> super::LuaType {
-        match self.at_index(idx) {
-            Ok(val) => val.typ(&self.heap),
-            Err(_) => super::LuaType::Nil,
-        }
+        self.at_index(idx)
+            .map_or(super::LuaType::Nil, |val| val.typ(&self.heap))
+    }
+
+    /// Like [`State::typ`], but returns [`ErrorKind::InvalidStackIndex`]
+    /// when the index is invalid.
+    pub fn try_typ(&self, idx: isize) -> Result<super::LuaType> {
+        self.at_index(idx).map(|val| val.typ(&self.heap))
     }
 
     /// Returns true if the values at the two indices are primitively equal.
-    /// Does not invoke __eq metamethod.
+    /// Does not invoke the `__eq` metamethod.
+    ///
+    /// Follows Lua's acceptable-index rule as `lua_rawequal` does: if either
+    /// index is outside the current frame, the result is false. Use
+    /// [`State::try_raw_equal`] to have an invalid index reported.
     pub fn raw_equal(&self, idx1: isize, idx2: isize) -> bool {
-        match (self.at_index(idx1), self.at_index(idx2)) {
-            (Ok(v1), Ok(v2)) => v1 == v2,
-            _ => false,
-        }
+        matches!(self.try_raw_equal(idx1, idx2), Ok(true))
+    }
+
+    /// Like [`State::raw_equal`], but returns
+    /// [`ErrorKind::InvalidStackIndex`] when either index is invalid.
+    pub fn try_raw_equal(&self, idx1: isize, idx2: isize) -> Result<bool> {
+        Ok(self.at_index(idx1)? == self.at_index(idx2)?)
     }
 
     /// Get the value at the given index. Returns error if out of bounds.
@@ -355,9 +374,7 @@ impl State {
         } else if fake_idx < 0 && fake_idx >= -stack_len {
             Ok((stack_top + fake_idx) as usize)
         } else {
-            Err(Error::without_location(ErrorKind::InvalidStackIndex {
-                index: fake_idx,
-            }))
+            Err(self.error(ErrorKind::InvalidStackIndex { index: fake_idx }))
         }
     }
 
@@ -398,7 +415,7 @@ impl State {
     #[inline(always)]
     fn check_stack_slot(&self) -> Result<()> {
         if self.stack.len() >= MAX_STACK_SIZE {
-            return Err(Error::without_location(ErrorKind::StackOverflow {
+            return Err(self.error(ErrorKind::StackOverflow {
                 size: self.stack.len().saturating_add(1),
                 limit: MAX_STACK_SIZE,
             }));
@@ -411,7 +428,7 @@ impl State {
     pub(crate) fn check_stack_space(&self, n: usize) -> Result<()> {
         let new_size = self.stack.len().saturating_add(n);
         if new_size > MAX_STACK_SIZE {
-            return Err(Error::without_location(ErrorKind::StackOverflow {
+            return Err(self.error(ErrorKind::StackOverflow {
                 size: new_size,
                 limit: MAX_STACK_SIZE,
             }));

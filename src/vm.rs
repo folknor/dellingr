@@ -47,7 +47,7 @@ use anchor::Registry;
 
 pub(super) use lua_val::Val;
 pub(super) use object::ObjectPtr;
-use object::{GcHeap, Markable, StringPtr, UpvaluePool, UpvalueRef};
+use object::{GcHeap, GcPolicy, Markable, StringPtr, UpvaluePool, UpvalueRef};
 use rng::VmRng;
 use table::Table;
 
@@ -362,7 +362,54 @@ impl State {
     /// let mut state = State::with_callbacks(Box::new(MyCallbacks { output: vec![] }));
     /// ```
     pub fn with_callbacks(callbacks: Box<dyn HostCallbacks>) -> Self {
-        let mut me = Self::empty_with_callbacks(callbacks);
+        Self::with_callbacks_and_policy(callbacks, GcPolicy::default())
+    }
+
+    /// Creates a state with a host-selected garbage collection policy.
+    ///
+    /// The initial threshold is active while the standard library is opened.
+    /// After an automatic collection, the next threshold is
+    /// `max(live_allocations * growth_factor, minimum_threshold)`. These values
+    /// are runtime policy and are not written to snapshots.
+    ///
+    /// `usize::MAX` as `initial_threshold` disables automatic collection until
+    /// the threshold is changed. A zero threshold triggers collection before
+    /// each allocation. The default policy is `(20, 20, 2)`.
+    pub fn with_gc_policy(
+        initial_threshold: usize,
+        minimum_threshold: usize,
+        growth_factor: usize,
+    ) -> Self {
+        Self::with_callbacks_and_policy(
+            Box::new(DefaultCallbacks),
+            GcPolicy::new(initial_threshold, minimum_threshold, growth_factor),
+        )
+    }
+
+    /// Creates a state with custom callbacks and a host-selected GC policy.
+    ///
+    /// The initial threshold is active while the standard library is opened.
+    /// After an automatic collection, the next threshold is
+    /// `max(live_allocations * growth_factor, minimum_threshold)`. These values
+    /// are runtime policy and are not written to snapshots.
+    ///
+    /// `usize::MAX` as `initial_threshold` disables automatic collection until
+    /// the threshold is changed. A zero threshold triggers collection before
+    /// each allocation. The default policy is `(20, 20, 2)`.
+    pub fn with_callbacks_and_gc_policy(
+        callbacks: Box<dyn HostCallbacks>,
+        initial_threshold: usize,
+        minimum_threshold: usize,
+        growth_factor: usize,
+    ) -> Self {
+        Self::with_callbacks_and_policy(
+            callbacks,
+            GcPolicy::new(initial_threshold, minimum_threshold, growth_factor),
+        )
+    }
+
+    fn with_callbacks_and_policy(callbacks: Box<dyn HostCallbacks>, policy: GcPolicy) -> Self {
+        let mut me = Self::empty_with_callbacks_and_gc_policy(callbacks, policy);
         me.open_libs()
             .expect("standard library initialization starts with an empty value stack");
         me
@@ -420,6 +467,13 @@ impl State {
 
     /// Creates an empty state with custom callbacks.
     pub(crate) fn empty_with_callbacks(callbacks: Box<dyn HostCallbacks>) -> Self {
+        Self::empty_with_callbacks_and_gc_policy(callbacks, GcPolicy::default())
+    }
+
+    fn empty_with_callbacks_and_gc_policy(
+        callbacks: Box<dyn HostCallbacks>,
+        gc_policy: GcPolicy,
+    ) -> Self {
         let state_id = anchor::next_state_id();
         Self {
             globals: IndexMap::default(),
@@ -429,7 +483,7 @@ impl State {
             string_mt_index_shape: None,
             stack: Vec::with_capacity(256), // Pre-size for typical function depth * locals
             stack_bottom: 0,
-            heap: GcHeap::new(),
+            heap: GcHeap::with_policy(gc_policy),
             bytecode_caches: IndexMap::default(),
             pending_bytecode_caches: Vec::new(),
             transient_roots: TransientRoots {
@@ -742,24 +796,55 @@ impl State {
     }
 
     /// Returns the current GC threshold in total heap allocations (objects plus
-    /// distinct interned strings). Each collection recomputes it from survivors.
+    /// distinct interned strings). Automatic thresholds are recomputed from the
+    /// configured policy after collection; host-set thresholds stay fixed.
     pub fn gc_threshold(&self) -> usize {
         self.heap.threshold()
     }
 
     /// Sets the GC threshold in total heap allocations (objects plus distinct
     /// interned strings). Collection triggers before allocation when
-    /// `heap_size() >= threshold`; each collection recomputes the threshold
-    /// from survivors.
+    /// `heap_size() >= threshold`. This host-set threshold remains fixed across
+    /// automatic and explicit collections.
     /// Set to `usize::MAX` to disable automatic GC. `gc_threshold()` reports
     /// `usize::MAX` while automatic collection is disabled.
     pub fn gc_set_threshold(&mut self, threshold: usize) {
         self.heap.set_threshold(threshold);
     }
 
+    /// Replaces this State's automatic GC policy and resets its threshold to
+    /// `initial_threshold`.
+    ///
+    /// After each automatic collection, the next threshold is
+    /// `max(live_allocations * growth_factor, minimum_threshold)`. This also
+    /// switches a manually set or disabled threshold back to automatic mode.
+    /// `usize::MAX` as `initial_threshold` keeps automatic collection disabled.
+    pub fn gc_set_policy(
+        &mut self,
+        initial_threshold: usize,
+        minimum_threshold: usize,
+        growth_factor: usize,
+    ) {
+        self.heap.set_policy(GcPolicy::new(
+            initial_threshold,
+            minimum_threshold,
+            growth_factor,
+        ));
+    }
+
+    /// Resumes the configured automatic policy at its initial threshold.
+    ///
+    /// The next collection then computes the threshold from the configured
+    /// minimum and growth factor. If the policy's initial threshold is
+    /// `usize::MAX`, automatic collection remains disabled.
+    pub fn gc_set_auto_threshold(&mut self) {
+        self.heap.reset_auto_threshold();
+    }
+
     /// Disables automatic GC while preserving explicit `gc_collect()` calls.
     /// Explicit collections keep automatic GC disabled. Re-enable it with
-    /// `gc_set_threshold`.
+    /// `gc_set_auto_threshold` to resume the configured policy or
+    /// `gc_set_threshold` to use a fixed host threshold.
     pub fn gc_disable_auto(&mut self) {
         self.heap.disable_auto_gc();
     }
@@ -1037,19 +1122,27 @@ impl State {
     ///
     /// This is useful when the host pushes or stores the function manually but
     /// still wants it to survive save/load if Lua makes it reachable.
+    /// Ids exceeding [`crate::limits::MAX_SAVE_IDENTIFIER_BYTES`] are rejected
+    /// before either registry is changed.
     #[cfg(feature = "snapshot")]
     pub fn register_rust_fn(
         &mut self,
         id: &str,
         func: RustFunc,
     ) -> std::result::Result<(), save_state::SaveError> {
+        if id.len() > crate::limits::MAX_SAVE_IDENTIFIER_BYTES {
+            return Err(save_state::SaveError::TooLarge {
+                what: "function id",
+                count: id.len(),
+            });
+        }
         let addr = func as usize;
         // Keep SaveError in this public signature: load setup closures
         // propagate it. Execution-API wrappers convert it with
         // `registration_error`, which keeps the id structured. Moving the type
         // needs a coordinated API migration rather than a local change.
-        // The only genuine error is an id collision: one id bound to two
-        // different function addresses (an embedder bug). Re-registering the
+        // An id collision binds one id to two different function addresses
+        // (an embedder bug). Re-registering the
         // same id->fn pair is idempotent.
         if let Some(existing_func) = self.rust_fns_by_id.get(id) {
             if *existing_func as usize != addr {

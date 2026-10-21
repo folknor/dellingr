@@ -34,7 +34,7 @@ fn gmatch_wrapper() -> Arc<crate::compiler::Bytecode> {
 // Native costs in the stdlib are deliberately per-function literals, not a
 // declarative rule table. The numbers are part of the cost model: changing any
 // of them (including the pattern bytes that find/match/gsub charge twice, or
-// the free `string.len`, `tostring` and `select`) changes `cost_used` for
+// the free `string.len`, `print`, `tostring` and `select`) changes `cost_used` for
 // existing scripts and replays, so it needs a COST_MODEL_VERSION bump and
 // invalidates saves. A table would only relocate the literals and `analyze_cost`
 // still could not see them, because native calls are opaque to the static
@@ -108,10 +108,19 @@ fn pattern_runtime_error(state: &State, error: PatternError) -> Error {
     state.error(ErrorKind::PatternError(error.into()))
 }
 
+/// Convert a nonnegative Lua integer to `usize`, saturating where `usize` is
+/// narrower than `i64`, and mapping negatives to 0. For every caller (a
+/// string index, a replacement count) a value past `usize::MAX` behaves
+/// exactly like `usize::MAX`.
+#[allow(clippy::disallowed_methods)]
+fn saturating_usize(n: i64) -> usize {
+    usize::try_from(n.max(0)).unwrap_or(usize::MAX)
+}
+
 fn lua_start_index(len: usize, idx: i64) -> usize {
     let len = i64::try_from(len).expect("string length fits in i64");
     if idx >= 0 {
-        usize::try_from((idx - 1).max(0)).unwrap_or(usize::MAX)
+        saturating_usize(idx - 1)
     } else {
         usize::try_from((len + idx).max(0)).expect("nonnegative string index fits in usize")
     }
@@ -728,13 +737,7 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
         let pattern = string_or_number_bytes(state, 2, "gsub")?;
         state.consume_cost((s.len() + pattern.len()).max(1) as u64)?;
         charge_bytes(state, pattern.len())?;
-        let max_replacements = opt_integer(state, 4, "gsub")?.map(|n| {
-            if n <= 0 {
-                0
-            } else {
-                usize::try_from(n).unwrap_or(usize::MAX)
-            }
-        });
+        let max_replacements = opt_integer(state, 4, "gsub")?.map(saturating_usize);
         let repl_type = state.typ(3);
 
         if !matches!(

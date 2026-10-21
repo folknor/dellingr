@@ -259,9 +259,7 @@ impl State {
                     }
                     if !handler_is_function
                         && let Err(error) = &mut result
-                        && self.call_depth == 0
-                        && self.call_chain_depth == 0
-                        && self.active_rust_fn.is_none()
+                        && self.is_outermost_host_boundary()
                     {
                         // Errors from a non-function __call chain can pass
                         // through here without a Lua frame or RustFn reporting
@@ -276,7 +274,7 @@ impl State {
             let mut error = self.type_error(TypeError::FunctionCall(func_val.typ(&self.heap)));
             // Resolving a callable is execution, even when it has no handler.
             // Nested chains defer to their outer boundary, as Rust failures do.
-            if self.call_depth == 0 && self.call_chain_depth == 0 && self.active_rust_fn.is_none() {
+            if self.is_outermost_host_boundary() {
                 self.host_error(&mut error);
             }
             return Err(error);
@@ -296,10 +294,14 @@ impl State {
 
     // Used only on error exits, never in the bytecode dispatch loop.
     fn report_call_error(&mut self, mut error: Error) -> Error {
-        if self.call_depth == 0 && self.call_chain_depth == 0 && self.active_rust_fn.is_none() {
+        if self.is_outermost_host_boundary() {
             self.host_error(&mut error);
         }
         error
+    }
+
+    fn is_outermost_host_boundary(&self) -> bool {
+        self.call_depth == 0 && self.call_chain_depth == 0 && self.active_rust_fn.is_none()
     }
 
     fn truncate_call_frame(&mut self, call_base: usize, old_stack_bottom: usize) {
@@ -317,7 +319,8 @@ impl State {
     /// Loads a string as a Lua chunk with an optional source name.
     /// The source name is used in error messages and stack traces.
     /// Use a filename for files, or an application-defined chunk name for
-    /// dynamically loaded code.
+    /// dynamically loaded code. Names exceeding
+    /// [`crate::limits::MAX_SOURCE_NAME_BYTES`] are rejected before parsing.
     #[hotpath::measure]
     pub fn load_string_named(
         &mut self,
@@ -338,7 +341,7 @@ impl State {
         // The count is the problem, not a Lua argument, so this is not an
         // ArgError: `InvalidStackIndex` is what the other count-taking host
         // APIs return.
-        if n < 2 || n > self.stack.len() - self.stack_bottom {
+        if n < 2 || n > self.get_top() {
             return Err(self.error(ErrorKind::InvalidStackIndex {
                 index: isize::try_from(n).map_or(isize::MIN, |n| -n),
             }));
@@ -397,7 +400,7 @@ impl State {
     pub(super) fn eval_closure(&mut self, closure: Closure, num_args: u8) -> Result<u8> {
         // Check call depth limit
         if self.call_depth >= MAX_CALL_DEPTH {
-            return Err(Error::without_location(ErrorKind::CallDepthExceeded {
+            return Err(self.error(ErrorKind::CallDepthExceeded {
                 depth: self.call_depth,
                 limit: MAX_CALL_DEPTH,
             }));

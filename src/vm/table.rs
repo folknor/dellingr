@@ -250,14 +250,19 @@ impl Table {
         // Count the slots actually created, not the ids supplied: the bytecode
         // verifier rejects duplicate template keys, but a duplicate that got
         // through would otherwise leave phantom tombstones and underflow
-        // `map.len() - dead_count`. Template keys are verified to be strings,
-        // so none of them belongs in the array part.
+        // `map.len() - dead_count`. Keep this defensive in debug builds too:
+        // duplicate keys must not create phantom tombstones or underflow.
+        // Template keys are verified to be strings, so none belongs in the
+        // array part.
         let dead_count = map.len();
-        Self {
+        let table = Self {
             storage: TableStorage::Map(map),
             dead_count,
             ..Self::default()
-        }
+        };
+        #[cfg(debug_assertions)]
+        table.debug_assert_invariants();
+        table
     }
 
     /// The array slot holding `key`, if `key` is an integer in
@@ -291,6 +296,69 @@ impl Table {
     #[inline]
     fn bump_version(&self) {
         self.version.set(self.version.get().wrapping_add(1));
+    }
+
+    /// Check the table shape and tombstone count while developing the VM.
+    ///
+    /// Array slots never move and a hash key at the append position would be
+    /// migrated into the array before it can become visible there. The
+    /// tombstone count tracks every nil-valued hash slot, including vacant map
+    /// entries.
+    #[cfg(debug_assertions)]
+    fn debug_assert_invariants(&self) {
+        let assert_hash_key_outside_array = |key: &Val| {
+            debug_assert!(
+                self.array_slot(key).is_none() && !self.is_array_append_key(key),
+                "live hash key overlaps the array part or its append slot"
+            );
+        };
+
+        let dead_count = match &self.storage {
+            TableStorage::Inline { entries, len } => {
+                debug_assert!((*len as usize) <= INLINE_CAPACITY);
+                let mut dead_count = 0;
+                for (key, value) in entries.iter().take(*len as usize) {
+                    if matches!(value, Val::Nil) {
+                        dead_count += 1;
+                    } else {
+                        assert_hash_key_outside_array(key);
+                    }
+                }
+                dead_count
+            }
+            TableStorage::Map(map) => {
+                // The full walk is O(n) per mutation, which makes hash-heavy
+                // scripts quadratic in debug builds. Past a small size, check
+                // only the O(1) counter bound.
+                const FULL_WALK_LIMIT: usize = 16;
+                if map.len() > FULL_WALK_LIMIT {
+                    debug_assert!(
+                        self.dead_count <= map.len(),
+                        "dead_count must equal the number of nil-valued hash slots"
+                    );
+                    return;
+                }
+                let mut dead_count = 0;
+                for (key, value) in map {
+                    if matches!(value, Val::Nil) {
+                        dead_count += 1;
+                    } else {
+                        match key {
+                            HashKey::Live(key) => assert_hash_key_outside_array(key),
+                            HashKey::Vacant(_) => {
+                                debug_assert!(false, "a vacant hash key cannot hold a live value");
+                            }
+                        }
+                    }
+                }
+                dead_count
+            }
+        };
+
+        debug_assert_eq!(
+            self.dead_count, dead_count,
+            "dead_count must equal the number of nil-valued hash slots"
+        );
     }
 
     #[hotpath::measure]
@@ -496,6 +564,8 @@ impl Table {
             self.insert(key, value)?;
         }
         self.version.set(next_version);
+        #[cfg(debug_assertions)]
+        self.debug_assert_invariants();
         Ok(())
     }
 
@@ -511,36 +581,46 @@ impl Table {
     /// version (value-only change preserves (key, index) bindings).
     #[inline]
     pub(super) fn set_at_index(&mut self, index: usize, value: Val) -> bool {
-        if index & ARRAY_SLOT_TAG != 0 {
-            return match self.array.get_mut(index & !ARRAY_SLOT_TAG) {
+        debug_assert!(
+            !matches!(value, Val::Nil),
+            "set_at_index requires a non-nil value"
+        );
+        let updated = if index & ARRAY_SLOT_TAG != 0 {
+            match self.array.get_mut(index & !ARRAY_SLOT_TAG) {
                 Some(slot) if !matches!(*slot, Val::Nil) => {
                     *slot = value;
                     true
                 }
                 _ => false,
-            };
-        }
-        match &mut self.storage {
-            TableStorage::Inline { entries, len } => {
-                if index < *len as usize && !matches!(entries[index].1, Val::Nil) {
-                    entries[index].1 = value;
-                    true
-                } else {
-                    false
+            }
+        } else {
+            match &mut self.storage {
+                TableStorage::Inline { entries, len } => {
+                    if index < *len as usize && !matches!(entries[index].1, Val::Nil) {
+                        entries[index].1 = value;
+                        true
+                    } else {
+                        false
+                    }
+                }
+                TableStorage::Map(map) => {
+                    let Some((_, v)) = map.get_index_mut(index) else {
+                        return false;
+                    };
+                    if matches!(*v, Val::Nil) {
+                        false
+                    } else {
+                        *v = value;
+                        true
+                    }
                 }
             }
-            TableStorage::Map(map) => {
-                let Some((_, v)) = map.get_index_mut(index) else {
-                    return false;
-                };
-                if matches!(*v, Val::Nil) {
-                    false
-                } else {
-                    *v = value;
-                    true
-                }
-            }
+        };
+        #[cfg(debug_assertions)]
+        if updated {
+            self.debug_assert_invariants();
         }
+        updated
     }
 
     /// Initializes a reserved template slot without exposing dead slots to caches.
@@ -582,6 +662,8 @@ impl Table {
             (true, false) => self.dead_count += 1,
             _ => {}
         }
+        #[cfg(debug_assertions)]
+        self.debug_assert_invariants();
         true
     }
 
@@ -621,6 +703,8 @@ impl Table {
     pub(super) fn insert(&mut self, key: Val, value: Val) -> Result<()> {
         if let Some(slot) = self.array_slot(&key) {
             self.array[slot] = value;
+            #[cfg(debug_assertions)]
+            self.debug_assert_invariants();
             return Ok(());
         }
 
@@ -654,7 +738,7 @@ impl Table {
             return self.insert_without_tombstones(key, value);
         }
 
-        match &mut self.storage {
+        let updated_live_inline_entry = match &mut self.storage {
             TableStorage::Inline { entries, len } => {
                 if let Some(index) = entries
                     .iter()
@@ -662,8 +746,21 @@ impl Table {
                     .position(|entry| entry.0 == key && !matches!(entry.1, Val::Nil))
                 {
                     entries[index].1 = value;
-                    return Ok(());
+                    true
+                } else {
+                    false
                 }
+            }
+            TableStorage::Map(_) => false,
+        };
+        if updated_live_inline_entry {
+            #[cfg(debug_assertions)]
+            self.debug_assert_invariants();
+            return Ok(());
+        }
+
+        match &mut self.storage {
+            TableStorage::Inline { entries, len } => {
                 if let Some(index) = entries
                     .iter()
                     .take(*len as usize)
@@ -694,6 +791,8 @@ impl Table {
             }
             TableStorage::Map(_) => self.insert_into_map_with_tombstones(key, value),
         }
+        #[cfg(debug_assertions)]
+        self.debug_assert_invariants();
         Ok(())
     }
 
@@ -704,6 +803,8 @@ impl Table {
     /// outnumber the live entries.
     fn migrate_from_hash(&mut self) {
         if self.hash_live_len() == 0 {
+            #[cfg(debug_assertions)]
+            self.debug_assert_invariants();
             return;
         }
         let mut migrated = false;
@@ -720,6 +821,8 @@ impl Table {
         if migrated && self.dead_count >= self.hash_live_len() && self.compact_dead() {
             self.bump_version();
         }
+        #[cfg(debug_assertions)]
+        self.debug_assert_invariants();
     }
 
     fn hash_live_len(&self) -> usize {
@@ -731,14 +834,25 @@ impl Table {
     }
 
     fn insert_into_map_with_tombstones(&mut self, key: Val, value: Val) {
-        let TableStorage::Map(map) = &mut self.storage else {
-            unreachable!("map insertion requires map storage");
+        let existing = match &mut self.storage {
+            TableStorage::Map(map) => map.get_full_mut(&key).map(|(index, _, existing)| {
+                let was_live = !matches!(*existing, Val::Nil);
+                if was_live {
+                    *existing = value;
+                }
+                (index, was_live)
+            }),
+            TableStorage::Inline { .. } => unreachable!("map insertion requires map storage"),
         };
-        if let Some((index, _, existing)) = map.get_full_mut(&key) {
-            if !matches!(*existing, Val::Nil) {
-                *existing = value;
-                return;
-            }
+        if let Some((_, true)) = existing {
+            #[cfg(debug_assertions)]
+            self.debug_assert_invariants();
+            return;
+        }
+        if let Some((index, false)) = existing {
+            let TableStorage::Map(map) = &mut self.storage else {
+                unreachable!("map insertion requires map storage");
+            };
             // Re-adding a tombstoned key: vacate its old slot in place (it
             // stays a tombstone, so `dead_count` is unchanged) and append the
             // key below, moving it to the back of `pairs()` order. The key's
@@ -751,25 +865,30 @@ impl Table {
         // Both a new key and a re-added one add a slot; compacting once the
         // tombstones (vacated slots included) reach the live count keeps the
         // part within twice its live size at amortised O(1) per write.
-        let live_count = map.len() - self.dead_count;
+        let live_count = match &self.storage {
+            TableStorage::Map(map) => map.len() - self.dead_count,
+            TableStorage::Inline { .. } => unreachable!("map insertion requires map storage"),
+        };
         if self.dead_count >= live_count && self.compact_dead() {
             self.bump_version();
         }
         if let TableStorage::Map(map) = &mut self.storage {
             map.insert(HashKey::Live(key), value);
         }
+        #[cfg(debug_assertions)]
+        self.debug_assert_invariants();
     }
 
     fn insert_without_tombstones(&mut self, key: Val, value: Val) -> Result<()> {
         match &mut self.storage {
             TableStorage::Inline { entries, len } => {
-                for (entry_key, entry_value) in entries.iter_mut().take(*len as usize) {
-                    if *entry_key == key {
-                        *entry_value = value;
-                        return Ok(());
-                    }
-                }
-                if (*len as usize) < INLINE_CAPACITY {
+                if let Some(index) = entries
+                    .iter()
+                    .take(*len as usize)
+                    .position(|(entry_key, _)| *entry_key == key)
+                {
+                    entries[index].1 = value;
+                } else if (*len as usize) < INLINE_CAPACITY {
                     entries[*len as usize] = (key, value);
                     *len += 1;
                 } else {
@@ -780,6 +899,8 @@ impl Table {
                 map.insert(HashKey::Live(key), value);
             }
         }
+        #[cfg(debug_assertions)]
+        self.debug_assert_invariants();
         Ok(())
     }
 
@@ -800,6 +921,8 @@ impl Table {
             map.insert(HashKey::Live(new_key), new_value);
             self.storage = TableStorage::Map(map);
         }
+        #[cfg(debug_assertions)]
+        self.debug_assert_invariants();
     }
 
     /// Remove a key and return its value (if any).
@@ -807,6 +930,8 @@ impl Table {
     fn remove(&mut self, key: &Val) -> Option<Val> {
         if let Some(slot) = self.array_slot(key) {
             let removed = std::mem::replace(&mut self.array[slot], Val::Nil);
+            #[cfg(debug_assertions)]
+            self.debug_assert_invariants();
             return (!matches!(removed, Val::Nil)).then_some(removed);
         }
         self.hash_remove(key)
@@ -814,19 +939,20 @@ impl Table {
 
     /// Tombstone a hash-part key and return its value (if any).
     fn hash_remove(&mut self, key: &Val) -> Option<Val> {
-        match &mut self.storage {
+        let removed = match &mut self.storage {
             TableStorage::Inline { entries, len } => {
+                let mut removed = None;
                 for (entry_key, entry_value) in entries.iter_mut().take(*len as usize) {
                     if entry_key == key {
-                        let removed = std::mem::replace(entry_value, Val::Nil);
-                        if !matches!(removed, Val::Nil) {
+                        let value = std::mem::replace(entry_value, Val::Nil);
+                        if !matches!(value, Val::Nil) {
                             self.dead_count += 1;
-                            return Some(removed);
+                            removed = Some(value);
                         }
-                        return None;
+                        break;
                     }
                 }
-                None
+                removed
             }
             TableStorage::Map(map) => {
                 let value = map.get_mut(key)?;
@@ -838,12 +964,17 @@ impl Table {
                     Some(removed)
                 }
             }
-        }
+        };
+        #[cfg(debug_assertions)]
+        self.debug_assert_invariants();
+        removed
     }
 
     /// Stably remove logically absent hash slots. The caller owns version changes.
     fn compact_dead(&mut self) -> bool {
         if self.dead_count == 0 {
+            #[cfg(debug_assertions)]
+            self.debug_assert_invariants();
             return false;
         }
         match &mut self.storage {
@@ -866,6 +997,8 @@ impl Table {
             TableStorage::Map(map) => map.retain(|_, value| !matches!(value, Val::Nil)),
         }
         self.dead_count = 0;
+        #[cfg(debug_assertions)]
+        self.debug_assert_invariants();
         true
     }
 
@@ -883,6 +1016,8 @@ impl Table {
                 self.insert(Val::Num(key as f64), value)?;
             }
         }
+        #[cfg(debug_assertions)]
+        self.debug_assert_invariants();
         Ok(())
     }
 
@@ -911,6 +1046,8 @@ impl Table {
             self.array.insert(pos - 1, value);
             self.migrate_from_hash();
         }
+        #[cfg(debug_assertions)]
+        self.debug_assert_invariants();
     }
 
     /// Removes and returns the value at the given position, shifting later
@@ -924,11 +1061,15 @@ impl Table {
             let removed = self.array[pos - 1];
             self.array.copy_within(pos..len, pos - 1);
             self.array[len - 1] = Val::Nil;
+            #[cfg(debug_assertions)]
+            self.debug_assert_invariants();
             return removed;
         }
         let key = Val::Num(pos as f64);
         let removed = self.get(&key);
         self.remove(&key);
+        #[cfg(debug_assertions)]
+        self.debug_assert_invariants();
         removed
     }
 
@@ -947,6 +1088,8 @@ impl Table {
             self.insert(Val::Num((i + 1) as f64), v)
                 .expect("set_array: integer key insert cannot fail");
         }
+        #[cfg(debug_assertions)]
+        self.debug_assert_invariants();
     }
 
     /// Returns the metatable of this table, if any.
@@ -957,6 +1100,8 @@ impl Table {
     /// Sets the metatable of this table.
     pub(super) fn set_metatable(&mut self, mt: Option<ObjectPtr>) {
         self.metatable = mt;
+        #[cfg(debug_assertions)]
+        self.debug_assert_invariants();
     }
 
     /// Scan from `position` in iteration order, skipping nil slots.
@@ -1787,5 +1932,28 @@ mod tests {
         t.insert(h(5), Val::Bool(true)).unwrap();
         assert_eq!(t.version(), 1);
         assert!(matches!(t.next(&h(4)), TableNext::Pair(Val::Num(5.5), _)));
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "dead_count must equal the number of nil-valued hash slots")]
+    fn invariant_check_detects_dead_count_mismatch() {
+        let table = Table {
+            dead_count: 1,
+            ..Table::default()
+        };
+        table.debug_assert_invariants();
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "live hash key overlaps the array part or its append slot")]
+    fn invariant_check_detects_live_append_key_in_hash_part() {
+        let mut table = Table::default();
+        table
+            .insert(n(2), Val::Bool(true))
+            .expect("numeric table key is valid");
+        table.array.push(Val::Nil);
+        table.debug_assert_invariants();
     }
 }

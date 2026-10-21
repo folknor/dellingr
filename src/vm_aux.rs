@@ -51,7 +51,7 @@ impl State {
             };
             return Err(self.error(ErrorKind::ArgError(e)));
         }
-        let received_type = self.typ(arg_number);
+        let received_type = self.try_typ(arg_number)?;
         if received_type != expected_type {
             let e = ArgError {
                 arg_number,

@@ -72,6 +72,8 @@ then
     exit 0
 fi
 
+HYPERFINE_WARMUP_COUNT="$(hyperfine_warmup)" || exit 2
+
 DELLINGR_BIN="$(dellingr_bin_built release)" || exit 1
 if [ ! -x "$DELLINGR_BIN" ]; then
     echo "dellingr binary is not executable: $DELLINGR_BIN" >&2
@@ -101,6 +103,7 @@ done
 printf '\n'
 
 failures=()
+failure_indices=()
 START=$(date +%s)
 run_id="$(date '+%Y%m%dT%H%M%S%z')-$$"
 results_dir=".scratch/bench-results/$run_id"
@@ -144,6 +147,7 @@ for script in "${scripts[@]}"
 do
     run_index=$((run_index + 1))
     json_file="$results_dir/$run_index.json"
+    error_file="$results_dir/$run_index.err"
     printf '%s\t%s\n' "$run_index" "$script" >> "$results_dir/scripts.tsv"
     SCRIPT_COMMAND="$(shell_quote "$script")"
     benchmark_commands=(-n dellingr "$DELLINGR_COMMAND $SCRIPT_COMMAND")
@@ -151,12 +155,13 @@ do
     do
         benchmark_commands+=(-n "$reference_lua" "$reference_lua $SCRIPT_COMMAND")
     done
-    if ! hyperfine --warmup 2 -N \
+    if ! hyperfine --warmup "$HYPERFINE_WARMUP_COUNT" -N \
         --export-json "$json_file" \
         "${benchmark_commands[@]}" \
-        >/dev/null 2>&1
+        >/dev/null 2>"$error_file"
     then
         failures+=("$script")
+        failure_indices+=("$run_index")
         printf '%-42s %10s' "$script" "FAIL"
         for reference_lua in "${reference_luas[@]}"
         do
@@ -179,6 +184,8 @@ do
     if [ "${#values[@]}" -ne "$(( ${#reference_luas[@]} + 1 ))" ]
     then
         failures+=("$script")
+        failure_indices+=("$run_index")
+        printf 'hyperfine JSON did not contain the expected result columns: %s\n' "$json_file" > "$error_file"
         printf '%-42s %10s' "$script" "FAIL"
         for reference_lua in "${reference_luas[@]}"
         do
@@ -204,5 +211,15 @@ printf '  results: %s\n' "$results_dir"
 if [ "${#failures[@]}" -gt 0 ]
 then
     printf '  - %s\n' "${failures[@]}"
+    for index in "${!failures[@]}"
+    do
+        error_file="$results_dir/${failure_indices[$index]}.err"
+        if [ -s "$error_file" ]; then
+            printf '  hyperfine diagnostic for %s:\n' "${failures[$index]}" >&2
+            sed 's/^/    /' "$error_file" >&2
+        else
+            printf '  hyperfine reported failure for %s without diagnostic output\n' "${failures[$index]}" >&2
+        fi
+    done
     exit 1
 fi

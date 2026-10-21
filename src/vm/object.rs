@@ -260,15 +260,45 @@ const GC_INITIAL_THRESHOLD: usize = GC_MIN_THRESHOLD;
 const GC_THRESHOLD_GROWTH_FACTOR: usize = 2;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct GcPolicy {
+    initial_threshold: usize,
+    minimum_threshold: usize,
+    growth_factor: usize,
+}
+
+impl GcPolicy {
+    pub(crate) const fn new(
+        initial_threshold: usize,
+        minimum_threshold: usize,
+        growth_factor: usize,
+    ) -> Self {
+        Self {
+            initial_threshold,
+            minimum_threshold,
+            growth_factor,
+        }
+    }
+}
+
+impl Default for GcPolicy {
+    fn default() -> Self {
+        Self::new(
+            GC_INITIAL_THRESHOLD,
+            GC_MIN_THRESHOLD,
+            GC_THRESHOLD_GROWTH_FACTOR,
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum GcThreshold {
     Automatic(usize),
+    Manual(usize),
     Disabled,
 }
 
 impl GcThreshold {
-    // `usize::MAX` is accepted only at the public threshold boundary; heap
-    // policy stores disabled mode as a separate variant.
-    fn from_value(value: usize) -> Self {
+    fn automatic(value: usize) -> Self {
         if value == usize::MAX {
             Self::Disabled
         } else {
@@ -276,9 +306,17 @@ impl GcThreshold {
         }
     }
 
+    fn manual(value: usize) -> Self {
+        if value == usize::MAX {
+            Self::Disabled
+        } else {
+            Self::Manual(value)
+        }
+    }
+
     fn value(self) -> usize {
         match self {
-            Self::Automatic(value) => value,
+            Self::Automatic(value) | Self::Manual(value) => value,
             Self::Disabled => usize::MAX,
         }
     }
@@ -292,6 +330,9 @@ pub(crate) struct GcHeap {
     /// When total heap allocations (objects plus distinct interned strings)
     /// reach this threshold, run the GC.
     threshold: GcThreshold,
+    /// Automatic threshold changes are derived from this policy after each
+    /// collection. Manual thresholds and disabled mode are kept separately.
+    policy: GcPolicy,
     /// Pool for interned strings.
     strings: StringPool,
     /// Reused scratch space for the iterative GC mark phase.
@@ -303,11 +344,11 @@ pub(crate) struct GcHeap {
 }
 
 impl GcHeap {
-    /// Create a heap using the collector's initial threshold policy.
-    pub(super) fn new() -> Self {
+    pub(super) fn with_policy(policy: GcPolicy) -> Self {
         Self {
             objects: SlotMap::with_key(),
-            threshold: GcThreshold::from_value(GC_INITIAL_THRESHOLD),
+            threshold: GcThreshold::automatic(policy.initial_threshold),
+            policy,
             strings: StringPool::new(),
             mark_worklist: Vec::new(),
             empty_upvalues: Arc::from([]),
@@ -319,7 +360,8 @@ impl GcHeap {
     pub(super) fn with_threshold(threshold: usize) -> Self {
         Self {
             objects: SlotMap::with_key(),
-            threshold: GcThreshold::from_value(threshold),
+            threshold: GcThreshold::manual(threshold),
+            policy: GcPolicy::default(),
             strings: StringPool::new(),
             mark_worklist: Vec::new(),
             empty_upvalues: Arc::from([]),
@@ -599,13 +641,13 @@ impl GcHeap {
         // String collection
         self.strings.collect();
 
-        // Preserve disabled mode across explicit collections. The collection
-        // schedule and threshold update are owned by the heap policy.
+        // Preserve manual and disabled modes across explicit collections.
+        // Automatic mode follows the State's policy rather than replacing it.
         if matches!(self.threshold, GcThreshold::Automatic(_)) {
-            self.threshold = GcThreshold::Automatic(
+            self.threshold = GcThreshold::automatic(
                 self.allocation_count()
-                    .saturating_mul(GC_THRESHOLD_GROWTH_FACTOR)
-                    .max(GC_MIN_THRESHOLD),
+                    .saturating_mul(self.policy.growth_factor)
+                    .max(self.policy.minimum_threshold),
             );
         }
 
@@ -663,7 +705,19 @@ impl GcHeap {
 
     /// Set the GC threshold.
     pub(super) fn set_threshold(&mut self, threshold: usize) {
-        self.threshold = GcThreshold::from_value(threshold);
+        self.threshold = GcThreshold::manual(threshold);
+    }
+
+    /// Replace the automatic collection policy and restart at its initial
+    /// threshold.
+    pub(super) fn set_policy(&mut self, policy: GcPolicy) {
+        self.policy = policy;
+        self.threshold = GcThreshold::automatic(policy.initial_threshold);
+    }
+
+    /// Resume automatic collection at the configured initial threshold.
+    pub(super) fn reset_auto_threshold(&mut self) {
+        self.threshold = GcThreshold::automatic(self.policy.initial_threshold);
     }
 
     /// Disable automatic collection while preserving explicit collection.

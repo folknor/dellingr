@@ -14,6 +14,22 @@ All notable changes to dellingr are documented here. The format follows
 - `Error`'s `Display` no longer ends with a newline after the traceback.
 - Snapshot loading rejects gmatch iterator state that lacks its cached pattern
   key, has a non-`true` compile flag, or an out-of-range `lastmatch`.
+- `State::gc_set_threshold` installs a fixed threshold that collections no
+  longer recompute. Use `gc_set_auto_threshold` to resume adaptive collection.
+- Source names over `limits::MAX_SOURCE_NAME_BYTES` are rejected with
+  `ErrorKind::SourceNameSizeExceeded` before parsing, and `register_rust_fn`
+  rejects ids over `limits::MAX_SAVE_IDENTIFIER_BYTES` before changing
+  either registry. Diagnostic function names longer than
+  `limits::MAX_CHUNK_NAME_BYTES` are truncated, so such chunks still save.
+
+### Added
+
+- Per-State GC policy: `State::with_gc_policy`,
+  `State::with_callbacks_and_gc_policy`, `gc_set_policy` and
+  `gc_set_auto_threshold`.
+- `State::try_to_boolean`, `try_typ` and `try_raw_equal` report an invalid
+  stack index; the existing forms keep reading it as `nil`.
+- The snapshot byte limits are public in `limits`.
 
 ### Fixed
 

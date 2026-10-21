@@ -13,6 +13,28 @@ use super::frame::Frame;
 use super::object::{ObjectPtr, Upvalue};
 use crate::instr::{ArgCount, RetCount};
 
+impl MethodLookupCacheEntry {
+    fn new(
+        receiver_metatable: ObjectPtr,
+        index_key: Val,
+        index_field_index: usize,
+        index_handler: Val,
+        method_table_version: u64,
+        method_index: Option<usize>,
+        globals_version: u64,
+    ) -> Self {
+        Self {
+            receiver_metatable,
+            index_key,
+            index_field_index,
+            index_handler,
+            method_table_version,
+            method_index,
+            globals_version,
+        }
+    }
+}
+
 impl State {
     #[hotpath::measure]
     pub(super) fn instr_get_field(
@@ -24,7 +46,7 @@ impl State {
     ) -> Result<()> {
         // Pop value, handle both tables and strings
         let val = self.pop_val();
-        let key = self.get_string_constant(frame, field_id);
+        let key = frame.literal(field_id);
 
         let cache = frame.runtime.caches.field_lookup.get(cache_idx as usize);
 
@@ -318,58 +340,58 @@ impl State {
         let (index_field_index, index_handler) = metatable.get_with_index(&index_key)?;
         let Some(index_table) = index_handler.as_object_ptr() else {
             if let Some(cache) = cache {
-                cache.set_method(MethodLookupCacheEntry {
+                cache.set_method(MethodLookupCacheEntry::new(
                     receiver_metatable,
                     index_key,
                     index_field_index,
                     index_handler,
-                    method_table_version: 0,
-                    method_index: None,
-                    globals_version: self.globals_version,
-                });
+                    0,
+                    None,
+                    self.globals_version,
+                ));
             }
             return None;
         };
         let Some(method_table) = self.heap.as_table_ref(index_table) else {
             if let Some(cache) = cache {
-                cache.set_method(MethodLookupCacheEntry {
+                cache.set_method(MethodLookupCacheEntry::new(
                     receiver_metatable,
                     index_key,
                     index_field_index,
                     index_handler,
-                    method_table_version: 0,
-                    method_index: None,
-                    globals_version: self.globals_version,
-                });
+                    0,
+                    None,
+                    self.globals_version,
+                ));
             }
             return None;
         };
         let method_table_version = method_table.version();
         let Some((method_index, method)) = method_table.get_with_index(&key) else {
             if let Some(cache) = cache {
-                cache.set_method(MethodLookupCacheEntry {
+                cache.set_method(MethodLookupCacheEntry::new(
                     receiver_metatable,
                     index_key,
                     index_field_index,
                     index_handler,
                     method_table_version,
-                    method_index: None,
-                    globals_version: self.globals_version,
-                });
+                    None,
+                    self.globals_version,
+                ));
             }
             return None;
         };
 
         if let Some(cache) = cache {
-            cache.set_method(MethodLookupCacheEntry {
+            cache.set_method(MethodLookupCacheEntry::new(
                 receiver_metatable,
                 index_key,
                 index_field_index,
                 index_handler,
                 method_table_version,
-                method_index: Some(method_index),
-                globals_version: self.globals_version,
-            });
+                Some(method_index),
+                self.globals_version,
+            ));
         }
 
         Some(method)
@@ -428,15 +450,15 @@ impl State {
 
         let (cached_key, method) = method_table.get_index(method_index)?;
         if cached_key == key {
-            cache.set_method(MethodLookupCacheEntry {
-                receiver_metatable: entry.receiver_metatable,
-                index_key: entry.index_key,
-                index_field_index: entry.index_field_index,
-                index_handler: entry.index_handler,
+            cache.set_method(MethodLookupCacheEntry::new(
+                entry.receiver_metatable,
+                entry.index_key,
+                entry.index_field_index,
+                entry.index_handler,
                 method_table_version,
-                method_index: Some(method_index),
-                globals_version: self.globals_version,
-            });
+                Some(method_index),
+                self.globals_version,
+            ));
             Some(Some(method))
         } else {
             None

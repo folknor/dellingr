@@ -13,7 +13,8 @@
 #   the hyperfine-driven wall time.
 #
 # Env:
-#   FEATURES=hotpath  # KV side; switch to hotpath-alloc for alloc tracking
+#   DELLINGR_HOTPATH_FEATURES=hotpath-alloc  # KV side; empty disables features
+#   HYPERFINE_WARMUP=2                       # wall-time warmup calls
 
 set -u
 
@@ -31,7 +32,7 @@ fi
 
 TARGET="$1"
 shift
-FEATURES="${FEATURES:-hotpath}"
+HYPERFINE_WARMUP_COUNT="$(hyperfine_warmup)" || exit 2
 SCRIPT="$(workload_hotpath_files "$TARGET")" || exit 1
 
 if [ ! -f "$SCRIPT" ]
@@ -47,7 +48,7 @@ then
 fi
 
 DELLINGR_BIN="$(dellingr_bin_built release)" || exit 1
-HOTPATH_BIN="$(cargo_artifact release hotpath example "$FEATURES")" || exit 1
+HOTPATH_BIN="$(cargo_artifact release hotpath example "$DELLINGR_HOTPATH_FEATURES")" || exit 1
 
 if [ ! -x "$DELLINGR_BIN" ] || [ ! -x "$HOTPATH_BIN" ]
 then
@@ -66,4 +67,4 @@ echo "==== harness output ===="
 
 echo ""
 echo "==== hyperfine ===="
-hyperfine --warmup 2 -N "$@" -n "$TARGET" "$DELLINGR_COMMAND $SCRIPT_COMMAND"
+hyperfine --warmup "$HYPERFINE_WARMUP_COUNT" -N "$@" -n "$TARGET" "$DELLINGR_COMMAND $SCRIPT_COMMAND"

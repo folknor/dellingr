@@ -59,15 +59,14 @@ use crate::COST_MODEL_VERSION;
 use crate::compiler::{Bytecode, UpvalueDesc};
 use crate::host::HostCallbacks;
 use crate::instr::{FORMAT_VERSION, Instr};
+use crate::limits::{
+    MAX_CHUNK_NAME_BYTES, MAX_ENGINE_VERSION_BYTES, MAX_ENVIRONMENT_TOKEN_BYTES,
+    MAX_SAVE_IDENTIFIER_BYTES, MAX_SOURCE_NAME_BYTES,
+};
 
 mod verify;
 
 const MAGIC: [u8; 4] = *b"DLGS";
-const MAX_ENGINE_VERSION_BYTES: usize = 128;
-const MAX_SAVE_IDENTIFIER_BYTES: usize = 4 * 1024;
-const MAX_ENVIRONMENT_TOKEN_BYTES: usize = 256;
-const MAX_CHUNK_NAME_BYTES: usize = 4 * 1024;
-const MAX_CHUNK_SOURCE_BYTES: usize = 256 * 1024;
 const MAX_PATH_GLOBAL_BYTES: usize = 96;
 const MAX_RENDERED_PATH_SEGMENTS: usize = 32;
 const MAX_RENDERED_PATH_BYTES: usize = 512;
@@ -1959,7 +1958,7 @@ impl ByteField {
             Self::FunctionId => MAX_SAVE_IDENTIFIER_BYTES,
             Self::EnvironmentToken => MAX_ENVIRONMENT_TOKEN_BYTES,
             Self::ChunkName => MAX_CHUNK_NAME_BYTES,
-            Self::ChunkSource => MAX_CHUNK_SOURCE_BYTES,
+            Self::ChunkSource => MAX_SOURCE_NAME_BYTES,
         }
     }
 }

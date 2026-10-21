@@ -376,6 +376,7 @@ impl Engine {
 
     /// Compile a Lua source string with a source name used in error messages
     /// and stack traces (e.g. a filename or chunk identifier).
+    /// Names exceeding [`limits::MAX_SOURCE_NAME_BYTES`] are rejected before parsing.
     pub fn compile_named(&self, source: &str, name: impl Into<String>) -> Result<Program> {
         let bc = compiler::parse_str_named(source, Some(name.into()))?;
         Ok(Program(Arc::new(bc)))

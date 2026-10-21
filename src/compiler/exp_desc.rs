@@ -5,10 +5,17 @@ use crate::instr::{ArgCount, Builtin, Instr};
 
 #[derive(Debug)]
 pub(super) enum ExpDesc {
-    Prefix(PrefixExp),
-    /// A vararg expression (...)
-    Vararg,
+    /// A final call or vararg expression that can produce multiple values.
+    MultiTail(TailKind),
     Other,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) enum TailKind {
+    /// A function call whose instruction result count depends on its tail use.
+    FunctionCall(CallSite),
+    /// A vararg expression whose instruction result count depends on its tail use.
+    Vararg,
 }
 
 /// A call's argument count and opening line, packed into four bytes.
@@ -20,11 +27,15 @@ pub(super) enum ExpDesc {
 /// size of every other, so the two are packed: the line occupies the low 24
 /// bits and the argument count the high 8. The saturation is unreachable in
 /// practice, so the narrower width versus the `u32` in `line_info` is not a
-/// real divergence: `MAX_SOURCE_BYTES` is 2^24 bytes and a call needs at least
-/// a few bytes, so no call can open on a line at or past 2^24. The `min` is
-/// only a guard against wraparound should that source cap ever be raised.
+/// real divergence: `MAX_SOURCE_BYTES` is at most 2^24 bytes (asserted below)
+/// and a call needs at least a few bytes, so no call can open on a line at or
+/// past 2^24. The `min` is only a guard against wraparound.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct CallSite(u32);
+
+// Every call opens on a line strictly below the source byte cap, so the cap
+// must fit the packed line field.
+const _: () = assert!(crate::limits::MAX_SOURCE_BYTES <= CallSite::LINE_MASK as usize + 1);
 
 impl CallSite {
     const LINE_MASK: u32 = (1 << 24) - 1;
@@ -84,7 +95,12 @@ pub(super) enum PlaceExp {
 
 impl From<PrefixExp> for ExpDesc {
     fn from(exp: PrefixExp) -> Self {
-        Self::Prefix(exp)
+        match exp {
+            PrefixExp::FunctionCall(call) => Self::MultiTail(TailKind::FunctionCall(call)),
+            // No consumer distinguishes a non-call prefix from any other
+            // single-value expression.
+            PrefixExp::Place(_) | PrefixExp::Parenthesized => Self::Other,
+        }
     }
 }
 

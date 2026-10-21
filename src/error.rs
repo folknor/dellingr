@@ -157,6 +157,13 @@ pub enum ErrorKind {
         /// Maximum permitted source length in bytes.
         limit: usize,
     },
+    /// A diagnostic source name exceeded its fixed byte limit.
+    SourceNameSizeExceeded {
+        /// Requested source-name length in bytes.
+        size: usize,
+        /// Maximum permitted source-name length in bytes.
+        limit: usize,
+    },
     /// Invalid stack index passed to a host API.
     InvalidStackIndex {
         /// The bad index, as supplied by the caller.
@@ -625,6 +632,9 @@ impl fmt::Display for ErrorKind {
             }
             SourceSizeExceeded { size, limit } => {
                 write!(f, "source size {size} exceeds limit {limit}")
+            }
+            SourceNameSizeExceeded { size, limit } => {
+                write!(f, "source name size {size} exceeds limit {limit}")
             }
             InvalidStackIndex { index } => {
                 write!(f, "invalid stack index ({index})")

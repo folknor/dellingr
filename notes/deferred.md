@@ -13,7 +13,7 @@
    and they are never deduplicated through git history. Carry the context
    inline instead.
 
-Entries moved out of `notes/bugs.md` and `notes/hygiene.md` (hunt at 6c795d1)
+Entries moved out of the bug and hygiene documents (hunt at 6c795d1)
 before the resolution loop, judged on their face rather than verified. They keep
 their IDs; cross-references to other IDs point back into those two documents.
 Entries are moved whole, so some carry a small part that is fixable as written;
@@ -156,6 +156,24 @@ out); decide once whether the empty fast paths are needed (`str_match` already
 handles an empty item list).
 
 ## Unmeasured performance
+
+## BUG-008 - Traceback frames copy the source name per frame
+
+Narrowed in wave 2 to its growth residue (name limits are now enforced at
+registration and compile time). `StackFrame.source` is still a fresh `String`
+per frame per error, so a long source name times `MAX_CALL_DEPTH` frames is
+copied on every error, while chunks already hold it as `Arc<str>`. Fix: make
+`StackFrame.source` an `Arc<str>` (touches `vm/frame.rs` traceback
+construction and existing tests).
+
+## HYG-064 - `OP_NEW_TABLE_PRESIZED` never presizes the array part
+
+Narrowed in wave 2. The parser encodes the total field count (positional plus
+keyed) in `A`; `frame.rs` passes it to `new_table_with_capacity`, which presizes
+only the hash map, so `{1, ..., 10}` reserves an unused 10-slot map and grows the
+array by doubling. A fix needs separate positional and keyed counts (parser,
+allocator, table storage, possibly `instr.rs`) and must keep `pairs` order, `#`
+and snapshot bytes unchanged. A comment at the dispatch site records this.
 
 ## HYG-033 - Verifier and finalize cost scales badly with source size
 

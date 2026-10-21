@@ -6,7 +6,7 @@ use crate::Result;
 use crate::State;
 use crate::error::{ArgDetail, ErrorKind};
 use crate::instr::{ArgCount, RetCount};
-use crate::numeral::{exact_i64, parse_lua_numeral};
+use crate::numeral::{MAX_EXACT_INTEGER, exact_i64, parse_lua_numeral};
 
 // Keep a separate callback address for the `table.unpack` snapshot id. If this
 // aliases global `unpack`, reverse callback-name lookup resolves only one id.
@@ -42,12 +42,12 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
 
         if num_args == 2 {
             // table.insert(t, value) - append at end
-            let len = state.table_len(1);
+            let len = state.table_len(1)?;
             state.table_insert_at(1, len + 1)?;
         } else if num_args == 3 {
             // table.insert(t, pos, value)
             let pos = arg_integer(state, 2, "insert")?;
-            let len = i64::try_from(state.table_len(1)).expect("table length fits in i64");
+            let len = i64::try_from(state.table_len(1)?).expect("table length fits in i64");
             if !(1..=len + 1).contains(&pos) {
                 return Err(position_out_of_bounds(state, "insert"));
             }
@@ -73,7 +73,7 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         if has_sequence_metamethods(state, 1)? {
             return remove_through_metamethods(state);
         }
-        let len = state.table_len(1);
+        let len = state.table_len(1)?;
         let len_i = i64::try_from(len).expect("table length fits in i64");
         let pos = if let Some(pos) = opt_integer(state, 2, "remove")? {
             let valid = if len == 0 {
@@ -349,9 +349,6 @@ pub(crate) fn open_table(state: &mut State) -> Result<()> {
     Ok(())
 }
 
-/// Largest magnitude for a contiguous range of distinct integer f64 keys.
-const MAX_EXACT_KEY: i64 = 1 << 53;
-
 /// Check a sequence of integer keys that will be converted to f64. A single
 /// key can be exact above 2^53, while a longer range must stay within the
 /// largest interval where every integer is exactly representable.
@@ -359,8 +356,8 @@ fn check_integer_key_range(first: i64, last: i64) -> bool {
     if first == last {
         exact_i64(first as f64) == Some(first)
     } else {
-        (-MAX_EXACT_KEY..=MAX_EXACT_KEY).contains(&first)
-            && (-MAX_EXACT_KEY..=MAX_EXACT_KEY).contains(&last)
+        (-MAX_EXACT_INTEGER..=MAX_EXACT_INTEGER).contains(&first)
+            && (-MAX_EXACT_INTEGER..=MAX_EXACT_INTEGER).contains(&last)
     }
 }
 
@@ -437,8 +434,8 @@ fn has_sequence_metamethods(state: &mut State, idx: isize) -> Result<bool> {
 /// raw fast paths); a shared metamethod-aware length belongs beside it in
 /// `vm/table_ops.rs` once more callers need one.
 pub(super) fn sequence_len(state: &mut State, idx: isize) -> Result<i64> {
-    // A table length beyond i64::MAX is unreachable; saturating keeps this infallible.
-    let raw = i64::try_from(state.table_len(idx)).unwrap_or(i64::MAX);
+    // The array part is bounded by the stack and heap caps, far below i64::MAX.
+    let raw = i64::try_from(state.table_len(idx)?).map_or(i64::MAX, i64::from);
     state.get_metatable_of(idx)?;
     if state.typ(-1) == LuaType::Nil {
         state.pop(1)?;

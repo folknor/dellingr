@@ -16,6 +16,14 @@ fn digit_value(byte: u8) -> Option<u32> {
     }
 }
 
+/// Convert a positive `error` level to the stored trace-frame index.
+///
+/// Levels beyond the trace index range intentionally saturate.
+#[allow(clippy::disallowed_methods)]
+fn error_trace_frame(level: i64) -> u32 {
+    u32::try_from(level).unwrap_or(u32::MAX).saturating_sub(1)
+}
+
 fn parse_integer_with_base(bytes: &[u8], base: u32) -> Option<f64> {
     // Trim with the same `isspace` set as `parse_lua_numeral`; `trim_ascii`
     // omits `\v`, which reference Lua accepts.
@@ -208,9 +216,7 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
             if level <= 0 {
                 PrefixLocation::Suppressed
             } else {
-                PrefixLocation::TraceFrame(
-                    u32::try_from(level).unwrap_or(u32::MAX).saturating_sub(1),
-                )
+                PrefixLocation::TraceFrame(error_trace_frame(level))
             }
         };
         Err(state.error(ErrorKind::ScriptError {
@@ -392,7 +398,7 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
         let typ = state.typ(1);
         let len = match typ {
             LuaType::String => state.to_bytes(1)?.len(),
-            LuaType::Table => state.table_len(1),
+            LuaType::Table => state.table_len(1)?,
             _ => {
                 return Err(super::argument_error(
                     state,

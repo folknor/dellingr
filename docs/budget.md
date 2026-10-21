@@ -24,38 +24,62 @@ defect.
   afterwards.
 - Stack-cap enforcement charges nothing.
 
+## Static opcode charges
+
+These rows describe the units returned by `Instr::static_units()`. The table
+is checked against every declared opcode by a unit test in `vm/frame.rs`.
+
+| `OpcodeCost` | Units from `static_units()` |
+| --- | --- |
+| `Free` | 0 |
+| `Call` | 0 |
+| `Arithmetic` | 1 |
+| `Negation` | 1 |
+| `TableCreation` | 1 |
+| `TableWrite` | 1 |
+| `ArrayElements` | encoded `A` |
+
+A dynamic `SET_LIST` has encoded `A = 0`, so static analysis counts zero; at
+runtime it charges the live number of elements.
+
 ## Free by design
 
 - Structural constructs, for example `while true do end`.
+- `..`: concatenation output bytes are uncharged; string size remains capped.
+- `print`: host output is free by design.
 - `select`: it moves its arguments once, as passing `...` along does.
 - `unpack` and `table.unpack`: free however many elements they visit.
 - `string.len`, `tostring`.
 
 ## Native charges
 
-Math library: every function charges a flat 1.
+Math library: each function charges a flat 1: `abs`, `acos`, `asin`, `atan`,
+`atan2`, `ceil`, `cos`, `deg`, `exp`, `floor`, `fmod`, `log`, `max`, `min`,
+`modf`, `rad`, `random`, `sin`, `sqrt`, and `tan`.
 
-String library, in bytes:
+String library:
 
-- `sub`, `upper`, `lower`, `reverse`: bytes in the result or processed (at
-  least 1).
-- `find`, `match`, `gsub`, `gmatch`: subject length plus pattern length (at
-  least 1) up front.
-  - `find`, `match` and `gsub` also charge the pattern bytes a second time.
-  - Matcher primitives, including backtracking steps, charge as they run.
-  - `gsub` also charges replacement text bytes. With a replacement limit of zero
-    it charges the subject length.
-  - `gmatch` charges pattern compilation once per iterator.
-- `format`: format string length (at least 1), plus bytes appended to the
-  output, plus bytes of string arguments consumed.
+- `sub`: output bytes, at least 1.
+- `upper`, `lower`, `reverse`: input bytes processed, at least 1.
+- `find`, `match`, `gsub`: `max(1, subject bytes + pattern bytes)` up front,
+  plus `max(1, pattern bytes)`; scanning and matcher operations charge as they
+  run. `gsub` also charges replacement text bytes. With a replacement limit
+  of zero it charges the subject length.
+- `gmatch`: `max(1, subject bytes + pattern bytes)` when the iterator is
+  created; `max(1, pattern bytes)` on the iterator's first call, and matching
+  work as it runs.
+- `format`: format string bytes, at least 1, plus bytes appended to the output
+  and bytes of string arguments consumed.
 
 Table library:
 
 - `insert`, `remove`, `pack`: flat 1, however many elements they shift or
   store. This is a deliberate cost-model choice. The metamethod path charges
   the same.
-- `move`: 1 per element copied.
-- `concat`: 1 per element visited, plus bytes copied, plus separator bytes.
+- `move`: 1 per element copied, with an empty range charging 1.
+- `concat`: 1 per element visited, plus bytes consumed from the separator and
+  element values, plus bytes of separators appended. An empty range with an
+  empty separator charges 1.
 - `sort`: the length of the original range (at least 1), charged before any
   comparator runs. A Lua comparator also incurs its normal execution cost, as
   do sequence-library metamethod handlers.

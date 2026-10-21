@@ -7,18 +7,16 @@ use super::UpvalueDesc;
 use super::error::Error;
 use super::error::ErrorKind;
 use super::error::SyntaxError;
-use super::exp_desc::CallSite;
 use super::exp_desc::ExpDesc;
 use super::exp_desc::PlaceExp;
 use super::exp_desc::PrefixExp;
+use super::exp_desc::TailKind;
 use super::lexer::TokenStream;
 use super::token::Token;
 use super::token::TokenType;
+use crate::det_hash::IndexMap;
 use crate::instr::{ArgCount, Builtin, RetCount};
 use crate::limits::{MAX_FIXED_ARGS, MAX_LITERALS, MAX_LOCALS, MAX_SOURCE_BYTES, MAX_SYNTAX_DEPTH};
-use crate::numeral::{hex_value, is_lua_whitespace, is_newline_pair};
-
-use crate::det_hash::IndexMap;
 
 use state::FunctionStack;
 
@@ -136,16 +134,24 @@ impl<'a> Parser<'a> {
         Ok(total as u8)
     }
 
-    fn enter_syntax_level(&mut self) -> Result<()> {
-        if self.syntax_depth >= MAX_SYNTAX_DEPTH {
+    /// Runs recursive parsing while charging its syntax nesting cost.
+    ///
+    /// The depth belongs to the parser rather than a function frame, so nested
+    /// function bodies share the same limit. Inlining keeps this bracket from
+    /// adding another live frame to recursive expression parsing.
+    #[inline(always)]
+    fn with_syntax_level<T>(
+        &mut self,
+        cost: u32,
+        parse: impl FnOnce(&mut Self) -> Result<T>,
+    ) -> Result<T> {
+        if cost > MAX_SYNTAX_DEPTH.saturating_sub(self.syntax_depth) {
             return Err(self.error_here(SyntaxError::TooManySyntaxLevels));
         }
-        self.syntax_depth += 1;
-        Ok(())
-    }
-
-    fn exit_syntax_level(&mut self) {
-        self.syntax_depth -= 1;
+        self.syntax_depth += cost;
+        let result = parse(self);
+        self.syntax_depth -= cost;
+        result
     }
 
     fn checked_jump_offset(&self, from: usize, target: usize) -> Result<i16> {
@@ -182,10 +188,7 @@ impl<'a> Parser<'a> {
     /// Returns a human-readable description of the given token.
     fn describe_token(&self, token: &Token) -> String {
         match token.typ {
-            TokenType::Identifier
-            | TokenType::LiteralNumber
-            | TokenType::LiteralHexNumber
-            | TokenType::LiteralString => {
+            TokenType::Identifier | TokenType::LiteralNumber | TokenType::LiteralString => {
                 let text = self
                     .input
                     .substring(token.start..token.start + token.len as usize);
@@ -272,109 +275,30 @@ impl<'a> Parser<'a> {
         Ok(index)
     }
 
-    /// Converts a literal string's offsets into Lua string bytes, processing escape sequences.
-    fn get_literal_string_contents(&self, tok: Token) -> Result<Vec<u8>> {
-        // Chop off the quotes
-        let Token {
-            start, len, typ, ..
-        } = tok;
-        assert_eq!(typ, TokenType::LiteralString);
-        assert!(len >= 2);
-        let range = (start + 1)..(start + len as usize - 1);
-        let raw = self.input.substring(range).as_bytes();
+    /// Takes the decoded bytes retained for a short-string token by the lexer.
+    fn get_literal_string_contents(&mut self, tok: Token) -> Result<Vec<u8>> {
+        use super::lexer::LiteralStringContents;
 
-        // Process escape sequences.
-        //
-        // The cap applies to the DECODED Lua string, not to its source
-        // spelling: `"\z" ..` a megabyte of whitespace decodes to nothing, and
-        // `\x61` spends four source bytes per output byte. Bound only the
-        // reservation by the cap, and check each byte as it is actually
-        // emitted (below) plus the finished string at `find_or_add_string_bytes`.
-        let mut result = Vec::with_capacity(raw.len().min(crate::vm::MAX_STRING_BYTES));
-        let mut raw_offset = 0;
-        while raw_offset < raw.len() {
-            let byte = raw[raw_offset];
-            raw_offset += 1;
-            crate::vm::checked_string_growth(result.len(), 1)
-                .map_err(|err| self.error_here(err.kind))?;
-            if byte == b'\\' {
-                let error_pos = start + 1 + raw_offset - 1;
-                let next = *raw
-                    .get(raw_offset)
-                    .ok_or_else(|| self.error_at(SyntaxError::InvalidEscapeSequence, error_pos))?;
-                raw_offset += 1;
-                match next {
-                    b'0'..=b'9' => {
-                        let mut value = u16::from(next - b'0');
-                        let mut digits = 1;
-                        while digits < 3 {
-                            let Some(&digit) = raw.get(raw_offset) else {
-                                break;
-                            };
-                            if !digit.is_ascii_digit() {
-                                break;
-                            }
-                            value = value * 10 + u16::from(digit - b'0');
-                            raw_offset += 1;
-                            digits += 1;
-                        }
-                        if value > 255 {
-                            return Err(
-                                self.error_at(SyntaxError::DecimalEscapeTooLarge, error_pos)
-                            );
-                        }
-                        result.push(value as u8);
-                    }
-                    b'x' => {
-                        let high = *raw.get(raw_offset).ok_or_else(|| {
-                            self.error_at(SyntaxError::HexadecimalDigitExpected, error_pos)
-                        })?;
-                        let low = *raw.get(raw_offset + 1).ok_or_else(|| {
-                            self.error_at(SyntaxError::HexadecimalDigitExpected, error_pos)
-                        })?;
-                        let high = hex_value(high).ok_or_else(|| {
-                            self.error_at(SyntaxError::HexadecimalDigitExpected, error_pos)
-                        })?;
-                        let low = hex_value(low).ok_or_else(|| {
-                            self.error_at(SyntaxError::HexadecimalDigitExpected, error_pos)
-                        })?;
-                        result.push(high * 16 + low);
-                        raw_offset += 2;
-                    }
-                    b'z' => {
-                        while raw
-                            .get(raw_offset)
-                            .is_some_and(|byte| is_lua_whitespace(*byte))
-                        {
-                            raw_offset += 1;
-                        }
-                    }
-                    b'n' => result.push(b'\n'),
-                    newline @ (b'\r' | b'\n') => {
-                        result.push(b'\n');
-                        if raw
-                            .get(raw_offset)
-                            .is_some_and(|next| is_newline_pair(newline as char, *next as char))
-                        {
-                            raw_offset += 1;
-                        }
-                    }
-                    b't' => result.push(b'\t'),
-                    b'r' => result.push(b'\r'),
-                    b'\\' => result.push(b'\\'),
-                    b'"' => result.push(b'"'),
-                    b'\'' => result.push(b'\''),
-                    b'a' => result.push(b'\x07'), // bell
-                    b'b' => result.push(b'\x08'), // backspace
-                    b'f' => result.push(b'\x0C'), // form feed
-                    b'v' => result.push(b'\x0B'), // vertical tab
-                    _ => return Err(self.error_at(SyntaxError::InvalidEscapeSequence, error_pos)),
-                }
-            } else {
-                result.push(byte);
-            }
+        if tok.typ != TokenType::LiteralString || tok.len < 2 {
+            return Err(self.error_at(
+                ErrorKind::InternalError(
+                    "parser requested contents for an invalid string token".into(),
+                ),
+                tok.start,
+            ));
         }
-        Ok(result)
+
+        match self.input.take_literal_string_contents(tok.start) {
+            Some(LiteralStringContents::Decoded(contents)) => Ok(contents),
+            Some(LiteralStringContents::SyntaxError { kind, pos }) => Err(self.error_at(kind, pos)),
+            Some(LiteralStringContents::StringSizeExceeded { size, limit }) => {
+                Err(self.error_here(ErrorKind::StringSizeExceeded { size, limit }))
+            }
+            None => Err(self.error_at(
+                ErrorKind::InternalError("lexer did not retain contents for a string token".into()),
+                tok.start,
+            )),
+        }
     }
 
     /// Gets the original source code contained by a token.
@@ -519,25 +443,18 @@ impl<'a> Parser<'a> {
         std::mem::replace(slot, instr)
     }
 
-    /// Changes a final call or vararg to provide every requested tail value.
-    /// Returns false when the expression emits exactly one value by default.
-    pub(super) fn open_tail(&mut self, last: &ExpDesc, want: RetCount) -> bool {
-        let (replacement, expected_opcode, expression) = match last {
-            ExpDesc::Vararg => (Instr::vararg(want.to_u8()), Instr::OP_VARARG, "vararg"),
-            ExpDesc::Prefix(PrefixExp::FunctionCall(call)) => (
-                Instr::call(call.num_args(), want),
-                Instr::OP_CALL,
-                "function call",
-            ),
-            _ => return false,
+    /// Changes a typed final call or vararg to provide every requested tail value.
+    pub(super) fn open_tail(&mut self, tail: TailKind, want: RetCount) {
+        let (replacement, expected_opcode) = match tail {
+            TailKind::Vararg => (Instr::vararg(want.to_u8()), Instr::OP_VARARG),
+            TailKind::FunctionCall(call) => (Instr::call(call.num_args(), want), Instr::OP_CALL),
         };
         let old = self.replace_last_instr(replacement);
-        assert_eq!(
+        debug_assert_eq!(
             old.opcode(),
             expected_opcode,
-            "a final {expression} must end with its matching instruction"
+            "a typed multi-value tail must still end with its own instruction"
         );
-        true
     }
 
     /// Updates current line from the lexer stamp on a consumed or peeked token.
@@ -665,10 +582,7 @@ impl<'a> Parser<'a> {
     /// guarantees that control cannot fall off the end of this block.
     #[hotpath::measure]
     fn parse_statements(&mut self) -> Result<bool> {
-        self.enter_syntax_level()?;
-        let result = self.parse_statements_inner();
-        self.exit_syntax_level();
-        result
+        self.with_syntax_level(1, Self::parse_statements_inner)
     }
 
     fn parse_statements_inner(&mut self) -> Result<bool> {

@@ -27,7 +27,6 @@ pub(super) enum TokenType {
     // Others
     Identifier,
     LiteralNumber,
-    LiteralHexNumber,
     LiteralString,
 
     EndOfFile,
@@ -116,7 +115,7 @@ impl TokenType {
             Self::DotDotDot => "...",
             Self::Assign => "=",
             Self::Identifier => "<name>",
-            Self::LiteralNumber | Self::LiteralHexNumber => "<number>",
+            Self::LiteralNumber => "<number>",
             Self::LiteralString => "<string>",
             Self::EndOfFile => "<eof>",
         }

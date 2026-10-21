@@ -67,6 +67,14 @@ callbacks, host user-data. Saving is valid only while the VM is quiescent.
   afterwards.
 - Allocation during load never runs GC. The only collection happens after all
   globals, deltas and setup anchors are in place.
+- GC policy and the current threshold are host configuration, not snapshot
+  data. A loaded State starts with the default automatic policy unless its
+  setup callback changes it. If setup calls `gc_set_policy`, the final load
+  collection recomputes the threshold from that policy and the loaded live
+  allocations. A threshold set with `gc_set_threshold` in setup remains fixed
+  across the final collection. See
+  [the GC policy](limits.md#garbage-collection-policy) for the policy and
+  threshold controls.
 
 ## Byte stability
 

@@ -154,8 +154,17 @@ fn write_fifo_all(mut file: &fs::File, bytes: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
-fn counter_value(v: u64) -> i64 {
-    i64::try_from(v).unwrap_or(i64::MAX)
+/// Convert a metric to the sidecar's signed counter type. A value past
+/// `i64::MAX` fails the run: storing a clamped counter would record a
+/// plausible-looking but wrong number.
+fn counter_value(name: &str, v: u64) -> i64 {
+    match i64::try_from(v) {
+        Ok(value) => value,
+        Err(_) => {
+            eprintln!("Benchmark counter {name}={v} does not fit the sidecar's i64 counter");
+            exit(1);
+        }
+    }
 }
 
 struct Args {
@@ -251,28 +260,40 @@ fn run_metrics(run: &RunMetrics<'_>) -> Vec<Metric> {
         integer_metric(
             "warm_avg_cost",
             u128::from(run.warm_avg_cost),
-            Some(counter_value(run.warm_avg_cost)),
+            Some(counter_value("warm_avg_cost", run.warm_avg_cost)),
         ),
         text_metric("cost_per_us", format!("{:.2}", run.cost_per_us)),
         integer_metric(
             "setup_heap_bytes",
             run.setup_heap_bytes as u128,
-            Some(counter_value(run.setup_heap_bytes as u64)),
+            Some(counter_value(
+                "setup_heap_bytes",
+                run.setup_heap_bytes as u64,
+            )),
         ),
         integer_metric(
             "setup_object_count",
             run.setup_object_count as u128,
-            Some(counter_value(run.setup_object_count as u64)),
+            Some(counter_value(
+                "setup_object_count",
+                run.setup_object_count as u64,
+            )),
         ),
         integer_metric(
             "final_heap_bytes",
             run.final_heap_bytes as u128,
-            Some(counter_value(run.final_heap_bytes as u64)),
+            Some(counter_value(
+                "final_heap_bytes",
+                run.final_heap_bytes as u64,
+            )),
         ),
         integer_metric(
             "final_object_count",
             run.final_object_count as u128,
-            Some(counter_value(run.final_object_count as u64)),
+            Some(counter_value(
+                "final_object_count",
+                run.final_object_count as u64,
+            )),
         ),
     ]
 }

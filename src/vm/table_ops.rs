@@ -389,19 +389,23 @@ impl State {
     }
 
     /// Returns the array length of the table at the given index, or 0 for a
-    /// bad index or a non-table. Crate-internal: stdlib callers have already
-    /// type-checked the argument, so the 0 fallback is unreachable for them.
-    /// Hosts use [`State::raw_len`], which reports both mistakes.
+    /// non-table value. Returns [`ErrorKind::InvalidStackIndex`] for an
+    /// invalid index. Standard library callers validate the argument type.
     #[hotpath::measure]
-    pub(crate) fn table_len(&self, idx: isize) -> usize {
-        let i = match self.convert_idx(idx) {
-            Ok(i) => i,
-            Err(_) => return 0,
-        };
-        self.stack[i]
+    pub(crate) fn table_len(&self, idx: isize) -> Result<usize> {
+        let i = self.convert_idx(idx)?;
+        Ok(self.stack[i]
             .as_object_ptr()
             .and_then(|ptr| self.heap.as_table_ref(ptr))
-            .map_or(0, super::table::Table::array_len)
+            .map_or(0, super::table::Table::array_len))
+    }
+
+    fn table_array_len_at(&self, idx: usize) -> usize {
+        self.stack[idx]
+            .as_object_ptr()
+            .and_then(|ptr| self.heap.as_table_ref(ptr))
+            .expect("table_operand_below_top validated the table")
+            .array_len()
     }
 
     /// Gets the metatable of the value at the given index.
@@ -467,7 +471,7 @@ impl State {
         // This keeps negative indices relative to the caller's visible top and
         // validates the table before mutating the stack.
         let idx = self.table_operand_below_top(table_idx, 1)?;
-        if !(1..=self.table_len(table_idx) + 1).contains(&pos) {
+        if !(1..=self.table_array_len_at(idx) + 1).contains(&pos) {
             return Err(self.error(ErrorKind::RuntimeError("position out of bounds".into())));
         }
         let value = self.pop_val();
@@ -491,7 +495,7 @@ impl State {
     #[hotpath::measure]
     pub fn table_remove_at(&mut self, table_idx: isize, pos: usize) -> Result<()> {
         let idx = self.table_operand_below_top(table_idx, 0)?;
-        let len = self.table_len(table_idx);
+        let len = self.table_array_len_at(idx);
         let valid = (1..=len + 1).contains(&pos) || (len == 0 && pos == 0);
         if !valid {
             return Err(self.error(ErrorKind::RuntimeError("position out of bounds".into())));
@@ -535,7 +539,8 @@ impl State {
             .as_table_ref(table_ptr)
             .expect("validated object pointer is a table")
             .array_len();
-        let len = i64::try_from(array_len).unwrap_or(i64::MAX);
+        // The array part is bounded far below i64::MAX; saturate rather than panic.
+        let len = i64::try_from(array_len).map_or(i64::MAX, i64::from);
         let n = self.checked_table_sort_len(len)?;
         let mut arr = self
             .heap

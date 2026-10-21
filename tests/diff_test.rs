@@ -99,21 +99,6 @@ fn diff_markers_have_nonempty_reasons() {
 }
 
 #[cfg(not(feature = "hotpath"))]
-fn lua_versions_available() -> bool {
-    let lua52_available = Command::new("lua5.2")
-        .arg("-v")
-        .output()
-        .is_ok_and(|output| output.status.success());
-
-    let lua54_available = Command::new("lua5.4")
-        .arg("-v")
-        .output()
-        .is_ok_and(|output| output.status.success());
-
-    lua52_available && lua54_available
-}
-
-#[cfg(not(feature = "hotpath"))]
 fn collect_examples(include: impl Fn(&Path) -> bool) -> Vec<PathBuf> {
     fn visit(dir: &Path, root: &Path, out: &mut Vec<PathBuf>, include: &impl Fn(&Path) -> bool) {
         for entry in fs::read_dir(dir).expect("examples directory should be readable") {
@@ -142,12 +127,9 @@ fn collect_examples(include: impl Fn(&Path) -> bool) -> Vec<PathBuf> {
 
 #[cfg(not(feature = "hotpath"))]
 fn run_differential_bucket(name: &str, examples: &[PathBuf]) {
-    assert!(
-        lua_versions_available(),
-        "lua5.2 and lua5.4 must be on PATH for the differential test \
-         (apt install lua5.2 lua5.4)"
-    );
-
+    // diff_test.sh refuses to compare without both reference Luas (named by
+    // LUA52 and LUA54, defaulting to lua5.2 and lua5.4) and says which one is
+    // missing, so a host without them fails here rather than skipping.
     let output = Command::new("bash")
         .arg(manifest_path("scripts/diff_test.sh"))
         .env("DELLINGR", common::dellingr_bin())

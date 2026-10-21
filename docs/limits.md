@@ -48,6 +48,33 @@ Violations are reported as errors at load time, never silently truncated.
 - `COST_CHECK_INTERVAL`: static cost units batched before the budget is
   checked.
 
+## Garbage collection policy
+
+The heap counts GC-managed objects plus distinct interned strings. It checks
+that count before each heap allocation and collects when the count is at least
+the current threshold. The default automatic policy is an initial threshold of
+20 allocations, a minimum threshold of 20, and a growth factor of 2. After an
+automatic collection, the next threshold is
+`max(live_allocations * growth_factor, minimum_threshold)`, using saturating
+multiplication.
+
+Embedders can provide per-State values with
+`State::with_gc_policy(initial_threshold, minimum_threshold, growth_factor)`
+or `State::with_callbacks_and_gc_policy`. The initial threshold is in force
+while `open_libs` initializes the standard library. `gc_set_policy` replaces
+the policy and restarts automatic mode at its initial threshold.
+
+`gc_set_threshold` installs a fixed host threshold that remains in force
+across explicit and automatic collections. `gc_set_auto_threshold` resumes
+automatic mode at the policy's initial threshold. `gc_disable_auto` or a
+threshold of `usize::MAX` disables automatic collection; explicit
+`gc_collect` calls still work.
+
+GC policy is State-local and changes collection timing. Collection timing
+affects when dead heap objects and interned strings are reclaimed, and can
+affect rendered identities and snapshot contents. Keep the policy consistent
+across replay runs.
+
 ## Value stack
 
 - Every path that can grow the stack is checked, batch-preflighted, or

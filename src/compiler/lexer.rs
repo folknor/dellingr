@@ -5,7 +5,7 @@ use super::error::Error;
 use super::error::SyntaxError;
 use super::token::Token;
 use super::token::TokenType::{self, *};
-use crate::numeral::{is_lua_whitespace, is_newline_pair};
+use crate::numeral::{hex_value, is_lua_whitespace, is_newline_pair, parse_lua_numeral};
 
 use std::iter::Peekable;
 use std::slice::SliceIndex;
@@ -18,6 +18,23 @@ pub(super) struct TokenStream<'a> {
     lexer: Lexer<'a>,
     lookahead: Option<Token>,
     lookahead2: Option<Token>,
+}
+
+/// Decoded contents saved by the lexer for a short-string token.
+#[derive(Debug)]
+pub(super) enum LiteralStringContents {
+    /// The literal decoded successfully.
+    Decoded(Vec<u8>),
+    /// A malformed escape, retained until the parser consumes its token.
+    SyntaxError { kind: SyntaxError, pos: usize },
+    /// The decoded literal exceeded the configured string limit.
+    StringSizeExceeded { size: usize, limit: usize },
+}
+
+#[derive(Debug)]
+enum LiteralStringFailure {
+    SyntaxError(SyntaxError, usize),
+    StringSizeExceeded { size: usize, limit: usize },
 }
 
 /// A `Lexer` handles the raw conversion of characters to tokens.
@@ -34,6 +51,7 @@ pub(super) struct Lexer<'a> {
     newline_pair_open: bool,
     iter: Peekable<CharIndices<'a>>,
     source: &'a str,
+    literal_string_contents: Vec<(usize, LiteralStringContents)>,
 }
 
 impl<'a> TokenStream<'a> {
@@ -130,6 +148,19 @@ impl<'a> TokenStream<'a> {
     pub(super) fn substring(&self, index: impl SliceIndex<str, Output = str>) -> &'a str {
         &self.lexer.source[index]
     }
+
+    /// Takes decoded contents for a string token already returned by the lexer.
+    pub(super) fn take_literal_string_contents(
+        &mut self,
+        token_start: usize,
+    ) -> Option<LiteralStringContents> {
+        let index = self
+            .lexer
+            .literal_string_contents
+            .iter()
+            .position(|(start, _)| *start == token_start)?;
+        Some(self.lexer.literal_string_contents.remove(index).1)
+    }
 }
 
 impl<'a> Lexer<'a> {
@@ -143,6 +174,7 @@ impl<'a> Lexer<'a> {
             newline_pair_open: false,
             pos: 0,
             source,
+            literal_string_contents: Vec::new(),
         }
     }
 
@@ -191,7 +223,7 @@ impl<'a> Lexer<'a> {
                     Minus
                 }
 
-                '\'' | '\"' => self.lex_string(first_char)?,
+                '\'' | '\"' => self.lex_string(first_char, tok_start)?,
                 '[' => {
                     if let Some('=' | '[') = self.peek_char() {
                         return Err(self.error_at(SyntaxError::LongStringUnsupported, tok_start));
@@ -199,7 +231,7 @@ impl<'a> Lexer<'a> {
                     LSquare
                 }
 
-                '0'..='9' => self.lex_full_number(first_char)?,
+                '0'..='9' => self.lex_full_number(first_char, tok_start)?,
 
                 'a'..='z' | 'A'..='Z' | '_' => self.lex_word(tok_start),
 
@@ -379,70 +411,222 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    /// Tokenizes a 'short' literal string, AKA a string denoted by single or
-    /// double quotes and not by two square brackets.
-    fn lex_string(&mut self, quote: char) -> Result<TokenType> {
-        while let Some(c) = self.next_char() {
+    /// Tokenizes and decodes a short literal string in one pass.
+    ///
+    /// Escape failures are saved with the token and returned only when the
+    /// parser consumes it. This preserves the parser's error ordering when a
+    /// malformed string appears after an earlier syntax error.
+    fn lex_string(&mut self, quote: char, token_start: usize) -> Result<TokenType> {
+        let body_start = self.pos;
+        let mut decoded = Vec::new();
+        let mut failure = None;
+        let mut decoded_until = body_start;
+
+        loop {
+            let char_start = self.pos;
+            let Some(c) = self.next_char() else {
+                return Err(self.error(SyntaxError::UnclosedString));
+            };
             if c == quote {
+                let contents = match failure {
+                    Some(LiteralStringFailure::SyntaxError(kind, pos)) => {
+                        LiteralStringContents::SyntaxError { kind, pos }
+                    }
+                    Some(LiteralStringFailure::StringSizeExceeded { size, limit }) => {
+                        LiteralStringContents::StringSizeExceeded { size, limit }
+                    }
+                    None => LiteralStringContents::Decoded(decoded),
+                };
+                self.literal_string_contents.push((token_start, contents));
                 return Ok(LiteralString);
-            } else if c == '\\' {
-                // Skip the escaped character - escape processing is done in the parser
-                match self.next_char() {
-                    Some('z') => {
-                        self.consume_whitespace();
+            }
+
+            if c == '\\' {
+                let Some(escaped) = self.next_char() else {
+                    return Err(self.error(SyntaxError::UnclosedString));
+                };
+                if escaped == 'z' {
+                    self.consume_whitespace();
+                } else if matches!(escaped, '\r' | '\n')
+                    && matches!(self.peek_char(), Some(next) if is_newline_pair(escaped, next))
+                {
+                    self.next_char();
+                }
+
+                if failure.is_none() {
+                    match self.decode_string_escape(
+                        char_start,
+                        escaped,
+                        quote,
+                        self.pos,
+                        &mut decoded,
+                    ) {
+                        Ok(skip_until) => decoded_until = skip_until,
+                        Err(error) => failure = Some(error),
                     }
-                    Some(newline @ ('\r' | '\n')) => {
-                        if matches!(self.peek_char(), Some(next) if is_newline_pair(newline, next))
-                        {
-                            self.next_char();
-                        }
-                    }
-                    _ => {}
                 }
             } else if matches!(c, '\r' | '\n') {
                 return Err(self.error(SyntaxError::UnclosedString));
+            } else if failure.is_none() && char_start >= decoded_until {
+                let bytes = &self.source.as_bytes()[char_start..self.pos];
+                for &byte in bytes {
+                    if let Err(error) = Self::check_decoded_string_growth(decoded.len()) {
+                        failure = Some(error);
+                        break;
+                    }
+                    decoded.push(byte);
+                }
             }
         }
+    }
 
-        Err(self.error(SyntaxError::UnclosedString))
+    fn check_decoded_string_growth(
+        current_len: usize,
+    ) -> std::result::Result<(), LiteralStringFailure> {
+        let size = current_len.saturating_add(1);
+        if size > crate::vm::MAX_STRING_BYTES {
+            Err(LiteralStringFailure::StringSizeExceeded {
+                size,
+                limit: crate::vm::MAX_STRING_BYTES,
+            })
+        } else {
+            Ok(())
+        }
+    }
+
+    fn decode_string_escape(
+        &self,
+        slash_pos: usize,
+        escaped: char,
+        quote: char,
+        lexical_end: usize,
+        decoded: &mut Vec<u8>,
+    ) -> std::result::Result<usize, LiteralStringFailure> {
+        Self::check_decoded_string_growth(decoded.len())?;
+        let bytes = self.source.as_bytes();
+        let error = |kind| LiteralStringFailure::SyntaxError(kind, slash_pos);
+        let unchanged_end = lexical_end;
+
+        let skip_until = match escaped {
+            '0'..='9' => {
+                let mut value = u16::from(escaped as u8 - b'0');
+                let mut digits = 1;
+                let mut end = slash_pos + 2;
+                while digits < 3 {
+                    let Some(&digit) = bytes.get(end) else {
+                        break;
+                    };
+                    if !digit.is_ascii_digit() {
+                        break;
+                    }
+                    value = value * 10 + u16::from(digit - b'0');
+                    end += 1;
+                    digits += 1;
+                }
+                if value > 255 {
+                    return Err(error(SyntaxError::DecimalEscapeTooLarge));
+                }
+                decoded.push(value as u8);
+                end
+            }
+            'x' => {
+                let high_pos = slash_pos + 2;
+                let low_pos = high_pos + 1;
+                let high = match bytes.get(high_pos) {
+                    Some(&byte) if byte != quote as u8 => hex_value(byte),
+                    _ => None,
+                }
+                .ok_or_else(|| error(SyntaxError::HexadecimalDigitExpected))?;
+                let low = match bytes.get(low_pos) {
+                    Some(&byte) if byte != quote as u8 => hex_value(byte),
+                    _ => None,
+                }
+                .ok_or_else(|| error(SyntaxError::HexadecimalDigitExpected))?;
+                decoded.push(high * 16 + low);
+                low_pos + 1
+            }
+            'z' => unchanged_end,
+            '\r' | '\n' | 'n' => {
+                decoded.push(b'\n');
+                unchanged_end
+            }
+            't' => {
+                decoded.push(b'\t');
+                unchanged_end
+            }
+            'r' => {
+                decoded.push(b'\r');
+                unchanged_end
+            }
+            '\\' => {
+                decoded.push(b'\\');
+                unchanged_end
+            }
+            '"' => {
+                decoded.push(b'"');
+                unchanged_end
+            }
+            '\'' => {
+                decoded.push(b'\'');
+                unchanged_end
+            }
+            'a' => {
+                decoded.push(b'\x07');
+                unchanged_end
+            }
+            'b' => {
+                decoded.push(b'\x08');
+                unchanged_end
+            }
+            'f' => {
+                decoded.push(b'\x0C');
+                unchanged_end
+            }
+            'v' => {
+                decoded.push(b'\x0B');
+                unchanged_end
+            }
+            _ => return Err(error(SyntaxError::InvalidEscapeSequence)),
+        };
+        Ok(skip_until)
     }
 
     /// Reads in a number which starts with a digit (as opposed to a decimal point).
-    fn lex_full_number(&mut self, first_char: char) -> Result<TokenType> {
+    fn lex_full_number(&mut self, first_char: char, tok_start: usize) -> Result<TokenType> {
         // Check for hex values (both 0x and 0X)
         if first_char == '0' && (self.try_next('x') || self.try_next('X')) {
             // Mantissa: hex digits with an optional fraction (Lua 5.2 hex
-            // floats). At least one digit must appear on either side of
-            // the dot: `0x1.8`, `0x1.`, and `0x.8` are valid, `0x.` is not.
-            let mut mantissa_digits = self.lex_hex_digits();
+            // floats). At least one digit must appear in the mantissa:
+            // `0x1.8`, `0x1.`, and `0x.8` are valid, `0x.` is not.
+            self.lex_hex_digits();
             if self.try_next('.') {
-                mantissa_digits += self.lex_hex_digits();
+                self.lex_hex_digits();
             }
-            if mantissa_digits == 0 {
+            // Let the shared numeral parser own mantissa validation. Check at
+            // this boundary to keep malformed-mantissa diagnostics before a
+            // following exponent, as in the original lexer.
+            if parse_lua_numeral(&self.source.as_bytes()[tok_start..self.pos]).is_none() {
                 return Err(self.error(SyntaxError::BadNumber));
             }
 
             // Optional binary exponent: p/P, an optional sign, then at least
             // one DECIMAL digit (`0x1p-2`, `0x1.8p+0`).
-            if self.try_next('p') || self.try_next('P') {
+            let has_exponent = self.try_next('p') || self.try_next('P');
+            if has_exponent {
                 if let Some(c) = self.peek_char()
                     && (c == '+' || c == '-')
                 {
                     self.next_char();
                 }
-                let mut exponent_digits = 0usize;
-                while self.peek_char().is_some_and(|c| c.is_ascii_digit()) {
-                    self.next_char();
-                    exponent_digits += 1;
-                }
-                if exponent_digits == 0 {
+                self.lex_digits();
+                if parse_lua_numeral(&self.source.as_bytes()[tok_start..self.pos]).is_none() {
                     return Err(self.error(SyntaxError::BadNumber));
                 }
             }
 
             match self.peek_char() {
                 Some(c) if is_identifier_continue(c) => Err(self.error(SyntaxError::BadNumber)),
-                _ => Ok(LiteralHexNumber),
+                _ => Ok(LiteralNumber),
             }
         } else {
             // Read in the rest of the base
@@ -479,14 +663,16 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    /// Consumes an unbroken sequence of hex digits, returning how many.
-    fn lex_hex_digits(&mut self) -> usize {
-        let mut count = 0;
-        while self.peek_char().is_some_and(|c| c.is_ascii_hexdigit()) {
+    /// Consumes an unbroken sequence of hexadecimal digits.
+    fn lex_hex_digits(&mut self) {
+        while self.peek_char().is_some_and(|c| {
+            matches!(
+                u8::try_from(u32::from(c)),
+                Ok(byte) if hex_value(byte).is_some()
+            )
+        }) {
             self.next_char();
-            count += 1;
         }
-        count
     }
 
     /// Consumes the optional exponent part of a literal number, then rejects
@@ -563,6 +749,13 @@ mod tests {
             let actual = lexer.next_token().unwrap();
             if actual.typ == TokenType::EndOfFile {
                 break;
+            }
+            if actual.typ == LiteralNumber {
+                assert!(
+                    parse_lua_numeral(lexer.source[actual.range()].as_bytes()).is_some(),
+                    "lexer emitted an invalid numeral token at {}",
+                    actual.start
+                );
             }
             let expected = tokens.next().unwrap();
             assert_eq!(expected, actual);
@@ -693,6 +886,35 @@ mod tests {
     }
 
     #[test]
+    fn short_strings_are_decoded_by_the_lexer_and_bad_escapes_are_deferred() {
+        let mut input = TokenStream::new("\"a\\x41\\n\"");
+        let token = input.next().expect("closed string must lex");
+        assert_eq!(token.typ, LiteralString);
+        match input
+            .take_literal_string_contents(token.start)
+            .expect("lexer must retain decoded string contents")
+        {
+            LiteralStringContents::Decoded(contents) => {
+                assert_eq!(contents.as_slice(), &b"aA\n"[..]);
+            }
+            _ => panic!("valid escapes must decode successfully"),
+        }
+
+        let mut input = TokenStream::new("\"\\q\"");
+        let token = input
+            .next()
+            .expect("invalid escapes remain deferred until parser consumption");
+        assert_eq!(token.typ, LiteralString);
+        assert!(matches!(
+            input.take_literal_string_contents(token.start),
+            Some(LiteralStringContents::SyntaxError {
+                kind: SyntaxError::InvalidEscapeSequence,
+                pos: 1,
+            })
+        ));
+    }
+
+    #[test]
     fn bare_cr_in_short_string_is_unclosed() {
         let source = "\"a\rb\"";
         assert_eq!(source.as_bytes()[2], b'\r');
@@ -768,13 +990,24 @@ mod tests {
     }
 
     #[test]
+    fn decimal_exponent_validation_stays_with_the_shared_numeral_parser() {
+        for input in ["1e", "1e+"] {
+            let token = Lexer::new(input)
+                .next_token()
+                .expect("decimal exponent failure is deferred to parsing");
+            assert_eq!(token.typ, LiteralNumber);
+            assert!(parse_lua_numeral(input.as_bytes()).is_none());
+        }
+    }
+
+    #[test]
     fn hex_float_literals_lex_as_one_token() {
-        // Fractions and binary-exponent forms are single hex tokens.
-        check_line("0x1.8p+0", &[(LiteralHexNumber, 0, 8)]);
-        check_line("0x1.8P-2", &[(LiteralHexNumber, 0, 8)]);
-        check_line("0x.8", &[(LiteralHexNumber, 0, 4)]);
-        check_line("0x1.", &[(LiteralHexNumber, 0, 4)]);
-        check_line("0x1p2", &[(LiteralHexNumber, 0, 5)]);
+        // Fractions and binary-exponent forms are single numeral tokens.
+        check_line("0x1.8p+0", &[(LiteralNumber, 0, 8)]);
+        check_line("0x1.8P-2", &[(LiteralNumber, 0, 8)]);
+        check_line("0x.8", &[(LiteralNumber, 0, 4)]);
+        check_line("0x1.", &[(LiteralNumber, 0, 4)]);
+        check_line("0x1p2", &[(LiteralNumber, 0, 5)]);
     }
 
     #[test]
@@ -790,6 +1023,20 @@ mod tests {
                 result = lexer.next_token();
             }
             assert!(result.is_err(), "{input:?} must fail to lex");
+        }
+    }
+
+    #[test]
+    fn malformed_hex_number_errors_keep_their_original_columns() {
+        for (input, column) in [("0x.", 4), ("0xp1", 3), ("0x1p+", 6)] {
+            let err = Lexer::new(input)
+                .next_token()
+                .expect_err("malformed hexadecimal numeral must fail in the lexer");
+            assert!(matches!(
+                err.kind,
+                crate::error::ErrorKind::SyntaxError(SyntaxError::BadNumber)
+            ));
+            assert_eq!(err.column, column, "{input:?}");
         }
     }
 

@@ -18,10 +18,12 @@ impl<'a> Parser<'a> {
         // Check if there's an expression following return
         let n = if self.is_expr_start()? {
             let (n, last_exp) = self.parse_explist()?;
-            if self.open_tail(&last_exp, RetCount::All) {
-                u8::MAX
-            } else {
-                n
+            match last_exp {
+                ExpDesc::MultiTail(tail) => {
+                    self.open_tail(tail, RetCount::All);
+                    u8::MAX
+                }
+                _ => n,
             }
         } else {
             0
@@ -45,7 +47,6 @@ impl<'a> Parser<'a> {
                 | TokenType::LParen
                 | TokenType::LCurly
                 | TokenType::LiteralNumber
-                | TokenType::LiteralHexNumber
                 | TokenType::LiteralString
                 | TokenType::Function
                 | TokenType::Nil
@@ -374,18 +375,14 @@ impl<'a> Parser<'a> {
         debug_assert!(num_exprs >= 1, "expression lists are never empty");
         let fixed_prefix = num_exprs - 1;
         let tail_needed = num_targets.saturating_sub(fixed_prefix);
-
-        let expandable_tail = matches!(
-            last_exp,
-            ExpDesc::Prefix(PrefixExp::FunctionCall(_)) | ExpDesc::Vararg
-        );
-        if tail_needed > 1 && expandable_tail {
+        if tail_needed > 1
+            && let ExpDesc::MultiTail(tail) = last_exp
+        {
             let tail_needed = self.checked_multi_assign_width(tail_needed)?;
-            assert!(
-                self.open_tail(last_exp, RetCount::Fixed(tail_needed)),
-                "an expandable assignment tail must be a call or vararg"
-            );
-        } else if num_targets > num_exprs {
+            self.open_tail(*tail, RetCount::Fixed(tail_needed));
+            return Ok(());
+        }
+        if num_targets > num_exprs {
             for _ in num_exprs..num_targets {
                 self.push(Instr::push_nil());
             }
@@ -493,10 +490,7 @@ impl<'a> Parser<'a> {
     /// `elseif` chain is flat, so the whole statement charges one syntax
     /// level however many arms it has.
     pub(super) fn parse_if_arm(&mut self) -> Result<()> {
-        self.enter_syntax_level()?;
-        let result = self.parse_if_chain();
-        self.exit_syntax_level();
-        result
+        self.with_syntax_level(1, Self::parse_if_chain)
     }
 
     fn parse_if_chain(&mut self) -> Result<()> {

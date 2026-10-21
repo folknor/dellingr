@@ -19,8 +19,8 @@ patterns, host surface/cost/CLI, tooling and harnesses). The question was what
 has more than one owner, or rests on an assumption about its host. Hunters read
 code and ran nothing. Entries are unranked and unverified; where several hunters
 reported one mechanism, that is noted as a fact about the reports, and where they
-disagreed both readings are kept. Defects found along the way are in
-`notes/bugs.md`.
+disagreed both readings are kept. The defects found along the way have all been
+fixed or deferred; deferred items are in `notes/deferred.md`.
 
 Common context several entries lean on: the build can enforce clippy lints and
 `clippy.toml` path bans, visibility, types, golden tests, and the gremlins scan.
@@ -69,11 +69,8 @@ elsewhere:
 - `string_format.rs`: `MAX_FORMAT_LEN = 22` with no note that it is lstrlib's
   `MAX_FORMAT - 10`; width/precision digit cap is a bare `> 2`.
 - `basic.rs`: `tonumber` base range `2..=36` inline.
-- `table.rs`: `MAX_EXACT_KEY` (see HYG-069); `sort_through_metamethods`'s
-  `len >= i32::MAX` "array too big" (see HYG-070).
-- `save_state.rs`: every `MAX_*_BYTES` codec cap (see BUG-008 in
-  `notes/bugs.md` for the enforcement gap).
-- `vm/object.rs`: GC thresholds (see HYG-008).
+- `vm/table_ops.rs`: the shared sort's `len >= i32::MAX` "array too big" rule.
+- `vm/object.rs`: GC policy defaults.
 - `compiler/parser/table.rs`: inline-template threshold `4` (HYG-016); the
   doubled syntax-level charge per call/index suffix (HYG-017); `numeral.rs`
   `MAX_SIGNIFICANT_HEX_DIGITS` and the `+2048` exponent clamp (correctness
@@ -112,29 +109,6 @@ derived (VM constants become const sums or go). Interim: a test opening the libs
 and asserting counts. Group the other `vm.rs` capacity literals next to them.
 Enforceable structurally once counts are `.len()`.
 
-## HYG-008 - GC policy: constants unlisted, initial threshold not injectable, host threshold lost on load
-
-Reported by the heap and VM-core hunters.
-
-- `GC_MIN_THRESHOLD = 20`, `GC_INITIAL_THRESHOLD` (`= GC_MIN_THRESHOLD`, used
-  once, a second name suggesting a past difference) and
-  `GC_THRESHOLD_GROWTH_FACTOR = 2` sit at the top of `object.rs`. `limits.rs`
-  does not mention them and no `docs/` page describes collection policy.
-- `GcHeap::with_threshold` is `cfg(test)`; a State cannot be built with a chosen
-  initial threshold, and `open_libs` already ran under the default by the time a
-  host can mutate it. The initial threshold is below the stdlib's footprint, so
-  every `State::new` collects during `open_libs`.
-- Host-set thresholds are one-shot: every `collect` overwrites `Automatic(_)` with
-  `survivors * 2` (documented in rustdoc).
-- `load_state` runs the host `setup`, then `materialize_payload`, which ends with
-  `gc_collect()`, replacing any threshold setup configured; only `Disabled`
-  survives. The threshold is not in the snapshot, and nothing says so.
-
-Fix: document in `docs/save-state.md`, or make GC policy explicit `State` config
-(initial, growth, min) that collection reads rather than overwrites. Drop or give
-a role to `GC_INITIAL_THRESHOLD`. Enforceable by a test: set a threshold in setup,
-load, assert it.
-
 ## HYG-009 - `MAX_STRING_BYTES` and `MAX_RESULTS` reachable through several paths; string-size policy lives in `vm`
 
 Reported by the compiler and host-surface hunters.
@@ -149,22 +123,17 @@ check functions beside the constant, drop the re-exports. Enforcement is deletin
 them (no lint catches const re-exports); a dependency rule (HYG-027) holds the
 compiler side.
 
-## HYG-010 - `MAX_SOURCE_BYTES` silently underwrites narrow widths and equals `MAX_STRING_BYTES` by coincidence
+## HYG-010 - The 24-bit call-line assert in `limits.rs` is not tied to `CallSite::LINE_MASK`
 
-Reported by the compiler and host-surface hunters.
+Reported by the compiler and host-surface hunters; narrowed in wave 2
+(`MAX_SOURCE_BYTES` is now derived from `MAX_STRING_BYTES`, and `limits.rs`
+asserts the u32 and 24-bit bounds at compile time).
 
-The lexer's `tok_line = linebreaks.len() as u32`, `Token.len: u32`, and
-`CallSite`'s 24-bit line field (`LINE_MASK`) are sound only because
-`MAX_SOURCE_BYTES = 16 MiB`; each has a prose comment, nothing ties them. Raising
-the cap above 2^24 makes tracebacks saturate line numbers with no test failing.
-`MAX_SOURCE_BYTES` and `MAX_STRING_BYTES` are separate `16 * 1024 * 1024`
-literals; a reader cannot tell if they are one policy. If they diverge, `load` of
-a max-length string starts refusing strings the VM built (`SourceSizeExceeded`).
-`GMATCH_PATTERN_CACHE_BYTES = MAX_STRING_BYTES` already shows the derived style.
-
-Fix: `const _: () = assert!(MAX_SOURCE_BYTES <= CallSite::LINE_MASK as usize)`
-and a `u32::MAX` assert; decide explicitly whether one is defined as the other.
-Enforceable by compile-time asserts.
+The 24-bit assert restates the width rather than reading the private
+`CallSite::LINE_MASK` in `src/compiler/exp_desc.rs`, so narrowing the field
+would not trip it. Note 16 MiB equals `LINE_MASK + 1`; it holds only because
+call syntax takes more than one byte per line. Fix: assert against the mask
+itself, next to `CallSite`.
 
 ## HYG-011 - Public line-number widths disagree
 
@@ -201,48 +170,7 @@ Fix: one `budget: Option<Budget { limit, remaining }>` (or an owned `CostState`
 that hands out `CostMeter`), `cost_remaining()` a single `map_or`; snapshot
 encoding follows the type (tag byte + payload). Enforceable by type.
 
-## HYG-013 - Opcode charges restated in dispatch comments; stdlib charges have no list
-
-Reported by the VM-core and stdlib hunters.
-
-`frame.rs` arms carry "costs 1", "Table reads are free", "comparisons are free";
-the owner is `Instr::static_units()`, read correctly via `const { .. }`, so the
-comments (and presumably `docs/budget.md`'s table) are second copies. On the
-stdlib side about 40 cost literals are deliberate (the `string.rs` comment
-explains why a rule table would not help `analyze_cost`), but nobody can answer
-"what does `string.gsub` charge" without reading code. The formula
-`(s.len() + pattern.len()).max(1)` plus `charge_bytes(pattern.len())` repeats in
-find, match and gsub while gmatch charges the second part lazily. `math.rs`
-repeats `consume_cost(1)` 20 times on the same reasoning. `print` charges nothing
-though its work scales with output; consistent with the budget stance, but absent
-from the `string.rs` list of deliberately free functions.
-
-Fix: delete numeric claims from dispatch comments; generate or test the budget.md
-table from `static_units`; a golden test snapshotting `cost_used` per library
-function on fixed inputs, which turns "needs a version bump" into a check and
-supplies the missing charge table.
-
 ## Compiler front end
-
-## HYG-016 - Table inline-template threshold spelled twice
-
-Reported by the compiler hunter.
-
-`table.rs` uses `field_count > 4` in `parse_table` and `[TableTemplateField; 4]`
-plus `self.inline.len()` in `TableTemplateCandidate`. Changing one without the
-other makes `fields_for_template` silently return `None` for 5..N fields. Fix:
-`const INLINE_TEMPLATE_FIELDS`. Enforceable by the const, or a test that a
-5-field named constructor gets a template.
-
-## HYG-018 - Expandable-tail predicate spelled three times
-
-Reported by the compiler hunter.
-
-`Parser::open_tail`, `adjust_multi_assign` (stmt.rs) and `parse_table_entry`
-(table.rs) each match `ExpDesc::Prefix(PrefixExp::FunctionCall(_)) |
-ExpDesc::Vararg`; `open_tail`'s `assert_eq!` and two caller `assert!`s exist only
-because of it. Fix: `ExpDesc::is_multi`, or a `MultiTail(TailKind)` variant that
-`open_tail` takes by value, removing the asserts. Enforceable by type.
 
 ## HYG-019 - Two styles for narrowing to u8 against a limit
 
@@ -259,30 +187,6 @@ check bounds the value. Fix: one `bounded_u8(value, limit, err)`, and/or a
 `clippy::cast_possible_truncation` / `as_conversions` scoped to `compiler/`
 (`lua_std.rs` already denies `cast_possible_truncation`).
 
-## HYG-020 - Number-literal validation split between lexer and `numeral.rs`
-
-Reported by the compiler hunter.
-
-Hex needs mantissa and exponent digits in the lexer, but a decimal exponent with
-zero digits (`1e`, `1e+`) passes `lex_exponent` and is rejected by
-`numeral::parse_decimal`. Same `BadNumber` error, two enforcement points. Hex
-digits are classified by `is_ascii_hexdigit` in the lexer and
-`numeral::hex_value` in the parser. Fix: the lexer finds the maximal numeral span
-(Lua's `read_numeral`), `numeral::parse_lua_numeral` is the single validator.
-Enforceable by a test running every lexer fixture through both paths.
-
-## HYG-021 - String-literal bodies scanned twice; newline-pair consumption written three times
-
-Reported by the compiler hunter.
-
-`lex_string` scans to the closing quote with its own `\z` and escaped-newline
-handling; `Parser::get_literal_string_contents` re-scans to decode,
-re-implementing both. `is_newline_pair` is shared but the consumption rule is
-written in `Lexer::next_char`, `lex_string` and the parser decode. Errors split:
-lexer reports unclosed strings, parser reports bad escapes. Fix: decode once in
-the lexer and hand decoded bytes to the parser. Enforceable structurally; today
-only the test suite keeps them in step.
-
 ## HYG-024 - Line attribution depends on which token-consumption helper a site used
 
 Reported by the compiler hunter (not verified against reference line numbers; a
@@ -296,25 +200,6 @@ Affects runtime error lines (operator-facing, not replay-visible). Fix: update t
 line in `TokenStream::next` and stamp operators with the operator token's line
 (`luaK_fixline`). Enforceable by a line-info golden test over multi-line
 expressions.
-
-## HYG-025 - Syntax-depth bracket hand-rolled at each recursive entry
-
-Reported by the compiler hunter.
-
-`enter_syntax_level()?; let r = inner(); exit_syntax_level(); r` in
-`parse_statements`, `parse_expr`, `parse_unary`, `parse_if_arm`, doubled in
-`parse_prefix_extension`. An early `?` between the calls leaks depth silently.
-Fix: `with_syntax_level(cost, f)`. Enforceable if `syntax_depth` is touched only
-inside it, backed by a grep.
-
-## HYG-026 - Call-site marker emission duplicated across two suffix arms
-
-Reported by the compiler hunter.
-
-The `LParen | LiteralString | LCurly` and `Colon` arms of `parse_prefix_suffix`
-both emit `mark_call_base(1)`, parse args, call `open_tail`, NOP the marker for
-fixed counts and build a `CallSite`, with copied comments; they differ only in the
-prelude and implicit-arg count. Fix: one `finish_call(mark_idx, implicit_args)`.
 
 ## HYG-027 - Compiler depends on the VM; runtime cache types and `unsafe impl Sync` live in the compiler
 
@@ -412,9 +297,6 @@ Reported by the compiler hunter.
   `PartialEq`, from when caches lived in `Bytecode`. `RuntimeCaches` derives
   neither and no slot is cloned or compared; `TforCursorSlot` has neither. The
   compiler would reject a slot clone if removed, so deletion is self-checking.
-- `TokenType::LiteralHexNumber`: every consumer treats it as `LiteralNumber`
-  (`spelling`, `parse_expr_base`, `describe_token`, `is_expr_start`), and
-  `parse_lua_numeral` re-detects `0x`. Delete.
 - `numeral::scale_finite_by_power_of_two`: its only caller runs at
   `top_exponent >= MIN_NORMAL_EXPONENT` and rounding only raises the exponent, so
   the `< HALF_MIN_SUBNORMAL_EXPONENT` and `< MIN_NORMAL_EXPONENT` branches look
@@ -518,16 +400,6 @@ filter from aborting the host. Fix: a `TableKey` newtype built only through
 `Option` for `to_bytes_with_heap`; an iterator API that never yields dead slots.
 Enforceable by type.
 
-## HYG-043 - Outermost-host-boundary predicate restated three times in `call_op`
-
-Reported by the VM-core hunter.
-
-`report_call_error`, the inline `host_error` in the `__call` chain block, and a
-third inline copy for "not callable" all restate `call_depth == 0 &&
-call_chain_depth == 0 && active_rust_fn.is_none()`. The two inline copies should
-call `report_call_error`, or a shared `is_outermost_host_boundary()` where
-`handler_is_function` is needed.
-
 ## HYG-044 - Call-site recording and cost flushing placed by hand per opcode
 
 Reported by the VM-core hunter.
@@ -545,20 +417,10 @@ each opcode against a metatable'd operand asserting traceback line and
 
 ## HYG-046 - Duplicated small VM routines
 
-Reported by the VM-core hunter.
+Reported by the VM-core hunter; narrowed in wave 2.
 
-- `instr_set_list_count` and `instr_set_list` repeat the same three SetList(0)
-  base checks with identical strings; extract `constructor_base()`.
-- `State::error(&self, kind)` ignores `self` and equals
-  `Error::without_location(kind)` ("public compatibility helper"); VM code uses
-  both spellings. Pick one inside the crate.
-- `concat` checks `n > stack.len() - stack_bottom`, `get_top()` spelled
-  differently from every other count-taking API.
-- `get_index_table_field_direct` builds `MethodLookupCacheEntry` four times
-  differing in two fields; a constructor removes ~30 lines and the risk of one
-  copy missing `globals_version`.
-- `State::get_string_constant` forwards to `frame.literal(i)` and carries
-  `#[hotpath::measure]`; inline it at its 4 sites (see HYG-099).
+- `Error::without_location` is still spelled directly in `anchor.rs` and
+  `frame.rs` where `State::error` is available.
 - `Frame::new`'s `let ip = 0;` and `Frame::bytecode()` vs direct field access:
   trivial.
 
@@ -577,21 +439,6 @@ a test. `vararg_call_bases` / `table_constructor_bases` are shared across frames
 balanced by bytecode and repaired by watermarks; per-frame storage would make
 cross-frame confusion unrepresentable and delete the watermark logic and three
 `InternalError` checks.
-
-## HYG-048 - Public stack API swallows invalid indices; `table_len` does too
-
-Reported by the VM-core and heap hunters.
-
-`stack.rs`: `to_boolean(idx)` returns `false`, `typ(idx)` returns `Nil`,
-`raw_equal(a, b)` returns `false` for invalid indices, while `to_number`,
-`to_bytes`, `copy_val`, `insert` return `InvalidStackIndex`. Mirrors the C API's
-"acceptable index", but inconsistent within this API. Make them `Result` or add
-`try_` forms. `table_len` returns 0 for a bad index; `table_insert_at` /
-`table_remove_at` call it with the original `table_idx` after
-`table_operand_below_top` already resolved it. Pass the resolved index and drop
-the fallback. Enforceable by signature.
-
----
 
 ## Heap, tables, persistence
 
@@ -689,20 +536,6 @@ roots, but open-upvalue slots and `pending_bytecode_caches` are rooted in
 construct; heap `collect` private to a collector module owning the side sweeps;
 fold the extra roots into `mark_gc_roots`. Enforceable by visibility.
 
-## HYG-057 - `Table` invariants kept by many writers, unchecked
-
-Reported by the heap hunter.
-
-`dead_count` is adjusted by `insert`, `hash_remove`, `init_at_index` (both
-directions), `compact_dead`, `with_template_keys`; `version` is bumped by
-`bump_version` and hand-inlined in `insert_into_map_with_tombstones`, and reset by
-`rebuild`. The shape rules in the `Table` doc are the contract and nothing checks
-them. Fix: `debug_assert_invariants()` (dead_count equals nil-slot count; no live
-hash entry for keys `1..=array.len()+1`) at the end of every mutator under
-`debug_assertions`, as `drain_mark_worklist` did for `mark`. Lateral:
-`with_template_keys`' defensive duplicate count absorbs what would mean a verifier
-bug; a `debug_assert_eq!(map.len(), key_ids.len())` would surface it.
-
 ## HYG-059 - Snapshot encoder holds a breadcrumb per encoded value
 
 Reported by the heap hunter.
@@ -717,28 +550,10 @@ value. Fix: record nothing on the happy path; on failure re-walk from roots. Als
 x7) already truncate before constructing; delete the call-site copies and make
 `PathSegment::global(&str)` the only constructor.
 
-## HYG-064 - `OP_NEW_TABLE_PRESIZED` sizes only the hash part
-
-Reported by the heap hunter (parser side not confirmed).
-
-`frame.rs` passes `A` to `new_table_with_capacity`, which presizes the
-`IndexMap`; the array part is never presized. If `A` counts positional items,
-`{1, ..., 10}` allocates an unused 10-slot hash map and grows the array by
-doubling. Check what the parser emits.
 
 ---
 
 ## Stdlib and patterns
-
-## HYG-069 - Exact-integer bound is owned by `table.rs`, not `numeral.rs`
-
-Reported by the stdlib hunter; narrowed in wave 1.
-
-The table library now uses one range rule for `table.move` and the sequence
-functions, but the 2^53 bound itself is still `table.rs`'s `MAX_EXACT_KEY`, while
-`vm/rng.rs` writes `1u64 << 53` for a related purpose and `numeral::exact_i64`
-(in `src/numeral.rs`) owns the conversion. Fix: `numeral::MAX_EXACT_INTEGER`
-beside `exact_i64`, imported by both.
 
 ## HYG-072 - Argument-error construction bypasses its owner; library error text is free strings
 
@@ -773,19 +588,6 @@ function name, so a malformed pattern from `gsub` and from `find` look the same
 to a host (reference shares the gap; the typed error could carry it free). gsub's
 "invalid capture index" omits the index the code holds. `sort_less`'s comparison
 `TypeError` does not name `table.sort`.
-
-## HYG-075 - `Result::unwrap_or` bypasses the `Result::ok` ban
-
-Reported by the stdlib and compiler hunters.
-
-The `Result::ok` ban exists to stop silent discards; `unwrap_or` on a `Result`
-does the same. Sites: the gmatch iterators' `to_number(-1).unwrap_or(0.0)`
-(HYG-052), `error(msg, level)` saturating via `unwrap_or(u32::MAX)` (harmless),
-and `numeral::parse_decimal`'s `Some(parsed.unwrap_or(f64::NAN))` after an
-`is_err` check, which exists only to dodge `unwrap_used` and makes a reader prove
-NaN cannot reach a literal pool (use `match`). Enforceable: add
-`core::result::Result::unwrap_or` and `unwrap_or_default` to `disallowed-methods`
-with scoped allows where a default is meant.
 
 ## HYG-076 - Stdlib invariant panics restated per site
 
@@ -871,94 +673,16 @@ unit/integration boundary unless the test moves. Fix: one
 helper in src or move the compiler test; a parity test between the shell and Rust
 lists. Enforceable by the parity test.
 
-## HYG-088 - Reference-Lua set and install hint spelled in six places
+## HYG-097 - `research/bench_luars.sh` is untracked yet sources published numbers
 
-Reported by the tooling hunter.
+Reported by the tooling hunter; narrowed in wave 2. (The `.gitignore` entries
+`overnight.sh`, `overnight-logs` and `.plans` stay: those files exist locally on
+the user's host and would otherwise show as untracked.)
 
-"lua5.2 and lua5.4" appears in `diff_test.sh` (tool check loop, two `run_lua`
-sites, TIMEOUT labels), `tests/diff_test.rs` (`lua_versions_available` runs each
-with `-v`; the assertion carries an `apt install` hint), `diff_gate.sh`'s comment,
-a brokkr.toml comment and AGENTS.md. `bench.sh` has a legitimately different set
-(`lua5.5 lua5.4 lua5.2 luajit`) with no shared naming. Already drifted: Rust checks
-`-v` exits zero, shell checks `command -v`; the hint exists only in Rust. Tools
-are assumed under Debian names; on distros shipping `lua52` or `lua-5.4` the result
-is a loud refusal. Fix: a `REFERENCE_LUAS` array in lib.sh, optional
-`LUA52=`/`LUA54=` overrides; the Rust test should not pre-check. Enforceable by
-deleting the second site.
-
-## HYG-089 - Tooling knobs have no inventory; `FEATURES` is generic and cannot be empty
-
-Reported by the tooling hunter.
-
-Env vars: `DELLINGR`, `DELLINGR_SKIP_BUILD`, `DELLINGR_DIFF_TIMEOUT`,
-`DELLINGR_SKIP_TIMEOUT`, `DELLINGR_TEST_LIMIT_KB`, `FEATURES`,
-`BROKKR_MARKER_FIFO`. Constants: `DEFAULT_ITERATIONS`, `MAX_WARM_BLOCKS`,
-hyperfine `--warmup 2` (in both `bench.sh` and `hotbench.sh`), the 5s diff timeout,
-the 2 GiB vm cap, bucket directory lists, `FUNCTION_COUNT`, the 30-call footer.
-AGENTS.md omits `DELLINGR_SKIP_BUILD` (documented in `diff_test.sh`), so the
-documented set already diverges. In `hotbench.sh` an ambient `FEATURES` from CI or
-another tool changes which harness is built, and `${FEATURES:-hotpath}` makes "no
-features" unrepresentable. Fix: lib.sh resolves all shell knobs with a header
-listing them (`HYPERFINE_WARMUP` there); rename to `DELLINGR_HOTPATH_FEATURES` or a
-`--alloc` flag.
-
-## HYG-090 - bench/ and examples/ kernel pairing is unchecked
-
-Reported by the tooling hunter; narrowed in wave 1 (`tests/bench_scripts.rs` now
-parses every bench/ file and checks `_bench`, the 30-call footer and the success
-line).
-
-The pairing invariant (each brokkr.toml `file` and `hotpath_file` are the same
-kernel in the same proportions) is still unchecked, and a kernel in examples/
-that prints nothing still passes `run_examples`. Fix: compare `analyze_cost`
-fingerprints of each pair's `_bench`; require at least one `: true` line per
-example that defines `_bench`.
-
-## HYG-092 - Tooling diagnostics swallow the failure reason
-
-Reported by the tooling hunter.
-
-`bench.sh` runs `hyperfine ... >/dev/null 2>&1`; on failure the table shows `FAIL`
-and the reason is gone, with no JSON. `diff_test.sh`'s `FAIL: <name>` gives no
-diff or hint which reference was closer, and temp outputs die in the EXIT trap
-(the terse stdout format is deliberate for brokkr's last-line match). Fix: stderr
-to `$results_dir/$run_index.err` printed in the summary; keep
-`.scratch/diff-fail/<name>.{ours,52,54}` or write detail to stderr. Harness
-`counter_value` saturates to `i64::MAX` and `warm_avg_cost` truncates; a saturated
-counter should be a refusal rather than a lie in the results DB.
-
-## HYG-094 - Example runner and stress cap: no bound where stress runs, cap where nothing runs
-
-Reported by the tooling hunter.
-
-`run_examples` has no per-example timeout or memory cap; worker count is
-`available_parallelism()` with no override, so core count decides how many stress
-examples run at once, concurrently with the diff buckets. `scripts/test_limited.sh`
-exists "for stress tests" but its only reference is AGENTS.md's command list, and
-`ulimit -v` is a poor cap on allocators that reserve large virtual ranges (and
-Linux-specific). Either the cap is unnecessary and the script is dead, or the
-policy it encodes is not applied where stress examples run. Fix: wire it into the
-stress path or delete it; add an override for constrained CI.
-
-## HYG-097 - Dead or out-of-tree tooling
-
-Reported by the tooling hunter.
-
-- `scripts/notes_drop.py`: zero references in the repo or docs; it edits
-  `## <ID> - ` sections of findings documents (the tool behind 7996ccf's final
-  drain). These hunt documents use that heading format, so it may be relevant
-  again; if kept, document it in AGENTS.md's scripts section.
-- `.gitignore` entries `overnight.sh`, `overnight-logs`, `.plans` match nothing any
-  tracked tool writes (plans/ is retired), and would hide such files from `git
-  status` if they reappeared.
-- `research/` is ignored wholesale, yet AGENTS.md names
-  `research/bench_luars.sh` as the source of the README's lua-rs column; the
-  published numbers come from an untracked script on one host. Track it (or move
-  to `scripts/`) and ignore only `research/lua-rs/`.
-- `diff_test.sh`'s timeout fallback chain (`timeout` -> `gtimeout` -> a 20-line
-  embedded Python reimplementation of GNU duration parsing) is load-bearing only
-  on hosts without coreutils, while the project already assumes GNU-ish tools; if
-  macOS is not a goal it is dead weight kept in step with `timeout(1)` by hand.
+`research/` is ignored wholesale, yet AGENTS.md names `research/bench_luars.sh`
+as the source of the README's lua-rs column; the published numbers come from an
+untracked script on one host. Track it (or move to `scripts/`) and ignore only
+`research/lua-rs/`.
 
 ## HYG-098 - Stale and drifting comments and docs
 
@@ -1001,16 +725,6 @@ derived `Debug`, which renders the slotmap key: process-local, so any message or
 log built from `{:?}` of a `Val` differs between runs. No production formatting
 use was found. Fix: render the string contents (or a fixed placeholder) in
 `Val`'s `Debug`.
-
-## HYG-101 - `tests/test_conventions.rs` asserts source spelling, not behaviour
-
-Reported by the wave 1 reconciler.
-
-The conventions scan pins exact substrings of `tests/common/save_fixture.rs`
-(the `env::var_os` match arm text), so formatting or a harmless refactor breaks
-it. Test the regeneration gate's behaviour instead. Related: `run_examples.rs`
-builds its own `Command::new(common::dellingr_bin())` rather than
-`tests/common/cli.rs`'s `command()`.
 
 ## HYG-102 - Snapshot `FORMAT_VERSION` lives in `instr.rs`
 

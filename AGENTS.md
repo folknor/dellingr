@@ -51,22 +51,37 @@ brokkr run --quiet -- script.lua                      # forwards raw to cargo ru
 Differential testing against reference Lua:
 
 ```sh
-./scripts/diff_test.sh        # diff vs lua5.2 / lua5.4 (must be on PATH); prints "ok", or one FAIL/TIMEOUT line per failing script
+./scripts/diff_test.sh        # diff vs Lua 5.2 / 5.4; prints "ok", or one FAIL/TIMEOUT line per failing script
 ./scripts/test_limited.sh <cmd>  # run <cmd> under a virtual-memory cap (for stress tests)
 ```
 
-`diff_test.sh` exits 1 at the first unmarked example if `lua5.2` or `lua5.4`
-is missing, and requires dellingr to exit zero even for
-`-- DIFF: <reason>` files. DIFF files skip both reference runs after dellingr
-succeeds. Both `-- DIFF:` and `-- SKIP-DIFF:` require a nonempty reason.
+`diff_test.sh` exits 1 at the first unmarked example if either reference Lua
+is missing, naming the executable and the variable that overrides it, and
+requires dellingr to exit zero even for `-- DIFF: <reason>` files. DIFF files
+skip both reference runs after dellingr succeeds. Both `-- DIFF:` and
+`-- SKIP-DIFF:` require a nonempty reason. For each failure it also prints
+detail to stderr: the captured output of a process that failed or timed out,
+or unified diffs of dellingr's output against both references.
 Environment knobs:
 `DELLINGR=<path>` uses an existing binary instead of building one;
-`DELLINGR_DIFF_TIMEOUT` sets the per-process timeout in `timeout(1)` syntax
-(default `5s`; `0` disables it and does not require a timeout utility). Invalid
-values are rejected once at startup with exit code 2. Its temporary output lives
-under the gitignored `.scratch/`.
+`DELLINGR_SKIP_BUILD=1` refuses to build and requires `DELLINGR`;
+`LUA52` and `LUA54` name the reference executables (default `lua5.2` and
+`lua5.4`); `DELLINGR_DIFF_TIMEOUT` sets the per-process timeout in `timeout(1)`
+syntax (default `5s`). A nonzero timeout requires GNU `timeout` (coreutils) on
+PATH; there is no other fallback. `0` disables the timeout and needs no timeout
+utility. Invalid values are rejected once at startup with exit code 2. Its
+temporary output lives under the gitignored `.scratch/`.
 `test_limited.sh` reads `DELLINGR_TEST_LIMIT_KB` (a `ulimit -v` value in KiB,
-default 2 GiB).
+default 2 GiB; `unlimited` runs the command with no cap). Where `ulimit -v` is
+unsupported, the default cap is skipped silently, but an explicitly set value
+that cannot be applied is an error (exit 2).
+
+The defaults for these knobs, plus `HYPERFINE_WARMUP` (hyperfine warmup runs
+for `bench.sh` and `hotbench.sh`, default 2) and `DELLINGR_HOTPATH_FEATURES`
+(see Hotpath benchmarks), are set in one place at the top of `scripts/lib.sh`.
+
+`scripts/notes_drop.py` and `scripts/notes_move.py` are maintainer helpers for
+the `notes/` working documents, run directly when needed; no gate invokes them.
 
 Shell scripts live in `scripts/` and share `scripts/lib.sh`, which builds a
 cargo target and asks cargo for the artifact path (it needs `python3`), so no
@@ -138,9 +153,10 @@ value stack, not total host memory, and enforcing it charges no cost.
 
 ## Tests
 
-- `tests/run_examples.rs` - recursively runs every Lua file under `examples/` with the binary cargo built for the test run (`tests/common` owns the path; no test may reference `target/` or spawn cargo), in parallel worker threads. That includes the stress examples and the generated `parse/large_source.lua`. It fails on nonzero exit, unexpected stderr, or if any stdout line ends with `: false`. Examples that print test results follow the convention `print("test name: " .. tostring(condition))`. Adding an example that prints a line ending in `: false` will fail this test.
+- `tests/run_examples.rs` - recursively runs every Lua file under `examples/` with the binary cargo built for the test run (`tests/common` owns the path; no test may reference `target/` or spawn cargo), in parallel worker threads. That includes the stress examples and the generated `parse/large_source.lua`. Each example runs under `scripts/test_limited.sh` (so `DELLINGR_TEST_LIMIT_KB` applies) with a per-example timeout. `DELLINGR_EXAMPLE_TIMEOUT_MS` overrides the timeout (positive milliseconds, default in the test source) and `DELLINGR_EXAMPLE_WORKERS` lowers the worker count (1 to 8; the default is the smaller of 8 and the available parallelism). It fails on timeout, nonzero exit, unexpected stderr, if any stdout line ends with `: false`, or if a file defining `_bench()` prints no line ending in `: true`. Examples that print test results follow the convention `print("test name: " .. tostring(condition))`. Adding an example that prints a line ending in `: false` will fail this test.
 - `tests/error_handling.rs`, `gc_upvalues.rs`, `gsub_errors.rs`, `metamethod_errors.rs`, `rustfn_error.rs` - focused integration suites.
-- `tests/diff_test.rs` is the differential gate: it drives `scripts/diff_test.sh` over the whole corpus in three time-bounded partitions, once per `[[check]]` feature shape in `brokkr.toml` (there is no separate brokkr script check for it), and also checks malformed timeout rejection and nonempty marker reasons. The corpus partitions are compiled out under the `hotpath` feature. `scripts/diff_gate.sh` is an optional debug-build wrapper around `diff_test.sh` for direct runs; nothing in `brokkr check` invokes it. Mark intentional divergences with a `-- DIFF: <reason>` comment; dellingr must still succeed, but the references are skipped. A file carrying a `-- SKIP-DIFF: <reason>` line is not run by the differential gate. Reference Lua is required for unmarked examples.
+- `tests/diff_test.rs` is the differential gate: it drives `scripts/diff_test.sh` over the whole corpus in time-bounded partitions, once per `[[check]]` feature shape in `brokkr.toml` (there is no separate brokkr script check for it), and also checks malformed timeout rejection and nonempty marker reasons. The corpus partitions are compiled out under the `hotpath` feature. `scripts/diff_gate.sh` is an optional debug-build wrapper around `diff_test.sh` for direct runs; nothing in `brokkr check` invokes it. Mark intentional divergences with a `-- DIFF: <reason>` comment; dellingr must still succeed, but the references are skipped. A file carrying a `-- SKIP-DIFF: <reason>` line is not run by the differential gate. Reference Lua is required for unmarked examples; the test leaves that check, and its error message, to `diff_test.sh`.
+- `tests/bench_scripts.rs` checks the bench/ footer contract and that each `brokkr.toml` workload's `file` and `hotpath_file` give their `kernel` and shared helper functions matching `analyze_cost` fingerprints, which guards the same-kernel pairing described under Hotpath benchmarks.
 - Unit tests live alongside their modules (e.g. `src/vm/object.rs` has GC tests).
 
 ## Hotpath benchmarks
@@ -195,11 +211,13 @@ To add a new target: write `examples/{category}/{name}.lua` defining `_bench()` 
 ```sh
 ./scripts/hotbench.sh same_obj_read           # KVs from harness + hyperfine wall time
 ./scripts/hotbench.sh fill --runs 20          # extra args pass through to hyperfine
-FEATURES=hotpath-alloc ./scripts/hotbench.sh fill   # alloc tracking on the KV side
+DELLINGR_HOTPATH_FEATURES=hotpath-alloc ./scripts/hotbench.sh fill   # alloc tracking on the KV side
 ```
 
 `scripts/hotbench.sh` takes a brokkr workload name and resolves it to that
-registration's `hotpath_file`. It builds both the regular `dellingr` binary and the
+registration's `hotpath_file`. `DELLINGR_HOTPATH_FEATURES` picks the harness
+build's cargo features (unset means `hotpath`; set but empty builds without
+features), and `HYPERFINE_WARMUP` sets the hyperfine warmup count. It builds both the regular `dellingr` binary and the
 hotpath example, prints the harness's KV breakdown, and runs hyperfine
 on the script via the regular binary (the hotpath stats table at exit
 otherwise dominates wall time). Don't invoke the `cargo run --example

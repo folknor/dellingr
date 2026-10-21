@@ -193,7 +193,7 @@ impl Frame {
             #[cfg(feature = "debug_vm")]
             println!("{inst:?}");
             match inst.opcode() {
-                // === FREE OPERATIONS (cost 0) ===
+                // === Dispatch operations ===
 
                 // General control flow
                 Instr::OP_NOP => {}
@@ -232,7 +232,7 @@ impl Frame {
                 Instr::OP_GET_BUILTIN => state.instr_get_builtin(inst.a())?,
                 Instr::OP_SET_BUILTIN => state.instr_set_builtin(inst.a()),
 
-                // Functions (calls and returns are free)
+                // Functions (calls and returns)
                 Instr::OP_CLOSURE => state.instr_closure(self, inst.a())?,
                 Instr::OP_CALL => {
                     self.record_call_site(state);
@@ -294,7 +294,7 @@ impl Frame {
                     }
                 }
 
-                // Literals (free)
+                // Literals
                 Instr::OP_PUSH_NIL => state.push_nil()?,
                 Instr::OP_PUSH_BOOL => state.push_boolean(inst.a() != 0)?,
                 Instr::OP_PUSH_NUM => {
@@ -302,11 +302,11 @@ impl Frame {
                     state.push_number(n)?;
                 }
                 Instr::OP_PUSH_STRING => {
-                    let val = state.get_string_constant(self, inst.bx());
+                    let val = self.literal(inst.bx());
                     state.push_val(val)?;
                 }
 
-                // Equality (comparisons are free)
+                // Equality
                 Instr::OP_EQUAL => {
                     let val2 = state.pop_val();
                     let val1 = state.pop_val();
@@ -318,7 +318,7 @@ impl Frame {
                     state.push_unchecked(Val::Bool(val1 != val2));
                 }
 
-                // Orderings (comparisons are free)
+                // Orderings
                 // Supports both number and string comparisons
                 Instr::OP_LESS => state.eval_compare(Instr::LESS_ORDER.0, Instr::LESS_ORDER.1)?,
                 Instr::OP_GREATER => {
@@ -330,7 +330,7 @@ impl Frame {
                 Instr::OP_GREATER_EQUAL => state
                     .eval_compare(Instr::GREATER_EQUAL_ORDER.0, Instr::GREATER_EQUAL_ORDER.1)?,
 
-                // Fused comparison + BranchFalse (both halves free): pop two
+                // Fused comparison + BranchFalse: pop two
                 // operands, jump when the comparison is false. One range arm
                 // with the variant decode outlined - per-variant arms here
                 // measurably perturbed the dispatch loop's codegen.
@@ -338,11 +338,11 @@ impl Frame {
                     state.instr_branch_fused(self, inst.opcode(), inst.sbx())?;
                 }
 
-                // `for` loops - control flow is free
+                // `for` loops
                 Instr::OP_FOR_LOOP => state.instr_for_loop(self, inst.a(), inst.sbx())?,
                 Instr::OP_FOR_PREP => state.instr_for_prep(self, inst.a(), inst.sbx())?,
 
-                // Generic `for` loops - iteration is free
+                // Generic `for` loops
                 Instr::OP_TFOR_PREP => state.instr_tfor_prep(inst.a()),
                 Instr::OP_TFOR_CALL => {
                     self.record_call_site(state);
@@ -351,16 +351,16 @@ impl Frame {
                 }
                 Instr::OP_TFOR_LOOP => state.instr_tfor_loop(self, inst.a(), inst.sbx())?,
 
-                // Length has no fixed opcode charge; helpers may charge native work
+                // Length helpers may charge native work.
                 Instr::OP_LENGTH => {
                     self.record_call_site(state);
                     state.instr_length(local_cost)?;
                 }
 
-                // Logical not is free
+                // Logical not
                 Instr::OP_NOT => state.instr_not(),
 
-                // Table reads are free
+                // Table reads
                 Instr::OP_GET_FIELD => {
                     self.record_call_site(state);
                     state.instr_get_field(self, inst.bx(), inst.a(), local_cost)?;
@@ -370,9 +370,9 @@ impl Frame {
                     state.instr_get_table(local_cost)?;
                 }
 
-                // Concatenation has no fixed opcode charge. Operand A is the chain
-                // length (>= 2). Chained `..` collapses into one OP_CONCAT
-                // so a long concat has only one intermediate allocation.
+                // Operand A is the chain length (>= 2). Chained `..` collapses
+                // into one OP_CONCAT so a long concat has only one intermediate
+                // allocation.
                 //
                 // The bytes the operator emits are deliberately uncharged: the
                 // budget is a game-design instrument rather than a CPU meter
@@ -384,9 +384,9 @@ impl Frame {
                 // the operator does not.
                 Instr::OP_CONCAT => state.concat_helper(inst.a() as usize)?,
 
-                // === COSTED OPERATIONS (cost 1) ===
+                // === Fixed-charge operations ===
 
-                // Arithmetic costs 1
+                // Arithmetic
                 Instr::OP_ADD => {
                     add_cost!(
                         state,
@@ -436,7 +436,7 @@ impl Frame {
                     state.eval_float_float(f64::powf)?;
                 }
 
-                // Unary negation costs 1
+                // Unary negation
                 Instr::OP_NEGATE => {
                     add_cost!(
                         state,
@@ -446,7 +446,7 @@ impl Frame {
                     state.instr_negate()?;
                 }
 
-                // Table creation costs 1
+                // Table creation
                 Instr::OP_NEW_TABLE => {
                     add_cost!(
                         state,
@@ -461,6 +461,11 @@ impl Frame {
                         local_cost,
                         const { Instr::op(Instr::OP_NEW_TABLE_PRESIZED).static_units() }
                     );
+                    // The parser encodes its total field count here, including
+                    // keyed fields. This allocator uses it for hash capacity;
+                    // array presizing needs a separate list count and a
+                    // two-part capacity contract through the parser and
+                    // allocator/table path.
                     state.new_table_with_capacity(inst.a() as usize)?;
                 }
                 Instr::OP_NEW_TABLE_TEMPLATE => {
@@ -482,7 +487,7 @@ impl Frame {
                     state.table_constructor_bases.push(table_idx);
                 }
 
-                // Table writes cost 1
+                // Table writes
                 Instr::OP_INIT_FIELD => {
                     add_cost!(
                         state,
@@ -535,7 +540,7 @@ impl Frame {
                     state.instr_set_table(inst.a(), local_cost)?;
                 }
 
-                // Array initialization: cost per element
+                // Array initialization
                 Instr::OP_SET_LIST => {
                     let n = inst.a();
                     let count = state.instr_set_list_count(n)?;
@@ -607,5 +612,57 @@ mod tests {
             error.kind,
             ErrorKind::InvalidJump { ip: 0, offset: 1 }
         ));
+    }
+
+    #[test]
+    fn documented_opcode_charges_match_static_units() {
+        let docs = include_str!("../../docs/budget.md");
+        let section = docs
+            .split_once("## Static opcode charges")
+            .map(|(_, rest)| rest)
+            .expect("budget documentation contains the opcode charge table");
+        let mut classes = Vec::new();
+
+        for opcode in u8::MIN..=u8::MAX {
+            if !Instr::known_opcode(opcode) {
+                continue;
+            }
+
+            let class_name = format!("{:?}", Instr::cost_class(opcode));
+            let row_prefix = format!("| `{class_name}` |");
+            let row = section
+                .lines()
+                .find(|line| line.starts_with(&row_prefix))
+                .expect("each opcode cost class has a documented row");
+            if !classes.contains(&class_name) {
+                classes.push(class_name.clone());
+            }
+
+            let documented_units = row
+                .split('|')
+                .nth(2)
+                .expect("opcode charge row has a units column")
+                .trim();
+            if class_name == "ArrayElements" {
+                assert_eq!(documented_units, "encoded `A`");
+                assert_eq!(Instr::op_a(opcode, 7).static_units(), 7);
+            } else {
+                let documented_units = documented_units
+                    .parse::<u64>()
+                    .expect("fixed opcode charge is a unit count");
+                assert_eq!(
+                    Instr::op(opcode).static_units(),
+                    documented_units,
+                    "{class_name}"
+                );
+            }
+        }
+
+        let documented_rows = section
+            .lines()
+            .filter(|line| line.starts_with("| `"))
+            .count();
+        assert_eq!(documented_rows, classes.len() + 1);
+        assert_eq!(Instr::set_list(0).static_units(), 0);
     }
 }

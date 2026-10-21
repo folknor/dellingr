@@ -36,7 +36,7 @@ impl VmRng {
     }
 
     pub(crate) fn random_f64(&mut self) -> f64 {
-        const SCALE: f64 = 1.0 / ((1u64 << 53) as f64);
+        const SCALE: f64 = 1.0 / (crate::numeral::MAX_EXACT_INTEGER as f64);
         ((self.next_u64() >> 11) as f64) * SCALE
     }
 

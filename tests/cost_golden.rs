@@ -280,7 +280,7 @@ fn mid_run_budget_reset_sees_a_flushed_meter() {
         assert_eq!(state.cost_used(), expected, "meter before reset");
         assert_eq!(
             state.cost_remaining(),
-            1_000_000 - i64::try_from(expected).unwrap_or(i64::MAX)
+            1_000_000 - i64::try_from(expected).map_or(i64::MAX, i64::from)
         );
         state.set_cost_budget(1_000_000);
         Ok(0)

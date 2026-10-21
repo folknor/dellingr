@@ -74,6 +74,10 @@ pub(crate) fn exact_i64(number: f64) -> Option<i64> {
     }
 }
 
+/// Magnitude through which every integer has a distinct exact `f64` value.
+/// Some individual integers above this boundary are exact as well.
+pub(crate) const MAX_EXACT_INTEGER: i64 = 1 << 53;
+
 /// Converts a complete Lua numeral, allowing only Lua's ASCII whitespace.
 pub(crate) fn parse_lua_numeral(input: &[u8]) -> Option<f64> {
     let bytes = trim_lua_whitespace(input);
@@ -122,11 +126,11 @@ fn parse_decimal(bytes: &[u8]) -> Option<f64> {
         Ok(text) => text,
         Err(_) => return None,
     };
-    let parsed = text.parse::<f64>();
-    if parsed.is_err() {
+    // `Result::ok` is banned; a let-else keeps clippy's `manual_ok_err` quiet.
+    let Ok(value) = text.parse::<f64>() else {
         return None;
-    }
-    Some(parsed.unwrap_or(f64::NAN))
+    };
+    Some(value)
 }
 
 fn parse_hex(bytes: &[u8]) -> Option<f64> {
@@ -139,7 +143,7 @@ fn parse_hex(bytes: &[u8]) -> Option<f64> {
     // Any mantissa correction is bounded by four bits per byte. Once an
     // exponent exceeds this limit, no mantissa of this length can move the
     // result back from definite overflow or underflow.
-    let mantissa_len = i64::try_from(mantissa.len()).unwrap_or(i64::MAX);
+    let mantissa_len = i64::try_from(mantissa.len()).expect("a source slice length fits in i64");
     let exponent_limit = mantissa_len.saturating_mul(4).saturating_add(2048);
 
     let exponent = match exponent {

@@ -60,7 +60,7 @@ impl State {
     ) -> Result<()> {
         let val = self.pop_val();
         let positive_offset = self.stack.len() - negative_offset as usize - 1;
-        let key = self.get_string_constant(frame, key_id);
+        let key = frame.literal(key_id);
         let obj_ptr = self.stack[positive_offset].as_object_ptr();
         let typ = self.stack[positive_offset].typ(&self.heap);
 
@@ -103,7 +103,7 @@ impl State {
     ) -> Result<()> {
         let val = self.pop_val();
         let table_idx = self.stack.len() - 1;
-        let key = self.get_string_constant(frame, key_id);
+        let key = frame.literal(key_id);
         let obj_ptr = self.stack[table_idx].as_object_ptr();
         let typ = self.stack[table_idx].typ(&self.heap);
 
@@ -223,7 +223,7 @@ impl State {
     ) -> Result<()> {
         let val = self.pop_val();
         let idx = self.stack.len() - stack_offset as usize - 1;
-        let key = self.get_string_constant(frame, field_id);
+        let key = frame.literal(field_id);
         let cache = frame
             .runtime
             .caches
@@ -435,12 +435,7 @@ impl State {
         true
     }
 
-    #[hotpath::measure]
-    pub(super) fn instr_set_list_count(&self, count: u8) -> Result<usize> {
-        if count != 0 {
-            return Ok(count as usize);
-        }
-
+    fn constructor_base(&self) -> Result<usize> {
         let table_idx = *self.table_constructor_bases.last().ok_or_else(|| {
             self.error(ErrorKind::InternalError(
                 "SetList(0): no constructor base".to_string(),
@@ -460,6 +455,16 @@ impl State {
                 "SetList(0): base is not a table".to_string(),
             )));
         }
+        Ok(table_idx)
+    }
+
+    #[hotpath::measure]
+    pub(super) fn instr_set_list_count(&self, count: u8) -> Result<usize> {
+        if count != 0 {
+            return Ok(count as usize);
+        }
+
+        let table_idx = self.constructor_base()?;
         Ok(self.stack.len() - table_idx - 1)
     }
 
@@ -468,25 +473,10 @@ impl State {
         // Find the table on the stack (it's below the values)
         // count=0 means "use all values above the table"
         let values = if count == 0 {
-            let table_idx = self.table_constructor_bases.pop().ok_or_else(|| {
-                self.error(ErrorKind::InternalError(
-                    "SetList(0): no constructor base".to_string(),
-                ))
-            })?;
-            if table_idx < self.stack_bottom || table_idx >= self.stack.len() {
-                return Err(self.error(ErrorKind::InternalError(
-                    "SetList(0): base out of frame".to_string(),
-                )));
-            }
-            let is_table = self.stack[table_idx]
-                .as_object_ptr()
-                .and_then(|ptr| self.heap.as_table_ref(ptr))
-                .is_some();
-            if !is_table {
-                return Err(self.error(ErrorKind::InternalError(
-                    "SetList(0): base is not a table".to_string(),
-                )));
-            }
+            let table_idx = self.constructor_base()?;
+            self.table_constructor_bases
+                .pop()
+                .expect("constructor_base validated a pending base");
             self.stack.split_off(table_idx + 1)
         } else {
             self.stack.split_off(self.stack.len() - count as usize)
@@ -584,11 +574,6 @@ impl State {
         // Net-negative: two operands popped, one result pushed.
         self.push_unchecked(Val::Num(f(n1, n2)));
         Ok(())
-    }
-
-    #[hotpath::measure]
-    pub(super) fn get_string_constant(&self, frame: &Frame, i: u16) -> Val {
-        frame.literal(i)
     }
 
     pub(super) fn pop_num(&mut self) -> Result<f64> {
