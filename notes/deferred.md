@@ -229,9 +229,6 @@ Reported by the stdlib hunter.
   the VM always passes them and scripts cannot reach the handlers (`__metatable =
   false`), so the checks are unreachable from Lua (a host could call them). Noted
   so nobody cites them as precedent.
-- `LuaPattern::new` is uncached for find, match and gsub; a script calling
-  `s:find(p)` in a loop recompiles every time (uncharged, bounded). Sharing the
-  gmatch cache would be a win without cost-model change.
 
 ## HYG-060 - Small persistence redundancies
 
