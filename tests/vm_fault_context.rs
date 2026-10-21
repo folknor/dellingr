@@ -53,10 +53,6 @@ fn host_preflight_and_lua_errors_have_no_vm_fault() {
 #[test]
 fn legacy_internal_kinds_keep_exact_prefixes() {
     assert_eq!(
-        ErrorKind::InvalidJump { ip: 7, offset: -9 }.to_string(),
-        "internal error: invalid jump (instruction 7, offset -9)"
-    );
-    assert_eq!(
         ErrorKind::InternalError("detail".into()).to_string(),
         "internal error: detail"
     );

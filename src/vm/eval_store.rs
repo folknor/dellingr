@@ -1,4 +1,4 @@
-use super::super::error::{ErrorKind, TypeError};
+use super::super::error::{ConstructorTableOperation, ErrorKind, InternalFault, TypeError};
 use super::Result;
 use super::State;
 use super::Val;
@@ -65,9 +65,12 @@ impl State {
                 tbl.insert(key, val)?;
                 Ok(())
             }
-            None => Err(self.error(ErrorKind::InternalError(format!(
-                "InitField: expected table, got {typ}"
-            )))),
+            None => Err(super::Error::internal_fault(
+                InternalFault::ConstructorTableMissing {
+                    operation: ConstructorTableOperation::InitField,
+                    actual: typ,
+                },
+            )),
         }
     }
 
@@ -103,9 +106,12 @@ impl State {
                 }
                 Ok(())
             }
-            None => Err(self.error(ErrorKind::InternalError(format!(
-                "InitFieldPinned: expected table, got {typ}"
-            )))),
+            None => Err(super::Error::internal_fault(
+                InternalFault::ConstructorTableMissing {
+                    operation: ConstructorTableOperation::InitFieldPinned,
+                    actual: typ,
+                },
+            )),
         }
     }
 
@@ -122,9 +128,12 @@ impl State {
                 tbl.insert(key, val)?;
                 Ok(())
             }
-            None => Err(self.error(ErrorKind::InternalError(format!(
-                "InitIndex: expected table, got {tbl_typ}"
-            )))),
+            None => Err(super::Error::internal_fault(
+                InternalFault::ConstructorTableMissing {
+                    operation: ConstructorTableOperation::InitIndex,
+                    actual: tbl_typ,
+                },
+            )),
         }
     }
 
@@ -397,9 +406,9 @@ impl State {
             .and_then(|ptr| self.heap.as_table_ref(ptr))
             .is_some();
         if !is_table {
-            return Err(self.error(ErrorKind::InternalError(
-                "SetList(0): base is not a table".to_string(),
-            )));
+            return Err(super::Error::internal_fault(
+                InternalFault::SetListBaseNotTable,
+            ));
         }
         Ok(table_idx)
     }
@@ -439,9 +448,12 @@ impl State {
                 self.push_unchecked(tbl_value);
                 Ok(())
             }
-            None => Err(self.error(ErrorKind::InternalError(format!(
-                "SetList: expected table, got {typ}"
-            )))),
+            None => Err(super::Error::internal_fault(
+                InternalFault::ConstructorTableMissing {
+                    operation: ConstructorTableOperation::SetList,
+                    actual: typ,
+                },
+            )),
         }
     }
 

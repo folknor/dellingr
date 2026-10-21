@@ -34,6 +34,228 @@ pub struct VmFault {
     pub function_name: Option<String>,
 }
 
+pub(crate) enum InternalFault {
+    CallDynamicArguments,
+    CallAnchorDynamicArguments,
+    Compiler(CompilerFault),
+    CompilerValidation {
+        chunk: String,
+        detail: String,
+    },
+    GsubReplacementTemplateMissing,
+    GmatchPatternNotMemoized,
+    GmatchState(GmatchStateFault),
+    #[cfg(feature = "snapshot")]
+    SnapshotTable(SnapshotTableFault),
+    #[cfg(feature = "snapshot")]
+    SaveStateFailure(String),
+    CaptureRangeOutsideString,
+    MissingPointerIdentity,
+    ConstructorTableMissing {
+        operation: ConstructorTableOperation,
+        actual: LuaType,
+    },
+    SetListBaseNotTable,
+}
+
+pub(crate) enum CompilerFault {
+    RemappedJumpOffsetOutOfRange,
+    MissingLineForInstruction,
+    JumpTargetOutOfRange,
+    RemappedJumpBeyondCode,
+    TransferOpcodeExpected,
+    LineInfoDesynced,
+    NestedBytecodeNotUniquelyOwned,
+}
+
+pub(crate) enum ParserFault {
+    InvalidStringToken,
+    MissingStringContents,
+    BlockExitWithoutEntry,
+    ArithmeticFoldRequiresFoldableOpcode,
+    InstructionReplacementWithoutInstruction,
+    MultiValueTailMissingInstruction,
+    LoopExitWithoutEntry,
+    BreakEmissionLostLoopContext,
+    CompletedSourceRetainsFunctionFrames,
+    ChunkCompletionWithoutFunctionFrame,
+    CompletedFunctionRetainsScopes,
+    NamedFunctionTargetNotVariable,
+    EmptyMultiAssignment,
+    ConcatChainWithoutOperator,
+}
+
+pub(crate) enum GmatchStateFault {
+    StringFieldInvalid(&'static str),
+    NumberFieldInvalid(&'static str),
+    NumberFieldOutOfRange(&'static str),
+    PositionExceedsSubjectLength,
+    LastMatchExceedsSubjectLength,
+    LastMatchFieldInvalid(&'static str),
+    CompileFlagKeyMissing,
+    CompileFlagInvalid,
+}
+
+#[cfg(feature = "snapshot")]
+#[derive(Debug)]
+pub(crate) enum SnapshotTableFault {
+    ArrayLengthExceedsEntries,
+    ArraySlotHasWrongKey,
+    HashEntryBelongsInArray,
+}
+
+pub(crate) enum ConstructorTableOperation {
+    InitField,
+    InitFieldPinned,
+    InitIndex,
+    SetList,
+}
+
+impl InternalFault {
+    fn into_message(self) -> String {
+        match self {
+            Self::CallDynamicArguments => {
+                "call does not support ArgCount::Dynamic; use ArgCount::Fixed".to_owned()
+            }
+            Self::CallAnchorDynamicArguments => {
+                "call_anchor does not support ArgCount::Dynamic; use ArgCount::Fixed".to_owned()
+            }
+            Self::Compiler(fault) => fault.to_string(),
+            Self::CompilerValidation { chunk, detail } => {
+                format!("compiler emitted invalid bytecode in {chunk} {detail}")
+            }
+            Self::GsubReplacementTemplateMissing => {
+                "gsub replacement template was not initialized".to_owned()
+            }
+            Self::GmatchPatternNotMemoized => {
+                "gmatch pattern was not memoized before matching".to_owned()
+            }
+            Self::GmatchState(fault) => format!("invalid gmatch iterator state: {fault}"),
+            #[cfg(feature = "snapshot")]
+            Self::SnapshotTable(fault) => format!("{fault}"),
+            #[cfg(feature = "snapshot")]
+            Self::SaveStateFailure(error) => error,
+            Self::CaptureRangeOutsideString => "capture range outside the source string".to_owned(),
+            Self::MissingPointerIdentity => {
+                "value without a heap rendering has no pointer identity".to_owned()
+            }
+            Self::ConstructorTableMissing { operation, actual } => {
+                format!("{operation}: expected table, got {actual}")
+            }
+            Self::SetListBaseNotTable => "SetList(0): base is not a table".to_owned(),
+        }
+    }
+}
+
+impl fmt::Display for CompilerFault {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let message = match self {
+            Self::RemappedJumpOffsetOutOfRange => {
+                "instruction stripping produced an out-of-range jump"
+            }
+            Self::MissingLineForInstruction => {
+                "instruction stripping requires one line per instruction"
+            }
+            Self::JumpTargetOutOfRange => "instruction stripping found an out-of-range jump",
+            Self::RemappedJumpBeyondCode => {
+                "instruction stripping mapped a jump beyond retained code"
+            }
+            Self::TransferOpcodeExpected => "instruction stripping requires a transfer opcode",
+            Self::LineInfoDesynced => "line_info desynced from code",
+            Self::NestedBytecodeNotUniquelyOwned => {
+                "nested bytecode must be uniquely owned during finalization"
+            }
+        };
+        f.write_str(message)
+    }
+}
+
+impl ParserFault {
+    pub(crate) fn into_message(self) -> &'static str {
+        match self {
+            Self::InvalidStringToken => "parser requested contents for an invalid string token",
+            Self::MissingStringContents => "lexer did not retain contents for a string token",
+            Self::BlockExitWithoutEntry => "block exit requires a block entry",
+            Self::ArithmeticFoldRequiresFoldableOpcode => {
+                "arithmetic folding requires a foldable opcode"
+            }
+            Self::InstructionReplacementWithoutInstruction => {
+                "instruction replacement requires emitted code"
+            }
+            Self::MultiValueTailMissingInstruction => {
+                "multi-value tail does not end with its instruction"
+            }
+            Self::LoopExitWithoutEntry => "loop exit requires a loop entry",
+            Self::BreakEmissionLostLoopContext => "break emission lost its loop context",
+            Self::CompletedSourceRetainsFunctionFrames => {
+                "completed source retains function frames"
+            }
+            Self::ChunkCompletionWithoutFunctionFrame => {
+                "chunk completion requires a function frame"
+            }
+            Self::CompletedFunctionRetainsScopes => {
+                "completed function retains loop or block scopes"
+            }
+            Self::NamedFunctionTargetNotVariable => "a named function target must be a variable",
+            Self::EmptyMultiAssignment => "multi-assignment requires a nonempty expression list",
+            Self::ConcatChainWithoutOperator => "concat chain requires an operator",
+        }
+    }
+}
+
+impl fmt::Display for GmatchStateFault {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::StringFieldInvalid(field) => {
+                write!(f, "field '{field}' is missing or is not a string")
+            }
+            Self::NumberFieldInvalid(field) => {
+                write!(f, "field '{field}' is missing or is not a number")
+            }
+            Self::NumberFieldOutOfRange(field) => {
+                write!(f, "field '{field}' is outside its valid range")
+            }
+            Self::PositionExceedsSubjectLength => {
+                f.write_str("position exceeds the stored subject length")
+            }
+            Self::LastMatchExceedsSubjectLength => {
+                f.write_str("last match exceeds the stored subject length")
+            }
+            Self::LastMatchFieldInvalid(field) => {
+                write!(f, "field '{field}' is not a number or nil")
+            }
+            Self::CompileFlagKeyMissing => {
+                f.write_str("compile flag key is missing from integer slot 0")
+            }
+            Self::CompileFlagInvalid => f.write_str("compile flag is not a boolean or nil"),
+        }
+    }
+}
+
+#[cfg(feature = "snapshot")]
+impl fmt::Display for SnapshotTableFault {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let message = match self {
+            Self::ArrayLengthExceedsEntries => "snapshot array length exceeds its entries",
+            Self::ArraySlotHasWrongKey => "snapshot array slot has the wrong key",
+            Self::HashEntryBelongsInArray => "snapshot hash entry belongs in the array",
+        };
+        f.write_str(message)
+    }
+}
+
+impl fmt::Display for ConstructorTableOperation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let operation = match self {
+            Self::InitField => "InitField",
+            Self::InitFieldPinned => "InitFieldPinned",
+            Self::InitIndex => "InitIndex",
+            Self::SetList => "SetList",
+        };
+        f.write_str(operation)
+    }
+}
+
 /// Rarely-set error context, boxed so `Error` stays narrow. Structured library
 /// details live here so existing rendered messages and `ErrorKind` matches
 /// remain stable while hosts can inspect the operation that failed.
@@ -158,15 +380,6 @@ pub enum ErrorKind {
         /// Maximum permitted by the corresponding `limits` constant.
         limit: u32,
     },
-    /// Invalid jump target (compiler bug or corrupt bytecode).
-    /// Retained for API compatibility. Execution trusts verified jump targets;
-    /// new dispatch failures share instruction context via [`Error::vm_fault`].
-    InvalidJump {
-        /// Bytecode index where the bad jump originated.
-        ip: usize,
-        /// Signed jump offset that pointed outside the chunk.
-        offset: isize,
-    },
     /// Call stack depth exceeded (too much recursion).
     CallDepthExceeded {
         /// Depth reached at the failing call.
@@ -246,8 +459,9 @@ pub enum ErrorKind {
         prefix: PrefixLocation,
     },
     /// Internal error (corrupt bytecode or VM bug). The string is a
-    /// human-readable description; report these as bugs. Some host preflight
-    /// and compiler failures also use this legacy kind and have no opcode.
+    /// human-readable description; report these as bugs. Hosts may use this
+    /// legacy kind for their own errors. Library-created internal failures use
+    /// typed private reasons while preserving their rendered messages.
     /// Dispatch attaches structured instruction context via [`Error::vm_fault`]
     /// without widening `Error` on the recursive evaluation path.
     InternalError(String),
@@ -611,6 +825,10 @@ impl Error {
         Error::new(kind, 0, 0)
     }
 
+    pub(crate) fn internal_fault(fault: InternalFault) -> Self {
+        Self::without_location(ErrorKind::InternalError(fault.into_message()))
+    }
+
     /// Attach a stack trace to this error.
     pub fn with_stack_trace(mut self, trace: Vec<StackFrame>) -> Self {
         self.stack_trace = trace;
@@ -728,8 +946,7 @@ impl Error {
         self
     }
 
-    /// Instruction context shared by internal dispatch failures, regardless of
-    /// whether the legacy kind is `InternalError` or `InvalidJump`.
+    /// Instruction context shared by internal dispatch failures.
     pub fn vm_fault(&self) -> Option<&VmFault> {
         self.context
             .as_deref()
@@ -742,11 +959,7 @@ impl Error {
         opcode: u8,
         function_name: Option<&str>,
     ) -> Self {
-        if matches!(
-            self.kind,
-            ErrorKind::InternalError(_) | ErrorKind::InvalidJump { .. }
-        ) && self.vm_fault().is_none()
-        {
+        if matches!(self.kind, ErrorKind::InternalError(_)) && self.vm_fault().is_none() {
             self.context_mut().vm_fault = Some(VmFault {
                 instruction,
                 opcode,
@@ -971,8 +1184,7 @@ impl fmt::Display for MalformedPatternDetail {
 impl fmt::Display for ErrorKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use ErrorKind::*;
-        // One prefix owner for both legacy internal-error representations.
-        if matches!(self, InternalError(_) | InvalidJump { .. }) {
+        if matches!(self, InternalError(_)) {
             f.write_str("internal error: ")?;
         }
         match self {
@@ -992,9 +1204,6 @@ impl fmt::Display for ErrorKind {
                     f,
                     "metamethod chain too deep (depth {depth}, limit {limit})"
                 )
-            }
-            InvalidJump { ip, offset } => {
-                write!(f, "invalid jump (instruction {ip}, offset {offset})")
             }
             CallDepthExceeded { depth, limit } => {
                 write!(f, "call stack overflow (depth {depth}, limit {limit})")

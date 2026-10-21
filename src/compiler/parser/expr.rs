@@ -10,6 +10,7 @@ use super::SyntaxError;
 use super::TailKind;
 use super::TokenType;
 use crate::compiler::exp_desc::CallSite;
+use crate::error::ParserFault;
 use crate::limits::MAX_EXPRESSIONS;
 
 impl Parser<'_> {
@@ -130,7 +131,7 @@ impl Parser<'_> {
                 SyntaxError::TooManyExpressions,
             )?;
             let line =
-                line.ok_or_else(|| self.internal_error("concat chain requires an operator"))?;
+                line.ok_or_else(|| self.internal_error(ParserFault::ConcatChainWithoutOperator))?;
             self.push_at_line(Instr::concat(n), line);
         }
         Ok(exp_desc)

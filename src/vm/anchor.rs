@@ -26,6 +26,7 @@ use super::State;
 use super::TypeError;
 use super::Val;
 use super::object::{GcHeap, Markable, ObjectPtr};
+use crate::error::InternalFault;
 
 new_key_type! {
     pub(crate) struct AnchorKey;
@@ -241,9 +242,9 @@ impl State {
                 // against a call base its own OP_MARK_CALL_BASE pushed; a
                 // host owns no such base. Reject it explicitly, as
                 // State::call does.
-                return Err(self.error(ErrorKind::InternalError(
-                    "call_anchor does not support ArgCount::Dynamic; use ArgCount::Fixed".into(),
-                )));
+                return Err(super::Error::internal_fault(
+                    InternalFault::CallAnchorDynamicArguments,
+                ));
             }
         };
         // Insert the fn below the n_args topmost values. Validate against the

@@ -153,8 +153,8 @@ impl Bytecode {
     }
 }
 
-fn internal_error(message: impl Into<String>) -> error::Error {
-    error::Error::without_location(error::ErrorKind::InternalError(message.into()))
+fn internal_error(fault: error::CompilerFault) -> error::Error {
+    error::Error::internal_fault(error::InternalFault::Compiler(fault))
 }
 
 fn transfer_with_offset(inst: Instr, offset: i16) -> Option<Instr> {
@@ -163,7 +163,7 @@ fn transfer_with_offset(inst: Instr, offset: i16) -> Option<Instr> {
 
 fn checked_remapped_offset(offset: i64) -> Result<i16> {
     i16::try_from(offset)
-        .map_err(|_| internal_error("instruction stripping produced an out-of-range jump"))
+        .map_err(|_| internal_error(error::CompilerFault::RemappedJumpOffsetOutOfRange))
 }
 
 /// Remove compiler-only no-ops and close-upvalue instructions that cannot
@@ -188,7 +188,7 @@ fn strip_dead_instructions(bc: &mut Bytecode) -> Result<()> {
     let old_len = bc.code.len();
     if bc.line_info.len() != old_len {
         return Err(internal_error(
-            "instruction stripping requires one line per instruction",
+            error::CompilerFault::MissingLineForInstruction,
         ));
     }
     let mut map = Vec::with_capacity(old_len + 1);
@@ -209,21 +209,17 @@ fn strip_dead_instructions(bc: &mut Bytecode) -> Result<()> {
         } else {
             old_next.checked_sub(inst.sbx().unsigned_abs() as usize)
         }
-        .ok_or_else(|| internal_error("instruction stripping found an out-of-range jump"))?;
+        .ok_or_else(|| internal_error(error::CompilerFault::JumpTargetOutOfRange))?;
         if old_target >= old_len {
-            return Err(internal_error(
-                "instruction stripping found an out-of-range jump",
-            ));
+            return Err(internal_error(error::CompilerFault::JumpTargetOutOfRange));
         }
         let new_target = map[old_target];
         if new_target >= retained_len {
-            return Err(internal_error(
-                "instruction stripping mapped a jump beyond retained code",
-            ));
+            return Err(internal_error(error::CompilerFault::RemappedJumpBeyondCode));
         }
         let new_offset = checked_remapped_offset(new_target as i64 - map[old_next] as i64)?;
         *inst = transfer_with_offset(*inst, new_offset)
-            .ok_or_else(|| internal_error("instruction stripping requires a transfer opcode"))?;
+            .ok_or_else(|| internal_error(error::CompilerFault::TransferOpcodeExpected))?;
     }
 
     let old_code = std::mem::take(&mut bc.code);
@@ -274,11 +270,16 @@ fn validation_error(bc: &Bytecode, validation: &verify::BytecodeValidationError)
         || "unnamed chunk".to_string(),
         |name| format!("function '{name}'"),
     );
-    let message = format!("compiler emitted invalid bytecode in {chunk_desc} {validation}");
+    let validation_detail = validation.to_string();
+    let message = format!("compiler emitted invalid bytecode in {chunk_desc} {validation_detail}");
     debug_assert!(false, "{message}");
     // Internal errors start without a location. The error representation uses
     // 0:0 for that state; attach a line only when the verifier identifies one.
-    let mut error = internal_error(message).with_source_name(bc.source.clone());
+    let mut error = error::Error::internal_fault(error::InternalFault::CompilerValidation {
+        chunk: chunk_desc,
+        detail: validation_detail,
+    })
+    .with_source_name(bc.source.clone());
     if let Some(line) = validation
         .instruction
         .and_then(|instruction| bc.line_info.get(instruction as usize))
@@ -302,7 +303,7 @@ fn finalize_at_depth(bc: &mut Bytecode, depth: usize) -> Result<()> {
         name.truncate(end);
     }
     if bc.code.len() != bc.line_info.len() {
-        return Err(internal_error("line_info desynced from code"));
+        return Err(internal_error(error::CompilerFault::LineInfoDesynced));
     }
     strip_dead_instructions(bc).map_err(|error| error.with_source_name(bc.source.clone()))?;
     debug_assert_eq!(
@@ -330,9 +331,8 @@ fn finalize_at_depth(bc: &mut Bytecode, depth: usize) -> Result<()> {
     for nested in &mut bc.nested {
         // The parser produces nested `Arc<Bytecode>` with a refcount of 1, so
         // we have unique access to mutate each one in place before it ships.
-        let inner = Arc::get_mut(nested).ok_or_else(|| {
-            internal_error("nested bytecode must be uniquely owned during finalization")
-        })?;
+        let inner = Arc::get_mut(nested)
+            .ok_or_else(|| internal_error(error::CompilerFault::NestedBytecodeNotUniquelyOwned))?;
         finalize_at_depth(inner, depth + 1)?;
     }
     Ok(())

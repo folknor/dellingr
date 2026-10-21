@@ -6,6 +6,7 @@ use super::PlaceExp;
 use super::Result;
 use super::SyntaxError;
 use super::TokenType;
+use crate::error::ParserFault;
 use crate::limits::{MAX_CHUNK_NESTING, MAX_NESTED};
 
 impl<'a> Parser<'a> {
@@ -27,7 +28,7 @@ impl<'a> Parser<'a> {
         let place_exp = self.parse_prefix_identifier(name)?;
         let instr = match place_exp {
             PlaceExp::FieldAccess(_) | PlaceExp::TableIndex => {
-                return Err(self.internal_error("a named function target must be a variable"));
+                return Err(self.internal_error(ParserFault::NamedFunctionTargetNotVariable));
             }
             place => place.set_instr(0),
         };

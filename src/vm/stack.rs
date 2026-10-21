@@ -7,6 +7,7 @@ use std::cmp::Ordering;
 
 use super::lua_val::{RustFunc, Val};
 use super::{ErrorKind, MAX_STACK_SIZE, Result, State};
+use crate::error::InternalFault;
 
 impl State {
     /// Returns the index of the top element in the stack. Because indices start
@@ -135,9 +136,9 @@ impl State {
         match bytes.get(range) {
             Some(slice) => copied.extend_from_slice(slice),
             None => {
-                return Err(self.error(ErrorKind::InternalError(
-                    "capture range outside the source string".into(),
-                )));
+                return Err(super::Error::internal_fault(
+                    InternalFault::CaptureRangeOutsideString,
+                ));
             }
         }
         self.push_bytes(copied)

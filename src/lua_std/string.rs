@@ -4,7 +4,10 @@ use std::sync::{Arc, OnceLock};
 
 use super::{STRING_LIBRARY_CAPACITY, arg_integer, check_any_named, check_type_named, opt_integer};
 use crate::compiler;
-use crate::error::{Error, ErrorKind, LibraryError, PatternErrorDetail, StringPatternFunction};
+use crate::error::{
+    Error, ErrorKind, GmatchStateFault, InternalFault, LibraryError, PatternErrorDetail,
+    StringPatternFunction,
+};
 use crate::instr::{ArgCount, RetCount};
 use crate::patterns::{LuaCapture, LuaPattern, MatchError, PatternError};
 use crate::{LuaType, Result, State};
@@ -419,9 +422,7 @@ fn append_gsub_replacement(
                 false
             };
             let replacement_template = template.as_ref().ok_or_else(|| {
-                state.error(ErrorKind::InternalError(
-                    "gsub replacement template was not initialized".into(),
-                ))
+                Error::internal_fault(InternalFault::GsubReplacementTemplateMissing)
             })?;
             append_templated_replacement(
                 state,
@@ -929,21 +930,17 @@ fn push_gmatch_wrapper(
     Ok(1)
 }
 
-fn invalid_gmatch_state(state: &State, reason: impl Into<String>) -> Error {
-    state.error(ErrorKind::InternalError(format!(
-        "invalid gmatch iterator state: {}",
-        reason.into()
-    )))
+fn invalid_gmatch_state(fault: GmatchStateFault) -> Error {
+    Error::internal_fault(InternalFault::GmatchState(fault))
 }
 
-fn push_gmatch_string_field(state: &mut State, field: &str) -> Result<()> {
+fn push_gmatch_string_field(state: &mut State, field: &'static str) -> Result<()> {
     state.push_string(field)?;
     state.get_table_raw(1)?;
     if state.typ(-1) != LuaType::String {
-        return Err(invalid_gmatch_state(
-            state,
-            format!("field '{field}' is missing or is not a string"),
-        ));
+        return Err(invalid_gmatch_state(GmatchStateFault::StringFieldInvalid(
+            field,
+        )));
     }
     Ok(())
 }
@@ -954,19 +951,17 @@ fn push_gmatch_string_field(state: &mut State, field: &str) -> Result<()> {
 fn gmatch_state_index(
     state: &State,
     stack_index: isize,
-    field: &str,
+    field: &'static str,
     maximum: usize,
 ) -> Result<usize> {
     if state.typ(stack_index) != LuaType::Number {
-        return Err(invalid_gmatch_state(
-            state,
-            format!("field '{field}' is missing or is not a number"),
-        ));
+        return Err(invalid_gmatch_state(GmatchStateFault::NumberFieldInvalid(
+            field,
+        )));
     }
     let number = state.to_number(stack_index)?;
-    crate::vm::integer_index(number, maximum).ok_or_else(|| {
-        invalid_gmatch_state(state, format!("field '{field}' is outside its valid range"))
-    })
+    crate::vm::integer_index(number, maximum)
+        .ok_or_else(|| invalid_gmatch_state(GmatchStateFault::NumberFieldOutOfRange(field)))
 }
 
 fn gmatch_empty_iter(state: &mut State) -> Result<u8> {
@@ -994,8 +989,7 @@ fn gmatch_empty_iter(state: &mut State) -> Result<u8> {
 
     if pos > len.saturating_add(1) {
         return Err(invalid_gmatch_state(
-            state,
-            "position exceeds the stored subject length",
+            GmatchStateFault::PositionExceedsSubjectLength,
         ));
     }
     if pos > len {
@@ -1042,11 +1036,7 @@ fn gmatch_iter(state: &mut State) -> Result<u8> {
         )?),
         _ => {
             return Err(invalid_gmatch_state(
-                state,
-                format!(
-                    "field '{}' is not a number or nil",
-                    gmatch_schema::LAST_MATCH_FIELD
-                ),
+                GmatchStateFault::LastMatchFieldInvalid(gmatch_schema::LAST_MATCH_FIELD),
             ));
         }
     };
@@ -1055,14 +1045,12 @@ fn gmatch_iter(state: &mut State) -> Result<u8> {
     let subject_len = state.to_bytes(2)?.len();
     if pos > subject_len.saturating_add(1) {
         return Err(invalid_gmatch_state(
-            state,
-            "position exceeds the stored subject length",
+            GmatchStateFault::PositionExceedsSubjectLength,
         ));
     }
     if lastmatch.is_some_and(|last| last > subject_len) {
         return Err(invalid_gmatch_state(
-            state,
-            "last match exceeds the stored subject length",
+            GmatchStateFault::LastMatchExceedsSubjectLength,
         ));
     }
     if pos > subject_len {
@@ -1087,8 +1075,7 @@ fn gmatch_iter(state: &mut State) -> Result<u8> {
     };
     if !cache_key_matches {
         return Err(invalid_gmatch_state(
-            state,
-            "compile flag key is missing from integer slot 0",
+            GmatchStateFault::CompileFlagKeyMissing,
         ));
     }
     state.get_table_raw(1)?;
@@ -1096,10 +1083,7 @@ fn gmatch_iter(state: &mut State) -> Result<u8> {
         LuaType::Nil => false,
         LuaType::Boolean if state.to_boolean(-1) => true,
         _ => {
-            return Err(invalid_gmatch_state(
-                state,
-                "compile flag is not a boolean or nil",
-            ));
+            return Err(invalid_gmatch_state(GmatchStateFault::CompileFlagInvalid));
         }
     };
     state.pop(1)?;

@@ -4,14 +4,19 @@
 //! including metamethod-aware operations.
 
 use super::lua_val::{PointerIdKey, RustFunc, Val};
-use super::table::TableNext;
+use super::table::{TableError, TableNext};
 use super::{Result, State, TypeError};
-use crate::error::{ErrorKind, LibraryError};
+use crate::error::{ErrorKind, InternalFault, LibraryError};
 use crate::instr::{ArgCount, RetCount};
 
 trait TableSortAccess {
     fn get(&mut self, state: &mut State, index: usize) -> Result<Val>;
-    fn set(&mut self, state: &mut State, index: usize, value: Val) -> Result<()>;
+    fn set(
+        &mut self,
+        state: &mut State,
+        index: usize,
+        value: Val,
+    ) -> std::result::Result<(), TableError>;
 }
 
 struct VecSortAccess<'a> {
@@ -23,7 +28,12 @@ impl TableSortAccess for VecSortAccess<'_> {
         Ok(self.values[index])
     }
 
-    fn set(&mut self, _state: &mut State, index: usize, value: Val) -> Result<()> {
+    fn set(
+        &mut self,
+        _state: &mut State,
+        index: usize,
+        value: Val,
+    ) -> std::result::Result<(), TableError> {
         self.values[index] = value;
         Ok(())
     }
@@ -45,7 +55,12 @@ impl TableSortAccess for ScratchTableSortAccess {
         Ok(table.get(&Val::Num((index + 1) as f64)))
     }
 
-    fn set(&mut self, state: &mut State, index: usize, value: Val) -> Result<()> {
+    fn set(
+        &mut self,
+        state: &mut State,
+        index: usize,
+        value: Val,
+    ) -> std::result::Result<(), TableError> {
         let ptr = state.stack[self.table_idx]
             .as_object_ptr()
             .expect("scratch sort stack slot holds a table");
@@ -122,7 +137,8 @@ fn table_sort_swap<A: TableSortAccess>(
     let a_value = access.get(state, a)?;
     let b_value = access.get(state, b)?;
     access.set(state, a, b_value)?;
-    access.set(state, b, a_value)
+    access.set(state, b, a_value)?;
+    Ok(())
 }
 
 impl State {
@@ -749,9 +765,9 @@ impl State {
         }
         match self.format_pointer_id(idx)? {
             Some(id) => Ok(format!("{}: 0x{id:x}", val.typ(&self.heap).as_str()).into_bytes()),
-            None => Err(self.error(ErrorKind::InternalError(
-                "value without a heap rendering has no pointer identity".to_string(),
-            ))),
+            None => Err(super::Error::internal_fault(
+                InternalFault::MissingPointerIdentity,
+            )),
         }
     }
 

@@ -12,6 +12,7 @@ use super::object::{Closure, Upvalue, UpvalueRef};
 use super::{
     Bytecode, CallInfo, Error, ErrorKind, MAX_CALL_DEPTH, Result, State, TypeError, compiler,
 };
+use crate::error::InternalFault;
 use crate::instr::{ArgCount, RetCount};
 
 impl State {
@@ -48,9 +49,7 @@ impl State {
         let num_args = match num_args {
             ArgCount::Fixed(num_args) => num_args,
             ArgCount::Dynamic => {
-                return Err(self.error(ErrorKind::InternalError(
-                    "call does not support ArgCount::Dynamic; use ArgCount::Fixed".into(),
-                )));
+                return Err(Error::internal_fault(InternalFault::CallDynamicArguments));
             }
         };
         self.call_op(num_args, num_ret_expected)

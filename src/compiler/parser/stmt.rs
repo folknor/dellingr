@@ -7,6 +7,7 @@ use super::Result;
 use super::RetCount;
 use super::SyntaxError;
 use super::TokenType;
+use crate::error::ParserFault;
 use crate::limits::{MAX_ASSIGNMENT_OFFSET, MAX_FIXED_RESULTS};
 
 impl<'a> Parser<'a> {
@@ -376,7 +377,7 @@ impl<'a> Parser<'a> {
         last_exp: &ExpDesc,
     ) -> Result<()> {
         if num_exprs == 0 {
-            return Err(self.internal_error("multi-assignment requires a nonempty expression list"));
+            return Err(self.internal_error(ParserFault::EmptyMultiAssignment));
         }
         let fixed_prefix = num_exprs - 1;
         let tail_needed = num_targets.saturating_sub(fixed_prefix);

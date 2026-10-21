@@ -38,6 +38,7 @@ use super::compiler::Bytecode;
 use super::cost_meter::{CostMeter, CostState};
 use super::error::Error;
 use super::error::ErrorKind;
+use super::error::InternalFault;
 use super::error::StackFrame;
 use super::error::TypeError;
 use super::host::{DefaultCallbacks, HostCallbacks};
@@ -618,11 +619,9 @@ impl State {
         let pattern_ptr = stack[pattern_idx]
             .as_string_ptr()
             .expect("expect_string_at validated the pattern's string type");
-        let entry = gmatch_patterns.get_mut(&pattern_ptr).ok_or_else(|| {
-            Error::without_location(ErrorKind::InternalError(
-                "gmatch pattern was not memoized before matching".into(),
-            ))
-        })?;
+        let entry = gmatch_patterns
+            .get_mut(&pattern_ptr)
+            .ok_or_else(|| Error::internal_fault(InternalFault::GmatchPatternNotMemoized))?;
         let matcher = &mut entry.pattern;
         let meter = cost.meter();
         Ok(operation(subject, matcher, meter))
@@ -659,11 +658,9 @@ impl State {
         let pattern_ptr = stack[pattern_idx]
             .as_string_ptr()
             .expect("expect_string_at validated the pattern's string type");
-        let entry = gmatch_patterns.get_mut(&pattern_ptr).ok_or_else(|| {
-            Error::without_location(ErrorKind::InternalError(
-                "gmatch pattern was not memoized before matching".into(),
-            ))
-        })?;
+        let entry = gmatch_patterns
+            .get_mut(&pattern_ptr)
+            .ok_or_else(|| Error::internal_fault(InternalFault::GmatchPatternNotMemoized))?;
         let matcher = &mut entry.pattern;
         let meter = cost.meter();
         Ok((subject, matcher, meter))
@@ -1035,7 +1032,7 @@ impl State {
             SaveError::DuplicateFunctionRegistration { id } => {
                 Error::without_location(ErrorKind::DuplicateFunctionRegistration { id })
             }
-            other => Error::without_location(ErrorKind::InternalError(other.to_string())),
+            other => Error::internal_fault(InternalFault::SaveStateFailure(other.to_string())),
         }
     }
 

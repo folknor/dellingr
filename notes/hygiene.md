@@ -62,29 +62,7 @@ ids), deterministic but snapshot-visible, so call it out; see HYG-038 on whether
 timing is contract. Enforceable by a text rule banning `alloc_string("__` /
 `"__[a-z]+"` literals outside the enum's module.
 
-## HYG-039 - `InternalError(String)` assembled ad hoc; `InvalidJump` is a second "VM bug" kind
-
-Reported by the VM-core and host-surface hunters; narrowed in wave 8 (VM faults
-carry a typed `VmFault` with opcode and location through `Error::vm_fault()`,
-both kinds share one prefix, dispatch no longer emits `InvalidJump`, and VM
-`InternalError` sites fell from about 20 to 9).
-
-Still open: the nine remaining `InternalError(String)` sites carry free text,
-including host misuse of a dynamic argument count; the public `InvalidJump`
-variant is kept for compatibility though nothing in dispatch produces it.
-
 ## Heap, tables, persistence
-
-## HYG-053 - `table.rs` still returns the crate `Error`
-
-Reported by the heap hunter; narrowed in waves 6 to 8 (every snapshot
-corruption error carries a typed location, and gmatch state errors name the
-state table).
-
-Still open: `Table::insert`, `set_list`, `rebuild*` and
-`clear_and_insert_entries` return `Result<(), Error>`; a table-local key error
-would need wrapping at about 11 caller sites (a comment above the import says
-so).
 
 ## Stdlib and patterns
 

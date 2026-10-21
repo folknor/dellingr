@@ -8,6 +8,11 @@ All notable changes to dellingr are documented here. The format follows
 
 ### Changed (breaking)
 
+- `ErrorKind::InvalidJump` is removed. Verified bytecode execution reports
+  internal dispatch failures as `InternalError`, with instruction context
+  available through `Error::vm_fault()`.
+- `LoadError::InvalidTable` reasons no longer carry a leading `0:0: `
+  location prefix.
 - `HostCallbacks::on_print` has no default body; every implementation must
   define it. `DefaultCallbacks` writes to stdout and drops write errors instead
   of panicking.

@@ -17,6 +17,7 @@ use super::lexer::TokenStream;
 use super::token::Token;
 use super::token::TokenType;
 use crate::det_hash::{IndexMap, IndexSet};
+use crate::error::ParserFault;
 use crate::instr::{ArgCount, Builtin, RetCount};
 use crate::limits::{MAX_FIXED_ARGS, MAX_LITERALS, MAX_LOCALS, MAX_SOURCE_BYTES, MAX_SYNTAX_DEPTH};
 
@@ -149,8 +150,8 @@ impl<'a> Parser<'a> {
         )
     }
 
-    fn internal_error(&self, message: &str) -> Error {
-        self.error_here(ErrorKind::InternalError(message.into()))
+    fn internal_error(&self, fault: ParserFault) -> Error {
+        self.error_here(ErrorKind::InternalError(fault.into_message().to_owned()))
     }
 
     fn checked_fixed_arg_count(&self, explicit: usize, implicit: usize) -> Result<u8> {
@@ -301,9 +302,7 @@ impl<'a> Parser<'a> {
 
         if tok.typ != TokenType::LiteralString || tok.len < 2 {
             return Err(self.error_at(
-                ErrorKind::InternalError(
-                    "parser requested contents for an invalid string token".into(),
-                ),
+                ErrorKind::InternalError(ParserFault::InvalidStringToken.into_message().to_owned()),
                 tok.start,
             ));
         }
@@ -315,7 +314,9 @@ impl<'a> Parser<'a> {
                 Err(self.error_here(ErrorKind::StringSizeExceeded { size, limit }))
             }
             None => Err(self.error_at(
-                ErrorKind::InternalError("lexer did not retain contents for a string token".into()),
+                ErrorKind::InternalError(
+                    ParserFault::MissingStringContents.into_message().to_owned(),
+                ),
                 tok.start,
             )),
         }
@@ -336,7 +337,7 @@ impl<'a> Parser<'a> {
     /// Closes and discards exactly the locals declared in this block.
     fn level_down(&mut self) -> Result<()> {
         let Some(block_base) = self.funcs.block_starts.pop() else {
-            return Err(self.internal_error("block exit requires a block entry"));
+            return Err(self.internal_error(ParserFault::BlockExitWithoutEntry));
         };
         let before = self.funcs.locals.len();
         self.funcs.locals.truncate(block_base);
@@ -394,8 +395,9 @@ impl<'a> Parser<'a> {
     /// pool falls back to emitting the instruction unfolded rather than
     /// failing a program the unfolded compiler accepted.
     fn push_arith(&mut self, instr: Instr, line: u32) -> Result<()> {
-        let op = crate::numeral::arith_fn(instr.opcode())
-            .ok_or_else(|| self.internal_error("arithmetic folding requires a foldable opcode"))?;
+        let op = crate::numeral::arith_fn(instr.opcode()).ok_or_else(|| {
+            self.internal_error(ParserFault::ArithmeticFoldRequiresFoldableOpcode)
+        })?;
         if let Some((lhs, rhs)) = self.foldable_binary_operands() {
             let result = op(lhs, rhs);
             if let Some(idx) = self.try_fold_literal(result)? {
@@ -463,7 +465,7 @@ impl<'a> Parser<'a> {
     /// Overwrites the last emitted instruction in place, returning the old one.
     fn replace_last_instr(&mut self, instr: Instr) -> Result<Instr> {
         let Some(slot) = self.funcs.chunk.code.last_mut() else {
-            return Err(self.internal_error("instruction replacement requires emitted code"));
+            return Err(self.internal_error(ParserFault::InstructionReplacementWithoutInstruction));
         };
         Ok(std::mem::replace(slot, instr))
     }
@@ -475,7 +477,7 @@ impl<'a> Parser<'a> {
             TailKind::FunctionCall(call) => (Instr::call(call.num_args(), want), Instr::OP_CALL),
         };
         if self.funcs.chunk.code.last().map(|instr| instr.opcode()) != Some(expected_opcode) {
-            return Err(self.internal_error("multi-value tail does not end with its instruction"));
+            return Err(self.internal_error(ParserFault::MultiValueTailMissingInstruction));
         }
         self.replace_last_instr(replacement)?;
         Ok(())
@@ -493,7 +495,7 @@ impl<'a> Parser<'a> {
     /// current instruction position (the instruction after the loop).
     fn exit_loop(&mut self) -> Result<()> {
         let Some(context) = self.funcs.loop_breaks.pop() else {
-            return Err(self.internal_error("loop exit requires a loop entry"));
+            return Err(self.internal_error(ParserFault::LoopExitWithoutEntry));
         };
         let loop_end = self.funcs.chunk.code.len();
         for break_idx in context.break_jumps {
@@ -516,7 +518,7 @@ impl<'a> Parser<'a> {
             // Record the index where we'll emit the Jump instruction.
             let idx = self.funcs.chunk.code.len();
             let Some(context) = self.funcs.loop_breaks.last_mut() else {
-                return Err(self.internal_error("break emission lost its loop context"));
+                return Err(self.internal_error(ParserFault::BreakEmissionLostLoopContext));
             };
             context.break_jumps.push(idx);
             // Emit a placeholder Jump that will be patched by exit_loop
@@ -536,7 +538,7 @@ impl<'a> Parser<'a> {
         let c = self.parse_chunk(&[], true)?;
         let token = self.input.next()?;
         if !self.funcs.frames.is_empty() {
-            return Err(self.internal_error("completed source retains function frames"));
+            return Err(self.internal_error(ParserFault::CompletedSourceRetainsFunctionFrames));
         }
         if let TokenType::EndOfFile = token.typ {
             Ok(c)
@@ -571,10 +573,10 @@ impl<'a> Parser<'a> {
         self.funcs.chunk.upvalues = self.funcs.upvalues.iter().map(|(_, desc)| *desc).collect();
 
         let Some(finished) = self.funcs.frames.pop() else {
-            return Err(self.internal_error("chunk completion requires a function frame"));
+            return Err(self.internal_error(ParserFault::ChunkCompletionWithoutFunctionFrame));
         };
         if !finished.loop_breaks.is_empty() || !finished.block_starts.is_empty() {
-            return Err(self.internal_error("completed function retains loop or block scopes"));
+            return Err(self.internal_error(ParserFault::CompletedFunctionRetainsScopes));
         }
         let mut tmp_chunk = finished.chunk;
         // Keep one copy of each string while parsing, then build the canonical

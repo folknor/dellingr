@@ -1,21 +1,20 @@
 use std::cell::Cell;
+use std::fmt;
 use std::hash::{Hash, Hasher};
 
 use indexmap::Equivalent;
 
 use crate::det_hash::{IndexMap, map_with_capacity};
 
-// Table still reports invalid keys and malformed snapshot shapes as VM
-// `Error`s; callers in eval, metamethod, table_ops and snapshot loading
-// propagate them with `?`. A table-local error type would need each of those
-// sites to wrap it.
+// Storage reports key and snapshot-shape failures locally. The conversion to
+// VM `Error` preserves script-visible text; snapshot loading keeps its
+// location in `LoadError` when it consumes the local reason directly.
 use super::Error;
-use super::Result;
 use super::TypeError;
 use super::Val;
 use super::object::{GcHeap, Markable, ObjectPtr};
 #[cfg(feature = "snapshot")]
-use crate::error::ErrorKind;
+use crate::error::{InternalFault, SnapshotTableFault};
 
 /// Maximum number of entries for inline storage.
 /// Tables with more entries promote to IndexMap.
@@ -32,6 +31,37 @@ const ARRAY_SLOT_TAG: usize = 1 << (usize::BITS - 1);
 pub(super) enum InvalidTableKey {
     Nil,
     Nan,
+}
+
+#[derive(Debug)]
+pub(super) enum TableError {
+    InvalidKey(InvalidTableKey),
+    #[cfg(feature = "snapshot")]
+    InvalidSnapshot(SnapshotTableFault),
+}
+
+impl fmt::Display for TableError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidKey(InvalidTableKey::Nil) => f.write_str("table index was nil"),
+            Self::InvalidKey(InvalidTableKey::Nan) => f.write_str("table index was NaN"),
+            #[cfg(feature = "snapshot")]
+            Self::InvalidSnapshot(fault) => write!(f, "internal error: {fault}"),
+        }
+    }
+}
+
+impl From<TableError> for Error {
+    fn from(error: TableError) -> Self {
+        match error {
+            TableError::InvalidKey(InvalidTableKey::Nil) => Self::new(TypeError::TableKeyNil, 0, 0),
+            TableError::InvalidKey(InvalidTableKey::Nan) => Self::new(TypeError::TableKeyNan, 0, 0),
+            #[cfg(feature = "snapshot")]
+            TableError::InvalidSnapshot(fault) => {
+                Self::internal_fault(InternalFault::SnapshotTable(fault))
+            }
+        }
+    }
 }
 
 /// A non-negative integral number bounded by a collection's maximum index.
@@ -682,7 +712,10 @@ impl Table {
     /// re-derived by insertion, so this does not reproduce nil array slots;
     /// use `rebuild_from_snapshot` where the array length must round-trip.
     #[cfg(feature = "snapshot")]
-    pub(super) fn clear_and_insert_entries(&mut self, entries: Vec<(Val, Val)>) -> Result<()> {
+    pub(super) fn clear_and_insert_entries(
+        &mut self,
+        entries: Vec<(Val, Val)>,
+    ) -> std::result::Result<(), TableError> {
         self.rebuild(0, entries, false)
     }
 
@@ -694,7 +727,7 @@ impl Table {
         &mut self,
         array_len: usize,
         entries: Vec<(Val, Val)>,
-    ) -> Result<()> {
+    ) -> std::result::Result<(), TableError> {
         self.rebuild(array_len, entries, true)
     }
 
@@ -704,12 +737,10 @@ impl Table {
         array_len: usize,
         entries: Vec<(Val, Val)>,
         exact_shape: bool,
-    ) -> Result<()> {
+    ) -> std::result::Result<(), TableError> {
         if array_len > entries.len() {
-            return Err(Error::new(
-                ErrorKind::InternalError("snapshot array length exceeds its entries".into()),
-                0,
-                0,
+            return Err(TableError::InvalidSnapshot(
+                SnapshotTableFault::ArrayLengthExceedsEntries,
             ));
         }
         // Reset to a shell sized for the incoming hash entries, then re-insert
@@ -728,10 +759,8 @@ impl Table {
         let mut array = Vec::with_capacity(array_len);
         for (slot, (key, value)) in entries.by_ref().take(array_len).enumerate() {
             if !matches!(key, Val::Num(n) if array_index(n, array_len) == Some(slot)) {
-                return Err(Error::new(
-                    ErrorKind::InternalError("snapshot array slot has the wrong key".into()),
-                    0,
-                    0,
+                return Err(TableError::InvalidSnapshot(
+                    SnapshotTableFault::ArraySlotHasWrongKey,
                 ));
             }
             array.push(value);
@@ -742,10 +771,8 @@ impl Table {
             // would migrate into the array and reorder `pairs()`, so it
             // cannot have come from `snapshot_entries`.
             if exact_shape && (self.array_slot(&key).is_some() || self.is_array_append_key(&key)) {
-                return Err(Error::new(
-                    ErrorKind::InternalError("snapshot hash entry belongs in the array".into()),
-                    0,
-                    0,
+                return Err(TableError::InvalidSnapshot(
+                    SnapshotTableFault::HashEntryBelongsInArray,
                 ));
             }
             self.insert(key, value)?;
@@ -887,7 +914,7 @@ impl Table {
     }
 
     #[hotpath::measure]
-    pub(super) fn insert(&mut self, key: Val, value: Val) -> Result<()> {
+    pub(super) fn insert(&mut self, key: Val, value: Val) -> std::result::Result<(), TableError> {
         if let Some(slot) = self.array_slot(&key) {
             self.array[slot] = value;
             #[cfg(debug_assertions)]
@@ -895,12 +922,9 @@ impl Table {
             return Ok(());
         }
 
-        // Frame exit supplies source context for VM errors; direct host calls
-        // have no Lua source location. Keep the table's error text unchanged.
         let table_key = match TableKey::new(key) {
             Ok(key) => key,
-            Err(InvalidTableKey::Nil) => return Err(Error::new(TypeError::TableKeyNil, 0, 0)),
-            Err(InvalidTableKey::Nan) => return Err(Error::new(TypeError::TableKeyNan, 0, 0)),
+            Err(error) => return Err(TableError::InvalidKey(error)),
         };
         let key = table_key.value();
 
@@ -917,7 +941,8 @@ impl Table {
         }
 
         if self.dead_count == 0 {
-            return self.insert_without_tombstones(table_key, value);
+            self.insert_without_tombstones(table_key, value);
+            return Ok(());
         }
 
         let updated_live_inline_entry = match &mut self.storage {
@@ -1061,7 +1086,7 @@ impl Table {
         self.debug_assert_invariants();
     }
 
-    fn insert_without_tombstones(&mut self, key: TableKey, value: Val) -> Result<()> {
+    fn insert_without_tombstones(&mut self, key: TableKey, value: Val) {
         let key_value = key.value();
         match &mut self.storage {
             TableStorage::Inline { entries, len } => {
@@ -1084,7 +1109,6 @@ impl Table {
         }
         #[cfg(debug_assertions)]
         self.debug_assert_invariants();
-        Ok(())
     }
 
     /// Promote from inline storage to IndexMap, adding the new key-value pair.
@@ -1191,7 +1215,11 @@ impl Table {
     /// a nil positional value still occupies its array slot, so
     /// `#{1, nil, 3}` is 3.
     #[hotpath::measure]
-    pub(super) fn set_list(&mut self, first: usize, values: Vec<Val>) -> Result<()> {
+    pub(super) fn set_list(
+        &mut self,
+        first: usize,
+        values: Vec<Val>,
+    ) -> std::result::Result<(), TableError> {
         for (key, value) in (first..).zip(values) {
             if key == self.array.len() + 1 {
                 self.array.push(value);
