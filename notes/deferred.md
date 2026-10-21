@@ -212,23 +212,6 @@ Reported by the stdlib hunter.
   false`), so the checks are unreachable from Lua (a host could call them). Noted
   so nobody cites them as precedent.
 
-## HYG-060 - Small persistence redundancies
-
-Reported by the heap hunter.
-
-- `retype_load_error` restates every `LoadError` variant to change the phantom
-  `E`; split into `LoadError::Setup(E)` + `LoadError::Snapshot(SnapshotError)` with
-  one `From`.
-- `Encoder::enforce_field_limits` is `true` in production and `false` only in the
-  `cfg(test)` constructor, so tests encode payloads production refuses and never
-  exercise the encoder's own limit checks; build raw bytes for oversized-field
-  decoding and drop the flag.
-- `Table::clear_and_insert_entries` has one production caller in
-  `materialize_payload`, which already falls back to `rebuild_from_snapshot` when
-  the array is non-empty; merging deletes it and the `exact_shape` flag.
-- `SavePayload::encoded_size_estimate` ignores bytecode size, which dominates
-  script-heavy worlds; the buffer still grows.
-
 ## Comment or doc only
 
 ## Decisions for the user

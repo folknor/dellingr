@@ -55,7 +55,7 @@ pub use vm::LuaType;
 pub use vm::RustFunc;
 pub use vm::State;
 #[cfg(feature = "snapshot")]
-pub use vm::{LoadError, SaveDiagnostics, SaveError, SaveState, TableLoadLocation};
+pub use vm::{LoadError, SaveDiagnostics, SaveError, SaveState, SnapshotError, TableLoadLocation};
 
 use compiler::Bytecode;
 use instr::Instr;

@@ -4,7 +4,7 @@ use crate::compiler::verify::{self, BytecodeView};
 
 use super::super::table::{array_index, integer_index, is_append_key};
 use super::{
-    LoadError, SaveLocation, SavePayload, SavedBytecode, SavedObject, corrupt_arena as corrupt,
+    SaveLocation, SavePayload, SavedBytecode, SavedObject, SnapshotError, corrupt_arena as corrupt,
 };
 
 use crate::gmatch_schema;
@@ -74,10 +74,10 @@ impl BytecodeView for SavedBytecode {
     }
 }
 
-// Preserve structured chunk/instruction fields here. LoadError owns their
+// Preserve structured chunk/instruction fields here. SnapshotError owns their
 // rendering, while the shared verifier owns the reason and compiler display.
-fn invalid(chunk: usize, instruction: Option<u32>, reason: impl Into<String>) -> LoadError {
-    LoadError::InvalidBytecode {
+fn invalid(chunk: usize, instruction: Option<u32>, reason: impl Into<String>) -> SnapshotError {
+    SnapshotError::InvalidBytecode {
         chunk: u32::try_from(chunk)
             .expect("saved chunk indices are bounded by a u32 length prefix"),
         instruction,
@@ -91,7 +91,7 @@ fn insert_unique<T: Ord>(
     reason: &'static str,
     index: usize,
     location: SaveLocation,
-) -> Result<(), LoadError> {
+) -> Result<(), SnapshotError> {
     if set.insert(key) {
         Ok(())
     } else {
@@ -99,7 +99,7 @@ fn insert_unique<T: Ord>(
     }
 }
 
-fn validate_nested_graph(bytecode: &[SavedBytecode]) -> Result<(), LoadError> {
+fn validate_nested_graph(bytecode: &[SavedBytecode]) -> Result<(), SnapshotError> {
     let mut indegree = vec![0usize; bytecode.len()];
     for (parent, chunk) in bytecode.iter().enumerate() {
         for child in &chunk.nested {
@@ -147,7 +147,7 @@ fn validate_nested_graph(bytecode: &[SavedBytecode]) -> Result<(), LoadError> {
     Ok(())
 }
 
-fn validate_closures(payload: &SavePayload) -> Result<(), LoadError> {
+fn validate_closures(payload: &SavePayload) -> Result<(), SnapshotError> {
     for object in &payload.objects {
         let SavedObject::Closure { chunk, upvalues } = object else {
             continue;
@@ -180,7 +180,7 @@ fn validate_closures(payload: &SavePayload) -> Result<(), LoadError> {
     Ok(())
 }
 
-fn validate_value(value: &super::SavedVal, payload: &SavePayload) -> Result<(), LoadError> {
+fn validate_value(value: &super::SavedVal, payload: &SavePayload) -> Result<(), SnapshotError> {
     match value {
         super::SavedVal::Str(id) if (*id as usize) >= payload.strings.len() => Err(corrupt(
             "string id is out of range",
@@ -196,7 +196,7 @@ fn validate_value(value: &super::SavedVal, payload: &SavePayload) -> Result<(), 
     }
 }
 
-fn validate_environment_deltas(payload: &SavePayload) -> Result<(), LoadError> {
+fn validate_environment_deltas(payload: &SavePayload) -> Result<(), SnapshotError> {
     let mut tokens = BTreeSet::new();
     for (delta_index, delta) in payload.env_deltas.iter().enumerate() {
         insert_unique(
@@ -384,7 +384,7 @@ fn validate_metatable(
     reason: &'static str,
     owner_index: usize,
     location: SaveLocation,
-) -> Result<(), LoadError> {
+) -> Result<(), SnapshotError> {
     match value {
         super::SavedVal::Obj(id) => match payload.objects.get(*id as usize) {
             Some(SavedObject::Table { .. }) => Ok(()),
@@ -395,7 +395,7 @@ fn validate_metatable(
     }
 }
 
-fn validate_references(payload: &SavePayload) -> Result<(), LoadError> {
+fn validate_references(payload: &SavePayload) -> Result<(), SnapshotError> {
     for value in &payload.upvalues {
         validate_value(value, payload)?;
     }
@@ -543,7 +543,7 @@ fn gmatch_integer_field(
     field: &[u8],
     maximum: usize,
     reason: &'static str,
-) -> Result<usize, LoadError> {
+) -> Result<usize, SnapshotError> {
     let Some(super::SavedVal::Num(bits)) = table_field(payload, table_id, field) else {
         return Err(corrupt(reason, table_id as usize, SaveLocation::Objects));
     };
@@ -556,7 +556,7 @@ fn validate_gmatch_last_match(
     payload: &SavePayload,
     table_id: u32,
     subject_len: usize,
-) -> Result<(), LoadError> {
+) -> Result<(), SnapshotError> {
     if table_field(
         payload,
         table_id,
@@ -575,7 +575,10 @@ fn validate_gmatch_last_match(
     Ok(())
 }
 
-fn validate_gmatch_compile_state(payload: &SavePayload, table_id: u32) -> Result<(), LoadError> {
+fn validate_gmatch_compile_state(
+    payload: &SavePayload,
+    table_id: u32,
+) -> Result<(), SnapshotError> {
     let Some(super::SavedVal::Str(cache_key_id)) =
         table_numeric_field(payload, table_id, gmatch_schema::COMPILE_CHARGED_SLOT)
     else {
@@ -620,7 +623,7 @@ fn validate_gmatch_state(
     payload: &SavePayload,
     table_id: u32,
     empty_pattern: bool,
-) -> Result<(), LoadError> {
+) -> Result<(), SnapshotError> {
     let maximum_position = crate::limits::MAX_STRING_BYTES + 1;
     if empty_pattern {
         let len = gmatch_integer_field(
@@ -692,7 +695,7 @@ fn validate_gmatch_state(
     Ok(())
 }
 
-fn validate_gmatch_iterators(payload: &SavePayload) -> Result<(), LoadError> {
+fn validate_gmatch_iterators(payload: &SavePayload) -> Result<(), SnapshotError> {
     let mut validated_states = BTreeSet::new();
     for (closure_index, object) in payload.objects.iter().enumerate() {
         let super::SavedObject::Closure { upvalues, .. } = object else {
@@ -772,7 +775,7 @@ fn validate_gmatch_iterators(payload: &SavePayload) -> Result<(), LoadError> {
     Ok(())
 }
 
-fn validate_pointer_ids(payload: &SavePayload) -> Result<(), LoadError> {
+fn validate_pointer_ids(payload: &SavePayload) -> Result<(), SnapshotError> {
     let mut ids = BTreeSet::new();
     // Duplicate detection is split by variant and kept in ordered sets rather
     // than a linear scan: the list length is attacker-controlled, so an O(n^2)
@@ -823,7 +826,7 @@ fn validate_pointer_ids(payload: &SavePayload) -> Result<(), LoadError> {
     Ok(())
 }
 
-pub(super) fn verify_payload(payload: SavePayload) -> Result<VerifiedSavePayload, LoadError> {
+pub(super) fn verify_payload(payload: SavePayload) -> Result<VerifiedSavePayload, SnapshotError> {
     for (chunk, bytecode) in payload.bytecode.iter().enumerate() {
         verify::validate_bytecode(bytecode)
             .map_err(|error| invalid(chunk, error.instruction, error.reason))?;
@@ -948,7 +951,7 @@ mod tests {
         };
         assert!(matches!(
             verify_payload(payload(duplicate_strings)),
-            Err(LoadError::CorruptArena { .. })
+            Err(SnapshotError::CorruptArena { .. })
         ));
 
         let negative_zero = super::super::SavedEnvDelta {
@@ -964,7 +967,7 @@ mod tests {
         };
         assert!(matches!(
             verify_payload(payload(negative_zero)),
-            Err(LoadError::CorruptArena { .. })
+            Err(SnapshotError::CorruptArena { .. })
         ));
 
         let invalid_order = super::super::SavedEnvDelta {
@@ -980,7 +983,7 @@ mod tests {
         };
         assert!(matches!(
             verify_payload(payload(invalid_order)),
-            Err(LoadError::CorruptArena { .. })
+            Err(SnapshotError::CorruptArena { .. })
         ));
     }
 
@@ -1029,7 +1032,7 @@ mod tests {
         ] {
             assert!(matches!(
                 verify_payload(payload(delta)),
-                Err(LoadError::CorruptArena { .. })
+                Err(SnapshotError::CorruptArena { .. })
             ));
         }
     }
@@ -1043,7 +1046,7 @@ mod tests {
         let malformed = super::super::SavedVal::Str(2);
         assert!(matches!(
             validate_gmatch_iterators(&gmatch_payload(false, malformed.clone())),
-            Err(LoadError::CorruptArena {
+            Err(SnapshotError::CorruptArena {
                 reason: "gmatch position is missing or invalid",
                 index: 0,
                 location: SaveLocation::Objects,
@@ -1051,7 +1054,7 @@ mod tests {
         ));
         assert!(matches!(
             validate_gmatch_iterators(&gmatch_payload(true, malformed)),
-            Err(LoadError::CorruptArena {
+            Err(SnapshotError::CorruptArena {
                 reason: "empty gmatch position is missing or invalid",
                 index: 0,
                 location: SaveLocation::Objects,
@@ -1067,7 +1070,7 @@ mod tests {
         entries[1].1 = super::super::SavedVal::Str(2);
         assert!(matches!(
             validate_gmatch_iterators(&invalid_length),
-            Err(LoadError::CorruptArena {
+            Err(SnapshotError::CorruptArena {
                 reason: "empty gmatch length is missing or invalid",
                 index: 0,
                 location: SaveLocation::Objects,
@@ -1118,7 +1121,7 @@ mod tests {
         ] {
             assert!(matches!(
                 validate_references(&with_table(array_len, entries)),
-                Err(LoadError::CorruptArena { .. })
+                Err(SnapshotError::CorruptArena { .. })
             ));
         }
     }
@@ -1162,7 +1165,7 @@ mod tests {
         ] {
             assert!(matches!(
                 validate_references(&with_metatable(bad)),
-                Err(LoadError::CorruptArena { .. })
+                Err(SnapshotError::CorruptArena { .. })
             ));
         }
 
@@ -1180,7 +1183,7 @@ mod tests {
         }];
         assert!(matches!(
             validate_environment_deltas(&env),
-            Err(LoadError::CorruptArena { .. })
+            Err(SnapshotError::CorruptArena { .. })
         ));
     }
 
@@ -1203,7 +1206,7 @@ mod tests {
         for next in [0, 1] {
             assert!(matches!(
                 validate_pointer_ids(&with_next(next)),
-                Err(LoadError::CorruptArena { .. })
+                Err(SnapshotError::CorruptArena { .. })
             ));
         }
     }
@@ -1229,7 +1232,7 @@ mod tests {
         assert!(validate_references(&with_globals(vec![one.clone(), other])).is_ok());
         assert!(matches!(
             validate_references(&with_globals(vec![one, two])),
-            Err(LoadError::CorruptArena { .. })
+            Err(SnapshotError::CorruptArena { .. })
         ));
     }
 }

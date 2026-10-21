@@ -192,9 +192,68 @@ pub enum SaveError {
 }
 
 /// Errors produced while loading a saved [`State`].
+///
+/// Decoding, verification and trailing-byte rejection all run before the
+/// setup closure, so a [`LoadError::Snapshot`] from those stages means setup
+/// never ran.
 #[non_exhaustive]
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum LoadError<E = Infallible> {
+    /// The host's load-time setup closure failed.
+    Setup(E),
+    /// The load-time setup closure returned success on a State a panic had
+    /// unwound through (it caught the panic), so the snapshot is not loaded
+    /// into it.
+    StatePoisoned,
+    /// The snapshot could not be restored: its bytes are malformed or
+    /// unsupported, or they reference something the load-time environment
+    /// does not provide.
+    Snapshot(SnapshotError),
+}
+
+impl<E> From<SnapshotError> for LoadError<E> {
+    fn from(error: SnapshotError) -> Self {
+        Self::Snapshot(error)
+    }
+}
+
+impl<E> LoadError<E> {
+    /// The snapshot failure, if this is one.
+    pub fn snapshot(&self) -> Option<&SnapshotError> {
+        match self {
+            Self::Snapshot(error) => Some(error),
+            Self::Setup(_) | Self::StatePoisoned => None,
+        }
+    }
+}
+
+impl<E: fmt::Display> fmt::Display for LoadError<E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LoadError::Setup(error) => write!(f, "load setup failed: {error}"),
+            LoadError::StatePoisoned => write!(f, "load setup left the state poisoned by a panic"),
+            LoadError::Snapshot(error) => error.fmt(f),
+        }
+    }
+}
+
+impl<E: fmt::Debug + fmt::Display + 'static> std::error::Error for LoadError<E> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            LoadError::Snapshot(error) => Some(error),
+            LoadError::Setup(_) | LoadError::StatePoisoned => None,
+        }
+    }
+}
+
+/// Why a snapshot could not be restored, independent of the host's setup.
+///
+/// Not every variant means corrupt bytes: [`SnapshotError::UnknownFunction`]
+/// and [`SnapshotError::UnknownEnvObject`] can come from a valid save loaded
+/// into an environment that does not register what it references.
+#[non_exhaustive]
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum SnapshotError {
     /// Save bytes did not start with the dellingr save magic.
     BadMagic,
     /// Save format version is not supported by this build.
@@ -213,12 +272,6 @@ pub enum LoadError<E = Infallible> {
     },
     /// A saved function id was not registered by the load-time environment.
     UnknownFunction(String),
-    /// The host's load-time setup closure failed.
-    Setup(E),
-    /// The load-time setup closure returned success on a State a panic had
-    /// unwound through (it caught the panic), so the snapshot is not loaded
-    /// into it.
-    StatePoisoned,
     /// A saved environment-object token was not present at load time.
     UnknownEnvObject(String),
     /// Binary payload could not be decoded.
@@ -269,7 +322,7 @@ pub enum LoadError<E = Infallible> {
 /// Location of a table restoration failure or corrupt snapshot collection.
 ///
 /// `Object` and `Environment` identify materialized tables; the other variants
-/// qualify the separate entry index in [`LoadError::CorruptArena`].
+/// qualify the separate entry index in [`SnapshotError::CorruptArena`].
 #[derive(Debug, Clone, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum TableLoadLocation {
@@ -373,50 +426,48 @@ impl fmt::Display for SaveError {
 
 impl std::error::Error for SaveError {}
 
-impl<E: fmt::Display> fmt::Display for LoadError<E> {
+impl fmt::Display for SnapshotError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            LoadError::BadMagic => write!(f, "bad save magic"),
-            LoadError::UnsupportedVersion { found, expected } => {
+            SnapshotError::BadMagic => write!(f, "bad save magic"),
+            SnapshotError::UnsupportedVersion { found, expected } => {
                 write!(
                     f,
                     "unsupported save format version {found}; expected {expected}"
                 )
             }
-            LoadError::UnsupportedCostModelVersion { found, expected } => {
+            SnapshotError::UnsupportedCostModelVersion { found, expected } => {
                 write!(
                     f,
                     "unsupported save cost model version {found}; expected {expected}"
                 )
             }
-            LoadError::UnknownFunction(id) => {
+            SnapshotError::UnknownFunction(id) => {
                 f.write_str("unknown saved function id ")?;
                 write_bounded_user_text(f, id)
             }
-            LoadError::Setup(error) => write!(f, "load setup failed: {error}"),
-            LoadError::StatePoisoned => write!(f, "load setup left the state poisoned by a panic"),
-            LoadError::UnknownEnvObject(id) => {
+            SnapshotError::UnknownEnvObject(id) => {
                 f.write_str("unknown saved environment object ")?;
                 write_bounded_user_text(f, id)
             }
-            LoadError::DecodeError(err) => write!(f, "save decode error: {err}"),
-            LoadError::FieldSizeExceeded { kind, size, limit } => {
+            SnapshotError::DecodeError(err) => write!(f, "save decode error: {err}"),
+            SnapshotError::FieldSizeExceeded { kind, size, limit } => {
                 write!(f, "save {kind} size {size} exceeds limit {limit}")
             }
-            LoadError::StringSizeExceeded { size, limit } => {
+            SnapshotError::StringSizeExceeded { size, limit } => {
                 write!(f, "string size {size} exceeds limit {limit}")
             }
-            LoadError::CorruptArena {
+            SnapshotError::CorruptArena {
                 reason,
                 index,
                 location,
             } => {
                 write!(f, "corrupt save {location} at index {index}: {reason}")
             }
-            LoadError::InvalidTable { location, reason } => {
+            SnapshotError::InvalidTable { location, reason } => {
                 write!(f, "invalid saved table at {location}: {reason}")
             }
-            LoadError::InvalidBytecode {
+            SnapshotError::InvalidBytecode {
                 chunk,
                 instruction,
                 reason,
@@ -431,53 +482,7 @@ impl<E: fmt::Display> fmt::Display for LoadError<E> {
     }
 }
 
-impl<E: fmt::Debug + fmt::Display + 'static> std::error::Error for LoadError<E> {}
-
-// Decode and materialization helpers use the default, infallible setup error
-// type. Lift those errors into the caller's setup error type unchanged.
-fn retype_load_error<E>(error: LoadError<Infallible>) -> LoadError<E> {
-    match error {
-        LoadError::BadMagic => LoadError::BadMagic,
-        LoadError::UnsupportedVersion { found, expected } => {
-            LoadError::UnsupportedVersion { found, expected }
-        }
-        LoadError::UnsupportedCostModelVersion { found, expected } => {
-            LoadError::UnsupportedCostModelVersion { found, expected }
-        }
-        LoadError::UnknownFunction(id) => LoadError::UnknownFunction(id),
-        LoadError::Setup(never) => match never {},
-        LoadError::StatePoisoned => LoadError::StatePoisoned,
-        LoadError::UnknownEnvObject(id) => LoadError::UnknownEnvObject(id),
-        LoadError::DecodeError(error) => LoadError::DecodeError(error),
-        LoadError::FieldSizeExceeded { kind, size, limit } => {
-            LoadError::FieldSizeExceeded { kind, size, limit }
-        }
-        LoadError::StringSizeExceeded { size, limit } => {
-            LoadError::StringSizeExceeded { size, limit }
-        }
-        LoadError::CorruptArena {
-            reason,
-            index,
-            location,
-        } => LoadError::CorruptArena {
-            reason,
-            index,
-            location,
-        },
-        LoadError::InvalidTable { location, reason } => {
-            LoadError::InvalidTable { location, reason }
-        }
-        LoadError::InvalidBytecode {
-            chunk,
-            instruction,
-            reason,
-        } => LoadError::InvalidBytecode {
-            chunk,
-            instruction,
-            reason,
-        },
-    }
-}
+impl std::error::Error for SnapshotError {}
 
 fn write_bounded_user_text(f: &mut fmt::Formatter<'_>, text: &str) -> fmt::Result {
     let mut written = 0usize;
@@ -581,22 +586,53 @@ struct SavePayload {
 }
 
 impl SavePayload {
-    /// Rough encoded size: string content plus ~16 bytes per value slot.
-    /// Used only to seed the encoder's buffer capacity.
+    /// Rough encoded size: string content, ~16 bytes per value slot, and each
+    /// bytecode arena node's own fields (children are separate nodes, so
+    /// nothing is counted twice). Used only to seed the encoder's buffer
+    /// capacity; every step saturates.
     fn encoded_size_estimate(&self) -> usize {
-        let string_bytes: usize = self.strings.iter().map(Vec::len).sum();
+        let string_bytes = self
+            .strings
+            .iter()
+            .fold(0usize, |sum, s| sum.saturating_add(s.len()));
         let value_count = self
             .objects
             .iter()
-            .map(|obj| match obj {
-                SavedObject::Table { entries, .. } => entries.len() * 2 + 1,
-                SavedObject::Closure { upvalues, .. } => upvalues.len() + 1,
+            .fold(0usize, |sum, obj| {
+                sum.saturating_add(match obj {
+                    SavedObject::Table { entries, .. } => {
+                        entries.len().saturating_mul(2).saturating_add(1)
+                    }
+                    SavedObject::Closure { upvalues, .. } => upvalues.len().saturating_add(1),
+                })
             })
-            .sum::<usize>()
-            + self.upvalues.len()
-            + self.user_globals.len() * 2;
+            .saturating_add(self.upvalues.len())
+            .saturating_add(self.user_globals.len().saturating_mul(2));
+        let bytecode_bytes = self.bytecode.iter().fold(0usize, |sum, chunk| {
+            let literal_bytes = chunk.string_literals.iter().fold(0usize, |sum, literal| {
+                sum.saturating_add(literal.len()).saturating_add(4)
+            });
+            let template_bytes = chunk.table_templates.iter().fold(0usize, |sum, keys| {
+                sum.saturating_add(keys.len().saturating_mul(2))
+                    .saturating_add(4)
+            });
+            let word_count = chunk
+                .code
+                .len()
+                .saturating_add(chunk.line_info.len())
+                .saturating_add(chunk.nested.len())
+                .saturating_add(chunk.upvalues.len());
+            sum.saturating_add(word_count.saturating_mul(4))
+                .saturating_add(chunk.number_literals.len().saturating_mul(8))
+                .saturating_add(literal_bytes)
+                .saturating_add(template_bytes)
+                .saturating_add(chunk.name.as_ref().map_or(0, String::len))
+                .saturating_add(chunk.source.as_ref().map_or(0, |s| s.len()))
+                .saturating_add(64)
+        });
         string_bytes
             .saturating_add(value_count.saturating_mul(16))
+            .saturating_add(bytecode_bytes)
             .saturating_add(1024)
     }
 }
@@ -1564,19 +1600,15 @@ impl State {
         setup: impl FnOnce(&mut State) -> std::result::Result<(), E>,
     ) -> std::result::Result<State, LoadError<E>> {
         let mut decoder = Decoder::new(bytes);
-        decoder
-            .read_magic_and_versions()
-            .map_err(retype_load_error::<E>)?;
+        decoder.read_magic_and_versions()?;
         // Read and discard the diagnostic crate-version string. Compatibility is
         // enforced by the format and cost-model versions in
         // read_magic_and_versions above; this string is metadata, not a compat
         // gate, so it is deliberately not compared.
-        let _engine_version = decoder
-            .read_bytes(ByteField::EngineVersion)
-            .map_err(retype_load_error::<E>)?;
-        let decoded = SavePayload::decode(&mut decoder).map_err(retype_load_error::<E>)?;
-        let payload = verify::verify_payload(decoded).map_err(retype_load_error::<E>)?;
-        decoder.finish().map_err(retype_load_error::<E>)?;
+        let _engine_version = decoder.read_bytes(ByteField::EngineVersion)?;
+        let decoded = SavePayload::decode(&mut decoder)?;
+        let payload = verify::verify_payload(decoded)?;
+        decoder.finish()?;
 
         let mut state = if payload.has_standard_environment() {
             State::with_callbacks(callbacks)
@@ -1590,7 +1622,7 @@ impl State {
         if state.poisoned {
             return Err(LoadError::StatePoisoned);
         }
-        materialize_payload(&mut state, payload).map_err(retype_load_error::<E>)?;
+        materialize_payload(&mut state, payload)?;
         Ok(state)
     }
 }
@@ -1628,8 +1660,8 @@ fn saved_num_bits(n: f64) -> u64 {
     }
 }
 
-fn corrupt_arena(reason: &'static str, index: usize, location: SaveLocation) -> LoadError {
-    LoadError::CorruptArena {
+fn corrupt_arena(reason: &'static str, index: usize, location: SaveLocation) -> SnapshotError {
+    SnapshotError::CorruptArena {
         reason,
         index,
         location,
@@ -1643,8 +1675,8 @@ fn invalid_environment_table(
     entry: Option<usize>,
     operation: &str,
     error: impl fmt::Display,
-) -> LoadError {
-    LoadError::InvalidTable {
+) -> SnapshotError {
+    SnapshotError::InvalidTable {
         location: TableLoadLocation::Environment {
             token: token.to_owned(),
             entry,
@@ -1663,7 +1695,7 @@ fn runtime_array_slot(key: Val, array_len: usize) -> Option<usize> {
 fn materialize_payload(
     state: &mut State,
     payload: verify::VerifiedSavePayload,
-) -> Result<(), LoadError> {
+) -> Result<(), SnapshotError> {
     // All graph allocation below uses the heap's no-collection allocator and
     // UpvaluePool directly. They do not consult thresholds or collect; the one
     // runtime resolver used here is explicitly resolve_bytecode_runtime_no_gc.
@@ -1752,7 +1784,7 @@ fn materialize_payload(
                         )?;
                         Ok((key, decode_val(value, &ctx)?))
                     })
-                    .collect::<Result<Vec<_>, LoadError>>()?;
+                    .collect::<Result<Vec<_>, SnapshotError>>()?;
                 // A metatable must be a table; the verifier checks saved `Obj`
                 // ids, and this also covers `EnvObj` tokens, whose runtime
                 // object is only known here.
@@ -1781,7 +1813,7 @@ fn materialize_payload(
                 })?;
                 table
                     .rebuild_from_snapshot(*array_len as usize, entries)
-                    .map_err(|error| LoadError::InvalidTable {
+                    .map_err(|error| SnapshotError::InvalidTable {
                         location: TableLoadLocation::Object(idx),
                         reason: error.to_string(),
                     })?;
@@ -1796,7 +1828,7 @@ fn materialize_payload(
     for (delta_index, delta) in payload.env_deltas.iter().enumerate() {
         let ptr = *env_forward
             .get(&delta.token)
-            .ok_or_else(|| LoadError::UnknownEnvObject(delta.token.clone()))?;
+            .ok_or_else(|| SnapshotError::UnknownEnvObject(delta.token.clone()))?;
         // Deliberately repeats the verifier's duplicate and disjointness
         // checks, now on resolved runtime values. The verifier compares saved
         // keys, which can differ while naming the same runtime key: two `Fn`
@@ -1959,8 +1991,24 @@ fn materialize_payload(
                     SaveLocation::EnvironmentDeltas,
                 )
             })?;
-            if array.is_empty() {
-                table.clear_and_insert_entries(ordered).map_err(|error| {
+            // Reordering live hash entries must retain setup's array slots,
+            // including holes that are absent from `current`. With an empty
+            // array this is just `ordered`: it permutes the table's live hash
+            // keys, none of which can be the append key 1, so the exact-shape
+            // rebuild accepts it and re-derives no array part.
+            let mut entries: Vec<_> = array
+                .iter()
+                .enumerate()
+                .map(|(slot, value)| (Val::Num((slot + 1) as f64), *value))
+                .collect();
+            entries.extend(
+                ordered
+                    .into_iter()
+                    .filter(|(key, _)| runtime_array_slot(*key, array.len()).is_none()),
+            );
+            table
+                .rebuild_from_snapshot(array.len(), entries)
+                .map_err(|error| {
                     invalid_environment_table(
                         &delta.token,
                         None,
@@ -1968,30 +2016,6 @@ fn materialize_payload(
                         error,
                     )
                 })?;
-            } else {
-                // Reordering live hash entries must retain setup's array
-                // slots, including holes that are absent from `current`.
-                let mut entries: Vec<_> = array
-                    .iter()
-                    .enumerate()
-                    .map(|(slot, value)| (Val::Num((slot + 1) as f64), *value))
-                    .collect();
-                entries.extend(
-                    ordered
-                        .into_iter()
-                        .filter(|(key, _)| runtime_array_slot(*key, array.len()).is_none()),
-                );
-                table
-                    .rebuild_from_snapshot(array.len(), entries)
-                    .map_err(|error| {
-                        invalid_environment_table(
-                            &delta.token,
-                            None,
-                            "saved environment order is invalid",
-                            error,
-                        )
-                    })?;
-            }
             // Rebuilding entries replaces the table shell. An unchanged delta
             // must retain a metatable that setup or a later library installed.
             table.set_metatable(metatable);
@@ -2003,7 +2027,7 @@ fn materialize_payload(
             let mut array = array
                 .iter()
                 .map(|value| decode_val(value, &ctx))
-                .collect::<Result<Vec<_>, LoadError>>()?;
+                .collect::<Result<Vec<_>, SnapshotError>>()?;
             let table = state.heap.as_table(ptr).ok_or_else(|| {
                 corrupt_arena(
                     "environment token does not resolve to a table",
@@ -2136,7 +2160,7 @@ fn materialize_payload(
     Ok(())
 }
 
-fn upvalues_ref(upvalues: &[UpvalueRef], id: u32) -> Result<&UpvalueRef, LoadError> {
+fn upvalues_ref(upvalues: &[UpvalueRef], id: u32) -> Result<&UpvalueRef, SnapshotError> {
     upvalues.get(id as usize).ok_or_else(|| {
         corrupt_arena(
             "upvalue id is out of range",
@@ -2146,7 +2170,7 @@ fn upvalues_ref(upvalues: &[UpvalueRef], id: u32) -> Result<&UpvalueRef, LoadErr
     })
 }
 
-fn object_ref(objects: &[ObjectPtr], id: u32) -> Result<&ObjectPtr, LoadError> {
+fn object_ref(objects: &[ObjectPtr], id: u32) -> Result<&ObjectPtr, SnapshotError> {
     objects.get(id as usize).ok_or_else(|| {
         corrupt_arena(
             "object id is out of range",
@@ -2179,7 +2203,7 @@ impl SavedVal {
         strings: &[Vec<u8>],
         index: usize,
         location: SaveLocation,
-    ) -> Result<ResolvedKey, LoadError> {
+    ) -> Result<ResolvedKey, SnapshotError> {
         let key = match self {
             SavedVal::Nil => TableKeyInput::Nil,
             SavedVal::Bool(value) => TableKeyInput::Bool(*value),
@@ -2204,7 +2228,11 @@ impl SavedVal {
 }
 
 /// The corruption error for a key the shared normalizer rejected.
-fn invalid_key_error(error: InvalidTableKey, index: usize, location: SaveLocation) -> LoadError {
+fn invalid_key_error(
+    error: InvalidTableKey,
+    index: usize,
+    location: SaveLocation,
+) -> SnapshotError {
     match error {
         InvalidTableKey::Nil => corrupt_arena("nil is not a table key", index, location),
         InvalidTableKey::Nan => corrupt_arena("NaN is not a table key", index, location),
@@ -2218,7 +2246,7 @@ fn runtime_table_key(
     heap: &GcHeap,
     index: usize,
     location: SaveLocation,
-) -> Result<RuntimeTableKey, LoadError> {
+) -> Result<RuntimeTableKey, SnapshotError> {
     let key = value
         .table_key()
         .map_err(|error| invalid_key_error(error, index, location))?;
@@ -2240,7 +2268,7 @@ fn insert_runtime_key(
     index: usize,
     reason: &'static str,
     location: SaveLocation,
-) -> Result<(), LoadError> {
+) -> Result<(), SnapshotError> {
     if keys.insert(runtime_table_key(value, heap, index, location.clone())?) {
         Ok(())
     } else {
@@ -2248,7 +2276,7 @@ fn insert_runtime_key(
     }
 }
 
-fn decode_val(saved: &SavedVal, ctx: &DecodeCtx<'_>) -> Result<Val, LoadError> {
+fn decode_val(saved: &SavedVal, ctx: &DecodeCtx<'_>) -> Result<Val, SnapshotError> {
     match saved {
         SavedVal::Nil => Ok(Val::Nil),
         SavedVal::Bool(b) => Ok(Val::Bool(*b)),
@@ -2268,19 +2296,19 @@ fn decode_val(saved: &SavedVal, ctx: &DecodeCtx<'_>) -> Result<Val, LoadError> {
             .get(id)
             .copied()
             .map(Val::RustFn)
-            .ok_or_else(|| LoadError::UnknownFunction(id.clone())),
+            .ok_or_else(|| SnapshotError::UnknownFunction(id.clone())),
         SavedVal::EnvObj(token) => ctx
             .env_forward
             .get(token)
             .copied()
             .map(Val::Obj)
-            .ok_or_else(|| LoadError::UnknownEnvObject(token.clone())),
+            .ok_or_else(|| SnapshotError::UnknownEnvObject(token.clone())),
     }
 }
 
 fn materialize_bytecode(
     payload: &verify::VerifiedSavePayload,
-) -> Result<Vec<Arc<Bytecode>>, LoadError> {
+) -> Result<Vec<Arc<Bytecode>>, SnapshotError> {
     let saved = payload.bytecode();
     let source_names = intern_bytecode_sources(saved);
     let mut out: Vec<Option<Arc<Bytecode>>> = vec![None; saved.len()];
@@ -2332,7 +2360,7 @@ fn build_bytecode_tree(
     source_names: &[Option<Arc<str>>],
     out: &mut [Option<Arc<Bytecode>>],
     visiting: &mut [bool],
-) -> Result<(), LoadError> {
+) -> Result<(), SnapshotError> {
     if out[root].is_some() {
         return Ok(());
     }
@@ -2389,7 +2417,7 @@ fn build_bytecode_tree(
                         )
                     })
             })
-            .collect::<Result<Vec<_>, LoadError>>()?;
+            .collect::<Result<Vec<_>, SnapshotError>>()?;
         let source = source_names.get(idx).cloned().ok_or_else(|| {
             corrupt_arena(
                 "bytecode source name was not materialized",
@@ -2434,7 +2462,6 @@ fn build_bytecode_node(
 
 struct Encoder {
     bytes: Vec<u8>,
-    enforce_field_limits: bool,
 }
 
 // Resource caps for length-prefixed byte fields. They do not change the
@@ -2478,10 +2505,7 @@ impl ByteField {
 impl Encoder {
     #[cfg(test)]
     fn new() -> Self {
-        Self {
-            bytes: Vec::new(),
-            enforce_field_limits: false,
-        }
+        Self { bytes: Vec::new() }
     }
 
     /// Seed the output buffer so a large save does not reallocate it
@@ -2490,7 +2514,6 @@ impl Encoder {
     fn with_capacity(capacity: usize) -> Self {
         Self {
             bytes: Vec::with_capacity(capacity),
-            enforce_field_limits: true,
         }
     }
 
@@ -2535,7 +2558,7 @@ impl Encoder {
     }
 
     fn write_bytes(&mut self, bytes: &[u8], field: ByteField) -> Result<(), SaveError> {
-        if self.enforce_field_limits && bytes.len() > field.limit() {
+        if bytes.len() > field.limit() {
             return Err(SaveError::TooLarge {
                 what: field.name(),
                 count: bytes.len(),
@@ -2572,7 +2595,7 @@ impl<'a> Decoder<'a> {
         Self { bytes, pos: 0 }
     }
 
-    fn finish(&self) -> Result<(), LoadError> {
+    fn finish(&self) -> Result<(), SnapshotError> {
         if self.pos == self.bytes.len() {
             Ok(())
         } else {
@@ -2580,8 +2603,8 @@ impl<'a> Decoder<'a> {
         }
     }
 
-    fn decode_error_at(&self, offset: usize, message: &str) -> LoadError {
-        LoadError::DecodeError(format!("at byte {offset}: {message}"))
+    fn decode_error_at(&self, offset: usize, message: &str) -> SnapshotError {
+        SnapshotError::DecodeError(format!("at byte {offset}: {message}"))
     }
 
     /// Bytes not yet consumed. Used to bound speculative allocations so a
@@ -2590,21 +2613,21 @@ impl<'a> Decoder<'a> {
         self.bytes.len().saturating_sub(self.pos)
     }
 
-    fn read_magic_and_versions(&mut self) -> Result<(), LoadError> {
+    fn read_magic_and_versions(&mut self) -> Result<(), SnapshotError> {
         let magic = self.read_exact(4)?;
         if magic != MAGIC {
-            return Err(LoadError::BadMagic);
+            return Err(SnapshotError::BadMagic);
         }
         let found = self.read_u16()?;
         if found != FORMAT_VERSION {
-            return Err(LoadError::UnsupportedVersion {
+            return Err(SnapshotError::UnsupportedVersion {
                 found,
                 expected: FORMAT_VERSION,
             });
         }
         let found = self.read_u16()?;
         if found != COST_MODEL_VERSION {
-            return Err(LoadError::UnsupportedCostModelVersion {
+            return Err(SnapshotError::UnsupportedCostModelVersion {
                 found,
                 expected: COST_MODEL_VERSION,
             });
@@ -2612,7 +2635,7 @@ impl<'a> Decoder<'a> {
         Ok(())
     }
 
-    fn read_exact(&mut self, len: usize) -> Result<&'a [u8], LoadError> {
+    fn read_exact(&mut self, len: usize) -> Result<&'a [u8], SnapshotError> {
         let start = self.pos;
         let end = self
             .pos
@@ -2626,11 +2649,11 @@ impl<'a> Decoder<'a> {
         Ok(slice)
     }
 
-    fn read_u8(&mut self) -> Result<u8, LoadError> {
+    fn read_u8(&mut self) -> Result<u8, SnapshotError> {
         Ok(self.read_exact(1)?[0])
     }
 
-    fn read_bool(&mut self) -> Result<bool, LoadError> {
+    fn read_bool(&mut self) -> Result<bool, SnapshotError> {
         match self.read_u8()? {
             0 => Ok(false),
             1 => Ok(true),
@@ -2638,52 +2661,52 @@ impl<'a> Decoder<'a> {
         }
     }
 
-    fn read_u16(&mut self) -> Result<u16, LoadError> {
+    fn read_u16(&mut self) -> Result<u16, SnapshotError> {
         let bytes = self.read_exact(2)?;
         let mut out = [0; 2];
         out.copy_from_slice(bytes);
         Ok(u16::from_le_bytes(out))
     }
 
-    fn read_u32(&mut self) -> Result<u32, LoadError> {
+    fn read_u32(&mut self) -> Result<u32, SnapshotError> {
         let bytes = self.read_exact(4)?;
         let mut out = [0; 4];
         out.copy_from_slice(bytes);
         Ok(u32::from_le_bytes(out))
     }
 
-    fn read_u64(&mut self) -> Result<u64, LoadError> {
+    fn read_u64(&mut self) -> Result<u64, SnapshotError> {
         let bytes = self.read_exact(8)?;
         let mut out = [0; 8];
         out.copy_from_slice(bytes);
         Ok(u64::from_le_bytes(out))
     }
 
-    fn read_i64(&mut self) -> Result<i64, LoadError> {
+    fn read_i64(&mut self) -> Result<i64, SnapshotError> {
         let bytes = self.read_exact(8)?;
         let mut out = [0; 8];
         out.copy_from_slice(bytes);
         Ok(i64::from_le_bytes(out))
     }
 
-    fn read_len(&mut self) -> Result<usize, LoadError> {
+    fn read_len(&mut self) -> Result<usize, SnapshotError> {
         Ok(self.read_u32()? as usize)
     }
 
-    fn read_bytes(&mut self, field: ByteField) -> Result<Vec<u8>, LoadError> {
+    fn read_bytes(&mut self, field: ByteField) -> Result<Vec<u8>, SnapshotError> {
         self.read_bounded(field)
     }
 
-    fn read_bounded(&mut self, field: ByteField) -> Result<Vec<u8>, LoadError> {
+    fn read_bounded(&mut self, field: ByteField) -> Result<Vec<u8>, SnapshotError> {
         let len = self.read_len()?;
         if len > field.limit() {
             if matches!(field, ByteField::LuaString) {
-                return Err(LoadError::StringSizeExceeded {
+                return Err(SnapshotError::StringSizeExceeded {
                     size: len,
                     limit: field.limit(),
                 });
             }
-            return Err(LoadError::FieldSizeExceeded {
+            return Err(SnapshotError::FieldSizeExceeded {
                 kind: field.name(),
                 size: len,
                 limit: field.limit(),
@@ -2692,17 +2715,17 @@ impl<'a> Decoder<'a> {
         Ok(self.read_exact(len)?.to_vec())
     }
 
-    fn read_lua_string_bytes(&mut self) -> Result<Vec<u8>, LoadError> {
+    fn read_lua_string_bytes(&mut self) -> Result<Vec<u8>, SnapshotError> {
         self.read_bounded(ByteField::LuaString)
     }
 
-    fn read_string(&mut self, field: ByteField) -> Result<String, LoadError> {
+    fn read_string(&mut self, field: ByteField) -> Result<String, SnapshotError> {
         let start = self.pos;
         String::from_utf8(self.read_bounded(field)?)
             .map_err(|_| self.decode_error_at(start, "string is not UTF-8"))
     }
 
-    fn read_option_string(&mut self, field: ByteField) -> Result<Option<String>, LoadError> {
+    fn read_option_string(&mut self, field: ByteField) -> Result<Option<String>, SnapshotError> {
         if self.read_bool()? {
             Ok(Some(self.read_string(field)?))
         } else {
@@ -2740,7 +2763,7 @@ impl SavePayload {
         Ok(())
     }
 
-    fn decode(input: &mut Decoder<'_>) -> Result<Self, LoadError> {
+    fn decode(input: &mut Decoder<'_>) -> Result<Self, SnapshotError> {
         Ok(Self {
             has_standard_environment: input.read_bool()?,
             rng_state: input.read_u64()?,
@@ -2798,7 +2821,7 @@ impl SavedEnvDelta {
         self.metatable.encode(out)
     }
 
-    fn decode(input: &mut Decoder<'_>) -> Result<Self, LoadError> {
+    fn decode(input: &mut Decoder<'_>) -> Result<Self, SnapshotError> {
         Ok(Self {
             token: input.read_string(ByteField::EnvironmentToken)?,
             deleted: read_vec(input, SavedVal::decode)?,
@@ -2831,7 +2854,7 @@ impl SavedMetatableDelta {
         Ok(())
     }
 
-    fn decode(input: &mut Decoder<'_>) -> Result<Self, LoadError> {
+    fn decode(input: &mut Decoder<'_>) -> Result<Self, SnapshotError> {
         let tag_offset = input.pos;
         match input.read_u8()? {
             0 => Ok(Self::Unchanged),
@@ -2872,7 +2895,7 @@ impl SavedVal {
         Ok(())
     }
 
-    fn decode(input: &mut Decoder<'_>) -> Result<Self, LoadError> {
+    fn decode(input: &mut Decoder<'_>) -> Result<Self, SnapshotError> {
         let tag_offset = input.pos;
         match input.read_u8()? {
             0 => Ok(SavedVal::Nil),
@@ -2924,7 +2947,7 @@ impl SavedObject {
         Ok(())
     }
 
-    fn decode(input: &mut Decoder<'_>) -> Result<Self, LoadError> {
+    fn decode(input: &mut Decoder<'_>) -> Result<Self, SnapshotError> {
         let tag_offset = input.pos;
         match input.read_u8()? {
             0 => {
@@ -2991,7 +3014,7 @@ impl SavedBytecode {
         Ok(())
     }
 
-    fn decode(input: &mut Decoder<'_>) -> Result<Self, LoadError> {
+    fn decode(input: &mut Decoder<'_>) -> Result<Self, SnapshotError> {
         Ok(Self {
             code: read_vec(input, Decoder::read_u32)?,
             number_literals: read_vec(input, Decoder::read_u64)?,
@@ -3029,7 +3052,7 @@ impl SavedUpvalueDesc {
         Ok(())
     }
 
-    fn decode(input: &mut Decoder<'_>) -> Result<Self, LoadError> {
+    fn decode(input: &mut Decoder<'_>) -> Result<Self, SnapshotError> {
         let tag_offset = input.pos;
         match input.read_u8()? {
             0 => Ok(SavedUpvalueDesc::Local(input.read_u8()?)),
@@ -3053,8 +3076,8 @@ fn write_vec<T>(
 
 fn read_vec<'a, T>(
     input: &mut Decoder<'a>,
-    mut read_item: impl FnMut(&mut Decoder<'a>) -> Result<T, LoadError>,
-) -> Result<Vec<T>, LoadError> {
+    mut read_item: impl FnMut(&mut Decoder<'a>) -> Result<T, SnapshotError>,
+) -> Result<Vec<T>, SnapshotError> {
     let len = input.read_len()?;
     // Each element consumes at least one byte, so the true count cannot exceed
     // the bytes left. Cap the reservation to defang a forged length prefix.
@@ -3147,7 +3170,7 @@ mod tests {
             encoder.write_u64(used);
             let mut decoder = Decoder::new(&encoder.bytes);
             match SavePayload::decode(&mut decoder) {
-                Err(LoadError::DecodeError(message)) => {
+                Err(SnapshotError::DecodeError(message)) => {
                     assert!(message.contains("inconsistent cost meter"));
                 }
                 _ => panic!("inconsistent meter must fail before decoding the arena"),
@@ -3178,7 +3201,7 @@ mod tests {
     fn load_bytecode(
         bytecode: Vec<SavedBytecode>,
         objects: Vec<SavedObject>,
-    ) -> Result<State, LoadError> {
+    ) -> Result<State, SnapshotError> {
         load_bytecode_with_globals(bytecode, objects, Vec::new())
     }
 
@@ -3186,7 +3209,7 @@ mod tests {
         bytecode: Vec<SavedBytecode>,
         objects: Vec<SavedObject>,
         user_globals: Vec<(String, SavedVal)>,
-    ) -> Result<State, LoadError> {
+    ) -> Result<State, SnapshotError> {
         let payload = SavePayload {
             has_standard_environment: false,
             rng_state: 0,
@@ -3202,31 +3225,37 @@ mod tests {
         };
         let mut encoder = Encoder::new();
         encoder.write_magic_and_versions();
-        encoder
+        // The encoder enforces production field limits, so a fixture that
+        // fails to encode is a broken test, never a decoder rejection.
+        let encoded = encoder
             .write_bytes(
                 env!("CARGO_PKG_VERSION").as_bytes(),
                 ByteField::EngineVersion,
             )
-            .map_err(|error| LoadError::DecodeError(error.to_string()))?;
-        payload
-            .encode(&mut encoder)
-            .map_err(|error| LoadError::DecodeError(error.to_string()))?;
+            .and_then(|()| payload.encode(&mut encoder));
+        if let Err(error) = encoded {
+            panic!("fixture payload must encode: {error}");
+        }
         State::load_state(
             &encoder.finish(),
             Box::new(crate::DefaultCallbacks),
             no_setup,
         )
+        .map_err(|error| match error {
+            LoadError::Snapshot(error) => error,
+            other => panic!("fixture load failed outside the snapshot: {other:?}"),
+        })
     }
 
-    fn rejected_bytecode(bytecode: Vec<SavedBytecode>, objects: Vec<SavedObject>) -> LoadError {
+    fn rejected_bytecode(bytecode: Vec<SavedBytecode>, objects: Vec<SavedObject>) -> SnapshotError {
         match load_bytecode(bytecode, objects) {
             Ok(_) => panic!("fixture must be rejected"),
             Err(error) => error,
         }
     }
 
-    fn assert_invalid(error: LoadError, chunk: u32, instruction: Option<u32>) {
-        let LoadError::InvalidBytecode {
+    fn assert_invalid(error: SnapshotError, chunk: u32, instruction: Option<u32>) {
+        let SnapshotError::InvalidBytecode {
             chunk: actual_chunk,
             instruction: actual_instruction,
             reason,
@@ -3385,14 +3414,14 @@ mod tests {
         empty.code.clear();
         assert!(matches!(
             rejected_bytecode(vec![empty], Vec::new()),
-            LoadError::InvalidBytecode { .. }
+            SnapshotError::InvalidBytecode { .. }
         ));
 
         let mut no_return = valid_saved_bytecode();
         no_return.code[0] = Instr::push_nil().raw();
         assert!(matches!(
             rejected_bytecode(vec![no_return], Vec::new()),
-            LoadError::InvalidBytecode { .. }
+            SnapshotError::InvalidBytecode { .. }
         ));
 
         let mut bad_jump = valid_saved_bytecode();
@@ -3400,7 +3429,7 @@ mod tests {
         bad_jump.line_info.insert(0, 1);
         assert!(matches!(
             rejected_bytecode(vec![bad_jump], Vec::new()),
-            LoadError::InvalidBytecode { .. }
+            SnapshotError::InvalidBytecode { .. }
         ));
 
         let mut bad_literal = valid_saved_bytecode();
@@ -3408,7 +3437,7 @@ mod tests {
         bad_literal.line_info.insert(0, 1);
         assert!(matches!(
             rejected_bytecode(vec![bad_literal], Vec::new()),
-            LoadError::InvalidBytecode { .. }
+            SnapshotError::InvalidBytecode { .. }
         ));
 
         let mut bad_cache = valid_saved_bytecode();
@@ -3419,7 +3448,7 @@ mod tests {
         bad_cache.line_info.insert(0, 1);
         assert!(matches!(
             rejected_bytecode(vec![bad_cache], Vec::new()),
-            LoadError::InvalidBytecode { .. }
+            SnapshotError::InvalidBytecode { .. }
         ));
 
         let mut legacy_set = valid_saved_bytecode();
@@ -3486,7 +3515,7 @@ mod tests {
             assert!(
                 matches!(
                     rejected_bytecode(vec![bad_string], Vec::new()),
-                    LoadError::InvalidBytecode { .. }
+                    SnapshotError::InvalidBytecode { .. }
                 ),
                 "{forged:?} with an out-of-range string id must be rejected"
             );
@@ -3525,7 +3554,7 @@ mod tests {
         bad_nop.code.insert(0, Instr::op_a(Instr::OP_NOP, 1).raw());
         bad_nop.line_info.insert(0, 1);
         let error = rejected_bytecode(vec![bad_nop], Vec::new());
-        let LoadError::InvalidBytecode { reason, .. } = &error else {
+        let SnapshotError::InvalidBytecode { reason, .. } = &error else {
             panic!("malformed nop must be InvalidBytecode, got {error:?}");
         };
         assert!(reason.contains("reserved operand bytes"), "{reason}");
@@ -3666,7 +3695,7 @@ mod tests {
             forged.line_info = vec![1; forged.code.len()];
             assert!(matches!(
                 rejected_bytecode(vec![forged], Vec::new()),
-                LoadError::InvalidBytecode { .. }
+                SnapshotError::InvalidBytecode { .. }
             ));
         }
     }
@@ -3749,14 +3778,94 @@ mod tests {
         // reintroducing the unbounded-allocation hole. (Compile-time literals
         // are capped by the parser; raw test bytecode is prevalidated by
         // resolve_bytecode_runtime.)
-        let mut oversized = valid_saved_bytecode();
-        oversized
-            .string_literals
-            .push(vec![b'a'; crate::limits::MAX_STRING_BYTES + 1]);
+        //
+        // The encoder refuses oversized fields, so the forged save is built by
+        // encoding a marker literal and splicing raw bytes over it.
+        let limit = crate::limits::MAX_STRING_BYTES;
+        let oversized = vec![b'a'; limit + 1];
+        let mut with_body = forged_literal_save(&oversized, true);
         assert!(matches!(
-            rejected_bytecode(vec![oversized], Vec::new()),
-            LoadError::StringSizeExceeded { .. }
+            State::load_state(&with_body, Box::new(crate::DefaultCallbacks), no_setup),
+            Err(LoadError::Snapshot(SnapshotError::StringSizeExceeded { size, limit: reported }))
+                if size == limit + 1 && reported == limit
         ));
+        // The cap is checked before the body is read: a forged prefix with no
+        // following bytes still reports the size, not truncation.
+        with_body = forged_literal_save(&oversized, false);
+        assert!(matches!(
+            State::load_state(&with_body, Box::new(crate::DefaultCallbacks), no_setup),
+            Err(LoadError::Snapshot(
+                SnapshotError::StringSizeExceeded { .. }
+            ))
+        ));
+    }
+
+    /// A valid one-chunk save whose single string literal is replaced, in the
+    /// raw bytes, by a length prefix for `literal` and (if `body`) its bytes.
+    fn forged_literal_save(literal: &[u8], body: bool) -> Vec<u8> {
+        const MARKER: &[u8] = b"forged-literal-marker";
+        let mut bytecode = valid_saved_bytecode();
+        bytecode.string_literals.push(MARKER.to_vec());
+        let payload = SavePayload {
+            has_standard_environment: false,
+            rng_state: 0,
+            cost: CostState::default(),
+            strings: Vec::new(),
+            bytecode: vec![bytecode],
+            upvalues: Vec::new(),
+            objects: Vec::new(),
+            user_globals: Vec::new(),
+            env_deltas: Vec::new(),
+            next_format_pointer_id: 1,
+            format_pointer_ids: Vec::new(),
+        };
+        let mut encoder = Encoder::new();
+        encoder.write_magic_and_versions();
+        encoder
+            .write_bytes(
+                env!("CARGO_PKG_VERSION").as_bytes(),
+                ByteField::EngineVersion,
+            )
+            .expect("engine version fits");
+        payload
+            .encode(&mut encoder)
+            .expect("marker payload encodes");
+        let bytes = encoder.finish();
+        let hits: Vec<usize> = bytes
+            .windows(MARKER.len())
+            .enumerate()
+            .filter(|(_, window)| *window == MARKER)
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(hits.len(), 1, "marker must occur exactly once");
+        let at = hits[0];
+        let prefix = at - 4;
+        let marker_len = u32::try_from(MARKER.len()).expect("marker length fits u32");
+        assert_eq!(bytes[prefix..at], marker_len.to_le_bytes());
+        let mut forged = bytes[..prefix].to_vec();
+        let literal_len = u32::try_from(literal.len()).expect("literal length fits u32");
+        forged.extend_from_slice(&literal_len.to_le_bytes());
+        if body {
+            forged.extend_from_slice(literal);
+            forged.extend_from_slice(&bytes[at + MARKER.len()..]);
+        }
+        forged
+    }
+
+    #[test]
+    fn encoder_enforces_field_limits() {
+        let limit = ByteField::ChunkSource.limit();
+        let mut encoder = Encoder::new();
+        encoder
+            .write_bytes(&vec![b's'; limit], ByteField::ChunkSource)
+            .expect("a field at its limit encodes");
+        assert_eq!(
+            encoder.write_bytes(&vec![b's'; limit + 1], ByteField::ChunkSource),
+            Err(SaveError::TooLarge {
+                what: ByteField::ChunkSource.name(),
+                count: limit + 1,
+            })
+        );
     }
 
     #[test]
@@ -3765,7 +3874,7 @@ mod tests {
         missing_child.nested.push(1);
         assert_eq!(
             rejected_bytecode(vec![missing_child], Vec::new()),
-            LoadError::CorruptArena {
+            SnapshotError::CorruptArena {
                 reason: "nested chunk id is out of range",
                 index: 1,
                 location: SaveLocation::Bytecode,
@@ -3776,7 +3885,7 @@ mod tests {
         cycle.nested.push(0);
         assert!(matches!(
             rejected_bytecode(vec![cycle], Vec::new()),
-            LoadError::InvalidBytecode { .. }
+            SnapshotError::InvalidBytecode { .. }
         ));
 
         let mut chunks = vec![valid_saved_bytecode(); 201];
@@ -3785,7 +3894,7 @@ mod tests {
         }
         assert!(matches!(
             rejected_bytecode(chunks, Vec::new()),
-            LoadError::InvalidBytecode { .. }
+            SnapshotError::InvalidBytecode { .. }
         ));
 
         let chunk = valid_saved_bytecode();
@@ -3795,7 +3904,7 @@ mod tests {
         };
         assert!(matches!(
             rejected_bytecode(vec![chunk], vec![object]),
-            LoadError::InvalidBytecode { .. }
+            SnapshotError::InvalidBytecode { .. }
         ));
 
         let mut boundary = vec![valid_saved_bytecode(); 200];

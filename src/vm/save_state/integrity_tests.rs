@@ -35,7 +35,7 @@ fn corrupt_environment_key_names_its_delta_and_section() {
     payload.env_deltas = vec![empty_delta("first"), delta];
     assert!(matches!(
         verify::verify_payload(payload),
-        Err(LoadError::CorruptArena {
+        Err(SnapshotError::CorruptArena {
             index: 0,
             location: SaveLocation::EnvironmentDeleted(1),
             reason: "nil is not a table key",
@@ -60,7 +60,7 @@ fn corrupt_metatable_names_its_owner_instead_of_zero() {
     ];
     assert!(matches!(
         verify::verify_payload(payload),
-        Err(LoadError::CorruptArena {
+        Err(SnapshotError::CorruptArena {
             index: 1,
             location: SaveLocation::Objects,
             reason: "saved table metatable is not a table",
@@ -82,7 +82,7 @@ fn saved_keys_share_numeric_equality_and_string_content_equality() {
     for invalid in [SavedVal::Nil, SavedVal::Num(f64::NAN.to_bits())] {
         assert!(matches!(
             invalid.table_key(&strings, 2, location.clone()),
-            Err(LoadError::CorruptArena {
+            Err(SnapshotError::CorruptArena {
                 index: 2,
                 location: SaveLocation::TableEntries { object: 3 },
                 ..

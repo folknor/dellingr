@@ -24,7 +24,9 @@ pub use anchor::Anchor;
 pub use lua_val::LuaType;
 pub use lua_val::RustFunc;
 #[cfg(feature = "snapshot")]
-pub use save_state::{LoadError, SaveDiagnostics, SaveError, SaveState, TableLoadLocation};
+pub use save_state::{
+    LoadError, SaveDiagnostics, SaveError, SaveState, SnapshotError, TableLoadLocation,
+};
 
 use crate::det_hash::IndexMap;
 #[cfg(feature = "snapshot")]

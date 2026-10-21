@@ -703,17 +703,6 @@ impl Table {
         out.extend(self.live_hash_entries().map(|(_, key, value)| (key, value)));
     }
 
-    /// Rebuild from live entries in `pairs()` order. The array part is
-    /// re-derived by insertion, so this does not reproduce nil array slots;
-    /// use `rebuild_from_snapshot` where the array length must round-trip.
-    #[cfg(feature = "snapshot")]
-    pub(super) fn clear_and_insert_entries(
-        &mut self,
-        entries: Vec<(Val, Val)>,
-    ) -> std::result::Result<(), TableError> {
-        self.rebuild(0, entries, false)
-    }
-
     /// Rebuild from `snapshot_entries` output: the first `array_len` entries
     /// are the array slots (keys `1..=array_len` in order, nil values for
     /// empty slots), the rest live hash entries in insertion order.
@@ -722,16 +711,6 @@ impl Table {
         &mut self,
         array_len: usize,
         entries: Vec<(Val, Val)>,
-    ) -> std::result::Result<(), TableError> {
-        self.rebuild(array_len, entries, true)
-    }
-
-    #[cfg(feature = "snapshot")]
-    fn rebuild(
-        &mut self,
-        array_len: usize,
-        entries: Vec<(Val, Val)>,
-        exact_shape: bool,
     ) -> std::result::Result<(), TableError> {
         if array_len > entries.len() {
             return Err(TableError::InvalidSnapshot(
@@ -762,10 +741,10 @@ impl Table {
         }
         self.array = array;
         for (key, value) in entries {
-            // With an exact shape, a hash entry at the array's append key
-            // would migrate into the array and reorder `pairs()`, so it
-            // cannot have come from `snapshot_entries`.
-            if exact_shape && (self.array_slot(&key).is_some() || self.is_array_append_key(&key)) {
+            // A hash entry at the array's append key would migrate into the
+            // array and reorder `pairs()`, so it cannot have come from
+            // `snapshot_entries`.
+            if self.array_slot(&key).is_some() || self.is_array_append_key(&key) {
                 return Err(TableError::InvalidSnapshot(
                     SnapshotTableFault::HashEntryBelongsInArray,
                 ));
@@ -2007,15 +1986,18 @@ mod tests {
         let mut t = Table::default();
         fill_hash(&mut t, 1..=3);
         assert_eq!(t.version(), 0);
-        t.clear_and_insert_entries(vec![
-            (h(3), Val::Bool(true)),
-            (h(1), Val::Bool(true)),
-            (h(2), Val::Bool(true)),
-        ])
+        t.rebuild_from_snapshot(
+            0,
+            vec![
+                (h(3), Val::Bool(true)),
+                (h(1), Val::Bool(true)),
+                (h(2), Val::Bool(true)),
+            ],
+        )
         .unwrap();
         assert_eq!(t.version(), 1);
         assert_eq!(t.get_index(0).map(|(key, _)| key), Some(h(3)));
-        t.clear_and_insert_entries(vec![(h(1), Val::Bool(true))])
+        t.rebuild_from_snapshot(0, vec![(h(1), Val::Bool(true))])
             .unwrap();
         assert_eq!(t.version(), 2);
         assert_eq!(t.get_index(0).map(|(key, _)| key), Some(h(1)));

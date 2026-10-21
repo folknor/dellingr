@@ -3,7 +3,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use dellingr::{
-    ArgCount, DefaultCallbacks, HostCallbacks, LoadError, LuaType, RetCount, SaveError, State,
+    ArgCount, DefaultCallbacks, HostCallbacks, LoadError, LuaType, RetCount, SaveError,
+    SnapshotError, State,
 };
 
 #[derive(Clone, Default)]
@@ -784,7 +785,8 @@ fn unsupported_format_versions_fail_before_setup() {
                 observed.store(true, Ordering::SeqCst);
                 Ok::<(), std::convert::Infallible>(())
             }),
-            Err(LoadError::UnsupportedVersion { found, expected: 7 }) if found == version
+            Err(LoadError::Snapshot(SnapshotError::UnsupportedVersion { found, expected: 7 }))
+                if found == version
         ));
         assert!(!setup_ran.load(Ordering::SeqCst));
     }
@@ -805,7 +807,7 @@ fn unsupported_cost_model_versions_fail_before_setup() {
                 observed.store(true, Ordering::SeqCst);
                 Ok::<(), std::convert::Infallible>(())
             }),
-            Err(LoadError::UnsupportedCostModelVersion { found, expected })
+            Err(LoadError::Snapshot(SnapshotError::UnsupportedCostModelVersion { found, expected }))
                 if found == version && expected == dellingr::COST_MODEL_VERSION
         ));
         assert!(!setup_ran.load(Ordering::SeqCst));
@@ -859,7 +861,7 @@ fn bad_or_truncated_bytes_error_without_panicking() {
         Ok(_) => panic!("bad magic load should fail"),
         Err(err) => err,
     };
-    assert_eq!(bad_magic, LoadError::BadMagic);
+    assert_eq!(bad_magic, LoadError::Snapshot(SnapshotError::BadMagic));
 
     let state = State::new();
     let mut bytes = state.save_state().unwrap().bytes;
@@ -868,7 +870,10 @@ fn bad_or_truncated_bytes_error_without_panicking() {
         Ok(_) => panic!("truncated load should fail"),
         Err(err) => err,
     };
-    assert!(matches!(truncated, LoadError::DecodeError(_)));
+    assert!(matches!(
+        truncated,
+        LoadError::Snapshot(SnapshotError::DecodeError(_))
+    ));
 }
 
 #[test]
@@ -887,7 +892,10 @@ fn missing_host_function_registration_errors_on_load() {
         Ok(_) => panic!("missing host function load should fail"),
         Err(err) => err,
     };
-    assert_eq!(err, LoadError::UnknownFunction("game.host_fn".to_string()));
+    assert_eq!(
+        err,
+        LoadError::Snapshot(SnapshotError::UnknownFunction("game.host_fn".to_string()))
+    );
 }
 
 #[test]
@@ -1444,7 +1452,7 @@ fn table_library_metatable_survives_snapshot() {
 #[test]
 fn ordered_table_library_replay_restores_membership() {
     // Seven live keys with different membership plus a forced reorder, so the
-    // load path takes the ordered `clear_and_insert_entries` replay.
+    // load path takes the ordered environment replay.
     let mut original = fresh();
     run(
         &mut original,
@@ -1520,6 +1528,39 @@ fn environment_order_replay_preserves_setup_array_holes() {
         "math[2] = 2; order = ''; for k in pairs(math) do if type(k) == 'number' then order = order .. k end end",
     );
     assert_eq!(global_str(&mut loaded, "order"), "123");
+}
+
+#[test]
+fn environment_order_replay_with_hash_only_numeric_keys() {
+    // An environment table with no array part but numeric hash keys 3 and 2,
+    // a forced reorder, and an entry only the load-time setup adds. The
+    // replay rebuilds it with an empty array, so key 1 written afterwards
+    // must still start the array exactly as it does without a save.
+    let setup = "math[3] = 3; math[2] = 2; math.floor = nil; math.floor = 7";
+    let after = "math[1] = 1; order = ''; for k in pairs(math) do \
+                 if type(k) == 'number' then order = order .. k end end; \
+                 length = #math";
+    let mut original = fresh();
+    run(&mut original, setup);
+    let save = original.save_state().unwrap();
+    let mut loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), |state| {
+        run(state, "math.extra = 5");
+        Ok::<(), std::convert::Infallible>(())
+    })
+    .expect("order replay accepts hash-only numeric keys");
+    run(&mut original, after);
+    run(&mut loaded, after);
+    assert_eq!(
+        global_str(&mut loaded, "order"),
+        global_str(&mut original, "order")
+    );
+    assert_eq!(
+        global_num(&mut loaded, "length"),
+        global_num(&mut original, "length")
+    );
+    run(&mut loaded, "extra = math.extra; floor = math.floor");
+    assert_eq!(global_num(&mut loaded, "extra"), 5.0);
+    assert_eq!(global_num(&mut loaded, "floor"), 7.0);
 }
 
 #[test]

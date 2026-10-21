@@ -8,6 +8,12 @@ All notable changes to dellingr are documented here. The format follows
 
 ### Changed (breaking)
 
+- `LoadError<E>` now has three variants: `Setup(E)`, `StatePoisoned`, and
+  `Snapshot(SnapshotError)`. Every other former `LoadError` variant moved,
+  unchanged, to the new exported `SnapshotError` (so `LoadError::BadMagic`
+  becomes `LoadError::Snapshot(SnapshotError::BadMagic)`);
+  `LoadError::snapshot()` returns it, and `Error::source` exposes it. Display
+  text is unchanged.
 - `error::StackFrame::source` is `Option<Arc<str>>` instead of
   `Option<String>`: trace frames share the chunk's source-name allocation
   rather than copying it per frame per error. `as_deref()` reads it as before.
