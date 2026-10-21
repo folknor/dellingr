@@ -7,6 +7,9 @@ mod scratch;
 use std::ffi::OsStr;
 use std::process::{ExitStatus, Stdio};
 
+use dellingr::CostAnalysis;
+use dellingr::cli::{ANALYSIS_WARNING_PREFIX, ERROR_PREFIX};
+
 use cli::{command, run};
 use scratch::ScratchScript;
 
@@ -44,7 +47,7 @@ fn closed_pipes_do_not_panic_and_error_display_has_one_final_newline() {
     let stderr = String::from_utf8(output.stderr).expect("CLI diagnostics should be UTF-8");
     assert_eq!(status.code(), Some(1));
     assert!(
-        stderr.contains("Error: "),
+        stderr.contains(ERROR_PREFIX),
         "expected runtime error in stderr"
     );
     assert!(
@@ -67,5 +70,18 @@ fn closed_pipes_do_not_panic_and_error_display_has_one_final_newline() {
         closed_stderr_status.code(),
         Some(1),
         "a closed stderr pipe should not replace the runtime error status with a panic"
+    );
+}
+
+#[test]
+fn analyze_warning_uses_the_library_caveat() {
+    let script = ScratchScript::new("output-analysis", "return 1 + 2\n");
+    let output = run([OsStr::new("--analyze"), script.path().as_os_str()]);
+    assert!(output.status.success(), "analysis should succeed");
+
+    let stderr = String::from_utf8(output.stderr).expect("CLI diagnostics should be UTF-8");
+    assert_eq!(
+        stderr,
+        format!("{ANALYSIS_WARNING_PREFIX}{}\n", CostAnalysis::caveat())
     );
 }

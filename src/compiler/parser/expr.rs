@@ -113,18 +113,18 @@ impl Parser<'_> {
     /// concats with an intermediate string allocation between them.
     fn parse_concat(&mut self) -> Result<ExpDesc> {
         let mut exp_desc = self.parse_addition()?;
-        let mut count: u32 = 1;
+        let mut count: usize = 1;
         while self.input.try_pop(TokenType::DotDot)?.is_some() {
             exp_desc = ExpDesc::Other;
             self.parse_addition()?;
             count += 1;
         }
         if count > 1 {
-            if count > u32::from(MAX_EXPRESSIONS) {
-                return Err(self.error_here(SyntaxError::TooManyExpressions));
-            }
-            let n = u8::try_from(count)
-                .map_err(|_| self.error_here(SyntaxError::TooManyExpressions))?;
+            let n = self.bounded_u8(
+                count,
+                usize::from(MAX_EXPRESSIONS),
+                SyntaxError::TooManyExpressions,
+            )?;
             self.push(Instr::concat(n));
         }
         Ok(exp_desc)
@@ -142,7 +142,8 @@ impl Parser<'_> {
             exp_desc = ExpDesc::Other;
             self.input.next()?;
             self.parse_multiplication()?;
-            self.push_arith(instr, crate::numeral::arith_fn(instr.opcode()));
+            // The token match above selects only foldable arithmetic opcodes.
+            self.push_arith(instr, crate::numeral::arith_fn(instr.opcode()))?;
         }
         Ok(exp_desc)
     }
@@ -160,7 +161,8 @@ impl Parser<'_> {
             exp_desc = ExpDesc::Other;
             self.input.next()?;
             self.parse_unary()?;
-            self.push_arith(instr, crate::numeral::arith_fn(instr.opcode()));
+            // The token match above selects only foldable arithmetic opcodes.
+            self.push_arith(instr, crate::numeral::arith_fn(instr.opcode()))?;
         }
         Ok(exp_desc)
     }
@@ -183,7 +185,7 @@ impl Parser<'_> {
         self.input.next()?;
         self.parse_unary()?;
         if token_type == TokenType::Minus {
-            self.push_negate();
+            self.push_negate()?;
         } else {
             self.push(instr);
         }
@@ -375,7 +377,7 @@ impl Parser<'_> {
         let (num_args, last_exp) = self.parse_call_args()?;
         let num_args = match last_exp {
             ExpDesc::MultiTail(tail) => {
-                self.open_tail(tail, RetCount::All);
+                self.open_tail(tail, RetCount::All)?;
                 ArgCount::Dynamic
             }
             _ => {

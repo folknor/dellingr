@@ -20,13 +20,30 @@ pub struct StackFrame {
     pub line: u32,
 }
 
-/// Rarely-set error context, boxed so `Error` stays narrow.
-#[derive(Debug)]
+/// Rarely-set error context, boxed so `Error` stays narrow. Structured library
+/// details live here so existing rendered messages and `ErrorKind` matches
+/// remain stable while hosts can inspect the operation that failed.
 struct ErrorContext {
     /// Source file or chunk name, if the error came from named source.
     name: Option<Arc<str>>,
     /// Whether `on_error` has already been notified for this error.
     reported: bool,
+    /// String function whose pattern operation produced this error, if any.
+    pattern_function: Option<StringPatternFunction>,
+    /// Typed standard-library reason behind a rendered runtime error, if any.
+    library_error: Option<LibraryError>,
+    /// Standard-library function responsible for a non-library error, if any.
+    library_function: Option<LibraryFunction>,
+}
+
+// Keep typed metadata behind accessors so Error's existing Debug output stays stable.
+impl fmt::Debug for ErrorContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ErrorContext")
+            .field("name", &self.name)
+            .field("reported", &self.reported)
+            .finish()
+    }
 }
 
 impl ErrorContext {
@@ -169,7 +186,8 @@ pub enum ErrorKind {
         /// The bad index, as supplied by the caller.
         index: isize,
     },
-    /// Lua pattern compilation or matching failed.
+    /// Lua pattern compilation or matching failed. The string function is
+    /// available through [`Error::pattern_function`].
     PatternError(PatternErrorDetail),
     /// An embedder registered one stable id for different Rust functions.
     DuplicateFunctionRegistration {
@@ -185,7 +203,8 @@ pub enum ErrorKind {
     /// should use `Option<Anchor>`.
     AnchorNil,
     /// A runtime fault detected by the VM or by a library operation - an
-    /// invalid `next` key and so on. Pattern failures use
+    /// invalid `next` key and so on. Typed standard-library details are
+    /// available through [`Error::library_error`]. Pattern failures use
     /// [`ErrorKind::PatternError`]. Distinct
     /// from [`ErrorKind::ScriptError`], which the script raised on purpose,
     /// and from [`ErrorKind::InternalError`], which indicates a VM bug.
@@ -229,6 +248,127 @@ pub enum PatternErrorDetail {
     MatchDepthExceeded,
     /// A capture was still open when matching finished.
     UnfinishedCapture,
+}
+
+/// String function whose pattern operation raised an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StringPatternFunction {
+    /// `string.find`.
+    Find,
+    /// `string.match`.
+    Match,
+    /// `string.gmatch`.
+    Gmatch,
+    /// `string.gsub`.
+    Gsub,
+}
+
+/// Standard library function named by a typed library error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LibraryFunction {
+    /// `math.random`.
+    Random,
+    /// `table.insert`.
+    Insert,
+    /// `table.remove`.
+    Remove,
+    /// `table.move`.
+    Move,
+    /// `table.unpack` or global `unpack`.
+    Unpack,
+    /// `table.concat`.
+    Concat,
+    /// `table.sort`'s default comparator.
+    Sort,
+    /// Another library function name, for an internal caller not yet listed.
+    Other(String),
+}
+
+impl LibraryFunction {
+    /// Resolve the stable names used by standard library helpers.
+    pub(crate) fn from_name(name: &str) -> Self {
+        match name {
+            "random" => Self::Random,
+            "insert" => Self::Insert,
+            "remove" => Self::Remove,
+            "move" => Self::Move,
+            "unpack" => Self::Unpack,
+            "concat" => Self::Concat,
+            "sort" => Self::Sort,
+            other => Self::Other(other.to_owned()),
+        }
+    }
+
+    fn as_str(&self) -> &str {
+        match self {
+            Self::Random => "random",
+            Self::Insert => "insert",
+            Self::Remove => "remove",
+            Self::Move => "move",
+            Self::Unpack => "unpack",
+            Self::Concat => "concat",
+            Self::Sort => "sort",
+            Self::Other(name) => name,
+        }
+    }
+}
+
+/// A failure raised by a standard library operation. Library runtime errors
+/// retain this value through [`Error::library_error`] while rendering through
+/// [`ErrorKind::RuntimeError`].
+#[derive(Debug)]
+pub enum LibraryError {
+    /// A protected metatable cannot be replaced.
+    ProtectedMetatable,
+    /// A function was called with an unsupported number of arguments.
+    WrongNumberOfArguments {
+        /// The function whose argument count was rejected.
+        function: LibraryFunction,
+    },
+    /// A `string.format` conversion character is unsupported.
+    InvalidFormatConversion {
+        /// The rendered conversion directive.
+        directive: String,
+    },
+    /// A `string.format` conversion directive exceeds the size limit.
+    FormatDirectiveTooLong,
+    /// A `%q` directive contains flags, width or precision.
+    QuotedFormatHasModifiers,
+    /// A `string.format` conversion contains invalid flags or precision.
+    InvalidFormatSpecification {
+        /// The rendered conversion directive.
+        directive: String,
+    },
+    /// A `table.concat` element has a type other than string or number.
+    InvalidConcatValue {
+        /// The type of the invalid element.
+        value_type: LuaType,
+        /// The one-based index of the invalid element.
+        index: i64,
+    },
+    /// A `table.move` operation would exceed the supported element count.
+    TooManyMoveElements,
+    /// A `table.move` destination calculation would wrap around.
+    MoveDestinationWrapAround,
+    /// An integer key range cannot be represented exactly by Lua numbers.
+    IntegerKeyRangeExceeded {
+        /// The function whose key range was rejected.
+        function: LibraryFunction,
+    },
+    /// A table length metamethod returned a value without an exact integer.
+    ObjectLengthNotInteger,
+    /// A replacement string references a capture that does not exist.
+    InvalidGsubCaptureIndex {
+        /// The capture number read from the replacement string.
+        index: usize,
+    },
+    /// A `string.gsub` replacement string contains an invalid percent escape.
+    InvalidGsubEscape,
+    /// A `string.gsub` replacement callback or table returned another type.
+    InvalidGsubReplacementValue {
+        /// The type returned by the replacement.
+        value_type: LuaType,
+    },
 }
 
 /// The specific malformed Lua pattern construct.
@@ -279,19 +419,107 @@ pub fn results_count(count: usize) -> Result<u8, ErrorKind> {
 }
 
 /// Structured reason an argument failed validation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Equality treats each typed standard-library detail as equal to its
+/// corresponding legacy `Custom` or `OutOfBounds` value with the same wording.
+#[derive(Debug, Clone)]
 pub enum ArgDetail {
     /// Type or presence mismatch, described by `expected` and `received`.
     TypeMismatch,
     /// A number cannot be represented as an integer.
     NoInteger,
-    /// A value lies outside the permitted range, with its precise diagnostic.
+    /// Legacy caller-provided wording for an out-of-range value. Internal
+    /// standard-library checks use the typed variants below.
     OutOfBounds(String),
     /// A random interval contains no values.
     IntervalEmpty,
-    /// Another validation failure, including a union of expected types.
+    /// Legacy caller-provided wording for another validation failure. Internal
+    /// standard-library checks use the typed variants below.
     Custom(String),
+    /// A required argument was not supplied.
+    NoValue,
+    /// A string contains a zero byte where `string.format` cannot accept one.
+    StringContainsZeros,
+    /// A value has no literal form for `string.format`'s `%q` conversion.
+    ValueHasNoLiteralForm,
+    /// `tonumber` received a base outside its supported range.
+    BaseOutOfRange,
+    /// `select` received an index below its supported range.
+    IndexOutOfRange,
+    /// `rawlen` requires a table or string.
+    TableOrStringExpected,
+    /// `string.gsub` requires a string, function or table replacement.
+    StringFunctionOrTableExpected,
+    /// A table sequence position is outside its supported range.
+    PositionOutOfBounds,
 }
+
+impl ArgDetail {
+    fn rendered_detail(&self) -> Option<&str> {
+        match self {
+            Self::NoInteger => Some("number has no integer representation"),
+            Self::IntervalEmpty => Some("interval is empty"),
+            Self::OutOfBounds(detail) | Self::Custom(detail) => Some(detail),
+            Self::NoValue => Some("no value"),
+            Self::StringContainsZeros => Some("string contains zeros"),
+            Self::ValueHasNoLiteralForm => Some("value has no literal form"),
+            Self::BaseOutOfRange => Some("base out of range"),
+            Self::IndexOutOfRange => Some("index out of range"),
+            Self::TableOrStringExpected => Some("table or string expected"),
+            Self::StringFunctionOrTableExpected => Some("string/function/table expected"),
+            Self::PositionOutOfBounds => Some("position out of bounds"),
+            Self::TypeMismatch => None,
+        }
+    }
+}
+
+impl PartialEq for ArgDetail {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::TypeMismatch, Self::TypeMismatch)
+            | (Self::NoInteger, Self::NoInteger)
+            | (Self::IntervalEmpty, Self::IntervalEmpty)
+            | (Self::NoValue, Self::NoValue)
+            | (Self::StringContainsZeros, Self::StringContainsZeros)
+            | (Self::ValueHasNoLiteralForm, Self::ValueHasNoLiteralForm)
+            | (Self::BaseOutOfRange, Self::BaseOutOfRange)
+            | (Self::IndexOutOfRange, Self::IndexOutOfRange)
+            | (Self::TableOrStringExpected, Self::TableOrStringExpected)
+            | (Self::StringFunctionOrTableExpected, Self::StringFunctionOrTableExpected)
+            | (Self::PositionOutOfBounds, Self::PositionOutOfBounds) => true,
+            (Self::OutOfBounds(left), Self::OutOfBounds(right))
+            | (Self::Custom(left), Self::Custom(right)) => left == right,
+            (Self::BaseOutOfRange, Self::OutOfBounds(text))
+            | (Self::OutOfBounds(text), Self::BaseOutOfRange) => text == "base out of range",
+            (Self::IndexOutOfRange, Self::OutOfBounds(text))
+            | (Self::OutOfBounds(text), Self::IndexOutOfRange) => text == "index out of range",
+            (Self::PositionOutOfBounds, Self::OutOfBounds(text))
+            | (Self::OutOfBounds(text), Self::PositionOutOfBounds) => {
+                text == "position out of bounds"
+            }
+            (Self::TableOrStringExpected, Self::Custom(text))
+            | (Self::Custom(text), Self::TableOrStringExpected) => {
+                text == "table or string expected"
+            }
+            (Self::StringFunctionOrTableExpected, Self::Custom(text))
+            | (Self::Custom(text), Self::StringFunctionOrTableExpected) => {
+                text == "string/function/table expected"
+            }
+            (Self::NoValue, Self::Custom(text)) | (Self::Custom(text), Self::NoValue) => {
+                text == "no value"
+            }
+            (Self::StringContainsZeros, Self::Custom(text))
+            | (Self::Custom(text), Self::StringContainsZeros) => text == "string contains zeros",
+            (Self::ValueHasNoLiteralForm, Self::Custom(text))
+            | (Self::Custom(text), Self::ValueHasNoLiteralForm) => {
+                text == "value has no literal form"
+            }
+            _ => false,
+        }
+    }
+}
+
+impl Eq for ArgDetail {}
 
 /// Syntax-level error categories raised by the parser.
 #[derive(Debug)]
@@ -421,6 +649,9 @@ impl Error {
             Box::new(ErrorContext {
                 name: None,
                 reported: false,
+                pattern_function: None,
+                library_error: None,
+                library_function: None,
             })
         })
     }
@@ -435,6 +666,42 @@ impl Error {
     /// Source file or chunk name attached to this error, if it came from named source.
     pub fn source_name(&self) -> Option<&str> {
         self.context.as_deref().and_then(ErrorContext::as_str)
+    }
+
+    /// String function whose pattern operation produced this error, if any.
+    pub fn pattern_function(&self) -> Option<StringPatternFunction> {
+        self.context
+            .as_deref()
+            .and_then(|context| context.pattern_function)
+    }
+
+    /// Typed standard-library reason behind this runtime error, if any.
+    pub fn library_error(&self) -> Option<&LibraryError> {
+        self.context
+            .as_deref()
+            .and_then(|context| context.library_error.as_ref())
+    }
+
+    /// Standard-library function responsible for this error, if known.
+    pub fn library_function(&self) -> Option<&LibraryFunction> {
+        self.context
+            .as_deref()
+            .and_then(|context| context.library_function.as_ref())
+    }
+
+    pub(crate) fn with_pattern_function(mut self, function: StringPatternFunction) -> Self {
+        self.context_mut().pattern_function = Some(function);
+        self
+    }
+
+    pub(crate) fn with_library_error(mut self, detail: LibraryError) -> Self {
+        self.context_mut().library_error = Some(detail);
+        self
+    }
+
+    pub(crate) fn with_library_function(mut self, function: LibraryFunction) -> Self {
+        self.context_mut().library_function = Some(function);
+        self
     }
 
     /// 1-based column number where the error surfaced (0 if unknown).
@@ -473,6 +740,24 @@ impl ErrorKind {
             e.is_recoverable()
         } else {
             false
+        }
+    }
+}
+
+impl ArgError {
+    /// Build a typed argument type mismatch.
+    pub(crate) fn type_mismatch(
+        arg_number: isize,
+        func_name: Option<&str>,
+        expected: LuaType,
+        received: Option<LuaType>,
+    ) -> Self {
+        Self {
+            arg_number,
+            func_name: func_name.map(str::to_owned),
+            detail: ArgDetail::TypeMismatch,
+            expected: Some(expected),
+            received,
         }
     }
 }
@@ -668,14 +953,15 @@ impl fmt::Display for ArgError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let func_name = self.func_name.as_deref().unwrap_or("<anonymous>");
         let extra = match &self.detail {
-            ArgDetail::NoInteger => "number has no integer representation".into(),
-            ArgDetail::IntervalEmpty => "interval is empty".into(),
-            ArgDetail::OutOfBounds(detail) | ArgDetail::Custom(detail) => detail.clone(),
             ArgDetail::TypeMismatch => match (&self.expected, &self.received) {
                 (Some(expected), Some(got)) => format!("{expected} expected, got {got}"),
                 (Some(expected), None) => format!("{expected} expected, got no value"),
                 (None, _) => "value expected".into(),
             },
+            detail => detail
+                .rendered_detail()
+                .expect("every non-type argument detail has rendered wording")
+                .to_owned(),
         };
 
         write!(
@@ -683,6 +969,42 @@ impl fmt::Display for ArgError {
             "bad argument #{} to '{}' ({})",
             self.arg_number, func_name, extra
         )
+    }
+}
+
+impl fmt::Display for LibraryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ProtectedMetatable => f.write_str("cannot change a protected metatable"),
+            Self::WrongNumberOfArguments { function } => {
+                write!(f, "wrong number of arguments to '{}'", function.as_str())
+            }
+            Self::InvalidFormatConversion { directive } => {
+                write!(f, "invalid conversion '{directive}' to 'format'")
+            }
+            Self::FormatDirectiveTooLong => f.write_str("invalid format (too long)"),
+            Self::QuotedFormatHasModifiers => f.write_str("specifier '%q' cannot have modifiers"),
+            Self::InvalidFormatSpecification { directive } => {
+                write!(f, "invalid conversion specification: '{directive}'")
+            }
+            Self::InvalidConcatValue { value_type, index } => write!(
+                f,
+                "invalid value ({value_type}) at index {index} in table for 'concat'"
+            ),
+            Self::TooManyMoveElements => f.write_str("too many elements to move"),
+            Self::MoveDestinationWrapAround => f.write_str("destination wrap around"),
+            Self::IntegerKeyRangeExceeded { function } => write!(
+                f,
+                "{} range exceeds the exactly representable integer keys",
+                function.as_str()
+            ),
+            Self::ObjectLengthNotInteger => f.write_str("object length is not an integer"),
+            Self::InvalidGsubCaptureIndex { .. } => f.write_str("invalid capture index"),
+            Self::InvalidGsubEscape => f.write_str("invalid use of '%' in replacement string"),
+            Self::InvalidGsubReplacementValue { value_type } => {
+                write!(f, "invalid replacement value (a {value_type})")
+            }
+        }
     }
 }
 

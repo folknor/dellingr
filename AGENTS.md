@@ -229,9 +229,10 @@ scripts and same hyperfine pass, but against [lua-rs](https://github.com/ianm199
 (the only comparable pure-Rust Lua VM) anchored to C Lua 5.4 and the
 LuaJIT floor. It expects a `lua-rs` release binary built from a clone in
 `research/lua-rs/` (build command in the script header); `research/` is
-an untracked external checkout, not part of the crate. The README's
-`lua-rs` column comes from this script - its footnote pins the captured
-date and upstream commit, so refresh both together.
+an area for local upstream checkouts, which remain ignored. The comparison
+script lives at `research/bench_luars.sh`. The README's `lua-rs` column comes
+from this script - its footnote pins the captured date and upstream commit, so
+refresh both together.
 
 ## Project conventions worth knowing
 

@@ -20,7 +20,7 @@ use super::{MATH_LIBRARY_CAPACITY, arg_integer, check_type_named};
 use crate::LuaType;
 use crate::Result;
 use crate::State;
-use crate::error::{ArgDetail, ArgError, ErrorKind};
+use crate::error::{ArgDetail, ErrorKind, LibraryError, LibraryFunction};
 use std::f64::consts::PI;
 
 // Every math function charges a flat 1 through its own `consume_cost(1)`.
@@ -95,16 +95,6 @@ pub(crate) fn open_math(state: &mut State) -> Result<()> {
     add_fn!("min", |state| {
         state.consume_cost(1)?;
         let n = isize::try_from(state.get_top()).expect("the value stack limit fits in isize");
-        if n == 0 {
-            let e = ArgError {
-                arg_number: 1,
-                func_name: Some("min".to_string()),
-                detail: crate::error::ArgDetail::TypeMismatch,
-                expected: Some(LuaType::Number),
-                received: None,
-            };
-            return Err(state.error(ErrorKind::ArgError(e)));
-        }
         check_type_named(state, 1, LuaType::Number, "min")?;
         let mut result = state.to_number(1)?;
         for i in 2..=n {
@@ -123,16 +113,6 @@ pub(crate) fn open_math(state: &mut State) -> Result<()> {
     add_fn!("max", |state| {
         state.consume_cost(1)?;
         let n = isize::try_from(state.get_top()).expect("the value stack limit fits in isize");
-        if n == 0 {
-            let e = ArgError {
-                arg_number: 1,
-                func_name: Some("max".to_string()),
-                detail: crate::error::ArgDetail::TypeMismatch,
-                expected: Some(LuaType::Number),
-                received: None,
-            };
-            return Err(state.error(ErrorKind::ArgError(e)));
-        }
         check_type_named(state, 1, LuaType::Number, "max")?;
         let mut result = state.to_number(1)?;
         for i in 2..=n {
@@ -215,9 +195,9 @@ pub(crate) fn open_math(state: &mut State) -> Result<()> {
                 state.rng.random_range_i64(m, n) as f64
             }
             _ => {
-                return Err(state.error(ErrorKind::RuntimeError(
-                    "wrong number of arguments to 'random'".to_string(),
-                )));
+                return Err(state.library_error(LibraryError::WrongNumberOfArguments {
+                    function: LibraryFunction::Random,
+                }));
             }
         };
 

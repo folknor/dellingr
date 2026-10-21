@@ -184,7 +184,9 @@ impl fmt::Debug for Val {
             Num(n) => n.fmt(f),
             RustFn(_) => f.write_str(RUST_FN_DISPLAY),
             Obj(o) => o.fmt(f),
-            Str(s) => s.fmt(f),
+            // Val has no heap reference here, so render a stable marker rather
+            // than exposing StringPtr's process-local slotmap key.
+            Str(_) => f.write_str("<string>"),
         }
     }
 }
@@ -252,7 +254,7 @@ impl PartialEq for Val {
 // Markable impl for Val is in object.rs
 
 /// The runtime type of a Lua value, as exposed to host code via [`State`].
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum LuaType {
     /// `nil`
     Nil,
@@ -337,5 +339,14 @@ mod tests {
     fn rust_function_debug_rendering_is_opaque() {
         let value = Val::RustFn(first_callback);
         assert_eq!(format!("{value:?}"), RUST_FN_DISPLAY);
+    }
+
+    #[test]
+    fn string_debug_rendering_does_not_expose_pointer_identity() {
+        let mut state = State::new();
+        let value = state
+            .alloc_string("example")
+            .expect("small test string fits the VM string limit");
+        assert_eq!(format!("{value:?}"), "<string>");
     }
 }

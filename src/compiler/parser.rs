@@ -1,3 +1,5 @@
+#![deny(clippy::cast_possible_truncation)]
+
 use std::sync::Arc;
 
 use super::Bytecode;
@@ -98,7 +100,9 @@ impl<'a> Parser<'a> {
         } else {
             self.funcs.locals.push(name);
             let non_param_locals = self.funcs.locals.len() - self.funcs.chunk.num_params as usize;
-            self.funcs.chunk.num_locals = self.funcs.chunk.num_locals.max(non_param_locals as u8);
+            let count =
+                self.bounded_u8(non_param_locals, MAX_LOCALS, SyntaxError::TooManyLocals)?;
+            self.funcs.chunk.num_locals = self.funcs.chunk.num_locals.max(count);
             Ok(())
         }
     }
@@ -126,12 +130,29 @@ impl<'a> Parser<'a> {
         Error::new(kind, line, column)
     }
 
+    /// Checks an inclusive semantic bound and the instruction operand width together.
+    fn bounded_u8(&self, value: usize, limit: usize, error: SyntaxError) -> Result<u8> {
+        match u8::try_from(value) {
+            Ok(value_u8) if value <= limit => Ok(value_u8),
+            _ => Err(self.error_here(error)),
+        }
+    }
+
+    fn local_slot_count(&self) -> Result<u8> {
+        self.bounded_u8(
+            self.funcs.locals.len(),
+            MAX_LOCALS,
+            SyntaxError::TooManyLocals,
+        )
+    }
+
+    fn internal_error(&self, message: &str) -> Error {
+        self.error_here(ErrorKind::InternalError(message.into()))
+    }
+
     fn checked_fixed_arg_count(&self, explicit: usize, implicit: usize) -> Result<u8> {
         let total = explicit + implicit;
-        if total > MAX_FIXED_ARGS {
-            return Err(self.error_here(SyntaxError::TooManyArguments));
-        }
-        Ok(total as u8)
+        self.bounded_u8(total, MAX_FIXED_ARGS, SyntaxError::TooManyArguments)
     }
 
     /// Runs recursive parsing while charging its syntax nesting cost.
@@ -314,17 +335,17 @@ impl<'a> Parser<'a> {
     }
 
     /// Closes and discards exactly the locals declared in this block.
-    fn level_down(&mut self) {
-        let block_base = self
-            .funcs
-            .block_starts
-            .pop()
-            .expect("every block exit follows a block entry");
+    fn level_down(&mut self) -> Result<()> {
+        let Some(block_base) = self.funcs.block_starts.pop() else {
+            return Err(self.internal_error("block exit requires a block entry"));
+        };
         let before = self.funcs.locals.len();
         self.funcs.locals.truncate(block_base);
         if block_base < before {
-            self.push(Instr::close_upvalues(block_base as u8));
+            let slot = self.bounded_u8(block_base, MAX_LOCALS, SyntaxError::TooManyLocals)?;
+            self.push(Instr::close_upvalues(slot));
         }
+        Ok(())
     }
 
     /// Adds an instruction to the output with line number tracking.
@@ -351,13 +372,19 @@ impl<'a> Parser<'a> {
         ))
     }
 
-    /// A folded result must not be NaN or -0.0 - reference lcode.c's guards.
-    /// `find_or_add_number` dedups through `number_literal_key`, which gives
-    /// NaN no key (every folded NaN would take a fresh pool slot) and folds
-    /// both signed zeroes onto one key (a folded -0.0 could reuse an earlier
-    /// 0.0 slot, or later 0.0 literals could reuse its -0.0 slot).
-    fn fold_result_allowed(value: f64) -> bool {
-        !value.is_nan() && !(value == 0.0 && value.is_sign_negative())
+    /// Folding must preserve signed zero and NaN behavior, and a full pool
+    /// must leave otherwise valid source compilable using runtime arithmetic.
+    fn try_fold_literal(&mut self, value: f64) -> Result<Option<u16>> {
+        if value.is_nan() || (value == 0.0 && value.is_sign_negative()) {
+            return Ok(None);
+        }
+        match self.find_or_add_number(value) {
+            Ok(index) => Ok(Some(index)),
+            Err(error) => match error.kind {
+                ErrorKind::SyntaxError(SyntaxError::TooManyNumbers) => Ok(None),
+                _ => Err(error),
+            },
+        }
     }
 
     /// Emits an arithmetic instruction, folding `PushNum a; PushNum b; op`
@@ -366,19 +393,18 @@ impl<'a> Parser<'a> {
     /// folded value is bit-exact with runtime evaluation. A full literal
     /// pool falls back to emitting the instruction unfolded rather than
     /// failing a program the unfolded compiler accepted.
-    fn push_arith(&mut self, instr: Instr, op: fn(f64, f64) -> f64) {
+    fn push_arith(&mut self, instr: Instr, op: fn(f64, f64) -> f64) -> Result<()> {
         if let Some((lhs, rhs)) = self.foldable_binary_operands() {
             let result = op(lhs, rhs);
-            if Self::fold_result_allowed(result)
-                && let Ok(idx) = self.find_or_add_number(result)
-            {
+            if let Some(idx) = self.try_fold_literal(result)? {
                 self.funcs.chunk.code.pop();
                 self.funcs.chunk.line_info.pop();
-                self.replace_last_instr(Instr::push_num(idx));
-                return;
+                self.replace_last_instr(Instr::push_num(idx))?;
+                return Ok(());
             }
         }
         self.push(instr);
+        Ok(())
     }
 
     /// Emits the branch-if-false that follows a condition, fusing it with a
@@ -410,20 +436,19 @@ impl<'a> Parser<'a> {
     /// Emits unary negation, folding `PushNum v; Negate` into `PushNum -v`.
     /// Replacing in place is safe even at a jump target: the landing site
     /// still computes the same value.
-    fn push_negate(&mut self) {
+    fn push_negate(&mut self) -> Result<()> {
         if self.funcs.chunk.code.len() > self.funcs.fold_barrier
             && let Some(last) = self.funcs.chunk.code.last()
             && last.opcode() == Instr::OP_PUSH_NUM
         {
             let value = -self.funcs.chunk.number_literals[last.bx() as usize];
-            if Self::fold_result_allowed(value)
-                && let Ok(idx) = self.find_or_add_number(value)
-            {
-                self.replace_last_instr(Instr::push_num(idx));
-                return;
+            if let Some(idx) = self.try_fold_literal(value)? {
+                self.replace_last_instr(Instr::push_num(idx))?;
+                return Ok(());
             }
         }
         self.push(Instr::negate());
+        Ok(())
     }
 
     /// Adds an instruction with an explicit source line.
@@ -433,28 +458,24 @@ impl<'a> Parser<'a> {
     }
 
     /// Overwrites the last emitted instruction in place, returning the old one.
-    fn replace_last_instr(&mut self, instr: Instr) -> Instr {
-        let slot = self
-            .funcs
-            .chunk
-            .code
-            .last_mut()
-            .expect("replace_last_instr requires a previously emitted instruction");
-        std::mem::replace(slot, instr)
+    fn replace_last_instr(&mut self, instr: Instr) -> Result<Instr> {
+        let Some(slot) = self.funcs.chunk.code.last_mut() else {
+            return Err(self.internal_error("instruction replacement requires emitted code"));
+        };
+        Ok(std::mem::replace(slot, instr))
     }
 
     /// Changes a typed final call or vararg to provide every requested tail value.
-    pub(super) fn open_tail(&mut self, tail: TailKind, want: RetCount) {
+    pub(super) fn open_tail(&mut self, tail: TailKind, want: RetCount) -> Result<()> {
         let (replacement, expected_opcode) = match tail {
             TailKind::Vararg => (Instr::vararg(want.to_u8()), Instr::OP_VARARG),
             TailKind::FunctionCall(call) => (Instr::call(call.num_args(), want), Instr::OP_CALL),
         };
-        let old = self.replace_last_instr(replacement);
-        debug_assert_eq!(
-            old.opcode(),
-            expected_opcode,
-            "a typed multi-value tail must still end with its own instruction"
-        );
+        if self.funcs.chunk.code.last().map(|instr| instr.opcode()) != Some(expected_opcode) {
+            return Err(self.internal_error("multi-value tail does not end with its instruction"));
+        }
+        self.replace_last_instr(replacement)?;
+        Ok(())
     }
 
     /// Updates current line from the lexer stamp on a consumed or peeked token.
@@ -474,11 +495,9 @@ impl<'a> Parser<'a> {
     /// Called when exiting a loop. Patches all break jumps to jump to the
     /// current instruction position (the instruction after the loop).
     fn exit_loop(&mut self) -> Result<()> {
-        let context = self
-            .funcs
-            .loop_breaks
-            .pop()
-            .expect("exit_loop called without enter_loop");
+        let Some(context) = self.funcs.loop_breaks.pop() else {
+            return Err(self.internal_error("loop exit requires a loop entry"));
+        };
         let loop_end = self.funcs.chunk.code.len();
         for break_idx in context.break_jumps {
             // The break instruction is a Jump with placeholder offset.
@@ -499,12 +518,10 @@ impl<'a> Parser<'a> {
             self.push(Instr::close_upvalues(close_slot));
             // Record the index where we'll emit the Jump instruction.
             let idx = self.funcs.chunk.code.len();
-            self.funcs
-                .loop_breaks
-                .last_mut()
-                .expect("loop context existed before emitting break close")
-                .break_jumps
-                .push(idx);
+            let Some(context) = self.funcs.loop_breaks.last_mut() else {
+                return Err(self.internal_error("break emission lost its loop context"));
+            };
+            context.break_jumps.push(idx);
             // Emit a placeholder Jump that will be patched by exit_loop
             self.push(Instr::jump(0));
             Ok(())
@@ -521,7 +538,9 @@ impl<'a> Parser<'a> {
         // The top-level chunk is a vararg function (can receive command-line args)
         let c = self.parse_chunk(&[], true)?;
         let token = self.input.next()?;
-        debug_assert!(self.funcs.frames.is_empty());
+        if !self.funcs.frames.is_empty() {
+            return Err(self.internal_error("completed source retains function frames"));
+        }
         if let TokenType::EndOfFile = token.typ {
             Ok(c)
         } else {
@@ -532,11 +551,7 @@ impl<'a> Parser<'a> {
     /// Parses a `Bytecode`.
     #[hotpath::measure]
     fn parse_chunk(&mut self, params: &[&'a str], is_vararg: bool) -> Result<Bytecode> {
-        if params.len() > MAX_LOCALS {
-            return Err(self.error_here(SyntaxError::TooManyLocals));
-        }
-        let num_params =
-            u8::try_from(params.len()).map_err(|_| self.error_here(SyntaxError::TooManyLocals))?;
+        let num_params = self.bounded_u8(params.len(), MAX_LOCALS, SyntaxError::TooManyLocals)?;
         // The root is a real frame too; no placeholder chunk participates in
         // name lookup or the function-depth limit.
         self.funcs.frames.push(state::FuncState::new(
@@ -555,19 +570,12 @@ impl<'a> Parser<'a> {
         // Copy upvalues to chunk
         self.funcs.chunk.upvalues = self.funcs.upvalues.iter().map(|(_, desc)| *desc).collect();
 
-        let finished = self
-            .funcs
-            .frames
-            .pop()
-            .expect("parse_chunk pushed its function frame before parsing");
-        debug_assert!(
-            finished.loop_breaks.is_empty(),
-            "every loop entered in a function is exited before its chunk ends"
-        );
-        debug_assert!(
-            finished.block_starts.is_empty(),
-            "every block entered in a function is exited before its chunk ends"
-        );
+        let Some(finished) = self.funcs.frames.pop() else {
+            return Err(self.internal_error("chunk completion requires a function frame"));
+        };
+        if !finished.loop_breaks.is_empty() || !finished.block_starts.is_empty() {
+            return Err(self.internal_error("completed function retains loop or block scopes"));
+        }
         let tmp_chunk = finished.chunk;
 
         #[cfg(feature = "debug_parser")]

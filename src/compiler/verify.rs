@@ -1,4 +1,4 @@
-use super::Bytecode;
+use super::{Bytecode, UpvalueDesc};
 use crate::instr::{Builtin, Instr};
 use crate::limits::{
     MAX_FRAME_SLOTS, MAX_LITERALS, MAX_NESTED, MAX_TABLE_TEMPLATE_FIELDS, MAX_TABLE_TEMPLATES,
@@ -84,6 +84,43 @@ pub(crate) struct BytecodeValidationError {
     pub(crate) reason: String,
 }
 
+impl std::fmt::Display for BytecodeValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.instruction {
+            Some(instruction) => write!(f, "at instruction {instruction}: {}", self.reason),
+            None => write!(f, "at chunk metadata: {}", self.reason),
+        }
+    }
+}
+
+/// Check the enclosing-frame contract shared by compiled and saved chunks.
+/// Arena references and cycle detection belong to the snapshot representation.
+pub(crate) fn validate_child(
+    parent: &impl BytecodeView,
+    child: &impl BytecodeView,
+) -> Result<(), BytecodeValidationError> {
+    for index in 0..child.upvalues_len() {
+        let valid = match child.upvalue(index) {
+            UpvalueDesc::Local(slot) => {
+                usize::from(slot)
+                    < usize::from(parent.num_params()) + usize::from(parent.num_locals())
+            }
+            UpvalueDesc::Upvalue(slot) => usize::from(slot) < parent.upvalues_len(),
+        };
+        if !valid {
+            return Err(err(None, "child upvalue descriptor is invalid for parent"));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_depth(depth: usize) -> Result<(), BytecodeValidationError> {
+    if depth > crate::limits::MAX_CHUNK_NESTING {
+        return Err(err(None, "nested chunk depth exceeds parser limit"));
+    }
+    Ok(())
+}
+
 pub(crate) trait BytecodeView {
     fn code_len(&self) -> usize;
     fn raw_instruction(&self, pc: usize) -> u32;
@@ -97,6 +134,7 @@ pub(crate) trait BytecodeView {
     fn num_locals(&self) -> u8;
     fn nested_len(&self) -> usize;
     fn upvalues_len(&self) -> usize;
+    fn upvalue(&self, index: usize) -> UpvalueDesc;
     fn is_vararg(&self) -> bool;
     fn line_info_len(&self) -> usize;
 }
@@ -137,6 +175,9 @@ impl BytecodeView for Bytecode {
     }
     fn upvalues_len(&self) -> usize {
         self.upvalues.len()
+    }
+    fn upvalue(&self, index: usize) -> UpvalueDesc {
+        self.upvalues[index]
     }
     fn is_vararg(&self) -> bool {
         self.is_vararg
@@ -729,4 +770,40 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
         return Err(err(None, "declared cache slots do not match instructions"));
     }
     verify_stack_discipline(view)
+}
+
+#[cfg(test)]
+mod tree_tests {
+    use super::{Bytecode, UpvalueDesc, validate_child, validate_depth};
+
+    #[test]
+    fn child_captures_are_bounded_by_the_enclosing_frame() {
+        let parent = Bytecode {
+            num_params: 1,
+            num_locals: 1,
+            upvalues: vec![UpvalueDesc::Local(0)],
+            ..Bytecode::default()
+        };
+        for (descriptor, valid) in [
+            (UpvalueDesc::Local(0), true),
+            (UpvalueDesc::Local(1), true),
+            (UpvalueDesc::Local(2), false),
+            (UpvalueDesc::Upvalue(0), true),
+            (UpvalueDesc::Upvalue(1), false),
+        ] {
+            let child = Bytecode {
+                upvalues: vec![descriptor],
+                ..Bytecode::default()
+            };
+            assert_eq!(validate_child(&parent, &child).is_ok(), valid);
+        }
+    }
+
+    #[test]
+    fn chunk_depth_includes_the_root() {
+        let limit = crate::limits::MAX_CHUNK_NESTING;
+        assert!(validate_depth(1).is_ok());
+        assert!(validate_depth(limit).is_ok());
+        assert!(validate_depth(limit + 1).is_err());
+    }
 }

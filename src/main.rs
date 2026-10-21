@@ -14,7 +14,8 @@ use std::fs;
 use std::io::{self, Write};
 use std::process::exit;
 
-use dellingr::{ArgCount, HostCallbacks, RetCount, State, analyze_cost};
+use dellingr::cli::{ANALYSIS_WARNING_PREFIX, COST_USED_PREFIX, ERROR_PREFIX};
+use dellingr::{ArgCount, CostAnalysis, HostCallbacks, RetCount, State, analyze_cost};
 
 #[derive(Clone, Copy)]
 enum OptionKind {
@@ -180,12 +181,12 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Option<CliArgs
 // errors (error kinds, cost budget exhaustion) through the API, never through
 // this process's exit status, so distinct error codes would have no consumer.
 fn report_error(error: impl std::fmt::Display) -> ! {
-    write_stderr(&format!("Error: {error}\n"));
+    write_stderr(&format!("{ERROR_PREFIX}{error}\n"));
     exit(1);
 }
 
 fn report_usage_error(error: &str) -> ! {
-    write_stderr(&format!("Error: {error}\n{}\n", usage_line()));
+    write_stderr(&format!("{ERROR_PREFIX}{error}\n{}\n", usage_line()));
     exit(1);
 }
 
@@ -255,9 +256,10 @@ fn main() {
         match analyze_cost(&source) {
             Ok(analysis) => {
                 write_stdout_or_exit(&format!("{analysis}\n"));
-                write_stderr(
-                    "Warning: analyze_cost accounts only for static bytecode and excludes all data-dependent native string, pattern, and table work; it is not a runtime bound or native-cost estimate.\n",
-                );
+                write_stderr(&format!(
+                    "{ANALYSIS_WARNING_PREFIX}{}\n",
+                    CostAnalysis::caveat()
+                ));
             }
             Err(error) => report_error(format!("parsing source: {error}")),
         }
@@ -275,7 +277,7 @@ fn main() {
         .and_then(|()| state.call(ArgCount::Fixed(0), RetCount::Fixed(0)));
 
     if !args.quiet {
-        write_stderr(&format!("Cost used: {}\n", state.cost_used()));
+        write_stderr(&format!("{COST_USED_PREFIX}{}\n", state.cost_used()));
     }
 
     if let Err(error) = result {

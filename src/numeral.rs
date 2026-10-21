@@ -32,8 +32,9 @@ pub(crate) fn lua_div(a: f64, b: f64) -> f64 {
 }
 
 /// Returns the numeric function the VM dispatch uses for an arithmetic opcode
-/// that is safe to fold. Used by the constant folder only; the dispatch loop
-/// calls the named functions directly.
+/// that is safe to fold. This is const so opcode mappings can be checked or
+/// reused in compile-time contexts; the dispatch loop keeps direct function
+/// items so its calls remain statically dispatched and inlinable.
 ///
 /// Exponentiation is deliberately excluded: its result depends on the host
 /// `powf` implementation, so folding it would bake a platform-specific result

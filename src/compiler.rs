@@ -472,6 +472,30 @@ pub(super) fn parse_str_named(
 
 /// Finalize a freshly-parsed `Bytecode` tree before it ships to the runtime.
 fn finalize(bc: &mut Bytecode) -> Result<()> {
+    finalize_at_depth(bc, 1)
+}
+
+fn validation_error(bc: &Bytecode, validation: &verify::BytecodeValidationError) -> error::Error {
+    let chunk_desc = bc.name.as_deref().map_or_else(
+        || "unnamed chunk".to_string(),
+        |name| format!("function '{name}'"),
+    );
+    let message = format!("compiler emitted invalid bytecode in {chunk_desc} {validation}");
+    debug_assert!(false, "{message}");
+    // Internal errors start without a location. The error representation uses
+    // 0:0 for that state; attach a line only when the verifier identifies one.
+    let mut error = internal_error(message).with_source_name(bc.source.clone());
+    if let Some(line) = validation
+        .instruction
+        .and_then(|instruction| bc.line_info.get(instruction as usize))
+    {
+        error = error.with_location(*line as usize, 0);
+    }
+    error
+}
+
+fn finalize_at_depth(bc: &mut Bytecode, depth: usize) -> Result<()> {
+    verify::validate_depth(depth).map_err(|error| validation_error(bc, &error))?;
     // Diagnostic names are not identifiers used by execution. Bound them at
     // compilation so every emitted chunk fits the unchanged snapshot field.
     if let Some(name) = &mut bc.name
@@ -507,38 +531,16 @@ fn finalize(bc: &mut Bytecode) -> Result<()> {
     // Reporting it as a compile error keeps a compiler bug catchable instead of
     // fatal. The debug assertion stays on top so CI fails loudly at the source
     // rather than surfacing it as a user-facing error.
-    if let Err(validation_error) = verify::validate_bytecode(bc) {
-        let chunk_desc = bc.name.as_deref().map_or_else(
-            || "unnamed chunk".to_string(),
-            |name| format!("function '{name}'"),
-        );
-        let location_desc = validation_error.instruction.map_or_else(
-            || " at chunk metadata".to_string(),
-            |instruction| format!(" at instruction {instruction}"),
-        );
-        debug_assert!(
-            false,
-            "compiler emitted invalid bytecode in {chunk_desc}{location_desc}: {validation_error:?}"
-        );
-        let line_num = validation_error
-            .instruction
-            .and_then(|instruction| bc.line_info.get(instruction as usize))
-            .copied()
-            .unwrap_or(0) as usize;
-        let message = format!(
-            "compiler emitted invalid bytecode in {chunk_desc}{location_desc}: {}",
-            validation_error.reason
-        );
-        return Err(internal_error(message)
-            .with_location(line_num, 0)
-            .with_source_name(bc.source.clone()));
+    verify::validate_bytecode(bc).map_err(|error| validation_error(bc, &error))?;
+    for child in &bc.nested {
+        verify::validate_child(bc, child.as_ref()).map_err(|error| validation_error(bc, &error))?;
     }
     for nested in &mut bc.nested {
         // The parser produces nested `Arc<Bytecode>` with a refcount of 1, so
         // we have unique access to mutate each one in place before it ships.
         let inner =
             Arc::get_mut(nested).expect("nested Bytecode should be uniquely owned during finalize");
-        finalize(inner)?;
+        finalize_at_depth(inner, depth + 1)?;
     }
     Ok(())
 }

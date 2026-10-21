@@ -4,7 +4,7 @@ use std::sync::{Arc, OnceLock};
 
 use super::{STRING_LIBRARY_CAPACITY, arg_integer, check_any_named, check_type_named, opt_integer};
 use crate::compiler;
-use crate::error::{ArgError, Error, ErrorKind};
+use crate::error::{Error, ErrorKind, LibraryError, PatternErrorDetail, StringPatternFunction};
 use crate::instr::{ArgCount, RetCount};
 use crate::patterns::{LuaCapture, LuaPattern, MatchError, PatternError};
 use crate::{LuaType, Result, State};
@@ -97,15 +97,23 @@ fn find_subslice(state: &mut State, haystack: &[u8], needle: &[u8]) -> Result<Op
     Ok(None)
 }
 
-fn match_error(state: &State, error: MatchError) -> Error {
+fn match_error(state: &State, function: StringPatternFunction, error: MatchError) -> Error {
     match error {
-        MatchError::Pattern(error) => pattern_runtime_error(state, error),
+        MatchError::Pattern(error) => pattern_runtime_error(state, function, error),
         MatchError::BudgetExceeded => state.budget_exceeded_error(),
     }
 }
 
-fn pattern_runtime_error(state: &State, error: PatternError) -> Error {
-    state.error(ErrorKind::PatternError(error.into()))
+fn pattern_runtime_error(
+    state: &State,
+    function: StringPatternFunction,
+    error: PatternError,
+) -> Error {
+    // Keep PatternError's detail-only kind for hosts that match its existing
+    // variants; the boxed Error context carries the string function separately.
+    state
+        .error(ErrorKind::PatternError(PatternErrorDetail::from(error)))
+        .with_pattern_function(function)
 }
 
 /// Convert a nonnegative Lua integer to `usize`, saturating where `usize` is
@@ -167,49 +175,50 @@ fn string_or_number_bytes(state: &mut State, idx: isize, function_name: &str) ->
 /// The type gate of `string_or_number_bytes`, without the copy. Used where an
 /// argument must be validated before later arguments are read, so errors name
 /// the arguments in the reference's order.
-fn check_string_or_number(state: &State, idx: isize, function_name: &str) -> Result<()> {
-    match state.typ(idx) {
-        LuaType::String | LuaType::Number => Ok(()),
-        received => Err(state.error(ErrorKind::ArgError(ArgError {
-            arg_number: idx,
-            func_name: Some(function_name.to_owned()),
-            detail: crate::error::ArgDetail::TypeMismatch,
-            expected: Some(LuaType::String),
-            received: Some(received),
-        }))),
-    }
+fn check_string_or_number(state: &mut State, idx: isize, function_name: &str) -> Result<()> {
+    state.check_type_in(idx, &[LuaType::String, LuaType::Number], function_name)
 }
 
 /// Reference Lua raises "unfinished capture" only when a library function
 /// reads a capture whose `(` the match never closed (`get_onecapture`), so
 /// every consumer of a capture value routes `LuaCapture::Unfinished` here.
-fn unfinished_capture_error(state: &State) -> Error {
-    pattern_runtime_error(state, PatternError::UnfinishedCapture)
+fn unfinished_capture_error(state: &State, function: StringPatternFunction) -> Error {
+    pattern_runtime_error(state, function, PatternError::UnfinishedCapture)
 }
 
-fn push_capture_value(state: &mut State, bytes: &[u8], capture: LuaCapture) -> Result<()> {
+fn push_capture_value(
+    state: &mut State,
+    bytes: &[u8],
+    capture: LuaCapture,
+    function: StringPatternFunction,
+) -> Result<()> {
     match capture {
         LuaCapture::Bytes { start, end } => state.push_bytes(&bytes[start..end])?,
         LuaCapture::Position(offset) => state.push_number((offset + 1) as f64)?,
-        LuaCapture::Unfinished => return Err(unfinished_capture_error(state)),
+        LuaCapture::Unfinished => return Err(unfinished_capture_error(state, function)),
     }
     Ok(())
 }
 
-fn push_captures(state: &mut State, bytes: &[u8], pattern: &LuaPattern) -> Result<u8> {
+fn push_captures(
+    state: &mut State,
+    bytes: &[u8],
+    pattern: &LuaPattern,
+    function: StringPatternFunction,
+) -> Result<u8> {
     let n = pattern.num_matches();
     if n > 1 {
-        preflight_capture_bytes(state, (1..n).map(|i| pattern.capture(i)))?;
+        preflight_capture_bytes(state, (1..n).map(|i| pattern.capture(i)), function)?;
     } else {
-        preflight_capture_bytes(state, [pattern.capture(0)])?;
+        preflight_capture_bytes(state, [pattern.capture(0)], function)?;
     }
     if n > 1 {
         for i in 1..n {
-            push_capture_value(state, bytes, pattern.capture(i))?;
+            push_capture_value(state, bytes, pattern.capture(i), function)?;
         }
         crate::error::results_count(n - 1).map_err(|kind| state.error(kind))
     } else {
-        push_capture_value(state, bytes, pattern.capture(0))?;
+        push_capture_value(state, bytes, pattern.capture(0), function)?;
         Ok(1)
     }
 }
@@ -224,13 +233,14 @@ fn capture_byte_len(capture: LuaCapture) -> usize {
 fn preflight_capture_bytes(
     state: &mut State,
     captures: impl IntoIterator<Item = LuaCapture>,
+    function: StringPatternFunction,
 ) -> Result<()> {
     // Every caller pushes exactly the captures it preflights, so reject an
     // unclosed one before copying any capture bytes to the stack.
     let mut total = 0usize;
     for capture in captures {
         if capture == LuaCapture::Unfinished {
-            return Err(unfinished_capture_error(state));
+            return Err(unfinished_capture_error(state, function));
         }
         total = total.saturating_add(capture_byte_len(capture));
     }
@@ -242,6 +252,7 @@ fn append_capture_bytes(
     out: &mut Vec<u8>,
     bytes: &[u8],
     capture: LuaCapture,
+    function: StringPatternFunction,
 ) -> Result<()> {
     match capture {
         LuaCapture::Bytes { start, end } => append_bytes(state, out, &bytes[start..end])?,
@@ -249,7 +260,7 @@ fn append_capture_bytes(
             let position = (offset + 1).to_string();
             append_bytes(state, out, position.as_bytes())?;
         }
-        LuaCapture::Unfinished => return Err(unfinished_capture_error(state)),
+        LuaCapture::Unfinished => return Err(unfinished_capture_error(state, function)),
     }
     Ok(())
 }
@@ -262,11 +273,11 @@ fn append_bytes(state: &mut State, out: &mut Vec<u8>, bytes: &[u8]) -> Result<()
     Ok(())
 }
 
-fn invalid_gsub_capture_error(state: &State) -> Error {
+fn invalid_gsub_capture_error(state: &State, index: usize) -> Error {
     // Replacement-template errors stay runtime errors: PatternError describes
     // errors in the pattern, while this index refers to a replacement template.
-    // Keep capture-index failures on one constructor for every template reference.
-    state.error(ErrorKind::RuntimeError("invalid capture index".into()))
+    // Keep the index in typed error context without changing its rendered text.
+    state.library_error(LibraryError::InvalidGsubCaptureIndex { index })
 }
 
 fn gsub_replacement_keeps_original(state: &State, index: isize) -> bool {
@@ -275,9 +286,7 @@ fn gsub_replacement_keeps_original(state: &State, index: isize) -> bool {
 }
 
 fn invalid_gsub_escape_error(state: &State) -> Error {
-    state.error(ErrorKind::RuntimeError(
-        "invalid use of '%' in replacement string".into(),
-    ))
+    state.library_error(LibraryError::InvalidGsubEscape)
 }
 
 /// A string replacement parsed once: literal runs (with `%%` unescaped) and
@@ -379,9 +388,9 @@ fn append_templated_replacement(
                 } else {
                     *captures
                         .get(*idx)
-                        .ok_or_else(|| invalid_gsub_capture_error(state))?
+                        .ok_or_else(|| invalid_gsub_capture_error(state, *idx))?
                 };
-                append_capture_bytes(state, out, bytes, capture)?;
+                append_capture_bytes(state, out, bytes, capture, StringPatternFunction::Gsub)?;
             }
             ReplSegment::InvalidEscape => return Err(invalid_gsub_escape_error(state)),
         }
@@ -429,21 +438,22 @@ fn append_gsub_replacement(
             } else {
                 captures[0]
             };
-            preflight_capture_bytes(state, [key])?;
+            preflight_capture_bytes(state, [key], StringPatternFunction::Gsub)?;
             state.push_value(3)?;
-            push_capture_value(state, bytes, key)?;
+            push_capture_value(state, bytes, key, StringPatternFunction::Gsub)?;
             state.get_table(-2)?;
             let keep_original = gsub_replacement_keeps_original(state, -1);
             if keep_original {
                 state.pop(2)?;
-                append_capture_bytes(state, out, bytes, captures[0])?;
+                append_capture_bytes(state, out, bytes, captures[0], StringPatternFunction::Gsub)?;
             } else {
                 let t = state.typ(-1);
                 if !matches!(t, LuaType::String | LuaType::Number) {
-                    return Err(state.error(ErrorKind::RuntimeError(format!(
-                        "invalid replacement value (a {})",
-                        t.as_str()
-                    ))));
+                    return Err(
+                        state.library_error(LibraryError::InvalidGsubReplacementValue {
+                            value_type: t,
+                        }),
+                    );
                 }
                 let val = state.bytes_with_default_string_coercion(-1)?;
                 state.pop(2)?;
@@ -456,37 +466,38 @@ fn append_gsub_replacement(
             } else {
                 &captures[..1]
             };
-            preflight_capture_bytes(state, args.iter().copied())?;
+            preflight_capture_bytes(state, args.iter().copied(), StringPatternFunction::Gsub)?;
             state.push_value(3)?;
             if captures.len() > 1 {
                 for cap in &captures[1..] {
-                    push_capture_value(state, bytes, *cap)?;
+                    push_capture_value(state, bytes, *cap, StringPatternFunction::Gsub)?;
                 }
                 let argument_count = crate::error::results_count(captures.len() - 1)
                     .map_err(|kind| state.error(kind))?;
                 state.call(ArgCount::Fixed(argument_count), RetCount::Fixed(1))?;
             } else {
-                push_capture_value(state, bytes, captures[0])?;
+                push_capture_value(state, bytes, captures[0], StringPatternFunction::Gsub)?;
                 state.call(ArgCount::Fixed(1), RetCount::Fixed(1))?;
             }
             let keep_original = gsub_replacement_keeps_original(state, -1);
             if keep_original {
                 state.pop(1)?;
-                append_capture_bytes(state, out, bytes, captures[0])?;
+                append_capture_bytes(state, out, bytes, captures[0], StringPatternFunction::Gsub)?;
             } else {
                 let t = state.typ(-1);
                 if !matches!(t, LuaType::String | LuaType::Number) {
-                    return Err(state.error(ErrorKind::RuntimeError(format!(
-                        "invalid replacement value (a {})",
-                        t.as_str()
-                    ))));
+                    return Err(
+                        state.library_error(LibraryError::InvalidGsubReplacementValue {
+                            value_type: t,
+                        }),
+                    );
                 }
                 let val = state.bytes_with_default_string_coercion(-1)?;
                 state.pop(1)?;
                 append_bytes(state, out, &val)?;
             }
         }
-        _ => append_capture_bytes(state, out, bytes, captures[0])?,
+        _ => append_capture_bytes(state, out, bytes, captures[0], StringPatternFunction::Gsub)?,
     }
     Ok(())
 }
@@ -575,7 +586,7 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
                 let mut meter = state.cost_meter();
                 matcher.matches_bytes_from(&s, init, &mut meter)
             }
-            .map_err(|err| match_error(state, err))?;
+            .map_err(|err| match_error(state, StringPatternFunction::Find, err))?;
             match matched {
                 true => {
                     let range = matcher.range();
@@ -583,10 +594,19 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
                     state.push_number(range.end as f64)?;
 
                     let n = matcher.num_matches();
-                    preflight_capture_bytes(state, (1..n).map(|i| matcher.capture(i)))?;
+                    preflight_capture_bytes(
+                        state,
+                        (1..n).map(|i| matcher.capture(i)),
+                        StringPatternFunction::Find,
+                    )?;
                     if n > 1 {
                         for i in 1..n {
-                            push_capture_value(state, &s, matcher.capture(i))?;
+                            push_capture_value(
+                                state,
+                                &s,
+                                matcher.capture(i),
+                                StringPatternFunction::Find,
+                            )?;
                         }
                     }
                     let capture_returns = u8::try_from(n.saturating_sub(1))
@@ -668,9 +688,9 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
             let mut meter = state.cost_meter();
             matcher.matches_bytes_from(&s, init, &mut meter)
         }
-        .map_err(|err| match_error(state, err))?;
+        .map_err(|err| match_error(state, StringPatternFunction::Match, err))?;
         if matched {
-            push_captures(state, &s, &matcher)
+            push_captures(state, &s, &matcher, StringPatternFunction::Match)
         } else {
             state.push_nil()?;
             Ok(1)
@@ -748,7 +768,7 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
                 state,
                 3,
                 "gsub",
-                crate::error::ArgDetail::Custom("string/function/table expected".to_owned()),
+                crate::error::ArgDetail::StringFunctionOrTableExpected,
             ));
         }
         if max_replacements == Some(0) {
@@ -852,7 +872,7 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
                 let mut meter = state.cost_meter();
                 matcher.matches_bytes_from(&s, pos, &mut meter)
             }
-            .map_err(|err| match_error(state, err))?;
+            .map_err(|err| match_error(state, StringPatternFunction::Gsub, err))?;
             if !matched {
                 break;
             }
@@ -1148,14 +1168,18 @@ fn gmatch_iter(state: &mut State) -> Result<u8> {
         };
         (matched, range, captures)
     };
-    let matched = matched.map_err(|err| match_error(state, err))?;
+    let matched = matched.map_err(|err| match_error(state, StringPatternFunction::Gmatch, err))?;
     if matched {
         let returned = if captures.len() > 1 {
             &captures[1..]
         } else {
             &captures[..1]
         };
-        preflight_capture_bytes(state, returned.iter().copied())?;
+        preflight_capture_bytes(
+            state,
+            returned.iter().copied(),
+            StringPatternFunction::Gmatch,
+        )?;
         state.push_string(gmatch_schema::POSITION_FIELD)?;
         state.push_number(range.end as f64)?;
         state.set_table_raw(1)?;
@@ -1187,7 +1211,10 @@ fn push_gmatch_capture(state: &mut State, capture: LuaCapture) -> Result<()> {
     match capture {
         LuaCapture::Bytes { start, end } => state.push_bytes_from_stack_range(2, start..end),
         LuaCapture::Position(offset) => state.push_number((offset + 1) as f64),
-        LuaCapture::Unfinished => Err(unfinished_capture_error(state)),
+        LuaCapture::Unfinished => Err(unfinished_capture_error(
+            state,
+            StringPatternFunction::Gmatch,
+        )),
     }
 }
 

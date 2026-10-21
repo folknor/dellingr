@@ -107,7 +107,7 @@ impl Parser<'_> {
             self.expect(TokenType::RCurly)?;
 
             if let Some(tail) = last_tail.as_ref() {
-                self.open_tail(*tail, RetCount::All);
+                self.open_tail(*tail, RetCount::All)?;
                 self.funcs.chunk.code[table_instr_idx] = Instr::new_table_tracked(field_count);
                 self.push(Instr::set_list_batch(0, batch));
             } else if usize::from(field_count) > INLINE_TEMPLATE_FIELDS
@@ -184,7 +184,11 @@ impl Parser<'_> {
             field_indices.push(entry_idx);
         }
 
-        let template_idx = self.funcs.chunk.table_templates.len() as u8;
+        // Templates are optional: an unencodable index keeps ordinary table
+        // construction rather than rejecting the source.
+        let Ok(template_idx) = u8::try_from(self.funcs.chunk.table_templates.len()) else {
+            return false;
+        };
         self.funcs.chunk.table_templates.push(template);
         self.funcs.chunk.code[table_instr_idx] = Instr::new_table_template(template_idx);
         for ((key_id, instr_idx), entry_idx) in fields.iter().zip(field_indices) {

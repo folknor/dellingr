@@ -71,19 +71,28 @@ const _: () = {
 /// Custom result type for evaluating Lua.
 pub type Result<T> = std::result::Result<T, error::Error>;
 
+/// Shared textual fragments used by the command-line interface.
+pub mod cli {
+    /// Prefix used for the static analysis caveat.
+    pub const ANALYSIS_WARNING_PREFIX: &str = "Warning: ";
+
+    /// Prefix used for errors printed by the command-line interface.
+    pub const ERROR_PREFIX: &str = "Error: ";
+
+    /// Prefix used for the command-line cost summary.
+    pub const COST_USED_PREFIX: &str = "Cost used: ";
+}
+
 /// Cost breakdown for a single scope (function or main chunk).
 #[derive(Debug, Default, Clone)]
 pub struct ScopeCost {
     /// Name of this scope
     pub name: String,
     /// Static cost of this scope's own opcodes, each counted once at its
-    /// occurrence. Loop and branch bodies are counted a single time, so this is
-    /// neither a runtime lower nor upper bound - it is a structural estimate.
+    /// occurrence in the bytecode.
     pub own_cost: u64,
     /// `own_cost` plus the `total_cost` of every nested function body, each
-    /// counted once regardless of whether (or how many times) it is actually
-    /// invoked. A structural estimate of all reachable code, not a runtime
-    /// prediction.
+    /// counted once regardless of whether that function is invoked.
     pub total_cost: u64,
     // The category counters below, ScopeTotals and both renderers mirror the
     // non-free variants of instr::OpcodeCost; a new variant needs a counter
@@ -214,6 +223,17 @@ pub struct CostAnalysis {
 }
 
 impl CostAnalysis {
+    /// Return the standard explanation of the limits of this static estimate.
+    ///
+    /// The command-line interface prints this text after its analysis report.
+    pub const fn caveat() -> &'static str {
+        concat!(
+            "Static cost analysis counts each costed opcode once across the main chunk and every nested function body, ",
+            "whether or not that body runs. Loops and branches count once. It excludes data-dependent native work in ",
+            "the string, pattern, and table libraries, so it is not a runtime-cost bound or a native-cost estimate."
+        )
+    }
+
     /// Collect totals across all scopes
     fn totals(&self) -> ScopeTotals {
         // analyze_chunk already computed the recursive total for the root.
@@ -308,9 +328,8 @@ impl std::fmt::Display for CostAnalysis {
 ///
 /// Returns a `CostAnalysis` with per-scope cost breakdown.
 /// The actual runtime cost depends on control flow and loop iterations.
-/// This accounts only for static bytecode. It excludes data-dependent native
-/// work in the string, pattern, and table libraries, so it is neither a runtime
-/// lower nor upper bound, and it is not a native-cost estimate.
+/// [`CostAnalysis::caveat`] returns the standard explanation of the estimate's
+/// limits for display in a host application.
 ///
 /// For repeated analysis of the same source, prefer `Engine::compile` followed
 /// by `Engine::analyze_cost(&program)` so the parse is paid once.

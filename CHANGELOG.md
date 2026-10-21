@@ -30,6 +30,12 @@ All notable changes to dellingr are documented here. The format follows
 - `State::try_to_boolean`, `try_typ` and `try_raw_equal` report an invalid
   stack index; the existing forms keep reading it as `nil`.
 - The snapshot byte limits are public in `limits`.
+- Typed library error context: `LibraryError`, `LibraryFunction` and
+  `StringPatternFunction`, read through `Error::library_error`,
+  `Error::library_function` and `Error::pattern_function`. Message text is
+  unchanged.
+- `CostAnalysis::caveat()` and a `dellingr::cli` module with the CLI's output
+  prefixes. The `--analyze` warning now prints that caveat, with new wording.
 
 ### Fixed
 

@@ -20,7 +20,7 @@ impl<'a> Parser<'a> {
             let (n, last_exp) = self.parse_explist()?;
             match last_exp {
                 ExpDesc::MultiTail(tail) => {
-                    self.open_tail(tail, RetCount::All);
+                    self.open_tail(tail, RetCount::All)?;
                     u8::MAX
                 }
                 _ => n,
@@ -93,11 +93,11 @@ impl<'a> Parser<'a> {
             let instr = match &place_exp {
                 PlaceExp::FieldAccess(_) | PlaceExp::TableIndex => {
                     let stack_offset = num_lvals - i - 1;
-                    if stack_offset > MAX_ASSIGNMENT_OFFSET {
-                        return Err(self.error_here(SyntaxError::AssignmentOffsetTooLarge));
-                    }
-                    let stack_offset = u8::try_from(stack_offset)
-                        .map_err(|_| self.error_here(SyntaxError::AssignmentOffsetTooLarge))?;
+                    let stack_offset = self.bounded_u8(
+                        stack_offset,
+                        MAX_ASSIGNMENT_OFFSET,
+                        SyntaxError::AssignmentOffsetTooLarge,
+                    )?;
                     place_exp.set_instr(stack_offset)
                 }
                 _ => place_exp.set_instr(0),
@@ -128,7 +128,7 @@ impl<'a> Parser<'a> {
             return self.parse_local_function();
         }
 
-        let old_local_count = self.funcs.locals.len() as u8;
+        let old_local_count = self.local_slot_count()?;
 
         let names = self.parse_namelist()?;
 
@@ -146,8 +146,8 @@ impl<'a> Parser<'a> {
 
         // Actually perform the assignment
         for i in (0..num_names).rev() {
-            let slot = u8::try_from(i)
-                .map_err(|_| self.error_here(SyntaxError::TooManyLocals))?
+            let slot = self
+                .bounded_u8(i, crate::limits::MAX_LOCALS, SyntaxError::TooManyLocals)?
                 .checked_add(old_local_count)
                 .ok_or_else(|| self.error_here(SyntaxError::TooManyLocals))?;
             self.push(Instr::set_local(slot));
@@ -168,7 +168,7 @@ impl<'a> Parser<'a> {
     fn parse_local_function(&mut self) -> Result<()> {
         self.input.next()?; // `function` keyword
         let name = self.expect_identifier()?;
-        let local_slot = self.funcs.locals.len() as u8;
+        let local_slot = self.local_slot_count()?;
 
         // Add the local FIRST so it's in scope within the function body
         // (this allows recursive calls like `local function fib(n) ... fib(n-1) ... end`)
@@ -215,14 +215,14 @@ impl<'a> Parser<'a> {
                 return Err(self.err_unexpected(tok, TokenType::Assign));
             }
         }
-        self.level_down();
+        self.level_down()?;
         Ok(())
     }
 
     /// Parses a numeric `for` loop, starting with the first expression after the `=`.
     fn parse_numeric_for(&mut self, name: &'a str) -> Result<()> {
         // The start(current), stop and step are stored in three "hidden" local slots.
-        let current_local_slot = self.funcs.locals.len() as u8;
+        let current_local_slot = self.local_slot_count()?;
 
         // Control expressions are evaluated in the enclosing scope, before the
         // loop variable exists. Check capacity now so its error precedence is
@@ -298,14 +298,17 @@ impl<'a> Parser<'a> {
         }
         self.expect(TokenType::In)?;
 
-        let num_loop_vars =
-            u8::try_from(names.len()).map_err(|_| self.error_here(SyntaxError::TooManyLocals))?;
+        let num_loop_vars = self.bounded_u8(
+            names.len(),
+            usize::from(u8::MAX),
+            SyntaxError::TooManyLocals,
+        )?;
         let local_count = 3usize
             .checked_add(names.len())
             .ok_or_else(|| self.error_here(SyntaxError::TooManyLocals))?;
 
         // The hidden control variables: iterator function, state, control var
-        let base_slot = self.funcs.locals.len() as u8;
+        let base_slot = self.local_slot_count()?;
 
         // The expressions run in the enclosing scope. Preserve the existing
         // local-limit error without declaring the future loop locals early.
@@ -372,14 +375,16 @@ impl<'a> Parser<'a> {
         num_exprs: usize,
         last_exp: &ExpDesc,
     ) -> Result<()> {
-        debug_assert!(num_exprs >= 1, "expression lists are never empty");
+        if num_exprs == 0 {
+            return Err(self.internal_error("multi-assignment requires a nonempty expression list"));
+        }
         let fixed_prefix = num_exprs - 1;
         let tail_needed = num_targets.saturating_sub(fixed_prefix);
         if tail_needed > 1
             && let ExpDesc::MultiTail(tail) = last_exp
         {
             let tail_needed = self.checked_multi_assign_width(tail_needed)?;
-            self.open_tail(*tail, RetCount::Fixed(tail_needed));
+            self.open_tail(*tail, RetCount::Fixed(tail_needed))?;
             return Ok(());
         }
         if num_targets > num_exprs {
@@ -398,10 +403,7 @@ impl<'a> Parser<'a> {
     /// Converts a fixed multi-assignment result width without allowing the
     /// `255` dynamic/all-results sentinel into a fixed-width instruction.
     fn checked_multi_assign_width(&self, width: usize) -> Result<u8> {
-        if width > MAX_FIXED_RESULTS {
-            return Err(self.error_here(SyntaxError::TooManyFixedResults));
-        }
-        u8::try_from(width).map_err(|_| self.error_here(SyntaxError::TooManyFixedResults))
+        self.bounded_u8(width, MAX_FIXED_RESULTS, SyntaxError::TooManyFixedResults)
     }
 
     /// Parses a `do ... end` statement.
@@ -410,7 +412,7 @@ impl<'a> Parser<'a> {
         self.level_up();
         self.parse_statements()?;
         self.expect(TokenType::End)?;
-        self.level_down();
+        self.level_down()?;
         Ok(())
     }
 
@@ -420,7 +422,7 @@ impl<'a> Parser<'a> {
         self.level_up();
 
         // Track locals before body
-        let body_locals_start = self.funcs.locals.len() as u8;
+        let body_locals_start = self.local_slot_count()?;
 
         let body_start = self.funcs.chunk.code.len();
         self.enter_loop(body_locals_start);
@@ -430,14 +432,14 @@ impl<'a> Parser<'a> {
 
         // Close upvalues for any locals declared inside the loop body
         // (before the conditional jump back)
-        if self.funcs.locals.len() as u8 > body_locals_start {
+        if self.local_slot_count()? > body_locals_start {
             self.push(Instr::close_upvalues(body_locals_start));
         }
 
         let (branch_index, branch_constructor) = self.push_branch_false();
         self.patch_jump(branch_index, body_start, branch_constructor)?;
         self.exit_loop()?;
-        self.level_down();
+        self.level_down()?;
         Ok(())
     }
 
@@ -458,14 +460,14 @@ impl<'a> Parser<'a> {
         let (test_position, test_constructor) = self.push_branch_false();
 
         // Track locals before body
-        let body_locals_start = self.funcs.locals.len() as u8;
+        let body_locals_start = self.local_slot_count()?;
 
         self.enter_loop(body_locals_start);
         self.parse_statements()?;
         self.expect(TokenType::End)?;
 
         // Close upvalues for any locals declared inside the loop body
-        if self.funcs.locals.len() as u8 > body_locals_start {
+        if self.local_slot_count()? > body_locals_start {
             self.push(Instr::close_upvalues(body_locals_start));
         }
 
@@ -477,7 +479,7 @@ impl<'a> Parser<'a> {
         self.patch_jump(test_position, self.funcs.chunk.code.len(), test_constructor)?;
 
         self.exit_loop()?;
-        self.level_down();
+        self.level_down()?;
 
         Ok(())
     }
@@ -512,7 +514,7 @@ impl<'a> Parser<'a> {
             // `Return` instruction, yet the nested `if`'s false branch lands
             // after it and does fall through.
             let arm_returns = self.parse_statements()?;
-            self.level_down();
+            self.level_down()?;
 
             let next = self.input.peek_type()?;
             if !arm_returns && matches!(next, TokenType::ElseIf | TokenType::Else) {
@@ -547,7 +549,7 @@ impl<'a> Parser<'a> {
         self.input.next()?; // `else` keyword
         self.parse_statements()?;
         self.expect(TokenType::End)?;
-        self.level_down();
+        self.level_down()?;
         Ok(())
     }
 }

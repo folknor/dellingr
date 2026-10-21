@@ -58,7 +58,8 @@ use super::{ObjectPtr, State, Val};
 use crate::COST_MODEL_VERSION;
 use crate::compiler::{Bytecode, UpvalueDesc};
 use crate::host::HostCallbacks;
-use crate::instr::{FORMAT_VERSION, Instr};
+use crate::instr::Instr;
+use crate::instr::snapshot_format::FORMAT_VERSION;
 use crate::limits::{
     MAX_CHUNK_NAME_BYTES, MAX_ENGINE_VERSION_BYTES, MAX_ENVIRONMENT_TOKEN_BYTES,
     MAX_SAVE_IDENTIFIER_BYTES, MAX_SOURCE_NAME_BYTES,
@@ -354,6 +355,10 @@ enum SavedObject {
     },
 }
 
+// This is a wire arena node, not an executable chunk: children are untrusted
+// ids (including possible cycles), instructions are unchecked words, and
+// numbers retain their encoded bits. Keep it separate until graph verification
+// completes so decoding never constructs a recursive executable object graph.
 #[derive(Clone, Debug, PartialEq)]
 struct SavedBytecode {
     code: Vec<u32>,
@@ -373,11 +378,7 @@ struct SavedBytecode {
     line_info: Vec<u32>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum SavedUpvalueDesc {
-    Local(u8),
-    Upvalue(u8),
-}
+type SavedUpvalueDesc = UpvalueDesc;
 
 #[derive(Clone, Debug, PartialEq)]
 struct SavePayload {
@@ -1158,14 +1159,7 @@ impl<'a> SaveBuilder<'a> {
             num_params: bc.num_params,
             num_locals: bc.num_locals,
             nested,
-            upvalues: bc
-                .upvalues
-                .iter()
-                .map(|uv| match uv {
-                    UpvalueDesc::Local(idx) => SavedUpvalueDesc::Local(*idx),
-                    UpvalueDesc::Upvalue(idx) => SavedUpvalueDesc::Upvalue(*idx),
-                })
-                .collect(),
+            upvalues: bc.upvalues.clone(),
             is_vararg: bc.is_vararg,
             name: bc.name.clone(),
             source: bc.source.clone(),
@@ -1905,14 +1899,7 @@ fn build_bytecode_node(
         num_params: src.num_params,
         num_locals: src.num_locals,
         nested,
-        upvalues: src
-            .upvalues
-            .iter()
-            .map(|uv| match uv {
-                SavedUpvalueDesc::Local(idx) => UpvalueDesc::Local(*idx),
-                SavedUpvalueDesc::Upvalue(idx) => UpvalueDesc::Upvalue(*idx),
-            })
-            .collect(),
+        upvalues: src.upvalues.clone(),
         is_vararg: src.is_vararg,
         name: src.name.clone(),
         source,

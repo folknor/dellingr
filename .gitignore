@@ -20,5 +20,6 @@ target
 overnight.sh
 overnight-logs
 
-research
+# Local upstream checkouts live in research subdirectories; keep scripts trackable.
+research/*/
 

@@ -27,7 +27,7 @@ impl<'a> Parser<'a> {
         let place_exp = self.parse_prefix_identifier(name)?;
         let instr = match place_exp {
             PlaceExp::FieldAccess(_) | PlaceExp::TableIndex => {
-                unreachable!("a named function target must be a variable")
+                return Err(self.internal_error("a named function target must be a variable"));
             }
             place => place.set_instr(0),
         };
@@ -153,8 +153,13 @@ impl<'a> Parser<'a> {
         let mut new_chunk = self.parse_chunk(&params, is_vararg)?;
         new_chunk.name = name;
 
+        let index = self.bounded_u8(
+            self.funcs.chunk.nested.len(),
+            MAX_NESTED - 1,
+            SyntaxError::TooManyNestedFunctions,
+        )?;
         self.funcs.chunk.nested.push(Arc::new(new_chunk));
-        self.push(Instr::closure(self.funcs.chunk.nested.len() as u8 - 1));
+        self.push(Instr::closure(index));
         self.expect(TokenType::End)?;
         Ok(())
     }

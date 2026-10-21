@@ -5,6 +5,7 @@ mod common;
 mod scratch;
 
 use cli::run;
+use dellingr::cli::COST_USED_PREFIX;
 use scratch::ScratchScript;
 
 #[test]
@@ -50,6 +51,7 @@ fn signed_limits_are_applied_and_positive_limit_can_run_one_operation() {
 
     let output = run(["--limit", "1", script_path]);
     assert!(output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("Cost used: 1"));
-    assert!(!String::from_utf8_lossy(&output.stdout).contains("Cost used:"));
+    let expected_summary = format!("{COST_USED_PREFIX}1");
+    assert!(String::from_utf8_lossy(&output.stderr).contains(&expected_summary));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(COST_USED_PREFIX));
 }

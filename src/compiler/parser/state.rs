@@ -49,6 +49,10 @@ pub(super) struct FunctionStack<'a> {
     pub(super) frames: Vec<FuncState<'a>>,
 }
 
+// Deref cannot return a parser error. These two guards enforce the private
+// lifecycle boundary: parse_chunk installs a frame before any field access,
+// and removes it only after the final access. Recoverable checks inside that
+// lifecycle return InternalError instead of relying on this guard.
 impl<'a> Deref for FunctionStack<'a> {
     type Target = FuncState<'a>;
 

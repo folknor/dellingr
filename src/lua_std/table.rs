@@ -4,7 +4,7 @@ use super::{arg_integer, check_optional_type_named, check_type_named, opt_intege
 use crate::LuaType;
 use crate::Result;
 use crate::State;
-use crate::error::{ArgDetail, ErrorKind};
+use crate::error::{ArgDetail, ErrorKind, LibraryError, LibraryFunction, TypeError};
 use crate::instr::{ArgCount, RetCount};
 use crate::numeral::{MAX_EXACT_INTEGER, exact_i64, parse_lua_numeral};
 
@@ -54,9 +54,9 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
             let pos = usize::try_from(pos).expect("validated insertion position is positive");
             state.table_insert_at(1, pos)?;
         } else {
-            return Err(state.error(ErrorKind::RuntimeError(
-                "wrong number of arguments to 'insert'".to_string(),
-            )));
+            return Err(state.library_error(LibraryError::WrongNumberOfArguments {
+                function: LibraryFunction::Insert,
+            }));
         }
 
         state.set_top(0)?;
@@ -113,7 +113,7 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
 
         // Cost is charged inside table_sort BEFORE the comparator runs / the
         // table is mutated, so an exhausted budget blocks the sort.
-        state.table_sort(1, has_comp)?;
+        table_sort_result(state.table_sort(1, has_comp), has_comp)?;
         state.set_top(0)?;
         Ok(0)
     }),
@@ -219,10 +219,10 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
                 // the element's type and its index, not the generic
                 // concatenation TypeError, which loses the index.
                 _ => {
-                    return Err(state.error(ErrorKind::RuntimeError(format!(
-                        "invalid value ({}) at index {idx} in table for 'concat'",
-                        typ.as_str()
-                    ))));
+                    return Err(state.library_error(LibraryError::InvalidConcatValue {
+                        value_type: typ,
+                        index: idx,
+                    }));
                 }
             }
             state.pop(1)?;
@@ -254,13 +254,11 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
             // behavior, they prove the count and destination key arithmetic
             // below cannot overflow.
             if !(f > 0 || e < i64::MAX + f) {
-                return Err(
-                    state.error(ErrorKind::RuntimeError("too many elements to move".into()))
-                );
+                return Err(state.library_error(LibraryError::TooManyMoveElements));
             }
             let count = e - f + 1;
             if t > i64::MAX - count + 1 {
-                return Err(state.error(ErrorKind::RuntimeError("destination wrap around".into())));
+                return Err(state.library_error(LibraryError::MoveDestinationWrapAround));
             }
             count
         } else {
@@ -272,9 +270,9 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         if count > 0 {
             let dest_last = t + (count - 1);
             if !(check_integer_key_range(f, e) && check_integer_key_range(t, dest_last)) {
-                return Err(state.error(ErrorKind::RuntimeError(
-                    "move range exceeds the exactly representable integer keys".into(),
-                )));
+                return Err(state.library_error(LibraryError::IntegerKeyRangeExceeded {
+                    function: LibraryFunction::Move,
+                }));
             }
         }
 
@@ -371,9 +369,9 @@ pub(super) fn check_sequence_keys(
     function: &str,
 ) -> Result<()> {
     if !check_integer_key_range(first, last) {
-        return Err(state.error(ErrorKind::RuntimeError(format!(
-            "{function} range exceeds the exactly representable integer keys"
-        ))));
+        return Err(state.library_error(LibraryError::IntegerKeyRangeExceeded {
+            function: LibraryFunction::from_name(function),
+        }));
     }
     Ok(())
 }
@@ -459,11 +457,7 @@ pub(super) fn sequence_len(state: &mut State, idx: isize) -> Result<i64> {
         _ => None,
     };
     state.pop(1)?;
-    len.ok_or_else(|| {
-        state.error(ErrorKind::RuntimeError(
-            "object length is not an integer".into(),
-        ))
-    })
+    len.ok_or_else(|| state.library_error(LibraryError::ObjectLengthNotInteger))
 }
 
 /// Lua 5.4's `lua_seti`/`lua_settable` for library code: does `t[k] = v`
@@ -483,9 +477,9 @@ fn insert_through_metamethods(state: &mut State, num_args: usize) -> Result<u8> 
     let first_empty = sequence_len(state, 1)?.wrapping_add(1);
     // Lua evaluates the length even when the argument count is invalid.
     if num_args != 2 && num_args != 3 {
-        return Err(state.error(ErrorKind::RuntimeError(
-            "wrong number of arguments to 'insert'".to_string(),
-        )));
+        return Err(state.library_error(LibraryError::WrongNumberOfArguments {
+            function: LibraryFunction::Insert,
+        }));
     }
     let pos = if num_args == 3 {
         let pos = arg_integer(state, 2, "insert")?;
@@ -570,7 +564,7 @@ fn sort_through_metamethods(state: &mut State, has_comp: bool) -> Result<u8> {
         state.set_table_raw(s)?;
     }
 
-    state.table_sort_scratch(s, n, has_comp)?;
+    table_sort_result(state.table_sort_scratch(s, n, has_comp), has_comp)?;
 
     for i in 1..=len {
         state.push_number(i as f64)?;
@@ -583,10 +577,23 @@ fn sort_through_metamethods(state: &mut State, has_comp: bool) -> Result<u8> {
 }
 
 fn position_out_of_bounds(state: &State, func_name: &str) -> crate::error::Error {
-    super::argument_error(
-        state,
-        2,
-        func_name,
-        ArgDetail::OutOfBounds("position out of bounds".to_owned()),
-    )
+    super::argument_error(state, 2, func_name, ArgDetail::PositionOutOfBounds)
+}
+
+/// Retain the TypeError kind and wording while identifying default sort failures.
+fn table_sort_result<T>(result: Result<T>, has_comp: bool) -> Result<T> {
+    match result {
+        Ok(value) => Ok(value),
+        Err(mut error) => {
+            if !has_comp
+                && matches!(
+                    &error.kind,
+                    ErrorKind::TypeError(TypeError::Comparison(_, _))
+                )
+            {
+                error = error.with_library_function(LibraryFunction::Sort);
+            }
+            Err(error)
+        }
+    }
 }

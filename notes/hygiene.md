@@ -34,14 +34,14 @@ to `brokkr check`.
 
 ## HYG-004 - Two opcode-to-function tables for arithmetic
 
-Reported by the compiler hunter.
+Reported by the compiler hunter. (A `const fn arith_fn` does not compile with
+its `unreachable!` fallback.)
 
-`numeral::arith_fn` maps opcodes to `lua_add`...`lua_modulo` for the folder;
-`vm/frame.rs` dispatch arms map the same opcodes by hand. The "bit-exact by
-construction" comment rests on two hand-written tables agreeing. Fix: `const fn
-arith_fn`, dispatch calls `const { arith_fn(Instr::OP_ADD) }`, or carry the
-function in the `define_opcodes!` row. Enforceable structurally only; a test
-comparing the two cannot be written.
+`numeral::arith_fn` and the `vm/frame.rs` dispatch arms still map the five
+arithmetic opcodes independently, and `arith_fn` keeps an `unreachable!` for
+non-foldable opcodes. Fix: carry the function in the `define_opcodes!` row in
+`instr.rs` (keeping dispatch on direct, inlineable calls), or make `arith_fn`
+return `Option` so its two parser callers report `InternalError`.
 
 ## HYG-005 - Snapshot environment token names spelled at more than one site
 
@@ -123,18 +123,6 @@ check functions beside the constant, drop the re-exports. Enforcement is deletin
 them (no lint catches const re-exports); a dependency rule (HYG-027) holds the
 compiler side.
 
-## HYG-010 - The 24-bit call-line assert in `limits.rs` is not tied to `CallSite::LINE_MASK`
-
-Reported by the compiler and host-surface hunters; narrowed in wave 2
-(`MAX_SOURCE_BYTES` is now derived from `MAX_STRING_BYTES`, and `limits.rs`
-asserts the u32 and 24-bit bounds at compile time).
-
-The 24-bit assert restates the width rather than reading the private
-`CallSite::LINE_MASK` in `src/compiler/exp_desc.rs`, so narrowing the field
-would not trip it. Note 16 MiB equals `LINE_MASK + 1`; it holds only because
-call syntax takes more than one byte per line. Fix: assert against the mask
-itself, next to `CallSite`.
-
 ## HYG-011 - Public line-number widths disagree
 
 Reported by the host-surface hunter.
@@ -171,21 +159,6 @@ that hands out `CostMeter`), `cost_remaining()` a single `map_or`; snapshot
 encoding follows the type (tag byte + payload). Enforceable by type.
 
 ## Compiler front end
-
-## HYG-019 - Two styles for narrowing to u8 against a limit
-
-Reported by the compiler hunter.
-
-`checked_fixed_arg_count`, `checked_multi_assign_width`, `parse_concat`,
-`parse_assign` (`MAX_ASSIGNMENT_OFFSET`), `parse_chunk` (params) and
-`parse_generic_for` compare against a `limits::` const then do an infallible
-`u8::try_from(..).map_err(same error)`. Elsewhere bare `as u8` (`locals.len() as
-u8` five times in stmt.rs, `local_idx`/`upvalue_idx as u8` in upvalue.rs,
-`nested.len() as u8 - 1`, `template_idx as u8`) is sound only because an earlier
-check bounds the value. Fix: one `bounded_u8(value, limit, err)`, and/or a
-`Slot(u8)` newtype only `add_local` constructs. Enforceable:
-`clippy::cast_possible_truncation` / `as_conversions` scoped to `compiler/`
-(`lua_std.rs` already denies `cast_possible_truncation`).
 
 ## HYG-024 - Line attribution depends on which token-consumption helper a site used
 
@@ -230,63 +203,15 @@ Code that pushes to a pool directly desynchronizes them silently. Fix: an
 `IndexSet<Vec<u8>>` (via det_hash) where index = position, converted in
 `finalize`; numbers keep a key newtype. Enforceable structurally.
 
-## HYG-029 - Fold-failure fallback policy spelled twice
-
-Reported by the compiler hunter.
-
-`push_arith` and `push_negate` both `if let Ok(idx) = find_or_add_number(..)`,
-dropping `TooManyNumbers` and falling back unfolded. Correct (folding must not
-reject a valid program), but the rule lives in two places. Fix: one
-`try_fold_literal(value) -> Option<u16>` owning NaN, -0.0 and full-pool policy.
-
 ## HYG-030 - Compiler invariants panic while `finalize` argues they must be errors
 
-Reported by the compiler hunter.
+Reported by the compiler hunter; narrowed in wave 3 (the parser's panics are
+catchable invariant errors, except two documented `FunctionStack` guards).
 
-`finalize`'s comment states a compiler bug must surface as a catchable
-`InternalError`, never a host panic. The parser contradicts it at roughly fifteen
-sites: `assert_eq!` in `get_literal_string_contents` and `open_tail`; `assert!`
-in `adjust_multi_assign` and `parse_table`; `assert_eq!(nest_level, 0)` in
-`parse_all`; two `panic!` in `peek_equals`; `unreachable!` in
-`parse_fndecl_basic` and `numeral::arith_fn`; `expect` in `exit_loop`,
-`add_break`, `replace_last_instr`, `finalize` (`Arc::get_mut`),
-`strip_dead_instructions`; `ArgCount::to_u8`/`RetCount::to_u8` asserts via
-`Instr::call`/`ret`. None is reachable from script input today. Fix: decide the
-rule; several disappear structurally (HYG-018's `MultiTail`, a typed
-`CmpTokenKind` for `peek_equals`, splitting `PlaceExp`). Enforceable:
-`clippy::panic`, `unreachable`, `expect_used` scoped to `compiler/`.
-
-## HYG-031 - Compile-time validation errors rendered at two sites; metadata failures located at 0:0
-
-Reported by the compiler hunter.
-
-`compiler::finalize` builds "compiler emitted invalid bytecode in function 'x' at
-instruction N: reason" by hand; `save_state/verify.rs` builds its own
-`invalid(chunk, instruction, reason)`, with different subjects (function name vs
-chunk index). When `instruction == None`, `finalize` uses `unwrap_or(0)` and
-`with_location(line, 0)`; line 0 column 0 is not "no location", and
-`without_location` exists. Fix: `impl Display for BytecodeValidationError` owned
-by verify.rs; `without_location` plus source name.
-
-## HYG-032 - Bytecode verification split by data type: tree checks run only on snapshot load, and `SavedBytecode` mirrors `Bytecode`
-
-Reported by the compiler and heap hunters.
-
-`compiler::verify::validate_bytecode` checks each chunk alone. Tree-level checks
-(child `UpvalueDesc::Local(slot)` within the parent frame, `Upvalue(i)` within the
-parent's count, depth vs `MAX_CHUNK_NESTING`) exist only in
-`save_state/verify.rs::validate_nested_graph` over `SavedBytecode`; `finalize`
-never runs them, so an upvalue-resolution bug ships unverified on the compile
-path. Separately, `SavedBytecode` mirrors `Bytecode` field for field at four sites
-(struct, `encode_bytecode` conversion, an all-zeros placeholder literal,
-`build_bytecode_node`) plus the `BytecodeView` impl, which does not catch a new
-field; `SavedUpvalueDesc` mirrors `UpvalueDesc`.
-
-Fix: move tree checks into `compiler/verify.rs` behind `BytecodeView` and call
-from both `finalize` and `verify_payload`; have the codec encode/decode
-`Bytecode` directly and verify the decoded value, deleting `SavedBytecode` and its
-conversions. Enforceable structurally; the examples-corpus test then covers the
-tree checks.
+`compiler.rs` finalization still panics on invariant breaks (`finalize`'s
+`Arc::get_mut` expect, `strip_dead_instructions`), and `numeral::arith_fn` keeps
+an `unreachable!` (see HYG-004). Fix: convert those to `InternalError`; then
+scope `clippy::panic`, `unreachable`, `expect_used` to `compiler/`.
 
 ## HYG-034 - Dead or vestigial front-end code
 
@@ -414,15 +339,6 @@ the ip into `CallInfo` unconditionally on every call out (one store); or an
 `Instr::may_reenter()` table cross-checked by a test. Enforceable by a test running
 each opcode against a metatable'd operand asserting traceback line and
 `cost_used`.
-
-## HYG-046 - Duplicated small VM routines
-
-Reported by the VM-core hunter; narrowed in wave 2.
-
-- `Error::without_location` is still spelled directly in `anchor.rs` and
-  `frame.rs` where `State::error` is available.
-- `Frame::new`'s `let ip = 0;` and `Frame::bytecode()` vs direct field access:
-  trivial.
 
 ## HYG-047 - Stack indices held across user code; per-frame bases stored globally
 
@@ -557,37 +473,17 @@ x7) already truncate before constructing; delete the call-site copies and make
 
 ## HYG-072 - Argument-error construction bypasses its owner; library error text is free strings
 
-Reported by the stdlib hunter.
+Reported by the stdlib hunter; narrowed in wave 3 (stdlib sites build typed
+`LibraryError` details through `State::library_error`, and `check_type_in`
+exists).
 
-`vm_aux.rs::check_type` builds typed `ArgError { TypeMismatch, .. }`. Bypasses:
-`basic.rs::arg_type_error` (used once by `setmetatable`); `math.min`/`max`'s
-hand-built "no arguments" error, which is exactly what `check_type_named(state, 1,
-Number, ..)` produces on the next line (dead in effect); `string.rs::
-check_string_or_number` claiming `expected: String`; `string_format.rs::format`
-using `ArgDetail::Custom` free text where others use `TypeMismatch`, so a host
-matching `TypeMismatch` misses `string.format`. Beyond that, one class of event
-goes through several channels: "wrong number of arguments" (`math.random`,
-`table.insert` x2) as `RuntimeError(String)`; "position out of bounds" etc. via
-`ArgDetail::OutOfBounds(String)`; "table or string expected" via `Custom`; gsub's
-"invalid capture index" as `RuntimeError` while the pattern's is a typed
-`PatternErrorDetail`; about 20 ad hoc literals ("invalid conversion '...' to
-'format'" spelled twice in `parse_directive`, "cannot change a protected
-metatable", ...). Hosts cannot match without parsing text, and the
-reference-pinned wording is scattered. Fix: `check_type_in(state, n, &[LuaType],
-name)`; a `LibError` enum (or payload-free `ArgDetail` variants) whose `Display`
-owns the wording. Enforceable: private `ArgError` fields/constructors; removing
-`Custom`/`OutOfBounds(String)` and making `RuntimeError` non-constructible outside
-`error.rs`.
-
-## HYG-073 - Library errors shed context
-
-Reported by the stdlib hunter.
-
-`match_error` / `pattern_runtime_error` produce `PatternError(detail)` with no
-function name, so a malformed pattern from `gsub` and from `find` look the same
-to a host (reference shares the gap; the typed error could carry it free). gsub's
-"invalid capture index" omits the index the code holds. `sort_less`'s comparison
-`TypeError` does not name `table.sort`.
+Still open: `ArgError` fields are public (`lua_std.rs` mutates `func_name`,
+`vm/stack.rs` constructs it directly); `ArgDetail::Custom` and
+`OutOfBounds(String)` survive for compatibility though no source site builds
+them; `RuntimeError(String)` is still built directly in `vm/table_ops.rs` (six
+sites, including the host table API's "position out of bounds"). Fix: route
+those through `LibraryError`, then make `ArgError` fields private and drop the
+free-text variants.
 
 ## HYG-076 - Stdlib invariant panics restated per site
 
@@ -606,21 +502,6 @@ asserted in `string.rs`; put `const _: () = assert!(..)` beside the constant.
 ---
 
 ## Host surface and CLI
-
-## HYG-082 - Cost-analysis caveat and CLI output strings restated at several sites
-
-Reported by the host-surface hunter.
-
-The `--analyze` caveat is an inline `eprintln!` in `main.rs`, prose in the
-`analyze_cost` doc, and restated in `docs/cli.md` and `docs/budget.md`, already
-worded differently ("not a runtime bound or native-cost estimate" vs "neither a
-runtime lower nor upper bound, and it is not a native-cost estimate"). A host
-printing a `CostAnalysis` gets no caveat. The `"Error: "` prefix is spelled in
-`report_error` and `report_usage_error`; `"Cost used: {}"` inline in `main`, as a
-literal in `tests/cli_limits.rs`, and in `docs/cli.md`. The test cannot import from
-a bin crate. Fix: `pub const ANALYSIS_CAVEAT` (or `CostAnalysis::caveat()`) and a
-`cli` module (or lib behind a feature) owning argument parsing and output formats
-that tests import. Enforceable by a CLI test asserting stderr contains the const.
 
 ## HYG-083 - Cost-category counters enumerated at four sites
 
@@ -673,17 +554,6 @@ unit/integration boundary unless the test moves. Fix: one
 helper in src or move the compiler test; a parity test between the shell and Rust
 lists. Enforceable by the parity test.
 
-## HYG-097 - `research/bench_luars.sh` is untracked yet sources published numbers
-
-Reported by the tooling hunter; narrowed in wave 2. (The `.gitignore` entries
-`overnight.sh`, `overnight-logs` and `.plans` stay: those files exist locally on
-the user's host and would otherwise show as untracked.)
-
-`research/` is ignored wholesale, yet AGENTS.md names `research/bench_luars.sh`
-as the source of the README's lua-rs column; the published numbers come from an
-untracked script on one host. Track it (or move to `scripts/`) and ignore only
-`research/lua-rs/`.
-
 ## HYG-098 - Stale and drifting comments and docs
 
 Reported by every hunter, at different sites.
@@ -716,23 +586,15 @@ Reported by every hunter, at different sites.
 - AGENTS.md says the CLI carries both `disallowed_methods` and `disallowed_types`
   allows; `main` carries only the first. Reword to "scoped allows as needed".
 
-## HYG-100 - `Val`'s `Debug` prints a process-local slotmap key for strings
+## HYG-100 - `Val`'s `Debug` prints a process-local slotmap key for objects
 
-Reported by a wave 1 fixer.
+Reported by a wave 1 fixer; narrowed in wave 3 (strings now render as
+`<string>`).
 
-`Val`'s `Debug` (`src/vm/lua_val.rs`) forwards string values to `StringPtr`'s
-derived `Debug`, which renders the slotmap key: process-local, so any message or
-log built from `{:?}` of a `Val` differs between runs. No production formatting
-use was found. Fix: render the string contents (or a fixed placeholder) in
-`Val`'s `Debug`.
-
-## HYG-102 - Snapshot `FORMAT_VERSION` lives in `instr.rs`
-
-Reported by the wave 1 reconciler.
-
-It moved there so the opcode fixture test can see it in non-snapshot builds, but
-the snapshot format version is now owned by the bytecode module. An ungated
-home for persistence constants (or `limits.rs`-style module) would fit better.
+`Val`'s `Debug` (`src/vm/lua_val.rs`) still forwards object values to
+`ObjectPtr`'s derived `Debug` (`src/vm/object.rs`), which renders the slotmap
+key, so `{:?}` of a table or closure differs between runs. No production
+formatting use was found. Fix: a fixed placeholder per object type.
 
 ## HYG-099 - `#[hotpath::measure]` on trivial functions distorts the distribution
 

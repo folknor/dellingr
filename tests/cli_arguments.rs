@@ -58,7 +58,12 @@ fn analyze_rejects_limit_and_sends_its_warning_to_stderr() {
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stdout).contains("=== Cost Analysis ==="));
     assert!(!String::from_utf8_lossy(&output.stdout).contains("Warning:"));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("Warning: analyze_cost"));
+    let expected_warning = format!(
+        "{}{}",
+        dellingr::cli::ANALYSIS_WARNING_PREFIX,
+        dellingr::CostAnalysis::caveat()
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains(&expected_warning));
 
     let limited = run(strings(&["--limit", "10", "--analyze", script_path]));
     assert_eq!(limited.status.code(), Some(1));

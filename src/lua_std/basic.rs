@@ -4,7 +4,7 @@ use super::{check_any_named, check_type_named};
 use crate::LuaType;
 use crate::Result;
 use crate::State;
-use crate::error::{ArgDetail, ArgError, ErrorKind, PrefixLocation};
+use crate::error::{ArgDetail, ErrorKind, LibraryError, PrefixLocation};
 use crate::numeral::parse_lua_numeral;
 
 fn digit_value(byte: u8) -> Option<u32> {
@@ -245,7 +245,7 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
                     state,
                     2,
                     "tonumber",
-                    ArgDetail::OutOfBounds("base out of range".to_owned()),
+                    ArgDetail::BaseOutOfRange,
                 ));
             }
 
@@ -332,16 +332,12 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
     add!("setmetatable", |state| {
         check_type_named(state, 1, LuaType::Table, "setmetatable")?;
         check_any_named(state, 2, "setmetatable")?;
-        if !matches!(state.typ(2), LuaType::Table | LuaType::Nil) {
-            return Err(arg_type_error(state, 2, "setmetatable", LuaType::Table));
-        }
+        state.check_type_in(2, &[LuaType::Table, LuaType::Nil], "setmetatable")?;
         // Ignore any extra arguments (Lua does) so set_metatable_of below reads
         // the replacement metatable, not a trailing argument.
         state.set_top(2)?;
         if raw_metafield(state, 1)? {
-            return Err(state.error(ErrorKind::RuntimeError(
-                "cannot change a protected metatable".to_string(),
-            )));
+            return Err(state.library_error(LibraryError::ProtectedMetatable));
         }
         state.pop(1)?;
         // Stack: [table, metatable]
@@ -404,7 +400,7 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
                     state,
                     1,
                     "rawlen",
-                    ArgDetail::Custom("table or string expected".to_owned()),
+                    ArgDetail::TableOrStringExpected,
                 ));
             }
         };
@@ -442,7 +438,7 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
                 state,
                 1,
                 "select",
-                ArgDetail::OutOfBounds("index out of range".to_owned()),
+                ArgDetail::IndexOutOfRange,
             ));
         }
 
@@ -514,21 +510,6 @@ fn raw_metafield(state: &mut State, idx: isize) -> Result<bool> {
         state.pop(2)?;
         Ok(false)
     }
-}
-
-fn arg_type_error(
-    state: &State,
-    arg_number: isize,
-    func_name: &str,
-    expected: LuaType,
-) -> crate::error::Error {
-    state.error(ErrorKind::ArgError(ArgError {
-        arg_number,
-        func_name: Some(func_name.to_string()),
-        detail: crate::error::ArgDetail::TypeMismatch,
-        expected: Some(expected),
-        received: Some(state.typ(arg_number)),
-    }))
 }
 
 /// The `globals` name for the `_G` key at stack index 2, if it has one.

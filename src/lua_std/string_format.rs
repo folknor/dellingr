@@ -1,7 +1,7 @@
 //! Lua 5.4-compatible `string.format`.
 
 use super::exact_integer_value;
-use crate::error::{Error, ErrorKind};
+use crate::error::{ArgDetail, ArgError, Error, ErrorKind, LibraryError};
 use crate::numeral::{exact_i64, parse_lua_numeral};
 use crate::{LuaType, Result, State};
 
@@ -49,21 +49,14 @@ enum Conversion {
 }
 
 pub(crate) fn format(state: &mut State) -> Result<u8> {
-    let format_bytes = match state.typ(1) {
-        LuaType::Number => state.bytes_with_default_string_coercion(1)?,
-        LuaType::String => state.to_bytes(1)?.to_vec(),
-        received => {
-            let got = if state.get_top() == 0 {
-                "no value"
-            } else {
-                received.as_str()
-            };
-            return Err(format_arg_error(
-                state,
-                1,
-                &format!("string expected, got {got}"),
-            ));
-        }
+    if state.get_top() == 0 {
+        return Err(format_arg_type_error(state, 1, LuaType::String, None));
+    }
+    state.check_type_in(1, &[LuaType::String, LuaType::Number], "format")?;
+    let format_bytes = if state.typ(1) == LuaType::Number {
+        state.bytes_with_default_string_coercion(1)?
+    } else {
+        state.to_bytes(1)?.to_vec()
     };
     state.consume_cost(format_bytes.len().max(1) as u64)?;
     let argument_count = state.get_top();
@@ -87,7 +80,7 @@ pub(crate) fn format(state: &mut State) -> Result<u8> {
 
         argument += 1;
         if argument > argument_count {
-            return Err(format_arg_error(state, argument, "no value"));
+            return Err(format_arg_error(state, argument, ArgDetail::NoValue));
         }
 
         let (directive, next) = parse_directive(state, &format_bytes, cursor)?;
@@ -172,17 +165,10 @@ fn parse_directive(state: &State, bytes: &[u8], start: usize) -> Result<(Directi
     }
     check_directive_length(state, start, cursor)?;
     let raw = bytes[start..cursor].to_vec();
-    let conversion = classify_conversion(conversion_byte).ok_or_else(|| {
-        state.error(ErrorKind::RuntimeError(format!(
-            "invalid conversion '{}' to 'format'",
-            String::from_utf8_lossy(&raw)
-        )))
-    })?;
+    let conversion = classify_conversion(conversion_byte)
+        .ok_or_else(|| invalid_conversion_error(state, &raw))?;
     if matches!(conversion, Conversion::Percent) && raw != b"%%" {
-        return Err(state.error(ErrorKind::RuntimeError(format!(
-            "invalid conversion '{}' to 'format'",
-            String::from_utf8_lossy(&raw)
-        ))));
+        return Err(invalid_conversion_error(state, &raw));
     }
     let has_modifiers = raw.len() > 2;
 
@@ -203,9 +189,7 @@ fn parse_directive(state: &State, bytes: &[u8], start: usize) -> Result<(Directi
 
 fn check_directive_length(state: &State, start: usize, end: usize) -> Result<()> {
     if end - start > MAX_FORMAT_LEN {
-        Err(state.error(ErrorKind::RuntimeError(
-            "invalid format (too long)".to_string(),
-        )))
+        Err(state.library_error(LibraryError::FormatDirectiveTooLong))
     } else {
         Ok(())
     }
@@ -253,9 +237,7 @@ fn classify_conversion(byte: u8) -> Option<Conversion> {
 
 fn validate_directive(state: &State, directive: &Directive) -> Result<()> {
     if matches!(directive.conversion, Conversion::Quoted) && directive.has_modifiers {
-        return Err(state.error(ErrorKind::RuntimeError(
-            "specifier '%q' cannot have modifiers".to_string(),
-        )));
+        return Err(state.library_error(LibraryError::QuotedFormatHasModifiers));
     }
 
     let flags = directive.flags;
@@ -293,10 +275,15 @@ fn validate_directive(state: &State, directive: &Directive) -> Result<()> {
 }
 
 fn invalid_specification(state: &State, raw: &[u8]) -> Error {
-    state.error(ErrorKind::RuntimeError(format!(
-        "invalid conversion specification: '{}'",
-        String::from_utf8_lossy(raw)
-    )))
+    state.library_error(LibraryError::InvalidFormatSpecification {
+        directive: String::from_utf8_lossy(raw).into_owned(),
+    })
+}
+
+fn invalid_conversion_error(state: &State, raw: &[u8]) -> Error {
+    state.library_error(LibraryError::InvalidFormatConversion {
+        directive: String::from_utf8_lossy(raw).into_owned(),
+    })
 }
 
 // Lua's unsigned integer conversions preserve the signed value's two's
@@ -374,7 +361,11 @@ fn format_argument(state: &mut State, argument: usize, directive: &Directive) ->
             };
             state.consume_cost(bytes.len() as u64)?;
             if directive.has_modifiers && bytes.contains(&0) {
-                return Err(format_arg_error(state, argument, "string contains zeros"));
+                return Err(format_arg_error(
+                    state,
+                    argument,
+                    ArgDetail::StringContainsZeros,
+                ));
             }
             if let Some(precision) = directive.precision {
                 bytes.truncate(usize::from(precision).min(bytes.len()));
@@ -404,17 +395,14 @@ fn number_argument(state: &mut State, idx: isize, argument: usize) -> Result<f64
             let bytes = state.to_bytes(idx)?.to_vec();
             state.consume_cost(bytes.len() as u64)?;
             parse_lua_numeral(&bytes).ok_or_else(|| {
-                format_arg_error(
-                    state,
-                    argument,
-                    &format!("number expected, got {}", state.typ(idx).as_str()),
-                )
+                format_arg_type_error(state, argument, LuaType::Number, Some(LuaType::String))
             })
         }
-        received => Err(format_arg_error(
+        received => Err(format_arg_type_error(
             state,
             argument,
-            &format!("number expected, got {}", received.as_str()),
+            LuaType::Number,
+            Some(received),
         )),
     }
 }
@@ -424,15 +412,26 @@ fn integer_argument(state: &mut State, idx: isize, argument: usize) -> Result<i6
     exact_integer_value(state, number, idx, "format")
 }
 
-fn format_arg_error(state: &State, argument: usize, detail: &str) -> Error {
+fn format_arg_error(state: &State, argument: usize, detail: ArgDetail) -> Error {
     let argument =
         isize::try_from(argument).expect("format argument index is bounded by the VM stack cap");
-    super::argument_error(
-        state,
+    super::argument_error(state, argument, "format", detail)
+}
+
+fn format_arg_type_error(
+    state: &State,
+    argument: usize,
+    expected: LuaType,
+    received: Option<LuaType>,
+) -> Error {
+    let argument =
+        isize::try_from(argument).expect("format argument index is bounded by the VM stack cap");
+    state.error(ErrorKind::ArgError(ArgError::type_mismatch(
         argument,
-        "format",
-        crate::error::ArgDetail::Custom(detail.to_owned()),
-    )
+        Some("format"),
+        expected,
+        received,
+    )))
 }
 
 fn format_signed_integer(value: i64, directive: &Directive) -> Vec<u8> {
@@ -844,7 +843,7 @@ fn quote_argument(state: &mut State, idx: isize, argument: usize) -> Result<Vec<
         LuaType::Table | LuaType::Function => Err(format_arg_error(
             state,
             argument,
-            "value has no literal form",
+            ArgDetail::ValueHasNoLiteralForm,
         )),
     }
 }

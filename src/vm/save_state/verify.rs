@@ -1,12 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::compiler::verify::{self, BytecodeView};
-use crate::limits::MAX_CHUNK_NESTING;
 
 use super::super::table::{
     InvalidTableKey, NormalizedTableKey, TableKeyInput, normalize_table_key,
 };
-use super::{LoadError, SavePayload, SavedBytecode, SavedObject, SavedUpvalueDesc};
+use super::{LoadError, SavePayload, SavedBytecode, SavedObject};
 
 use crate::gmatch_schema;
 
@@ -64,6 +63,9 @@ impl BytecodeView for SavedBytecode {
     fn upvalues_len(&self) -> usize {
         self.upvalues.len()
     }
+    fn upvalue(&self, index: usize) -> crate::compiler::UpvalueDesc {
+        self.upvalues[index]
+    }
     fn is_vararg(&self) -> bool {
         self.is_vararg
     }
@@ -72,6 +74,8 @@ impl BytecodeView for SavedBytecode {
     }
 }
 
+// Preserve structured chunk/instruction fields here. LoadError owns their
+// rendering, while the shared verifier owns the reason and compiler display.
 fn invalid(chunk: usize, instruction: Option<u32>, reason: impl Into<String>) -> LoadError {
     LoadError::InvalidBytecode {
         chunk: u32::try_from(chunk)
@@ -109,21 +113,8 @@ fn validate_nested_graph(bytecode: &[SavedBytecode]) -> Result<(), LoadError> {
             indegree[child] = indegree[child]
                 .checked_add(1)
                 .ok_or_else(|| invalid(parent, None, "nested graph is too large"))?;
-            for descriptor in &bytecode[child].upvalues {
-                let valid = match descriptor {
-                    SavedUpvalueDesc::Local(slot) => {
-                        (*slot as usize) < chunk.num_params as usize + chunk.num_locals as usize
-                    }
-                    SavedUpvalueDesc::Upvalue(slot) => (*slot as usize) < chunk.upvalues.len(),
-                };
-                if !valid {
-                    return Err(invalid(
-                        parent,
-                        None,
-                        "child upvalue descriptor is invalid for parent",
-                    ));
-                }
-            }
+            verify::validate_child(chunk, &bytecode[child])
+                .map_err(|error| invalid(parent, error.instruction, error.reason))?;
         }
     }
     let mut depths = vec![0usize; bytecode.len()];
@@ -141,13 +132,8 @@ fn validate_nested_graph(bytecode: &[SavedBytecode]) -> Result<(), LoadError> {
             let child = *child as usize;
             let depth = depths[parent] + 1;
             depths[child] = depths[child].max(depth);
-            if depths[child] > MAX_CHUNK_NESTING {
-                return Err(invalid(
-                    child,
-                    None,
-                    "nested chunk depth exceeds parser limit",
-                ));
-            }
+            verify::validate_depth(depths[child])
+                .map_err(|error| invalid(child, error.instruction, error.reason))?;
             indegree[child] -= 1;
             if indegree[child] == 0 {
                 ready.push_back(child);

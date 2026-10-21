@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
-// The constant folder reaches these same functions through `numeral::arith_fn`;
-// dispatch names them directly so each stays an inlinable direct call.
+// The constant folder reaches these same functions through `numeral::arith_fn`.
+// Keep the dispatch arms' explicit mapping to direct function items so each
+// generic call stays statically dispatched and inlinable.
 use crate::numeral::{lua_add, lua_div, lua_modulo, lua_mul, lua_sub};
 
 use super::super::error::{Error, ErrorKind, StackFrame};
@@ -103,10 +104,15 @@ impl Frame {
                 self.ip = ip;
                 Ok(())
             }
-            _ => Err(Error::without_location(ErrorKind::InvalidJump {
-                ip: self.ip,
-                offset: offset as isize,
-            })),
+            _ => {
+                // This helper has no State argument; State::error currently
+                // delegates to this same constructor. Keep jump validation
+                // standalone so the successful dispatch path stays unchanged.
+                Err(Error::without_location(ErrorKind::InvalidJump {
+                    ip: self.ip,
+                    offset: offset as isize,
+                }))
+            }
         }
     }
 
@@ -550,7 +556,7 @@ impl Frame {
 
                 // Unknown opcode
                 _ => {
-                    return Err(Error::without_location(ErrorKind::InternalError(format!(
+                    return Err(state.error(ErrorKind::InternalError(format!(
                         "unknown opcode: {}",
                         inst.opcode()
                     ))));

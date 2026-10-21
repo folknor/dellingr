@@ -5,9 +5,17 @@ use crate::Result;
 use crate::State;
 use crate::error::ArgError;
 use crate::error::ErrorKind;
+use crate::error::LibraryError;
 use crate::lua_std;
 
 impl State {
+    /// Construct a standard-library runtime error while retaining its typed
+    /// reason for hosts that need to inspect it.
+    pub(crate) fn library_error(&self, detail: LibraryError) -> crate::error::Error {
+        self.error(ErrorKind::RuntimeError(detail.to_string()))
+            .with_library_error(detail)
+    }
+
     /// Verify that the host call has at least `arg_number` arguments on the
     /// stack. Returns an [`ArgError`] if not, or [`ErrorKind::InvalidStackIndex`]
     /// if the argument index is zero. Argument indices are 1-based; negative
@@ -18,9 +26,10 @@ impl State {
             return Err(self.error(ErrorKind::InvalidStackIndex { index: arg_number }));
         }
         if self.get_top() < arg_number.unsigned_abs() {
+            let func_name = self.active_rust_function_name();
             let e = ArgError {
                 arg_number,
-                func_name: self.active_rust_function_name(),
+                func_name,
                 detail: crate::error::ArgDetail::TypeMismatch,
                 expected: None,
                 received: None,
@@ -42,27 +51,53 @@ impl State {
             return Err(self.error(ErrorKind::InvalidStackIndex { index: arg_number }));
         }
         if self.get_top() < arg_number.unsigned_abs() {
-            let e = ArgError {
-                arg_number,
-                func_name: self.active_rust_function_name(),
-                detail: crate::error::ArgDetail::TypeMismatch,
-                expected: Some(expected_type),
-                received: None,
-            };
+            let func_name = self.active_rust_function_name();
+            let e = ArgError::type_mismatch(arg_number, func_name.as_deref(), expected_type, None);
             return Err(self.error(ErrorKind::ArgError(e)));
         }
         let received_type = self.try_typ(arg_number)?;
         if received_type != expected_type {
-            let e = ArgError {
+            let func_name = self.active_rust_function_name();
+            let e = ArgError::type_mismatch(
                 arg_number,
-                func_name: self.active_rust_function_name(),
-                detail: crate::error::ArgDetail::TypeMismatch,
-                expected: Some(expected_type),
-                received: Some(received_type),
-            };
+                func_name.as_deref(),
+                expected_type,
+                Some(received_type),
+            );
             return Err(self.error(ErrorKind::ArgError(e)));
         }
         Ok(())
+    }
+
+    /// Verify that an argument belongs to a list of accepted Lua types.
+    ///
+    /// The first type owns the rendered expectation, preserving a library
+    /// function's established message while the check accepts additional
+    /// types. Missing arguments have Lua's visible `nil` type here, as in the
+    /// string library's string-or-number checks.
+    pub(crate) fn check_type_in(
+        &mut self,
+        arg_number: isize,
+        accepted_types: &[LuaType],
+        function_name: &str,
+    ) -> Result<()> {
+        if arg_number == 0 {
+            return Err(self.error(ErrorKind::InvalidStackIndex { index: arg_number }));
+        }
+        let expected_type = *accepted_types
+            .first()
+            .expect("a type check requires at least one accepted type");
+        let received_type = self.typ(arg_number);
+        if accepted_types.contains(&received_type) {
+            return Ok(());
+        }
+        let error = ArgError::type_mismatch(
+            arg_number,
+            Some(function_name),
+            expected_type,
+            Some(received_type),
+        );
+        Err(self.error(ErrorKind::ArgError(error)))
     }
 
     /// Returns whether argument `arg_number` is missing or explicitly nil.

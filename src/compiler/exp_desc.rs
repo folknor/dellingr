@@ -45,7 +45,7 @@ impl CallSite {
     }
 
     pub(super) fn num_args(self) -> ArgCount {
-        ArgCount::from_u8((self.0 >> 24) as u8)
+        ArgCount::from_u8(self.0.to_be_bytes()[0])
     }
 
     pub(super) fn line(self) -> u32 {

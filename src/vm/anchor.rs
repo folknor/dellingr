@@ -18,7 +18,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use slotmap::{Key, KeyData, SlotMap, new_key_type};
 
 use super::ArgCount;
-use super::Error;
 use super::ErrorKind;
 use super::LuaType;
 use super::Result;
@@ -152,7 +151,7 @@ impl State {
         // the host API.
         let val = self.at_index(-1)?;
         if matches!(val, Val::Nil) {
-            return Err(Error::without_location(ErrorKind::AnchorNil));
+            return Err(self.error(ErrorKind::AnchorNil));
         }
         let anchor = self.registry.insert(val);
         self.pop_val();
@@ -164,7 +163,7 @@ impl State {
     pub fn anchor_at(&mut self, idx: isize) -> Result<Anchor> {
         let val = self.at_index(idx)?;
         if matches!(val, Val::Nil) {
-            return Err(Error::without_location(ErrorKind::AnchorNil));
+            return Err(self.error(ErrorKind::AnchorNil));
         }
         Ok(self.registry.insert(val))
     }
@@ -204,7 +203,7 @@ impl State {
     pub fn push_anchor(&mut self, a: Anchor) -> Result<()> {
         match self.registry.get(a) {
             Some(val) => self.push_val(val),
-            None => Err(Error::without_location(ErrorKind::InvalidAnchor)),
+            None => Err(self.error(ErrorKind::InvalidAnchor)),
         }
     }
 

@@ -18,8 +18,9 @@ closed pipe, the CLI stops quietly with status 0. Library users of
 write errors. Stderr write failures do not panic; the command retains its
 normal result.
 
-The `--analyze` caveat states that the analysis covers static bytecode only
-and excludes data-dependent native string, pattern and table work.
+The `--analyze` warning uses `CostAnalysis::caveat()` and the shared
+`cli::ANALYSIS_WARNING_PREFIX`. Library hosts can use the same caveat when
+presenting an analysis.
 
 ## Arguments
 

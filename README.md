@@ -156,9 +156,8 @@ dellingr = "0.5"
 - `analyze_cost` (or `engine.analyze_cost(&program)`) - static cost
   estimate for a script: sums each costed opcode once across the main
   chunk and every nested function body (counted once each, whether or not
-  invoked; loops/branches counted once), so it is neither a runtime lower
-  nor upper bound. It excludes data-dependent native string, pattern, and
-  table work, so it is not a native-cost estimate.
+  invoked; loops/branches counted once). `CostAnalysis::caveat()` returns the
+  standard explanation of the estimate's limits for display in a host.
 - Per-state user-data (`Send + 'static`) for hanging embedder context off
   the VM.
 

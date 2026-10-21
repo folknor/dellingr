@@ -135,7 +135,8 @@ fn run_example(path: &Path, timeout_ms: u64) -> Result<ExampleRun, String> {
         .join()
         .map_err(|_| "example stderr reader panicked".to_string())?;
     let output = Output {
-        status: status.ok_or_else(|| "example process status unavailable after waiting".to_string())?,
+        status: status
+            .ok_or_else(|| "example process status unavailable after waiting".to_string())?,
         stdout,
         stderr,
     };
