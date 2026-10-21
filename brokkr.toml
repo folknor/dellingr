@@ -127,6 +127,12 @@ xxh128 = "cdb6bfdf21a72c08d4b1d683d7d85d07"
 hotpath_file = "examples/fields/same_obj_read.lua"
 hotpath_xxh128 = "f3ab24014039d2327a870aa31e020d6b"
 
+[dellingr.workloads.method]
+file = "bench/method.lua"
+xxh128 = "04d0824886560a272b218449d5fbdd96"
+hotpath_file = "examples/calls/method.lua"
+hotpath_xxh128 = "6372dbfbd4aea331f0642f73b0662aa5"
+
 [dellingr.workloads.write]
 file = "bench/write.lua"
 xxh128 = "e083a0a88b2838c78d0b684dd2bbd1dc"
