@@ -22,6 +22,8 @@ disallowed-types = [
     { path = "std::collections::HashSet", reason = "Non-deterministic iteration order. Use BTreeSet instead." },
     { path = "std::collections::hash_map::HashMap", reason = "Non-deterministic iteration order. Use IndexMap or BTreeMap instead." },
     { path = "std::collections::hash_set::HashSet", reason = "Non-deterministic iteration order. Use BTreeSet instead." },
+    { path = "hashbrown::HashMap", reason = "Use det_hash::IndexMap or BTreeMap. Only hashbrown::HashTable with det_hash hashes is allowed." },
+    { path = "hashbrown::HashSet", reason = "Use det_hash::IndexSet or BTreeSet. Only hashbrown::HashTable with det_hash hashes is allowed." },
     { path = "std::time::Instant", reason = "Host timing must not affect deterministic library behavior." },
     { path = "std::time::SystemTime", reason = "Host time must not affect deterministic library behavior." },
     { path = "std::hash::RandomState", reason = "Randomized hash seeding breaks determinism. Use det_hash::IndexMap or BTreeMap instead." },

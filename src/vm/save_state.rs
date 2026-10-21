@@ -48,7 +48,7 @@ use std::sync::Arc;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::det_hash::{IndexMap as DetMap, map_with_capacity};
+use crate::det_hash::{FixedState, IndexMap as DetMap, IndexSet as DetSet, map_with_capacity};
 
 use super::lua_val::RustFunc;
 use super::object::{GcHeap, RawObject, StringPtr, Upvalue, UpvalueRef};
@@ -636,8 +636,8 @@ struct SaveBuilder<'a> {
     objects: Vec<Option<PendingObject>>,
     object_ids: BTreeMap<ObjectPtr, u32>,
     roots: Vec<Option<SavedVal>>,
-    reachable_pointer_values: BTreeMap<SavedVal, ()>,
-    expanded_environment_objects: BTreeMap<ObjectPtr, ()>,
+    reachable_pointer_values: BTreeSet<SavedVal>,
+    expanded_environment_objects: BTreeSet<ObjectPtr>,
 }
 
 #[derive(Clone, Copy)]
@@ -932,8 +932,8 @@ impl<'a> SaveBuilder<'a> {
             objects: Vec::new(),
             object_ids: BTreeMap::new(),
             roots: Vec::new(),
-            reachable_pointer_values: BTreeMap::new(),
-            expanded_environment_objects: BTreeMap::new(),
+            reachable_pointer_values: BTreeSet::new(),
+            expanded_environment_objects: BTreeSet::new(),
         }
     }
 
@@ -968,7 +968,7 @@ impl<'a> SaveBuilder<'a> {
                 && self.state.format_pointer_ids.contains_key(&key)
             {
                 let id = self.string_id(ptr)?;
-                self.reachable_pointer_values.insert(SavedVal::Str(id), ());
+                self.reachable_pointer_values.insert(SavedVal::Str(id));
             }
         }
         let pointer_ids = self.state.format_pointer_ids.clone();
@@ -984,7 +984,7 @@ impl<'a> SaveBuilder<'a> {
             // registers, see `materialize_payload`).
             if let Some(saved) = self.saved_reachable_pointer_value(val)
                 && (matches!(saved, SavedVal::Fn(_))
-                    || self.reachable_pointer_values.contains_key(&saved))
+                    || self.reachable_pointer_values.contains(&saved))
             {
                 format_pointer_ids.push((saved, id));
             }
@@ -1066,13 +1066,14 @@ impl<'a> SaveBuilder<'a> {
                     .entry(TableKey::from_prevalidated(*key))
                     .or_insert(*value);
             }
-            let mut live_keys: DetMap<TableKey, ()> = map_with_capacity(live.len());
+            let mut live_keys: DetSet<TableKey> =
+                DetSet::with_capacity_and_hasher(live.len(), FixedState::default());
             for (key, _) in &live {
-                live_keys.insert(TableKey::from_prevalidated(*key), ());
+                live_keys.insert(TableKey::from_prevalidated(*key));
             }
             let mut deleted = Vec::new();
             for (key, _) in &baseline.entries {
-                if !live_keys.contains_key(&TableKey::from_prevalidated(*key)) {
+                if !live_keys.contains(&TableKey::from_prevalidated(*key)) {
                     deleted.push(self.encode_root(*key, &token)?);
                 }
             }
@@ -1089,7 +1090,7 @@ impl<'a> SaveBuilder<'a> {
             let replayed_order: Vec<Val> = baseline
                 .entries
                 .iter()
-                .filter(|(key, _)| live_keys.contains_key(&TableKey::from_prevalidated(*key)))
+                .filter(|(key, _)| live_keys.contains(&TableKey::from_prevalidated(*key)))
                 .map(|(key, _)| *key)
                 .chain(live.iter().filter_map(|(key, _)| {
                     (!baseline_values.contains_key(&TableKey::from_prevalidated(*key)))
@@ -1200,11 +1201,11 @@ impl<'a> SaveBuilder<'a> {
                         }
                     }?;
                     if matches!(val, Val::Str(_) | Val::RustFn(_) | Val::Obj(_)) {
-                        self.reachable_pointer_values.insert(saved.clone(), ());
+                        self.reachable_pointer_values.insert(saved.clone());
                     }
                     if let Val::Obj(ptr) = val
                         && self.env_reverse.contains_key(&ptr)
-                        && self.expanded_environment_objects.insert(ptr, ()).is_none()
+                        && self.expanded_environment_objects.insert(ptr)
                     {
                         let table = self
                             .state

@@ -83,6 +83,10 @@ todo = "deny"
 # maps still use the explicit fixed hasher in `det_hash::IndexMap`.
 indexmap = { version = "2.14", default-features = false }
 foldhash = { version = "0.2", default-features = false }
+# Only `HashTable` is used (the string interner), with hashes computed by
+# `det_hash`. `default-features = false` drops the default hasher; clippy
+# bans hashbrown's `HashMap`/`HashSet` in case a host re-enables it.
+hashbrown = { version = "0.17", default-features = false }
 slotmap = "1.1"
 # Deliberately non-optional: many internal functions carry the
 # `hotpath::measure` attribute, and without the `hotpath` cargo feature the

@@ -497,7 +497,7 @@ impl GcHeap {
     /// Allocate or intern a string.
     #[hotpath::measure]
     fn alloc_string_raw(&mut self, bytes: &[u8]) -> StringPtr {
-        let hash = StringPool::hash_string(bytes);
+        let hash = crate::det_hash::hash_bytes(bytes);
         if let Some(ptr) = self.strings.find_by_hash(bytes, hash) {
             return ptr;
         }
@@ -750,25 +750,38 @@ pub(crate) struct StringPtr(StringKey);
 pub(crate) struct StringPool {
     /// SlotMap storing all interned strings.
     strings: SlotMap<StringKey, StringEntry>,
-    /// Hash -> bucket of StringKeys for O(1) interner lookup.
-    /// Multiple keys per bucket only on hash collision; the typical bucket
-    /// holds a single key. Only ever probed by hash, never iterated, so its
-    /// order is unobservable and empty buckets are dropped with an O(1)
-    /// `swap_remove` rather than an O(len) `shift_remove`.
-    hash_index: IndexMap<u64, Vec<StringKey>>,
+    /// Content index for interning: one key per live string, placed by the
+    /// string's `det_hash::hash_bytes` hash (kept in its `StringEntry`, which
+    /// is what the rehash closures read) and matched by content. Only ever
+    /// probed, never iterated, so its layout cannot reach program-visible
+    /// order: string identity comes from the slotmap, and table keys hash the
+    /// `StringPtr`, not the content. Every key here must resolve in
+    /// `strings` whenever a closure that rehashes can run.
+    index: hashbrown::HashTable<StringKey>,
 }
 
 impl StringPool {
     fn new() -> Self {
         Self {
             strings: SlotMap::with_key(),
-            hash_index: IndexMap::default(),
+            index: hashbrown::HashTable::new(),
         }
     }
 
     fn reserve(&mut self, additional: usize) {
         self.strings.reserve(additional);
-        self.hash_index.reserve(additional);
+        let strings = &self.strings;
+        self.index
+            .reserve(additional, |key| Self::entry_hash(strings, *key));
+    }
+
+    /// Hash of a live string. The index only holds live keys, so a miss is a
+    /// broken pool invariant.
+    fn entry_hash(strings: &SlotMap<StringKey, StringEntry>, key: StringKey) -> u64 {
+        strings
+            .get(key)
+            .expect("string index holds only live string keys")
+            .hash
     }
 
     pub(super) fn len(&self) -> usize {
@@ -777,31 +790,6 @@ impl StringPool {
 
     pub(super) fn contains(&self, ptr: StringPtr) -> bool {
         self.strings.contains_key(ptr.0)
-    }
-
-    pub(super) fn hash_string(bytes: &[u8]) -> u64 {
-        const FX_HASH_MUL: u64 = 0x517cc1b727220a95;
-
-        #[inline]
-        fn mix(hash: u64, word: u64) -> u64 {
-            (hash.rotate_left(5) ^ word).wrapping_mul(FX_HASH_MUL)
-        }
-
-        let mut hash = bytes.len() as u64;
-        let (chunks, remainder) = bytes.as_chunks::<8>();
-        for chunk in chunks {
-            let word = u64::from_le_bytes(*chunk);
-            hash = mix(hash, word);
-        }
-
-        let mut tail = 0u64;
-        for (i, byte) in remainder.iter().enumerate() {
-            tail |= u64::from(*byte) << (i * 8);
-        }
-        if !remainder.is_empty() {
-            hash = mix(hash, tail);
-        }
-        hash
     }
 
     /// Get a string's content by its pointer.
@@ -815,18 +803,16 @@ impl StringPool {
     }
 
     /// Find an existing interned string by content and hash.
-    /// O(1) via hash_index; only scans within a hash bucket on collision.
     #[hotpath::measure]
     pub(super) fn find_by_hash(&self, bytes: &[u8], hash: u64) -> Option<StringPtr> {
-        let bucket = self.hash_index.get(&hash)?;
-        for key in bucket {
-            if let Some(entry) = self.strings.get(*key)
-                && entry.data.as_ref() == bytes
-            {
-                return Some(StringPtr(*key));
-            }
-        }
-        None
+        let strings = &self.strings;
+        self.index
+            .find(hash, |key| {
+                strings
+                    .get(*key)
+                    .is_some_and(|entry| entry.data.as_ref() == bytes)
+            })
+            .map(|key| StringPtr(*key))
     }
 
     /// Insert a new string with precomputed hash. Updates the hash index.
@@ -838,7 +824,9 @@ impl StringPool {
             color: Cell::new(Color::Unmarked),
         };
         let key = self.strings.insert(entry);
-        self.hash_index.entry(hash).or_default().push(key);
+        let strings = &self.strings;
+        self.index
+            .insert_unique(hash, key, |key| Self::entry_hash(strings, *key));
         StringPtr(key)
     }
 
@@ -863,13 +851,15 @@ impl StringPool {
                 false
             }
         });
-        // Drop dead keys from hash_index buckets, and drop empty buckets.
+        // The freed keys are still in the index and no longer resolve, so
+        // nothing between the retain above and this loop may rehash it (no
+        // insert or reserve). Removal matches by key, never dereferencing.
         for (key, hash) in removed {
-            if let Some(bucket) = self.hash_index.get_mut(&hash) {
-                bucket.retain(|k| *k != key);
-                if bucket.is_empty() {
-                    self.hash_index.swap_remove(&hash);
+            match self.index.find_entry(hash, |k| *k == key) {
+                Ok(entry) => {
+                    entry.remove();
                 }
+                Err(_) => unreachable!("every interned string has one index entry"),
             }
         }
     }
@@ -963,9 +953,50 @@ mod tests {
     }
 
     #[test]
-    fn test_string_hash_is_pinned() {
-        assert_eq!(StringPool::hash_string(b""), 0x0000000000000000);
-        assert_eq!(StringPool::hash_string(b"hello"), 0xd76e0ef553a10d68);
+    fn string_pool_survives_growth_across_collisions_sweeps_and_slot_reuse() {
+        // Grow the index past collisions, sweep part of it, reuse freed
+        // slots, then grow again: every rehash must still find each live
+        // key's hash, and lookups must still resolve by content.
+        let mut pool = StringPool::new();
+        let mut live = Vec::new();
+        for i in 0..200u32 {
+            let bytes = format!("s{i}").into_bytes();
+            // Every fourth string shares a forced hash with its neighbours.
+            let hash = if i % 4 == 0 { 7 } else { u64::from(i) };
+            live.push((
+                pool.insert_with_hash(bytes.clone().into(), hash),
+                bytes,
+                hash,
+            ));
+        }
+        for (index, (ptr, _, _)) in live.iter().enumerate() {
+            if index % 3 == 0 {
+                pool.mark(*ptr);
+            }
+        }
+        pool.collect();
+        let mut survivors: Vec<_> = live
+            .into_iter()
+            .enumerate()
+            .filter(|(index, _)| index % 3 == 0)
+            .map(|(_, entry)| entry)
+            .collect();
+        assert_eq!(pool.len(), survivors.len());
+        for i in 0..400u32 {
+            let bytes = format!("t{i}").into_bytes();
+            let hash = if i % 2 == 0 { 7 } else { 1000 + u64::from(i) };
+            survivors.push((
+                pool.insert_with_hash(bytes.clone().into(), hash),
+                bytes,
+                hash,
+            ));
+        }
+        pool.reserve(1000);
+        for (ptr, bytes, hash) in &survivors {
+            assert_eq!(pool.find_by_hash(bytes, *hash), Some(*ptr));
+            assert_eq!(pool.get(*ptr), bytes.as_slice());
+        }
+        assert_eq!(pool.find_by_hash(b"s1", 1), None);
     }
 
     #[test]

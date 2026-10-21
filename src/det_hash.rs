@@ -4,7 +4,9 @@
 //! does not exist in standalone builds and a bare `indexmap::IndexMap<K, V>`
 //! fails to compile. An embedding host can re-enable `std` through Cargo
 //! feature unification; this alias still fixes the hasher explicitly.
-//! Every map and set in the crate goes through these aliases. Iteration order
+//! Every map and set in the crate goes through these aliases, except the
+//! string interner's `hashbrown::HashTable`, which is never iterated and
+//! hashes with [`hash_bytes`] from this module. Iteration order
 //! is insertion order regardless of the hasher, but the hasher still decides
 //! bucket layout and probe counts, so an OS-seeded one makes performance
 //! vary run to run. `FixedState` is foldhash with a compile-time constant
@@ -33,6 +35,13 @@ pub(crate) type IndexSet<T> = indexmap::IndexSet<T, FixedState>;
 #[inline]
 pub(crate) fn map_with_capacity<K, V>(capacity: usize) -> IndexMap<K, V> {
     IndexMap::with_capacity_and_hasher(capacity, FixedState::default())
+}
+
+/// Hash a byte string with the crate's fixed-seed hasher.
+#[inline]
+pub(crate) fn hash_bytes(bytes: &[u8]) -> u64 {
+    use std::hash::BuildHasher;
+    FixedState::default().hash_one(bytes)
 }
 
 #[cfg(test)]

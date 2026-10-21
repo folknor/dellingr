@@ -229,20 +229,6 @@ Reported by the heap hunter.
 - `SavePayload::encoded_size_estimate` ignores bytecode size, which dominates
   script-heavy worlds; the buffer still grows.
 
-## HYG-061 - Two hash functions for one string lookup
-
-Reported by the heap hunter.
-
-`det_hash.rs` calls itself the crate's only hash-map type and fixes foldhash's
-seed, but `StringPool` hashes with a hand-rolled FxHash (`hash_string`, pinned by a
-test, endian-defined) and stores the `u64`s in an `IndexMap<u64, _>` that foldhash
-hashes again (`det_hash` says foldhash may change per target). Neither reaches
-observable order. Fix: key by content with foldhash, or a no-op `BuildHasher` for
-the `u64` map; drop the pin test's stability claim if nothing needs it. Related:
-`det_hash` offers no `IndexSet` alias, pushing code to `IndexMap<K, ()>` and
-`BTreeMap<_, ()>` sets (`SaveBuilder::reachable_pointer_values`,
-`expanded_environment_objects`, `encode_env_deltas`' `live_keys`); add one.
-
 ## Comment or doc only
 
 ## Decisions for the user
