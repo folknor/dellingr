@@ -13,7 +13,7 @@ fn lua_error(source: &str) -> Error {
 
 fn assert_invalid_zero_index(error: &Error) {
     assert!(matches!(
-        &error.kind,
+        error.kind(),
         ErrorKind::InvalidStackIndex { index: 0 }
     ));
 }
@@ -50,7 +50,7 @@ fn stack_editing_rejects_zero_without_panicking_or_mutating_the_stack() {
 fn nan_table_insertion_returns_the_existing_typed_error() {
     let error = lua_error("local t = {}; t[0 / 0] = 1");
     assert!(matches!(
-        error.kind,
+        error.kind(),
         ErrorKind::TypeError(TypeError::TableKeyNan)
     ));
 }
@@ -59,34 +59,34 @@ fn nan_table_insertion_returns_the_existing_typed_error() {
 fn pattern_errors_keep_their_text_and_expose_structured_details() {
     let error = lua_error(r#"return string.match("a", ")")"#);
     assert!(matches!(
-        &error.kind,
+        error.kind(),
         ErrorKind::PatternError(PatternErrorDetail::InvalidPatternCapture)
     ));
-    assert_eq!(error.kind.to_string(), "invalid pattern capture");
+    assert_eq!(error.kind().to_string(), "invalid pattern capture");
 
     let error = lua_error(r#"return string.match("aa", "(a)%0")"#);
     assert!(matches!(
-        &error.kind,
+        error.kind(),
         ErrorKind::PatternError(PatternErrorDetail::InvalidCaptureIndex(Some(-1)))
     ));
-    assert_eq!(error.kind.to_string(), "invalid capture index %0");
+    assert_eq!(error.kind().to_string(), "invalid capture index %0");
 
     let error = lua_error(r#"return string.match("a", "[")"#);
     assert!(matches!(
-        &error.kind,
+        error.kind(),
         ErrorKind::PatternError(PatternErrorDetail::MalformedPattern(
             MalformedPatternDetail::MissingBracket
         ))
     ));
-    assert_eq!(error.kind.to_string(), "malformed pattern (missing ']')");
+    assert_eq!(error.kind().to_string(), "malformed pattern (missing ']')");
 }
 
 #[test]
 fn gmatch_cached_pattern_errors_are_structured_too() {
     let error = lua_error(r#"local iter = string.gmatch("a", "("); return iter()"#);
     assert!(matches!(
-        &error.kind,
+        error.kind(),
         ErrorKind::PatternError(PatternErrorDetail::UnfinishedCapture)
     ));
-    assert_eq!(error.kind.to_string(), "unfinished capture");
+    assert_eq!(error.kind().to_string(), "unfinished capture");
 }

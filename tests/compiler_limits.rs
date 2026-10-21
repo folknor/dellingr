@@ -13,7 +13,7 @@ fn expect_syntax_error(code: &str, expected: fn(&SyntaxError) -> bool) {
     let err = State::new()
         .load_string(code)
         .expect_err("source should not compile");
-    match &err.kind {
+    match err.kind() {
         ErrorKind::SyntaxError(kind) if expected(kind) => {}
         _ => panic!("unexpected error: {err}"),
     }

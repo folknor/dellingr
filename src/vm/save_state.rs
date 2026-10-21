@@ -538,7 +538,7 @@ impl<'a> SaveBuilder<'a> {
         // `print = function ... end` or `math = {}`, which live in `globals`
         // under a builtin name but no longer hold the canonical value.
         let mut user_globals = Vec::new();
-        for (name, val) in &self.state.globals {
+        for (name, val) in self.state.global_env.iter() {
             let saved = self.encode_root(
                 *val,
                 PathSegment::Global(truncate_utf8(name, MAX_PATH_GLOBAL_BYTES)),
@@ -1300,7 +1300,7 @@ fn build_env_forward(state: &State) -> BTreeMap<String, ObjectPtr> {
 /// nothing. Every other value, `-0.0` included, keeps its exact bits.
 fn saved_num_bits(n: f64) -> u64 {
     if n.is_nan() {
-        0x7ff8_0000_0000_0000
+        crate::numeral::CANONICAL_NAN_BITS
     } else {
         n.to_bits()
     }
@@ -1638,13 +1638,7 @@ fn materialize_payload(
 
     for (name, saved) in payload.user_globals {
         let val = decode_val(&saved, &ctx)?;
-        // A saved nil is an existing global's tombstone, not a new nil
-        // assignment. Restore its entry even when setup did not create it:
-        // its position affects snapshot bytes and later non-nil writes.
-        if matches!(val, Val::Nil) && !state.globals.contains_key(&name) {
-            state.globals.insert(name.clone(), Val::Nil);
-        }
-        state.set_global_value_owned(name, val);
+        state.global_env.restore_binding(name, val);
     }
     state.rng = VmRng::from_state(payload.rng_state);
     state.cost_remaining = payload.cost_remaining;

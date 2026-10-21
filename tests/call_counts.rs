@@ -17,11 +17,11 @@ fn expect_error(code: &str, expected: &str, kind_matches: fn(&ErrorKind) -> bool
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect_err("script must return an error");
     assert!(
-        kind_matches(&err.kind),
+        kind_matches(err.kind()),
         "unexpected error kind: {:?}",
-        err.kind
+        err.kind()
     );
-    assert_eq!(err.kind.to_string(), expected);
+    assert_eq!(err.kind().to_string(), expected);
 }
 
 fn too_many_arguments(kind: &ErrorKind) -> bool {

@@ -93,7 +93,7 @@ fn method_sugar_on_plain_table_is_an_error() {
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect_err("the missing insert field is not callable");
     assert!(matches!(
-        error.kind,
+        error.kind(),
         ErrorKind::TypeError(TypeError::FunctionCall(LuaType::Nil))
     ));
 }

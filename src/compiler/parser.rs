@@ -37,8 +37,6 @@ struct Parser<'a> {
     /// Every active function, outermost first; field access selects the last.
     funcs: FunctionStack<'a>,
     source_name: Option<Arc<str>>,
-    /// Current line number for instruction emission.
-    current_line: u32,
     /// Current nesting depth across recursive parser entry points.
     syntax_depth: u32,
 }
@@ -81,7 +79,6 @@ pub(super) fn parse_str_named(source: &str, source_name: Option<String>) -> Resu
         input: TokenStream::new(source),
         funcs: FunctionStack::default(),
         source_name: source_name.clone(),
-        current_line: 1,
         syntax_depth: 0,
     };
     parser
@@ -229,7 +226,6 @@ impl<'a> Parser<'a> {
     /// Returns the token if it matches, `Err` otherwise.
     fn expect(&mut self, expected: TokenType) -> Result<Token> {
         let token = self.input.next()?;
-        self.update_line(token);
         if token.typ == expected {
             Ok(token)
         } else {
@@ -257,7 +253,8 @@ impl<'a> Parser<'a> {
 
     /// Stores literal string bytes and returns its index.
     fn find_or_add_string_bytes(&mut self, bytes: &[u8]) -> Result<u16> {
-        crate::vm::check_string_size(bytes.len()).map_err(|err| self.error_here(err.kind))?;
+        crate::vm::check_string_size(bytes.len())
+            .map_err(|err| self.error_here(err.into_kind()))?;
         if let Some(index) = self.funcs.literal_indices.strings.get(bytes) {
             return Ok(*index);
         }
@@ -351,7 +348,7 @@ impl<'a> Parser<'a> {
     /// Adds an instruction to the output with line number tracking.
     fn push(&mut self, instr: Instr) {
         self.funcs.chunk.code.push(instr);
-        self.funcs.chunk.line_info.push(self.current_line);
+        self.funcs.chunk.line_info.push(self.input.last_line());
     }
 
     /// The values of the two trailing instructions when both are `PushNum`
@@ -380,7 +377,7 @@ impl<'a> Parser<'a> {
         }
         match self.find_or_add_number(value) {
             Ok(index) => Ok(Some(index)),
-            Err(error) => match error.kind {
+            Err(error) => match error.kind() {
                 ErrorKind::SyntaxError(SyntaxError::TooManyNumbers) => Ok(None),
                 _ => Err(error),
             },
@@ -388,12 +385,15 @@ impl<'a> Parser<'a> {
     }
 
     /// Emits an arithmetic instruction, folding `PushNum a; PushNum b; op`
-    /// into one `PushNum` when both operands are number literals. `op` must
-    /// be the same function the VM dispatch applies for this opcode, so the
-    /// folded value is bit-exact with runtime evaluation. A full literal
+    /// into one `PushNum` when both operands are number literals. The folder
+    /// uses `numeral::arith_fn`, the same function the VM dispatch applies for
+    /// this opcode, so the folded value is bit-exact with runtime evaluation.
+    /// An unfolded instruction records `line`, the operator's line. A full literal
     /// pool falls back to emitting the instruction unfolded rather than
     /// failing a program the unfolded compiler accepted.
-    fn push_arith(&mut self, instr: Instr, op: fn(f64, f64) -> f64) -> Result<()> {
+    fn push_arith(&mut self, instr: Instr, line: u32) -> Result<()> {
+        let op = crate::numeral::arith_fn(instr.opcode())
+            .ok_or_else(|| self.internal_error("arithmetic folding requires a foldable opcode"))?;
         if let Some((lhs, rhs)) = self.foldable_binary_operands() {
             let result = op(lhs, rhs);
             if let Some(idx) = self.try_fold_literal(result)? {
@@ -403,7 +403,7 @@ impl<'a> Parser<'a> {
                 return Ok(());
             }
         }
-        self.push(instr);
+        self.push_at_line(instr, line);
         Ok(())
     }
 
@@ -435,8 +435,9 @@ impl<'a> Parser<'a> {
 
     /// Emits unary negation, folding `PushNum v; Negate` into `PushNum -v`.
     /// Replacing in place is safe even at a jump target: the landing site
-    /// still computes the same value.
-    fn push_negate(&mut self) -> Result<()> {
+    /// still computes the same value. An emitted `Negate` records `line`, the
+    /// operator's line; a folded constant keeps its operand's line.
+    fn push_negate(&mut self, line: u32) -> Result<()> {
         if self.funcs.chunk.code.len() > self.funcs.fold_barrier
             && let Some(last) = self.funcs.chunk.code.last()
             && last.opcode() == Instr::OP_PUSH_NUM
@@ -447,7 +448,7 @@ impl<'a> Parser<'a> {
                 return Ok(());
             }
         }
-        self.push(Instr::negate());
+        self.push_at_line(Instr::negate(), line);
         Ok(())
     }
 
@@ -476,12 +477,6 @@ impl<'a> Parser<'a> {
         }
         self.replace_last_instr(replacement)?;
         Ok(())
-    }
-
-    /// Updates current line from the lexer stamp on a consumed or peeked token.
-    #[hotpath::measure]
-    fn update_line(&mut self, token: Token) {
-        self.current_line = token.line;
     }
 
     /// Called when entering a loop to track break statements.
@@ -565,7 +560,10 @@ impl<'a> Parser<'a> {
         }
 
         self.parse_statements()?;
-        self.push(Instr::ret(RetCount::Fixed(0)));
+        // The implicit return belongs to the block terminator, even though
+        // the enclosing parser has not consumed that token yet.
+        let end_line = self.input.peek()?.line;
+        self.push_at_line(Instr::ret(RetCount::Fixed(0)), end_line);
 
         // Copy upvalues to chunk
         self.funcs.chunk.upvalues = self.funcs.upvalues.iter().map(|(_, desc)| *desc).collect();
@@ -595,10 +593,6 @@ impl<'a> Parser<'a> {
 
     fn parse_statements_inner(&mut self) -> Result<bool> {
         loop {
-            // Update line number at start of each statement for accurate error reporting
-            let stmt_start = *self.input.peek()?;
-            self.update_line(stmt_start);
-
             match self.input.peek_type()? {
                 TokenType::Identifier | TokenType::LParen => {
                     self.parse_assign_or_call()?;
@@ -731,3 +725,6 @@ fn number_literal_key(number: f64) -> Option<u64> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod line_attribution_tests;

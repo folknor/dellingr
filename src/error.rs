@@ -68,16 +68,16 @@ impl fmt::Display for StackFrame {
 #[derive(Debug)]
 pub struct Error {
     /// What went wrong.
-    pub kind: ErrorKind,
+    kind: ErrorKind,
     /// 1-based source line number where the error surfaced (0 if unknown).
-    pub line_num: usize,
+    line_num: u32,
     /// 1-based source column (0 if unknown).
-    pub column: usize,
+    column: u32,
     /// The box keeps this optional context to one pointer in each `Error`, which
     /// is carried across recursive VM calls.
     context: Option<Box<ErrorContext>>,
     /// Stack trace at the point of error (innermost frame first).
-    pub stack_trace: Vec<StackFrame>,
+    stack_trace: Vec<StackFrame>,
 }
 
 /// Which source location an error renders as its `chunk:line:` prefix.
@@ -320,6 +320,16 @@ impl LibraryFunction {
 pub enum LibraryError {
     /// A protected metatable cannot be replaced.
     ProtectedMetatable,
+    /// `next` received a key that does not identify an entry in the table.
+    InvalidNextKey,
+    /// A table sequence operation received an unsupported position.
+    PositionOutOfBounds,
+    /// A table sequence is too large to sort.
+    ArrayTooBig,
+    /// A `__tostring` metamethod returned a value other than a string or number.
+    TostringMustReturnString,
+    /// The deterministic identity counter used to format a value was exhausted.
+    FormatPointerIdentitySpaceExhausted,
     /// A function was called with an unsupported number of arguments.
     WrongNumberOfArguments {
         /// The function whose argument count was rejected.
@@ -397,15 +407,15 @@ pub enum MalformedPatternDetail {
 pub struct ArgError {
     /// 1-based argument index that failed validation. Negative values count
     /// from the end of the argument list.
-    pub arg_number: isize,
+    arg_number: isize,
     /// Name of the function the argument was passed to (if known).
-    pub func_name: Option<String>,
+    func_name: Option<String>,
     /// Reason validation failed.
-    pub detail: ArgDetail,
+    detail: ArgDetail,
     /// Expected Lua type for this argument.
-    pub expected: Option<LuaType>,
+    expected: Option<LuaType>,
     /// Lua type the caller actually supplied.
-    pub received: Option<LuaType>,
+    received: Option<LuaType>,
 }
 
 /// Maximum number of values a call can return (Rust callbacks and Lua
@@ -420,22 +430,15 @@ pub fn results_count(count: usize) -> Result<u8, ErrorKind> {
 
 /// Structured reason an argument failed validation.
 ///
-/// Equality treats each typed standard-library detail as equal to its
-/// corresponding legacy `Custom` or `OutOfBounds` value with the same wording.
-#[derive(Debug, Clone)]
+/// Equality compares the structured reason by its exact variant.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArgDetail {
     /// Type or presence mismatch, described by `expected` and `received`.
     TypeMismatch,
     /// A number cannot be represented as an integer.
     NoInteger,
-    /// Legacy caller-provided wording for an out-of-range value. Internal
-    /// standard-library checks use the typed variants below.
-    OutOfBounds(String),
     /// A random interval contains no values.
     IntervalEmpty,
-    /// Legacy caller-provided wording for another validation failure. Internal
-    /// standard-library checks use the typed variants below.
-    Custom(String),
     /// A required argument was not supplied.
     NoValue,
     /// A string contains a zero byte where `string.format` cannot accept one.
@@ -459,7 +462,6 @@ impl ArgDetail {
         match self {
             Self::NoInteger => Some("number has no integer representation"),
             Self::IntervalEmpty => Some("interval is empty"),
-            Self::OutOfBounds(detail) | Self::Custom(detail) => Some(detail),
             Self::NoValue => Some("no value"),
             Self::StringContainsZeros => Some("string contains zeros"),
             Self::ValueHasNoLiteralForm => Some("value has no literal form"),
@@ -472,54 +474,6 @@ impl ArgDetail {
         }
     }
 }
-
-impl PartialEq for ArgDetail {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::TypeMismatch, Self::TypeMismatch)
-            | (Self::NoInteger, Self::NoInteger)
-            | (Self::IntervalEmpty, Self::IntervalEmpty)
-            | (Self::NoValue, Self::NoValue)
-            | (Self::StringContainsZeros, Self::StringContainsZeros)
-            | (Self::ValueHasNoLiteralForm, Self::ValueHasNoLiteralForm)
-            | (Self::BaseOutOfRange, Self::BaseOutOfRange)
-            | (Self::IndexOutOfRange, Self::IndexOutOfRange)
-            | (Self::TableOrStringExpected, Self::TableOrStringExpected)
-            | (Self::StringFunctionOrTableExpected, Self::StringFunctionOrTableExpected)
-            | (Self::PositionOutOfBounds, Self::PositionOutOfBounds) => true,
-            (Self::OutOfBounds(left), Self::OutOfBounds(right))
-            | (Self::Custom(left), Self::Custom(right)) => left == right,
-            (Self::BaseOutOfRange, Self::OutOfBounds(text))
-            | (Self::OutOfBounds(text), Self::BaseOutOfRange) => text == "base out of range",
-            (Self::IndexOutOfRange, Self::OutOfBounds(text))
-            | (Self::OutOfBounds(text), Self::IndexOutOfRange) => text == "index out of range",
-            (Self::PositionOutOfBounds, Self::OutOfBounds(text))
-            | (Self::OutOfBounds(text), Self::PositionOutOfBounds) => {
-                text == "position out of bounds"
-            }
-            (Self::TableOrStringExpected, Self::Custom(text))
-            | (Self::Custom(text), Self::TableOrStringExpected) => {
-                text == "table or string expected"
-            }
-            (Self::StringFunctionOrTableExpected, Self::Custom(text))
-            | (Self::Custom(text), Self::StringFunctionOrTableExpected) => {
-                text == "string/function/table expected"
-            }
-            (Self::NoValue, Self::Custom(text)) | (Self::Custom(text), Self::NoValue) => {
-                text == "no value"
-            }
-            (Self::StringContainsZeros, Self::Custom(text))
-            | (Self::Custom(text), Self::StringContainsZeros) => text == "string contains zeros",
-            (Self::ValueHasNoLiteralForm, Self::Custom(text))
-            | (Self::Custom(text), Self::ValueHasNoLiteralForm) => {
-                text == "value has no literal form"
-            }
-            _ => false,
-        }
-    }
-}
-
-impl Eq for ArgDetail {}
 
 /// Syntax-level error categories raised by the parser.
 #[derive(Debug)]
@@ -607,7 +561,7 @@ pub enum TypeError {
 
 impl Error {
     /// Construct an error with explicit source location.
-    pub fn new(kind: impl Into<ErrorKind>, line_num: usize, column: usize) -> Self {
+    pub fn new(kind: impl Into<ErrorKind>, line_num: u32, column: u32) -> Self {
         Error {
             kind: kind.into(),
             line_num,
@@ -629,7 +583,7 @@ impl Error {
         self
     }
 
-    pub(crate) fn with_location(mut self, line_num: usize, column: usize) -> Self {
+    pub(crate) fn with_location(mut self, line_num: u32, column: u32) -> Self {
         self.line_num = line_num;
         self.column = column;
         self
@@ -640,6 +594,16 @@ impl Error {
             self.context_mut().name = source_name;
         }
         self
+    }
+
+    /// Attach the reporting frame's source name unless the error already
+    /// carries one, so `on_error` sees where the error was first reported.
+    pub(crate) fn attach_source_name_if_absent(&mut self, source_name: Option<&Arc<str>>) {
+        if self.source_name().is_none()
+            && let Some(name) = source_name
+        {
+            self.context_mut().name = Some(Arc::clone(name));
+        }
     }
 
     // Keep reporting state in the existing optional box: widening Error adds
@@ -666,6 +630,31 @@ impl Error {
     /// Source file or chunk name attached to this error, if it came from named source.
     pub fn source_name(&self) -> Option<&str> {
         self.context.as_deref().and_then(ErrorContext::as_str)
+    }
+
+    /// Error category and details.
+    pub fn kind(&self) -> &ErrorKind {
+        &self.kind
+    }
+
+    /// Take the error category, discarding location and context.
+    pub(crate) fn into_kind(self) -> ErrorKind {
+        self.kind
+    }
+
+    /// Stack frames at the point the error was raised, innermost first.
+    pub fn stack_trace(&self) -> &[StackFrame] {
+        &self.stack_trace
+    }
+
+    /// Give an argument error the explicit standard-library function name.
+    /// Updating the kind in place keeps this error's source and reporting
+    /// state attached.
+    pub(crate) fn with_argument_function_name(mut self, function_name: &str) -> Self {
+        if let ErrorKind::ArgError(argument) = &mut self.kind {
+            argument.func_name = Some(function_name.to_owned());
+        }
+        self
     }
 
     /// String function whose pattern operation produced this error, if any.
@@ -705,12 +694,12 @@ impl Error {
     }
 
     /// 1-based column number where the error surfaced (0 if unknown).
-    pub fn column(&self) -> usize {
+    pub fn column(&self) -> u32 {
         self.column
     }
 
     /// 1-based line number where the error surfaced (0 if unknown).
-    pub fn line_num(&self) -> usize {
+    pub fn line_num(&self) -> u32 {
         self.line_num
     }
 
@@ -745,6 +734,43 @@ impl ErrorKind {
 }
 
 impl ArgError {
+    /// One-based argument index that failed validation. Negative values count
+    /// from the end of the argument list.
+    pub fn arg_number(&self) -> isize {
+        self.arg_number
+    }
+
+    /// Name of the function the argument was passed to, if known.
+    pub fn func_name(&self) -> Option<&str> {
+        self.func_name.as_deref()
+    }
+
+    /// Structured reason validation failed.
+    pub fn detail(&self) -> &ArgDetail {
+        &self.detail
+    }
+
+    /// Expected Lua type for this argument.
+    pub fn expected(&self) -> Option<LuaType> {
+        self.expected
+    }
+
+    /// Lua type the caller actually supplied.
+    pub fn received(&self) -> Option<LuaType> {
+        self.received
+    }
+
+    /// Build an error for a required argument without an expected type.
+    pub(crate) fn required(arg_number: isize, func_name: Option<&str>) -> Self {
+        Self {
+            arg_number,
+            func_name: func_name.map(str::to_owned),
+            detail: ArgDetail::TypeMismatch,
+            expected: None,
+            received: None,
+        }
+    }
+
     /// Build a typed argument type mismatch.
     pub(crate) fn type_mismatch(
         arg_number: isize,
@@ -821,7 +847,7 @@ impl fmt::Display for Error {
                             prefix_location,
                             PrefixLocation::Current | PrefixLocation::TraceFrame(0)
                         ) && frame.line != 0
-                            && frame.line as usize == self.line_num;
+                            && frame.line == self.line_num;
                         let column = if same_site { self.column } else { 0 };
                         write!(f, "{}:{}: {}", frame.line, column, self.kind)?;
                     }
@@ -976,6 +1002,13 @@ impl fmt::Display for LibraryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ProtectedMetatable => f.write_str("cannot change a protected metatable"),
+            Self::InvalidNextKey => f.write_str("invalid key to 'next'"),
+            Self::PositionOutOfBounds => f.write_str("position out of bounds"),
+            Self::ArrayTooBig => f.write_str("array too big"),
+            Self::TostringMustReturnString => f.write_str("'__tostring' must return a string"),
+            Self::FormatPointerIdentitySpaceExhausted => {
+                f.write_str("format pointer identity space exhausted")
+            }
             Self::WrongNumberOfArguments { function } => {
                 write!(f, "wrong number of arguments to '{}'", function.as_str())
             }

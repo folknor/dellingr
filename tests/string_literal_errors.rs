@@ -18,7 +18,7 @@ fn malformed_escapes_return_syntax_errors_through_state_loading() {
             .expect_err("malformed escape must not compile");
         assert!(
             matches!(
-                (&err.kind, expected),
+                (err.kind(), expected),
                 (
                     ErrorKind::SyntaxError(SyntaxError::DecimalEscapeTooLarge),
                     "decimal"
@@ -42,7 +42,7 @@ fn long_strings_return_syntax_errors_through_public_compilation() {
             .compile(source)
             .expect_err("long strings must not compile");
         assert!(matches!(
-            err.kind,
+            err.kind(),
             ErrorKind::SyntaxError(SyntaxError::LongStringUnsupported)
         ));
     }

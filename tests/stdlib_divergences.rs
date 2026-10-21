@@ -65,8 +65,8 @@ fn print_rejects_output_whose_lossy_expansion_exceeds_the_cap() {
         state.set_global("s").expect("global set");
         let err = run(&mut state, source).expect_err("expanded output exceeds the cap");
         assert!(
-            matches!(err.kind, ErrorKind::StringSizeExceeded { size, limit }
-                if size == raw.len() * 3 && limit == MAX_STRING_BYTES),
+            matches!(err.kind(), ErrorKind::StringSizeExceeded { size, limit }
+                if *size == raw.len() * 3 && *limit == MAX_STRING_BYTES),
             "{source}: {err}"
         );
         assert!(prints.lock().expect("print lock is healthy").is_empty());
@@ -119,11 +119,11 @@ fn math_random_is_deterministic_per_seed() {
 #[test]
 fn string_sub_checks_argument_one_first() {
     let err = expect_error("string.sub()");
-    let ErrorKind::ArgError(arg) = err.kind else {
+    let ErrorKind::ArgError(arg) = err.kind() else {
         panic!("expected an argument error, got {err}");
     };
-    assert_eq!(arg.arg_number, 1);
-    assert_eq!(arg.expected, Some(LuaType::String));
+    assert_eq!(arg.arg_number(), 1);
+    assert_eq!(arg.expected(), Some(LuaType::String));
 }
 
 #[test]
@@ -140,7 +140,7 @@ fn table_concat_names_the_bad_element_and_index() {
     ] {
         let err = expect_error(source);
         assert!(
-            matches!(&err.kind, ErrorKind::RuntimeError(m) if m == expected),
+            matches!(err.kind(), ErrorKind::RuntimeError(m) if m == expected),
             "{source}: {err}"
         );
     }
@@ -157,7 +157,7 @@ fn sequence_readers_refuse_ranges_past_exact_keys() {
             };
             let err = expect_error(&format!("{function}({{}}, {sep}{range})"));
             assert!(
-                matches!(&err.kind, ErrorKind::RuntimeError(m)
+                matches!(err.kind(), ErrorKind::RuntimeError(m)
                     if m.contains("exactly representable integer keys")),
                 "{function}({range}): {err}"
             );

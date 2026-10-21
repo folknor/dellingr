@@ -178,11 +178,8 @@ impl State {
 /// Adds the known standard-library function name to a generic argument error.
 ///
 /// Explicit library names override global aliases and snapshot registration ids.
-fn name_argument_error(mut error: Error, function_name: &str) -> Error {
-    if let ErrorKind::ArgError(argument) = &mut error.kind {
-        argument.func_name = Some(function_name.to_owned());
-    }
-    error
+fn name_argument_error(error: Error, function_name: &str) -> Error {
+    error.with_argument_function_name(function_name)
 }
 
 pub(super) fn check_any_named(

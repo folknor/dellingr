@@ -18,6 +18,7 @@ pub(super) struct TokenStream<'a> {
     lexer: Lexer<'a>,
     lookahead: Option<Token>,
     lookahead2: Option<Token>,
+    last_line: u32,
 }
 
 /// Decoded contents saved by the lexer for a short-string token.
@@ -62,23 +63,32 @@ impl<'a> TokenStream<'a> {
             lexer: Lexer::new(source),
             lookahead: None,
             lookahead2: None,
+            last_line: 1,
         }
     }
 
     /// Returns the next `Token`.
     #[hotpath::measure]
     pub(super) fn next(&mut self) -> Result<Token> {
-        match self.lookahead.take() {
+        let token = match self.lookahead.take() {
             Some(token) => {
                 self.lookahead = self.lookahead2.take();
                 Ok(token)
             }
             None => self.lexer.next_token(),
-        }
+        }?;
+        self.last_line = token.line;
+        Ok(token)
+    }
+
+    /// Line of the last consumed token. Lookahead never changes attribution.
+    pub(super) fn last_line(&self) -> u32 {
+        self.last_line
     }
 
     /// Returns the next `Token`, without popping it from the stream.
     #[hotpath::measure]
+    #[allow(clippy::expect_used)] // The branch above populates this exact option.
     pub(super) fn peek(&mut self) -> Result<&Token> {
         if self.lookahead.is_none() {
             self.lookahead = Some(self.lexer.next_token()?);
@@ -90,6 +100,7 @@ impl<'a> TokenStream<'a> {
     }
 
     /// Returns the token after the next token, without popping it from the stream.
+    #[allow(clippy::expect_used)] // Both lookahead slots are populated before access.
     pub(super) fn peek2(&mut self) -> Result<&Token> {
         if self.lookahead.is_none() {
             self.lookahead = Some(self.lexer.next_token()?);
@@ -130,7 +141,7 @@ impl<'a> TokenStream<'a> {
 
     /// Returns the current position of the `TokenStream`.
     #[must_use]
-    pub(super) fn line_and_column(&self, pos: usize) -> (usize, usize) {
+    pub(super) fn line_and_column(&self, pos: usize) -> (u32, u32) {
         self.lexer.line_and_col(pos)
     }
 
@@ -390,6 +401,7 @@ impl<'a> Lexer<'a> {
     ///
     /// Returns `Err` if the first character is `~` and it is not paired with a
     /// `=`.
+    #[allow(clippy::panic)] // Only the four operator characters call this helper.
     fn peek_equals(&mut self, first_char: char) -> Result<TokenType> {
         if self.try_next('=') {
             let typ = match first_char {
@@ -710,12 +722,14 @@ impl<'a> Lexer<'a> {
     /// Returns the current position of the `Lexer`.
     #[must_use]
     #[hotpath::measure]
-    fn line_and_col(&self, pos: usize) -> (usize, usize) {
+    fn line_and_col(&self, pos: usize) -> (u32, u32) {
         // A byte at a recorded line start is column 1 of that new line;
         // newline bytes themselves precede the following recorded start.
         let line_index = self.linebreaks.partition_point(|&start| start <= pos) - 1;
         let column = pos - self.linebreaks[line_index];
-        (line_index + 1, column + 1)
+        // Both values are bounded by the source length, which the parser caps
+        // at `MAX_SOURCE_BYTES`; `limits` asserts that cap is below u32::MAX.
+        ((line_index + 1) as u32, (column + 1) as u32)
     }
 
     #[must_use]
@@ -880,7 +894,7 @@ mod tests {
             .next_token()
             .expect_err("an unescaped CR must end the short string");
         assert!(matches!(
-            err.kind,
+            err.kind(),
             crate::error::ErrorKind::SyntaxError(SyntaxError::UnclosedString)
         ));
     }
@@ -922,7 +936,7 @@ mod tests {
             .next_token()
             .expect_err("bare CR must terminate a short string");
         assert!(matches!(
-            err.kind,
+            err.kind(),
             crate::error::ErrorKind::SyntaxError(SyntaxError::UnclosedString)
         ));
     }
@@ -981,7 +995,7 @@ mod tests {
                 .expect_err("glued numeral and identifier must fail");
             assert!(
                 matches!(
-                    err.kind,
+                    err.kind(),
                     crate::error::ErrorKind::SyntaxError(SyntaxError::BadNumber)
                 ),
                 "{input:?}"
@@ -1033,10 +1047,10 @@ mod tests {
                 .next_token()
                 .expect_err("malformed hexadecimal numeral must fail in the lexer");
             assert!(matches!(
-                err.kind,
+                err.kind(),
                 crate::error::ErrorKind::SyntaxError(SyntaxError::BadNumber)
             ));
-            assert_eq!(err.column, column, "{input:?}");
+            assert_eq!(err.column(), column, "{input:?}");
         }
     }
 
@@ -1143,10 +1157,10 @@ mod tests {
                 .next_token()
                 .expect_err("long strings must not tokenize");
             assert!(matches!(
-                err.kind,
+                err.kind(),
                 crate::error::ErrorKind::SyntaxError(SyntaxError::LongStringUnsupported)
             ));
-            assert_eq!((err.line_num, err.column), (1, 1));
+            assert_eq!((err.line_num(), err.column()), (1, 1));
         }
     }
 
@@ -1168,11 +1182,11 @@ mod tests {
                 .next_token()
                 .expect_err("an unfinished long comment must not swallow the file");
             assert!(matches!(
-                err.kind,
+                err.kind(),
                 crate::error::ErrorKind::SyntaxError(SyntaxError::UnfinishedLongComment)
             ));
             assert!(err.is_recoverable(), "{input:?}");
-            assert_eq!((err.line_num, err.column), (1, 3), "{input:?}");
+            assert_eq!((err.line_num(), err.column()), (1, 3), "{input:?}");
         }
         // A short comment running to EOF stays legal.
         check_line("x -- trailing", &[(Identifier, 0, 1)]);
@@ -1273,7 +1287,7 @@ mod tests {
         let err = Lexer::new("\r\n@")
             .next_token()
             .expect_err("invalid character must fail");
-        assert_eq!((err.line_num, err.column), (2, 2));
+        assert_eq!((err.line_num(), err.column()), (2, 2));
 
         // Pre-existing quirk, preserved: the unterminated-string error fires
         // on the newline's FIRST byte, before a CRLF/LFCR pair's line start
@@ -1290,7 +1304,7 @@ mod tests {
             let err = Lexer::new(source)
                 .next_token()
                 .expect_err("physical newline must leave a string unclosed");
-            assert_eq!((err.line_num, err.column), expected, "{source:?}");
+            assert_eq!((err.line_num(), err.column()), expected, "{source:?}");
         }
     }
 }

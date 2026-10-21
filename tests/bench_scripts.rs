@@ -55,12 +55,12 @@ struct CostFingerprint {
 fn cost_fingerprint(scope: &ScopeCost) -> CostFingerprint {
     CostFingerprint {
         own_cost: scope.own_cost,
-        arithmetic_ops: scope.arithmetic_ops,
-        negations: scope.negations,
-        table_creations: scope.table_creations,
-        table_writes: scope.table_writes,
-        array_elements: scope.array_elements,
-        function_calls: scope.function_calls,
+        arithmetic_ops: scope.arithmetic_ops(),
+        negations: scope.negations(),
+        table_creations: scope.table_creations(),
+        table_writes: scope.table_writes(),
+        array_elements: scope.array_elements(),
+        function_calls: scope.function_calls(),
         instructions: scope.instructions,
         nested: scope.nested.iter().map(cost_fingerprint).collect(),
     }

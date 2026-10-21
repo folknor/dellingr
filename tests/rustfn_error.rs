@@ -12,7 +12,7 @@ struct ErrorCounter(Arc<Mutex<usize>>);
 impl HostCallbacks for ErrorCounter {
     fn on_print(&mut self, _source: Option<&str>, _line: u32, _message: &str) {}
 
-    fn on_error(&mut self, _source: Option<&str>, _error: &Error) {
+    fn on_error(&mut self, _error: &Error) {
         *self.0.lock().expect("error counter mutex") += 1;
     }
 }

@@ -179,15 +179,118 @@ pub(crate) struct Instr(u32);
 pub(crate) mod snapshot_format;
 
 /// Static opcode charge categories. Native work is charged separately by its helpers.
+#[repr(usize)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum OpcodeCost {
-    Free,
-    Arithmetic,
+    Arithmetic = 0,
     Negation,
     TableCreation,
     TableWrite,
     ArrayElements,
     Call,
+    Free,
+}
+
+impl OpcodeCost {
+    /// Number of categories with a reportable counter. `Free` has no counter.
+    pub(crate) const COUNT: usize = Self::Free as usize;
+
+    pub(crate) const fn counter_index(self) -> Option<usize> {
+        match self {
+            Self::Arithmetic
+            | Self::Negation
+            | Self::TableCreation
+            | Self::TableWrite
+            | Self::ArrayElements
+            | Self::Call => Some(self as usize),
+            Self::Free => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CostSummarySection {
+    CostedOperations,
+    Statistics,
+}
+
+pub(crate) struct OpcodeCostLabels {
+    pub(crate) category: OpcodeCost,
+    pub(crate) summary_prefix: &'static str,
+    pub(crate) summary_suffix: &'static str,
+    pub(crate) scope_label: &'static str,
+    pub(crate) summary_section: CostSummarySection,
+    pub(crate) summary_when_zero: bool,
+}
+
+// Kept in OpcodeCost discriminant order so a category's index addresses both
+// the counter array and its labels. Keep Free last; each new category needs a row.
+pub(crate) const OPCODE_COST_LABELS: [OpcodeCostLabels; OpcodeCost::COUNT] = [
+    OpcodeCostLabels {
+        category: OpcodeCost::Arithmetic,
+        summary_prefix: "  Arithmetic (+,-,*,/,%,^): ",
+        summary_suffix: " ops",
+        scope_label: "arithmetic",
+        summary_section: CostSummarySection::CostedOperations,
+        summary_when_zero: false,
+    },
+    OpcodeCostLabels {
+        category: OpcodeCost::Negation,
+        summary_prefix: "  Unary negation (-):       ",
+        summary_suffix: " ops",
+        scope_label: "negation",
+        summary_section: CostSummarySection::CostedOperations,
+        summary_when_zero: false,
+    },
+    OpcodeCostLabels {
+        category: OpcodeCost::TableCreation,
+        summary_prefix: "  Table creation {}:        ",
+        summary_suffix: " ops",
+        scope_label: "table creation",
+        summary_section: CostSummarySection::CostedOperations,
+        summary_when_zero: false,
+    },
+    OpcodeCostLabels {
+        category: OpcodeCost::TableWrite,
+        summary_prefix: "  Table writes (t[k]=v):    ",
+        summary_suffix: " ops",
+        scope_label: "table writes",
+        summary_section: CostSummarySection::CostedOperations,
+        summary_when_zero: false,
+    },
+    OpcodeCostLabels {
+        category: OpcodeCost::ArrayElements,
+        summary_prefix: "  Array elements:           ",
+        summary_suffix: " elements",
+        scope_label: "array elements",
+        summary_section: CostSummarySection::CostedOperations,
+        summary_when_zero: false,
+    },
+    OpcodeCostLabels {
+        category: OpcodeCost::Call,
+        summary_prefix: "  Call instructions:    ",
+        summary_suffix: "",
+        scope_label: "call instructions",
+        summary_section: CostSummarySection::Statistics,
+        summary_when_zero: true,
+    },
+];
+
+const _: () = assert!(OpcodeCost::Call as usize + 1 == OpcodeCost::COUNT);
+
+#[cfg(test)]
+mod opcode_cost_tests {
+    use super::*;
+
+    #[test]
+    fn every_cost_category_has_labels_at_its_counter_index() {
+        for (index, labels) in OPCODE_COST_LABELS.iter().enumerate() {
+            assert_eq!(labels.category as usize, index);
+            assert_eq!(labels.category.counter_index(), Some(index));
+        }
+        assert_eq!(OpcodeCost::Free.counter_index(), None);
+        assert_eq!(OPCODE_COST_LABELS.len(), OpcodeCost::COUNT);
+    }
 }
 
 #[derive(Clone, Copy)]

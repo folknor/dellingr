@@ -10,7 +10,7 @@ fn argument_message(code: &str) -> String {
     let error = state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect_err("regression script must fail");
-    match error.kind {
+    match error.kind() {
         ErrorKind::ArgError(argument) => argument.to_string(),
         kind => panic!("expected a structured argument error, got {kind:?}"),
     }
@@ -84,18 +84,9 @@ fn argument_details_are_structured_without_changing_text() {
     use dellingr::error::ArgDetail;
 
     for (code, expected) in [
-        (
-            "return tonumber('10', 37)",
-            ArgDetail::OutOfBounds("base out of range".into()),
-        ),
-        (
-            "return select(0, 'a')",
-            ArgDetail::OutOfBounds("index out of range".into()),
-        ),
-        (
-            "return rawlen(1)",
-            ArgDetail::Custom("table or string expected".into()),
-        ),
+        ("return tonumber('10', 37)", ArgDetail::BaseOutOfRange),
+        ("return select(0, 'a')", ArgDetail::IndexOutOfRange),
+        ("return rawlen(1)", ArgDetail::TableOrStringExpected),
         ("return math.random(2, 1)", ArgDetail::IntervalEmpty),
         ("return string.sub('a', 1.5)", ArgDetail::NoInteger),
     ] {
@@ -104,10 +95,10 @@ fn argument_details_are_structured_without_changing_text() {
         let error = state
             .call(ArgCount::Fixed(0), RetCount::Fixed(0))
             .expect_err("invalid argument fails");
-        let ErrorKind::ArgError(argument) = error.kind else {
+        let ErrorKind::ArgError(argument) = error.kind() else {
             panic!("expected argument error for {code}");
         };
-        assert_eq!(argument.detail, expected, "{code}");
+        assert_eq!(argument.detail(), &expected, "{code}");
     }
 }
 
@@ -133,7 +124,7 @@ fn host_argument_checks_name_direct_lua_and_iterator_callbacks() {
         let error = state
             .call(ArgCount::Fixed(0), RetCount::Fixed(0))
             .expect_err("callback rejects boolean");
-        let ErrorKind::ArgError(argument) = error.kind else {
+        let ErrorKind::ArgError(argument) = error.kind() else {
             panic!("expected callback argument error");
         };
         assert_eq!(
@@ -150,17 +141,17 @@ fn host_argument_checks_name_direct_lua_and_iterator_callbacks() {
     let error = state
         .call(ArgCount::Fixed(1), RetCount::Fixed(0))
         .expect_err("callback rejects boolean");
-    let ErrorKind::ArgError(argument) = error.kind else {
+    let ErrorKind::ArgError(argument) = error.kind() else {
         panic!("expected callback argument error");
     };
-    assert_eq!(argument.func_name.as_deref(), Some("host_number"));
+    assert_eq!(argument.func_name(), Some("host_number"));
     let error = state
         .check_type(1, dellingr::LuaType::Number)
         .expect_err("the callback context was restored and stack is empty");
-    let ErrorKind::ArgError(argument) = error.kind else {
+    let ErrorKind::ArgError(argument) = error.kind() else {
         panic!("expected missing argument error");
     };
-    assert_eq!(argument.func_name, None);
+    assert_eq!(argument.func_name(), None);
 }
 
 #[test]
@@ -185,7 +176,7 @@ fn runtime_result_limit_accepts_255_and_rejects_256() {
         } else {
             let error = result.expect_err("256 results exceed the runtime limit");
             assert!(matches!(
-                error.kind,
+                error.kind(),
                 ErrorKind::TooManyResults { limit: 255 }
             ));
             assert!(error.to_string().contains("too many results (limit 255)"));
@@ -216,10 +207,10 @@ fn nested_native_dispatch_restores_outer_argument_name() {
     let error = state
         .call(ArgCount::Fixed(1), RetCount::Fixed(0))
         .expect_err("outer callback rejects boolean after inner callback succeeds");
-    let ErrorKind::ArgError(argument) = error.kind else {
+    let ErrorKind::ArgError(argument) = error.kind() else {
         panic!("expected outer callback argument error");
     };
-    assert_eq!(argument.func_name.as_deref(), Some("outer_number"));
+    assert_eq!(argument.func_name(), Some("outer_number"));
 }
 
 #[test]
@@ -236,7 +227,7 @@ fn runtime_argument_limit_reports_typed_errors() {
             .call(ArgCount::Fixed(0), RetCount::Fixed(0))
             .expect_err("256 arguments exceed the runtime limit");
         assert!(matches!(
-            error.kind,
+            error.kind(),
             ErrorKind::TooManyArguments { limit: 255 }
         ));
         assert!(error.to_string().contains("too many arguments (limit 255)"));
@@ -254,8 +245,8 @@ fn snapshot_registered_callback_uses_its_id_without_a_global() {
     let error = state
         .call(ArgCount::Fixed(1), RetCount::Fixed(0))
         .expect_err("callback rejects boolean");
-    let ErrorKind::ArgError(argument) = error.kind else {
+    let ErrorKind::ArgError(argument) = error.kind() else {
         panic!("expected registered callback argument error");
     };
-    assert_eq!(argument.func_name.as_deref(), Some("host.number"));
+    assert_eq!(argument.func_name(), Some("host.number"));
 }

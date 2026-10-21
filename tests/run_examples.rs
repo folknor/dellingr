@@ -2,7 +2,7 @@
 
 use std::fs;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Child, ExitStatus, Output, Stdio};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -12,6 +12,8 @@ use std::time::Duration;
 #[path = "common/cli.rs"]
 mod cli;
 mod common;
+#[path = "common/examples.rs"]
+mod example_files;
 
 const DEFAULT_EXAMPLE_WORKERS: usize = 8;
 const DEFAULT_EXAMPLE_TIMEOUT_MS: u64 = 60_000;
@@ -19,31 +21,28 @@ const POLL_INTERVAL_MS: u64 = 25;
 
 #[test]
 fn run_feature_test_extended_in_process() {
-    let source = fs::read_to_string("examples/feature_test_extended.lua")
-        .expect("Failed to read feature_test_extended.lua");
+    let examples_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+    let feature_test = example_files::example_corpus()
+        .into_iter()
+        .find(|path| {
+            path.strip_prefix(&examples_dir)
+                .is_ok_and(|relative| relative == Path::new("feature_test_extended.lua"))
+        })
+        .expect("feature_test_extended.lua must be present in the example corpus");
+    let source =
+        fs::read_to_string(&feature_test).expect("Failed to read feature_test_extended.lua");
     let mut state = dellingr::State::new();
+    let source_name = feature_test
+        .strip_prefix(Path::new(env!("CARGO_MANIFEST_DIR")))
+        .expect("example corpus paths must be rooted at the crate manifest")
+        .display()
+        .to_string();
     state
-        .load_string_named(
-            &source,
-            Some("examples/feature_test_extended.lua".to_string()),
-        )
+        .load_string_named(&source, Some(source_name))
         .expect("feature_test_extended.lua should load successfully");
     state
         .call(dellingr::ArgCount::Fixed(0), dellingr::RetCount::Fixed(0))
         .expect("feature_test_extended.lua should execute successfully");
-}
-
-fn collect_lua_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let entries = fs::read_dir(dir).expect("Failed to read directory");
-    for entry in entries {
-        let entry = entry.expect("Failed to read directory entry");
-        let path = entry.path();
-        if path.is_dir() {
-            collect_lua_files(&path, out);
-        } else if path.extension().is_some_and(|ext| ext == "lua") {
-            out.push(path);
-        }
-    }
 }
 
 fn read_output<R>(mut reader: R) -> JoinHandle<Vec<u8>>
@@ -149,11 +148,10 @@ fn run_example(path: &Path, timeout_ms: u64) -> Result<ExampleRun, String> {
 }
 
 fn check_example(path: &Path, timeout_ms: u64) -> Option<String> {
-    // Every collected path starts with examples/; a stray one prints whole.
-    // A hand-written match trips clippy's manual_unwrap_or, and the
-    // fallback here is intentional, so allow the banned method locally.
-    #[allow(clippy::disallowed_methods)]
-    let display = path.strip_prefix("examples").unwrap_or(path).display();
+    let display = path
+        .strip_prefix(Path::new(env!("CARGO_MANIFEST_DIR")))
+        .expect("example corpus paths must be rooted at the crate manifest")
+        .display();
 
     println!("Running: {display}");
 
@@ -258,15 +256,8 @@ fn example_timeout_ms() -> u64 {
     }
 }
 
-fn run_examples_bucket(name: &str, include: impl Fn(&Path) -> bool) {
-    let examples_dir = Path::new("examples");
-
-    assert!(examples_dir.exists(), "examples directory not found");
-
-    let mut files: Vec<PathBuf> = Vec::new();
-    collect_lua_files(examples_dir, &mut files);
-    files.retain(|path| include(path));
-    files.sort();
+fn run_examples_bucket(name: &str) {
+    let files = example_files::example_corpus();
 
     assert!(
         !files.is_empty(),
@@ -315,5 +306,5 @@ fn run_examples_bucket(name: &str, include: impl Fn(&Path) -> bool) {
 
 #[test]
 fn run_all_examples() {
-    run_examples_bucket("all", |_| true);
+    run_examples_bucket("all");
 }

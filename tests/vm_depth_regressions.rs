@@ -14,7 +14,7 @@ fn cyclic_call_metamethod_returns_depth_error_and_state_recovers() {
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect_err("a cyclic __call chain should hit the metamethod depth limit");
     assert!(matches!(
-        error.kind,
+        error.kind(),
         ErrorKind::MetamethodDepthExceeded { .. }
     ));
     assert_eq!(state.get_top(), 0);

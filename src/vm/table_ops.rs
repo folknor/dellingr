@@ -7,7 +7,7 @@ use super::lua_val::RustFunc;
 use super::lua_val::Val;
 use super::table::TableNext;
 use super::{Result, State, TypeError};
-use crate::error::ErrorKind;
+use crate::error::{ErrorKind, LibraryError};
 use crate::instr::{ArgCount, RetCount};
 
 trait TableSortAccess {
@@ -365,9 +365,7 @@ impl State {
                 self.stack[top] = Val::Nil;
                 Ok(false)
             }
-            TableNext::InvalidKey => {
-                Err(self.error(ErrorKind::RuntimeError("invalid key to 'next'".into())))
-            }
+            TableNext::InvalidKey => Err(self.library_error(LibraryError::InvalidNextKey)),
         }
     }
 
@@ -472,7 +470,7 @@ impl State {
         // validates the table before mutating the stack.
         let idx = self.table_operand_below_top(table_idx, 1)?;
         if !(1..=self.table_array_len_at(idx) + 1).contains(&pos) {
-            return Err(self.error(ErrorKind::RuntimeError("position out of bounds".into())));
+            return Err(self.library_error(LibraryError::PositionOutOfBounds));
         }
         let value = self.pop_val();
         self.stack[idx]
@@ -498,7 +496,7 @@ impl State {
         let len = self.table_array_len_at(idx);
         let valid = (1..=len + 1).contains(&pos) || (len == 0 && pos == 0);
         if !valid {
-            return Err(self.error(ErrorKind::RuntimeError("position out of bounds".into())));
+            return Err(self.library_error(LibraryError::PositionOutOfBounds));
         }
 
         // Reserve the result slot *before* mutating the table: failing after
@@ -622,7 +620,7 @@ impl State {
     }
 
     fn table_sort_too_big_error(&self) -> crate::error::Error {
-        self.error(ErrorKind::RuntimeError("array too big".to_string()))
+        self.library_error(LibraryError::ArrayTooBig)
     }
 
     fn table_sort_less(&mut self, a: Val, b: Val, comp_idx: Option<usize>) -> Result<bool> {
@@ -680,12 +678,11 @@ impl State {
             if matches!(
                 result.typ(&self.heap),
                 super::LuaType::String | super::LuaType::Number
-            ) {
-                return Ok(result.to_bytes_with_heap(&self.heap));
+            ) && let Some(bytes) = result.to_bytes_with_heap(&self.heap)
+            {
+                return Ok(bytes);
             }
-            return Err(self.error(ErrorKind::RuntimeError(
-                "'__tostring' must return a string".to_string(),
-            )));
+            return Err(self.library_error(LibraryError::TostringMustReturnString));
         }
 
         self.bytes_with_default_string_coercion(idx)
@@ -746,34 +743,40 @@ impl State {
         // render distinctly. The id map is keyed by the function value and is
         // saved state: a registered RustFn reachable at save time encodes as
         // a registry token, so its id survives save and load.
-        if matches!(val, Val::Obj(_) | Val::RustFn(_)) {
-            let id = self.format_pointer_id(idx)?;
-            return Ok(format!("{}: 0x{id:x}", val.typ(&self.heap).as_str()).into_bytes());
+        // Strings and primitives render from the heap alone; only functions
+        // and objects fall through to their pointer identity.
+        if let Some(bytes) = val.to_bytes_with_heap(&self.heap) {
+            return Ok(bytes);
         }
-        Ok(val.to_bytes_with_heap(&self.heap))
+        match self.format_pointer_id(idx)? {
+            Some(id) => Ok(format!("{}: 0x{id:x}", val.typ(&self.heap).as_str()).into_bytes()),
+            None => Err(self.error(ErrorKind::InternalError(
+                "value without a heap rendering has no pointer identity".to_string(),
+            ))),
+        }
     }
 
-    /// Returns a deterministic, state-local identity for pointer-like values.
-    pub(crate) fn format_pointer_id(&mut self, idx: isize) -> Result<u64> {
+    /// Returns a deterministic, state-local identity for pointer-like values
+    /// (strings, objects and functions), or `None` for values that have no
+    /// pointer representation. Numbers, including NaN, never enter the map.
+    pub(crate) fn format_pointer_id(&mut self, idx: isize) -> Result<Option<u64>> {
         let val = self.at_index(idx)?;
-        // Callers request identities only for strings, objects and functions;
-        // numbers (including NaN) never enter this map.
-        debug_assert!(matches!(val, Val::Str(_) | Val::Obj(_) | Val::RustFn(_)));
+        if !matches!(val, Val::Str(_) | Val::Obj(_) | Val::RustFn(_)) {
+            return Ok(None);
+        }
         if let Some(id) = self.format_pointer_ids.get(&val) {
-            return Ok(*id);
+            return Ok(Some(*id));
         }
         let id = self.next_format_pointer_id;
         // A snapshot can place the counter at the end of its range. Refuse a
         // fresh identity before mutating either field: wrapping would reissue
         // old ids and violate the snapshot verifier's id < next invariant.
-        let next = id.checked_add(1).ok_or_else(|| {
-            self.error(ErrorKind::RuntimeError(
-                "format pointer identity space exhausted".to_string(),
-            ))
-        })?;
+        let next = id
+            .checked_add(1)
+            .ok_or_else(|| self.library_error(LibraryError::FormatPointerIdentitySpaceExhausted))?;
         self.next_format_pointer_id = next;
         self.format_pointer_ids.insert(val, id);
-        Ok(id)
+        Ok(Some(id))
     }
 
     /// Allocates a new table on the heap.

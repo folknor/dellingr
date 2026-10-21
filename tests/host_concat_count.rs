@@ -12,9 +12,9 @@ fn concat_count_below_two_is_invalid_stack_index() {
         state.push_number(2.0).unwrap();
         let err = state.concat(n).unwrap_err();
         assert!(
-            matches!(err.kind, ErrorKind::InvalidStackIndex { index } if index == -(n as isize)),
+            matches!(err.kind(), ErrorKind::InvalidStackIndex { index } if *index == -(n as isize)),
             "n={n}: {:?}",
-            err.kind
+            err.kind()
         );
         assert_eq!(state.get_top(), 2, "n={n}: stack must be unchanged");
     }
@@ -26,7 +26,7 @@ fn concat_count_above_stack_is_invalid_stack_index() {
     state.push_number(1.0).unwrap();
     let err = state.concat(2).unwrap_err();
     assert!(matches!(
-        err.kind,
+        err.kind(),
         ErrorKind::InvalidStackIndex { index: -2 }
     ));
     assert_eq!(state.get_top(), 1);

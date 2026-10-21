@@ -22,12 +22,12 @@ impl HostCallbacks for Recorder {
         ));
     }
 
-    fn on_error(&mut self, source: Option<&str>, _error: &Error) {
+    fn on_error(&mut self, error: &Error) {
         self.0
             .lock()
             .expect("event lock is healthy")
             .errors
-            .push(source.map(str::to_owned));
+            .push(error.source_name().map(str::to_owned));
     }
 }
 
@@ -60,8 +60,8 @@ fn nested_chunks_restore_source_and_attribute_error_to_running_frame() {
     let error = state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect_err("a fails");
-    assert_eq!(error.stack_trace[0].source.as_deref(), Some("A"));
-    assert_eq!(error.stack_trace[0].line, 5);
+    assert_eq!(error.stack_trace()[0].source.as_deref(), Some("A"));
+    assert_eq!(error.stack_trace()[0].line, 5);
     assert_eq!(state.current_source(), None);
     let events = events.lock().expect("event lock is healthy");
     assert_eq!(

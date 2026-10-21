@@ -10,7 +10,7 @@ fn typed_argument_detail_preserves_variant_and_rendering() {
         "bad argument #2 to 'host' (number has no integer representation)"
     );
     assert!(
-        matches!(error, ErrorKind::ArgError(argument) if argument.detail == ArgDetail::NoInteger)
+        matches!(error, ErrorKind::ArgError(argument) if argument.detail() == &ArgDetail::NoInteger)
     );
     assert_eq!(
         ErrorKind::InvalidStackIndex { index: -1 }.to_string(),
@@ -37,7 +37,7 @@ fn duplicate_named_push_preserves_id_and_stack() {
         .push_named_rust_fn("host.same", second)
         .expect_err("id conflicts");
     assert!(
-        matches!(error.kind, ErrorKind::DuplicateFunctionRegistration { id } if id == "host.same")
+        matches!(error.kind(), ErrorKind::DuplicateFunctionRegistration { id } if id == "host.same")
     );
     assert_eq!(state.get_top(), top);
     state

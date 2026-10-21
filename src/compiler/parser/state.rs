@@ -56,6 +56,7 @@ pub(super) struct FunctionStack<'a> {
 impl<'a> Deref for FunctionStack<'a> {
     type Target = FuncState<'a>;
 
+    #[allow(clippy::expect_used)] // A function frame is active throughout parsing.
     fn deref(&self) -> &Self::Target {
         self.frames
             .last()
@@ -64,6 +65,7 @@ impl<'a> Deref for FunctionStack<'a> {
 }
 
 impl DerefMut for FunctionStack<'_> {
+    #[allow(clippy::expect_used)] // A function frame is active throughout parsing.
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.frames
             .last_mut()

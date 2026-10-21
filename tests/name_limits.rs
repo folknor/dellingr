@@ -19,9 +19,9 @@ fn source_names_accept_the_limit_and_reject_one_more_byte() {
         .compile_named("return 1", too_long.clone())
         .expect_err("oversized source name is rejected");
     assert!(matches!(
-        error.kind,
+        error.kind(),
         ErrorKind::SourceNameSizeExceeded { size, limit }
-            if size == MAX_SOURCE_NAME_BYTES + 1 && limit == MAX_SOURCE_NAME_BYTES
+            if *size == MAX_SOURCE_NAME_BYTES + 1 && *limit == MAX_SOURCE_NAME_BYTES
     ));
 
     let mut state = State::new();
@@ -39,7 +39,7 @@ fn source_names_accept_the_limit_and_reject_one_more_byte() {
         .load_string_named("return 2", Some(too_long))
         .expect_err("load rejects oversized source name");
     assert!(matches!(
-        error.kind,
+        error.kind(),
         ErrorKind::SourceNameSizeExceeded { .. }
     ));
     #[cfg(feature = "snapshot")]

@@ -18,7 +18,8 @@ pub(crate) fn limited_command() -> Command {
     let mut command = Command::new("bash");
     command
         .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/test_limited.sh"))
-        .arg(crate::common::dellingr_bin());
+        .arg(crate::common::dellingr_bin())
+        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")));
     command
 }
 

@@ -493,16 +493,16 @@ impl State {
     /// same frame. An error that already carries a location keeps it - that is
     /// how parser errors survive with their own line and column.
     fn locate_in_frame(error: Error, frame: &Frame) -> Error {
-        if error.line_num == 0 {
-            let column = error.column;
-            error.with_location(frame.current_line() as usize, column)
+        if error.line_num() == 0 {
+            let column = error.column();
+            error.with_location(frame.current_line(), column)
         } else {
             error
         }
     }
 
     fn report_frame_error(&mut self, mut error: Error, frame: &Frame) -> Error {
-        if error.stack_trace.is_empty() {
+        if error.stack_trace().is_empty() {
             error = Self::locate_in_frame(error, frame);
             error = error.with_stack_trace(self.build_stack_trace(frame));
         }

@@ -111,7 +111,7 @@ fn matcher_refusal_is_a_budget_error_at_the_exact_budget() {
     let error = state
         .call(ArgCount::Fixed(0), RetCount::Fixed(1))
         .expect_err("pathological matcher exhausts its budget");
-    assert!(matches!(error.kind, ErrorKind::BudgetExceeded { .. }));
+    assert!(matches!(error.kind(), ErrorKind::BudgetExceeded { .. }));
     assert_eq!(state.cost_used(), 17);
 }
 
@@ -121,7 +121,7 @@ fn gsub_does_not_return_a_partial_result_and_keeps_callback_effects() {
         "calls = 0; result = string.gsub('aaaa', 'a', function() calls = calls + 1; return 'xx' end)",
         20,
     );
-    assert!(matches!(error.kind, ErrorKind::BudgetExceeded { .. }));
+    assert!(matches!(error.kind(), ErrorKind::BudgetExceeded { .. }));
     state
         .load_string("return calls, result")
         .expect("query compiles");
@@ -148,7 +148,7 @@ fn gmatch_refusal_does_not_advance_the_iterator() {
     let error = state
         .call(ArgCount::Fixed(0), RetCount::Fixed(1))
         .expect_err("iterator refuses before a match");
-    assert!(matches!(error.kind, ErrorKind::BudgetExceeded { .. }));
+    assert!(matches!(error.kind(), ErrorKind::BudgetExceeded { .. }));
 
     state.set_cost_budget(1_000);
     state.load_string("return iter()").expect("retry compiles");
@@ -207,7 +207,7 @@ fn gmatch_capture_refusal_does_not_advance_the_iterator() {
     let error = state
         .call(ArgCount::Fixed(0), RetCount::Fixed(1))
         .expect_err("capture materialization refuses after matching");
-    assert!(matches!(error.kind, ErrorKind::BudgetExceeded { .. }));
+    assert!(matches!(error.kind(), ErrorKind::BudgetExceeded { .. }));
 
     state.set_cost_budget(1_000_000);
     state.load_string("return iter()").expect("retry compiles");
@@ -236,7 +236,7 @@ fn malformed_gmatch_iterator_compiles_once() {
         let error = state
             .call(ArgCount::Fixed(0), RetCount::Fixed(1))
             .expect_err("malformed iterator reports its deferred error");
-        assert!(matches!(error.kind, ErrorKind::PatternError(_)));
+        assert!(matches!(error.kind(), ErrorKind::PatternError(_)));
     }
     #[cfg(debug_assertions)]
     assert_eq!(state.gmatch_pattern_compilations(), 1);
@@ -245,7 +245,7 @@ fn malformed_gmatch_iterator_compiles_once() {
 #[test]
 fn state_is_reusable_after_a_native_refusal() {
     let (mut state, error) = run_with_budget("return string.upper('abcdef')", 0);
-    assert!(matches!(error.kind, ErrorKind::BudgetExceeded { .. }));
+    assert!(matches!(error.kind(), ErrorKind::BudgetExceeded { .. }));
     state.set_cost_budget(100);
     state
         .load_string("return string.upper('ok')")
@@ -302,7 +302,7 @@ fn refusal_leaves_snapshot_state_quiescent() {
         ("matcher", (matcher_state, matcher_error)),
         ("capture", (capture_state, capture_error)),
     ] {
-        assert!(matches!(error.kind, ErrorKind::BudgetExceeded { .. }));
+        assert!(matches!(error.kind(), ErrorKind::BudgetExceeded { .. }));
         state
             .save_state()
             .unwrap_or_else(|err| panic!("{label} refusal left the state non-quiescent: {err:?}"));

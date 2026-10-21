@@ -27,7 +27,7 @@ fn report(state: &mut State, name: &str, flag: bool) -> dellingr::Result<()> {
 // Dynamic call base is pending.
 fn dynamic_call_from_callback(state: &mut State) -> dellingr::Result<u8> {
     let rejected = match state.call(ArgCount::Dynamic, RetCount::Fixed(0)) {
-        Err(e) => matches!(e.kind, ErrorKind::InternalError(_)),
+        Err(e) => matches!(e.kind(), ErrorKind::InternalError(_)),
         Ok(()) => false,
     };
     report(state, "rejected", rejected)?;
@@ -58,14 +58,14 @@ fn host_dynamic_call_is_rejected_at_top_level() {
     let err = state
         .call(ArgCount::Dynamic, RetCount::Fixed(0))
         .expect_err("hosts own no call base");
-    assert!(matches!(err.kind, ErrorKind::InternalError(_)));
+    assert!(matches!(err.kind(), ErrorKind::InternalError(_)));
     assert_eq!(state.get_top(), 1);
 }
 
 // Called with no arguments, so its visible frame is empty.
 fn set_global_on_empty_frame(state: &mut State) -> dellingr::Result<u8> {
     let rejected = match state.set_global("stolen") {
-        Err(e) => matches!(e.kind, ErrorKind::InvalidStackIndex { .. }),
+        Err(e) => matches!(e.kind(), ErrorKind::InvalidStackIndex { .. }),
         Ok(()) => false,
     };
     report(state, "rejected", rejected)?;
@@ -96,7 +96,7 @@ fn set_global_on_empty_callback_frame_is_rejected() {
 fn set_global_on_empty_stack_errors_instead_of_panicking() {
     let mut state = State::new();
     let err = state.set_global("x").expect_err("nothing to pop");
-    assert!(matches!(err.kind, ErrorKind::InvalidStackIndex { .. }));
+    assert!(matches!(err.kind(), ErrorKind::InvalidStackIndex { .. }));
     assert_eq!(state.get_top(), 0);
 }
 
@@ -105,7 +105,7 @@ fn call_anchor_short_of_args(state: &mut State) -> dellingr::Result<u8> {
     state.get_global("h")?;
     let h = state.anchor_function()?;
     let rejected = match state.call_anchor(h, ArgCount::Fixed(1), RetCount::Fixed(0)) {
-        Err(e) => matches!(e.kind, ErrorKind::InvalidStackIndex { .. }),
+        Err(e) => matches!(e.kind(), ErrorKind::InvalidStackIndex { .. }),
         Ok(()) => false,
     };
     let untouched = state.get_top() == 0;

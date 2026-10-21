@@ -587,7 +587,7 @@ fn table_sort_result<T>(result: Result<T>, has_comp: bool) -> Result<T> {
         Err(mut error) => {
             if !has_comp
                 && matches!(
-                    &error.kind,
+                    error.kind(),
                     ErrorKind::TypeError(TypeError::Comparison(_, _))
                 )
             {

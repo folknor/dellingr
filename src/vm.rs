@@ -7,6 +7,7 @@ mod eval_control;
 mod eval_index;
 mod eval_store;
 mod frame;
+mod global_env;
 mod lua_val;
 mod metamethod;
 mod object;
@@ -44,6 +45,7 @@ use super::instr::{ArgCount, Builtin, RetCount};
 use super::patterns::LuaPattern;
 
 use anchor::Registry;
+use global_env::GlobalEnv;
 
 pub(super) use lua_val::Val;
 pub(super) use object::ObjectPtr;
@@ -100,25 +102,13 @@ pub(crate) fn checked_string_growth(current: usize, additional: usize) -> Result
 /// Values temporarily held outside the visible VM stack.
 pub(super) struct TransientRoots {
     values: Vec<Val>,
-    suspended_envs: Vec<SuspendedEnvironment>,
+    suspended_envs: Vec<GlobalEnv>,
 }
 
 impl TransientRoots {
     #[cfg(feature = "snapshot")]
     fn is_empty(&self) -> bool {
         self.values.is_empty() && self.suspended_envs.is_empty()
-    }
-}
-
-struct SuspendedEnvironment {
-    globals: IndexMap<String, Val>,
-    builtins: [Val; Builtin::COUNT],
-}
-
-impl Markable for SuspendedEnvironment {
-    fn mark_reachable(&self, heap: &GcHeap, worklist: &mut Vec<ObjectPtr>) {
-        self.globals.mark_reachable(heap, worklist);
-        self.builtins.mark_reachable(heap, worklist);
     }
 }
 
@@ -139,8 +129,7 @@ pub(super) fn mark_gc_roots(state: &State, worklist: &mut Vec<ObjectPtr>) {
     // Mark all roots - closed upvalues are now marked transitively when
     // marking LuaFn closures that reference them
     state.stack.mark_reachable(&state.heap, worklist);
-    state.globals.mark_reachable(&state.heap, worklist);
-    state.builtins.mark_reachable(&state.heap, worklist);
+    state.global_env.mark_reachable(&state.heap, worklist);
     for (identity, entry) in &state.bytecode_caches {
         debug_assert_eq!(*identity, Arc::as_ptr(&entry.bytecode) as usize);
         entry.runtime.literals.mark_reachable(&state.heap, worklist);
@@ -203,14 +192,8 @@ struct BytecodeCacheEntry {
 
 /// The main interface into the Lua VM.
 pub struct State {
-    /// The global environment. Uses IndexMap for deterministic iteration order
-    /// (GC marking, restrict_globals).
-    pub(super) globals: IndexMap<String, Val>,
-    /// Fast array for well-known builtin globals (print, pairs, type, etc.).
-    /// Indexed by Builtin enum. Avoids IndexMap lookup for common globals.
-    pub(super) builtins: [Val; Builtin::COUNT],
-    /// Bumped when the whole global environment is swapped.
-    pub(super) globals_version: u64,
+    /// Global bindings and their cache invalidation policy.
+    global_env: GlobalEnv,
     /// The metatable shared by every string, as in reference Lua. Built by
     /// `open_libs` with `__index` = the string library table it created, so
     /// string indexing (`s:upper()`) never consults the global `string`.
@@ -422,7 +405,7 @@ impl State {
     pub(crate) fn capture_env_tokens(&mut self) {
         let mut map = BTreeMap::new();
         for slot in [Builtin::Math, Builtin::String, Builtin::Table, Builtin::G] {
-            if let Val::Obj(ptr) = self.builtins[slot as usize] {
+            if let Val::Obj(ptr) = self.global_env.builtin(slot as u8) {
                 map.insert(ptr, slot.name().to_string());
                 if slot == Builtin::G
                     && let Some(table) = self.heap.as_table_ref(ptr)
@@ -476,9 +459,7 @@ impl State {
     ) -> Self {
         let state_id = anchor::next_state_id();
         Self {
-            globals: IndexMap::default(),
-            builtins: std::array::from_fn(|_| Val::Nil),
-            globals_version: 0,
+            global_env: GlobalEnv::new(),
             string_metatable: None,
             string_mt_index_shape: None,
             stack: Vec::with_capacity(256), // Pre-size for typical function depth * locals
@@ -525,7 +506,7 @@ impl State {
     }
 
     pub(crate) fn reserve_stdlib_capacity(&mut self) {
-        self.globals
+        self.global_env
             .reserve(Builtin::COUNT + STDLIB_NON_BUILTIN_GLOBALS + HOST_GLOBAL_CAPACITY_HEADROOM);
         self.heap
             .reserve(STDLIB_HEAP_TABLES, STDLIB_INTERNED_TABLE_KEYS);
@@ -1020,8 +1001,9 @@ impl State {
             let source = self
                 .call_stack
                 .last()
-                .and_then(|info| info.bytecode.source.as_deref());
-            self.callbacks.on_error(source, error);
+                .and_then(|info| info.bytecode.source.as_ref());
+            error.attach_source_name_if_absent(source);
+            self.callbacks.on_error(error);
         }
     }
 
@@ -1035,12 +1017,7 @@ impl State {
     /// Pushes onto the stack the value of the global `name`.
     #[hotpath::measure]
     pub fn get_global(&mut self, name: &str) -> Result<()> {
-        // Check builtins first for common names
-        let val = if let Some(slot) = Builtin::from_name(name) {
-            self.builtins[slot as usize]
-        } else {
-            self.globals.get(name).copied().unwrap_or_default()
-        };
+        let val = self.global_env.read(name, None);
         self.push_val(val)
     }
 
@@ -1071,7 +1048,7 @@ impl State {
     // Snapshot ids are a fallback, not names inferred from the Lua caller.
     pub(crate) fn active_rust_function_name(&self) -> Option<String> {
         let function = self.active_rust_fn?;
-        for (name, value) in &self.globals {
+        for (name, value) in self.global_env.iter() {
             if let Val::RustFn(candidate) = value
                 && *candidate as usize == function as usize
             {
@@ -1178,30 +1155,7 @@ impl State {
     }
 
     pub(super) fn set_global_value_owned(&mut self, name: String, val: Val) {
-        // Update the builtins array for well-known names and invalidate global
-        // lookup caches and conservatively guarded table-method caches.
-        // String-method caches validate the shared metatable's handler instead.
-        if let Some(slot) = Builtin::from_name(&name) {
-            self.builtins[slot as usize] = val;
-            self.globals_version = self.globals_version.wrapping_add(1);
-        }
-        if matches!(val, Val::Nil) && !self.globals.contains_key(&name) {
-            // Assigning nil to a global that has never existed is a no-op:
-            // reads of an absent name already yield nil, and no inline cache
-            // can hold an index for it.
-            return;
-        }
-        // A global that already exists keeps its entry when set to nil (a
-        // tombstone) instead of being removed. Removing would shift or swap
-        // IndexMap indices, so every removal would have to bump
-        // globals_version and invalidate every GET/SET_GLOBAL inline cache in
-        // the State - a loop doing `g = nil; g = 1` would then thrash them -
-        // and the cached SET_GLOBAL fast path writes nil in place without
-        // reaching here, so removal would depend on cache state. It would
-        // also move a re-set name to the end of `globals`, changing snapshot
-        // order. The cost of keeping tombstones is bounded by the number of
-        // distinct names a script has ever given a non-nil value.
-        self.globals.insert(name, val);
+        self.global_env.write(name, val);
     }
 
     /// Builds the shared string metatable with `__index` = the table at the
@@ -1234,31 +1188,8 @@ impl State {
     where
         F: FnOnce(&mut Self) -> R,
     {
-        // Build restricted environment
-        let mut restricted_globals = IndexMap::default();
-        let mut restricted_builtins: [Val; Builtin::COUNT] = std::array::from_fn(|_| Val::Nil);
-
-        for name in whitelist {
-            // Copy from builtins if it's a well-known name
-            if let Some(slot) = Builtin::from_name(name) {
-                restricted_builtins[slot as usize] = self.builtins[slot as usize];
-            }
-            // Also copy from globals
-            if let Some(val) = self.globals.get(*name) {
-                restricted_globals.insert((*name).to_string(), *val);
-            }
-        }
-
-        // Swap to restricted environment
-        let saved_globals = std::mem::replace(&mut self.globals, restricted_globals);
-        let saved_builtins = std::mem::replace(&mut self.builtins, restricted_builtins);
-        self.transient_roots
-            .suspended_envs
-            .push(SuspendedEnvironment {
-                globals: saved_globals,
-                builtins: saved_builtins,
-            });
-        self.globals_version = self.globals_version.wrapping_add(1);
+        let saved = self.global_env.restrict(whitelist);
+        self.transient_roots.suspended_envs.push(saved);
 
         // Execute the function under an unwind guard so a panic in `f` still
         // restores the original environment before propagating. Without
@@ -1273,9 +1204,7 @@ impl State {
             .suspended_envs
             .pop()
             .expect("suspended environment missing during restoration");
-        self.globals = saved.globals;
-        self.builtins = saved.builtins;
-        self.globals_version = self.globals_version.wrapping_add(1);
+        self.global_env.replace(saved);
 
         match result {
             Ok(r) => r,
@@ -1380,7 +1309,7 @@ mod runtime_tests {
     #[test]
     fn standard_library_initialization_populates_every_builtin_slot() {
         let state = State::new();
-        assert!(state.builtins.iter().all(|value| *value != Val::Nil));
+        assert!((0..Builtin::COUNT).all(|slot| state.global_env.builtin(slot as u8) != Val::Nil));
     }
 
     #[test]

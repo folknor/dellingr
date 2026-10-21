@@ -528,7 +528,7 @@ fn configured_budget_remains_enforced_after_load() {
         .expect_err("restored configured budget stops table.move");
 
     assert!(matches!(
-        error.kind,
+        error.kind(),
         dellingr::error::ErrorKind::BudgetExceeded { .. }
     ));
     assert_eq!(loaded.cost_remaining(), 0);

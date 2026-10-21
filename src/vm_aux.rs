@@ -27,13 +27,7 @@ impl State {
         }
         if self.get_top() < arg_number.unsigned_abs() {
             let func_name = self.active_rust_function_name();
-            let e = ArgError {
-                arg_number,
-                func_name,
-                detail: crate::error::ArgDetail::TypeMismatch,
-                expected: None,
-                received: None,
-            };
+            let e = ArgError::required(arg_number, func_name.as_deref());
             Err(self.error(ErrorKind::ArgError(e)))
         } else {
             Ok(())
@@ -173,13 +167,13 @@ mod tests {
             .expect_err("wrong required argument type must fail");
 
         let (ErrorKind::ArgError(optional), ErrorKind::ArgError(required)) =
-            (&optional.kind, &required.kind)
+            (optional.kind(), required.kind())
         else {
             panic!("both checks must produce argument errors");
         };
-        assert_eq!(optional.arg_number, required.arg_number);
-        assert_eq!(optional.expected, required.expected);
-        assert_eq!(optional.received, required.received);
-        assert_eq!(optional.func_name, required.func_name);
+        assert_eq!(optional.arg_number(), required.arg_number());
+        assert_eq!(optional.expected(), required.expected());
+        assert_eq!(optional.received(), required.received());
+        assert_eq!(optional.func_name(), required.func_name());
     }
 }

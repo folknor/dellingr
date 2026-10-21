@@ -32,18 +32,18 @@ fn frame(line: u32) -> StackFrame {
 fn crlf_followed_by_cr_is_two_line_breaks() {
     // Reference Lua 5.2 and 5.4 both report line 3 here.
     let err = run_error("local x = 1\r\n\rerror('boom')");
-    assert_eq!(err.stack_trace[0].line, 3);
+    assert_eq!(err.stack_trace()[0].line, 3);
     assert!(format!("{err}").starts_with("3:0: boom"), "{err}");
 
     let err = run_error("local x = 1\n\r\nerror('boom')");
-    assert_eq!(err.stack_trace[0].line, 3);
+    assert_eq!(err.stack_trace()[0].line, 3);
 }
 
 #[test]
 fn unfinished_long_comment_has_its_own_message() {
     let err = load_error("x = 1\n--[[ never closed\nx = 2");
     assert!(matches!(
-        err.kind,
+        err.kind(),
         ErrorKind::SyntaxError(SyntaxError::UnfinishedLongComment)
     ));
     assert_eq!((err.line_num(), err.column()), (2, 1));

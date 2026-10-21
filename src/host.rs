@@ -61,11 +61,10 @@ pub trait HostCallbacks: Send {
     /// settings can affect the result. Do not treat that label as a stable id.
     ///
     /// # Arguments
-    /// * `source` - The Lua frame source at first reporting (`None` without a Lua frame)
-    /// * `error` - The error that occurred (includes stack trace)
-    fn on_error(&mut self, source: Option<&str>, error: &Error) {
+    /// * `error` - The error that occurred (includes source name and stack trace)
+    fn on_error(&mut self, error: &Error) {
         // Default: no-op (host handles via Result)
-        let _ = (source, error);
+        let _ = error;
     }
 }
 

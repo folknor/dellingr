@@ -63,7 +63,7 @@ fn opcode_cost_interval_matches_immediate_flush_across_budgets() {
             } else {
                 let error = call.expect_err("reference says the next addition is blocked");
                 assert!(
-                    matches!(error.kind, ErrorKind::BudgetExceeded { .. }),
+                    matches!(error.kind(), ErrorKind::BudgetExceeded { .. }),
                     "budget {budget} returned {error:?}"
                 );
             }

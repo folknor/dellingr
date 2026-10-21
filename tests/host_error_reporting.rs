@@ -11,7 +11,7 @@ struct ErrorCounter(Arc<AtomicUsize>);
 impl HostCallbacks for ErrorCounter {
     fn on_print(&mut self, _source: Option<&str>, _line: u32, _message: &str) {}
 
-    fn on_error(&mut self, _source: Option<&str>, _error: &Error) {
+    fn on_error(&mut self, _error: &Error) {
         self.0.fetch_add(1, Ordering::SeqCst);
     }
 }
@@ -52,10 +52,10 @@ fn host_call_of_cyclic_call_metamethod_notifies_once() {
     let error = call_global(&mut state, "callable");
 
     assert!(matches!(
-        error.kind,
+        error.kind(),
         ErrorKind::MetamethodDepthExceeded { .. }
     ));
-    assert!(error.stack_trace.is_empty());
+    assert!(error.stack_trace().is_empty());
     assert_eq!(state.get_top(), 0);
     assert_eq!(count.load(Ordering::SeqCst), 1);
 }
@@ -78,7 +78,7 @@ fn host_call_through_callable_table_chain_notifies_once() {
 
     let error = call_global(&mut state, "callable");
 
-    assert!(matches!(error.kind, ErrorKind::InternalError(_)));
+    assert!(matches!(error.kind(), ErrorKind::InternalError(_)));
     assert_eq!(count.load(Ordering::SeqCst), 1);
 }
 
@@ -117,7 +117,7 @@ fn host_table_read_through_failing_rust_index_notifies_once() {
         .get_table(1)
         .expect_err("the __index handler should fail");
 
-    assert!(matches!(error.kind, ErrorKind::InternalError(_)));
+    assert!(matches!(error.kind(), ErrorKind::InternalError(_)));
     assert_eq!(count.load(Ordering::SeqCst), 1);
 }
 
@@ -133,7 +133,7 @@ fn host_call_through_direct_rust_call_metamethod_notifies_once() {
 
     let error = call_global(&mut state, "callable");
 
-    assert!(matches!(error.kind, ErrorKind::InternalError(_)));
+    assert!(matches!(error.kind(), ErrorKind::InternalError(_)));
     assert_eq!(count.load(Ordering::SeqCst), 1);
 }
 
@@ -148,7 +148,7 @@ fn direct_non_callable_and_terminal_call_chain_notify_once() {
         let mut state = State::with_callbacks(Box::new(ErrorCounter(Arc::clone(&count))));
         run_setup(&mut state, setup);
         let error = call_global(&mut state, "callable");
-        assert!(matches!(error.kind, ErrorKind::TypeError(_)));
+        assert!(matches!(error.kind(), ErrorKind::TypeError(_)));
         assert!(error.to_string().contains("attempt to call a number value"));
         assert_eq!(state.get_top(), 0);
         assert_eq!(count.load(Ordering::SeqCst), 1, "{setup}");
@@ -171,7 +171,7 @@ fn rust_callback_propagating_nested_call_failure_notifies_once() {
     let error = state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect_err("the nested non-callable call fails");
-    assert!(matches!(error.kind, ErrorKind::TypeError(_)));
+    assert!(matches!(error.kind(), ErrorKind::TypeError(_)));
     assert_eq!(state.get_top(), 0);
     assert_eq!(count.load(Ordering::SeqCst), 1);
 }
@@ -183,7 +183,7 @@ fn malformed_host_call_does_not_notify() {
     let error = state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect_err("a call without a function is malformed");
-    assert!(matches!(error.kind, ErrorKind::InvalidStackIndex { .. }));
+    assert!(matches!(error.kind(), ErrorKind::InvalidStackIndex { .. }));
     assert_eq!(count.load(Ordering::SeqCst), 0);
 }
 
@@ -203,7 +203,7 @@ fn rust_callback_propagating_nested_rust_failure_notifies_once() {
     let error = state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect_err("the nested Rust callback fails");
-    assert!(matches!(error.kind, ErrorKind::InternalError(_)));
+    assert!(matches!(error.kind(), ErrorKind::InternalError(_)));
     assert_eq!(count.load(Ordering::SeqCst), 1);
 }
 
@@ -232,7 +232,10 @@ fn host_supplied_trace_does_not_suppress_notification() {
         let error = state
             .call(ArgCount::Fixed(0), RetCount::Fixed(0))
             .expect_err("callback fails");
-        assert_eq!(error.stack_trace[0].source.as_deref(), Some("host-source"));
+        assert_eq!(
+            error.stack_trace()[0].source.as_deref(),
+            Some("host-source")
+        );
         assert_eq!(count.load(Ordering::SeqCst), 1);
     }
 }
@@ -287,11 +290,11 @@ fn execution_stack_preflights_notify_once() {
         let error = state
             .call(ArgCount::Fixed(0), expected)
             .expect_err("preflight exceeds the real stack limit");
-        assert!(matches!(error.kind, ErrorKind::StackOverflow { .. }));
+        assert!(matches!(error.kind(), ErrorKind::StackOverflow { .. }));
         assert_eq!(count.load(Ordering::SeqCst), 1, "case {case}");
         assert_eq!(state.get_top(), dellingr::limits::MAX_STACK_SIZE - 1);
         if case == 0 {
-            assert!(!error.stack_trace.is_empty());
+            assert!(!error.stack_trace().is_empty());
         }
     }
 }
@@ -314,7 +317,7 @@ fn callable_argument_overflow_notifies_once() {
             RetCount::Fixed(0),
         )
         .expect_err("implicit self exceeds argument ABI");
-    assert!(matches!(error.kind, ErrorKind::TooManyArguments { .. }));
+    assert!(matches!(error.kind(), ErrorKind::TooManyArguments { .. }));
     assert_eq!(count.load(Ordering::SeqCst), 1);
     assert_eq!(state.get_top(), 0);
 }

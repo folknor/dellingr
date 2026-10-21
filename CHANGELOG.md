@@ -21,6 +21,28 @@ All notable changes to dellingr are documented here. The format follows
   rejects ids over `limits::MAX_SAVE_IDENTIFIER_BYTES` before changing
   either registry. Diagnostic function names longer than
   `limits::MAX_CHUNK_NAME_BYTES` are truncated, so such chunks still save.
+- `Error` and `ArgError` fields are private. Read them through
+  `Error::kind`, `stack_trace`, `line_num` and `column`, and
+  `ArgError::arg_number`, `func_name`, `detail`, `expected` and `received`.
+  `Error::new`, `line_num` and `column` use `u32` locations.
+- `ArgDetail::Custom` and `ArgDetail::OutOfBounds` are removed, and
+  `ArgDetail` equality compares variants exactly.
+- `HostCallbacks::on_error` takes only the error; the reporting frame's source
+  is available as `Error::source_name`.
+- `ScopeCost` category counts are methods (`arithmetic_ops()`, `negations()`,
+  `table_creations()`, `table_writes()`, `array_elements()`,
+  `function_calls()`), so `ScopeCost` can no longer be built with a struct
+  literal outside the crate.
+- Binary operators, unary operators and concatenation record the line of
+  their operator token, so runtime errors and tracebacks in multi-line
+  expressions name the operator's line. Other instructions take the line of
+  the last token consumed before they are emitted, where they previously took
+  the line of their statement's first token or of the last token the parser
+  explicitly expected. Bytecode line metadata, and with it snapshot bytes for
+  multi-line chunks, changes accordingly.
+- `LibraryError` gains `InvalidNextKey`, `PositionOutOfBounds`, `ArrayTooBig`,
+  `TostringMustReturnString` and `FormatPointerIdentitySpaceExhausted`; those
+  runtime errors keep their message text.
 
 ### Added
 

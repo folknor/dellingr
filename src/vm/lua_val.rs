@@ -162,16 +162,16 @@ impl Val {
         }
     }
 
-    pub(super) fn to_bytes_with_heap(self, heap: &GcHeap) -> Vec<u8> {
+    /// Render a primitive value. Pointer-like values have no heap-only
+    /// representation because their deterministic identity needs State.
+    pub(super) fn to_bytes_with_heap(self, heap: &GcHeap) -> Option<Vec<u8>> {
         match self {
-            Nil => b"nil".to_vec(),
-            Bool(false) => b"false".to_vec(),
-            Bool(true) => b"true".to_vec(),
-            Num(n) => number_to_string(n).into_bytes(),
-            RustFn(_) | Obj(_) => {
-                unreachable!("function and object rendering requires State pointer identity")
-            }
-            Str(s) => heap.get_string(s).to_vec(),
+            Nil => Some(b"nil".to_vec()),
+            Bool(false) => Some(b"false".to_vec()),
+            Bool(true) => Some(b"true".to_vec()),
+            Num(n) => Some(number_to_string(n).into_bytes()),
+            RustFn(_) | Obj(_) => None,
+            Str(s) => Some(heap.get_string(s).to_vec()),
         }
     }
 }
@@ -183,6 +183,8 @@ impl fmt::Debug for Val {
             Bool(b) => b.fmt(f),
             Num(n) => n.fmt(f),
             RustFn(_) => f.write_str(RUST_FN_DISPLAY),
+            // `ObjectPtr` is intentionally opaque in Debug: its slotmap key
+            // is process-local and can vary between replay runs.
             Obj(o) => o.fmt(f),
             // Val has no heap reference here, so render a stable marker rather
             // than exposing StringPtr's process-local slotmap key.
@@ -201,6 +203,9 @@ impl fmt::Debug for Val {
 /// This is very dangerous, since f64 doesn't implement Eq.
 impl Eq for Val {}
 
+// `Val` is also used by internal identity indexes, so its `Hash` implementation
+// must remain total even for values that cannot be Lua table keys. Lua table
+// storage wraps validated keys in `TableKey`.
 impl Hash for Val {
     fn hash<H: Hasher>(&self, hasher: &mut H) {
         match self {
@@ -214,13 +219,12 @@ impl Hash for Val {
                 let bits = match normalize_table_key::<(), (), ()>(TableKeyInput::Number(*n)) {
                     Ok(NormalizedTableKey::Number(bits)) => bits,
                     Err(InvalidTableKey::Nan) => {
-                        // Runtime table writes normalize keys, snapshot loads
-                        // validate saved keys before rebuilding tables, table
-                        // reads return before hashing NaN, and pointer-id maps
-                        // accept only strings, objects, or functions. Reaching
-                        // this branch means crate code bypassed those checks.
-                        // Keep the invariant assertion on this hashing path.
-                        panic!("Cannot use NaN as table key");
+                        // NaN never compares equal, including to itself, so
+                        // any deterministic hash is valid under Hash's
+                        // equality contract. Use one stable token so the hash
+                        // stays host-independent for the invalid key value.
+                        crate::numeral::CANONICAL_NAN_BITS.hash(hasher);
+                        return;
                     }
                     Err(InvalidTableKey::Nil) | Ok(_) => {
                         // This call supplies a number, so nil and non-number

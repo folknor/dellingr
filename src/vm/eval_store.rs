@@ -1,7 +1,7 @@
 use std::str;
 
 use super::super::compiler::{
-    FieldLookupCacheEntry, GlobalLookupCacheEntry, GlobalLookupCacheSlot, SetFieldLookupCacheSlot,
+    FieldLookupCacheEntry, GlobalLookupCacheSlot, SetFieldLookupCacheSlot,
 };
 use super::super::error::{ErrorKind, TypeError};
 use super::Result;
@@ -9,7 +9,7 @@ use super::State;
 use super::Val;
 use super::frame::Frame;
 use super::object::ObjectPtr;
-use crate::instr::{ArgCount, Builtin, RetCount};
+use crate::instr::{ArgCount, RetCount};
 use crate::limits::MAX_TABLE_BATCH_SIZE;
 
 impl State {
@@ -397,42 +397,13 @@ impl State {
                 ))
             },
         )?;
-        // Builtins must keep using the central setter: it updates the builtin
-        // slot and bumps the environment version. They never seed a SET_GLOBAL
-        // cache slot.
-        if Builtin::from_name(name).is_some() {
-            self.set_global_value_owned(name.to_owned(), val);
-        } else if let Some(index) = self.globals.get_index_of(name) {
-            if let Some((_, target)) = self.globals.get_index_mut(index) {
-                *target = val;
-                if let Some(cache) = cache {
-                    cache.set(GlobalLookupCacheEntry {
-                        globals_version: self.globals_version,
-                        index,
-                    });
-                }
-            }
-        } else {
-            // Inserts deliberately remain cold: the following execution finds
-            // the stable index and populates this site without allocating.
-            self.set_global_value_owned(name.to_owned(), val);
-        }
+        self.global_env.write_named(name, val, cache);
         Ok(())
     }
 
     #[inline(always)]
     fn try_set_global_cached(&mut self, cache: &GlobalLookupCacheSlot, val: Val) -> bool {
-        let Some(entry) = cache.get() else {
-            return false;
-        };
-        if entry.globals_version != self.globals_version {
-            return false;
-        }
-        let Some((_, target)) = self.globals.get_index_mut(entry.index) else {
-            return false;
-        };
-        *target = val;
-        true
+        self.global_env.write_cached(cache, val)
     }
 
     fn constructor_base(&self) -> Result<usize> {

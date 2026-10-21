@@ -84,6 +84,7 @@ pub mod cli {
 }
 
 /// Cost breakdown for a single scope (function or main chunk).
+/// Category counts are available through the corresponding accessor methods.
 #[derive(Debug, Default, Clone)]
 pub struct ScopeCost {
     /// Name of this scope
@@ -94,23 +95,9 @@ pub struct ScopeCost {
     /// `own_cost` plus the `total_cost` of every nested function body, each
     /// counted once regardless of whether that function is invoked.
     pub total_cost: u64,
-    // The category counters below, ScopeTotals and both renderers mirror the
-    // non-free variants of instr::OpcodeCost; a new variant needs a counter
-    // here, a match arm in analyze_chunk, and a line in each renderer.
-    /// Number of arithmetic operations (+, -, *, /, %, ^)
-    pub arithmetic_ops: u64,
-    /// Number of unary negation operations
-    pub negations: u64,
-    /// Number of table creations ({})
-    pub table_creations: u64,
-    /// Number of table field writes (`t.x = v`, `t[k] = v`)
-    pub table_writes: u64,
-    /// Number of array elements initialized
-    pub array_elements: u64,
-    /// Number of call instructions (`OP_CALL`). Generic-`for` iterator calls
-    /// and metamethod-driven calls are not call instructions and are not
-    /// counted.
-    pub function_calls: u64,
+    // Category counters intentionally use one private array; use the accessors
+    // below. This keeps analysis, aggregation, and rendering on the same index.
+    category_counts: [u64; instr::OpcodeCost::COUNT],
     /// Total instruction count
     pub instructions: u64,
     /// Nested scopes (functions defined in this scope)
@@ -118,6 +105,44 @@ pub struct ScopeCost {
 }
 
 impl ScopeCost {
+    /// Number of arithmetic operations (+, -, *, /, %, ^).
+    pub fn arithmetic_ops(&self) -> u64 {
+        self.category_count(instr::OpcodeCost::Arithmetic)
+    }
+
+    /// Number of unary negation operations.
+    pub fn negations(&self) -> u64 {
+        self.category_count(instr::OpcodeCost::Negation)
+    }
+
+    /// Number of table creations ({}).
+    pub fn table_creations(&self) -> u64 {
+        self.category_count(instr::OpcodeCost::TableCreation)
+    }
+
+    /// Number of table field writes (`t.x = v`, `t[k] = v`).
+    pub fn table_writes(&self) -> u64 {
+        self.category_count(instr::OpcodeCost::TableWrite)
+    }
+
+    /// Number of array elements initialized.
+    pub fn array_elements(&self) -> u64 {
+        self.category_count(instr::OpcodeCost::ArrayElements)
+    }
+
+    /// Number of call instructions (`OP_CALL`). Generic-`for` iterator calls
+    /// and metamethod-driven calls are not call instructions and are not
+    /// counted.
+    pub fn function_calls(&self) -> u64 {
+        self.category_count(instr::OpcodeCost::Call)
+    }
+
+    fn category_count(&self, category: instr::OpcodeCost) -> u64 {
+        category
+            .counter_index()
+            .map_or(0, |index| self.category_counts[index])
+    }
+
     pub(crate) fn analyze_chunk(chunk: &Bytecode, name: String) -> Self {
         let mut scope = ScopeCost {
             name,
@@ -127,14 +152,13 @@ impl ScopeCost {
         for inst in &chunk.code {
             scope.instructions += 1;
             scope.own_cost += inst.static_units();
-            match Instr::cost_class(inst.opcode()) {
-                instr::OpcodeCost::Arithmetic => scope.arithmetic_ops += 1,
-                instr::OpcodeCost::Negation => scope.negations += 1,
-                instr::OpcodeCost::TableCreation => scope.table_creations += 1,
-                instr::OpcodeCost::TableWrite => scope.table_writes += 1,
-                instr::OpcodeCost::ArrayElements => scope.array_elements += u64::from(inst.a()),
-                instr::OpcodeCost::Call => scope.function_calls += 1,
-                instr::OpcodeCost::Free => {}
+            let category = Instr::cost_class(inst.opcode());
+            if let Some(index) = category.counter_index() {
+                let count = match category {
+                    instr::OpcodeCost::ArrayElements => u64::from(inst.a()),
+                    _ => 1,
+                };
+                scope.category_counts[index] += count;
             }
         }
 
@@ -163,7 +187,7 @@ impl ScopeCost {
     fn fmt_indent(&self, f: &mut std::fmt::Formatter<'_>, indent: usize) -> std::fmt::Result {
         let pad = "  ".repeat(indent);
 
-        if self.own_cost == 0 && self.nested.is_empty() && self.function_calls == 0 {
+        if self.own_cost == 0 && self.nested.is_empty() && self.function_calls() == 0 {
             writeln!(f, "{}{}: cost 0 (free)", pad, self.name)?;
             return Ok(());
         }
@@ -181,25 +205,14 @@ impl ScopeCost {
 
         // Calls are statically free but their instruction count still belongs
         // in the per-scope breakdown.
-        if self.own_cost > 0 || self.function_calls > 0 {
+        if self.own_cost > 0 || self.function_calls() > 0 {
             let inner_pad = "  ".repeat(indent + 1);
-            if self.arithmetic_ops > 0 {
-                writeln!(f, "{}arithmetic: {}", inner_pad, self.arithmetic_ops)?;
-            }
-            if self.negations > 0 {
-                writeln!(f, "{}negation: {}", inner_pad, self.negations)?;
-            }
-            if self.table_creations > 0 {
-                writeln!(f, "{}table creation: {}", inner_pad, self.table_creations)?;
-            }
-            if self.table_writes > 0 {
-                writeln!(f, "{}table writes: {}", inner_pad, self.table_writes)?;
-            }
-            if self.array_elements > 0 {
-                writeln!(f, "{}array elements: {}", inner_pad, self.array_elements)?;
-            }
-            if self.function_calls > 0 {
-                writeln!(f, "{}call instructions: {}", inner_pad, self.function_calls)?;
+            for labels in &instr::OPCODE_COST_LABELS {
+                let index = labels.category as usize;
+                let count = self.category_counts[index];
+                if count > 0 {
+                    writeln!(f, "{}{}: {}", inner_pad, labels.scope_label, count)?;
+                }
             }
         }
 
@@ -250,30 +263,44 @@ impl CostAnalysis {
 #[derive(Default)]
 struct ScopeTotals {
     total_cost: u64,
-    arithmetic_ops: u64,
-    negations: u64,
-    table_creations: u64,
-    table_writes: u64,
-    array_elements: u64,
-    function_calls: u64,
+    category_counts: [u64; instr::OpcodeCost::COUNT],
     instructions: u64,
     function_count: u64,
 }
 
 impl ScopeCost {
     fn accumulate(&self, totals: &mut ScopeTotals) {
-        totals.arithmetic_ops += self.arithmetic_ops;
-        totals.negations += self.negations;
-        totals.table_creations += self.table_creations;
-        totals.table_writes += self.table_writes;
-        totals.array_elements += self.array_elements;
-        totals.function_calls += self.function_calls;
+        for (total, count) in totals.category_counts.iter_mut().zip(&self.category_counts) {
+            *total += count;
+        }
         totals.instructions += self.instructions;
         totals.function_count += self.nested.len() as u64;
         for nested in &self.nested {
             nested.accumulate(totals);
         }
     }
+}
+
+fn write_summary_categories(
+    f: &mut std::fmt::Formatter<'_>,
+    counts: &[u64; instr::OpcodeCost::COUNT],
+    section: instr::CostSummarySection,
+) -> std::fmt::Result {
+    for labels in &instr::OPCODE_COST_LABELS {
+        if labels.summary_section != section {
+            continue;
+        }
+        let index = labels.category as usize;
+        let count = counts[index];
+        if count > 0 || labels.summary_when_zero {
+            writeln!(
+                f,
+                "{}{}{}",
+                labels.summary_prefix, count, labels.summary_suffix
+            )?;
+        }
+    }
+    Ok(())
 }
 
 impl std::fmt::Display for CostAnalysis {
@@ -285,38 +312,20 @@ impl std::fmt::Display for CostAnalysis {
         writeln!(f, "Static cost estimate: {}", totals.total_cost)?;
         writeln!(f)?;
         writeln!(f, "--- Costed Operations ---")?;
-        if totals.arithmetic_ops > 0 {
-            writeln!(
-                f,
-                "  Arithmetic (+,-,*,/,%,^): {} ops",
-                totals.arithmetic_ops
-            )?;
-        }
-        if totals.negations > 0 {
-            writeln!(f, "  Unary negation (-):       {} ops", totals.negations)?;
-        }
-        if totals.table_creations > 0 {
-            writeln!(
-                f,
-                "  Table creation {{}}:        {} ops",
-                totals.table_creations
-            )?;
-        }
-        if totals.table_writes > 0 {
-            writeln!(f, "  Table writes (t[k]=v):    {} ops", totals.table_writes)?;
-        }
-        if totals.array_elements > 0 {
-            writeln!(
-                f,
-                "  Array elements:           {} elements",
-                totals.array_elements
-            )?;
-        }
+        write_summary_categories(
+            f,
+            &totals.category_counts,
+            instr::CostSummarySection::CostedOperations,
+        )?;
         writeln!(f)?;
         writeln!(f, "--- Statistics ---")?;
         writeln!(f, "  Total instructions:   {}", totals.instructions)?;
         writeln!(f, "  Function definitions: {}", totals.function_count)?;
-        writeln!(f, "  Call instructions:    {}", totals.function_calls)?;
+        write_summary_categories(
+            f,
+            &totals.category_counts,
+            instr::CostSummarySection::Statistics,
+        )?;
         writeln!(f)?;
         writeln!(f, "--- Per-Scope Breakdown ---")?;
         self.root.fmt_indent(f, 0)?;
@@ -457,7 +466,7 @@ mod tests {
         let nested = &analysis.root.nested[0];
 
         assert_eq!(nested.own_cost, 1);
-        assert_eq!(nested.array_elements, 0);
+        assert_eq!(nested.array_elements(), 0);
         assert_eq!(analysis.root.total_cost, 1);
 
         let mut state = State::new();
@@ -471,7 +480,51 @@ mod tests {
 
         let fixed = analyze_cost("return {1, 2}").expect("fixed table constructor should parse");
         assert_eq!(fixed.root.own_cost, 3);
-        assert_eq!(fixed.root.array_elements, 2);
+        assert_eq!(fixed.root.array_elements(), 2);
+    }
+
+    #[test]
+    fn cost_analysis_display_preserves_category_report_bytes() {
+        let analysis = CostAnalysis {
+            root: ScopeCost {
+                name: "main".to_string(),
+                own_cost: 6,
+                total_cost: 6,
+                category_counts: [1, 1, 1, 1, 2, 1],
+                instructions: 7,
+                nested: Vec::new(),
+            },
+        };
+
+        assert_eq!(
+            analysis.to_string(),
+            concat!(
+                "=== Cost Analysis ===\n",
+                "\n",
+                "Static cost estimate: 6\n",
+                "\n",
+                "--- Costed Operations ---\n",
+                "  Arithmetic (+,-,*,/,%,^): 1 ops\n",
+                "  Unary negation (-):       1 ops\n",
+                "  Table creation {}:        1 ops\n",
+                "  Table writes (t[k]=v):    1 ops\n",
+                "  Array elements:           2 elements\n",
+                "\n",
+                "--- Statistics ---\n",
+                "  Total instructions:   7\n",
+                "  Function definitions: 0\n",
+                "  Call instructions:    1\n",
+                "\n",
+                "--- Per-Scope Breakdown ---\n",
+                "main: cost 6\n",
+                "  arithmetic: 1\n",
+                "  negation: 1\n",
+                "  table creation: 1\n",
+                "  table writes: 1\n",
+                "  array elements: 2\n",
+                "  call instructions: 1\n",
+            )
+        );
     }
 
     #[test]

@@ -100,9 +100,9 @@ impl Parser<'_> {
                 _ => break,
             };
             exp_desc = ExpDesc::Other;
-            self.input.next()?;
+            let line = self.input.next()?.line;
             self.parse_concat()?;
-            self.push(instr);
+            self.push_at_line(instr, line);
         }
         Ok(exp_desc)
     }
@@ -114,7 +114,11 @@ impl Parser<'_> {
     fn parse_concat(&mut self) -> Result<ExpDesc> {
         let mut exp_desc = self.parse_addition()?;
         let mut count: usize = 1;
-        while self.input.try_pop(TokenType::DotDot)?.is_some() {
+        let mut line = None;
+        while let Some(token) = self.input.try_pop(TokenType::DotDot)? {
+            // A flattened chain reports its first operator, as Lua does when
+            // it merges the right-associative concatenation instructions.
+            line = line.or(Some(token.line));
             exp_desc = ExpDesc::Other;
             self.parse_addition()?;
             count += 1;
@@ -125,7 +129,9 @@ impl Parser<'_> {
                 usize::from(MAX_EXPRESSIONS),
                 SyntaxError::TooManyExpressions,
             )?;
-            self.push(Instr::concat(n));
+            let line =
+                line.ok_or_else(|| self.internal_error("concat chain requires an operator"))?;
+            self.push_at_line(Instr::concat(n), line);
         }
         Ok(exp_desc)
     }
@@ -140,10 +146,10 @@ impl Parser<'_> {
                 _ => break,
             };
             exp_desc = ExpDesc::Other;
-            self.input.next()?;
+            let line = self.input.next()?.line;
             self.parse_multiplication()?;
             // The token match above selects only foldable arithmetic opcodes.
-            self.push_arith(instr, crate::numeral::arith_fn(instr.opcode()))?;
+            self.push_arith(instr, line)?;
         }
         Ok(exp_desc)
     }
@@ -159,10 +165,10 @@ impl Parser<'_> {
                 _ => break,
             };
             exp_desc = ExpDesc::Other;
-            self.input.next()?;
+            let line = self.input.next()?.line;
             self.parse_unary()?;
             // The token match above selects only foldable arithmetic opcodes.
-            self.push_arith(instr, crate::numeral::arith_fn(instr.opcode()))?;
+            self.push_arith(instr, line)?;
         }
         Ok(exp_desc)
     }
@@ -182,12 +188,12 @@ impl Parser<'_> {
                 return self.parse_pow();
             }
         };
-        self.input.next()?;
+        let line = self.input.next()?.line;
         self.parse_unary()?;
         if token_type == TokenType::Minus {
-            self.push_negate()?;
+            self.push_negate(line)?;
         } else {
-            self.push(instr);
+            self.push_at_line(instr, line);
         }
 
         Ok(ExpDesc::Other)
@@ -196,7 +202,7 @@ impl Parser<'_> {
     /// Parse an exponentiation expression (`^`). Right-associative, Precedence 1.
     fn parse_pow(&mut self) -> Result<ExpDesc> {
         let mut exp_desc = self.parse_primary()?;
-        if self.input.try_pop(TokenType::Caret)?.is_some() {
+        if let Some(token) = self.input.try_pop(TokenType::Caret)? {
             exp_desc = ExpDesc::Other;
             self.parse_unary()?;
             // `^` is deliberately never constant-folded, unlike `+ - * / %`.
@@ -208,7 +214,7 @@ impl Parser<'_> {
             // host's runtime `powf`. Leaving it to runtime keeps every `^` on
             // one implementation per host (literal `^` is charged as a normal
             // instruction, part of the cost model since version 4).
-            self.push(Instr::pow());
+            self.push_at_line(Instr::pow(), token.line);
         }
 
         Ok(exp_desc)

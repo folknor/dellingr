@@ -179,7 +179,7 @@ fn protected_metatables_hide_and_prevent_replacement() {
     let err =
         expect_error("local t = setmetatable({}, { __metatable = 'locked' }); setmetatable(t, {})");
     assert!(
-        matches!(&err.kind, ErrorKind::RuntimeError(message) if message == "cannot change a protected metatable")
+        matches!(err.kind(), ErrorKind::RuntimeError(message) if message == "cannot change a protected metatable")
     );
 }
 
@@ -397,7 +397,7 @@ fn index_number_handler_errors() {
     "#,
     );
     assert!(
-        matches!(err.kind, ErrorKind::TypeError(_)),
+        matches!(err.kind(), ErrorKind::TypeError(_)),
         "Expected TypeError for number __index, got: {err}"
     );
 }
@@ -439,7 +439,7 @@ fn index_boolean_handler_errors() {
     "#,
     );
     assert!(
-        matches!(err.kind, ErrorKind::TypeError(_)),
+        matches!(err.kind(), ErrorKind::TypeError(_)),
         "Expected TypeError for boolean __index, got: {err}"
     );
 }
@@ -503,7 +503,7 @@ fn newindex_number_handler_errors() {
     "#,
     );
     assert!(
-        matches!(err.kind, ErrorKind::TypeError(_)),
+        matches!(err.kind(), ErrorKind::TypeError(_)),
         "Expected TypeError for number __newindex, got: {err}"
     );
 }
@@ -517,7 +517,7 @@ fn newindex_string_handler_errors() {
     "#,
     );
     assert!(
-        matches!(err.kind, ErrorKind::TypeError(_)),
+        matches!(err.kind(), ErrorKind::TypeError(_)),
         "Expected TypeError for string __newindex, got: {err}"
     );
 }
@@ -531,7 +531,7 @@ fn newindex_boolean_handler_errors() {
     "#,
     );
     assert!(
-        matches!(err.kind, ErrorKind::TypeError(_)),
+        matches!(err.kind(), ErrorKind::TypeError(_)),
         "Expected TypeError for boolean __newindex, got: {err}"
     );
 }
@@ -548,7 +548,7 @@ fn metamethod_depth_exceeded() {
     "#,
     );
     assert!(
-        matches!(err.kind, ErrorKind::MetamethodDepthExceeded { .. }),
+        matches!(err.kind(), ErrorKind::MetamethodDepthExceeded { .. }),
         "Expected MetamethodDepthExceeded, got: {err}"
     );
 }

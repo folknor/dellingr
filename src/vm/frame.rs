@@ -615,7 +615,7 @@ mod tests {
 
         let error = frame.jump(1).expect_err("jump to end must be rejected");
         assert!(matches!(
-            error.kind,
+            error.kind(),
             ErrorKind::InvalidJump { ip: 0, offset: 1 }
         ));
     }

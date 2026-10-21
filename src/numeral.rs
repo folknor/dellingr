@@ -3,6 +3,11 @@
 
 use crate::instr::Instr;
 
+/// The one quiet-NaN bit pattern that stands in for every NaN wherever its
+/// bits must not depend on the host: hardware default NaNs differ by host
+/// (sign bit set on x86-64, clear on aarch64).
+pub(crate) const CANONICAL_NAN_BITS: u64 = 0x7ff8_0000_0000_0000;
+
 // The VM dispatch calls these named functions directly and the constant
 // folder reaches the same definitions through `arith_fn`, so a folded result
 // is bit-identical to the runtime one by construction.
@@ -32,22 +37,21 @@ pub(crate) fn lua_div(a: f64, b: f64) -> f64 {
 }
 
 /// Returns the numeric function the VM dispatch uses for an arithmetic opcode
-/// that is safe to fold. This is const so opcode mappings can be checked or
-/// reused in compile-time contexts; the dispatch loop keeps direct function
+/// that is safe to fold, or `None` for other opcodes. The dispatch keeps direct function
 /// items so its calls remain statically dispatched and inlinable.
 ///
 /// Exponentiation is deliberately excluded: its result depends on the host
 /// `powf` implementation, so folding it would bake a platform-specific result
 /// into bytecode.
-pub(crate) fn arith_fn(opcode: u8) -> fn(f64, f64) -> f64 {
-    match opcode {
+pub(crate) fn arith_fn(opcode: u8) -> Option<fn(f64, f64) -> f64> {
+    Some(match opcode {
         Instr::OP_ADD => lua_add,
         Instr::OP_SUBTRACT => lua_sub,
         Instr::OP_MULTIPLY => lua_mul,
         Instr::OP_DIVIDE => lua_div,
         Instr::OP_MOD => lua_modulo,
-        _ => unreachable!("opcode has no foldable arithmetic function"),
-    }
+        _ => return None,
+    })
 }
 
 /// Lua 5.4 floored modulo, including its special floating-point cases.

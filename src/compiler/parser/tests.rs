@@ -35,7 +35,7 @@ fn assert_too_many_syntax_levels(source: &str) {
     let err = parse_str(source).expect_err("source must exceed the syntax depth limit");
     assert!(
         matches!(
-            err.kind,
+            err.kind(),
             ErrorKind::SyntaxError(SyntaxError::TooManySyntaxLevels),
         ),
         "unexpected error: {err:?}"
@@ -47,7 +47,7 @@ fn break_outside_loop_uses_the_source_line() {
     let err = parse_str("\n\nbreak").expect_err("break outside a loop must fail");
 
     assert!(matches!(
-        &err.kind,
+        err.kind(),
         ErrorKind::SyntaxError(SyntaxError::BreakOutsideLoop)
     ));
     assert_eq!(err.line_num(), 3);
@@ -146,7 +146,7 @@ fn literal_string_escape_errors_use_the_backslash_position() {
         let err = parse_str(source).expect_err("malformed escape must fail");
         assert!(
             matches!(
-                (&err.kind, expected),
+                (err.kind(), expected),
                 (
                     ErrorKind::SyntaxError(SyntaxError::DecimalEscapeTooLarge),
                     "decimal escape"
@@ -161,7 +161,7 @@ fn literal_string_escape_errors_use_the_backslash_position() {
             "unexpected error: {err}"
         );
         assert_eq!(
-            err.column,
+            err.column() as usize,
             source.find('\\').expect("source has escape") + 1
         );
     }
@@ -175,7 +175,6 @@ fn checked_jump_offset_accepts_i16_boundaries_only() {
             frames: vec![super::state::FuncState::new(None, 0, false)],
         },
         source_name: None,
-        current_line: 1,
         syntax_depth: 0,
     };
 
@@ -1431,7 +1430,7 @@ fn line_info_reports_correct_line() {
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect_err("calling nil must fail");
     assert_eq!(
-        err.stack_trace
+        err.stack_trace()
             .first()
             .expect("runtime error must carry a stack frame")
             .line,
@@ -1471,26 +1470,26 @@ fn parser_error_positions_stay_pinned_after_comments_and_newlines() {
         let after_comment = format!("-- comment{newline}end");
         let err = parse_str(&after_comment).expect_err("stray end must fail");
         assert!(matches!(
-            err.kind,
+            err.kind(),
             ErrorKind::SyntaxError(SyntaxError::ExpectedToken { .. })
         ));
-        assert_eq!((err.line_num, err.column), (2, 1), "{newline:?}");
+        assert_eq!((err.line_num(), err.column()), (2, 1), "{newline:?}");
 
         let bad_escape = format!("-- comment{newline}return \"\\q\"");
         let err = parse_str(&bad_escape).expect_err("bad escape must fail");
         assert!(matches!(
-            err.kind,
+            err.kind(),
             ErrorKind::SyntaxError(SyntaxError::InvalidEscapeSequence)
         ));
-        assert_eq!((err.line_num, err.column), (2, 9), "{newline:?}");
+        assert_eq!((err.line_num(), err.column()), (2, 9), "{newline:?}");
 
         let invalid_after_newline = format!("x = 1{newline}@");
         let err = parse_str(&invalid_after_newline).expect_err("invalid character must fail");
         assert!(matches!(
-            err.kind,
+            err.kind(),
             ErrorKind::SyntaxError(SyntaxError::InvalidCharacter('@'))
         ));
-        assert_eq!((err.line_num, err.column), (2, 2), "{newline:?}");
+        assert_eq!((err.line_num(), err.column()), (2, 2), "{newline:?}");
     }
 }
 
@@ -1583,7 +1582,6 @@ fn parser_for_limit_test() -> Parser<'static> {
             frames: vec![super::state::FuncState::new(None, 0, false)],
         },
         source_name: None,
-        current_line: 1,
         syntax_depth: 0,
     }
 }
@@ -1616,7 +1614,7 @@ fn literal_pool_limits_match_their_error_messages() {
         .find_or_add_number(f64::from(max_literal_count))
         .expect_err("one more than MAX_LITERALS must fail");
     assert!(matches!(
-        error.kind,
+        error.kind(),
         ErrorKind::SyntaxError(SyntaxError::TooManyNumbers)
     ));
     assert!(error.to_string().contains(&format!("limit {MAX_LITERALS}")));
@@ -1648,7 +1646,7 @@ fn literal_pool_limits_match_their_error_messages() {
         .find_or_add_string_bytes(b"overflow")
         .expect_err("one more than MAX_LITERALS must fail");
     assert!(matches!(
-        error.kind,
+        error.kind(),
         ErrorKind::SyntaxError(SyntaxError::TooManyStrings)
     ));
     assert!(error.to_string().contains(&format!("limit {MAX_LITERALS}")));
@@ -1662,17 +1660,17 @@ fn source_size_limit_runs_before_lexing() {
 
     let error = parse_str(&source).expect_err("source one byte over the limit must be rejected");
     assert!(matches!(
-        error.kind,
+        error.kind(),
         ErrorKind::SourceSizeExceeded {
             size,
             limit: MAX_SOURCE_BYTES,
-        } if size == MAX_SOURCE_BYTES + 1
+        } if *size == MAX_SOURCE_BYTES + 1
     ));
 
     source.pop();
     let error = parse_str(&source).expect_err("the exact-size fixture must reach the lexer");
     assert!(matches!(
-        error.kind,
+        error.kind(),
         ErrorKind::SyntaxError(SyntaxError::InvalidCharacter('@'))
     ));
 }
@@ -1714,7 +1712,7 @@ fn local_limit_matches_its_error_message() {
     let source = format!("local {}", identifier_list("v", MAX_LOCALS + 1));
     let error = parse_str(&source).expect_err("one more than MAX_LOCALS must fail");
     assert!(matches!(
-        error.kind,
+        error.kind(),
         ErrorKind::SyntaxError(SyntaxError::TooManyLocals)
     ));
     assert!(error.to_string().contains(&format!("limit {MAX_LOCALS}")));
@@ -1728,7 +1726,7 @@ fn fixed_argument_limit_matches_its_error_message() {
     let source = format!("f({})", value_list(MAX_FIXED_ARGS + 1));
     let error = parse_str(&source).expect_err("one more than MAX_FIXED_ARGS must fail");
     assert!(matches!(
-        error.kind,
+        error.kind(),
         ErrorKind::SyntaxError(SyntaxError::TooManyArguments)
     ));
     assert!(
@@ -1746,7 +1744,7 @@ fn expression_limit_matches_its_error_message() {
     let source = format!("return {}", value_list(usize::from(MAX_EXPRESSIONS) + 1));
     let error = parse_str(&source).expect_err("one more than MAX_EXPRESSIONS must fail");
     assert!(matches!(
-        error.kind,
+        error.kind(),
         ErrorKind::SyntaxError(SyntaxError::TooManyExpressions)
     ));
     assert!(
@@ -1764,7 +1762,7 @@ fn fixed_result_limit_matches_its_error_message() {
     let source = format!("{} = f()", identifier_list("v", MAX_FIXED_RESULTS + 1));
     let error = parse_str(&source).expect_err("one more than MAX_FIXED_RESULTS must fail");
     assert!(matches!(
-        error.kind,
+        error.kind(),
         ErrorKind::SyntaxError(SyntaxError::TooManyFixedResults)
     ));
     assert!(
@@ -1783,7 +1781,7 @@ fn assignment_offset_limit_matches_its_error_message() {
     let error = parse_str(&format!("{targets} = 1"))
         .expect_err("an offset past MAX_ASSIGNMENT_OFFSET must fail");
     assert!(matches!(
-        error.kind,
+        error.kind(),
         ErrorKind::SyntaxError(SyntaxError::AssignmentOffsetTooLarge)
     ));
     assert!(
@@ -1807,7 +1805,7 @@ fn nested_function_limit_matches_its_error_message() {
         .join("\n");
     let error = parse_str(&source).expect_err("one more than MAX_NESTED must fail");
     assert!(matches!(
-        error.kind,
+        error.kind(),
         ErrorKind::SyntaxError(SyntaxError::TooManyNestedFunctions)
     ));
     assert!(error.to_string().contains(&format!("limit {MAX_NESTED}")));
@@ -1886,7 +1884,7 @@ fn table_array_batch_limit_splits_at_the_encoded_count() {
 fn too_many_upvalues_errors() {
     let err = parse_str(&upvalue_program(200, 56)).expect_err("256 upvalues must be rejected");
     assert!(matches!(
-        err.kind,
+        err.kind(),
         ErrorKind::SyntaxError(SyntaxError::TooManyUpvalues)
     ));
     assert!(err.to_string().contains("limit 255"));
@@ -2015,7 +2013,7 @@ fn break_in_nested_function_is_outside_any_loop() {
                 .expect_err("break inside a nested function's non-loop body must fail");
             assert!(
                 matches!(
-                    err.kind,
+                    err.kind(),
                     ErrorKind::SyntaxError(SyntaxError::BreakOutsideLoop)
                 ),
                 "{source}: unexpected error {err:?}"
@@ -2316,7 +2314,7 @@ fn unfinished_long_comment_is_a_syntax_error() {
         let err = parse_str(source).expect_err("an unfinished long comment must not compile");
         assert!(
             matches!(
-                err.kind,
+                err.kind(),
                 ErrorKind::SyntaxError(SyntaxError::UnfinishedLongComment)
             ),
             "{source:?}: {err:?}"
@@ -2382,7 +2380,7 @@ fn chunk_nesting_limit_is_enforced_by_the_parser() {
             let error = parse_str(&nested_function_chain(MAX_CHUNK_NESTING + 1))
                 .expect_err("one more nested chunk must fail in the parser");
             assert!(matches!(
-                error.kind,
+                error.kind(),
                 ErrorKind::SyntaxError(SyntaxError::TooManySyntaxLevels)
             ));
             assert_eq!(chunk_depth(&bytecode), MAX_CHUNK_NESTING);

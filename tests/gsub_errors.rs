@@ -52,7 +52,7 @@ fn gsub_function_budget_error_is_propagated() {
     );
     let err = result.unwrap_err();
     assert!(
-        matches!(err.kind, ErrorKind::BudgetExceeded { .. }),
+        matches!(err.kind(), ErrorKind::BudgetExceeded { .. }),
         "Expected BudgetExceeded, got: {err}"
     );
 }
@@ -320,7 +320,7 @@ fn malformed_patterns_are_pattern_errors_in_all_wrappers() {
             .call(ArgCount::Fixed(0), RetCount::Fixed(2))
             .unwrap_err();
         assert!(
-            matches!(err.kind, ErrorKind::PatternError(_)),
+            matches!(err.kind(), ErrorKind::PatternError(_)),
             "{code}: {err:?}"
         );
     }
@@ -347,7 +347,7 @@ fn unclosed_captures_error_only_when_a_caller_reads_them() {
             .call(ArgCount::Fixed(0), RetCount::Fixed(2))
             .unwrap_err();
         assert!(
-            matches!(err.kind, ErrorKind::PatternError(_)),
+            matches!(err.kind(), ErrorKind::PatternError(_)),
             "{code}: {err:?}"
         );
         assert!(
@@ -393,12 +393,12 @@ fn gsub_validates_replacement_grammar_only_for_actual_replacements() {
         .unwrap_err();
     assert!(
         matches!(
-            &err.kind,
+            err.kind(),
             ErrorKind::RuntimeError(message) if message == "invalid capture index"
         ),
         "expected runtime invalid capture index error, got {err:?}"
     );
-    assert_eq!(err.kind.to_string(), "invalid capture index");
+    assert_eq!(err.kind().to_string(), "invalid capture index");
 
     // A bad replacement is not validated when there is no match or the
     // substitution limit is zero. Bind each gsub's two results to locals so all

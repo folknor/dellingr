@@ -168,9 +168,9 @@ mod tests {
         }
     }
 
-    fn assert_argument(error: crate::error::Error, number: isize) {
-        match error.kind {
-            crate::error::ErrorKind::ArgError(arg) => assert_eq!(arg.arg_number, number),
+    fn assert_argument(error: &crate::error::Error, number: isize) {
+        match error.kind() {
+            crate::error::ErrorKind::ArgError(arg) => assert_eq!(arg.arg_number(), number),
             kind => panic!("expected an argument error, got {kind:?}"),
         }
     }
@@ -182,20 +182,20 @@ mod tests {
         state.push_nil().unwrap();
         state.push_nil().unwrap();
         state.stack_bottom = 2;
-        assert_argument(state.memoize_gmatch_pattern(1).unwrap_err(), 1);
+        assert_argument(&state.memoize_gmatch_pattern(1).unwrap_err(), 1);
         assert_argument(
-            state
+            &state
                 .gmatch_subject_matcher_and_cost_meter(1, 1)
                 .err()
                 .expect("non-string subject fails"),
             1,
         );
-        assert_argument(state.to_bytes(1).unwrap_err(), 1);
-        assert_argument(state.to_bytes(-1).unwrap_err(), -1);
-        assert_argument(state.push_bytes_from_stack_range(1, 0..0).unwrap_err(), 1);
+        assert_argument(&state.to_bytes(1).unwrap_err(), 1);
+        assert_argument(&state.to_bytes(-1).unwrap_err(), -1);
+        assert_argument(&state.push_bytes_from_stack_range(1, 0..0).unwrap_err(), 1);
         state.push_string("subject").unwrap();
         assert_argument(
-            state
+            &state
                 .gmatch_subject_matcher_and_cost_meter(2, 1)
                 .err()
                 .expect("non-string pattern fails"),

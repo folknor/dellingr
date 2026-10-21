@@ -63,7 +63,7 @@ fn set_table_raw_rejects_nil_and_nan_keys_without_popping() {
         state.push_number(1.0).unwrap();
         let err = state.set_table_raw(1).expect_err("invalid key");
         assert!(matches!(
-            err.kind,
+            err.kind(),
             ErrorKind::TypeError(TypeError::TableKeyNil | TypeError::TableKeyNan)
         ));
         assert_eq!(state.get_top(), 3);
@@ -127,11 +127,11 @@ fn raw_len_reports_bad_indices_and_lengthless_values() {
     assert_eq!(state.raw_len(1).unwrap(), 3);
     assert_eq!(state.raw_len(2).unwrap(), 4);
     assert!(matches!(
-        state.raw_len(3).unwrap_err().kind,
+        state.raw_len(3).unwrap_err().kind(),
         ErrorKind::TypeError(TypeError::Length(LuaType::Number))
     ));
     assert!(matches!(
-        state.raw_len(9).unwrap_err().kind,
+        state.raw_len(9).unwrap_err().kind(),
         ErrorKind::InvalidStackIndex { index: 9 }
     ));
 }
@@ -159,12 +159,12 @@ fn get_table_preserves_the_key_on_dispatch_preflight_failures() {
         state.push_string("missing").unwrap();
         let err = state.get_table(1).expect_err("dispatch must fail");
         match handler {
-            "5" => assert!(matches!(err.kind, ErrorKind::TypeError(_))),
+            "5" => assert!(matches!(err.kind(), ErrorKind::TypeError(_))),
             "t" => assert!(matches!(
-                err.kind,
+                err.kind(),
                 ErrorKind::MetamethodDepthExceeded { .. }
             )),
-            _ => assert!(matches!(err.kind, ErrorKind::StackOverflow { .. })),
+            _ => assert!(matches!(err.kind(), ErrorKind::StackOverflow { .. })),
         }
         assert_eq!(state.get_top(), expected_top);
         assert_eq!(state.to_string(-1).unwrap(), "missing");

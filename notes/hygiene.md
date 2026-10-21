@@ -34,14 +34,13 @@ to `brokkr check`.
 
 ## HYG-004 - Two opcode-to-function tables for arithmetic
 
-Reported by the compiler hunter. (A `const fn arith_fn` does not compile with
-its `unreachable!` fallback.)
+Reported by the compiler hunter; narrowed in wave 4 (`arith_fn` returns
+`Option` and its parser callers report `InternalError`).
 
 `numeral::arith_fn` and the `vm/frame.rs` dispatch arms still map the five
-arithmetic opcodes independently, and `arith_fn` keeps an `unreachable!` for
-non-foldable opcodes. Fix: carry the function in the `define_opcodes!` row in
-`instr.rs` (keeping dispatch on direct, inlineable calls), or make `arith_fn`
-return `Option` so its two parser callers report `InternalError`.
+arithmetic opcodes independently. Fix: carry the function in the
+`define_opcodes!` row in `instr.rs`, keeping dispatch on direct, inlineable
+calls.
 
 ## HYG-005 - Snapshot environment token names spelled at more than one site
 
@@ -123,16 +122,6 @@ check functions beside the constant, drop the re-exports. Enforcement is deletin
 them (no lint catches const re-exports); a dependency rule (HYG-027) holds the
 compiler side.
 
-## HYG-011 - Public line-number widths disagree
-
-Reported by the host-surface hunter.
-
-`Error::line_num: usize`, `Error::column: usize`, `StackFrame::line: u32`,
-`on_print(line: u32)`. `limits.rs` says source size is capped so lines fit u32.
-Pick `u32` on the public surface. Enforceable by type.
-
----
-
 ## Cost model
 
 ## HYG-012 - Budget state has two representations and is not validated on restore
@@ -159,20 +148,6 @@ that hands out `CostMeter`), `cost_remaining()` a single `map_or`; snapshot
 encoding follows the type (tag byte + payload). Enforceable by type.
 
 ## Compiler front end
-
-## HYG-024 - Line attribution depends on which token-consumption helper a site used
-
-Reported by the compiler hunter (not verified against reference line numbers; a
-probe is warranted).
-
-`current_line` updates only in `Parser::expect` and at statement start; `next`,
-`try_pop` and `check_type` leave it. In `local x = a +\n b +\n c` the arithmetic
-ops carry the statement's line, and a `)` taken by `expect` on a later line moves
-everything after it. Calls work around it with an explicit `CallSite` line.
-Affects runtime error lines (operator-facing, not replay-visible). Fix: update the
-line in `TokenStream::next` and stamp operators with the operator token's line
-(`luaK_fixline`). Enforceable by a line-info golden test over multi-line
-expressions.
 
 ## HYG-027 - Compiler depends on the VM; runtime cache types and `unsafe impl Sync` live in the compiler
 
@@ -203,16 +178,6 @@ Code that pushes to a pool directly desynchronizes them silently. Fix: an
 `IndexSet<Vec<u8>>` (via det_hash) where index = position, converted in
 `finalize`; numbers keep a key newtype. Enforceable structurally.
 
-## HYG-030 - Compiler invariants panic while `finalize` argues they must be errors
-
-Reported by the compiler hunter; narrowed in wave 3 (the parser's panics are
-catchable invariant errors, except two documented `FunctionStack` guards).
-
-`compiler.rs` finalization still panics on invariant breaks (`finalize`'s
-`Arc::get_mut` expect, `strip_dead_instructions`), and `numeral::arith_fn` keeps
-an `unreachable!` (see HYG-004). Fix: convert those to `InternalError`; then
-scope `clippy::panic`, `unreachable`, `expect_used` to `compiler/`.
-
 ## HYG-034 - Dead or vestigial front-end code
 
 Reported by the compiler hunter.
@@ -232,29 +197,6 @@ Reported by the compiler hunter.
 ---
 
 ## VM execution core
-
-## HYG-036 - Global read/write rule implemented by four independent writers
-
-Reported by the VM-core hunter.
-
-The rule (builtins live in `builtins[]` mirrored into `globals`; nil to a
-never-defined name is a no-op while an existing name keeps a tombstone; a builtin
-rebind bumps `globals_version`) is implemented in `vm.rs::set_global_value_owned`
-(the documented central setter), `eval_index.rs::instr_set_builtin` (restates the
-tombstone rule, bumps the version unconditionally, correct only because every
-caller is a builtin), `eval_store.rs::instr_set_global` (slow path writes
-`globals` in place for existing non-builtin names) and `try_set_global_cached`
-(writes nil in place, the reason tombstones exist). `globals_version` is bumped in
-three places (`with_restricted_env` twice). The read side ("`Builtin::from_name`,
-then `globals`") repeats in `get_global`, `instr_get_global`,
-`with_restricted_env`, and probably the `_G` proxy in `basic.rs` (not verified).
-None disagree today. Lateral: `instr_set_builtin` does
-`globals.insert(builtin.name().to_string(), val)`, allocating a String per
-builtin assignment; use `get_mut` first.
-
-Fix: a `GlobalEnv` type owning `globals`, `builtins`, `globals_version` with
-private fields. Enforceable by module privacy, plus a debug assertion at GC mark
-that builtin slots equal their `globals` entries.
 
 ## HYG-037 - Metamethod event names interned by string literal at each dispatch site, with three error/allocation policies
 
@@ -309,21 +251,18 @@ belong to the same question. Fix: a `VerifiedBytecode` newtype only the verifier
 constructs, `Frame` accepts only that; then drop defensive checks everywhere or
 keep them everywhere. Enforceable by signature.
 
-## HYG-041 - Partial functions whose types admit inputs they panic on
+## HYG-041 - `Val` is `Eq` and `Hash` although NaN is not reflexive
 
-Reported by the VM-core and heap hunters.
+Reported by the VM-core and heap hunters; narrowed in wave 4 (`Val::hash` is
+total, `to_bytes_with_heap` returns `Option`, `format_pointer_id` is total, map
+slots are a `TableKey` newtype, and `live_hash_entries` skips dead slots).
 
-`Val::hash` panics on NaN (all callers filter first, enumerated in a comment);
-it is a `Hash` impl, so reachable by any future `IndexMap<Val, _>` user.
-`to_bytes_with_heap` (`pub(super)`) is `unreachable!` for 2 of 6 variants.
-`format_pointer_id` only `debug_assert!`s its input. `GcHeap::get`/`get_mut`/
-`StringPool::get` `expect` on stale pointers (the intended tripwire), but
-`table.rs`'s tombstone note ("the key of a dead slot may dangle ... must never
-dereference it") is the only thing stopping a new raw-slot walker that forgets the
-filter from aborting the host. Fix: a `TableKey` newtype built only through
-`normalize_table_key` as the only `Hash` implementor; a `Primitive` view or
-`Option` for `to_bytes_with_heap`; an iterator API that never yields dead slots.
-Enforceable by type.
+`Val` still implements `Eq`, and `Val::hash` maps NaN to a fixed token, so a NaN
+used as a key in any `Val`-keyed map (the pointer-id index is one) is stored but
+never found. No known path reaches it today. `TableKey::new` also repeats the
+`Val` to `TableKeyInput` mapping that `save_state.rs::runtime_table_key` does
+(see HYG-051). Fix: key the pointer-id index by a pointer-only type and drop
+`Hash`/`Eq` from `Val`.
 
 ## HYG-044 - Call-site recording and cost flushing placed by hand per opcode
 
@@ -471,20 +410,6 @@ x7) already truncate before constructing; delete the call-site copies and make
 
 ## Stdlib and patterns
 
-## HYG-072 - Argument-error construction bypasses its owner; library error text is free strings
-
-Reported by the stdlib hunter; narrowed in wave 3 (stdlib sites build typed
-`LibraryError` details through `State::library_error`, and `check_type_in`
-exists).
-
-Still open: `ArgError` fields are public (`lua_std.rs` mutates `func_name`,
-`vm/stack.rs` constructs it directly); `ArgDetail::Custom` and
-`OutOfBounds(String)` survive for compatibility though no source site builds
-them; `RuntimeError(String)` is still built directly in `vm/table_ops.rs` (six
-sites, including the host table API's "position out of bounds"). Fix: route
-those through `LibraryError`, then make `ArgError` fields private and drop the
-free-text variants.
-
 ## HYG-076 - Stdlib invariant panics restated per site
 
 Reported by the stdlib hunter.
@@ -503,56 +428,7 @@ asserted in `string.rs`; put `const _: () = assert!(..)` beside the constant.
 
 ## Host surface and CLI
 
-## HYG-083 - Cost-category counters enumerated at four sites
-
-Reported by the host-surface hunter.
-
-`ScopeCost` (7 counters), `ScopeTotals` (same plus `function_count`),
-`ScopeCost::accumulate`, `fmt_indent` and `CostAnalysis::fmt` enumerate categories
-field by field; only the `OpcodeCost` match in `analyze_chunk` is exhaustive.
-Labels re-encode opcode knowledge ("Arithmetic (+,-,*,/,%,^)") owned by
-`instr.rs`. Fix: `counts: [u64; OpcodeCost::COUNT]` with labels as an
-`OpcodeCost` method. Enforceable by type. Lateral: a zero-cost scope prints
-`cost 0 (free)` only when `function_calls == 0`, otherwise `cost 0` plus the
-breakdown (intentional per comment); `ScopeTotals.total_cost` is copied from root
-only to print.
-
-## HYG-084 - `Error` exposes the same data through pub fields and accessors; `on_error` source duplicates it
-
-Reported by the host-surface hunter.
-
-`Error` has `pub line_num`, `pub column` and `line_num()`/`column()`; `kind` and
-`stack_trace` are pub while `context` is private. Pub fields let hosts mutate or
-rebuild an error and lose the `reported` flag that gates `on_error` firing once,
-whose safety depends on re-raise paths carrying the same value.
-`on_error(source: Option<&str>, error)` passes a source that `Error::source_name()`
-and the first stack frame also carry; the `Display` doc spends a paragraph on how
-splicing two of them once produced wrong output. Fix: private fields with
-accessors; drop the parameter or document precisely why it differs. Enforceable by
-visibility.
-
----
-
 ## Tooling, tests and harnesses
-
-## HYG-086 - Examples corpus walked by five implementations with different rules
-
-Reported by the tooling and compiler hunters.
-
-`tests/run_examples.rs::collect_lua_files` (cwd-relative, follows symlinked dirs),
-`tests/diff_test.rs::collect_examples::visit` (cwd-relative, follows symlinks),
-the `src/compiler.rs` unit test `collect_lua_sources` (`CARGO_MANIFEST_DIR`, `> 20`
-vacuity floor), `scripts/diff_test.sh::append_lua_files` (`find -type f`, does not
-follow symlinks, `LC_ALL=C` sort), and `bench.sh` (reads brokkr.toml).
-`run_feature_test_extended_in_process` hard-codes one example path the walker
-already covers. Anchoring, vacuity guards and sort order (PathBuf component order
-vs C-locale byte order) differ; they agree only because the tree has no symlinks
-or diverging names. A second extension or a skip convention would split them. The
-compiler unit test cannot reach `tests/common`, so that copy is forced by the
-unit/integration boundary unless the test moves. Fix: one
-`tests/common::example_corpus()` anchored at `CARGO_MANIFEST_DIR`; a `cfg(test)`
-helper in src or move the compiler test; a parity test between the shell and Rust
-lists. Enforceable by the parity test.
 
 ## HYG-098 - Stale and drifting comments and docs
 
@@ -586,15 +462,13 @@ Reported by every hunter, at different sites.
 - AGENTS.md says the CLI carries both `disallowed_methods` and `disallowed_types`
   allows; `main` carries only the first. Reword to "scoped allows as needed".
 
-## HYG-100 - `Val`'s `Debug` prints a process-local slotmap key for objects
+## HYG-103 - Public error enums are exhaustive
 
-Reported by a wave 1 fixer; narrowed in wave 3 (strings now render as
-`<string>`).
+Reported by the wave 4 reconciler.
 
-`Val`'s `Debug` (`src/vm/lua_val.rs`) still forwards object values to
-`ObjectPtr`'s derived `Debug` (`src/vm/object.rs`), which renders the slotmap
-key, so `{:?}` of a table or closure differs between runs. No production
-formatting use was found. Fix: a fixed placeholder per object type.
+`LibraryError`, `ArgDetail` and `ErrorKind` gain and lose variants every few
+waves, and none is `#[non_exhaustive]`, so every change breaks a downstream
+exhaustive match. Fix: mark them non-exhaustive while pre-1.0.
 
 ## HYG-099 - `#[hotpath::measure]` on trivial functions distorts the distribution
 

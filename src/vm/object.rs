@@ -10,6 +10,7 @@
 
 use crate::det_hash::IndexMap;
 use std::cell::Cell;
+use std::fmt;
 use std::sync::Arc;
 
 use slotmap::{SlotMap, new_key_type};
@@ -241,8 +242,15 @@ new_key_type! {
 /// - Each key contains a generation number
 /// - When a slot is freed and reused, the generation increments
 /// - Accessing with an old key panics instead of causing memory corruption
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) struct ObjectPtr(pub(crate) ObjectKey);
+
+/// Slotmap keys are process-local, so diagnostics keep the pointer opaque.
+impl fmt::Debug for ObjectPtr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("<object>")
+    }
+}
 
 impl ObjectPtr {
     /// Get the type of this object.

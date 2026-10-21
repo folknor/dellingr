@@ -1,8 +1,8 @@
 use std::str;
 
 use super::super::compiler::{
-    FieldLookupCacheEntry, FieldLookupCacheSlot, GlobalLookupCacheEntry, GlobalLookupCacheSlot,
-    MethodLookupCacheEntry, StringMethodCacheEntry,
+    FieldLookupCacheEntry, FieldLookupCacheSlot, GlobalLookupCacheSlot, MethodLookupCacheEntry,
+    StringMethodCacheEntry,
 };
 use super::super::error::{ErrorKind, TypeError};
 use super::LuaType;
@@ -347,7 +347,7 @@ impl State {
                     index_handler,
                     0,
                     None,
-                    self.globals_version,
+                    self.global_env.version(),
                 ));
             }
             return None;
@@ -361,7 +361,7 @@ impl State {
                     index_handler,
                     0,
                     None,
-                    self.globals_version,
+                    self.global_env.version(),
                 ));
             }
             return None;
@@ -376,7 +376,7 @@ impl State {
                     index_handler,
                     method_table_version,
                     None,
-                    self.globals_version,
+                    self.global_env.version(),
                 ));
             }
             return None;
@@ -390,7 +390,7 @@ impl State {
                 index_handler,
                 method_table_version,
                 Some(method_index),
-                self.globals_version,
+                self.global_env.version(),
             ));
         }
 
@@ -412,7 +412,7 @@ impl State {
         // `mt.__index = string` (or similar) and stays alive across the
         // swap, so without this check a pre-warmed callsite resurrects
         // the pre-swap binding inside the sandbox.
-        if entry.globals_version != self.globals_version {
+        if entry.globals_version != self.global_env.version() {
             return None;
         }
 
@@ -457,7 +457,7 @@ impl State {
                 entry.index_handler,
                 method_table_version,
                 Some(method_index),
-                self.globals_version,
+                self.global_env.version(),
             ));
             Some(Some(method))
         } else {
@@ -512,21 +512,7 @@ impl State {
                 "compiler emitted non-UTF-8 global name".to_string(),
             ))
         })?;
-        let val = if let Some(slot) = crate::instr::Builtin::from_name(name) {
-            self.builtins[slot as usize]
-        } else if let Some(index) = self.globals.get_index_of(name) {
-            if let Some(cache) = cache {
-                cache.set(GlobalLookupCacheEntry {
-                    globals_version: self.globals_version,
-                    index,
-                });
-            }
-            self.globals
-                .get_index(index)
-                .map_or_else(Val::default, |(_, val)| *val)
-        } else {
-            Val::Nil
-        };
+        let val = self.global_env.read(name, cache);
         self.check_stack_space(1)?;
         self.push_unchecked(val);
         Ok(())
@@ -534,17 +520,13 @@ impl State {
 
     #[inline(always)]
     pub(super) fn get_cached_global(&self, cache: &GlobalLookupCacheSlot) -> Option<Val> {
-        let entry = cache.get()?;
-        if entry.globals_version != self.globals_version {
-            return None;
-        }
-        self.globals.get_index(entry.index).map(|(_, val)| *val)
+        self.global_env.read_cached(cache)
     }
 
     /// Fast path for getting well-known builtin globals.
     #[inline(always)]
     pub(super) fn instr_get_builtin(&mut self, slot: u8) -> Result<()> {
-        let val = self.builtins[slot as usize];
+        let val = self.global_env.builtin(slot);
         self.check_stack_space(1)?;
         self.push_unchecked(val);
         Ok(())
@@ -554,18 +536,7 @@ impl State {
     #[inline(always)]
     pub(super) fn instr_set_builtin(&mut self, slot: u8) {
         let val = self.pop_val();
-        self.builtins[slot as usize] = val;
-        // Global lookup caches and conservatively guarded table-method
-        // caches revalidate after a builtin binding changes. String-method
-        // caches instead validate the shared string metatable's handler.
-        self.globals_version = self.globals_version.wrapping_add(1);
-        // Also update globals for _G compatibility, retaining existing
-        // tombstones but avoiding an entry for a never-defined nil builtin.
-        if let Some(builtin) = crate::instr::Builtin::from_u8(slot)
-            && (!matches!(val, Val::Nil) || self.globals.contains_key(builtin.name()))
-        {
-            self.globals.insert(builtin.name().to_string(), val);
-        }
+        self.global_env.write_builtin(slot, val);
     }
 
     #[inline(always)]

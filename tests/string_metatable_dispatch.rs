@@ -57,7 +57,7 @@ fn host_get_table_on_string_preserves_operands_at_the_stack_cap() {
     state.set_top(isize::try_from(cap - 1).unwrap()).unwrap();
     state.push_string("upper").unwrap();
     let error = state.get_table(1).unwrap_err();
-    assert!(matches!(error.kind, ErrorKind::StackOverflow { .. }));
+    assert!(matches!(error.kind(), ErrorKind::StackOverflow { .. }));
     assert_eq!(state.get_top(), cap);
     assert_eq!(state.to_bytes(1).unwrap(), b"abc");
     assert_eq!(state.to_bytes(-1).unwrap(), b"upper");
@@ -75,7 +75,7 @@ fn error_keeps_a_string_message_raw_despite_tostring() {
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .unwrap_err();
     assert!(matches!(
-        error.kind,
+        error.kind(),
         ErrorKind::ScriptError { message, .. } if message == "raw message"
     ));
 }
@@ -200,9 +200,9 @@ fn lossy_host_conversion_is_size_checked() {
         state.to_string(-1).unwrap_err(),
     ] {
         assert!(matches!(
-            error.kind,
+            error.kind(),
             ErrorKind::StringSizeExceeded { size, limit }
-                if size == raw.len() * 3 && limit == MAX_STRING_BYTES
+                if *size == raw.len() * 3 && *limit == MAX_STRING_BYTES
         ));
     }
     assert_eq!(state.get_top(), 1);
@@ -224,9 +224,9 @@ fn lossy_host_conversion_is_size_checked() {
     );
     state.push_string("small").unwrap();
     assert!(matches!(
-        state.to_string_with_meta(-1).unwrap_err().kind,
+        state.to_string_with_meta(-1).unwrap_err().kind(),
         ErrorKind::StringSizeExceeded { size, limit }
-            if size == raw.len() * 3 && limit == MAX_STRING_BYTES
+            if *size == raw.len() * 3 && *limit == MAX_STRING_BYTES
     ));
     assert_eq!(state.to_string(-1).unwrap(), "small");
 }

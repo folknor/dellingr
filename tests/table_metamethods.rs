@@ -72,7 +72,7 @@ fn newindex_self_loop_hits_the_metamethod_depth_limit() {
     let err =
         run("local a = {}\nsetmetatable(a, {__newindex = a})\ntable.insert(a, 1)").unwrap_err();
     assert!(
-        matches!(err.kind, ErrorKind::MetamethodDepthExceeded { .. }),
+        matches!(err.kind(), ErrorKind::MetamethodDepthExceeded { .. }),
         "expected MetamethodDepthExceeded, got {err}"
     );
 }
@@ -179,7 +179,7 @@ fn library_newindex_uses_the_shared_depth_limit_across_function_calls() {
     ))
     .unwrap_err();
     assert!(
-        matches!(err.kind, ErrorKind::MetamethodDepthExceeded { .. }),
+        matches!(err.kind(), ErrorKind::MetamethodDepthExceeded { .. }),
         "expected the shared metamethod limit, got {err}"
     );
 }

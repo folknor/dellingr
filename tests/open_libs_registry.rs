@@ -29,7 +29,7 @@ fn conflicting_preregistered_id_leaves_state_untouched() {
 
     let error = state.open_libs().expect_err("id conflicts");
     assert!(
-        matches!(error.kind, ErrorKind::DuplicateFunctionRegistration { id } if id == "string.find")
+        matches!(error.kind(), ErrorKind::DuplicateFunctionRegistration { id } if id == "string.find")
     );
     assert_eq!(state.get_top(), top);
     assert_eq!(state.heap_size(), heap_size);
@@ -59,7 +59,7 @@ fn conflicting_hidden_iterator_id_leaves_existing_environment_untouched() {
     let heap_size = state.heap_size();
     let error = state.open_libs().expect_err("hidden iterator id conflicts");
     assert!(
-        matches!(error.kind, ErrorKind::DuplicateFunctionRegistration { id }
+        matches!(error.kind(), ErrorKind::DuplicateFunctionRegistration { id }
         if id == "string.gmatch.empty_iter")
     );
     assert_eq!(state.heap_size(), heap_size);

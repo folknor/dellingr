@@ -61,7 +61,7 @@ fn push_anchor_after_release_returns_invalid_anchor() {
     assert!(state.release_anchor(a));
 
     let err = state.push_anchor(a).unwrap_err();
-    assert!(matches!(err.kind, ErrorKind::InvalidAnchor));
+    assert!(matches!(err.kind(), ErrorKind::InvalidAnchor));
 }
 
 #[test]
@@ -79,7 +79,7 @@ fn generation_rejects_stale_handle_after_slot_reuse() {
 
     // Old handle is now stale.
     let err = state.push_anchor(a).unwrap_err();
-    assert!(matches!(err.kind, ErrorKind::InvalidAnchor));
+    assert!(matches!(err.kind(), ErrorKind::InvalidAnchor));
 
     // New handle still works.
     state.push_anchor(b).unwrap();
@@ -95,7 +95,7 @@ fn cross_state_anchor_is_rejected() {
     let a = state_a.anchor().unwrap();
 
     let err = state_b.push_anchor(a).unwrap_err();
-    assert!(matches!(err.kind, ErrorKind::InvalidAnchor));
+    assert!(matches!(err.kind(), ErrorKind::InvalidAnchor));
 
     // Releasing a wrong-state handle is a no-op (returns false).
     assert!(!state_b.release_anchor(a));
@@ -106,7 +106,7 @@ fn anchor_nil_is_rejected() {
     let mut state = State::new();
     state.push_nil().unwrap();
     let err = state.anchor().unwrap_err();
-    assert!(matches!(err.kind, ErrorKind::AnchorNil));
+    assert!(matches!(err.kind(), ErrorKind::AnchorNil));
 }
 
 #[test]
@@ -116,7 +116,7 @@ fn anchor_at_nil_is_rejected_without_popping() {
     state.push_nil().unwrap();
 
     let err = state.anchor_at(-1).unwrap_err();
-    assert!(matches!(err.kind, ErrorKind::AnchorNil));
+    assert!(matches!(err.kind(), ErrorKind::AnchorNil));
 
     // Stack still holds [1.0, nil]; anchor_at didn't touch it.
     assert_eq!(state.typ(-1), LuaType::Nil);
@@ -165,7 +165,7 @@ fn anchor_does_not_pop_on_nil_error() {
     state.push_number(7.0).unwrap();
     state.push_nil().unwrap();
     assert!(matches!(
-        state.anchor().unwrap_err().kind,
+        state.anchor().unwrap_err().kind(),
         ErrorKind::AnchorNil,
     ));
     // Error path leaves the stack untouched, matching anchor_at.
@@ -180,7 +180,7 @@ fn anchor_function_does_not_pop_on_type_error() {
     state.push_number(7.0).unwrap();
     state.push_number(1.0).unwrap();
     let err = state.anchor_function().unwrap_err();
-    assert!(matches!(err.kind, ErrorKind::TypeError(_)));
+    assert!(matches!(err.kind(), ErrorKind::TypeError(_)));
     assert_eq!(state.get_top(), 2);
     assert_eq!(state.to_number(-1).unwrap(), 1.0);
     assert_eq!(state.to_number(-2).unwrap(), 7.0);
@@ -194,7 +194,7 @@ fn call_anchor_rejects_dynamic_arg_count() {
     let err = state
         .call_anchor(a, ArgCount::Dynamic, RetCount::Fixed(0))
         .expect_err("Dynamic args have no host-API call-base, must be rejected");
-    assert!(matches!(err.kind, ErrorKind::InternalError(_)));
+    assert!(matches!(err.kind(), ErrorKind::InternalError(_)));
 }
 
 #[test]

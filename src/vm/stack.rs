@@ -315,13 +315,14 @@ impl State {
         // including when a snapshot supplies a wrong type. Reserve internal
         // errors for missing cache entries and failed-compilation ordering;
         // neither changes the argument index or the expected value type.
-        Err(self.error(ErrorKind::ArgError(crate::error::ArgError {
-            arg_number: idx,
-            func_name: function_name.map(ToOwned::to_owned),
-            detail: crate::error::ArgDetail::TypeMismatch,
-            expected: Some(super::LuaType::String),
-            received: Some(val.typ(&self.heap)),
-        })))
+        Err(
+            self.error(ErrorKind::ArgError(crate::error::ArgError::type_mismatch(
+                idx,
+                function_name,
+                super::LuaType::String,
+                Some(val.typ(&self.heap)),
+            ))),
+        )
     }
 
     /// Returns the type of the value at the given acceptable index.

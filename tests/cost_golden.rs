@@ -118,7 +118,7 @@ fn cost_used_after_runtime_error_matches_golden_corpus() {
                 .call(ArgCount::Fixed(0), RetCount::Fixed(0))
                 .expect_err("golden error source must fail at runtime");
             assert!(
-                matches!(error.kind, ErrorKind::TypeError(_)),
+                matches!(error.kind(), ErrorKind::TypeError(_)),
                 "{name} (budget {budget:?}): expected a type error, got {error:?}"
             );
             assert_eq!(
@@ -153,7 +153,7 @@ fn unpack_charges_nothing_for_lookups_reached_before_an_index_error() {
         let err = state
             .call(ArgCount::Fixed(0), RetCount::Fixed(0))
             .expect_err("first lookup errors");
-        assert!(matches!(err.kind, ErrorKind::TypeError(_)));
+        assert!(matches!(err.kind(), ErrorKind::TypeError(_)));
         costs.push(state.cost_used());
     }
     // Two tables, one field initializer, and the failing handler add.

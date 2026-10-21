@@ -380,7 +380,10 @@ fn format_argument(state: &mut State, argument: usize, directive: &Directive) ->
                 // the reference - `string.format("%p", 42)` prints `(null)`.
                 LuaType::Nil | LuaType::Boolean | LuaType::Number => b"(null)".to_vec(),
                 LuaType::String | LuaType::Table | LuaType::Function => {
-                    format!("0x{:x}", state.format_pointer_id(idx)?).into_bytes()
+                    match state.format_pointer_id(idx)? {
+                        Some(id) => format!("0x{id:x}").into_bytes(),
+                        None => b"(null)".to_vec(),
+                    }
                 }
             };
             Ok(pad_bytes(&bytes, directive.width, directive.flags.left))

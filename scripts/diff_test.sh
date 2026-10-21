@@ -20,6 +20,9 @@
 #   DELLINGR_DIFF_TIMEOUT=<time>  per-process timeout (default is in lib.sh)
 #   DELLINGR_DIFF_TIMEOUT=0       disable the per-process timeout
 #
+# Internal input mode:
+#   --list-examples               print the default example paths and exit
+#
 # Output is intentionally terse: prints "ok" on success, or one failure line
 # per failing script. Invalid timeout configuration exits 2; gate failures exit 1.
 
@@ -29,6 +32,24 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 cd "$SCRIPT_DIR/.." || exit 1
 ROOT="$(pwd -P)"
 . "$SCRIPT_DIR/lib.sh"
+
+scripts=()
+append_lua_files() {
+    local root="$1"
+    local file
+    while IFS= read -r file
+    do
+        scripts+=("$file")
+    done < <(sorted_lua_files "$root")
+}
+
+if [ "$#" -eq 1 ] && [ "$1" = "--list-examples" ]; then
+    append_lua_files examples
+    if [ "${#scripts[@]}" -gt 0 ]; then
+        printf '%s\n' "${scripts[@]}"
+    fi
+    exit 0
+fi
 
 DURATION_RE='^\+?([0-9]+([.][0-9]*)?|[.][0-9]+)([smhd])?$'
 if [[ ! "$DELLINGR_DIFF_TIMEOUT" =~ $DURATION_RE ]]; then
@@ -87,16 +108,6 @@ LUA54_OUT="$(mktemp "$SCRATCH_DIR/dellingr-diff-lua54.XXXXXX")" || {
     exit 1
 }
 trap 'rm -f "$OUR_OUT" "$LUA52_OUT" "$LUA54_OUT"' EXIT
-
-scripts=()
-append_lua_files() {
-    local root="$1"
-    local file
-    while IFS= read -r file
-    do
-        scripts+=("$file")
-    done < <(find "$root" -type f -name '*.lua' -print | LC_ALL=C sort)
-}
 
 if [ "$#" -gt 0 ]; then
     scripts=()

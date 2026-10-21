@@ -62,7 +62,7 @@ fn vm_test01() {
     let mut state = State::new();
     let input = parse_str("a = 1").unwrap();
     state.eval_chunk(input, 0).unwrap();
-    assert_eq!(Val::Num(1.0), *state.globals.get("a").unwrap());
+    assert_eq!(Val::Num(1.0), *state.global_env.get("a").unwrap());
 }
 
 #[test]
@@ -72,12 +72,12 @@ fn nil_assignment_does_not_create_unknown_globals_including_builtins() {
     state
         .call(crate::instr::ArgCount::Fixed(0), RetCount::Fixed(0))
         .unwrap();
-    assert!(state.globals.is_empty());
+    assert!(state.global_env.is_empty());
     for name in ["never_set", "print"] {
         state.push_nil().unwrap();
         state.set_global(name).unwrap();
     }
-    assert!(state.globals.is_empty());
+    assert!(state.global_env.is_empty());
 }
 
 #[test]
@@ -95,7 +95,7 @@ fn vm_test02() {
         ..Bytecode::default()
     };
     state.eval_chunk(input, 0).unwrap();
-    let val = state.globals.get("key").unwrap();
+    let val = state.global_env.get("key").unwrap();
     assert_eq!(val.as_string(&state.heap), Some(&b"ab"[..]));
 }
 
@@ -115,7 +115,7 @@ fn vm_test04() {
         ..Bytecode::default()
     };
     state.eval_chunk(input, 0).unwrap();
-    assert_eq!(Val::Bool(true), *state.globals.get("a").unwrap());
+    assert_eq!(Val::Bool(true), *state.global_env.get("a").unwrap());
 }
 
 #[test]
@@ -134,7 +134,7 @@ fn vm_test05() {
         ..Bytecode::default()
     };
     state.eval_chunk(input, 0).unwrap();
-    assert_eq!(Val::Bool(false), *state.globals.get("key").unwrap());
+    assert_eq!(Val::Bool(false), *state.global_env.get("key").unwrap());
 }
 
 #[test]
@@ -154,7 +154,7 @@ fn vm_test06() {
         ..Bytecode::default()
     };
     state.eval_chunk(chunk, 0).unwrap();
-    assert_eq!(Val::Num(5.0), *state.globals.get("a").unwrap());
+    assert_eq!(Val::Num(5.0), *state.global_env.get("a").unwrap());
 }
 
 #[test]
@@ -176,7 +176,7 @@ fn vm_test07() {
         ..Bytecode::default()
     };
     state.eval_chunk(chunk, 0).unwrap();
-    assert!(state.globals.get("a").is_none());
+    assert!(state.global_env.get("a").is_none());
 }
 
 #[test]
@@ -237,7 +237,7 @@ fn vm_test09() {
     };
     let mut state = State::new();
     state.eval_chunk(chunk, 0).unwrap();
-    assert_eq!(Val::Num(10.0), *state.globals.get("x").unwrap());
+    assert_eq!(Val::Num(10.0), *state.global_env.get("x").unwrap());
 }
 
 #[test]
@@ -264,7 +264,7 @@ fn vm_test10() {
     };
     let mut state = State::new();
     state.eval_chunk(chunk, 0).unwrap();
-    assert!(state.globals.get("a").is_none());
+    assert!(state.global_env.get("a").is_none());
 }
 
 #[test]
@@ -277,7 +277,7 @@ fn vm_test11() {
     let chunk = parse_str(text).unwrap();
     let mut state = State::new();
     state.eval_chunk(chunk, 0).unwrap();
-    let a = state.globals.get("a").unwrap().as_num().unwrap();
+    let a = state.global_env.get("a").unwrap().as_num().unwrap();
     assert_eq!(a, 6.0);
 }
 
@@ -352,7 +352,7 @@ fn gc_preserves_nested_suspended_environments() {
         });
 
         let outer = *state
-            .globals
+            .global_env
             .get("outer")
             .expect("outer restricted value must be restored");
         // Dereference through the heap. `as_object_ptr().is_some()` only
@@ -365,14 +365,14 @@ fn gc_preserves_nested_suspended_environments() {
     });
 
     let original = *state
-        .globals
+        .global_env
         .get("original")
         .expect("original value must be restored");
     assert!(
         live_table(&state, original),
         "original global was collected"
     );
-    let math = state.builtins[crate::instr::Builtin::Math as usize];
+    let math = state.global_env.builtin(crate::instr::Builtin::Math as u8);
     assert!(live_table(&state, math), "math library table was collected");
 }
 
@@ -674,8 +674,8 @@ fn error_line_numbers() {
     assert!(result.is_err());
     let err = result.unwrap_err();
     // Check the stack trace points to line 3
-    assert!(!err.stack_trace.is_empty());
-    assert_eq!(err.stack_trace[0].line, 3);
+    assert!(!err.stack_trace().is_empty());
+    assert_eq!(err.stack_trace()[0].line, 3);
 }
 
 // --- MAX_STACK_SIZE is a real cap on the shared Lua/Rust value stack ---
@@ -736,9 +736,9 @@ fn a_rejected_push_reports_stack_overflow() {
 
     let err = state.push_nil().expect_err("the cap must be enforced");
     assert!(
-        matches!(err.kind, crate::error::ErrorKind::StackOverflow { .. }),
+        matches!(err.kind(), crate::error::ErrorKind::StackOverflow { .. }),
         "expected StackOverflow, got {:?}",
-        err.kind
+        err.kind()
     );
 }
 
@@ -785,9 +785,9 @@ fn table_next_preflights_its_net_growth_before_replacing_the_key() {
         .table_next(1)
         .expect_err("popping one and pushing two must not fit at the cap");
     assert!(
-        matches!(err.kind, crate::error::ErrorKind::StackOverflow { .. }),
+        matches!(err.kind(), crate::error::ErrorKind::StackOverflow { .. }),
         "expected StackOverflow, got {:?}",
-        err.kind
+        err.kind()
     );
     assert_eq!(state.get_top(), MAX_STACK_SIZE);
     assert_eq!(state.typ(-1), crate::LuaType::Nil);
@@ -830,7 +830,10 @@ fn open_libs_is_all_or_nothing_against_the_cap() {
     // `State::open_libs` is public, so a host can call it on a full stack. It
     // must refuse up front rather than installing part of the standard library.
     let mut state = State::empty();
-    assert!(state.globals.is_empty(), "empty() starts with no globals");
+    assert!(
+        state.global_env.is_empty(),
+        "empty() starts with no globals"
+    );
 
     // Three free slots allow early global installs but not the four values
     // needed for `_G`'s protection field. Without the up-front reservation,
@@ -841,7 +844,7 @@ fn open_libs_is_all_or_nothing_against_the_cap() {
 
     assert!(state.open_libs().is_err(), "no headroom for library setup");
     assert!(
-        state.globals.is_empty(),
+        state.global_env.is_empty(),
         "a rejected open_libs must not install any globals"
     );
 }
@@ -1026,9 +1029,9 @@ fn length_metamethod_preflights_three_slots_at_the_stack_cap() {
             .instr_length(&mut 0)
             .expect_err("three slots do not fit");
         assert!(matches!(
-            error.kind,
+            error.kind(),
             crate::error::ErrorKind::StackOverflow { size, limit }
-                if size == entry_size + 2 && limit == MAX_STACK_SIZE
+                if *size == entry_size + 2 && *limit == MAX_STACK_SIZE
         ));
         assert_eq!(state.get_top(), entry_size - 1);
         assert_eq!(*state.user_data::<usize>().unwrap(), 0);
@@ -1050,20 +1053,32 @@ fn exhausted_format_pointer_counter_does_not_wrap_or_mutate() {
     state.new_table().unwrap();
     state.new_table().unwrap();
     state.next_format_pointer_id = u64::MAX - 1;
-    assert_eq!(state.format_pointer_id(1).unwrap(), u64::MAX - 1);
+    assert_eq!(state.format_pointer_id(1).unwrap(), Some(u64::MAX - 1));
     assert_eq!(state.next_format_pointer_id, u64::MAX);
 
     let error = state
         .format_pointer_id(2)
         .expect_err("counter must not wrap");
     assert!(matches!(
-        error.kind,
-        crate::error::ErrorKind::RuntimeError(ref message)
+        error.kind(),
+        crate::error::ErrorKind::RuntimeError(message)
             if message == "format pointer identity space exhausted"
+    ));
+    assert!(matches!(
+        error.library_error(),
+        Some(crate::error::LibraryError::FormatPointerIdentitySpaceExhausted)
     ));
     assert_eq!(state.next_format_pointer_id, u64::MAX);
     assert_eq!(state.format_pointer_ids.len(), 1);
-    assert_eq!(state.format_pointer_id(1).unwrap(), u64::MAX - 1);
+    assert_eq!(state.format_pointer_id(1).unwrap(), Some(u64::MAX - 1));
+    state.push_number(f64::NAN).unwrap();
+    assert_eq!(
+        state.format_pointer_id(-1).unwrap(),
+        None,
+        "values without pointer identity never enter the id map"
+    );
+    assert_eq!(state.format_pointer_ids.len(), 1);
+    state.pop_val();
     assert_eq!(state.get_top(), 2);
 }
 

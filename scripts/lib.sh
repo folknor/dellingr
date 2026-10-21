@@ -138,6 +138,7 @@ dellingr_bin() {
     dellingr_bin_built "$1"
 }
 
+# This is a curated benchmark subset from brokkr.toml, not an examples corpus walk.
 workload_hotpath_files() {
     if [ "$#" -gt 1 ]; then
         echo "usage: workload_hotpath_files [workload-name]" >&2
@@ -213,4 +214,14 @@ shell_quote() {
         return 2
     fi
     printf '%q' "$1"
+}
+
+# Match tests/common::example_corpus: regular files only and C-locale byte order.
+sorted_lua_files() {
+    if [ "$#" -ne 1 ]; then
+        echo "usage: sorted_lua_files <directory>" >&2
+        return 2
+    fi
+
+    find "$1" -type f -name '*.lua' -print | LC_ALL=C sort
 }

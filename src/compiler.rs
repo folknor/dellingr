@@ -1,5 +1,10 @@
 //! Functions and types associated with converting source code into bytecode.
 
+#![cfg_attr(
+    not(test),
+    deny(clippy::panic, clippy::unreachable, clippy::expect_used)
+)]
+
 mod exp_desc;
 mod lexer;
 mod parser;
@@ -93,7 +98,7 @@ pub(super) struct MethodLookupCacheEntry {
     pub(super) index_handler: Val,
     pub(super) method_table_version: u64,
     pub(super) method_index: Option<usize>,
-    /// Snapshot of `State::globals_version` when the entry was populated.
+    /// Snapshot of the global environment version when the entry was populated.
     /// Bumped on builtin rebind / `with_restricted_env` swap, so a cached
     /// `index_handler` that resolved through a global library table
     /// (e.g. `__index = string`) re-validates after the binding changes.
@@ -339,14 +344,18 @@ fn strip_dead_instructions(bc: &mut Bytecode) -> Result<()> {
     }
 
     let old_len = bc.code.len();
-    let mut map = Vec::with_capacity(old_len + 1);
-    map.push(0usize);
-    for removed in &remove {
-        let retained =
-            map.last().copied().expect("boundary map starts non-empty") + usize::from(!*removed);
-        map.push(retained);
+    if bc.line_info.len() != old_len {
+        return Err(internal_error(
+            "instruction stripping requires one line per instruction",
+        ));
     }
-    let retained_len = *map.last().expect("boundary map starts non-empty");
+    let mut map = Vec::with_capacity(old_len + 1);
+    let mut retained_len = 0usize;
+    map.push(retained_len);
+    for removed in &remove {
+        retained_len += usize::from(!*removed);
+        map.push(retained_len);
+    }
 
     for (source, inst) in bc.code.iter_mut().enumerate() {
         let Some(_) = transfer_with_offset(*inst, 0) else {
@@ -372,7 +381,7 @@ fn strip_dead_instructions(bc: &mut Bytecode) -> Result<()> {
         }
         let new_offset = checked_remapped_offset(new_target as i64 - map[old_next] as i64)?;
         *inst = transfer_with_offset(*inst, new_offset)
-            .expect("transfer opcode was recognized before remapping");
+            .ok_or_else(|| internal_error("instruction stripping requires a transfer opcode"))?;
     }
 
     let old_code = std::mem::take(&mut bc.code);
@@ -390,7 +399,7 @@ fn strip_dead_instructions(bc: &mut Bytecode) -> Result<()> {
 ///
 /// These are never shared across `State`s: cached `ObjectPtr` keys are only
 /// valid inside the heap of the State that wrote them, and version cells are
-/// keyed to that State's `globals_version` / table versions. They are never
+/// keyed to that State's global environment version and table versions. They are never
 /// serialized and are rebuilt cold when a snapshot is loaded.
 ///
 /// The interior `Cell`s give cache writes a `&self`-only borrow shape, which
@@ -489,7 +498,7 @@ fn validation_error(bc: &Bytecode, validation: &verify::BytecodeValidationError)
         .instruction
         .and_then(|instruction| bc.line_info.get(instruction as usize))
     {
-        error = error.with_location(*line as usize, 0);
+        error = error.with_location(*line, 0);
     }
     error
 }
@@ -507,11 +516,9 @@ fn finalize_at_depth(bc: &mut Bytecode, depth: usize) -> Result<()> {
         }
         name.truncate(end);
     }
-    debug_assert_eq!(
-        bc.code.len(),
-        bc.line_info.len(),
-        "line_info desynced from code"
-    );
+    if bc.code.len() != bc.line_info.len() {
+        return Err(internal_error("line_info desynced from code"));
+    }
     strip_dead_instructions(bc).map_err(|error| error.with_source_name(bc.source.clone()))?;
     debug_assert_eq!(
         bc.code.len(),
@@ -529,8 +536,8 @@ fn finalize_at_depth(bc: &mut Bytecode, depth: usize) -> Result<()> {
     // let a release build emit stack-imbalanced bytecode and discover it later
     // as a VM panic, which is precisely the failure mode this crate refuses.
     // Reporting it as a compile error keeps a compiler bug catchable instead of
-    // fatal. The debug assertion stays on top so CI fails loudly at the source
-    // rather than surfacing it as a user-facing error.
+    // fatal. Line metadata is checked before stripping so a mismatch cannot
+    // silently truncate the instruction stream while the vectors are zipped.
     verify::validate_bytecode(bc).map_err(|error| validation_error(bc, &error))?;
     for child in &bc.nested {
         verify::validate_child(bc, child.as_ref()).map_err(|error| validation_error(bc, &error))?;
@@ -538,8 +545,9 @@ fn finalize_at_depth(bc: &mut Bytecode, depth: usize) -> Result<()> {
     for nested in &mut bc.nested {
         // The parser produces nested `Arc<Bytecode>` with a refcount of 1, so
         // we have unique access to mutate each one in place before it ships.
-        let inner =
-            Arc::get_mut(nested).expect("nested Bytecode should be uniquely owned during finalize");
+        let inner = Arc::get_mut(nested).ok_or_else(|| {
+            internal_error("nested bytecode must be uniquely owned during finalization")
+        })?;
         finalize_at_depth(inner, depth + 1)?;
     }
     Ok(())
@@ -584,18 +592,13 @@ mod runtime_cache_tests {
         }
     }
 
-    fn collect_lua_sources(directory: &std::path::Path, paths: &mut Vec<std::path::PathBuf>) {
-        let entries = std::fs::read_dir(directory).expect("examples directory must be readable");
-        for entry in entries {
-            let path = entry
-                .expect("example directory entry must be readable")
-                .path();
-            if path.is_dir() {
-                collect_lua_sources(&path, paths);
-            } else if path.extension().is_some_and(|extension| extension == "lua") {
-                paths.push(path);
-            }
-        }
+    /// The integration tests' examples-corpus walker, compiled into this unit
+    /// test so both share one traversal and ordering policy.
+    mod examples_corpus {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/common/examples.rs"
+        ));
     }
 
     fn deepest_accepted_program(source_for_depth: impl Fn(usize) -> String) -> (usize, Bytecode) {
@@ -607,7 +610,7 @@ mod runtime_cache_tests {
                 Ok(bytecode) => deepest = Some((depth, bytecode)),
                 Err(error) => {
                     assert!(matches!(
-                        error.kind,
+                        error.kind(),
                         ErrorKind::SyntaxError(SyntaxError::TooManySyntaxLevels)
                     ));
                     first_rejected = Some(depth);
@@ -684,10 +687,7 @@ mod runtime_cache_tests {
 
     #[test]
     fn compiler_examples_pass_stack_discipline_verification() {
-        let mut paths = Vec::new();
-        let examples_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
-        collect_lua_sources(&examples_dir, &mut paths);
-        paths.sort();
+        let paths = examples_corpus::example_corpus();
         // Without this the corpus proof passes vacuously if the walk finds
         // nothing, which is exactly the failure mode that would let a verifier
         // that rejects real compiler output reach a release.
@@ -979,6 +979,21 @@ mod runtime_cache_tests {
     }
 
     #[test]
+    fn finalize_rejects_shared_nested_chunks_and_missing_lines() {
+        let mut shared =
+            parser::parse_str("return function() end").expect("nested fixture compiles");
+        let retained_child = Arc::clone(&shared.nested[0]);
+        let error = finalize(&mut shared).expect_err("shared child cannot be finalized in place");
+        assert!(matches!(error.kind(), ErrorKind::InternalError(_)));
+        drop(retained_child);
+
+        let mut missing = parser::parse_str("return 1").expect("fixture compiles");
+        missing.line_info.clear();
+        let error = finalize(&mut missing).expect_err("missing lines must be recoverable");
+        assert!(matches!(error.kind(), ErrorKind::InternalError(_)));
+    }
+
+    #[test]
     fn strip_rejects_bad_targets_and_unrepresentable_offsets() {
         let mut bad_target = Bytecode {
             code: vec![
@@ -1061,9 +1076,9 @@ mod runtime_cache_tests {
         let after = crate::ScopeCost::analyze_chunk(&raw, "main".to_string());
         assert_eq!(after.own_cost, before.own_cost);
         assert_eq!(after.total_cost, before.total_cost);
-        assert_eq!(after.arithmetic_ops, before.arithmetic_ops);
-        assert_eq!(after.table_creations, before.table_creations);
-        assert_eq!(after.table_writes, before.table_writes);
+        assert_eq!(after.arithmetic_ops(), before.arithmetic_ops());
+        assert_eq!(after.table_creations(), before.table_creations());
+        assert_eq!(after.table_writes(), before.table_writes());
         assert!(after.instructions < before.instructions);
     }
 }

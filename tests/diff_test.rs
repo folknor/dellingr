@@ -14,8 +14,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-#[cfg(not(feature = "hotpath"))]
 mod common;
+#[path = "common/examples.rs"]
+mod example_files;
 
 fn manifest_path(relative: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
@@ -46,20 +47,9 @@ fn malformed_timeout_is_rejected_once_before_other_checks() {
     );
 }
 
-fn collect_empty_reason_markers(dir: &Path, root: &Path, empty: &mut Vec<String>) {
-    for entry in fs::read_dir(dir).expect("examples directory should be readable") {
-        let path = entry
-            .expect("examples directory entry should be readable")
-            .path();
-        if path.is_dir() {
-            collect_empty_reason_markers(&path, root, empty);
-            continue;
-        }
-        if path.extension().and_then(|ext| ext.to_str()) != Some("lua") {
-            continue;
-        }
-
-        let source = fs::read_to_string(&path).expect("example source should be readable");
+fn collect_empty_reason_markers(paths: &[PathBuf], root: &Path, empty: &mut Vec<String>) {
+    for path in paths {
+        let source = fs::read_to_string(path).expect("example source should be readable");
         for (line_number, line) in source.lines().enumerate() {
             let marker = line
                 .strip_prefix("-- DIFF:")
@@ -89,7 +79,8 @@ fn collect_empty_reason_markers(dir: &Path, root: &Path, empty: &mut Vec<String>
 fn diff_markers_have_nonempty_reasons() {
     let examples = manifest_path("examples");
     let mut empty = Vec::new();
-    collect_empty_reason_markers(&examples, &examples, &mut empty);
+    let corpus = example_files::example_corpus();
+    collect_empty_reason_markers(&corpus, &examples, &mut empty);
     empty.sort();
 
     assert!(
@@ -100,29 +91,69 @@ fn diff_markers_have_nonempty_reasons() {
 
 #[cfg(not(feature = "hotpath"))]
 fn collect_examples(include: impl Fn(&Path) -> bool) -> Vec<PathBuf> {
-    fn visit(dir: &Path, root: &Path, out: &mut Vec<PathBuf>, include: &impl Fn(&Path) -> bool) {
-        for entry in fs::read_dir(dir).expect("examples directory should be readable") {
-            let entry = entry.expect("examples directory entry should be readable");
-            let path = entry.path();
-            if path.is_dir() {
-                visit(&path, root, out, include);
-            } else if path.extension().is_some_and(|ext| ext == "lua") {
-                let rel = path
-                    .strip_prefix(root)
-                    .expect("example path should be under examples");
-                if include(rel) {
-                    out.push(path);
-                }
-            }
-        }
-    }
-
+    // The shared corpus is manifest-rooted; filters receive examples-relative paths.
     let root = manifest_path("examples");
-    let mut examples = Vec::new();
-    visit(&root, &root, &mut examples, &include);
-    examples.sort();
+    let examples: Vec<PathBuf> = example_files::example_corpus()
+        .into_iter()
+        .filter(|path| {
+            let relative = path
+                .strip_prefix(&root)
+                .expect("example corpus paths must be under the examples directory");
+            include(relative)
+        })
+        .collect();
     assert!(!examples.is_empty(), "differential test bucket is empty");
     examples
+}
+
+#[cfg(not(feature = "hotpath"))]
+#[test]
+fn shell_and_rust_example_corpora_match() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let output = Command::new("bash")
+        .arg(root.join("scripts/diff_test.sh"))
+        .arg("--list-examples")
+        .current_dir(root)
+        .output()
+        .expect("bash should be available to list the shell example corpus");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "shell corpus listing failed: {stderr}"
+    );
+    assert!(
+        stderr.is_empty(),
+        "shell corpus listing wrote stderr: {stderr}"
+    );
+
+    let examples_dir = root.join("examples");
+    let rust_paths: Vec<Vec<u8>> = example_files::example_corpus()
+        .iter()
+        .map(|path| {
+            path.strip_prefix(root)
+                .expect("example corpus paths must be rooted at the crate manifest")
+                .as_os_str()
+                .as_encoded_bytes()
+                .to_vec()
+        })
+        .collect();
+    assert!(!rust_paths.is_empty(), "example corpus must not be empty");
+    let shell_paths: Vec<Vec<u8>> = output
+        .stdout
+        .strip_suffix(b"\n")
+        .unwrap_or(&output.stdout)
+        .split(|byte| *byte == b'\n')
+        .filter(|_| !output.stdout.is_empty())
+        .map(<[u8]>::to_vec)
+        .collect();
+
+    assert_eq!(
+        shell_paths,
+        rust_paths,
+        "Rust example list differs from scripts/diff_test.sh under {}",
+        examples_dir.display()
+    );
 }
 
 #[cfg(not(feature = "hotpath"))]

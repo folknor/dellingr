@@ -15,10 +15,10 @@ fn host_string_limit_is_inclusive_and_leaves_stack_unchanged() {
     let err = state
         .push_bytes(vec![b'x'; MAX_STRING_BYTES + 1])
         .expect_err("a string above the limit must fail");
-    match err.kind {
+    match err.kind() {
         ErrorKind::StringSizeExceeded { size, limit } => {
-            assert_eq!(size, MAX_STRING_BYTES + 1);
-            assert_eq!(limit, MAX_STRING_BYTES);
+            assert_eq!(*size, MAX_STRING_BYTES + 1);
+            assert_eq!(*limit, MAX_STRING_BYTES);
         }
         kind => panic!("expected StringSizeExceeded, got: {kind:?}"),
     }
@@ -45,7 +45,7 @@ fn expect_error(code: &str) -> dellingr::error::Error {
 
 fn assert_invalid_next_key(code: &str) {
     let err = expect_error(code);
-    match err.kind {
+    match err.kind() {
         ErrorKind::RuntimeError(message) => assert_eq!(message, "invalid key to 'next'"),
         kind => panic!("Expected invalid next key runtime error, got: {kind:?}"),
     }
@@ -53,7 +53,7 @@ fn assert_invalid_next_key(code: &str) {
 
 fn assert_pattern_error(code: &str, message: &str) {
     let err = expect_error(code);
-    match err.kind {
+    match err.kind() {
         ErrorKind::PatternError(detail) => assert_eq!(detail.to_string(), message),
         kind => panic!("Expected pattern error, got: {kind:?}"),
     }
@@ -67,8 +67,8 @@ fn assert_trace_lines(code: &str, innermost: u32, caller: u32) {
     let error = state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect_err("trace program must fail");
-    assert_eq!(error.stack_trace[0].line, innermost);
-    assert_eq!(error.stack_trace[1].line, caller);
+    assert_eq!(error.stack_trace()[0].line, innermost);
+    assert_eq!(error.stack_trace()[1].line, caller);
     let rendered = format!("{error}");
     assert!(rendered.contains(&format!("trace:{innermost}:")));
     assert!(rendered.contains(&format!("trace:{caller}:")));
@@ -124,7 +124,7 @@ fn call_rejects_missing_fixed_arguments_without_panicking() {
         .call(ArgCount::Fixed(1), RetCount::Fixed(0))
         .expect_err("missing fixed argument must return an error");
     assert!(matches!(
-        err.kind,
+        err.kind(),
         ErrorKind::InvalidStackIndex { index: -2 }
     ));
     assert_eq!(state.get_top(), 1);
@@ -139,7 +139,7 @@ fn public_call_rejects_dynamic_without_base_without_panicking() {
     let err = state
         .call(ArgCount::Dynamic, RetCount::Fixed(0))
         .expect_err("host Dynamic call without a base must return an error");
-    assert!(matches!(err.kind, ErrorKind::InternalError(_)));
+    assert!(matches!(err.kind(), ErrorKind::InternalError(_)));
     assert_eq!(state.get_top(), 1);
     assert_eq!(state.typ(-1), LuaType::Function);
 }
@@ -278,7 +278,7 @@ fn error_level_selects_or_suppresses_only_the_prefix() {
     assert!(format!("{one}").starts_with("1:0: boom"));
 
     let two = expect_error("local function f() error('boom', 2) end\nf()");
-    assert_eq!(two.stack_trace.len(), 2);
+    assert_eq!(two.stack_trace().len(), 2);
     assert!(format!("{two}").starts_with("2:0: boom"));
 
     let out_of_range = expect_error("error('boom', 99)");
@@ -297,7 +297,7 @@ fn math_log_base_ten_uses_the_exact_base_ten_path() {
 fn type_error_on_arithmetic() {
     let err = expect_error("local x = 'hello' + 1");
     assert!(
-        matches!(err.kind, ErrorKind::TypeError(_)),
+        matches!(err.kind(), ErrorKind::TypeError(_)),
         "Expected TypeError, got: {err}"
     );
 }
@@ -306,7 +306,7 @@ fn type_error_on_arithmetic() {
 fn type_error_on_call() {
     let err = expect_error("local x = 5\nx()");
     assert!(
-        matches!(err.kind, ErrorKind::TypeError(_)),
+        matches!(err.kind(), ErrorKind::TypeError(_)),
         "Expected TypeError, got: {err}"
     );
 }
@@ -315,7 +315,7 @@ fn type_error_on_call() {
 fn type_error_on_index() {
     let err = expect_error("local x = 5\nlocal y = x.foo");
     assert!(
-        matches!(err.kind, ErrorKind::TypeError(_)),
+        matches!(err.kind(), ErrorKind::TypeError(_)),
         "Expected TypeError, got: {err}"
     );
 }
@@ -324,7 +324,7 @@ fn type_error_on_index() {
 fn type_error_on_table_key_nil() {
     let err = expect_error("local t = {}\nt[nil] = 1");
     assert!(
-        matches!(err.kind, ErrorKind::TypeError(_)),
+        matches!(err.kind(), ErrorKind::TypeError(_)),
         "Expected TypeError, got: {err}"
     );
 }
@@ -346,7 +346,7 @@ fn budget_exceeded_error() {
     let result = state.call(ArgCount::Fixed(0), RetCount::Fixed(0));
     let err = result.expect_err("Expected budget error");
     assert!(
-        matches!(err.kind, ErrorKind::BudgetExceeded { .. }),
+        matches!(err.kind(), ErrorKind::BudgetExceeded { .. }),
         "Expected BudgetExceeded, got: {err}"
     );
 }
@@ -367,7 +367,7 @@ fn budget_stops_at_the_first_operation_after_exhaustion() {
         let err = state
             .call(ArgCount::Fixed(0), RetCount::Fixed(0))
             .expect_err("the operation after the exhausted budget must fail");
-        assert!(matches!(err.kind, ErrorKind::BudgetExceeded { .. }));
+        assert!(matches!(err.kind(), ErrorKind::BudgetExceeded { .. }));
 
         state.get_global("x").unwrap();
         assert_eq!(
@@ -390,7 +390,7 @@ fn budget_flushes_pending_caller_cost_before_nested_call() {
     let err = state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect_err("callee must observe the caller's pending cost");
-    assert!(matches!(err.kind, ErrorKind::BudgetExceeded { .. }));
+    assert!(matches!(err.kind(), ErrorKind::BudgetExceeded { .. }));
     state.get_global("x").unwrap();
     assert_eq!(state.to_number(-1).expect("x should be numeric"), 1.0);
     assert_eq!(state.cost_used(), 1);
@@ -409,7 +409,7 @@ fn call_depth_exceeded_error() {
         "#,
         );
         assert!(
-            matches!(err.kind, ErrorKind::CallDepthExceeded { .. }),
+            matches!(err.kind(), ErrorKind::CallDepthExceeded { .. }),
             "Expected CallDepthExceeded, got: {err}"
         );
     });
@@ -547,12 +547,12 @@ fn table_insert_sparse_array_does_not_cache_a_non_border() {
 #[test]
 fn table_insert_nil_position_is_required() {
     let err = expect_error("table.insert({}, nil, 9)");
-    let ErrorKind::ArgError(arg) = err.kind else {
+    let ErrorKind::ArgError(arg) = err.kind() else {
         panic!("table.insert nil position must be an argument error: {err}");
     };
-    assert_eq!(arg.arg_number, 2);
-    assert_eq!(arg.expected, Some(LuaType::Number));
-    assert_eq!(arg.received, Some(LuaType::Nil));
+    assert_eq!(arg.arg_number(), 2);
+    assert_eq!(arg.expected(), Some(LuaType::Number));
+    assert_eq!(arg.received(), Some(LuaType::Nil));
 }
 
 #[test]
@@ -562,7 +562,7 @@ fn table_concat_rejects_non_integer_endpoints() {
         ("return table.concat({}, '', 1, 1e300)", 4),
     ] {
         let err = expect_error(code);
-        match err.kind {
+        match err.kind() {
             ErrorKind::ArgError(error) => {
                 assert_eq!(
                     error.to_string(),
@@ -599,12 +599,12 @@ fn tonumber_uses_lua_numeral_grammar() {
 #[test]
 fn tonumber_with_base_requires_a_string_first_argument() {
     let err = expect_error("return tonumber(10, 16)");
-    let ErrorKind::ArgError(arg) = err.kind else {
+    let ErrorKind::ArgError(arg) = err.kind() else {
         panic!("tonumber number with base must be an argument error: {err}");
     };
-    assert_eq!(arg.arg_number, 1);
-    assert_eq!(arg.expected, Some(LuaType::String));
-    assert_eq!(arg.received, Some(LuaType::Number));
+    assert_eq!(arg.arg_number(), 1);
+    assert_eq!(arg.expected(), Some(LuaType::String));
+    assert_eq!(arg.received(), Some(LuaType::Number));
 }
 
 #[test]
@@ -661,7 +661,10 @@ fn table_position_boundaries_and_integer_errors() {
         "table.remove({}, 2)",
     ] {
         let err = expect_error(code);
-        assert!(matches!(err.kind, ErrorKind::ArgError(_)), "{code}: {err}");
+        assert!(
+            matches!(err.kind(), ErrorKind::ArgError(_)),
+            "{code}: {err}"
+        );
     }
     // A negative position is a valid integer that is simply out of range: it
     // must report "position out of bounds", not "no integer representation".
@@ -679,12 +682,12 @@ fn table_insert_move_and_random_validate_before_mutation() {
     for code in ["table.insert({})", "table.insert({}, 1, 2, 3)"] {
         let err = expect_error(code);
         assert!(
-            matches!(err.kind, ErrorKind::RuntimeError(_)),
+            matches!(err.kind(), ErrorKind::RuntimeError(_)),
             "{code}: {err}"
         );
     }
     let err = expect_error("local t = {7}; table.move(t, 1, 1, 2, 42)");
-    assert!(matches!(err.kind, ErrorKind::ArgError(_)), "{err}");
+    assert!(matches!(err.kind(), ErrorKind::ArgError(_)), "{err}");
     for code in [
         "math.random(0)",
         "math.random(2, 1)",
@@ -692,9 +695,9 @@ fn table_insert_move_and_random_validate_before_mutation() {
     ] {
         let err = expect_error(code);
         assert!(
-            matches!(&err.kind, ErrorKind::ArgError(_))
+            matches!(err.kind(), ErrorKind::ArgError(_))
                 || (code == "math.random(1, 2, 3)"
-                    && matches!(&err.kind, ErrorKind::RuntimeError(_))),
+                    && matches!(err.kind(), ErrorKind::RuntimeError(_))),
             "{code}: {err}"
         );
     }
@@ -790,7 +793,7 @@ fn table_sort_default_rejects_incomparable_values_without_mutation() {
         ),
     ] {
         let err = expect_error(code);
-        let ErrorKind::TypeError(kind) = err.kind else {
+        let ErrorKind::TypeError(kind) = err.kind() else {
             panic!("expected comparison type error: {err}");
         };
         assert_eq!(kind.to_string(), expected);
@@ -888,7 +891,7 @@ fn table_sort_charges_before_mutating() {
 
     state.set_cost_budget(0);
     let err = host_table_sort(&mut state).expect_err("exhausted budget must block the sort");
-    assert!(matches!(err.kind, ErrorKind::BudgetExceeded { .. }));
+    assert!(matches!(err.kind(), ErrorKind::BudgetExceeded { .. }));
     assert_eq!(state.get_top(), 1);
 
     // Restore budget and confirm the table is untouched: still {3, 1, 2}.
@@ -912,7 +915,7 @@ fn table_concat_basic() {
 fn table_concat_rejects_boolean_elements() {
     let err = expect_error(r#"return table.concat({true}, ",")"#);
     assert!(
-        matches!(&err.kind, ErrorKind::RuntimeError(m)
+        matches!(err.kind(), ErrorKind::RuntimeError(m)
             if m == "invalid value (boolean) at index 1 in table for 'concat'"),
         "Expected the reference concat error, got: {err}"
     );
@@ -922,7 +925,7 @@ fn table_concat_rejects_boolean_elements() {
 fn table_concat_rejects_nil_elements_in_range() {
     let err = expect_error(r#"return table.concat({1, nil, 3}, ",", 1, 3)"#);
     assert!(
-        matches!(&err.kind, ErrorKind::RuntimeError(m)
+        matches!(err.kind(), ErrorKind::RuntimeError(m)
             if m == "invalid value (nil) at index 2 in table for 'concat'"),
         "Expected the reference concat error, got: {err}"
     );
@@ -1018,7 +1021,7 @@ fn table_move_costs_empty_and_each_moved_element() {
     let error = state
         .call(ArgCount::Fixed(4), RetCount::Fixed(1))
         .expect_err("empty table.move must charge a configured exhausted budget");
-    assert!(matches!(error.kind, ErrorKind::BudgetExceeded { .. }));
+    assert!(matches!(error.kind(), ErrorKind::BudgetExceeded { .. }));
 }
 
 #[test]
@@ -1045,7 +1048,7 @@ fn table_move_rejects_overflow_ranges_before_mutating() {
         let err = state
             .call(ArgCount::Fixed(0), RetCount::Fixed(0))
             .expect_err("overflow range must fail cleanly");
-        assert!(matches!(err.kind, ErrorKind::RuntimeError(ref got) if got == message));
+        assert!(matches!(err.kind(), ErrorKind::RuntimeError(got) if got == message));
 
         state.get_global("t").unwrap();
         for (index, expected) in [10.0, 20.0, 30.0].into_iter().enumerate() {
@@ -1064,9 +1067,9 @@ fn table_move_rejects_overflow_ranges_before_mutating() {
 #[test]
 fn table_move_rejects_out_of_range_numbers_cleanly() {
     let error = expect_error("table.move({}, -1e300, 1e300, 1)");
-    assert!(matches!(error.kind, ErrorKind::ArgError(_)));
+    assert!(matches!(error.kind(), ErrorKind::ArgError(_)));
     assert_eq!(
-        error.kind.to_string(),
+        error.kind().to_string(),
         "bad argument #2 to 'move' (number has no integer representation)"
     );
 }
@@ -1101,7 +1104,7 @@ fn table_after_budgeted_move(budget: i64) -> (dellingr::error::Error, Vec<f64>) 
 #[test]
 fn table_move_budget_zero_does_not_mutate() {
     let (error, values) = table_after_budgeted_move(0);
-    assert!(matches!(error.kind, ErrorKind::BudgetExceeded { .. }));
+    assert!(matches!(error.kind(), ErrorKind::BudgetExceeded { .. }));
     assert_eq!(values, [1.0, 2.0, 3.0, 4.0, 5.0]);
 }
 
@@ -1109,8 +1112,8 @@ fn table_move_budget_zero_does_not_mutate() {
 fn table_move_budget_partial_mutation_is_deterministic() {
     let first = table_after_budgeted_move(2);
     let second = table_after_budgeted_move(2);
-    assert!(matches!(first.0.kind, ErrorKind::BudgetExceeded { .. }));
-    assert!(matches!(second.0.kind, ErrorKind::BudgetExceeded { .. }));
+    assert!(matches!(first.0.kind(), ErrorKind::BudgetExceeded { .. }));
+    assert!(matches!(second.0.kind(), ErrorKind::BudgetExceeded { .. }));
     assert_eq!(first.1, [1.0, 2.0, 3.0, 3.0, 4.0]);
     assert_eq!(first.1, second.1);
 }
@@ -1147,7 +1150,7 @@ fn select_negative_index_counts_from_end() {
 #[test]
 fn select_zero_index_errors() {
     let err = expect_error(r#"select(0, "a", "b")"#);
-    match err.kind {
+    match err.kind() {
         ErrorKind::ArgError(error) => {
             assert_eq!(
                 error.to_string(),
@@ -1161,7 +1164,7 @@ fn select_zero_index_errors() {
 #[test]
 fn select_too_negative_index_errors() {
     let err = expect_error(r#"select(-4, "a", "b", "c")"#);
-    match err.kind {
+    match err.kind() {
         ErrorKind::ArgError(error) => {
             assert_eq!(
                 error.to_string(),
@@ -1198,7 +1201,7 @@ fn tonumber_base_invalid_digit_returns_nil() {
 #[test]
 fn tonumber_base_out_of_range_errors() {
     let err = expect_error(r#"return tonumber("10", 37)"#);
-    match err.kind {
+    match err.kind() {
         ErrorKind::ArgError(error) => {
             assert_eq!(
                 error.to_string(),
@@ -1213,7 +1216,7 @@ fn tonumber_base_out_of_range_errors() {
 fn tonumber_base_requires_string_input() {
     let err = expect_error(r#"return tonumber(10, 10)"#);
     assert!(
-        matches!(err.kind, ErrorKind::ArgError(_)),
+        matches!(err.kind(), ErrorKind::ArgError(_)),
         "Expected ArgError, got: {err}"
     );
 }

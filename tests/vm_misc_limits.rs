@@ -20,7 +20,7 @@ fn lua_return_of_many_values_hits_documented_cap() {
         .call(ArgCount::Fixed(0), RetCount::All)
         .expect_err("256 Lua results exceed the runtime cap");
     assert!(
-        matches!(error.kind, ErrorKind::TooManyResults { limit: 255 }),
+        matches!(error.kind(), ErrorKind::TooManyResults { limit: 255 }),
         "unexpected error: {error:?}"
     );
 }
@@ -44,8 +44,8 @@ fn error_with_expanding_invalid_bytes_is_size_checked() {
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect_err("error() must fail");
     assert!(
-        matches!(error.kind, ErrorKind::StringSizeExceeded { size, limit }
-            if size == 3 * (1 << 23) && limit == dellingr::limits::MAX_STRING_BYTES),
+        matches!(error.kind(), ErrorKind::StringSizeExceeded { size, limit }
+            if *size == 3 * (1 << 23) && *limit == dellingr::limits::MAX_STRING_BYTES),
         "the oversized message must be rejected, got {error:?}"
     );
 }
@@ -58,7 +58,7 @@ fn error_with_small_invalid_bytes_still_raises_script_error() {
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect_err("error() must fail");
     assert!(
-        matches!(&error.kind, ErrorKind::ScriptError { message, .. } if message == "a\u{FFFD}b"),
+        matches!(error.kind(), ErrorKind::ScriptError { message, .. } if message == "a\u{FFFD}b"),
         "unexpected error: {error:?}"
     );
 }
@@ -86,7 +86,7 @@ fn anonymous_scopes_are_numbered_among_themselves() {
 fn free_scopes_display_call_instruction_counts() {
     let analysis = analyze_cost("print()").unwrap();
     assert_eq!(analysis.root.own_cost, 0);
-    assert_eq!(analysis.root.function_calls, 1);
+    assert_eq!(analysis.root.function_calls(), 1);
     let rendered = analysis.to_string();
     let (_, scopes) = rendered.split_once("--- Per-Scope Breakdown ---").unwrap();
     assert!(scopes.contains("call instructions: 1"), "{rendered}");

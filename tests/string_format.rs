@@ -19,7 +19,7 @@ fn expect_runtime_error(code: &str, expected: &str) {
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect_err("format call must fail");
     assert!(
-        match &error.kind {
+        match error.kind() {
             ErrorKind::RuntimeError(message) => {
                 !expected.starts_with("bad argument") && message == expected
             }
@@ -337,7 +337,7 @@ fn tostring_errors_propagate_without_format_wrapping() {
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect_err("__tostring must fail");
     assert!(
-        matches!(&error.kind, ErrorKind::ScriptError { message, .. } if message == "format tostring boom"),
+        matches!(error.kind(), ErrorKind::ScriptError { message, .. } if message == "format tostring boom"),
         "format must propagate the original error unchanged, got {error:?}"
     );
 }
@@ -410,9 +410,9 @@ fn script_error_has_source_line_and_state_remains_reusable() {
     let error = state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect_err("script error must fail");
-    assert!(matches!(&error.kind, ErrorKind::ScriptError { message, .. } if message == "oops"));
+    assert!(matches!(error.kind(), ErrorKind::ScriptError { message, .. } if message == "oops"));
     assert_eq!(error.line_num(), 1);
-    assert_eq!(error.stack_trace[0].source.as_deref(), Some("input"));
+    assert_eq!(error.stack_trace()[0].source.as_deref(), Some("input"));
     assert!(error.to_string().starts_with("input:1: oops"));
 
     state
