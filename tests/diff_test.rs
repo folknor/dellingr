@@ -12,7 +12,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 mod common;
 #[path = "common/examples.rs"]
@@ -156,109 +156,65 @@ fn shell_and_rust_example_corpora_match() {
     );
 }
 
+/// Kernel examples run for about a second each in the unoptimized test
+/// profile, so they are dealt round-robin into this many partitions. The
+/// remaining examples are fast and share one more partition.
 #[cfg(not(feature = "hotpath"))]
-fn run_differential_bucket(name: &str, examples: &[PathBuf]) {
+const KERNEL_PARTITIONS: usize = 6;
+
+#[cfg(not(feature = "hotpath"))]
+fn is_kernel_example(rel: &Path) -> bool {
+    // A kernel example lives in a subdirectory; top-level examples are fast.
+    rel.components().count() > 1
+}
+
+/// The whole corpus, every example exactly once, split into partitions that
+/// `diff_test.sh` runs concurrently. brokkr runs test binaries with one test
+/// thread, so separate tests would run these one after another.
+#[cfg(not(feature = "hotpath"))]
+#[test]
+fn differential_examples() {
+    let mut partitions: Vec<Vec<PathBuf>> = vec![Vec::new(); KERNEL_PARTITIONS];
+    let kernels = collect_examples(is_kernel_example);
+    for (index, path) in kernels.into_iter().enumerate() {
+        partitions[index % KERNEL_PARTITIONS].push(path);
+    }
+    partitions.push(collect_examples(|rel| !is_kernel_example(rel)));
+
     // diff_test.sh requires both lua5.2 and lua5.4 and says which executable
     // is missing, so a host without them fails here rather than skipping.
-    let output = Command::new("bash")
-        .arg(manifest_path("scripts/diff_test.sh"))
-        .arg("--bin")
-        .arg(common::dellingr_bin())
-        .arg("--")
-        .args(examples)
-        .output()
-        .expect("bash should be available to run scripts/diff_test.sh");
+    let children: Vec<_> = partitions
+        .iter()
+        .map(|examples| {
+            Command::new("bash")
+                .arg(manifest_path("scripts/diff_test.sh"))
+                .arg("--bin")
+                .arg(common::dellingr_bin())
+                .arg("--")
+                .args(examples)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("bash should be available to run scripts/diff_test.sh")
+        })
+        .collect();
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    println!("{stdout}");
-    if !stderr.is_empty() {
-        eprintln!("{stderr}");
+    let mut failures = Vec::new();
+    for (index, child) in children.into_iter().enumerate() {
+        let output = child
+            .wait_with_output()
+            .expect("diff_test.sh partition output should be readable");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !output.status.success() {
+            failures.push(format!(
+                "partition {index} failed\n\nstdout:\n{stdout}\n\nstderr:\n{stderr}"
+            ));
+        }
     }
-
     assert!(
-        output.status.success(),
-        "Differential test bucket {name} failed!\n\nstdout:\n{stdout}\n\nstderr:\n{stderr}"
-    );
-}
-
-#[cfg(not(feature = "hotpath"))]
-// Keep each integration test within the test-profile time budget while covering
-// every example exactly once per feature shape.
-const KERNEL_DIRS_A: [&str; 5] = ["alloc", "calls", "fields", "globals", "iter"];
-#[cfg(not(feature = "hotpath"))]
-const KERNEL_DIRS_B: [&str; 5] = ["numerics", "tables", "strings", "composite", "parse"];
-
-#[cfg(not(feature = "hotpath"))]
-fn top_level_dir(rel: &Path) -> Option<&str> {
-    let mut components = rel.components();
-    let first = components.next()?.as_os_str().to_str()?;
-    components.next().map(|_| first)
-}
-
-/// Kernel examples in sorted order, dealt round-robin into `KERNEL_CHUNKS`
-/// buckets. Each kernel script runs for about a second in the unoptimized test
-/// profile, so the buckets stay small enough for the per-test time budget.
-#[cfg(not(feature = "hotpath"))]
-const KERNEL_CHUNKS: usize = 6;
-
-#[cfg(not(feature = "hotpath"))]
-fn kernel_chunk(chunk: usize) -> Vec<PathBuf> {
-    let all = collect_examples(|rel| {
-        top_level_dir(rel)
-            .is_some_and(|dir| KERNEL_DIRS_A.contains(&dir) || KERNEL_DIRS_B.contains(&dir))
-    });
-    all.into_iter()
-        .enumerate()
-        .filter(|(index, _)| index % KERNEL_CHUNKS == chunk)
-        .map(|(_, path)| path)
-        .collect()
-}
-
-#[cfg(not(feature = "hotpath"))]
-#[test]
-fn differential_kernel_examples_0() {
-    run_differential_bucket("kernel-0", &kernel_chunk(0));
-}
-
-#[cfg(not(feature = "hotpath"))]
-#[test]
-fn differential_kernel_examples_1() {
-    run_differential_bucket("kernel-1", &kernel_chunk(1));
-}
-
-#[cfg(not(feature = "hotpath"))]
-#[test]
-fn differential_kernel_examples_2() {
-    run_differential_bucket("kernel-2", &kernel_chunk(2));
-}
-
-#[cfg(not(feature = "hotpath"))]
-#[test]
-fn differential_kernel_examples_3() {
-    run_differential_bucket("kernel-3", &kernel_chunk(3));
-}
-
-#[cfg(not(feature = "hotpath"))]
-#[test]
-fn differential_kernel_examples_4() {
-    run_differential_bucket("kernel-4", &kernel_chunk(4));
-}
-
-#[cfg(not(feature = "hotpath"))]
-#[test]
-fn differential_kernel_examples_5() {
-    run_differential_bucket("kernel-5", &kernel_chunk(5));
-}
-
-#[cfg(not(feature = "hotpath"))]
-#[test]
-fn differential_top_level_examples() {
-    run_differential_bucket(
-        "top-level",
-        &collect_examples(|rel| {
-            top_level_dir(rel)
-                .is_none_or(|dir| !KERNEL_DIRS_A.contains(&dir) && !KERNEL_DIRS_B.contains(&dir))
-        }),
+        failures.is_empty(),
+        "Differential test failed!\n\n{}",
+        failures.join("\n\n")
     );
 }
