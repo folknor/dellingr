@@ -145,6 +145,12 @@ xxh128 = "af2ca0e8c8623e2c31e9d1c5cfc9e6fc"
 hotpath_file = "examples/calls/many_literals.lua"
 hotpath_xxh128 = "19aa377694a551e4817077fff79add56"
 
+[dellingr.workloads.loop_beside_closure]
+file = "bench/loop_beside_closure.lua"
+xxh128 = "d3641fef08461158df9f383cee08cd7b"
+hotpath_file = "examples/calls/loop_beside_closure.lua"
+hotpath_xxh128 = "909804e0909e64b7a58ed449a9175660"
+
 [dellingr.workloads.closure]
 file = "bench/closure.lua"
 xxh128 = "5befb079865e20e3343cd9beaa8e84be"

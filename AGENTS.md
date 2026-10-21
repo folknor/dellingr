@@ -190,7 +190,8 @@ README table. Most are *workload* benches, meant to look like plausible script
 code. A few are *diagnostic probes* written to isolate one known-unoptimized
 path so that a candidate optimization has something to measure against;
 `numerics/constants`, `globals/write`, `calls/many_literals`,
-`alloc/gc_churn` and `parse/large_source` are all probes. Their ratios against
+`calls/loop_beside_closure`, `alloc/gc_churn` and `parse/large_source` are
+all probes. Their ratios against
 reference Lua are worst cases by construction, not representative numbers, and
 each carries a header comment naming the candidate it exists to measure and the
 sibling bench to compare it against.
