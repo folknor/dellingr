@@ -158,9 +158,8 @@ fn shell_and_rust_example_corpora_match() {
 
 #[cfg(not(feature = "hotpath"))]
 fn run_differential_bucket(name: &str, examples: &[PathBuf]) {
-    // diff_test.sh refuses to compare without both reference Luas (named by
-    // LUA52 and LUA54, defaulting to lua5.2 and lua5.4) and says which one is
-    // missing, so a host without them fails here rather than skipping.
+    // diff_test.sh requires both lua5.2 and lua5.4 and says which executable
+    // is missing, so a host without them fails here rather than skipping.
     let output = Command::new("bash")
         .arg(manifest_path("scripts/diff_test.sh"))
         .env("DELLINGR", common::dellingr_bin())

@@ -28,6 +28,90 @@ pub const COST_MODEL_VERSION: u16 = 5;
 #[doc(hidden)]
 pub const COST_MODEL_GOLDEN_FINGERPRINT: u64 = 0xec0d_1c77_2501_886a;
 
+/// Owned runtime accounting, with one representation of an optional budget.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct CostState {
+    budget: Option<Budget>,
+    used: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Budget {
+    limit: i64,
+    remaining: i64,
+}
+
+impl CostState {
+    pub(crate) fn set_budget(&mut self, limit: i64) {
+        self.budget = Some(Budget {
+            limit,
+            remaining: limit,
+        });
+        self.used = 0;
+    }
+
+    pub(crate) fn used(&self) -> u64 {
+        self.used
+    }
+
+    pub(crate) fn remaining(&self) -> i64 {
+        self.budget.map_or(i64::MAX, |budget| budget.remaining)
+    }
+
+    pub(crate) fn limit(&self) -> i64 {
+        self.budget.map_or(i64::MAX, |budget| budget.limit)
+    }
+
+    pub(crate) fn batch_needs_flush(&self, pending: u64) -> bool {
+        self.budget
+            .is_some_and(|budget| budget.remaining.saturating_sub_unsigned(pending) <= 0)
+    }
+
+    pub(crate) fn meter(&mut self) -> CostMeter<'_> {
+        match &mut self.budget {
+            Some(budget) => CostMeter::finite_budget(&mut budget.remaining, &mut self.used),
+            None => CostMeter::count_only(&mut self.used),
+        }
+    }
+
+    // Retain the existing snapshot layout, including canonical unbounded sentinels.
+    #[cfg(feature = "snapshot")]
+    pub(crate) fn snapshot_fields(&self) -> (i64, i64, bool, u64) {
+        (
+            self.remaining(),
+            self.limit(),
+            self.budget.is_some(),
+            self.used,
+        )
+    }
+
+    /// Rebuild counters from snapshot fields, rejecting any combination the
+    /// runtime cannot reach: an unconfigured meter must carry the unbounded
+    /// sentinels, and a configured one must satisfy
+    /// `remaining == limit - used` (saturating), with no use against a
+    /// budget that started exhausted.
+    #[cfg(feature = "snapshot")]
+    pub(crate) fn from_snapshot(
+        remaining: i64,
+        limit: i64,
+        configured: bool,
+        used: u64,
+    ) -> Option<Self> {
+        let budget = if configured {
+            if (limit <= 0 && used != 0) || remaining != limit.saturating_sub_unsigned(used) {
+                return None;
+            }
+            Some(Budget { limit, remaining })
+        } else {
+            if remaining != i64::MAX || limit != i64::MAX {
+                return None;
+            }
+            None
+        };
+        Some(Self { budget, used })
+    }
+}
+
 /// Tracks costs either without a budget or against a finite budget.
 ///
 /// The meter deliberately borrows only counters. This keeps data-dependent
@@ -52,17 +136,6 @@ impl<'a> CostMeter<'a> {
     /// Creates a meter for an explicitly configured finite budget.
     pub(crate) fn finite_budget(remaining: &'a mut i64, used: &'a mut u64) -> Self {
         Self::FiniteBudget { remaining, used }
-    }
-
-    /// Selects the meter for a VM's persisted counters: a finite budget when
-    /// one is configured, otherwise count-only. Every runtime borrowing path
-    /// goes through here so the choice cannot drift between call sites.
-    pub(crate) fn runtime(configured: bool, remaining: &'a mut i64, used: &'a mut u64) -> Self {
-        if configured {
-            Self::finite_budget(remaining, used)
-        } else {
-            Self::count_only(used)
-        }
     }
 
     /// Charges `n` unit costs with the exact outcome of `n` consecutive
@@ -119,6 +192,57 @@ impl<'a> CostMeter<'a> {
 #[cfg(test)]
 mod tests {
     use super::CostMeter;
+
+    #[cfg(feature = "snapshot")]
+    #[test]
+    fn snapshot_meter_rejects_unreachable_counters() {
+        use super::CostState;
+        for fields in [
+            (0, 0, false, 0),
+            (i64::MAX, 0, false, 0),
+            (11, 10, true, 0),
+            (9, 10, true, 0),
+            (10, 10, true, 1),
+            (-2, -1, true, 0),
+            (-2, -1, true, 1),
+            (-1, 0, true, 1),
+        ] {
+            assert!(CostState::from_snapshot(fields.0, fields.1, fields.2, fields.3).is_none());
+        }
+    }
+
+    #[cfg(feature = "snapshot")]
+    #[test]
+    fn snapshot_meter_roundtrips_crossing_reset_and_saturation() {
+        use super::CostState;
+        for limit in [
+            None,
+            Some(i64::MIN),
+            Some(-1),
+            Some(0),
+            Some(1),
+            Some(i64::MAX),
+        ] {
+            let mut cost = CostState::default();
+            if let Some(limit) = limit {
+                cost.set_budget(limit);
+            }
+            for charge in [0, 3, 0, u64::MAX, 1] {
+                let accepted = cost.meter().consume(charge);
+                let fields = cost.snapshot_fields();
+                let mut restored = CostState::from_snapshot(fields.0, fields.1, fields.2, fields.3)
+                    .expect("runtime counters must be restorable");
+                assert_eq!(restored.snapshot_fields(), fields);
+                assert_eq!(restored.meter().consume(1), cost.meter().consume(1));
+                assert_eq!(restored.snapshot_fields(), cost.snapshot_fields());
+                if !accepted {
+                    assert!(cost.remaining() <= 0);
+                }
+            }
+            cost.set_budget(7);
+            assert_eq!(cost.snapshot_fields(), (7, 7, true, 0));
+        }
+    }
 
     /// Charge `n` units one at a time - the loop `consume_units` must match.
     fn naive_units(remaining: &mut i64, used: &mut u64, n: u64) -> bool {

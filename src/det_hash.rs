@@ -1,10 +1,10 @@
-//! The crate's only hash-map type.
+//! The crate's deterministic hash collection types.
 //!
 //! We disable `indexmap`'s `std` feature, so its `S = RandomState` default
 //! does not exist in standalone builds and a bare `indexmap::IndexMap<K, V>`
 //! fails to compile. An embedding host can re-enable `std` through Cargo
 //! feature unification; this alias still fixes the hasher explicitly.
-//! Every map in the crate goes through this alias. Iteration order
+//! Every map and set in the crate goes through these aliases. Iteration order
 //! is insertion order regardless of the hasher, but the hasher still decides
 //! bucket layout and probe counts, so an OS-seeded one makes performance
 //! vary run to run. `FixedState` is foldhash with a compile-time constant
@@ -18,13 +18,16 @@
 //! function address, which ASLR moves between processes; that only affects
 //! layout, never order.
 
-/// Deterministic, fixed-seed hasher used by every map in the crate.
+/// Deterministic, fixed-seed hasher used by the crate's map and set aliases.
 pub(crate) type FixedState = foldhash::fast::FixedState;
 
 /// Insertion-ordered map with the crate's fixed-seed hasher. Construct with
 /// `IndexMap::default()` or `IndexMap::with_capacity_and_hasher(n,
 /// FixedState::default())`.
 pub(crate) type IndexMap<K, V> = indexmap::IndexMap<K, V, FixedState>;
+
+/// Insertion-ordered set with the crate's fixed-seed hasher.
+pub(crate) type IndexSet<T> = indexmap::IndexSet<T, FixedState>;
 
 /// `IndexMap::with_capacity` for the crate alias.
 #[inline]

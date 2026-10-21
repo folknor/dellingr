@@ -226,9 +226,9 @@ fn saves_are_byte_stable() {
 #[test]
 fn state_is_quiescent_after_error_in_dynamic_call_args() {
     // An error while evaluating a dynamic call's arguments (after the base was
-    // marked, before the call ran) must not leave a stale vararg_call_base, or
-    // the State would fail quiescence validation and could not be snapshotted
-    // (L8).
+    // marked, before the call ran) must not leave a stale pending call base,
+    // or the State would fail quiescence validation and could not be
+    // snapshotted.
     let mut state = State::new();
     state
         .load_string(
@@ -308,8 +308,8 @@ fn save_state_rejects_suspended_environment() {
 
 #[test]
 fn state_is_quiescent_after_error_in_table_constructor() {
-    // Same guard for the table_constructor_bases stack: an error between
-    // NewTableTracked and its SetList must not leak a base (L8).
+    // Same guard for pending constructor bases: an error between
+    // NewTableTracked and its SetList must not leak a base.
     let mut state = State::new();
     state
         .load_string(

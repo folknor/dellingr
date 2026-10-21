@@ -1,5 +1,5 @@
 -- Hypothesis: vararg functions go through dynamic ArgCount handling and
--- the vararg_call_bases stack. A tight loop calling a vararg function
+-- the pending call-base stack. A tight loop calling a vararg function
 -- should expose any per-call overhead vs a fixed-arity equivalent.
 
 local function sum_varargs(...)

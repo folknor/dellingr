@@ -1620,21 +1620,8 @@ fn literal_pool_limits_match_their_error_messages() {
     assert!(error.to_string().contains(&format!("limit {MAX_LITERALS}")));
 
     let mut parser = parser_for_limit_test();
-    parser.funcs.chunk.string_literals = (0..MAX_LITERALS - 1)
+    parser.funcs.literal_indices.strings = (0..MAX_LITERALS - 1)
         .map(|index| index.to_string().into_bytes())
-        .collect();
-    parser.funcs.literal_indices.strings = parser
-        .funcs
-        .chunk
-        .string_literals
-        .iter()
-        .enumerate()
-        .map(|(index, bytes)| {
-            (
-                bytes.clone(),
-                u16::try_from(index).expect("literal test index fits in u16"),
-            )
-        })
         .collect();
     assert_eq!(
         parser

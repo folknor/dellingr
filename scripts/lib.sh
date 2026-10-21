@@ -1,34 +1,22 @@
 #!/usr/bin/env bash
 # Shared build and command-line helpers for the repository scripts.
 #
-# Script environment overrides:
+# Script environment inputs:
 #   DELLINGR                    use an existing dellingr binary
 #   DELLINGR_SKIP_BUILD         diff_test.sh requires DELLINGR when set to 1
 #   DELLINGR_DIFF_TIMEOUT       per-process timeout for diff_test.sh (default 5s)
-#   LUA52, LUA54                reference Lua executable paths
-#   HYPERFINE_WARMUP            hyperfine warmup count (default 2)
-#   DELLINGR_HOTPATH_FEATURES   hotbench features; unset defaults to hotpath,
-#                               empty disables features
 # DELLINGR_TEST_LIMIT_KB is consumed by test_limited.sh. BROKKR_MARKER_FIFO is
 # consumed by the hotpath harness and brokkr.
 
 : "${DELLINGR_SKIP_BUILD:=0}"
 : "${DELLINGR_DIFF_TIMEOUT:=5s}"
-: "${HYPERFINE_WARMUP:=2}"
-LUA52="${LUA52:-lua5.2}"
-LUA54="${LUA54:-lua5.4}"
-REFERENCE_LUAS=("$LUA52" "$LUA54")
+readonly HYPERFINE_WARMUP=2
+REFERENCE_LUAS=("lua5.2" "lua5.4")
 REFERENCE_LUA_LABELS=("Lua 5.2" "Lua 5.4")
-REFERENCE_LUA_OVERRIDES=(LUA52 LUA54)
-DELLINGR_HOTPATH_FEATURES="${DELLINGR_HOTPATH_FEATURES-hotpath}"
 
 hyperfine_warmup() {
     if [ "$#" -ne 0 ]; then
         echo "usage: hyperfine_warmup" >&2
-        return 2
-    fi
-    if [[ ! "$HYPERFINE_WARMUP" =~ ^[0-9]+$ ]]; then
-        echo "invalid HYPERFINE_WARMUP: $HYPERFINE_WARMUP (expected a nonnegative integer)" >&2
         return 2
     fi
     printf '%s\n' "$HYPERFINE_WARMUP"

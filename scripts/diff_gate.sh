@@ -5,8 +5,7 @@
 # shape. This wrapper supports direct runs with a DEBUG binary; debug vs release
 # does not change the behavior under test (identical VM semantics, only speed).
 #
-# Reference Lua executables are required for unmarked examples. Set LUA52 and
-# LUA54 to their paths when their default command names are unavailable.
+# The lua5.2 and lua5.4 executables are required for unmarked examples.
 # Forwards diff_test.sh's terse output for direct use.
 
 set -u

@@ -15,8 +15,8 @@ mod common;
 #[path = "common/examples.rs"]
 mod example_files;
 
-const DEFAULT_EXAMPLE_WORKERS: usize = 8;
-const DEFAULT_EXAMPLE_TIMEOUT_MS: u64 = 60_000;
+const EXAMPLE_WORKERS: usize = 8;
+const EXAMPLE_TIMEOUT_MS: u64 = 60_000;
 const POLL_INTERVAL_MS: u64 = 25;
 
 #[test]
@@ -207,53 +207,10 @@ fn check_example(path: &Path, timeout_ms: u64) -> Option<String> {
     }
 }
 
-#[allow(clippy::disallowed_methods)]
 fn example_worker_count(file_count: usize) -> usize {
-    let available = std::thread::available_parallelism()
-        .map_or(DEFAULT_EXAMPLE_WORKERS, std::num::NonZeroUsize::get);
-    let default = available.min(DEFAULT_EXAMPLE_WORKERS);
-    let configured = std::env::var("DELLINGR_EXAMPLE_WORKERS");
-    let workers = match configured {
-        Ok(value) => {
-            let workers = value.parse::<usize>().unwrap_or_else(|_| {
-                panic!("DELLINGR_EXAMPLE_WORKERS must be between 1 and 8, got {value:?}")
-            });
-            assert!(
-                workers > 0,
-                "DELLINGR_EXAMPLE_WORKERS must be between 1 and 8"
-            );
-            assert!(
-                workers <= DEFAULT_EXAMPLE_WORKERS,
-                "DELLINGR_EXAMPLE_WORKERS must be between 1 and 8"
-            );
-            workers.min(default)
-        }
-        Err(std::env::VarError::NotPresent) => default,
-        Err(std::env::VarError::NotUnicode(_)) => {
-            panic!("DELLINGR_EXAMPLE_WORKERS must be valid Unicode")
-        }
-    };
-    workers.min(file_count)
-}
-
-#[allow(clippy::disallowed_methods)]
-fn example_timeout_ms() -> u64 {
-    match std::env::var("DELLINGR_EXAMPLE_TIMEOUT_MS") {
-        Ok(value) => {
-            let timeout_ms = value.parse::<u64>().unwrap_or_else(|_| {
-                panic!("DELLINGR_EXAMPLE_TIMEOUT_MS must be a positive integer, got {value:?}")
-            });
-            assert!(
-                timeout_ms > 0,
-                "DELLINGR_EXAMPLE_TIMEOUT_MS must be a positive integer"
-            );
-            timeout_ms
-        }
-        Err(std::env::VarError::NotPresent) => DEFAULT_EXAMPLE_TIMEOUT_MS,
-        Err(std::env::VarError::NotUnicode(_)) => {
-            panic!("DELLINGR_EXAMPLE_TIMEOUT_MS must be valid Unicode")
-        }
-    }
+    let available =
+        std::thread::available_parallelism().map_or(EXAMPLE_WORKERS, std::num::NonZeroUsize::get);
+    available.min(EXAMPLE_WORKERS).min(file_count)
 }
 
 fn run_examples_bucket(name: &str) {
@@ -264,10 +221,9 @@ fn run_examples_bucket(name: &str) {
         "No .lua files found in examples bucket {name}"
     );
 
-    // Keep stress workload concurrency bounded and let constrained CI lower
-    // it without changing the source tree.
+    // Keep stress workload concurrency bounded by available parallelism.
     let workers = example_worker_count(files.len());
-    let timeout_ms = example_timeout_ms();
+    let timeout_ms = EXAMPLE_TIMEOUT_MS;
     let next = std::sync::atomic::AtomicUsize::new(0);
     let mut failures: Vec<(usize, String)> = std::thread::scope(|scope| {
         let handles = (0..workers)

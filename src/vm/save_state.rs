@@ -57,6 +57,7 @@ use super::table::{NormalizedTableKey, TableKeyInput, normalize_table_key};
 use super::{ObjectPtr, State, Val};
 use crate::COST_MODEL_VERSION;
 use crate::compiler::{Bytecode, UpvalueDesc};
+use crate::cost_meter::CostState;
 use crate::host::HostCallbacks;
 use crate::instr::Instr;
 use crate::instr::snapshot_format::FORMAT_VERSION;
@@ -93,6 +94,7 @@ pub struct SaveDiagnostics {
 ///
 /// Save and load failures are returned directly and do not call
 /// [`HostCallbacks::on_error`].
+#[non_exhaustive]
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum SaveError {
     /// The VM has an active stack/call frame/open upvalue and cannot be snapshotted.
@@ -124,6 +126,7 @@ pub enum SaveError {
 }
 
 /// Errors produced while loading a saved [`State`].
+#[non_exhaustive]
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum LoadError<E = Infallible> {
     /// Save bytes did not start with the dellingr save magic.
@@ -384,10 +387,7 @@ type SavedUpvalueDesc = UpvalueDesc;
 struct SavePayload {
     has_standard_environment: bool,
     rng_state: u64,
-    cost_remaining: i64,
-    cost_budget: i64,
-    cost_budget_configured: bool,
-    cost_used: u64,
+    cost: CostState,
     strings: Vec<Vec<u8>>,
     bytecode: Vec<SavedBytecode>,
     upvalues: Vec<SavedVal>,
@@ -578,10 +578,7 @@ impl<'a> SaveBuilder<'a> {
         Ok(SavePayload {
             has_standard_environment: !self.state.env_tokens.is_empty(),
             rng_state: self.state.rng.state(),
-            cost_remaining: self.state.cost_remaining,
-            cost_budget: self.state.cost_budget,
-            cost_budget_configured: self.state.cost_budget_configured,
-            cost_used: self.state.cost_used,
+            cost: self.state.cost,
             strings: self.strings,
             bytecode: self.bytecode,
             upvalues,
@@ -1260,8 +1257,7 @@ impl State {
             && self.pending_bytecode_caches.is_empty()
             && self.transient_roots.is_empty()
             && self.open_upvalues.is_empty()
-            && self.vararg_call_bases.is_empty()
-            && self.table_constructor_bases.is_empty()
+            && self.pending_bases.is_empty()
             && self.call_stack.is_empty()
             && self.metamethod_depth == 0
             && self.call_chain_depth == 0
@@ -1641,10 +1637,7 @@ fn materialize_payload(
         state.global_env.restore_binding(name, val);
     }
     state.rng = VmRng::from_state(payload.rng_state);
-    state.cost_remaining = payload.cost_remaining;
-    state.cost_budget = payload.cost_budget;
-    state.cost_budget_configured = payload.cost_budget_configured;
-    state.cost_used = payload.cost_used;
+    state.cost = payload.cost;
     state.next_format_pointer_id = payload.next_format_pointer_id;
     let mut seen_pointer_values = BTreeSet::new();
     let mut seen_pointer_ids = BTreeSet::new();
@@ -1683,8 +1676,7 @@ fn materialize_payload(
     state.transient_roots.values.clear();
     state.transient_roots.suspended_envs.clear();
     state.open_upvalues.clear();
-    state.vararg_call_bases.clear();
-    state.table_constructor_bases.clear();
+    state.pending_bases.clear();
     state.call_stack.clear();
     state.metamethod_depth = 0;
     state.call_chain_depth = 0;
@@ -2184,10 +2176,11 @@ impl SavePayload {
     fn encode(&self, out: &mut Encoder) -> Result<(), SaveError> {
         out.write_u8(u8::from(self.has_standard_environment));
         out.write_u64(self.rng_state);
-        out.write_i64(self.cost_remaining);
-        out.write_i64(self.cost_budget);
-        out.write_bool(self.cost_budget_configured);
-        out.write_u64(self.cost_used);
+        let (remaining, limit, configured, used) = self.cost.snapshot_fields();
+        out.write_i64(remaining);
+        out.write_i64(limit);
+        out.write_bool(configured);
+        out.write_u64(used);
         write_vec(out, &self.strings, |out, bytes| {
             out.write_bytes(bytes, ByteField::LuaString)
         })?;
@@ -2212,10 +2205,16 @@ impl SavePayload {
         Ok(Self {
             has_standard_environment: input.read_bool()?,
             rng_state: input.read_u64()?,
-            cost_remaining: input.read_i64()?,
-            cost_budget: input.read_i64()?,
-            cost_budget_configured: input.read_bool()?,
-            cost_used: input.read_u64()?,
+            cost: {
+                let offset = input.pos;
+                CostState::from_snapshot(
+                    input.read_i64()?,
+                    input.read_i64()?,
+                    input.read_bool()?,
+                    input.read_u64()?,
+                )
+                .ok_or_else(|| input.decode_error_at(offset, "inconsistent cost meter"))?
+            },
             strings: read_vec(input, Decoder::read_lua_string_bytes)?,
             bytecode: read_vec(input, SavedBytecode::decode)?,
             upvalues: read_vec(input, SavedVal::decode)?,
@@ -2592,6 +2591,31 @@ mod tests {
         }};
     }
 
+    #[test]
+    fn decode_rejects_inconsistent_legacy_meter_fields() {
+        for (remaining, limit, configured, used) in [
+            (0, 0, false, 0),
+            (11, 10, true, 0),
+            (9, 10, true, 0),
+            (-1, 0, true, 1),
+        ] {
+            let mut encoder = Encoder::new();
+            encoder.write_bool(false);
+            encoder.write_u64(0);
+            encoder.write_i64(remaining);
+            encoder.write_i64(limit);
+            encoder.write_bool(configured);
+            encoder.write_u64(used);
+            let mut decoder = Decoder::new(&encoder.bytes);
+            match SavePayload::decode(&mut decoder) {
+                Err(LoadError::DecodeError(message)) => {
+                    assert!(message.contains("inconsistent cost meter"));
+                }
+                _ => panic!("inconsistent meter must fail before decoding the arena"),
+            }
+        }
+    }
+
     fn valid_saved_bytecode() -> SavedBytecode {
         SavedBytecode {
             code: vec![Instr::ret(RetCount::Fixed(0)).raw()],
@@ -2627,10 +2651,7 @@ mod tests {
         let payload = SavePayload {
             has_standard_environment: false,
             rng_state: 0,
-            cost_remaining: 0,
-            cost_budget: 0,
-            cost_budget_configured: false,
-            cost_used: 0,
+            cost: CostState::default(),
             strings: Vec::new(),
             bytecode,
             upvalues: Vec::new(),

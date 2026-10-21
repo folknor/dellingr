@@ -85,6 +85,10 @@ pub struct Error {
 /// Set by `error(msg, level)`: level 1 (the default) blames the frame that
 /// raised the error, level 0 suppresses the prefix, and level N blames N-1
 /// frames further up the traceback.
+///
+/// This is a closed set: every level maps to the current frame, no prefix, or
+/// a frame selected from the trace. `TraceFrame` represents all non-default
+/// positive levels.
 #[derive(Debug, Clone, Copy)]
 pub enum PrefixLocation {
     /// Blame the frame where the error surfaced. The default.
@@ -105,6 +109,7 @@ pub enum PrefixLocation {
 /// Top-level error categories. See the type-specific enums (e.g.
 /// [`TypeError`], [`SyntaxError`], [`ArgError`], [`PatternErrorDetail`]) for
 /// finer-grained variants.
+#[non_exhaustive]
 #[derive(Debug)]
 pub enum ErrorKind {
     /// Operation applied to a value of the wrong Lua type.
@@ -232,6 +237,7 @@ pub enum ErrorKind {
 ///
 /// The display text matches the Lua pattern diagnostics previously returned
 /// as [`ErrorKind::RuntimeError`].
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PatternErrorDetail {
     /// A closing capture delimiter had no matching opening delimiter.
@@ -251,6 +257,9 @@ pub enum PatternErrorDetail {
 }
 
 /// String function whose pattern operation raised an error.
+///
+/// This closed set covers the pattern-taking functions in the supported Lua
+/// 5.2 and 5.4 string libraries: `find`, `match`, `gmatch`, and `gsub`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StringPatternFunction {
     /// `string.find`.
@@ -264,6 +273,7 @@ pub enum StringPatternFunction {
 }
 
 /// Standard library function named by a typed library error.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LibraryFunction {
     /// `math.random`.
@@ -316,6 +326,7 @@ impl LibraryFunction {
 /// A failure raised by a standard library operation. Library runtime errors
 /// retain this value through [`Error::library_error`] while rendering through
 /// [`ErrorKind::RuntimeError`].
+#[non_exhaustive]
 #[derive(Debug)]
 pub enum LibraryError {
     /// A protected metatable cannot be replaced.
@@ -382,6 +393,7 @@ pub enum LibraryError {
 }
 
 /// The specific malformed Lua pattern construct.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MalformedPatternDetail {
     /// A pattern ended with an unpaired `%`.
@@ -431,6 +443,7 @@ pub fn results_count(count: usize) -> Result<u8, ErrorKind> {
 /// Structured reason an argument failed validation.
 ///
 /// Equality compares the structured reason by its exact variant.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArgDetail {
     /// Type or presence mismatch, described by `expected` and `received`.
@@ -476,6 +489,7 @@ impl ArgDetail {
 }
 
 /// Syntax-level error categories raised by the parser.
+#[non_exhaustive]
 #[derive(Debug)]
 pub enum SyntaxError {
     /// Numeric literal could not be parsed as a number.
@@ -537,6 +551,7 @@ pub enum SyntaxError {
 }
 
 /// Type errors raised by arithmetic, comparison, indexing, and concat.
+#[non_exhaustive]
 #[derive(Debug)]
 pub enum TypeError {
     /// Arithmetic op applied to a non-numeric value of the given type.

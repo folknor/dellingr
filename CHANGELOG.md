@@ -27,6 +27,13 @@ All notable changes to dellingr are documented here. The format follows
   `Error::new`, `line_num` and `column` use `u32` locations.
 - `ArgDetail::Custom` and `ArgDetail::OutOfBounds` are removed, and
   `ArgDetail` equality compares variants exactly.
+- `ErrorKind`, `ArgDetail`, `LibraryError`, `LibraryFunction`,
+  `PatternErrorDetail`, `MalformedPatternDetail`, `SyntaxError`, `TypeError`,
+  `SaveError` and `LoadError` are `#[non_exhaustive]`; matches on them outside
+  the crate need a wildcard arm.
+- Snapshot loading rejects cost counters the runtime cannot produce: an
+  unbudgeted meter whose remaining or limit is not `i64::MAX`, or a budgeted
+  one whose remaining is not its limit minus the cost used.
 - `HostCallbacks::on_error` takes only the error; the reporting frame's source
   is available as `Error::source_name`.
 - `ScopeCost` category counts are methods (`arithmetic_ops()`, `negations()`,

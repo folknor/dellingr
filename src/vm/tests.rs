@@ -49,8 +49,12 @@ fn consume_cost_saturates_large_host_charges() {
         .expect("first charge may cross the budget");
     assert!(state.consume_cost(1).is_err());
 
-    state.cost_used = u64::MAX - 1;
-    state.cost_remaining = i64::MAX;
+    // Reach a near-saturated meter through the API. Count-only, so the
+    // second charge cannot be blocked by an exhausted budget.
+    let mut state = State::new();
+    state
+        .consume_cost(u64::MAX - 1)
+        .expect("count-only charges are never blocked");
     state
         .consume_cost(2)
         .expect("saturating used-cost charge should succeed");

@@ -14,74 +14,26 @@
 //! subtree in storage order, and the metatable only after every entry; for a
 //! closure, its bytecode and then its upvalues in vector order.
 //!
-//! To refresh deliberately after an intentional format change, run the ignored
-//! helper with `DELLINGR_REGENERATE_GOLDEN=1` and the `snapshot` feature enabled.
-//! Without that explicit opt-in it panics before writing, since the test runner
-//! includes ignored tests for substring filters.
-
-#[path = "common/save_fixture.rs"]
-mod save_fixture;
+//! To refresh deliberately after an intentional format change, run
+//! `brokkr run --release --features snapshot regenerate_save_golden`.
 
 use std::path::PathBuf;
 
 use dellingr::{ArgCount, DefaultCallbacks, RetCount, State};
 
-/// Exercises every edge kind the walker can take: several globals, an
-/// object-valued key, an object-valued value, a shared reference reached twice,
-/// a cycle, a metatable, a closure with multiple upvalues, and strings first
-/// seen at different depths.
-const GOLDEN_PROGRAM: &str = r#"
-    shared = { tag = "shared" }
+#[path = "common/save_golden_program.rs"]
+mod save_golden_program;
 
-    keyed = {}
-    keyed[shared] = "by-object-key"
-
-    nested = { inner = { deep = { leaf = "leaf" } } }
-    nested.inner.sibling = shared
-
-    cyclic = {}
-    cyclic.self = cyclic
-    cyclic.other = keyed
-
-    meta = setmetatable({ marked = true }, { __index = shared, name = "meta" })
-
-    function make(a, b)
-        local c = a + b
-        return function() return a + b + c end
-    end
-    captured = make(2, 3)
-
-    ordered = { 1, 2, 3, extra = "tail" }
-    math.golden_delta = { marker = "environment delta" }
-    golden_pointer = tostring(ordered)
-"#;
+use save_golden_program::golden_bytes;
 
 const FIXTURE_NAMES: &[&str] = &["save_golden_current.bin"];
-
-fn golden_bytes() -> Vec<u8> {
-    let mut state = State::new();
-    state
-        .load_string(GOLDEN_PROGRAM)
-        .expect("golden program compiles");
-    state
-        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
-        .expect("golden program runs");
-    state.save_state().expect("golden state saves").bytes
-}
 
 fn fixture_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("tests/fixtures/{name}"))
 }
 
 fn current_fixture_path() -> PathBuf {
-    fixture_path(FIXTURE_NAMES[0])
-}
-
-#[test]
-#[ignore = "regeneration helper; run explicitly after an intentional format change"]
-fn deliberately_rewrite_snapshot_fixture_file() {
-    save_fixture::rewrite_save_golden_fixture(&golden_bytes());
-    println!("wrote {}", current_fixture_path().display());
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(save_golden_program::GOLDEN_FIXTURE)
 }
 
 #[test]
@@ -110,11 +62,12 @@ fn every_save_fixture_is_declared_and_referenced() {
     assert_eq!(actual, expected, "every save fixture must be listed here");
 }
 
+// After an intentional serializer format change, regenerate with
+// `brokkr run --release --features snapshot regenerate_save_golden`.
 #[test]
 fn save_traversal_order_matches_golden_fixture() {
     let expected = std::fs::read(current_fixture_path()).expect(
-        "golden fixture missing; refresh it after an intentional format change with \
-         `DELLINGR_REGENERATE_GOLDEN=1 brokkr test deliberately_rewrite_snapshot_fixture_file`",
+        "golden fixture missing; run the explicit regeneration example with the snapshot feature",
     );
     let actual = golden_bytes();
     assert_eq!(

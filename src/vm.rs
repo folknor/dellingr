@@ -35,7 +35,7 @@ use super::Result;
 use super::compiler;
 use super::compiler::Bytecode;
 use super::compiler::RuntimeCaches;
-use super::cost_meter::CostMeter;
+use super::cost_meter::{CostMeter, CostState};
 use super::error::Error;
 use super::error::ErrorKind;
 use super::error::StackFrame;
@@ -223,22 +223,11 @@ pub struct State {
     /// Each entry is (stack_index, upvalue_ref). Kept sorted by stack_index ascending
     /// so we can efficiently close them when a function returns.
     pub(super) open_upvalues: Vec<(usize, UpvalueRef)>,
-    /// Stack of call base positions for dynamic argument counting.
-    /// Pushed by MarkCallBase, popped by Call(255, ...).
-    /// Supports nested function calls where each level needs its own base.
-    pub(super) vararg_call_bases: Vec<usize>,
-    /// Stack of constructor positions for dynamic SetList(0) operations.
-    pub(super) table_constructor_bases: Vec<usize>,
-    /// Cost budget remaining. When this reaches 0 or below, operations with cost > 0
-    /// will fail. The action that pushes you over budget completes before stopping.
-    /// Uses i64 to allow going negative (the final action that exceeds budget completes).
-    pub(super) cost_remaining: i64,
-    /// The original cost budget (for error reporting).
-    pub(super) cost_budget: i64,
-    /// Whether the host explicitly configured a cost budget.
-    pub(super) cost_budget_configured: bool,
-    /// Total cost consumed (for reporting).
-    pub(super) cost_used: u64,
+    /// Dynamic call and constructor bases awaiting their consuming opcode.
+    /// Each Lua frame owns the entries above the floor it recorded on entry.
+    pub(in crate::vm) pending_bases: frame::PendingBases,
+    /// Runtime cost accounting and optional budget.
+    pub(super) cost: CostState,
     /// Compiled patterns retained for active `string.gmatch` iterators.
     ///
     /// Keys are interned string pointers, so cache lookup does not compare
@@ -473,12 +462,8 @@ impl State {
             },
             upvalue_pool: UpvaluePool::new(),
             open_upvalues: Vec::new(),
-            vararg_call_bases: Vec::new(),
-            table_constructor_bases: Vec::new(),
-            cost_remaining: i64::MAX,
-            cost_budget: i64::MAX,
-            cost_budget_configured: false,
-            cost_used: 0,
+            pending_bases: frame::PendingBases::default(),
+            cost: CostState::default(),
             gmatch_patterns: IndexMap::default(),
             gmatch_pattern_bytes: 0,
             #[cfg(debug_assertions)]
@@ -521,32 +506,28 @@ impl State {
     /// When the budget is exhausted, operations with cost > 0 will fail.
     /// The action that pushes you over budget always completes before stopping.
     ///
+    /// This configures a finite budget, including for `i64::MAX`; it does not
+    /// return the VM to count-only mode. Negative budgets are accepted.
+    ///
     /// Also resets [`State::cost_used`] to zero. Calling it from inside a Rust
     /// callback (mid-run) is supported: the Lua caller's batched opcode cost is
     /// always flushed before any call leaves the dispatch loop, so the reset
     /// sees a complete meter and `cost_used` afterwards counts only work done
     /// after the reset, independent of the batching interval.
     pub fn set_cost_budget(&mut self, budget: i64) {
-        self.cost_budget = budget;
-        self.cost_remaining = budget;
-        self.cost_budget_configured = true;
-        self.cost_used = 0;
+        self.cost.set_budget(budget);
     }
 
     /// Returns the total cost consumed since the last budget reset.
     pub fn cost_used(&self) -> u64 {
-        self.cost_used
+        self.cost.used()
     }
 
     /// Returns the cost remaining in the budget.
     /// Can be negative if the last action pushed over budget.
     /// Without a configured budget, returns the unbounded sentinel `i64::MAX`.
     pub fn cost_remaining(&self) -> i64 {
-        if self.cost_budget_configured {
-            self.cost_remaining
-        } else {
-            i64::MAX
-        }
+        self.cost.remaining()
     }
 
     /// Test instrumentation for the gmatch compilation cache.
@@ -572,16 +553,12 @@ impl State {
 
     /// Returns a meter for runtime work that does not need VM state.
     pub(crate) fn cost_meter(&mut self) -> CostMeter<'_> {
-        CostMeter::runtime(
-            self.cost_budget_configured,
-            &mut self.cost_remaining,
-            &mut self.cost_used,
-        )
+        self.cost.meter()
     }
 
     /// Flush before batching would hide exhaustion of a configured budget.
     pub(super) fn cost_batch_needs_flush(&self, pending: u64) -> bool {
-        self.cost_budget_configured && self.cost_remaining.saturating_sub_unsigned(pending) <= 0
+        self.cost.batch_needs_flush(pending)
     }
 
     /// Compile and retain a `string.gmatch` pattern on its first iteration.
@@ -651,9 +628,7 @@ impl State {
         let State {
             stack,
             heap,
-            cost_budget_configured,
-            cost_remaining,
-            cost_used,
+            cost,
             gmatch_patterns,
             ..
         } = self;
@@ -674,14 +649,14 @@ impl State {
             ))
         })?;
         let matcher = &mut entry.pattern;
-        let meter = CostMeter::runtime(*cost_budget_configured, cost_remaining, cost_used);
+        let meter = cost.meter();
         Ok((subject, matcher, meter))
     }
 
     pub(crate) fn budget_exceeded_error(&self) -> Error {
         self.error(ErrorKind::BudgetExceeded {
-            used: self.cost_used,
-            budget: self.cost_budget,
+            used: self.cost.used(),
+            budget: self.cost.limit(),
         })
     }
 

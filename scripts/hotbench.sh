@@ -2,8 +2,9 @@
 # Hotpath bench: phase KVs from the hotpath harness + hyperfine wall-time
 # from the regular dellingr binary on the same target's standalone runner.
 #
-# Usage: ./scripts/hotbench.sh <workload-name> [hyperfine-args...]
+# Usage: ./scripts/hotbench.sh [--alloc] <workload-name> [hyperfine-args...]
 #   The workload name is resolved to its hotpath_file in brokkr.toml.
+#   --alloc enables allocation tracking on the phase KV side.
 #
 # Why two binaries:
 #   The hotpath feature instruments every traced fn and prints a stats
@@ -12,10 +13,6 @@
 #   and the regular dellingr binary on the bench's standalone runner for
 #   the hyperfine-driven wall time.
 #
-# Env:
-#   DELLINGR_HOTPATH_FEATURES=hotpath-alloc  # KV side; empty disables features
-#   HYPERFINE_WARMUP=2                       # wall-time warmup calls
-
 set -u
 
 # Binary and example paths below are repo-relative, so anchor to the repo root
@@ -24,9 +21,16 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 cd "$SCRIPT_DIR/.." || exit 1
 . "$SCRIPT_DIR/lib.sh"
 
+HOTPATH_FEATURES=hotpath
+if [ "${1:-}" = "--alloc" ]
+then
+    HOTPATH_FEATURES=hotpath-alloc
+    shift
+fi
+
 if [ $# -lt 1 ]
 then
-    echo "usage: $0 <workload-name> [hyperfine-args...]" >&2
+    echo "usage: $0 [--alloc] <workload-name> [hyperfine-args...]" >&2
     exit 2
 fi
 
@@ -48,7 +52,7 @@ then
 fi
 
 DELLINGR_BIN="$(dellingr_bin_built release)" || exit 1
-HOTPATH_BIN="$(cargo_artifact release hotpath example "$DELLINGR_HOTPATH_FEATURES")" || exit 1
+HOTPATH_BIN="$(cargo_artifact release hotpath example "$HOTPATH_FEATURES")" || exit 1
 
 if [ ! -x "$DELLINGR_BIN" ] || [ ! -x "$HOTPATH_BIN" ]
 then

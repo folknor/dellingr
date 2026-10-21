@@ -1,14 +1,5 @@
-use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
-
-// The gate test exercises only part of each helper module.
-#[allow(dead_code)]
-#[path = "common/save_fixture.rs"]
-mod save_fixture;
-#[allow(dead_code)]
-#[path = "common/scratch.rs"]
-mod scratch;
 
 fn collect_rust_files(directory: &Path, files: &mut Vec<PathBuf>) {
     for entry in fs::read_dir(directory).expect("test source directory should be readable") {
@@ -22,7 +13,7 @@ fn collect_rust_files(directory: &Path, files: &mut Vec<PathBuf>) {
 }
 
 #[test]
-fn cli_and_file_mutation_helpers_stay_in_tests_common() {
+fn cli_paths_and_test_file_mutations_stay_in_common_helpers() {
     let tests_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests");
     let mut sources = Vec::new();
     collect_rust_files(&tests_dir, &mut sources);
@@ -52,14 +43,6 @@ fn cli_and_file_mutation_helpers_stay_in_tests_common() {
             );
         }
 
-        if source.contains(direct_write_marker) {
-            assert_eq!(
-                relative_path,
-                Path::new("common/save_fixture.rs"),
-                "checked-in fixture writes belong in the explicitly gated helper"
-            );
-        }
-
         let has_file_mutation = [
             direct_write_marker,
             write_all_marker,
@@ -73,62 +56,19 @@ fn cli_and_file_mutation_helpers_stay_in_tests_common() {
         .iter()
         .any(|marker| source.contains(*marker));
         if has_file_mutation {
-            assert!(
-                relative_path.starts_with("common"),
-                "test file mutations belong in tests/common: {}",
-                relative_path.display()
+            assert_eq!(
+                relative_path,
+                Path::new("common/scratch.rs"),
+                "test file mutations must use the scratch helper"
             );
         }
     }
-}
 
-#[test]
-fn save_fixture_regeneration_requires_the_exact_opt_in_before_writing() {
-    let expected_fixture =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/save_golden_current.bin");
-    assert_eq!(
-        save_fixture::save_golden_fixture_path(),
-        expected_fixture,
-        "the regeneration helper must target the checked-in golden"
-    );
-
-    let directory = scratch::ScratchDirectory::new("fixture-regeneration-gate");
-    let missing_script =
-        scratch::ScratchScript::at(directory.path().join("missing-golden.bin"), "placeholder");
-    let missing_fixture = missing_script.path().to_owned();
-    drop(missing_script);
-    let fixture_script =
-        scratch::ScratchScript::at(directory.path().join("save-golden.bin"), "original bytes");
-    let fixture = fixture_script.path().to_owned();
-
-    for authorization in [None, Some(OsStr::new("0")), Some(OsStr::new("true"))] {
-        let result = save_fixture::rewrite_save_golden_fixture_at(
-            b"fixture bytes",
-            &missing_fixture,
-            authorization,
-        );
-        assert!(result.is_err(), "an invalid opt-in must be rejected");
-        assert!(
-            !missing_fixture.exists(),
-            "an invalid opt-in must not create a fixture"
-        );
-    }
-
-    for authorization in [None, Some(OsStr::new("0")), Some(OsStr::new("true"))] {
-        let result =
-            save_fixture::rewrite_save_golden_fixture_at(b"fixture bytes", &fixture, authorization);
-        assert!(result.is_err(), "an invalid opt-in must be rejected");
-        assert_eq!(
-            fs::read(&fixture).expect("existing fixture should be readable"),
-            b"original bytes",
-            "an invalid opt-in must not overwrite a fixture"
-        );
-    }
-
-    save_fixture::rewrite_save_golden_fixture_at(b"fixture bytes", &fixture, Some(OsStr::new("1")))
-        .expect("the exact regeneration opt-in should authorize a fixture write");
-    assert_eq!(
-        fs::read(&fixture).expect("authorized fixture should be readable"),
-        b"fixture bytes"
+    let scratch_source = fs::read_to_string(tests_dir.join("common/scratch.rs"))
+        .expect("test scratch helper should be readable");
+    assert!(
+        scratch_source.contains("CARGO_TARGET_TMPDIR")
+            && scratch_source.contains(".starts_with(scratch_root)"),
+        "test file mutations must be restricted to Cargo's temporary test directory"
     );
 }

@@ -237,12 +237,10 @@ impl State {
         let n_args = match args {
             ArgCount::Fixed(n) => n as usize,
             ArgCount::Dynamic => {
-                // ArgCount::Dynamic relies on a vararg_call_base pushed by
-                // OP_MARK_CALL_BASE inside bytecode; no public host API
-                // populates that stack, so a host-side call_anchor with
-                // Dynamic would either panic on the missing base or read
-                // a stale one set up by prior bytecode and corrupt the
-                // call. Reject it explicitly.
+                // ArgCount::Dynamic is resolved by the executing Lua frame
+                // against a call base its own OP_MARK_CALL_BASE pushed; a
+                // host owns no such base. Reject it explicitly, as
+                // State::call does.
                 return Err(self.error(ErrorKind::InternalError(
                     "call_anchor does not support ArgCount::Dynamic; use ArgCount::Fixed".into(),
                 )));

@@ -70,19 +70,6 @@ impl GlobalLookupCacheSlot {
     }
 }
 
-impl Clone for GlobalLookupCacheSlot {
-    fn clone(&self) -> Self {
-        // Runtime lookup caches are State-specific, so cloned chunks start cold.
-        Self::default()
-    }
-}
-
-impl PartialEq for GlobalLookupCacheSlot {
-    fn eq(&self, _other: &Self) -> bool {
-        true
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct FieldLookupCacheEntry {
     pub(super) table: ObjectPtr,
@@ -149,19 +136,6 @@ impl FieldLookupCacheSlot {
     }
 }
 
-impl Clone for FieldLookupCacheSlot {
-    fn clone(&self) -> Self {
-        // Runtime lookup caches are State-specific, so cloned chunks start cold.
-        Self::default()
-    }
-}
-
-impl PartialEq for FieldLookupCacheSlot {
-    fn eq(&self, _other: &Self) -> bool {
-        true
-    }
-}
-
 #[derive(Debug, Default)]
 pub(super) struct SetFieldLookupCacheSlot {
     entry: Cell<Option<FieldLookupCacheEntry>>,
@@ -174,19 +148,6 @@ impl SetFieldLookupCacheSlot {
 
     pub(super) fn set(&self, entry: FieldLookupCacheEntry) {
         self.entry.set(Some(entry));
-    }
-}
-
-impl Clone for SetFieldLookupCacheSlot {
-    fn clone(&self) -> Self {
-        // Runtime lookup caches are State-specific, so cloned chunks start cold.
-        Self::default()
-    }
-}
-
-impl PartialEq for SetFieldLookupCacheSlot {
-    fn eq(&self, _other: &Self) -> bool {
-        true
     }
 }
 

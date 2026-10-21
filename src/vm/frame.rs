@@ -15,6 +15,54 @@ use super::Val;
 use super::object::UpvalueRef;
 use crate::instr::{ArgCount, RetCount};
 
+/// Stack positions pushed by `OP_MARK_CALL_BASE` and `OP_NEW_TABLE_TRACKED`
+/// and awaiting their Dynamic `OP_CALL` or `SetList(0)`.
+///
+/// The vectors are shared by every active Lua frame so that no frame
+/// allocates, but each entry belongs to the frame that pushed it: a frame
+/// records a [`PendingFloor`] on entry, reads and pops only entries above it,
+/// and truncates back to it on exit. A frame therefore cannot consume a
+/// caller's base, and an error between a push and its consumer leaves nothing
+/// behind once the frame unwinds. Host code never sees these entries.
+#[derive(Debug, Default)]
+pub(super) struct PendingBases {
+    calls: Vec<usize>,
+    constructors: Vec<usize>,
+}
+
+/// One frame's view boundary into [`PendingBases`].
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct PendingFloor {
+    calls: usize,
+    constructors: usize,
+}
+
+impl PendingBases {
+    pub(super) fn floor(&self) -> PendingFloor {
+        PendingFloor {
+            calls: self.calls.len(),
+            constructors: self.constructors.len(),
+        }
+    }
+
+    /// Discard every entry the frame owning `floor` pushed.
+    pub(super) fn truncate(&mut self, floor: PendingFloor) {
+        self.calls.truncate(floor.calls);
+        self.constructors.truncate(floor.constructors);
+    }
+
+    #[cfg(feature = "snapshot")]
+    pub(super) fn is_empty(&self) -> bool {
+        self.calls.is_empty() && self.constructors.is_empty()
+    }
+
+    #[cfg(feature = "snapshot")]
+    pub(super) fn clear(&mut self) {
+        self.calls.clear();
+        self.constructors.clear();
+    }
+}
+
 /// A `Frame` represents a single stack-frame of a Lua function.
 pub(super) struct Frame {
     /// The bytecode being executed (shared via Arc; cheap to clone, immutable).
@@ -30,6 +78,9 @@ pub(super) struct Frame {
     pub(super) upvalues: Arc<[UpvalueRef]>,
     /// The varargs passed to this function (if it's a vararg function).
     varargs: Vec<Val>,
+    /// Lengths of `State::pending_bases` when this frame started; entries
+    /// below belong to callers.
+    pub(super) pending_floor: PendingFloor,
     /// The stack bottom when this frame was created (used for closing upvalues).
     pub(super) stack_bottom: usize,
 }
@@ -43,6 +94,7 @@ impl Frame {
         upvalues: Arc<[UpvalueRef]>,
         varargs: Vec<Val>,
         stack_bottom: usize,
+        pending_floor: PendingFloor,
     ) -> Self {
         let ip = 0;
         Self {
@@ -51,8 +103,56 @@ impl Frame {
             ip,
             upvalues,
             varargs,
+            pending_floor,
             stack_bottom,
         }
+    }
+
+    /// This frame's innermost pending constructor base, if it pushed one.
+    pub(super) fn constructor_base(&self, state: &State) -> Option<usize> {
+        state
+            .pending_bases
+            .constructors
+            .get(self.pending_floor.constructors..)?
+            .last()
+            .copied()
+    }
+
+    /// Pop this frame's innermost pending constructor base; never a caller's.
+    pub(super) fn pop_constructor_base(&self, state: &mut State) {
+        if state.pending_bases.constructors.len() > self.pending_floor.constructors {
+            let _base = state.pending_bases.constructors.pop();
+        }
+    }
+
+    fn call_args(&self, state: &mut State, args: ArgCount) -> Result<ArgCount> {
+        let args = if args == ArgCount::Dynamic {
+            let calls = &mut state.pending_bases.calls;
+            let owned = if calls.len() > self.pending_floor.calls {
+                calls.pop()
+            } else {
+                None
+            };
+            let base = owned.ok_or_else(|| {
+                state.error(ErrorKind::InternalError(
+                    "call with Dynamic args but no call base pending in this frame".into(),
+                ))
+            })?;
+            let actual_len = state.stack.len().checked_sub(base + 1).ok_or_else(|| {
+                state.error(ErrorKind::InternalError(
+                    "dynamic call base is outside the active stack".into(),
+                ))
+            })?;
+            let actual = u8::try_from(actual_len).map_err(|_| {
+                state.error(ErrorKind::TooManyArguments {
+                    limit: crate::limits::MAX_ARGUMENTS,
+                })
+            })?;
+            ArgCount::Fixed(actual)
+        } else {
+            args
+        };
+        Ok(args)
     }
 
     /// Get the bytecode being executed.
@@ -243,7 +343,8 @@ impl Frame {
                 Instr::OP_CALL => {
                     self.record_call_site(state);
                     Self::flush_local_cost(state, local_cost)?;
-                    state.call_op(ArgCount::from_u8(inst.a()), RetCount::from_u8(inst.b()))?;
+                    let args = self.call_args(state, ArgCount::from_u8(inst.a()))?;
+                    state.call_op(args, RetCount::from_u8(inst.b()))?;
                 }
                 Instr::OP_MARK_CALL_BASE => {
                     // The verifier requires the serialized A operand to be 1;
@@ -265,7 +366,7 @@ impl Frame {
                                 "call-base marker is below the active frame".into(),
                             ))
                         })?;
-                    state.vararg_call_bases.push(base);
+                    state.pending_bases.calls.push(base);
                 }
                 Instr::OP_CLOSE_UPVALUES => {
                     // Close upvalues for locals at or above the given slot
@@ -490,7 +591,7 @@ impl Frame {
                     );
                     let table_idx = state.stack.len();
                     state.new_table_with_capacity(inst.a() as usize)?;
-                    state.table_constructor_bases.push(table_idx);
+                    state.pending_bases.constructors.push(table_idx);
                 }
 
                 // Table writes
@@ -549,9 +650,9 @@ impl Frame {
                 // Array initialization
                 Instr::OP_SET_LIST => {
                     let n = inst.a();
-                    let count = state.instr_set_list_count(n)?;
+                    let count = state.instr_set_list_count(self, n)?;
                     add_cost!(state, local_cost, count as u64);
-                    state.instr_set_list(n, inst.bx())?;
+                    state.instr_set_list(self, n, inst.bx())?;
                 }
 
                 // Unknown opcode
@@ -592,7 +693,14 @@ mod tests {
             literals: Box::new([]),
             caches: super::super::compiler::RuntimeCaches::new(&bytecode),
         });
-        let mut frame = Frame::new(bytecode, runtime, Arc::from([]), Vec::new(), 0);
+        let mut frame = Frame::new(
+            bytecode,
+            runtime,
+            Arc::from([]),
+            Vec::new(),
+            0,
+            PendingFloor::default(),
+        );
         frame.ip = i16::MIN.unsigned_abs() as usize;
 
         frame
@@ -611,7 +719,14 @@ mod tests {
             literals: Box::new([]),
             caches: super::super::compiler::RuntimeCaches::new(&bytecode),
         });
-        let mut frame = Frame::new(bytecode, runtime, Arc::from([]), Vec::new(), 0);
+        let mut frame = Frame::new(
+            bytecode,
+            runtime,
+            Arc::from([]),
+            Vec::new(),
+            0,
+            PendingFloor::default(),
+        );
 
         let error = frame.jump(1).expect_err("jump to end must be rejected");
         assert!(matches!(

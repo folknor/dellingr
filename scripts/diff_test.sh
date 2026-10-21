@@ -2,7 +2,7 @@
 # Differential test: dellingr vs reference Lua 5.2 and 5.4.
 #
 # Walks examples/**/*.lua, running each script through dellingr and comparing
-# ordinary examples with the configured reference runtimes. A file passes when
+# ordinary examples with the fixed reference runtimes. A file passes when
 # its dellingr output matches either reference. Files tagged with -- DIFF:
 # <reason> skip the reference runs after dellingr exits successfully.
 #
@@ -195,7 +195,7 @@ do
         for index in "${!REFERENCE_LUAS[@]}"; do
             tool="${REFERENCE_LUAS[$index]}"
             if ! command -v "$tool" >/dev/null 2>&1; then
-                echo "missing reference ${REFERENCE_LUA_LABELS[$index]} executable: $tool (set ${REFERENCE_LUA_OVERRIDES[$index]} to its path)" >&2
+                echo "missing reference ${REFERENCE_LUA_LABELS[$index]} executable: $tool" >&2
                 exit 1
             fi
         done

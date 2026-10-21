@@ -103,3 +103,8 @@ libc = "0.2.190"
 [[example]]
 name = "hotpath"
 path = "examples/hotpath.rs"
+
+[[example]]
+name = "regenerate_save_golden"
+path = "examples/regenerate_save_golden.rs"
+required-features = ["snapshot"]

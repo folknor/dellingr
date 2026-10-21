@@ -16,7 +16,7 @@ use super::exp_desc::TailKind;
 use super::lexer::TokenStream;
 use super::token::Token;
 use super::token::TokenType;
-use crate::det_hash::IndexMap;
+use crate::det_hash::{IndexMap, IndexSet};
 use crate::instr::{ArgCount, Builtin, RetCount};
 use crate::limits::{MAX_FIXED_ARGS, MAX_LITERALS, MAX_LOCALS, MAX_SOURCE_BYTES, MAX_SYNTAX_DEPTH};
 
@@ -41,15 +41,20 @@ struct Parser<'a> {
     syntax_depth: u32,
 }
 
-/// Lookup indexes for one chunk's ordered literal vectors.
+/// Ordered literal storage for one chunk while parsing.
 ///
-/// The vectors remain the canonical bytecode pools. These maps only avoid
-/// rescanning them and always retain the index assigned at first insertion.
+/// The string set becomes the bytecode pool at chunk completion. The number
+/// vector stays in the chunk for constant folding, while its map stores only
+/// equality keys and indices.
 #[derive(Debug, Default)]
 struct LiteralPoolIndices {
-    strings: IndexMap<Vec<u8>, u16>,
-    numbers: IndexMap<u64, u16>,
+    strings: IndexSet<Vec<u8>>,
+    numbers: IndexMap<NumberLiteralKey, u16>,
 }
+
+/// Key for number literals under Lua numeric equality.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct NumberLiteralKey(u64);
 
 /// Tracks the break jumps and upvalue-close boundary for one loop.
 #[derive(Debug)]
@@ -255,21 +260,17 @@ impl<'a> Parser<'a> {
     fn find_or_add_string_bytes(&mut self, bytes: &[u8]) -> Result<u16> {
         crate::vm::check_string_size(bytes.len())
             .map_err(|err| self.error_here(err.into_kind()))?;
-        if let Some(index) = self.funcs.literal_indices.strings.get(bytes) {
-            return Ok(*index);
+        if let Some(index) = self.funcs.literal_indices.strings.get_index_of(bytes) {
+            return u16::try_from(index).map_err(|_| self.error_here(SyntaxError::TooManyStrings));
         }
 
-        let i = self.funcs.chunk.string_literals.len();
+        let i = self.funcs.literal_indices.strings.len();
         // MAX_LITERALS keeps indices within u16, so the conversion cannot fail.
         let index = match u16::try_from(i) {
             Ok(index) if i < MAX_LITERALS => index,
             _ => return Err(self.error_here(SyntaxError::TooManyStrings)),
         };
-        self.funcs.chunk.string_literals.push(bytes.to_vec());
-        self.funcs
-            .literal_indices
-            .strings
-            .insert(bytes.to_vec(), index);
+        self.funcs.literal_indices.strings.insert(bytes.to_vec());
         Ok(index)
     }
 
@@ -574,7 +575,10 @@ impl<'a> Parser<'a> {
         if !finished.loop_breaks.is_empty() || !finished.block_starts.is_empty() {
             return Err(self.internal_error("completed function retains loop or block scopes"));
         }
-        let tmp_chunk = finished.chunk;
+        let mut tmp_chunk = finished.chunk;
+        // Keep one copy of each string while parsing, then build the canonical
+        // bytecode pool in the same first-insertion order.
+        tmp_chunk.string_literals = finished.literal_indices.strings.into_iter().collect();
 
         #[cfg(feature = "debug_parser")]
         println!("Compiled chunk: {tmp_chunk:#?}");
@@ -710,16 +714,16 @@ fn find_last_local(locals: &[&str], name: &str) -> Option<usize> {
 
 /// Returns a stable lookup key for values equal under the literal pool's `==` semantics.
 /// NaNs intentionally have no key because `NaN != NaN`; signed zeroes share one key.
-fn number_literal_key(number: f64) -> Option<u64> {
+fn number_literal_key(number: f64) -> Option<NumberLiteralKey> {
     if number.is_nan() {
         return None;
     }
 
     let bits = number.to_bits();
     if bits & !(1_u64 << 63) == 0 {
-        Some(0)
+        Some(NumberLiteralKey(0))
     } else {
-        Some(bits)
+        Some(NumberLiteralKey(bits))
     }
 }
 

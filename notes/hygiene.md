@@ -124,29 +124,6 @@ compiler side.
 
 ## Cost model
 
-## HYG-012 - Budget state has two representations and is not validated on restore
-
-Reported by the host-surface and VM-core hunters.
-
-`State` carries `cost_budget: i64`, `cost_remaining: i64`,
-`cost_budget_configured: bool` and `cost_used`. "Unbounded" is the bool and the
-`i64::MAX` sentinel; `cost_remaining()` re-spells `i64::MAX` when the bool is
-false; `CHANGELOG.md` documents that return. Consumers must test the bool first:
-`cost_meter`, `cost_batch_needs_flush`, `gmatch_subject_matcher_and_cost_meter`
-(hand-destructures the fields), `lua_std/table.rs` sort
-(`cost_budget_configured || honour_meta`). Already diverged: verifier and
-save_state fixtures build `0/0/false`, a combination `State::new` never produces.
-Restore copies all four fields without checking consistency (`remaining >
-budget`, configured=false with non-MAX remaining), so a hand-built or corrupted
-snapshot can install a meter state no API reaches. The bool only goes
-false->true; there is no way back to count-only, and `set_cost_budget` does not
-say whether that is intended. Lateral: negative budgets are accepted (tested);
-`BudgetExceeded { budget: i64, used: u64 }` mixes signedness.
-
-Fix: one `budget: Option<Budget { limit, remaining }>` (or an owned `CostState`
-that hands out `CostMeter`), `cost_remaining()` a single `map_or`; snapshot
-encoding follows the type (tag byte + payload). Enforceable by type.
-
 ## Compiler front end
 
 ## HYG-027 - Compiler depends on the VM; runtime cache types and `unsafe impl Sync` live in the compiler
@@ -166,35 +143,6 @@ keep `BytecodeRuntime` private to `vm` and state the real obligation in the
 SAFETY comment, or replace `Sync` with a Send-only handle. Enforceable: a
 `brokkr check` grep that `src/compiler/**` contains no `crate::vm`/`super::vm`
 (nothing like it exists); partly by visibility.
-
-## HYG-028 - Literal pools are a two-writer invariant with doubled string storage
-
-Reported by the compiler hunter.
-
-`chunk.string_literals`/`number_literals` and `literal_indices.strings`/`numbers`
-must stay in step; `find_or_add_*` writes both, and the string map stores a
-second full copy of every string (doubling pool memory up to the source cap).
-Code that pushes to a pool directly desynchronizes them silently. Fix: an
-`IndexSet<Vec<u8>>` (via det_hash) where index = position, converted in
-`finalize`; numbers keep a key newtype. Enforceable structurally.
-
-## HYG-034 - Dead or vestigial front-end code
-
-Reported by the compiler hunter.
-
-- `GlobalLookupCacheSlot`, `FieldLookupCacheSlot`, `SetFieldLookupCacheSlot` have
-  hand-written `Clone` ("cloned chunks start cold", stale) and an always-true
-  `PartialEq`, from when caches lived in `Bytecode`. `RuntimeCaches` derives
-  neither and no slot is cloned or compared; `TforCursorSlot` has neither. The
-  compiler would reject a slot clone if removed, so deletion is self-checking.
-- `numeral::scale_finite_by_power_of_two`: its only caller runs at
-  `top_exponent >= MIN_NORMAL_EXPONENT` and rounding only raises the exponent, so
-  the `< HALF_MIN_SUBNORMAL_EXPONENT` and `< MIN_NORMAL_EXPONENT` branches look
-  unreachable (subnormals go through `round_hex_subnormal`). Confirm with
-  coverage before deleting: numeric, replay-visible. If dead, it is an untested
-  second subnormal algorithm that disagrees in method with the live one.
-
----
 
 ## VM execution core
 
@@ -278,22 +226,6 @@ the ip into `CallInfo` unconditionally on every call out (one store); or an
 `Instr::may_reenter()` table cross-checked by a test. Enforceable by a test running
 each opcode against a metatable'd operand asserting traceback line and
 `cost_used`.
-
-## HYG-047 - Stack indices held across user code; per-frame bases stored globally
-
-Reported by the VM-core hunter.
-
-`instr_set_field` keeps a stack index across a `__newindex` call, checked only by
-`debug_assert_eq!(stack[idx], tbl_val)` ("no current path" safety); in release a
-violation removes the wrong slot. Same in `handle_index_metamethod_inner` (reads
-`stack[table_idx]` after a flush) and `instr_tfor_call` (writes `stack[base + 3 +
-i]` after arbitrary code). Safety rests on called frames living above
-`stack_bottom`, structural for Lua frames and true for RustFns only because
-`convert_idx` refuses indices below `stack_bottom`; state it as the invariant with
-a test. `vararg_call_bases` / `table_constructor_bases` are shared across frames,
-balanced by bytecode and repaired by watermarks; per-frame storage would make
-cross-frame confusion unrepresentable and delete the watermark logic and three
-`InternalError` checks.
 
 ## Heap, tables, persistence
 
@@ -462,13 +394,16 @@ Reported by every hunter, at different sites.
 - AGENTS.md says the CLI carries both `disallowed_methods` and `disallowed_types`
   allows; `main` carries only the first. Reword to "scoped allows as needed".
 
-## HYG-103 - Public error enums are exhaustive
+## HYG-104 - Two invariants held only by reasoning
 
-Reported by the wave 4 reconciler.
+Reported by the wave 5 reconciler.
 
-`LibraryError`, `ArgDetail` and `ErrorKind` gain and lose variants every few
-waves, and none is `#[non_exhaustive]`, so every change breaks a downstream
-exhaustive match. Fix: mark them non-exhaustive while pre-1.0.
+- `numeral::scale_finite_by_power_of_two` lost its subnormal branches on the
+  argument that its only caller never passes an exponent below
+  `MIN_NORMAL_EXPONENT`; nothing checks that. A `debug_assert!` would make the
+  claim self-checking.
+- `call_op` still has an `ArgCount::Dynamic` arm that frames now always resolve
+  first; taking a fixed `u8` would make it a type guarantee.
 
 ## HYG-099 - `#[hotpath::measure]` on trivial functions distorts the distribution
 

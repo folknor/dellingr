@@ -735,10 +735,7 @@ mod tests {
         SavePayload {
             has_standard_environment: true,
             rng_state: 0,
-            cost_remaining: 0,
-            cost_budget: 0,
-            cost_budget_configured: false,
-            cost_used: 0,
+            cost: crate::cost_meter::CostState::default(),
             strings: vec![b"same".to_vec(), b"same".to_vec()],
             bytecode: Vec::new(),
             upvalues: Vec::new(),
@@ -799,10 +796,7 @@ mod tests {
         SavePayload {
             has_standard_environment: true,
             rng_state: 0,
-            cost_remaining: 0,
-            cost_budget: 0,
-            cost_budget_configured: false,
-            cost_used: 0,
+            cost: crate::cost_meter::CostState::default(),
             strings,
             bytecode: Vec::new(),
             upvalues: vec![
@@ -1072,10 +1066,7 @@ mod tests {
         let with_next = |next: u64| SavePayload {
             has_standard_environment: true,
             rng_state: 0,
-            cost_remaining: 0,
-            cost_budget: 0,
-            cost_budget_configured: false,
-            cost_used: 0,
+            cost: crate::cost_meter::CostState::default(),
             strings: vec![b"x".to_vec()],
             bytecode: Vec::new(),
             upvalues: Vec::new(),
@@ -1099,10 +1090,7 @@ mod tests {
         let with_globals = |globals: Vec<(String, super::super::SavedVal)>| SavePayload {
             has_standard_environment: true,
             rng_state: 0,
-            cost_remaining: 0,
-            cost_budget: 0,
-            cost_budget_configured: false,
-            cost_used: 0,
+            cost: crate::cost_meter::CostState::default(),
             strings: Vec::new(),
             bytecode: Vec::new(),
             upvalues: Vec::new(),

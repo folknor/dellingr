@@ -172,6 +172,9 @@ impl State {
                     // Settle batched cost first too, so a budget failure
                     // also leaves no temporaries behind.
                     Frame::flush_local_cost(self, local_cost)?;
+                    // Cost settlement does not call user code. The receiver
+                    // remains rooted at this index until call_op establishes
+                    // a separate callee frame above it.
                     let table_val = self.stack[table_idx];
                     self.check_stack_space(3)?;
                     self.push_unchecked(Val::Obj(ptr));

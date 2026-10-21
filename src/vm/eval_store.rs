@@ -257,14 +257,10 @@ impl State {
             }
         };
         self.set_table_with_key(idx, key, val, local_cost)?;
-        // set_table_with_key may invoke a user `__newindex`, which is
-        // host code that could in principle reorganize the stack. No
-        // current path mutates `stack[idx]` mid-call (RustFn callbacks
-        // operate above stack_bottom; Lua __newindex doesn't touch the
-        // receiver slot), and the assert below guards against future
-        // regressions. We use the captured `receiver_ptr` for cache
-        // populate so the IC entry is correct even if a future change
-        // weakens that invariant.
+        // Calls preserve the caller's stack prefix: Lua frames start above
+        // these operands, and Rust callbacks can index only their own frame.
+        // Upvalue writes may change captured locals, but not this temporary
+        // receiver slot. Reallocation can move the buffer, not its indices.
         debug_assert_eq!(
             self.stack[idx], tbl_val,
             "set_table_with_key must not mutate stack[idx]; SET_FIELD cache populate relies on the captured receiver pointer"
@@ -406,8 +402,8 @@ impl State {
         self.global_env.write_cached(cache, val)
     }
 
-    fn constructor_base(&self) -> Result<usize> {
-        let table_idx = *self.table_constructor_bases.last().ok_or_else(|| {
+    fn constructor_base(&self, frame: &Frame) -> Result<usize> {
+        let table_idx = frame.constructor_base(self).ok_or_else(|| {
             self.error(ErrorKind::InternalError(
                 "SetList(0): no constructor base".to_string(),
             ))
@@ -430,24 +426,22 @@ impl State {
     }
 
     #[hotpath::measure]
-    pub(super) fn instr_set_list_count(&self, count: u8) -> Result<usize> {
+    pub(super) fn instr_set_list_count(&self, frame: &Frame, count: u8) -> Result<usize> {
         if count != 0 {
             return Ok(count as usize);
         }
 
-        let table_idx = self.constructor_base()?;
+        let table_idx = self.constructor_base(frame)?;
         Ok(self.stack.len() - table_idx - 1)
     }
 
     #[hotpath::measure]
-    pub(super) fn instr_set_list(&mut self, count: u8, batch: u16) -> Result<()> {
+    pub(super) fn instr_set_list(&mut self, frame: &Frame, count: u8, batch: u16) -> Result<()> {
         // Find the table on the stack (it's below the values)
         // count=0 means "use all values above the table"
         let values = if count == 0 {
-            let table_idx = self.constructor_base()?;
-            self.table_constructor_bases
-                .pop()
-                .expect("constructor_base validated a pending base");
+            let table_idx = self.constructor_base(frame)?;
+            frame.pop_constructor_base(self);
             self.stack.split_off(table_idx + 1)
         } else {
             self.stack.split_off(self.stack.len() - count as usize)

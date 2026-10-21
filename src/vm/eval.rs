@@ -37,12 +37,9 @@ impl State {
     /// `limits::MAX_RESULTS`. Reporting state follows the Error value: returning
     /// an already reported Error from a later callback does not report it again.
     pub fn call(&mut self, num_args: ArgCount, num_ret_expected: RetCount) -> Result<()> {
-        // ArgCount::Dynamic consumes a base pushed by OP_MARK_CALL_BASE. A
-        // RustFunc running inside argument evaluation (`f(1, g())`) sees the
-        // outer Lua frame's pending base on vararg_call_bases; letting a host
-        // pop it would remove a caller-owned slot as the callee and leave the
-        // outer Dynamic OP_CALL without its base. Hosts never own a base, so
-        // the public entry point rejects Dynamic before touching any state.
+        // ArgCount::Dynamic is resolved by the executing Lua Frame against
+        // its own pending base. Hosts never own such a base, so the public
+        // entry point rejects Dynamic before touching any state.
         //
         // This and call_op's InvalidStackIndex preflight are returned without
         // notifying on_error: they are host misuse detected before anything
@@ -56,43 +53,19 @@ impl State {
         self.call_op(num_args, num_ret_expected)
     }
 
-    /// Bytecode `OP_CALL` entry point: like [`State::call`], but also accepts
-    /// `ArgCount::Dynamic`, which consumes the base pushed by the frame's own
-    /// `OP_MARK_CALL_BASE`.
+    /// Shared call entry after the executing Frame resolves dynamic arguments.
+    ///
+    /// The callee owns only slots at or above its new stack_bottom. Public
+    /// stack operations reject indices and truncations below that boundary;
+    /// nested Lua locals and temporaries are also placed above it. Returning
+    /// restores the caller's slot positions even if pushes reallocate the
+    /// buffer. Captured locals can still be written through explicit upvalues.
     pub(super) fn call_op(&mut self, num_args: ArgCount, num_ret_expected: RetCount) -> Result<()> {
-        // Handle vararg call: ArgCount::Dynamic means calculate from vararg_call_bases stack
         let (idx, actual_num_args) = match num_args {
             ArgCount::Dynamic => {
-                // Defence in depth: a base below the current frame belongs to
-                // a caller and must not be consumed (checked before popping).
-                match self.vararg_call_bases.last() {
-                    None => {
-                        return Err(self.error(ErrorKind::InternalError(
-                            "call with Dynamic args but no vararg_call_base set".into(),
-                        )));
-                    }
-                    Some(&b) if b < self.stack_bottom => {
-                        return Err(self.error(ErrorKind::InternalError(
-                            "dynamic call base lies below the current frame".into(),
-                        )));
-                    }
-                    Some(_) => {}
-                }
-                let base = self
-                    .vararg_call_bases
-                    .pop()
-                    .expect("vararg_call_bases checked non-empty just above");
-                let actual_len = self.stack.len().checked_sub(base + 1).ok_or_else(|| {
-                    self.error(ErrorKind::InternalError(
-                        "dynamic call base is outside the active stack".into(),
-                    ))
-                })?;
-                let actual = u8::try_from(actual_len).map_err(|_| {
-                    self.error(ErrorKind::TooManyArguments {
-                        limit: crate::limits::MAX_ARGUMENTS,
-                    })
-                })?;
-                (base, actual)
+                return Err(self.error(ErrorKind::InternalError(
+                    "call_op received Dynamic args the calling frame did not resolve".into(),
+                )));
             }
             ArgCount::Fixed(n) => {
                 let required = usize::from(n) + 1;
@@ -161,7 +134,7 @@ impl State {
             // MAX_CALL_DEPTH (the same constraint AGENTS.md records for
             // #[hotpath::measure] on this path). A Rust panic unwinding through
             // here therefore leaks this root - but it also leaves call_stack,
-            // string_literals, stack_bottom and the vararg bases inconsistent,
+            // string_literals, stack_bottom and the pending bases inconsistent,
             // none of which are unwound either. A State that has been unwound
             // through must be discarded, not reused.
             self.transient_roots.values.push(func_val);
@@ -407,22 +380,7 @@ impl State {
         }
         self.call_depth += 1;
 
-        // Watermark the dynamic-call-base stacks on entry. A well-formed frame
-        // pushes and consumes these in balance, but an error between an
-        // OP_MARK_CALL_BASE and its Dynamic OP_CALL (or between NewTableTracked
-        // and its SetList) leaves a stale base behind. The per-frame error
-        // cleanup in eval_closure_inner does not touch these stacks, so truncate
-        // them here on any error so the State stays quiescent (reusable /
-        // snapshot-saveable) after a killed callback.
-        let vararg_base_watermark = self.vararg_call_bases.len();
-        let table_base_watermark = self.table_constructor_bases.len();
-
         let result = self.eval_closure_inner(closure, num_args);
-
-        if result.is_err() {
-            self.vararg_call_bases.truncate(vararg_base_watermark);
-            self.table_constructor_bases.truncate(table_base_watermark);
-        }
 
         self.call_depth -= 1;
         result
@@ -584,7 +542,12 @@ impl State {
         }
 
         let mut frame = self.initialize_frame(closure, varargs);
-        let ret_count = match frame.eval(self) {
+        let result = frame.eval(self);
+        // A balanced frame consumed every base it pushed, so this is a no-op
+        // on success; after an error it drops the bases left between a push
+        // and its consumer, which keeps the State reusable and saveable.
+        self.pending_bases.truncate(frame.pending_floor);
+        let ret_count = match result {
             Ok(count) => count,
             Err(e) => {
                 let e = self.report_frame_error(e, &frame);
@@ -644,6 +607,7 @@ impl State {
             closure.upvalues,
             varargs,
             self.stack_bottom,
+            self.pending_bases.floor(),
         )
     }
 

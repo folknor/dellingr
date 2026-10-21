@@ -287,13 +287,10 @@ fn scale_finite_by_power_of_two(value: f64, scale: i64) -> f64 {
     if exponent > MAX_NORMAL_EXPONENT {
         return f64::INFINITY;
     }
-    if exponent < HALF_MIN_SUBNORMAL_EXPONENT {
-        return 0.0;
-    }
-    if exponent < MIN_NORMAL_EXPONENT {
-        let tail_exponent = exponent.saturating_sub(MIN_NORMAL_EXPONENT).clamp(-53, -1) as i32;
-        return (normalized * f64::MIN_POSITIVE) * 2_f64.powi(tail_exponent);
-    }
+    // The rounded significand has the retained bit count or one extra bit if
+    // rounding carries. Its exponent is therefore `top_exponent` or one above.
+    // `finish_hex` calls this only when `top_exponent` is at least
+    // `MIN_NORMAL_EXPONENT`; subnormals use `round_hex_subnormal` instead.
     let exponent = exponent.clamp(MIN_NORMAL_EXPONENT, MAX_NORMAL_EXPONENT) as i32;
     normalized * 2_f64.powi(exponent)
 }
@@ -395,5 +392,27 @@ mod tests {
             parse_lua_numeral(long_one.as_bytes()).map(f64::to_bits),
             Some(0x4c30_0000_0000_0000)
         );
+    }
+
+    #[test]
+    fn parse_hex_subnormal_boundaries_round_to_even() {
+        let cases = [
+            ("0x1.ffffffffffffep-1023", 0x000f_ffff_ffff_ffff),
+            ("0x1.fffffffffffffp-1023", 0x0010_0000_0000_0000),
+            ("0x1p-1022", 0x0010_0000_0000_0000),
+            ("0x1p-1074", 0x0000_0000_0000_0001),
+            ("0x1p-1075", 0x0000_0000_0000_0000),
+            ("0x3p-1075", 0x0000_0000_0000_0002),
+            ("0x5p-1075", 0x0000_0000_0000_0002),
+            ("0x1.0000000000001p-1075", 0x0000_0000_0000_0001),
+        ];
+
+        for (input, expected) in cases {
+            assert_eq!(
+                parse_lua_numeral(input.as_bytes()).map(f64::to_bits),
+                Some(expected),
+                "{input}"
+            );
+        }
     }
 }
