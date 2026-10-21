@@ -224,20 +224,43 @@ fn check_slots(
 }
 
 fn verify_stack_discipline(view: &impl BytecodeView) -> Result<(), BytecodeValidationError> {
+    // Abstract states are stored only at join candidates: transfer targets and
+    // the entry. Any other pc has exactly one predecessor (the instruction
+    // before it), which executes at most once, so its state travels in the
+    // worklist by value and is never compared. Storing a state per reachable
+    // pc instead cost a marker-stack clone per instruction. The worklist order,
+    // the comparison points and therefore the first reported error are the
+    // same as storing everywhere.
     let code_len = view.code_len();
-    let mut states = vec![None; code_len];
-    states[0] = Some(AbsState {
+    // Dense ordinal of each join candidate; `u32::MAX` marks a plain pc.
+    let mut join_index = vec![u32::MAX; code_len];
+    let mut join_count = 0u32;
+    let mut mark_join = |pc: usize| {
+        if join_index[pc] == u32::MAX {
+            join_index[pc] = join_count;
+            join_count += 1;
+        }
+    };
+    mark_join(0);
+    for pc in 0..code_len {
+        let inst = Instr::from_raw(view.raw_instruction(pc));
+        if Instr::is_transfer(inst.opcode()) {
+            // `validate_bytecode` range-checked every transfer target before
+            // calling this, so the target is a valid pc.
+            let target = (pc as i64 + 1 + i64::from(inst.sbx())) as usize;
+            mark_join(target);
+        }
+    }
+    let entry = AbsState {
         height: Height::Known(0),
         call_bases: Vec::new(),
         table_bases: Vec::new(),
-    });
-    let mut worklist = vec![0usize];
+    };
+    let mut joins: Vec<Option<AbsState>> = vec![None; join_count as usize];
+    joins[join_index[0] as usize] = Some(entry.clone());
+    let mut worklist = vec![(0usize, entry)];
 
-    while let Some(pc) = worklist.pop() {
-        let state = match &states[pc] {
-            Some(state) => state.clone(),
-            None => return Err(err(Some(pc), "missing abstract stack state")),
-        };
+    while let Some((pc, state)) = worklist.pop() {
         let inst = Instr::from_raw(view.raw_instruction(pc));
         let op = inst.opcode();
         let a = inst.a();
@@ -484,15 +507,26 @@ fn verify_stack_discipline(view: &impl BytecodeView) -> Result<(), BytecodeValid
                     .ok_or_else(|| err(Some(pc), "jump target is out of range"))
             }
         };
-        let mut successors = Vec::with_capacity(2);
-        if op != Instr::OP_JUMP {
-            successors.push(pc + 1);
-        }
-        if Instr::is_transfer(op) {
-            successors.push(target(inst)?);
-        }
-        for successor in successors {
-            match &states[successor] {
+        let fallthrough = (op != Instr::OP_JUMP).then_some(pc + 1);
+        let jump = if Instr::is_transfer(op) {
+            Some(target(inst)?)
+        } else {
+            None
+        };
+        // Compare at enumeration time, in successor order, exactly where a
+        // per-pc state table would: that fixes which error is reported first.
+        let mut to_push = [None; 2];
+        let mut pushes = 0;
+        for successor in [fallthrough, jump].into_iter().flatten() {
+            let join = join_index[successor];
+            if join == u32::MAX {
+                // Only a fallthrough can land on a plain pc, and that pc's sole
+                // predecessor is this one: first and only arrival.
+                to_push[pushes] = Some(successor);
+                pushes += 1;
+                continue;
+            }
+            match &joins[join as usize] {
                 Some(existing) if existing != &next => {
                     return Err(err(
                         Some(successor),
@@ -501,10 +535,19 @@ fn verify_stack_discipline(view: &impl BytecodeView) -> Result<(), BytecodeValid
                 }
                 Some(_) => {}
                 None => {
-                    states[successor] = Some(next.clone());
-                    worklist.push(successor);
+                    joins[join as usize] = Some(next.clone());
+                    to_push[pushes] = Some(successor);
+                    pushes += 1;
                 }
             }
+        }
+        match to_push {
+            [Some(first), Some(second)] => {
+                worklist.push((first, next.clone()));
+                worklist.push((second, next));
+            }
+            [Some(only), None] => worklist.push((only, next)),
+            _ => {}
         }
     }
     Ok(())
@@ -590,6 +633,7 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
     }
     let slots = view.num_params() as usize + view.num_locals() as usize;
     let mut global_slots = vec![None; view.string_literals().len()];
+    let mut global_name_checked = vec![false; view.string_literals().len()];
     let mut next_global_slot = 0usize;
     let mut next_field_slot = 0u8;
     let mut next_set_field_slot = 0usize;
@@ -630,8 +674,14 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
             }
             Instr::OP_GET_GLOBAL | Instr::OP_SET_GLOBAL => {
                 check_index(pc, bx, view.string_literals().len(), "string literal")?;
-                if std::str::from_utf8(&view.string_literals()[bx as usize]).is_err() {
-                    return Err(err(Some(pc), "global name operand is not UTF-8"));
+                // Check each name once: re-scanning a long name at every
+                // reference would cost references x name length. The first
+                // reference to a bad name still reports.
+                if !global_name_checked[bx as usize] {
+                    if std::str::from_utf8(&view.string_literals()[bx as usize]).is_err() {
+                        return Err(err(Some(pc), "global name operand is not UTF-8"));
+                    }
+                    global_name_checked[bx as usize] = true;
                 }
                 // The sentinel means "deliberately uncached" and is valid
                 // anywhere, not only once the slots are exhausted. The compiler

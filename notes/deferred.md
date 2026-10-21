@@ -171,16 +171,6 @@ for `with_rooted_value` on the recursive path - or a plain struct that every
 remove. Revisit only with a native-stack-per-level measurement of the
 recursive path showing the closure form is frame-neutral.
 
-## HYG-033 - Verifier and finalize cost scales badly with source size
-
-Reported by the compiler hunter.
-
-`verify_stack_discipline` clones `AbsState` (two marker stacks up to 200 entries)
-into every reachable pc: O(code_len x marker depth) memory per chunk, bounded but
-large for 16 MiB sources. `finalize` runs `validate_bytecode` per chunk and
-recurses, so a source with many nested chunks pays it many times, in release, on
-every `load`. Fix: share marker stacks or store them only at join points.
-
 ## HYG-049 - Unbounded or super-linear VM growth paths
 
 Reported by the VM-core and heap hunters.

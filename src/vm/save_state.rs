@@ -3393,6 +3393,16 @@ mod tests {
             1,
             0,
         );
+        // A back-edge to the entry joins against the entry state itself.
+        stack_rejection(
+            vec![
+                Instr::push_nil(),
+                Instr::jump(-2),
+                Instr::ret(RetCount::Fixed(0)),
+            ],
+            0,
+            0,
+        );
 
         let mut bad_set_field_at = valid_saved_bytecode();
         bad_set_field_at.string_literals.push(b"field".to_vec());
