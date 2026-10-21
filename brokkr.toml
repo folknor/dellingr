@@ -157,6 +157,12 @@ xxh128 = "9ebd1f3da641203c82de3ee42b0c251c"
 hotpath_file = "examples/alloc/record_tables.lua"
 hotpath_xxh128 = "75c4136ff4e1c1308baecf9b7f2b2283"
 
+[dellingr.workloads.list_literals]
+file = "bench/list_literals.lua"
+xxh128 = "69948cfa2e1cb8ea44e935f481d3fa16"
+hotpath_file = "examples/alloc/list_literals.lua"
+hotpath_xxh128 = "011d9bebb4c271ca3371e7101c3f5741"
+
 [dellingr.workloads.gc_churn]
 file = "bench/gc_churn.lua"
 xxh128 = "1ed1ab2e97827b61e317a94d3f197a5a"

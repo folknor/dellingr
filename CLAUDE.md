@@ -120,6 +120,11 @@ Querying results (`.brokkr/results.db`):
 
 ### Benchmarking rules
 
+- **Every benchmark, timing or calibration measurement goes through
+  `brokkr dellingr`.** Never hyperfine, `scripts/bench.sh`,
+  `scripts/hotbench.sh`, `time` or a hand-rolled loop, including for
+  calibrating a new workload's repeat count. A workload that is not
+  registered gets registered in brokkr.toml first.
 - **Never run benchmark or profiling commands in parallel.** One at a
   time, wait for completion.
 - **Interleave matched A/B cells.** `--bench N` is best-of-N within one
