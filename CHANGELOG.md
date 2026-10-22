@@ -8,6 +8,62 @@ All notable changes to dellingr are documented here. The format follows
 
 ### Changed (breaking)
 
+- One compile path, byte-exact. `Program::compile(source, name)` is the only
+  way to compile Lua: `source` is `impl AsRef<[u8]>` and `name` is
+  `Option<&[u8]>`, so non-UTF-8 sources load (string literals keep their
+  bytes) and chunk names are kept exactly. `Engine` is removed (its
+  `compile`/`compile_named` become `Program::compile`, `new_state` becomes
+  `State::new`/`State::with_callbacks`, `raw` becomes `State::raw`/the new
+  `State::raw_with_callbacks`); `State::load_string` and
+  `load_string_named` are removed (compile, then `State::load`); the free
+  `analyze_cost(source)` and `Engine::analyze_cost` become
+  `Program::analyze_cost(&self)`. `State::empty` is renamed `State::raw`.
+  An oversized chunk name is still rejected before the source is examined.
+- Chunk names are bytes: `Program::source_name`, `Error::source_name` and
+  `State::current_source` return `Option<&[u8]>`, and `StackFrame::source`
+  is `Option<Arc<[u8]>>`. `Display` renders them lossily. Snapshots store
+  them as the same length-prefixed bytes as before, now without requiring
+  UTF-8, so the format and existing saves are unchanged.
+- `HostCallbacks::on_print(&mut self, source: Option<&[u8]>, line: u32,
+  message: &[u8])`: the host receives the printed bytes and chunk name
+  exactly. `DefaultCallbacks` and the CLI write the bytes unchanged.
+- Typed errors. `ErrorKind::ScriptError { value: ErrorValue, prefix }`
+  replaces `message: String`: `ErrorValue` is `Nil`, `Boolean`, `Number`,
+  `String(Vec<u8>)` (exact bytes) or `Object { value_type, rendering }` for
+  tables and functions, whose rendering is their `tostring` bytes.
+  `error()` with no argument raises `Nil`, as `error(nil)` does, instead of
+  the invented message "(error raised with no message)"; it renders as
+  `nil`. Library failures are
+  `ErrorKind::LibraryError(LibraryError)` instead of a rendered
+  `RuntimeError(String)` plus `Error::library_error()`, which is removed.
+  `RuntimeError(String)` is gone; `ErrorKind::HostError(Box<dyn
+  std::error::Error + Send + Sync>)` is the kind for a `RustFunc`'s own
+  failure (`"text".into()` builds one), recoverable through
+  `Error::source` and the now-public `Error::into_kind`; `Error` implements
+  `std::error::Error`. `ErrorKind::InternalError` wraps an opaque
+  `InternalError` that only dellingr constructs, so it always means a
+  dellingr bug; a host passing `ArgCount::Dynamic` to `call` or
+  `call_anchor`, previously reported as an internal error, is the new
+  `ErrorKind::DynamicArgumentsUnsupported { api }`, whose text drops the
+  `internal error: ` prefix. `SyntaxError::ExpectedToken` holds `expected: &'static str`
+  and `found: Vec<u8>` (the token's source bytes); the never-constructed
+  `SyntaxError::UnexpectedTok` is removed; a stray non-UTF-8 byte in source
+  is the new `SyntaxError::InvalidByte`. `LibraryError`'s format
+  `directive` fields are `Vec<u8>`.
+- `State::bytes_with_tostring_meta` is renamed `State::tostring_bytes`.
+- **Replay-visible:** invalid UTF-8 in printed text and in error values now
+  reaches the host as the script's bytes instead of U+FFFD. `print` and
+  `error` no longer check a threefold lossy expansion against the string
+  cap: a `print` whose raw output fits the cap but whose U+FFFD expansion did
+  not now prints, and such an `error` now raises its value instead of
+  `StringSizeExceeded`. The CLI's `print` output is byte-exact, as reference
+  Lua's is. Costs are unchanged.
+- Error text changes for valid UTF-8 are limited to: `error()` renders `nil`
+  (above); `ArgCount::Dynamic` refusals lose the `internal error: ` prefix;
+  and the CLI's `--analyze` names the chunk (file path or `stdin`) in a
+  parse error, as running and `--dump-bytecode` already did, because it
+  compiles through the same `Program::compile` call.
+
 - Snapshot format version 10. Every bytecode inline-cache operand
   (`GET_GLOBAL`, `SET_GLOBAL`, `GET_FIELD`, `SET_FIELD` and the generic-for
   `pairs` cursor) now uses one encoding: biased by one, 0 meaning uncached;

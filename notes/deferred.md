@@ -24,76 +24,11 @@ the category names the part that kept them out of the loop.
 The user walked through these one by one on 2026-10-22 and approved each
 decision below. Entries are removed as they ship.
 
-They land together as one breaking release, so the game host migrates once:
-
-- HYG-079 and HYG-035 change the public host API.
-- The snapshot format is already bumped to 10 in this release (the
-  cache-operand unification). If HYG-079's chunk names are persisted, that
-  change rides on the same unreleased bump; do not bump again.
-- The cost model is already bumped to 6 in this release (gmatch's literal
-  `^`).
-- CHANGELOG.md calls out each replay-visible change.
-
-## HYG-079 - Host boundary assumes UTF-8: lossy `print`, UTF-8-only source
-
-Reported by the stdlib and host-surface hunters.
-
-`print` converts to `&str` lossily because `HostCallbacks::print` takes `&str`;
-scripts can print arbitrary bytes and the host sees U+FFFD, and the 3x expansion
-preflight in `print` and `error` exists only because of it. `load_string(&str)` is
-the only load API, so the CLI's `fs::read_to_string` refuses non-UTF-8 sources
-(a clean refusal naming the path; stdin input is refused the same way) although
-Lua strings are bytes; non-UTF-8 paths become the chunk name via
-`to_string_lossy`, silently degrading the identifier.
-
-Decision: the full fix, with errors typed properly.
-
-- `on_print` takes the message as `&[u8]`.
-- A byte source load, which becomes the single compile entry point (see
-  HYG-035); the CLI uses it for files and stdin.
-- Chunk names are byte-exact, or follow one stated conversion rule.
-- `ErrorKind::ScriptError` carries a typed payload instead of
-  `message: String`: nil, boolean, number, or string as exact bytes. Values
-  that cannot outlive the State's GC (tables, functions, ...) carry their type
-  plus their `__tostring` rendering as bytes. `error()` with no argument is
-  the nil payload, not a made-up message. `Display` renders today's text, so
-  CLI output for valid UTF-8 is unchanged.
-- The remaining `ErrorKind::RuntimeError(String)` and `InternalError(String)`
-  construction sites (`src/compiler.rs`, `src/compiler/parser.rs`,
-  `src/vm_aux.rs`, `src/error.rs`) get typed variants or reasons, as the
-  library and pattern errors already have.
-- The 3x preflight goes from `print` and `error`. `State::to_string` keeps
-  its checked lossy conversion: it promises a `String`.
-- Replay-visible: invalid UTF-8 in printed text and error values reaches the
-  host as the script's bytes instead of U+FFFD.
-
-## HYG-035 - Thin wrapper layers and a facade with one bool of payload
-
-Reported by the compiler and host-surface hunters.
-
-`Parser::describe_token_type` returns `typ.spelling()`; `parse_fndef`,
-`parse_fndef_named`, `parse_fndef_method` forward to `parse_fndef_with_params`;
-two layers of `parse_str`/`parse_str_named` (`compiler::` wraps `parser::`).
-`parser::parse_str` exists separately only so tests can see pre-`finalize`
-output. On the host side, `Engine::compile`/`compile_named` never reference
-`self` (Engine's only state is `install_stdlib: bool`); `analyze_cost(source)` and
-`Engine::analyze_cost(&program)` are two entries to one thing;
-`State::load_string(_named)` is a third compile path.
-
-Decision: collapse the internals and drop `Engine`. One internal
-`compile(source, name)`, with a test helper for pre-finalize output; the
-parser forwarders and `describe_token_type` fold away. Publicly,
-`Program::compile` plus `State::new`/`raw` replace `Engine`, and one
-`analyze_cost` remains. The byte source load from HYG-079 is the one compile
-path, not a byte variant beside each of today's three.
-
 ## HYG-077 - Small stdlib duplications and unreachable checks
 
-Reported by the stdlib hunter.
+Reported by the stdlib hunter. The `__tostring` rule duplication shipped
+(`State::tostring_rendering`, with `error_value` beside it). Remaining:
 
-- `tostring` and `string.format("%s")` each implement "a string bypasses
-  `__tostring` unless the shared string metatable has one"; `error` implements the
-  opposite (always bypass). One `State::tostring_bytes(idx)` should own the first.
 - Lua-index normalisation: `string.rs` has `lua_start_index`/`lua_end_index`,
   `table.rs` has per-function rules (matching 5.4's quirks), `select` its own.
   The rules really differ, but nothing documents them in one place.
@@ -102,12 +37,10 @@ Reported by the stdlib hunter.
   false`), so the checks are unreachable from Lua (a host could call them). Noted
   so nobody cites them as precedent.
 
-Decision: split it up. The first bullet lands with HYG-079, whose byte-exact
-`error` and `print` rework the same conversion: `tostring_bytes` owns the
-rule, with `error`'s opposite rule beside it. The second gets one short
-section listing the per-function index rules (`reference/` or a comment
-block in `src/lua_std.rs`). The third gets a comment at the `_G` handlers.
-Then the entry is removed.
+Decision: the first remaining bullet gets one short section listing the
+per-function index rules (`reference/` or a comment block in
+`src/lua_std.rs`). The second gets a comment at the `_G` handlers. Then the
+entry is removed.
 
 ## Unmeasured performance
 

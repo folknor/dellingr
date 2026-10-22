@@ -37,8 +37,8 @@ fn run_feature_test_extended_in_process() {
         .expect("example corpus paths must be rooted at the crate manifest")
         .display()
         .to_string();
-    state
-        .load_string_named(&source, Some(source_name))
+    dellingr::Program::compile(&source, Some(source_name.as_bytes()))
+        .and_then(|program| state.load(&program))
         .expect("feature_test_extended.lua should load successfully");
     state
         .call(dellingr::ArgCount::Fixed(0), dellingr::RetCount::Fixed(0))

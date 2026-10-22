@@ -2,7 +2,9 @@ use dellingr::{ArgCount, RetCount, State};
 
 fn run_number(code: &str) -> f64 {
     let mut state = State::new();
-    state.load_string(code).unwrap();
+    dellingr::Program::compile(code, None)
+        .and_then(|program| state.load(&program))
+        .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
     state.to_number(-1).unwrap()
 }
@@ -47,8 +49,7 @@ fn collectable_tombstone_key_survives_next_control_lookup() {
         })
         .unwrap();
     state.set_global("force_gc").unwrap();
-    state
-        .load_string("local t = {}; local a = {}; local b = {}; t[a] = 1; t[b] = 2; local control = next(t); t[control] = nil; force_gc(); return next(t, control) == b and 1 or 0")
+    dellingr::Program::compile("local t = {}; local a = {}; local b = {}; t[a] = 1; t[b] = 2; local control = next(t); t[control] = nil; force_gc(); return next(t, control) == b and 1 or 0", None).and_then(|program| state.load(&program))
         .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
     assert_eq!(state.to_number(-1).unwrap(), 1.0);
@@ -91,15 +92,18 @@ fn pairs_cursor_preserves_mutation_and_same_site_recursion_semantics() {
 #[test]
 fn pairs_cursor_keeps_invalid_controls_and_costs_unchanged() {
     let mut state = State::new();
-    state
-        .load_string("local t={a=1,b=2,c=3}; for k in pairs(t) do end; for k in pairs(t) do end")
-        .unwrap();
+    dellingr::Program::compile(
+        "local t={a=1,b=2,c=3}; for k in pairs(t) do end; for k in pairs(t) do end",
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
     assert_eq!(state.cost_used(), 4);
 
     let mut invalid = State::new();
-    invalid
-        .load_string("local t={a=1}; return next(t, 'missing')")
+    dellingr::Program::compile("local t={a=1}; return next(t, 'missing')", None)
+        .and_then(|program| invalid.load(&program))
         .unwrap();
     let error = invalid
         .call(ArgCount::Fixed(0), RetCount::Fixed(1))

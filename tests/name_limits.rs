@@ -4,29 +4,35 @@
 
 use dellingr::error::ErrorKind;
 use dellingr::limits::MAX_SOURCE_NAME_BYTES;
-use dellingr::{Engine, State};
+use dellingr::{Program, State};
 
 #[test]
 fn source_names_accept_the_limit_and_reject_one_more_byte() {
-    let engine = Engine::new();
-    let name = "s".repeat(MAX_SOURCE_NAME_BYTES);
-    let program = engine
-        .compile_named("return 1", name.clone())
-        .expect("source name at the limit compiles");
-    assert_eq!(program.source_name(), Some(name.as_str()));
-    let too_long = format!("{name}s");
-    let error = engine
-        .compile_named("return 1", too_long.clone())
+    let name = vec![b's'; MAX_SOURCE_NAME_BYTES];
+    let program =
+        Program::compile("return 1", Some(&name)).expect("source name at the limit compiles");
+    assert_eq!(program.source_name(), Some(name.as_slice()));
+    let mut too_long = name.clone();
+    too_long.push(b's');
+    let error = Program::compile("return 1", Some(&too_long))
         .expect_err("oversized source name is rejected");
     assert!(matches!(
         error.kind(),
         ErrorKind::SourceNameSizeExceeded { size, limit }
             if *size == MAX_SOURCE_NAME_BYTES + 1 && *limit == MAX_SOURCE_NAME_BYTES
     ));
+    // The name is bounded before the source is examined: an oversized name
+    // wins over a malformed source.
+    let error = Program::compile("local =", Some(&too_long))
+        .expect_err("oversized source name is rejected first");
+    assert!(matches!(
+        error.kind(),
+        ErrorKind::SourceNameSizeExceeded { .. }
+    ));
 
     let mut state = State::new();
     state
-        .load_string_named("return 1", Some(name))
+        .load(&program)
         .expect("load accepts the source-name boundary");
     // Saving requires an empty stack, so drop the loaded chunk.
     state.pop(1).expect("loaded chunk is on the stack");
@@ -35,13 +41,6 @@ fn source_names_accept_the_limit_and_reject_one_more_byte() {
         .save_state()
         .expect("boundary source name saves")
         .bytes;
-    let error = state
-        .load_string_named("return 2", Some(too_long))
-        .expect_err("load rejects oversized source name");
-    assert!(matches!(
-        error.kind(),
-        ErrorKind::SourceNameSizeExceeded { .. }
-    ));
     #[cfg(feature = "snapshot")]
     assert_eq!(
         state
@@ -89,7 +88,9 @@ fn long_function_identifiers_remain_executable_and_savable() {
     let name = "f".repeat(dellingr::limits::MAX_CHUNK_NAME_BYTES + 1);
     let source = format!("function {name}() return 7 end; return {name}()");
     let mut state = State::new();
-    state.load_string(source).expect("long identifier compiles");
+    dellingr::Program::compile(source, None)
+        .and_then(|program| state.load(&program))
+        .expect("long identifier compiles");
     state
         .call(dellingr::ArgCount::Fixed(0), dellingr::RetCount::Fixed(1))
         .expect("truncating diagnostic metadata preserves identifier lookup");

@@ -10,7 +10,7 @@ use dellingr::{ArgCount, HostCallbacks, RetCount, State};
 struct ErrorCounter(Arc<Mutex<usize>>);
 
 impl HostCallbacks for ErrorCounter {
-    fn on_print(&mut self, _source: Option<&str>, _line: u32, _message: &str) {}
+    fn on_print(&mut self, _source: Option<&[u8]>, _line: u32, _message: &[u8]) {}
 
     fn on_error(&mut self, _error: &Error) {
         *self.0.lock().expect("error counter mutex") += 1;
@@ -34,7 +34,9 @@ fn call_preflight_misuse_does_not_notify() {
         .call(ArgCount::Fixed(3), RetCount::Fixed(0))
         .expect_err("too few stack values");
     assert!(matches!(err.kind(), ErrorKind::InvalidStackIndex { .. }));
-    state.load_string("return 1").unwrap();
+    dellingr::Program::compile("return 1", None)
+        .and_then(|program| state.load(&program))
+        .unwrap();
     state
         .call(ArgCount::Dynamic, RetCount::Fixed(0))
         .expect_err("Dynamic is bytecode-only");
@@ -49,7 +51,9 @@ fn call_preflight_misuse_does_not_notify() {
 #[test]
 fn call_anchor_preflight_misuse_does_not_notify() {
     let (mut state, counter) = counted_state();
-    state.load_string("return 1").unwrap();
+    dellingr::Program::compile("return 1", None)
+        .and_then(|program| state.load(&program))
+        .unwrap();
     let anchor = state.anchor_function().unwrap();
 
     let err = state
@@ -61,7 +65,9 @@ fn call_anchor_preflight_misuse_does_not_notify() {
         .expect_err("Dynamic is bytecode-only");
 
     let mut other = State::new();
-    other.load_string("return 1").unwrap();
+    dellingr::Program::compile("return 1", None)
+        .and_then(|program| other.load(&program))
+        .unwrap();
     let foreign = other.anchor_function().unwrap();
     let err = state
         .call_anchor(&foreign, ArgCount::Fixed(0), RetCount::Fixed(0))
@@ -75,7 +81,9 @@ fn call_anchor_preflight_misuse_does_not_notify() {
 #[test]
 fn call_anchor_dispatch_error_notifies_once() {
     let (mut state, counter) = counted_state();
-    state.load_string("error('boom')").unwrap();
+    dellingr::Program::compile("error('boom')", None)
+        .and_then(|program| state.load(&program))
+        .unwrap();
     let anchor = state.anchor_function().unwrap();
     state
         .call_anchor(&anchor, ArgCount::Fixed(0), RetCount::Fixed(0))
@@ -86,7 +94,9 @@ fn call_anchor_dispatch_error_notifies_once() {
 #[test]
 fn call_anchor_without_room_for_callee_does_not_notify() {
     let (mut state, counter) = counted_state();
-    state.load_string("return 1").unwrap();
+    dellingr::Program::compile("return 1", None)
+        .and_then(|program| state.load(&program))
+        .unwrap();
     let anchor = state.anchor_function().unwrap();
     let cap = dellingr::limits::MAX_STACK_SIZE;
     state

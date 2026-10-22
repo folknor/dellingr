@@ -1,4 +1,4 @@
-use std::fmt;
+use std::fmt::{self, Write as _};
 use std::sync::Arc;
 
 use crate::LuaType;
@@ -9,13 +9,32 @@ use crate::limits::{
 
 // Types
 
+/// Display adapter for bytes that are usually, but not necessarily, UTF-8:
+/// valid UTF-8 renders as itself and each maximal invalid subsequence as one
+/// U+FFFD. Rendering only; the bytes themselves stay exact wherever they are
+/// stored.
+pub(crate) struct LossyBytes<'a>(pub(crate) &'a [u8]);
+
+impl fmt::Display for LossyBytes<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for chunk in self.0.utf8_chunks() {
+            f.write_str(chunk.valid())?;
+            if !chunk.invalid().is_empty() {
+                f.write_char(char::REPLACEMENT_CHARACTER)?;
+            }
+        }
+        Ok(())
+    }
+}
+
 /// A single frame in a stack trace.
 #[derive(Debug, Clone)]
 pub struct StackFrame {
     /// Function name (if known), shared with the chunk that executed.
     pub function_name: Option<Arc<str>>,
-    /// Source file or chunk name, shared with the chunk that executed.
-    pub source: Option<Arc<str>>,
+    /// Chunk name exactly as given to `Program::compile`, shared with the
+    /// chunk that executed. Byte-exact; `Display` renders it lossily.
+    pub source: Option<Arc<[u8]>>,
     /// Line number where the call occurred (1-indexed).
     pub line: u32,
 }
@@ -34,20 +53,44 @@ pub struct VmFault {
     pub function_name: Option<Arc<str>>,
 }
 
+/// The reason behind an [`ErrorKind::InternalError`]: a dellingr bug, never a
+/// script or host failure. Opaque on purpose - hosts report these, they do
+/// not branch on them - and constructible only inside the crate, so an
+/// `InternalError` always means dellingr broke one of its own invariants.
+/// Host failures use [`ErrorKind::HostError`].
+pub struct InternalError(InternalFault);
+
+impl fmt::Debug for InternalError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("InternalError").field(&self.0).finish()
+    }
+}
+
+impl fmt::Display for InternalError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, f)
+    }
+}
+
+#[derive(Debug)]
 pub(crate) enum InternalFault {
-    CallDynamicArguments,
-    CallAnchorDynamicArguments,
     Compiler(CompilerFault),
+    Parser(ParserFault),
     CompilerValidation {
-        chunk: String,
-        detail: String,
+        /// Function name of the chunk that failed verification, if any.
+        function: Option<Arc<str>>,
+        error: crate::compiler::verify::BytecodeValidationError,
     },
     GsubReplacementTemplateMissing,
     GmatchState(GmatchStateFault),
     #[cfg(feature = "snapshot")]
     SnapshotTable(SnapshotTableFault),
+    /// The standard library failed to register one of its own function ids.
     #[cfg(feature = "snapshot")]
-    SaveStateFailure(String),
+    Registration(crate::SaveError),
+    /// Injected by unit tests that need an internal error escaping dispatch.
+    #[cfg(test)]
+    Test,
     CaptureRangeOutsideString,
     MissingPointerIdentity,
     ConstructorTableMissing {
@@ -57,6 +100,7 @@ pub(crate) enum InternalFault {
     SetListBaseNotTable,
 }
 
+#[derive(Debug)]
 pub(crate) enum CompilerFault {
     RemappedJumpOffsetOutOfRange,
     MissingLineForInstruction,
@@ -67,6 +111,7 @@ pub(crate) enum CompilerFault {
     NestedBytecodeNotUniquelyOwned,
 }
 
+#[derive(Debug)]
 pub(crate) enum ParserFault {
     InvalidStringToken,
     MissingStringContents,
@@ -82,8 +127,12 @@ pub(crate) enum ParserFault {
     NamedFunctionTargetNotVariable,
     EmptyMultiAssignment,
     ConcatChainWithoutOperator,
+    /// Identifier and numeral tokens are ASCII by construction in the byte
+    /// lexer, and the parser reads them as `&str`.
+    TokenTextNotUtf8,
 }
 
+#[derive(Debug)]
 pub(crate) enum GmatchStateFault {
     StringFieldInvalid(&'static str),
     NumberFieldInvalid(&'static str),
@@ -104,6 +153,7 @@ pub(crate) enum SnapshotTableFault {
     HashEntryBelongsInArray,
 }
 
+#[derive(Debug)]
 pub(crate) enum ConstructorTableOperation {
     InitField,
     InitFieldPinned,
@@ -111,35 +161,39 @@ pub(crate) enum ConstructorTableOperation {
     SetList,
 }
 
-impl InternalFault {
-    fn into_message(self) -> String {
+impl fmt::Display for InternalFault {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::CallDynamicArguments => {
-                "call does not support ArgCount::Dynamic; use ArgCount::Fixed".to_owned()
-            }
-            Self::CallAnchorDynamicArguments => {
-                "call_anchor does not support ArgCount::Dynamic; use ArgCount::Fixed".to_owned()
-            }
-            Self::Compiler(fault) => fault.to_string(),
-            Self::CompilerValidation { chunk, detail } => {
-                format!("compiler emitted invalid bytecode in {chunk} {detail}")
+            Self::Compiler(fault) => fmt::Display::fmt(fault, f),
+            Self::Parser(fault) => f.write_str(fault.message()),
+            Self::CompilerValidation { function, error } => {
+                f.write_str("compiler emitted invalid bytecode in ")?;
+                match function {
+                    Some(name) => write!(f, "function '{name}'")?,
+                    None => f.write_str("unnamed chunk")?,
+                }
+                write!(f, " {error}")
             }
             Self::GsubReplacementTemplateMissing => {
-                "gsub replacement template was not initialized".to_owned()
+                f.write_str("gsub replacement template was not initialized")
             }
-            Self::GmatchState(fault) => format!("invalid gmatch iterator state: {fault}"),
+            Self::GmatchState(fault) => write!(f, "invalid gmatch iterator state: {fault}"),
             #[cfg(feature = "snapshot")]
-            Self::SnapshotTable(fault) => format!("{fault}"),
+            Self::SnapshotTable(fault) => fmt::Display::fmt(fault, f),
             #[cfg(feature = "snapshot")]
-            Self::SaveStateFailure(error) => error,
-            Self::CaptureRangeOutsideString => "capture range outside the source string".to_owned(),
+            Self::Registration(error) => fmt::Display::fmt(error, f),
+            #[cfg(test)]
+            Self::Test => f.write_str("test fault"),
+            Self::CaptureRangeOutsideString => {
+                f.write_str("capture range outside the source string")
+            }
             Self::MissingPointerIdentity => {
-                "value without a heap rendering has no pointer identity".to_owned()
+                f.write_str("value without a heap rendering has no pointer identity")
             }
             Self::ConstructorTableMissing { operation, actual } => {
-                format!("{operation}: expected table, got {actual}")
+                write!(f, "{operation}: expected table, got {actual}")
             }
-            Self::SetListBaseNotTable => "SetList(0): base is not a table".to_owned(),
+            Self::SetListBaseNotTable => f.write_str("SetList(0): base is not a table"),
         }
     }
 }
@@ -168,7 +222,7 @@ impl fmt::Display for CompilerFault {
 }
 
 impl ParserFault {
-    pub(crate) fn into_message(self) -> &'static str {
+    fn message(&self) -> &'static str {
         match self {
             Self::InvalidStringToken => "parser requested contents for an invalid string token",
             Self::MissingStringContents => "lexer did not retain contents for a string token",
@@ -196,6 +250,7 @@ impl ParserFault {
             Self::NamedFunctionTargetNotVariable => "a named function target must be a variable",
             Self::EmptyMultiAssignment => "multi-assignment requires a nonempty expression list",
             Self::ConcatChainWithoutOperator => "concat chain requires an operator",
+            Self::TokenTextNotUtf8 => "lexer produced a non-UTF-8 identifier or numeral token",
         }
     }
 }
@@ -254,19 +309,17 @@ impl fmt::Display for ConstructorTableOperation {
     }
 }
 
-/// Rarely-set error context, boxed so `Error` stays narrow. Structured library
-/// details live here so existing rendered messages and `ErrorKind` matches
-/// remain stable while hosts can inspect the operation that failed.
+/// Rarely-set error context, boxed so `Error` stays narrow. Structured
+/// attribution lives here so hosts can inspect the operation that failed
+/// without the kind carrying it.
 struct ErrorContext {
-    /// Source file or chunk name, if the error came from named source.
-    name: Option<Arc<str>>,
+    /// Chunk name, byte-exact, if the error came from named source.
+    name: Option<Arc<[u8]>>,
     /// Whether `on_error` has already been notified for this error.
     reported: bool,
     /// String function whose pattern operation produced this error, if any.
     pattern_function: Option<StringPatternFunction>,
-    /// Typed standard-library reason behind a rendered runtime error, if any.
-    library_error: Option<LibraryError>,
-    /// Standard-library function responsible for a non-library error, if any.
+    /// Standard-library function responsible for this error, if any.
     library_function: Option<LibraryFunction>,
     vm_fault: Option<VmFault>,
 }
@@ -282,14 +335,14 @@ impl fmt::Debug for ErrorContext {
 }
 
 impl ErrorContext {
-    fn as_str(&self) -> Option<&str> {
+    fn name_bytes(&self) -> Option<&[u8]> {
         self.name.as_deref()
     }
 }
 
 impl fmt::Display for StackFrame {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let source = self.source.as_deref().unwrap_or("[C]");
+        let source = LossyBytes(self.source.as_deref().unwrap_or(b"[C]"));
         let func_desc = match &self.function_name {
             Some(name) => format!("function '{name}'"),
             None => "main chunk".to_string(),
@@ -348,8 +401,7 @@ pub enum PrefixLocation {
     /// Blame this index into the stack trace, counting from the innermost
     /// frame. An index past the end renders no prefix.
     ///
-    /// `u32` rather than `usize` so `PrefixLocation` stays 8 bytes and
-    /// `ScriptError` stays within `ErrorKind`'s existing largest variant.
+    /// `u32` rather than `usize` so `PrefixLocation` stays 8 bytes.
     TraceFrame(u32),
 }
 
@@ -449,6 +501,14 @@ pub enum ErrorKind {
         /// Maximum permitted source-name length in bytes.
         limit: usize,
     },
+    /// A host passed `ArgCount::Dynamic` to `call` or `call_anchor`. Only an
+    /// executing Lua frame owns the call base a dynamic count resolves
+    /// against, so a host must use `ArgCount::Fixed`. Rejected before
+    /// anything executes.
+    DynamicArgumentsUnsupported {
+        /// The host API that was called: `"call"` or `"call_anchor"`.
+        api: &'static str,
+    },
     /// Invalid stack index passed to a host API.
     InvalidStackIndex {
         /// The bad index, as supplied by the caller.
@@ -469,37 +529,100 @@ pub enum ErrorKind {
     /// use case for a stable handle; embedders that need an "absent" value
     /// should use `Option<Anchor>`.
     AnchorNil,
-    /// A runtime fault detected by the VM or by a library operation - an
-    /// invalid `next` key and so on. Typed standard-library details are
-    /// available through [`Error::library_error`]. Pattern failures use
-    /// [`ErrorKind::PatternError`]. Distinct
-    /// from [`ErrorKind::ScriptError`], which the script raised on purpose,
-    /// and from [`ErrorKind::InternalError`], which indicates a VM bug.
-    RuntimeError(String),
+    /// A standard-library operation failed: an invalid `next` key, a bad
+    /// `string.format` directive and so on. Pattern failures use
+    /// [`ErrorKind::PatternError`]. Distinct from [`ErrorKind::ScriptError`],
+    /// which the script raised on purpose, and from
+    /// [`ErrorKind::InternalError`], which indicates a dellingr bug.
+    LibraryError(LibraryError),
+    /// A failure reported by host code: a `RustFunc` returning its own error.
+    /// dellingr never constructs this kind. The boxed error is the host's own
+    /// value, so a host can carry a typed error through Lua and recover it
+    /// with `downcast_ref` (or [`Error::into_kind`] for ownership); it is
+    /// also [`std::error::Error::source`] of the enclosing [`Error`].
+    /// A plain message converts with `"text".into()`.
+    HostError(Box<dyn std::error::Error + Send + Sync>),
     /// An error explicitly raised by script code through `error()`. Hosts can
     /// use this to tell deliberate script termination from a VM-detected fault.
     ///
     /// The prefix location lives here rather than on [`Error`] because only
     /// `error()` can set it.
     ScriptError {
-        /// The message the script passed to `error()`.
-        message: String,
+        /// The value the script passed to `error()`, byte-exact.
+        value: ErrorValue,
         /// Which frame supplies the rendered `chunk:line:` prefix.
         prefix: PrefixLocation,
     },
-    /// Internal error (corrupt bytecode or VM bug). The string is a
-    /// human-readable description; report these as bugs. Hosts may use this
-    /// legacy kind for their own errors. Library-created internal failures use
-    /// typed private reasons while preserving their rendered messages.
-    /// Dispatch attaches structured instruction context via [`Error::vm_fault`]
-    /// without widening `Error` on the recursive evaluation path.
-    InternalError(String),
+    /// Internal error: corrupt bytecode or a dellingr bug; report these as
+    /// bugs. Only dellingr constructs it - host failures use
+    /// [`ErrorKind::HostError`]. Dispatch attaches structured instruction
+    /// context via [`Error::vm_fault`] without widening `Error` on the
+    /// recursive evaluation path.
+    InternalError(InternalError),
+}
+
+/// The value a script passed to `error()`.
+///
+/// Nil, booleans, numbers and strings are carried as values; a string keeps
+/// the script's exact bytes, valid UTF-8 or not. Tables and functions cannot
+/// outlive the State's garbage collector, so they carry their type and their
+/// rendering instead: the `__tostring` result if the value has one, otherwise
+/// the State-local identity (`table: 0x1`) that `tostring` would produce.
+/// `error()` with no argument raises [`ErrorValue::Nil`], exactly like
+/// `error(nil)`.
+///
+/// `Display` renders numbers with Lua's `tostring` spelling and bytes lossily
+/// (each invalid UTF-8 sequence as U+FFFD); read the variants for exact
+/// bytes.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ErrorValue {
+    /// `error()` or `error(nil)`.
+    Nil,
+    /// A boolean error value.
+    Boolean(bool),
+    /// A number error value.
+    Number(f64),
+    /// A string error value, byte-exact.
+    String(Vec<u8>),
+    /// A table or function error value, which does not survive the State.
+    Object {
+        /// The value's Lua type.
+        value_type: LuaType,
+        /// Its `tostring` rendering, byte-exact.
+        rendering: Vec<u8>,
+    },
+}
+
+impl ErrorValue {
+    /// The Lua type of the value the script raised.
+    pub fn value_type(&self) -> LuaType {
+        match self {
+            Self::Nil => LuaType::Nil,
+            Self::Boolean(_) => LuaType::Boolean,
+            Self::Number(_) => LuaType::Number,
+            Self::String(_) => LuaType::String,
+            Self::Object { value_type, .. } => *value_type,
+        }
+    }
+}
+
+impl fmt::Display for ErrorValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Nil => f.write_str("nil"),
+            Self::Boolean(value) => write!(f, "{value}"),
+            Self::Number(number) => f.write_str(&crate::vm::number_to_string(*number)),
+            Self::String(bytes)
+            | Self::Object {
+                rendering: bytes, ..
+            } => LossyBytes(bytes).fmt(f),
+        }
+    }
 }
 
 /// Structured reason that Lua pattern compilation or matching failed.
 ///
-/// The display text matches the Lua pattern diagnostics previously returned
-/// as [`ErrorKind::RuntimeError`].
+/// The display text is reference Lua's pattern diagnostic.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PatternErrorDetail {
@@ -586,9 +709,8 @@ impl LibraryFunction {
     }
 }
 
-/// A failure raised by a standard library operation. Library runtime errors
-/// retain this value through [`Error::library_error`] while rendering through
-/// [`ErrorKind::RuntimeError`].
+/// A failure raised by a standard library operation, carried by
+/// [`ErrorKind::LibraryError`].
 #[non_exhaustive]
 #[derive(Debug)]
 pub enum LibraryError {
@@ -611,8 +733,8 @@ pub enum LibraryError {
     },
     /// A `string.format` conversion character is unsupported.
     InvalidFormatConversion {
-        /// The rendered conversion directive.
-        directive: String,
+        /// The conversion directive's bytes, exactly as in the format string.
+        directive: Vec<u8>,
     },
     /// A `string.format` conversion directive exceeds the size limit.
     FormatDirectiveTooLong,
@@ -620,8 +742,8 @@ pub enum LibraryError {
     QuotedFormatHasModifiers,
     /// A `string.format` conversion contains invalid flags or precision.
     InvalidFormatSpecification {
-        /// The rendered conversion directive.
-        directive: String,
+        /// The conversion directive's bytes, exactly as in the format string.
+        directive: Vec<u8>,
     },
     /// A `table.concat` element has a type other than string or number.
     InvalidConcatValue {
@@ -761,6 +883,9 @@ pub enum SyntaxError {
     BreakOutsideLoop,
     /// Character not valid as part of any token.
     InvalidCharacter(char),
+    /// A byte that is neither valid as part of any token nor the start of a
+    /// valid UTF-8 character.
+    InvalidByte(u8),
     /// Escape sequence is not supported by Lua string literals.
     InvalidEscapeSequence,
     /// A hexadecimal string escape did not contain two hexadecimal digits.
@@ -800,14 +925,12 @@ pub enum SyntaxError {
     /// A long comment (`--[[` / `--[==[`) reached EOF before its closing
     /// delimiter. Reported at the comment's opener.
     UnfinishedLongComment,
-    /// Unexpected token. The String contains a token description.
-    UnexpectedTok(String),
     /// A required token was missing before another token.
     ExpectedToken {
         /// Spelling of the token the grammar required.
-        expected: String,
-        /// Description of the token actually found.
-        found: String,
+        expected: &'static str,
+        /// The source bytes of the token actually found, exactly as written.
+        found: Vec<u8>,
     },
     /// `...` was used outside a vararg function.
     VarargOutsideVarargFunction,
@@ -865,7 +988,7 @@ impl Error {
     }
 
     pub(crate) fn internal_fault(fault: InternalFault) -> Self {
-        Self::without_location(ErrorKind::InternalError(fault.into_message()))
+        Self::without_location(ErrorKind::InternalError(InternalError(fault)))
     }
 
     /// Attach a stack trace to this error. The VM attaches the real trace when
@@ -883,7 +1006,7 @@ impl Error {
         self
     }
 
-    pub(crate) fn with_source_name(mut self, source_name: Option<Arc<str>>) -> Self {
+    pub(crate) fn with_source_name(mut self, source_name: Option<Arc<[u8]>>) -> Self {
         if source_name.is_some() || self.0.context.is_some() {
             self.context_mut().name = source_name;
         }
@@ -892,7 +1015,7 @@ impl Error {
 
     /// Attach the reporting frame's source name unless the error already
     /// carries one, so `on_error` sees where the error was first reported.
-    pub(crate) fn attach_source_name_if_absent(&mut self, source_name: Option<&Arc<str>>) {
+    pub(crate) fn attach_source_name_if_absent(&mut self, source_name: Option<&Arc<[u8]>>) {
         if self.source_name().is_none()
             && let Some(name) = source_name
         {
@@ -906,7 +1029,6 @@ impl Error {
                 name: None,
                 reported: false,
                 pattern_function: None,
-                library_error: None,
                 library_function: None,
                 vm_fault: None,
             })
@@ -920,9 +1042,10 @@ impl Error {
         first_report
     }
 
-    /// Source file or chunk name attached to this error, if it came from named source.
-    pub fn source_name(&self) -> Option<&str> {
-        self.0.context.as_deref().and_then(ErrorContext::as_str)
+    /// Chunk name attached to this error, byte-exact, if it came from named
+    /// source.
+    pub fn source_name(&self) -> Option<&[u8]> {
+        self.0.context.as_deref().and_then(ErrorContext::name_bytes)
     }
 
     /// Error category and details.
@@ -930,8 +1053,10 @@ impl Error {
         &self.0.kind
     }
 
-    /// Take the error category, discarding location and context.
-    pub(crate) fn into_kind(self) -> ErrorKind {
+    /// Take the error category, discarding location and context; the owned
+    /// way to recover an [`ErrorKind::HostError`] payload or an
+    /// [`ErrorValue`].
+    pub fn into_kind(self) -> ErrorKind {
         self.0.kind
     }
 
@@ -958,14 +1083,6 @@ impl Error {
             .and_then(|context| context.pattern_function)
     }
 
-    /// Typed standard-library reason behind this runtime error, if any.
-    pub fn library_error(&self) -> Option<&LibraryError> {
-        self.0
-            .context
-            .as_deref()
-            .and_then(|context| context.library_error.as_ref())
-    }
-
     /// Standard-library function responsible for this error, if known.
     pub fn library_function(&self) -> Option<&LibraryFunction> {
         self.0
@@ -976,11 +1093,6 @@ impl Error {
 
     pub(crate) fn with_pattern_function(mut self, function: StringPatternFunction) -> Self {
         self.context_mut().pattern_function = Some(function);
-        self
-    }
-
-    pub(crate) fn with_library_error(mut self, detail: LibraryError) -> Self {
-        self.context_mut().library_error = Some(detail);
         self
     }
 
@@ -1114,13 +1226,6 @@ impl ArgError {
 }
 
 impl SyntaxError {
-    pub(crate) fn expected_token(expected: &str, got: String) -> Self {
-        Self::ExpectedToken {
-            expected: expected.to_string(),
-            found: got,
-        }
-    }
-
     /// Returns true if this is a SyntaxError that can be fixed by appending
     /// more text to the source code.
     pub fn is_recoverable(&self) -> bool {
@@ -1162,7 +1267,9 @@ impl fmt::Display for Error {
         } else {
             match prefix_frame {
                 Some(frame) => match frame.source.as_deref() {
-                    Some(source) => write!(f, "{source}:{}: {}", frame.line, self.0.kind)?,
+                    Some(source) => {
+                        write!(f, "{}:{}: {}", LossyBytes(source), frame.line, self.0.kind)?;
+                    }
                     None => {
                         // `self.0.column` belongs to the innermost error site.
                         // Pair it with the frame's line only when that frame
@@ -1177,7 +1284,7 @@ impl fmt::Display for Error {
                         write!(f, "{}:{}: {}", frame.line, column, self.0.kind)?;
                     }
                 },
-                None => match self.source_name() {
+                None => match self.source_name().map(LossyBytes) {
                     Some(source) if self.0.line_num != 0 && self.0.column != 0 => write!(
                         f,
                         "{source}:{}:{}: {}",
@@ -1285,6 +1392,12 @@ impl fmt::Display for ErrorKind {
             SourceNameSizeExceeded { size, limit } => {
                 write!(f, "source name size {size} exceeds limit {limit}")
             }
+            DynamicArgumentsUnsupported { api } => {
+                write!(
+                    f,
+                    "{api} does not support ArgCount::Dynamic; use ArgCount::Fixed"
+                )
+            }
             InvalidStackIndex { index } => {
                 write!(f, "invalid stack index ({index})")
             }
@@ -1296,13 +1409,25 @@ impl fmt::Display for ErrorKind {
             AnchorNil => {
                 write!(f, "cannot anchor nil")
             }
-            // A script's `error()` message and a library runtime error render
-            // identically, exactly as reference does. The variants are distinct
-            // so hosts can tell deliberate script termination from a VM-detected
+            // A script's `error()` value and a library error render the same
+            // way, exactly as reference does. The variants are distinct so
+            // hosts can tell deliberate script termination from a VM-detected
             // fault, which is not a rendering difference.
-            RuntimeError(msg) | ScriptError { message: msg, .. } | InternalError(msg) => {
-                write!(f, "{msg}")
-            }
+            LibraryError(error) => fmt::Display::fmt(error, f),
+            HostError(error) => fmt::Display::fmt(error, f),
+            ScriptError { value, .. } => fmt::Display::fmt(value, f),
+            InternalError(error) => fmt::Display::fmt(error, f),
+        }
+    }
+}
+
+impl std::error::Error for Error {
+    /// The host's own error behind an [`ErrorKind::HostError`], itself rather
+    /// than its source, so it can be downcast.
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match &self.0.kind {
+            ErrorKind::HostError(error) => Some(error.as_ref()),
+            _ => None,
         }
     }
 }
@@ -1345,12 +1470,20 @@ impl fmt::Display for LibraryError {
                 write!(f, "wrong number of arguments to '{}'", function.as_str())
             }
             Self::InvalidFormatConversion { directive } => {
-                write!(f, "invalid conversion '{directive}' to 'format'")
+                write!(
+                    f,
+                    "invalid conversion '{}' to 'format'",
+                    LossyBytes(directive)
+                )
             }
             Self::FormatDirectiveTooLong => f.write_str("invalid format (too long)"),
             Self::QuotedFormatHasModifiers => f.write_str("specifier '%q' cannot have modifiers"),
             Self::InvalidFormatSpecification { directive } => {
-                write!(f, "invalid conversion specification: '{directive}'")
+                write!(
+                    f,
+                    "invalid conversion specification: '{}'",
+                    LossyBytes(directive)
+                )
             }
             Self::InvalidConcatValue { value_type, index } => write!(
                 f,
@@ -1382,6 +1515,7 @@ impl fmt::Display for SyntaxError {
             // formats the actual line and column for this syntax error.
             BreakOutsideLoop => write!(f, "<break> not inside a loop"),
             InvalidCharacter(c) => write!(f, "invalid character '{c}'"),
+            InvalidByte(byte) => write!(f, "invalid character '<\\{byte}>'"),
             InvalidEscapeSequence => write!(f, "invalid escape sequence"),
             HexadecimalDigitExpected => write!(f, "hexadecimal digit expected"),
             DecimalEscapeTooLarge => write!(f, "decimal escape too large"),
@@ -1419,8 +1553,9 @@ impl fmt::Display for SyntaxError {
             UnclosedString => write!(f, "unfinished string"),
             UnexpectedEof => write!(f, "unexpected <eof>"),
             UnfinishedLongComment => write!(f, "unfinished long comment"),
-            UnexpectedTok(msg) => write!(f, "{msg}"),
-            ExpectedToken { expected, found } => write!(f, "'{expected}' expected near {found}"),
+            ExpectedToken { expected, found } => {
+                write!(f, "'{expected}' expected near '{}'", LossyBytes(found))
+            }
             VarargOutsideVarargFunction => {
                 write!(f, "cannot use '...' outside a vararg function")
             }

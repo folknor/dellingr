@@ -4,7 +4,9 @@ use dellingr::error::ErrorKind;
 use dellingr::{Anchor, ArgCount, LuaType, RetCount, State};
 
 fn load_function(state: &mut State, src: &str) {
-    state.load_string(src).unwrap();
+    dellingr::Program::compile(src, None)
+        .and_then(|program| state.load(&program))
+        .unwrap();
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(1))
         .expect("function expression should produce a value");
@@ -13,7 +15,9 @@ fn load_function(state: &mut State, src: &str) {
 /// Anchor a fresh table and return the handle with the object count it
 /// raised the heap to.
 fn anchor_fresh_table(state: &mut State) -> (Anchor, usize) {
-    state.load_string("return {}").unwrap();
+    dellingr::Program::compile("return {}", None)
+        .and_then(|program| state.load(&program))
+        .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
     let a = state.anchor().unwrap();
     state.gc_collect();
@@ -159,13 +163,14 @@ fn callback_dropping_an_anchor_mid_execution_is_collected_safely() {
     let mut state = State::new();
     state.push_rust_fn(churn).unwrap();
     state.set_global("churn").unwrap();
-    state
-        .load_string(
-            "local kept = { v = 5 }
+    dellingr::Program::compile(
+        "local kept = { v = 5 }
              for _ = 1, 10 do churn() end
              result = kept.v",
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
     state.get_global("result").unwrap();
     assert_eq!(state.to_number(-1).unwrap(), 5.0);
@@ -274,7 +279,10 @@ fn call_anchor_rejects_dynamic_arg_count() {
     let err = state
         .call_anchor(&a, ArgCount::Dynamic, RetCount::Fixed(0))
         .expect_err("Dynamic args have no host-API call-base, must be rejected");
-    assert!(matches!(err.kind(), ErrorKind::InternalError(_)));
+    assert!(matches!(
+        err.kind(),
+        ErrorKind::DynamicArgumentsUnsupported { api: "call_anchor" }
+    ));
 }
 
 #[test]
@@ -283,14 +291,15 @@ fn anchored_closure_survives_gc_after_global_dropped() {
     state.gc_disable_auto();
 
     // Build a closure that returns a captured value, push it as a global.
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
             captured = 7
             handler = function() return captured end
         "#,
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
 
     // Anchor the global so we can safely drop it.

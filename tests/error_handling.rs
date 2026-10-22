@@ -32,7 +32,9 @@ fn host_string_limit_is_inclusive_and_leaves_stack_unchanged() {
 /// Helper: runs Lua code that returns a number, checks the result.
 fn run_number(code: &str) -> f64 {
     let mut state = State::new();
-    state.load_string(code).unwrap();
+    dellingr::Program::compile(code, None)
+        .and_then(|program| state.load(&program))
+        .unwrap();
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(1))
         .unwrap_or_else(|e| panic!("Error running: {code}\n{e}"));
@@ -42,7 +44,9 @@ fn run_number(code: &str) -> f64 {
 /// Helper: runs a Lua string and returns the error, panicking if it succeeds.
 fn expect_error(code: &str) -> dellingr::error::Error {
     let mut state = State::new();
-    state.load_string(code).unwrap();
+    dellingr::Program::compile(code, None)
+        .and_then(|program| state.load(&program))
+        .unwrap();
     let result = state.call(ArgCount::Fixed(0), RetCount::Fixed(0));
     result.expect_err(&format!("Expected error from: {code}"))
 }
@@ -50,7 +54,9 @@ fn expect_error(code: &str) -> dellingr::error::Error {
 fn assert_invalid_next_key(code: &str) {
     let err = expect_error(code);
     match err.kind() {
-        ErrorKind::RuntimeError(message) => assert_eq!(message, "invalid key to 'next'"),
+        ErrorKind::LibraryError(error) => {
+            assert_eq!(error.to_string(), "invalid key to 'next'");
+        }
         kind => panic!("Expected invalid next key runtime error, got: {kind:?}"),
     }
 }
@@ -65,8 +71,8 @@ fn assert_pattern_error(code: &str, message: &str) {
 
 fn assert_trace_lines(code: &str, innermost: u32, caller: u32) {
     let mut state = State::new();
-    state
-        .load_string_named(code, Some("trace".to_string()))
+    dellingr::Program::compile(code, Some(b"trace".as_slice()))
+        .and_then(|program| state.load(&program))
         .unwrap();
     let error = state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
@@ -143,7 +149,10 @@ fn public_call_rejects_dynamic_without_base_without_panicking() {
     let err = state
         .call(ArgCount::Dynamic, RetCount::Fixed(0))
         .expect_err("host Dynamic call without a base must return an error");
-    assert!(matches!(err.kind(), ErrorKind::InternalError(_)));
+    assert!(matches!(
+        err.kind(),
+        ErrorKind::DynamicArgumentsUnsupported { api: "call" }
+    ));
     assert_eq!(state.get_top(), 1);
     assert_eq!(state.typ(-1), LuaType::Function);
 }
@@ -337,16 +346,17 @@ fn type_error_on_table_key_nil() {
 fn budget_exceeded_error() {
     let mut state = State::new();
     state.set_cost_budget(10);
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
         local sum = 0
         for i = 1, 10000 do
             sum = sum + i
         end
     "#,
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     let result = state.call(ArgCount::Fixed(0), RetCount::Fixed(0));
     let err = result.expect_err("Expected budget error");
     assert!(
@@ -361,12 +371,12 @@ fn budget_stops_at_the_first_operation_after_exhaustion() {
         let mut state = State::new();
         state.set_cost_budget(budget);
         let increments = budget + 2;
-        state
-            .load_string(format!(
-                "x = 0\n{}",
-                "x = x + 1\n".repeat(increments as usize)
-            ))
-            .expect("test program should load");
+        dellingr::Program::compile(
+            format!("x = 0\n{}", "x = x + 1\n".repeat(increments as usize)),
+            None,
+        )
+        .and_then(|program| state.load(&program))
+        .expect("test program should load");
 
         let err = state
             .call(ArgCount::Fixed(0), RetCount::Fixed(0))
@@ -387,9 +397,12 @@ fn budget_stops_at_the_first_operation_after_exhaustion() {
 fn budget_flushes_pending_caller_cost_before_nested_call() {
     let mut state = State::new();
     state.set_cost_budget(1);
-    state
-        .load_string("x = 0\nlocal function f() x = x + 1 end\nx = x + 1\nf()\nx = x + 1")
-        .expect("test program should load");
+    dellingr::Program::compile(
+        "x = 0\nlocal function f() x = x + 1 end\nx = x + 1\nf()\nx = x + 1",
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .expect("test program should load");
 
     let err = state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
@@ -525,9 +538,8 @@ fn table_sort_comparator_error_leaves_every_slot_untouched() {
     // comparator that fails part-way through must leave every original slot as
     // it was - not a partially sorted prefix.
     let mut state = State::new();
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
             t = {5, 3, 1, 4, 2}
             local n = 0
             table.sort(t, function(a, b)
@@ -536,21 +548,24 @@ fn table_sort_comparator_error_leaves_every_slot_untouched() {
                 return a < b
             end)
         "#,
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect_err("comparator error must propagate out of table.sort");
 
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
             local parts = {}
             for i = 1, 5 do parts[#parts + 1] = tostring(t[i]) end
             return table.concat(parts, ",")
         "#,
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
     assert_eq!(state.to_bytes(-1).unwrap(), b"5,3,1,4,2");
 }
@@ -706,7 +721,7 @@ fn table_insert_move_and_random_validate_before_mutation() {
     for code in ["table.insert({})", "table.insert({}, 1, 2, 3)"] {
         let err = expect_error(code);
         assert!(
-            matches!(err.kind(), ErrorKind::RuntimeError(_)),
+            matches!(err.kind(), ErrorKind::LibraryError(_)),
             "{code}: {err}"
         );
     }
@@ -721,7 +736,7 @@ fn table_insert_move_and_random_validate_before_mutation() {
         assert!(
             matches!(err.kind(), ErrorKind::ArgError(_))
                 || (code == "math.random(1, 2, 3)"
-                    && matches!(err.kind(), ErrorKind::RuntimeError(_))),
+                    && matches!(err.kind(), ErrorKind::LibraryError(_))),
             "{code}: {err}"
         );
     }
@@ -730,8 +745,8 @@ fn table_insert_move_and_random_validate_before_mutation() {
     first.set_rng_seed(99);
     second.set_rng_seed(99);
     for state in [&mut first, &mut second] {
-        state
-            .load_string("return math.random() + math.random(1, 10)")
+        dellingr::Program::compile("return math.random() + math.random(1, 10)", None)
+            .and_then(|program| state.load(&program))
             .unwrap();
         state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
     }
@@ -827,7 +842,9 @@ fn table_sort_default_rejects_incomparable_values_without_mutation() {
     assert_eq!(singleton, 1.0);
 
     let mut state = State::new();
-    state.load_string("return {1, 'a', 2}").unwrap();
+    dellingr::Program::compile("return {1, 'a', 2}", None)
+        .and_then(|program| state.load(&program))
+        .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
     host_table_sort(&mut state).expect_err("mixed default sort must fail");
     assert_eq!(state.get_top(), 1);
@@ -910,7 +927,9 @@ fn table_sort_charges_before_mutating() {
     // table or runs the comparator (L18). table_sort charges its cost up front,
     // so with budget 0 it errors instead of sorting.
     let mut state = State::new();
-    state.load_string("return {3, 1, 2}").unwrap();
+    dellingr::Program::compile("return {3, 1, 2}", None)
+        .and_then(|program| state.load(&program))
+        .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
 
     state.set_cost_budget(0);
@@ -928,8 +947,8 @@ fn table_sort_charges_before_mutating() {
 #[test]
 fn table_concat_basic() {
     let mut state = State::new();
-    state
-        .load_string(r#"return table.concat({1, 2, 3}, ", ")"#)
+    dellingr::Program::compile(r#"return table.concat({1, 2, 3}, ", ")"#, None)
+        .and_then(|program| state.load(&program))
         .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
     assert_eq!(state.to_string(-1).unwrap(), "1, 2, 3");
@@ -939,8 +958,8 @@ fn table_concat_basic() {
 fn table_concat_rejects_boolean_elements() {
     let err = expect_error(r#"return table.concat({true}, ",")"#);
     assert!(
-        matches!(err.kind(), ErrorKind::RuntimeError(m)
-            if m == "invalid value (boolean) at index 1 in table for 'concat'"),
+        matches!(err.kind(), ErrorKind::LibraryError(m)
+            if m.to_string() == "invalid value (boolean) at index 1 in table for 'concat'"),
         "Expected the reference concat error, got: {err}"
     );
 }
@@ -949,8 +968,8 @@ fn table_concat_rejects_boolean_elements() {
 fn table_concat_rejects_nil_elements_in_range() {
     let err = expect_error(r#"return table.concat({1, nil, 3}, ",", 1, 3)"#);
     assert!(
-        matches!(err.kind(), ErrorKind::RuntimeError(m)
-            if m == "invalid value (nil) at index 2 in table for 'concat'"),
+        matches!(err.kind(), ErrorKind::LibraryError(m)
+            if m.to_string() == "invalid value (nil) at index 2 in table for 'concat'"),
         "Expected the reference concat error, got: {err}"
     );
 }
@@ -1021,8 +1040,8 @@ fn table_move_costs_empty_and_each_moved_element() {
         ("return table.move({}, 1, 3, 1)", 4),
     ] {
         let mut state = State::new();
-        state
-            .load_string(code)
+        dellingr::Program::compile(code, None)
+            .and_then(|program| state.load(&program))
             .expect("table.move program compiles");
         state
             .call(ArgCount::Fixed(0), RetCount::Fixed(1))
@@ -1051,8 +1070,8 @@ fn table_move_costs_empty_and_each_moved_element() {
 #[test]
 fn table_move_rejects_overflow_ranges_before_mutating() {
     let mut state = State::new();
-    state
-        .load_string("t = {10, 20, 30}")
+    dellingr::Program::compile("t = {10, 20, 30}", None)
+        .and_then(|program| state.load(&program))
         .expect("setup compiles");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
@@ -1068,11 +1087,13 @@ fn table_move_rejects_overflow_ranges_before_mutating() {
             "destination wrap around",
         ),
     ] {
-        state.load_string(code).expect("overflow program compiles");
+        dellingr::Program::compile(code, None)
+            .and_then(|program| state.load(&program))
+            .expect("overflow program compiles");
         let err = state
             .call(ArgCount::Fixed(0), RetCount::Fixed(0))
             .expect_err("overflow range must fail cleanly");
-        assert!(matches!(err.kind(), ErrorKind::RuntimeError(got) if got == message));
+        assert!(matches!(err.kind(), ErrorKind::LibraryError(got) if got.to_string() == message));
 
         state.get_global("t").unwrap();
         for (index, expected) in [10.0, 20.0, 30.0].into_iter().enumerate() {
@@ -1100,15 +1121,15 @@ fn table_move_rejects_out_of_range_numbers_cleanly() {
 
 fn table_after_budgeted_move(budget: i64) -> (dellingr::error::Error, Vec<f64>) {
     let mut state = State::new();
-    state
-        .load_string("t = {1, 2, 3, 4, 5}")
+    dellingr::Program::compile("t = {1, 2, 3, 4, 5}", None)
+        .and_then(|program| state.load(&program))
         .expect("setup compiles");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect("setup runs");
     state.set_cost_budget(budget);
-    state
-        .load_string("table.move(t, 1, 4, 2)")
+    dellingr::Program::compile("table.move(t, 1, 4, 2)", None)
+        .and_then(|program| state.load(&program))
         .expect("move program compiles");
     let error = state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
@@ -1146,8 +1167,8 @@ fn table_move_budget_partial_mutation_is_deterministic() {
 fn table_move_cost_is_deterministic_across_fresh_states() {
     let run = || {
         let mut state = State::new();
-        state
-            .load_string("local t = {1, 2, 3}; table.move(t, 1, 3, 4)")
+        dellingr::Program::compile("local t = {1, 2, 3}; table.move(t, 1, 3, 4)", None)
+            .and_then(|program| state.load(&program))
             .expect("program compiles");
         state
             .call(ArgCount::Fixed(0), RetCount::Fixed(0))
@@ -1251,7 +1272,8 @@ fn tonumber_base_requires_string_input() {
 /// Uses RetCount::Void since we only care about the error.
 fn expect_load_or_run_error(code: &str) -> dellingr::error::Error {
     let mut state = State::new();
-    if let Err(e) = state.load_string(code) {
+    if let Err(e) = dellingr::Program::compile(code, None).and_then(|program| state.load(&program))
+    {
         return e;
     }
     let result = state.call(ArgCount::Fixed(0), RetCount::Fixed(0));
@@ -1335,8 +1357,8 @@ fn error_msg_type_error_index() {
 fn error_msg_budget_exceeded_shows_amounts() {
     let mut state = State::new();
     state.set_cost_budget(10);
-    state
-        .load_string("local s = 0\nfor i = 1, 10000 do s = s + i end")
+    dellingr::Program::compile("local s = 0\nfor i = 1, 10000 do s = s + i end", None)
+        .and_then(|program| state.load(&program))
         .unwrap();
     let err = state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
@@ -1351,17 +1373,18 @@ fn error_msg_budget_exceeded_shows_amounts() {
 #[test]
 fn global_lookup_cache_respects_restricted_env() {
     let mut state = State::new();
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
             x = 1
             function read_x()
                 if x == nil then return 2 end
                 return x
             end
         "#,
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
 
     state.get_global("read_x").unwrap();

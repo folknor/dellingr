@@ -1,9 +1,13 @@
 use super::Bytecode;
 use super::Instr;
 use super::State;
-use super::compiler::parse_str;
 use super::lua_val::Val;
+use crate::compiler::compile;
 use crate::instr::RetCount;
+
+fn compile_unnamed(source: &str) -> crate::Result<Bytecode> {
+    compile(source, None)
+}
 
 fn force_gc(state: &mut State) -> crate::Result<u8> {
     state.gc_collect();
@@ -13,9 +17,12 @@ fn force_gc(state: &mut State) -> crate::Result<u8> {
 #[test]
 fn auto_gc_marks_a_deep_lua_table_chain_iteratively() {
     let mut state = State::new();
-    state
-        .load_string("t = {}\nfor i = 1, 100000 do t = { t } end\ndone = t ~= nil")
-        .expect("deep chain compiles");
+    crate::Program::compile(
+        "t = {}\nfor i = 1, 100000 do t = { t } end\ndone = t ~= nil",
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .expect("deep chain compiles");
     state
         .call(crate::instr::ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect("deep chain completes without overflowing the native stack");
@@ -59,15 +66,17 @@ fn consume_cost_saturates_large_host_charges() {
 #[test]
 fn vm_test01() {
     let mut state = State::new();
-    let input = parse_str("a = 1").unwrap();
+    let input = compile_unnamed("a = 1").unwrap();
     state.eval_chunk(input, 0).unwrap();
     assert_eq!(Val::Num(1.0), *state.global_env.get("a").unwrap());
 }
 
 #[test]
 fn nil_assignment_does_not_create_unknown_globals_including_builtins() {
-    let mut state = State::empty();
-    state.load_string("never_set = nil; print = nil").unwrap();
+    let mut state = State::raw();
+    crate::Program::compile("never_set = nil; print = nil", None)
+        .and_then(|program| state.load(&program))
+        .unwrap();
     state
         .call(crate::instr::ArgCount::Fixed(0), RetCount::Fixed(0))
         .unwrap();
@@ -80,7 +89,9 @@ fn nil_assignment_does_not_create_unknown_globals_including_builtins() {
 }
 
 fn run_lua(state: &mut State, source: &str) {
-    state.load_string(source).unwrap();
+    crate::Program::compile(source, None)
+        .and_then(|program| state.load(&program))
+        .unwrap();
     state
         .call(crate::instr::ArgCount::Fixed(0), RetCount::Fixed(0))
         .unwrap();
@@ -367,7 +378,7 @@ fn vm_test11() {
         for i = 1, 3 do
             a = a + i
         end";
-    let chunk = parse_str(text).unwrap();
+    let chunk = compile_unnamed(text).unwrap();
     let mut state = State::new();
     state.eval_chunk(chunk, 0).unwrap();
     let a = state.global_env.get("a").unwrap().as_num().unwrap();
@@ -388,7 +399,7 @@ fn gc_host_controlled() {
     assert_eq!(state.gc_threshold(), usize::MAX);
 
     // Create some tables - GC won't trigger automatically
-    let code = parse_str("t1 = {} t2 = {} t3 = {}").unwrap();
+    let code = compile_unnamed("t1 = {} t2 = {} t3 = {}").unwrap();
     state.eval_chunk(code, 0).unwrap();
 
     // Should have more objects now
@@ -403,7 +414,7 @@ fn gc_host_controlled() {
     assert_eq!(state.object_count(), before_gc); // All tables are reachable
 
     // Remove references and collect
-    let code = parse_str("t1 = nil t2 = nil t3 = nil").unwrap();
+    let code = compile_unnamed("t1 = nil t2 = nil t3 = nil").unwrap();
     state.eval_chunk(code, 0).unwrap();
     state.gc_collect();
 
@@ -416,7 +427,7 @@ fn gc_collect_preserves_disabled_auto_gc() {
     let mut state = State::new();
     state.gc_disable_auto();
 
-    let code = parse_str("t1 = {} t2 = {} t3 = {}").unwrap();
+    let code = compile_unnamed("t1 = {} t2 = {} t3 = {}").unwrap();
     state.eval_chunk(code, 0).unwrap();
 
     // An explicit collection must not clobber the disabled-auto sentinel.
@@ -489,7 +500,7 @@ fn live_table(state: &State, val: Val) -> bool {
 fn gc_preserves_frame_varargs() {
     let mut state = State::new();
     state.set_global_value("force_gc", Val::RustFn(force_gc));
-    let input = parse_str(
+    let input = compile_unnamed(
         r#"
         local function f(...)
             force_gc()
@@ -509,7 +520,7 @@ fn gc_preserves_frame_varargs() {
 fn table_sort_array_survives_comparator_collection() {
     let mut state = State::new();
     state.set_global_value("force_gc", Val::RustFn(force_gc));
-    let input = parse_str(
+    let input = compile_unnamed(
         r#"
         local t = {}
         for i = 1, 20 do t[i] = { v = 21 - i } end
@@ -541,7 +552,7 @@ fn table_sort_array_survives_comparator_collection() {
 
 #[test]
 fn set_table_str_key_value_roots_heap_value() {
-    let mut state = State::empty();
+    let mut state = State::raw();
     state.gc_disable_auto();
     let child = state.alloc_table();
     state.new_table().unwrap();
@@ -563,7 +574,7 @@ fn set_table_str_key_value_roots_heap_value() {
 
 #[test]
 fn gc_threshold_control() {
-    let mut state = State::empty(); // Empty state, no stdlib tables
+    let mut state = State::raw(); // Empty state, no stdlib tables
 
     // Set a custom threshold
     state.gc_set_threshold(100);
@@ -576,7 +587,7 @@ fn gc_threshold_control() {
     state.gc_set_threshold(1);
 
     // Create a table to exceed threshold
-    let code = parse_str("t = {}").unwrap();
+    let code = compile_unnamed("t = {}").unwrap();
     state.eval_chunk(code, 0).unwrap();
 
     // Now GC should be needed (but won't auto-run since we're just checking)
@@ -585,7 +596,7 @@ fn gc_threshold_control() {
 
 #[test]
 fn string_allocations_drive_automatic_gc_threshold() {
-    let mut state = State::empty();
+    let mut state = State::raw();
     // An automatic policy, not a fixed host threshold, so collection adapts.
     state.gc_set_policy(20, 20, 2);
 
@@ -650,7 +661,9 @@ fn callback_pattern_local_upvalue() {
         end
     "#;
 
-    state.load_string(code).unwrap();
+    crate::Program::compile(code, None)
+        .and_then(|program| state.load(&program))
+        .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
 
     // Now the main chunk has finished. The upvalue for `helper` should be closed.
@@ -685,7 +698,9 @@ fn callback_pattern_mutable_upvalue() {
         end
     "#;
 
-    state.load_string(code).unwrap();
+    crate::Program::compile(code, None)
+        .and_then(|program| state.load(&program))
+        .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
 
     // Call tick multiple times
@@ -721,7 +736,9 @@ fn callback_pattern_nested_locals() {
         end
     "#;
 
-    state.load_string(code).unwrap();
+    crate::Program::compile(code, None)
+        .and_then(|program| state.load(&program))
+        .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
 
     state.get_global("callback").unwrap();
@@ -740,7 +757,9 @@ fn error_line_numbers() {
     // Error is on line 3 (t() call), not line 2 (t = {})
     let code = "-- comment\nlocal t = {}\nt()";
 
-    state.load_string(code).unwrap();
+    crate::Program::compile(code, None)
+        .and_then(|program| state.load(&program))
+        .unwrap();
     let result = state.call(ArgCount::Fixed(0), RetCount::Fixed(0));
 
     assert!(result.is_err());
@@ -764,7 +783,7 @@ fn fill_to_one_below_cap(state: &mut State) {
 
 #[test]
 fn last_slot_below_the_cap_is_usable() {
-    let mut state = State::empty();
+    let mut state = State::raw();
     fill_to_one_below_cap(&mut state);
 
     // The cap is exclusive of nothing: the millionth value is still legal.
@@ -774,7 +793,7 @@ fn last_slot_below_the_cap_is_usable() {
 
 #[test]
 fn every_push_type_is_rejected_at_the_cap() {
-    let mut state = State::empty();
+    let mut state = State::raw();
     fill_to_one_below_cap(&mut state);
     state.push_nil().expect("the final slot must be usable");
 
@@ -802,7 +821,7 @@ fn every_push_type_is_rejected_at_the_cap() {
 
 #[test]
 fn a_rejected_push_reports_stack_overflow() {
-    let mut state = State::empty();
+    let mut state = State::raw();
     fill_to_one_below_cap(&mut state);
     state.push_nil().expect("the final slot must be usable");
 
@@ -816,7 +835,7 @@ fn a_rejected_push_reports_stack_overflow() {
 
 #[test]
 fn set_top_cannot_exceed_the_cap() {
-    let mut state = State::empty();
+    let mut state = State::raw();
     // The bulk path preflights, so it must refuse in one shot rather than
     // allocating most of the way and then failing.
     assert!(state.set_top((MAX_STACK_SIZE + 1) as isize).is_err());
@@ -825,7 +844,7 @@ fn set_top_cannot_exceed_the_cap() {
 
 #[test]
 fn the_cap_does_not_charge_cost() {
-    let mut state = State::empty();
+    let mut state = State::raw();
     fill_to_one_below_cap(&mut state);
     state.push_nil().expect("the final slot must be usable");
 
@@ -842,7 +861,7 @@ fn the_cap_does_not_charge_cost() {
 fn table_next_preflights_its_net_growth_before_replacing_the_key() {
     // `next` replaces one key with two values, so it needs one free slot
     // measured against the entry stack, before the key is consumed.
-    let mut state = State::empty();
+    let mut state = State::raw();
     state.new_table().expect("room for the table");
     state.push_string("k").expect("room for the key");
     state.push_number(1.0).expect("room for the value");
@@ -875,7 +894,7 @@ fn table_next_preflights_its_net_growth_before_replacing_the_key() {
 fn table_remove_at_does_not_mutate_when_the_result_has_nowhere_to_go() {
     // The removed value can only be returned by pushing it. If the push is
     // going to fail, the element must still be in the table afterwards.
-    let mut state = State::empty();
+    let mut state = State::raw();
     state.new_table().expect("room for the table");
     state.push_number(1.0).expect("room for the key");
     state.push_number(42.0).expect("room for the value");
@@ -901,7 +920,7 @@ fn table_remove_at_does_not_mutate_when_the_result_has_nowhere_to_go() {
 fn open_libs_is_all_or_nothing_against_the_cap() {
     // `State::open_libs` is public, so a host can call it on a full stack. It
     // must refuse up front rather than installing part of the standard library.
-    let mut state = State::empty();
+    let mut state = State::raw();
     assert!(
         state.global_env.is_empty(),
         "empty() starts with no globals"
@@ -923,7 +942,7 @@ fn open_libs_is_all_or_nothing_against_the_cap() {
 
 #[test]
 fn open_libs_succeeds_with_exactly_four_slots_of_headroom() {
-    let mut state = State::empty();
+    let mut state = State::raw();
     state.set_top((MAX_STACK_SIZE - 4) as isize).unwrap();
     state.open_libs().expect("four slots cover the full setup");
     assert_eq!(state.get_top(), MAX_STACK_SIZE - 4);
@@ -938,7 +957,7 @@ fn open_libs_succeeds_with_exactly_four_slots_of_headroom() {
 fn open_libs_with_values_on_the_stack_targets_its_own_g_table() {
     // `_G` setup must address its table relative to the top, not absolute
     // index 1, or a host value already on the stack receives the metatable.
-    let mut state = State::empty();
+    let mut state = State::raw();
     state.new_table().expect("host table fits");
     state
         .open_libs()
@@ -1002,7 +1021,7 @@ fn a_rejected_named_push_does_not_register_the_function() {
 
 #[test]
 fn a_state_stays_usable_after_a_rejected_push() {
-    let mut state = State::empty();
+    let mut state = State::raw();
     fill_to_one_below_cap(&mut state);
     state.push_nil().expect("the final slot must be usable");
     assert!(state.push_nil().is_err());
@@ -1025,14 +1044,14 @@ fn gc_sweeps_dead_upvalue_pool_slots_and_reuses_them() {
         end
     "#;
     state
-        .eval_chunk(parse_str(make_counters).unwrap(), 0)
+        .eval_chunk(compile_unnamed(make_counters).unwrap(), 0)
         .expect("closure factory runs");
     state.gc_collect();
     let occupied_live = state.upvalue_pool.occupied_count();
     assert!(occupied_live >= 100, "each counter holds one captured slot");
 
     state
-        .eval_chunk(parse_str("counters = nil").unwrap(), 0)
+        .eval_chunk(compile_unnamed("counters = nil").unwrap(), 0)
         .expect("release runs");
     state.gc_collect();
     assert!(
@@ -1043,7 +1062,7 @@ fn gc_sweeps_dead_upvalue_pool_slots_and_reuses_them() {
     // A second wave must reuse freed slots instead of growing the pool.
     let total_before = state.upvalue_pool.total_slots();
     state
-        .eval_chunk(parse_str(make_counters).unwrap(), 0)
+        .eval_chunk(compile_unnamed(make_counters).unwrap(), 0)
         .expect("second closure factory runs");
     assert_eq!(
         state.upvalue_pool.total_slots(),
@@ -1056,7 +1075,7 @@ fn gc_sweeps_dead_upvalue_pool_slots_and_reuses_them() {
 fn live_upvalues_survive_the_pool_sweep_and_keep_working() {
     let mut state = State::new();
     state.set_global_value("force_gc", Val::RustFn(force_gc));
-    let input = parse_str(
+    let input = compile_unnamed(
         r#"
         local n = 10
         local function bump() n = n + 1 return n end
@@ -1087,8 +1106,8 @@ fn length_metamethod_preflights_three_slots_at_the_stack_cap() {
     let mut state = State::new();
     state.set_user_data(0usize);
     state.set_global_value("len_handler", Val::RustFn(len_handler));
-    state
-        .load_string("t = setmetatable({}, { __len = len_handler })")
+    crate::Program::compile("t = setmetatable({}, { __len = len_handler })", None)
+        .and_then(|program| state.load(&program))
         .unwrap();
     state
         .call(crate::ArgCount::Fixed(0), RetCount::Fixed(0))
@@ -1121,7 +1140,7 @@ fn length_metamethod_preflights_three_slots_at_the_stack_cap() {
 
 #[test]
 fn exhausted_format_pointer_counter_does_not_wrap_or_mutate() {
-    let mut state = State::empty();
+    let mut state = State::raw();
     state.new_table().unwrap();
     state.new_table().unwrap();
     state.next_format_pointer_id = u64::MAX - 1;
@@ -1133,13 +1152,14 @@ fn exhausted_format_pointer_counter_does_not_wrap_or_mutate() {
         .expect_err("counter must not wrap");
     assert!(matches!(
         error.kind(),
-        crate::error::ErrorKind::RuntimeError(message)
-            if message == "format pointer identity space exhausted"
+        crate::error::ErrorKind::LibraryError(
+            crate::error::LibraryError::FormatPointerIdentitySpaceExhausted
+        )
     ));
-    assert!(matches!(
-        error.library_error(),
-        Some(crate::error::LibraryError::FormatPointerIdentitySpaceExhausted)
-    ));
+    assert_eq!(
+        error.kind().to_string(),
+        "format pointer identity space exhausted"
+    );
     assert_eq!(state.next_format_pointer_id, u64::MAX);
     assert_eq!(state.format_pointer_ids.len(), 1);
     assert_eq!(state.format_pointer_id(1).unwrap(), Some(u64::MAX - 1));
@@ -1160,7 +1180,7 @@ fn gc_drops_format_pointer_ids_for_dead_values() {
     // Auto-GC would sweep dead entries mid-loop; disable it so the assertion
     // below observes the accumulation and one explicit collect does the sweep.
     state.gc_disable_auto();
-    let input = parse_str(
+    let input = compile_unnamed(
         r#"
         keep = {}
         local ids = string.format("%p", keep)
@@ -1189,4 +1209,40 @@ fn gc_drops_format_pointer_ids_for_dead_values() {
             .any(|(key, _)| live_table(&state, key.as_val())),
         "the reachable value's identity entry must survive"
     );
+}
+
+fn internal_failure(_state: &mut State) -> crate::Result<u8> {
+    Err(crate::error::Error::internal_fault(
+        crate::error::InternalFault::Test,
+    ))
+}
+
+/// Only dellingr constructs internal errors, so the instruction context they
+/// pick up while escaping dispatch is tested here rather than from a host.
+#[test]
+fn internal_fault_keeps_innermost_instruction() {
+    let mut state = State::new();
+    state.push_rust_fn(internal_failure).unwrap();
+    state.set_global("fail_internal").unwrap();
+    let program = crate::Program::compile(
+        "local function inner() return fail_internal() end\n\
+         local function outer() return inner() end\n\
+         return outer()",
+        None,
+    )
+    .unwrap();
+    state.load(&program).unwrap();
+    let error = state
+        .call(crate::instr::ArgCount::Fixed(0), RetCount::Fixed(0))
+        .expect_err("callback fails through nested Lua frames");
+    let fault = error.vm_fault().expect("Lua dispatch supplies context");
+    // The trace also starts at inner; preserving this instruction prevents
+    // outer frame unwinding from overwriting it with its own call site.
+    assert_eq!(fault.function_name, error.stack_trace()[0].function_name);
+    assert_eq!(error.stack_trace()[0].line, 1);
+    assert_eq!(error.kind().to_string(), "internal error: test fault");
+    assert!(matches!(
+        error.kind(),
+        crate::error::ErrorKind::InternalError(_)
+    ));
 }

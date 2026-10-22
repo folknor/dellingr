@@ -90,8 +90,7 @@ fn stdin_scripts_are_named_stdin_and_honour_every_mode() {
         source.as_bytes(),
     );
     assert!(dumped.status.success());
-    let program = dellingr::Engine::new()
-        .compile_named(source, "stdin")
+    let program = dellingr::Program::compile(source, Some(b"stdin".as_slice()))
         .expect("source should compile");
     assert_eq!(
         String::from_utf8_lossy(&dumped.stdout),
@@ -111,9 +110,11 @@ fn stdin_scripts_are_named_stdin_and_honour_every_mode() {
     assert!(empty.stdout.is_empty());
     assert!(empty.stderr.is_empty());
 
-    let not_utf8 = run_with_stdin(directory.path(), &["-"], b"print('\xff')\n");
-    assert_eq!(not_utf8.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&not_utf8.stderr).starts_with("Error: reading stdin: "));
+    // Lua source is bytes: a non-UTF-8 literal loads, and `print` writes the
+    // script's bytes unchanged.
+    let not_utf8 = run_with_stdin(directory.path(), &["--quiet", "-"], b"print('\xff')\n");
+    assert!(not_utf8.status.success(), "{not_utf8:?}");
+    assert_eq!(not_utf8.stdout, b"\xff\n");
 }
 
 #[test]
@@ -154,8 +155,7 @@ fn dump_bytecode_lists_the_program_without_running_it() {
     assert!(output.stderr.is_empty(), "no cost summary or warning");
 
     // Same bytes as the library listing for the same source and name.
-    let program = dellingr::Engine::new()
-        .compile_named(source, script_path)
+    let program = dellingr::Program::compile(source, Some(script_path.as_bytes()))
         .expect("source should compile");
     assert_eq!(stdout, program.disassemble().to_string());
 
@@ -205,9 +205,15 @@ fn accepts_non_utf8_script_paths() {
     let path = directory
         .path()
         .join(OsString::from_vec(b"script-\xff.lua".to_vec()));
-    let script = ScratchScript::at(path, "print('ran')\n");
+    let script = ScratchScript::at(path, "print('ran')\nerror('boom')\n");
     let output = run([script.path().as_os_str().to_os_string()]);
 
-    assert!(output.status.success());
+    assert_eq!(output.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&output.stdout).contains("ran"));
+    // The chunk name is the path's exact bytes; only the diagnostic text on
+    // stderr renders it lossily.
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("script-\u{FFFD}.lua:2: boom"),
+        "{output:?}"
+    );
 }

@@ -238,7 +238,7 @@ impl Parser<'_> {
         let tok = self.input.next()?;
         let prefix = match tok.typ {
             TokenType::Identifier => {
-                let text = self.get_text(tok);
+                let text = self.get_text(tok)?;
                 let place = self.parse_prefix_identifier(text)?;
                 place.into()
             }
@@ -407,8 +407,8 @@ impl Parser<'_> {
             TokenType::LiteralNumber => {
                 // The lexer determines token boundaries; this shared parser
                 // owns conversion and validates the complete numeral.
-                let text = self.get_text(tok);
-                let number = crate::numeral::parse_lua_numeral(text.as_bytes())
+                let text = self.input.source_bytes(tok.range());
+                let number = crate::numeral::parse_lua_numeral(text)
                     .ok_or_else(|| self.error_at(SyntaxError::BadNumber, tok.start))?;
                 let idx = self.find_or_add_number(number)?;
                 self.push(Instr::push_num(idx));
@@ -416,7 +416,7 @@ impl Parser<'_> {
             TokenType::LiteralString => {
                 self.push_literal_string(tok)?;
             }
-            TokenType::Function => self.parse_fndef()?,
+            TokenType::Function => self.parse_fndef(None, false)?,
             TokenType::Nil => self.push(Instr::push_nil()),
             TokenType::False => self.push(Instr::push_bool(false)),
             TokenType::True => self.push(Instr::push_bool(true)),

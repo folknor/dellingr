@@ -7,7 +7,9 @@ use dellingr::limits::MAX_STRING_BYTES;
 use dellingr::{ArgCount, LuaType, RetCount, State};
 
 fn run(state: &mut State, source: &str) {
-    state.load_string(source).unwrap();
+    dellingr::Program::compile(source, None)
+        .and_then(|program| state.load(&program))
+        .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
 }
 
@@ -67,17 +69,19 @@ fn host_get_table_on_string_preserves_operands_at_the_stack_cap() {
 #[test]
 fn error_keeps_a_string_message_raw_despite_tostring() {
     let mut state = State::new();
-    state
-        .load_string(
-            "getmetatable('').__tostring = function() return 'wrong' end error('raw message')",
-        )
-        .unwrap();
+    dellingr::Program::compile(
+        "getmetatable('').__tostring = function() return 'wrong' end error('raw message')",
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     let error = state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .unwrap_err();
     assert!(matches!(
         error.kind(),
-        ErrorKind::ScriptError { message, .. } if message == "raw message"
+        ErrorKind::ScriptError { value: dellingr::error::ErrorValue::String(message), .. }
+            if message == b"raw message"
     ));
 }
 
@@ -187,7 +191,9 @@ fn string_call_metamethod_makes_strings_callable() {
 #[test]
 fn string_call_without_metamethod_is_an_error() {
     let mut state = State::new();
-    state.load_string("local s = 'x' return s(1)").unwrap();
+    dellingr::Program::compile("local s = 'x' return s(1)", None)
+        .and_then(|program| state.load(&program))
+        .unwrap();
     let err = state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .unwrap_err();

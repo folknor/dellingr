@@ -9,7 +9,7 @@ use dellingr::{ArgCount, HostCallbacks, RetCount, State};
 struct ErrorCounter(Arc<AtomicUsize>);
 
 impl HostCallbacks for ErrorCounter {
-    fn on_print(&mut self, _source: Option<&str>, _line: u32, _message: &str) {}
+    fn on_print(&mut self, _source: Option<&[u8]>, _line: u32, _message: &[u8]) {}
 
     fn on_error(&mut self, _error: &Error) {
         self.0.fetch_add(1, Ordering::SeqCst);
@@ -17,14 +17,14 @@ impl HostCallbacks for ErrorCounter {
 }
 
 fn fail_fn(_state: &mut State) -> dellingr::Result<u8> {
-    Err(Error::without_location(ErrorKind::InternalError(
+    Err(Error::without_location(ErrorKind::HostError(
         "host callback failed".into(),
     )))
 }
 
 fn run_setup(state: &mut State, source: &str) {
-    state
-        .load_string(source)
+    dellingr::Program::compile(source, None)
+        .and_then(|program| state.load(&program))
         .expect("the setup chunk should compile");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
@@ -78,7 +78,7 @@ fn host_call_through_callable_table_chain_notifies_once() {
 
     let error = call_global(&mut state, "callable");
 
-    assert!(matches!(error.kind(), ErrorKind::InternalError(_)));
+    assert!(matches!(error.kind(), ErrorKind::HostError(_)));
     assert_eq!(count.load(Ordering::SeqCst), 1);
 }
 
@@ -117,7 +117,7 @@ fn host_table_read_through_failing_rust_index_notifies_once() {
         .get_table(1)
         .expect_err("the __index handler should fail");
 
-    assert!(matches!(error.kind(), ErrorKind::InternalError(_)));
+    assert!(matches!(error.kind(), ErrorKind::HostError(_)));
     assert_eq!(count.load(Ordering::SeqCst), 1);
 }
 
@@ -133,7 +133,7 @@ fn host_call_through_direct_rust_call_metamethod_notifies_once() {
 
     let error = call_global(&mut state, "callable");
 
-    assert!(matches!(error.kind(), ErrorKind::InternalError(_)));
+    assert!(matches!(error.kind(), ErrorKind::HostError(_)));
     assert_eq!(count.load(Ordering::SeqCst), 1);
 }
 
@@ -203,16 +203,16 @@ fn rust_callback_propagating_nested_rust_failure_notifies_once() {
     let error = state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect_err("the nested Rust callback fails");
-    assert!(matches!(error.kind(), ErrorKind::InternalError(_)));
+    assert!(matches!(error.kind(), ErrorKind::HostError(_)));
     assert_eq!(count.load(Ordering::SeqCst), 1);
 }
 
 fn fail_with_trace(_state: &mut State) -> dellingr::Result<u8> {
     Err(
-        Error::without_location(ErrorKind::RuntimeError("host failure".into())).with_stack_trace(
+        Error::without_location(ErrorKind::HostError("host failure".into())).with_stack_trace(
             vec![dellingr::error::StackFrame {
                 function_name: Some("host".into()),
-                source: Some("host-source".into()),
+                source: Some(b"host-source".as_slice().into()),
                 line: 7,
             }],
         ),
@@ -227,14 +227,16 @@ fn host_supplied_trace_does_not_suppress_notification() {
         state.push_rust_fn(fail_with_trace).expect("callback fits");
         if through_lua {
             state.set_global("fail").unwrap();
-            state.load_string("fail()").expect("chunk compiles");
+            dellingr::Program::compile("fail()", None)
+                .and_then(|program| state.load(&program))
+                .expect("chunk compiles");
         }
         let error = state
             .call(ArgCount::Fixed(0), RetCount::Fixed(0))
             .expect_err("callback fails");
         assert_eq!(
             error.stack_trace()[0].source.as_deref(),
-            Some("host-source")
+            Some(b"host-source".as_slice())
         );
         assert_eq!(count.load(Ordering::SeqCst), 1);
     }

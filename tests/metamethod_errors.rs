@@ -9,7 +9,9 @@ use dellingr::{ArgCount, RetCount, State};
 /// Helper: runs Lua code that returns a number.
 fn run_number(code: &str) -> f64 {
     let mut state = State::new();
-    state.load_string(code).unwrap();
+    dellingr::Program::compile(code, None)
+        .and_then(|program| state.load(&program))
+        .unwrap();
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(1))
         .unwrap_or_else(|e| panic!("Error running: {code}\n{e}"));
@@ -19,7 +21,9 @@ fn run_number(code: &str) -> f64 {
 /// Helper: runs Lua code that returns a string.
 fn run_string(code: &str) -> String {
     let mut state = State::new();
-    state.load_string(code).expect("source compiles");
+    dellingr::Program::compile(code, None)
+        .and_then(|program| state.load(&program))
+        .expect("source compiles");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(1))
         .unwrap_or_else(|e| panic!("Error running: {code}\n{e}"));
@@ -29,7 +33,9 @@ fn run_string(code: &str) -> String {
 /// Helper: runs a Lua string and returns the error.
 fn expect_error(code: &str) -> dellingr::error::Error {
     let mut state = State::new();
-    state.load_string(code).unwrap();
+    dellingr::Program::compile(code, None)
+        .and_then(|program| state.load(&program))
+        .unwrap();
     let result = state.call(ArgCount::Fixed(0), RetCount::Fixed(0));
     result.expect_err(&format!("Expected error from: {code}"))
 }
@@ -37,7 +43,9 @@ fn expect_error(code: &str) -> dellingr::error::Error {
 /// Helper: runs and expects success with no return value.
 fn expect_ok(code: &str) {
     let mut state = State::new();
-    state.load_string(code).unwrap();
+    dellingr::Program::compile(code, None)
+        .and_then(|program| state.load(&program))
+        .unwrap();
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .unwrap_or_else(|e| panic!("Error running: {code}\n{e}"));
@@ -178,9 +186,10 @@ fn protected_metatables_hide_and_prevent_replacement() {
     assert_eq!(value, 1.0);
     let err =
         expect_error("local t = setmetatable({}, { __metatable = 'locked' }); setmetatable(t, {})");
-    assert!(
-        matches!(err.kind(), ErrorKind::RuntimeError(message) if message == "cannot change a protected metatable")
-    );
+    assert!(matches!(
+        err.kind(),
+        ErrorKind::LibraryError(dellingr::error::LibraryError::ProtectedMetatable)
+    ));
 }
 
 #[test]

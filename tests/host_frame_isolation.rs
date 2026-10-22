@@ -7,7 +7,9 @@ use dellingr::error::ErrorKind;
 use dellingr::{ArgCount, RetCount, State};
 
 fn run(state: &mut State, src: &str) {
-    state.load_string(src).unwrap();
+    dellingr::Program::compile(src, None)
+        .and_then(|program| state.load(&program))
+        .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
 }
 
@@ -27,7 +29,10 @@ fn report(state: &mut State, name: &str, flag: bool) -> dellingr::Result<()> {
 // Dynamic call base is pending.
 fn dynamic_call_from_callback(state: &mut State) -> dellingr::Result<u8> {
     let rejected = match state.call(ArgCount::Dynamic, RetCount::Fixed(0)) {
-        Err(e) => matches!(e.kind(), ErrorKind::InternalError(_)),
+        Err(e) => matches!(
+            e.kind(),
+            ErrorKind::DynamicArgumentsUnsupported { api: "call" }
+        ),
         Ok(()) => false,
     };
     report(state, "rejected", rejected)?;
@@ -58,7 +63,10 @@ fn host_dynamic_call_is_rejected_at_top_level() {
     let err = state
         .call(ArgCount::Dynamic, RetCount::Fixed(0))
         .expect_err("hosts own no call base");
-    assert!(matches!(err.kind(), ErrorKind::InternalError(_)));
+    assert!(matches!(
+        err.kind(),
+        ErrorKind::DynamicArgumentsUnsupported { api: "call" }
+    ));
     assert_eq!(state.get_top(), 1);
 }
 

@@ -13,15 +13,16 @@ use dellingr::{ArgCount, RetCount, State};
 #[test]
 fn gsub_function_error_is_propagated() {
     let mut state = State::new();
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
         return string.gsub("hello world", "%w+", function(m)
             error("boom")
         end)
     "#,
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     let result = state.call(ArgCount::Fixed(0), RetCount::Fixed(2));
     assert!(
         result.is_err(),
@@ -33,9 +34,8 @@ fn gsub_function_error_is_propagated() {
 fn gsub_function_budget_error_is_propagated() {
     let mut state = State::new();
     state.set_cost_budget(50);
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
         -- replacement function that burns budget with a tight loop
         return string.gsub("aaa", "%w", function(m)
             local x = 0
@@ -43,8 +43,10 @@ fn gsub_function_budget_error_is_propagated() {
             return m
         end)
     "#,
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     let result = state.call(ArgCount::Fixed(0), RetCount::Fixed(2));
     assert!(
         result.is_err(),
@@ -60,9 +62,8 @@ fn gsub_function_budget_error_is_propagated() {
 #[test]
 fn gsub_table_metamethod_error_is_propagated() {
     let mut state = State::new();
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
         local t = setmetatable({}, {
             __index = function(self, key)
                 error("metamethod error")
@@ -70,8 +71,10 @@ fn gsub_table_metamethod_error_is_propagated() {
         })
         return string.gsub("hello", "%w+", t)
     "#,
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     let result = state.call(ArgCount::Fixed(0), RetCount::Fixed(2));
     assert!(
         result.is_err(),
@@ -84,16 +87,17 @@ fn gsub_table_metamethod_error_is_propagated() {
 #[test]
 fn gsub_function_nil_keeps_original() {
     let mut state = State::new();
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
         return string.gsub("hello world", "%w+", function(m)
             if m == "hello" then return nil end
             return string.upper(m)
         end)
     "#,
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(2)).unwrap();
     let result = state.to_string(-2).unwrap();
     assert_eq!(
@@ -105,16 +109,17 @@ fn gsub_function_nil_keeps_original() {
 #[test]
 fn gsub_function_false_keeps_original() {
     let mut state = State::new();
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
         return string.gsub("hello world", "%w+", function(m)
             if m == "hello" then return false end
             return string.upper(m)
         end)
     "#,
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(2)).unwrap();
     let result = state.to_string(-2).unwrap();
     assert_eq!(
@@ -126,15 +131,16 @@ fn gsub_function_false_keeps_original() {
 #[test]
 fn gsub_table_nil_keeps_original() {
     let mut state = State::new();
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
         local t = { world = "WORLD" }
         -- "hello" is not in the table, so it should stay as-is
         return string.gsub("hello world", "%w+", t)
     "#,
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(2)).unwrap();
     let result = state.to_string(-2).unwrap();
     assert_eq!(
@@ -146,14 +152,15 @@ fn gsub_table_nil_keeps_original() {
 #[test]
 fn gsub_table_false_keeps_original() {
     let mut state = State::new();
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
         local t = { hello = false, world = "WORLD" }
         return string.gsub("hello world", "%w+", t)
     "#,
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(2)).unwrap();
     let result = state.to_string(-2).unwrap();
     assert_eq!(
@@ -167,15 +174,16 @@ fn gsub_table_false_keeps_original() {
 #[test]
 fn gsub_function_replacement_works() {
     let mut state = State::new();
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
         return string.gsub("hello world", "%w+", function(m)
             return string.upper(m)
         end)
     "#,
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(2)).unwrap();
     let result = state.to_string(-2).unwrap();
     let count = state.to_number(-1).unwrap();
@@ -186,14 +194,15 @@ fn gsub_function_replacement_works() {
 #[test]
 fn gsub_table_replacement_works() {
     let mut state = State::new();
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
         local t = { hello = "HI", world = "EARTH" }
         return string.gsub("hello world", "%w+", t)
     "#,
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(2)).unwrap();
     let result = state.to_string(-2).unwrap();
     let count = state.to_number(-1).unwrap();
@@ -204,9 +213,12 @@ fn gsub_table_replacement_works() {
 #[test]
 fn gsub_string_replacement_works() {
     let mut state = State::new();
-    state
-        .load_string(r#"return string.gsub("hello world", "world", "earth")"#)
-        .unwrap();
+    dellingr::Program::compile(
+        r#"return string.gsub("hello world", "world", "earth")"#,
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(2)).unwrap();
     let result = state.to_string(-2).unwrap();
     let count = state.to_number(-1).unwrap();
@@ -217,8 +229,8 @@ fn gsub_string_replacement_works() {
 #[test]
 fn gsub_number_replacement_is_coerced_to_a_string() {
     let mut state = State::new();
-    state
-        .load_string(r#"return string.gsub("aba", "a", 12)"#)
+    dellingr::Program::compile(r#"return string.gsub("aba", "a", 12)"#, None)
+        .and_then(|program| state.load(&program))
         .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(2)).unwrap();
     assert_eq!(state.to_bytes(-2).unwrap(), b"12b12");
@@ -228,14 +240,15 @@ fn gsub_number_replacement_is_coerced_to_a_string() {
 #[test]
 fn gsub_string_replacement_replaces_all_matches() {
     let mut state = State::new();
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
         local result, count = string.gsub("hello", "l", "L")
         return result, count
     "#,
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(2)).unwrap();
     let result = state.to_string(-2).unwrap();
     let count = state.to_number(-1).unwrap();
@@ -246,9 +259,8 @@ fn gsub_string_replacement_replaces_all_matches() {
 #[test]
 fn gsub_string_replacement_inside_dynamic_argument() {
     let mut state = State::new();
-    state
-        .load_string_named(
-            r#"
+    dellingr::Program::compile(
+        r#"
         local function test(name, condition)
             if condition then
                 print("[PASS] " .. name)
@@ -270,24 +282,26 @@ fn gsub_string_replacement_inside_dynamic_argument() {
             return result == "heLLo" and count == 2
         end)())
     "#,
-            Some("dynamic-gsub.lua".to_string()),
-        )
-        .unwrap();
+        Some(b"dynamic-gsub.lua".as_slice()),
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
 }
 
 #[test]
 fn gsub_with_captures_function() {
     let mut state = State::new();
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
         return string.gsub("2+3=5", "(%d+)", function(n)
             return tostring(tonumber(n) * 10)
         end)
     "#,
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(2)).unwrap();
     let result = state.to_string(-2).unwrap();
     assert_eq!(result, "20+30=50");
@@ -295,7 +309,9 @@ fn gsub_with_captures_function() {
 
 fn assert_runtime_error(code: &str, expected: &str) {
     let mut state = State::new();
-    state.load_string(code).unwrap();
+    dellingr::Program::compile(code, None)
+        .and_then(|program| state.load(&program))
+        .unwrap();
     let err = state
         .call(ArgCount::Fixed(0), RetCount::Fixed(2))
         .unwrap_err();
@@ -315,7 +331,9 @@ fn malformed_patterns_are_pattern_errors_in_all_wrappers() {
     ] {
         assert_runtime_error(code, "malformed pattern");
         let mut state = State::new();
-        state.load_string(code).unwrap();
+        dellingr::Program::compile(code, None)
+            .and_then(|program| state.load(&program))
+            .unwrap();
         let err = state
             .call(ArgCount::Fixed(0), RetCount::Fixed(2))
             .unwrap_err();
@@ -342,7 +360,9 @@ fn unclosed_captures_error_only_when_a_caller_reads_them() {
         r#"return string.gsub("abc", "(a", function() end)"#,
     ] {
         let mut state = State::new();
-        state.load_string(code).unwrap();
+        dellingr::Program::compile(code, None)
+            .and_then(|program| state.load(&program))
+            .unwrap();
         let err = state
             .call(ArgCount::Fixed(0), RetCount::Fixed(2))
             .unwrap_err();
@@ -385,8 +405,8 @@ fn gsub_validates_replacement_grammar_only_for_actual_replacements() {
         );
     }
     let mut state = State::new();
-    state
-        .load_string(r#"return string.gsub("a", "(a)", "%2")"#)
+    dellingr::Program::compile(r#"return string.gsub("a", "(a)", "%2")"#, None)
+        .and_then(|program| state.load(&program))
         .unwrap();
     let err = state
         .call(ArgCount::Fixed(0), RetCount::Fixed(2))
@@ -394,7 +414,7 @@ fn gsub_validates_replacement_grammar_only_for_actual_replacements() {
     assert!(
         matches!(
             err.kind(),
-            ErrorKind::RuntimeError(message) if message == "invalid capture index"
+            ErrorKind::LibraryError(error) if error.to_string() == "invalid capture index"
         ),
         "expected runtime invalid capture index error, got {err:?}"
     );
@@ -405,15 +425,16 @@ fn gsub_validates_replacement_grammar_only_for_actual_replacements() {
     // four values survive (a non-final call in a return list is truncated to
     // one value).
     let mut state = State::new();
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
             local s1, c1 = string.gsub("a", "b", "%q")
             local s2, c2 = string.gsub("a", "a", "%q", 0)
             return s1, c1, s2, c2
             "#,
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(4)).unwrap();
     assert_eq!(state.to_bytes(-4).unwrap(), b"a");
     assert_eq!(state.to_number(-3).unwrap(), 0.0);
@@ -424,15 +445,16 @@ fn gsub_validates_replacement_grammar_only_for_actual_replacements() {
 #[test]
 fn gsub_zero_limit_skips_pattern_and_replacement_validation() {
     let mut state = State::new();
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
             local s1, c1 = string.gsub("abc", "[", "x", 0)
             local s2, c2 = string.gsub("a", "a", "%q", 0)
             return s1, c1, s2, c2
             "#,
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(4)).unwrap();
     assert_eq!(state.to_bytes(-4).unwrap(), b"abc");
     assert_eq!(state.to_number(-3).unwrap(), 0.0);
@@ -467,17 +489,18 @@ fn gsub_rejects_invalid_function_and_table_replacement_values() {
 #[test]
 fn gsub_leading_caret_matches_only_at_subject_start() {
     let mut state = State::new();
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
             local a, ac = string.gsub("aa", "^a", "X")
             local b, bc = string.gsub("ba", "^a", "X")
             local c, cc = string.gsub("abc", "^", "X")
             local d, dc = string.gsub("^a^a", "%^a", "X")
             return a, ac, b, bc, c, cc, d, dc
             "#,
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(8)).unwrap();
     assert_eq!(state.to_bytes(-8).unwrap(), b"Xa");
     assert_eq!(state.to_number(-7).unwrap(), 1.0);
@@ -492,17 +515,18 @@ fn gsub_leading_caret_matches_only_at_subject_start() {
 #[test]
 fn gsub_position_captures_and_replacement_escapes() {
     let mut state = State::new();
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
             local a = string.gsub("ab", "()a", "<%0:%1:%%>")
             local b = string.gsub("ab", "a", "<%1>")
             local c = string.gsub("ab", "()(a)", function(pos, value) return pos .. value end)
             local d = string.gsub("ab", "()(a)", {[1] = "table"})
             return a, b, c, d
             "#,
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(4)).unwrap();
     assert_eq!(state.to_bytes(-4).unwrap(), b"<a:1:%>b");
     assert_eq!(state.to_bytes(-3).unwrap(), b"<a>b");

@@ -1,10 +1,12 @@
 //! Regression coverage for the per-Bytecode runtime cache (shared literal
 //! interning + shared inline caches).
 
-use dellingr::{ArgCount, Engine, LuaType, RetCount, State};
+use dellingr::{ArgCount, LuaType, Program, RetCount, State};
 
 fn run(state: &mut State, source: &str) {
-    state.load_string(source).expect("test source compiles");
+    dellingr::Program::compile(source, None)
+        .and_then(|program| state.load(&program))
+        .expect("test source compiles");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .unwrap_or_else(|error| panic!("test source fails: {source}\n{error}"));
@@ -111,8 +113,7 @@ fn factory_closures_share_caches_without_semantic_drift() {
 /// compiled `Program` and a second State keeps one loaded.
 #[test]
 fn repeated_loads_release_runtime_entries_while_programs_stay_retained() {
-    let engine = Engine::new();
-    let mut primary = engine.new_state();
+    let mut primary = State::new();
     primary.gc_collect();
     primary.gc_collect();
     let strings_baseline = primary.string_count();
@@ -120,7 +121,7 @@ fn repeated_loads_release_runtime_entries_while_programs_stay_retained() {
     let mut retained = Vec::new();
     for i in 0..10 {
         let source = format!("local probe = 'unique_literal_{i}' return probe == probe");
-        let program = engine.compile(&source).expect("program compiles");
+        let program = Program::compile(&source, None).expect("program compiles");
         primary.load(&program).expect("program loads");
         primary
             .call(ArgCount::Fixed(0), RetCount::Fixed(1))
@@ -131,7 +132,7 @@ fn repeated_loads_release_runtime_entries_while_programs_stay_retained() {
 
     // The same bytecode also lives in a second State as a live closure;
     // reclamation in `primary` must be blind to both forms of ownership.
-    let mut secondary = engine.new_state();
+    let mut secondary = State::new();
     secondary
         .load(retained.last().expect("programs were retained"))
         .expect("program loads into a second State");
@@ -191,7 +192,8 @@ fn rejected_load_leaves_string_pool_unchanged() {
     let strings_before = state.string_count();
     let objects_before = state.object_count();
 
-    let result = state.load_string("local marker_literal = 'cap_probe' return 1");
+    let result = dellingr::Program::compile("local marker_literal = 'cap_probe' return 1", None)
+        .and_then(|program| state.load(&program));
     assert!(result.is_err(), "load must be rejected at the stack cap");
     assert_eq!(state.string_count(), strings_before);
     assert_eq!(state.object_count(), objects_before);

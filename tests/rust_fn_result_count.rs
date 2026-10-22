@@ -11,7 +11,7 @@ use dellingr::{ArgCount, HostCallbacks, RetCount, State};
 struct ErrorCounter(Arc<AtomicUsize>);
 
 impl HostCallbacks for ErrorCounter {
-    fn on_print(&mut self, _source: Option<&str>, _line: u32, _message: &str) {}
+    fn on_print(&mut self, _source: Option<&[u8]>, _line: u32, _message: &[u8]) {}
 
     fn on_error(&mut self, _error: &Error) {
         self.0.fetch_add(1, Ordering::SeqCst);
@@ -52,7 +52,7 @@ fn nested_over_report(state: &mut State) -> dellingr::Result<u8> {
         .call(ArgCount::Fixed(0), RetCount::Fixed(1))
         .expect_err("inner callback over-reports");
     if state.get_top() != 1 || state.to_number(1)? != 42.0 {
-        return Err(Error::without_location(ErrorKind::InternalError(
+        return Err(Error::without_location(ErrorKind::HostError(
             "outer frame disturbed".into(),
         )));
     }
@@ -96,7 +96,9 @@ fn lua_call_rejects_over_report() {
     let (mut state, count) = counting_state();
     state.push_rust_fn(over_report).unwrap();
     state.set_global("bad").unwrap();
-    state.load_string("local a, b, c = bad()").unwrap();
+    dellingr::Program::compile("local a, b, c = bad()", None)
+        .and_then(|program| state.load(&program))
+        .unwrap();
     let error = state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect_err("over-report fails");
@@ -110,8 +112,8 @@ fn generic_for_iterator_rejects_over_report() {
     let (mut state, count) = counting_state();
     state.push_rust_fn(over_report_iterator).unwrap();
     state.set_global("bad").unwrap();
-    state
-        .load_string("for k, v in bad do error('unreachable') end")
+    dellingr::Program::compile("for k, v in bad do error('unreachable') end", None)
+        .and_then(|program| state.load(&program))
         .unwrap();
     let error = state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))

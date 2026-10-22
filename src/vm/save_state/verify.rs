@@ -118,7 +118,7 @@ fn validate_nested_graph(bytecode: &[SavedBytecode]) -> Result<(), SnapshotError
                 .checked_add(1)
                 .ok_or_else(|| invalid(parent, None, "nested graph is too large"))?;
             verify::validate_child(chunk, &bytecode[child])
-                .map_err(|error| invalid(parent, error.instruction, error.reason))?;
+                .map_err(|error| invalid(parent, error.instruction, error.reason.to_string()))?;
         }
     }
     let mut depths = vec![0usize; bytecode.len()];
@@ -137,7 +137,7 @@ fn validate_nested_graph(bytecode: &[SavedBytecode]) -> Result<(), SnapshotError
             let depth = depths[parent] + 1;
             depths[child] = depths[child].max(depth);
             verify::validate_depth(depths[child])
-                .map_err(|error| invalid(child, error.instruction, error.reason))?;
+                .map_err(|error| invalid(child, error.instruction, error.reason.to_string()))?;
             indegree[child] -= 1;
             if indegree[child] == 0 {
                 ready.push_back(child);
@@ -886,7 +886,7 @@ fn validate_pointer_ids(payload: &SavePayload) -> Result<(), SnapshotError> {
 pub(super) fn verify_payload(payload: SavePayload) -> Result<VerifiedSavePayload, SnapshotError> {
     for (chunk, bytecode) in payload.bytecode.iter().enumerate() {
         verify::validate_bytecode(bytecode)
-            .map_err(|error| invalid(chunk, error.instruction, error.reason))?;
+            .map_err(|error| invalid(chunk, error.instruction, error.reason.to_string()))?;
     }
     // This precedes materialization, including build_bytecode's out[idx] access.
     validate_nested_graph(&payload.bytecode)?;

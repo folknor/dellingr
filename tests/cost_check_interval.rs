@@ -37,8 +37,8 @@ fn opcode_cost_interval_matches_immediate_flush_across_budgets() {
         let source = arithmetic_program(additions);
 
         let mut count_only = State::new();
-        count_only
-            .load_string(&source)
+        dellingr::Program::compile(&source, None)
+            .and_then(|program| count_only.load(&program))
             .expect("arithmetic test program compiles");
         count_only
             .call(ArgCount::Fixed(0), RetCount::Fixed(1))
@@ -53,8 +53,8 @@ fn opcode_cost_interval_matches_immediate_flush_across_budgets() {
             let (should_complete, expected_used) = immediate_flush_reference(budget, additions);
             let mut state = State::new();
             state.set_cost_budget(budget);
-            state
-                .load_string(&source)
+            dellingr::Program::compile(&source, None)
+                .and_then(|program| state.load(&program))
                 .expect("arithmetic test program compiles");
 
             let call = state.call(ArgCount::Fixed(0), RetCount::Fixed(1));

@@ -3,7 +3,7 @@
 //!
 //! Loads a bench script that must define a global `_bench` function, then
 //! runs phases on one `State`:
-//!   - parse   `load_string_named` (parser and codegen)
+//!   - parse   `Program::compile` plus `State::load` (parser and codegen)
 //!   - setup   top-level chunk run (registers `_bench`, builds fixtures)
 //!   - cold    first `_bench` invocation
 //!   - warm    N further invocations on the same State, controlled by
@@ -44,7 +44,7 @@ use std::path::PathBuf;
 use std::process::exit;
 use std::time::{Duration, Instant};
 
-use dellingr::{ArgCount, LuaType, RetCount, State};
+use dellingr::{ArgCount, LuaType, Program, RetCount, State};
 
 // Install the counting allocator in this instrumented binary so
 // hotpath-alloc runs observe allocation traffic. Without it, allocations use
@@ -389,7 +389,7 @@ fn main() {
     };
     let target = &args.target;
 
-    let source = match fs::read_to_string(&args.script_path) {
+    let source = match fs::read(&args.script_path) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("Failed to read {}: {e}", args.script_path.display());
@@ -405,7 +405,9 @@ fn main() {
     let chunk_name = format!("@{}", args.script_path.display());
     emit_marker("PARSE_START");
     let parse_start = Instant::now();
-    if let Err(e) = state.load_string_named(&source, Some(chunk_name)) {
+    if let Err(e) = Program::compile(&source, Some(chunk_name.as_bytes()))
+        .and_then(|program| state.load(&program))
+    {
         eprintln!("Parse error in {}: {e}", args.script_path.display());
         exit(1);
     }

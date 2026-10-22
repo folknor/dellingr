@@ -11,11 +11,11 @@ static ALLOC: hotpath::CountingAllocator = hotpath::CountingAllocator::new();
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::process::exit;
 
 use dellingr::cli::{ANALYSIS_WARNING_PREFIX, COST_USED_PREFIX, ERROR_PREFIX};
-use dellingr::{ArgCount, CostAnalysis, Engine, HostCallbacks, RetCount, State, analyze_cost};
+use dellingr::{ArgCount, CostAnalysis, HostCallbacks, Program, RetCount, State};
 
 #[derive(Clone, Copy)]
 enum OptionKind {
@@ -88,20 +88,33 @@ impl Input {
         }
     }
 
-    /// The chunk name that tracebacks and `print` locations show.
-    fn chunk_name(&self) -> String {
+    /// The chunk name that tracebacks and `print` locations show: `stdin`, or
+    /// the path exactly as given, as its OS-encoded bytes
+    /// (`OsStr::as_encoded_bytes`). On Unix those are the path's own bytes,
+    /// so a non-UTF-8 path is named exactly; elsewhere they are the
+    /// platform's encoding (WTF-8 on Windows), which is UTF-8 for any path
+    /// that is valid Unicode.
+    fn chunk_name(&self) -> &[u8] {
         match self {
-            Self::Stdin => "stdin".to_owned(),
-            Self::File(path) => path.to_string_lossy().into_owned(),
+            Self::Stdin => b"stdin",
+            Self::File(path) => path.as_encoded_bytes(),
         }
     }
 
-    fn read(&self) -> Result<String, String> {
+    /// The script's bytes. Lua source is bytes, so no encoding is required.
+    fn read(&self) -> Result<Vec<u8>, String> {
         match self {
-            Self::Stdin => io::read_to_string(io::stdin().lock())
-                .map_err(|error| format!("reading stdin: {error}")),
-            Self::File(path) => fs::read_to_string(path)
-                .map_err(|error| format!("reading {}: {error}", path.display())),
+            Self::Stdin => {
+                let mut source = Vec::new();
+                io::stdin()
+                    .lock()
+                    .read_to_end(&mut source)
+                    .map(|_| source)
+                    .map_err(|error| format!("reading stdin: {error}"))
+            }
+            Self::File(path) => {
+                fs::read(path).map_err(|error| format!("reading {}: {error}", path.display()))
+            }
         }
     }
 }
@@ -258,9 +271,13 @@ fn write_stdout_or_exit(output: &str) {
 }
 
 #[allow(clippy::disallowed_methods)]
-fn write_stdout_line_or_exit(line: &str) {
+fn write_stdout_line_or_exit(line: &[u8]) {
     let mut stdout = io::stdout().lock();
-    if let Err(error) = writeln!(stdout, "{line}").and_then(|()| stdout.flush()) {
+    if let Err(error) = stdout
+        .write_all(line)
+        .and_then(|()| stdout.write_all(b"\n"))
+        .and_then(|()| stdout.flush())
+    {
         exit_for_stdout_error(&error);
     }
 }
@@ -286,7 +303,8 @@ fn write_stderr(output: &str) {
 struct CliCallbacks;
 
 impl HostCallbacks for CliCallbacks {
-    fn on_print(&mut self, _source: Option<&str>, _line: u32, message: &str) {
+    /// Writes the script's bytes unchanged, as reference Lua's `print` does.
+    fn on_print(&mut self, _source: Option<&[u8]>, _line: u32, message: &[u8]) {
         write_stdout_line_or_exit(message);
     }
 }
@@ -309,10 +327,12 @@ fn main() {
         Err(error) => report_error(error),
     };
 
+    let compiled = Program::compile(&source, Some(args.input.chunk_name()));
+
     if args.analyze {
-        match analyze_cost(&source) {
-            Ok(analysis) => {
-                write_stdout_or_exit(&format!("{analysis}\n"));
+        match compiled {
+            Ok(program) => {
+                write_stdout_or_exit(&format!("{}\n", program.analyze_cost()));
                 write_stderr(&format!(
                     "{ANALYSIS_WARNING_PREFIX}{}\n",
                     CostAnalysis::caveat()
@@ -324,7 +344,7 @@ fn main() {
     }
 
     if args.dump_bytecode {
-        match Engine::new().compile_named(&source, args.input.chunk_name()) {
+        match compiled {
             Ok(program) => write_stdout_or_exit(&program.disassemble().to_string()),
             Err(error) => report_error(error),
         }
@@ -336,8 +356,8 @@ fn main() {
         state.set_cost_budget(limit);
     }
 
-    let result = state
-        .load_string_named(&source, Some(args.input.chunk_name()))
+    let result = compiled
+        .and_then(|program| state.load(&program))
         .and_then(|()| state.call(ArgCount::Fixed(0), RetCount::Fixed(0)));
 
     if !args.quiet {

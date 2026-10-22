@@ -6,8 +6,17 @@
 use super::lua_val::{PointerIdKey, RustFunc, Val};
 use super::table::{TableError, TableNext};
 use super::{Result, State, TypeError};
-use crate::error::{ErrorKind, InternalFault, LibraryError};
+use crate::error::{ErrorKind, ErrorValue, InternalFault, LibraryError};
 use crate::instr::{ArgCount, RetCount};
+
+/// How a value renders under `tostring`; see `State::tostring_rendering`.
+pub(crate) enum TostringRendering {
+    /// A string with no `__tostring` handler: the value is its own rendering,
+    /// so a caller can return the original stack value without re-interning.
+    Itself,
+    /// The rendered bytes.
+    Bytes(Vec<u8>),
+}
 
 trait TableSortAccess {
     fn get(&mut self, state: &mut State, index: usize) -> Result<Val>;
@@ -443,7 +452,7 @@ impl State {
     /// Gets the metatable of the value at the given index.
     /// For tables, returns the table's metatable. For strings, returns the
     /// metatable all strings share, as reference Lua does (`__index` = the
-    /// string library table `open_libs` built; nil in a `State::empty` that
+    /// string library table `open_libs` built; nil in a `State::raw` that
     /// never opened the libraries). It is a real table a script may modify;
     /// `index_string` in `eval_index.rs` resolves string indexing through it.
     /// It cannot be replaced: `set_metatable_of` accepts only tables. Every
@@ -686,20 +695,21 @@ impl State {
     /// Converts the value at the given index to a UTF-8 string, checking for
     /// a `__tostring` metamethod. Invalid UTF-8 bytes (from a Lua string or a
     /// `__tostring` result) are converted lossily; use
-    /// [`State::bytes_with_tostring_meta`] for the exact bytes. A converted
-    /// result over `MAX_STRING_BYTES` is an error, checked before conversion.
-    #[hotpath::measure]
+    /// [`State::tostring_bytes`] for the exact bytes. A converted result over
+    /// `MAX_STRING_BYTES` is an error, checked before conversion.
     ///
     /// Guarded like [`State::call`]: refused on a poisoned State, and a
     /// panic out of `__tostring` poisons it.
+    #[hotpath::measure]
     pub fn to_string_with_meta(&mut self, idx: isize) -> Result<String> {
-        let raw = self.bytes_with_tostring_meta(idx)?;
+        let raw = self.tostring_bytes(idx)?;
         Self::lossy_utf8_checked(&raw)
     }
 
-    /// Converts a value with `tostring` semantics while preserving arbitrary
-    /// bytes returned by a `__tostring` metamethod. This is what the
-    /// `tostring` builtin returns.
+    /// The value's `tostring` rendering, byte-exact: what the `tostring`
+    /// builtin returns, what `print` prints and what `string.format("%s")`
+    /// formats. A `__tostring` result keeps its bytes whether or not they are
+    /// valid UTF-8.
     ///
     /// Strings consult the shared string metatable too, as reference Lua's
     /// `tostring` does: setting `getmetatable("").__tostring` changes
@@ -707,13 +717,29 @@ impl State {
     ///
     /// Guarded like [`State::call`]: refused on a poisoned State, and a
     /// panic out of `__tostring` poisons it.
-    pub fn bytes_with_tostring_meta(&mut self, idx: isize) -> Result<Vec<u8>> {
-        self.guarded(|state| state.bytes_with_tostring_meta_unguarded(idx))
+    pub fn tostring_bytes(&mut self, idx: isize) -> Result<Vec<u8>> {
+        self.guarded(|state| state.tostring_bytes_unguarded(idx))
     }
 
-    /// [`State::bytes_with_tostring_meta`] without the poison boundary, for
-    /// the standard library.
-    pub(crate) fn bytes_with_tostring_meta_unguarded(&mut self, idx: isize) -> Result<Vec<u8>> {
+    /// [`State::tostring_bytes`] without the poison boundary, for the
+    /// standard library.
+    pub(crate) fn tostring_bytes_unguarded(&mut self, idx: isize) -> Result<Vec<u8>> {
+        match self.tostring_rendering(idx)? {
+            // No handler ran, so `idx` still names the same string.
+            TostringRendering::Itself => Ok(self.to_bytes(idx)?.to_vec()),
+            TostringRendering::Bytes(bytes) => Ok(bytes),
+        }
+    }
+
+    /// The one owner of `tostring`'s rule: a value with a `__tostring`
+    /// handler renders through it (a string's handler is the shared string
+    /// metatable's, nil by default), so **a string bypasses `__tostring`
+    /// unless the shared string metatable has one**; a string without a
+    /// handler renders as itself, and any other value by its default
+    /// coercion. The handler must return a string or a number.
+    ///
+    /// `error_value` applies the opposite rule to strings on purpose.
+    pub(crate) fn tostring_rendering(&mut self, idx: isize) -> Result<TostringRendering> {
         let i = self.convert_idx(idx)?;
         let val = self.stack[i];
         let tostring_handler = self.tostring_handler(val);
@@ -730,23 +756,43 @@ impl State {
                 super::LuaType::String | super::LuaType::Number
             ) && let Some(bytes) = result.to_bytes_with_heap(&self.heap)
             {
-                return Ok(bytes);
+                return Ok(TostringRendering::Bytes(bytes));
             }
             return Err(self.library_error(LibraryError::TostringMustReturnString));
         }
-
+        if matches!(val, Val::Str(_)) {
+            return Ok(TostringRendering::Itself);
+        }
         self.bytes_with_default_string_coercion(idx)
+            .map(TostringRendering::Bytes)
     }
 
-    /// Whether the shared string metatable currently has a non-nil
-    /// `__tostring`; lets `tostring` keep its return-the-argument fast path
-    /// for strings in the default (unset) case, without allocating or GC.
-    pub(crate) fn string_has_tostring(&self) -> bool {
-        !matches!(self.string_tostring_handler(), Val::Nil)
-    }
-
-    fn string_tostring_handler(&self) -> Val {
-        self.metatable_tostring_field(self.string_metatable)
+    /// The value `error()` raises, built from the stack value at `idx`.
+    ///
+    /// The opposite of `tostring`'s rule for strings: a string error value is
+    /// the value itself in reference Lua, never passed through `__tostring`,
+    /// so it **always bypasses** the shared string metatable's handler and
+    /// keeps its exact bytes. Nil, booleans and numbers are carried as values.
+    /// Tables and functions cannot outlive the State, so they carry their type
+    /// and their `tostring` rendering, which may run `__tostring` and may
+    /// assign a State-local identity.
+    pub(crate) fn error_value(&mut self, idx: isize) -> Result<ErrorValue> {
+        let val = self.at_index(idx)?;
+        Ok(match val {
+            Val::Nil => ErrorValue::Nil,
+            Val::Bool(value) => ErrorValue::Boolean(value),
+            Val::Num(number) => ErrorValue::Number(number),
+            Val::Str(string) => ErrorValue::String(self.heap.get_string(string).to_vec()),
+            Val::RustFn(_) | Val::Obj(_) => {
+                // Read the type before any handler runs.
+                let value_type = val.typ(&self.heap);
+                let rendering = self.tostring_bytes_unguarded(idx)?;
+                ErrorValue::Object {
+                    value_type,
+                    rendering,
+                }
+            }
+        })
     }
 
     fn metatable_tostring_field(&self, mt: Option<super::object::ObjectPtr>) -> Val {

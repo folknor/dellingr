@@ -5,7 +5,9 @@ use dellingr::{ArgCount, RetCount, State};
 
 fn run_bytes(code: &str) -> Vec<u8> {
     let mut state = State::new();
-    state.load_string(code).expect("test source compiles");
+    dellingr::Program::compile(code, None)
+        .and_then(|program| state.load(&program))
+        .expect("test source compiles");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(1))
         .expect("test source executes");

@@ -114,7 +114,7 @@ Determinism is a product requirement, not a style preference - game replays depe
 
 ## Architecture
 
-Compilation pipeline: source to `compiler::parse_str` to bytecode `Chunk` to executed by `State` in `vm::eval`. There is no separate IR.
+Compilation pipeline: source bytes to `compiler::compile` (the parser, then `finalize`) to bytecode `Chunk` to executed by `State` in `vm::eval`. There is no separate IR. `Program::compile` is the one public entry to it.
 
 **`src/instr.rs`** - fixed-width 32-bit bytecode (`[opcode:8][A:8][B:8][C:8]` or `[opcode:8][A:8][sBx:16]`). `ArgCount` and `RetCount` use `255` as a sentinel for `Dynamic`/`All`; the encoding round-trips through `to_u8`/`from_u8`. The `Builtin` enum gives well-known globals (`print`, `pairs`, `math`, etc.) fast array-indexed access through the global environment's builtin mirror instead of a hash lookup.
 

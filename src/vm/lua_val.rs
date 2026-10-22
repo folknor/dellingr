@@ -39,7 +39,7 @@ const RUST_FN_DISPLAY: &str = "<function>";
 /// printing it would make output host-dependent. `string.format` drops the
 /// sign at the same point for the same reason. Reference C Lua prints `-nan`
 /// for `0/0` on x86-64 glibc.
-pub(super) fn number_to_string(number: f64) -> String {
+pub(crate) fn number_to_string(number: f64) -> String {
     if number.is_nan() {
         return "nan".to_string();
     }

@@ -1,4 +1,9 @@
-//! This module contains functions which can tokenize a string input.
+//! This module tokenizes Lua source. Source is bytes, as Lua strings are:
+//! every token the grammar knows is ASCII, so the lexer walks bytes, and the
+//! only places arbitrary bytes may appear - string literals and comments -
+//! are copied or skipped byte for byte. A non-ASCII byte anywhere else is a
+//! syntax error, reported as the UTF-8 character it starts when it starts
+//! one.
 
 use super::Result;
 use super::error::Error;
@@ -7,9 +12,7 @@ use super::token::Token;
 use super::token::TokenType::{self, *};
 use crate::numeral::{hex_value, is_lua_whitespace, is_newline_pair, parse_lua_numeral};
 
-use std::iter::Peekable;
-use std::slice::SliceIndex;
-use std::str::CharIndices;
+use std::ops::Range;
 
 /// A `TokenStream` is a wrapper around a `Lexer`. It provides a lookahead buffer and several
 /// helper methods.
@@ -38,10 +41,10 @@ enum LiteralStringFailure {
     StringSizeExceeded { size: usize, limit: usize },
 }
 
-/// A `Lexer` handles the raw conversion of characters to tokens.
+/// A `Lexer` handles the raw conversion of bytes to tokens.
 #[derive(Debug)]
 pub(super) struct Lexer<'a> {
-    /// The starting position of the next character.
+    /// The position of the next byte.
     pos: usize,
     /// `linebreaks[i]` is the byte offset of the start of line `i`.
     linebreaks: Vec<usize>,
@@ -50,15 +53,14 @@ pub(super) struct Lexer<'a> {
     /// member. That second member always closes the pair, so in `\r\n\r` the
     /// trailing `\r` starts a fresh break, as reference `inclinenumber` does.
     newline_pair_open: bool,
-    iter: Peekable<CharIndices<'a>>,
-    source: &'a str,
+    source: &'a [u8],
     literal_string_contents: Vec<(usize, LiteralStringContents)>,
 }
 
 impl<'a> TokenStream<'a> {
     /// Constructs a new `TokenStream`.
     #[must_use]
-    pub(super) fn new(source: &'a str) -> Self {
+    pub(super) fn new(source: &'a [u8]) -> Self {
         Self {
             lexer: Lexer::new(source),
             lookahead: None,
@@ -154,10 +156,10 @@ impl<'a> TokenStream<'a> {
         }
     }
 
-    /// Returns a substring from the source code.
+    /// Returns a range of the source bytes; token ranges are always in bounds.
     #[must_use]
-    pub(super) fn substring(&self, index: impl SliceIndex<str, Output = str>) -> &'a str {
-        &self.lexer.source[index]
+    pub(super) fn source_bytes(&self, range: Range<usize>) -> &'a [u8] {
+        &self.lexer.source[range]
     }
 
     /// Takes decoded contents for a string token already returned by the lexer.
@@ -177,10 +179,9 @@ impl<'a> TokenStream<'a> {
 impl<'a> Lexer<'a> {
     /// Constructs a new `Lexer`.
     #[must_use]
-    pub(super) fn new(source: &'a str) -> Self {
+    pub(super) fn new(source: &'a [u8]) -> Self {
         let linebreaks = vec![0];
         Self {
-            iter: source.char_indices().peekable(),
             linebreaks,
             newline_pair_open: false,
             pos: 0,
@@ -207,46 +208,46 @@ impl<'a> Lexer<'a> {
                 return Ok(self.end_of_file(tok_line));
             };
             let tok_type = match first_char {
-                '+' => Plus,
-                '*' => Star,
-                '/' => Slash,
-                '%' => Mod,
-                '^' => Caret,
-                '#' => Hash,
-                ';' => Semi,
-                ':' => Colon,
-                ',' => Comma,
-                '(' => LParen,
-                ')' => RParen,
-                '{' => LCurly,
-                '}' => RCurly,
-                ']' => RSquare,
+                b'+' => Plus,
+                b'*' => Star,
+                b'/' => Slash,
+                b'%' => Mod,
+                b'^' => Caret,
+                b'#' => Hash,
+                b';' => Semi,
+                b':' => Colon,
+                b',' => Comma,
+                b'(' => LParen,
+                b')' => RParen,
+                b'{' => LCurly,
+                b'}' => RCurly,
+                b']' => RSquare,
 
-                '.' => self.peek_dot()?,
+                b'.' => self.peek_dot()?,
 
-                '=' | '<' | '>' | '~' => self.peek_equals(first_char)?,
+                b'=' | b'<' | b'>' | b'~' => self.peek_equals(first_char)?,
 
-                '-' => {
-                    if self.try_next('-') {
+                b'-' => {
+                    if self.try_next(b'-') {
                         self.skip_comment(tok_start)?;
                         continue;
                     }
                     Minus
                 }
 
-                '\'' | '\"' => self.lex_string(first_char, tok_start)?,
-                '[' => {
-                    if let Some('=' | '[') = self.peek_char() {
+                b'\'' | b'\"' => self.lex_string(first_char, tok_start)?,
+                b'[' => {
+                    if let Some(b'=' | b'[') = self.peek_char() {
                         return Err(self.error_at(SyntaxError::LongStringUnsupported, tok_start));
                     }
                     LSquare
                 }
 
-                '0'..='9' => self.lex_full_number(first_char, tok_start)?,
+                b'0'..=b'9' => self.lex_full_number(first_char, tok_start)?,
 
-                'a'..='z' | 'A'..='Z' | '_' => self.lex_word(tok_start),
+                b'a'..=b'z' | b'A'..=b'Z' | b'_' => self.lex_word(tok_start),
 
-                _ => return Err(self.error(SyntaxError::InvalidCharacter(first_char))),
+                _ => return Err(self.invalid_character(first_char, tok_start)),
             };
             let len = (self.pos - tok_start) as u32;
             return Ok(Token {
@@ -270,22 +271,22 @@ impl<'a> Lexer<'a> {
     fn skip_comment(&mut self, comment_start: usize) -> Result<()> {
         // Check for a long comment: --[=*[ ... ]=*]. A failed opener probe is
         // still ordinary comment text, so falling through is correct.
-        if self.peek_char() == Some('[') {
+        if self.peek_char() == Some(b'[') {
             self.next_char(); // consume '['
             let mut level = 0;
-            while self.try_next('=') {
+            while self.try_next(b'=') {
                 level += 1;
             }
-            if self.try_next('[') {
+            if self.try_next(b'[') {
                 // Long comment: skip until a closing delimiter of the same level.
                 loop {
                     match self.next_char() {
-                        Some(']') => {
+                        Some(b']') => {
                             let mut closing_level = 0;
-                            while self.try_next('=') {
+                            while self.try_next(b'=') {
                                 closing_level += 1;
                             }
-                            if closing_level == level && self.try_next(']') {
+                            if closing_level == level && self.try_next(b']') {
                                 return Ok(());
                             }
                         }
@@ -302,56 +303,76 @@ impl<'a> Lexer<'a> {
         }
         // Single-line comment: skip until newline (consumed) or EOF
         while let Some(c) = self.next_char() {
-            if matches!(c, '\r' | '\n') {
+            if matches!(c, b'\r' | b'\n') {
                 return Ok(());
             }
         }
         Ok(())
     }
 
-    /// Peeks the next character.
+    /// Peeks the next byte.
     #[must_use]
-    fn peek_char(&mut self) -> Option<char> {
-        self.iter.peek().map(|(_, c)| *c)
+    fn peek_char(&self) -> Option<u8> {
+        self.source.get(self.pos).copied()
     }
 
-    /// Pops and returns the next character.
-    fn next_char(&mut self) -> Option<char> {
-        match self.iter.next() {
-            Some((pos, c)) => {
-                self.pos = pos + c.len_utf8();
-                // CRLF and LFCR are each one logical newline. Defer the first
-                // member, then record the line start after the second. The
-                // second member never opens a new pair: `\r\n\r` is two breaks.
-                if matches!(c, '\r' | '\n') {
-                    if !self.newline_pair_open
-                        && matches!(self.peek_char(), Some(next) if is_newline_pair(c, next))
-                    {
-                        self.newline_pair_open = true;
-                    } else {
-                        self.newline_pair_open = false;
-                        self.linebreaks.push(self.pos);
-                    }
-                }
-                Some(c)
+    /// Pops and returns the next byte.
+    fn next_char(&mut self) -> Option<u8> {
+        let c = self.peek_char()?;
+        self.pos += 1;
+        // CRLF and LFCR are each one logical newline. Defer the first member,
+        // then record the line start after the second. The second member never
+        // opens a new pair: `\r\n\r` is two breaks.
+        if matches!(c, b'\r' | b'\n') {
+            if !self.newline_pair_open
+                && matches!(self.peek_char(), Some(next) if is_newline_pair(c, next))
+            {
+                self.newline_pair_open = true;
+            } else {
+                self.newline_pair_open = false;
+                self.linebreaks.push(self.pos);
             }
-            None => None,
+        }
+        Some(c)
+    }
+
+    /// The error for a byte that starts no token. The reported position is
+    /// just past the offending character: a byte that starts a valid UTF-8
+    /// character consumes the whole character first, so the column matches
+    /// a character-at-a-time scan. Only that one candidate character is
+    /// decoded, so malformed bytes after it do not matter.
+    fn invalid_character(&mut self, first: u8, start: usize) -> Error {
+        if first.is_ascii() {
+            return self.error(SyntaxError::InvalidCharacter(char::from(first)));
+        }
+        let end = self.source.len().min(start + 4);
+        let decoded = self.source[start..end]
+            .utf8_chunks()
+            .next()
+            .and_then(|chunk| chunk.valid().chars().next());
+        match decoded {
+            Some(c) => {
+                // Continuation bytes are never newlines, so this cannot record
+                // a line break.
+                self.pos = start + c.len_utf8();
+                self.error(SyntaxError::InvalidCharacter(c))
+            }
+            None => self.error(SyntaxError::InvalidByte(first)),
         }
     }
 
-    /// Consumes any whitespace characters.
+    /// Consumes any whitespace bytes.
     fn consume_whitespace(&mut self) {
         while let Some(c) = self.peek_char() {
-            if !c.is_ascii() || !is_lua_whitespace(c as u8) {
+            if !is_lua_whitespace(c) {
                 break;
             }
             self.next_char();
         }
     }
 
-    /// Move a character forward, only if the current character matches
-    /// `expected`.
-    fn try_next(&mut self, expected: char) -> bool {
+    /// Move a byte forward, only if the current byte matches `expected`.
+    fn try_next(&mut self, expected: u8) -> bool {
         match self.peek_char() {
             Some(c) if c == expected => {
                 self.next_char();
@@ -378,9 +399,9 @@ impl<'a> Lexer<'a> {
     /// Determines whether it is part of a `Dot`, `DotDot`, `DotDotDot` or `Number`.
     fn peek_dot(&mut self) -> Result<TokenType> {
         let typ = match self.peek_char() {
-            Some('.') => {
+            Some(b'.') => {
                 self.next_char();
-                if self.try_next('.') {
+                if self.try_next(b'.') {
                     DotDotDot
                 } else {
                     DotDot
@@ -402,22 +423,22 @@ impl<'a> Lexer<'a> {
     /// Returns `Err` if the first character is `~` and it is not paired with a
     /// `=`.
     #[allow(clippy::panic)] // Only the four operator characters call this helper.
-    fn peek_equals(&mut self, first_char: char) -> Result<TokenType> {
-        if self.try_next('=') {
+    fn peek_equals(&mut self, first_char: u8) -> Result<TokenType> {
+        if self.try_next(b'=') {
             let typ = match first_char {
-                '=' => Equal,
-                '~' => NotEqual,
-                '<' => LessEqual,
-                '>' => GreaterEqual,
+                b'=' => Equal,
+                b'~' => NotEqual,
+                b'<' => LessEqual,
+                b'>' => GreaterEqual,
                 _ => panic!("peek_equals was called with first_char = {first_char}"),
             };
             Ok(typ)
         } else {
             match first_char {
-                '=' => Ok(Assign),
-                '<' => Ok(Less),
-                '>' => Ok(Greater),
-                '~' => Err(self.error(SyntaxError::InvalidCharacter(first_char))),
+                b'=' => Ok(Assign),
+                b'<' => Ok(Less),
+                b'>' => Ok(Greater),
+                b'~' => Err(self.error(SyntaxError::InvalidCharacter('~'))),
                 _ => panic!("peek_equals was called with first_char = {first_char}"),
             }
         }
@@ -427,8 +448,10 @@ impl<'a> Lexer<'a> {
     ///
     /// Escape failures are saved with the token and returned only when the
     /// parser consumes it. This preserves the parser's error ordering when a
-    /// malformed string appears after an earlier syntax error.
-    fn lex_string(&mut self, quote: char, token_start: usize) -> Result<TokenType> {
+    /// malformed string appears after an earlier syntax error. Bytes other
+    /// than the quote, backslash and line breaks are copied verbatim, so a
+    /// literal holds exactly the source's bytes, valid UTF-8 or not.
+    fn lex_string(&mut self, quote: u8, token_start: usize) -> Result<TokenType> {
         let body_start = self.pos;
         let mut decoded = Vec::new();
         let mut failure = None;
@@ -453,13 +476,13 @@ impl<'a> Lexer<'a> {
                 return Ok(LiteralString);
             }
 
-            if c == '\\' {
+            if c == b'\\' {
                 let Some(escaped) = self.next_char() else {
                     return Err(self.error(SyntaxError::UnclosedString));
                 };
-                if escaped == 'z' {
+                if escaped == b'z' {
                     self.consume_whitespace();
-                } else if matches!(escaped, '\r' | '\n')
+                } else if matches!(escaped, b'\r' | b'\n')
                     && matches!(self.peek_char(), Some(next) if is_newline_pair(escaped, next))
                 {
                     self.next_char();
@@ -477,16 +500,12 @@ impl<'a> Lexer<'a> {
                         Err(error) => failure = Some(error),
                     }
                 }
-            } else if matches!(c, '\r' | '\n') {
+            } else if matches!(c, b'\r' | b'\n') {
                 return Err(self.error(SyntaxError::UnclosedString));
             } else if failure.is_none() && char_start >= decoded_until {
-                let bytes = &self.source.as_bytes()[char_start..self.pos];
-                for &byte in bytes {
-                    if let Err(error) = Self::check_decoded_string_growth(decoded.len()) {
-                        failure = Some(error);
-                        break;
-                    }
-                    decoded.push(byte);
+                match Self::check_decoded_string_growth(decoded.len()) {
+                    Ok(()) => decoded.push(c),
+                    Err(error) => failure = Some(error),
                 }
             }
         }
@@ -509,19 +528,19 @@ impl<'a> Lexer<'a> {
     fn decode_string_escape(
         &self,
         slash_pos: usize,
-        escaped: char,
-        quote: char,
+        escaped: u8,
+        quote: u8,
         lexical_end: usize,
         decoded: &mut Vec<u8>,
     ) -> std::result::Result<usize, LiteralStringFailure> {
         Self::check_decoded_string_growth(decoded.len())?;
-        let bytes = self.source.as_bytes();
+        let bytes = self.source;
         let error = |kind| LiteralStringFailure::SyntaxError(kind, slash_pos);
         let unchanged_end = lexical_end;
 
         let skip_until = match escaped {
-            '0'..='9' => {
-                let mut value = u16::from(escaped as u8 - b'0');
+            b'0'..=b'9' => {
+                let mut value = u16::from(escaped - b'0');
                 let mut digits = 1;
                 let mut end = slash_pos + 2;
                 while digits < 3 {
@@ -541,60 +560,60 @@ impl<'a> Lexer<'a> {
                 decoded.push(value as u8);
                 end
             }
-            'x' => {
+            b'x' => {
                 let high_pos = slash_pos + 2;
                 let low_pos = high_pos + 1;
                 let high = match bytes.get(high_pos) {
-                    Some(&byte) if byte != quote as u8 => hex_value(byte),
+                    Some(&byte) if byte != quote => hex_value(byte),
                     _ => None,
                 }
                 .ok_or_else(|| error(SyntaxError::HexadecimalDigitExpected))?;
                 let low = match bytes.get(low_pos) {
-                    Some(&byte) if byte != quote as u8 => hex_value(byte),
+                    Some(&byte) if byte != quote => hex_value(byte),
                     _ => None,
                 }
                 .ok_or_else(|| error(SyntaxError::HexadecimalDigitExpected))?;
                 decoded.push(high * 16 + low);
                 low_pos + 1
             }
-            'z' => unchanged_end,
-            '\r' | '\n' | 'n' => {
+            b'z' => unchanged_end,
+            b'\r' | b'\n' | b'n' => {
                 decoded.push(b'\n');
                 unchanged_end
             }
-            't' => {
+            b't' => {
                 decoded.push(b'\t');
                 unchanged_end
             }
-            'r' => {
+            b'r' => {
                 decoded.push(b'\r');
                 unchanged_end
             }
-            '\\' => {
+            b'\\' => {
                 decoded.push(b'\\');
                 unchanged_end
             }
-            '"' => {
+            b'"' => {
                 decoded.push(b'"');
                 unchanged_end
             }
-            '\'' => {
+            b'\'' => {
                 decoded.push(b'\'');
                 unchanged_end
             }
-            'a' => {
+            b'a' => {
                 decoded.push(b'\x07');
                 unchanged_end
             }
-            'b' => {
+            b'b' => {
                 decoded.push(b'\x08');
                 unchanged_end
             }
-            'f' => {
+            b'f' => {
                 decoded.push(b'\x0C');
                 unchanged_end
             }
-            'v' => {
+            b'v' => {
                 decoded.push(b'\x0B');
                 unchanged_end
             }
@@ -604,34 +623,34 @@ impl<'a> Lexer<'a> {
     }
 
     /// Reads in a number which starts with a digit (as opposed to a decimal point).
-    fn lex_full_number(&mut self, first_char: char, tok_start: usize) -> Result<TokenType> {
+    fn lex_full_number(&mut self, first_char: u8, tok_start: usize) -> Result<TokenType> {
         // Check for hex values (both 0x and 0X)
-        if first_char == '0' && (self.try_next('x') || self.try_next('X')) {
+        if first_char == b'0' && (self.try_next(b'x') || self.try_next(b'X')) {
             // Mantissa: hex digits with an optional fraction (Lua 5.2 hex
             // floats). At least one digit must appear in the mantissa:
             // `0x1.8`, `0x1.`, and `0x.8` are valid, `0x.` is not.
             self.lex_hex_digits();
-            if self.try_next('.') {
+            if self.try_next(b'.') {
                 self.lex_hex_digits();
             }
             // Let the shared numeral parser own mantissa validation. Check at
             // this boundary to keep malformed-mantissa diagnostics before a
             // following exponent, as in the original lexer.
-            if parse_lua_numeral(&self.source.as_bytes()[tok_start..self.pos]).is_none() {
+            if parse_lua_numeral(&self.source[tok_start..self.pos]).is_none() {
                 return Err(self.error(SyntaxError::BadNumber));
             }
 
             // Optional binary exponent: p/P, an optional sign, then at least
             // one DECIMAL digit (`0x1p-2`, `0x1.8p+0`).
-            let has_exponent = self.try_next('p') || self.try_next('P');
+            let has_exponent = self.try_next(b'p') || self.try_next(b'P');
             if has_exponent {
                 if let Some(c) = self.peek_char()
-                    && (c == '+' || c == '-')
+                    && (c == b'+' || c == b'-')
                 {
                     self.next_char();
                 }
                 self.lex_digits();
-                if parse_lua_numeral(&self.source.as_bytes()[tok_start..self.pos]).is_none() {
+                if parse_lua_numeral(&self.source[tok_start..self.pos]).is_none() {
                     return Err(self.error(SyntaxError::BadNumber));
                 }
             }
@@ -645,7 +664,7 @@ impl<'a> Lexer<'a> {
             self.lex_digits();
 
             // Handle the fraction and exponent components.
-            if self.try_next('.') {
+            if self.try_next(b'.') {
                 match self.peek_char() {
                     Some(c) if c.is_ascii_digit() => self.lex_number_after_decimal()?,
                     _ => self.lex_exponent()?,
@@ -677,12 +696,7 @@ impl<'a> Lexer<'a> {
 
     /// Consumes an unbroken sequence of hexadecimal digits.
     fn lex_hex_digits(&mut self) {
-        while self.peek_char().is_some_and(|c| {
-            matches!(
-                u8::try_from(u32::from(c)),
-                Ok(byte) if hex_value(byte).is_some()
-            )
-        }) {
+        while self.peek_char().is_some_and(|c| hex_value(c).is_some()) {
             self.next_char();
         }
     }
@@ -690,10 +704,10 @@ impl<'a> Lexer<'a> {
     /// Consumes the optional exponent part of a literal number, then rejects
     /// an identifier character glued to it.
     fn lex_exponent(&mut self) -> Result<()> {
-        if self.try_next('E') || self.try_next('e') {
+        if self.try_next(b'E') || self.try_next(b'e') {
             // The exponent might have a sign.
             if let Some(c) = self.peek_char()
-                && (c == '+' || c == '-')
+                && (c == b'+' || c == b'-')
             {
                 self.next_char();
             }
@@ -743,8 +757,8 @@ impl<'a> Lexer<'a> {
     }
 }
 
-fn is_identifier_continue(c: char) -> bool {
-    c.is_ascii_alphanumeric() || c == '_'
+fn is_identifier_continue(c: u8) -> bool {
+    c.is_ascii_alphanumeric() || c == b'_'
 }
 
 #[cfg(test)]
@@ -752,7 +766,7 @@ mod tests {
     use super::*;
 
     fn check(input: &str, tokens: &[(TokenType, usize, u32)], lines: &[usize]) {
-        let mut lexer = Lexer::new(input);
+        let mut lexer = Lexer::new(input.as_bytes());
         let mut tokens = tokens.iter().map(|&(typ, start, len)| Token {
             typ,
             start,
@@ -766,7 +780,7 @@ mod tests {
             }
             if actual.typ == LiteralNumber {
                 assert!(
-                    parse_lua_numeral(lexer.source[actual.range()].as_bytes()).is_some(),
+                    parse_lua_numeral(&lexer.source[actual.range()]).is_some(),
                     "lexer emitted an invalid numeral token at {}",
                     actual.start
                 );
@@ -847,7 +861,7 @@ mod tests {
             src.push_str("-- comment\n");
         }
         src.push('x');
-        let mut lexer = Lexer::new(&src);
+        let mut lexer = Lexer::new(src.as_bytes());
         assert_eq!(lexer.next_token().unwrap().typ, TokenType::Identifier);
         assert_eq!(lexer.next_token().unwrap().typ, TokenType::EndOfFile);
     }
@@ -890,7 +904,7 @@ mod tests {
     fn escaped_crlf_then_cr_leaves_string_unclosed() {
         // The escape swallows exactly one "\r\n" pair; the following bare
         // '\r' is an unescaped newline that ends the short string.
-        let err = Lexer::new("\"a\\\r\n\rb\"")
+        let err = Lexer::new("\"a\\\r\n\rb\"".as_bytes())
             .next_token()
             .expect_err("an unescaped CR must end the short string");
         assert!(matches!(
@@ -901,7 +915,7 @@ mod tests {
 
     #[test]
     fn short_strings_are_decoded_by_the_lexer_and_bad_escapes_are_deferred() {
-        let mut input = TokenStream::new("\"a\\x41\\n\"");
+        let mut input = TokenStream::new("\"a\\x41\\n\"".as_bytes());
         let token = input.next().expect("closed string must lex");
         assert_eq!(token.typ, LiteralString);
         match input
@@ -914,7 +928,7 @@ mod tests {
             _ => panic!("valid escapes must decode successfully"),
         }
 
-        let mut input = TokenStream::new("\"\\q\"");
+        let mut input = TokenStream::new("\"\\q\"".as_bytes());
         let token = input
             .next()
             .expect("invalid escapes remain deferred until parser consumption");
@@ -932,7 +946,7 @@ mod tests {
     fn bare_cr_in_short_string_is_unclosed() {
         let source = "\"a\rb\"";
         assert_eq!(source.as_bytes()[2], b'\r');
-        let err = Lexer::new(source)
+        let err = Lexer::new(source.as_bytes())
             .next_token()
             .expect_err("bare CR must terminate a short string");
         assert!(matches!(
@@ -990,7 +1004,7 @@ mod tests {
     fn numeral_identifier_adjacency_is_malformed() {
         // Lua 5.2 accepts `3or`; dellingr follows Lua 5.4's stricter rule.
         for input in ["3or", "1e5or", "3_name", "0x5rad"] {
-            let err = Lexer::new(input)
+            let err = Lexer::new(input.as_bytes())
                 .next_token()
                 .expect_err("glued numeral and identifier must fail");
             assert!(
@@ -1006,7 +1020,7 @@ mod tests {
     #[test]
     fn decimal_exponent_validation_stays_with_the_shared_numeral_parser() {
         for input in ["1e", "1e+"] {
-            let token = Lexer::new(input)
+            let token = Lexer::new(input.as_bytes())
                 .next_token()
                 .expect("decimal exponent failure is deferred to parsing");
             assert_eq!(token.typ, LiteralNumber);
@@ -1028,7 +1042,7 @@ mod tests {
     fn malformed_hex_floats_are_rejected() {
         // No mantissa digits, or a 'p' exponent without digits.
         for input in ["0x.", "0xp1", "0x1p", "0x1p+", "0x1p-", "0x1p2f"] {
-            let mut lexer = Lexer::new(input);
+            let mut lexer = Lexer::new(input.as_bytes());
             let mut result = lexer.next_token();
             while let Ok(token) = &result {
                 if token.typ == TokenType::EndOfFile {
@@ -1043,7 +1057,7 @@ mod tests {
     #[test]
     fn malformed_hex_number_errors_keep_their_original_columns() {
         for (input, column) in [("0x.", 4), ("0xp1", 3), ("0x1p+", 6)] {
-            let err = Lexer::new(input)
+            let err = Lexer::new(input.as_bytes())
                 .next_token()
                 .expect_err("malformed hexadecimal numeral must fail in the lexer");
             assert!(matches!(
@@ -1153,7 +1167,7 @@ mod tests {
     #[test]
     fn long_strings_return_an_error_at_the_opening_bracket() {
         for input in ["[[hello]]", "[=[x]=]", "[["] {
-            let err = Lexer::new(input)
+            let err = Lexer::new(input.as_bytes())
                 .next_token()
                 .expect_err("long strings must not tokenize");
             assert!(matches!(
@@ -1176,7 +1190,7 @@ mod tests {
             "x --[==[ closed at the wrong level ]=]\nprint(1)",
             "x --[[",
         ] {
-            let mut lexer = Lexer::new(input);
+            let mut lexer = Lexer::new(input.as_bytes());
             assert_eq!(lexer.next_token().unwrap().typ, Identifier);
             let err = lexer
                 .next_token()
@@ -1211,11 +1225,11 @@ mod tests {
             "f --[=[ a\rb ]=] --[[ c ]] (g)",
             "f --[[ note ]] (g)",
         ] {
-            let mut lexer = Lexer::new(input);
+            let mut lexer = Lexer::new(input.as_bytes());
             assert_eq!(lexer.next_token().unwrap().typ, Identifier);
             assert_eq!(lexer.next_token().unwrap().typ, LParen, "{input:?}");
         }
-        let mut tokens = TokenStream::new("f -- note\n(g)");
+        let mut tokens = TokenStream::new("f -- note\n(g)".as_bytes());
         assert_eq!(tokens.peek2().unwrap().typ, LParen);
         assert_eq!(tokens.next().unwrap().typ, Identifier);
         assert_eq!(tokens.next().unwrap().typ, LParen);
@@ -1241,7 +1255,7 @@ mod tests {
             ("\"a\\\r\nb\" x", vec![1, 2, 2]),
             ("\"a\\\n\rb\" x", vec![1, 2, 2]),
         ] {
-            let mut lexer = Lexer::new(source);
+            let mut lexer = Lexer::new(source.as_bytes());
             let mut actual_lines = Vec::new();
             loop {
                 let token = lexer.next_token().expect("line fixture must lex");
@@ -1256,7 +1270,7 @@ mod tests {
 
     #[test]
     fn peek2_preserves_line_stamps_across_lookahead() {
-        let mut tokens = TokenStream::new("a\nb");
+        let mut tokens = TokenStream::new("a\nb".as_bytes());
         assert_eq!(tokens.peek().unwrap().line, 1);
         assert_eq!(tokens.peek2().unwrap().line, 2);
         assert_eq!(tokens.next().unwrap().line, 1);
@@ -1266,7 +1280,7 @@ mod tests {
 
     #[test]
     fn line_and_col_keeps_newline_boundary_tie_breaks() {
-        let mut lexer = Lexer::new("a\r\nb\n\rc");
+        let mut lexer = Lexer::new("a\r\nb\n\rc".as_bytes());
         while lexer.next_token().expect("boundary fixture must lex").typ != TokenType::EndOfFile {}
 
         for (pos, expected) in [
@@ -1284,7 +1298,7 @@ mod tests {
 
     #[test]
     fn lexer_error_positions_stay_pinned_across_newlines() {
-        let err = Lexer::new("\r\n@")
+        let err = Lexer::new("\r\n@".as_bytes())
             .next_token()
             .expect_err("invalid character must fail");
         assert_eq!((err.line_num(), err.column()), (2, 2));
@@ -1301,7 +1315,7 @@ mod tests {
             ("\"a\r\n\"", (1, 4)),
             ("\"a\n\r\"", (1, 4)),
         ] {
-            let err = Lexer::new(source)
+            let err = Lexer::new(source.as_bytes())
                 .next_token()
                 .expect_err("physical newline must leave a string unclosed");
             assert_eq!((err.line_num(), err.column()), expected, "{source:?}");

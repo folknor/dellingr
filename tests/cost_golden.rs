@@ -120,7 +120,9 @@ fn cost_used_after_runtime_error_matches_golden_corpus() {
             if let Some(budget) = budget {
                 state.set_cost_budget(budget);
             }
-            state.load_string(source).expect("golden source compiles");
+            dellingr::Program::compile(source, None)
+                .and_then(|program| state.load(&program))
+                .expect("golden source compiles");
             let error = state
                 .call(ArgCount::Fixed(0), RetCount::Fixed(0))
                 .expect_err("golden error source must fail at runtime");
@@ -140,7 +142,9 @@ fn cost_used_after_runtime_error_matches_golden_corpus() {
 
 fn cost_of(source: &str) -> u64 {
     let mut state = State::new();
-    state.load_string(source).expect("cost source compiles");
+    dellingr::Program::compile(source, None)
+        .and_then(|program| state.load(&program))
+        .expect("cost source compiles");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect("cost source runs");
@@ -152,10 +156,9 @@ fn unpack_charges_nothing_for_lookups_reached_before_an_index_error() {
     let mut costs = Vec::new();
     for end in [1, 10] {
         let mut state = State::new();
-        state
-            .load_string(format!(
+        dellingr::Program::compile(format!(
                 "local t = setmetatable({{}}, {{__index = function() return nil + 1 end}}) unpack(t, 1, {end})"
-            ))
+            ), None).and_then(|program| state.load(&program))
             .unwrap();
         let err = state
             .call(ArgCount::Fixed(0), RetCount::Fixed(0))
@@ -228,7 +231,9 @@ fn cost_used_matches_golden_corpus() {
     let mut drift = Vec::new();
     for &(name, source, expected) in CORPUS {
         let mut state = State::new();
-        state.load_string(source).expect("golden source compiles");
+        dellingr::Program::compile(source, None)
+            .and_then(|program| state.load(&program))
+            .expect("golden source compiles");
         state
             .call(ArgCount::Fixed(0), RetCount::Fixed(0))
             .expect("golden source runs");
@@ -337,12 +342,15 @@ fn mid_run_budget_reset_sees_a_flushed_meter() {
             state.set_user_data(prefix + setup_cost);
             state.push_rust_fn(reset).unwrap();
             state.set_global("reset").unwrap();
-            state
-                .load_string(format!(
+            dellingr::Program::compile(
+                format!(
                     "{setup} local s = 0 for i = 1, {prefix} do s = s + i end \
                      {call_site} local a = {{}} a.x = 1 a.y = 2 local z = a.x + a.y"
-                ))
-                .unwrap();
+                ),
+                None,
+            )
+            .and_then(|program| state.load(&program))
+            .unwrap();
             state
                 .call(ArgCount::Fixed(0), RetCount::Fixed(0))
                 .unwrap_or_else(|error| panic!("{call_site}, prefix {prefix}: {error}"));

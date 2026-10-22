@@ -175,7 +175,7 @@ impl<'a> Parser<'a> {
         self.add_local(name)?;
 
         // Parse the function definition (pushes a Closure instruction)
-        self.parse_fndef_named(Some(name.to_string()))?;
+        self.parse_fndef(Some(name.to_string()), false)?;
 
         // Assign the closure to the local
         self.push(Instr::set_local(local_slot));

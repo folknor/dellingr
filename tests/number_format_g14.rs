@@ -64,9 +64,8 @@ fn number_rendering_matches_reference_g14() {
 #[test]
 fn string_functions_see_the_g14_spelling() {
     let mut state = State::new();
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
             if string.len(1/3) ~= 16 then error("len(1/3) " .. string.len(1/3)) end
             if ("x" .. 1e15) ~= "x1e+15" then error("concat " .. ("x" .. 1e15)) end
             local t = {}
@@ -75,8 +74,10 @@ fn string_functions_see_the_g14_spelling() {
             if tostring(0/0) ~= "nan" then error("nan " .. tostring(0/0)) end
             if tostring(-(0/0)) ~= "nan" then error("negated nan") end
             "#,
-        )
-        .expect("the script parses");
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .expect("the script parses");
     state
         .call(dellingr::ArgCount::Fixed(0), dellingr::RetCount::Fixed(0))
         .expect("number coercions use the %.14g spelling");

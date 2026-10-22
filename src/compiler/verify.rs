@@ -30,12 +30,12 @@ impl Height {
             Self::Known(height) => {
                 *height = height
                     .checked_add(amount)
-                    .ok_or_else(|| err(Some(pc), "operand stack height overflows"))?;
+                    .ok_or_else(|| err(Some(pc), ValidationReason::StackOverflows))?;
             }
             Self::Dyn { floor } => {
                 *floor = floor
                     .checked_add(amount)
-                    .ok_or_else(|| err(Some(pc), "operand stack height overflows"))?;
+                    .ok_or_else(|| err(Some(pc), ValidationReason::StackOverflows))?;
             }
         }
         Ok(())
@@ -43,18 +43,18 @@ impl Height {
 
     fn remove(&mut self, amount: u32, pc: usize) -> Result<(), BytecodeValidationError> {
         if self.floor() < amount {
-            return Err(err(Some(pc), "operand stack underflows"));
+            return Err(err(Some(pc), ValidationReason::StackUnderflows));
         }
         match self {
             Self::Known(height) => {
                 *height = height
                     .checked_sub(amount)
-                    .ok_or_else(|| err(Some(pc), "operand stack underflows"))?;
+                    .ok_or_else(|| err(Some(pc), ValidationReason::StackUnderflows))?;
             }
             Self::Dyn { floor } => {
                 *floor = floor
                     .checked_sub(amount)
-                    .ok_or_else(|| err(Some(pc), "operand stack underflows"))?;
+                    .ok_or_else(|| err(Some(pc), ValidationReason::StackUnderflows))?;
             }
         }
         Ok(())
@@ -78,10 +78,163 @@ struct AbsState {
     table_bases: Vec<u32>,
 }
 
+/// Why the verifier rejected a chunk. Typed so neither the compiler's
+/// internal error nor a snapshot rejection carries a free-form string.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ValidationReason {
+    /// operand stack height overflows
+    StackOverflows,
+    /// operand stack underflows
+    StackUnderflows,
+    /// child upvalue descriptor is invalid for parent
+    ChildUpvalueInvalid,
+    /// nested chunk depth exceeds parser limit
+    ChunkDepthExceeded,
+    /// frame slot range is out of range
+    FrameSlotRangeOutOfRange,
+    /// control flow requires a known operand stack height
+    UnknownStackHeight,
+    /// call-base marker is below the active frame
+    CallBaseBelowFrame,
+    /// call-base marker stack is too deep
+    CallBaseMarkersTooDeep,
+    /// table-constructor marker stack is too deep
+    TableMarkersTooDeep,
+    /// dynamic set-list has no table marker
+    DynamicSetListWithoutMarker,
+    /// dynamic call has no call-base marker
+    DynamicCallWithoutMarker,
+    /// return leaves a live stack marker
+    ReturnLeavesLiveMarker,
+    /// return values exceed operand stack height
+    ReturnExceedsStack,
+    /// missing operand stack effect
+    MissingStackEffect,
+    /// operand stack drops below a live marker
+    StackBelowLiveMarker,
+    /// jump target is out of range
+    JumpTargetOutOfRange,
+    /// operand stack state disagrees at control-flow join
+    JoinStateMismatch,
+    /// code is empty
+    EmptyCode,
+    /// line info length does not match code length
+    LineInfoLengthMismatch,
+    /// code does not end in return
+    MissingFinalReturn,
+    /// unknown opcode
+    UnknownOpcode,
+    /// global name operand is not UTF-8
+    GlobalNameNotUtf8,
+    /// global cache slot does not match first-use order
+    GlobalCacheSlotOrder,
+    /// builtin slot is out of range
+    BuiltinSlotOutOfRange,
+    /// TFOR_CALL requires at least one result
+    TforCallWithoutResults,
+    /// close-upvalues level is out of range
+    CloseUpvaluesOutOfRange,
+    /// vararg instruction in non-vararg function
+    VarargInNonVarargFunction,
+    /// boolean operand is invalid
+    BooleanOperandInvalid,
+    /// concat requires at least two values
+    ConcatTooFewValues,
+    /// call-base marker adjustment is invalid
+    CallBaseAdjustmentInvalid,
+    /// declared cache slots do not match instructions
+    CacheSlotCountMismatch,
+    /// An operand indexes past its pool or table.
+    IndexOutOfRange { operand: &'static str },
+    /// A pool or descriptor list exceeds its limit.
+    TooMany { what: &'static str, limit: usize },
+    /// A table template has more fields than the template limit.
+    TableTemplateTooLarge,
+    /// Parameters plus locals exceed the frame slot limit.
+    FrameSlotCountExceeded,
+    /// A table template key does not name a string literal.
+    TemplateKeyInvalid { template: usize },
+    /// A table template names one key twice.
+    TemplateKeyDuplicate { template: usize },
+    /// A cache family's slots are not allocated in instruction order.
+    CacheSlotOrder { family: &'static str },
+    /// An instruction's reserved operand bytes are not zero.
+    ReservedBytesNonZero { opcode: u8, raw: u32 },
+}
+
+impl std::fmt::Display for ValidationReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let text = match self {
+            Self::StackOverflows => "operand stack height overflows",
+            Self::StackUnderflows => "operand stack underflows",
+            Self::ChildUpvalueInvalid => "child upvalue descriptor is invalid for parent",
+            Self::ChunkDepthExceeded => "nested chunk depth exceeds parser limit",
+            Self::FrameSlotRangeOutOfRange => "frame slot range is out of range",
+            Self::UnknownStackHeight => "control flow requires a known operand stack height",
+            Self::CallBaseBelowFrame => "call-base marker is below the active frame",
+            Self::CallBaseMarkersTooDeep => "call-base marker stack is too deep",
+            Self::TableMarkersTooDeep => "table-constructor marker stack is too deep",
+            Self::DynamicSetListWithoutMarker => "dynamic set-list has no table marker",
+            Self::DynamicCallWithoutMarker => "dynamic call has no call-base marker",
+            Self::ReturnLeavesLiveMarker => "return leaves a live stack marker",
+            Self::ReturnExceedsStack => "return values exceed operand stack height",
+            Self::MissingStackEffect => "missing operand stack effect",
+            Self::StackBelowLiveMarker => "operand stack drops below a live marker",
+            Self::JumpTargetOutOfRange => "jump target is out of range",
+            Self::JoinStateMismatch => "operand stack state disagrees at control-flow join",
+            Self::EmptyCode => "code is empty",
+            Self::LineInfoLengthMismatch => "line info length does not match code length",
+            Self::MissingFinalReturn => "code does not end in return",
+            Self::UnknownOpcode => "unknown opcode",
+            Self::GlobalNameNotUtf8 => "global name operand is not UTF-8",
+            Self::GlobalCacheSlotOrder => "global cache slot does not match first-use order",
+            Self::BuiltinSlotOutOfRange => "builtin slot is out of range",
+            Self::TforCallWithoutResults => "TFOR_CALL requires at least one result",
+            Self::CloseUpvaluesOutOfRange => "close-upvalues level is out of range",
+            Self::VarargInNonVarargFunction => "vararg instruction in non-vararg function",
+            Self::BooleanOperandInvalid => "boolean operand is invalid",
+            Self::ConcatTooFewValues => "concat requires at least two values",
+            Self::CallBaseAdjustmentInvalid => "call-base marker adjustment is invalid",
+            Self::CacheSlotCountMismatch => "declared cache slots do not match instructions",
+            Self::IndexOutOfRange { operand } => {
+                return write!(f, "{operand} index is out of range");
+            }
+            Self::TooMany { what, limit } => {
+                return write!(f, "too many {what}s (limit {limit})");
+            }
+            Self::TableTemplateTooLarge => {
+                return write!(
+                    f,
+                    "table template exceeds limit {MAX_TABLE_TEMPLATE_FIELDS}"
+                );
+            }
+            Self::FrameSlotCountExceeded => {
+                return write!(f, "frame slot count exceeds {MAX_FRAME_SLOTS}");
+            }
+            Self::TemplateKeyInvalid { template } => {
+                return write!(f, "table template {template} has an invalid string key");
+            }
+            Self::TemplateKeyDuplicate { template } => {
+                return write!(f, "table template {template} has a duplicate key");
+            }
+            Self::CacheSlotOrder { family } => {
+                return write!(f, "{family} cache slot does not match instruction order");
+            }
+            Self::ReservedBytesNonZero { opcode, raw } => {
+                return write!(
+                    f,
+                    "reserved operand bytes are non-zero (opcode {opcode}, raw {raw:08x})"
+                );
+            }
+        };
+        f.write_str(text)
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct BytecodeValidationError {
     pub(crate) instruction: Option<u32>,
-    pub(crate) reason: String,
+    pub(crate) reason: ValidationReason,
 }
 
 impl std::fmt::Display for BytecodeValidationError {
@@ -108,7 +261,7 @@ pub(crate) fn validate_child(
             UpvalueDesc::Upvalue(slot) => usize::from(slot) < parent.upvalues_len(),
         };
         if !valid {
-            return Err(err(None, "child upvalue descriptor is invalid for parent"));
+            return Err(err(None, ValidationReason::ChildUpvalueInvalid));
         }
     }
     Ok(())
@@ -116,7 +269,7 @@ pub(crate) fn validate_child(
 
 pub(crate) fn validate_depth(depth: usize) -> Result<(), BytecodeValidationError> {
     if depth > crate::limits::MAX_CHUNK_NESTING {
-        return Err(err(None, "nested chunk depth exceeds parser limit"));
+        return Err(err(None, ValidationReason::ChunkDepthExceeded));
     }
     Ok(())
 }
@@ -191,10 +344,10 @@ impl BytecodeView for Bytecode {
     }
 }
 
-fn err(pc: Option<usize>, reason: impl Into<String>) -> BytecodeValidationError {
+fn err(pc: Option<usize>, reason: ValidationReason) -> BytecodeValidationError {
     BytecodeValidationError {
         instruction: pc.map(|pc| pc as u32),
-        reason: reason.into(),
+        reason,
     }
 }
 
@@ -202,12 +355,12 @@ fn check_index(
     pc: usize,
     value: u16,
     len: usize,
-    what: &str,
+    operand: &'static str,
 ) -> Result<(), BytecodeValidationError> {
     if (value as usize) < len {
         Ok(())
     } else {
-        Err(err(Some(pc), format!("{what} index is out of range")))
+        Err(err(Some(pc), ValidationReason::IndexOutOfRange { operand }))
     }
 }
 
@@ -223,7 +376,7 @@ fn check_slots(
     {
         Ok(())
     } else {
-        Err(err(Some(pc), "frame slot range is out of range"))
+        Err(err(Some(pc), ValidationReason::FrameSlotRangeOutOfRange))
     }
 }
 
@@ -271,16 +424,13 @@ fn verify_stack_discipline(view: &impl BytecodeView) -> Result<(), BytecodeValid
         let mut next = state;
 
         let require_known = |height: &Height| {
-            height.known().ok_or_else(|| {
-                err(
-                    Some(pc),
-                    "control flow requires a known operand stack height",
-                )
-            })
+            height
+                .known()
+                .ok_or_else(|| err(Some(pc), ValidationReason::UnknownStackHeight))
         };
         let require_at_least = |height: &Height, amount: u32| {
             if height.floor() < amount {
-                Err(err(Some(pc), "operand stack underflows"))
+                Err(err(Some(pc), ValidationReason::StackUnderflows))
             } else {
                 Ok(())
             }
@@ -288,7 +438,7 @@ fn verify_stack_discipline(view: &impl BytecodeView) -> Result<(), BytecodeValid
         let offset_requirement = |offset: u8, extra: u32| {
             u32::from(offset)
                 .checked_add(extra)
-                .ok_or_else(|| err(Some(pc), "operand stack height overflows"))
+                .ok_or_else(|| err(Some(pc), ValidationReason::StackOverflows))
         };
 
         // Stack semantics stay explicit: dynamic calls, list constructors and
@@ -334,17 +484,17 @@ fn verify_stack_discipline(view: &impl BytecodeView) -> Result<(), BytecodeValid
             Instr::OP_MARK_CALL_BASE => {
                 let height = require_known(&next.height)?;
                 if height < 1 {
-                    return Err(err(Some(pc), "call-base marker is below the active frame"));
+                    return Err(err(Some(pc), ValidationReason::CallBaseBelowFrame));
                 }
                 if next.call_bases.len() >= MAX_VERIFIER_MARKER_DEPTH {
-                    return Err(err(Some(pc), "call-base marker stack is too deep"));
+                    return Err(err(Some(pc), ValidationReason::CallBaseMarkersTooDeep));
                 }
                 next.call_bases.push(height - 1);
             }
             Instr::OP_NEW_TABLE_TRACKED => {
                 let height = require_known(&next.height)?;
                 if next.table_bases.len() >= MAX_VERIFIER_MARKER_DEPTH {
-                    return Err(err(Some(pc), "table-constructor marker stack is too deep"));
+                    return Err(err(Some(pc), ValidationReason::TableMarkersTooDeep));
                 }
                 next.table_bases.push(height);
                 next.height.add(1, pc)?;
@@ -386,11 +536,13 @@ fn verify_stack_discipline(view: &impl BytecodeView) -> Result<(), BytecodeValid
             Instr::OP_SET_LIST if a == 0 => {
                 let base = match next.table_bases.pop() {
                     Some(base) => base,
-                    None => return Err(err(Some(pc), "dynamic set-list has no table marker")),
+                    None => {
+                        return Err(err(Some(pc), ValidationReason::DynamicSetListWithoutMarker));
+                    }
                 };
                 let minimum = base
                     .checked_add(1)
-                    .ok_or_else(|| err(Some(pc), "operand stack height overflows"))?;
+                    .ok_or_else(|| err(Some(pc), ValidationReason::StackOverflows))?;
                 require_at_least(&next.height, minimum)?;
                 next.height = Height::Known(minimum);
             }
@@ -400,7 +552,7 @@ fn verify_stack_discipline(view: &impl BytecodeView) -> Result<(), BytecodeValid
                     &next.height,
                     count
                         .checked_add(1)
-                        .ok_or_else(|| err(Some(pc), "operand stack height overflows"))?,
+                        .ok_or_else(|| err(Some(pc), ValidationReason::StackOverflows))?,
                 )?;
                 next.height.remove(count, pc)?;
             }
@@ -415,24 +567,26 @@ fn verify_stack_discipline(view: &impl BytecodeView) -> Result<(), BytecodeValid
                 (ArgCount::Dynamic, results) => {
                     let base = match next.call_bases.pop() {
                         Some(base) => base,
-                        None => return Err(err(Some(pc), "dynamic call has no call-base marker")),
+                        None => {
+                            return Err(err(Some(pc), ValidationReason::DynamicCallWithoutMarker));
+                        }
                     };
                     let minimum = base
                         .checked_add(1)
-                        .ok_or_else(|| err(Some(pc), "operand stack height overflows"))?;
+                        .ok_or_else(|| err(Some(pc), ValidationReason::StackOverflows))?;
                     require_at_least(&next.height, minimum)?;
                     next.height = match results {
                         RetCount::All => Height::Dyn { floor: base },
                         RetCount::Fixed(n) => Height::Known(
                             base.checked_add(u32::from(n))
-                                .ok_or_else(|| err(Some(pc), "operand stack height overflows"))?,
+                                .ok_or_else(|| err(Some(pc), ValidationReason::StackOverflows))?,
                         ),
                     };
                 }
                 (ArgCount::Fixed(args), results) => {
                     let inputs = u32::from(args)
                         .checked_add(1)
-                        .ok_or_else(|| err(Some(pc), "operand stack height overflows"))?;
+                        .ok_or_else(|| err(Some(pc), ValidationReason::StackOverflows))?;
                     match results {
                         RetCount::All => {
                             next.height.remove(inputs, pc)?;
@@ -474,24 +628,24 @@ fn verify_stack_discipline(view: &impl BytecodeView) -> Result<(), BytecodeValid
             }
             Instr::OP_RETURN => {
                 if !next.call_bases.is_empty() || !next.table_bases.is_empty() {
-                    return Err(err(Some(pc), "return leaves a live stack marker"));
+                    return Err(err(Some(pc), ValidationReason::ReturnLeavesLiveMarker));
                 }
                 if let RetCount::Fixed(n) = inst.return_count() {
                     let height = require_known(&next.height)?;
                     if height < u32::from(n) {
-                        return Err(err(Some(pc), "return values exceed operand stack height"));
+                        return Err(err(Some(pc), ValidationReason::ReturnExceedsStack));
                     }
                 }
             }
-            _ => return Err(err(Some(pc), "missing operand stack effect")),
+            _ => return Err(err(Some(pc), ValidationReason::MissingStackEffect)),
         }
 
         for base in next.call_bases.iter().chain(next.table_bases.iter()) {
             let minimum = base
                 .checked_add(1)
-                .ok_or_else(|| err(Some(pc), "operand stack height overflows"))?;
+                .ok_or_else(|| err(Some(pc), ValidationReason::StackOverflows))?;
             if next.height.floor() < minimum {
-                return Err(err(Some(pc), "operand stack drops below a live marker"));
+                return Err(err(Some(pc), ValidationReason::StackBelowLiveMarker));
             }
         }
 
@@ -501,15 +655,15 @@ fn verify_stack_discipline(view: &impl BytecodeView) -> Result<(), BytecodeValid
         let target = |inst: Instr| -> Result<usize, BytecodeValidationError> {
             let next_pc = pc
                 .checked_add(1)
-                .ok_or_else(|| err(Some(pc), "jump target is out of range"))?;
+                .ok_or_else(|| err(Some(pc), ValidationReason::JumpTargetOutOfRange))?;
             if inst.sbx() >= 0 {
                 next_pc
                     .checked_add(inst.sbx() as usize)
-                    .ok_or_else(|| err(Some(pc), "jump target is out of range"))
+                    .ok_or_else(|| err(Some(pc), ValidationReason::JumpTargetOutOfRange))
             } else {
                 next_pc
                     .checked_sub(inst.sbx().unsigned_abs() as usize)
-                    .ok_or_else(|| err(Some(pc), "jump target is out of range"))
+                    .ok_or_else(|| err(Some(pc), ValidationReason::JumpTargetOutOfRange))
             }
         };
         let fallthrough = (op != Instr::OP_JUMP).then_some(pc + 1);
@@ -533,10 +687,7 @@ fn verify_stack_discipline(view: &impl BytecodeView) -> Result<(), BytecodeValid
             }
             match &joins[join as usize] {
                 Some(existing) if existing != &next => {
-                    return Err(err(
-                        Some(successor),
-                        "operand stack state disagrees at control-flow join",
-                    ));
+                    return Err(err(Some(successor), ValidationReason::JoinStateMismatch));
                 }
                 Some(_) => {}
                 None => {
@@ -569,10 +720,10 @@ fn verify_stack_discipline(view: &impl BytecodeView) -> Result<(), BytecodeValid
 pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), BytecodeValidationError> {
     let code_len = view.code_len();
     if code_len == 0 {
-        return Err(err(None, "code is empty"));
+        return Err(err(None, ValidationReason::EmptyCode));
     }
     if view.line_info_len() != code_len {
-        return Err(err(None, "line info length does not match code length"));
+        return Err(err(None, ValidationReason::LineInfoLengthMismatch));
     }
     for (name, len, limit) in [
         (
@@ -584,13 +735,16 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
         ("upvalue descriptor", view.upvalues_len(), MAX_UPVALUES),
     ] {
         if len > limit {
-            return Err(err(None, format!("too many {name}s (limit {limit})")));
+            return Err(err(None, ValidationReason::TooMany { what: name, limit }));
         }
     }
     if view.number_literals_len() > MAX_LITERALS || view.string_literals().len() > MAX_LITERALS {
         return Err(err(
             None,
-            format!("too many literals (limit {MAX_LITERALS})"),
+            ValidationReason::TooMany {
+                what: "literal",
+                limit: MAX_LITERALS,
+            },
         ));
     }
     if view
@@ -598,22 +752,19 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
         .iter()
         .any(|template| template.len() > MAX_TABLE_TEMPLATE_FIELDS)
     {
-        return Err(err(
-            None,
-            format!("table template exceeds limit {MAX_TABLE_TEMPLATE_FIELDS}"),
-        ));
+        return Err(err(None, ValidationReason::TableTemplateTooLarge));
     }
     if view.num_params() as usize + view.num_locals() as usize > MAX_FRAME_SLOTS {
-        return Err(err(
-            None,
-            format!("frame slot count exceeds {MAX_FRAME_SLOTS}"),
-        ));
+        return Err(err(None, ValidationReason::FrameSlotCountExceeded));
     }
     if !matches!(
         Instr::from_raw(view.raw_instruction(code_len - 1)).opcode(),
         Instr::OP_RETURN
     ) {
-        return Err(err(Some(code_len - 1), "code does not end in return"));
+        return Err(err(
+            Some(code_len - 1),
+            ValidationReason::MissingFinalReturn,
+        ));
     }
     for (template_idx, template) in view.table_templates().iter().enumerate() {
         // Keys are compared by content, not id: two equal-content string
@@ -625,13 +776,17 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
             let Some(bytes) = view.string_literals().get(*key as usize) else {
                 return Err(err(
                     None,
-                    format!("table template {template_idx} has an invalid string key"),
+                    ValidationReason::TemplateKeyInvalid {
+                        template: template_idx,
+                    },
                 ));
             };
             if !seen.insert(bytes.as_slice()) {
                 return Err(err(
                     None,
-                    format!("table template {template_idx} has a duplicate key"),
+                    ValidationReason::TemplateKeyDuplicate {
+                        template: template_idx,
+                    },
                 ));
             }
         }
@@ -661,13 +816,10 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
     let sequential = |pc: usize,
                       slot: u8,
                       next: &mut usize,
-                      what: &str|
+                      family: &'static str|
      -> Result<(), BytecodeValidationError> {
         if usize::from(slot) != *next {
-            return Err(err(
-                Some(pc),
-                format!("{what} cache slot does not match instruction order"),
-            ));
+            return Err(err(Some(pc), ValidationReason::CacheSlotOrder { family }));
         }
         *next += 1;
         Ok(())
@@ -676,7 +828,7 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
         let inst = Instr::from_raw(view.raw_instruction(pc));
         let op = inst.opcode();
         if !Instr::known_opcode(op) {
-            return Err(err(Some(pc), "unknown opcode"));
+            return Err(err(Some(pc), ValidationReason::UnknownOpcode));
         }
         let a = inst.a();
         let b = inst.b();
@@ -685,10 +837,10 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
         if !reserved_zero {
             return Err(err(
                 Some(pc),
-                format!(
-                    "reserved operand bytes are non-zero (opcode {op}, raw {:08x})",
-                    inst.raw()
-                ),
+                ValidationReason::ReservedBytesNonZero {
+                    opcode: op,
+                    raw: inst.raw(),
+                },
             ));
         }
         match op {
@@ -702,7 +854,7 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
                 // reference to a bad name still reports.
                 if !global_name_checked[bx as usize] {
                     if std::str::from_utf8(&view.string_literals()[bx as usize]).is_err() {
-                        return Err(err(Some(pc), "global name operand is not UTF-8"));
+                        return Err(err(Some(pc), ValidationReason::GlobalNameNotUtf8));
                     }
                     global_name_checked[bx as usize] = true;
                 }
@@ -712,8 +864,7 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
                 // semantically valid, and the runtime takes the slow path.
                 // An uncached read neither reserves a slot for its name nor
                 // marks the name exhausted.
-                let global_order_error =
-                    || err(Some(pc), "global cache slot does not match first-use order");
+                let global_order_error = || err(Some(pc), ValidationReason::GlobalCacheSlotOrder);
                 match (op, inst.global_cache_slot()) {
                     (_, None) => {}
                     (Instr::OP_GET_GLOBAL, Some(slot)) => {
@@ -767,7 +918,7 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
             }
             Instr::OP_CLOSURE => check_index(pc, u16::from(a), view.nested_len(), "nested chunk")?,
             Instr::OP_GET_BUILTIN | Instr::OP_SET_BUILTIN if (a as usize) >= Builtin::COUNT => {
-                return Err(err(Some(pc), "builtin slot is out of range"));
+                return Err(err(Some(pc), ValidationReason::BuiltinSlotOutOfRange));
             }
             Instr::OP_GET_LOCAL | Instr::OP_SET_LOCAL => check_slots(pc, a, 1, slots)?,
             Instr::OP_GET_UPVALUE | Instr::OP_SET_UPVALUE => {
@@ -779,7 +930,7 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
             Instr::OP_TFOR_PREP => check_slots(pc, a, 3, slots)?,
             Instr::OP_TFOR_CALL => {
                 if b == 0 {
-                    return Err(err(Some(pc), "TFOR_CALL requires at least one result"));
+                    return Err(err(Some(pc), ValidationReason::TforCallWithoutResults));
                 }
                 check_slots(pc, a, 3 + b as usize, slots)?;
                 if let Some(slot) = inst.tfor_cursor_slot() {
@@ -787,22 +938,22 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
                 }
             }
             Instr::OP_CLOSE_UPVALUES if (a as usize) > slots => {
-                return Err(err(Some(pc), "close-upvalues level is out of range"));
+                return Err(err(Some(pc), ValidationReason::CloseUpvaluesOutOfRange));
             }
             Instr::OP_VARARG if !view.is_vararg() => {
-                return Err(err(Some(pc), "vararg instruction in non-vararg function"));
+                return Err(err(Some(pc), ValidationReason::VarargInNonVarargFunction));
             }
             Instr::OP_PUSH_BOOL if a > 1 => {
-                return Err(err(Some(pc), "boolean operand is invalid"));
+                return Err(err(Some(pc), ValidationReason::BooleanOperandInvalid));
             }
             Instr::OP_CONCAT if a < 2 => {
-                return Err(err(Some(pc), "concat requires at least two values"));
+                return Err(err(Some(pc), ValidationReason::ConcatTooFewValues));
             }
             // Always 1: the marker is emitted after the callee is evaluated, so
             // the callee is the single value on top and the base is one slot
             // below it. Anything else is corrupt.
             Instr::OP_MARK_CALL_BASE if a != 1 => {
-                return Err(err(Some(pc), "call-base marker adjustment is invalid"));
+                return Err(err(Some(pc), ValidationReason::CallBaseAdjustmentInvalid));
             }
             _ => {}
         }
@@ -813,7 +964,7 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
             }
             .and_then(|next| next.checked_add(inst.sbx() as i64));
             if !target.is_some_and(|target| target >= 0 && target < code_len as i64) {
-                return Err(err(Some(pc), "jump target is out of range"));
+                return Err(err(Some(pc), ValidationReason::JumpTargetOutOfRange));
             }
         }
     }
@@ -822,7 +973,7 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
         || usize::from(view.set_field_cache_slots()) != next_set_field_slot
         || usize::from(view.tfor_cursor_slots()) != next_tfor_cursor_slot
     {
-        return Err(err(None, "declared cache slots do not match instructions"));
+        return Err(err(None, ValidationReason::CacheSlotCountMismatch));
     }
     verify_stack_discipline(view)
 }
@@ -908,7 +1059,7 @@ mod tree_tests {
         ];
 
         for (source, opcode, slot_of, count_of) in families {
-            let mut bc = crate::compiler::parse_str(&source).expect("capacity source compiles");
+            let mut bc = crate::compiler::compile(&source, None).expect("capacity source compiles");
             validate_bytecode(&bc).expect("compiler output at capacity verifies");
             assert_eq!(usize::from(*count_of(&mut bc)), MAX_CACHE_SLOTS);
             let sites: Vec<usize> = (0..bc.code.len())

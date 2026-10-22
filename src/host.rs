@@ -7,17 +7,17 @@
 //! # Example (Game Engine)
 //!
 //! ```
-//! use dellingr::{ArgCount, Engine, HostCallbacks, RetCount};
+//! use dellingr::{ArgCount, HostCallbacks, Program, RetCount, State};
 //!
 //! struct GameCallbacks;
 //!
 //! impl HostCallbacks for GameCallbacks {
-//!     fn on_print(&mut self, _source: Option<&str>, _line: u32, _message: &str) {}
+//!     fn on_print(&mut self, _source: Option<&[u8]>, _line: u32, _message: &[u8]) {}
 //! }
 //!
-//! let engine = Engine::new();
-//! let mut state = engine.new_state_with_callbacks(Box::new(GameCallbacks));
-//! state.load_string("print('Hello!')").unwrap();
+//! let program = Program::compile("print('Hello!')", Some(b"hello.lua".as_slice())).unwrap();
+//! let mut state = State::with_callbacks(Box::new(GameCallbacks));
+//! state.load(&program).unwrap();
 //! state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
 //! ```
 
@@ -33,11 +33,16 @@ use crate::error::Error;
 pub trait HostCallbacks: Send {
     /// Called when Lua's `print()` function is executed.
     ///
+    /// Both byte slices are exact: Lua strings are bytes, so a script can
+    /// print bytes that are not valid UTF-8, and the host receives them
+    /// unchanged. Decide at the host how to display them.
+    ///
     /// # Arguments
-    /// * `source` - The active Lua frame source name (`None` for direct native calls)
+    /// * `source` - The active Lua frame's chunk name (`None` for direct
+    ///   native calls and unnamed chunks)
     /// * `line` - The current line number (0 if unknown)
-    /// * `message` - The formatted message (all arguments joined with tabs)
-    fn on_print(&mut self, source: Option<&str>, line: u32, message: &str);
+    /// * `message` - The rendered arguments, joined with tabs; no newline
+    fn on_print(&mut self, source: Option<&[u8]>, line: u32, message: &[u8]);
 
     /// Called when an error is raised while executing code reached through
     /// `call()`. Fired exactly once per error, in addition to that error being
@@ -71,6 +76,7 @@ pub trait HostCallbacks: Send {
 /// Default callbacks that print to stdout.
 ///
 /// This is used when no custom callbacks are provided, suitable for CLI tools.
+/// The message bytes are written unchanged, followed by a newline.
 /// Since `on_print` cannot return an I/O error, a failed stdout write is ignored.
 #[derive(Default)]
 pub struct DefaultCallbacks;
@@ -79,11 +85,14 @@ impl HostCallbacks for DefaultCallbacks {
     // Printing to stdout is this callback's job; the library-wide stream ban
     // exists so that nothing else does.
     #[allow(clippy::disallowed_methods)]
-    fn on_print(&mut self, _source: Option<&str>, _line: u32, message: &str) {
+    fn on_print(&mut self, _source: Option<&[u8]>, _line: u32, message: &[u8]) {
         use std::io::Write;
 
+        let mut stdout = std::io::stdout().lock();
         // Deliberately discarded: on_print has no error channel (see above).
         #[allow(clippy::let_underscore_must_use)]
-        let _ = writeln!(std::io::stdout().lock(), "{message}");
+        let _ = stdout
+            .write_all(message)
+            .and_then(|()| stdout.write_all(b"\n"));
     }
 }

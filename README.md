@@ -140,20 +140,27 @@ dellingr = "0.5"
 
 ## Library usage/VM
 
-- `Engine` (`Send + Sync`) - factory for compiling source into `Program`s
-  and creating `State`s. One `Engine` per app, shared via `Arc`.
-- `Program` (`Send + Sync + Clone`) - compiled bytecode handle. Compile
-  once on the engine, load into many states with `state.load(&program)`.
-- `State` (`Send`) - VM instance with cost-bounded execution. Movable
-  across threads; pair with `Mutex<State>` if you need to share one.
+- `Program` (`Send + Sync + Clone`) - compiled bytecode handle.
+  `Program::compile(source, name)` is the one way to compile Lua: source
+  and chunk name are bytes, kept exactly. Compile once, load into many
+  states with `state.load(&program)`.
+- `State` (`Send`) - VM instance with cost-bounded execution. `State::new`
+  opens the standard library, `State::raw` starts with empty globals; both
+  have `_with_callbacks` variants. Movable across threads; pair with
+  `Mutex<State>` if you need to share one.
 - `Anchor` (`Send + Sync + 'static`) - owned handle that retains a Lua value
   (function, table, etc.) across host calls without using globals. Dropping
   it releases the value. State-scoped; cross-state misuse surfaces as an
   error, not silent corruption.
-- `HostCallbacks` trait (`: Send`) - embedders redirect `print`, hook
-  errors, etc.
+- `HostCallbacks` trait (`: Send`) - embedders redirect `print` (the
+  script's exact bytes), hook errors, etc.
 - `RustFunc` - expose Rust functions to Lua scripts.
-- `analyze_cost` (or `engine.analyze_cost(&program)`) - static cost
+- Typed errors - `ErrorKind::ScriptError` carries the value a script passed
+  to `error()` (`ErrorValue`: nil, boolean, number, exact string bytes, or a
+  table/function's type and rendering); library, syntax, argument and limit
+  failures have their own kinds, and `ErrorKind::HostError` carries a
+  `RustFunc`'s own boxed error back to the host.
+- `program.analyze_cost()` - static cost
   estimate for a script: sums each costed opcode once across the main
   chunk and every nested function body (counted once each, whether or not
   invoked; loops/branches counted once). `CostAnalysis::caveat()` returns the

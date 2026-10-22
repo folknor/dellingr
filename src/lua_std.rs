@@ -96,7 +96,7 @@ fn open_libs_unchecked(state: &mut State) -> Result<()> {
 /// `"string.find"`, `"string.gmatch.iter"`, ...) for a different function would
 /// otherwise hit `DuplicateFunctionRegistration` partway through setup, with
 /// earlier libraries already installed as globals and their ids registered. The
-/// host can still use the State after that error (`State::empty` followed by
+/// host can still use the State after that error (`State::raw` followed by
 /// `register_rust_fn` and `open_libs` is the supported route), so it must be
 /// all-or-nothing.
 ///
@@ -118,7 +118,7 @@ fn check_registry_compatible(state: &State) -> Result<()> {
     if state.rust_fns_by_id.is_empty() {
         return Ok(());
     }
-    let mut scratch = State::empty();
+    let mut scratch = State::raw();
     open_libs_unchecked(&mut scratch)?;
     for (id, func) in &scratch.rust_fns_by_id {
         if let Some(existing) = state.rust_fns_by_id.get(id)

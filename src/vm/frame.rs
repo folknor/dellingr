@@ -782,7 +782,10 @@ mod tests {
         let error = crate::compiler::verify::validate_bytecode(&bytecode)
             .expect_err("jump to end must be rejected before dispatch");
         assert_eq!(error.instruction, Some(0));
-        assert_eq!(error.reason, "jump target is out of range");
+        assert_eq!(
+            error.reason,
+            crate::compiler::verify::ValidationReason::JumpTargetOutOfRange
+        );
     }
 
     #[test]
@@ -881,7 +884,7 @@ mod tests {
         ];
 
         for (source, expected_opcode, expected_a, name) in cases {
-            let bytecode = crate::compiler::parse_str(source)
+            let bytecode = crate::compiler::compile(source, None)
                 .unwrap_or_else(|error| panic!("{name} source compiles: {error}"));
             assert!(
                 bytecode.code.iter().any(|instruction| {

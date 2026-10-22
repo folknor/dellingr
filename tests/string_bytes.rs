@@ -2,7 +2,9 @@ use dellingr::{ArgCount, RetCount, State};
 
 fn run_one(code: &str) -> State {
     let mut state = State::new();
-    state.load_string(code).unwrap();
+    dellingr::Program::compile(code, None)
+        .and_then(|program| state.load(&program))
+        .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
     state
 }
@@ -30,8 +32,8 @@ fn string_library_coerces_number_subjects_and_patterns() {
 #[test]
 fn gsub_dot_matches_utf8_bytes() {
     let mut state = State::new();
-    state
-        .load_string(r#"return string.gsub("⚠", ".", "X")"#)
+    dellingr::Program::compile(r#"return string.gsub("⚠", ".", "X")"#, None)
+        .and_then(|program| state.load(&program))
         .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(2)).unwrap();
 
@@ -42,8 +44,8 @@ fn gsub_dot_matches_utf8_bytes() {
 #[test]
 fn gsub_can_remove_multibyte_string_bytewise() {
     let mut state = State::new();
-    state
-        .load_string(r#"return string.gsub("⚠", ".", "")"#)
+    dellingr::Program::compile(r#"return string.gsub("⚠", ".", "")"#, None)
+        .and_then(|program| state.load(&program))
         .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(2)).unwrap();
 
@@ -67,17 +69,18 @@ fn gsub_can_produce_invalid_utf8() {
 #[test]
 fn empty_pattern_find_and_match_respect_init_bounds() {
     let mut state = State::new();
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
             local f1, f2 = string.find("abc", "", 4)
             local f3 = string.find("abc", "", 5)
             local m1 = string.match("abc", "", 4)
             local m2 = string.match("abc", "", 5)
             return f1, f2, f3, m1, m2
         "#,
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(5)).unwrap();
 
     assert_eq!(state.to_number(-5).unwrap(), 4.0);
@@ -90,8 +93,8 @@ fn empty_pattern_find_and_match_respect_init_bounds() {
 #[test]
 fn empty_pattern_gsub_replaces_boundaries() {
     let mut state = State::new();
-    state
-        .load_string(r#"return string.gsub("abc", "", "-")"#)
+    dellingr::Program::compile(r#"return string.gsub("abc", "", "-")"#, None)
+        .and_then(|program| state.load(&program))
         .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(2)).unwrap();
 
@@ -102,8 +105,8 @@ fn empty_pattern_gsub_replaces_boundaries() {
 #[test]
 fn empty_pattern_gsub_respects_replacement_limit() {
     let mut state = State::new();
-    state
-        .load_string(r#"return string.gsub("abc", "", "-", 2)"#)
+    dellingr::Program::compile(r#"return string.gsub("abc", "", "-", 2)"#, None)
+        .and_then(|program| state.load(&program))
         .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(2)).unwrap();
 
@@ -130,17 +133,18 @@ fn empty_pattern_gmatch_visits_each_boundary() {
 #[test]
 fn gmatch_treats_a_leading_caret_as_literal() {
     let mut state = State::new();
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
             local none = 0
             for _ in string.gmatch("aaa", "^a") do none = none + 1 end
             local found = {}
             for x in string.gmatch("^a^a", "^a") do found[#found + 1] = x end
             return none, #found, found[1], found[2]
             "#,
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(4)).unwrap();
     assert_eq!(state.to_number(-4).unwrap(), 0.0);
     assert_eq!(state.to_number(-3).unwrap(), 2.0);
@@ -151,14 +155,15 @@ fn gmatch_treats_a_leading_caret_as_literal() {
 #[test]
 fn gmatch_returns_a_self_contained_closure() {
     let mut state = State::new();
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
             local f = string.gmatch("a b", "%w+")
             return type(f), f(), f(), f()
             "#,
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(4)).unwrap();
     assert_eq!(state.to_bytes(-4).unwrap(), b"function");
     assert_eq!(state.to_bytes(-3).unwrap(), b"a");
@@ -169,15 +174,16 @@ fn gmatch_returns_a_self_contained_closure() {
 #[test]
 fn gmatch_closures_keep_independent_state() {
     let mut state = State::new();
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
             local f = string.gmatch("ab", ".")
             local g = string.gmatch("xy", ".")
             return f(), g(), f(), g()
             "#,
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(4)).unwrap();
     assert_eq!(state.to_bytes(-4).unwrap(), b"a");
     assert_eq!(state.to_bytes(-3).unwrap(), b"x");
@@ -212,9 +218,8 @@ fn push_bytes_and_to_bytes_preserve_invalid_utf8() {
 #[test]
 fn match_backreferences_compare_captures() {
     let mut state = State::new();
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
             local mismatch = string.match("ab", "(a)%1")
             local single = string.match("aa", "(a)%1")
             local repeated = string.match("abcabc", "(abc)%1")
@@ -222,8 +227,10 @@ fn match_backreferences_compare_captures() {
             local short = string.match("abcab", "^(abc)%1$")
             return mismatch, single, repeated, empty, short
             "#,
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(5)).unwrap();
 
     assert_eq!(state.typ(-5), dellingr::LuaType::Nil);
@@ -236,15 +243,16 @@ fn match_backreferences_compare_captures() {
 #[test]
 fn find_backreferences_compare_captures() {
     let mut state = State::new();
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
             local mismatch_start, mismatch_end = string.find("ab", "(a)%1")
             local start, finish, capture = string.find("zaaz", "(a)%1")
             return mismatch_start, mismatch_end, start, finish, capture
             "#,
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(5)).unwrap();
 
     assert_eq!(state.typ(-5), dellingr::LuaType::Nil);
@@ -261,9 +269,12 @@ fn string_match_returns_all_32_capture_results() {
         ("(x)".repeat(32), "x".repeat(32), false),
     ] {
         let mut state = State::new();
-        state
-            .load_string(format!("return string.match({subject:?}, {pattern:?})"))
-            .unwrap();
+        dellingr::Program::compile(
+            format!("return string.match({subject:?}, {pattern:?})"),
+            None,
+        )
+        .and_then(|program| state.load(&program))
+        .unwrap();
         state.call(ArgCount::Fixed(0), RetCount::All).unwrap();
         assert_eq!(state.get_top(), 32);
         for index in 1..=32 {
@@ -279,9 +290,8 @@ fn string_match_returns_all_32_capture_results() {
 #[test]
 fn position_captures_are_numbers_in_all_string_wrappers() {
     let mut state = State::new();
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
         local fa, fb, fc, fd, fe = string.find("abc", "()(a)()")
         local m1, m2, m3 = string.match("abc", "()(a)()")
         local g1, g2, g3
@@ -291,8 +301,10 @@ fn position_captures_are_numbers_in_all_string_wrappers() {
         end
         return fa, fb, fc, fd, fe, m1, m2, m3, g1, g2, g3
         "#,
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(11)).unwrap();
 
     // find: start, end, then the () (a) () captures -> 1, 1, 1, "a", 2.
@@ -319,9 +331,8 @@ fn position_captures_use_absolute_positions_after_init() {
 #[test]
 fn resumed_patterns_keep_frontier_context_and_absolute_captures() {
     let mut state = State::new();
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
         local a, b = string.find("ab", "%f[%a]%a", 2)
         local c, d = string.find("abcd", "%f[%w]%w", 2)
         local m, p, q = string.match("ab", "()(b)()", 2)
@@ -330,8 +341,10 @@ fn resumed_patterns_keep_frontier_context_and_absolute_captures() {
         for x in string.gmatch("ab", ".%f[%z]") do g = x end
         return a, b, c, d, m, p, q, out, n, g
         "#,
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(10)).unwrap();
     assert_eq!(state.typ(-10), dellingr::LuaType::Nil);
     assert_eq!(state.typ(-9), dellingr::LuaType::Nil);
@@ -348,17 +361,18 @@ fn resumed_patterns_keep_frontier_context_and_absolute_captures() {
 #[test]
 fn deferred_pattern_validation_keeps_existing_call_timing() {
     let mut state = State::new();
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
             local f = string.find("abc", "%", 5)
             local m = string.match("abc", "%", 5)
             local g, n = string.gsub("abc", "%", "X", 0)
             local iter = string.gmatch("abc", "%")
             return f, m, g, n, type(iter)
             "#,
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(5)).unwrap();
     assert_eq!(state.typ(-5), dellingr::LuaType::Nil);
     assert_eq!(state.typ(-4), dellingr::LuaType::Nil);
@@ -370,9 +384,8 @@ fn deferred_pattern_validation_keeps_existing_call_timing() {
 #[test]
 fn end_position_patterns_match_once() {
     let mut state = State::new();
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
         local a, b = string.find("", "$")
         local c = string.match("", "$")
         local d, e = string.find("abc", "$", 4)
@@ -380,8 +393,10 @@ fn end_position_patterns_match_once() {
         for _ in string.gmatch("abc", "$") do n = n + 1 end
         return a, b, c, d, e, n
         "#,
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(6)).unwrap();
     assert_eq!(state.to_number(-6).unwrap(), 1.0);
     assert_eq!(state.to_number(-5).unwrap(), 0.0);

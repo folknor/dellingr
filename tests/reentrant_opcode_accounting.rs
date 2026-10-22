@@ -82,8 +82,8 @@ const CASES: [ReentryCase; 8] = [
 fn reentering_opcodes_preserve_call_sites_and_cost_prefixes() {
     for case in CASES {
         let mut state = State::new();
-        state
-            .load_string_named(SETUP, Some("setup".to_owned()))
+        dellingr::Program::compile(SETUP, Some(b"setup".as_slice()))
+            .and_then(|program| state.load(&program))
             .expect("metatable setup compiles");
         state
             .call(ArgCount::Fixed(0), RetCount::Fixed(0))
@@ -93,8 +93,8 @@ fn reentering_opcodes_preserve_call_sites_and_cost_prefixes() {
         // second unit before their callback; budgets leave two further units
         // for the callback so the flush at the re-entry boundary is exercised.
         state.set_cost_budget(case.budget);
-        state
-            .load_string_named(case.source, Some("reentry".to_owned()))
+        dellingr::Program::compile(case.source, Some(b"reentry".as_slice()))
+            .and_then(|program| state.load(&program))
             .expect("reentry source compiles");
         let error = state
             .call(ArgCount::Fixed(0), RetCount::Fixed(0))
@@ -107,9 +107,19 @@ fn reentering_opcodes_preserve_call_sites_and_cost_prefixes() {
         );
         let trace = error.stack_trace();
         assert_eq!(trace.len(), 2, "{}: {trace:?}", case.name);
-        assert_eq!(trace[0].source.as_deref(), Some("setup"), "{}", case.name);
+        assert_eq!(
+            trace[0].source.as_deref(),
+            Some(b"setup".as_slice()),
+            "{}",
+            case.name
+        );
         assert_eq!(trace[0].line, 6, "{}: {trace:?}", case.name);
-        assert_eq!(trace[1].source.as_deref(), Some("reentry"), "{}", case.name);
+        assert_eq!(
+            trace[1].source.as_deref(),
+            Some(b"reentry".as_slice()),
+            "{}",
+            case.name
+        );
         assert_eq!(trace[1].line, 2, "{}: {trace:?}", case.name);
         assert_eq!(
             state.cost_used(),

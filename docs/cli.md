@@ -18,9 +18,12 @@ diagnostic and may change between versions.
 ## Output streams
 
 - stdout: script output (`print`), the `--analyze` report and the
-  `--dump-bytecode` listing.
+  `--dump-bytecode` listing. `print` writes the script's bytes unchanged,
+  as reference Lua does, whether or not they are valid UTF-8.
 - stderr: the `Cost used: N` summary, the `--analyze` caveat and all errors.
-  `--quiet` suppresses the cost summary.
+  `--quiet` suppresses the cost summary. Error text is diagnostic and
+  renders invalid UTF-8 (in an error value or a chunk name) as U+FFFD; the
+  library hands hosts the exact bytes.
 
 If a CLI stdout write for help, `--analyze`, `--dump-bytecode` or script `print()` encounters a
 closed pipe, the CLI stops quietly with status 0. Library users of
@@ -39,7 +42,13 @@ presenting an analysis.
 - Exactly one input file is required. `-` reads the script from stdin, as in
   reference Lua, also after `--`; a file named `-` is run as `dellingr ./-`.
   A script read from stdin is named `stdin` in error messages and
-  `--dump-bytecode` output. Like a file, it must be valid UTF-8.
+  `--dump-bytecode` output. A script file is named by its path exactly as
+  given, as the path's OS-encoded bytes (`OsStr::as_encoded_bytes`): the
+  path's own bytes on Unix, so a non-UTF-8 path keeps its exact name;
+  another platform's encoding (WTF-8 on Windows) elsewhere. Error text on
+  stderr renders a non-UTF-8 name with U+FFFD.
+- Scripts are bytes, from a file or stdin alike: Lua source need not be
+  valid UTF-8, and string literals keep the bytes they contain.
 - `--limit` takes a signed 64-bit integer and cannot be combined with
   `--analyze` or `--dump-bytecode`.
 - `--analyze` and `--dump-bytecode` cannot be combined. `--quiet` is accepted

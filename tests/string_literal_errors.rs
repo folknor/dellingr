@@ -1,7 +1,7 @@
 //! Public compilation regressions for malformed and unsupported string syntax.
 
 use dellingr::error::{ErrorKind, SyntaxError};
-use dellingr::{Engine, State};
+use dellingr::{Program, State};
 
 #[test]
 fn malformed_escapes_return_syntax_errors_through_state_loading() {
@@ -13,8 +13,8 @@ fn malformed_escapes_return_syntax_errors_through_state_loading() {
         (r#"return "\x4G""#, "hexadecimal"),
         (r#"return "\q""#, "invalid"),
     ] {
-        let err = State::new()
-            .load_string(source)
+        let err = dellingr::Program::compile(source, None)
+            .and_then(|program| State::new().load(&program))
             .expect_err("malformed escape must not compile");
         assert!(
             matches!(
@@ -38,9 +38,7 @@ fn malformed_escapes_return_syntax_errors_through_state_loading() {
 #[test]
 fn long_strings_return_syntax_errors_through_public_compilation() {
     for source in ["[[hello]]", "[=[x]=]", "[["] {
-        let err = Engine::new()
-            .compile(source)
-            .expect_err("long strings must not compile");
+        let err = Program::compile(source, None).expect_err("long strings must not compile");
         assert!(matches!(
             err.kind(),
             ErrorKind::SyntaxError(SyntaxError::LongStringUnsupported)

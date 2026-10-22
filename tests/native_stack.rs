@@ -19,7 +19,7 @@ mod stack;
 
 fn run(source: &str) -> dellingr::Result<()> {
     let mut state = State::new();
-    state.load_string(source)?;
+    dellingr::Program::compile(source, None).and_then(|program| state.load(&program))?;
     state.call(ArgCount::Fixed(0), RetCount::Fixed(0))
 }
 
@@ -135,10 +135,11 @@ fn run_scenario(cycle: &Cycle, refuse_one_more: bool) -> dellingr::Result<()> {
     let mut state = State::new();
     state.push_rust_fn(callthrough)?;
     state.set_global("callthrough")?;
-    state.load_string(scenario(cycle, refuse_one_more))?;
+    dellingr::Program::compile(scenario(cycle, refuse_one_more), None)
+        .and_then(|program| state.load(&program))?;
     let result = state.call(ArgCount::Fixed(0), RetCount::Fixed(0));
     // Whatever happened, the State is usable and back at rest.
-    state.load_string("return 7")?;
+    dellingr::Program::compile("return 7", None).and_then(|program| state.load(&program))?;
     state.call(ArgCount::Fixed(0), RetCount::Fixed(1))?;
     assert_eq!(state.to_number(-1)?, 7.0, "{}: State reuse", cycle.name);
     result
@@ -206,7 +207,9 @@ fn deepest_nested_functions_parse_on_the_limit_test_stack() {
         let mut deepest = 0;
         for depth in 1.. {
             let mut state = State::new();
-            match state.load_string(source(depth)) {
+            match dellingr::Program::compile(source(depth), None)
+                .and_then(|program| state.load(&program))
+            {
                 Ok(()) => deepest = depth,
                 Err(error) => {
                     assert!(

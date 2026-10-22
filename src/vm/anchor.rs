@@ -33,7 +33,6 @@ use super::State;
 use super::TypeError;
 use super::Val;
 use super::object::{GcHeap, Markable, ObjectPtr};
-use crate::error::InternalFault;
 
 new_key_type! {
     pub(crate) struct AnchorKey;
@@ -338,8 +337,8 @@ impl State {
                 // against a call base its own OP_MARK_CALL_BASE pushed; a
                 // host owns no such base. Reject it explicitly, as
                 // State::call does.
-                return Err(super::Error::internal_fault(
-                    InternalFault::CallAnchorDynamicArguments,
+                return Err(super::Error::without_location(
+                    ErrorKind::DynamicArgumentsUnsupported { api: "call_anchor" },
                 ));
             }
         };

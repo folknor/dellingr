@@ -5,7 +5,9 @@ use dellingr::{ArgCount, RetCount, State};
 
 fn run_number(code: &str) -> f64 {
     let mut state = State::new();
-    state.load_string(code).unwrap();
+    dellingr::Program::compile(code, None)
+        .and_then(|program| state.load(&program))
+        .unwrap();
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(1))
         .unwrap_or_else(|e| panic!("Error running: {code}\n{e}"));
@@ -14,7 +16,9 @@ fn run_number(code: &str) -> f64 {
 
 fn cost_of(code: &str) -> u64 {
     let mut state = State::new();
-    state.load_string(code).unwrap();
+    dellingr::Program::compile(code, None)
+        .and_then(|program| state.load(&program))
+        .unwrap();
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .unwrap_or_else(|e| panic!("Error running: {code}\n{e}"));
@@ -94,9 +98,8 @@ fn proxy_sort_roots_scratch_values_across_handler_and_comparator_gc() {
         })
         .unwrap();
     state.set_global("force_gc").unwrap();
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
             local store = {}
             local proxy = setmetatable({}, {
                 __len = function() force_gc(); return 12 end,
@@ -120,17 +123,18 @@ fn proxy_sort_roots_scratch_values_across_handler_and_comparator_gc() {
                 if store[i].key ~= i then error("scratch value lost or unsorted") end
             end
             "#,
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
 }
 
 #[test]
 fn proxy_sort_comparison_error_for_mixed_types() {
     let mut state = State::new();
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
             local store = {1, "x", 3}
             local proxy = setmetatable({}, {
                 __len = function() return #store end,
@@ -139,8 +143,10 @@ fn proxy_sort_comparison_error_for_mixed_types() {
             })
             table.sort(proxy)
             "#,
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     let err = state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect_err("mixed types do not compare");

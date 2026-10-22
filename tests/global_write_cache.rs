@@ -1,7 +1,9 @@
 use dellingr::{ArgCount, RetCount, State};
 
 fn run(state: &mut State, source: &str) {
-    state.load_string(source).expect("source compiles");
+    dellingr::Program::compile(source, None)
+        .and_then(|program| state.load(&program))
+        .expect("source compiles");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect("source runs");

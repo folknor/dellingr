@@ -3,7 +3,9 @@ use dellingr::{ArgCount, RetCount, State};
 
 fn run_number(code: &str) -> f64 {
     let mut state = State::new();
-    state.load_string(code).unwrap();
+    dellingr::Program::compile(code, None)
+        .and_then(|program| state.load(&program))
+        .unwrap();
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(1))
         .unwrap_or_else(|e| panic!("Error running: {code}\n{e}"));
@@ -12,7 +14,9 @@ fn run_number(code: &str) -> f64 {
 
 fn expect_error(code: &str, expected: &str, kind_matches: fn(&ErrorKind) -> bool) {
     let mut state = State::new();
-    state.load_string(code).unwrap();
+    dellingr::Program::compile(code, None)
+        .and_then(|program| state.load(&program))
+        .unwrap();
     let err = state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect_err("script must return an error");
@@ -145,7 +149,7 @@ fn unpack_rejects_i64_span_overflow() {
         expect_error(
             code,
             &format!("{name} range exceeds the exactly representable integer keys"),
-            |kind| matches!(kind, ErrorKind::RuntimeError(_)),
+            |kind| matches!(kind, ErrorKind::LibraryError(_)),
         );
     }
     // In-range but too wide still reports the result limit.

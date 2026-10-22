@@ -9,11 +9,9 @@ use crate::error::LibraryError;
 use crate::lua_std;
 
 impl State {
-    /// Construct a standard-library runtime error while retaining its typed
-    /// reason for hosts that need to inspect it.
+    /// Construct a standard-library error carrying its typed reason.
     pub(crate) fn library_error(&self, detail: LibraryError) -> crate::error::Error {
-        self.error(ErrorKind::RuntimeError(detail.to_string()))
-            .with_library_error(detail)
+        self.error(ErrorKind::LibraryError(detail))
     }
 
     /// Verify that the host call has at least `arg_number` arguments on the

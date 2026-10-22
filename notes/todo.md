@@ -37,6 +37,15 @@ removed.
   base `pow` shortcut truncates the exponent (`4^0.25` gives 1); `sin` on
   huge arguments panics (its Ziv loop never converges); `to_f64` mishandles
   the bottom of the subnormal range.
+- `error(42)` gets a `chunk:line:` location prefix; reference Lua adds the
+  position only to string messages. Older than the typed `ErrorValue`, not
+  listed in `docs/compatibility.md`. Either match reference or document it.
+- Still stringly typed after the typed-errors pass: `LibraryFunction::Other(String)`
+  and `SnapshotError::InvalidBytecode { reason: String }`.
+- Two ignored crmath oracle tests (matched by `brokkr test golden`) fail on
+  their own with "hex float exponents are decimal" in
+  `src/crmath/tests/oracle.rs`. Unverified; seen during the 2026-10-22 loops.
+- The `State::set_user_data` doc example is still marked `ignore`.
 - Possible CORE-MATH bug: `is_exact` in pow.c measures the bit length of `m`
   rather than `m^y`. Ported as is; unobservable here (the sweeps pass).
 

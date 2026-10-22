@@ -2,7 +2,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use dellingr::{ScopeCost, State, analyze_cost};
+use dellingr::{Program, ScopeCost, State};
 
 // Keep the expected function name tied to the constant used by the harness.
 const HOTPATH_SOURCE: &str = include_str!("../examples/hotpath.rs");
@@ -244,7 +244,10 @@ fn bench_scripts_parse_and_follow_the_standalone_footer_contract() {
         );
 
         let mut state = State::new();
-        if let Err(error) = state.load_string_named(&source, Some(format!("@{display_path}"))) {
+        let name = format!("@{display_path}");
+        if let Err(error) = Program::compile(&source, Some(name.as_bytes()))
+            .and_then(|program| state.load(&program))
+        {
             panic!("{} does not parse: {error}", script_path.display());
         }
     }
@@ -275,10 +278,12 @@ fn registered_workload_pairs_keep_kernel_cost_fingerprints_aligned() {
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", bench_path.display()));
         let hotpath_source = fs::read_to_string(&hotpath_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", hotpath_path.display()));
-        let bench_analysis = analyze_cost(&bench_source)
-            .unwrap_or_else(|error| panic!("{} does not parse: {error}", bench_path.display()));
-        let hotpath_analysis = analyze_cost(&hotpath_source)
-            .unwrap_or_else(|error| panic!("{} does not parse: {error}", hotpath_path.display()));
+        let bench_analysis = Program::compile(&bench_source, None)
+            .unwrap_or_else(|error| panic!("{} does not parse: {error}", bench_path.display()))
+            .analyze_cost();
+        let hotpath_analysis = Program::compile(&hotpath_source, None)
+            .unwrap_or_else(|error| panic!("{} does not parse: {error}", hotpath_path.display()))
+            .analyze_cost();
 
         // Verdict files usually put the kernel in `kernel()` and call it from
         // `_bench()` K times. Hotpath examples put that same body directly in

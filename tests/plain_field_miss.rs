@@ -7,7 +7,9 @@ use dellingr::error::{ErrorKind, TypeError};
 use dellingr::{ArgCount, LuaType, RetCount, State};
 
 fn run_bool(state: &mut State, source: &str) -> bool {
-    state.load_string(source).expect("test source compiles");
+    dellingr::Program::compile(source, None)
+        .and_then(|program| state.load(&program))
+        .expect("test source compiles");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(1))
         .unwrap_or_else(|error| panic!("test source fails: {source}\n{error}"));
@@ -86,8 +88,8 @@ fn explicit_index_and_own_methods_still_work() {
 #[test]
 fn method_sugar_on_plain_table_is_an_error() {
     let mut state = State::new();
-    state
-        .load_string("local t = {} t:insert(1)")
+    dellingr::Program::compile("local t = {} t:insert(1)", None)
+        .and_then(|program| state.load(&program))
         .expect("test source compiles");
     let error = state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
@@ -114,9 +116,12 @@ fn misses_survive_a_non_table_table_global() {
 #[test]
 fn misses_survive_a_restricted_environment_without_table() {
     let mut state = State::new();
-    state
-        .load_string("function probe() local t = {} return t.unknown == nil end")
-        .expect("test source compiles");
+    dellingr::Program::compile(
+        "function probe() local t = {} return t.unknown == nil end",
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .expect("test source compiles");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect("setup runs");

@@ -33,20 +33,18 @@ fn tombstoned_keys_and_values_are_not_gc_roots() {
     for preset in [0, 8] {
         let mut state = State::new();
         state.gc_disable_auto();
-        state
-            .load_string(format!(
-                "t = {{}}; for i = 1, {preset} do t[i + 0.5] = i end"
-            ))
-            .unwrap();
+        dellingr::Program::compile(
+            format!("t = {{}}; for i = 1, {preset} do t[i + 0.5] = i end"),
+            None,
+        )
+        .and_then(|program| state.load(&program))
+        .unwrap();
         state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
         state.gc_collect();
         let baseline = state.object_count();
 
         // The map case leaves both a Vacant slot and a Live(key) tombstone.
-        state
-            .load_string(
-                "local key = {}; local value = {}; t[key] = value; t[key] = nil; t[key] = value; t[key] = nil",
-            )
+        dellingr::Program::compile("local key = {}; local value = {}; t[key] = value; t[key] = nil; t[key] = value; t[key] = nil", None).and_then(|program| state.load(&program))
             .unwrap();
         state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
         state.gc_collect();
@@ -54,10 +52,9 @@ fn tombstoned_keys_and_values_are_not_gc_roots() {
 
         // Traverse and then force compaction with collected keys still in the
         // dead slots. Neither path may dereference or expose those keys.
-        state
-            .load_string(format!(
+        dellingr::Program::compile(format!(
                 "local count = 0; for k in pairs(t) do count = count + 1; t[k] = nil end; if count ~= {preset} then error('dead key escaped') end; t[0.5] = true",
-            ))
+            ), None).and_then(|program| state.load(&program))
             .unwrap();
         state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
     }
@@ -69,14 +66,15 @@ fn active_frame_string_literal_survives_explicit_gc() {
     state.gc_disable_auto();
     install_force_gc(&mut state);
 
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
         force_gc()
         return "literal after gc"
     "#,
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
 
     assert_eq!(state.to_string(-1).unwrap(), "literal after gc");
@@ -85,18 +83,19 @@ fn active_frame_string_literal_survives_explicit_gc() {
 
 #[test]
 fn string_literals_are_reclaimed_one_collection_after_runtime_cache_sweep() {
-    let mut state = State::empty();
+    let mut state = State::raw();
     state.gc_disable_auto();
 
     // A fresh State already holds its permanent interned strings.
     let baseline = state.string_count();
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
         local temporary = "collect this literal after return"
     "#,
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
 
     assert!(state.string_count() > baseline);
@@ -115,9 +114,8 @@ fn open_upvalue_survives_gc_while_defining_frame_is_active() {
     state.gc_disable_auto();
     install_force_gc(&mut state);
 
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
         local function outer()
             local captured = {value = 55}
             live = function()
@@ -129,8 +127,10 @@ fn open_upvalue_survives_gc_while_defining_frame_is_active() {
 
         return outer()
     "#,
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
 
     assert_eq!(state.to_number(-1).unwrap(), 55.0);
@@ -139,11 +139,10 @@ fn open_upvalue_survives_gc_while_defining_frame_is_active() {
 
 #[test]
 fn executing_returned_closure_roots_closed_upvalues_during_auto_gc() {
-    let mut state = State::empty();
+    let mut state = State::raw();
 
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
         local function make_closure()
             local captured = {value = 42}
             return function()
@@ -154,8 +153,10 @@ fn executing_returned_closure_roots_closed_upvalues_during_auto_gc() {
 
         return make_closure()()
     "#,
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     state.gc_set_threshold(1);
     state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
 
@@ -168,9 +169,8 @@ fn temporary_callable_table_survives_gc_during_call_metamethod_lookup() {
     let mut state = State::new();
     install_force_next_gc(&mut state);
 
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
         local function make_callable()
             local callable = setmetatable({ value = 73 }, {
                 __call = function(self)
@@ -183,8 +183,10 @@ fn temporary_callable_table_survives_gc_during_call_metamethod_lookup() {
 
         return make_callable()()
     "#,
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
 
     assert_eq!(state.to_number(-1).unwrap(), 73.0);
@@ -198,17 +200,18 @@ fn closure_captured_table_survives_gc() {
     state.gc_disable_auto(); // Manual GC control
 
     // Create a closure that captures a local table
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
         local function make_closure()
             local captured = {value = 42}
             return function() return captured.value end
         end
         test_fn = make_closure()
     "#,
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
 
     // Force GC - the captured table should survive
@@ -229,9 +232,8 @@ fn closure_survives_multiple_gc_cycles() {
     let mut state = State::new();
     state.gc_disable_auto();
 
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
         local function make_closure()
             local data = {count = 0}
             return function()
@@ -241,8 +243,10 @@ fn closure_survives_multiple_gc_cycles() {
         end
         counter = make_closure()
     "#,
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
 
     // Call and GC multiple times
@@ -267,9 +271,8 @@ fn nested_closures_survive_gc() {
     let mut state = State::new();
     state.gc_disable_auto();
 
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
         local function outer()
             local x = 10
             local function middle()
@@ -282,8 +285,10 @@ fn nested_closures_survive_gc() {
         end
         nested_fn = outer()
     "#,
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
 
     state.gc_collect();
@@ -303,9 +308,8 @@ fn metatable_as_upvalue_survives_gc() {
     state.gc_disable_auto();
 
     // This pattern mirrors fleet:group() - metatable defined once, used by closure
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
         local mt = {
             __index = {
                 get_value = function(self) return self._value end
@@ -318,8 +322,10 @@ fn metatable_as_upvalue_survives_gc() {
             return obj
         end
     "#,
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
 
     // Force GC - mt should survive because create_object closure references it
@@ -332,7 +338,9 @@ fn metatable_as_upvalue_survives_gc() {
     state.set_global("obj").unwrap();
 
     // Access via metatable method
-    state.load_string("return obj:get_value()").unwrap();
+    dellingr::Program::compile("return obj:get_value()", None)
+        .and_then(|program| state.load(&program))
+        .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
 
     let result = state.to_number(-1).unwrap();
@@ -349,9 +357,8 @@ fn unreferenced_closure_is_collected() {
     let size_before = state.heap_size();
 
     // Create and immediately discard a closure with captured table
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
         local function make_and_discard()
             local big_table = {a=1, b=2, c=3, d=4}
             local fn = function() return big_table end
@@ -359,8 +366,10 @@ fn unreferenced_closure_is_collected() {
         end
         make_and_discard()
     "#,
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
 
     let size_after_create = state.heap_size();
@@ -384,9 +393,8 @@ fn closure_with_mixed_upvalues() {
     let mut state = State::new();
     state.gc_disable_auto();
 
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
         local function make_closure()
             local num = 42
             local str = "hello"
@@ -399,8 +407,10 @@ fn closure_with_mixed_upvalues() {
         end
         mixed_fn = make_closure()
     "#,
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
 
     state.gc_collect();
@@ -421,9 +431,8 @@ fn closure_in_table_survives_gc() {
     let mut state = State::new();
     state.gc_disable_auto();
 
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
         local registry = {}
 
         local function register(name, value)
@@ -438,8 +447,10 @@ fn closure_in_table_survives_gc() {
             return registry[name]()
         end
     "#,
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
 
     state.gc_collect();
@@ -468,9 +479,8 @@ fn many_closures_shared_upvalue() {
     let mut state = State::new();
     state.gc_disable_auto();
 
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
         local shared = {value = 0}
         closures = {}
 
@@ -481,16 +491,18 @@ fn many_closures_shared_upvalue() {
             end
         end
     "#,
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
 
     state.gc_collect();
 
     // Call each closure, all should increment the same shared table
     for i in 1..=10 {
-        state
-            .load_string(format!("return closures[{i}]()"))
+        dellingr::Program::compile(format!("return closures[{i}]()"), None)
+            .and_then(|program| state.load(&program))
             .unwrap();
         state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
         let result = state.to_number(-1).unwrap();
@@ -507,7 +519,9 @@ fn many_closures_shared_upvalue() {
 
 fn run_number(source: &str) -> f64 {
     let mut state = State::new();
-    state.load_string(source).unwrap();
+    dellingr::Program::compile(source, None)
+        .and_then(|program| state.load(&program))
+        .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
     let result = state.to_number(-1).unwrap();
     state.pop(1).unwrap();

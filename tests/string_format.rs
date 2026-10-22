@@ -1,10 +1,10 @@
-use dellingr::error::ErrorKind;
+use dellingr::error::{ErrorKind, ErrorValue};
 use dellingr::{ArgCount, RetCount, State};
 
 fn run_bytes(code: &str) -> Vec<u8> {
     let mut state = State::new();
-    state
-        .load_string(code)
+    dellingr::Program::compile(code, None)
+        .and_then(|program| state.load(&program))
         .expect("format test source compiles");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(1))
@@ -14,14 +14,16 @@ fn run_bytes(code: &str) -> Vec<u8> {
 
 fn expect_runtime_error(code: &str, expected: &str) {
     let mut state = State::new();
-    state.load_string(code).expect("error test source compiles");
+    dellingr::Program::compile(code, None)
+        .and_then(|program| state.load(&program))
+        .expect("error test source compiles");
     let error = state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect_err("format call must fail");
     assert!(
         match error.kind() {
-            ErrorKind::RuntimeError(message) => {
-                !expected.starts_with("bad argument") && message == expected
+            ErrorKind::LibraryError(error) => {
+                !expected.starts_with("bad argument") && error.to_string() == expected
             }
             ErrorKind::ArgError(argument) => {
                 expected.starts_with("bad argument") && argument.to_string() == expected
@@ -171,14 +173,15 @@ fn byte_strings_remain_byte_exact() {
     );
 
     let mut state = State::new();
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
             local value = string.format("%c%c%c", 97, 0, 98)
             return string.len(string.format("%s", value))
             "#,
-        )
-        .expect("NUL test source compiles");
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .expect("NUL test source compiles");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(1))
         .expect("unmodified %s accepts NUL");
@@ -194,8 +197,8 @@ fn quoted_floats_round_trip_through_the_parser() {
         let literal = String::from_utf8(quoted).expect("numeric %q output is ASCII");
         let check = format!("return ({literal}) == ({source})");
         let mut state = State::new();
-        state
-            .load_string(&check)
+        dellingr::Program::compile(&check, None)
+            .and_then(|program| state.load(&program))
             .expect("numeric %q output must re-parse");
         state
             .call(ArgCount::Fixed(0), RetCount::Fixed(1))
@@ -323,21 +326,22 @@ fn missing_argument_wins_over_invalid_directive() {
 #[test]
 fn tostring_errors_propagate_without_format_wrapping() {
     let mut state = State::new();
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
         local value = setmetatable({}, {
             __tostring = function() error("format tostring boom") end
         })
         return string.format("%s", value)
         "#,
-        )
-        .expect("tostring error source compiles");
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .expect("tostring error source compiles");
     let error = state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect_err("__tostring must fail");
     assert!(
-        matches!(error.kind(), ErrorKind::ScriptError { message, .. } if message == "format tostring boom"),
+        matches!(error.kind(), ErrorKind::ScriptError { value: ErrorValue::String(message), .. } if message == b"format tostring boom"),
         "format must propagate the original error unchanged, got {error:?}"
     );
 }
@@ -404,19 +408,24 @@ fn tostring_object_identity_matches_pointer_format() {
 #[test]
 fn script_error_has_source_line_and_state_remains_reusable() {
     let mut state = State::new();
-    state
-        .load_string_named("error('oops')", Some("input".to_string()))
+    dellingr::Program::compile("error('oops')", Some(b"input".as_slice()))
+        .and_then(|program| state.load(&program))
         .expect("error source compiles");
     let error = state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect_err("script error must fail");
-    assert!(matches!(error.kind(), ErrorKind::ScriptError { message, .. } if message == "oops"));
+    assert!(
+        matches!(error.kind(), ErrorKind::ScriptError { value: ErrorValue::String(message), .. } if message == b"oops")
+    );
     assert_eq!(error.line_num(), 1);
-    assert_eq!(error.stack_trace()[0].source.as_deref(), Some("input"));
+    assert_eq!(
+        error.stack_trace()[0].source.as_deref(),
+        Some(b"input".as_slice())
+    );
     assert!(error.to_string().starts_with("input:1: oops"));
 
-    state
-        .load_string("return 7")
+    dellingr::Program::compile("return 7", None)
+        .and_then(|program| state.load(&program))
         .expect("reuse source compiles");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(1))

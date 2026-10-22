@@ -32,7 +32,7 @@ static GMATCH_WRAPPER: OnceLock<Arc<crate::compiler::Bytecode>> = OnceLock::new(
 fn gmatch_wrapper() -> Arc<crate::compiler::Bytecode> {
     Arc::clone(GMATCH_WRAPPER.get_or_init(|| {
         Arc::new(
-            compiler::parse_str_named(GMATCH_WRAPPER_SRC, Some("string.gmatch".to_owned()))
+            compiler::compile(GMATCH_WRAPPER_SRC, Some(b"string.gmatch".as_slice()))
                 .expect("the static gmatch wrapper source must compile"),
         )
     }))

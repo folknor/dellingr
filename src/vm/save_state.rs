@@ -571,7 +571,7 @@ struct SavedBytecode {
     upvalues: Vec<SavedUpvalueDesc>,
     is_vararg: bool,
     name: Option<String>,
-    source: Option<Arc<str>>,
+    source: Option<Arc<[u8]>>,
     line_info: Vec<u32>,
 }
 
@@ -1611,10 +1611,10 @@ impl State {
     /// to this function until materialization has fully succeeded.
     ///
     /// Whether the standard library is installed is decided by the save itself,
-    /// not by any [`Engine`](crate::Engine): a save taken from a standard-library
-    /// State loads into one, and a raw save loads into a raw State. There is
-    /// deliberately no engine-level override, so a load can never disagree with
-    /// the environment tokens recorded in the save.
+    /// not by the caller: a save taken from a standard-library State loads into
+    /// one, and a raw save ([`State::raw`]) loads into a raw State. There is
+    /// deliberately no override, so a load can never disagree with the
+    /// environment tokens recorded in the save.
     pub fn load_state<E>(
         bytes: &[u8],
         callbacks: Box<dyn HostCallbacks>,
@@ -1634,7 +1634,7 @@ impl State {
         let mut state = if payload.has_standard_environment() {
             State::with_callbacks(callbacks)
         } else {
-            State::empty_with_callbacks(callbacks)
+            State::raw_with_callbacks(callbacks)
         };
         // Anchors created by setup are deliberately retained and participate
         // in the final collection.
@@ -2360,9 +2360,9 @@ fn materialize_bytecode(
         .collect()
 }
 
-fn intern_bytecode_sources(saved: &[SavedBytecode]) -> Vec<Option<Arc<str>>> {
+fn intern_bytecode_sources(saved: &[SavedBytecode]) -> Vec<Option<Arc<[u8]>>> {
     // The save format stores each chunk's source field; share equal names again after loading.
-    let mut source_pool = BTreeMap::<&str, Arc<str>>::new();
+    let mut source_pool = BTreeMap::<&[u8], Arc<[u8]>>::new();
     saved
         .iter()
         .map(|bytecode| {
@@ -2370,7 +2370,7 @@ fn intern_bytecode_sources(saved: &[SavedBytecode]) -> Vec<Option<Arc<str>>> {
                 Arc::clone(
                     source_pool
                         .entry(source)
-                        .or_insert_with(|| Arc::<str>::from(source)),
+                        .or_insert_with(|| Arc::<[u8]>::from(source)),
                 )
             })
         })
@@ -2387,7 +2387,7 @@ fn intern_bytecode_sources(saved: &[SavedBytecode]) -> Vec<Option<Arc<str>>> {
 fn build_bytecode_tree(
     root: usize,
     saved: &[SavedBytecode],
-    source_names: &[Option<Arc<str>>],
+    source_names: &[Option<Arc<[u8]>>],
     out: &mut [Option<Arc<Bytecode>>],
     visiting: &mut [bool],
 ) -> Result<(), SnapshotError> {
@@ -2465,7 +2465,7 @@ fn build_bytecode_tree(
 fn build_bytecode_node(
     src: &SavedBytecode,
     nested: Vec<Arc<Bytecode>>,
-    source: Option<Arc<str>>,
+    source: Option<Arc<[u8]>>,
 ) -> Arc<Bytecode> {
     Arc::new(Bytecode {
         code: src.code.iter().map(|raw| Instr::from_raw(*raw)).collect(),
@@ -2605,10 +2605,16 @@ impl Encoder {
     }
 
     fn write_option_string(&mut self, s: Option<&str>, field: ByteField) -> Result<(), SaveError> {
+        self.write_option_bytes(s.map(str::as_bytes), field)
+    }
+
+    /// The same encoding as `write_option_string`: a presence flag, then a
+    /// length-prefixed byte field.
+    fn write_option_bytes(&mut self, s: Option<&[u8]>, field: ByteField) -> Result<(), SaveError> {
         match s {
             Some(s) => {
                 self.write_bool(true);
-                self.write_string(s, field)?;
+                self.write_bytes(s, field)?;
             }
             None => self.write_bool(false),
         }
@@ -2759,6 +2765,14 @@ impl<'a> Decoder<'a> {
     fn read_option_string(&mut self, field: ByteField) -> Result<Option<String>, SnapshotError> {
         if self.read_bool()? {
             Ok(Some(self.read_string(field)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn read_option_bytes(&mut self, field: ByteField) -> Result<Option<Vec<u8>>, SnapshotError> {
+        if self.read_bool()? {
+            Ok(Some(self.read_bytes(field)?))
         } else {
             Ok(None)
         }
@@ -3044,7 +3058,7 @@ impl SavedBytecode {
         write_vec(out, &self.upvalues, |out, item| item.encode(out))?;
         out.write_bool(self.is_vararg);
         out.write_option_string(self.name.as_deref(), ByteField::ChunkName)?;
-        out.write_option_string(self.source.as_deref(), ByteField::ChunkSource)?;
+        out.write_option_bytes(self.source.as_deref(), ByteField::ChunkSource)?;
         write_vec(out, &self.line_info, |out, line| {
             out.write_u32(*line);
             Ok(())
@@ -3068,9 +3082,11 @@ impl SavedBytecode {
             upvalues: read_vec(input, SavedUpvalueDesc::decode)?,
             is_vararg: input.read_bool()?,
             name: input.read_option_string(ByteField::ChunkName)?,
+            // Chunk names are byte-exact, so unlike function names they are
+            // not required to be UTF-8.
             source: input
-                .read_option_string(ByteField::ChunkSource)?
-                .map(Arc::<str>::from),
+                .read_option_bytes(ByteField::ChunkSource)?
+                .map(Arc::<[u8]>::from),
             line_info: read_vec(input, Decoder::read_u32)?,
         })
     }
@@ -3616,8 +3632,7 @@ mod tests {
     #[test]
     fn compiler_saves_contain_no_nops_or_closure_free_closes() {
         let mut state = State::new();
-        state
-            .load_string("writer = function() local x = 0; for i = 1, 3 do do local y = i; x = x + y end end; fixed(1) end")
+        crate::Program::compile("writer = function() local x = 0; for i = 1, 3 do do local y = i; x = x + y end end; fixed(1) end", None).and_then(|program| state.load(&program))
             .expect("compiler fixture loads");
         state
             .call(ArgCount::Fixed(0), RetCount::Fixed(0))
@@ -3793,12 +3808,13 @@ mod tests {
         // materialized Bytecode the same runtime bundle - not a cold copy
         // each - or a loaded State pays per-closure caches all over again.
         let mut original = State::new();
-        original
-            .load_string(
-                "function make(n) return function() return n end end \
+        crate::Program::compile(
+            "function make(n) return function() return n end end \
                  a = make(1) b = make(2)",
-            )
-            .expect("factory source compiles");
+            None,
+        )
+        .and_then(|program| original.load(&program))
+        .expect("factory source compiles");
         original
             .call(crate::ArgCount::Fixed(0), crate::RetCount::Fixed(0))
             .expect("factory source runs");
@@ -4148,10 +4164,7 @@ mod tests {
         // A parser-emitted closure carrying fused compare-and-branch opcodes
         // and folded literals must pass the load-side verifier and run.
         let mut state = State::new();
-        state
-            .load_string(
-                "function count(n)\n  local i = 0\n  while i < n do i = i + 1 end\n  if i == n then return i + 60 * 1000 end\n  return -1\nend",
-            )
+        crate::Program::compile("function count(n)\n  local i = 0\n  while i < n do i = i + 1 end\n  if i == n then return i + 60 * 1000 end\n  return -1\nend", None).and_then(|program| state.load(&program))
             .expect("script compiles");
         state
             .call(crate::ArgCount::Fixed(0), crate::RetCount::Fixed(0))
@@ -4174,18 +4187,18 @@ mod tests {
         // reuse them, and prove the save/load identity mapping (keyed on
         // slot index) still round-trips the reused slots' values.
         let mut state = State::new();
-        state
-            .load_string(
-                "do\n  local dead = 1\n  local f = function() dead = dead + 1 end\nend\ncollect_marker = 1",
-            )
+        crate::Program::compile("do\n  local dead = 1\n  local f = function() dead = dead + 1 end\nend\ncollect_marker = 1", None).and_then(|program| state.load(&program))
             .expect("dead-closure script compiles");
         state
             .call(crate::ArgCount::Fixed(0), crate::RetCount::Fixed(0))
             .expect("dead-closure chunk runs");
         state.gc_collect();
-        state
-            .load_string("local n = 41\nbump = function() n = n + 1 return n end\nbump()")
-            .expect("live-closure script compiles");
+        crate::Program::compile(
+            "local n = 41\nbump = function() n = n + 1 return n end\nbump()",
+            None,
+        )
+        .and_then(|program| state.load(&program))
+        .expect("live-closure script compiles");
         state
             .call(crate::ArgCount::Fixed(0), crate::RetCount::Fixed(0))
             .expect("live-closure chunk runs");
@@ -4352,9 +4365,8 @@ mod tests {
     #[test]
     fn save_walker_object_count_matches_gc_live_minus_env() {
         let mut state = State::new();
-        state
-            .load_string(
-                r#"
+        crate::Program::compile(
+            r#"
                 a = { 1, 2, 3 }
                 a.b = {}
                 a.b.back = a
@@ -4363,8 +4375,10 @@ mod tests {
                 junk = { x = {} }
                 junk = nil
             "#,
-            )
-            .expect("compile");
+            None,
+        )
+        .and_then(|program| state.load(&program))
+        .expect("compile");
         state
             .call(ArgCount::Fixed(0), RetCount::Fixed(0))
             .expect("run");

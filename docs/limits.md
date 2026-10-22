@@ -252,6 +252,6 @@ Outside the envelope, and the embedder's to provision:
 - the host's own native frames below its first call into the State;
 - what a Rust callback itself puts on the stack, per level of nesting;
 - library work a callback starts at the deepest level besides the above,
-  such as compiling source (`load_string`, `analyze_cost`), which needs the
+  such as compiling source (`Program::compile`), which needs the
   parser's own stack on top of the nested calls;
 - `hotpath`-instrumented builds, whose timing guards add to every level.

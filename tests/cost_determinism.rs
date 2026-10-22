@@ -3,8 +3,8 @@
 use dellingr::{ArgCount, RetCount, State};
 
 fn run(state: &mut State, source: &str) {
-    state
-        .load_string(source)
+    dellingr::Program::compile(source, None)
+        .and_then(|program| state.load(&program))
         .expect("regression source compiles");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
@@ -13,8 +13,8 @@ fn run(state: &mut State, source: &str) {
 
 fn call_iterator(state: &mut State, name: &str) -> (u64, Vec<u8>) {
     let before = state.cost_used();
-    state
-        .load_string(format!("return {name}()"))
+    dellingr::Program::compile(format!("return {name}()"), None)
+        .and_then(|program| state.load(&program))
         .expect("iterator call compiles");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(1))

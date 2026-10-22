@@ -67,8 +67,9 @@ pub(crate) struct Bytecode {
     /// Optional function name (for debugging/analysis), shared with the
     /// trace frames and VM faults that report it.
     pub(crate) name: Option<Arc<str>>,
-    /// Shared source name (file path or chunk identifier like "[string]").
-    pub(crate) source: Option<Arc<str>>,
+    /// Shared chunk name (file path or other identifier), byte-exact as the
+    /// host gave it to `Program::compile`.
+    pub(crate) source: Option<Arc<[u8]>>,
     /// Maps instruction index to source line number.
     /// line_info[i] is the line number for code[i].
     pub(crate) line_info: Vec<u32>,
@@ -223,19 +224,12 @@ fn strip_dead_instructions(bc: &mut Bytecode) -> Result<()> {
     Ok(())
 }
 
+/// The one compile path: Lua source bytes plus an optional, byte-exact chunk
+/// name, to finalized bytecode. The name is bounded before anything else is
+/// examined, so an oversized name wins over a malformed or oversized source.
 #[hotpath::measure]
-pub(super) fn parse_str(source: impl AsRef<str>) -> Result<Bytecode> {
-    let mut bc = parser::parse_str(source.as_ref())?;
-    finalize(&mut bc)?;
-    Ok(bc)
-}
-
-#[hotpath::measure]
-pub(super) fn parse_str_named(
-    source: impl AsRef<str>,
-    source_name: Option<String>,
-) -> Result<Bytecode> {
-    if let Some(name) = &source_name
+pub(crate) fn compile(source: impl AsRef<[u8]>, name: Option<&[u8]>) -> Result<Bytecode> {
+    if let Some(name) = name
         && name.len() > crate::limits::MAX_SOURCE_NAME_BYTES
     {
         return Err(error::Error::without_location(
@@ -245,7 +239,7 @@ pub(super) fn parse_str_named(
             },
         ));
     }
-    let mut bc = parser::parse_str_named(source.as_ref(), source_name)?;
+    let mut bc = parser::parse(source.as_ref(), name.map(Arc::<[u8]>::from))?;
     finalize(&mut bc)?;
     Ok(bc)
 }
@@ -255,32 +249,27 @@ fn finalize(bc: &mut Bytecode) -> Result<()> {
     finalize_at_depth(bc, 1)
 }
 
-fn validation_error(bc: &Bytecode, validation: &verify::BytecodeValidationError) -> error::Error {
-    let chunk_desc = bc.name.as_deref().map_or_else(
-        || "unnamed chunk".to_string(),
-        |name| format!("function '{name}'"),
-    );
-    let validation_detail = validation.to_string();
-    let message = format!("compiler emitted invalid bytecode in {chunk_desc} {validation_detail}");
-    debug_assert!(false, "{message}");
+fn validation_error(bc: &Bytecode, validation: verify::BytecodeValidationError) -> error::Error {
     // Internal errors start without a location. The error representation uses
     // 0:0 for that state; attach a line only when the verifier identifies one.
-    let mut error = error::Error::internal_fault(error::InternalFault::CompilerValidation {
-        chunk: chunk_desc,
-        detail: validation_detail,
-    })
-    .with_source_name(bc.source.clone());
-    if let Some(line) = validation
+    let line = validation
         .instruction
         .and_then(|instruction| bc.line_info.get(instruction as usize))
-    {
-        error = error.with_location(*line, 0);
+        .copied();
+    let mut error = error::Error::internal_fault(error::InternalFault::CompilerValidation {
+        function: bc.name.clone(),
+        error: validation,
+    })
+    .with_source_name(bc.source.clone());
+    debug_assert!(false, "{error}");
+    if let Some(line) = line {
+        error = error.with_location(line, 0);
     }
     error
 }
 
 fn finalize_at_depth(bc: &mut Bytecode, depth: usize) -> Result<()> {
-    verify::validate_depth(depth).map_err(|error| validation_error(bc, &error))?;
+    verify::validate_depth(depth).map_err(|error| validation_error(bc, error))?;
     // Diagnostic names are not identifiers used by execution. Bound them at
     // compilation so every emitted chunk fits the unchanged snapshot field.
     if let Some(name) = &bc.name
@@ -314,9 +303,9 @@ fn finalize_at_depth(bc: &mut Bytecode, depth: usize) -> Result<()> {
     // Reporting it as a compile error keeps a compiler bug catchable instead of
     // fatal. Line metadata is checked before stripping so a mismatch cannot
     // silently truncate the instruction stream while the vectors are zipped.
-    verify::validate_bytecode(bc).map_err(|error| validation_error(bc, &error))?;
+    verify::validate_bytecode(bc).map_err(|error| validation_error(bc, error))?;
     for child in &bc.nested {
-        verify::validate_child(bc, child.as_ref()).map_err(|error| validation_error(bc, &error))?;
+        verify::validate_child(bc, child.as_ref()).map_err(|error| validation_error(bc, error))?;
     }
     for nested in &mut bc.nested {
         // The parser produces nested `Arc<Bytecode>` with a refcount of 1, so
@@ -387,7 +376,7 @@ mod runtime_cache_tests {
         let mut first_rejected = None;
         for depth in 1..=(MAX_SYNTAX_DEPTH as usize + 1) {
             let source = source_for_depth(depth);
-            match parse_str(&source) {
+            match compile(&source, None) {
                 Ok(bytecode) => deepest = Some((depth, bytecode)),
                 Err(error) => {
                     assert!(matches!(
@@ -488,7 +477,7 @@ mod runtime_cache_tests {
         let mut seen = DynamicShapes::default();
         for path in paths {
             let source = std::fs::read_to_string(&path).expect("example source must be readable");
-            let bytecode = parse_str(&source).expect("example source must compile");
+            let bytecode = compile(&source, None).expect("example source must compile");
             assert_verified_tree(&bytecode, &mut seen);
         }
         assert!(seen.mark_call_base, "corpus lost OP_MARK_CALL_BASE");
@@ -501,13 +490,14 @@ mod runtime_cache_tests {
 
     #[test]
     fn global_lookup_cache_shares_gets_and_assigns_fresh_set_slots() {
-        let bc = parse_str(
+        let bc = compile(
             r#"
             local literal = "not a global"
             local t = { field = literal }
             foo = foo + foo
             bar = bar
             "#,
+            None,
         )
         .unwrap();
 
@@ -538,7 +528,7 @@ mod runtime_cache_tests {
 
     #[test]
     fn global_set_cache_uses_biased_fresh_slots_and_excludes_builtins() {
-        let bc = parse_str("foo = 1; foo = 2; table = {}").expect("source compiles");
+        let bc = compile("foo = 1; foo = 2; table = {}", None).expect("source compiles");
         let set_globals: Vec<_> = bc
             .code
             .iter()
@@ -562,7 +552,7 @@ mod runtime_cache_tests {
             .map(|idx| format!("set_cache_{idx} = {idx}"))
             .collect::<Vec<_>>()
             .join("; ");
-        let bc = parse_str(source).expect("source compiles");
+        let bc = compile(source, None).expect("source compiles");
         let set_globals: Vec<_> = bc
             .code
             .iter()
@@ -579,11 +569,12 @@ mod runtime_cache_tests {
 
     #[test]
     fn field_lookup_cache_tracks_get_field_call_sites() {
-        let bc = parse_str(
+        let bc = compile(
             r#"
             local t = { x = 1, y = 2 }
             return t.x + t.x + t.y
             "#,
+            None,
         )
         .unwrap();
 
@@ -602,13 +593,14 @@ mod runtime_cache_tests {
 
     #[test]
     fn set_field_lookup_cache_tracks_set_field_call_sites() {
-        let bc = parse_str(
+        let bc = compile(
             r#"
             local t = { x = 0, y = 0 }
             t.x = 1
             t.x = 2
             t.y = 3
             "#,
+            None,
         )
         .unwrap();
 
@@ -628,7 +620,7 @@ mod runtime_cache_tests {
     #[test]
     fn cache_assignment_is_idempotent() {
         let source = "local t = {}; for k in pairs(t) do t.x = g.y end; h = t.x; local a, b = {}, {}; a.f, b.f = 1, 2";
-        let once = parse_str(source).expect("source compiles");
+        let once = compile(source, None).expect("source compiles");
         let mut twice = once.clone();
         twice.assign_cache_slots();
         assert_eq!(twice, once);
@@ -757,13 +749,13 @@ mod runtime_cache_tests {
     #[test]
     fn finalize_rejects_shared_nested_chunks_and_missing_lines() {
         let mut shared =
-            parser::parse_str("return function() end").expect("nested fixture compiles");
+            parser::parse_unfinalized("return function() end").expect("nested fixture compiles");
         let retained_child = Arc::clone(&shared.nested[0]);
         let error = finalize(&mut shared).expect_err("shared child cannot be finalized in place");
         assert!(matches!(error.kind(), ErrorKind::InternalError(_)));
         drop(retained_child);
 
-        let mut missing = parser::parse_str("return 1").expect("fixture compiles");
+        let mut missing = parser::parse_unfinalized("return 1").expect("fixture compiles");
         missing.line_info.clear();
         let error = finalize(&mut missing).expect_err("missing lines must be recoverable");
         assert!(matches!(error.kind(), ErrorKind::InternalError(_)));
@@ -793,7 +785,7 @@ mod runtime_cache_tests {
 
     #[test]
     fn fixed_calls_become_raw_nops_then_finalize_strips_them() {
-        let raw = parser::parse_str("f(1); obj:m(2)").expect("raw parser output compiles");
+        let raw = parser::parse_unfinalized("f(1); obj:m(2)").expect("raw parser output compiles");
         assert_eq!(
             raw.code
                 .iter()
@@ -801,11 +793,11 @@ mod runtime_cache_tests {
                 .count(),
             2
         );
-        let finalized = parse_str("f(1); obj:m(2)").expect("finalized output compiles");
+        let finalized = compile("f(1); obj:m(2)", None).expect("finalized output compiles");
         assert_no_opcode_in_tree(&finalized, Instr::OP_NOP);
 
         for source in ["local function f(...) end; f(...)", "f(g())"] {
-            let dynamic = parser::parse_str(source).expect("raw dynamic call compiles");
+            let dynamic = parser::parse_unfinalized(source).expect("raw dynamic call compiles");
             assert!(
                 dynamic
                     .code
@@ -820,8 +812,9 @@ mod runtime_cache_tests {
     fn close_upvalues_kept_only_for_scopes_with_captures() {
         // `captures` also makes a closure, so a per-chunk rule could not drop
         // its uncaptured loop's closes; the per-scope capture log does.
-        let finalized = parse_str(
+        let finalized = compile(
             "local function plain() do local x = 1 end end; local function captures() for i = 1, 2 do local s = i end; for i = 1, 2 do if i then break end end; do local x = 1; f = function() return x end end end",
+            None,
         )
         .expect("finalized nested functions compile");
         assert_no_opcode_in_tree(&finalized.nested[0], Instr::OP_CLOSE_UPVALUES);
@@ -838,7 +831,7 @@ mod runtime_cache_tests {
     fn break_close_is_decided_at_loop_exit() {
         // The break precedes the loop's only capture textually, so deciding at
         // break emission would drop it; deciding at loop exit keeps it.
-        let raw = parser::parse_str(
+        let raw = parser::parse_unfinalized(
             "while true do local z = 1; if z then break end; f = function() return z end end",
         )
         .expect("break fixture compiles");
@@ -863,7 +856,7 @@ mod runtime_cache_tests {
     #[test]
     fn stripping_preserves_costs_and_decreases_only_instruction_counts() {
         // The uncaptured loop's break close is NOP'd by the parser.
-        let mut raw = parser::parse_str(
+        let mut raw = parser::parse_unfinalized(
             "local x = 0; for i = 1, 3 do if i == 2 then break end; x = x + i end",
         )
         .expect("raw cost fixture compiles");

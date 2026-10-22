@@ -4,7 +4,9 @@
 use dellingr::{ArgCount, DefaultCallbacks, RetCount, State};
 
 fn run(state: &mut State, source: &str) {
-    state.load_string(source).unwrap();
+    dellingr::Program::compile(source, None)
+        .and_then(|program| state.load(&program))
+        .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
 }
 
@@ -102,7 +104,7 @@ fn unregistered_unreachable_rust_function_identity_does_not_fail_load() {
 
 #[test]
 fn nil_global_tombstones_preserve_snapshot_bytes_and_insertion_order() {
-    for mut state in [State::new(), State::empty()] {
+    for mut state in [State::new(), State::raw()] {
         // Host writes work with either environment. The first name must keep
         // its original position even after load and a later non-nil write.
         state.push_number(1.0).unwrap();

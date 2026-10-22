@@ -8,10 +8,10 @@ use dellingr::error::{Error, ErrorKind};
 use dellingr::limits::MAX_STRING_BYTES;
 use dellingr::{ArgCount, HostCallbacks, LuaType, RetCount, State};
 
-struct Prints(Arc<Mutex<Vec<String>>>);
+struct Prints(Arc<Mutex<Vec<Vec<u8>>>>);
 
 impl HostCallbacks for Prints {
-    fn on_print(&mut self, _source: Option<&str>, _line: u32, message: &str) {
+    fn on_print(&mut self, _source: Option<&[u8]>, _line: u32, message: &[u8]) {
         self.0
             .lock()
             .expect("print lock is healthy")
@@ -19,14 +19,14 @@ impl HostCallbacks for Prints {
     }
 }
 
-fn printing_state() -> (State, Arc<Mutex<Vec<String>>>) {
+fn printing_state() -> (State, Arc<Mutex<Vec<Vec<u8>>>>) {
     let prints = Arc::new(Mutex::new(Vec::new()));
     let state = State::with_callbacks(Box::new(Prints(Arc::clone(&prints))));
     (state, prints)
 }
 
 fn run(state: &mut State, source: &str) -> Result<(), Error> {
-    state.load_string(source)?;
+    dellingr::Program::compile(source, None).and_then(|program| state.load(&program))?;
     state.call(ArgCount::Fixed(0), RetCount::Fixed(0))
 }
 
@@ -39,23 +39,27 @@ fn expect_error(source: &str) -> Error {
 }
 
 #[test]
-fn print_converts_invalid_bytes_lossily() {
+fn print_hands_the_host_exact_bytes() {
     let (mut state, prints) = printing_state();
     state
         .push_bytes(b"a\xffb\xe2\x82")
         .expect("short string fits");
     state.set_global("s").expect("global set");
-    run(&mut state, "print(s, 1)").expect("print succeeds");
+    run(
+        &mut state,
+        "print(s, 1, setmetatable({}, {__tostring = function() return s end}))",
+    )
+    .expect("print succeeds");
     assert_eq!(
         *prints.lock().expect("print lock is healthy"),
-        vec!["a\u{FFFD}b\u{FFFD}\t1".to_string()]
+        vec![b"a\xffb\xe2\x82\t1\ta\xffb\xe2\x82".to_vec()]
     );
 }
 
 #[test]
-fn print_rejects_output_whose_lossy_expansion_exceeds_the_cap() {
-    // Each invalid byte expands to three bytes, taking this half-cap input
-    // over the cap. Check direct strings and byte-string __tostring results.
+fn print_bounds_the_raw_joined_output_by_the_cap() {
+    // Invalid UTF-8 is no longer expanded, so a half-cap invalid string
+    // prints whole, directly and as a byte-string __tostring result.
     for source in [
         "print(s)",
         "print(setmetatable({}, {__tostring = function() return s end}))",
@@ -64,14 +68,22 @@ fn print_rejects_output_whose_lossy_expansion_exceeds_the_cap() {
         let raw = vec![0xffu8; MAX_STRING_BYTES / 2];
         state.push_bytes(&raw).expect("half-cap string fits");
         state.set_global("s").expect("global set");
-        let err = run(&mut state, source).expect_err("expanded output exceeds the cap");
-        assert!(
-            matches!(err.kind(), ErrorKind::StringSizeExceeded { size, limit }
-                if *size == raw.len() * 3 && *limit == MAX_STRING_BYTES),
-            "{source}: {err}"
-        );
-        assert!(prints.lock().expect("print lock is healthy").is_empty());
+        run(&mut state, source).expect("raw output within the cap prints");
+        assert_eq!(*prints.lock().expect("print lock is healthy"), vec![raw]);
     }
+
+    // The joined message itself is capped on its raw length.
+    let (mut state, prints) = printing_state();
+    let raw = vec![0xffu8; MAX_STRING_BYTES / 2 + 1];
+    state.push_bytes(&raw).expect("half-cap string fits");
+    state.set_global("s").expect("global set");
+    let err = run(&mut state, "print(s, s)").expect_err("joined output exceeds the cap");
+    assert!(
+        matches!(err.kind(), ErrorKind::StringSizeExceeded { size, limit }
+            if *size == raw.len() * 2 + 1 && *limit == MAX_STRING_BYTES),
+        "{err}"
+    );
+    assert!(prints.lock().expect("print lock is healthy").is_empty());
 }
 
 #[test]
@@ -102,12 +114,13 @@ fn math_random_is_deterministic_per_seed() {
     let draw = |seed| {
         let mut state = State::new();
         state.set_rng_seed(seed);
-        state
-            .load_string(
-                "local t = {} for i = 1, 32 do t[i] = math.random(1, 1000000) end \
+        dellingr::Program::compile(
+            "local t = {} for i = 1, 32 do t[i] = math.random(1, 1000000) end \
                  return table.concat(t, ',')",
-            )
-            .expect("compiles");
+            None,
+        )
+        .and_then(|program| state.load(&program))
+        .expect("compiles");
         state
             .call(ArgCount::Fixed(0), RetCount::Fixed(1))
             .expect("runs");
@@ -141,7 +154,7 @@ fn table_concat_names_the_bad_element_and_index() {
     ] {
         let err = expect_error(source);
         assert!(
-            matches!(err.kind(), ErrorKind::RuntimeError(m) if m == expected),
+            matches!(err.kind(), ErrorKind::LibraryError(m) if m.to_string() == expected),
             "{source}: {err}"
         );
     }
@@ -158,8 +171,8 @@ fn sequence_readers_refuse_ranges_past_exact_keys() {
             };
             let err = expect_error(&format!("{function}({{}}, {sep}{range})"));
             assert!(
-                matches!(err.kind(), ErrorKind::RuntimeError(m)
-                    if m.contains("exactly representable integer keys")),
+                matches!(err.kind(), ErrorKind::LibraryError(m)
+                    if m.to_string().contains("exactly representable integer keys")),
                 "{function}({range}): {err}"
             );
         }

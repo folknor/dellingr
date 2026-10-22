@@ -9,10 +9,13 @@
 //! # Example
 //!
 //! ```
-//! use dellingr::{State, ArgCount, RetCount};
+//! use dellingr::{ArgCount, Program, RetCount, State};
 //!
+//! // Source and chunk name are bytes: Lua strings are bytes, and so is the
+//! // source a script is written in.
+//! let program = Program::compile("print('Hello!')", Some(b"hello.lua".as_slice())).unwrap();
 //! let mut state = State::new();
-//! state.load_string("print('Hello!')").unwrap();
+//! state.load(&program).unwrap();
 //! state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
 //! ```
 
@@ -65,13 +68,14 @@ use std::sync::Arc;
 // Compile-time witnesses for the thread-sharing contract. `State` can be
 // moved across threads but is deliberately NOT `Sync`; cost-budgeted dispatch
 // and bytecode-cache invariants only have well-defined semantics under
-// exclusive access. `Engine` and `Program` can be shared across threads.
+// exclusive access. `Program` can be shared across threads, and `Error`
+// travels across them (its host-error payload is `Send + Sync`).
 const _: () = {
     const fn assert_send<T: Send>() {}
     const fn assert_send_sync<T: Send + Sync>() {}
     assert_send::<State>();
-    assert_send_sync::<Engine>();
     assert_send_sync::<Program>();
+    assert_send_sync::<error::Error>();
     // A handle may be dropped on any thread; its release queue is a Mutex.
     assert_send_sync::<Anchor>();
 };
@@ -341,111 +345,52 @@ impl std::fmt::Display for CostAnalysis {
     }
 }
 
-/// Analyze the cost of a Lua script without executing it.
-///
-/// Returns a `CostAnalysis` with per-scope cost breakdown.
-/// The actual runtime cost depends on control flow and loop iterations.
-/// [`CostAnalysis::caveat`] returns the standard explanation of the estimate's
-/// limits for display in a host application.
-///
-/// For repeated analysis of the same source, prefer `Engine::compile` followed
-/// by `Engine::analyze_cost(&program)` so the parse is paid once.
-pub fn analyze_cost(source: &str) -> Result<CostAnalysis> {
-    let bc = compiler::parse_str(source)?;
-    Ok(analyze_compiled_bytecode(&bc))
-}
-
-fn analyze_compiled_bytecode(bytecode: &Bytecode) -> CostAnalysis {
-    let root = ScopeCost::analyze_chunk(bytecode, "main".to_string());
-    CostAnalysis { root }
-}
-
-/// A factory for compiling Lua source and creating new `State`s.
-///
-/// `Engine` is `Send + Sync`: a single instance can be shared across worker
-/// threads via `Arc`. Compile a `Program` once on the engine, then load it
-/// into per-thread (or per-request) `State`s.
+/// A compiled, executable Lua program. Cheap to clone (refcounted) and safe
+/// to share across threads: compile once, then [`State::load`] it into as
+/// many `State`s as needed, on any thread.
 ///
 /// ```
-/// use dellingr::{ArgCount, Engine, RetCount};
-/// use std::sync::Arc;
-/// let engine = Arc::new(Engine::new());
-/// let program = engine.compile("return 1 + 2").unwrap();
+/// use dellingr::{ArgCount, Program, RetCount, State};
+/// let program = Program::compile("return 1 + 2", None).unwrap();
 ///
 /// // Load the same compiled program into a State for each worker.
-/// let mut state = engine.new_state();
+/// let mut state = State::new();
 /// state.load(&program).unwrap();
 /// state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
 /// ```
-#[derive(Debug)]
-pub struct Engine {
-    install_stdlib: bool,
-}
-
-impl Default for Engine {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Engine {
-    /// Create an engine that installs the standard library on each new `State`.
-    pub fn new() -> Self {
-        Self {
-            install_stdlib: true,
-        }
-    }
-
-    /// Create an engine whose new `State`s start with empty global namespaces,
-    /// matching `lua_newstate` in the reference C API.
-    pub fn raw() -> Self {
-        Self {
-            install_stdlib: false,
-        }
-    }
-
-    /// Compile a Lua source string into an executable `Program`.
-    pub fn compile(&self, source: &str) -> Result<Program> {
-        let bc = compiler::parse_str(source)?;
-        Ok(Program(Arc::new(bc)))
-    }
-
-    /// Compile a Lua source string with a source name used in error messages
-    /// and stack traces (e.g. a filename or chunk identifier).
-    /// Names exceeding [`limits::MAX_SOURCE_NAME_BYTES`] are rejected before parsing.
-    pub fn compile_named(&self, source: &str, name: impl Into<String>) -> Result<Program> {
-        let bc = compiler::parse_str_named(source, Some(name.into()))?;
-        Ok(Program(Arc::new(bc)))
-    }
-
-    /// Statically analyze the cost of a compiled `Program`. No execution.
-    pub fn analyze_cost(&self, program: &Program) -> CostAnalysis {
-        analyze_compiled_bytecode(&program.0)
-    }
-
-    /// Create a new `State` configured by this engine.
-    pub fn new_state(&self) -> State {
-        self.new_state_with_callbacks(Box::new(DefaultCallbacks))
-    }
-
-    /// Create a new `State` configured by this engine with custom callbacks.
-    pub fn new_state_with_callbacks(&self, callbacks: Box<dyn HostCallbacks>) -> State {
-        if self.install_stdlib {
-            State::with_callbacks(callbacks)
-        } else {
-            State::empty_with_callbacks(callbacks)
-        }
-    }
-}
-
-/// A compiled, executable Lua program. Cheap to clone (refcounted) and safe
-/// to share across threads. Load with `State::load` to execute.
 #[derive(Clone, Debug)]
 pub struct Program(Arc<Bytecode>);
 
 impl Program {
-    /// Returns the optional source name attached at compile time.
-    pub fn source_name(&self) -> Option<&str> {
+    /// Compile Lua source into an executable `Program`. This is the only way
+    /// to compile Lua.
+    ///
+    /// `source` is bytes, as Lua strings are: string literals and comments may
+    /// hold any bytes, and a literal keeps them exactly. `name` is the chunk
+    /// name that error messages, tracebacks and `print` locations report
+    /// (typically a file name); it is byte-exact too, kept and handed back to
+    /// the host exactly as given, and rendered lossily only by `Display`.
+    /// `None` compiles an unnamed chunk, whose locations render without a
+    /// name. Names exceeding [`limits::MAX_SOURCE_NAME_BYTES`] are rejected
+    /// before the source is examined.
+    pub fn compile(source: impl AsRef<[u8]>, name: Option<&[u8]>) -> Result<Program> {
+        Ok(Program(Arc::new(compiler::compile(source, name)?)))
+    }
+
+    /// Statically analyze the cost of this program, without executing it.
+    ///
+    /// Returns a `CostAnalysis` with per-scope cost breakdown. The actual
+    /// runtime cost depends on control flow and loop iterations.
+    /// [`CostAnalysis::caveat`] returns the standard explanation of the
+    /// estimate's limits for display in a host application.
+    pub fn analyze_cost(&self) -> CostAnalysis {
+        CostAnalysis {
+            root: ScopeCost::analyze_chunk(&self.0, "main".to_string()),
+        }
+    }
+
+    /// The chunk name given at compile time, byte-exact.
+    pub fn source_name(&self) -> Option<&[u8]> {
         self.0.source.as_deref()
     }
 
@@ -480,6 +425,10 @@ impl State {
 mod tests {
     use super::*;
 
+    fn analyze_cost(source: &str) -> Result<CostAnalysis> {
+        Program::compile(source, None).map(|program| program.analyze_cost())
+    }
+
     #[test]
     fn dynamic_set_list_has_zero_minimum_cost_when_empty() {
         let analysis = analyze_cost("local function f(...) return {...} end\nf()")
@@ -491,8 +440,8 @@ mod tests {
         assert_eq!(analysis.root.total_cost, 1);
 
         let mut state = State::new();
-        state
-            .load_string("local function f(...) return {...} end\nf()")
+        crate::Program::compile("local function f(...) return {...} end\nf()", None)
+            .and_then(|program| state.load(&program))
             .expect("variadic table constructor should load");
         state
             .call(ArgCount::Fixed(0), RetCount::Fixed(0))
@@ -555,8 +504,8 @@ mod tests {
         assert_eq!(analysis.root.total_cost, 0);
 
         let mut state = State::new();
-        state
-            .load_string("return string.upper('abcd')")
+        crate::Program::compile("return string.upper('abcd')", None)
+            .and_then(|program| state.load(&program))
             .expect("string.upper program should load");
         state
             .call(ArgCount::Fixed(0), RetCount::Fixed(1))
@@ -606,7 +555,9 @@ mod tests {
             ),
         ] {
             let mut state = State::new();
-            state.load_string(source).expect("cost fixture should load");
+            crate::Program::compile(source, None)
+                .and_then(|program| state.load(&program))
+                .expect("cost fixture should load");
             state
                 .call(ArgCount::Fixed(0), returns)
                 .expect("cost fixture should run");

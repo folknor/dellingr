@@ -3,7 +3,9 @@
 use dellingr::{ArgCount, DefaultCallbacks, RetCount, State};
 
 fn run(state: &mut State, source: &str) {
-    state.load_string(source).expect("test script compiles");
+    dellingr::Program::compile(source, None)
+        .and_then(|program| state.load(&program))
+        .expect("test script compiles");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect("test script runs");

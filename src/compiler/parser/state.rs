@@ -30,7 +30,7 @@ pub(super) struct FuncState<'a> {
 }
 
 impl FuncState<'_> {
-    pub(super) fn new(source: Option<Arc<str>>, num_params: u8, is_vararg: bool) -> Self {
+    pub(super) fn new(source: Option<Arc<[u8]>>, num_params: u8, is_vararg: bool) -> Self {
         Self {
             chunk: Bytecode {
                 source,

@@ -9,7 +9,9 @@
 use dellingr::{ArgCount, RetCount, State};
 
 fn run(state: &mut State, source: &str) {
-    state.load_string(source).unwrap();
+    dellingr::Program::compile(source, None)
+        .and_then(|program| state.load(&program))
+        .unwrap();
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .unwrap_or_else(|e| panic!("error running:\n{source}\n{e}"));
@@ -21,7 +23,9 @@ fn run_fresh(source: &str) {
 
 fn run_err(source: &str) -> String {
     let mut state = State::new();
-    state.load_string(source).unwrap();
+    dellingr::Program::compile(source, None)
+        .and_then(|program| state.load(&program))
+        .unwrap();
     let err = state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect_err("script must fail");
@@ -246,7 +250,7 @@ fn string_metatable_survives_gc_when_unreferenced() {
 
 #[test]
 fn empty_state_has_no_string_metatable() {
-    let mut state = State::empty();
+    let mut state = State::raw();
     state.push_string("x").unwrap();
     state.get_metatable_of(-1).unwrap();
     assert_eq!(state.typ(-1), dellingr::LuaType::Nil);

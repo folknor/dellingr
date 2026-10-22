@@ -7,14 +7,16 @@ use dellingr::{ArgCount, RetCount, State};
 
 fn load_error(code: &str) -> Error {
     let mut state = State::new();
-    state
-        .load_string(code)
+    dellingr::Program::compile(code, None)
+        .and_then(|program| state.load(&program))
         .expect_err(&format!("expected a load error from {code:?}"))
 }
 
 fn run_error(code: &str) -> Error {
     let mut state = State::new();
-    state.load_string(code).expect("program must compile");
+    dellingr::Program::compile(code, None)
+        .and_then(|program| state.load(&program))
+        .expect("program must compile");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect_err("program must fail")
@@ -57,15 +59,15 @@ fn unfinished_long_comment_has_its_own_message() {
 #[test]
 fn lparen_on_a_new_line_compiles_as_a_call() {
     let mut state = State::new();
-    state
-        .load_string("local f = print\nlocal x = f\n(1)")
+    dellingr::Program::compile("local f = print\nlocal x = f\n(1)", None)
+        .and_then(|program| state.load(&program))
         .expect("a `(` on a new line continues the call, as in reference Lua");
 }
 
 #[test]
 fn selected_caller_frame_does_not_borrow_the_innermost_column() {
     let kind = |prefix| ErrorKind::ScriptError {
-        message: "boom".to_string(),
+        value: dellingr::error::ErrorValue::String(b"boom".to_vec()),
         prefix,
     };
 

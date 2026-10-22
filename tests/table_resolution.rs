@@ -2,7 +2,9 @@ use dellingr::{ArgCount, RetCount, State};
 
 fn run_boolean(code: &str) -> bool {
     let mut state = State::new();
-    state.load_string(code).expect("source compiles");
+    dellingr::Program::compile(code, None)
+        .and_then(|program| state.load(&program))
+        .expect("source compiles");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(1))
         .expect("script returns one value");
@@ -15,15 +17,15 @@ fn run_boolean(code: &str) -> bool {
 #[test]
 fn budget_exhaustion_mid_move_keeps_the_paid_prefix() {
     let mut state = State::new();
-    state
-        .load_string("src = {} for i = 1, 100 do src[i] = i end dst = {}")
+    dellingr::Program::compile("src = {} for i = 1, 100 do src[i] = i end dst = {}", None)
+        .and_then(|program| state.load(&program))
         .expect("setup compiles");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect("setup runs");
 
-    state
-        .load_string("table.move(src, 1, 100, 1, dst)")
+    dellingr::Program::compile("table.move(src, 1, 100, 1, dst)", None)
+        .and_then(|program| state.load(&program))
         .expect("move compiles");
     state.set_cost_budget(50);
     let error = state

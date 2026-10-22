@@ -3,20 +3,20 @@
 use std::sync::{Arc, Mutex};
 
 use dellingr::error::Error;
-use dellingr::{ArgCount, HostCallbacks, RetCount, State};
+use dellingr::{ArgCount, HostCallbacks, Program, RetCount, State};
 
 #[derive(Default)]
 struct Events {
-    prints: Vec<(Option<String>, u32, String)>,
-    errors: Vec<Option<String>>,
+    prints: Vec<(Option<Vec<u8>>, u32, Vec<u8>)>,
+    errors: Vec<Option<Vec<u8>>>,
 }
 
 struct Recorder(Arc<Mutex<Events>>);
 
 impl HostCallbacks for Recorder {
-    fn on_print(&mut self, source: Option<&str>, line: u32, message: &str) {
+    fn on_print(&mut self, source: Option<&[u8]>, line: u32, message: &[u8]) {
         self.0.lock().expect("event lock is healthy").prints.push((
-            source.map(str::to_owned),
+            source.map(<[u8]>::to_owned),
             line,
             message.to_owned(),
         ));
@@ -27,14 +27,13 @@ impl HostCallbacks for Recorder {
             .lock()
             .expect("event lock is healthy")
             .errors
-            .push(error.source_name().map(str::to_owned));
+            .push(error.source_name().map(<[u8]>::to_owned));
     }
 }
 
-fn load_and_run(state: &mut State, source: &str, name: &str) {
-    state
-        .load_string_named(source, Some(name.into()))
-        .expect("chunk compiles");
+fn load_and_run(state: &mut State, source: &str, name: &[u8]) {
+    let program = Program::compile(source, Some(name)).expect("chunk compiles");
+    state.load(&program).expect("chunk loads");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect("setup succeeds");
@@ -47,32 +46,31 @@ fn nested_chunks_restore_source_and_attribute_error_to_running_frame() {
     load_and_run(
         &mut state,
         "function a()\n print('a')\n b()\n print('again')\n error('failure')\nend",
-        "A",
+        b"A",
     );
-    load_and_run(&mut state, "function b()\n print('b')\nend", "B");
-    assert!(
-        state
-            .load_string_named("local =", Some("rejected".into()))
-            .is_err()
-    );
+    load_and_run(&mut state, "function b()\n print('b')\nend", b"B");
+    assert!(Program::compile("local =", Some(b"rejected".as_slice())).is_err());
     assert_eq!(state.current_source(), None);
     state.get_global("a").expect("a is installed");
     let error = state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect_err("a fails");
-    assert_eq!(error.stack_trace()[0].source.as_deref(), Some("A"));
+    assert_eq!(
+        error.stack_trace()[0].source.as_deref(),
+        Some(b"A".as_slice())
+    );
     assert_eq!(error.stack_trace()[0].line, 5);
     assert_eq!(state.current_source(), None);
     let events = events.lock().expect("event lock is healthy");
     assert_eq!(
         events.prints,
         vec![
-            (Some("A".into()), 2, "a".into()),
-            (Some("B".into()), 2, "b".into()),
-            (Some("A".into()), 4, "again".into()),
+            (Some(b"A".to_vec()), 2, b"a".to_vec()),
+            (Some(b"B".to_vec()), 2, b"b".to_vec()),
+            (Some(b"A".to_vec()), 4, b"again".to_vec()),
         ]
     );
-    assert_eq!(events.errors, vec![Some("A".into())]);
+    assert_eq!(events.errors, vec![Some(b"A".to_vec())]);
 }
 
 #[test]
@@ -81,7 +79,7 @@ fn trace_frames_share_the_chunk_source_and_outlive_the_state() {
     load_and_run(
         &mut state,
         "function inner()\n error('boom')\nend\nfunction outer()\n inner()\nend",
-        "shared",
+        b"shared",
     );
     state.get_global("outer").expect("outer is installed");
     let error = state
@@ -97,7 +95,7 @@ fn trace_frames_share_the_chunk_source_and_outlive_the_state() {
         .as_ref()
         .expect("current frame has a source");
     let caller = trace[1].source.as_ref().expect("caller frame has a source");
-    assert_eq!(&**current, "shared");
+    assert_eq!(&**current, b"shared");
     assert!(Arc::ptr_eq(current, caller));
     assert_eq!(error.to_string(), before);
 }
@@ -108,7 +106,7 @@ fn trace_frames_share_the_function_name() {
     load_and_run(
         &mut state,
         "function rec(n)\n if n == 0 then error('boom') end\n rec(n - 1)\nend",
-        "recursive",
+        b"recursive",
     );
     state.get_global("rec").expect("rec is installed");
     state.push_number(2.0).expect("argument fits");
@@ -128,4 +126,33 @@ fn trace_frames_share_the_function_name() {
         let name = frame.function_name.as_ref().expect("caller is named");
         assert!(Arc::ptr_eq(current, name));
     }
+}
+
+#[test]
+fn chunk_names_and_printed_bytes_reach_the_host_exactly() {
+    let events = Arc::new(Mutex::new(Events::default()));
+    let mut state = State::with_callbacks(Box::new(Recorder(Arc::clone(&events))));
+    // A non-UTF-8 chunk name and a non-UTF-8 source byte in a literal.
+    let name: &[u8] = b"scripts/\xffbad.lua";
+    let program = Program::compile(b"print('a\xfe', 1)\nerror('x')", Some(name))
+        .expect("non-UTF-8 source compiles");
+    assert_eq!(program.source_name(), Some(name));
+    state.load(&program).expect("chunk loads");
+    let error = state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+        .expect_err("chunk raises");
+    assert_eq!(error.source_name(), Some(name));
+    assert_eq!(error.stack_trace()[0].source.as_deref(), Some(name));
+    assert!(
+        error
+            .to_string()
+            .starts_with("scripts/\u{FFFD}bad.lua:2: x"),
+        "{error}"
+    );
+    let events = events.lock().expect("event lock is healthy");
+    assert_eq!(
+        events.prints,
+        vec![(Some(name.to_vec()), 1, b"a\xfe\t1".to_vec())]
+    );
+    assert_eq!(events.errors, vec![Some(name.to_vec())]);
 }

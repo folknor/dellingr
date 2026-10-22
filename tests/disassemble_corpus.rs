@@ -1,7 +1,7 @@
 #[path = "common/examples.rs"]
 mod example_files;
 
-use dellingr::Engine;
+use dellingr::Program;
 
 /// Every example compiles, so every example must disassemble into well-formed
 /// rows: function headers, indented detail lines and blank separators, with no
@@ -10,12 +10,11 @@ use dellingr::Engine;
 fn every_example_disassembles_into_well_formed_rows() {
     let files = example_files::example_corpus();
     assert!(!files.is_empty(), "the example corpus should not be empty");
-    let engine = Engine::new();
     for path in files {
-        let source = std::fs::read_to_string(&path).expect("example should be readable");
-        let program = engine
-            .compile_named(&source, path.display().to_string())
-            .expect("example should compile");
+        let source = std::fs::read(&path).expect("example should be readable");
+        let name = path.display().to_string();
+        let program =
+            Program::compile(&source, Some(name.as_bytes())).expect("example should compile");
         let text = program.disassemble().to_string();
         assert!(text.starts_with("function main "), "{}", path.display());
         for line in text.lines() {

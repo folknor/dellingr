@@ -6,7 +6,9 @@ use dellingr::{ArgCount, RetCount, State};
 
 fn argument_message(code: &str) -> String {
     let mut state = State::new();
-    state.load_string(code).expect("regression script compiles");
+    dellingr::Program::compile(code, None)
+        .and_then(|program| state.load(&program))
+        .expect("regression script compiles");
     let error = state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect_err("regression script must fail");
@@ -19,11 +21,12 @@ fn argument_message(code: &str) -> String {
 #[test]
 fn string_find_keeps_the_reference_literal_close_parenthesis_case() {
     let mut state = State::new();
-    state
-        .load_string(
-            r#"local first, last = string.find("a)", ")"); return first == 2 and last == 2"#,
-        )
-        .expect("regression script compiles");
+    dellingr::Program::compile(
+        r#"local first, last = string.find("a)", ")"); return first == 2 and last == 2"#,
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .expect("regression script compiles");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(1))
         .expect("literal close parenthesis search succeeds");
@@ -91,7 +94,9 @@ fn argument_details_are_structured_without_changing_text() {
         ("return string.sub('a', 1.5)", ArgDetail::NoInteger),
     ] {
         let mut state = State::new();
-        state.load_string(code).expect("argument test compiles");
+        dellingr::Program::compile(code, None)
+            .and_then(|program| state.load(&program))
+            .expect("argument test compiles");
         let error = state
             .call(ArgCount::Fixed(0), RetCount::Fixed(0))
             .expect_err("invalid argument fails");
@@ -120,7 +125,9 @@ fn host_argument_checks_name_direct_lua_and_iterator_callbacks() {
     ] {
         let mut state = State::new();
         install_callback(&mut state);
-        state.load_string(code).expect("callback test compiles");
+        dellingr::Program::compile(code, None)
+            .and_then(|program| state.load(&program))
+            .expect("callback test compiles");
         let error = state
             .call(ArgCount::Fixed(0), RetCount::Fixed(0))
             .expect_err("callback rejects boolean");
@@ -167,8 +174,8 @@ fn runtime_result_limit_accepts_255_and_rejects_256() {
 
     for count in [255, 256] {
         let mut state = State::new();
-        state
-            .load_string(format!("return unpack({{}}, 1, {count})"))
+        dellingr::Program::compile(format!("return unpack({{}}, 1, {count})"), None)
+            .and_then(|program| state.load(&program))
             .expect("unpack test compiles");
         let result = state.call(ArgCount::Fixed(0), RetCount::All);
         if count == 255 {
@@ -221,8 +228,8 @@ fn runtime_argument_limit_reports_typed_errors() {
         "local f = setmetatable({}, { __call = function(...) end }); f(unpack({}, 1, 255))",
     ] {
         let mut state = State::new();
-        state
-            .load_string(code)
+        dellingr::Program::compile(code, None)
+            .and_then(|program| state.load(&program))
             .expect("argument count test compiles");
         let error = state
             .call(ArgCount::Fixed(0), RetCount::Fixed(0))

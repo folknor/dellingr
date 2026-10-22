@@ -43,7 +43,7 @@ fn swallowing_fn(state: &mut State) -> dellingr::Result<u8> {
         state.call(ArgCount::Fixed(0), RetCount::Fixed(0))
     }));
     if caught.is_ok() {
-        return Err(Error::without_location(ErrorKind::InternalError(
+        return Err(Error::without_location(ErrorKind::HostError(
             "inner was expected to panic".into(),
         )));
     }
@@ -56,7 +56,9 @@ fn state_with(fns: &[(&str, dellingr::RustFunc)], source: &str) -> State {
         state.push_rust_fn(*f).expect("room for a function");
         state.set_global(name).expect("global install");
     }
-    state.load_string(source).expect("source compiles");
+    dellingr::Program::compile(source, None)
+        .and_then(|program| state.load(&program))
+        .expect("source compiles");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect("setup runs");
@@ -77,7 +79,9 @@ fn assert_poisoned(result: dellingr::Result<()>) {
 fn assert_refuses_everything(state: &mut State) {
     assert!(state.is_poisoned());
     assert_poisoned(state.call(ArgCount::Fixed(0), RetCount::Fixed(0)));
-    assert_poisoned(state.load_string("return 1"));
+    assert_poisoned(
+        dellingr::Program::compile("return 1", None).and_then(|program| state.load(&program)),
+    );
     assert_poisoned(state.push_nil());
     assert_poisoned(state.push_number(1.0));
     assert_poisoned(state.push_string("x"));
@@ -89,7 +93,7 @@ fn assert_refuses_everything(state: &mut State) {
     assert_poisoned(state.get_table(1));
     assert_poisoned(state.consume_cost(1));
     assert_poisoned(state.anchor().map(|_| ()));
-    assert_poisoned(state.bytes_with_tostring_meta(1).map(|_| ()));
+    assert_poisoned(state.tostring_bytes(1).map(|_| ()));
     assert_poisoned(state.open_libs());
     assert_poisoned(state.to_number(1).map(|_| ()));
     assert_poisoned(state.to_bytes(1).map(|_| ()));
@@ -240,7 +244,7 @@ fn swallowed_panic_then_callback_error_is_still_abandoned() {
     quiet_deliberate_panics();
     fn swallow_then_fail(state: &mut State) -> dellingr::Result<u8> {
         swallowing_fn(state)?;
-        Err(Error::without_location(ErrorKind::InternalError(
+        Err(Error::without_location(ErrorKind::HostError(
             "callback error after a swallowed panic".into(),
         )))
     }
@@ -257,7 +261,7 @@ fn swallowed_panic_then_callback_error_is_still_abandoned() {
 struct PanickingOnError;
 
 impl HostCallbacks for PanickingOnError {
-    fn on_print(&mut self, _source: Option<&str>, _line: u32, _message: &str) {}
+    fn on_print(&mut self, _source: Option<&[u8]>, _line: u32, _message: &[u8]) {}
 
     fn on_error(&mut self, _error: &Error) {
         std::panic::panic_any(PANIC_MESSAGE);
@@ -265,7 +269,7 @@ impl HostCallbacks for PanickingOnError {
 }
 
 fn failing_fn(_state: &mut State) -> dellingr::Result<u8> {
-    Err(Error::without_location(ErrorKind::InternalError(
+    Err(Error::without_location(ErrorKind::HostError(
         "deliberate callback error".into(),
     )))
 }
@@ -275,18 +279,18 @@ fn panicking_on_error_from_a_host_tostring_poisons_the_state() {
     quiet_deliberate_panics();
     // The callback returns an error normally; the panic comes from on_error,
     // raised after the callback's own unwind guard, so only the public
-    // boundary of bytes_with_tostring_meta can mark it.
+    // boundary of tostring_bytes can mark it.
     let mut state = State::with_callbacks(Box::new(PanickingOnError));
     state.push_rust_fn(failing_fn).expect("room for a function");
     state.set_global("fail").expect("global install");
-    state
-        .load_string("t = setmetatable({}, { __tostring = fail })")
+    dellingr::Program::compile("t = setmetatable({}, { __tostring = fail })", None)
+        .and_then(|program| state.load(&program))
         .expect("source compiles");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect("setup runs");
     state.get_global("t").expect("t is defined");
-    let caught = catch_unwind(AssertUnwindSafe(|| state.bytes_with_tostring_meta(1)));
+    let caught = catch_unwind(AssertUnwindSafe(|| state.tostring_bytes(1)));
     assert!(caught.is_err(), "the on_error panic must propagate");
     assert_refuses_everything(&mut state);
 }
@@ -343,7 +347,9 @@ fn panic_through_a_vararg_frame_poisons_the_state() {
 fn an_unpoisoned_state_is_unaffected() {
     let mut state = State::new();
     assert!(!state.is_poisoned());
-    state.load_string("return 1 + 1").expect("compiles");
+    dellingr::Program::compile("return 1 + 1", None)
+        .and_then(|program| state.load(&program))
+        .expect("compiles");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(1))
         .expect("runs");

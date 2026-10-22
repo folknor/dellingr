@@ -102,7 +102,7 @@ impl State {
     /// it. A table `__index` is indexed with its own metamethods, a function is
     /// called as `__index(receiver, key)`, and a string is indexed again
     /// (bounded by the metamethod depth limit). Without a string metatable
-    /// (`State::empty`) or with a nil `__index`, indexing a string is the usual
+    /// (`State::raw`) or with a nil `__index`, indexing a string is the usual
     /// "attempt to index a string value" error.
     ///
     /// Receiver and key are rooted here across dispatch-time interning. The

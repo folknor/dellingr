@@ -17,7 +17,7 @@ use super::lexer::TokenStream;
 use super::token::Token;
 use super::token::TokenType;
 use crate::det_hash::{IndexMap, IndexSet};
-use crate::error::ParserFault;
+use crate::error::{InternalFault, ParserFault};
 use crate::instr::{ArgCount, Builtin, RetCount};
 use crate::limits::{MAX_FIXED_ARGS, MAX_LITERALS, MAX_LOCALS, MAX_SOURCE_BYTES, MAX_SYNTAX_DEPTH};
 
@@ -38,7 +38,7 @@ struct Parser<'a> {
     input: TokenStream<'a>,
     /// Every active function, outermost first; field access selects the last.
     funcs: FunctionStack<'a>,
-    source_name: Option<Arc<str>>,
+    source_name: Option<Arc<[u8]>>,
     /// Current nesting depth across recursive parser entry points.
     syntax_depth: u32,
 }
@@ -71,15 +71,10 @@ struct LoopContext {
     break_closes: Vec<usize>,
 }
 
-/// Parses Lua source code into a `Bytecode`.
-pub(super) fn parse_str(source: &str) -> Result<Bytecode> {
-    parse_str_named(source, None)
-}
-
-/// Parses Lua source code into a `Bytecode` with an optional source name.
+/// Parses Lua source bytes into an unfinalized `Bytecode` tree; the compiler's
+/// `compile` finalizes it.
 #[hotpath::measure]
-pub(super) fn parse_str_named(source: &str, source_name: Option<String>) -> Result<Bytecode> {
-    let source_name = source_name.map(Arc::<str>::from);
+pub(super) fn parse(source: &[u8], source_name: Option<Arc<[u8]>>) -> Result<Bytecode> {
     if source.len() > MAX_SOURCE_BYTES {
         return Err(Error::without_location(ErrorKind::SourceSizeExceeded {
             size: source.len(),
@@ -97,6 +92,13 @@ pub(super) fn parse_str_named(source: &str, source_name: Option<String>) -> Resu
     parser
         .parse_all()
         .map_err(|error| error.with_source_name(source_name))
+}
+
+/// Pre-finalize parser output for unit tests that inspect what `finalize`
+/// strips or rewrites.
+#[cfg(test)]
+pub(super) fn parse_unfinalized(source: &str) -> Result<Bytecode> {
+    parse(source.as_bytes(), None)
 }
 
 impl<'a> Parser<'a> {
@@ -157,7 +159,13 @@ impl<'a> Parser<'a> {
     }
 
     fn internal_error(&self, fault: ParserFault) -> Error {
-        self.error_here(ErrorKind::InternalError(fault.into_message().to_owned()))
+        let pos = self.input.pos();
+        self.internal_error_at(fault, pos)
+    }
+
+    fn internal_error_at(&self, fault: ParserFault, pos: usize) -> Error {
+        let (line, column) = self.input.line_and_column(pos);
+        Error::internal_fault(InternalFault::Parser(fault)).with_location(line, column)
     }
 
     fn checked_fixed_arg_count(&self, explicit: usize, implicit: usize) -> Result<u8> {
@@ -209,30 +217,12 @@ impl<'a> Parser<'a> {
         let error_kind = if token.typ == TokenType::EndOfFile {
             SyntaxError::UnexpectedEof
         } else {
-            let got = self.describe_token(&token);
-            let exp = Self::describe_token_type(expected);
-            SyntaxError::expected_token(exp, got)
+            SyntaxError::ExpectedToken {
+                expected: expected.spelling(),
+                found: self.input.source_bytes(token.range()).to_vec(),
+            }
         };
         self.error_at(error_kind, token.start)
-    }
-
-    /// Returns a human-readable description of the given token.
-    fn describe_token(&self, token: &Token) -> String {
-        match token.typ {
-            TokenType::Identifier | TokenType::LiteralNumber | TokenType::LiteralString => {
-                let text = self
-                    .input
-                    .substring(token.start..token.start + token.len as usize);
-                format!("'{text}'")
-            }
-            TokenType::EndOfFile => "<eof>".to_string(),
-            other => format!("'{}'", Self::describe_token_type(other)),
-        }
-    }
-
-    /// Returns the display name for a TokenType.
-    fn describe_token_type(typ: TokenType) -> &'static str {
-        typ.spelling()
     }
 
     /// Pulls a token off the input and checks it against `expected`.
@@ -249,8 +239,7 @@ impl<'a> Parser<'a> {
     /// Expects an identifier token and returns the identifier as a string.
     fn expect_identifier(&mut self) -> Result<&'a str> {
         let token = self.expect(TokenType::Identifier)?;
-        let name = self.get_text(token);
-        Ok(name)
+        self.get_text(token)
     }
 
     /// Expects an identifier and returns the id of its string literal.
@@ -307,10 +296,7 @@ impl<'a> Parser<'a> {
         use super::lexer::LiteralStringContents;
 
         if tok.typ != TokenType::LiteralString || tok.len < 2 {
-            return Err(self.error_at(
-                ErrorKind::InternalError(ParserFault::InvalidStringToken.into_message().to_owned()),
-                tok.start,
-            ));
+            return Err(self.internal_error_at(ParserFault::InvalidStringToken, tok.start));
         }
 
         match self.input.take_literal_string_contents(tok.start) {
@@ -319,19 +305,16 @@ impl<'a> Parser<'a> {
             Some(LiteralStringContents::StringSizeExceeded { size, limit }) => {
                 Err(self.error_here(ErrorKind::StringSizeExceeded { size, limit }))
             }
-            None => Err(self.error_at(
-                ErrorKind::InternalError(
-                    ParserFault::MissingStringContents.into_message().to_owned(),
-                ),
-                tok.start,
-            )),
+            None => Err(self.internal_error_at(ParserFault::MissingStringContents, tok.start)),
         }
     }
 
-    /// Gets the original source code contained by a token.
-    #[must_use]
-    fn get_text(&self, token: Token) -> &'a str {
-        self.input.substring(token.range())
+    /// The source text of an identifier or numeral token. The byte lexer only
+    /// builds those tokens from ASCII, so the conversion cannot fail on lexer
+    /// output; a failure is a lexer bug reported as an internal error.
+    fn get_text(&self, token: Token) -> Result<&'a str> {
+        std::str::from_utf8(self.input.source_bytes(token.range()))
+            .map_err(|_| self.internal_error_at(ParserFault::TokenTextNotUtf8, token.start))
     }
 
     /// Starts a block at the next available local slot.

@@ -14,7 +14,11 @@ fn churn(state: &mut State) -> dellingr::Result<u8> {
     // must remain present even though their backing allocation may move.
     state.set_top(2048)?;
     state.set_top(0)?;
-    state.load_string("local function many() return 7, 8 end; return {many()}, many()")?;
+    dellingr::Program::compile(
+        "local function many() return 7, 8 end; return {many()}, many()",
+        None,
+    )
+    .and_then(|program| state.load(&program))?;
     state.call(ArgCount::Fixed(0), RetCount::Fixed(0))?;
     state.push_number(41.0)?;
     state.push_number(42.0)?;
@@ -22,7 +26,9 @@ fn churn(state: &mut State) -> dellingr::Result<u8> {
 }
 
 fn run(state: &mut State, source: &str) {
-    state.load_string(source).unwrap();
+    dellingr::Program::compile(source, None)
+        .and_then(|program| state.load(&program))
+        .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
     assert_eq!(state.get_top(), 0);
 }
@@ -80,7 +86,9 @@ fn failed_pending_bases_do_not_survive_their_frame() {
         "local t = {1, error('stop')}",
         "local function f() local t = {error('stop')} end; local t = {f()}",
     ] {
-        state.load_string(source).unwrap();
+        dellingr::Program::compile(source, None)
+            .and_then(|program| state.load(&program))
+            .unwrap();
         assert!(state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).is_err());
         state.set_top(0).unwrap();
         run(

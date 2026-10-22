@@ -53,7 +53,7 @@ fn write_function(f: &mut fmt::Formatter<'_>, bc: &Bytecode, path: &mut String) 
     }
     f.write_str(" source=")?;
     match &bc.source {
-        Some(source) => write_quoted(f, source.as_bytes())?,
+        Some(source) => write_quoted(f, source)?,
         None => f.write_str("-")?,
     }
     writeln!(
@@ -330,12 +330,11 @@ mod tests {
 
     #[test]
     fn listing_quotes_metadata_and_nests_children() {
-        let program = crate::Engine::new()
-            .compile_named(
-                "local t = {}\nfunction f(a, ...) return function() return a end end\nprint(answer)",
-                "evil\nfunction main",
-            )
-            .expect("source should compile");
+        let program = crate::Program::compile(
+            "local t = {}\nfunction f(a, ...) return function() return a end end\nprint(answer)",
+            Some(b"evil\nfunction main".as_slice()),
+        )
+        .expect("source should compile");
         let text = program.disassemble().to_string();
         assert!(text.starts_with("function main name=- source=\"evil\\nfunction main\""));
         assert!(text.contains("\nfunction main/0 "));

@@ -54,9 +54,12 @@ fn unregistered_function_path_in_closed_upvalue_is_rendered() {
         .push_rust_fn(unregistered)
         .expect("callback fits on the stack");
     state.set_global("seed").expect("callback is installed");
-    state
-        .load_string("do local callback = seed; root = function() return callback end end")
-        .expect("closure source compiles");
+    dellingr::Program::compile(
+        "do local callback = seed; root = function() return callback end end",
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .expect("closure source compiles");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect("closure is created");

@@ -23,10 +23,12 @@ mod table_ops;
 pub use anchor::Anchor;
 pub use lua_val::LuaType;
 pub use lua_val::RustFunc;
+pub(crate) use lua_val::number_to_string;
 #[cfg(feature = "snapshot")]
 pub use save_state::{
     LoadError, SaveDiagnostics, SaveError, SaveState, SnapshotError, TableLoadLocation,
 };
+pub(crate) use table_ops::TostringRendering;
 
 use crate::det_hash::IndexMap;
 #[cfg(feature = "snapshot")]
@@ -36,7 +38,6 @@ use std::sync::Arc;
 
 use super::Instr;
 use super::Result;
-use super::compiler;
 use super::compiler::Bytecode;
 use super::cost_meter::{CostMeter, CostState};
 use super::error::Error;
@@ -201,7 +202,7 @@ pub struct State {
     /// The metatable shared by every string, as in reference Lua. Built by
     /// `open_libs` with `__index` = the string library table it created, so
     /// string indexing (`s:upper()`) never consults the global `string`.
-    /// `None` in a `State::empty` that never opened the libraries. Not a
+    /// `None` in a `State::raw` that never opened the libraries. Not a
     /// global: `with_restricted_env` leaves it alone. A GC root.
     pub(super) string_metatable: Option<ObjectPtr>,
     /// `(shape version, slot)` of `__index` in `string_metatable`, recorded
@@ -371,15 +372,19 @@ impl State {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// struct MyCallbacks { output: Vec<String> }
+    /// ```
+    /// use dellingr::{HostCallbacks, State};
+    ///
+    /// struct MyCallbacks {
+    ///     output: Vec<Vec<u8>>,
+    /// }
     /// impl HostCallbacks for MyCallbacks {
-    ///     fn on_print(&mut self, _source: Option<&str>, _line: u32, message: &str) {
-    ///         self.output.push(message.to_string());
+    ///     fn on_print(&mut self, _source: Option<&[u8]>, _line: u32, message: &[u8]) {
+    ///         self.output.push(message.to_vec());
     ///     }
     /// }
     ///
-    /// let mut state = State::with_callbacks(Box::new(MyCallbacks { output: vec![] }));
+    /// let state = State::with_callbacks(Box::new(MyCallbacks { output: vec![] }));
     /// ```
     pub fn with_callbacks(callbacks: Box<dyn HostCallbacks>) -> Self {
         Self::with_callbacks_and_policy(callbacks, GcPolicy::default())
@@ -429,7 +434,7 @@ impl State {
     }
 
     fn with_callbacks_and_policy(callbacks: Box<dyn HostCallbacks>, policy: GcPolicy) -> Self {
-        let mut me = Self::empty_with_callbacks_and_gc_policy(callbacks, policy);
+        let mut me = Self::raw_with_callbacks_and_gc_policy(callbacks, policy);
         me.open_libs()
             .expect("standard library initialization starts with an empty value stack");
         me
@@ -480,19 +485,19 @@ impl State {
         self.env_baselines = baselines;
     }
 
-    /// Creates a new state without opening any of the standard libs.
-    /// The global namespace of this state is entirely empty. This corresponds
-    /// to the `lua_newstate' function in the C API.
-    pub fn empty() -> Self {
-        Self::empty_with_callbacks(Box::new(DefaultCallbacks))
+    /// Creates a raw state, without opening any of the standard libraries:
+    /// its global namespace is entirely empty, as with `lua_newstate` in the
+    /// reference C API. [`State::open_libs`] installs them later if wanted.
+    pub fn raw() -> Self {
+        Self::raw_with_callbacks(Box::new(DefaultCallbacks))
     }
 
-    /// Creates an empty state with custom callbacks.
-    pub(crate) fn empty_with_callbacks(callbacks: Box<dyn HostCallbacks>) -> Self {
-        Self::empty_with_callbacks_and_gc_policy(callbacks, GcPolicy::default())
+    /// Creates a raw state (see [`State::raw`]) with custom host callbacks.
+    pub fn raw_with_callbacks(callbacks: Box<dyn HostCallbacks>) -> Self {
+        Self::raw_with_callbacks_and_gc_policy(callbacks, GcPolicy::default())
     }
 
-    fn empty_with_callbacks_and_gc_policy(
+    fn raw_with_callbacks_and_gc_policy(
         callbacks: Box<dyn HostCallbacks>,
         gc_policy: GcPolicy,
     ) -> Self {
@@ -954,8 +959,8 @@ impl State {
     // ========================================================================
 
     /// Called by the built-in `print()` function.
-    /// Routes output through host callbacks with source context.
-    pub(crate) fn host_print(&mut self, message: &str) {
+    /// Routes output, byte-exact, through host callbacks with source context.
+    pub(crate) fn host_print(&mut self, message: &[u8]) {
         // Get current line from call stack (if available)
         let line = self
             .call_stack
@@ -987,8 +992,9 @@ impl State {
         }
     }
 
-    /// Returns the active Lua frame source name, or `None` outside execution.
-    pub fn current_source(&self) -> Option<&str> {
+    /// Returns the active Lua frame's chunk name, byte-exact, or `None`
+    /// outside execution or in an unnamed chunk.
+    pub fn current_source(&self) -> Option<&[u8]> {
         self.call_stack
             .last()
             .and_then(|info| info.bytecode.source.as_deref())
@@ -1099,9 +1105,7 @@ impl State {
             SaveError::DuplicateFunctionRegistration { id } => {
                 Error::without_location(ErrorKind::DuplicateFunctionRegistration { id })
             }
-            other => Error::internal_fault(super::error::InternalFault::SaveStateFailure(
-                other.to_string(),
-            )),
+            other => Error::internal_fault(super::error::InternalFault::Registration(other)),
         }
     }
 
@@ -1416,7 +1420,7 @@ mod runtime_tests {
 
     #[test]
     fn closures_of_one_bytecode_share_runtime_bundle() {
-        let mut state = State::empty();
+        let mut state = State::raw();
         let bytecode = Arc::new(Bytecode {
             string_literals: vec![b"field".to_vec()],
             ..Bytecode::default()
@@ -1442,12 +1446,13 @@ mod runtime_tests {
     #[test]
     fn warming_one_factory_closure_populates_the_shared_slots() {
         let mut state = State::new();
-        state
-            .load_string(
-                "function make() return function(t) return t.v end end \
+        crate::Program::compile(
+            "function make() return function(t) return t.v end end \
                  r1 = make() r2 = make() warmed = r1({ v = 3 })",
-            )
-            .expect("factory source compiles");
+            None,
+        )
+        .and_then(|program| state.load(&program))
+        .expect("factory source compiles");
         state
             .call(ArgCount::Fixed(0), RetCount::Fixed(0))
             .expect("factory source runs");
@@ -1476,7 +1481,7 @@ mod runtime_tests {
 
     #[test]
     fn runtime_cache_sweep_is_state_reachability_based() {
-        let mut state = State::empty();
+        let mut state = State::raw();
         state.gc_disable_auto();
         let bytecode = Arc::new(Bytecode {
             string_literals: vec![b"temporary".to_vec()],
@@ -1498,7 +1503,7 @@ mod runtime_tests {
 
     #[test]
     fn live_parent_retains_nested_runtime_entry() {
-        let mut state = State::empty();
+        let mut state = State::raw();
         state.gc_disable_auto();
         let child = Arc::new(Bytecode::default());
         let parent = Arc::new(Bytecode {
@@ -1553,12 +1558,13 @@ mod snapshot_env_alias_tests {
             Ok::<(), Infallible>(())
         })
         .expect("aliased environment loads");
-        loaded
-            .load_string(
-                "if math ~= string then error('builtin alias changed') end; \
+        crate::Program::compile(
+            "if math ~= string then error('builtin alias changed') end; \
                  if math.match == nil then error('last token did not resolve') end",
-            )
-            .expect("alias check compiles");
+            None,
+        )
+        .and_then(|program| loaded.load(&program))
+        .expect("alias check compiles");
         loaded
             .call(ArgCount::Fixed(0), RetCount::Fixed(0))
             .expect("alias check runs");

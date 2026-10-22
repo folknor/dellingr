@@ -2,7 +2,9 @@ use dellingr::{ArgCount, RetCount, State};
 
 fn run_number(code: &str) -> f64 {
     let mut state = State::new();
-    state.load_string(code).unwrap();
+    dellingr::Program::compile(code, None)
+        .and_then(|program| state.load(&program))
+        .unwrap();
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(1))
         .unwrap_or_else(|e| panic!("Error running: {code}\n{e}"));

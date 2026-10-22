@@ -10,7 +10,7 @@ use dellingr::{ArgCount, HostCallbacks, LuaType, RetCount, State};
 struct ErrorCounter(Arc<Mutex<usize>>);
 
 impl HostCallbacks for ErrorCounter {
-    fn on_print(&mut self, _source: Option<&str>, _line: u32, _message: &str) {}
+    fn on_print(&mut self, _source: Option<&[u8]>, _line: u32, _message: &[u8]) {}
 
     fn on_error(&mut self, _error: &Error) {
         *self.0.lock().expect("error counter mutex") += 1;
@@ -18,9 +18,7 @@ impl HostCallbacks for ErrorCounter {
 }
 
 fn boom_fn(_state: &mut State) -> dellingr::Result<u8> {
-    Err(Error::without_location(ErrorKind::InternalError(
-        "boom".to_string(),
-    )))
+    Err(Error::without_location(ErrorKind::HostError("boom".into())))
 }
 
 #[test]
@@ -44,7 +42,9 @@ fn lua_reached_rustfn_error_notifies_on_error_once() {
     let mut state = State::with_callbacks(Box::new(ErrorCounter(Arc::clone(&counter))));
     state.push_rust_fn(boom_fn).unwrap();
     state.set_global("boom").unwrap();
-    state.load_string("return boom()").unwrap();
+    dellingr::Program::compile("return boom()", None)
+        .and_then(|program| state.load(&program))
+        .unwrap();
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect_err("lua-reached rust fn errors");
@@ -125,15 +125,17 @@ fn generic_for_rust_iterator_keeps_its_topmost_reported_result() {
         .push_rust_fn(iterator_with_256_visible_values)
         .unwrap();
     state.set_global("overfull_iter").unwrap();
-    state
-        .load_string("for value in overfull_iter do return value end")
+    dellingr::Program::compile("for value in overfull_iter do return value end", None)
+        .and_then(|program| state.load(&program))
         .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
     assert_eq!(state.get_top(), 1);
     assert_eq!(state.to_number(1).unwrap(), 42.0);
 
     state.pop(1).unwrap();
-    state.load_string("return 7").unwrap();
+    dellingr::Program::compile("return 7", None)
+        .and_then(|program| state.load(&program))
+        .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
     assert_eq!(state.to_number(1).unwrap(), 7.0);
 }
@@ -146,8 +148,8 @@ fn rustfn_error_restores_stack_bottom() {
     // Register a Rust function that returns an error.
     state
         .push_rust_fn(|_state| {
-            Err(Error::without_location(ErrorKind::InternalError(
-                "intentional error".to_string(),
+            Err(Error::without_location(ErrorKind::HostError(
+                "intentional error".into(),
             )))
         })
         .unwrap();
@@ -182,8 +184,8 @@ fn stack_operations_after_rustfn_error() {
     // Register a Rust function that returns an error.
     state
         .push_rust_fn(|_state| {
-            Err(Error::without_location(ErrorKind::InternalError(
-                "intentional error".to_string(),
+            Err(Error::without_location(ErrorKind::HostError(
+                "intentional error".into(),
             )))
         })
         .unwrap();
@@ -221,8 +223,8 @@ fn rustfn_error_with_arguments_clears_call_frame() {
             state
                 .push_string("callback temporary")
                 .expect("short test string fits");
-            Err(Error::without_location(ErrorKind::InternalError(
-                "argument callback failed".to_string(),
+            Err(Error::without_location(ErrorKind::HostError(
+                "argument callback failed".into(),
             )))
         })
         .unwrap();
@@ -248,9 +250,8 @@ fn lua_error_clears_frame_above_host_stack() {
         .expect("short test string fits");
     let top_before = state.get_top();
 
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
             local function explode(a, b)
                 local values = a .. b
                 local function capture_values()
@@ -261,8 +262,10 @@ fn lua_error_clears_frame_above_host_stack() {
 
             return explode("alpha", "beta")
         "#,
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
 
     let err = state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
@@ -273,7 +276,9 @@ fn lua_error_clears_frame_above_host_stack() {
     assert_eq!(state.to_number(1).unwrap(), 7.0);
     assert_eq!(state.to_string(2).unwrap(), "host sentinel");
 
-    state.load_string("return 99").unwrap();
+    dellingr::Program::compile("return 99", None)
+        .and_then(|program| state.load(&program))
+        .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
     assert_eq!(state.get_top(), top_before + 1);
     assert_eq!(state.to_number(-1).unwrap(), 99.0);
@@ -288,9 +293,8 @@ fn non_callable_dynamic_call_error_clears_call_frame() {
         .expect("short test string fits");
     let top_before = state.get_top();
 
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
             local function many()
                 return "c", "d"
             end
@@ -298,8 +302,10 @@ fn non_callable_dynamic_call_error_clears_call_frame() {
             local not_a_function = 17
             return not_a_function("a", "b", many())
         "#,
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
 
     let result = state.call(ArgCount::Fixed(0), RetCount::Fixed(0));
     assert!(result.is_err(), "Expected non-callable value error");
@@ -316,8 +322,8 @@ fn multiple_rustfn_errors() {
     // Register error function
     state
         .push_rust_fn(|_state| {
-            Err(Error::without_location(ErrorKind::InternalError(
-                "error".to_string(),
+            Err(Error::without_location(ErrorKind::HostError(
+                "error".into(),
             )))
         })
         .unwrap();
@@ -357,8 +363,8 @@ fn nested_dynamic_callback_error_clears_all_call_frames() {
             state
                 .push_string("callback temporary")
                 .expect("short test string fits");
-            Err(Error::without_location(ErrorKind::InternalError(
-                "nested dynamic callback failed".to_string(),
+            Err(Error::without_location(ErrorKind::HostError(
+                "nested dynamic callback failed".into(),
             )))
         })
         .unwrap();
@@ -369,9 +375,8 @@ fn nested_dynamic_callback_error_clears_all_call_frames() {
         .expect("short test string fits");
     let top_before = state.get_top();
 
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
             local function many(...)
                 return "m1", "m2", ...
             end
@@ -386,8 +391,10 @@ fn nested_dynamic_callback_error_clears_all_call_frames() {
 
             return outer("a", "b")
         "#,
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
 
     let err = state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
@@ -416,9 +423,8 @@ fn rustfn_called_inside_dynamic_arg_sees_only_its_arguments() {
         .unwrap();
     state.set_global("arg_count").unwrap();
 
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
         local function test(name, condition)
             return condition
         end
@@ -430,8 +436,10 @@ fn rustfn_called_inside_dynamic_arg_sees_only_its_arguments() {
             return arg_count("a", "b", "c")
         end)())
     "#,
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
 
     assert_eq!(state.to_number(-1).unwrap(), 3.0);
@@ -459,9 +467,8 @@ fn rustfn_table_field_called_inside_dynamic_arg_sees_only_its_arguments() {
     state.set_table_raw(-3).unwrap();
     state.pop(1).unwrap();
 
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
         local function test(name, condition)
             if not condition then
                 error("Test failed: " .. name)
@@ -474,7 +481,9 @@ fn rustfn_table_field_called_inside_dynamic_arg_sees_only_its_arguments() {
             return string.arg_probe("hello", "l", "L") == "ok"
         end)())
     "#,
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
 }

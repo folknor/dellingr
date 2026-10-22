@@ -58,8 +58,10 @@ impl TokenType {
         Self::While,
     ];
 
-    pub(super) fn keyword_match(s: &str) -> Self {
-        match Self::KEYWORDS.binary_search_by(|token_type| token_type.spelling().cmp(s)) {
+    pub(super) fn keyword_match(word: &[u8]) -> Self {
+        match Self::KEYWORDS
+            .binary_search_by(|token_type| token_type.spelling().as_bytes().cmp(word))
+        {
             Ok(index) => Self::KEYWORDS[index],
             Err(_) => Self::Identifier,
         }

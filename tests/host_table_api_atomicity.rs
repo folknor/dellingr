@@ -83,7 +83,9 @@ fn table_next_keeps_an_invalid_key_for_the_host() {
 #[test]
 fn table_remove_at_rejects_positions_outside_the_sequence() {
     let mut state = State::new();
-    state.load_string("return {10, 20, [50] = 'far'}").unwrap();
+    dellingr::Program::compile("return {10, 20, [50] = 'far'}", None)
+        .and_then(|program| state.load(&program))
+        .unwrap();
     state
         .call(dellingr::ArgCount::Fixed(0), dellingr::RetCount::Fixed(1))
         .unwrap();
@@ -117,7 +119,9 @@ fn table_remove_at_accepts_zero_on_an_empty_table() {
 #[test]
 fn raw_len_reports_bad_indices_and_lengthless_values() {
     let mut state = State::new();
-    state.load_string("return {1, 2, 3}").unwrap();
+    dellingr::Program::compile("return {1, 2, 3}", None)
+        .and_then(|program| state.load(&program))
+        .unwrap();
     state
         .call(dellingr::ArgCount::Fixed(0), dellingr::RetCount::Fixed(1))
         .unwrap();
@@ -140,11 +144,12 @@ fn raw_len_reports_bad_indices_and_lengthless_values() {
 fn get_table_preserves_the_key_on_dispatch_preflight_failures() {
     for handler in ["5", "t", "function() return 1 end"] {
         let mut state = State::new();
-        state
-            .load_string(format!(
-                "local t = {{}}; setmetatable(t, {{__index = {handler}}}); return t"
-            ))
-            .unwrap();
+        dellingr::Program::compile(
+            format!("local t = {{}}; setmetatable(t, {{__index = {handler}}}); return t"),
+            None,
+        )
+        .and_then(|program| state.load(&program))
+        .unwrap();
         state
             .call(dellingr::ArgCount::Fixed(0), dellingr::RetCount::Fixed(1))
             .unwrap();
@@ -174,9 +179,12 @@ fn get_table_preserves_the_key_on_dispatch_preflight_failures() {
 #[test]
 fn get_table_still_consumes_the_key_when_a_handler_errors() {
     let mut state = State::new();
-    state
-        .load_string("return setmetatable({}, {__index = function() error('handler') end})")
-        .unwrap();
+    dellingr::Program::compile(
+        "return setmetatable({}, {__index = function() error('handler') end})",
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     state
         .call(dellingr::ArgCount::Fixed(0), dellingr::RetCount::Fixed(1))
         .unwrap();
@@ -188,7 +196,9 @@ fn get_table_still_consumes_the_key_when_a_handler_errors() {
 #[test]
 fn raw_reads_replace_the_key_even_at_the_stack_cap() {
     let mut state = State::new();
-    state.load_string("return {42}").unwrap();
+    dellingr::Program::compile("return {42}", None)
+        .and_then(|program| state.load(&program))
+        .unwrap();
     state
         .call(dellingr::ArgCount::Fixed(0), dellingr::RetCount::Fixed(1))
         .unwrap();

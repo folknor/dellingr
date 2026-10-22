@@ -94,9 +94,8 @@ fn golden_fixture_round_trips() {
     })
     .expect("fixture loads");
 
-    loaded
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
             result = captured()
                 .. "|" .. tostring(cyclic.self == cyclic)
                 .. "|" .. tostring(cyclic.other == keyed)
@@ -106,8 +105,10 @@ fn golden_fixture_round_trips() {
                 .. "|" .. nested.inner.deep.leaf
                 .. "|" .. ordered.extra
         "#,
-        )
-        .expect("probe compiles");
+        None,
+    )
+    .and_then(|program| loaded.load(&program))
+    .expect("probe compiles");
     loaded
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect("probe runs");

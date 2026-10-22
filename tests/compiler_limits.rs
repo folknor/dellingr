@@ -1,7 +1,7 @@
 //! Regression tests for compiler limits that must fail gracefully.
 
 use dellingr::error::{ErrorKind, SyntaxError};
-use dellingr::{ArgCount, Engine, RetCount, State};
+use dellingr::{ArgCount, Program, RetCount, State};
 
 fn fixed_args(count: usize) -> String {
     std::iter::repeat_n("1", count)
@@ -10,8 +10,8 @@ fn fixed_args(count: usize) -> String {
 }
 
 fn expect_syntax_error(code: &str, expected: fn(&SyntaxError) -> bool) {
-    let err = State::new()
-        .load_string(code)
+    let err = dellingr::Program::compile(code, None)
+        .and_then(|program| State::new().load(&program))
         .expect_err("source should not compile");
     match err.kind() {
         ErrorKind::SyntaxError(kind) if expected(kind) => {}
@@ -22,12 +22,15 @@ fn expect_syntax_error(code: &str, expected: fn(&SyntaxError) -> bool) {
 #[test]
 fn fixed_call_argument_limit_preserves_dynamic_calls() {
     let mut state = State::new();
-    state
-        .load_string(format!(
+    dellingr::Program::compile(
+        format!(
             "local f = function(...) return 1 end return f({})",
             fixed_args(254)
-        ))
-        .expect("254 fixed arguments should compile");
+        ),
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .expect("254 fixed arguments should compile");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(1))
         .expect("254 fixed arguments should run");
@@ -42,12 +45,15 @@ fn fixed_call_argument_limit_preserves_dynamic_calls() {
     );
 
     let mut state = State::new();
-    state
-        .load_string(format!(
+    dellingr::Program::compile(
+        format!(
             "local t = {{ m = function(self, ...) return 1 end }} return t:m({})",
             fixed_args(253)
-        ))
-        .expect("253 explicit method arguments should compile");
+        ),
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .expect("253 explicit method arguments should compile");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(1))
         .expect("253 explicit method arguments should run");
@@ -69,9 +75,12 @@ fn fixed_call_argument_limit_preserves_dynamic_calls() {
     );
 
     let mut state = State::new();
-    state
-        .load_string("local function f(...) return select('#', ...) end return f(1, ...)")
-        .expect("dynamic vararg tail should compile");
+    dellingr::Program::compile(
+        "local function f(...) return select('#', ...) end return f(1, ...)",
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .expect("dynamic vararg tail should compile");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(1))
         .expect("dynamic vararg tail should run");
@@ -88,12 +97,15 @@ fn parameter_limit_includes_method_self() {
         .collect::<Vec<_>>()
         .join(",");
     let mut state = State::new();
-    state
-        .load_string(format!(
+    dellingr::Program::compile(
+        format!(
             "local function f({params}) return p253, p254 end return f({})",
             fixed_args(254)
-        ))
-        .expect("255 parameters should compile");
+        ),
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .expect("255 parameters should compile");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(2))
         .expect("255-parameter function should run");
@@ -146,18 +158,17 @@ fn jumps_beyond_i16_are_rejected_before_execution() {
 fn set_field_sites_past_the_cache_capacity_use_the_uncached_path() {
     let assignments = "t.x = nil\n".repeat(255);
     let source = format!("local t = {{}}\n{assignments}");
-    State::new()
-        .load_string(&source)
+    dellingr::Program::compile(&source, None)
+        .and_then(|program| State::new().load(&program))
         .expect("255 field assignment sites should compile");
-    Engine::new()
-        .compile(&source)
-        .expect("Engine::compile should accept 255 field assignment sites");
+    Program::compile(&source, None)
+        .expect("Program::compile should accept 255 field assignment sites");
 
     let uncached = "t.x = 1\n".repeat(256);
     let source = format!("local t = {{}}\n{uncached}return t.x");
     let mut state = State::new();
-    state
-        .load_string(&source)
+    dellingr::Program::compile(&source, None)
+        .and_then(|program| state.load(&program))
         .expect("256 field assignment sites should compile with an uncached tail");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(1))
@@ -166,17 +177,16 @@ fn set_field_sites_past_the_cache_capacity_use_the_uncached_path() {
         state.to_number(-1).expect("field value should be numeric"),
         1.0
     );
-    Engine::new()
-        .compile(&source)
-        .expect("Engine::compile should accept uncached set-field sites");
+    Program::compile(&source, None)
+        .expect("Program::compile should accept uncached set-field sites");
 }
 
 #[test]
 fn table_constructors_flush_array_batches_without_changing_values() {
     let values = std::iter::repeat_n("1", 300).collect::<Vec<_>>().join(",");
     let mut state = State::new();
-    state
-        .load_string(format!("local t = {{{values}}} return #t, t[300]"))
+    dellingr::Program::compile(format!("local t = {{{values}}} return #t, t[300]"), None)
+        .and_then(|program| state.load(&program))
         .expect("300 array entries should compile");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(2))
@@ -189,11 +199,14 @@ fn table_constructors_flush_array_batches_without_changing_values() {
 
     let prefix = std::iter::repeat_n("1", 255).collect::<Vec<_>>().join(",");
     let mut state = State::new();
-    state
-        .load_string(format!(
+    dellingr::Program::compile(
+        format!(
             "local t = {{{prefix}, named = 2, [999] = 3, 4}} return t[255], t[256], t.named, t[999]"
-        ))
-        .expect("mixed fields after a batch boundary should compile");
+        ),
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .expect("mixed fields after a batch boundary should compile");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(4))
         .expect("mixed fields after a batch boundary should execute");
@@ -223,10 +236,9 @@ fn table_constructors_flush_array_batches_without_changing_values() {
 fn dynamic_table_tail_uses_the_batch_after_flushed_values() {
     let prefix = std::iter::repeat_n("1", 255).collect::<Vec<_>>().join(",");
     let mut state = State::new();
-    state
-        .load_string(format!(
+    dellingr::Program::compile(format!(
             "local function values() return 2, 3 end local t = {{{prefix}, values()}} return t[255], t[256], t[257]"
-        ))
+        ), None).and_then(|program| state.load(&program))
         .expect("dynamic tail after a flushed batch should compile");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(3))
@@ -256,8 +268,8 @@ fn literal_pools_and_wide_field_keys_execute() {
         .collect::<Vec<_>>()
         .join(",");
     let mut state = State::new();
-    state
-        .load_string(format!("local t = {{{numbers}}} return t[300]"))
+    dellingr::Program::compile(format!("local t = {{{numbers}}} return t[300]"), None)
+        .and_then(|program| state.load(&program))
         .expect("300 numeric literals should compile");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(1))
@@ -272,8 +284,8 @@ fn literal_pools_and_wide_field_keys_execute() {
         .collect::<Vec<_>>()
         .join(",");
     let mut state = State::new();
-    state
-        .load_string(format!("local t = {{{strings}}} return t[300]"))
+    dellingr::Program::compile(format!("local t = {{{strings}}} return t[300]"), None)
+        .and_then(|program| state.load(&program))
         .expect("300 string literals should compile");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(1))
@@ -288,8 +300,8 @@ fn literal_pools_and_wide_field_keys_execute() {
         .collect::<Vec<_>>()
         .join("\n");
     let mut state = State::new();
-    state
-        .load_string(format!("{globals}\nreturn g299"))
+    dellingr::Program::compile(format!("{globals}\nreturn g299"), None)
+        .and_then(|program| state.load(&program))
         .expect("wide global names should compile");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(1))
@@ -304,8 +316,8 @@ fn literal_pools_and_wide_field_keys_execute() {
         .collect::<Vec<_>>()
         .join("\n");
     let mut state = State::new();
-    state
-        .load_string(format!("local t = {{}}\n{fields}\nreturn t.f299"))
+    dellingr::Program::compile(format!("local t = {{}}\n{fields}\nreturn t.f299"), None)
+        .and_then(|program| state.load(&program))
         .expect("wide field names should compile");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(1))
@@ -332,11 +344,12 @@ fn uncached_slots_templates_and_wide_set_field_at_execute() {
         .collect::<Vec<_>>()
         .join("\n");
     let mut state = State::new();
-    state
-        .load_string(format!(
-            "{globals}\nlocal t = {{}}\n{fields}\n{global_reads}\n{field_reads}\nreturn r, q"
-        ))
-        .expect("uncached cache candidates should compile");
+    dellingr::Program::compile(
+        format!("{globals}\nlocal t = {{}}\n{fields}\n{global_reads}\n{field_reads}\nreturn r, q"),
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .expect("uncached cache candidates should compile");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(2))
         .expect("uncached cache candidates should run");
@@ -354,8 +367,7 @@ fn uncached_slots_templates_and_wide_set_field_at_execute() {
         .collect::<Vec<_>>()
         .join("\n");
     let mut state = State::new();
-    state
-        .load_string(format!("{prefix}\nlocal a, b = {{}}, {{}}\na.wide, b.wide = 1, 2\nlocal t = {{ one = 1, two = 2, three = 3, four = 4, five = 5 }}\nreturn a.wide, b.wide, t.five"))
+    dellingr::Program::compile(format!("{prefix}\nlocal a, b = {{}}, {{}}\na.wide, b.wide = 1, 2\nlocal t = {{ one = 1, two = 2, three = 3, four = 4, five = 5 }}\nreturn a.wide, b.wide, t.five"), None).and_then(|program| state.load(&program))
         .expect("wide template and SET_FIELD_AT keys should compile");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(3))
@@ -384,8 +396,8 @@ fn uncached_slots_templates_and_wide_set_field_at_execute() {
         .collect::<Vec<_>>()
         .join(",");
     let mut state = State::new();
-    state
-        .load_string(format!("local t = {{{named_fields}}} return t.f255"))
+    dellingr::Program::compile(format!("local t = {{{named_fields}}} return t.f255"), None)
+        .and_then(|program| state.load(&program))
         .expect("constructors beyond the template-entry cap should fall back");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(1))

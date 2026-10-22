@@ -204,7 +204,7 @@ impl RuntimeCaches {
 #[cfg(test)]
 mod tests {
     use super::RuntimeCaches;
-    use crate::compiler::parse_str;
+    use crate::compiler::compile;
     use crate::instr::Instr;
 
     #[test]
@@ -214,7 +214,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("; ");
         let source = format!("local t = {{}}; {source}");
-        let bc = parse_str(source).expect("source compiles");
+        let bc = compile(source, None).expect("source compiles");
         let calls: Vec<_> = bc
             .code
             .iter()

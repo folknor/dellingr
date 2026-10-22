@@ -40,8 +40,8 @@ pub(crate) const GOLDEN_FIXTURE: &str = "tests/fixtures/save_golden_current.bin"
 /// Run the golden program on a fresh standard State and save it.
 pub(crate) fn golden_bytes() -> Vec<u8> {
     let mut state = State::new();
-    state
-        .load_string(GOLDEN_PROGRAM)
+    dellingr::Program::compile(GOLDEN_PROGRAM, None)
+        .and_then(|program| state.load(&program))
         .expect("golden program compiles");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))

@@ -9,10 +9,7 @@ use std::sync::Arc;
 use super::frame::Frame;
 use super::lua_val::{RustFunc, Val};
 use super::object::{Upvalue, UpvalueRef};
-use super::{
-    Bytecode, CallInfo, Error, ErrorKind, MAX_CALL_DEPTH, Result, State, TypeError, compiler,
-};
-use crate::error::InternalFault;
+use super::{Bytecode, CallInfo, Error, ErrorKind, MAX_CALL_DEPTH, Result, State, TypeError};
 use crate::instr::{ArgCount, RetCount};
 use crate::limits::{MAX_METAMETHOD_DEPTH, MAX_NATIVE_CALL_DEPTH};
 
@@ -73,7 +70,9 @@ impl State {
         let num_args = match num_args {
             ArgCount::Fixed(num_args) => num_args,
             ArgCount::Dynamic => {
-                return Err(Error::internal_fault(InternalFault::CallDynamicArguments));
+                return Err(Error::without_location(
+                    ErrorKind::DynamicArgumentsUnsupported { api: "call" },
+                ));
             }
         };
         let idx = self.call_base(num_args)?;
@@ -464,30 +463,6 @@ impl State {
     fn truncate_call_frame(&mut self, call_base: usize, old_stack_bottom: usize) {
         self.stack.truncate(call_base);
         self.stack_bottom = old_stack_bottom;
-    }
-
-    /// Loads a string as a Lua chunk. This function uses `load` to load the
-    /// chunk in the string `s`.
-    #[hotpath::measure]
-    pub fn load_string(&mut self, s: impl AsRef<str>) -> Result<()> {
-        self.load_string_named(s, None)
-    }
-
-    /// Loads a string as a Lua chunk with an optional source name.
-    /// The source name is used in error messages and stack traces.
-    /// Use a filename for files, or an application-defined chunk name for
-    /// dynamically loaded code. Names exceeding
-    /// [`crate::limits::MAX_SOURCE_NAME_BYTES`] are rejected before parsing.
-    #[hotpath::measure]
-    pub fn load_string_named(
-        &mut self,
-        s: impl AsRef<str>,
-        source_name: Option<String>,
-    ) -> Result<()> {
-        self.check_poisoned()?;
-        let bytecode = compiler::parse_str_named(s, source_name)?;
-        self.push_chunk(Arc::new(bytecode))?;
-        Ok(())
     }
 
     /// Pops `n` values from the stack, concatenates them, and pushes the

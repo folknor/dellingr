@@ -272,13 +272,13 @@ fn validate_directive(state: &State, directive: &Directive) -> Result<()> {
 
 fn invalid_specification(state: &State, raw: &[u8]) -> Error {
     state.library_error(LibraryError::InvalidFormatSpecification {
-        directive: String::from_utf8_lossy(raw).into_owned(),
+        directive: raw.to_vec(),
     })
 }
 
 fn invalid_conversion_error(state: &State, raw: &[u8]) -> Error {
     state.library_error(LibraryError::InvalidFormatConversion {
-        directive: String::from_utf8_lossy(raw).into_owned(),
+        directive: raw.to_vec(),
     })
 }
 
@@ -344,11 +344,8 @@ fn format_argument(state: &mut State, argument: usize, directive: &Directive) ->
             Ok(format_float(number, directive, kind))
         }
         Conversion::String => {
-            let mut bytes = if state.typ(idx) == LuaType::String && !state.string_has_tostring() {
-                state.to_bytes(idx)?.to_vec()
-            } else {
-                state.bytes_with_tostring_meta_unguarded(idx)?
-            };
+            // Charged on the full rendering, before precision truncation.
+            let mut bytes = state.tostring_bytes_unguarded(idx)?;
             state.consume_cost(bytes.len() as u64)?;
             if directive.has_modifiers && bytes.contains(&0) {
                 return Err(format_arg_error(

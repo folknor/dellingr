@@ -5,7 +5,9 @@ use dellingr::{ArgCount, LuaType, RetCount, State};
 
 fn run_cost(source: &str) -> u64 {
     let mut state = State::new();
-    state.load_string(source).expect("test program compiles");
+    dellingr::Program::compile(source, None)
+        .and_then(|program| state.load(&program))
+        .expect("test program compiles");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect("test program runs");
@@ -15,7 +17,9 @@ fn run_cost(source: &str) -> u64 {
 fn run_with_budget(source: &str, budget: i64) -> (State, Error) {
     let mut state = State::new();
     state.set_cost_budget(budget);
-    state.load_string(source).expect("test program compiles");
+    dellingr::Program::compile(source, None)
+        .and_then(|program| state.load(&program))
+        .expect("test program compiles");
     let error = state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect_err("test program exhausts its budget");
@@ -49,9 +53,12 @@ fn gmatch_full_scan_is_linear_in_its_subject() {
     fn cost(words: usize) -> (u64, u64) {
         let subject = "a ".repeat(words);
         let mut state = State::new();
-        state
-            .load_string(format!("for _ in string.gmatch('{subject}', '%a+') do end"))
-            .expect("test program compiles");
+        dellingr::Program::compile(
+            format!("for _ in string.gmatch('{subject}', '%a+') do end"),
+            None,
+        )
+        .and_then(|program| state.load(&program))
+        .expect("test program compiles");
         state
             .call(ArgCount::Fixed(0), RetCount::Fixed(0))
             .expect("test program runs");
@@ -128,14 +135,17 @@ fn empty_find_and_match_charge_only_their_up_front_units() {
         ("return string.match('abc', '', 5)", "nil"),
     ] {
         let mut state = State::new();
-        state
-            .load_string(format!(
+        dellingr::Program::compile(
+            format!(
                 "local r = table.pack({}) local out = {{}} \
                  for i = 1, r.n do out[i] = tostring(r[i]) end \
                  result = table.concat(out, ' ')",
                 source.trim_start_matches("return ")
-            ))
-            .expect("test program compiles");
+            ),
+            None,
+        )
+        .and_then(|program| state.load(&program))
+        .expect("test program compiles");
         state
             .call(ArgCount::Fixed(0), RetCount::Fixed(0))
             .expect("test program runs");
@@ -148,15 +158,15 @@ fn empty_find_and_match_charge_only_their_up_front_units() {
 #[test]
 fn matcher_refusal_is_a_budget_error_at_the_exact_budget() {
     let mut state = State::new();
-    state
-        .load_string("iter = string.gmatch('aaaaaaaa', 'a*a*a*a*b')")
+    dellingr::Program::compile("iter = string.gmatch('aaaaaaaa', 'a*a*a*a*b')", None)
+        .and_then(|program| state.load(&program))
         .expect("iterator setup compiles");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect("iterator setup runs");
     state.set_cost_budget(17);
-    state
-        .load_string("return iter()")
+    dellingr::Program::compile("return iter()", None)
+        .and_then(|program| state.load(&program))
         .expect("iterator call compiles");
     let error = state
         .call(ArgCount::Fixed(0), RetCount::Fixed(1))
@@ -172,8 +182,8 @@ fn gsub_does_not_return_a_partial_result_and_keeps_callback_effects() {
         20,
     );
     assert!(matches!(error.kind(), ErrorKind::BudgetExceeded { .. }));
-    state
-        .load_string("return calls, result")
+    dellingr::Program::compile("return calls, result", None)
+        .and_then(|program| state.load(&program))
         .expect("query compiles");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(2))
@@ -185,15 +195,15 @@ fn gsub_does_not_return_a_partial_result_and_keeps_callback_effects() {
 #[test]
 fn gmatch_refusal_does_not_advance_the_iterator() {
     let mut state = State::new();
-    state
-        .load_string("iter = string.gmatch('one two', '%a+')")
+    dellingr::Program::compile("iter = string.gmatch('one two', '%a+')", None)
+        .and_then(|program| state.load(&program))
         .expect("iterator setup compiles");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect("iterator setup runs");
     state.set_cost_budget(0);
-    state
-        .load_string("return iter()")
+    dellingr::Program::compile("return iter()", None)
+        .and_then(|program| state.load(&program))
         .expect("iterator call compiles");
     let error = state
         .call(ArgCount::Fixed(0), RetCount::Fixed(1))
@@ -201,7 +211,9 @@ fn gmatch_refusal_does_not_advance_the_iterator() {
     assert!(matches!(error.kind(), ErrorKind::BudgetExceeded { .. }));
 
     state.set_cost_budget(1_000);
-    state.load_string("return iter()").expect("retry compiles");
+    dellingr::Program::compile("return iter()", None)
+        .and_then(|program| state.load(&program))
+        .expect("retry compiles");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(1))
         .expect("iterator retry runs");
@@ -216,34 +228,36 @@ fn gmatch_capture_refusal_does_not_advance_the_iterator() {
     let subject = "a".repeat(4096);
     let setup = format!("iter = string.gmatch('{subject}', '(%a+)')");
     let mut state = State::new();
-    state.load_string(&setup).expect("iterator setup compiles");
+    dellingr::Program::compile(&setup, None)
+        .and_then(|program| state.load(&program))
+        .expect("iterator setup compiles");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect("iterator setup runs");
-    state
-        .load_string("return iter()")
+    dellingr::Program::compile("return iter()", None)
+        .and_then(|program| state.load(&program))
         .expect("warm iterator call compiles");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(1))
         .expect("warm iterator call runs");
 
-    state
-        .load_string(&setup)
+    dellingr::Program::compile(&setup, None)
+        .and_then(|program| state.load(&program))
         .expect("fresh iterator setup compiles");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect("fresh iterator setup runs");
     state.set_cost_budget(1_000_000);
-    state
-        .load_string("return iter()")
+    dellingr::Program::compile("return iter()", None)
+        .and_then(|program| state.load(&program))
         .expect("cost measurement compiles");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(1))
         .expect("cost measurement runs");
     let successful_cost = state.cost_used();
 
-    state
-        .load_string(&setup)
+    dellingr::Program::compile(&setup, None)
+        .and_then(|program| state.load(&program))
         .expect("retry iterator setup compiles");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
@@ -251,8 +265,8 @@ fn gmatch_capture_refusal_does_not_advance_the_iterator() {
     state.set_cost_budget(
         i64::try_from(successful_cost - subject.len() as u64).expect("cost fits in a budget"),
     );
-    state
-        .load_string("return iter()")
+    dellingr::Program::compile("return iter()", None)
+        .and_then(|program| state.load(&program))
         .expect("refused iterator call compiles");
     let error = state
         .call(ArgCount::Fixed(0), RetCount::Fixed(1))
@@ -260,7 +274,9 @@ fn gmatch_capture_refusal_does_not_advance_the_iterator() {
     assert!(matches!(error.kind(), ErrorKind::BudgetExceeded { .. }));
 
     state.set_cost_budget(1_000_000);
-    state.load_string("return iter()").expect("retry compiles");
+    dellingr::Program::compile("return iter()", None)
+        .and_then(|program| state.load(&program))
+        .expect("retry compiles");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(1))
         .expect("retry runs");
@@ -273,15 +289,15 @@ fn gmatch_capture_refusal_does_not_advance_the_iterator() {
 #[test]
 fn malformed_gmatch_iterator_compiles_once() {
     let mut state = State::new();
-    state
-        .load_string("iter = string.gmatch('abc', '%')")
+    dellingr::Program::compile("iter = string.gmatch('abc', '%')", None)
+        .and_then(|program| state.load(&program))
         .expect("iterator setup compiles");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect("iterator setup runs");
     for _ in 0..2 {
-        state
-            .load_string("return iter()")
+        dellingr::Program::compile("return iter()", None)
+            .and_then(|program| state.load(&program))
             .expect("iterator call compiles");
         let error = state
             .call(ArgCount::Fixed(0), RetCount::Fixed(1))
@@ -296,17 +312,18 @@ fn malformed_gmatch_iterator_compiles_once() {
 #[test]
 fn find_match_and_gsub_share_one_compiled_pattern() {
     let mut state = State::new();
-    state
-        .load_string(
-            "local s = 'alpha beta gamma'
+    dellingr::Program::compile(
+        "local s = 'alpha beta gamma'
              for _ = 1, 50 do
                  string.find(s, '%a+')
                  string.match(s, '%a+')
                  string.gsub(s, '%a+', 'x')
              end
              for _ in string.gmatch(s, '%a+') do end",
-        )
-        .expect("test program compiles");
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .expect("test program compiles");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect("test program runs");
@@ -316,9 +333,8 @@ fn find_match_and_gsub_share_one_compiled_pattern() {
 #[test]
 fn gsub_keeps_its_pattern_across_collections_in_its_replacement() {
     let mut state = State::new();
-    state
-        .load_string(
-            "local junk
+    dellingr::Program::compile(
+        "local junk
              local out, n = string.gsub('a1b2c3d4e5f6', '(%a)(%d)',
                  function(a, d)
                      for i = 1, 200 do junk = {i, tostring(i)} end
@@ -326,8 +342,10 @@ fn gsub_keeps_its_pattern_across_collections_in_its_replacement() {
                      return inner
                  end)
              return out .. ':' .. n",
-        )
-        .expect("test program compiles");
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .expect("test program compiles");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(1))
         .expect("test program runs");
@@ -342,8 +360,8 @@ fn state_is_reusable_after_a_native_refusal() {
     let (mut state, error) = run_with_budget("return string.upper('abcdef')", 0);
     assert!(matches!(error.kind(), ErrorKind::BudgetExceeded { .. }));
     state.set_cost_budget(100);
-    state
-        .load_string("return string.upper('ok')")
+    dellingr::Program::compile("return string.upper('ok')", None)
+        .and_then(|program| state.load(&program))
         .expect("retry compiles");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(1))
@@ -355,29 +373,29 @@ fn state_is_reusable_after_a_native_refusal() {
 #[test]
 fn refusal_leaves_snapshot_state_quiescent() {
     let mut matcher_state = State::new();
-    matcher_state
-        .load_string("iter = string.gmatch('aaaa', 'a+')")
+    dellingr::Program::compile("iter = string.gmatch('aaaa', 'a+')", None)
+        .and_then(|program| matcher_state.load(&program))
         .expect("iterator setup compiles");
     matcher_state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect("iterator setup runs");
-    matcher_state
-        .load_string("return iter()")
+    dellingr::Program::compile("return iter()", None)
+        .and_then(|program| matcher_state.load(&program))
         .expect("warm iterator call compiles");
     // Discard the warm result: a retained return value would leave the stack
     // non-empty and fail quiescence for reasons unrelated to the refusal.
     matcher_state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect("warm iterator call runs");
-    matcher_state
-        .load_string("iter = string.gmatch('aaaa', 'a+')")
+    dellingr::Program::compile("iter = string.gmatch('aaaa', 'a+')", None)
+        .and_then(|program| matcher_state.load(&program))
         .expect("fresh iterator setup compiles");
     matcher_state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect("fresh iterator setup runs");
     matcher_state.set_cost_budget(0);
-    matcher_state
-        .load_string("return iter()")
+    dellingr::Program::compile("return iter()", None)
+        .and_then(|program| matcher_state.load(&program))
         .expect("refused iterator call compiles");
     let matcher_error = matcher_state
         .call(ArgCount::Fixed(0), RetCount::Fixed(1))
@@ -411,8 +429,8 @@ fn table_concat_cost_is_identical_with_or_without_a_budget() {
         "return table.concat({'a', false, 'bb'}, ',')",
     ] {
         let mut count_only = State::new();
-        count_only
-            .load_string(source)
+        dellingr::Program::compile(source, None)
+            .and_then(|program| count_only.load(&program))
             .expect("test program compiles");
         // Some cases in this list fail on an invalid element on purpose. The
         // outcome is irrelevant here; only the cost the two modes report is.
@@ -422,7 +440,9 @@ fn table_concat_cost_is_identical_with_or_without_a_budget() {
 
         let mut finite = State::new();
         finite.set_cost_budget(1_000_000);
-        finite.load_string(source).expect("test program compiles");
+        dellingr::Program::compile(source, None)
+            .and_then(|program| finite.load(&program))
+            .expect("test program compiles");
         match finite.call(ArgCount::Fixed(0), RetCount::Fixed(1)) {
             Ok(_) | Err(_) => {}
         }

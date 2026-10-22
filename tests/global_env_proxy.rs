@@ -4,7 +4,7 @@ use dellingr::{ArgCount, RetCount, State};
 
 fn run(source: &str) -> dellingr::Result<()> {
     let mut state = State::new();
-    state.load_string(source)?;
+    dellingr::Program::compile(source, None).and_then(|program| state.load(&program))?;
     state.call(ArgCount::Fixed(0), RetCount::Fixed(0))
 }
 

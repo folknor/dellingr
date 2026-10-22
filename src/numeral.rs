@@ -111,8 +111,8 @@ pub(crate) const fn is_lua_whitespace(byte: u8) -> bool {
 }
 
 /// Returns whether two adjacent newline characters form one Lua line ending.
-pub(crate) const fn is_newline_pair(first: char, second: char) -> bool {
-    matches!((first, second), ('\r', '\n') | ('\n', '\r'))
+pub(crate) const fn is_newline_pair(first: u8, second: u8) -> bool {
+    matches!((first, second), (b'\r', b'\n') | (b'\n', b'\r'))
 }
 
 fn parse_decimal(bytes: &[u8]) -> Option<f64> {

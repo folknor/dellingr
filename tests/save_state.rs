@@ -13,13 +13,18 @@ struct Capture {
 }
 
 impl HostCallbacks for Capture {
-    fn on_print(&mut self, _source: Option<&str>, _line: u32, message: &str) {
-        self.lines.lock().unwrap().push(message.to_string());
+    fn on_print(&mut self, _source: Option<&[u8]>, _line: u32, message: &[u8]) {
+        self.lines
+            .lock()
+            .unwrap()
+            .push(String::from_utf8(message.to_vec()).expect("test prints are UTF-8"));
     }
 }
 
 fn run(state: &mut State, source: &str) {
-    state.load_string(source).unwrap();
+    dellingr::Program::compile(source, None)
+        .and_then(|program| state.load(&program))
+        .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
 }
 
@@ -51,8 +56,8 @@ fn global_environment_preserves_non_string_key_identity_across_save_load() {
     let save = state.save_state().expect("state saves");
     let mut loaded =
         State::load_state(&save.bytes, Box::new(DefaultCallbacks), no_setup).expect("state loads");
-    loaded
-        .load_string("return _G[1], _G['1']")
+    dellingr::Program::compile("return _G[1], _G['1']", None)
+        .and_then(|program| loaded.load(&program))
         .expect("query compiles");
     loaded
         .call(ArgCount::Fixed(0), RetCount::Fixed(2))
@@ -231,15 +236,16 @@ fn state_is_quiescent_after_error_in_dynamic_call_args() {
     // or the State would fail quiescence validation and could not be
     // snapshotted.
     let mut state = State::new();
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
             local function f(...) return ... end
             local function g() return nil + 1 end
             return f(g())
         "#,
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect_err("g() errors mid-call");
@@ -251,14 +257,15 @@ fn state_is_quiescent_after_error_in_dynamic_call_args() {
 #[test]
 fn state_is_quiescent_after_error_in_vararg_frame() {
     let mut state = State::new();
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
             local function f(...) return nil + 1 end
             return f({ marker = 42 })
         "#,
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect_err("vararg frame must error");
@@ -270,14 +277,15 @@ fn state_is_quiescent_after_error_in_vararg_frame() {
 #[test]
 fn state_is_quiescent_after_error_in_table_sort_comparator() {
     let mut state = State::new();
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
             local t = { { v = 2 }, { v = 1 } }
             table.sort(t, function() return nil + 1 end)
         "#,
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect_err("sort comparator must error");
@@ -290,7 +298,8 @@ fn state_is_quiescent_after_error_in_table_sort_comparator() {
 fn state_is_quiescent_after_error_in_restricted_environment() {
     let mut state = State::new();
     let result = state.with_restricted_env(&[], |state| {
-        state.load_string("return nil + 1")?;
+        dellingr::Program::compile("return nil + 1", None)
+            .and_then(|program| state.load(&program))?;
         state.call(ArgCount::Fixed(0), RetCount::Fixed(0))
     });
     result
@@ -316,14 +325,15 @@ fn state_is_quiescent_after_error_in_table_constructor() {
     // Same guard for pending constructor bases: an error between
     // NewTableTracked and its SetList must not leak a base.
     let mut state = State::new();
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
             local function g() return nil + 1 end
             return {g()}
         "#,
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect_err("g() errors mid-constructor");
@@ -338,14 +348,15 @@ fn gmatch_closure_survives_save_load() {
     // function as an upvalue; persisting and restoring it must resolve that id
     // and resume iteration (L12 snapshot follow-up).
     let mut state = State::new();
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
             f = string.gmatch("a b c", "%w+")
             return f()
         "#,
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
     assert_eq!(state.to_string(-1).unwrap(), "a");
     state.pop(1).unwrap();
@@ -363,8 +374,8 @@ fn gmatch_last_match_end_survives_save_load() {
     // The saved iterator must remember the previous end, or resuming after
     // "abc" would incorrectly accept a trailing empty match.
     let mut state = State::new();
-    state
-        .load_string(r#"f = string.gmatch("abc", "%a*"); return f()"#)
+    dellingr::Program::compile(r#"f = string.gmatch("abc", "%a*"); return f()"#, None)
+        .and_then(|program| state.load(&program))
         .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
     assert_eq!(state.to_string(-1).unwrap(), "abc");
@@ -382,7 +393,9 @@ fn empty_gmatch_closure_survives_save_load() {
     // The empty-pattern gmatch path uses a different iterator id; it too must be
     // registered at library-open so its closure restores.
     let mut state = State::new();
-    state.load_string(r#"g = string.gmatch("ab", "")"#).unwrap();
+    dellingr::Program::compile(r#"g = string.gmatch("ab", "")"#, None)
+        .and_then(|program| state.load(&program))
+        .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
 
     let save = state.save_state().unwrap();
@@ -395,7 +408,7 @@ fn empty_gmatch_closure_survives_save_load() {
 
 #[test]
 fn empty_state_round_trip_stays_empty() {
-    let state = State::empty();
+    let state = State::raw();
     let save = state.save_state().unwrap();
     let mut loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), no_setup).unwrap();
 
@@ -436,9 +449,12 @@ fn pairs_iterator_round_trips_after_next_rebinding() {
     );
     let save = state.save_state().unwrap();
     let mut loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), no_setup).unwrap();
-    loaded
-        .load_string("for key, value in iter, iter_state, iter_key do result = value end")
-        .unwrap();
+    dellingr::Program::compile(
+        "for key, value in iter, iter_state, iter_key do result = value end",
+        None,
+    )
+    .and_then(|program| loaded.load(&program))
+    .unwrap();
     loaded.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
     loaded.get_global("result").unwrap();
     assert_eq!(loaded.to_number(-1).unwrap(), 7.0);
@@ -706,7 +722,8 @@ fn ordered_environment_replay_invalidates_setup_field_caches() {
     let mut loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), |state| {
         // Capture the canonical table in a setup closure, warm its field cache
         // at version 0 and retain the same closure across materialization.
-        state.load_string("local m = math return function() return m.floor end")?;
+        dellingr::Program::compile("local m = math return function() return m.floor end", None)
+            .and_then(|program| state.load(&program))?;
         state.call(ArgCount::Fixed(0), RetCount::Fixed(1))?;
         let anchor = state.anchor_function()?;
         state.call_anchor(&anchor, ArgCount::Fixed(0), RetCount::Fixed(1))?;
@@ -837,8 +854,8 @@ fn wide_literal_indices_and_uncached_slots_round_trip() {
     let saved = state.save_state().expect("wide bytecode should save");
     let mut loaded = State::load_state(&saved.bytes, Box::new(DefaultCallbacks), no_setup)
         .expect("wide bytecode should load");
-    loaded
-        .load_string("return answer")
+    dellingr::Program::compile("return answer", None)
+        .and_then(|program| loaded.load(&program))
         .expect("loaded state should accept a continuation");
     loaded
         .call(ArgCount::Fixed(0), RetCount::Fixed(1))
@@ -852,7 +869,9 @@ fn wide_literal_indices_and_uncached_slots_round_trip() {
 #[test]
 fn non_quiescent_save_errors() {
     let mut state = State::new();
-    state.load_string("x = 1").unwrap();
+    dellingr::Program::compile("x = 1", None)
+        .and_then(|program| state.load(&program))
+        .unwrap();
 
     assert_eq!(state.save_state().unwrap_err(), SaveError::NotQuiescent);
 }

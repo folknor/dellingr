@@ -1,7 +1,9 @@
 use dellingr::{ArgCount, RetCount, State};
 
 fn eval_one(state: &mut State, source: &str) {
-    state.load_string(source).unwrap();
+    dellingr::Program::compile(source, None)
+        .and_then(|program| state.load(&program))
+        .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
 }
 
@@ -22,7 +24,7 @@ fn host_tostring_bytes_preserve_the_value_and_exact_result() {
         &mut state,
         "return setmetatable({}, { __tostring = function() return '\\255\\0a' end })",
     );
-    assert_eq!(state.bytes_with_tostring_meta(-1).unwrap(), b"\xff\0a");
+    assert_eq!(state.tostring_bytes(-1).unwrap(), b"\xff\0a");
     assert_eq!(state.get_top(), 1);
     assert_eq!(state.typ(-1), dellingr::LuaType::Table);
     assert_eq!(state.to_string_with_meta(-1).unwrap(), "\u{fffd}\0a");
@@ -57,9 +59,12 @@ fn rust_functions_render_with_distinct_stable_identities() {
 fn rust_function_identity_survives_save_and_load() {
     use dellingr::DefaultCallbacks;
     let mut state = State::new();
-    state
-        .load_string("before = tostring(print); floor_before = tostring(math.floor)")
-        .unwrap();
+    dellingr::Program::compile(
+        "before = tostring(print); floor_before = tostring(math.floor)",
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
     let save = state.save_state().expect("state saves");
     let mut loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), |_| {
@@ -89,12 +94,13 @@ fn rust_function_identity_survives_save_and_load() {
 fn closure_literal_identity_survives_save_and_load() {
     use dellingr::DefaultCallbacks;
     let mut state = State::new();
-    state
-        .load_string(
-            "render = function() return string.format('%p', 'only_in_bytecode') end
+    dellingr::Program::compile(
+        "render = function() return string.format('%p', 'only_in_bytecode') end
              before = render()",
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
 
     let save = state.save_state().expect("state saves");

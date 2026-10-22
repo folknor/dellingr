@@ -18,7 +18,7 @@ fn global_type(state: &mut State, name: &str) -> LuaType {
 
 #[test]
 fn conflicting_preregistered_id_leaves_state_untouched() {
-    let mut state = State::empty();
+    let mut state = State::raw();
     // "string.find" is registered by the string library, which opens after
     // base and math; without the dry run those would already be installed.
     state
@@ -49,7 +49,7 @@ fn conflicting_preregistered_id_leaves_state_untouched() {
 
 #[test]
 fn conflicting_hidden_iterator_id_leaves_existing_environment_untouched() {
-    let mut state = State::empty();
+    let mut state = State::raw();
     state.push_number(42.0).unwrap();
     state.set_global("print").unwrap();
     state.push_string("preserved stack value").unwrap();
@@ -75,7 +75,7 @@ fn conflicting_hidden_iterator_id_leaves_existing_environment_untouched() {
 
 #[test]
 fn non_conflicting_preregistration_opens_normally() {
-    let mut state = State::empty();
+    let mut state = State::raw();
     state
         .register_rust_fn("host.print", host_print)
         .expect("fresh registry");

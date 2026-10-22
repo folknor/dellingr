@@ -4,10 +4,11 @@ use super::{check_any_named, check_type_named};
 use crate::LuaType;
 use crate::Result;
 use crate::State;
-use crate::error::{ArgDetail, ErrorKind, LibraryError, PrefixLocation};
+use crate::error::{ArgDetail, ErrorKind, ErrorValue, LibraryError, PrefixLocation};
 use crate::limits::{TONUMBER_BASE_MAX, TONUMBER_BASE_MIN};
 use crate::numeral::parse_lua_numeral;
 use crate::vm::MetaName;
+use crate::vm::TostringRendering;
 
 fn digit_value(byte: u8) -> Option<u32> {
     match byte {
@@ -157,25 +158,16 @@ pub(super) const GLOBAL_ENV_PROTECTION_FIELDS: &[(&str, bool)] =
 pub(super) const NON_BUILTIN_GLOBALS: &[(&str, crate::RustFunc)] = &[
     // Raises an error with the given message.
     ("error", |state| {
-        let message = if state.get_top() >= 1 {
-            // `ErrorKind::ScriptError::message` is a `String` (it is rendered
-            // through Display with a location prefix, so the host sees text
-            // either way), hence the lossy conversion. Size the converted text
-            // against the string cap first: each invalid chunk grows to a
-            // 3-byte U+FFFD, so an unchecked conversion could expand a capped
-            // byte string about threefold past the cap.
-            //
-            // A string message is the error value itself in reference Lua,
-            // never passed through `__tostring`, so it bypasses the shared
-            // string metatable's handler.
-            let raw = if state.typ(1) == LuaType::String {
-                state.to_bytes(1)?.to_vec()
-            } else {
-                state.bytes_with_tostring_meta_unguarded(1)?
-            };
-            State::lossy_utf8_checked(&raw)?
+        // The value is built before the level argument is validated, so a
+        // table's `__tostring` runs (and any error it raises wins) exactly as
+        // before the payload was typed. `error()` with no argument raises nil,
+        // as `error(nil)` does. `error_value` owns the rule that a string
+        // value bypasses `__tostring`; see `State::tostring_rendering` for
+        // the opposite rule `tostring` follows.
+        let value = if state.get_top() >= 1 {
+            state.error_value(1)?
         } else {
-            "(error raised with no message)".to_string()
+            ErrorValue::Nil
         };
         let prefix_location = if state.get_top() < 2 {
             PrefixLocation::Current
@@ -188,7 +180,7 @@ pub(super) const NON_BUILTIN_GLOBALS: &[(&str, crate::RustFunc)] = &[
             }
         };
         Err(state.error(ErrorKind::ScriptError {
-            message,
+            value,
             prefix: prefix_location,
         }))
     }),
@@ -211,30 +203,17 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
     // redirect print output to per-script consoles.
     add!("print", |state| {
         let top = state.top_isize();
-        let mut message = String::new();
+        let mut message = Vec::new();
         for stack_index in 1..=top {
             if stack_index != 1 {
                 crate::limits::checked_string_growth(message.len(), 1)?;
-                message.push('\t');
+                message.push(b'\t');
             }
-            // The host receives `&str`, so each part is converted lossily:
-            // every maximal invalid UTF-8 subsequence becomes one 3-byte
-            // U+FFFD. Measure the converted length from the raw bytes first
-            // and check it against the cap before materializing expanded text.
-            // Conversion keeps an already capped raw value plus a `message`
-            // whose length never exceeds the cap. The raw bytes come from
-            // `bytes_with_tostring_meta`, which also covers `__tostring`
-            // results that are byte strings.
-            let raw = state.bytes_with_tostring_meta_unguarded(stack_index)?;
-            let lossy_len = State::lossy_utf8_len(&raw);
-            crate::limits::checked_string_growth(message.len(), lossy_len)?;
-            message.reserve(lossy_len);
-            for chunk in raw.utf8_chunks() {
-                message.push_str(chunk.valid());
-                if !chunk.invalid().is_empty() {
-                    message.push(char::REPLACEMENT_CHARACTER);
-                }
-            }
+            // The host receives the exact bytes, so the joined message is
+            // bounded by the string cap on its raw length.
+            let part = state.tostring_bytes_unguarded(stack_index)?;
+            crate::limits::checked_string_growth(message.len(), part.len())?;
+            message.extend_from_slice(&part);
         }
         state.host_print(&message);
         Ok(0)
@@ -311,16 +290,15 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
     // Converts any value to its string representation.
     add!("tostring", |state| {
         check_any_named(state, 1, "tostring")?;
-        // A string is returned as-is unless the shared string metatable has
-        // a `__tostring` (reference Lua honours it, nil by default).
-        if state.typ(1) == LuaType::String && !state.string_has_tostring() {
-            state.set_top(1)?;
-        } else {
+        match state.tostring_rendering(1)? {
+            // Argument 1 is its own rendering: return it without re-interning.
+            TostringRendering::Itself => state.set_top(1)?,
             // Byte-exact: a `__tostring` result may hold non-UTF-8 bytes,
             // which reference Lua returns unchanged.
-            let bytes = state.bytes_with_tostring_meta_unguarded(1)?;
-            state.set_top(0)?;
-            state.push_bytes(bytes)?;
+            TostringRendering::Bytes(bytes) => {
+                state.set_top(0)?;
+                state.push_bytes(bytes)?;
+            }
         }
         Ok(1)
     });

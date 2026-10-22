@@ -11,13 +11,15 @@ use dellingr::{ArgCount, RetCount, State};
 
 fn run(code: &str) -> dellingr::Result<()> {
     let mut state = State::new();
-    state.load_string(code)?;
+    dellingr::Program::compile(code, None).and_then(|program| state.load(&program))?;
     state.call(ArgCount::Fixed(0), RetCount::Fixed(0))
 }
 
 fn cost_of(code: &str) -> u64 {
     let mut state = State::new();
-    state.load_string(code).unwrap();
+    dellingr::Program::compile(code, None)
+        .and_then(|program| state.load(&program))
+        .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
     state.cost_used()
 }
@@ -55,13 +57,14 @@ fn non_number_len_is_rejected() {
 #[test]
 fn len_metamethod_drives_unpack_count() {
     let mut state = State::new();
-    state
-        .load_string(
-            "local t = setmetatable({}, {__len = function() return 3 end, \
+    dellingr::Program::compile(
+        "local t = setmetatable({}, {__len = function() return 3 end, \
              __index = function(_, k) return k * 10 end})\n\
              return table.unpack(t)",
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(3)).unwrap();
     assert!((state.to_number(-1).unwrap() - 30.0).abs() < f64::EPSILON);
     assert!((state.to_number(-3).unwrap() - 10.0).abs() < f64::EPSILON);
@@ -249,9 +252,8 @@ fn sequence_values_stay_rooted_across_allocating_handlers() {
         .unwrap();
     state.set_global("force_gc").unwrap();
     state.gc_set_threshold(1);
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
             local p = setmetatable({}, {
                 __len = function() force_gc(); return 3 end,
                 __index = function(_, k)
@@ -275,8 +277,10 @@ fn sequence_values_stay_rooted_across_allocating_handlers() {
             table.insert(p, 1, {marker = 99, label = "value 99"})
             table.move(p, 1, 3, 10)
             "#,
-        )
-        .unwrap();
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
 }
 
@@ -298,13 +302,16 @@ fn sequence_mutations_reject_rounded_keys_before_writing() {
         ("2^53 + 2", "table.remove(t, 2^53)"),
     ] {
         let mut state = State::new();
-        state
-            .load_string(format!(
+        dellingr::Program::compile(
+            format!(
                 "writes = 0; local t = setmetatable({{}}, {{ \
                  __len = function() return {len} end, \
                  __newindex = function() writes = writes + 1 end }}); {op}"
-            ))
-            .unwrap();
+            ),
+            None,
+        )
+        .and_then(|program| state.load(&program))
+        .unwrap();
         let err = state
             .call(ArgCount::Fixed(0), RetCount::Fixed(0))
             .unwrap_err();

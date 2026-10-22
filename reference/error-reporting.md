@@ -4,6 +4,30 @@ Errors carry a structured `ErrorKind`, source location, and an optional stack
 trace. Their `Display` text is for diagnostics. It is not a stable identifier
 for an error or a cross-build log format.
 
+## Kinds and exact bytes
+
+No kind carries free-form text built by dellingr. Each failure source has its
+own typed kind: `ScriptError` (the `ErrorValue` a script passed to `error()`),
+`LibraryError` (a `LibraryError` reason), `PatternError`, `SyntaxError`,
+`ArgError`, `TypeError` and the limit kinds. `InternalError` wraps an opaque
+`InternalError` reason that only dellingr constructs: it always means a
+dellingr bug. `HostError` is the one kind dellingr never constructs; it boxes
+a `RustFunc`'s own `std::error::Error`, which `Error::source` returns and
+`Error::into_kind` hands back owned.
+
+Bytes a script controls reach the host exactly: an `ErrorValue::String` is the
+script's string, a table or function error value carries its `tostring`
+rendering as bytes, `SyntaxError::ExpectedToken::found` is the offending
+token's source bytes, `string.format` directives in `LibraryError` are the
+format string's bytes, and chunk names (`Error::source_name`,
+`StackFrame::source`) are the bytes given to `Program::compile`. Only
+`Display` converts, rendering each invalid UTF-8 sequence as U+FFFD.
+
+`error()`'s value rule is the opposite of `tostring`'s for strings: a string
+passed to `error()` is the error value itself and never goes through the
+shared string metatable's `__tostring`. `State::tostring_rendering` owns the
+`tostring` rule and `State::error_value`, beside it, the `error()` rule.
+
 ## Argument error names
 
 `ArgError` stores an optional function name. Its display includes that name as
@@ -60,7 +84,7 @@ instead of trying to make each site unwind-safe:
   guards of `with_rooted_values`, `with_restricted_env` and the vararg frame,
   and in `State::guarded`, the boundary of every public entry point that can
   execute Lua, metamethods or host callbacks (`call`, `call_anchor`,
-  `get_table`, `to_string_with_meta`, `bytes_with_tostring_meta`,
+  `get_table`, `to_string_with_meta`, `tostring_bytes`,
   `with_restricted_env`). Nothing is added to the dispatch loop or the
   recursive Lua call path.
 - A poisoned State refuses every public `Result`-returning operation with

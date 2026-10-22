@@ -11,8 +11,8 @@ fn literal_return_and_unpack_keep_all_255_values() {
         format!("return table.unpack({{{values}}})"),
     ] {
         let mut state = State::new();
-        state
-            .load_string(&source)
+        dellingr::Program::compile(&source, None)
+            .and_then(|program| state.load(&program))
             .expect("255-result source compiles");
         state
             .call(ArgCount::Fixed(0), RetCount::Fixed(255))
@@ -26,8 +26,8 @@ fn literal_return_and_unpack_keep_all_255_values() {
 #[test]
 fn host_call_accepts_255_fixed_arguments() {
     let mut state = State::new();
-    state
-        .load_string("return function(...) return ... end")
+    dellingr::Program::compile("return function(...) return ... end", None)
+        .and_then(|program| state.load(&program))
         .expect("vararg function compiles");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(1))
@@ -54,8 +54,8 @@ fn callable_table_receiver_can_make_255_runtime_arguments() {
         "local t = setmetatable({{}}, {{__call = function(...) local packed = {{...}}; return #packed end}}); return t({args})"
     );
     let mut state = State::new();
-    state
-        .load_string(&source)
+    dellingr::Program::compile(&source, None)
+        .and_then(|program| state.load(&program))
         .expect("254 explicit arguments compile");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(1))

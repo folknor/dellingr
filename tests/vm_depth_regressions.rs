@@ -7,11 +7,12 @@ mod stack;
 #[test]
 fn cyclic_call_metamethod_returns_depth_error_and_state_recovers() {
     let mut state = State::new();
-    state
-        .load_string(
-            "local callable = {}; setmetatable(callable, { __call = callable }); callable()",
-        )
-        .expect("the cyclic __call program should compile");
+    dellingr::Program::compile(
+        "local callable = {}; setmetatable(callable, { __call = callable }); callable()",
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .expect("the cyclic __call program should compile");
 
     let error = state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
@@ -22,8 +23,8 @@ fn cyclic_call_metamethod_returns_depth_error_and_state_recovers() {
     ));
     assert_eq!(state.get_top(), 0);
 
-    state
-        .load_string("return 7")
+    dellingr::Program::compile("return 7", None)
+        .and_then(|program| state.load(&program))
         .expect("a second program should compile after the error");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(1))
@@ -44,9 +45,8 @@ fn recursion_through_a_function_valued_call_metamethod_is_not_capped_at_metameth
 
 fn function_valued_call_recursion() {
     let mut state = State::new();
-    state
-        .load_string(
-            r#"
+    dellingr::Program::compile(
+        r#"
             local counter = setmetatable({}, {
                 __call = function(self, n)
                     if n == 0 then return 0 end
@@ -55,8 +55,10 @@ fn function_valued_call_recursion() {
             })
             return counter(500)
             "#,
-        )
-        .expect("the recursive callable program should compile");
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .expect("the recursive callable program should compile");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(1))
         .expect("recursion below the call-depth limit through __call should succeed");

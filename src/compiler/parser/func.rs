@@ -32,7 +32,7 @@ impl<'a> Parser<'a> {
             }
             place => place.set_instr(0),
         };
-        self.parse_fndef_named(Some(name.to_string()))?;
+        self.parse_fndef(Some(name.to_string()), false)?;
         self.push(instr);
         Ok(())
     }
@@ -65,10 +65,10 @@ impl<'a> Parser<'a> {
             full_name.push_str(method_name);
             let method_name_id = self.find_or_add_string(method_name)?;
 
-            self.parse_fndef_method(Some(full_name))?;
+            self.parse_fndef(Some(full_name), true)?;
             self.push(Instr::set_field_at(0, method_name_id));
         } else {
-            self.parse_fndef_named(Some(full_name))?;
+            self.parse_fndef(Some(full_name), false)?;
             self.push(Instr::set_field_at(0, last_field_id));
         }
         Ok(())
@@ -88,7 +88,7 @@ impl<'a> Parser<'a> {
         let method_name_id = self.find_or_add_string(method_name)?;
 
         // Parse the function params and body with implicit self.
-        self.parse_fndef_method(Some(full_name))?;
+        self.parse_fndef(Some(full_name), true)?;
         self.push(Instr::set_field_at(0, method_name_id));
         Ok(())
     }
@@ -128,18 +128,10 @@ impl<'a> Parser<'a> {
         Ok((args, is_vararg))
     }
 
-    /// Parses the parameters and body of a function definition.
-    pub(super) fn parse_fndef(&mut self) -> Result<()> {
-        self.parse_fndef_named(None)
-    }
-
-    /// Parses the parameters and body of a function definition with an optional name.
-    pub(super) fn parse_fndef_named(&mut self, name: Option<String>) -> Result<()> {
-        self.parse_fndef_with_params(name, false)
-    }
-
-    /// Parses a function definition, optionally adding its implicit `self` parameter.
-    fn parse_fndef_with_params(&mut self, name: Option<String>, method: bool) -> Result<()> {
+    /// Parses the parameters and body of a function definition with an
+    /// optional diagnostic name. A `method` (`function t:m()`) gets the
+    /// implicit leading `self` parameter.
+    pub(super) fn parse_fndef(&mut self, name: Option<String>, method: bool) -> Result<()> {
         let (mut params, is_vararg) = self.parse_params()?;
         if method {
             params.insert(0, "self");
@@ -163,11 +155,5 @@ impl<'a> Parser<'a> {
         self.push(Instr::closure(index));
         self.expect(TokenType::End)?;
         Ok(())
-    }
-
-    /// Parses a method definition with implicit `self` parameter.
-    /// Used for `function table:method()` syntax.
-    fn parse_fndef_method(&mut self, name: Option<String>) -> Result<()> {
-        self.parse_fndef_with_params(name, true)
     }
 }
