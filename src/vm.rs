@@ -7,6 +7,8 @@ mod eval;
 mod eval_control;
 mod eval_index;
 mod eval_store;
+#[cfg(feature = "fault-injection")]
+mod fault_injection;
 mod frame;
 mod global_env;
 mod lua_val;
@@ -180,9 +182,62 @@ pub(super) struct CallInfo {
     /// at the time it is innermost.
     pub(super) has_varargs: bool,
     /// Non-function `__call` chain steps resolved to reach this activation.
-    /// Each holds one unit of `metamethod_depth` and `call_chain_depth` until
-    /// the call completes, result adjustment included.
+    /// Each holds one unit of metamethod_depth. Resolution transfers these
+    /// for calls from Rust and Lua alike; popping the activation releases
+    /// them before result adjustment.
     pub(super) chain_charges: u32,
+}
+
+// The single inventory of execution-lifetime state. New fields must be
+// classified here; host values and suspended environments are allowed at
+// rest, but are forbidden for snapshots. Fault-injection bookkeeping is
+// exempt: test-only, disarmed before observing quiescence, never serialized.
+macro_rules! in_flight {
+    (collections: [$($collection:ident),*], scalars: [$($scalar:ident = $zero:expr),*],
+     optionals: [$($optional:ident),*]) => {
+        impl State {
+            #[cfg(debug_assertions)]
+            #[cold]
+            #[inline(never)]
+            fn debug_assert_at_rest(&self) {
+                debug_assert!($(self.$collection.is_empty() &&)*
+                    $(self.$scalar == $zero &&)*
+                    $(self.$optional.is_none() &&)* self.transient_roots.values.is_empty());
+            }
+
+            #[cfg(feature = "snapshot")]
+            fn validate_quiescent(&self) -> std::result::Result<(), save_state::SaveError> {
+                #[cfg(feature = "fault-injection")]
+                self.debug_assert_fault_injection_disarmed();
+                if self.stack.is_empty() && $(self.$collection.is_empty() &&)*
+                    $(self.$scalar == $zero &&)*
+                    $(self.$optional.is_none() &&)* self.transient_roots.is_empty() {
+                    Ok(())
+                } else {
+                    Err(save_state::SaveError::NotQuiescent)
+                }
+            }
+
+            #[cfg(feature = "snapshot")]
+            fn reset_in_flight(&mut self) {
+                self.stack.clear();
+                $(self.$collection.clear();)*
+                $(self.$scalar = $zero;)*
+                $(self.$optional = None;)*
+                let TransientRoots { values, suspended_envs } = &mut self.transient_roots;
+                values.clear();
+                suspended_envs.clear();
+            }
+        }
+    };
+}
+
+in_flight! {
+    collections: [pending_bytecode_caches, open_upvalues, pending_bases,
+        call_stack, vararg_stack],
+    scalars: [stack_bottom = 0, metamethod_depth = 0, call_depth = 0,
+        native_call_depth = 0],
+    optionals: [active_rust_fn]
 }
 
 /// State-local runtime data for one immutable bytecode chunk.
@@ -200,6 +255,8 @@ struct BytecodeCacheEntry {
 
 /// The main interface into the Lua VM.
 pub struct State {
+    #[cfg(feature = "fault-injection")]
+    fault_injection: fault_injection::FaultInjection,
     /// Global bindings and their cache invalidation policy.
     global_env: GlobalEnv,
     /// The metatable shared by every string, as in reference Lua. Built by
@@ -255,15 +312,9 @@ pub struct State {
     pattern_bytes: usize,
     #[cfg(debug_assertions)]
     pattern_compilations: u64,
-    /// Current metamethod call depth (for __index/__newindex chains).
+    /// Depth of __index, __newindex and non-function __call chains.
     /// Prevents stack overflow from circular metamethod references.
     pub(super) metamethod_depth: u32,
-    /// Nesting of non-function `__call` handler resolution. Only the outermost
-    /// level of such a chain reports trace-less errors to `on_error`; nested
-    /// Rust callbacks defer to it. Kept separate from `metamethod_depth` so a
-    /// Rust `__index`/`__newindex` handler failing under a host table access
-    /// still reports at its own boundary.
-    pub(super) call_chain_depth: u32,
     /// Active native callback, restored across nested Rust calls.
     pub(super) active_rust_fn: Option<RustFunc>,
     /// Active Lua activations (the length of `call_stack`, kept as a counter
@@ -530,7 +581,6 @@ impl State {
             #[cfg(debug_assertions)]
             pattern_compilations: 0,
             metamethod_depth: 0,
-            call_chain_depth: 0,
             active_rust_fn: None,
             call_depth: 0,
             native_call_depth: 0,
@@ -540,6 +590,8 @@ impl State {
             vararg_stack: Vec::new(),
             callbacks,
             user_data: None,
+            #[cfg(feature = "fault-injection")]
+            fault_injection: fault_injection::FaultInjection::default(),
             rng: VmRng::seed_from_u64(VmRng::DEFAULT_SEED),
             registry: Registry::new(state_id),
             format_pointer_ids: IndexMap::default(),
@@ -1325,6 +1377,10 @@ impl State {
                 if self.poisoned {
                     drop(result);
                     return Err(Self::poisoned_error());
+                }
+                #[cfg(debug_assertions)]
+                if self.active_rust_fn.is_none() {
+                    self.debug_assert_at_rest();
                 }
                 result
             }

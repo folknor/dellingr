@@ -2,13 +2,22 @@
 /// Rust default for spawned threads, and the native stack docs/limits.md
 /// states every limit fits in, unoptimized builds included. Set explicitly so
 /// `RUST_MIN_STACK` cannot loosen it.
-#[cfg(not(feature = "hotpath"))]
+#[cfg(not(any(
+    feature = "hotpath",
+    feature = "hotpath-alloc",
+    feature = "fault-injection"
+)))]
 pub(crate) const LIMIT_TEST_STACK_BYTES: usize = 2 << 20;
 
 /// `#[hotpath::measure]` wraps every annotated function in a timing guard,
 /// which an instrumented build adds to each native level. The stack envelope
-/// in docs/limits.md is stated for uninstrumented builds.
-#[cfg(feature = "hotpath")]
+/// in docs/limits.md is stated for uninstrumented builds. Fault injection
+/// also adds bookkeeping to preflights on these frames.
+#[cfg(any(
+    feature = "hotpath",
+    feature = "hotpath-alloc",
+    feature = "fault-injection"
+))]
 pub(crate) const LIMIT_TEST_STACK_BYTES: usize = 8 << 20;
 
 /// Run `f` on a named thread with [`LIMIT_TEST_STACK_BYTES`] of stack. A

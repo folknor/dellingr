@@ -35,7 +35,11 @@ impl State {
         &mut self,
         operation: impl FnOnce(&mut Self) -> Result<T>,
     ) -> Result<T> {
-        if self.metamethod_depth >= MAX_METAMETHOD_DEPTH {
+        #[cfg(not(feature = "fault-injection"))]
+        let injected = false;
+        #[cfg(feature = "fault-injection")]
+        let injected = self.inject_fault("metamethod", self.metamethod_depth as usize, true);
+        if injected || self.metamethod_depth >= MAX_METAMETHOD_DEPTH {
             return Err(self.error(ErrorKind::MetamethodDepthExceeded {
                 depth: self.metamethod_depth,
                 limit: MAX_METAMETHOD_DEPTH,
@@ -142,18 +146,14 @@ impl State {
                     self.check_stack_space(1)?;
                     self.push_unchecked(Val::Obj(ptr));
                     let new_idx = self.stack.len() - 1;
-                    // The handler table above is an internal temporary. If the
-                    // recursive lookup fails - including on its own cap check -
-                    // drop it rather than leaving it visible to the caller.
-                    if let Err(e) = self.get_table_with_key_tracking_call(
+                    // The enclosing boundary clears this handler temporary
+                    // if recursive lookup fails.
+                    self.get_table_with_key_tracking_call(
                         new_idx,
                         key,
                         local_cost,
                         handler_called,
-                    ) {
-                        self.stack.truncate(new_idx);
-                        return Err(e);
-                    }
+                    )?;
                     // Stack: [... __index_table, result]
                     // Remove the __index table, keep the result
                     let val = self.pop_val();
@@ -292,11 +292,7 @@ impl State {
                     self.check_stack_space(1)?;
                     self.push_unchecked(Val::Obj(ptr));
                     let new_idx = self.stack.len() - 1;
-                    // Same internal temporary as the __index table case.
-                    if let Err(e) = self.set_table_with_key(new_idx, key, val, local_cost) {
-                        self.stack.truncate(new_idx);
-                        return Err(e);
-                    }
+                    self.set_table_with_key(new_idx, key, val, local_cost)?;
                     self.pop_n(1)?; // Remove the __newindex table
                     Ok(())
                 } else if is_function {

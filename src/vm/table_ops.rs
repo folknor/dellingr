@@ -254,8 +254,9 @@ impl State {
     /// the host what it gives a script.
     ///
     /// Validation and dispatch preflight failures leave the stack unchanged.
-    /// An error from calling an `__index` function is not covered: by then
-    /// the key has been consumed, and a script error kills the callback anyway.
+    /// An error from calling an `__index` function consumes the key and clears
+    /// handler temporaries, preserving every earlier stack slot. Writes made
+    /// by the handler survive the error.
     ///
     /// Guarded like [`State::call`]: refused on a poisoned State, and a
     /// panic out of a metamethod poisons it.
@@ -285,11 +286,13 @@ impl State {
         } else {
             self.get_table_with_key_tracking_call(idx, key, &mut local_cost, &mut handler_called)
         };
-        if result.is_err() && !handler_called {
-            // No user code ran. Dispatch roots the key through its allocations
-            // and can only have added temporary slots above the entry prefix.
+        if result.is_err() {
+            // Clear every handler-table temporary. Before handler entry the
+            // dispatch contract also preserves the popped key.
             self.stack.truncate(top - 1);
-            self.push_unchecked(key); // Replaces the key popped above.
+            if !handler_called {
+                self.push_unchecked(key);
+            }
         }
         result
     }
@@ -366,7 +369,9 @@ impl State {
 
     /// Library assignment with the same `__newindex` dispatch as bytecode.
     /// Keep the key and value on the stack as GC roots throughout dispatch;
-    /// consume them only after a successful write or handler call.
+    /// consume them only after a successful write or handler call. On error
+    /// the key, value and handler temporaries stay for the enclosing call
+    /// boundary or dispatch-loop unwind.
     pub(crate) fn set_table(&mut self, i: isize) -> Result<()> {
         let idx = self.table_operand_below_top(i, 2)?;
         let top = self.stack.len();
@@ -714,6 +719,9 @@ impl State {
     /// Strings consult the shared string metatable too, as reference Lua's
     /// `tostring` does: setting `getmetatable("").__tostring` changes
     /// `tostring(s)` and `print(s)`.
+    ///
+    /// A handler failure leaves the stack as it was. Writes made by the
+    /// handler survive the error.
     ///
     /// Guarded like [`State::call`]: refused on a poisoned State, and a
     /// panic out of `__tostring` poisons it.

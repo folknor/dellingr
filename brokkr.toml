@@ -197,3 +197,9 @@ expect = "ok"
 match = "last-line"
 stream = "stdout"
 stage = "post-test"
+
+[dellingr.workloads.rust_boundary]
+file = "bench/rust_boundary.lua"
+xxh128 = "488c7cc9b818ba7a69cdede59b518cfd"
+hotpath_file = "examples/calls/rust_boundary.lua"
+hotpath_xxh128 = "bcb7102ce7484441339c7b03450b8a90"

@@ -82,6 +82,12 @@ repository. Script constants live in `scripts/lib.sh`; hyperfine uses a fixed wa
 
 `scripts/notes_drop.py` and `scripts/notes_move.py` are maintainer helpers for
 the `notes/` working documents, run directly when needed; no gate invokes them.
+`scripts/frame_sizes.py <binary> <symbol substring>...` prints native frame
+sizes (prologue `sub rsp` plus pushes) from a built binary's disassembly, with
+`--calls` for each function's call targets (inlining decisions) and `--body`
+for an address-blanked body dump; `scripts/asm_diff.py` diffs two such dumps
+(`--slots` lists the `%rsp` slots each build uses). They need `objdump` and
+are how a `tests/native_stack.rs` probe delta gets attributed to a function.
 
 Shell scripts live in `scripts/` and share `scripts/lib.sh`, which builds a
 cargo target and asks cargo for the artifact path (it needs `python3`), so no
@@ -146,6 +152,16 @@ fallible for this reason; a rejected operation must leave the stack, the string
 pool and the function registry unchanged. The cap bounds the shared Lua/Rust
 value stack, not total host memory, and enforcing it charges no cost.
 
+**Error cleanup belongs to boundaries and resource owners.** Ordinary bodies
+propagate with `?`. A new resource gets one owner that releases what it took
+before propagating. `call_unguarded` clears failed call operands and restores
+the caller's stack bottom; `get_table_unguarded` clears handler temporaries
+and restores the key only before handler entry; `unwind_invocation` owns
+failed Lua frames. `call_anchor` and `tostring_bytes` use the
+`call_unguarded` boundary beneath their temporaries. A new host entry point
+that can return an error to continuing code must define and test its own
+boundary and operand contract. Handler writes survive an error.
+
 **GC roots**: `vm::mark_gc_roots` is the *single source of truth* for what's reachable. Any allocator that may trigger GC must use this same root set. Closed upvalues are reached transitively via the closures that hold them, not as a separate root set - there's an explicit comment about this (`vm.rs` / `vm/object.rs`). Root an object with `GcHeap::mark`, never by pushing onto the worklist directly: `mark` sets the object's colour *and* queues it, whereas a bare push traces the object's children while leaving the object itself Unmarked, so sweep frees it and later reads dangle. A `debug_assert!` in `drain_mark_worklist` enforces this - the mistake is otherwise invisible until something actually collects.
 
 **Stack indexing**: Rust callbacks (`RustFunc = fn(&mut State) -> Result<u8>`) use **1-based** indexing; Lua bytecode internally uses 0-based. `vm_aux.rs` and the lua_std modules show the 1-based pattern.
@@ -168,6 +184,24 @@ value stack, not total host memory, and enforcing it charges no cost.
   `brokkr run --debug --features snapshot regenerate_save_golden`. Use the
   debug profile the tests run under: release builds fold identical Rust
   functions, which changes the saved function ids.
+
+The non-default `fault-injection` feature is test infrastructure, never a
+production or native-stack-probe configuration. It adds a single-refusal
+countdown and event log, armed after setup, to stack and depth preflights.
+The ignored `error_boundary_fault_sweep` checks every eligible event of each
+fail-fast corpus execution, including event identity, surviving operands,
+notification count, State reuse and snapshot quiescence. Recovery execution
+is covered separately by focused caught-and-continue tests. No standing
+`[[check]]` shape enables it. Run on demand:
+
+```sh
+brokkr check --features fault-injection,snapshot -- --test error_boundary -- --include-ignored
+```
+
+The budget and natural-failure sweeps also run in ordinary check shapes.
+`brokkr test error_boundary --release` exercises them without debug checks;
+`brokkr test native_bytes_per_level` (also with `--release`) prints the
+on-demand recurring-stack probe in default and snapshot configurations.
 
 ## Hotpath benchmarks
 
@@ -213,7 +247,7 @@ Each bench script is also a standalone-runnable test: top-level setup + a `_benc
 
 The harness measures four phases on one State and emits KV pairs to stderr: `parse_us`, `cold_call_us`, `warm_avg_us` (averaged over the configured warm iteration count; fractional, three decimals), plus the dellingr-specific `cold_cost` / `warm_avg_cost` and the derived `cost_per_us`. Wall time is the benchmarking metric; cost is a deterministic property of the workload and rides along as a fingerprint (a cost change means the script or compiler changed, not the VM's speed). `setup_*` and `final_*` heap/object counts bracket GC pressure. Note the harness runs the script's top level during setup, so the standalone footer's calls execute there - the "cold" call is only cold with respect to what the footer has not already warmed.
 
-Internal functions carry `#[hotpath::measure]` annotations across `vm/table.rs`, `vm/table_ops.rs`, `vm/eval*.rs`, `vm/object.rs` and the compiler front end. The annotation is a no-op when the `hotpath` cargo feature is off, so it costs nothing in normal builds; it is cheap to add one when a new candidate needs a measurement point, and worth doing at the same time as the bench that will exercise it. **Don't add `#[hotpath::measure]` to a function that stays live across a native re-entry** (`call_unguarded`, `call_from_rust`, `begin_call`, `run_invocation`, `Frame::run`, and the metamethod/iterator/library helpers between the dispatch loop and their `call_unguarded`): every native level carries those frames, and the limit tests drive `limits::MAX_NATIVE_CALL_DEPTH` levels on a 2 MiB thread. Instrumented builds already get a larger test stack (`tests/common/stack.rs`), but the margin is not unlimited. A function *called from* the dispatch loop whose frame is popped before any re-entry is fine.
+Internal functions carry `#[hotpath::measure]` annotations across `vm/table.rs`, `vm/table_ops.rs`, `vm/eval*.rs`, `vm/object.rs` and the compiler front end. The annotation is a no-op when the `hotpath` cargo feature is off, so it costs nothing in normal builds; it is cheap to add one when a new candidate needs a measurement point, and worth doing at the same time as the bench that will exercise it. **Don't add `#[hotpath::measure]` to a function that stays live across a native re-entry** (`call_unguarded`, `begin_call`, `begin_callable_call`, `run_invocation`, `Frame::run`, and the metamethod/iterator/library helpers between the dispatch loop and their `call_unguarded`): every native level carries those frames, and the limit tests drive `limits::MAX_NATIVE_CALL_DEPTH` levels on a 2 MiB thread. Instrumented builds already get a larger test stack (`tests/common/stack.rs`), but the margin is not unlimited. A function *called from* the dispatch loop whose frame is popped before any re-entry is fine. The release frames of the live-across-re-entry functions are also sensitive to live-range shape, not only to what is inlined: a value returned for the caller to consume after a drop, or a `match` scrutinee `Result` whose arm makes the re-entering call, costs a spill slot or an unshared result slot there, and deleting a redundant line in something inlined into `Frame::run` can re-pack its spill slots one alignment step larger. Measure with `brokkr test native_bytes_per_level` (dev and `--release`, default and `snapshot`) and attribute with `scripts/frame_sizes.py` before and after.
 
 When adding annotations, verify the `hotpath` configuration still builds (`brokkr check --features hotpath`); the plain gate does not compile that feature, so a bad annotation is otherwise invisible.
 

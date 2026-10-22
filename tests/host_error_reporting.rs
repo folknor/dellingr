@@ -350,3 +350,125 @@ fn returning_the_same_error_value_preserves_reporting_state() {
         .expect_err("second call returns the same error");
     assert_eq!(count.load(Ordering::SeqCst), 1);
 }
+
+#[test]
+fn nonfunction_chain_resolution_and_admission_report_once() {
+    fn host_admit(state: &mut State) -> dellingr::Result<u8> {
+        state.get_global("target")?;
+        state.call(ArgCount::Fixed(0), RetCount::Fixed(0))?;
+        Ok(0)
+    }
+
+    for from_lua in [false, true] {
+        for admission in [false, true] {
+            let count = Arc::new(AtomicUsize::new(0));
+            let mut state = State::with_callbacks(Box::new(ErrorCounter(Arc::clone(&count))));
+            let terminal = if admission { "function() end" } else { "5" };
+            run_setup(
+                &mut state,
+                &format!(
+                    "local inner = setmetatable({{}}, {{__call = {terminal}}})
+                target = setmetatable({{}}, {{__call = inner}})"
+                ),
+            );
+            if admission {
+                state.push_rust_fn(host_admit).unwrap();
+                state.set_global("host_admit").unwrap();
+                // Fill Lua activation depth without holding chain units at
+                // intervening levels; the final admission exercises either
+                // call_from_lua or a nested call_unguarded from Rust.
+                let source = format!(
+                    "function recurse(n)
+                    if n < {} then return recurse(n + 1) end
+                    return {}()
+                    end",
+                    dellingr::limits::MAX_CALL_DEPTH - 1 - u32::from(from_lua),
+                    if from_lua { "target" } else { "host_admit" }
+                );
+                let program = dellingr::Program::compile(source, Some(b"chain-admission")).unwrap();
+                state.load(&program).unwrap();
+                state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
+            }
+            let error = if from_lua {
+                let source = if admission {
+                    "return recurse(0)"
+                } else {
+                    "return target()"
+                };
+                let program = dellingr::Program::compile(source, Some(b"chain-caller")).unwrap();
+                state.load(&program).unwrap();
+                state
+                    .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+                    .expect_err("chain fails")
+            } else {
+                state
+                    .get_global(if admission { "recurse" } else { "target" })
+                    .unwrap();
+                if admission {
+                    state.push_number(0.0).unwrap();
+                }
+                state
+                    .call(ArgCount::Fixed(u8::from(admission)), RetCount::Fixed(0))
+                    .expect_err("chain fails")
+            };
+            if admission {
+                assert!(
+                    matches!(error.kind(), ErrorKind::CallDepthExceeded { .. }),
+                    "{error:?}"
+                );
+                assert_eq!(error.line_num(), 3);
+                assert_eq!(error.source_name(), Some(b"chain-admission".as_slice()));
+                let trace = error.stack_trace();
+                assert_eq!(trace.len(), dellingr::limits::MAX_CALL_DEPTH as usize);
+                assert_eq!(trace[0].line, 3);
+                assert_eq!(
+                    trace[0].source.as_deref(),
+                    Some(b"chain-admission".as_slice())
+                );
+                for frame in &trace[1..trace.len() - usize::from(from_lua)] {
+                    assert_eq!(frame.line, 2);
+                    assert_eq!(frame.source.as_deref(), Some(b"chain-admission".as_slice()));
+                }
+                if from_lua {
+                    assert_eq!(trace.last().unwrap().line, 1);
+                    assert_eq!(
+                        trace.last().unwrap().source.as_deref(),
+                        Some(b"chain-caller".as_slice())
+                    );
+                }
+            } else {
+                assert!(matches!(error.kind(), ErrorKind::TypeError(_)));
+                if from_lua {
+                    assert_eq!(error.line_num(), 1);
+                    assert_eq!(error.source_name(), Some(b"chain-caller".as_slice()));
+                    assert_eq!(error.stack_trace().len(), 1);
+                    assert_eq!(error.stack_trace()[0].line, 1);
+                    assert_eq!(
+                        error.stack_trace()[0].source.as_deref(),
+                        Some(b"chain-caller".as_slice())
+                    );
+                } else {
+                    assert!(error.stack_trace().is_empty());
+                }
+            }
+            assert_eq!(count.load(Ordering::SeqCst), 1);
+            assert_eq!(state.get_top(), 0);
+            run_setup(
+                &mut state,
+                &format!(
+                    "local t = setmetatable({{}}, {{__call = function() return 7 end}})
+                for i = 1, {} do t = setmetatable({{}}, {{__call = t}}) end
+                if t() ~= 7 then error('reuse') end",
+                    dellingr::limits::MAX_METAMETHOD_DEPTH
+                ),
+            );
+            assert_eq!(count.load(Ordering::SeqCst), 1);
+            #[cfg(feature = "snapshot")]
+            {
+                state.push_nil().unwrap();
+                state.set_global("host_admit").unwrap();
+                state.save_state().unwrap();
+            }
+        }
+    }
+}

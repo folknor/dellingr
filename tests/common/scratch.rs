@@ -115,3 +115,13 @@ fn write_scratch_file(path: &Path, source: &[u8]) -> io::Result<()> {
     }
     Ok(())
 }
+
+/// Write the on-demand boundary A/B evidence to its spec-mandated location.
+/// This fixed path is the only exception to the ephemeral test-file root:
+/// the ignored dump must outlive the test process for external comparison.
+#[allow(dead_code)]
+pub(crate) fn write_boundary_transcript(bytes: &[u8]) -> io::Result<()> {
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join(".scratch/error-boundary");
+    fs::create_dir_all(&directory)?;
+    fs::write(directory.join("transcript.txt"), bytes)
+}

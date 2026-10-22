@@ -214,3 +214,96 @@ fn raw_reads_replace_the_key_even_at_the_stack_cap() {
     assert_eq!(state.to_number(-1).unwrap(), 42.0);
     assert_eq!(state.get_top(), dellingr::limits::MAX_STACK_SIZE);
 }
+
+#[test]
+fn chained_index_boundaries_preserve_their_operand_contract() {
+    for string in [false, true] {
+        for entered in [false, true] {
+            let mut state = State::new();
+            let terminal = if entered {
+                "function() observed = 73 error('handler') end"
+            } else {
+                "5"
+            };
+            let source = format!(
+                "local chain = setmetatable({{}}, {{__index = {terminal}}})
+                chain = setmetatable({{}}, {{__index = chain}})
+                {}",
+                if string {
+                    "getmetatable('').__index = chain return 'receiver'"
+                } else {
+                    "return setmetatable({}, {__index = chain})"
+                }
+            );
+            let program = dellingr::Program::compile(source, None).unwrap();
+            state.load(&program).unwrap();
+            state
+                .call(dellingr::ArgCount::Fixed(0), dellingr::RetCount::Fixed(1))
+                .unwrap();
+            let receiver = state.anchor_at(1).unwrap();
+            state.push_string("missing").unwrap();
+            let error = state.get_table(1).expect_err("terminal index fails");
+            assert_eq!(state.get_top(), if entered { 1 } else { 2 });
+            if entered {
+                assert!(matches!(error.kind(), ErrorKind::ScriptError { .. }));
+            } else {
+                assert!(matches!(error.kind(), ErrorKind::TypeError(_)));
+                assert_eq!(state.to_bytes(-1).unwrap(), b"missing");
+            }
+            if string {
+                assert_eq!(state.to_bytes(1).unwrap(), b"receiver");
+            }
+            state.push_anchor(&receiver).unwrap();
+            assert!(state.raw_equal(1, -1));
+            state.pop(1).unwrap();
+            drop(receiver);
+            state.get_global("observed").unwrap();
+            if entered {
+                assert_eq!(state.to_number(-1).unwrap(), 73.0);
+            } else {
+                assert_eq!(state.typ(-1), LuaType::Nil);
+            }
+            state.pop(1).unwrap();
+            state.set_top(0).unwrap();
+            #[cfg(feature = "snapshot")]
+            state.save_state().unwrap();
+            let reuse = dellingr::Program::compile("return 7", None).unwrap();
+            state.load(&reuse).unwrap();
+            state
+                .call(dellingr::ArgCount::Fixed(0), dellingr::RetCount::Fixed(1))
+                .unwrap();
+            assert_eq!(state.to_number(-1).unwrap(), 7.0);
+        }
+    }
+}
+
+#[test]
+fn tostring_handler_failure_preserves_the_host_stack() {
+    let mut state = State::new();
+    let program = dellingr::Program::compile(
+        "return setmetatable({}, {__tostring = function() observed = 73 error('handler') end})",
+        None,
+    )
+    .unwrap();
+    state.push_number(73.0).unwrap();
+    state.load(&program).unwrap();
+    state
+        .call(dellingr::ArgCount::Fixed(0), dellingr::RetCount::Fixed(1))
+        .unwrap();
+    let receiver = state.anchor_at(2).unwrap();
+    let error = state.tostring_bytes(2).expect_err("handler fails");
+    assert!(matches!(error.kind(), ErrorKind::ScriptError { .. }));
+    assert_eq!(state.get_top(), 2);
+    assert_eq!(state.to_number(1).unwrap(), 73.0);
+    assert_eq!(state.typ(2), LuaType::Table);
+    state.push_anchor(&receiver).unwrap();
+    assert!(state.raw_equal(2, -1));
+    state.pop(1).unwrap();
+    drop(receiver);
+    state.get_global("observed").unwrap();
+    assert_eq!(state.to_number(-1).unwrap(), 73.0);
+    state.pop(1).unwrap();
+    state.set_top(0).unwrap();
+    #[cfg(feature = "snapshot")]
+    state.save_state().unwrap();
+}

@@ -209,7 +209,7 @@ impl State {
         // Call with 2 args (state, control), expecting num_vars returns
         self.call_unguarded(ArgCount::Fixed(2), RetCount::Fixed(num_vars))?;
 
-        // The call preserves caller slot positions (see call_from_rust); user code
+        // The call preserves caller slot positions (see call_unguarded); user code
         // may change captured values, but cannot remove these loop slots.
         // Move results from stack to loop variable slots (base + 3, base + 4, ...)
         let results_start = self.stack.len() - num_vars as usize;
@@ -331,6 +331,13 @@ impl State {
 
         let num_ret_reported = self.invoke_rust_fn(f, call_base, false)?;
 
+        // This truncate is redundant: the error propagates into
+        // `unwind_invocation`, which truncates the whole frame. It stays
+        // because this function inlines into `Frame::run`, and deleting it
+        // re-packs that frame's spill slots one 16-byte alignment step larger
+        // in release, on every native re-entry cycle (measured with
+        // `tests/native_stack.rs`'s `native_bytes_per_level`). Keep it until
+        // a build shows the frame holds without it.
         if let Err(e) = self.balance_stack(num_vars as usize, num_ret_reported as usize) {
             self.stack.truncate(call_base);
             return Err(e);

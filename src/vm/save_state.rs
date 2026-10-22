@@ -87,53 +87,6 @@ pub(super) const BUILTIN_ENV_TOKENS: &[(crate::instr::Builtin, &str)] = &[
 pub(super) const GLOBAL_METATABLE_TOKEN: &str = "_G.metatable";
 pub(super) const STRING_METATABLE_TOKEN: &str = "string.metatable";
 
-// One inventory generates both snapshot-only operations. State keeps its
-// existing fields so execution and GC can access them without a second owner.
-// Snapshot quiescence is stricter than call/eval entry: host stack values and
-// reentrant callbacks with live outer frames are legal outside saving.
-// New execution-lifetime State fields still need classification here; keeping
-// State's existing layout does not make that classification exhaustive.
-macro_rules! snapshot_in_flight {
-    (
-        collections: [$($collection:ident),*],
-        scalars: [$($scalar:ident = $zero:expr),*],
-        optionals: [$($optional:ident),*],
-        roots: $roots:ident
-    ) => {
-        impl State {
-            fn validate_quiescent(&self) -> Result<(), SaveError> {
-                if $(self.$collection.is_empty() &&)*
-                    $(self.$scalar == $zero &&)*
-                    $(self.$optional.is_none() &&)* self.$roots.is_empty()
-                {
-                    Ok(())
-                } else {
-                    Err(SaveError::NotQuiescent)
-                }
-            }
-
-            fn reset_in_flight(&mut self) {
-                $(self.$collection.clear();)*
-                $(self.$scalar = $zero;)*
-                $(self.$optional = None;)*
-                // Exhaustive: another transient root class must be reset too.
-                let super::TransientRoots { values, suspended_envs } = &mut self.$roots;
-                values.clear();
-                suspended_envs.clear();
-            }
-        }
-    };
-}
-
-snapshot_in_flight! {
-    collections: [stack, pending_bytecode_caches, open_upvalues, pending_bases, call_stack,
-        vararg_stack],
-    scalars: [stack_bottom = 0, metamethod_depth = 0, call_chain_depth = 0,
-        call_depth = 0, native_call_depth = 0],
-    optionals: [active_rust_fn],
-    roots: transient_roots
-}
-
 const MAGIC: [u8; 4] = *b"DLGS";
 use crate::limits::tuning::{
     SAVE_PATH_GLOBAL_BYTES as MAX_PATH_GLOBAL_BYTES,

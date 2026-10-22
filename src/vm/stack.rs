@@ -451,7 +451,11 @@ impl State {
 
     #[inline(always)]
     fn check_stack_slot(&self) -> Result<()> {
-        if self.stack.len() >= MAX_STACK_SIZE {
+        #[cfg(not(feature = "fault-injection"))]
+        let injected = false;
+        #[cfg(feature = "fault-injection")]
+        let injected = self.inject_fault("stack_slot", self.stack.len(), true);
+        if injected || self.stack.len() >= MAX_STACK_SIZE {
             return Err(self.error(ErrorKind::StackOverflow {
                 size: self.stack.len().saturating_add(1),
                 limit: MAX_STACK_SIZE,
@@ -464,7 +468,11 @@ impl State {
     /// Returns an error if adding `n` values would exceed the stack limit.
     pub(crate) fn check_stack_space(&self, n: usize) -> Result<()> {
         let new_size = self.stack.len().saturating_add(n);
-        if new_size > MAX_STACK_SIZE {
+        #[cfg(not(feature = "fault-injection"))]
+        let injected = false;
+        #[cfg(feature = "fault-injection")]
+        let injected = self.inject_fault("stack_space", n, true);
+        if injected || new_size > MAX_STACK_SIZE {
             return Err(self.error(ErrorKind::StackOverflow {
                 size: new_size,
                 limit: MAX_STACK_SIZE,

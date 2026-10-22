@@ -51,7 +51,7 @@ impl PendingBases {
         self.constructors.truncate(floor.constructors);
     }
 
-    #[cfg(feature = "snapshot")]
+    #[cfg(any(feature = "snapshot", debug_assertions))]
     pub(super) fn is_empty(&self) -> bool {
         self.calls.is_empty() && self.constructors.is_empty()
     }

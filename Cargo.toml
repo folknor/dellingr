@@ -29,6 +29,7 @@ codegen-units = 1
 hotpath = ["hotpath/hotpath"]
 hotpath-alloc = ["hotpath/hotpath", "hotpath/hotpath-alloc"]
 snapshot = []
+fault-injection = []
 
 [lints.rust]
 future_incompatible = "deny"

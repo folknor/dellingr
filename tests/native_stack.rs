@@ -42,6 +42,17 @@ struct Cycle {
 
 const CYCLES: &[Cycle] = &[
     Cycle {
+        name: "callable_rust",
+        step: "local first = true
+            local t = setmetatable({2, 1}, {__call = table.sort})
+            t(function(a, b)
+                if first then first = false deep(n + 1) end
+                return a < b
+            end)",
+        // A function-valued __call holds no metamethod-depth unit.
+        metamethod: false,
+    },
+    Cycle {
         name: "sort_comparator",
         step: "local first = true
             table.sort({2, 1}, function(a, b)
@@ -221,5 +232,40 @@ fn deepest_nested_functions_parse_on_the_limit_test_stack() {
             }
         }
         assert!(deepest > 100, "nesting stopped early, at {deepest}");
+    });
+}
+
+/// Recurring native stack only; the full-depth test also covers leaf work
+/// and error unwinding, which this measurement deliberately excludes.
+#[test]
+#[ignore = "on-demand native stack measurement"]
+fn native_bytes_per_level() {
+    fn record(state: &mut State) -> dellingr::Result<u8> {
+        let local = 0_u8;
+        let address = std::ptr::from_ref(&local).addr();
+        state.push_number(address as f64)?;
+        Ok(1)
+    }
+    stack::on_limit_test_stack("native_bytes_per_level", || {
+        for cycle in CYCLES {
+            let mut state = State::new();
+            state.push_rust_fn(callthrough).unwrap();
+            state.set_global("callthrough").unwrap();
+            state.push_rust_fn(record).unwrap();
+            state.set_global("record").unwrap();
+            let source = format!(
+                "local addresses = {{}} function deep(n)
+                 addresses[n + 1] = record()
+                 if n < 8 then {} end end
+                 deep(0)
+                 for i = 2, #addresses do
+                   print('{}', i - 1, math.abs(addresses[i] - addresses[i - 1]))
+                 end",
+                cycle.step, cycle.name
+            );
+            let program = dellingr::Program::compile(source, None).unwrap();
+            state.load(&program).unwrap();
+            state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
+        }
     });
 }

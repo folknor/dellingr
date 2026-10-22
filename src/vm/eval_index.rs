@@ -157,15 +157,12 @@ impl State {
                 self.check_stack_space(1)?;
                 self.push_unchecked(handler);
                 let handler_idx = self.stack.len() - 1;
-                if let Err(e) = self.get_table_with_key_tracking_call(
+                self.get_table_with_key_tracking_call(
                     handler_idx,
                     key,
                     local_cost,
                     handler_called,
-                ) {
-                    self.stack.truncate(handler_idx);
-                    return Err(e);
-                }
+                )?;
                 let result = self.pop_val();
                 self.pop_val();
                 // Replaces the handler popped above: net-neutral.
