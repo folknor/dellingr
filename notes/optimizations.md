@@ -18,6 +18,29 @@ plantasjen) unless noted.
 
 ## Investigate
 
+### Array-window append path: list_literals +4-6%, fill +3% (2026-10-22)
+
+What: the array part became a window over its logical length in 2bcc71e
+(queue-growth fix). Interleaved `--commit` pairs on plantasjen against
+c2932f8: `list_literals` 5100/5200 ms vs 4900/4900, `fill` 3200/3200 vs
+3100/3100, while the untouched `arithmetic` control (3900 both) and
+`benchmark`, `mixed` held level and `pairs` flipped sign between pairs
+(noise). Two sign-consistent table workloads with a flat control point at
+the mechanism rather than layout: every append now runs `prepare_append`
+and `advance_lead` (bounded catch-up of up to `LEAD_CATCH_UP` slots), and
+every array read and write subtracts and compares against the window
+base. `record_tables` measured 4000 vs 4200 in one pair (unconfirmed).
+
+Sketch: `--hotpath` on `examples/tables/fill.lua` and
+`examples/tables/list_literals.lua` at both commits to see which of the two
+costs dominates; then a fast path for the common `base == 0`, `lead == 0`
+case (a plain dense array that has never shifted), or batching the lead
+catch-up into `SET_LIST` instead of per element.
+
+Signal: a hotpath distribution showing `prepare_append`/`advance_lead`
+share above noise, or a matched pair after a fast path landing back at the
+c2932f8 numbers.
+
 ### bench/arithmetic +11% wall after compare-and-branch fusion landed (2026-09-03)
 
 What: after A-O7 (commits fd4d333..6cc8493), `bench/arithmetic` measures

@@ -88,7 +88,8 @@ brokkr dellingr --lua <W> --bench --commit <ref>   # baseline an old commit
   persistent worktree (own CARGO_TARGET_DIR; `brokkr clean --worktrees`),
   but loads the workload file from the CURRENT tree, hash-checked - the
   baseline varies the VM and holds the workload fixed.
-- Requires a clean git tree (except `*.md` and `.brokkr/results.db`);
+- Requires a tree clean of source and build-input changes; prose,
+  brokkr's own state and config (`brokkr.toml` included) do not count.
   `--force` runs anyway but stores no results row. `brokkr sidecar dirty`
   reaches the latest forced/failed run's sidecar data.
 

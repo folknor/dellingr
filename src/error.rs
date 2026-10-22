@@ -300,16 +300,31 @@ impl fmt::Display for StackFrame {
 
 /// An error raised by the parser or VM. Carries an [`ErrorKind`], the source
 /// location where it surfaced, and a stack trace.
+///
+/// One pointer wide. Every fallible VM and parser function returns
+/// `Result<_, Error>`, and in unoptimized builds each `?` site reserves its
+/// own stack slots for that `Result`; with the 88-byte unboxed layout those
+/// slots made one dispatch-loop frame about 40 KB, which decided how much
+/// native stack every re-entry and parser level needs (docs/limits.md,
+/// "Native stack"). Errors kill the callback, so the allocation is never on a
+/// path that continues executing.
+pub struct Error(Box<ErrorRepr>);
+
+impl fmt::Debug for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 #[derive(Debug)]
-pub struct Error {
+struct ErrorRepr {
     /// What went wrong.
     kind: ErrorKind,
     /// 1-based source line number where the error surfaced (0 if unknown).
     line_num: u32,
     /// 1-based source column (0 if unknown).
     column: u32,
-    /// The box keeps this optional context to one pointer in each `Error`, which
-    /// is carried across recursive VM calls.
+    /// Optional reporting and library context, allocated only when set.
     context: Option<Box<ErrorContext>>,
     /// Stack trace at the point of error (innermost frame first).
     stack_trace: Vec<StackFrame>,
@@ -335,9 +350,6 @@ pub enum PrefixLocation {
     ///
     /// `u32` rather than `usize` so `PrefixLocation` stays 8 bytes and
     /// `ScriptError` stays within `ErrorKind`'s existing largest variant.
-    /// Widening `ErrorKind` widens every `Result<_, Error>` held across the
-    /// Lua call recursion, which runs to `limits::MAX_CALL_DEPTH` and overflows the
-    /// debug-build stack - `call_depth_exceeded_error` catches exactly that.
     TraceFrame(u32),
 }
 
@@ -821,13 +833,13 @@ pub enum TypeError {
 impl Error {
     /// Construct an error with explicit source location.
     pub fn new(kind: impl Into<ErrorKind>, line_num: u32, column: u32) -> Self {
-        Error {
+        Error(Box::new(ErrorRepr {
             kind: kind.into(),
             line_num,
             column,
             context: None,
             stack_trace: Vec::new(),
-        }
+        }))
     }
 
     /// Construct an error without source-location information. Used for
@@ -845,18 +857,18 @@ impl Error {
     /// `on_error` as given. Public chiefly so hosts and tests can build errors
     /// with known traces.
     pub fn with_stack_trace(mut self, trace: Vec<StackFrame>) -> Self {
-        self.stack_trace = trace;
+        self.0.stack_trace = trace;
         self
     }
 
     pub(crate) fn with_location(mut self, line_num: u32, column: u32) -> Self {
-        self.line_num = line_num;
-        self.column = column;
+        self.0.line_num = line_num;
+        self.0.column = column;
         self
     }
 
     pub(crate) fn with_source_name(mut self, source_name: Option<Arc<str>>) -> Self {
-        if source_name.is_some() || self.context.is_some() {
+        if source_name.is_some() || self.0.context.is_some() {
             self.context_mut().name = source_name;
         }
         self
@@ -872,10 +884,8 @@ impl Error {
         }
     }
 
-    // Keep reporting state in the existing optional box: widening Error adds
-    // stack storage at every level of the bounded recursive Lua call path.
     fn context_mut(&mut self) -> &mut ErrorContext {
-        self.context.get_or_insert_with(|| {
+        self.0.context.get_or_insert_with(|| {
             Box::new(ErrorContext {
                 name: None,
                 reported: false,
@@ -896,29 +906,29 @@ impl Error {
 
     /// Source file or chunk name attached to this error, if it came from named source.
     pub fn source_name(&self) -> Option<&str> {
-        self.context.as_deref().and_then(ErrorContext::as_str)
+        self.0.context.as_deref().and_then(ErrorContext::as_str)
     }
 
     /// Error category and details.
     pub fn kind(&self) -> &ErrorKind {
-        &self.kind
+        &self.0.kind
     }
 
     /// Take the error category, discarding location and context.
     pub(crate) fn into_kind(self) -> ErrorKind {
-        self.kind
+        self.0.kind
     }
 
     /// Stack frames at the point the error was raised, innermost first.
     pub fn stack_trace(&self) -> &[StackFrame] {
-        &self.stack_trace
+        &self.0.stack_trace
     }
 
     /// Give an argument error the explicit standard-library function name.
     /// Updating the kind in place keeps this error's source and reporting
     /// state attached.
     pub(crate) fn with_argument_function_name(mut self, function_name: &str) -> Self {
-        if let ErrorKind::ArgError(argument) = &mut self.kind {
+        if let ErrorKind::ArgError(argument) = &mut self.0.kind {
             argument.func_name = Some(function_name.to_owned());
         }
         self
@@ -926,21 +936,24 @@ impl Error {
 
     /// String function whose pattern operation produced this error, if any.
     pub fn pattern_function(&self) -> Option<StringPatternFunction> {
-        self.context
+        self.0
+            .context
             .as_deref()
             .and_then(|context| context.pattern_function)
     }
 
     /// Typed standard-library reason behind this runtime error, if any.
     pub fn library_error(&self) -> Option<&LibraryError> {
-        self.context
+        self.0
+            .context
             .as_deref()
             .and_then(|context| context.library_error.as_ref())
     }
 
     /// Standard-library function responsible for this error, if known.
     pub fn library_function(&self) -> Option<&LibraryFunction> {
-        self.context
+        self.0
+            .context
             .as_deref()
             .and_then(|context| context.library_function.as_ref())
     }
@@ -962,7 +975,8 @@ impl Error {
 
     /// Instruction context shared by internal dispatch failures.
     pub fn vm_fault(&self) -> Option<&VmFault> {
-        self.context
+        self.0
+            .context
             .as_deref()
             .and_then(|context| context.vm_fault.as_ref())
     }
@@ -973,7 +987,7 @@ impl Error {
         opcode: u8,
         function_name: Option<&Arc<str>>,
     ) -> Self {
-        if matches!(self.kind, ErrorKind::InternalError(_)) && self.vm_fault().is_none() {
+        if matches!(self.0.kind, ErrorKind::InternalError(_)) && self.vm_fault().is_none() {
             self.context_mut().vm_fault = Some(VmFault {
                 instruction,
                 opcode,
@@ -985,12 +999,12 @@ impl Error {
 
     /// 1-based column number where the error surfaced (0 if unknown).
     pub fn column(&self) -> u32 {
-        self.column
+        self.0.column
     }
 
     /// 1-based line number where the error surfaced (0 if unknown).
     pub fn line_num(&self) -> u32 {
-        self.line_num
+        self.0.line_num
     }
 
     /// Whether the host can plausibly retry the operation after handling the
@@ -999,7 +1013,7 @@ impl Error {
     /// that keep reading lines until a chunk is complete; the crate's own CLI
     /// has no REPL and does not call it.
     pub fn is_recoverable(&self) -> bool {
-        self.kind.is_recoverable()
+        self.0.kind.is_recoverable()
     }
 }
 
@@ -1108,33 +1122,33 @@ impl SyntaxError {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Take the source and the line from the SAME record. Reading the source
-        // from the innermost frame but the line from `self.line_num` can splice
+        // from the innermost frame but the line from `self.0.line_num` can splice
         // together two unrelated locations: a host `RustFunc` may return an
         // `Error` carrying its own line, which says nothing about the Lua chunk
         // whose name is about to be printed next to it.
-        let prefix_location = match &self.kind {
+        let prefix_location = match &self.0.kind {
             ErrorKind::ScriptError { prefix, .. } => *prefix,
             _ => PrefixLocation::Current,
         };
         let prefix_frame = match prefix_location {
-            PrefixLocation::Current => self.stack_trace.first(),
+            PrefixLocation::Current => self.0.stack_trace.first(),
             PrefixLocation::Suppressed => None,
-            PrefixLocation::TraceFrame(index) => self.stack_trace.get(index as usize),
+            PrefixLocation::TraceFrame(index) => self.0.stack_trace.get(index as usize),
         };
         let suppress_prefix = matches!(prefix_location, PrefixLocation::Suppressed)
             || matches!(prefix_location, PrefixLocation::TraceFrame(_)) && prefix_frame.is_none();
         // The line always comes from the selected frame, whether or not that
-        // frame knows its source name. Falling back to `self.line_num` when the
+        // frame knows its source name. Falling back to `self.0.line_num` when the
         // source is absent would report the innermost line under an
         // `error(msg, 2)` that deliberately selected a caller.
         if suppress_prefix {
-            write!(f, "{}", self.kind)?;
+            write!(f, "{}", self.0.kind)?;
         } else {
             match prefix_frame {
                 Some(frame) => match frame.source.as_deref() {
-                    Some(source) => write!(f, "{source}:{}: {}", frame.line, self.kind)?,
+                    Some(source) => write!(f, "{source}:{}: {}", frame.line, self.0.kind)?,
                     None => {
-                        // `self.column` belongs to the innermost error site.
+                        // `self.0.column` belongs to the innermost error site.
                         // Pair it with the frame's line only when that frame
                         // IS the innermost site; otherwise the column is
                         // unknown (0) for the selected frame.
@@ -1142,28 +1156,28 @@ impl fmt::Display for Error {
                             prefix_location,
                             PrefixLocation::Current | PrefixLocation::TraceFrame(0)
                         ) && frame.line != 0
-                            && frame.line == self.line_num;
-                        let column = if same_site { self.column } else { 0 };
-                        write!(f, "{}:{}: {}", frame.line, column, self.kind)?;
+                            && frame.line == self.0.line_num;
+                        let column = if same_site { self.0.column } else { 0 };
+                        write!(f, "{}:{}: {}", frame.line, column, self.0.kind)?;
                     }
                 },
                 None => match self.source_name() {
-                    Some(source) if self.line_num != 0 && self.column != 0 => write!(
+                    Some(source) if self.0.line_num != 0 && self.0.column != 0 => write!(
                         f,
                         "{source}:{}:{}: {}",
-                        self.line_num, self.column, self.kind
+                        self.0.line_num, self.0.column, self.0.kind
                     )?,
-                    Some(source) if self.line_num != 0 => {
-                        write!(f, "{source}:{}: {}", self.line_num, self.kind)?;
+                    Some(source) if self.0.line_num != 0 => {
+                        write!(f, "{source}:{}: {}", self.0.line_num, self.0.kind)?;
                     }
-                    Some(source) => write!(f, "{source}: {}", self.kind)?,
-                    None => write!(f, "{}:{}: {}", self.line_num, self.column, self.kind)?,
+                    Some(source) => write!(f, "{source}: {}", self.0.kind)?,
+                    None => write!(f, "{}:{}: {}", self.0.line_num, self.0.column, self.0.kind)?,
                 },
             }
         }
-        if !self.stack_trace.is_empty() {
+        if !self.0.stack_trace.is_empty() {
             write!(f, "\nstack traceback:")?;
-            for frame in &self.stack_trace {
+            for frame in &self.0.stack_trace {
                 write!(f, "\n\t{frame}")?;
             }
         }

@@ -104,6 +104,9 @@ hotpath_file = "examples/tables/fill.lua"
 hotpath_xxh128 = "0ca74ee6bbe329be1e1a74d45b3ba364"
 
 [dellingr.workloads.queue]
+# Never `--bench --commit` a ref older than 2bcc71e: before that commit the
+# VM walks the queue's whole push history on every pairs start, and this
+# file runs for hours. Use `--hotpath`/`--alloc` (hotpath_file) across it.
 file = "bench/queue.lua"
 xxh128 = "b02dfb55c808e62f08a1311046988351"
 hotpath_file = "examples/tables/queue.lua"
