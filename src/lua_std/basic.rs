@@ -524,6 +524,13 @@ fn utf8_global_key(state: &State) -> Result<Option<String>> {
     }
 }
 
+// The missing-argument errors of the `check_any_named` calls in this handler
+// and `global_env_newindex` cannot be reached from Lua: VM dispatch always
+// passes `__index` two arguments and `__newindex` three (a nil value included),
+// and `__metatable = false` keeps scripts from fetching either handler. Only a
+// host that takes them from the raw metatable (`State::get_metatable_of`) can
+// call them, or hand them to Lua, short of arguments. Not a precedent for
+// argument checks in Lua-callable library functions.
 fn global_env_index(state: &mut State) -> Result<u8> {
     check_any_named(state, 2, "_G.__index")?;
     if let Some(key) = utf8_global_key(state)? {
@@ -536,6 +543,8 @@ fn global_env_index(state: &mut State) -> Result<u8> {
     Ok(1)
 }
 
+// Its missing-argument errors are unreachable from Lua without host
+// intervention; see `global_env_index`.
 fn global_env_newindex(state: &mut State) -> Result<u8> {
     check_any_named(state, 2, "_G.__newindex")?;
     check_any_named(state, 3, "_G.__newindex")?;

@@ -19,29 +19,6 @@ their IDs; cross-references to other IDs point back into those two documents.
 Entries are moved whole, so some carry a small part that is fixable as written;
 the category names the part that kept them out of the loop.
 
-## Approved, not yet implemented
-
-The user walked through these one by one on 2026-10-22 and approved each
-decision below. Entries are removed as they ship.
-
-## HYG-077 - Small stdlib duplications and unreachable checks
-
-Reported by the stdlib hunter. The `__tostring` rule duplication shipped
-(`State::tostring_rendering`, with `error_value` beside it). Remaining:
-
-- Lua-index normalisation: `string.rs` has `lua_start_index`/`lua_end_index`,
-  `table.rs` has per-function rules (matching 5.4's quirks), `select` its own.
-  The rules really differ, but nothing documents them in one place.
-- `_G.__index`/`__newindex` handlers check args 2 and 3 via `check_any_named`;
-  the VM always passes them and scripts cannot reach the handlers (`__metatable =
-  false`), so the checks are unreachable from Lua (a host could call them). Noted
-  so nobody cites them as precedent.
-
-Decision: the first remaining bullet gets one short section listing the
-per-function index rules (`reference/` or a comment block in
-`src/lua_std.rs`). The second gets a comment at the `_G` handlers. Then the
-entry is removed.
-
 ## Unmeasured performance
 
 ## HYG-045 - Error-path cleanup decided per site

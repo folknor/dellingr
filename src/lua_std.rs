@@ -14,6 +14,58 @@
 //! `string.gsub` and `string.gmatch` follow Lua 5.4's empty-match rule: an
 //! empty match ending where the previous match ended is skipped.
 //! `string.gmatch` also accepts Lua 5.4's optional `init` argument.
+//!
+//! # Position arguments
+//!
+//! The library's sequence positions and replacement counts are read by
+//! `arg_integer` / `opt_integer`: a number (numeral strings are rejected,
+//! see `docs/compatibility.md`) with an exact `i64` value, else an argument
+//! error, as in Lua 5.4 (Lua 5.2 truncates `1.5`). An optional argument that is
+//! absent or nil takes its default; a required one rejects both. The rules that
+//! follow differ per function on purpose and follow Lua 5.4 unless noted; they
+//! are not shared code. `len` is the string length, or the sequence length
+//! (through `__len` where the function honours it; its result may be a number
+//! or a numeral string with an exact `i64` value, negative included).
+//!
+//! - `string.sub(s, i [, j])`: `j` defaults to -1. Negative counts back from
+//!   the end (-1 is the last byte), then `i` clamps up to 1 and `j` down to
+//!   `len`; when the resolved `i` exceeds the resolved `j` or `len` (as with
+//!   `j = 0`) the result is "". Positions outside the string do not raise.
+//! - `string.find`, `match`, `gmatch` `init`: defaults to 1. Negative counts
+//!   back from the end; 0 and anything below `-len` mean 1. Past `len + 1`,
+//!   `find` and `match` return nil without matching and `gmatch` yields
+//!   nothing; at `len + 1` only an empty match can succeed. Lua 5.2's `gmatch`
+//!   has no `init`.
+//! - `string.gsub` `n` is a count: absent or nil is unlimited, 0 or negative
+//!   replaces nothing (Lua 5.2 treats negative as unlimited).
+//! - `select(n, ...)`: `"#"` returns the number of arguments after it. A
+//!   positive `n` past that count returns nothing; negative counts back from
+//!   the last argument; 0 and anything below `-count` raise "index out of
+//!   range". The returned suffix is subject to the 255-result limit.
+//! - `table.insert(t, pos, v)` and `table.remove(t [, pos])` take `pos`
+//!   literally. For a nonnegative `len`: insert needs `1 <= pos <= len + 1`
+//!   (the two-argument form appends at `len + 1`); remove defaults to `len` and
+//!   accepts `len` or `1..=len + 1`, so 0 and 1 on an empty table. Anything else
+//!   is "position out of bounds". For a negative `__len` the metamethod paths
+//!   keep 5.4's wrapping checks, which admit negative positions: an explicit
+//!   insert `pos` needs `u64(pos.wrapping_sub(1)) < u64(len.wrapping_add(1))`
+//!   (the two-argument form uses `len.wrapping_add(1)` itself), remove needs
+//!   `pos == len` or `u64(pos.wrapping_sub(1)) <= u64(len)`, where `u64(x)`
+//!   reinterprets the bits as unsigned.
+//! - `table.concat(t [, sep [, i [, j]]])` and `unpack` / `table.unpack(t [, i
+//!   [, j]])`: `i` defaults to 1, `j` to `len` (`concat` evaluates `len` even
+//!   when `j` is given, `unpack` only when `j` is absent or nil). Taken literally: no
+//!   clamping, no negative counting, `i > j` is empty. `unpack` is subject to
+//!   the 255-result limit.
+//! - `table.move(a1, f, e, t [, a2])`: `f`, `e` and `t` are required and
+//!   literal. `f > e` moves nothing and still returns the destination;
+//!   otherwise 5.4's overflow guards apply.
+//!
+//! `concat`, `unpack`, `move` (source and destination) and the metamethod
+//! paths of `insert` and `remove` also refuse a nonempty key range that f64
+//! keys cannot represent: a single key must be exact, and a range of several
+//! must lie within the inclusive +/-2^53, where consecutive integer keys stop
+//! being distinct.
 
 #![deny(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 
