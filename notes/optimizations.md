@@ -48,8 +48,9 @@ chasing alignment is open-ended (B-O6's "verify with asm first"
 applies). What would settle it: a placebo experiment (rebuild 1efb68e
 with an unused-function-sized text shift and re-pair) to characterize
 dellingr's own binary-to-binary band, or an asm/alignment look at
-`Frame::eval` on this host. If the register-codegen rewrite lands, this
-dispatch loop is rebuilt wholesale and the question dissolves.
+`Frame::eval` on this host. The register VM (2026-10-22) rebuilt this
+dispatch loop wholesale; the three instances below predate it, so
+re-measure on the register loop before acting on any of them.
 
 Second instance (bygg, 2026-10-14): `bench/fill` early WARM_BLOCKs went from
 52 ms at b33d4a1 to a flat 54 ms at 67f07aa (+4%, interleaved, stable across
@@ -94,26 +95,6 @@ that something else dominates the bench).
 
 Large enough to reshape whole subsystems. Each subsumes several smaller
 entries below; check the cross-references before starting a subsumed item.
-
-### Register-based codegen (A-O1; biggest throughput lever)
-
-What: the parser emits a pure stack machine: `x = a + b` is GET_LOCAL,
-GET_LOCAL, ADD, SET_LOCAL - four dispatches plus stack traffic; a register VM
-does it in one ADD(dst, a, b). Reference Lua's 5.0 move from stack to register
-VM is the single largest reason for the persistent gap on arithmetic/field
-benches (`numerics/arithmetic` 2.6x, `fields/same_obj_read` 3.8x vs lua5.2).
-
-Sketch: the 32-bit ABC encoding in `instr.rs` already has the operand room;
-locals already live in fixed frame slots, which are registers in all but name.
-The expression parser would grow a lua-style expdesc with delayed emission
-(the existing `ExpDesc`/`PlaceExp` split is halfway there), and
-`mark_call_base` / `dup` / `swap` gymnastics disappear.
-
-Hard-constraint interactions: determinism unaffected; per-opcode cost
-accounting survives but cost_used values re-base (fewer, fatter ops) - a
-product decision to version, same as any replay-affecting change. Subsumes
-the field-update fusion and GET/SET cache-slot-sharing entries below, which
-become natural in a register IR.
 
 ### Call path after the frame-stack flattening (B-O1 remainder)
 
@@ -269,8 +250,9 @@ ideally sharing one cache slot across the read and write of the same
 Why deferred: requires parser-side pattern recognition, a new opcode, and
 unifying cache slot management. The win compounds (one dispatch + one
 cache lookup instead of three), but the complexity is parser-level, not
-VM-level, which is where we've been working. Subsumed by register-based
-codegen if that lands - fusion is a natural register-IR peephole.
+VM-level, which is where we've been working. With register bytecode it is
+a codegen peephole over `GET_FIELD`, an arithmetic op and `SET_FIELD` on the
+same receiver register and name.
 
 Signal that would promote it: a workload where method bodies of the form
 `self.field = self.field + ...` dominate, and the per-instruction
@@ -499,8 +481,7 @@ Saves a slot per such pair and shares warmup state.
 Sketch: parser-time def-use analysis. For `self.count = self.count + 1`,
 both the GET and SET refer to `self`'s `count`. They could share an
 entry shape (table_ptr, version, index) since both lookups bottom out
-in the same table at the same index. Subsumed by register-based codegen
-if that lands.
+in the same table at the same index.
 
 Why deferred: requires DEF-USE analysis that the parser doesn't currently
 do. The memory savings are small (one cache slot per pair = ~24 bytes per

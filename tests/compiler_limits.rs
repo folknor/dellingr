@@ -139,19 +139,23 @@ fn parameter_limit_includes_method_self() {
 }
 
 #[test]
-fn jumps_beyond_i16_are_rejected_before_execution() {
-    let body = "x = 1\n".repeat(17_000);
-    expect_syntax_error(&format!("if false then\n{body}end"), |kind| {
-        matches!(kind, SyntaxError::JumpTooFar)
-    });
-
-    expect_syntax_error(&format!("while false do\n{body}end"), |kind| {
-        matches!(kind, SyntaxError::JumpTooFar)
-    });
-
-    expect_syntax_error(&format!("while true do\n{body}break\nend"), |kind| {
-        matches!(kind, SyntaxError::JumpTooFar)
-    });
+fn long_jumps_compile_and_run() {
+    // Far past the 16-bit jump range of the stack VM, inside the 24-bit one.
+    let body = "x = 1\n".repeat(40_000);
+    for source in [
+        format!("if false then\n{body}end return 7"),
+        format!("while false do\n{body}end return 7"),
+        format!("while true do\n{body}break\nend return 7"),
+    ] {
+        let mut state = State::new();
+        dellingr::Program::compile(&source, None)
+            .and_then(|program| state.load(&program))
+            .expect("a long jump compiles");
+        state
+            .call(dellingr::ArgCount::Fixed(0), dellingr::RetCount::Fixed(1))
+            .expect("a long jump runs");
+        assert_eq!(state.to_number(-1).expect("numeric result"), 7.0);
+    }
 }
 
 #[test]
@@ -368,10 +372,10 @@ fn uncached_slots_templates_and_wide_set_field_at_execute() {
         .join("\n");
     let mut state = State::new();
     dellingr::Program::compile(format!("{prefix}\nlocal a, b = {{}}, {{}}\na.wide, b.wide = 1, 2\nlocal t = {{ one = 1, two = 2, three = 3, four = 4, five = 5 }}\nreturn a.wide, b.wide, t.five"), None).and_then(|program| state.load(&program))
-        .expect("wide template and SET_FIELD_AT keys should compile");
+        .expect("wide template and multiple-assignment field keys should compile");
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(3))
-        .expect("wide template and SET_FIELD_AT should run");
+        .expect("wide template and multiple-assignment field should run");
     assert_eq!(
         state
             .to_number(-3)

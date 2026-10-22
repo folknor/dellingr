@@ -1,16 +1,13 @@
-use super::ExpDesc;
-use super::Instr;
+use super::super::ast::{Expr, ExprKind, TableAlloc, TableExpr, TableItem};
 use super::Parser;
 use super::Result;
-use super::RetCount;
 use super::SyntaxError;
-use super::TailKind;
 use super::TokenKind;
 use crate::limits::tuning::{INLINE_TEMPLATE_FIELDS, TABLE_INLINE_CAPACITY};
 use crate::limits::{MAX_TABLE_BATCH_SIZE, MAX_TABLE_TEMPLATE_FIELDS, MAX_TABLE_TEMPLATES};
 
+/// A named field's key literal and the index of its constructor item.
 type TableTemplateField = (u16, usize);
-type ParsedTableEntry = (u8, Option<TailKind>, Option<TableTemplateField>);
 
 #[derive(Debug)]
 struct TableTemplateCandidate {
@@ -63,12 +60,23 @@ impl TableTemplateCandidate {
     }
 }
 
+/// One parsed constructor entry.
+enum Entry {
+    Positional(Expr),
+    Named { name: u16, value: Expr, line: u32 },
+    Keyed { key: Expr, value: Expr, line: u32 },
+}
+
 impl Parser<'_> {
-    /// Parses a table constructor.
+    /// Parses a table constructor after its opening brace, which was read on
+    /// `open_line`.
     #[hotpath::measure]
-    pub(super) fn parse_table(&mut self) -> Result<()> {
-        let table_instr_idx = self.funcs.chunk.code.len();
-        self.push(Instr::new_table());
+    pub(super) fn parse_table(&mut self, open_line: u32) -> Result<Expr> {
+        let mut table = TableExpr {
+            alloc: TableAlloc::Plain,
+            line: open_line,
+            items: Vec::new(),
+        };
         // Skip any leading separators (handles {;} and {,}). This is an
         // intentional divergence from Lua 5.2/5.4, which reject a leading or
         // lone separator; docs/compatibility.md documents it.
@@ -76,8 +84,8 @@ impl Parser<'_> {
             self.input.next()?;
         }
         if self.input.try_pop(TokenKind::RCurly)?.is_none() {
-            // i is the number of array-style entries.
-            let mut i = 0;
+            // i is the number of pending array-style entries.
+            let mut i = 0u8;
             let mut batch = 0u16;
             let mut field_count = 0u8;
             // Named and computed-key fields: the hash-capacity hint. The
@@ -85,88 +93,119 @@ impl Parser<'_> {
             // reserves the array for itself.
             let mut keyed_count = 0u8;
             let mut template_candidate = TableTemplateCandidate::new();
-            let last_tail = loop {
+            let last_positional_multi = loop {
                 if i == MAX_TABLE_BATCH_SIZE {
-                    self.push(Instr::set_list_batch(i, batch));
+                    table.items.push(TableItem::Flush {
+                        count: Some(i),
+                        batch,
+                        line: self.input.last_line(),
+                    });
                     i = 0;
                     batch = batch
                         .checked_add(1)
                         .ok_or_else(|| self.error_here(SyntaxError::TooManyTableFields))?;
                 }
-                let (new_i, tail, named_field) = self.parse_table_entry(i)?;
-                if new_i == i {
-                    keyed_count = keyed_count.saturating_add(1);
-                }
-                i = new_i;
+                let entry = self.parse_table_entry()?;
                 field_count = field_count.saturating_add(1);
-                template_candidate.push(named_field);
+                let mut tail_multi = false;
+                let item = match entry {
+                    Entry::Positional(value) => {
+                        i += 1;
+                        tail_multi = value.is_multi();
+                        template_candidate.push(None);
+                        TableItem::Positional(value)
+                    }
+                    Entry::Named { name, value, line } => {
+                        keyed_count = keyed_count.saturating_add(1);
+                        template_candidate.push(Some((name, table.items.len())));
+                        TableItem::Named {
+                            name,
+                            value,
+                            line,
+                            pinned: None,
+                        }
+                    }
+                    Entry::Keyed { key, value, line } => {
+                        keyed_count = keyed_count.saturating_add(1);
+                        template_candidate.push(None);
+                        TableItem::Keyed { key, value, line }
+                    }
+                };
+                table.items.push(item);
 
                 if !matches!(self.input.peek_type()?, TokenKind::Comma | TokenKind::Semi) {
-                    break tail;
+                    break tail_multi;
                 }
                 self.input.next()?;
                 if self.input.check_type(TokenKind::RCurly)? {
-                    break tail;
+                    break tail_multi;
                 }
             };
             self.expect(TokenKind::RCurly)?;
 
-            if let Some(tail) = last_tail.as_ref() {
-                self.open_tail(*tail, RetCount::All)?;
-                self.funcs.chunk.code[table_instr_idx] = Instr::new_table_tracked(keyed_count);
-                self.push(Instr::set_list_batch(0, batch));
-            } else if usize::from(field_count) > INLINE_TEMPLATE_FIELDS
-                && !template_candidate
-                    .fields_for_template(field_count)
-                    .is_some_and(|fields| self.try_use_table_template(table_instr_idx, fields))
-                && usize::from(keyed_count) > TABLE_INLINE_CAPACITY
-            {
-                self.funcs.chunk.code[table_instr_idx] = Instr::new_table_presized(keyed_count);
-            }
-
-            if last_tail.is_none() && i > 0 {
-                self.push(Instr::set_list_batch(i, batch));
+            if last_positional_multi {
+                // The open final batch takes every pending value up to the
+                // top, the expandable tail's values included.
+                table.alloc = TableAlloc::Presized(keyed_count);
+                table.items.push(TableItem::Flush {
+                    count: None,
+                    batch,
+                    line: self.input.last_line(),
+                });
+            } else {
+                if usize::from(field_count) > INLINE_TEMPLATE_FIELDS
+                    && !template_candidate
+                        .fields_for_template(field_count)
+                        .is_some_and(|fields| self.try_use_table_template(&mut table, fields))
+                    && usize::from(keyed_count) > TABLE_INLINE_CAPACITY
+                {
+                    table.alloc = TableAlloc::Presized(keyed_count);
+                }
+                if i > 0 {
+                    table.items.push(TableItem::Flush {
+                        count: Some(i),
+                        batch,
+                        line: self.input.last_line(),
+                    });
+                }
             }
         }
-        Ok(())
+        Ok(Expr::new(ExprKind::Table(Box::new(table))))
     }
 
     /// Parses a table entry.
-    /// Returns (new_counter, final multi-value tail candidate, template field).
     #[hotpath::measure]
-    fn parse_table_entry(&mut self, counter: u8) -> Result<ParsedTableEntry> {
+    fn parse_table_entry(&mut self) -> Result<Entry> {
         match self.input.peek_type()? {
             TokenKind::Identifier if self.input.peek2_type()? == TokenKind::Assign => {
-                let index = self.expect_identifier_id()?;
+                let name = self.expect_identifier_id()?;
                 self.expect(TokenKind::Assign)?;
-                self.parse_expr()?;
-                let instr_idx = self.funcs.chunk.code.len();
-                self.push(Instr::init_field(counter, index));
-                Ok((counter, None, Some((index, instr_idx))))
+                let value = self.parse_expr()?;
+                Ok(Entry::Named {
+                    name,
+                    value,
+                    line: self.input.last_line(),
+                })
             }
             TokenKind::LSquare => {
                 self.input.next()?;
-                self.parse_expr()?;
+                let key = self.parse_expr()?;
                 self.expect(TokenKind::RSquare)?;
                 self.expect(TokenKind::Assign)?;
-                self.parse_expr()?;
-                self.push(Instr::init_index(counter));
-                Ok((counter, None, None))
+                let value = self.parse_expr()?;
+                Ok(Entry::Keyed {
+                    key,
+                    value,
+                    line: self.input.last_line(),
+                })
             }
-            _ => {
-                let expr = self.parse_expr()?;
-                let tail = match expr {
-                    ExpDesc::MultiTail(tail) => Some(tail),
-                    _ => None,
-                };
-                Ok((counter + 1, tail, None))
-            }
+            _ => Ok(Entry::Positional(self.parse_expr()?)),
         }
     }
 
     fn try_use_table_template(
         &mut self,
-        table_instr_idx: usize,
+        table: &mut TableExpr,
         fields: &[TableTemplateField],
     ) -> bool {
         if fields.is_empty() || self.funcs.chunk.table_templates.len() >= MAX_TABLE_TEMPLATES {
@@ -196,9 +235,11 @@ impl Parser<'_> {
             return false;
         };
         self.funcs.chunk.table_templates.push(template);
-        self.funcs.chunk.code[table_instr_idx] = Instr::new_table_template(template_idx);
-        for ((key_id, instr_idx), entry_idx) in fields.iter().zip(field_indices) {
-            self.funcs.chunk.code[*instr_idx] = Instr::init_field_pinned(*key_id, entry_idx);
+        table.alloc = TableAlloc::Template(template_idx);
+        for ((_, item_idx), entry_idx) in fields.iter().zip(field_indices) {
+            if let Some(TableItem::Named { pinned, .. }) = table.items.get_mut(*item_idx) {
+                *pinned = Some(entry_idx);
+            }
         }
         true
     }

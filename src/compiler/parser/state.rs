@@ -1,32 +1,33 @@
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
+use super::super::ast::{LocalDecl, LocalId};
 use super::{Bytecode, LiteralPoolIndices, LoopContext, UpvalueDesc};
 
 /// All state scoped to one function. Entering a function constructs this unit;
-/// leaving it removes the unit, including its loops and folding barrier.
+/// leaving it removes the unit, including its loops.
 #[derive(Debug)]
 pub(super) struct FuncState<'a> {
     pub(super) chunk: Bytecode,
     pub(super) literal_indices: LiteralPoolIndices,
     /// Names borrow the source; slot order is declaration order.
     pub(super) locals: Vec<&'a str>,
+    /// The declaration of each active local, parallel to `locals`.
+    pub(super) local_ids: Vec<LocalId>,
+    /// Every local declared in this function, by declaration order.
+    pub(super) decls: Vec<LocalDecl>,
     pub(super) upvalues: Vec<(&'a str, UpvalueDesc)>,
-    /// A nested function must never see an enclosing function's break targets.
-    pub(super) loop_breaks: Vec<LoopContext>,
+    /// A nested function must never see an enclosing function's loops.
+    pub(super) loops: Vec<LoopContext>,
     /// Local count at each block entry, excluding the function's base scope,
     /// paired with the `captures` length at that entry.
     pub(super) block_starts: Vec<(usize, usize)>,
     /// Append-only log of this function's local slots captured by a nested
     /// function, one entry per first capture by each nested function. A scope
     /// whose log suffix holds no slot at or above its close boundary cannot
-    /// have an open upvalue there, so its `CloseUpvalues` is omitted. Never
-    /// deduplicate by slot: a later local reusing a slot needs its own entry.
+    /// have an open upvalue there, so it closes nothing. Never deduplicate by
+    /// slot: a later local reusing a slot needs its own entry.
     pub(super) captures: Vec<u8>,
-    /// Folding cannot merge operands across a patched forward-jump target.
-    /// The boundary is exclusive: landing on the first operand is safe, but
-    /// landing on the second must still execute that operand independently.
-    pub(super) fold_barrier: usize,
 }
 
 impl FuncState<'_> {
@@ -40,11 +41,12 @@ impl FuncState<'_> {
             },
             literal_indices: LiteralPoolIndices::default(),
             locals: Vec::new(),
+            local_ids: Vec::new(),
+            decls: Vec::new(),
             upvalues: Vec::new(),
-            loop_breaks: Vec::new(),
+            loops: Vec::new(),
             block_starts: Vec::new(),
             captures: Vec::new(),
-            fold_barrier: 0,
         }
     }
 }

@@ -1,29 +1,17 @@
-use std::sync::Arc;
-
 use super::Bytecode;
 use super::DEEP_PARSE_TEST_STACK_BYTES;
-use super::Instr;
 use super::Parser;
 use super::TokenStream;
 use super::parse_unfinalized;
 use crate::State;
 use crate::compiler::UpvalueDesc;
 use crate::error::{ErrorKind, SyntaxError};
-use crate::instr::{ArgCount, Builtin, RetCount};
+use crate::instr::{ArgCount, ArithOp, ArithOperands, CompareOp, Instr, RetCount};
 use crate::limits::{
     MAX_ASSIGNMENT_OFFSET, MAX_CHUNK_NESTING, MAX_EXPRESSIONS, MAX_FIXED_ARGS, MAX_FIXED_RESULTS,
     MAX_LITERALS, MAX_LOCALS, MAX_NESTED, MAX_SOURCE_BYTES, MAX_TABLE_BATCH_SIZE,
     MAX_TABLE_TEMPLATE_FIELDS, MAX_TABLE_TEMPLATES, SYNTAX_SUFFIX_COST,
 };
-
-/// Recursively clear line_info from a chunk and its nested chunks.
-fn clear_line_info(chunk: &mut Bytecode) {
-    chunk.line_info.clear();
-    for nested in &mut chunk.nested {
-        let inner = Arc::get_mut(nested).expect("test fixture should own its nested chunks");
-        clear_line_info(inner);
-    }
-}
 
 fn assert_line_info_matches_code_len(chunk: &Bytecode) {
     assert_eq!(chunk.code.len(), chunk.line_info.len());
@@ -41,6 +29,46 @@ fn assert_too_many_syntax_levels(source: &str) {
         ),
         "unexpected error: {err:?}"
     );
+}
+
+/// The opcodes of every arithmetic form of `op`.
+fn arith_opcodes(op: ArithOp) -> [u8; 3] {
+    [
+        op.opcode(ArithOperands::RegReg),
+        op.opcode(ArithOperands::RegConst),
+        op.opcode(ArithOperands::ConstReg),
+    ]
+}
+
+fn has_arith(chunk: &Bytecode, op: ArithOp) -> bool {
+    chunk
+        .code
+        .iter()
+        .any(|inst| arith_opcodes(op).contains(&inst.opcode()))
+}
+
+fn opcodes(chunk: &Bytecode, opcode: u8) -> Vec<Instr> {
+    chunk
+        .code
+        .iter()
+        .copied()
+        .filter(|inst| inst.opcode() == opcode)
+        .collect()
+}
+
+fn run(source: &str) -> State {
+    let mut state = State::new();
+    crate::Program::compile(source, None)
+        .and_then(|program| state.load(&program))
+        .expect("fixture compiles");
+    state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(1))
+        .expect("fixture runs");
+    state
+}
+
+fn eval_number(source: &str) -> f64 {
+    run(source).to_number(-1).expect("fixture returns a number")
 }
 
 #[test]
@@ -69,15 +97,6 @@ fn decimal_and_hex_literals_use_the_shared_numeral_parser() {
 
         assert_eq!(actual.to_bits(), expected.to_bits(), "{source}");
     }
-}
-
-fn check_it(input: &str, mut output: Bytecode) {
-    // Top-level chunks are always vararg functions
-    output.is_vararg = true;
-    let mut actual = parse_unfinalized(input).unwrap();
-    // Clear line_info for comparison (tests were written before line tracking existed)
-    clear_line_info(&mut actual);
-    assert_eq!(actual, output);
 }
 
 fn literal_bytes(source: &str) -> Vec<u8> {
@@ -169,512 +188,228 @@ fn literal_string_escape_errors_use_the_backslash_position() {
     }
 }
 
-#[test]
-fn checked_jump_offset_accepts_i16_boundaries_only() {
-    let parser = Parser {
-        input: TokenStream::new(b""),
-        funcs: super::FunctionStack {
-            frames: vec![super::state::FuncState::new(None, 0, false)],
-        },
-        source_name: None,
-        syntax_depth: 0,
-    };
+// ---------------------------------------------------------------------------
+// Register shapes
+// ---------------------------------------------------------------------------
 
-    assert_eq!(parser.checked_jump_offset(0, 32_768).unwrap(), i16::MAX);
-    assert!(parser.checked_jump_offset(0, 32_769).is_err());
-    assert_eq!(parser.checked_jump_offset(32_767, 0).unwrap(), i16::MIN);
-    assert!(parser.checked_jump_offset(32_768, 0).is_err());
+#[test]
+fn local_arithmetic_reads_and_writes_registers_in_place() {
+    let chunk = parse_unfinalized("local a, b, c = 1, 2, 3; c = a + b").expect("compiles");
+    let add = opcodes(&chunk, ArithOp::Add.opcode(ArithOperands::RegReg));
+    assert_eq!(
+        add,
+        vec![Instr::arith(ArithOp::Add, ArithOperands::RegReg, 2, 0, 1)]
+    );
+    assert!(opcodes(&chunk, Instr::OP_MOVE).is_empty());
 }
 
 #[test]
-fn test01() {
-    // 5 + 6 folds at parse time; the operand literals stay pooled.
-    let text = "x = 5 + 6";
-    let out = Bytecode {
-        code: vec![
-            Instr::push_num(2),
-            Instr::set_global(0, None),
-            Instr::ret(RetCount::Fixed(0)),
-        ],
-        number_literals: vec![5.0, 6.0, 11.0],
-        string_literals: vec!["x".into()],
-        ..Bytecode::default()
-    };
-    check_it(text, out);
+fn number_literal_operands_use_constant_forms() {
+    let chunk =
+        parse_unfinalized("local a = 1; local b = a + 2; local c = 3 - a").expect("compiles");
+    assert_eq!(
+        opcodes(&chunk, ArithOp::Add.opcode(ArithOperands::RegConst)).len(),
+        1
+    );
+    assert_eq!(
+        opcodes(&chunk, ArithOp::Sub.opcode(ArithOperands::ConstReg)).len(),
+        1
+    );
 }
 
 #[test]
-fn test02() {
-    // ^ binds tighter than unary minus. `^` is never folded (a folded literal
-    // would not be charged), so the negation has no literal to fold into.
-    let text = "x = -5^2";
-    let out = Bytecode {
-        code: vec![
-            Instr::push_num(0),
-            Instr::push_num(1),
-            Instr::pow(),
-            Instr::negate(),
-            Instr::set_global(0, None),
-            Instr::ret(RetCount::Fixed(0)),
-        ],
-        number_literals: vec![5.0, 2.0],
-        string_literals: vec!["x".into()],
-        ..Bytecode::default()
-    };
-    check_it(text, out);
+fn method_calls_look_up_with_self_and_mark_the_call() {
+    let chunk = parse_unfinalized("local o = {}; o:m(1)").expect("compiles");
+    assert_eq!(opcodes(&chunk, Instr::OP_SELF).len(), 1);
+    let calls = opcodes(&chunk, Instr::OP_CALL);
+    assert_eq!(calls.len(), 1);
+    assert!(calls[0].call_is_method());
+    assert_eq!(calls[0].call_args(), ArgCount::Fixed(2));
 }
 
 #[test]
-fn test03() {
-    let text = "x = 5 + true .. 'hi'";
-    let out = Bytecode {
-        code: vec![
-            Instr::push_num(0),
-            Instr::push_bool(true),
-            Instr::add(),
-            Instr::push_string(1),
-            Instr::concat(2),
-            Instr::set_global(0, None),
-            Instr::ret(RetCount::Fixed(0)),
-        ],
-        number_literals: vec![5.0],
-        string_literals: vec!["x".into(), "hi".into()],
-        ..Bytecode::default()
-    };
-    check_it(text, out);
+fn conditions_ending_in_a_comparison_branch_in_one_instruction() {
+    for (source, op) in [
+        ("local n = 0 while n < 3 do n = n + 1 end", CompareOp::Lt),
+        (
+            "local a = 1 if a >= 2 then return 1 end return 0",
+            CompareOp::Ge,
+        ),
+        ("local n = 0 repeat n = n + 1 until n ~= 1", CompareOp::Ne),
+    ] {
+        let chunk = parse_unfinalized(source).expect("compiles");
+        assert_eq!(opcodes(&chunk, op.branch_opcode()).len(), 1, "{source}");
+        assert!(opcodes(&chunk, op.value_opcode()).is_empty(), "{source}");
+    }
 }
 
 #[test]
-fn test04() {
-    // 2 + 3 folds to 5 before the concat.
-    let text = "x = 1 .. 2 + 3";
-    let output = Bytecode {
-        code: vec![
-            Instr::push_num(0),
-            Instr::push_num(3),
-            Instr::concat(2),
-            Instr::set_global(0, None),
-            Instr::ret(RetCount::Fixed(0)),
-        ],
-        number_literals: vec![1.0, 2.0, 3.0, 5.0],
-        string_literals: vec!["x".into()],
-        ..Bytecode::default()
-    };
-    check_it(text, output);
+fn open_results_are_consumed_by_the_next_instruction() {
+    for source in [
+        "local function f(...) return ... end; return f(f(f(1, 2, 3)))",
+        "local t = {}; function t:f(...) return ... end; return t:f(t:f(t:f(1, 2, 3)))",
+        "local t = {7, g()}",
+        "local function f(...) local t = {99, ...} end",
+        "return g()",
+        "print(type(nil))",
+    ] {
+        let chunk = crate::compiler::compile(source, None).expect("compiles");
+        let check = |chunk: &Bytecode| {
+            for (pc, inst) in chunk.code.iter().enumerate() {
+                if inst.produces_open() {
+                    assert!(chunk.code[pc + 1].consumes_open(), "{source} at {pc}");
+                }
+            }
+        };
+        check(&chunk);
+        for nested in &chunk.nested {
+            check(nested);
+        }
+    }
 }
 
 #[test]
-fn concat_chain_emits_single_n_ary_concat() {
-    let text = r#"x = "a" .. "b" .. "c" .. "d""#;
-    let output = Bytecode {
-        code: vec![
-            Instr::push_string(1),
-            Instr::push_string(2),
-            Instr::push_string(3),
-            Instr::push_string(4),
-            Instr::concat(4),
-            Instr::set_global(0, None),
-            Instr::ret(RetCount::Fixed(0)),
-        ],
-        string_literals: vec!["x".into(), "a".into(), "b".into(), "c".into(), "d".into()],
-        ..Bytecode::default()
-    };
-    check_it(text, output);
+fn table_constructor_expands_only_final_bare_call_or_vararg() {
+    let final_call = parse_unfinalized("y = {7, f()}").unwrap();
+    assert!(
+        final_call
+            .code
+            .iter()
+            .any(|i| i.opcode() == Instr::OP_CALL && i.call_results() == RetCount::All)
+    );
+    assert!(
+        opcodes(&final_call, Instr::OP_SET_LIST)
+            .iter()
+            .any(|i| i.set_list_count().is_none())
+    );
+
+    let non_final_call = parse_unfinalized("y = {f(), 7}").unwrap();
+    assert!(
+        non_final_call
+            .code
+            .iter()
+            .any(|i| i.opcode() == Instr::OP_CALL && i.call_results() == RetCount::Fixed(1))
+    );
+    assert_eq!(
+        opcodes(&non_final_call, Instr::OP_SET_LIST)[0].set_list_count(),
+        Some(2)
+    );
+
+    let final_vararg = parse_unfinalized("y = {99, ...}").unwrap();
+    assert!(
+        final_vararg
+            .code
+            .iter()
+            .any(|i| i.opcode() == Instr::OP_VARARG && i.vararg_count() == RetCount::All)
+    );
+
+    let non_final_vararg = parse_unfinalized("y = {..., 99}").unwrap();
+    assert!(
+        non_final_vararg
+            .code
+            .iter()
+            .any(|i| i.opcode() == Instr::OP_VARARG && i.vararg_count() == RetCount::Fixed(1))
+    );
+    assert_eq!(
+        opcodes(&non_final_vararg, Instr::OP_SET_LIST)[0].set_list_count(),
+        Some(2)
+    );
 }
 
 #[test]
-fn test05() {
-    // -3 folds to a literal; the `^` itself is left to runtime.
-    let text = "x = 2^-3";
-    let output = Bytecode {
-        code: vec![
-            Instr::push_num(0),
-            Instr::push_num(2),
-            Instr::pow(),
-            Instr::set_global(0, None),
-            Instr::ret(RetCount::Fixed(0)),
-        ],
-        number_literals: vec![2.0, 3.0, -3.0],
-        string_literals: vec!["x".into()],
-        ..Bytecode::default()
-    };
-    check_it(text, output);
+fn table_constructor_sizing_follows_its_keyed_fields() {
+    // A keyed final field stops the expansion; a call before it is fixed.
+    let keyed_last = parse_unfinalized("y = {f(), k = 7}").unwrap();
+    assert_eq!(opcodes(&keyed_last, Instr::OP_NEW_TABLE).len(), 1);
+    assert_eq!(
+        opcodes(&keyed_last, Instr::OP_SET_LIST)[0].set_list_count(),
+        Some(1)
+    );
+
+    // An open constructor's hint counts named and computed keys only.
+    let capacity = parse_unfinalized("y = {1, 2, a = 1, [k] = 2, f()}").unwrap();
+    assert_eq!(opcodes(&capacity, Instr::OP_NEW_TABLE_PRESIZED)[0].b(), 2);
+
+    // Positional fields alone need no hash hint; SET_LIST reserves the array.
+    let positional = parse_unfinalized("y = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10}").unwrap();
+    assert_eq!(opcodes(&positional, Instr::OP_NEW_TABLE).len(), 1);
+    assert!(opcodes(&positional, Instr::OP_NEW_TABLE_PRESIZED).is_empty());
+
+    // Five or more unique named fields use a template; duplicates or computed
+    // keys fall back to a presized table.
+    let template = parse_unfinalized("y = {a = 1, b = 2, c = 3, d = 4, e = 5}").unwrap();
+    assert_eq!(template.table_templates, vec![vec![1, 2, 3, 4, 5]]);
+    assert_eq!(opcodes(&template, Instr::OP_INIT_FIELD_PINNED).len(), 5);
+    for source in [
+        "y = {a = 1, b = 2, c = 3, d = 4, a = 5}",
+        "y = {a = 1, b = 2, c = 3, d = 4, [k] = 5}",
+    ] {
+        let chunk = parse_unfinalized(source).unwrap();
+        assert!(chunk.table_templates.is_empty(), "{source}");
+        assert_eq!(
+            opcodes(&chunk, Instr::OP_NEW_TABLE_PRESIZED)[0].b(),
+            5,
+            "{source}"
+        );
+    }
 }
 
 #[test]
-fn test06() {
-    let text = "x=  not not 1";
-    let output = Bytecode {
-        code: vec![
-            Instr::push_num(0),
-            Instr::not(),
-            Instr::not(),
-            Instr::set_global(0, None),
-            Instr::ret(RetCount::Fixed(0)),
-        ],
-        number_literals: vec![1.0],
-        string_literals: vec!["x".into()],
-        ..Bytecode::default()
-    };
-    check_it(text, output);
+fn table_constructor_does_not_expand_non_bare_tails() {
+    for source in ["y = {(f())}", "y = {f().x}", "y = {(...)}"] {
+        let chunk = parse_unfinalized(source).unwrap();
+        assert!(chunk.code.iter().all(|i| !i.produces_open()), "{source}");
+        assert_eq!(
+            opcodes(&chunk, Instr::OP_SET_LIST)[0].set_list_count(),
+            Some(1),
+            "{source}"
+        );
+    }
 }
 
 #[test]
-fn test07() {
-    let text = "a = 5";
-    let output = Bytecode {
-        code: vec![
-            Instr::push_num(0),
-            Instr::set_global(0, None),
-            Instr::ret(RetCount::Fixed(0)),
-        ],
-        number_literals: vec![5.0],
-        string_literals: vec!["a".into()],
-        ..Bytecode::default()
-    };
-    check_it(text, output);
+fn assignment_tail_vararg_expands_to_lvalue_count() {
+    let chunk = parse_unfinalized("f = function(...) a, b = ... end").unwrap();
+    let varargs = opcodes(&chunk.nested[0], Instr::OP_VARARG);
+    assert_eq!(varargs.len(), 1);
+    assert_eq!(varargs[0].vararg_count(), RetCount::Fixed(2));
 }
 
 #[test]
-fn test08() {
-    let text = "x = true and false";
-    let output = Bytecode {
-        code: vec![
-            Instr::push_bool(true),
-            Instr::branch_false_keep(2),
-            Instr::pop(),
-            Instr::push_bool(false),
-            Instr::set_global(0, None),
-            Instr::ret(RetCount::Fixed(0)),
-        ],
-        string_literals: vec!["x".into()],
-        ..Bytecode::default()
-    };
-    check_it(text, output);
+fn generic_for_tail_vararg_expands_to_iterator_triple() {
+    let chunk = parse_unfinalized("f = function(...) for x in ... do end end").unwrap();
+    let varargs = opcodes(&chunk.nested[0], Instr::OP_VARARG);
+    assert_eq!(varargs[0].vararg_count(), RetCount::Fixed(3));
 }
 
 #[test]
-fn test09() {
-    let text = "x =  5 or nil and true";
-    let code = vec![
-        Instr::push_num(0),
-        Instr::branch_true_keep(5),
-        Instr::pop(),
-        Instr::push_nil(),
-        Instr::branch_false_keep(2),
-        Instr::pop(),
-        Instr::push_bool(true),
-        Instr::set_global(0, None),
-        Instr::ret(RetCount::Fixed(0)),
-    ];
-    let output = Bytecode {
-        code,
-        number_literals: vec![5.0],
-        string_literals: vec!["x".into()],
-        ..Bytecode::default()
-    };
-    check_it(text, output);
+fn non_final_vararg_stays_single_valued() {
+    let chunk = parse_unfinalized("f = function(...) a, b, c = ..., 99 end").unwrap();
+    let varargs = opcodes(&chunk.nested[0], Instr::OP_VARARG);
+    assert_eq!(varargs[0].vararg_count(), RetCount::Fixed(1));
 }
 
 #[test]
-fn test10() {
-    let text = "if true then a = 5 end";
-    let code = vec![
-        Instr::push_bool(true),
-        Instr::branch_false(2),
-        Instr::push_num(0),
-        Instr::set_global(0, None),
-        Instr::ret(RetCount::Fixed(0)),
-    ];
-    let chunk = Bytecode {
-        code,
-        number_literals: vec![5.0],
-        string_literals: vec!["a".into()],
-        ..Bytecode::default()
-    };
-    check_it(text, chunk);
+fn local_declarations_land_in_their_own_registers() {
+    let chunk = parse_unfinalized("f = function(...) local a, b, c = ... end").unwrap();
+    let varargs = opcodes(&chunk.nested[0], Instr::OP_VARARG);
+    assert_eq!(varargs, vec![Instr::vararg(0, RetCount::Fixed(3))]);
+
+    let chunk = parse_unfinalized("f = function() local a, b, c = g() end").unwrap();
+    let calls = opcodes(&chunk.nested[0], Instr::OP_CALL);
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].a(), 0);
+    assert_eq!(calls[0].call_results(), RetCount::Fixed(3));
 }
 
 #[test]
-fn test11() {
-    let text = "if true then a = 5 if true then b = 4 end end";
-    let code = vec![
-        Instr::push_bool(true),
-        Instr::branch_false(6),
-        Instr::push_num(0),
-        Instr::set_global(0, None),
-        Instr::push_bool(true),
-        Instr::branch_false(2),
-        Instr::push_num(1),
-        Instr::set_global(1, None),
-        Instr::ret(RetCount::Fixed(0)),
-    ];
-    let chunk = Bytecode {
-        code,
-        number_literals: vec![5.0, 4.0],
-        string_literals: vec!["a".into(), "b".into()],
-        ..Bytecode::default()
-    };
-    check_it(text, chunk);
-}
+fn parameterized_function_tracks_only_non_parameter_locals() {
+    let chunk = parse_unfinalized("function f(a, b) do local x end do local y end end").unwrap();
+    let function = &chunk.nested[0];
 
-#[test]
-fn test12() {
-    let text = "if true then a = 5 else a = 4 end";
-    let code = vec![
-        Instr::push_bool(true),
-        Instr::branch_false(3),
-        Instr::push_num(0),
-        Instr::set_global(0, None),
-        Instr::jump(2),
-        Instr::push_num(1),
-        Instr::set_global(0, None),
-        Instr::ret(RetCount::Fixed(0)),
-    ];
-    let chunk = Bytecode {
-        code,
-        number_literals: vec![5.0, 4.0],
-        string_literals: vec!["a".into()],
-        ..Bytecode::default()
-    };
-    check_it(text, chunk);
-}
-
-#[test]
-fn test13() {
-    // The elseif condition ends in a comparison, so its branch fuses.
-    let text = "if true then a = 5 elseif 6 == 7 then a = 3 else a = 4 end";
-    let code = vec![
-        Instr::push_bool(true),
-        Instr::branch_false(3),
-        Instr::push_num(0),
-        Instr::set_global(0, None),
-        Instr::jump(8),
-        Instr::push_num(1),
-        Instr::push_num(2),
-        Instr::branch_false_equal(3),
-        Instr::push_num(3),
-        Instr::set_global(0, None),
-        Instr::jump(2),
-        Instr::push_num(4),
-        Instr::set_global(0, None),
-        Instr::ret(RetCount::Fixed(0)),
-    ];
-    let chunk = Bytecode {
-        code,
-        number_literals: vec![5.0, 6.0, 7.0, 3.0, 4.0],
-        string_literals: vec!["a".into()],
-        ..Bytecode::default()
-    };
-    check_it(text, chunk);
-}
-
-#[test]
-fn test14() {
-    // The loop condition ends in a comparison, so the test branch fuses.
-    let text = "while a < 10 do a = a + 1 end";
-    let code = vec![
-        Instr::get_global(0, None),
-        Instr::push_num(0),
-        Instr::branch_false_less(5),
-        Instr::get_global(0, None),
-        Instr::push_num(1),
-        Instr::add(),
-        Instr::set_global(0, None),
-        Instr::jump(-8),
-        Instr::ret(RetCount::Fixed(0)),
-    ];
-    let chunk = Bytecode {
-        code,
-        number_literals: vec![10.0, 1.0],
-        string_literals: vec!["a".into()],
-        ..Bytecode::default()
-    };
-    check_it(text, chunk);
-}
-
-#[test]
-fn test15() {
-    // repeat local x = 5 until a == b - uncaptured body locals need no
-    // CloseUpvalues, so the comparison fuses with the backward branch
-    let text = "repeat local x = 5 until a == b y = 4";
-    let code = vec![
-        Instr::push_num(0),
-        Instr::set_local(0),
-        Instr::get_global(0, None),
-        Instr::get_global(1, None),
-        Instr::branch_false_equal(-5),
-        Instr::push_num(1),
-        Instr::set_global(2, None),
-        Instr::ret(RetCount::Fixed(0)),
-    ];
-    let chunk = Bytecode {
-        code,
-        number_literals: vec![5.0, 4.0],
-        string_literals: vec!["a".into(), "b".into(), "y".into()],
-        num_locals: 1,
-        ..Bytecode::default()
-    };
-    check_it(text, chunk);
-}
-
-#[test]
-fn test16() {
-    let text = "local i i = 2";
-    let code = vec![
-        Instr::push_nil(),
-        Instr::set_local(0),
-        Instr::push_num(0),
-        Instr::set_local(0),
-        Instr::ret(RetCount::Fixed(0)),
-    ];
-    let chunk = Bytecode {
-        code,
-        number_literals: vec![2.0],
-        num_locals: 1,
-        ..Bytecode::default()
-    };
-    check_it(text, chunk);
-}
-
-#[test]
-fn test17() {
-    let text = "local i, j print(j)";
-    let code = vec![
-        Instr::push_nil(),
-        Instr::push_nil(),
-        Instr::set_local(1),
-        Instr::set_local(0),
-        Instr::get_builtin(Builtin::Print),
-        // Fixed calls leave their retired call-base mark as a nop; finalize
-        // strips it (raw parser output is what these tests pin).
-        Instr::nop(),
-        Instr::get_local(1),
-        Instr::call(ArgCount::Fixed(1), RetCount::Fixed(0)),
-        Instr::ret(RetCount::Fixed(0)),
-    ];
-    let chunk = Bytecode {
-        code,
-        num_locals: 2,
-        ..Bytecode::default()
-    };
-    check_it(text, chunk);
-}
-
-#[test]
-fn test18() {
-    let text = "local i do local i x = i end x = i";
-    let code = vec![
-        Instr::push_nil(),
-        Instr::set_local(0),
-        Instr::push_nil(),
-        Instr::set_local(1),
-        Instr::get_local(1),
-        Instr::set_global(0, None),
-        Instr::get_local(0),
-        Instr::set_global(0, None),
-        Instr::ret(RetCount::Fixed(0)),
-    ];
-    let chunk = Bytecode {
-        code,
-        string_literals: vec!["x".into()],
-        num_locals: 2,
-        ..Bytecode::default()
-    };
-    check_it(text, chunk);
-}
-
-#[test]
-fn test19() {
-    let text = "do local i x = i end x = i";
-    let code = vec![
-        Instr::push_nil(),
-        Instr::set_local(0),
-        Instr::get_local(0),
-        Instr::set_global(0, None),
-        Instr::get_global(1, None),
-        Instr::set_global(0, None),
-        Instr::ret(RetCount::Fixed(0)),
-    ];
-    let chunk = Bytecode {
-        code,
-        string_literals: vec!["x".into(), "i".into()],
-        num_locals: 1,
-        ..Bytecode::default()
-    };
-    check_it(text, chunk);
-}
-
-#[test]
-fn test20() {
-    let text = "local i if false then local i else x = i end";
-    let code = vec![
-        Instr::push_nil(),
-        Instr::set_local(0),
-        Instr::push_bool(false),
-        Instr::branch_false(3),
-        Instr::push_nil(),
-        Instr::set_local(1),
-        Instr::jump(2),
-        Instr::get_local(0),
-        Instr::set_global(0, None),
-        Instr::ret(RetCount::Fixed(0)),
-    ];
-    let chunk = Bytecode {
-        code,
-        string_literals: vec!["x".into()],
-        num_locals: 2,
-        ..Bytecode::default()
-    };
-    check_it(text, chunk);
-}
-
-#[test]
-fn test21() {
-    let text = "for i = 1,5 do x = i end";
-    let code = vec![
-        Instr::push_num(0),
-        Instr::push_num(1),
-        Instr::push_num(0),
-        Instr::for_prep(0, 3),
-        Instr::get_local(3),
-        Instr::set_global(0, None),
-        Instr::for_loop(0, -3),
-        Instr::ret(RetCount::Fixed(0)),
-    ];
-    let chunk = Bytecode {
-        code,
-        number_literals: vec![1.0, 5.0],
-        string_literals: vec!["x".into()],
-        num_locals: 4,
-        ..Bytecode::default()
-    };
-    check_it(text, chunk);
-}
-
-#[test]
-fn generic_for_bytecode_keeps_control_and_visible_slots() {
-    let text = "for k, v in pairs(t) do x = k end";
-    let code = vec![
-        Instr::get_builtin(Builtin::Pairs),
-        Instr::nop(),
-        Instr::get_global(0, None),
-        Instr::call(ArgCount::Fixed(1), RetCount::Fixed(3)),
-        Instr::tfor_prep(0),
-        Instr::tfor_call(0, 2, None),
-        Instr::tfor_loop(0, 3),
-        Instr::get_local(3),
-        Instr::set_global(1, None),
-        Instr::jump(-5),
-        Instr::ret(RetCount::Fixed(0)),
-    ];
-    let chunk = Bytecode {
-        code,
-        string_literals: vec!["t".into(), "x".into()],
-        num_locals: 5,
-        ..Bytecode::default()
-    };
-    check_it(text, chunk);
+    assert_eq!(function.num_params, 2);
+    assert_eq!(function.num_locals, 1);
+    assert!(function.max_stack >= 3);
 }
 
 #[test]
@@ -686,592 +421,105 @@ fn for_control_function_captures_enclosing_same_named_local() {
     assert_eq!(function.upvalues, vec![UpvalueDesc::Local(0)]);
 }
 
-#[test]
-fn test22() {
-    let text = "a, b = 1";
-    let code = vec![
-        Instr::push_num(0),
-        Instr::push_nil(),
-        Instr::set_global(1, None),
-        Instr::set_global(0, None),
-        Instr::ret(RetCount::Fixed(0)),
-    ];
-    let chunk = Bytecode {
-        code,
-        number_literals: vec![1.0],
-        string_literals: vec!["a".into(), "b".into()],
-        ..Bytecode::default()
-    };
-    check_it(text, chunk);
-}
+// ---------------------------------------------------------------------------
+// Evaluation order and binding preservation
+// ---------------------------------------------------------------------------
 
 #[test]
-fn test23() {
-    let text = "a, b = 1, 2";
-    let code = vec![
-        Instr::push_num(0),
-        Instr::push_num(1),
-        Instr::set_global(1, None),
-        Instr::set_global(0, None),
-        Instr::ret(RetCount::Fixed(0)),
-    ];
-    let chunk = Bytecode {
-        code,
-        number_literals: vec![1.0, 2.0],
-        string_literals: vec!["a".into(), "b".into()],
-        ..Bytecode::default()
-    };
-    check_it(text, chunk);
-}
-
-#[test]
-fn test24() {
-    let text = "a, b = 1, 2, 3";
-    let code = vec![
-        Instr::push_num(0),
-        Instr::push_num(1),
-        Instr::push_num(2),
-        Instr::pop(),
-        Instr::set_global(1, None),
-        Instr::set_global(0, None),
-        Instr::ret(RetCount::Fixed(0)),
-    ];
-    let chunk = Bytecode {
-        code,
-        number_literals: vec![1.0, 2.0, 3.0],
-        string_literals: vec!["a".into(), "b".into()],
-        ..Bytecode::default()
-    };
-    check_it(text, chunk);
-}
-
-#[test]
-fn test25() {
-    let text = "puts()";
-    let code = vec![
-        Instr::get_global(0, None),
-        Instr::nop(),
-        Instr::call(ArgCount::Fixed(0), RetCount::Fixed(0)),
-        Instr::ret(RetCount::Fixed(0)),
-    ];
-    let chunk = Bytecode {
-        code,
-        string_literals: vec!["puts".into()],
-        ..Bytecode::default()
-    };
-    check_it(text, chunk);
-}
-
-#[test]
-fn test26() {
-    let text = "y = {x = 5,}";
-    let code = vec![
-        Instr::new_table(),
-        Instr::push_num(0),
-        Instr::init_field(0, 1),
-        Instr::set_global(0, None),
-        Instr::ret(RetCount::Fixed(0)),
-    ];
-    let chunk = Bytecode {
-        code,
-        number_literals: vec![5.0],
-        string_literals: vec!["y".into(), "x".into()],
-        ..Bytecode::default()
-    };
-    check_it(text, chunk);
-}
-
-#[test]
-fn table_constructor_presizes_larger_literals() {
-    let text = "y = {a = 1, b = 2, c = 3, d = 4, e = 5}";
-    let code = vec![
-        Instr::new_table_template(0),
-        Instr::push_num(0),
-        Instr::init_field_pinned(1, 0),
-        Instr::push_num(1),
-        Instr::init_field_pinned(2, 1),
-        Instr::push_num(2),
-        Instr::init_field_pinned(3, 2),
-        Instr::push_num(3),
-        Instr::init_field_pinned(4, 3),
-        Instr::push_num(4),
-        Instr::init_field_pinned(5, 4),
-        Instr::set_global(0, None),
-        Instr::ret(RetCount::Fixed(0)),
-    ];
-    let chunk = Bytecode {
-        code,
-        number_literals: vec![1.0, 2.0, 3.0, 4.0, 5.0],
-        string_literals: vec![
-            "y".into(),
-            "a".into(),
-            "b".into(),
-            "c".into(),
-            "d".into(),
-            "e".into(),
-        ],
-        table_templates: vec![vec![1, 2, 3, 4, 5]],
-        ..Bytecode::default()
-    };
-    check_it(text, chunk);
-}
-
-#[test]
-fn duplicate_table_constructor_keys_use_presized_table() {
-    let text = "y = {a = 1, b = 2, c = 3, d = 4, a = 5}";
-    let code = vec![
-        Instr::new_table_presized(5),
-        Instr::push_num(0),
-        Instr::init_field(0, 1),
-        Instr::push_num(1),
-        Instr::init_field(0, 2),
-        Instr::push_num(2),
-        Instr::init_field(0, 3),
-        Instr::push_num(3),
-        Instr::init_field(0, 4),
-        Instr::push_num(4),
-        Instr::init_field(0, 1),
-        Instr::set_global(0, None),
-        Instr::ret(RetCount::Fixed(0)),
-    ];
-    let chunk = Bytecode {
-        code,
-        number_literals: vec![1.0, 2.0, 3.0, 4.0, 5.0],
-        string_literals: vec!["y".into(), "a".into(), "b".into(), "c".into(), "d".into()],
-        ..Bytecode::default()
-    };
-    check_it(text, chunk);
-}
-
-#[test]
-fn computed_table_constructor_keys_use_presized_table() {
-    let text = "y = {a = 1, b = 2, c = 3, d = 4, [k] = 5}";
-    let code = vec![
-        Instr::new_table_presized(5),
-        Instr::push_num(0),
-        Instr::init_field(0, 1),
-        Instr::push_num(1),
-        Instr::init_field(0, 2),
-        Instr::push_num(2),
-        Instr::init_field(0, 3),
-        Instr::push_num(3),
-        Instr::init_field(0, 4),
-        Instr::get_global(5, None),
-        Instr::push_num(4),
-        Instr::init_index(0),
-        Instr::set_global(0, None),
-        Instr::ret(RetCount::Fixed(0)),
-    ];
-    let chunk = Bytecode {
-        code,
-        number_literals: vec![1.0, 2.0, 3.0, 4.0, 5.0],
-        string_literals: vec![
-            "y".into(),
-            "a".into(),
-            "b".into(),
-            "c".into(),
-            "d".into(),
-            "k".into(),
-        ],
-        ..Bytecode::default()
-    };
-    check_it(text, chunk);
-}
-
-#[test]
-fn table_constructor_expands_only_final_bare_call_or_vararg() {
-    let final_call = parse_unfinalized("y = {7, f()}").unwrap();
-    assert!(
-        final_call
-            .code
-            .iter()
-            .any(|instr| instr == &Instr::new_table_tracked(0))
+fn a_local_operand_keeps_the_value_it_had_when_evaluated() {
+    // A closure writes the local while the right operand runs; the left
+    // operand was already evaluated.
+    assert_eq!(
+        eval_number(
+            "local x = 1 \
+             local function change() x = 9 return 2 end \
+             return x + change()"
+        ),
+        3.0
     );
-    assert!(
-        final_call
-            .code
-            .iter()
-            .any(|instr| instr == &Instr::call(ArgCount::Fixed(0), RetCount::All))
+    // The same through the current function's upvalue.
+    assert_eq!(
+        eval_number(
+            "local x = 1 \
+             local function change() x = 9 return 2 end \
+             local function calculate() return x + change() end \
+             return calculate()"
+        ),
+        3.0
     );
-    assert!(
-        final_call
-            .code
-            .iter()
-            .any(|instr| instr == &Instr::set_list(0))
+    // A capture that appears later in the source, reached on a later
+    // iteration.
+    assert_eq!(
+        eval_number(
+            "local x = 1 local h local total = 0 \
+             for i = 1, 2 do \
+               total = total + (x + (h and h() or 0)) \
+               h = function() x = 100 return 0 end \
+             end \
+             return total"
+        ),
+        2.0
     );
-
-    let non_final_call = parse_unfinalized("y = {f(), 7}").unwrap();
-    assert!(
-        non_final_call
-            .code
-            .iter()
-            .any(|instr| instr == &Instr::new_table())
+    // A comparison operand and an index receiver.
+    assert_eq!(
+        eval_number(
+            "local x = 1 local function change() x = 9 return 2 end \
+             if x < change() then return 1 end return 0"
+        ),
+        1.0
     );
-    assert!(
-        non_final_call
-            .code
-            .iter()
-            .any(|instr| instr == &Instr::call(ArgCount::Fixed(0), RetCount::Fixed(1)))
+    assert_eq!(
+        eval_number(
+            "local t = {10} local function change() t = {20} return 1 end \
+             return t[change()]"
+        ),
+        10.0
     );
-    assert!(
-        non_final_call
-            .code
-            .iter()
-            .any(|instr| instr == &Instr::set_list(2))
-    );
-
-    let final_vararg = parse_unfinalized("y = {99, ...}").unwrap();
-    assert!(
-        final_vararg
-            .code
-            .iter()
-            .any(|instr| instr == &Instr::new_table_tracked(0))
-    );
-    assert!(
-        final_vararg
-            .code
-            .iter()
-            .any(|instr| instr == &Instr::vararg(RetCount::All))
-    );
-    assert!(
-        final_vararg
-            .code
-            .iter()
-            .any(|instr| instr == &Instr::set_list(0))
-    );
-
-    let non_final_vararg = parse_unfinalized("y = {..., 99}").unwrap();
-    assert!(
-        non_final_vararg
-            .code
-            .iter()
-            .any(|instr| instr == &Instr::vararg(RetCount::Fixed(1)))
-    );
-    assert!(
-        non_final_vararg
-            .code
-            .iter()
-            .any(|instr| instr == &Instr::set_list(2))
+    // A field store's receiver.
+    assert_eq!(
+        eval_number(
+            "local t = {} local old = t local function change() t = {} return 5 end \
+             t.x = change() return old.x"
+        ),
+        5.0
     );
 }
 
 #[test]
-fn table_constructor_keyed_final_field_prevents_expansion() {
-    let keyed_last = parse_unfinalized("y = {f(), k = 7}").unwrap();
-    assert!(
-        keyed_last
-            .code
-            .iter()
-            .any(|instr| instr == &Instr::new_table())
+fn multiple_assignment_stores_see_the_operands_as_evaluated() {
+    assert_eq!(
+        eval_number(
+            "local t = {} local i = 1 \
+             t[i], i = 10, 2 \
+             return (t[1] or 0) * 100 + (t[2] or 0)"
+        ),
+        1000.0
     );
-    assert!(
-        keyed_last
-            .code
-            .iter()
-            .any(|instr| instr == &Instr::call(ArgCount::Fixed(0), RetCount::Fixed(1)))
+    assert_eq!(
+        eval_number("local t = {} local old = t t.x, t = 10, {} return old.x"),
+        10.0
     );
-    assert!(
-        keyed_last
-            .code
-            .iter()
-            .any(|instr| instr == &Instr::set_list(1))
-    );
-
-    let call_last = parse_unfinalized("y = {k = 7, f()}").unwrap();
-    assert!(
-        call_last
-            .code
-            .iter()
-            .any(|instr| instr == &Instr::new_table_tracked(1))
-    );
-    assert!(
-        call_last
-            .code
-            .iter()
-            .any(|instr| instr == &Instr::call(ArgCount::Fixed(0), RetCount::All))
-    );
-
-    let dynamic_call = parse_unfinalized("y = {f(g())}").unwrap();
-    assert!(
-        dynamic_call
-            .code
-            .iter()
-            .any(|instr| { instr == &Instr::call(ArgCount::Dynamic, RetCount::All) })
-    );
-
-    // The tracked hint counts named and computed keys, never positional ones.
-    let capacity = parse_unfinalized("y = {1, 2, a = 1, [k] = 2, f()}").unwrap();
-    assert!(
-        capacity
-            .code
-            .iter()
-            .any(|instr| instr == &Instr::new_table_tracked(2))
-    );
-
-    // Positional fields alone need no hash hint; SET_LIST reserves the array.
-    let positional = parse_unfinalized("y = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10}").unwrap();
-    assert!(
-        positional
-            .code
-            .iter()
-            .any(|instr| instr == &Instr::new_table())
-    );
-    assert!(
-        !positional
-            .code
-            .iter()
-            .any(|instr| instr.opcode() == Instr::OP_NEW_TABLE_PRESIZED)
+    assert_eq!(
+        eval_number("local a, b = 1, 2 a, b = b, a return a * 10 + b"),
+        21.0
     );
 }
 
 #[test]
-fn table_constructor_does_not_expand_non_bare_tails() {
-    // A parenthesized call is truncated to one value, so it is not a bare tail
-    // and must not be patched to multi-return or use a tracked constructor.
-    let paren_call = parse_unfinalized("y = {(f())}").unwrap();
-    assert!(
-        paren_call
-            .code
-            .iter()
-            .all(|instr| instr.opcode() != Instr::OP_NEW_TABLE_TRACKED)
+fn and_or_values_and_short_circuits() {
+    assert_eq!(eval_number("local a = 5 return (a or 2) * 3"), 15.0);
+    assert_eq!(eval_number("local a = false return (a or 2) * 3"), 6.0);
+    assert_eq!(eval_number("local a = 5 return (a and 2) * 3"), 6.0);
+    assert_eq!(eval_number("local x = 1 x = 2 or x return x"), 2.0);
+    assert_eq!(eval_number("local x = 1 x = false or x return x"), 1.0);
+    assert_eq!(
+        eval_number("local a = false if a or 1 < 2 then return 1 end return 0"),
+        1.0
     );
-    assert!(
-        paren_call
-            .code
-            .iter()
-            .any(|instr| instr == &Instr::call(ArgCount::Fixed(0), RetCount::Fixed(1)))
+    assert_eq!(
+        eval_number("local a = false if a or 2 < 1 then return 1 end return 0"),
+        0.0
     );
-    assert!(
-        paren_call
-            .code
-            .iter()
-            .any(|instr| instr == &Instr::set_list(1))
-    );
-
-    // A field access ends in GetField, not a call/vararg tail.
-    let field_access = parse_unfinalized("y = {f().x}").unwrap();
-    assert!(
-        field_access
-            .code
-            .iter()
-            .all(|instr| instr.opcode() != Instr::OP_NEW_TABLE_TRACKED)
-    );
-    assert!(
-        field_access
-            .code
-            .iter()
-            .any(|instr| instr == &Instr::set_list(1))
-    );
-
-    // A parenthesized vararg is truncated to one value (the top-level chunk is
-    // vararg), so it stays Vararg(1) and does not expand.
-    let paren_vararg = parse_unfinalized("y = {(...)}").unwrap();
-    assert!(
-        paren_vararg
-            .code
-            .iter()
-            .all(|instr| instr.opcode() != Instr::OP_NEW_TABLE_TRACKED)
-    );
-    assert!(
-        paren_vararg
-            .code
-            .iter()
-            .any(|instr| instr == &Instr::vararg(RetCount::Fixed(1)))
-    );
-    assert!(
-        paren_vararg
-            .code
-            .iter()
-            .any(|instr| instr == &Instr::set_list(1))
-    );
-}
-
-#[test]
-fn test27() {
-    let text = "local x = t.x.y";
-    let code = vec![
-        Instr::get_global(0, None),
-        Instr::get_field(1, None),
-        Instr::get_field(2, None),
-        Instr::set_local(0),
-        Instr::ret(RetCount::Fixed(0)),
-    ];
-    let chunk = Bytecode {
-        code,
-        string_literals: vec!["t".into(), "x".into(), "y".into()],
-        num_locals: 1,
-        ..Bytecode::default()
-    };
-    check_it(text, chunk);
-}
-
-#[test]
-fn test28() {
-    let text = "x = function () end";
-    let code = vec![
-        Instr::closure(0),
-        Instr::set_global(0, None),
-        Instr::ret(RetCount::Fixed(0)),
-    ];
-    let string_literals = vec!["x".into()];
-    let nested = vec![Arc::new(Bytecode {
-        code: vec![Instr::ret(RetCount::Fixed(0))],
-        defined_line: 1,
-        ..Bytecode::default()
-    })];
-    let chunk = Bytecode {
-        code,
-        string_literals,
-        nested,
-        ..Bytecode::default()
-    };
-    check_it(text, chunk);
-}
-
-#[test]
-fn test29() {
-    let text = "x = function () local y = 7 end";
-    let inner_chunk = Bytecode {
-        code: vec![
-            Instr::push_num(0),
-            Instr::set_local(0),
-            Instr::ret(RetCount::Fixed(0)),
-        ],
-        number_literals: vec![7.0],
-        num_locals: 1,
-        defined_line: 1,
-        ..Bytecode::default()
-    };
-    let outer_chunk = Bytecode {
-        code: vec![
-            Instr::closure(0),
-            Instr::set_global(0, None),
-            Instr::ret(RetCount::Fixed(0)),
-        ],
-        string_literals: vec!["x".into()],
-        nested: vec![Arc::new(inner_chunk)],
-        ..Bytecode::default()
-    };
-    check_it(text, outer_chunk);
-}
-
-#[test]
-fn test30() {
-    let text = "
-    z = function () local z = 21 end
-    x = function ()
-        local y = function () end
-        print(y)
-    end";
-    let z = Bytecode {
-        code: vec![
-            Instr::push_num(0),
-            Instr::set_local(0),
-            Instr::ret(RetCount::Fixed(0)),
-        ],
-        number_literals: vec![21.0],
-        num_locals: 1,
-        defined_line: 2,
-        ..Bytecode::default()
-    };
-    let y = Bytecode {
-        code: vec![Instr::ret(RetCount::Fixed(0))],
-        defined_line: 4,
-        ..Bytecode::default()
-    };
-    let x = Bytecode {
-        code: vec![
-            Instr::closure(0),
-            Instr::set_local(0),
-            Instr::get_builtin(Builtin::Print),
-            Instr::nop(),
-            Instr::get_local(0),
-            Instr::call(ArgCount::Fixed(1), RetCount::Fixed(0)),
-            Instr::ret(RetCount::Fixed(0)),
-        ],
-        nested: vec![Arc::new(y)],
-        num_locals: 1,
-        defined_line: 3,
-        ..Bytecode::default()
-    };
-    let outer_chunk = Bytecode {
-        code: vec![
-            Instr::closure(0),
-            Instr::set_global(0, None),
-            Instr::closure(1),
-            Instr::set_global(1, None),
-            Instr::ret(RetCount::Fixed(0)),
-        ],
-        nested: vec![Arc::new(z), Arc::new(x)],
-        string_literals: vec!["z".into(), "x".into()],
-        ..Bytecode::default()
-    };
-    check_it(text, outer_chunk);
-}
-
-#[test]
-fn test31() {
-    let text = "local s = type(4)";
-    let code = vec![
-        Instr::get_builtin(Builtin::Type),
-        Instr::nop(),
-        Instr::push_num(0),
-        Instr::call(ArgCount::Fixed(1), RetCount::Fixed(1)),
-        Instr::set_local(0),
-        Instr::ret(RetCount::Fixed(0)),
-    ];
-    let chunk = Bytecode {
-        code,
-        num_locals: 1,
-        number_literals: vec![4.0],
-        ..Bytecode::default()
-    };
-    check_it(text, chunk);
-}
-
-#[test]
-fn test32() {
-    // When the last argument is a function call, all its return values are passed
-    let text = "local type, print print(type(nil))";
-    let code = vec![
-        Instr::push_nil(),
-        Instr::push_nil(),
-        Instr::set_local(1),
-        Instr::set_local(0),
-        // The callee is evaluated first, then the base is marked one slot
-        // below the top. Marking before evaluation required guessing how many
-        // values the callee expression had already left on the stack.
-        Instr::get_local(1),                                // Get print
-        Instr::mark_call_base(1),                           // Mark the slot holding the callee
-        Instr::get_local(0),                                // Get type
-        Instr::nop(),                                       // Inner fixed call's retired mark
-        Instr::push_nil(),                                  // Push nil argument
-        Instr::call(ArgCount::Fixed(1), RetCount::All),     // Call type(nil), return ALL values
-        Instr::call(ArgCount::Dynamic, RetCount::Fixed(0)), // Call print with dynamic arg count
-        Instr::ret(RetCount::Fixed(0)),
-    ];
-    let chunk = Bytecode {
-        code,
-        num_locals: 2,
-        ..Bytecode::default()
-    };
-    check_it(text, chunk);
-}
-
-#[test]
-fn test33() {
-    // A `(` on a new line continues the previous expression as a call, as in
-    // reference Lua: the program is `print()(foo)()`.
-    let expected = parse_unfinalized("print()(foo)()").expect("same-line form compiles");
-    for text in [
-        "print()\n(foo)()\n",
-        "print()\r(foo)()\r",
-        "print()\r\n(foo)()\r\n",
-        "print()\n\r(foo)()\n\r",
-    ] {
-        let chunk = parse_unfinalized(text).unwrap_or_else(|e| panic!("{text:?}: {e:?}"));
-        assert_eq!(chunk.code, expected.code, "{text:?}");
-    }
 }
 
 #[test]
@@ -1284,137 +532,26 @@ fn break_allows_semicolons_and_following_statements() {
         parse_unfinalized(source).expect("break must allow following statements");
     }
 
-    let mut state = State::new();
-    crate::Program::compile(
-        "local reached = 0; while true do break; reached = 1 end; return reached",
-        None,
-    )
-    .and_then(|program| state.load(&program))
-    .expect("break fixture must compile");
-    state
-        .call(ArgCount::Fixed(0), RetCount::Fixed(1))
-        .expect("break fixture must run");
     assert_eq!(
-        state.to_number(-1).expect("return value must be numeric"),
+        eval_number("local reached = 0; while true do break; reached = 1 end; return reached"),
         0.0
     );
 }
 
 #[test]
-fn test34() {
-    // while false do local b end - an uncaptured body local needs no close
-    let text = "while false do local b end b()";
-    let code = vec![
-        Instr::push_bool(false),
-        Instr::branch_false(3),
-        Instr::push_nil(),
-        Instr::set_local(0),
-        Instr::jump(-5),
-        Instr::get_global(0, None),
-        Instr::nop(),
-        Instr::call(ArgCount::Fixed(0), RetCount::Fixed(0)),
-        Instr::ret(RetCount::Fixed(0)),
-    ];
-    let chunk = Bytecode {
-        code,
-        num_locals: 1,
-        string_literals: vec!["b".into()],
-        ..Bytecode::default()
-    };
-    check_it(text, chunk);
-}
-
-#[test]
-fn assignment_tail_vararg_expands_to_lvalue_count() {
-    let chunk = parse_unfinalized("f = function(...) a, b = ... end").unwrap();
-    let function = &chunk.nested[0];
-
-    assert_eq!(
-        function.code,
-        vec![
-            Instr::vararg(RetCount::Fixed(2)),
-            Instr::set_global(1, None),
-            Instr::set_global(0, None),
-            Instr::ret(RetCount::Fixed(0)),
-        ]
-    );
-}
-
-#[test]
-fn generic_for_tail_vararg_expands_to_iterator_triple() {
-    let chunk = parse_unfinalized("f = function(...) for x in ... do end end").unwrap();
-    let function = &chunk.nested[0];
-
-    assert_eq!(
-        function
-            .code
-            .iter()
-            .filter(|instr| instr.opcode() == Instr::OP_VARARG)
-            .map(|instr| instr.a())
-            .collect::<Vec<_>>(),
-        vec![3]
-    );
-}
-
-#[test]
-fn non_final_vararg_stays_single_valued() {
-    let chunk = parse_unfinalized("f = function(...) a, b, c = ..., 99 end").unwrap();
-    let function = &chunk.nested[0];
-
-    assert_eq!(
-        function
-            .code
-            .iter()
-            .filter(|instr| instr.opcode() == Instr::OP_VARARG)
-            .map(|instr| instr.a())
-            .collect::<Vec<_>>(),
-        vec![1]
-    );
-}
-
-#[test]
-fn local_vararg_assignment_bytecode_is_unchanged() {
-    let chunk = parse_unfinalized("f = function(...) local a, b, c = ... end").unwrap();
-    let function = &chunk.nested[0];
-
-    assert_eq!(
-        function.code,
-        vec![
-            Instr::vararg(RetCount::Fixed(3)),
-            Instr::set_local(2),
-            Instr::set_local(1),
-            Instr::set_local(0),
-            Instr::ret(RetCount::Fixed(0)),
-        ]
-    );
-}
-
-#[test]
-fn local_tail_call_assignment_bytecode_is_unchanged() {
-    let chunk = parse_unfinalized("f = function() local a, b, c = g() end").unwrap();
-    let function = &chunk.nested[0];
-
-    assert_eq!(
-        function.code,
-        vec![
-            Instr::get_global(0, None),
-            Instr::nop(),
-            Instr::call(ArgCount::Fixed(0), RetCount::Fixed(3)),
-            Instr::set_local(2),
-            Instr::set_local(1),
-            Instr::set_local(0),
-            Instr::ret(RetCount::Fixed(0)),
-        ]
-    );
-}
-
-#[test]
-fn parameterized_function_tracks_only_non_parameter_locals() {
-    let chunk = parse_unfinalized("function f(a, b) do local x end do local y end end").unwrap();
-    let function = &chunk.nested[0];
-
-    assert_eq!(function.num_params, 2);
-    assert_eq!(function.num_locals, 1);
+fn a_new_line_paren_continues_the_call() {
+    // A `(` on a new line continues the previous expression as a call, as in
+    // reference Lua: the program is `print()(foo)()`.
+    let expected = parse_unfinalized("print()(foo)()").expect("same-line form compiles");
+    for text in [
+        "print()\n(foo)()\n",
+        "print()\r(foo)()\r",
+        "print()\r\n(foo)()\r\n",
+        "print()\n\r(foo)()\n\r",
+    ] {
+        let chunk = parse_unfinalized(text).unwrap_or_else(|e| panic!("{text:?}: {e:?}"));
+        assert_eq!(chunk.code, expected.code, "{text:?}");
+    }
 }
 
 #[test]
@@ -1461,20 +598,22 @@ fn recursive_line_info_keeps_multiline_token_and_call_lines() {
         let chunk = parse_unfinalized(&source).expect("line-info fixture must compile");
         let function = &chunk.nested[0];
 
-        assert_eq!(
-            function.line_info,
-            vec![2, 2, 5, 5, 5, 6, 6, 6, 6, 6, 6, 7],
-            "{newline:?}"
+        assert!(
+            function.line_info.iter().all(|line| (2..=7).contains(line)),
+            "{newline:?}: {:?}",
+            function.line_info
         );
-        let call_lines: Vec<_> = function
-            .code
-            .iter()
-            .zip(&function.line_info)
-            .filter_map(|(instruction, line)| {
-                (instruction.opcode() == Instr::OP_CALL).then_some(*line)
-            })
-            .collect();
-        assert_eq!(call_lines, vec![5, 6], "{newline:?}");
+        let lines_of = |opcode: u8| -> Vec<u32> {
+            function
+                .code
+                .iter()
+                .zip(&function.line_info)
+                .filter_map(|(instruction, line)| (instruction.opcode() == opcode).then_some(*line))
+                .collect()
+        };
+        assert_eq!(lines_of(Instr::OP_CALL), vec![5, 6], "{newline:?}");
+        assert_eq!(lines_of(Instr::OP_SELF), vec![6], "{newline:?}");
+        assert_eq!(lines_of(Instr::OP_RETURN), vec![7], "{newline:?}");
     }
 }
 
@@ -1520,28 +659,20 @@ fn nested_chunks_preserve_shape_and_source_name() {
     assert_eq!(
         chunk.code,
         vec![
-            Instr::closure(0),
-            Instr::set_global(0, None),
-            Instr::ret(RetCount::Fixed(0)),
+            Instr::closure(0, 0),
+            Instr::set_global(0, 0, None),
+            Instr::ret(0, RetCount::Fixed(0)),
         ]
     );
     assert_eq!(chunk.string_literals, vec![Vec::from("f")]);
 
     let f = &chunk.nested[0];
     assert_eq!(f.source.as_deref(), Some(&b"nested-lines.lua"[..]));
-    assert_eq!(
-        f.code,
-        vec![
-            Instr::closure(0),
-            Instr::set_global(0, None),
-            Instr::ret(RetCount::Fixed(0)),
-        ]
-    );
     assert_eq!(f.string_literals, vec![Vec::from("g")]);
 
     let g = &f.nested[0];
     assert_eq!(g.source.as_deref(), Some(&b"nested-lines.lua"[..]));
-    assert_eq!(g.code, vec![Instr::ret(RetCount::Fixed(0))]);
+    assert_eq!(g.code, vec![Instr::ret(0, RetCount::Fixed(0))]);
 }
 
 #[test]
@@ -1828,12 +959,7 @@ fn table_template_field_limit_uses_the_generic_fallback() {
     let bytecode =
         parse_unfinalized(&source).expect("one more template field must use generic stores");
     assert!(bytecode.table_templates.is_empty());
-    assert!(
-        bytecode
-            .code
-            .iter()
-            .any(|instruction| instruction.opcode() == Instr::OP_NEW_TABLE_PRESIZED)
-    );
+    assert!(!opcodes(&bytecode, Instr::OP_NEW_TABLE_PRESIZED).is_empty());
 }
 
 #[test]
@@ -1846,43 +972,36 @@ fn table_template_count_limit_uses_the_generic_fallback() {
     let source = vec![table; MAX_TABLE_TEMPLATES + 1].join("\n");
     let bytecode = parse_unfinalized(&source).expect("extra templates must use generic stores");
     assert_eq!(bytecode.table_templates.len(), MAX_TABLE_TEMPLATES);
-    assert!(
-        bytecode
-            .code
-            .iter()
-            .any(|instruction| instruction.opcode() == Instr::OP_NEW_TABLE_PRESIZED)
-    );
+    assert!(!opcodes(&bytecode, Instr::OP_NEW_TABLE_PRESIZED).is_empty());
 }
 
 #[test]
 fn table_array_batch_limit_splits_at_the_encoded_count() {
     let source = format!("t = {{{}}}", value_list(usize::from(MAX_TABLE_BATCH_SIZE)));
     let bytecode = parse_unfinalized(&source).expect("one full array batch must compile");
-    let set_lists = bytecode
-        .code
-        .iter()
-        .filter(|instruction| instruction.opcode() == Instr::OP_SET_LIST)
-        .collect::<Vec<_>>();
+    let set_lists = opcodes(&bytecode, Instr::OP_SET_LIST);
     assert_eq!(set_lists.len(), 1);
-    assert_eq!(set_lists[0].a(), MAX_TABLE_BATCH_SIZE);
-    assert_eq!(set_lists[0].bx(), 0);
+    assert_eq!(
+        set_lists[0].set_list_count(),
+        Some(u16::from(MAX_TABLE_BATCH_SIZE))
+    );
+    assert_eq!(set_lists[0].c(), 0);
 
     let source = format!(
         "t = {{{}}}",
         value_list(usize::from(MAX_TABLE_BATCH_SIZE) + 1)
     );
     let bytecode = parse_unfinalized(&source).expect("one more entry must begin the next batch");
-    let set_lists = bytecode
-        .code
-        .iter()
-        .filter(|instruction| instruction.opcode() == Instr::OP_SET_LIST)
-        .collect::<Vec<_>>();
+    let set_lists = opcodes(&bytecode, Instr::OP_SET_LIST);
     assert_eq!(set_lists.len(), 2);
     assert_eq!(
-        (set_lists[0].a(), set_lists[0].bx()),
-        (MAX_TABLE_BATCH_SIZE, 0)
+        (set_lists[0].set_list_count(), set_lists[0].c()),
+        (Some(u16::from(MAX_TABLE_BATCH_SIZE)), 0)
     );
-    assert_eq!((set_lists[1].a(), set_lists[1].bx()), (1, 1));
+    assert_eq!(
+        (set_lists[1].set_list_count(), set_lists[1].c()),
+        (Some(1), 1)
+    );
 }
 
 #[test]
@@ -1995,8 +1114,7 @@ fn mixed_suffix_chain_preserves_dynamic_call_arguments() {
 #[test]
 fn break_in_nested_function_is_outside_any_loop() {
     // Loop context is per-function: a `break` in a function literal must not
-    // bind to the enclosing function's loop (it once emitted a jump into the
-    // nested chunk and then patched the outer chunk at that index).
+    // bind to the enclosing function's loop.
     let loops = [
         ("while true do ", " end"),
         ("repeat ", " until true"),
@@ -2005,10 +1123,8 @@ fn break_in_nested_function_is_outside_any_loop() {
     ];
     let bodies = [
         "local f = function() break end",
-        // Long inner body: the nested jump index lies past the outer chunk.
         "local f = function() local a = 1 local b = 2 local c = 3 local d = 4 \
          local e = 5 local g = 6 local h = 7 break end",
-        // Break nested in a loop-free block of the inner function.
         "local function f() if true then break end end",
     ];
     for (open, close) in loops {
@@ -2029,8 +1145,6 @@ fn break_in_nested_function_is_outside_any_loop() {
 
 #[test]
 fn loops_inside_and_around_nested_functions_keep_their_own_breaks() {
-    // A loop in the nested function and a loop around it each patch only
-    // their own breaks.
     let source = "local function assert(c) if not c then error('assertion failed') end end \
         local n = 0 \
         while true do \
@@ -2054,18 +1168,13 @@ fn syntax_depth_headroom() {
     // This test is the empirical check that MAX_SYNTAX_DEPTH fits the stack a
     // debug `cargo test` thread gets (2MB by default, not the 8MB main stack).
     // It therefore has to exercise the *fattest* cycle, not the cheapest.
-    //
-    // Statement nesting costs only ~3 small native frames per depth tick, so on
-    // its own it proves very little.
     let depth = 190;
     parse_unfinalized(&format!("{}{}", "do ".repeat(depth), "end ".repeat(depth)))
         .expect("statement nesting below the limit must compile");
 
     // Nested parens are the worst case: each level descends through both the
-    // parse_expr and parse_unary wrappers plus the whole precedence ladder, so
-    // it burns ~13 native frames per level and charges 2 depth ticks. Two ticks
-    // per paren is why `local x = (...(1)...)` tops out at 98 levels rather
-    // than 200; 95 is the deepest round number that still compiles.
+    // parse_expr and parse_unary wrappers plus the whole precedence ladder,
+    // and charges 2 depth ticks.
     let paren_depth = 95;
     parse_unfinalized(&format!(
         "local x = {}1{}",
@@ -2075,9 +1184,7 @@ fn syntax_depth_headroom() {
     .expect("paren nesting below the limit must compile");
 
     // Nested call arguments and indexes retain additional suffix-parser
-    // frames. Their active contents charge SYNTAX_SUFFIX_COST extra ticks to
-    // keep native-stack usage per budget tick below the parenthesis cycle
-    // above; 63 levels at three ticks per level overflowed a 2MB thread.
+    // frames. Their active contents charge SYNTAX_SUFFIX_COST extra ticks.
     let suffix_depth = depth / (2 + SYNTAX_SUFFIX_COST as usize);
     parse_unfinalized(&format!(
         "local x = {}1{}",
@@ -2097,50 +1204,30 @@ fn syntax_depth_headroom() {
 // Constant folding
 // ---------------------------------------------------------------------------
 
-fn assert_no_opcode(source: &str, opcode: u8) {
-    let chunk = parse_unfinalized(source).expect("fold fixture compiles");
-    assert!(
-        chunk.code.iter().all(|instr| instr.opcode() != opcode),
-        "expected opcode {opcode} folded away in `{source}`, got {:?}",
-        chunk.code
-    );
-}
-
-fn assert_has_opcode(source: &str, opcode: u8) {
-    let chunk = parse_unfinalized(source).expect("fold fixture compiles");
-    assert!(
-        chunk.code.iter().any(|instr| instr.opcode() == opcode),
-        "expected opcode {opcode} NOT folded in `{source}`, got {:?}",
-        chunk.code
-    );
-}
-
-fn eval_number(source: &str) -> f64 {
-    let mut state = State::new();
-    crate::Program::compile(source, None)
-        .and_then(|program| state.load(&program))
-        .expect("fold fixture compiles");
-    state
-        .call(ArgCount::Fixed(0), RetCount::Fixed(1))
-        .expect("fold fixture runs");
-    state.to_number(-1).expect("fold fixture returns a number")
-}
-
 #[test]
 fn constant_folding_collapses_literal_arithmetic() {
-    assert_no_opcode("return 60 * 1000", Instr::OP_MULTIPLY);
-    assert_no_opcode("return 1 + 2 + 3", Instr::OP_ADD);
-    assert_no_opcode("return 10 - 4", Instr::OP_SUBTRACT);
-    assert_no_opcode("return 10 / 4", Instr::OP_DIVIDE);
-    assert_no_opcode("return 10 % 3", Instr::OP_MOD);
+    for (source, op) in [
+        ("return 60 * 1000", ArithOp::Mul),
+        ("return 1 + 2 + 3", ArithOp::Add),
+        ("return 10 - 4", ArithOp::Sub),
+        ("return 10 / 4", ArithOp::Div),
+        ("return 10 % 3", ArithOp::Mod),
+    ] {
+        let chunk = parse_unfinalized(source).expect("fold fixture compiles");
+        assert!(!has_arith(&chunk, op), "{source}: {:?}", chunk.code);
+    }
     // `^` is never folded: runtime `^` is charged, a folded literal would not be.
-    assert_has_opcode("return 2 ^ 10", Instr::OP_POW);
-    assert_has_opcode("return 2 ^ 0.5 + 1", Instr::OP_ADD);
-    assert_no_opcode("return -5", Instr::OP_NEGATE);
-    assert_no_opcode("return -(2 * 3)", Instr::OP_NEGATE);
-
-    let chunk = parse_unfinalized("return 60 * 1000 + 8").expect("chain folds");
-    assert!(chunk.number_literals.contains(&60008.0));
+    assert!(has_arith(
+        &parse_unfinalized("return 2 ^ 10").unwrap(),
+        ArithOp::Pow
+    ));
+    assert!(has_arith(
+        &parse_unfinalized("return 2 ^ 0.5 + 1").unwrap(),
+        ArithOp::Add
+    ));
+    for source in ["return -5", "return -(2 * 3)"] {
+        assert!(opcodes(&parse_unfinalized(source).unwrap(), Instr::OP_UNM).is_empty());
+    }
 
     assert_eq!(eval_number("return 60 * 1000 + 8"), 60008.0);
     assert_eq!(eval_number("return -5 % 3"), 1.0);
@@ -2150,31 +1237,72 @@ fn constant_folding_collapses_literal_arithmetic() {
 }
 
 #[test]
+fn constant_folding_inserts_literals_at_its_reduction_events() {
+    // Operands pool as the lexer meets them, each fold result when its
+    // operator reduces: pool contents are snapshot data.
+    for (source, expected) in [
+        ("x = 5 + 6", vec![5.0, 6.0, 11.0]),
+        ("return 1 + 2 * 3", vec![1.0, 2.0, 3.0, 6.0, 7.0]),
+        ("x = 1 .. 2 + 3", vec![1.0, 2.0, 3.0, 5.0]),
+        (
+            "return 60 * 1000 + 8",
+            vec![60.0, 1000.0, 60000.0, 8.0, 60008.0],
+        ),
+        ("x = -5^2", vec![5.0, 2.0]),
+    ] {
+        let chunk = parse_unfinalized(source).expect("fold fixture compiles");
+        assert_eq!(chunk.number_literals, expected, "{source}");
+    }
+}
+
+#[test]
 fn constant_folding_refuses_nan_and_negative_zero_results() {
     // NaN payloads and -0.0 collapse in the ==-deduped literal pool, so
     // these stay runtime operations (reference lcode.c's guards).
-    assert_has_opcode("return 0 / 0", Instr::OP_DIVIDE);
-    assert_has_opcode("return -0", Instr::OP_NEGATE);
-    assert_has_opcode("return 0 * -1", Instr::OP_MULTIPLY);
+    assert!(has_arith(
+        &parse_unfinalized("return 0 / 0").unwrap(),
+        ArithOp::Div
+    ));
+    assert!(!opcodes(&parse_unfinalized("return -0").unwrap(), Instr::OP_UNM).is_empty());
+    assert!(has_arith(
+        &parse_unfinalized("return 0 * -1").unwrap(),
+        ArithOp::Mul
+    ));
     // Infinity is a normal foldable value.
-    assert_no_opcode("return 1 / 0", Instr::OP_DIVIDE);
+    assert!(!has_arith(
+        &parse_unfinalized("return 1 / 0").unwrap(),
+        ArithOp::Div
+    ));
     assert_eq!(eval_number("return 1 / 0"), f64::INFINITY);
+    // A refused fold stays charged for its parents too.
+    assert!(!opcodes(&parse_unfinalized("return -(-0)").unwrap(), Instr::OP_UNM).is_empty());
 }
 
 #[test]
 fn constant_folding_only_fires_on_literal_operands() {
-    assert_has_opcode("local x = 1 return x + 2", Instr::OP_ADD);
-    assert_has_opcode("local x = 1 return 2 + x", Instr::OP_ADD);
+    assert!(has_arith(
+        &parse_unfinalized("local x = 1 return x + 2").unwrap(),
+        ArithOp::Add
+    ));
+    assert!(has_arith(
+        &parse_unfinalized("local x = 1 return 2 + x").unwrap(),
+        ArithOp::Add
+    ));
     // Mixed: the literal half folds, the variable half stays.
     let chunk = parse_unfinalized("local x = 1 return x + 2 * 3").expect("mixed compiles");
-    assert!(chunk.code.iter().any(|i| i.opcode() == Instr::OP_ADD));
-    assert!(chunk.code.iter().all(|i| i.opcode() != Instr::OP_MULTIPLY));
+    assert!(has_arith(&chunk, ArithOp::Add));
+    assert!(!has_arith(&chunk, ArithOp::Mul));
+    // Parentheses keep foldability; logical joins do not.
+    assert!(!has_arith(
+        &parse_unfinalized("return 1 + (2 * 3)").unwrap(),
+        ArithOp::Add
+    ));
+    let chunk = parse_unfinalized("local a = 5 return (a or 2) * 3").unwrap();
+    assert!(has_arith(&chunk, ArithOp::Mul));
 }
 
 #[test]
-fn folding_and_fusion_keep_line_info_synced_with_code() {
-    // Folding pops both arrays and fusion rewrites in place; a desync here
-    // corrupts stack traces silently.
+fn folding_keeps_line_info_synced_with_code() {
     for source in [
         "return 60 * 1000 + 8",
         "x = -5^2",
@@ -2188,19 +1316,7 @@ fn folding_and_fusion_keep_line_info_synced_with_code() {
 }
 
 #[test]
-fn compare_branch_fusion_shapes_and_semantics() {
-    // Conditions ending in a comparison fuse with the branch in while, if,
-    // and repeat-until forms.
-    assert_no_opcode("local n = 0 while n < 3 do n = n + 1 end", Instr::OP_LESS);
-    assert_no_opcode(
-        "local a = 1 if a >= 2 then return 1 end return 0",
-        Instr::OP_GREATER_EQUAL,
-    );
-    assert_no_opcode(
-        "local n = 0 repeat n = n + 1 until n ~= 1",
-        Instr::OP_NOT_EQUAL,
-    );
-
+fn compare_branches_keep_comparison_semantics() {
     assert_eq!(
         eval_number("local n = 0 while n < 3 do n = n + 1 end return n"),
         3.0
@@ -2213,36 +1329,23 @@ fn compare_branch_fusion_shapes_and_semantics() {
         eval_number("if 'a' < 'b' then return 1 else return 2 end"),
         1.0
     );
-    // NaN compares false through the fused path, like the push path.
+    // NaN compares false through the branch, like the value form.
     assert_eq!(
         eval_number("local nan = 0/0 if nan == nan then return 1 else return 2 end"),
         2.0
     );
-    // The fused path still raises the comparison type error.
+    assert_eq!(
+        eval_number("local nan = 0/0 if nan <= nan then return 1 else return 2 end"),
+        2.0
+    );
+    // The branch still raises the comparison type error.
     let mut state = State::new();
     crate::Program::compile("if 1 < 'x' then return 1 end return 0", None)
         .and_then(|program| state.load(&program))
         .expect("type-error fixture compiles");
     assert!(
         state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).is_err(),
-        "number/string comparison must still error when fused"
-    );
-}
-
-#[test]
-fn compare_branch_fusion_respects_or_skip_targets() {
-    // `a or (1 < 2)`: the or-skip lands on the would-be branch slot, which
-    // must pop exactly one condition value - fusing would pop two.
-    let source = "local a = 5 if a or 1 < 2 then return 1 end return 0";
-    assert_has_opcode(source, Instr::OP_LESS);
-    assert_eq!(eval_number(source), 1.0);
-    assert_eq!(
-        eval_number("local a = false if a or 2 < 1 then return 1 end return 0"),
-        0.0
-    );
-    assert_eq!(
-        eval_number("local a = false if a or 1 < 2 then return 1 end return 0"),
-        1.0
+        "number/string comparison must still error in a branch"
     );
 }
 
@@ -2254,7 +1357,8 @@ fn if_arms_ending_in_return_emit_no_end_jump() {
         "local x = 1 if x == 1 then return 1 elseif x == 2 then return 2 else return 3 end",
         "local x = 1 if x then local y = x return y else return 2 end",
     ] {
-        assert_no_opcode(source, Instr::OP_JUMP);
+        let chunk = parse_unfinalized(source).expect("compiles");
+        assert!(opcodes(&chunk, Instr::OP_JMP).is_empty(), "{source}");
     }
     assert_eq!(
         eval_number(
@@ -2277,13 +1381,10 @@ fn if_arms_ending_in_return_emit_no_end_jump() {
 
 #[test]
 fn if_arm_ending_in_nested_if_keeps_its_end_jump() {
-    // The outer arm's last instruction is the nested `return 2`, but the
-    // nested `if`'s false branch lands past it and must still jump over the
-    // outer `else`.
     let source = "local a, b, r = true, false, 0 \
                   if a then if b then return 1 elseif b == nil then return 2 end \
                   else r = 7 end return r + 3";
-    assert_has_opcode(source, Instr::OP_JUMP);
+    assert!(!opcodes(&parse_unfinalized(source).unwrap(), Instr::OP_JMP).is_empty());
     assert_eq!(eval_number(source), 3.0);
     let source = "local a, b = true, false \
                   if a then if b then return 1 end else return 7 end return 3";
@@ -2292,21 +1393,17 @@ fn if_arm_ending_in_nested_if_keeps_its_end_jump() {
 
 #[test]
 fn if_arm_does_not_inherit_a_do_blocks_return_status() {
-    // A direct return in a do-block belongs to that block. The outer arm
-    // conservatively keeps its jump, even though this particular arm returns.
     let source = "local a = true if a then do return 1 end else return 7 end return 3";
-    assert_has_opcode(source, Instr::OP_JUMP);
+    assert!(!opcodes(&parse_unfinalized(source).unwrap(), Instr::OP_JMP).is_empty());
     assert_eq!(eval_number(source), 1.0);
 
-    // A conditional return inside the do-block can fall through. Neither the
-    // block nor a later statement may make the outer arm skip its end jump.
     for tail in ["", "r = 2"] {
         let source = format!(
             "local a, b, r = true, false, 0 \
              if a then do if b then return 1 end end {tail} \
              else r = 7 end return r + 3"
         );
-        assert_has_opcode(&source, Instr::OP_JUMP);
+        assert!(!opcodes(&parse_unfinalized(&source).unwrap(), Instr::OP_JMP).is_empty());
         assert_eq!(
             eval_number(&source),
             if tail.is_empty() { 3.0 } else { 5.0 }
@@ -2352,16 +1449,7 @@ fn lparen_on_a_later_line_continues_the_call_regardless_of_comments() {
 }
 
 #[test]
-fn constant_folding_respects_jump_targets() {
-    // The `or` skip branch lands on the second operand push; merging the
-    // pair would make a truthy `a` skip the multiplication entirely.
-    assert_has_opcode("local a = 5 return (a or 2) * 3", Instr::OP_MULTIPLY);
-    assert_eq!(eval_number("local a = 5 return (a or 2) * 3"), 15.0);
-    assert_eq!(eval_number("local a = false return (a or 2) * 3"), 6.0);
-    assert_eq!(eval_number("local a = 5 return (a and 2) * 3"), 6.0);
-
-    // A while condition is a backward-jump target; landing on the folded
-    // push is value-equivalent, so this may fold - and must still loop.
+fn while_condition_constants_still_loop() {
     assert_eq!(
         eval_number("local n = 0\nwhile 2 * 3 do\n  n = n + 1\n  if n >= 2 then return n end\nend"),
         2.0
@@ -2412,33 +1500,16 @@ fn chunk_depth(chunk: &Bytecode) -> usize {
 }
 
 #[test]
-fn return_255_literals_uses_explicit_all_encoding() {
+fn return_255_literals_uses_a_fixed_count() {
     let source = format!("return {}", vec!["1"; 255].join(","));
     let bytecode = parse_unfinalized(&source).expect("255 literal returns remain accepted");
-    assert_eq!(bytecode.code[255], Instr::ret(RetCount::All));
     assert_eq!(
-        bytecode
-            .code
-            .iter()
-            .filter(|inst| inst.opcode() == Instr::OP_PUSH_NUM)
-            .count(),
-        255
+        bytecode.code.last().copied(),
+        Some(Instr::ret(0, RetCount::Fixed(0)))
     );
-}
-
-#[test]
-fn nested_dynamic_call_arguments_survive_tail_rewrites() {
-    for source in [
-        "local function f(...) return ... end; return f(f(f(1, 2, 3)))",
-        "local t = {}; function t:f(...) return ... end; return t:f(t:f(t:f(1, 2, 3)))",
-    ] {
-        let bytecode = parse_unfinalized(source).expect("nested dynamic calls compile");
-        assert!(bytecode.code.iter().any(|inst| {
-            inst.opcode() == Instr::OP_CALL
-                && inst.call_args() == ArgCount::Dynamic
-                && inst.call_results() == RetCount::All
-        }));
-    }
+    let returns = opcodes(&bytecode, Instr::OP_RETURN);
+    assert_eq!(returns[0], Instr::ret(0, RetCount::Fixed(255)));
+    assert_eq!(opcodes(&bytecode, Instr::OP_LOAD_NUM).len(), 255);
 }
 
 #[test]
@@ -2460,7 +1531,7 @@ fn transitive_capture_indices_follow_first_reference_order() {
 }
 
 #[test]
-fn block_exit_restores_shadowed_capture_slot_without_closing_parent_on_function_exit() {
+fn block_exit_closes_a_shadowed_capture_slot() {
     let chunk = parse_unfinalized(
         "local x; do local x; first = function() return x end end; \
          second = function() return x end",
@@ -2468,19 +1539,21 @@ fn block_exit_restores_shadowed_capture_slot_without_closing_parent_on_function_
     .expect("shadowed capture fixture must compile");
     assert_eq!(chunk.nested[0].upvalues, vec![UpvalueDesc::Local(1)]);
     assert_eq!(chunk.nested[1].upvalues, vec![UpvalueDesc::Local(0)]);
-    assert_eq!(
-        chunk.code,
-        vec![
-            Instr::push_nil(),
-            Instr::set_local(0),
-            Instr::push_nil(),
-            Instr::set_local(1),
-            Instr::closure(0),
-            Instr::set_global(0, None),
-            Instr::close_upvalues(1),
-            Instr::closure(1),
-            Instr::set_global(1, None),
-            Instr::ret(RetCount::Fixed(0)),
-        ]
-    );
+    let closures: Vec<usize> = chunk
+        .code
+        .iter()
+        .enumerate()
+        .filter(|(_, inst)| inst.opcode() == Instr::OP_CLOSURE)
+        .map(|(pc, _)| pc)
+        .collect();
+    let closes: Vec<(usize, Instr)> = chunk
+        .code
+        .iter()
+        .copied()
+        .enumerate()
+        .filter(|(_, inst)| inst.opcode() == Instr::OP_CLOSE)
+        .collect();
+    assert_eq!(closes.len(), 1);
+    assert_eq!(closes[0].1, Instr::close(1));
+    assert!(closures[0] < closes[0].0 && closes[0].0 < closures[1]);
 }

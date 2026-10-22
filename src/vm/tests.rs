@@ -3,7 +3,7 @@ use super::Instr;
 use super::State;
 use super::lua_val::Val;
 use crate::compiler::compile;
-use crate::instr::RetCount;
+use crate::instr::{ArithOp, ArithOperands, RetCount};
 
 fn compile_unnamed(source: &str) -> crate::Result<Bytecode> {
     compile(source, None)
@@ -189,13 +189,14 @@ fn vm_test02() {
     let mut state = State::new();
     let input = Bytecode {
         code: vec![
-            Instr::push_string(1),
-            Instr::push_string(2),
-            Instr::concat(2),
-            Instr::set_global(0, None),
-            Instr::ret(RetCount::Fixed(0)),
+            Instr::load_str(0, 1),
+            Instr::load_str(1, 2),
+            Instr::concat(0, 0, 2),
+            Instr::set_global(0, 0, None),
+            Instr::ret(0, RetCount::Fixed(0)),
         ],
         string_literals: vec!["key".into(), "a".into(), "b".into()],
+        max_stack: 2,
         ..Bytecode::default()
     };
     state.eval_chunk(input, 0).unwrap();
@@ -208,14 +209,15 @@ fn vm_test04() {
     let mut state = State::new();
     let input = Bytecode {
         code: vec![
-            Instr::push_num(0),
-            Instr::push_num(0),
-            Instr::equal(),
-            Instr::set_global(0, None),
-            Instr::ret(RetCount::Fixed(0)),
+            Instr::load_num(0, 0),
+            Instr::load_num(1, 0),
+            Instr::compare(crate::instr::CompareOp::Eq, 0, 0, 1),
+            Instr::set_global(0, 0, None),
+            Instr::ret(0, RetCount::Fixed(0)),
         ],
         number_literals: vec![2.5],
         string_literals: vec!["a".into()],
+        max_stack: 2,
         ..Bytecode::default()
     };
     state.eval_chunk(input, 0).unwrap();
@@ -227,14 +229,15 @@ fn vm_test05() {
     let mut state = State::new();
     let input = Bytecode {
         code: vec![
-            Instr::push_bool(true),
-            Instr::branch_false_keep(2),
-            Instr::pop(),
-            Instr::push_bool(false),
-            Instr::set_global(0, None),
-            Instr::ret(RetCount::Fixed(0)),
+            // key = true and false
+            Instr::load_bool(0, true),
+            Instr::test_false(0, 1),
+            Instr::load_bool(0, false),
+            Instr::set_global(0, 0, None),
+            Instr::ret(0, RetCount::Fixed(0)),
         ],
         string_literals: vec!["key".into()],
+        max_stack: 1,
         ..Bytecode::default()
     };
     state.eval_chunk(input, 0).unwrap();
@@ -245,16 +248,17 @@ fn vm_test05() {
 fn vm_test06() {
     let mut state = State::new();
     let code = vec![
-        Instr::push_bool(true),
-        Instr::branch_false(3),
-        Instr::push_num(0),
-        Instr::set_global(0, None),
-        Instr::ret(RetCount::Fixed(0)),
+        Instr::load_bool(0, true),
+        Instr::test_false(0, 2),
+        Instr::load_num(0, 0),
+        Instr::set_global(0, 0, None),
+        Instr::ret(0, RetCount::Fixed(0)),
     ];
     let chunk = Bytecode {
         code,
         number_literals: vec![5.0],
         string_literals: vec!["a".into()],
+        max_stack: 1,
         ..Bytecode::default()
     };
     state.eval_chunk(chunk, 0).unwrap();
@@ -265,18 +269,18 @@ fn vm_test06() {
 fn vm_test07() {
     let mut state = State::new();
     let code = vec![
-        Instr::push_num(0),
-        Instr::push_num(0),
-        Instr::less(),
-        Instr::branch_false(2),
-        Instr::push_bool(true),
-        Instr::set_global(0, None),
-        Instr::ret(RetCount::Fixed(0)),
+        Instr::load_num(0, 0),
+        Instr::load_num(1, 0),
+        Instr::branch_compare(crate::instr::CompareOp::Lt, 0, 1, 2),
+        Instr::load_bool(0, true),
+        Instr::set_global(0, 0, None),
+        Instr::ret(0, RetCount::Fixed(0)),
     ];
     let chunk = Bytecode {
         code,
         number_literals: vec![2.0],
         string_literals: vec!["a".into()],
+        max_stack: 2,
         ..Bytecode::default()
     };
     state.eval_chunk(chunk, 0).unwrap();
@@ -286,27 +290,28 @@ fn vm_test07() {
 #[test]
 fn vm_test08() {
     let code = vec![
-        Instr::push_num(2), // a = 2
-        Instr::set_global(0, None),
-        Instr::get_global(0, None), // a <0
-        Instr::push_num(0),
-        Instr::less(),
-        Instr::branch_false(5),
-        Instr::get_global(0, None),
-        Instr::push_num(1),
-        Instr::add(),
-        Instr::set_global(0, None),
-        Instr::jump(-9),
-        Instr::ret(RetCount::Fixed(0)),
+        // a = 0; while a < 10 do a = a + 1 end
+        Instr::load_num(0, 2),
+        Instr::set_global(0, 0, None),
+        Instr::get_global(0, 0, None),
+        Instr::load_num(1, 1),
+        Instr::branch_compare(crate::instr::CompareOp::Lt, 0, 1, 4),
+        Instr::get_global(0, 0, None),
+        Instr::arith(ArithOp::Add, ArithOperands::RegConst, 0, 0, 0),
+        Instr::set_global(0, 0, None),
+        Instr::jump(-7),
+        Instr::ret(0, RetCount::Fixed(0)),
     ];
     let chunk = Bytecode {
         code,
         number_literals: vec![1.0, 10.0, 0.0],
         string_literals: vec!["a".into()],
+        max_stack: 2,
         ..Bytecode::default()
     };
     let mut state = State::new();
     state.eval_chunk(chunk, 0).unwrap();
+    assert_eq!(Val::Num(10.0), *state.global_env.get("a").unwrap());
 }
 
 #[test]
@@ -317,26 +322,20 @@ fn vm_test09() {
     // end
     // x = a
     let code = vec![
-        Instr::push_num(0),
-        Instr::set_local(0),
-        Instr::get_local(0),
-        Instr::push_num(1),
-        Instr::less(),
-        Instr::branch_false(5),
-        Instr::get_local(0),
-        Instr::push_num(2),
-        Instr::add(),
-        Instr::set_local(0),
-        Instr::jump(-9),
-        Instr::get_local(0),
-        Instr::set_global(0, None),
-        Instr::ret(RetCount::Fixed(0)),
+        Instr::load_num(0, 0),
+        Instr::load_num(1, 1),
+        Instr::branch_compare(crate::instr::CompareOp::Lt, 0, 1, 2),
+        Instr::arith(ArithOp::Add, ArithOperands::RegConst, 0, 0, 2),
+        Instr::jump(-4),
+        Instr::set_global(0, 0, None),
+        Instr::ret(0, RetCount::Fixed(0)),
     ];
     let chunk = Bytecode {
         code,
         number_literals: vec![1.0, 10.0, 1.0],
         string_literals: vec!["x".into()],
         num_locals: 1,
+        max_stack: 2,
         ..Bytecode::default()
     };
     let mut state = State::new();
@@ -348,22 +347,23 @@ fn vm_test09() {
 fn vm_test10() {
     let code = vec![
         // For loop control variables
-        Instr::push_num(0), // start = 6
-        Instr::push_num(1), // limit = 2
-        Instr::push_num(1), // step = 2
+        Instr::load_num(0, 0), // start = 6
+        Instr::load_num(1, 1), // limit = 2
+        Instr::load_num(2, 1), // step = 2
         // Start loop
         Instr::for_prep(0, 3),
-        Instr::push_num(0),
-        Instr::set_global(0, None), // a = 2
+        Instr::load_num(4, 0),
+        Instr::set_global(4, 0, None), // a = 6
         // End loop
         Instr::for_loop(0, -3),
-        Instr::ret(RetCount::Fixed(0)),
+        Instr::ret(0, RetCount::Fixed(0)),
     ];
     let chunk = Bytecode {
         code,
         number_literals: vec![6.0, 2.0],
         string_literals: vec!["a".into()],
         num_locals: 4,
+        max_stack: 5,
         ..Bytecode::default()
     };
     let mut state = State::new();

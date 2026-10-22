@@ -1,82 +1,9 @@
 use super::{Bytecode, UpvalueDesc};
-use crate::instr::{ArgCount, Builtin, Instr, RetCount};
+use crate::instr::{ArithOp, ArithOperands, Builtin, Instr, OPEN_COUNT};
 use crate::limits::{
-    MAX_FRAME_SLOTS, MAX_LITERALS, MAX_NESTED, MAX_TABLE_TEMPLATE_FIELDS, MAX_TABLE_TEMPLATES,
-    MAX_UPVALUES, MAX_VERIFIER_MARKER_DEPTH,
+    MAX_FIXED_ARGS, MAX_FIXED_RESULTS, MAX_FRAME_SLOTS, MAX_LITERALS, MAX_NESTED,
+    MAX_TABLE_TEMPLATE_FIELDS, MAX_TABLE_TEMPLATES, MAX_UPVALUES,
 };
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum Height {
-    Known(u32),
-    Dyn { floor: u32 },
-}
-
-impl Height {
-    fn floor(&self) -> u32 {
-        match self {
-            Self::Known(height) | Self::Dyn { floor: height } => *height,
-        }
-    }
-
-    fn known(&self) -> Option<u32> {
-        match self {
-            Self::Known(height) => Some(*height),
-            Self::Dyn { .. } => None,
-        }
-    }
-
-    fn add(&mut self, amount: u32, pc: usize) -> Result<(), BytecodeValidationError> {
-        match self {
-            Self::Known(height) => {
-                *height = height
-                    .checked_add(amount)
-                    .ok_or_else(|| err(Some(pc), ValidationReason::StackOverflows))?;
-            }
-            Self::Dyn { floor } => {
-                *floor = floor
-                    .checked_add(amount)
-                    .ok_or_else(|| err(Some(pc), ValidationReason::StackOverflows))?;
-            }
-        }
-        Ok(())
-    }
-
-    fn remove(&mut self, amount: u32, pc: usize) -> Result<(), BytecodeValidationError> {
-        if self.floor() < amount {
-            return Err(err(Some(pc), ValidationReason::StackUnderflows));
-        }
-        match self {
-            Self::Known(height) => {
-                *height = height
-                    .checked_sub(amount)
-                    .ok_or_else(|| err(Some(pc), ValidationReason::StackUnderflows))?;
-            }
-            Self::Dyn { floor } => {
-                *floor = floor
-                    .checked_sub(amount)
-                    .ok_or_else(|| err(Some(pc), ValidationReason::StackUnderflows))?;
-            }
-        }
-        Ok(())
-    }
-
-    fn adjust(
-        &mut self,
-        removed: u32,
-        added: u32,
-        pc: usize,
-    ) -> Result<(), BytecodeValidationError> {
-        self.remove(removed, pc)?;
-        self.add(added, pc)
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct AbsState {
-    height: Height,
-    call_bases: Vec<u32>,
-    table_bases: Vec<u32>,
-}
 
 /// Why the bytecode verifier rejected a function. Typed so neither the
 /// compiler's internal error nor a snapshot rejection carries a free-form
@@ -88,40 +15,22 @@ struct AbsState {
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ValidationReason {
-    /// operand stack height overflows
-    StackOverflows,
-    /// operand stack underflows
-    StackUnderflows,
     /// child upvalue descriptor is invalid for parent
     ChildUpvalueInvalid,
     /// nested chunk depth exceeds parser limit
     ChunkDepthExceeded,
-    /// frame slot range is out of range
-    FrameSlotRangeOutOfRange,
-    /// control flow requires a known operand stack height
-    UnknownStackHeight,
-    /// call-base marker is below the active frame
-    CallBaseBelowFrame,
-    /// call-base marker stack is too deep
-    CallBaseMarkersTooDeep,
-    /// table-constructor marker stack is too deep
-    TableMarkersTooDeep,
-    /// dynamic set-list has no table marker
-    DynamicSetListWithoutMarker,
-    /// dynamic call has no call-base marker
-    DynamicCallWithoutMarker,
-    /// return leaves a live stack marker
-    ReturnLeavesLiveMarker,
-    /// return values exceed operand stack height
-    ReturnExceedsStack,
-    /// missing operand stack effect
-    MissingStackEffect,
-    /// operand stack drops below a live marker
-    StackBelowLiveMarker,
+    /// a register operand or range is beyond the frame
+    RegisterOutOfRange,
+    /// the frame reserves fewer registers than its parameters and locals
+    FrameTooSmall,
+    /// a count operand is neither a valid fixed count nor open
+    CountOperandInvalid,
+    /// an instruction leaving open results is not followed by its consumer
+    OpenResultsNotConsumed,
+    /// an instruction reading open results does not follow their producer
+    OpenResultsWithoutProducer,
     /// jump target is out of range
     JumpTargetOutOfRange,
-    /// operand stack state disagrees at control-flow join
-    JoinStateMismatch,
     /// code is empty
     EmptyCode,
     /// line info length does not match code length
@@ -138,16 +47,12 @@ pub enum ValidationReason {
     BuiltinSlotOutOfRange,
     /// TFOR_CALL requires at least one result
     TforCallWithoutResults,
-    /// close-upvalues level is out of range
-    CloseUpvaluesOutOfRange,
     /// vararg instruction in non-vararg function
     VarargInNonVarargFunction,
     /// boolean operand is invalid
     BooleanOperandInvalid,
     /// concat requires at least two values
     ConcatTooFewValues,
-    /// call-base marker adjustment is invalid
-    CallBaseAdjustmentInvalid,
     /// declared cache slots do not match instructions
     CacheSlotCountMismatch,
     /// An operand indexes past its pool or table.
@@ -181,12 +86,12 @@ pub enum ValidationReason {
         /// The cache family.
         family: CacheFamily,
     },
-    /// An instruction's reserved operand bytes are not zero.
-    ReservedBytesNonZero {
+    /// An instruction's reserved operand bits are not zero.
+    ReservedBitsNonZero {
         /// The instruction's opcode byte.
         opcode: u8,
         /// The whole instruction word.
-        raw: u32,
+        raw: u64,
     },
 }
 
@@ -260,7 +165,7 @@ impl std::fmt::Display for BytecodePool {
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CacheFamily {
-    /// `GET_FIELD` caches.
+    /// `GET_FIELD` and `SELF` caches.
     Field,
     /// `SET_FIELD` caches.
     SetField,
@@ -281,23 +186,14 @@ impl std::fmt::Display for CacheFamily {
 impl std::fmt::Display for ValidationReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let text = match self {
-            Self::StackOverflows => "operand stack height overflows",
-            Self::StackUnderflows => "operand stack underflows",
             Self::ChildUpvalueInvalid => "child upvalue descriptor is invalid for parent",
             Self::ChunkDepthExceeded => "nested chunk depth exceeds parser limit",
-            Self::FrameSlotRangeOutOfRange => "frame slot range is out of range",
-            Self::UnknownStackHeight => "control flow requires a known operand stack height",
-            Self::CallBaseBelowFrame => "call-base marker is below the active frame",
-            Self::CallBaseMarkersTooDeep => "call-base marker stack is too deep",
-            Self::TableMarkersTooDeep => "table-constructor marker stack is too deep",
-            Self::DynamicSetListWithoutMarker => "dynamic set-list has no table marker",
-            Self::DynamicCallWithoutMarker => "dynamic call has no call-base marker",
-            Self::ReturnLeavesLiveMarker => "return leaves a live stack marker",
-            Self::ReturnExceedsStack => "return values exceed operand stack height",
-            Self::MissingStackEffect => "missing operand stack effect",
-            Self::StackBelowLiveMarker => "operand stack drops below a live marker",
+            Self::RegisterOutOfRange => "register operand is beyond the frame",
+            Self::FrameTooSmall => "frame reserves fewer registers than its locals",
+            Self::CountOperandInvalid => "count operand is invalid",
+            Self::OpenResultsNotConsumed => "open results are not consumed by the next instruction",
+            Self::OpenResultsWithoutProducer => "open results are read without a producer",
             Self::JumpTargetOutOfRange => "jump target is out of range",
-            Self::JoinStateMismatch => "operand stack state disagrees at control-flow join",
             Self::EmptyCode => "code is empty",
             Self::LineInfoLengthMismatch => "line info length does not match code length",
             Self::MissingFinalReturn => "code does not end in return",
@@ -306,11 +202,9 @@ impl std::fmt::Display for ValidationReason {
             Self::GlobalCacheSlotOrder => "global cache slot does not match first-use order",
             Self::BuiltinSlotOutOfRange => "builtin slot is out of range",
             Self::TforCallWithoutResults => "TFOR_CALL requires at least one result",
-            Self::CloseUpvaluesOutOfRange => "close-upvalues level is out of range",
             Self::VarargInNonVarargFunction => "vararg instruction in non-vararg function",
             Self::BooleanOperandInvalid => "boolean operand is invalid",
             Self::ConcatTooFewValues => "concat requires at least two values",
-            Self::CallBaseAdjustmentInvalid => "call-base marker adjustment is invalid",
             Self::CacheSlotCountMismatch => "declared cache slots do not match instructions",
             Self::IndexOutOfRange { operand } => {
                 return write!(f, "{operand} index is out of range");
@@ -336,10 +230,10 @@ impl std::fmt::Display for ValidationReason {
             Self::CacheSlotOrder { family } => {
                 return write!(f, "{family} cache slot does not match instruction order");
             }
-            Self::ReservedBytesNonZero { opcode, raw } => {
+            Self::ReservedBitsNonZero { opcode, raw } => {
                 return write!(
                     f,
-                    "reserved operand bytes are non-zero (opcode {opcode}, raw {raw:08x})"
+                    "reserved operand bits are non-zero (opcode {opcode}, raw {raw:016x})"
                 );
             }
         };
@@ -392,7 +286,7 @@ pub(crate) fn validate_depth(depth: usize) -> Result<(), BytecodeValidationError
 
 pub(crate) trait BytecodeView {
     fn code_len(&self) -> usize;
-    fn raw_instruction(&self, pc: usize) -> u32;
+    fn raw_instruction(&self, pc: usize) -> u64;
     fn number_literals_len(&self) -> usize;
     fn string_literals(&self) -> &[Vec<u8>];
     fn table_templates(&self) -> &[Vec<u16>];
@@ -402,6 +296,7 @@ pub(crate) trait BytecodeView {
     fn tfor_cursor_slots(&self) -> u8;
     fn num_params(&self) -> u8;
     fn num_locals(&self) -> u8;
+    fn max_stack(&self) -> u16;
     fn nested_len(&self) -> usize;
     fn upvalues_len(&self) -> usize;
     fn upvalue(&self, index: usize) -> UpvalueDesc;
@@ -413,7 +308,7 @@ impl BytecodeView for Bytecode {
     fn code_len(&self) -> usize {
         self.code.len()
     }
-    fn raw_instruction(&self, pc: usize) -> u32 {
+    fn raw_instruction(&self, pc: usize) -> u64 {
         self.code[pc].raw()
     }
     fn number_literals_len(&self) -> usize {
@@ -442,6 +337,9 @@ impl BytecodeView for Bytecode {
     }
     fn num_locals(&self) -> u8 {
         self.num_locals
+    }
+    fn max_stack(&self) -> u16 {
+        self.max_stack
     }
     fn nested_len(&self) -> usize {
         self.nested.len()
@@ -480,359 +378,61 @@ fn check_index(
     }
 }
 
-fn check_slots(
+/// The registers `first..first + count` exist in a frame of `frame` registers.
+fn check_registers(
     pc: usize,
-    start: u8,
+    first: u16,
     count: usize,
-    slots: usize,
+    frame: usize,
 ) -> Result<(), BytecodeValidationError> {
-    if (start as usize)
+    if usize::from(first)
         .checked_add(count)
-        .is_some_and(|end| end <= slots)
+        .is_some_and(|end| end <= frame)
     {
         Ok(())
     } else {
-        Err(err(Some(pc), ValidationReason::FrameSlotRangeOutOfRange))
+        Err(err(Some(pc), ValidationReason::RegisterOutOfRange))
     }
 }
 
-fn verify_stack_discipline(view: &impl BytecodeView) -> Result<(), BytecodeValidationError> {
-    // Abstract states are stored only at join candidates: transfer targets and
-    // the entry. Any other pc has exactly one predecessor (the instruction
-    // before it), which executes at most once, so its state travels in the
-    // worklist by value and is never compared. Storing a state per reachable
-    // pc instead cost a marker-stack clone per instruction. The worklist order,
-    // the comparison points and therefore the first reported error are the
-    // same as storing everywhere.
-    let code_len = view.code_len();
-    // Dense ordinal of each join candidate; `u32::MAX` marks a plain pc.
-    let mut join_index = vec![u32::MAX; code_len];
-    let mut join_count = 0u32;
-    let mut mark_join = |pc: usize| {
-        if join_index[pc] == u32::MAX {
-            join_index[pc] = join_count;
-            join_count += 1;
-        }
-    };
-    mark_join(0);
-    for pc in 0..code_len {
-        let inst = Instr::from_raw(view.raw_instruction(pc));
-        if Instr::is_transfer(inst.opcode()) {
-            // `validate_bytecode` range-checked every transfer target before
-            // calling this, so the target is a valid pc.
-            let target = (pc as i64 + 1 + i64::from(inst.sbx())) as usize;
-            mark_join(target);
-        }
+/// A fixed count operand, or `None` when it is the open sentinel. Counts
+/// above `limit` other than the sentinel are corrupt.
+fn count_operand(
+    pc: usize,
+    value: u16,
+    limit: usize,
+) -> Result<Option<usize>, BytecodeValidationError> {
+    if value == OPEN_COUNT {
+        Ok(None)
+    } else if usize::from(value) <= limit {
+        Ok(Some(usize::from(value)))
+    } else {
+        Err(err(Some(pc), ValidationReason::CountOperandInvalid))
     }
-    let entry = AbsState {
-        height: Height::Known(0),
-        call_bases: Vec::new(),
-        table_bases: Vec::new(),
-    };
-    let mut joins: Vec<Option<AbsState>> = vec![None; join_count as usize];
-    joins[join_index[0] as usize] = Some(entry.clone());
-    let mut worklist = vec![(0usize, entry)];
-
-    while let Some((pc, state)) = worklist.pop() {
-        let inst = Instr::from_raw(view.raw_instruction(pc));
-        let op = inst.opcode();
-        let a = inst.a();
-        let mut next = state;
-
-        let require_known = |height: &Height| {
-            height
-                .known()
-                .ok_or_else(|| err(Some(pc), ValidationReason::UnknownStackHeight))
-        };
-        let require_at_least = |height: &Height, amount: u32| {
-            if height.floor() < amount {
-                Err(err(Some(pc), ValidationReason::StackUnderflows))
-            } else {
-                Ok(())
-            }
-        };
-        let offset_requirement = |offset: u8, extra: u32| {
-            u32::from(offset)
-                .checked_add(extra)
-                .ok_or_else(|| err(Some(pc), ValidationReason::StackOverflows))
-        };
-
-        // Stack semantics stay explicit: dynamic calls, list constructors and
-        // marker stacks change abstract state beyond a fixed pop/push count.
-        // Operand encoding and transfer membership come from Instr metadata.
-        match op {
-            Instr::OP_DUP => {
-                require_at_least(&next.height, 1)?;
-                next.height.add(1, pc)?;
-            }
-            Instr::OP_SWAP => require_at_least(&next.height, 2)?,
-            Instr::OP_NEW_TABLE
-            | Instr::OP_NEW_TABLE_PRESIZED
-            | Instr::OP_NEW_TABLE_TEMPLATE
-            | Instr::OP_PUSH_NIL
-            | Instr::OP_PUSH_BOOL
-            | Instr::OP_PUSH_NUM
-            | Instr::OP_PUSH_STRING
-            | Instr::OP_GET_GLOBAL
-            | Instr::OP_GET_LOCAL
-            | Instr::OP_GET_UPVALUE
-            | Instr::OP_GET_BUILTIN
-            | Instr::OP_CLOSURE => next.height.add(1, pc)?,
-            // `GET_TABLE` pops the key and replaces the table with the result,
-            // which is the same two-in one-out shape as a binary operator.
-            Instr::OP_GET_TABLE
-            | Instr::OP_ADD
-            | Instr::OP_SUBTRACT
-            | Instr::OP_MULTIPLY
-            | Instr::OP_DIVIDE
-            | Instr::OP_POW
-            | Instr::OP_MOD
-            | Instr::OP_LESS
-            | Instr::OP_LESS_EQUAL
-            | Instr::OP_GREATER
-            | Instr::OP_GREATER_EQUAL
-            | Instr::OP_EQUAL
-            | Instr::OP_NOT_EQUAL => next.height.adjust(2, 1, pc)?,
-            Instr::OP_CONCAT => next.height.adjust(u32::from(a), 1, pc)?,
-            Instr::OP_NOT | Instr::OP_LENGTH | Instr::OP_NEGATE | Instr::OP_GET_FIELD => {
-                require_at_least(&next.height, 1)?;
-            }
-            Instr::OP_MARK_CALL_BASE => {
-                let height = require_known(&next.height)?;
-                if height < 1 {
-                    return Err(err(Some(pc), ValidationReason::CallBaseBelowFrame));
-                }
-                if next.call_bases.len() >= MAX_VERIFIER_MARKER_DEPTH {
-                    return Err(err(Some(pc), ValidationReason::CallBaseMarkersTooDeep));
-                }
-                next.call_bases.push(height - 1);
-            }
-            Instr::OP_NEW_TABLE_TRACKED => {
-                let height = require_known(&next.height)?;
-                if next.table_bases.len() >= MAX_VERIFIER_MARKER_DEPTH {
-                    return Err(err(Some(pc), ValidationReason::TableMarkersTooDeep));
-                }
-                next.table_bases.push(height);
-                next.height.add(1, pc)?;
-            }
-            // A discard and a store share one operand effect: consume the top
-            // value and push nothing. The store's destination is a local,
-            // upvalue or global slot, none of which is on the operand stack.
-            Instr::OP_POP
-            | Instr::OP_SET_GLOBAL
-            | Instr::OP_SET_LOCAL
-            | Instr::OP_SET_UPVALUE
-            | Instr::OP_SET_BUILTIN => next.height.remove(1, pc)?,
-            Instr::OP_INIT_FIELD => {
-                require_at_least(&next.height, offset_requirement(a, 2)?)?;
-                next.height.remove(1, pc)?;
-            }
-            Instr::OP_INIT_FIELD_PINNED => {
-                require_at_least(&next.height, 2)?;
-                next.height.remove(1, pc)?;
-            }
-            Instr::OP_INIT_INDEX => {
-                require_at_least(&next.height, offset_requirement(a, 3)?)?;
-                next.height.remove(2, pc)?;
-            }
-            Instr::OP_SET_FIELD => {
-                require_at_least(&next.height, 2)?;
-                next.height.remove(2, pc)?;
-            }
-            Instr::OP_SET_FIELD_AT => {
-                // A=0 is valid for generic bytecode even though compiler output
-                // rewrites that form to the cached field-store opcode.
-                require_at_least(&next.height, offset_requirement(a, 2)?)?;
-                next.height.remove(2, pc)?;
-            }
-            Instr::OP_SET_TABLE => {
-                require_at_least(&next.height, offset_requirement(a, 3)?)?;
-                next.height.remove(3, pc)?;
-            }
-            Instr::OP_SET_LIST if a == 0 => {
-                let base = match next.table_bases.pop() {
-                    Some(base) => base,
-                    None => {
-                        return Err(err(Some(pc), ValidationReason::DynamicSetListWithoutMarker));
-                    }
-                };
-                let minimum = base
-                    .checked_add(1)
-                    .ok_or_else(|| err(Some(pc), ValidationReason::StackOverflows))?;
-                require_at_least(&next.height, minimum)?;
-                next.height = Height::Known(minimum);
-            }
-            Instr::OP_SET_LIST => {
-                let count = u32::from(a);
-                require_at_least(
-                    &next.height,
-                    count
-                        .checked_add(1)
-                        .ok_or_else(|| err(Some(pc), ValidationReason::StackOverflows))?,
-                )?;
-                next.height.remove(count, pc)?;
-            }
-            Instr::OP_VARARG => match inst.vararg_count() {
-                RetCount::All => {
-                    let floor = next.height.floor();
-                    next.height = Height::Dyn { floor };
-                }
-                RetCount::Fixed(n) => next.height.add(u32::from(n), pc)?,
-            },
-            Instr::OP_CALL => match (inst.call_args(), inst.call_results()) {
-                (ArgCount::Dynamic, results) => {
-                    let base = match next.call_bases.pop() {
-                        Some(base) => base,
-                        None => {
-                            return Err(err(Some(pc), ValidationReason::DynamicCallWithoutMarker));
-                        }
-                    };
-                    let minimum = base
-                        .checked_add(1)
-                        .ok_or_else(|| err(Some(pc), ValidationReason::StackOverflows))?;
-                    require_at_least(&next.height, minimum)?;
-                    next.height = match results {
-                        RetCount::All => Height::Dyn { floor: base },
-                        RetCount::Fixed(n) => Height::Known(
-                            base.checked_add(u32::from(n))
-                                .ok_or_else(|| err(Some(pc), ValidationReason::StackOverflows))?,
-                        ),
-                    };
-                }
-                (ArgCount::Fixed(args), results) => {
-                    let inputs = u32::from(args)
-                        .checked_add(1)
-                        .ok_or_else(|| err(Some(pc), ValidationReason::StackOverflows))?;
-                    match results {
-                        RetCount::All => {
-                            next.height.remove(inputs, pc)?;
-                            let floor = next.height.floor();
-                            next.height = Height::Dyn { floor };
-                        }
-                        RetCount::Fixed(n) => next.height.adjust(inputs, u32::from(n), pc)?,
-                    }
-                }
-            },
-            Instr::OP_TFOR_PREP => next.height.remove(3, pc)?,
-            // Both work entirely within the locals region: `TFOR_CALL` drives
-            // the iterator through local slots and is internally balanced, and
-            // `CLOSE_UPVALUES` only closes upvalues at or above a local slot.
-            Instr::OP_NOP | Instr::OP_TFOR_CALL | Instr::OP_CLOSE_UPVALUES => {}
-            Instr::OP_FOR_PREP => {
-                require_known(&next.height)?;
-                next.height.remove(3, pc)?;
-            }
-            Instr::OP_FOR_LOOP | Instr::OP_TFOR_LOOP | Instr::OP_JUMP => {
-                require_known(&next.height)?;
-            }
-            Instr::OP_BRANCH_FALSE => {
-                require_known(&next.height)?;
-                next.height.remove(1, pc)?;
-            }
-            Instr::OP_BRANCH_FALSE_LESS
-            | Instr::OP_BRANCH_FALSE_LESS_EQUAL
-            | Instr::OP_BRANCH_FALSE_GREATER
-            | Instr::OP_BRANCH_FALSE_GREATER_EQUAL
-            | Instr::OP_BRANCH_FALSE_EQUAL
-            | Instr::OP_BRANCH_FALSE_NOT_EQUAL => {
-                require_known(&next.height)?;
-                next.height.remove(2, pc)?;
-            }
-            Instr::OP_BRANCH_TRUE_KEEP | Instr::OP_BRANCH_FALSE_KEEP => {
-                require_known(&next.height)?;
-                require_at_least(&next.height, 1)?;
-            }
-            Instr::OP_RETURN => {
-                if !next.call_bases.is_empty() || !next.table_bases.is_empty() {
-                    return Err(err(Some(pc), ValidationReason::ReturnLeavesLiveMarker));
-                }
-                if let RetCount::Fixed(n) = inst.return_count() {
-                    let height = require_known(&next.height)?;
-                    if height < u32::from(n) {
-                        return Err(err(Some(pc), ValidationReason::ReturnExceedsStack));
-                    }
-                }
-            }
-            _ => return Err(err(Some(pc), ValidationReason::MissingStackEffect)),
-        }
-
-        for base in next.call_bases.iter().chain(next.table_bases.iter()) {
-            let minimum = base
-                .checked_add(1)
-                .ok_or_else(|| err(Some(pc), ValidationReason::StackOverflows))?;
-            if next.height.floor() < minimum {
-                return Err(err(Some(pc), ValidationReason::StackBelowLiveMarker));
-            }
-        }
-
-        if op == Instr::OP_RETURN {
-            continue;
-        }
-        let target = |inst: Instr| -> Result<usize, BytecodeValidationError> {
-            let next_pc = pc
-                .checked_add(1)
-                .ok_or_else(|| err(Some(pc), ValidationReason::JumpTargetOutOfRange))?;
-            if inst.sbx() >= 0 {
-                next_pc
-                    .checked_add(inst.sbx() as usize)
-                    .ok_or_else(|| err(Some(pc), ValidationReason::JumpTargetOutOfRange))
-            } else {
-                next_pc
-                    .checked_sub(inst.sbx().unsigned_abs() as usize)
-                    .ok_or_else(|| err(Some(pc), ValidationReason::JumpTargetOutOfRange))
-            }
-        };
-        let fallthrough = (op != Instr::OP_JUMP).then_some(pc + 1);
-        let jump = if Instr::is_transfer(op) {
-            Some(target(inst)?)
-        } else {
-            None
-        };
-        // Compare at enumeration time, in successor order, exactly where a
-        // per-pc state table would: that fixes which error is reported first.
-        let mut to_push = [None; 2];
-        let mut pushes = 0;
-        for successor in [fallthrough, jump].into_iter().flatten() {
-            let join = join_index[successor];
-            if join == u32::MAX {
-                // Only a fallthrough can land on a plain pc, and that pc's sole
-                // predecessor is this one: first and only arrival.
-                to_push[pushes] = Some(successor);
-                pushes += 1;
-                continue;
-            }
-            match &joins[join as usize] {
-                Some(existing) if existing != &next => {
-                    return Err(err(Some(successor), ValidationReason::JoinStateMismatch));
-                }
-                Some(_) => {}
-                None => {
-                    joins[join as usize] = Some(next.clone());
-                    to_push[pushes] = Some(successor);
-                    pushes += 1;
-                }
-            }
-        }
-        match to_push {
-            [Some(first), Some(second)] => {
-                worklist.push((first, next.clone()));
-                worklist.push((second, next));
-            }
-            [Some(only), None] => worklist.push((only, next)),
-            _ => {}
-        }
-    }
-    Ok(())
 }
 
-// Dispatch policy: verify static operand bounds, stack shape, marker pairing
-// and control flow here at admission, then trust them during execution. This
-// does not prove runtime value types: constructor operands, numeric loop values,
-// callable handlers and host/resource limits still need fallible runtime checks.
-// A regression in these static proofs is a VM bug, not a recoverable Lua error.
-// The verifier also accepts valid caller-built and snapshot bytecode forms
-// that compiler finalization normalizes: it strips `OP_NOP` and rewrites
-// `OP_SET_FIELD_AT` with A=0 to a cached `OP_SET_FIELD`.
+/// The absolute target of a transfer at `pc`, if it lies in the code.
+fn jump_target(pc: usize, inst: Instr, code_len: usize) -> Option<usize> {
+    pc.checked_add(1)?
+        .checked_add_signed(inst.sj() as isize)
+        .filter(|&target| target < code_len)
+}
+
+// Dispatch policy: verify static operand bounds, register ranges, the
+// open-results protocol and control flow here at admission, then trust them
+// during execution. This does not prove runtime value types: constructor
+// operands, numeric loop values, callable handlers and host/resource limits
+// still need fallible runtime checks. A regression in these static proofs is
+// a VM bug, not a recoverable Lua error.
+//
+// Every register an instruction names lies inside the frame the function
+// reserves (`max_stack`), so execution indexes registers without checking.
+// Open results are the only place the stack top differs from the frame top
+// between instructions: a producer (a call asking for all results, a vararg
+// of every value) must be followed by its consumer (a call with open
+// arguments, an open return or set-list) on the very next instruction, which
+// no jump may enter, and the consumer's own operand range must start at or
+// below the producer's.
 pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), BytecodeValidationError> {
     let code_len = view.code_len();
     if code_len == 0 {
@@ -874,8 +474,13 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
     {
         return Err(err(None, ValidationReason::TableTemplateTooLarge));
     }
-    if view.num_params() as usize + view.num_locals() as usize > MAX_FRAME_SLOTS {
+    let slots = view.num_params() as usize + view.num_locals() as usize;
+    if slots > MAX_FRAME_SLOTS {
         return Err(err(None, ValidationReason::FrameSlotCountExceeded));
+    }
+    let frame = usize::from(view.max_stack());
+    if frame < slots || view.max_stack() == OPEN_COUNT {
+        return Err(err(None, ValidationReason::FrameTooSmall));
     }
     if !matches!(
         Instr::from_raw(view.raw_instruction(code_len - 1)).opcode(),
@@ -911,82 +516,172 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
             }
         }
     }
-    let slots = view.num_params() as usize + view.num_locals() as usize;
-    let mut global_slots: Vec<Option<usize>> = vec![None; view.string_literals().len()];
-    let mut global_name_checked = vec![false; view.string_literals().len()];
+
+    // Jump targets, needed to keep jumps out of open-results windows.
+    let mut targeted = vec![false; code_len];
+    for pc in 0..code_len {
+        let inst = Instr::from_raw(view.raw_instruction(pc));
+        if Instr::is_transfer(inst.opcode()) {
+            match jump_target(pc, inst, code_len) {
+                Some(target) => targeted[target] = true,
+                None => return Err(err(Some(pc), ValidationReason::JumpTargetOutOfRange)),
+            }
+        }
+    }
+
+    let strings = view.string_literals().len();
+    let numbers = view.number_literals_len();
+    let mut global_slots: Vec<Option<usize>> = vec![None; strings];
+    let mut global_name_checked = vec![false; strings];
     let mut next_global_slot = 0usize;
     let mut next_field_slot = 0usize;
     let mut next_set_field_slot = 0usize;
     let mut next_tfor_cursor_slot = 0usize;
     // This loop deliberately restates the cache-slot allocation policy of
     // `Bytecode::assign_cache_slots` (first-use order for globals, a fresh
-    // global slot per SET_GLOBAL, instruction order for fields, set-fields and
-    // TFOR_CALL cursors). The duplication is the point: the verifier is the
-    // independent check on a snapshot's cached operands, and a shared helper
-    // would let a policy bug validate itself. Any change to the allocation
-    // policy must change both. Compiler finalization runs this validation on
-    // every compile, so a drift between the two fails every compile that
-    // reaches the changed case. The operand encoding itself is not restated:
-    // both sides decode through the `Instr` cache-slot decoders.
+    // global slot per SET_GLOBAL, instruction order for fields and methods,
+    // set-fields and TFOR_CALL cursors). The duplication is the point: the
+    // verifier is the independent check on a snapshot's cached operands, and
+    // a shared helper would let a policy bug validate itself. Any change to
+    // the allocation policy must change both. Compiler finalization runs this
+    // validation on every compile, so a drift between the two fails every
+    // compile that reaches the changed case. The operand encoding itself is
+    // not restated: both sides decode through the `Instr` cache-slot decoder.
     //
     // Uncached operands are accepted anywhere and consume no slot. Sequential
     // allocation plus the final count equality prove every admitted slot is
     // below its family's declared count, which the runtime cache vectors are
-    // sized from.
+    // sized from. A cache slot owns one site: cache hits trust the slot to
+    // describe this site's key, so two sites must never share one.
     let sequential = |pc: usize,
-                      slot: u8,
+                      slot: Option<u8>,
                       next: &mut usize,
                       family: CacheFamily|
      -> Result<(), BytecodeValidationError> {
+        let Some(slot) = slot else {
+            return Ok(());
+        };
         if usize::from(slot) != *next {
             return Err(err(Some(pc), ValidationReason::CacheSlotOrder { family }));
         }
         *next += 1;
         Ok(())
     };
+    let string =
+        |pc: usize, value: u16| check_index(pc, value, strings, BytecodeOperand::StringLiteral);
+    let number =
+        |pc: usize, value: u16| check_index(pc, value, numbers, BytecodeOperand::NumberLiteral);
+    let reg = |pc: usize, value: u16| check_registers(pc, value, 1, frame);
+
     for pc in 0..code_len {
         let inst = Instr::from_raw(view.raw_instruction(pc));
         let op = inst.opcode();
         if !Instr::known_opcode(op) {
             return Err(err(Some(pc), ValidationReason::UnknownOpcode));
         }
-        let a = inst.a();
-        let b = inst.b();
-        let bx = inst.bx();
-        let reserved_zero = inst.reserved_bytes_zero();
-        if !reserved_zero {
+        if !inst.reserved_bits_zero() {
             return Err(err(
                 Some(pc),
-                ValidationReason::ReservedBytesNonZero {
+                ValidationReason::ReservedBitsNonZero {
                     opcode: op,
                     raw: inst.raw(),
                 },
             ));
         }
+        // D carries a cache slot, a method mark or a template entry; the
+        // layouts that leave it free reserve it, checked zero above.
+        let (a, b, c, d) = (inst.a(), inst.b(), inst.c(), inst.d());
+
+        if let Some((_, operands)) = ArithOp::decode(op) {
+            reg(pc, a)?;
+            match operands {
+                ArithOperands::RegReg => {
+                    reg(pc, b)?;
+                    reg(pc, c)?;
+                }
+                ArithOperands::RegConst => {
+                    reg(pc, b)?;
+                    number(pc, c)?;
+                }
+                ArithOperands::ConstReg => {
+                    number(pc, b)?;
+                    reg(pc, c)?;
+                }
+            }
+            continue;
+        }
+
         match op {
-            Instr::OP_PUSH_NUM => {
-                check_index(
-                    pc,
-                    bx,
-                    view.number_literals_len(),
-                    BytecodeOperand::NumberLiteral,
-                )?;
+            // Two registers: moves, unary operators and compare-and-branch.
+            Instr::OP_MOVE
+            | Instr::OP_UNM
+            | Instr::OP_NOT
+            | Instr::OP_LEN
+            | Instr::OP_BR_LT
+            | Instr::OP_BR_LE
+            | Instr::OP_BR_GT
+            | Instr::OP_BR_GE
+            | Instr::OP_BR_EQ
+            | Instr::OP_BR_NE => {
+                reg(pc, a)?;
+                reg(pc, b)?;
+            }
+            // Three registers: table reads and writes by key, comparisons.
+            Instr::OP_GET_TABLE
+            | Instr::OP_SET_TABLE
+            | Instr::OP_INIT_INDEX
+            | Instr::OP_LT
+            | Instr::OP_LE
+            | Instr::OP_GT
+            | Instr::OP_GE
+            | Instr::OP_EQ
+            | Instr::OP_NE => {
+                reg(pc, a)?;
+                reg(pc, b)?;
+                reg(pc, c)?;
+            }
+            // One register.
+            Instr::OP_NEW_TABLE | Instr::OP_TEST_FALSE | Instr::OP_TEST_TRUE => reg(pc, a)?,
+            Instr::OP_LOAD_NIL => {
+                if b == 0 {
+                    return Err(err(Some(pc), ValidationReason::CountOperandInvalid));
+                }
+                check_registers(pc, a, usize::from(b), frame)?;
+            }
+            Instr::OP_LOAD_BOOL => {
+                reg(pc, a)?;
+                if b > 1 {
+                    return Err(err(Some(pc), ValidationReason::BooleanOperandInvalid));
+                }
+            }
+            Instr::OP_LOAD_NUM => {
+                reg(pc, a)?;
+                number(pc, b)?;
+            }
+            Instr::OP_LOAD_STR => {
+                reg(pc, a)?;
+                string(pc, b)?;
+            }
+            Instr::OP_GET_UPVAL | Instr::OP_SET_UPVAL => {
+                reg(pc, a)?;
+                check_index(pc, b, view.upvalues_len(), BytecodeOperand::Upvalue)?;
+            }
+            Instr::OP_CLOSE => {
+                if usize::from(a) > frame {
+                    return Err(err(Some(pc), ValidationReason::RegisterOutOfRange));
+                }
             }
             Instr::OP_GET_GLOBAL | Instr::OP_SET_GLOBAL => {
-                check_index(
-                    pc,
-                    bx,
-                    view.string_literals().len(),
-                    BytecodeOperand::StringLiteral,
-                )?;
+                reg(pc, a)?;
+                string(pc, b)?;
                 // Check each name once: re-scanning a long name at every
                 // reference would cost references x name length. The first
                 // reference to a bad name still reports.
-                if !global_name_checked[bx as usize] {
-                    if std::str::from_utf8(&view.string_literals()[bx as usize]).is_err() {
+                if !global_name_checked[b as usize] {
+                    if std::str::from_utf8(&view.string_literals()[b as usize]).is_err() {
                         return Err(err(Some(pc), ValidationReason::GlobalNameNotUtf8));
                     }
-                    global_name_checked[bx as usize] = true;
+                    global_name_checked[b as usize] = true;
                 }
                 // "Uncached" is valid anywhere, not only once the slots are
                 // exhausted. The compiler never emits it early, but a
@@ -995,12 +690,12 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
                 // An uncached read neither reserves a slot for its name nor
                 // marks the name exhausted.
                 let global_order_error = || err(Some(pc), ValidationReason::GlobalCacheSlotOrder);
-                match (op, inst.global_cache_slot()) {
+                match (op, inst.cache_slot()) {
                     (_, None) => {}
                     (Instr::OP_GET_GLOBAL, Some(slot)) => {
                         // A cached read reuses its name's slot, or allocates
                         // the next one on the name's first cached read.
-                        let expected = *global_slots[bx as usize].get_or_insert_with(|| {
+                        let expected = *global_slots[b as usize].get_or_insert_with(|| {
                             next_global_slot += 1;
                             next_global_slot - 1
                         });
@@ -1017,114 +712,140 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
                     }
                 }
             }
-            Instr::OP_GET_FIELD => {
-                check_index(
-                    pc,
-                    bx,
-                    view.string_literals().len(),
-                    BytecodeOperand::StringLiteral,
-                )?;
-                if let Some(slot) = inst.field_cache_slot() {
-                    sequential(pc, slot, &mut next_field_slot, CacheFamily::Field)?;
+            Instr::OP_GET_BUILTIN | Instr::OP_SET_BUILTIN => {
+                reg(pc, a)?;
+                if usize::from(b) >= Builtin::COUNT {
+                    return Err(err(Some(pc), ValidationReason::BuiltinSlotOutOfRange));
                 }
             }
-            Instr::OP_SET_FIELD => {
-                check_index(
-                    pc,
-                    bx,
-                    view.string_literals().len(),
-                    BytecodeOperand::StringLiteral,
-                )?;
-                if let Some(slot) = inst.set_field_cache_slot() {
-                    sequential(pc, slot, &mut next_set_field_slot, CacheFamily::SetField)?;
+            Instr::OP_NEW_TABLE_PRESIZED => {
+                reg(pc, a)?;
+                if b > u16::from(u8::MAX) {
+                    return Err(err(Some(pc), ValidationReason::CountOperandInvalid));
                 }
-            }
-            // Every remaining opcode that names a string literal in Bx. Merged
-            // into one arm so the bounds check cannot be forgotten for one of
-            // them; forged bytecode reaches this path too.
-            Instr::OP_PUSH_STRING
-            | Instr::OP_INIT_FIELD_PINNED
-            | Instr::OP_SET_FIELD_AT
-            | Instr::OP_INIT_FIELD => {
-                check_index(
-                    pc,
-                    bx,
-                    view.string_literals().len(),
-                    BytecodeOperand::StringLiteral,
-                )?;
             }
             Instr::OP_NEW_TABLE_TEMPLATE => {
+                reg(pc, a)?;
                 check_index(
                     pc,
-                    u16::from(a),
+                    b,
                     view.table_templates().len(),
                     BytecodeOperand::TableTemplate,
                 )?;
             }
-            Instr::OP_CLOSURE => check_index(
-                pc,
-                u16::from(a),
-                view.nested_len(),
-                BytecodeOperand::NestedChunk,
-            )?,
-            Instr::OP_GET_BUILTIN | Instr::OP_SET_BUILTIN if (a as usize) >= Builtin::COUNT => {
-                return Err(err(Some(pc), ValidationReason::BuiltinSlotOutOfRange));
-            }
-            Instr::OP_GET_LOCAL | Instr::OP_SET_LOCAL => check_slots(pc, a, 1, slots)?,
-            Instr::OP_GET_UPVALUE | Instr::OP_SET_UPVALUE => {
-                check_index(
+            Instr::OP_GET_FIELD => {
+                reg(pc, a)?;
+                reg(pc, b)?;
+                string(pc, c)?;
+                sequential(
                     pc,
-                    u16::from(a),
-                    view.upvalues_len(),
-                    BytecodeOperand::Upvalue,
+                    inst.cache_slot(),
+                    &mut next_field_slot,
+                    CacheFamily::Field,
                 )?;
             }
-            Instr::OP_FOR_PREP | Instr::OP_FOR_LOOP | Instr::OP_TFOR_LOOP => {
-                check_slots(pc, a, 4, slots)?;
+            Instr::OP_SELF => {
+                check_registers(pc, a, 2, frame)?;
+                reg(pc, b)?;
+                string(pc, c)?;
+                sequential(
+                    pc,
+                    inst.cache_slot(),
+                    &mut next_field_slot,
+                    CacheFamily::Field,
+                )?;
             }
-            Instr::OP_TFOR_PREP => check_slots(pc, a, 3, slots)?,
+            Instr::OP_SET_FIELD => {
+                reg(pc, a)?;
+                string(pc, b)?;
+                reg(pc, c)?;
+                sequential(
+                    pc,
+                    inst.cache_slot(),
+                    &mut next_set_field_slot,
+                    CacheFamily::SetField,
+                )?;
+            }
+            Instr::OP_INIT_FIELD | Instr::OP_INIT_FIELD_PINNED => {
+                reg(pc, a)?;
+                string(pc, b)?;
+                reg(pc, c)?;
+            }
+            Instr::OP_SET_LIST => {
+                reg(pc, a)?;
+                if let Some(count) = count_operand(pc, b, usize::from(u8::MAX))? {
+                    check_registers(pc, a, 1 + count, frame)?;
+                }
+            }
+            Instr::OP_CONCAT => {
+                reg(pc, a)?;
+                if c < 2 {
+                    return Err(err(Some(pc), ValidationReason::ConcatTooFewValues));
+                }
+                check_registers(pc, b, usize::from(c), frame)?;
+            }
+            Instr::OP_JMP => {}
+            Instr::OP_FOR_PREP | Instr::OP_FOR_LOOP | Instr::OP_TFOR_LOOP => {
+                check_registers(pc, a, 4, frame)?;
+            }
             Instr::OP_TFOR_CALL => {
-                if b == 0 {
+                if b == 0 || b > u16::from(u8::MAX) {
                     return Err(err(Some(pc), ValidationReason::TforCallWithoutResults));
                 }
-                check_slots(pc, a, 3 + b as usize, slots)?;
-                if let Some(slot) = inst.tfor_cursor_slot() {
-                    sequential(
-                        pc,
-                        slot,
-                        &mut next_tfor_cursor_slot,
-                        CacheFamily::TforCursor,
-                    )?;
+                check_registers(pc, a, 3 + usize::from(b), frame)?;
+                sequential(
+                    pc,
+                    inst.cache_slot(),
+                    &mut next_tfor_cursor_slot,
+                    CacheFamily::TforCursor,
+                )?;
+            }
+            Instr::OP_CALL => {
+                if d > 1 {
+                    return Err(err(Some(pc), ValidationReason::BooleanOperandInvalid));
                 }
+                // The callee, its fixed arguments and its fixed results.
+                let args = count_operand(pc, b, MAX_FIXED_ARGS)?;
+                let results = count_operand(pc, c, MAX_FIXED_RESULTS)?;
+                check_registers(pc, a, 1 + args.unwrap_or(0), frame)?;
+                check_registers(pc, a, results.unwrap_or(0), frame)?;
             }
-            Instr::OP_CLOSE_UPVALUES if (a as usize) > slots => {
-                return Err(err(Some(pc), ValidationReason::CloseUpvaluesOutOfRange));
+            Instr::OP_RETURN => match count_operand(pc, b, usize::from(u8::MAX))? {
+                Some(count) => check_registers(pc, a, count, frame)?,
+                None => reg(pc, a)?,
+            },
+            Instr::OP_VARARG => {
+                if !view.is_vararg() {
+                    return Err(err(Some(pc), ValidationReason::VarargInNonVarargFunction));
+                }
+                let count = count_operand(pc, b, MAX_FIXED_RESULTS)?;
+                check_registers(pc, a, count.unwrap_or(1).max(1), frame)?;
             }
-            Instr::OP_VARARG if !view.is_vararg() => {
-                return Err(err(Some(pc), ValidationReason::VarargInNonVarargFunction));
+            Instr::OP_CLOSURE => {
+                reg(pc, a)?;
+                check_index(pc, b, view.nested_len(), BytecodeOperand::NestedChunk)?;
             }
-            Instr::OP_PUSH_BOOL if a > 1 => {
-                return Err(err(Some(pc), ValidationReason::BooleanOperandInvalid));
-            }
-            Instr::OP_CONCAT if a < 2 => {
-                return Err(err(Some(pc), ValidationReason::ConcatTooFewValues));
-            }
-            // Always 1: the marker is emitted after the callee is evaluated, so
-            // the callee is the single value on top and the base is one slot
-            // below it. Anything else is corrupt.
-            Instr::OP_MARK_CALL_BASE if a != 1 => {
-                return Err(err(Some(pc), ValidationReason::CallBaseAdjustmentInvalid));
-            }
-            _ => {}
+            _ => return Err(err(Some(pc), ValidationReason::UnknownOpcode)),
         }
-        if Instr::is_transfer(op) {
-            let target = match i64::try_from(pc) {
-                Ok(pc) => pc.checked_add(1),
-                Err(_) => None,
+
+        // The open-results protocol.
+        if inst.produces_open() {
+            let consumer = pc + 1;
+            let ok = consumer < code_len && !targeted[consumer] && {
+                let next = Instr::from_raw(view.raw_instruction(consumer));
+                next.consumes_open() && open_window_fits(next, inst)
+            };
+            if !ok {
+                return Err(err(Some(pc), ValidationReason::OpenResultsNotConsumed));
             }
-            .and_then(|next| next.checked_add(inst.sbx() as i64));
-            if !target.is_some_and(|target| target >= 0 && target < code_len as i64) {
-                return Err(err(Some(pc), ValidationReason::JumpTargetOutOfRange));
+        }
+        if inst.consumes_open() {
+            let ok = pc > 0 && !targeted[pc] && {
+                let previous = Instr::from_raw(view.raw_instruction(pc - 1));
+                previous.produces_open() && open_window_fits(inst, previous)
+            };
+            if !ok {
+                return Err(err(Some(pc), ValidationReason::OpenResultsWithoutProducer));
             }
         }
     }
@@ -1135,12 +856,24 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
     {
         return Err(err(None, ValidationReason::CacheSlotCountMismatch));
     }
-    verify_stack_discipline(view)
+    Ok(())
+}
+
+/// Whether `consumer` reads a range that starts at or below where `producer`
+/// left its values: a call's arguments and a set-list's values start just
+/// above their callee or table, a return's values at its own first register.
+fn open_window_fits(consumer: Instr, producer: Instr) -> bool {
+    let first = match consumer.opcode() {
+        Instr::OP_CALL | Instr::OP_SET_LIST => u32::from(consumer.a()) + 1,
+        _ => u32::from(consumer.a()),
+    };
+    first <= u32::from(producer.a())
 }
 
 #[cfg(test)]
 mod tree_tests {
-    use super::{Bytecode, UpvalueDesc, validate_child, validate_depth};
+    use super::{Bytecode, UpvalueDesc, validate_bytecode, validate_child, validate_depth};
+    use crate::instr::{ArgCount, Instr, RetCount};
 
     #[test]
     fn child_captures_are_bounded_by_the_enclosing_frame() {
@@ -1165,16 +898,58 @@ mod tree_tests {
         }
     }
 
+    fn chunk(code: Vec<Instr>, max_stack: u16) -> Bytecode {
+        Bytecode {
+            line_info: vec![1; code.len()],
+            code,
+            max_stack,
+            is_vararg: true,
+            ..Bytecode::default()
+        }
+    }
+
+    #[test]
+    fn registers_must_lie_inside_the_frame() {
+        let ok = chunk(vec![Instr::mov(1, 0), Instr::ret(0, RetCount::Fixed(2))], 2);
+        assert!(validate_bytecode(&ok).is_ok());
+        let beyond = chunk(vec![Instr::mov(2, 0), Instr::ret(0, RetCount::Fixed(0))], 2);
+        assert!(validate_bytecode(&beyond).is_err());
+        let wide_return = chunk(vec![Instr::ret(1, RetCount::Fixed(2))], 2);
+        assert!(validate_bytecode(&wide_return).is_err());
+    }
+
+    #[test]
+    fn open_results_need_an_adjacent_consumer_no_jump_enters() {
+        let call_all = Instr::call(1, ArgCount::Fixed(0), RetCount::All, false);
+        let ret_all = Instr::ret(1, RetCount::All);
+        let ok = chunk(vec![call_all, ret_all], 4);
+        assert!(validate_bytecode(&ok).is_ok());
+
+        // A producer followed by anything else leaves the top open.
+        let unconsumed = chunk(vec![call_all, Instr::mov(0, 0), ret_all], 4);
+        assert!(validate_bytecode(&unconsumed).is_err());
+
+        // A consumer without its producer reads an undefined top.
+        let orphan = chunk(vec![Instr::mov(0, 0), ret_all], 4);
+        assert!(validate_bytecode(&orphan).is_err());
+
+        // A jump into the consumer bypasses the producer.
+        let entered = chunk(vec![Instr::jump(1), call_all, ret_all], 4);
+        assert!(validate_bytecode(&entered).is_err());
+
+        // The consumer's range must start at or below the producer's values.
+        let above = chunk(vec![call_all, Instr::ret(2, RetCount::All)], 4);
+        assert!(validate_bytecode(&above).is_err());
+    }
+
     /// Each cache family filled past capacity: 255 cached sites, then an
     /// uncached one. The runtime sizes each cache vector from the declared
     /// count and looks slots up by decoded index, so admission must keep every
     /// cached slot below that count and the count within `MAX_CACHE_SLOTS`.
     #[test]
     fn cache_families_cap_below_the_encodable_limit() {
-        use super::validate_bytecode;
-        use crate::instr::{Instr, MAX_CACHE_SLOTS};
+        use crate::instr::MAX_CACHE_SLOTS;
 
-        type Slot = fn(Instr) -> Option<u8>;
         type Count = fn(&mut Bytecode) -> &mut u8;
         let sites = |site: &dyn Fn(usize) -> String| {
             (0..=MAX_CACHE_SLOTS)
@@ -1182,29 +957,25 @@ mod tree_tests {
                 .collect::<Vec<_>>()
                 .join("\n")
         };
-        let families: [(String, u8, Slot, Count); 5] = [
+        let families: [(String, u8, Count); 5] = [
             (
                 sites(&|i| format!("if get_{i} then end")),
                 Instr::OP_GET_GLOBAL,
-                Instr::global_cache_slot,
                 |bc| &mut bc.global_cache_slots,
             ),
             (
                 sites(&|i| format!("set_{i} = 1")),
                 Instr::OP_SET_GLOBAL,
-                Instr::global_cache_slot,
                 |bc| &mut bc.global_cache_slots,
             ),
             (
                 format!("local t = {{}}\n{}", sites(&|_| "if t.x then end".into())),
                 Instr::OP_GET_FIELD,
-                Instr::field_cache_slot,
                 |bc| &mut bc.field_cache_slots,
             ),
             (
                 format!("local t = {{}}\n{}", sites(&|_| "t.x = 1".into())),
                 Instr::OP_SET_FIELD,
-                Instr::set_field_cache_slot,
                 |bc| &mut bc.set_field_cache_slots,
             ),
             (
@@ -1213,12 +984,11 @@ mod tree_tests {
                     sites(&|_| "for _ in pairs(t) do end".into())
                 ),
                 Instr::OP_TFOR_CALL,
-                Instr::tfor_cursor_slot,
                 |bc| &mut bc.tfor_cursor_slots,
             ),
         ];
 
-        for (source, opcode, slot_of, count_of) in families {
+        for (source, opcode, count_of) in families {
             let mut bc = crate::compiler::compile(&source, None).expect("capacity source compiles");
             validate_bytecode(&bc).expect("compiler output at capacity verifies");
             assert_eq!(usize::from(*count_of(&mut bc)), MAX_CACHE_SLOTS);
@@ -1227,23 +997,15 @@ mod tree_tests {
                 .collect();
             assert_eq!(sites.len(), MAX_CACHE_SLOTS + 1, "opcode {opcode}");
             for (expected, pc) in sites.iter().take(MAX_CACHE_SLOTS).enumerate() {
-                assert_eq!(slot_of(bc.code[*pc]), Some(expected as u8));
+                assert_eq!(bc.code[*pc].cache_slot(), Some(expected as u8));
             }
             let overflow = sites[MAX_CACHE_SLOTS];
-            assert_eq!(slot_of(bc.code[overflow]), None);
+            assert_eq!(bc.code[overflow].cache_slot(), None);
 
             // Caching the overflow site as a repeat of the last slot is
             // rejected: it would alias slot 254 rather than fit a 256th.
             let mut aliased = bc.clone();
-            let last = aliased.code[sites[MAX_CACHE_SLOTS - 1]];
-            let mut raw = aliased.code[overflow].raw();
-            raw = if opcode == Instr::OP_TFOR_CALL {
-                (raw & !0xff) | (last.raw() & 0xff)
-            } else {
-                (raw & !0x00ff_0000) | (last.raw() & 0x00ff_0000)
-            };
-            aliased.code[overflow] = Instr::from_raw(raw);
-            assert_eq!(slot_of(aliased.code[overflow]), Some(254));
+            aliased.code[overflow] = aliased.code[overflow].with_cache_slot(Some(254));
             assert!(validate_bytecode(&aliased).is_err(), "opcode {opcode}");
 
             // A declared count that disagrees with the operands is rejected,
@@ -1254,6 +1016,21 @@ mod tree_tests {
                 assert!(validate_bytecode(&miscounted).is_err(), "opcode {opcode}");
             }
         }
+    }
+
+    /// Two field sites sharing one cache slot would let a hit for `t.a`
+    /// answer `t.b`; ownership, not bounds, is what admission proves.
+    #[test]
+    fn a_cache_slot_owns_one_site() {
+        let mut bc = crate::compiler::compile("local t = {}; local a, b = t.a, t.b", None)
+            .expect("fixture compiles");
+        let fields: Vec<usize> = (0..bc.code.len())
+            .filter(|pc| bc.code[*pc].opcode() == Instr::OP_GET_FIELD)
+            .collect();
+        assert_eq!(fields.len(), 2);
+        bc.code[fields[1]] = bc.code[fields[1]].with_cache_slot(Some(0));
+        bc.field_cache_slots = 1;
+        assert!(validate_bytecode(&bc).is_err());
     }
 
     /// The typed operands render the sentences the verifier carried as

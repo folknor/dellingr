@@ -1,231 +1,294 @@
-use super::ArgCount;
-use super::ExpDesc;
-use super::Instr;
+use super::super::ast::{
+    ArithChain, ArithLink, CallSuffix, CompareChain, CompareLink, Expr, ExprKind, MethodSuffix,
+    Place, Suffix, Suffixed,
+};
 use super::Parser;
-use super::PlaceExp;
-use super::PrefixExp;
 use super::Result;
-use super::RetCount;
 use super::SyntaxError;
-use super::TailKind;
 use super::TokenKind;
-use crate::compiler::exp_desc::CallSite;
-use crate::error::ParserFault;
+use super::Variable;
+use crate::instr::{ArithOp, CompareOp};
 use crate::limits::{MAX_EXPRESSIONS, SYNTAX_SUFFIX_COST};
+
+/// A parsed prefix expression: a variable or parenthesized expression and
+/// the field, index, call and method suffixes applied to it.
+pub(super) struct Prefix {
+    base: PrefixBase,
+    suffixes: Vec<Suffix>,
+}
+
+enum PrefixBase {
+    /// A name, resolved and stamped where it was read.
+    Var(Variable, u32),
+    /// A parenthesized expression.
+    Paren(Expr),
+}
+
+impl Prefix {
+    /// Whether the prefix ends in a call or method call.
+    pub(super) fn is_call(&self) -> bool {
+        matches!(
+            self.suffixes.last(),
+            Some(Suffix::Call(_) | Suffix::Method(_))
+        )
+    }
+
+    /// The prefix's value.
+    pub(super) fn into_expr(self) -> Expr {
+        let base = match self.base {
+            PrefixBase::Var(variable, line) => variable_read(variable, line),
+            PrefixBase::Paren(expr) => expr,
+        };
+        if self.suffixes.is_empty() {
+            base
+        } else {
+            Expr::new(ExprKind::Suffixed(Box::new(Suffixed {
+                base,
+                suffixes: self.suffixes,
+            })))
+        }
+    }
+
+    /// The prefix as an assignment target, or `None` when it names no
+    /// variable or field (a call or a parenthesized expression).
+    pub(super) fn into_place(mut self) -> Option<Place> {
+        match self.suffixes.pop() {
+            None => match self.base {
+                PrefixBase::Var(variable, _) => Some(match variable {
+                    Variable::Local { reg, .. } => Place::Local(reg),
+                    Variable::Upval(index) => Place::Upval(index),
+                    Variable::Global(name) => Place::Global(name),
+                    Variable::Builtin(builtin) => Place::Builtin(builtin),
+                }),
+                PrefixBase::Paren(_) => None,
+            },
+            Some(Suffix::Field { name, .. }) => Some(Place::Field {
+                object: self.into_expr(),
+                name,
+            }),
+            Some(Suffix::Index { key, .. }) => Some(Place::Index {
+                object: self.into_expr(),
+                key,
+            }),
+            Some(Suffix::Call(_) | Suffix::Method(_)) => None,
+        }
+    }
+}
+
+/// The read of a resolved variable stamped with `line`.
+pub(super) fn variable_read(variable: Variable, line: u32) -> Expr {
+    Expr::new(match variable {
+        Variable::Local { reg, id } => ExprKind::Local { reg, id },
+        Variable::Upval(index) => ExprKind::Upval(index),
+        Variable::Global(name) => ExprKind::Global { name, line },
+        Variable::Builtin(builtin) => ExprKind::Builtin(builtin),
+    })
+}
 
 impl Parser<'_> {
     /// Parses a comma-separated list of expressions. Trailing and leading
-    /// commas are not allowed. Returns how many expressions were parsed and
-    /// a descriptor of the last expression.
+    /// commas are not allowed.
     #[hotpath::measure]
-    pub(super) fn parse_explist(&mut self) -> Result<(u8, ExpDesc)> {
+    pub(super) fn parse_explist(&mut self) -> Result<Vec<Expr>> {
         // An explist has to have at least one expression.
-        let mut last_exp_desc = self.parse_expr()?;
-        let mut num_expressions = 1;
+        let mut exprs = vec![self.parse_expr()?];
         while let Some(token) = self.input.try_pop(TokenKind::Comma)? {
-            if num_expressions == MAX_EXPRESSIONS {
+            if exprs.len() == usize::from(MAX_EXPRESSIONS) {
                 return Err(self.error_at(SyntaxError::TooManyExpressions, token.start));
             }
-            last_exp_desc = self.parse_expr()?;
-            num_expressions += 1;
+            exprs.push(self.parse_expr()?);
         }
-
-        Ok((num_expressions, last_exp_desc))
+        Ok(exprs)
     }
 
     /// Parses a single expression.
     #[hotpath::measure]
-    pub(super) fn parse_expr(&mut self) -> Result<ExpDesc> {
+    pub(super) fn parse_expr(&mut self) -> Result<Expr> {
         self.with_syntax_level(1, Self::parse_expr_inner)
     }
 
-    fn parse_expr_inner(&mut self) -> Result<ExpDesc> {
+    fn parse_expr_inner(&mut self) -> Result<Expr> {
         self.parse_or()
     }
 
     /// Parses an `or` expression. Precedence 8.
-    fn parse_or(&mut self) -> Result<ExpDesc> {
-        let mut exp_desc = self.parse_and()?;
-
-        while self.input.try_pop(TokenKind::Or)?.is_some() {
-            exp_desc = ExpDesc::Other;
-            let branch_instr_index = self.funcs.chunk.code.len();
-            self.push(Instr::branch_true_keep(0));
-            // If we don't short-circuit, pop the left-hand expression
-            self.push(Instr::pop());
-            self.parse_and()?;
-            self.patch_jump(
-                branch_instr_index,
-                self.funcs.chunk.code.len(),
-                Instr::branch_true_keep,
-            )?;
+    fn parse_or(&mut self) -> Result<Expr> {
+        let first = self.parse_and()?;
+        if !self.input.check_type(TokenKind::Or)? {
+            return Ok(first);
         }
-
-        Ok(exp_desc)
+        let mut operands = vec![first];
+        while self.input.try_pop(TokenKind::Or)?.is_some() {
+            operands.push(self.parse_and()?);
+        }
+        Ok(Expr::new(ExprKind::Or(operands)))
     }
 
     /// Parses `and` expression. Precedence 7.
-    fn parse_and(&mut self) -> Result<ExpDesc> {
-        let mut exp_desc = self.parse_comparison()?;
-
-        while self.input.try_pop(TokenKind::And)?.is_some() {
-            exp_desc = ExpDesc::Other;
-            let branch_instr_index = self.funcs.chunk.code.len();
-            self.push(Instr::branch_false_keep(0));
-            // If we don't short-circuit, pop the left-hand expression
-            self.push(Instr::pop());
-            self.parse_comparison()?;
-            self.patch_jump(
-                branch_instr_index,
-                self.funcs.chunk.code.len(),
-                Instr::branch_false_keep,
-            )?;
+    fn parse_and(&mut self) -> Result<Expr> {
+        let first = self.parse_comparison()?;
+        if !self.input.check_type(TokenKind::And)? {
+            return Ok(first);
         }
-
-        Ok(exp_desc)
+        let mut operands = vec![first];
+        while self.input.try_pop(TokenKind::And)?.is_some() {
+            operands.push(self.parse_comparison()?);
+        }
+        Ok(Expr::new(ExprKind::And(operands)))
     }
 
     /// Parses a comparison expression. Precedence 6.
     ///
     /// `==`, `~=`, `<`, `<=`, `>`, `>=`
-    fn parse_comparison(&mut self) -> Result<ExpDesc> {
-        let mut exp_desc = self.parse_concat()?;
+    fn parse_comparison(&mut self) -> Result<Expr> {
+        let first = self.parse_concat()?;
+        let mut rest = Vec::new();
         loop {
-            let instr = match self.input.peek_type()? {
-                TokenKind::Less => Instr::less(),
-                TokenKind::LessEqual => Instr::less_equal(),
-                TokenKind::Greater => Instr::greater(),
-                TokenKind::GreaterEqual => Instr::greater_equal(),
-                TokenKind::Equal => Instr::equal(),
-                TokenKind::NotEqual => Instr::not_equal(),
+            let op = match self.input.peek_type()? {
+                TokenKind::Less => CompareOp::Lt,
+                TokenKind::LessEqual => CompareOp::Le,
+                TokenKind::Greater => CompareOp::Gt,
+                TokenKind::GreaterEqual => CompareOp::Ge,
+                TokenKind::Equal => CompareOp::Eq,
+                TokenKind::NotEqual => CompareOp::Ne,
                 _ => break,
             };
-            exp_desc = ExpDesc::Other;
             let line = self.input.next()?.line;
-            self.parse_concat()?;
-            self.push_at_line(instr, line);
+            let rhs = self.parse_concat()?;
+            rest.push(CompareLink { op, rhs, line });
         }
-        Ok(exp_desc)
+        if rest.is_empty() {
+            Ok(first)
+        } else {
+            Ok(Expr::new(ExprKind::Compare(Box::new(CompareChain {
+                first,
+                rest,
+            }))))
+        }
     }
 
     /// Parses a string concatenation expression (`..`). Precedence 5.
-    /// Flattens chained `..` into a single OP_CONCAT(n) so `a .. b .. c`
-    /// emits one concat with three operands instead of two two-operand
-    /// concats with an intermediate string allocation between them.
-    fn parse_concat(&mut self) -> Result<ExpDesc> {
-        let mut exp_desc = self.parse_addition()?;
-        let mut count: usize = 1;
-        let mut line = None;
-        while let Some(token) = self.input.try_pop(TokenKind::DotDot)? {
-            // A flattened chain reports its first operator, as Lua does when
-            // it merges the right-associative concatenation instructions.
-            line = line.or(Some(token.line));
-            exp_desc = ExpDesc::Other;
-            self.parse_addition()?;
-            count += 1;
+    /// A chained `..` is one concatenation of all its operands rather than
+    /// two-operand concatenations with intermediate strings between them.
+    fn parse_concat(&mut self) -> Result<Expr> {
+        let first = self.parse_addition()?;
+        let Some(token) = self.input.try_pop(TokenKind::DotDot)? else {
+            return Ok(first);
+        };
+        // A flattened chain reports its first operator, as Lua does when it
+        // merges the right-associative concatenation instructions.
+        let line = token.line;
+        let mut operands = vec![first, self.parse_addition()?];
+        while self.input.try_pop(TokenKind::DotDot)?.is_some() {
+            operands.push(self.parse_addition()?);
         }
-        if count > 1 {
-            let n = self.bounded_u8(
-                count,
-                usize::from(MAX_EXPRESSIONS),
-                SyntaxError::TooManyExpressions,
-            )?;
-            let line =
-                line.ok_or_else(|| self.internal_error(ParserFault::ConcatChainWithoutOperator))?;
-            self.push_at_line(Instr::concat(n), line);
+        if operands.len() > usize::from(MAX_EXPRESSIONS) {
+            return Err(self.error_here(SyntaxError::TooManyExpressions));
         }
-        Ok(exp_desc)
+        Ok(Expr::new(ExprKind::Concat { operands, line }))
     }
 
     /// Parses an addition expression (`+`, `-`). Precedence 4.
-    fn parse_addition(&mut self) -> Result<ExpDesc> {
-        let mut exp_desc = self.parse_multiplication()?;
+    fn parse_addition(&mut self) -> Result<Expr> {
+        let mut chain = ChainBuilder::new(self.parse_multiplication()?);
         loop {
-            let instr = match self.input.peek_type()? {
-                TokenKind::Plus => Instr::add(),
-                TokenKind::Minus => Instr::subtract(),
+            let op = match self.input.peek_type()? {
+                TokenKind::Plus => ArithOp::Add,
+                TokenKind::Minus => ArithOp::Sub,
                 _ => break,
             };
-            exp_desc = ExpDesc::Other;
             let line = self.input.next()?.line;
-            self.parse_multiplication()?;
-            // The token match above selects only foldable arithmetic opcodes.
-            self.push_arith(instr, line)?;
+            let rhs = self.parse_multiplication()?;
+            chain.push(self, op, rhs, line)?;
         }
-        Ok(exp_desc)
+        Ok(chain.finish())
     }
 
     /// Parses a multiplication expression (`*`, `/`, `%`). Precedence 3.
-    fn parse_multiplication(&mut self) -> Result<ExpDesc> {
-        let mut exp_desc = self.parse_unary()?;
+    fn parse_multiplication(&mut self) -> Result<Expr> {
+        let mut chain = ChainBuilder::new(self.parse_unary()?);
         loop {
-            let instr = match self.input.peek_type()? {
-                TokenKind::Star => Instr::multiply(),
-                TokenKind::Slash => Instr::divide(),
-                TokenKind::Mod => Instr::modulo(),
+            let op = match self.input.peek_type()? {
+                TokenKind::Star => ArithOp::Mul,
+                TokenKind::Slash => ArithOp::Div,
+                TokenKind::Mod => ArithOp::Mod,
                 _ => break,
             };
-            exp_desc = ExpDesc::Other;
             let line = self.input.next()?.line;
-            self.parse_unary()?;
-            // The token match above selects only foldable arithmetic opcodes.
-            self.push_arith(instr, line)?;
+            let rhs = self.parse_unary()?;
+            chain.push(self, op, rhs, line)?;
         }
-        Ok(exp_desc)
+        Ok(chain.finish())
     }
 
     /// Parses a unary expression (`not`, `#`, `-`). Precedence 2.
-    fn parse_unary(&mut self) -> Result<ExpDesc> {
+    fn parse_unary(&mut self) -> Result<Expr> {
         self.with_syntax_level(1, Self::parse_unary_inner)
     }
 
-    fn parse_unary_inner(&mut self) -> Result<ExpDesc> {
+    fn parse_unary_inner(&mut self) -> Result<Expr> {
         let token_type = self.input.peek_type()?;
-        let instr = match token_type {
-            TokenKind::Not => Instr::not(),
-            TokenKind::Hash => Instr::length(),
-            TokenKind::Minus => Instr::negate(),
-            _ => {
-                return self.parse_pow();
-            }
-        };
-        let line = self.input.next()?.line;
-        self.parse_unary()?;
-        if token_type == TokenKind::Minus {
-            self.push_negate(line)?;
-        } else {
-            self.push_at_line(instr, line);
+        if !matches!(
+            token_type,
+            TokenKind::Not | TokenKind::Hash | TokenKind::Minus
+        ) {
+            return self.parse_pow();
         }
+        let line = self.input.next()?.line;
+        let operand = self.parse_unary()?;
+        Ok(match token_type {
+            TokenKind::Not => Expr::new(ExprKind::Not {
+                operand: Box::new(operand),
+                line,
+            }),
+            TokenKind::Hash => Expr::new(ExprKind::Len {
+                operand: Box::new(operand),
+                line,
+            }),
+            _ => self.negate(operand, line)?,
+        })
+    }
 
-        Ok(ExpDesc::Other)
+    /// Negation, folding a number literal operand into its negated literal.
+    /// A folded constant keeps its operand's stamp; a refused fold (negative
+    /// zero, NaN, a full pool) stays a charged negation.
+    fn negate(&mut self, operand: Expr, line: u32) -> Result<Expr> {
+        if let ExprKind::Num(idx) = operand.kind {
+            let value = -self.number_literal(idx)?;
+            if let Some(folded) = self.try_fold_literal(value)? {
+                return Ok(Expr::new(ExprKind::Num(folded)));
+            }
+        }
+        Ok(Expr::new(ExprKind::Neg {
+            operand: Box::new(operand),
+            line,
+        }))
     }
 
     /// Parse an exponentiation expression (`^`). Right-associative, Precedence 1.
-    fn parse_pow(&mut self) -> Result<ExpDesc> {
-        let mut exp_desc = self.parse_primary()?;
+    fn parse_pow(&mut self) -> Result<Expr> {
+        let base = self.parse_primary()?;
         if let Some(token) = self.input.try_pop(TokenKind::Caret)? {
-            exp_desc = ExpDesc::Other;
-            self.parse_unary()?;
+            let exponent = self.parse_unary()?;
             // `^` is deliberately never constant-folded, unlike `+ - * / %`.
             // The runtime `pow` is the in-crate correctly rounded one
             // (`crmath::pow`), identical on every host, so folding would be
             // bit-safe; it stays unfolded because a folded literal is free
             // while a runtime `^` is charged as an instruction, and folding
-            // would move cost charges and change compiled bytecode.
-            self.push_at_line(Instr::pow(), token.line);
+            // would move cost charges.
+            return Ok(Expr::new(ExprKind::Pow {
+                base: Box::new(base),
+                exponent: Box::new(exponent),
+                line: token.line,
+            }));
         }
-
-        Ok(exp_desc)
+        Ok(base)
     }
 
     /// Parses a 'primary' expression. See `parse_prefix_exp` and `parse_expr_base` for details.
-    fn parse_primary(&mut self) -> Result<ExpDesc> {
+    fn parse_primary(&mut self) -> Result<Expr> {
         match self.input.peek_type()? {
-            TokenKind::Identifier | TokenKind::LParen => {
-                let prefix = self.parse_prefix_exp()?;
-                self.eval_prefix_exp(&prefix);
-                Ok(prefix.into())
-            }
+            TokenKind::Identifier | TokenKind::LParen => Ok(self.parse_prefix_exp()?.into_expr()),
             _ => self.parse_expr_base(),
         }
     }
@@ -234,24 +297,33 @@ impl Parser<'_> {
     /// which can appear on the left side of a function call, table index, or
     /// field access.
     #[hotpath::measure]
-    pub(super) fn parse_prefix_exp(&mut self) -> Result<PrefixExp> {
+    pub(super) fn parse_prefix_exp(&mut self) -> Result<Prefix> {
         let tok = self.input.next()?;
-        let prefix = match tok.typ {
+        let base = match tok.typ {
             TokenKind::Identifier => {
                 let text = self.get_text(tok)?;
-                let place = self.parse_prefix_identifier(text)?;
-                place.into()
+                let variable = self.parse_prefix_identifier(text)?;
+                PrefixBase::Var(variable, self.input.last_line())
             }
             TokenKind::LParen => {
-                self.parse_expr()?;
+                let inner = self.parse_expr()?;
                 self.expect(TokenKind::RParen)?;
-                PrefixExp::Parenthesized
+                if inner.is_multi() {
+                    PrefixBase::Paren(Expr::new(ExprKind::Paren(Box::new(inner))))
+                } else {
+                    PrefixBase::Paren(inner)
+                }
             }
             _ => {
                 return Err(self.err_near(tok, |found| SyntaxError::UnexpectedSymbol { found }));
             }
         };
-        self.parse_prefix_extension(prefix)
+        let mut prefix = Prefix {
+            base,
+            suffixes: Vec::new(),
+        };
+        self.parse_prefix_extension(&mut prefix)?;
+        Ok(prefix)
     }
 
     /// Parses every extension of a prefix expression: field accesses, table
@@ -260,8 +332,7 @@ impl Parser<'_> {
     /// depth. Parsing the contents of an index or call charges a level while
     /// those contents are active, in addition to their expression levels.
     #[hotpath::measure]
-    fn parse_prefix_extension(&mut self, base_expr: PrefixExp) -> Result<PrefixExp> {
-        let mut expr = base_expr;
+    fn parse_prefix_extension(&mut self, prefix: &mut Prefix) -> Result<()> {
         loop {
             // These suffixes retain this loop and the suffix parser while
             // descending into expressions. Keep their previous depth charge:
@@ -273,127 +344,77 @@ impl Parser<'_> {
                 TokenKind::LSquare | TokenKind::LParen | TokenKind::LCurly | TokenKind::Colon
             );
             let result = if nested {
-                self.with_syntax_level(SYNTAX_SUFFIX_COST, |parser| {
-                    parser.parse_prefix_suffix(&expr)
-                })
+                self.with_syntax_level(SYNTAX_SUFFIX_COST, Self::parse_prefix_suffix)
             } else {
-                self.parse_prefix_suffix(&expr)
+                self.parse_prefix_suffix()
             };
             match result? {
-                Some(extended) => expr = extended,
+                Some(suffix) => prefix.suffixes.push(suffix),
                 None => break,
             }
         }
-        Ok(expr)
+        Ok(())
     }
 
-    /// Parses one suffix applied to `base_expr`, or returns `None` (consuming
-    /// nothing) when the next token does not start a suffix.
-    fn parse_prefix_suffix(&mut self, base_expr: &PrefixExp) -> Result<Option<PrefixExp>> {
-        let next = match self.input.peek_type()? {
+    /// Parses one suffix, or returns `None` (consuming nothing) when the next
+    /// token does not start a suffix. Each suffix is stamped where the
+    /// emitting parser read it: a field or index at its last token, a call
+    /// at the line its arguments open on, a method lookup at its name.
+    fn parse_prefix_suffix(&mut self) -> Result<Option<Suffix>> {
+        let suffix = match self.input.peek_type()? {
             TokenKind::Dot => {
-                self.eval_prefix_exp(base_expr);
                 self.input.next()?;
                 let field_name = self.expect_identifier()?;
-                let name_idx = self.find_or_add_string(field_name)?;
-                PlaceExp::FieldAccess(name_idx).into()
+                let name = self.find_or_add_string(field_name)?;
+                Suffix::Field {
+                    name,
+                    line: self.input.last_line(),
+                }
             }
             TokenKind::LSquare => {
-                self.eval_prefix_exp(base_expr);
                 self.input.next()?;
-                self.parse_expr()?;
+                let key = self.parse_expr()?;
                 self.expect(TokenKind::RSquare)?;
-                PlaceExp::TableIndex.into()
+                Suffix::Index {
+                    key,
+                    line: self.input.last_line(),
+                }
             }
             TokenKind::LParen | TokenKind::LiteralString | TokenKind::LCurly => {
                 let line = self.input.peek()?.line;
-                // Evaluate the callee FIRST, then mark. The mark records where
-                // this call's frame begins, and after the callee is evaluated
-                // it is always exactly one value on top - whether it pushed
-                // itself (a name), was already there (a parenthesized
-                // expression or constructor), replaced its receiver (a field
-                // access), collapsed a receiver and key (an index), or is the
-                // single result of an inner call.
-                //
-                // Marking before evaluation instead required guessing how many
-                // values the callee expression had already left on the stack,
-                // which was wrong for every shape except a plain name and a
-                // field access, and is not even a fixed number for an inner
-                // call - the base then pointed at the receiver and the VM
-                // called that instead of the callee.
-                self.eval_prefix_exp(base_expr);
-                let mark_idx = self.mark_call_base();
-                self.finish_call(mark_idx, 0, line, false)?
+                let args = self.parse_call_args()?;
+                self.check_call_width(&args, 0)?;
+                Suffix::Call(CallSuffix { args, line })
             }
             TokenKind::Colon => {
                 let line = self.input.peek()?.line;
-                // Method call: obj:method(args) becomes obj.method(obj, args).
-                //
-                // Same ordering as a normal call: evaluate the receiver first,
-                // then mark, so the base always sits one slot below the top
-                // regardless of what shape the receiver expression had.
-                // The dup/get_field/swap below leaves the resolved method in
-                // that marked slot with the receiver above it, which is exactly
-                // the [callee, args...] layout the call expects.
-                self.eval_prefix_exp(base_expr);
-                let mark_idx = self.mark_call_base();
                 self.input.next()?; // consume ':'
                 let method_name = self.expect_identifier()?;
-                let name_idx = self.find_or_add_string(method_name)?;
-
-                // Stack: [obj]
-                // Duplicate obj (need it as both receiver and first arg)
-                self.push(Instr::dup());
-                // Stack: [obj, obj]
-                // Get the method from the object
-                self.push(Instr::get_field(name_idx, None));
-                // Stack: [obj, method]
-                // Swap so method is below obj (Call expects [func, args...])
-                self.push(Instr::swap());
-                // Stack: [method, obj]
-
-                let call = self.finish_call(mark_idx, 1, line, true)?;
-                // Stack: [method, obj, arg1, arg2, ...]
-                call
+                let name = self.find_or_add_string(method_name)?;
+                let lookup_line = self.input.last_line();
+                let args = self.parse_call_args()?;
+                // The receiver is an implicit first argument.
+                self.check_call_width(&args, 1)?;
+                Suffix::Method(MethodSuffix {
+                    name,
+                    lookup_line,
+                    args,
+                    line,
+                })
             }
             _ => return Ok(None),
         };
-        Ok(Some(next))
+        Ok(Some(suffix))
     }
 
-    /// Emits the marker shared by normal and method calls after evaluating
-    /// their callee or receiver.
-    fn mark_call_base(&mut self) -> usize {
-        let mark_idx = self.funcs.chunk.code.len();
-        self.push(Instr::mark_call_base(1));
-        mark_idx
-    }
-
-    /// Parses arguments and patches the call marker for a fixed or expandable
-    /// final argument list.
-    fn finish_call(
-        &mut self,
-        mark_idx: usize,
-        implicit_args: usize,
-        line: u32,
-        method: bool,
-    ) -> Result<PrefixExp> {
-        let (num_args, last_exp) = self.parse_call_args()?;
-        let num_args = match last_exp {
-            ExpDesc::MultiTail(tail) => {
-                self.open_tail(tail, RetCount::All)?;
-                ArgCount::Dynamic
-            }
-            _ => {
-                // Keep parse-time instruction indices stable. Finalization
-                // strips this free placeholder with one jump remap.
-                self.funcs.chunk.code[mark_idx] = Instr::nop();
-                ArgCount::Fixed(self.checked_fixed_arg_count(num_args as usize, implicit_args)?)
-            }
-        };
-        Ok(PrefixExp::FunctionCall(CallSite::new(
-            num_args, line, method,
-        )))
+    /// A call's fixed argument count is checked when its argument list
+    /// closes; an expandable final argument has no fixed width.
+    fn check_call_width(&self, args: &[Expr], implicit: usize) -> Result<()> {
+        if args.last().is_some_and(Expr::is_multi) {
+            return Ok(());
+        }
+        self.checked_fixed_arg_count(args.len(), implicit)?;
+        Ok(())
     }
 
     /// Parses a 'base' expression, after eliminating any operators. This can be:
@@ -403,39 +424,82 @@ impl Parser<'_> {
     /// * One of the keywords `nil`, `false` or `true
     /// * A table constructor
     #[hotpath::measure]
-    fn parse_expr_base(&mut self) -> Result<ExpDesc> {
+    fn parse_expr_base(&mut self) -> Result<Expr> {
         let tok = self.input.next()?;
-        match tok.typ {
-            TokenKind::LCurly => self.parse_table()?,
+        Ok(match tok.typ {
+            TokenKind::LCurly => self.parse_table(tok.line)?,
             TokenKind::LiteralNumber => {
                 // The lexer determines token boundaries; this shared parser
                 // owns conversion and validates the complete numeral.
                 let text = self.input.source_bytes(tok.range());
                 let number = crate::numeral::parse_lua_numeral(text)
                     .ok_or_else(|| self.error_at(SyntaxError::BadNumber, tok.start))?;
-                let idx = self.find_or_add_number(number)?;
-                self.push(Instr::push_num(idx));
+                Expr::new(ExprKind::Num(self.find_or_add_number(number)?))
             }
-            TokenKind::LiteralString => {
-                self.push_literal_string(tok)?;
+            TokenKind::LiteralString => self.literal_string(tok)?,
+            TokenKind::Function => {
+                let (nested, line) = self.parse_fndef(None, false)?;
+                Expr::new(ExprKind::Function { nested, line })
             }
-            TokenKind::Function => self.parse_fndef(None, false)?,
-            TokenKind::Nil => self.push(Instr::push_nil()),
-            TokenKind::False => self.push(Instr::push_bool(false)),
-            TokenKind::True => self.push(Instr::push_bool(true)),
+            TokenKind::Nil => Expr::new(ExprKind::Nil),
+            TokenKind::False => Expr::new(ExprKind::False),
+            TokenKind::True => Expr::new(ExprKind::True),
             TokenKind::DotDotDot => {
-                // Check if we're in a vararg function
                 if !self.funcs.chunk.is_vararg {
                     return Err(self.error_here(SyntaxError::VarargOutsideVarargFunction));
                 }
-                // Default: push 1 value (will be adjusted if in tail position)
-                self.push(Instr::vararg(RetCount::Fixed(1)));
-                return Ok(ExpDesc::MultiTail(TailKind::Vararg));
+                Expr::new(ExprKind::Vararg)
             }
             _ => {
                 return Err(self.err_near(tok, |found| SyntaxError::UnexpectedSymbol { found }));
             }
+        })
+    }
+}
+
+/// A same-precedence arithmetic chain under construction. While every
+/// operand so far has folded into one number literal, a further literal
+/// operand folds too, exactly when the emitting parser's last two
+/// instructions were both literal pushes.
+struct ChainBuilder {
+    first: Expr,
+    rest: Vec<ArithLink>,
+}
+
+impl ChainBuilder {
+    fn new(first: Expr) -> Self {
+        Self {
+            first,
+            rest: Vec::new(),
         }
-        Ok(ExpDesc::Other)
+    }
+
+    fn push(&mut self, parser: &mut Parser<'_>, op: ArithOp, rhs: Expr, line: u32) -> Result<()> {
+        if self.rest.is_empty()
+            && op.foldable()
+            && let (ExprKind::Num(lhs), ExprKind::Num(rhs_idx)) = (&self.first.kind, &rhs.kind)
+        {
+            let value = (op.function())(
+                parser.number_literal(*lhs)?,
+                parser.number_literal(*rhs_idx)?,
+            );
+            if let Some(folded) = parser.try_fold_literal(value)? {
+                self.first = Expr::new(ExprKind::Num(folded));
+                return Ok(());
+            }
+        }
+        self.rest.push(ArithLink { op, rhs, line });
+        Ok(())
+    }
+
+    fn finish(self) -> Expr {
+        if self.rest.is_empty() {
+            self.first
+        } else {
+            Expr::new(ExprKind::Arith(Box::new(ArithChain {
+                first: self.first,
+                rest: self.rest,
+            })))
+        }
     }
 }

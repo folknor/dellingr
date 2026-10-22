@@ -30,7 +30,7 @@ fn arithmetic_program(additions: usize) -> String {
 
 #[test]
 fn opcode_cost_interval_matches_immediate_flush_across_budgets() {
-    // Each statement emits one charged OP_ADD; global reads and writes are
+    // Each statement emits one charged addition; global reads and writes are
     // free. These sizes put charges immediately before, at, and after interval
     // boundaries, including a second batch.
     for additions in [1, 2, 63, 64, 65, 127, 128, 129] {

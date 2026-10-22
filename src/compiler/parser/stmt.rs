@@ -1,45 +1,29 @@
-use super::ExpDesc;
-use super::Instr;
+use super::super::ast::{Block, Expr, ExprKind, IfArm, Place, Stmt};
 use super::Parser;
-use super::PlaceExp;
-use super::PrefixExp;
 use super::Result;
-use super::RetCount;
 use super::SyntaxError;
 use super::TokenKind;
-use crate::error::ParserFault;
+use super::expr::Prefix;
 use crate::limits::{MAX_ASSIGNMENT_OFFSET, MAX_FIXED_RESULTS};
 
 impl<'a> Parser<'a> {
     /// Parses a return statement. Return statements must always come last in a
     /// block.
-    pub(super) fn parse_return(&mut self) -> Result<()> {
+    pub(super) fn parse_return(&mut self) -> Result<Stmt> {
         self.input.next()?; // 'return' keyword
 
         // As in reference Lua, only a block follower or `;` ends an empty
         // return; anything else must parse as an expression list, so a stray
         // token is an unexpected symbol rather than trailing input.
         let next = self.input.peek_type()?;
-        let count = if !(Self::is_block_follow(next) || next == TokenKind::Semi) {
-            let (n, last_exp) = self.parse_explist()?;
-            match last_exp {
-                ExpDesc::MultiTail(tail) => {
-                    self.open_tail(tail, RetCount::All)?;
-                    RetCount::All
-                }
-                // At a return statement boundary the operand stack contains
-                // exactly this expression list, so more fixed expressions
-                // than bytecode can count deliberately return All: rejecting
-                // the source would remove an existing accepted program.
-                _ if usize::from(n) > MAX_FIXED_RESULTS => RetCount::All,
-                _ => RetCount::Fixed(n),
-            }
+        let values = if !(Self::is_block_follow(next) || next == TokenKind::Semi) {
+            self.parse_explist()?
         } else {
-            RetCount::Fixed(0)
+            Vec::new()
         };
-        self.push(Instr::ret(count));
+        let line = self.input.last_line();
         self.input.try_pop(TokenKind::Semi)?;
-        Ok(())
+        Ok(Stmt::Return { values, line })
     }
 
     /// Parses a statement which could be a variable assignment or a function call.
@@ -49,23 +33,24 @@ impl<'a> Parser<'a> {
     /// variable; anything else makes it a call statement, which needs a call.
     /// Any other combination is a [`SyntaxError::MalformedStatement`] near
     /// that token.
-    pub(super) fn parse_assign_or_call(&mut self) -> Result<()> {
+    pub(super) fn parse_assign_or_call(&mut self) -> Result<Stmt> {
         let prefix = self.parse_prefix_exp()?;
         let assigning = matches!(
             self.input.peek_type()?,
             TokenKind::Assign | TokenKind::Comma
         );
-        match prefix {
-            PrefixExp::FunctionCall(call) if !assigning => {
-                let (num_args, line) = (call.num_args(), call.line());
-                self.push_at_line(
-                    Instr::call_site(num_args, RetCount::Fixed(0), call.is_method()),
-                    line,
-                );
-                Ok(())
+        if prefix.is_call() {
+            if assigning {
+                return Err(self.malformed_statement());
             }
-            PrefixExp::Place(first_place) if assigning => self.parse_assign(first_place),
-            _ => Err(self.malformed_statement()),
+            return Ok(Stmt::Call(prefix.into_expr()));
+        }
+        if !assigning {
+            return Err(self.malformed_statement());
+        }
+        match prefix.into_place() {
+            Some(place) => self.parse_assign(place),
+            None => Err(self.malformed_statement()),
         }
     }
 
@@ -78,49 +63,47 @@ impl<'a> Parser<'a> {
     }
 
     /// Parses a variable assignment.
-    fn parse_assign(&mut self, first_exp: PlaceExp) -> Result<()> {
-        let mut places = vec![first_exp];
+    fn parse_assign(&mut self, first: Place) -> Result<Stmt> {
+        let mut targets = vec![first];
         while self.input.try_pop(TokenKind::Comma)?.is_some() {
-            places.push(self.parse_place_exp()?);
+            targets.push(self.parse_place_exp()?);
         }
 
         self.expect(TokenKind::Assign)?;
-        let (num_rvals, last_exp) = self.parse_explist()?;
-        let num_lvals = places.len();
-        self.adjust_multi_assign(num_lvals, usize::from(num_rvals), &last_exp)?;
+        let values = self.parse_explist()?;
+        self.check_multi_assign(targets.len(), &values)?;
 
-        places.reverse();
-        for (i, place_exp) in places.into_iter().enumerate() {
-            let instr = match &place_exp {
-                PlaceExp::FieldAccess(_) | PlaceExp::TableIndex => {
-                    let stack_offset = num_lvals - i - 1;
-                    let stack_offset = self.bounded_u8(
-                        stack_offset,
-                        MAX_ASSIGNMENT_OFFSET,
-                        SyntaxError::AssignmentOffsetTooLarge,
-                    )?;
-                    place_exp.set_instr(stack_offset)
-                }
-                _ => place_exp.set_instr(0),
-            };
-            self.push(instr);
+        // Field and index targets stay bounded by their position in the
+        // target list, the limit the stack bytecode's store offsets set;
+        // keeping it keeps the set of accepted programs unchanged.
+        for (index, target) in targets.iter().enumerate().rev() {
+            if matches!(target, Place::Field { .. } | Place::Index { .. }) {
+                self.bounded_u8(
+                    index,
+                    MAX_ASSIGNMENT_OFFSET,
+                    SyntaxError::AssignmentOffsetTooLarge,
+                )?;
+            }
         }
 
-        Ok(())
+        Ok(Stmt::Assign {
+            targets,
+            values,
+            line: self.input.last_line(),
+        })
     }
 
     /// Parses an expression which can appear on the left side of an assignment.
-    fn parse_place_exp(&mut self) -> Result<PlaceExp> {
-        match self.parse_prefix_exp()? {
-            PrefixExp::Parenthesized | PrefixExp::FunctionCall(_) => {
-                Err(self.malformed_statement())
-            }
-            PrefixExp::Place(place) => Ok(place),
+    fn parse_place_exp(&mut self) -> Result<Place> {
+        let prefix: Prefix = self.parse_prefix_exp()?;
+        match prefix.into_place() {
+            Some(place) => Ok(place),
+            None => Err(self.malformed_statement()),
         }
     }
 
     /// Parses a `local` declaration.
-    pub(super) fn parse_locals(&mut self) -> Result<()> {
+    pub(super) fn parse_locals(&mut self) -> Result<Stmt> {
         self.input.next()?; // `local` keyword
 
         // Check for `local function name(...) ... end`
@@ -128,59 +111,53 @@ impl<'a> Parser<'a> {
             return self.parse_local_function();
         }
 
-        let old_local_count = self.local_slot_count()?;
+        let first = self.local_slot_count()?;
 
         let names = self.parse_namelist()?;
 
-        let num_names = names.len();
-        if self.input.try_pop(TokenKind::Assign)?.is_some() {
-            // Also perform the assignment
-            let (num_rvalues, last_exp) = self.parse_explist()?;
-            self.adjust_multi_assign(num_names, usize::from(num_rvalues), &last_exp)?;
+        let values = if self.input.try_pop(TokenKind::Assign)?.is_some() {
+            let values = self.parse_explist()?;
+            self.check_multi_assign(names.len(), &values)?;
+            values
         } else {
-            // They've only been declared, just set them all nil
-            for _ in &names {
-                self.push(Instr::push_nil());
-            }
-        }
+            Vec::new()
+        };
 
-        // Actually perform the assignment
-        for i in (0..num_names).rev() {
-            let slot = self
-                .bounded_u8(i, crate::limits::MAX_LOCALS, SyntaxError::TooManyLocals)?
-                .checked_add(old_local_count)
+        // Every new local needs a slot; the highest is checked first.
+        for i in (0..names.len()).rev() {
+            self.bounded_u8(i, crate::limits::MAX_LOCALS, SyntaxError::TooManyLocals)?
+                .checked_add(first)
                 .ok_or_else(|| self.error_here(SyntaxError::TooManyLocals))?;
-            self.push(Instr::set_local(slot));
         }
 
         // Bring the new variables into scope. It is important they are not
         // in scope until after this statement.
+        let count = names.len();
         for name in names {
             self.add_local(name)?;
         }
 
-        Ok(())
+        Ok(Stmt::Local {
+            first,
+            count,
+            values,
+        })
     }
 
     /// Parses `local function name(...) ... end`.
     /// This is equivalent to `local name; name = function(...) ... end`
     /// The name is in scope within the function body, allowing direct recursion.
-    fn parse_local_function(&mut self) -> Result<()> {
+    fn parse_local_function(&mut self) -> Result<Stmt> {
         self.input.next()?; // `function` keyword
         let name = self.expect_identifier()?;
-        let local_slot = self.local_slot_count()?;
+        let reg = self.local_slot_count()?;
 
         // Add the local FIRST so it's in scope within the function body
         // (this allows recursive calls like `local function fib(n) ... fib(n-1) ... end`)
         self.add_local(name)?;
 
-        // Parse the function definition (pushes a Closure instruction)
-        self.parse_fndef(Some(name.to_string()), false)?;
-
-        // Assign the closure to the local
-        self.push(Instr::set_local(local_slot));
-
-        Ok(())
+        let (nested, _) = self.parse_fndef(Some(name.to_string()), false)?;
+        Ok(Stmt::LocalFunction { reg, nested })
     }
 
     /// Parse a comma-separated list of identifiers.
@@ -194,35 +171,40 @@ impl<'a> Parser<'a> {
 
     /// Parses a `for` loop, before we know whether it's generic (`for k, v in t do`) or
     /// numeric (`for i = 1,5 do`).
-    pub(super) fn parse_for(&mut self) -> Result<()> {
+    pub(super) fn parse_for(&mut self) -> Result<Stmt> {
         self.input.next()?; // `for` keyword
         let first_name = self.expect_identifier()?;
         self.level_up();
 
         // Check what follows the first identifier to determine loop type
-        match self.input.peek_type()? {
+        let mut stmt = match self.input.peek_type()? {
             TokenKind::Assign => {
                 // Numeric for: for i = start, stop [, step] do
                 self.input.next()?; // consume '='
-                self.parse_numeric_for(first_name)?;
+                self.parse_numeric_for(first_name)?
             }
             TokenKind::Comma | TokenKind::In => {
                 // Generic for: for var1, var2, ... in explist do
-                self.parse_generic_for(first_name)?;
+                self.parse_generic_for(first_name)?
             }
             _ => {
                 let tok = self.input.next()?;
                 return Err(self.err_near(tok, |found| SyntaxError::ForSeparatorExpected { found }));
             }
+        };
+        let close = self.level_down()?;
+        if let Stmt::NumericFor { scope_close, .. } | Stmt::GenericFor { scope_close, .. } =
+            &mut stmt
+        {
+            *scope_close = close;
         }
-        self.level_down()?;
-        Ok(())
+        Ok(stmt)
     }
 
     /// Parses a numeric `for` loop, starting with the first expression after the `=`.
-    fn parse_numeric_for(&mut self, name: &'a str) -> Result<()> {
+    fn parse_numeric_for(&mut self, name: &'a str) -> Result<Stmt> {
         // The start(current), stop and step are stored in three "hidden" local slots.
-        let current_local_slot = self.local_slot_count()?;
+        let base = self.local_slot_count()?;
 
         // Control expressions are evaluated in the enclosing scope, before the
         // loop variable exists. Check capacity now so its error precedence is
@@ -230,12 +212,13 @@ impl<'a> Parser<'a> {
         self.ensure_local_capacity(4)?;
 
         // First, all 3 control expressions are evaluated.
-        self.parse_expr()?;
+        let start = self.parse_expr()?;
         self.expect(TokenKind::Comma)?;
-        self.parse_expr()?;
+        let limit = self.parse_expr()?;
 
         // optional step value
-        self.parse_numeric_for_step()?;
+        let step = self.parse_numeric_for_step()?;
+        let prep_line = self.input.last_line();
 
         self.add_local("")?;
         self.add_local("")?;
@@ -244,57 +227,49 @@ impl<'a> Parser<'a> {
         // The actual local is in a fourth slot, so that it can be reassigned to.
         self.add_local(name)?;
 
-        // The ForPrep command pulls three values off the stack and places them
-        // into locals to use in the loop.
-        let loop_start_instr_index = self.funcs.chunk.code.len();
-        self.push(Instr::for_prep(current_local_slot, -1));
-
-        // body
-        self.enter_loop(current_local_slot);
-        self.parse_statements()?;
+        self.enter_loop(base);
+        let (body, _) = self.parse_statements()?;
         self.expect(TokenKind::End)?;
 
         // Close the visible loop variable and body locals before its slot is
         // reused, giving a captured loop variable a fresh upvalue per iteration.
         // Omitted when nothing in the loop scope was captured.
-        if self.loop_body_captured() {
-            self.push(Instr::close_upvalues(current_local_slot + 3));
-        }
-
-        let loop_end = self.funcs.chunk.code.len();
-        let body_length = self.checked_jump_offset(loop_start_instr_index, loop_end + 1)?;
-        self.push(Instr::for_loop(current_local_slot, -body_length));
-
-        // Correct the ForPrep instruction. Through `patch_jump` like every
-        // other forward patch, so its landing site raises `fold_barrier`.
-        self.patch_jump(loop_start_instr_index, loop_end + 1, |offset| {
-            Instr::for_prep(current_local_slot, offset)
-        })?;
-
-        self.exit_loop()?;
-        Ok(())
+        let body_close = self.loop_body_captured();
+        let loop_line = self.input.last_line();
+        let break_close = self.exit_loop()?;
+        Ok(Stmt::NumericFor {
+            base,
+            start,
+            limit,
+            step,
+            body,
+            prep_line,
+            loop_line,
+            body_close,
+            break_close,
+            scope_close: None,
+        })
     }
 
     /// Parses the optional step value of a numeric `for` loop.
-    fn parse_numeric_for_step(&mut self) -> Result<()> {
+    fn parse_numeric_for_step(&mut self) -> Result<Expr> {
         let next_token = self.input.next()?;
         match next_token.typ {
             TokenKind::Comma => {
-                self.parse_expr()?;
+                let step = self.parse_expr()?;
                 self.expect(TokenKind::Do)?;
-                Ok(())
+                Ok(step)
             }
             TokenKind::Do => {
                 let i = self.find_or_add_number(1.0)?;
-                self.push(Instr::push_num(i));
-                Ok(())
+                Ok(Expr::new(ExprKind::Num(i)))
             }
             _ => Err(self.err_unexpected(next_token, TokenKind::Do)),
         }
     }
 
     /// Parses a generic `for` loop: `for var1, var2, ... in explist do body end`
-    fn parse_generic_for(&mut self, first_name: &'a str) -> Result<()> {
+    fn parse_generic_for(&mut self, first_name: &'a str) -> Result<Stmt> {
         // Collect all loop variable names
         let mut names = vec![first_name];
         while self.input.try_pop(TokenKind::Comma)?.is_some() {
@@ -302,7 +277,7 @@ impl<'a> Parser<'a> {
         }
         self.expect(TokenKind::In)?;
 
-        let num_loop_vars = self.bounded_u8(
+        let num_vars = self.bounded_u8(
             names.len(),
             usize::from(u8::MAX),
             SyntaxError::TooManyLocals,
@@ -312,17 +287,15 @@ impl<'a> Parser<'a> {
             .ok_or_else(|| self.error_here(SyntaxError::TooManyLocals))?;
 
         // The hidden control variables: iterator function, state, control var
-        let base_slot = self.local_slot_count()?;
+        let base = self.local_slot_count()?;
 
         // The expressions run in the enclosing scope. Preserve the existing
         // local-limit error without declaring the future loop locals early.
         self.ensure_local_capacity(local_count)?;
 
         // Evaluate the expression list (should produce iterator, state, initial)
-        // We expect exactly 3 values
-        let (num_exprs, last_exp) = self.parse_explist()?;
-
-        self.adjust_multi_assign(3, usize::from(num_exprs), &last_exp)?;
+        let exprs = self.parse_explist()?;
+        self.check_multi_assign(3, &exprs)?;
 
         self.add_local("")?; // iterator function (slot 0)
         self.add_local("")?; // state (slot 1)
@@ -334,230 +307,158 @@ impl<'a> Parser<'a> {
         }
 
         self.expect(TokenKind::Do)?;
+        let call_line = self.input.last_line();
 
-        // TForPrep: pop 3 values into the hidden locals
-        self.push(Instr::tfor_prep(base_slot));
-
-        // Loop structure:
-        // TForCall - call iterator, place results in loop var slots
-        // TForLoop - check if first result is nil, jump out if so
-        // body
-        // Jump back to TForCall
-
-        let loop_start = self.funcs.chunk.code.len();
-        self.push(Instr::tfor_call(base_slot, num_loop_vars, None));
-        let tforloop_index = self.funcs.chunk.code.len();
-        self.push(Instr::tfor_loop(base_slot, 0)); // placeholder offset
-
-        // body
-        self.enter_loop(base_slot);
-        self.parse_statements()?;
+        self.enter_loop(base);
+        let (body, _) = self.parse_statements()?;
         self.expect(TokenKind::End)?;
 
         // Close the visible loop variables and body locals before their slots are reused.
         // Omitted when nothing in the loop scope was captured.
-        if self.loop_body_captured() {
-            self.push(Instr::close_upvalues(base_slot + 3));
-        }
-
-        // Jump back to TForCall
-        let body_end = self.funcs.chunk.code.len();
-        self.push(Instr::jump(self.checked_jump_offset(body_end, loop_start)?));
-
-        // Patch the TForLoop to jump past the body
-        self.patch_jump(tforloop_index, self.funcs.chunk.code.len(), |offset| {
-            Instr::tfor_loop(base_slot, offset)
-        })?;
-
-        self.exit_loop()?;
-        Ok(())
+        let body_close = self.loop_body_captured();
+        let break_close = self.exit_loop()?;
+        Ok(Stmt::GenericFor {
+            base,
+            vars: num_vars,
+            exprs,
+            body,
+            call_line,
+            body_close,
+            break_close,
+            scope_close: None,
+        })
     }
 
-    /// Adjust an emitted expression list so exactly `num_targets` values are
-    /// left on the stack. A tail call or vararg can supply (or discard) the
-    /// required number of values; every other tail is padded or discarded.
-    fn adjust_multi_assign(
-        &mut self,
-        num_targets: usize,
-        num_exprs: usize,
-        last_exp: &ExpDesc,
-    ) -> Result<()> {
-        if num_exprs == 0 {
-            return Err(self.internal_error(ParserFault::EmptyMultiAssignment));
-        }
-        let fixed_prefix = num_exprs - 1;
+    /// Checks that an expression list adjusted to `num_targets` values can
+    /// encode its expandable tail: a final call or vararg that has to supply
+    /// more than one value has a fixed result width.
+    fn check_multi_assign(&self, num_targets: usize, values: &[Expr]) -> Result<()> {
+        let fixed_prefix = values.len().saturating_sub(1);
         let tail_needed = num_targets.saturating_sub(fixed_prefix);
-        if tail_needed > 1
-            && let ExpDesc::MultiTail(tail) = last_exp
-        {
-            let tail_needed = self.checked_multi_assign_width(tail_needed)?;
-            self.open_tail(*tail, RetCount::Fixed(tail_needed))?;
-            return Ok(());
+        if tail_needed > 1 && values.last().is_some_and(Expr::is_multi) {
+            self.bounded_u8(
+                tail_needed,
+                MAX_FIXED_RESULTS,
+                SyntaxError::TooManyFixedResults,
+            )?;
         }
-        if num_targets > num_exprs {
-            for _ in num_exprs..num_targets {
-                self.push(Instr::push_nil());
-            }
-        } else {
-            for _ in num_targets..num_exprs {
-                self.push(Instr::pop());
-            }
-        }
-
         Ok(())
-    }
-
-    /// Converts a fixed multi-assignment result width without allowing the
-    /// `255` dynamic/all-results sentinel into a fixed-width instruction.
-    fn checked_multi_assign_width(&self, width: usize) -> Result<u8> {
-        self.bounded_u8(width, MAX_FIXED_RESULTS, SyntaxError::TooManyFixedResults)
     }
 
     /// Parses a `do ... end` statement.
-    pub(super) fn parse_do(&mut self) -> Result<()> {
+    pub(super) fn parse_do(&mut self) -> Result<Stmt> {
         self.input.next()?; // `do` keyword
         self.level_up();
-        self.parse_statements()?;
+        let (stmts, _) = self.parse_statements()?;
         self.expect(TokenKind::End)?;
-        self.level_down()?;
-        Ok(())
+        let close = self.level_down()?;
+        Ok(Stmt::Do(Block { stmts, close }))
     }
 
     /// Parses a `repeat ... until` statement.
-    pub(super) fn parse_repeat(&mut self) -> Result<()> {
+    pub(super) fn parse_repeat(&mut self) -> Result<Stmt> {
         self.input.next()?; // `repeat` keyword
         self.level_up();
 
         // Track locals before body
         let body_locals_start = self.local_slot_count()?;
 
-        let body_start = self.funcs.chunk.code.len();
         self.enter_loop(body_locals_start);
-        self.parse_statements()?;
+        let (body, _) = self.parse_statements()?;
         self.expect(TokenKind::Until)?;
-        self.parse_expr()?;
+        let cond = self.parse_expr()?;
 
         // Close upvalues for any locals declared inside the loop body
         // (before the conditional jump back). Decided after the `until`
         // expression, which may itself capture a body local.
-        if self.local_slot_count()? > body_locals_start && self.loop_body_captured() {
-            self.push(Instr::close_upvalues(body_locals_start));
-        }
+        let body_close = (self.local_slot_count()? > body_locals_start
+            && self.loop_body_captured())
+        .then_some(body_locals_start);
 
-        let (branch_index, branch_constructor) = self.push_branch_false();
-        self.patch_jump(branch_index, body_start, branch_constructor)?;
-        self.exit_loop()?;
-        self.level_down()?;
-        Ok(())
+        let break_close = self.exit_loop()?;
+        let scope_close = self.level_down()?;
+        Ok(Stmt::Repeat {
+            body,
+            cond,
+            body_close,
+            break_close,
+            scope_close,
+        })
     }
 
     /// Parses a `while ... do ... end` statement.
-    pub(super) fn parse_while(&mut self) -> Result<()> {
-        // Structure of while loop instructions:
-        // - Condition instructions
-        // - `BranchFalse` to evaluate condition and skip body
-        // - Body instructions
-        // - CloseUpvalues for body-local variables
-        // - `Jump` back to condition start
+    pub(super) fn parse_while(&mut self) -> Result<Stmt> {
         self.input.next()?;
         self.level_up();
-        let condition_start = self.funcs.chunk.code.len();
-        self.parse_expr()?;
+        let cond = self.parse_expr()?;
         self.expect(TokenKind::Do)?;
-
-        let (test_position, test_constructor) = self.push_branch_false();
 
         // Track locals before body
         let body_locals_start = self.local_slot_count()?;
 
         self.enter_loop(body_locals_start);
-        self.parse_statements()?;
+        let (body, _) = self.parse_statements()?;
         self.expect(TokenKind::End)?;
 
         // Close upvalues for any captured locals declared inside the loop body
-        if self.local_slot_count()? > body_locals_start && self.loop_body_captured() {
-            self.push(Instr::close_upvalues(body_locals_start));
-        }
+        let body_close = (self.local_slot_count()? > body_locals_start
+            && self.loop_body_captured())
+        .then_some(body_locals_start);
 
-        let body_end = self.funcs.chunk.code.len();
-        self.push(Instr::jump(
-            self.checked_jump_offset(body_end, condition_start)?,
-        ));
+        let break_close = self.exit_loop()?;
+        let scope_close = self.level_down()?;
 
-        self.patch_jump(test_position, self.funcs.chunk.code.len(), test_constructor)?;
-
-        self.exit_loop()?;
-        self.level_down()?;
-
-        Ok(())
+        Ok(Stmt::While {
+            cond,
+            body,
+            body_close,
+            break_close,
+            scope_close,
+        })
     }
 
     /// Parses an if-then statement, including any attached `else` or `elseif` branches.
-    /// Parses an `if` or `elseif` block and any subsequent `elseif` or `else`
-    /// blocks in the same chain.
     ///
     /// The arms are parsed in a loop, like reference Lua's `ifstat`: an
     /// `elseif` chain is flat, so the whole statement charges one syntax
     /// level however many arms it has.
-    pub(super) fn parse_if_arm(&mut self) -> Result<()> {
+    pub(super) fn parse_if_arm(&mut self) -> Result<Stmt> {
         self.with_syntax_level(1, Self::parse_if_chain)
     }
 
-    fn parse_if_chain(&mut self) -> Result<()> {
-        // Each non-final arm that can fall through ends in a `Jump` to the end
-        // of the statement.
-        let mut end_jumps = Vec::new();
-        loop {
+    fn parse_if_chain(&mut self) -> Result<Stmt> {
+        let mut arms = Vec::new();
+        let else_block = loop {
             self.input.next()?; // `if` or `elseif` keyword
-            self.parse_expr()?;
+            let cond = self.parse_expr()?;
             self.expect(TokenKind::Then)?;
             self.level_up();
+            let (stmts, _) = self.parse_statements()?;
+            let close = self.level_down()?;
+            arms.push(IfArm {
+                cond,
+                block: Block { stmts, close },
+            });
 
-            let (branch_instr_index, branch_constructor) = self.push_branch_false();
-
-            // An arm whose own last statement is `return` cannot fall off its
-            // end, so its jump to the end of the statement would be dead code;
-            // skip it. This asks the parser, not the last emitted opcode: an
-            // arm ending in a nested `if ... then return end` also ends in a
-            // `Return` instruction, yet the nested `if`'s false branch lands
-            // after it and does fall through.
-            let arm_returns = self.parse_statements()?;
-            self.level_down()?;
-
-            let next = self.input.peek_type()?;
-            if !arm_returns && matches!(next, TokenKind::ElseIf | TokenKind::Else) {
-                end_jumps.push(self.funcs.chunk.code.len());
-                self.push(Instr::jump(0));
-            }
-            // A false condition lands on the next arm (or past the statement).
-            let next_arm_index = self.funcs.chunk.code.len();
-            self.patch_jump(branch_instr_index, next_arm_index, branch_constructor)?;
-            match next {
+            match self.input.peek_type()? {
                 TokenKind::ElseIf => {}
-                TokenKind::Else => {
-                    self.parse_else()?;
-                    break;
-                }
+                TokenKind::Else => break Some(self.parse_else()?),
                 _ => {
                     self.expect(TokenKind::End)?;
-                    break;
+                    break None;
                 }
             }
-        }
-        let end = self.funcs.chunk.code.len();
-        for jump_instr_index in end_jumps {
-            self.patch_jump(jump_instr_index, end, Instr::jump)?;
-        }
-        Ok(())
+        };
+        Ok(Stmt::If { arms, else_block })
     }
 
     /// Parses an `else` block.
-    fn parse_else(&mut self) -> Result<()> {
+    fn parse_else(&mut self) -> Result<Block> {
         self.level_up();
         self.input.next()?; // `else` keyword
-        self.parse_statements()?;
+        let (stmts, _) = self.parse_statements()?;
         self.expect(TokenKind::End)?;
-        self.level_down()?;
-        Ok(())
+        let close = self.level_down()?;
+        Ok(Block { stmts, close })
     }
 }

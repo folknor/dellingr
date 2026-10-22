@@ -79,7 +79,7 @@ fn caller_operands_survive_rust_metamethods_and_iterators() {
 }
 
 #[test]
-fn failed_pending_bases_do_not_survive_their_frame() {
+fn failed_calls_and_constructors_leave_no_stale_window() {
     let mut state = State::new();
     for source in [
         "local function f(...) end; f(1, error('stop'))",
@@ -98,7 +98,7 @@ fn failed_pending_bases_do_not_survive_their_frame() {
             local function collect(...) return {...} end
             local t = {1, many()}
             local u = collect(1, many())
-            if t[3] ~= 3 or u[3] ~= 3 then error("stale frame bases") end
+            if t[3] ~= 3 or u[3] ~= 3 then error("stale call window") end
         "#,
         );
     }

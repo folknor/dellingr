@@ -32,7 +32,7 @@ impl BytecodeView for SavedBytecode {
     fn code_len(&self) -> usize {
         self.code.len()
     }
-    fn raw_instruction(&self, pc: usize) -> u32 {
+    fn raw_instruction(&self, pc: usize) -> u64 {
         self.code[pc]
     }
     fn number_literals_len(&self) -> usize {
@@ -61,6 +61,9 @@ impl BytecodeView for SavedBytecode {
     }
     fn num_locals(&self) -> u8 {
         self.num_locals
+    }
+    fn max_stack(&self) -> u16 {
+        self.max_stack
     }
     fn nested_len(&self) -> usize {
         self.nested.len()

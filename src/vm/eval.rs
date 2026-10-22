@@ -3,7 +3,6 @@
 //! This module contains methods for calling functions, evaluating closures,
 //! and managing the call stack.
 
-use std::cmp::Ordering;
 use std::sync::Arc;
 
 use super::frame::Frame;
@@ -536,7 +535,7 @@ impl State {
         self.stack_bottom = frame_bottom;
 
         let num_params = bytecode.num_params;
-        let num_locals = bytecode.num_locals;
+        let max_stack = usize::from(bytecode.max_stack);
         let is_vararg = bytecode.is_vararg;
 
         // Extra arguments of a vararg function leave the value stack for the
@@ -557,37 +556,27 @@ impl State {
             has_varargs,
         }));
 
-        // Check stack space for parameters and locals
-        let extra_params = if num_args < num_params {
-            (num_params - num_args) as usize
-        } else {
-            0
-        };
-        if let Err(e) = self.check_stack_space(extra_params + num_locals as usize) {
+        // A public fixed call prevalidates these argument slots, so this pop
+        // cannot fail through the host API. Keep reporting here for a future
+        // internal caller that violates that invariant. A vararg function's
+        // extra arguments were already collected above.
+        if num_args > num_params
+            && !is_vararg
+            && let Err(e) = self.pop_n((num_args - num_params) as isize)
+        {
             return Err(self.reject_admission(e, frame_bottom, old_stack_bottom));
         }
 
-        match num_args.cmp(&num_params) {
-            Ordering::Less => {
-                for _ in num_args..num_params {
-                    self.push_unchecked(Val::Nil);
-                }
-            }
-            Ordering::Greater => {
-                // A public fixed call prevalidates these argument slots, so
-                // this pop cannot fail through the host API. Keep reporting
-                // here for a future internal caller that violates that invariant.
-                if !is_vararg && let Err(e) = self.pop_n((num_args - num_params) as isize) {
-                    return Err(self.reject_admission(e, frame_bottom, old_stack_bottom));
-                }
-                // If is_vararg, we already collected the extra args above
-            }
-            Ordering::Equal => (),
+        // The frame reserves every register it can use, parameters, locals
+        // and temporaries, against the stack cap now, so its bytecode never
+        // checks it again. Missing arguments and every other register start
+        // nil.
+        let frame_top = frame_bottom + max_stack;
+        let grow = frame_top.saturating_sub(self.stack.len());
+        if let Err(e) = self.check_stack_space(grow) {
+            return Err(self.reject_admission(e, frame_bottom, old_stack_bottom));
         }
-
-        for _ in 0..num_locals {
-            self.push_unchecked(Val::Nil);
-        }
+        self.stack.resize(frame_top, Val::Nil);
 
         Ok(())
     }
@@ -616,7 +605,6 @@ impl State {
             Arc::clone(&closure.runtime),
             Arc::clone(&closure.upvalues),
             self.stack_bottom,
-            self.pending_bases.floor(),
         )
     }
 
@@ -678,9 +666,9 @@ impl State {
         let mut frames = self.frame_stacks.pop().unwrap_or_default();
         frames.push(self.admitted_frame());
         let result = match Frame::run(&mut frames, self) {
-            Ok(ret_count) => {
+            Ok((first, count)) => {
                 let frame = frames.last().expect("the entry frame returned");
-                match self.collect_returns(frame, ret_count) {
+                match self.collect_returns(frame, first, count) {
                     Ok(count) => {
                         self.pop_activation();
                         frames.clear();
@@ -714,21 +702,29 @@ impl State {
     pub(super) fn return_to_caller(
         &mut self,
         frames: &mut Vec<Frame>,
-        ret_count: RetCount,
+        first: usize,
+        count: usize,
     ) -> Result<()> {
         let frame = frames.last().expect("a returning frame is on its stack");
-        let count = self.collect_returns(frame, ret_count)?;
+        let count = self.collect_returns(frame, first, count)?;
         self.pop_activation();
         frames.truncate(frames.len() - 1);
         let caller = frames.last().expect("a nested return has a Lua caller");
         self.stack_bottom = caller.stack_bottom;
         let expected = caller.pending_call_results();
-        self.finish_call(expected, count)
+        self.finish_call(expected, count)?;
+        // A fixed result count resumes ordinary execution at the caller's
+        // frame top; all results stay open for the consuming instruction.
+        if let RetCount::Fixed(_) = expected {
+            let top = caller.top;
+            self.stack.resize(top, Val::Nil);
+        }
+        Ok(())
     }
 
     /// Unwind every frame of one dispatch-loop invocation after an error,
-    /// innermost first, giving each the cleanup a returning frame gets: its
-    /// pending bases dropped, the error located and reported
+    /// innermost first, giving each the cleanup a returning frame gets: the
+    /// error located and reported
     /// (`report_frame_error` keeps whatever location, fault and traceback the
     /// error already carries, and reports it to the host once), its upvalues
     /// closed before its slots go, and its `__call` chain charges released
@@ -742,7 +738,6 @@ impl State {
         old_stack_bottom: usize,
     ) -> Error {
         while let Some(frame) = frames.last() {
-            self.pending_bases.truncate(frame.pending_floor);
             error = self.report_frame_error(error, frame);
             let frame_bottom = frame.stack_bottom;
             self.close_upvalues(frame_bottom);
@@ -779,41 +774,26 @@ impl State {
         self.call_depth -= 1;
     }
 
-    /// Finish a returning frame's results: count them, close the frame's
-    /// upvalues, and slide the results down into its function slot, just
-    /// below its stack_bottom, and upwards. Fails, before changing anything,
-    /// only when a dynamic count exceeds `MAX_RESULTS`; that error belongs to
-    /// the returning frame.
-    fn collect_returns(&mut self, frame: &Frame, ret_count: RetCount) -> Result<u8> {
-        // A balanced frame consumed every base it pushed, so this is a no-op.
-        self.pending_bases.truncate(frame.pending_floor);
-        // Handle RetCount::All which means "return all values on stack"
-        let actual_num_returned = match ret_count {
-            RetCount::All => {
-                // Calculate how many values are above the frame's locals
-                let frame_base = frame.stack_bottom
-                    + frame.bytecode().num_params as usize
-                    + frame.bytecode().num_locals as usize;
-                let count = self.stack.len() - frame_base;
-                crate::error::results_count(count).map_err(|kind| self.error(kind))?
-            }
-            RetCount::Fixed(n) => n,
-        };
+    /// Finish a returning frame's results, the `count` values from register
+    /// index `first`: close the frame's upvalues, and slide the results down
+    /// into its function slot, just below its stack_bottom, and upwards.
+    /// Fails, before changing anything, only when the count exceeds
+    /// `MAX_RESULTS`; that error belongs to the returning frame.
+    fn collect_returns(&mut self, frame: &Frame, first: usize, count: usize) -> Result<u8> {
+        let returned = crate::error::results_count(count).map_err(|kind| self.error(kind))?;
 
-        // Close open upvalues BEFORE moving anything: they point at the
-        // frame's local slots, which sit below `ret_start` and must still
-        // hold their values when the close reads them. The returns are
-        // transient operands above the locals, so no upvalue can point at
-        // them.
+        // Close open upvalues BEFORE moving anything: results can come
+        // straight from locals, and every captured local must still hold its
+        // value when the close reads it.
         self.close_upvalues(frame.stack_bottom);
 
-        // Slide the return values down over the frame in one memmove: drain
-        // the function slot, params, locals and operands beneath them and let
-        // the tail shift. The stack only ever shrinks here, so the cap needs
-        // no preflight.
-        let ret_start = self.stack.len() - actual_num_returned as usize;
-        self.stack.drain(frame.stack_bottom - 1..ret_start);
-        Ok(actual_num_returned)
+        // Drop the registers above the results, then slide the results down
+        // over the frame in one memmove: drain the function slot and every
+        // register beneath them and let the tail shift. The stack only ever
+        // shrinks here, so the cap needs no preflight.
+        self.stack.truncate(first + count);
+        self.stack.drain(frame.stack_bottom - 1..first);
+        Ok(returned)
     }
 
     /// Fill in a runtime error's source line from the frame it surfaced in.

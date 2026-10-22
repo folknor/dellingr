@@ -1,33 +1,60 @@
-use super::{Instr, parse_unfinalized};
+use super::parse_unfinalized;
+use crate::instr::{ArithOp, CompareOp, Instr};
+
+fn lines_where(source: &str, matches: impl Fn(u8) -> bool) -> Vec<u32> {
+    let chunk = parse_unfinalized(source).expect("operator source compiles");
+    chunk
+        .code
+        .iter()
+        .zip(&chunk.line_info)
+        .filter_map(|(instruction, line)| matches(instruction.opcode()).then_some(*line))
+        .collect()
+}
+
+fn arith(op: ArithOp) -> impl Fn(u8) -> bool {
+    move |opcode| ArithOp::decode(opcode).is_some_and(|(found, _)| found == op)
+}
 
 #[test]
 fn multiline_operator_line_info_golden() {
-    // Source-level attribution: both additions used to inherit line 1.
-    // Lua's operator-line correction assigns the two '+' tokens lines 1 and 2.
-    let chunk = parse_unfinalized("return a +\n b +\n c").expect("golden source compiles");
-    assert_eq!(chunk.line_info, vec![1, 2, 1, 3, 2, 3, 3]);
+    // Lua's operator-line correction assigns the two '+' tokens lines 1 and 2,
+    // not the line their right operand ends on.
+    assert_eq!(
+        lines_where("return a +\n b +\n c", arith(ArithOp::Add)),
+        vec![1, 2]
+    );
 }
 
 #[test]
 fn operator_lines_survive_parentheses_unary_and_concat() {
-    for (source, opcode, expected) in [
-        ("return (a\n) +\n b", Instr::OP_ADD, vec![2]),
-        ("return a\n *\n b /\n c %\n d", Instr::OP_MULTIPLY, vec![2]),
-        ("return a\n <\n b", Instr::OP_LESS, vec![2]),
-        ("return -\n a", Instr::OP_NEGATE, vec![1]),
-        ("return #\n a", Instr::OP_LENGTH, vec![1]),
-        ("return a ^\n b ^\n c", Instr::OP_POW, vec![2, 1]),
-        ("return a ..\n b ..\n c", Instr::OP_CONCAT, vec![1]),
-    ] {
-        let chunk = parse_unfinalized(source).expect("operator source compiles");
-        let lines: Vec<_> = chunk
-            .code
-            .iter()
-            .zip(&chunk.line_info)
-            .filter_map(|(instruction, line)| (instruction.opcode() == opcode).then_some(*line))
-            .collect();
-        assert_eq!(lines, expected, "{source:?}");
-    }
+    assert_eq!(
+        lines_where("return (a\n) +\n b", arith(ArithOp::Add)),
+        vec![2]
+    );
+    assert_eq!(
+        lines_where("return a\n *\n b /\n c %\n d", arith(ArithOp::Mul)),
+        vec![2]
+    );
+    assert_eq!(
+        lines_where("return a\n <\n b", |op| op == CompareOp::Lt.value_opcode()),
+        vec![2]
+    );
+    assert_eq!(
+        lines_where("return -\n a", |op| op == Instr::OP_UNM),
+        vec![1]
+    );
+    assert_eq!(
+        lines_where("return #\n a", |op| op == Instr::OP_LEN),
+        vec![1]
+    );
+    assert_eq!(
+        lines_where("return a ^\n b ^\n c", arith(ArithOp::Pow)),
+        vec![2, 1]
+    );
+    assert_eq!(
+        lines_where("return a ..\n b ..\n c", |op| op == Instr::OP_CONCAT),
+        vec![1]
+    );
 }
 
 #[test]

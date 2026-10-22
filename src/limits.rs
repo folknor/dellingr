@@ -74,12 +74,6 @@ pub const MAX_ENGINE_VERSION_BYTES: usize = 128;
 /// Maximum external-environment token bytes in a snapshot.
 pub const MAX_ENVIRONMENT_TOKEN_BYTES: usize = 256;
 
-// Each verifier marker stack can grow at most once per parser syntax-budget
-// entry. Keep that cap explicit so the verifier does not borrow the parser's
-// meaning by importing its constant directly.
-/// Maximum entries in each bytecode verifier marker stack.
-pub const MAX_VERIFIER_MARKER_DEPTH: usize = MAX_SYNTAX_DEPTH as usize;
-
 // Chunk-tree depth includes the root, as it does in save validation. The
 // parser checks this before descending into a child function. Because it
 // shares MAX_SYNTAX_DEPTH's numeric budget, a chain of nested functions hits
@@ -101,7 +95,7 @@ pub const MAX_FIXED_ARGS: usize = u8::MAX as usize - 1;
 pub const MAX_FIXED_RESULTS: usize = MAX_FIXED_ARGS;
 /// Maximum expressions in one source construct.
 pub const MAX_EXPRESSIONS: u8 = u8::MAX;
-/// Maximum assignment receiver offset encoded by bytecode.
+/// Maximum assignment receiver offset the compiler accepts.
 pub const MAX_ASSIGNMENT_OFFSET: usize = u8::MAX as usize;
 /// Maximum direct child functions in a chunk.
 pub const MAX_NESTED: usize = u8::MAX as usize;

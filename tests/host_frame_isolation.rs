@@ -1,6 +1,5 @@
-//! A host callback must not reach below its own frame: a pending
-//! `OP_MARK_CALL_BASE` base, a Lua caller's temporaries and its registers all
-//! belong to the calling Lua frame. Misuse must surface as an error and leave
+//! A host callback must not reach below its own frame: a Lua caller's
+//! temporaries and its registers belong to the calling Lua frame. Misuse must surface as an error and leave
 //! the caller's frame intact.
 
 use dellingr::error::ErrorKind;

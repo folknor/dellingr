@@ -44,14 +44,15 @@ Violations are reported as errors at load time, never silently truncated.
 - `MAX_LITERALS`: distinct entries per numeric pool and per string pool.
 - `MAX_FIXED_ARGS`, `MAX_FIXED_RESULTS`: fixed counts for calls and multiple
   assignment. The dynamic-count sentinel is reserved.
-- `MAX_EXPRESSIONS`, `MAX_ASSIGNMENT_OFFSET`, `MAX_FRAME_SLOTS`: encoding
-  limits of the bytecode operands.
+- `MAX_EXPRESSIONS`, `MAX_ASSIGNMENT_OFFSET`, `MAX_FRAME_SLOTS`: fixed
+  per-construct and per-function limits the compiler enforces.
 - `MAX_TABLE_TEMPLATES`, `MAX_TABLE_TEMPLATE_FIELDS`: inline table templates.
   Field assignment sites past `MAX_TABLE_TEMPLATES` stop being inline-cached;
   they are not rejected.
 - `MAX_TABLE_BATCH_SIZE`: array entries per constructor batch. Constructors
   have no overall entry limit.
-- `MAX_VERIFIER_MARKER_DEPTH`: bytecode verifier marker stack depth.
+- Jump distance: a branch or loop may span fewer than 2^23 instructions of
+  one function's bytecode; a longer one fails to compile with `JumpTooFar`.
 
 ## Runtime limits
 
@@ -118,6 +119,10 @@ automatic mode at the policy's initial threshold. `gc_disable_auto` or a
 threshold of `usize::MAX` disables automatic collection; explicit
 `gc_collect` calls still work.
 
+A running Lua function's registers are roots. A register whose value is no
+longer used keeps that value reachable until the function overwrites the
+register or returns.
+
 GC policy is State-local and changes collection timing. Collection timing
 affects when dead heap objects and interned strings are reclaimed, and can
 affect rendered identities and snapshot contents. Keep the policy consistent
@@ -181,6 +186,12 @@ capacity; what a collection frees is the payloads and entries it removes.
   registry unchanged.
 - The host methods `push_*`, `new_table`, `get_global` and `open_libs` are
   fallible for this reason.
+- A Lua call reserves its function's whole register frame when it is
+  admitted. A call whose frame does not fit under the cap fails there with
+  `StackOverflow`, before its body runs, even when the path it would take
+  needs fewer registers. A fixed number of results then lands in registers
+  that already exist, so such a return into a Lua caller never grows the
+  stack.
 - The cap bounds the shared value stack, not total host memory. Enforcing it
   charges no cost.
 - A stack at the cap holds about 16 MB of values on a 64-bit host. Tests that

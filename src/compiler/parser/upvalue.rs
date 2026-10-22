@@ -32,8 +32,15 @@ impl<'a> Parser<'a> {
         };
         if let UpvalueDesc::Local(slot) = desc {
             // Recorded in the frame that owns the local, so its scopes keep
-            // the CloseUpvalues that gives this capture its own lifetime.
-            self.funcs.frames[level - 1].captures.push(slot);
+            // the close that gives this capture its own lifetime, and its
+            // code generation knows a callback can write the local.
+            let owner = &mut self.funcs.frames[level - 1];
+            owner.captures.push(slot);
+            if let Some(&id) = owner.local_ids.get(usize::from(slot))
+                && let Some(decl) = owner.decls.get_mut(id as usize)
+            {
+                decl.captured = true;
+            }
         }
         let len = self.funcs.frames[level].upvalues.len();
         if len >= MAX_UPVALUES {

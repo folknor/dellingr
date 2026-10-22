@@ -101,16 +101,14 @@ pub(crate) enum InternalFault {
         operation: ConstructorTableOperation,
         actual: LuaType,
     },
-    SetListBaseNotTable,
+    /// A call, open-result or vararg window would cut through registers an
+    /// open upvalue still points at. Compiled code always runs these windows
+    /// above every live local; only forged bytecode can reach this.
+    WindowOverlapsOpenUpvalue,
 }
 
 #[derive(Debug)]
 pub(crate) enum CompilerFault {
-    RemappedJumpOffsetOutOfRange,
-    MissingLineForInstruction,
-    JumpTargetOutOfRange,
-    RemappedJumpBeyondCode,
-    TransferOpcodeExpected,
     LineInfoDesynced,
     NestedBytecodeNotUniquelyOwned,
 }
@@ -120,8 +118,6 @@ pub(crate) enum ParserFault {
     InvalidStringToken,
     MissingStringContents,
     BlockExitWithoutEntry,
-    ArithmeticFoldRequiresFoldableOpcode,
-    InstructionReplacementWithoutInstruction,
     MultiValueTailMissingInstruction,
     LoopExitWithoutEntry,
     BreakEmissionLostLoopContext,
@@ -130,7 +126,13 @@ pub(crate) enum ParserFault {
     CompletedFunctionRetainsScopes,
     NamedFunctionTargetNotVariable,
     EmptyMultiAssignment,
-    ConcatChainWithoutOperator,
+    EmptyComparisonChain,
+    /// A folded operand names a number literal that is not in the pool.
+    FoldedLiteralOutOfRange,
+    /// A resolved local has no declaration in its function.
+    LocalWithoutDeclaration,
+    /// A function needs more registers than an operand can name.
+    RegisterLimit,
     /// Identifier and numeral tokens are ASCII by construction in the byte
     /// lexer, and the parser reads them as `&str`.
     TokenTextNotUtf8,
@@ -197,7 +199,9 @@ impl fmt::Display for InternalFault {
             Self::ConstructorTableMissing { operation, actual } => {
                 write!(f, "{operation}: expected table, got {actual}")
             }
-            Self::SetListBaseNotTable => f.write_str("SetList(0): base is not a table"),
+            Self::WindowOverlapsOpenUpvalue => {
+                f.write_str("a register window overlaps an open upvalue")
+            }
         }
     }
 }
@@ -205,17 +209,6 @@ impl fmt::Display for InternalFault {
 impl fmt::Display for CompilerFault {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = match self {
-            Self::RemappedJumpOffsetOutOfRange => {
-                "instruction stripping produced an out-of-range jump"
-            }
-            Self::MissingLineForInstruction => {
-                "instruction stripping requires one line per instruction"
-            }
-            Self::JumpTargetOutOfRange => "instruction stripping found an out-of-range jump",
-            Self::RemappedJumpBeyondCode => {
-                "instruction stripping mapped a jump beyond retained code"
-            }
-            Self::TransferOpcodeExpected => "instruction stripping requires a transfer opcode",
             Self::LineInfoDesynced => "line_info desynced from code",
             Self::NestedBytecodeNotUniquelyOwned => {
                 "nested bytecode must be uniquely owned during finalization"
@@ -231,12 +224,6 @@ impl ParserFault {
             Self::InvalidStringToken => "parser requested contents for an invalid string token",
             Self::MissingStringContents => "lexer did not retain contents for a string token",
             Self::BlockExitWithoutEntry => "block exit requires a block entry",
-            Self::ArithmeticFoldRequiresFoldableOpcode => {
-                "arithmetic folding requires a foldable opcode"
-            }
-            Self::InstructionReplacementWithoutInstruction => {
-                "instruction replacement requires emitted code"
-            }
             Self::MultiValueTailMissingInstruction => {
                 "multi-value tail does not end with its instruction"
             }
@@ -253,7 +240,10 @@ impl ParserFault {
             }
             Self::NamedFunctionTargetNotVariable => "a named function target must be a variable",
             Self::EmptyMultiAssignment => "multi-assignment requires a nonempty expression list",
-            Self::ConcatChainWithoutOperator => "concat chain requires an operator",
+            Self::EmptyComparisonChain => "comparison chain requires an operator",
+            Self::FoldedLiteralOutOfRange => "folded operand names a literal outside the pool",
+            Self::LocalWithoutDeclaration => "resolved local has no declaration",
+            Self::RegisterLimit => "function needs more registers than operands can name",
             Self::TokenTextNotUtf8 => "lexer produced a non-UTF-8 identifier or numeral token",
         }
     }
@@ -1797,7 +1787,7 @@ impl fmt::Display for SyntaxError {
             ),
             JumpTooFar => write!(
                 f,
-                "control-flow jump is too far (exceeds signed 16-bit range)"
+                "control-flow jump is too far (exceeds signed 24-bit range)"
             ),
             TooManyNestedFunctions => {
                 write!(f, "too many direct child functions (limit {MAX_NESTED})")

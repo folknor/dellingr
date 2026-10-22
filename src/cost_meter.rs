@@ -24,13 +24,16 @@
 /// integral `%q` output. Version 6 compiles a `string.gmatch` pattern's
 /// leading `^` as a literal byte instead of rewriting it to `%^`, so the
 /// iterator's first-call compilation charge for such a pattern is one unit
-/// lower.
-pub const COST_MODEL_VERSION: u16 = 6;
+/// lower. Version 7 is the register VM: a Lua call reserves its whole frame
+/// when it is admitted, so a run that reaches `MAX_STACK_SIZE` fails at a
+/// different point (and with a different charged prefix) than before. Runs
+/// that never reach the stack cap charge exactly as under version 6.
+pub const COST_MODEL_VERSION: u16 = 7;
 
 /// Fingerprint of the fixed source and cost corpus in `tests/cost_golden.rs`,
 /// including `COST_MODEL_VERSION`.
 #[doc(hidden)]
-pub const COST_MODEL_GOLDEN_FINGERPRINT: u64 = 0x7dfa_d881_2436_3847;
+pub const COST_MODEL_GOLDEN_FINGERPRINT: u64 = 0xf469_b9d2_69a4_f8de;
 
 /// Owned runtime accounting, with one representation of an optional budget.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

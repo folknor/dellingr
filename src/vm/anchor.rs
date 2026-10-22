@@ -334,8 +334,8 @@ impl State {
             ArgCount::Fixed(n) => n as usize,
             ArgCount::Dynamic => {
                 // ArgCount::Dynamic is resolved by the executing Lua frame
-                // against a call base its own OP_MARK_CALL_BASE pushed; a
-                // host owns no such base. Reject it explicitly, as
+                // from the open results its previous instruction left; a
+                // host has no such window. Reject it explicitly, as
                 // State::call does.
                 return Err(super::Error::without_location(
                     ErrorKind::DynamicArgumentsUnsupported {

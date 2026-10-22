@@ -180,7 +180,7 @@ enum SavedObject {
 // completes so decoding never constructs a recursive executable object graph.
 #[derive(Clone, Debug, PartialEq)]
 struct SavedBytecode {
-    code: Vec<u32>,
+    code: Vec<u64>,
     number_literals: Vec<u64>,
     string_literals: Vec<Vec<u8>>,
     table_templates: Vec<Vec<u16>>,
@@ -190,6 +190,7 @@ struct SavedBytecode {
     tfor_cursor_slots: u8,
     num_params: u8,
     num_locals: u8,
+    max_stack: u16,
     nested: Vec<u32>,
     upvalues: Vec<SavedUpvalueDesc>,
     is_vararg: bool,
@@ -1139,6 +1140,7 @@ impl<'a> SaveBuilder<'a> {
             tfor_cursor_slots: 0,
             num_params: 0,
             num_locals: 0,
+            max_stack: 0,
             nested: Vec::new(),
             upvalues: Vec::new(),
             is_vararg: false,
@@ -1167,6 +1169,7 @@ impl<'a> SaveBuilder<'a> {
             tfor_cursor_slots: bc.tfor_cursor_slots,
             num_params: bc.num_params,
             num_locals: bc.num_locals,
+            max_stack: bc.max_stack,
             nested,
             upvalues: bc.upvalues.clone(),
             is_vararg: bc.is_vararg,
@@ -2132,6 +2135,7 @@ fn build_bytecode_node(
         tfor_cursor_slots: src.tfor_cursor_slots,
         num_params: src.num_params,
         num_locals: src.num_locals,
+        max_stack: src.max_stack,
         nested,
         upvalues: src.upvalues.clone(),
         is_vararg: src.is_vararg,
@@ -2714,7 +2718,7 @@ impl SavedObject {
 impl SavedBytecode {
     fn encode(&self, out: &mut Encoder) -> Result<(), SaveError> {
         write_vec(out, SaveCollection::Instructions, &self.code, |out, raw| {
-            out.write_u32(*raw);
+            out.write_u64(*raw);
             Ok(())
         })?;
         write_vec(
@@ -2749,6 +2753,7 @@ impl SavedBytecode {
         out.write_u8(self.tfor_cursor_slots);
         out.write_u8(self.num_params);
         out.write_u8(self.num_locals);
+        out.write_u16(self.max_stack);
         write_vec(
             out,
             SaveCollection::NestedChunks,
@@ -2782,7 +2787,7 @@ impl SavedBytecode {
 
     fn decode(input: &mut Decoder<'_>) -> Result<Self, SnapshotError> {
         Ok(Self {
-            code: read_vec(input, Decoder::read_u32)?,
+            code: read_vec(input, Decoder::read_u64)?,
             number_literals: read_vec(input, Decoder::read_u64)?,
             string_literals: read_vec(input, Decoder::read_lua_string_bytes)?,
             table_templates: read_vec(input, |input| read_vec(input, Decoder::read_u16))?,
@@ -2792,6 +2797,7 @@ impl SavedBytecode {
             tfor_cursor_slots: input.read_u8()?,
             num_params: input.read_u8()?,
             num_locals: input.read_u8()?,
+            max_stack: input.read_u16()?,
             nested: read_vec(input, Decoder::read_u32)?,
             upvalues: read_vec(input, SavedUpvalueDesc::decode)?,
             is_vararg: input.read_bool()?,
@@ -2879,8 +2885,8 @@ mod tests {
         ] {
             let mut bytecode = valid_saved_bytecode();
             bytecode.code = vec![
-                Instr::push_num(0).raw(),
-                Instr::ret(RetCount::Fixed(1)).raw(),
+                Instr::load_num(0, 0).raw(),
+                Instr::ret(0, RetCount::Fixed(1)).raw(),
             ];
             bytecode.line_info = vec![1; bytecode.code.len()];
             bytecode.number_literals = vec![bits];
@@ -2957,7 +2963,7 @@ mod tests {
 
     fn valid_saved_bytecode() -> SavedBytecode {
         SavedBytecode {
-            code: vec![Instr::ret(RetCount::Fixed(0)).raw()],
+            code: vec![Instr::ret(0, RetCount::Fixed(0)).raw()],
             number_literals: Vec::new(),
             string_literals: Vec::new(),
             table_templates: Vec::new(),
@@ -2967,6 +2973,7 @@ mod tests {
             tfor_cursor_slots: 0,
             num_params: 0,
             num_locals: 0,
+            max_stack: 2,
             nested: Vec::new(),
             upvalues: Vec::new(),
             is_vararg: false,
@@ -3047,11 +3054,13 @@ mod tests {
         assert_eq!(*actual_instruction, instruction);
     }
 
-    fn stack_rejection(code: Vec<Instr>, num_locals: u8, instruction: u32) {
+    /// A two-register frame running `code`, rejected at `instruction`.
+    fn register_rejection(code: Vec<Instr>, instruction: u32) {
         let mut bytecode = valid_saved_bytecode();
         bytecode.code = code.into_iter().map(Instr::raw).collect();
         bytecode.line_info = vec![1; bytecode.code.len()];
-        bytecode.num_locals = num_locals;
+        bytecode.string_literals.push(b"field".to_vec());
+        bytecode.is_vararg = true;
         assert_invalid(
             &rejected_bytecode(vec![bytecode], Vec::new()),
             0,
@@ -3060,141 +3069,88 @@ mod tests {
     }
 
     #[test]
-    fn verifier_rejects_forged_operand_stack_discipline() {
-        stack_rejection(
-            vec![Instr::op(Instr::OP_POP), Instr::ret(RetCount::Fixed(0))],
-            0,
-            0,
-        );
-        stack_rejection(
-            vec![Instr::op(Instr::OP_SWAP), Instr::ret(RetCount::Fixed(0))],
-            0,
-            0,
-        );
-        stack_rejection(
-            vec![Instr::op(Instr::OP_DUP), Instr::ret(RetCount::Fixed(0))],
-            0,
-            0,
-        );
-        stack_rejection(
+    fn verifier_rejects_forged_register_and_open_result_discipline() {
+        let ret = Instr::ret(0, RetCount::Fixed(0));
+        let call_all = Instr::call(0, ArgCount::Fixed(0), RetCount::All, false);
+        // Registers past the frame, singly and as ranges.
+        register_rejection(vec![Instr::mov(2, 0), ret], 0);
+        register_rejection(vec![Instr::mov(0, 2), ret], 0);
+        register_rejection(vec![Instr::ret(1, RetCount::Fixed(2))], 0);
+        register_rejection(vec![Instr::load_nil(1, 2), ret], 0);
+        register_rejection(vec![Instr::concat(0, 1, 2), ret], 0);
+        register_rejection(vec![Instr::self_(1, 0, 0, None), ret], 0);
+        register_rejection(vec![Instr::for_prep(0, 0), ret], 0);
+        register_rejection(vec![Instr::tfor_call(0, 1, None), ret], 0);
+        register_rejection(vec![Instr::vararg(1, RetCount::Fixed(2)), ret], 0);
+        register_rejection(
             vec![
-                Instr::push_nil(),
-                Instr::concat(2),
-                Instr::ret(RetCount::Fixed(0)),
+                Instr::call(1, ArgCount::Fixed(1), RetCount::Fixed(0), false),
+                ret,
             ],
             0,
+        );
+        register_rejection(vec![Instr::set_list(1, Some(1), 0), ret], 0);
+        register_rejection(vec![Instr::set_table(0, 1, 2), ret], 0);
+        register_rejection(vec![Instr::init_index(0, 2, 1), ret], 0);
+        register_rejection(vec![Instr::close(3), ret], 0);
+        // Malformed counts.
+        register_rejection(vec![Instr::load_nil(0, 0), ret], 0);
+        register_rejection(vec![Instr::concat(0, 0, 1), ret], 0);
+        register_rejection(vec![Instr::tfor_call(0, 0, None), ret], 0);
+        register_rejection(
+            vec![
+                Instr::call(0, ArgCount::Fixed(0), RetCount::Fixed(0), false).with_c(300),
+                ret,
+            ],
+            0,
+        );
+        // Open results: a consumer without its producer, a producer without
+        // its consumer, a jump into the consumer, and a consumer reading
+        // above where the producer left its values.
+        register_rejection(
+            vec![
+                Instr::call(0, ArgCount::Dynamic, RetCount::Fixed(1), false),
+                ret,
+            ],
+            0,
+        );
+        register_rejection(vec![Instr::set_list(0, None, 0), ret], 0);
+        register_rejection(vec![Instr::ret(0, RetCount::All)], 0);
+        register_rejection(vec![call_all, Instr::test_false(0, 0), ret], 0);
+        register_rejection(vec![call_all, ret], 0);
+        register_rejection(
+            vec![Instr::jump(1), call_all, Instr::ret(0, RetCount::All)],
             1,
         );
-        stack_rejection(vec![Instr::ret(RetCount::Fixed(1))], 0, 0);
-        stack_rejection(
+        register_rejection(vec![call_all, Instr::ret(1, RetCount::All)], 0);
+        register_rejection(
             vec![
-                Instr::push_bool(true),
-                Instr::branch_false(1),
-                Instr::push_nil(),
-                Instr::ret(RetCount::Fixed(0)),
+                Instr::vararg(1, RetCount::All),
+                Instr::set_list(1, None, 0),
+                ret,
             ],
-            0,
-            3,
-        );
-        stack_rejection(
-            vec![
-                Instr::jump(1),
-                Instr::ret(RetCount::Fixed(0)),
-                Instr::push_nil(),
-                Instr::jump(-2),
-                Instr::ret(RetCount::Fixed(0)),
-            ],
-            0,
-            2,
-        );
-        stack_rejection(
-            vec![
-                Instr::call(ArgCount::Dynamic, RetCount::Fixed(1)),
-                Instr::ret(RetCount::Fixed(0)),
-            ],
-            0,
-            0,
-        );
-        stack_rejection(
-            vec![Instr::set_list(0), Instr::ret(RetCount::Fixed(0))],
-            0,
-            0,
-        );
-        stack_rejection(
-            vec![
-                Instr::push_nil(),
-                Instr::op_a(Instr::OP_MARK_CALL_BASE, 1),
-                Instr::ret(RetCount::Fixed(0)),
-            ],
-            0,
-            2,
-        );
-        stack_rejection(
-            vec![
-                Instr::op_a(Instr::OP_MARK_CALL_BASE, 1),
-                Instr::ret(RetCount::Fixed(0)),
-            ],
-            0,
-            0,
-        );
-        stack_rejection(
-            vec![
-                Instr::push_nil(),
-                Instr::call(ArgCount::Fixed(0), RetCount::All),
-                Instr::branch_false(0),
-                Instr::ret(RetCount::Fixed(0)),
-            ],
-            0,
-            2,
-        );
-        stack_rejection(
-            vec![
-                Instr::push_nil(),
-                Instr::push_nil(),
-                Instr::set_table(0),
-                Instr::ret(RetCount::Fixed(0)),
-            ],
-            0,
-            2,
-        );
-        stack_rejection(
-            vec![
-                Instr::push_nil(),
-                Instr::push_nil(),
-                Instr::init_index(0),
-                Instr::ret(RetCount::Fixed(0)),
-            ],
-            0,
-            2,
-        );
-        stack_rejection(
-            vec![Instr::set_local(0), Instr::ret(RetCount::Fixed(0))],
-            1,
-            0,
-        );
-        // A back-edge to the entry joins against the entry state itself.
-        stack_rejection(
-            vec![
-                Instr::push_nil(),
-                Instr::jump(-2),
-                Instr::ret(RetCount::Fixed(0)),
-            ],
-            0,
             0,
         );
 
-        let mut bad_set_field_at = valid_saved_bytecode();
-        bad_set_field_at.string_literals.push(b"field".to_vec());
-        bad_set_field_at.code = vec![
-            Instr::set_field_at(0, 0).raw(),
-            Instr::ret(RetCount::Fixed(0)).raw(),
+        // The frame must hold the parameters and locals, and the open sentinel
+        // is never a frame size.
+        for (num_locals, max_stack) in [(3, 2), (0, crate::instr::OPEN_COUNT)] {
+            let mut bytecode = valid_saved_bytecode();
+            bytecode.num_locals = num_locals;
+            bytecode.max_stack = max_stack;
+            assert_invalid(&rejected_bytecode(vec![bytecode], Vec::new()), 0, None);
+        }
+
+        // The shapes the compiler emits are accepted.
+        let mut ok = valid_saved_bytecode();
+        ok.is_vararg = true;
+        ok.code = vec![
+            Instr::vararg(1, RetCount::All).raw(),
+            Instr::call(0, ArgCount::Dynamic, RetCount::All, false).raw(),
+            Instr::ret(0, RetCount::All).raw(),
         ];
-        bad_set_field_at.line_info = vec![1; bad_set_field_at.code.len()];
-        assert_invalid(
-            &rejected_bytecode(vec![bad_set_field_at], Vec::new()),
-            0,
-            Some(0),
-        );
+        ok.line_info = vec![1; ok.code.len()];
+        assert!(load_bytecode(vec![ok], Vec::new()).is_ok());
     }
 
     #[test]
@@ -3207,7 +3163,7 @@ mod tests {
         ));
 
         let mut no_return = valid_saved_bytecode();
-        no_return.code[0] = Instr::push_nil().raw();
+        no_return.code[0] = Instr::load_nil(0, 1).raw();
         assert!(matches!(
             rejected_bytecode(vec![no_return], Vec::new()),
             SnapshotError::InvalidBytecode { .. }
@@ -3222,7 +3178,7 @@ mod tests {
         ));
 
         let mut bad_literal = valid_saved_bytecode();
-        bad_literal.code.insert(0, Instr::push_num(0).raw());
+        bad_literal.code.insert(0, Instr::load_num(0, 0).raw());
         bad_literal.line_info.insert(0, 1);
         assert!(matches!(
             rejected_bytecode(vec![bad_literal], Vec::new()),
@@ -3233,7 +3189,7 @@ mod tests {
         bad_cache.string_literals.push(b"x".to_vec());
         bad_cache
             .code
-            .insert(0, Instr::get_global(0, Some(1)).raw());
+            .insert(0, Instr::get_global(0, 0, Some(1)).raw());
         bad_cache.line_info.insert(0, 1);
         assert!(matches!(
             rejected_bytecode(vec![bad_cache], Vec::new()),
@@ -3244,8 +3200,8 @@ mod tests {
         uncached_set.string_literals.push(b"x".to_vec());
         uncached_set
             .code
-            .insert(0, Instr::set_global(0, None).raw());
-        uncached_set.code.insert(0, Instr::push_nil().raw());
+            .insert(0, Instr::set_global(0, 0, None).raw());
+        uncached_set.code.insert(0, Instr::load_nil(0, 1).raw());
         uncached_set.line_info = vec![1; uncached_set.code.len()];
         assert!(load_bytecode(vec![uncached_set], Vec::new()).is_ok());
 
@@ -3254,8 +3210,8 @@ mod tests {
         valid_set.global_cache_slots = 1;
         valid_set
             .code
-            .insert(0, Instr::set_global(0, Some(0)).raw());
-        valid_set.code.insert(0, Instr::push_nil().raw());
+            .insert(0, Instr::set_global(0, 0, Some(0)).raw());
+        valid_set.code.insert(0, Instr::load_nil(0, 1).raw());
         valid_set.line_info = vec![1; valid_set.code.len()];
         assert!(load_bytecode(vec![valid_set], Vec::new()).is_ok());
 
@@ -3264,8 +3220,8 @@ mod tests {
         out_of_range_set.global_cache_slots = 1;
         out_of_range_set
             .code
-            .insert(0, Instr::set_global(0, Some(1)).raw());
-        out_of_range_set.code.insert(0, Instr::push_nil().raw());
+            .insert(0, Instr::set_global(0, 0, Some(1)).raw());
+        out_of_range_set.code.insert(0, Instr::load_nil(0, 1).raw());
         out_of_range_set.line_info = vec![1; out_of_range_set.code.len()];
         assert_invalid(
             &rejected_bytecode(vec![out_of_range_set], Vec::new()),
@@ -3277,11 +3233,11 @@ mod tests {
         wrong_order_set.string_literals.push(b"x".to_vec());
         wrong_order_set.global_cache_slots = 2;
         wrong_order_set.code = vec![
-            Instr::push_nil().raw(),
-            Instr::set_global(0, Some(1)).raw(),
-            Instr::push_nil().raw(),
-            Instr::set_global(0, Some(0)).raw(),
-            Instr::ret(RetCount::Fixed(0)).raw(),
+            Instr::load_nil(0, 1).raw(),
+            Instr::set_global(0, 0, Some(1)).raw(),
+            Instr::load_nil(0, 1).raw(),
+            Instr::set_global(0, 0, Some(0)).raw(),
+            Instr::ret(0, RetCount::Fixed(0)).raw(),
         ];
         wrong_order_set.line_info = vec![1; wrong_order_set.code.len()];
         assert_invalid(
@@ -3290,14 +3246,18 @@ mod tests {
             Some(1),
         );
 
-        // Every opcode that names a string literal in Bx shares one verifier
-        // arm; forge an out-of-range id through each so a future edit cannot
-        // drop one of them from that arm unnoticed.
+        // Forge an out-of-range string id through every opcode that names
+        // one, so a future edit cannot drop one of them from its check
+        // unnoticed.
         for forged in [
-            Instr::push_string(0),
-            Instr::init_field_pinned(0, 0),
-            Instr::set_field_at(0, 0),
-            Instr::init_field(0, 0),
+            Instr::load_str(0, 0),
+            Instr::get_global(0, 0, None),
+            Instr::set_global(0, 0, None),
+            Instr::get_field(0, 0, 0, None),
+            Instr::self_(0, 0, 0, None),
+            Instr::set_field(0, 0, 0, None),
+            Instr::init_field_pinned(0, 0, 0, 0),
+            Instr::init_field(0, 0, 0),
         ] {
             let mut bad_string = valid_saved_bytecode();
             bad_string.string_literals.clear();
@@ -3314,46 +3274,44 @@ mod tests {
     }
 
     #[test]
-    fn forged_nop_and_legacy_close_upvalues_load_and_execute() {
-        for code in [
-            vec![Instr::nop(), Instr::ret(RetCount::Fixed(0))],
-            vec![Instr::close_upvalues(0), Instr::ret(RetCount::Fixed(0))],
-        ] {
-            let mut bytecode = valid_saved_bytecode();
-            bytecode.code = code.into_iter().map(Instr::raw).collect();
-            bytecode.line_info = vec![1; bytecode.code.len()];
-            let mut state = load_bytecode_with_globals(
-                vec![bytecode],
-                vec![SavedObject::Closure {
-                    chunk: 0,
-                    upvalues: Vec::new(),
-                }],
-                vec![("writer".to_string(), SavedVal::Obj(0))],
-            )
-            .expect("forged free-op fixture loads");
-            state.get_global("writer").expect("writer exists");
-            state
-                .call(ArgCount::Fixed(0), RetCount::Fixed(0))
-                .expect("forged free-op fixture runs");
-            assert_eq!(state.cost_used(), 0);
-        }
+    fn forged_closure_free_close_loads_and_executes() {
+        let mut bytecode = valid_saved_bytecode();
+        bytecode.code = vec![
+            Instr::close(0).raw(),
+            Instr::ret(0, RetCount::Fixed(0)).raw(),
+        ];
+        bytecode.line_info = vec![1; bytecode.code.len()];
+        let mut state = load_bytecode_with_globals(
+            vec![bytecode],
+            vec![SavedObject::Closure {
+                chunk: 0,
+                upvalues: Vec::new(),
+            }],
+            vec![("writer".to_string(), SavedVal::Obj(0))],
+        )
+        .expect("forged free-op fixture loads");
+        state.get_global("writer").expect("writer exists");
+        state
+            .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+            .expect("forged free-op fixture runs");
+        assert_eq!(state.cost_used(), 0);
 
         // Insert before the RETURN rather than replacing it: overwriting the
         // terminal RETURN trips the ends-in-return check first and the
         // reserved-operand arm would go unexercised.
-        let mut bad_nop = valid_saved_bytecode();
-        bad_nop.code.insert(0, Instr::op_a(Instr::OP_NOP, 1).raw());
-        bad_nop.line_info.insert(0, 1);
-        let error = rejected_bytecode(vec![bad_nop], Vec::new());
+        let mut bad_close = valid_saved_bytecode();
+        bad_close.code.insert(0, Instr::close(0).with_b(1).raw());
+        bad_close.line_info.insert(0, 1);
+        let error = rejected_bytecode(vec![bad_close], Vec::new());
         let SnapshotError::InvalidBytecode { reason, .. } = &error else {
-            panic!("malformed nop must be InvalidBytecode, got {error:?}");
+            panic!("malformed close must be InvalidBytecode, got {error:?}");
         };
         assert!(
             matches!(
                 reason,
                 InvalidBytecodeReason::Validation(
-                    crate::compiler::verify::ValidationReason::ReservedBytesNonZero {
-                        opcode: Instr::OP_NOP,
+                    crate::compiler::verify::ValidationReason::ReservedBitsNonZero {
+                        opcode: Instr::OP_CLOSE,
                         ..
                     }
                 )
@@ -3363,7 +3321,7 @@ mod tests {
     }
 
     #[test]
-    fn compiler_saves_contain_no_nops_or_closure_free_closes() {
+    fn compiler_saves_contain_no_closure_free_closes() {
         let mut state = State::new();
         crate::Program::compile("writer = function() local x = 0; for i = 1, 3 do do local y = i; x = x + y end end; fixed(1) end", None).and_then(|program| state.load(&program))
             .expect("compiler fixture loads");
@@ -3378,10 +3336,10 @@ mod tests {
             .finish()
             .expect("failed callback leaves state saveable");
         assert!(payload.bytecode.iter().all(|chunk| {
-            chunk.code.iter().all(|raw| {
-                let opcode = Instr::from_raw(*raw).opcode();
-                opcode != Instr::OP_NOP && opcode != Instr::OP_CLOSE_UPVALUES
-            })
+            chunk
+                .code
+                .iter()
+                .all(|raw| Instr::from_raw(*raw).opcode() != Instr::OP_CLOSE)
         }));
     }
 
@@ -3389,12 +3347,11 @@ mod tests {
     fn uncached_set_cannot_alias_a_warmed_get_slot() {
         let mut bytecode = valid_saved_bytecode();
         bytecode.code = vec![
-            Instr::get_global(0, Some(0)).raw(),
-            Instr::pop().raw(),
-            Instr::push_num(0).raw(),
+            Instr::get_global(0, 0, Some(0)).raw(),
+            Instr::load_num(0, 0).raw(),
             // Operand 0 is uncached, never global slot zero.
-            Instr::set_global(1, None).raw(),
-            Instr::ret(RetCount::Fixed(0)).raw(),
+            Instr::set_global(0, 1, None).raw(),
+            Instr::ret(0, RetCount::Fixed(0)).raw(),
         ];
         bytecode.number_literals.push(42.0f64.to_bits());
         bytecode.string_literals = vec![b"x".to_vec(), b"y".to_vec()];
@@ -3432,9 +3389,10 @@ mod tests {
         let mut uncached = valid_saved_bytecode();
         uncached.code = vec![
             Instr::tfor_call(0, 1, None).raw(),
-            Instr::ret(RetCount::Fixed(0)).raw(),
+            Instr::ret(0, RetCount::Fixed(0)).raw(),
         ];
         uncached.num_locals = 4;
+        uncached.max_stack = 4;
         uncached.line_info = vec![1; uncached.code.len()];
         assert!(load_bytecode(vec![uncached.clone()], Vec::new()).is_ok());
 
@@ -3442,7 +3400,7 @@ mod tests {
         sequential.code = vec![
             Instr::tfor_call(0, 1, Some(0)).raw(),
             Instr::tfor_call(0, 1, Some(1)).raw(),
-            Instr::ret(RetCount::Fixed(0)).raw(),
+            Instr::ret(0, RetCount::Fixed(0)).raw(),
         ];
         sequential.tfor_cursor_slots = 2;
         sequential.line_info = vec![1; sequential.code.len()];
@@ -3489,7 +3447,7 @@ mod tests {
             forged.code = code
                 .into_iter()
                 .map(|slot| Instr::tfor_call(0, 1, slot).raw())
-                .chain([Instr::ret(RetCount::Fixed(0)).raw()])
+                .chain([Instr::ret(0, RetCount::Fixed(0)).raw()])
                 .collect();
             forged.tfor_cursor_slots = declared;
             forged.line_info = vec![1; forged.code.len()];
@@ -3504,9 +3462,9 @@ mod tests {
     fn forged_builtin_set_global_never_populates_a_cache_slot() {
         let mut bytecode = valid_saved_bytecode();
         bytecode.code = vec![
-            Instr::push_num(0).raw(),
-            Instr::set_global(0, Some(0)).raw(),
-            Instr::ret(RetCount::Fixed(0)).raw(),
+            Instr::load_num(0, 0).raw(),
+            Instr::set_global(0, 0, Some(0)).raw(),
+            Instr::ret(0, RetCount::Fixed(0)).raw(),
         ];
         bytecode.number_literals.push(7.0f64.to_bits());
         bytecode.string_literals.push(b"table".to_vec());
@@ -3723,7 +3681,7 @@ mod tests {
     fn verifier_covers_each_operand_class_and_reports_its_location() {
         let mut binary_literal = valid_saved_bytecode();
         binary_literal.string_literals.push(vec![255]);
-        binary_literal.code.insert(0, Instr::push_string(0).raw());
+        binary_literal.code.insert(0, Instr::load_str(0, 0).raw());
         binary_literal.line_info.insert(0, 1);
         assert!(load_bytecode(vec![binary_literal], Vec::new()).is_ok());
 
@@ -3731,7 +3689,7 @@ mod tests {
         bad_global_name.string_literals.push(vec![255]);
         bad_global_name
             .code
-            .insert(0, Instr::get_global(0, Some(0)).raw());
+            .insert(0, Instr::get_global(0, 0, Some(0)).raw());
         bad_global_name.global_cache_slots = 1;
         bad_global_name.line_info.insert(0, 1);
         assert_invalid(
@@ -3741,9 +3699,12 @@ mod tests {
         );
 
         let mut bad_builtin = valid_saved_bytecode();
-        bad_builtin
-            .code
-            .insert(0, Instr::op_a(Instr::OP_GET_BUILTIN, 255).raw());
+        bad_builtin.code.insert(
+            0,
+            Instr::get_builtin(0, crate::instr::Builtin::Print)
+                .with_b(255)
+                .raw(),
+        );
         bad_builtin.line_info.insert(0, 1);
         assert_invalid(
             &rejected_bytecode(vec![bad_builtin], Vec::new()),
@@ -3754,7 +3715,7 @@ mod tests {
         let mut bad_template = valid_saved_bytecode();
         bad_template
             .code
-            .insert(0, Instr::new_table_template(0).raw());
+            .insert(0, Instr::new_table_template(0, 0).raw());
         bad_template.line_info.insert(0, 1);
         assert_invalid(
             &rejected_bytecode(vec![bad_template], Vec::new()),
@@ -3785,13 +3746,17 @@ mod tests {
             );
         }
 
-        let mut bad_local = valid_saved_bytecode();
-        bad_local.code.insert(0, Instr::get_local(0).raw());
-        bad_local.line_info.insert(0, 1);
-        assert_invalid(&rejected_bytecode(vec![bad_local], Vec::new()), 0, Some(0));
+        let mut bad_register = valid_saved_bytecode();
+        bad_register.code.insert(0, Instr::mov(0, 2).raw());
+        bad_register.line_info.insert(0, 1);
+        assert_invalid(
+            &rejected_bytecode(vec![bad_register], Vec::new()),
+            0,
+            Some(0),
+        );
 
         let mut bad_upvalue = valid_saved_bytecode();
-        bad_upvalue.code.insert(0, Instr::get_upvalue(0).raw());
+        bad_upvalue.code.insert(0, Instr::get_upval(0, 0).raw());
         bad_upvalue.line_info.insert(0, 1);
         assert_invalid(
             &rejected_bytecode(vec![bad_upvalue], Vec::new()),
@@ -3800,7 +3765,7 @@ mod tests {
         );
 
         let mut bad_reserved = valid_saved_bytecode();
-        bad_reserved.code[0] = Instr::op_a(Instr::OP_PUSH_NIL, 1).raw();
+        bad_reserved.code[0] = Instr::ret(0, RetCount::Fixed(0)).with_c(1).raw();
         assert_invalid(
             &rejected_bytecode(vec![bad_reserved], Vec::new()),
             0,
@@ -3808,7 +3773,7 @@ mod tests {
         );
 
         let mut unknown = valid_saved_bytecode();
-        unknown.code[0] = Instr::op(255).raw();
+        unknown.code[0] = u64::MAX;
         assert_invalid(&rejected_bytecode(vec![unknown], Vec::new()), 0, Some(0));
     }
 
@@ -3818,7 +3783,7 @@ mod tests {
         bad_cache_count.string_literals.push(b"x".to_vec());
         bad_cache_count
             .code
-            .insert(0, Instr::get_global(0, Some(0)).raw());
+            .insert(0, Instr::get_global(0, 0, Some(0)).raw());
         bad_cache_count.line_info.insert(0, 1);
         assert_invalid(
             &rejected_bytecode(vec![bad_cache_count], Vec::new()),
@@ -3827,7 +3792,7 @@ mod tests {
         );
 
         let mut bad_line_info = valid_saved_bytecode();
-        bad_line_info.code.insert(0, Instr::push_nil().raw());
+        bad_line_info.code.insert(0, Instr::load_nil(0, 1).raw());
         assert_invalid(&rejected_bytecode(vec![bad_line_info], Vec::new()), 0, None);
 
         let mut negative_jump = valid_saved_bytecode();
@@ -3856,7 +3821,7 @@ mod tests {
         assert_invalid(&rejected_bytecode(vec![deep_self], Vec::new()), 0, None);
 
         let mut nested_bad_opcode = valid_saved_bytecode();
-        nested_bad_opcode.code[0] = Instr::op(255).raw();
+        nested_bad_opcode.code[0] = u64::MAX;
         assert_invalid(
             &rejected_bytecode(vec![valid_saved_bytecode(), nested_bad_opcode], Vec::new()),
             1,
@@ -3956,46 +3921,32 @@ mod tests {
     }
 
     #[test]
-    fn forged_fused_branches_validate_stack_and_targets() {
-        // Underflow: a fused branch pops two, only one value is on the stack.
-        let mut underflow = valid_saved_bytecode();
-        underflow.code = vec![
-            Instr::push_nil().raw(),
-            Instr::branch_false_less(0).raw(),
-            Instr::ret(RetCount::Fixed(0)).raw(),
-        ];
-        underflow.line_info = vec![1; underflow.code.len()];
-        assert_invalid(&rejected_bytecode(vec![underflow], Vec::new()), 0, Some(1));
+    fn forged_compare_branches_validate_registers_and_targets() {
+        use crate::instr::CompareOp;
+        let ret = Instr::ret(0, RetCount::Fixed(0)).raw();
+
+        // An operand register past the frame.
+        let mut beyond = valid_saved_bytecode();
+        beyond.code = vec![Instr::branch_compare(CompareOp::Lt, 0, 2, 0).raw(), ret];
+        beyond.line_info = vec![1; beyond.code.len()];
+        assert_invalid(&rejected_bytecode(vec![beyond], Vec::new()), 0, Some(0));
 
         // Jump target past the end of the code.
         let mut oob = valid_saved_bytecode();
         oob.code = vec![
-            Instr::push_nil().raw(),
-            Instr::push_nil().raw(),
-            Instr::branch_false_equal(5).raw(),
-            Instr::ret(RetCount::Fixed(0)).raw(),
+            Instr::load_nil(0, 2).raw(),
+            Instr::branch_compare(CompareOp::Eq, 0, 1, 5).raw(),
+            ret,
         ];
         oob.line_info = vec![1; oob.code.len()];
-        assert_invalid(&rejected_bytecode(vec![oob], Vec::new()), 0, Some(2));
-
-        // The A byte is reserved and must be zero.
-        let mut reserved = valid_saved_bytecode();
-        reserved.code = vec![
-            Instr::push_nil().raw(),
-            Instr::push_nil().raw(),
-            Instr::op_a_sbx(Instr::OP_BRANCH_FALSE_GREATER, 1, 0).raw(),
-            Instr::ret(RetCount::Fixed(0)).raw(),
-        ];
-        reserved.line_info = vec![1; reserved.code.len()];
-        assert_invalid(&rejected_bytecode(vec![reserved], Vec::new()), 0, Some(2));
+        assert_invalid(&rejected_bytecode(vec![oob], Vec::new()), 0, Some(1));
 
         // The well-formed shape is accepted.
         let mut ok = valid_saved_bytecode();
         ok.code = vec![
-            Instr::push_nil().raw(),
-            Instr::push_nil().raw(),
-            Instr::branch_false_not_equal(0).raw(),
-            Instr::ret(RetCount::Fixed(0)).raw(),
+            Instr::load_nil(0, 2).raw(),
+            Instr::branch_compare(CompareOp::Ne, 0, 1, 0).raw(),
+            ret,
         ];
         ok.line_info = vec![1; ok.code.len()];
         assert!(load_bytecode(vec![ok], Vec::new()).is_ok());
@@ -4089,7 +4040,7 @@ mod tests {
         roundtrip!(
             SavedBytecode,
             SavedBytecode {
-                code: vec![1, 2, 3, 0xdead_beef],
+                code: vec![1, 2, 3, 0xdead_beef_0bad_f00d],
                 number_literals: vec![1.5f64.to_bits(), f64::NAN.to_bits()],
                 string_literals: vec![b"hi".to_vec(), vec![0xff, 0x00, 0xfe]],
                 table_templates: vec![vec![0, 1], vec![]],
@@ -4099,6 +4050,7 @@ mod tests {
                 tfor_cursor_slots: 4,
                 num_params: 2,
                 num_locals: 5,
+                max_stack: 300,
                 nested: vec![0, 1, 2],
                 upvalues: vec![SavedUpvalueDesc::Local(1), SavedUpvalueDesc::Upvalue(2)],
                 is_vararg: true,

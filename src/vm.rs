@@ -15,6 +15,7 @@ mod lua_val;
 mod meta_name;
 mod metamethod;
 mod object;
+mod registers;
 mod rng;
 #[cfg(feature = "snapshot")]
 mod save_state;
@@ -233,8 +234,7 @@ macro_rules! in_flight {
 }
 
 in_flight! {
-    collections: [pending_bytecode_caches, open_upvalues, pending_bases,
-        call_stack, vararg_stack],
+    collections: [pending_bytecode_caches, open_upvalues, call_stack, vararg_stack],
     scalars: [stack_bottom = 0, metamethod_depth = 0, call_depth = 0,
         native_call_depth = 0],
     optionals: [active_rust_fn]
@@ -290,9 +290,6 @@ pub struct State {
     /// Each entry is (stack_index, upvalue_ref). Kept sorted by stack_index ascending
     /// so we can efficiently close them when a function returns.
     pub(super) open_upvalues: Vec<(usize, UpvalueRef)>,
-    /// Dynamic call and constructor bases awaiting their consuming opcode.
-    /// Each Lua frame owns the entries above the floor it recorded on entry.
-    pub(in crate::vm) pending_bases: frame::PendingBases,
     /// Runtime cost accounting and optional budget.
     pub(super) cost: CostState,
     /// Compiled pattern programs shared by `string.find`, `string.match`,
@@ -574,7 +571,6 @@ impl State {
             },
             upvalue_pool: UpvaluePool::new(),
             open_upvalues: Vec::new(),
-            pending_bases: frame::PendingBases::default(),
             cost: CostState::default(),
             patterns: IndexMap::default(),
             pattern_bytes: 0,

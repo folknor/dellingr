@@ -183,7 +183,7 @@ impl ScopeCost {
             let category = Instr::cost_class(inst.opcode());
             if let Some(index) = category.counter_index() {
                 let count = match category {
-                    instr::OpcodeCost::ArrayElements => u64::from(inst.a()),
+                    instr::OpcodeCost::ArrayElements => inst.set_list_count().map_or(0, u64::from),
                     _ => 1,
                 };
                 scope.category_counts[index] += count;
@@ -530,16 +530,16 @@ mod tests {
     }
 
     #[test]
-    fn stripping_changes_only_static_instruction_counts() {
+    fn static_analysis_counts_each_instruction_once() {
         let closure_free = analyze_cost(
             "local x = 0; for i = 1, 3 do do local y = i; x = x + y end end; return x",
         )
         .expect("closure-free loop should parse");
-        // Static analysis counts the loop body's single OP_ADD once; the
+        // Static analysis counts the loop body's single add once; the
         // runtime sweep below observes it three times.
         assert_eq!(closure_free.root.own_cost, 1);
         assert_eq!(closure_free.root.total_cost, 1);
-        assert_eq!(closure_free.root.instructions, 16);
+        assert_eq!(closure_free.root.instructions, 10);
 
         let dynamic = analyze_cost("local function f(...) return ... end; return f(1, f())")
             .expect("dynamic-call program should parse");

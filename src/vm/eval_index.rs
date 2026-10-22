@@ -11,7 +11,7 @@ use super::caches::{
     StringMethodCacheEntry,
 };
 use super::frame::Frame;
-use super::object::{ObjectPtr, Upvalue};
+use super::object::ObjectPtr;
 use crate::instr::{ArgCount, RetCount};
 
 /// Global names are verified UTF-8 at load time; this is not fallible host input.
@@ -453,80 +453,9 @@ impl State {
         }
     }
 
-    pub(super) fn instr_get_global(
-        &mut self,
-        frame: &Frame,
-        string_num: u16,
-        cache_slot: Option<u8>,
-    ) -> Result<()> {
-        let s = &frame.bytecode().string_literals[string_num as usize];
-        let cache = frame.runtime.caches.global(cache_slot);
-        // Net-positive by one slot, matching the uncached `get_global` path.
-        if let Some(val) = cache.and_then(|cache| self.get_cached_global(cache)) {
-            self.check_stack_space(1)?;
-            self.push_unchecked(val);
-            return Ok(());
-        }
-
-        let name = verified_global_name(s);
-        let val = self.global_env.read(name, cache);
-        self.check_stack_space(1)?;
-        self.push_unchecked(val);
-        Ok(())
-    }
-
     #[inline(always)]
     pub(super) fn get_cached_global(&self, cache: &GlobalLookupCacheSlot) -> Option<Val> {
         self.global_env.read_cached(cache)
-    }
-
-    /// Fast path for getting well-known builtin globals.
-    #[inline(always)]
-    pub(super) fn instr_get_builtin(&mut self, slot: u8) -> Result<()> {
-        let val = self.global_env.builtin(slot);
-        self.check_stack_space(1)?;
-        self.push_unchecked(val);
-        Ok(())
-    }
-
-    /// Fast path for setting well-known builtin globals.
-    #[inline(always)]
-    pub(super) fn instr_set_builtin(&mut self, slot: u8) {
-        let val = self.pop_val();
-        self.global_env.write_builtin(slot, val);
-    }
-
-    #[inline(always)]
-    pub(super) fn instr_get_local(&mut self, local_num: u8) -> Result<()> {
-        let i = local_num as usize + self.stack_bottom;
-        let val = self.stack[i];
-        self.check_stack_space(1)?;
-        self.push_unchecked(val);
-        Ok(())
-    }
-
-    pub(super) fn instr_get_upvalue(&mut self, frame: &Frame, upvalue_num: u8) -> Result<()> {
-        let uv_ref = frame.upvalues[upvalue_num as usize];
-        let val = match self.upvalue_pool.get(uv_ref) {
-            Upvalue::Open(stack_idx) => self.stack[*stack_idx],
-            Upvalue::Closed(v) => *v,
-        };
-        self.check_stack_space(1)?;
-        self.push_unchecked(val);
-        Ok(())
-    }
-
-    pub(super) fn instr_set_upvalue(&mut self, frame: &Frame, upvalue_num: u8) {
-        let val = self.pop_val();
-        let uv_ref = frame.upvalues[upvalue_num as usize];
-        match self.upvalue_pool.get(uv_ref).clone() {
-            Upvalue::Open(stack_idx) => {
-                self.stack[stack_idx] = val;
-            }
-            Upvalue::Closed(_) => {
-                *self.upvalue_pool.get_mut(uv_ref) = Upvalue::Closed(val);
-            }
-        }
     }
 
     #[hotpath::measure]

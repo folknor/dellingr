@@ -8,6 +8,35 @@ All notable changes to dellingr are documented here. The format follows
 
 ### Changed (breaking)
 
+- Register VM. The compiler builds a syntax tree per function and generates
+  64-bit register bytecode from it (locals live in registers, constant
+  operands are separate opcodes, comparisons branch in one instruction), in
+  place of the 32-bit stack bytecode. Results, evaluation and store order,
+  `pairs` order, rendered values, RNG draws, error kinds and lines, and
+  `cost_used` are unchanged for every run that never reaches
+  `MAX_STACK_SIZE`. The differences:
+  - **Replay-visible at the stack cap:** a Lua call reserves its function's
+    whole register frame when it is admitted, so a run that reaches
+    `MAX_STACK_SIZE` now fails at the call that cannot reserve its frame,
+    before the body runs. The surviving state, RNG position, error location,
+    traceback and `cost_used` of such runs differ. `COST_MODEL_VERSION` is 7.
+  - Multiple-assignment nil padding no longer occupies the stack, and a
+    fixed number of results returns into registers the caller already
+    holds, so some assignments and calls that failed with `StackOverflow`
+    near the cap now succeed.
+  - A register whose value is no longer used keeps that value reachable
+    until the function overwrites it or returns, which can move when a
+    collection reclaims it (and so `%p` and `tostring` ids of values rebuilt
+    later, and `object_count`).
+  - Jumps carry 24-bit offsets: `JumpTooFar` now means a span of 2^23
+    instructions or more, where it was 2^15.
+  - Snapshot `FORMAT_VERSION` is 11: instruction words are 64-bit and each
+    function records its register count. Older saves are rejected.
+  - `limits::MAX_VERIFIER_MARKER_DEPTH` is removed: the verifier no longer
+    simulates an operand stack.
+  - `--dump-bytecode` prints the register instruction set and each
+    function's register count.
+
 - One compile path, byte-exact. `Program::compile(source, name)` is the only
   way to compile Lua: `source` is `impl AsRef<[u8]>` and `name` is
   `Option<&[u8]>`, so non-UTF-8 sources load (string literals keep their
@@ -72,9 +101,7 @@ All notable changes to dellingr are documented here. The format follows
     `local t = {sub = string.sub}; t:sub(1)`, is now `calling 'sub' on bad
     self (string expected, got table)` (was `bad argument #1 to 'sub' (string
     expected, got table)`). This applies to every library function called
-    with `:`. The call instruction carries the mark in its previously
-    reserved third operand byte, so a snapshot of code containing a method
-    call stores that word as 1 instead of 0 (the loader accepts both).
+    with `:`. The call instruction carries the mark.
     `ArgError::arg_number` still reports the callee's own position;
     `ArgError::is_method_call` says whether the rendering shifted it.
   - Tracebacks call only the main chunk `main chunk`. An unnamed function is

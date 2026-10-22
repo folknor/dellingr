@@ -1,18 +1,18 @@
 use std::sync::Arc;
 
-use super::Instr;
+use super::super::ast::{Expr, ExprKind, Place, Stmt, Suffix, Suffixed};
 use super::Parser;
-use super::PlaceExp;
 use super::Result;
 use super::SyntaxError;
 use super::TokenKind;
-use crate::error::ParserFault;
+use super::Variable;
+use super::expr::variable_read;
 use crate::limits::{MAX_CHUNK_NESTING, MAX_NESTED};
 
 impl<'a> Parser<'a> {
     /// Parses a function declaration, which is any statement that starts with
     /// the keyword `function`.
-    pub(super) fn parse_fndecl(&mut self) -> Result<()> {
+    pub(super) fn parse_fndecl(&mut self) -> Result<Stmt> {
         self.input.next()?; // 'function' keyword
         let name = self.expect_identifier()?;
         match self.input.peek_type()? {
@@ -24,23 +24,31 @@ impl<'a> Parser<'a> {
 
     /// Parses a basic function declaration, which just assigns the function to
     /// a local, upvalue, or global variable.
-    fn parse_fndecl_basic(&mut self, name: &'a str) -> Result<()> {
-        let place_exp = self.parse_prefix_identifier(name)?;
-        let instr = match place_exp {
-            PlaceExp::FieldAccess(_) | PlaceExp::TableIndex => {
-                return Err(self.internal_error(ParserFault::NamedFunctionTargetNotVariable));
-            }
-            place => place.set_instr(0),
+    fn parse_fndecl_basic(&mut self, name: &'a str) -> Result<Stmt> {
+        let target = match self.parse_prefix_identifier(name)? {
+            Variable::Local { reg, .. } => Place::Local(reg),
+            Variable::Upval(index) => Place::Upval(index),
+            Variable::Global(name) => Place::Global(name),
+            Variable::Builtin(builtin) => Place::Builtin(builtin),
         };
-        self.parse_fndef(Some(name.to_string()), false)?;
-        self.push(instr);
-        Ok(())
+        let (nested, _) = self.parse_fndef(Some(name.to_string()), false)?;
+        Ok(Stmt::Function {
+            target,
+            nested,
+            line: self.input.last_line(),
+        })
     }
 
-    fn parse_fndecl_table(&mut self, table_name: &'a str) -> Result<()> {
-        // Push the table onto the stack.
+    /// The table a dotted or method declaration stores into, read where its
+    /// name was resolved.
+    fn declaration_table(&mut self, table_name: &'a str) -> Result<Expr> {
         let table = self.parse_prefix_identifier(table_name)?;
-        self.push(table.get_instr());
+        Ok(variable_read(table, self.input.last_line()))
+    }
+
+    fn parse_fndecl_table(&mut self, table_name: &'a str) -> Result<Stmt> {
+        let base = self.declaration_table(table_name)?;
+        let mut suffixes = Vec::new();
 
         // Parse all the fields, building the full name (e.g., "foo.bar.baz").
         let mut full_name = table_name.to_string();
@@ -51,46 +59,59 @@ impl<'a> Parser<'a> {
         let mut last_field_id = self.find_or_add_string(last_field)?;
 
         while self.input.try_pop(TokenKind::Dot)?.is_some() {
-            self.push(Instr::get_field(last_field_id, None));
+            suffixes.push(Suffix::Field {
+                name: last_field_id,
+                line: self.input.last_line(),
+            });
             last_field = self.expect_identifier()?;
             full_name.push('.');
             full_name.push_str(last_field);
             last_field_id = self.find_or_add_string(last_field)?;
         }
 
-        if self.input.try_pop(TokenKind::Colon)?.is_some() {
-            self.push(Instr::get_field(last_field_id, None));
+        let (name, method) = if self.input.try_pop(TokenKind::Colon)?.is_some() {
+            suffixes.push(Suffix::Field {
+                name: last_field_id,
+                line: self.input.last_line(),
+            });
             let method_name = self.expect_identifier()?;
             full_name.push(':');
             full_name.push_str(method_name);
-            let method_name_id = self.find_or_add_string(method_name)?;
-
-            self.parse_fndef(Some(full_name), true)?;
-            self.push(Instr::set_field_at(0, method_name_id));
+            (self.find_or_add_string(method_name)?, true)
         } else {
-            self.parse_fndef(Some(full_name), false)?;
-            self.push(Instr::set_field_at(0, last_field_id));
-        }
-        Ok(())
+            (last_field_id, false)
+        };
+        let object = if suffixes.is_empty() {
+            base
+        } else {
+            Expr::new(ExprKind::Suffixed(Box::new(Suffixed { base, suffixes })))
+        };
+        let (nested, _) = self.parse_fndef(Some(full_name), method)?;
+        Ok(Stmt::Function {
+            target: Place::Field { object, name },
+            nested,
+            line: self.input.last_line(),
+        })
     }
 
     /// Parses a method declaration: `function table:method()`
     /// This is sugar for `table.method = function(self, ...)`
-    fn parse_fndecl_method(&mut self, table_name: &'a str) -> Result<()> {
-        // Push the table onto the stack.
-        let table = self.parse_prefix_identifier(table_name)?;
-        self.push(table.get_instr());
+    fn parse_fndecl_method(&mut self, table_name: &'a str) -> Result<Stmt> {
+        let object = self.declaration_table(table_name)?;
 
         // Consume the colon and get the method name.
         self.expect(TokenKind::Colon)?;
         let method_name = self.expect_identifier()?;
         let full_name = format!("{table_name}:{method_name}");
-        let method_name_id = self.find_or_add_string(method_name)?;
+        let name = self.find_or_add_string(method_name)?;
 
         // Parse the function params and body with implicit self.
-        self.parse_fndef(Some(full_name), true)?;
-        self.push(Instr::set_field_at(0, method_name_id));
-        Ok(())
+        let (nested, _) = self.parse_fndef(Some(full_name), true)?;
+        Ok(Stmt::Function {
+            target: Place::Field { object, name },
+            nested,
+            line: self.input.last_line(),
+        })
     }
 
     /// Parses the parameters in a function definition.
@@ -130,8 +151,9 @@ impl<'a> Parser<'a> {
 
     /// Parses the parameters and body of a function definition with an
     /// optional diagnostic name. A `method` (`function t:m()`) gets the
-    /// implicit leading `self` parameter.
-    pub(super) fn parse_fndef(&mut self, name: Option<String>, method: bool) -> Result<()> {
+    /// implicit leading `self` parameter. Returns the new function's
+    /// nested-chunk index and the stamp of its closure creation.
+    pub(super) fn parse_fndef(&mut self, name: Option<String>, method: bool) -> Result<(u8, u32)> {
         let defined_line = self.input.peek()?.line;
         let (mut params, is_vararg) = self.parse_params()?;
         if method {
@@ -154,8 +176,8 @@ impl<'a> Parser<'a> {
             SyntaxError::TooManyNestedFunctions,
         )?;
         self.funcs.chunk.nested.push(Arc::new(new_chunk));
-        self.push(Instr::closure(index));
+        let line = self.input.last_line();
         self.expect(TokenKind::End)?;
-        Ok(())
+        Ok((index, line))
     }
 }

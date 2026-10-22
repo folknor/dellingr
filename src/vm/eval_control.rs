@@ -6,75 +6,14 @@ use super::Val;
 use super::caches::{RuntimeCaches, TforCursorEntry, TforCursorSlot};
 use super::frame::Frame;
 use super::lua_val::RustFunc;
-use crate::instr::{ArgCount, Instr, RetCount};
+use crate::instr::{ArgCount, RetCount};
 use crate::lua_std::{base_ipairs_iter, base_next};
 
 impl State {
-    /// Pop a value. If its truthiness matches `cond`, jump with `offset`.
-    /// If `keep_cond`, then push the value back after jumping.
+    /// Push a closure of nested function `i`, capturing its upvalues from
+    /// the running frame.
     #[hotpath::measure]
-    pub(super) fn instr_branch(
-        &mut self,
-        frame: &mut Frame,
-        cond: bool,
-        offset: i16,
-        keep_cond: bool,
-    ) -> Result<()> {
-        let val = self.pop_val();
-        let truthy = val.truthy();
-        if cond == truthy {
-            frame.jump(offset);
-        }
-        if keep_cond {
-            self.push_unchecked(val); // Replaces the condition popped above.
-        }
-        Ok(())
-    }
-
-    /// Fused comparison + branch-if-false, all six variants. The dispatch
-    /// loop hands the opcode through so its own match needs only one range
-    /// arm (see the comment at the dispatch site). Ordering forms share
-    /// `eval_compare_bool`'s semantics; equality forms compare Vals raw.
-    #[hotpath::measure]
-    pub(super) fn instr_branch_fused(
-        &mut self,
-        frame: &mut Frame,
-        opcode: u8,
-        offset: i16,
-    ) -> Result<()> {
-        let condition = match opcode {
-            crate::instr::Instr::OP_BRANCH_FALSE_LESS => {
-                self.eval_compare_bool(Instr::LESS_ORDER.0, Instr::LESS_ORDER.1)?
-            }
-            crate::instr::Instr::OP_BRANCH_FALSE_GREATER => {
-                self.eval_compare_bool(Instr::GREATER_ORDER.0, Instr::GREATER_ORDER.1)?
-            }
-            crate::instr::Instr::OP_BRANCH_FALSE_LESS_EQUAL => {
-                self.eval_compare_bool(Instr::LESS_EQUAL_ORDER.0, Instr::LESS_EQUAL_ORDER.1)?
-            }
-            crate::instr::Instr::OP_BRANCH_FALSE_GREATER_EQUAL => {
-                self.eval_compare_bool(Instr::GREATER_EQUAL_ORDER.0, Instr::GREATER_EQUAL_ORDER.1)?
-            }
-            crate::instr::Instr::OP_BRANCH_FALSE_EQUAL => {
-                let val2 = self.pop_val();
-                let val1 = self.pop_val();
-                val1 == val2
-            }
-            crate::instr::Instr::OP_BRANCH_FALSE_NOT_EQUAL => {
-                let val2 = self.pop_val();
-                let val1 = self.pop_val();
-                val1 != val2
-            }
-            _ => unreachable!("fused branch dispatched with a non-fused opcode"),
-        };
-        if !condition {
-            frame.jump(offset);
-        }
-        Ok(())
-    }
-
-    #[hotpath::measure]
-    pub(super) fn instr_closure(&mut self, frame: &mut Frame, i: u8) -> Result<()> {
+    pub(super) fn instr_closure(&mut self, frame: &mut Frame, i: u16) -> Result<()> {
         let bytecode = frame.get_nested_bytecode(i);
         // Capture upvalues based on the bytecode's upvalue descriptors
         let mut captured_upvalues = Vec::with_capacity(bytecode.upvalues.len());
@@ -95,16 +34,19 @@ impl State {
         self.push_closure(bytecode, captured_upvalues)
     }
 
+    /// Numeric-for setup over the registers from `slot`: start, limit and
+    /// step, then the visible variable. Checks the step, then the limit, then
+    /// the start, and jumps past the loop when it does not run.
     #[hotpath::measure]
     pub(super) fn instr_for_prep(
         &mut self,
         frame: &mut Frame,
-        local: u8,
-        body_len: i16,
+        slot: usize,
+        body_len: i32,
     ) -> Result<()> {
-        let step_val = self.pop_val();
-        let end_val = self.pop_val();
-        let start_val = self.pop_val();
+        let start_val = self.stack[slot];
+        let end_val = self.stack[slot + 1];
+        let step_val = self.stack[slot + 2];
         let step = step_val
             .as_num()
             .ok_or_else(|| self.type_error(TypeError::Arithmetic(step_val.typ(&self.heap))))?;
@@ -115,9 +57,7 @@ impl State {
             .as_num()
             .ok_or_else(|| self.type_error(TypeError::Arithmetic(start_val.typ(&self.heap))))?;
         if check_numeric_for_condition(start, end, step) {
-            for (local_slot, n) in
-                (local as usize + self.stack_bottom..).zip([start, end, step, start])
-            {
+            for (local_slot, n) in (slot..).zip([start, end, step, start]) {
                 self.stack[local_slot] = Val::Num(n);
             }
         } else {
@@ -130,10 +70,9 @@ impl State {
     pub(super) fn instr_for_loop(
         &mut self,
         frame: &mut Frame,
-        local_slot: u8,
-        offset: i16,
+        slot: usize,
+        offset: i32,
     ) -> Result<()> {
-        let slot = local_slot as usize + self.stack_bottom;
         let mut var = self.stack[slot].as_num().ok_or_else(|| {
             self.type_error(TypeError::Arithmetic(self.stack[slot].typ(&self.heap)))
         })?;
@@ -152,30 +91,16 @@ impl State {
         Ok(())
     }
 
-    /// TForPrep: Pop 3 values (iterator, state, control) and store in locals.
-    #[hotpath::measure]
-    pub(super) fn instr_tfor_prep(&mut self, local_slot: u8) {
-        let base = local_slot as usize + self.stack_bottom;
-        // Pop in reverse order: control, state, iterator
-        let control = self.pop_val();
-        let state = self.pop_val();
-        let iterator = self.pop_val();
-        // Store in order: iterator, state, control
-        self.stack[base] = iterator;
-        self.stack[base + 1] = state;
-        self.stack[base + 2] = control;
-    }
-
-    /// TForCall: Call iterator(state, control), store results in loop variable slots.
+    /// TForCall: Call iterator(state, control) from the registers at `base`,
+    /// store results in the loop variable registers after them.
     #[hotpath::measure]
     pub(super) fn instr_tfor_call(
         &mut self,
-        local_slot: u8,
+        base: usize,
         num_vars: u8,
         cursor_slot: Option<u8>,
         caches: &RuntimeCaches,
     ) -> Result<()> {
-        let base = local_slot as usize + self.stack_bottom;
         // Push iterator function, state, and control onto stack for call
         let iterator = self.stack[base];
         let state = self.stack[base + 1];
@@ -353,13 +278,7 @@ impl State {
 
     /// TForLoop: If first loop variable is nil, jump. Otherwise update control var.
     #[hotpath::measure]
-    pub(super) fn instr_tfor_loop(
-        &mut self,
-        frame: &mut Frame,
-        local_slot: u8,
-        offset: i16,
-    ) -> Result<()> {
-        let base = local_slot as usize + self.stack_bottom;
+    pub(super) fn instr_tfor_loop(&mut self, frame: &mut Frame, base: usize, offset: i32) {
         let first_var = &self.stack[base + 3];
 
         if matches!(first_var, Val::Nil) {
@@ -369,7 +288,6 @@ impl State {
             // Update control variable with first loop variable
             self.stack[base + 2] = self.stack[base + 3];
         }
-        Ok(())
     }
 }
 

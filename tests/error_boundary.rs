@@ -566,7 +566,7 @@ fn error_boundary_pending_base_and_captured_local_survive_unwind() {
 }
 
 #[test]
-fn error_boundary_chained_result_padding_reports_at_the_caller() {
+fn error_boundary_chained_result_padding_fits_a_lua_caller_and_reports_to_a_host() {
     let names = (0..64)
         .map(|i| format!("v{i}"))
         .collect::<Vec<_>>()
@@ -599,42 +599,40 @@ fn error_boundary_chained_result_padding_reports_at_the_caller() {
         state
             .get_global(if kind == "host" { "chain" } else { "caller" })
             .unwrap();
-        let error = state
-            .call(
-                ArgCount::Fixed(0),
-                RetCount::Fixed(if kind == "host" { 64 } else { 0 }),
-            )
-            .expect_err("padding fails after callee returned");
-        assert!(
-            matches!(
-                error.kind(),
-                dellingr::error::ErrorKind::StackOverflow { .. }
-            ),
-            "{kind}: {error:?}"
+        let result = state.call(
+            ArgCount::Fixed(0),
+            RetCount::Fixed(if kind == "host" { 64 } else { 0 }),
         );
         if kind != "host" {
-            assert_eq!(error.line_num(), 6, "{kind}: {error:?}");
-            assert_eq!(error.source_name(), Some(b"padding".as_slice()));
-            assert_eq!(error.stack_trace().len(), 1);
-            assert_eq!(error.stack_trace()[0].line, 6);
-            assert_eq!(
-                error.stack_trace()[0].source.as_deref(),
-                Some(b"padding".as_slice())
-            );
-        } else {
-            assert!(error.stack_trace().is_empty());
-            assert!(error.source_name().is_none());
-        }
-        assert_eq!(*notifications.lock().unwrap(), vec![error.to_string()]);
-        assert_eq!(state.get_top(), prefix + 1);
-        assert_eq!(state.to_number(-1).unwrap(), 73.0);
-        state.set_top(0).unwrap();
-        assert_full_chain_reuse(&mut state);
-        if kind != "host" {
+            // A Lua caller reserved its whole frame on entry, so its 64
+            // result registers exist before the chain runs: padding them
+            // needs no stack growth and cannot overflow.
+            result.unwrap_or_else(|error| panic!("{kind}: {error:?}"));
+            assert!(notifications.lock().unwrap().is_empty());
+            assert_eq!(state.get_top(), prefix + 1);
+            state.set_top(0).unwrap();
+            assert_full_chain_reuse(&mut state);
             state.get_global("saved").unwrap();
             state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
             assert_eq!(state.to_number(-1).unwrap(), 73.0);
             state.set_top(0).unwrap();
+        } else {
+            // A host asking for 64 results pads on the shared stack.
+            let error = result.expect_err("padding fails after callee returned");
+            assert!(
+                matches!(
+                    error.kind(),
+                    dellingr::error::ErrorKind::StackOverflow { .. }
+                ),
+                "{kind}: {error:?}"
+            );
+            assert!(error.stack_trace().is_empty());
+            assert!(error.source_name().is_none());
+            assert_eq!(*notifications.lock().unwrap(), vec![error.to_string()]);
+            assert_eq!(state.get_top(), prefix + 1);
+            assert_eq!(state.to_number(-1).unwrap(), 73.0);
+            state.set_top(0).unwrap();
+            assert_full_chain_reuse(&mut state);
         }
         #[cfg(feature = "snapshot")]
         {

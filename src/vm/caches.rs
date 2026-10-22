@@ -223,9 +223,9 @@ mod tests {
 
         assert_eq!(calls.len(), 256);
         for (index, inst) in calls.iter().take(255).enumerate() {
-            assert_eq!(inst.tfor_cursor_slot(), Some(index as u8));
+            assert_eq!(inst.cache_slot(), Some(index as u8));
         }
-        assert_eq!(calls[255].tfor_cursor_slot(), None);
+        assert_eq!(calls[255].cache_slot(), None);
         assert_eq!(bc.tfor_cursor_slots, 255);
         assert_eq!(RuntimeCaches::new(&bc).tfor_cursor.len(), 255);
     }

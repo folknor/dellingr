@@ -46,10 +46,10 @@ is checked against every declared opcode by a unit test in `vm/frame.rs`.
 | `Negation` | 1 |
 | `TableCreation` | 1 |
 | `TableWrite` | 1 |
-| `ArrayElements` | encoded `A` |
+| `ArrayElements` | encoded count |
 
-A dynamic `SET_LIST` has encoded `A = 0`, so static analysis counts zero; at
-runtime it charges the live number of elements.
+A `SET_LIST` ending in a call or `...` has an open count, so static analysis
+counts zero for it; at runtime it charges the live number of elements.
 
 ## Free by design
 

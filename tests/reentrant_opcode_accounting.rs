@@ -65,7 +65,7 @@ const CASES: [ReentryCase; 8] = [
         expected_used: 4,
     },
     ReentryCase {
-        name: "SET_FIELD_AT with __newindex",
+        name: "multiple-assignment field store with __newindex",
         source: "local prior = left + right\nother.field, new_indexed.field = left, right",
         budget: 4,
         expected_used: 4,

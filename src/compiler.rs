@@ -5,7 +5,8 @@
     deny(clippy::panic, clippy::unreachable, clippy::expect_used)
 )]
 
-mod exp_desc;
+mod ast;
+mod codegen;
 mod lexer;
 mod parser;
 mod token;
@@ -21,7 +22,8 @@ use crate::instr::MAX_CACHE_SLOTS;
 /// Describes where an upvalue comes from when creating a closure.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum UpvalueDesc {
-    /// Capture a local variable from the immediately enclosing function.
+    /// Capture a local variable (its register) from the immediately
+    /// enclosing function.
     Local(u8),
     /// Capture an upvalue from the immediately enclosing function.
     Upvalue(u8),
@@ -50,7 +52,8 @@ pub(crate) struct Bytecode {
     /// Cache slot indices are baked into `OP_GET_GLOBAL` and `OP_SET_GLOBAL`
     /// instructions.
     pub(crate) global_cache_slots: u8,
-    /// Number of slots in this function's field lookup cache (`OP_GET_FIELD`).
+    /// Number of slots in this function's field lookup cache (`OP_GET_FIELD`
+    /// and `OP_SELF`).
     pub(crate) field_cache_slots: u8,
     /// Number of slots in this function's set-field lookup cache
     /// (`OP_SET_FIELD`).
@@ -58,7 +61,11 @@ pub(crate) struct Bytecode {
     /// Number of `pairs` cursor slots (`OP_TFOR_CALL`).
     pub(crate) tfor_cursor_slots: u8,
     pub(crate) num_params: u8,
+    /// The most non-parameter locals the function has in scope at once.
     pub(crate) num_locals: u8,
+    /// The registers a frame of this function reserves: parameters, locals
+    /// and temporaries.
+    pub(crate) max_stack: u16,
     pub(crate) nested: Vec<Arc<Bytecode>>,
     /// Describes the upvalues this function captures.
     pub(crate) upvalues: Vec<UpvalueDesc>,
@@ -89,8 +96,7 @@ impl Bytecode {
     /// this allocation policy on purpose; see `validate_bytecode`.
     ///
     /// Every cache-bearing operand is rewritten, whatever it held before, so
-    /// the pass is idempotent: an already-finalized `SET_FIELD` is allocated
-    /// again exactly like the offset-zero `SET_FIELD_AT` it came from.
+    /// the pass is idempotent.
     fn assign_cache_slots(&mut self) {
         /// Allocate the next slot of one cache family, or `None` once the
         /// family holds `MAX_CACHE_SLOTS` slots.
@@ -114,36 +120,21 @@ impl Bytecode {
         let mut tfor_cursor_len = 0usize;
 
         for inst in &mut self.code {
-            match inst.opcode() {
-                Instr::OP_GET_GLOBAL => {
-                    // An out-of-range literal id has no slot entry; it stays
-                    // uncached and the verifier rejects it right after.
-                    let slot = global_slots
-                        .get_mut(usize::from(inst.bx()))
-                        .and_then(|entry| *entry.get_or_insert_with(|| allocate(&mut global_len)));
-                    *inst = Instr::get_global(inst.bx(), slot);
-                }
+            let slot = match inst.opcode() {
+                // An out-of-range literal id has no slot entry; it stays
+                // uncached and the verifier rejects it right after.
+                Instr::OP_GET_GLOBAL => global_slots
+                    .get_mut(usize::from(inst.b()))
+                    .and_then(|entry| *entry.get_or_insert_with(|| allocate(&mut global_len))),
                 // Each SET_GLOBAL site takes a fresh slot of the shared global
                 // cache, never one a GET_GLOBAL name owns.
-                Instr::OP_SET_GLOBAL => {
-                    *inst = Instr::set_global(inst.bx(), allocate(&mut global_len));
-                }
-                Instr::OP_GET_FIELD => {
-                    *inst = Instr::get_field(inst.bx(), allocate(&mut field_len));
-                }
-                Instr::OP_SET_FIELD => {
-                    *inst = Instr::set_field(inst.bx(), allocate(&mut set_field_len));
-                }
-                // A nonzero SET_FIELD_AT offset names a deeper receiver and is
-                // never cached.
-                Instr::OP_SET_FIELD_AT if inst.a() == 0 => {
-                    *inst = Instr::set_field(inst.bx(), allocate(&mut set_field_len));
-                }
-                Instr::OP_TFOR_CALL => {
-                    *inst = Instr::tfor_call(inst.a(), inst.b(), allocate(&mut tfor_cursor_len));
-                }
-                _ => {}
-            }
+                Instr::OP_SET_GLOBAL => allocate(&mut global_len),
+                Instr::OP_GET_FIELD | Instr::OP_SELF => allocate(&mut field_len),
+                Instr::OP_SET_FIELD => allocate(&mut set_field_len),
+                Instr::OP_TFOR_CALL => allocate(&mut tfor_cursor_len),
+                _ => continue,
+            };
+            *inst = inst.with_cache_slot(slot);
         }
 
         // `allocate` caps every family at MAX_CACHE_SLOTS, which fits a u8.
@@ -156,76 +147,6 @@ impl Bytecode {
 
 fn internal_error(fault: error::CompilerFault) -> error::Error {
     error::Error::internal_fault(error::InternalFault::Compiler(fault))
-}
-
-fn transfer_with_offset(inst: Instr, offset: i16) -> Option<Instr> {
-    Instr::is_transfer(inst.opcode()).then(|| Instr::op_a_sbx(inst.opcode(), inst.a(), offset))
-}
-
-fn checked_remapped_offset(offset: i64) -> Result<i16> {
-    i16::try_from(offset)
-        .map_err(|_| internal_error(error::CompilerFault::RemappedJumpOffsetOutOfRange))
-}
-
-/// Remove compiler-only no-ops, then remap every control-transfer offset.
-/// Close-upvalue instructions that cannot observe an open upvalue are never
-/// emitted (or are NOP'd at loop exit) by the parser's per-scope capture log.
-fn strip_dead_instructions(bc: &mut Bytecode) -> Result<()> {
-    let remove: Vec<bool> = bc
-        .code
-        .iter()
-        .map(|inst| inst.opcode() == Instr::OP_NOP)
-        .collect();
-    if !remove.iter().any(|removed| *removed) {
-        return Ok(());
-    }
-
-    let old_len = bc.code.len();
-    if bc.line_info.len() != old_len {
-        return Err(internal_error(
-            error::CompilerFault::MissingLineForInstruction,
-        ));
-    }
-    let mut map = Vec::with_capacity(old_len + 1);
-    let mut retained_len = 0usize;
-    map.push(retained_len);
-    for removed in &remove {
-        retained_len += usize::from(!*removed);
-        map.push(retained_len);
-    }
-
-    for (source, inst) in bc.code.iter_mut().enumerate() {
-        let Some(_) = transfer_with_offset(*inst, 0) else {
-            continue;
-        };
-        let old_next = source + 1;
-        let old_target = if inst.sbx() >= 0 {
-            old_next.checked_add(inst.sbx() as usize)
-        } else {
-            old_next.checked_sub(inst.sbx().unsigned_abs() as usize)
-        }
-        .ok_or_else(|| internal_error(error::CompilerFault::JumpTargetOutOfRange))?;
-        if old_target >= old_len {
-            return Err(internal_error(error::CompilerFault::JumpTargetOutOfRange));
-        }
-        let new_target = map[old_target];
-        if new_target >= retained_len {
-            return Err(internal_error(error::CompilerFault::RemappedJumpBeyondCode));
-        }
-        let new_offset = checked_remapped_offset(new_target as i64 - map[old_next] as i64)?;
-        *inst = transfer_with_offset(*inst, new_offset)
-            .ok_or_else(|| internal_error(error::CompilerFault::TransferOpcodeExpected))?;
-    }
-
-    let old_code = std::mem::take(&mut bc.code);
-    let old_line_info = std::mem::take(&mut bc.line_info);
-    for ((inst, line), removed) in old_code.into_iter().zip(old_line_info).zip(remove) {
-        if !removed {
-            bc.code.push(inst);
-            bc.line_info.push(line);
-        }
-    }
-    Ok(())
 }
 
 /// The one compile path: Lua source bytes plus an optional, byte-exact chunk
@@ -288,25 +209,14 @@ fn finalize_at_depth(bc: &mut Bytecode, depth: usize) -> Result<()> {
     if bc.code.len() != bc.line_info.len() {
         return Err(internal_error(error::CompilerFault::LineInfoDesynced));
     }
-    strip_dead_instructions(bc).map_err(|error| error.with_source_name(bc.source.clone()))?;
-    debug_assert_eq!(
-        bc.code.len(),
-        bc.line_info.len(),
-        "line_info desynced from code after instruction stripping"
-    );
-    debug_assert!(
-        bc.code.iter().all(|inst| inst.opcode() != Instr::OP_NOP),
-        "finalized compiler output must not contain OP_NOP"
-    );
     bc.assign_cache_slots();
     // Runs in release too, and the result is propagated rather than dropped.
     // Verifying our own fresh output guards against a compiler bug, and the
     // only reason to pay for it is to act on it: a debug-only assertion would
-    // let a release build emit stack-imbalanced bytecode and discover it later
-    // as a VM panic, which is precisely the failure mode this crate refuses.
-    // Reporting it as a compile error keeps a compiler bug catchable instead of
-    // fatal. Line metadata is checked before stripping so a mismatch cannot
-    // silently truncate the instruction stream while the vectors are zipped.
+    // let a release build emit malformed bytecode and discover it later as a
+    // VM panic, which is precisely the failure mode this crate refuses.
+    // Reporting it as a compile error keeps a compiler bug catchable instead
+    // of fatal.
     verify::validate_bytecode(bc).map_err(|error| validation_error(bc, error))?;
     for child in &bc.nested {
         verify::validate_child(bc, child.as_ref()).map_err(|error| validation_error(bc, error))?;
@@ -325,33 +235,37 @@ fn finalize_at_depth(bc: &mut Bytecode, depth: usize) -> Result<()> {
 mod runtime_cache_tests {
     use super::*;
     use crate::error::{ErrorKind, SyntaxError};
-    use crate::limits::{MAX_SYNTAX_DEPTH, MAX_VERIFIER_MARKER_DEPTH, SYNTAX_SUFFIX_COST};
+    use crate::limits::{MAX_SYNTAX_DEPTH, SYNTAX_SUFFIX_COST};
 
-    /// The dynamic shapes the verifier's `Known`/`Dyn` transitions and marker
-    /// stacks exist for. If the corpus stops containing one of these, the
-    /// acceptance proof silently stops covering the interesting half of the
-    /// analysis, so the corpus test pins that each was actually seen.
+    /// The open-result shapes the verifier's producer and consumer rules exist
+    /// for. If the corpus stops containing one of these, the acceptance proof
+    /// silently stops covering them, so the corpus test pins that each was
+    /// actually seen.
     #[derive(Default)]
-    struct DynamicShapes {
-        mark_call_base: bool,
-        dynamic_call: bool,
-        new_table_tracked: bool,
-        dynamic_set_list: bool,
+    struct OpenShapes {
+        open_call_args: bool,
+        open_call_results: bool,
+        open_set_list: bool,
         return_all: bool,
         vararg_all: bool,
     }
 
-    fn assert_verified_tree(bytecode: &Bytecode, seen: &mut DynamicShapes) {
+    fn assert_verified_tree(bytecode: &Bytecode, seen: &mut OpenShapes) {
         verify::validate_bytecode(bytecode)
             .expect("compiler output must pass bytecode verification");
         for instruction in &bytecode.code {
             match instruction.opcode() {
-                Instr::OP_MARK_CALL_BASE => seen.mark_call_base = true,
-                Instr::OP_NEW_TABLE_TRACKED => seen.new_table_tracked = true,
-                Instr::OP_CALL if instruction.call_args() == crate::ArgCount::Dynamic => {
-                    seen.dynamic_call = true;
+                Instr::OP_CALL => {
+                    if instruction.call_args() == crate::ArgCount::Dynamic {
+                        seen.open_call_args = true;
+                    }
+                    if instruction.call_results() == crate::RetCount::All {
+                        seen.open_call_results = true;
+                    }
                 }
-                Instr::OP_SET_LIST if instruction.a() == 0 => seen.dynamic_set_list = true,
+                Instr::OP_SET_LIST if instruction.set_list_count().is_none() => {
+                    seen.open_set_list = true;
+                }
                 Instr::OP_RETURN if instruction.return_count() == crate::RetCount::All => {
                     seen.return_all = true;
                 }
@@ -398,34 +312,14 @@ mod runtime_cache_tests {
         (depth, bytecode)
     }
 
-    fn marker_peak(
-        bytecode: &Bytecode,
-        open_opcode: u8,
-        closes_marker: impl Fn(&Instr) -> bool,
-    ) -> usize {
-        let mut marker_depth = 0usize;
-        let mut peak_marker_depth = 0usize;
-        for instruction in &bytecode.code {
-            if instruction.opcode() == open_opcode {
-                marker_depth += 1;
-                peak_marker_depth = peak_marker_depth.max(marker_depth);
-            } else if closes_marker(instruction) {
-                assert!(marker_depth > 0, "closing opcodes must have a marker");
-                marker_depth -= 1;
-            }
-        }
-        assert_eq!(marker_depth, 0, "all markers must be closed");
-        peak_marker_depth
-    }
-
     #[test]
-    fn deepest_nested_programs_fit_verifier_marker_limit() {
+    fn deepest_nested_programs_compile_within_the_test_stack() {
         std::thread::Builder::new()
             .stack_size(parser::DEEP_PARSE_TEST_STACK_BYTES)
             .spawn(deepest_nested_programs_body)
-            .expect("spawning the marker limit test thread should succeed")
+            .expect("spawning the nesting test thread should succeed")
             .join()
-            .expect("marker limit test thread should not panic");
+            .expect("nesting test thread should not panic");
     }
 
     fn deepest_nested_programs_body() {
@@ -440,34 +334,42 @@ mod runtime_cache_tests {
             (MAX_SYNTAX_DEPTH as usize - 1) / (2 + SYNTAX_SUFFIX_COST as usize),
             "the call chain must stop where the syntax budget says it does"
         );
-        let call_marker_peak = marker_peak(&call_chain, Instr::OP_MARK_CALL_BASE, |instruction| {
-            instruction.opcode() == Instr::OP_CALL
-                && instruction.call_args() == crate::ArgCount::Dynamic
-        });
-        assert!(
-            call_marker_peak <= MAX_VERIFIER_MARKER_DEPTH,
-            "compiler emitted {call_marker_peak} nested call markers at call depth {call_depth}"
-        );
+        verify::validate_bytecode(&call_chain).expect("deep call chain verifies");
 
-        let (table_depth, table_chain) = deepest_accepted_program(|depth| {
+        let (_, table_chain) = deepest_accepted_program(|depth| {
             let mut expression = "{g()}".to_string();
             for _ in 1..depth {
                 expression = format!("{{f({expression})}}");
             }
             format!("return {expression}")
         });
-        let table_marker_peak =
-            marker_peak(&table_chain, Instr::OP_NEW_TABLE_TRACKED, |instruction| {
-                instruction.opcode() == Instr::OP_SET_LIST && instruction.a() == 0
-            });
-        assert!(
-            table_marker_peak <= MAX_VERIFIER_MARKER_DEPTH,
-            "compiler emitted {table_marker_peak} nested table markers at table depth {table_depth}"
-        );
+        verify::validate_bytecode(&table_chain).expect("deep constructor chain verifies");
     }
 
     #[test]
-    fn compiler_examples_pass_stack_discipline_verification() {
+    fn long_flat_chains_compile_without_deep_recursion() {
+        // Operator, suffix and elseif chains are flat in the tree, so code
+        // generation walks them iteratively however long they are.
+        std::thread::Builder::new()
+            .stack_size(parser::DEEP_PARSE_TEST_STACK_BYTES)
+            .spawn(|| {
+                let sum = format!("local x = 1; return x{}", "+x".repeat(20_000));
+                compile(&sum, None).expect("long addition chain compiles");
+                let fields = format!("local t = {{}}; return t{}", ".a".repeat(20_000));
+                compile(&fields, None).expect("long field chain compiles");
+                let arms = format!(
+                    "local x = 1; if x == 0 then x = 0 {} end",
+                    "elseif x == 1 then x = 1 ".repeat(5_000)
+                );
+                compile(&arms, None).expect("long elseif chain compiles");
+            })
+            .expect("spawning the chain test thread should succeed")
+            .join()
+            .expect("chain test thread should not panic");
+    }
+
+    #[test]
+    fn compiler_examples_pass_bytecode_verification() {
         let paths = examples_corpus::example_corpus();
         // Without this the corpus proof passes vacuously if the walk finds
         // nothing, which is exactly the failure mode that would let a verifier
@@ -478,18 +380,31 @@ mod runtime_cache_tests {
              compiler output; found only {} sources",
             paths.len()
         );
-        let mut seen = DynamicShapes::default();
+        let mut seen = OpenShapes::default();
         for path in paths {
             let source = std::fs::read_to_string(&path).expect("example source must be readable");
             let bytecode = compile(&source, None).expect("example source must compile");
             assert_verified_tree(&bytecode, &mut seen);
         }
-        assert!(seen.mark_call_base, "corpus lost OP_MARK_CALL_BASE");
-        assert!(seen.dynamic_call, "corpus lost dynamic OP_CALL");
-        assert!(seen.new_table_tracked, "corpus lost OP_NEW_TABLE_TRACKED");
-        assert!(seen.dynamic_set_list, "corpus lost dynamic OP_SET_LIST");
+        assert!(
+            seen.open_call_args,
+            "corpus lost a call with open arguments"
+        );
+        assert!(
+            seen.open_call_results,
+            "corpus lost a call with all results"
+        );
+        assert!(seen.open_set_list, "corpus lost an open OP_SET_LIST");
         assert!(seen.return_all, "corpus lost OP_RETURN with RetCount::All");
         assert!(seen.vararg_all, "corpus lost OP_VARARG with all varargs");
+    }
+
+    fn opcodes(bc: &Bytecode, opcode: u8) -> Vec<Instr> {
+        bc.code
+            .iter()
+            .copied()
+            .filter(|inst| inst.opcode() == opcode)
+            .collect()
     }
 
     #[test]
@@ -505,49 +420,31 @@ mod runtime_cache_tests {
         )
         .unwrap();
 
-        let get_globals: Vec<_> = bc
-            .code
-            .iter()
-            .filter(|inst| inst.opcode() == Instr::OP_GET_GLOBAL)
-            .collect();
-
+        let get_globals = opcodes(&bc, Instr::OP_GET_GLOBAL);
         assert_eq!(get_globals.len(), 3);
-        let set_globals: Vec<_> = bc
-            .code
-            .iter()
-            .filter(|inst| inst.opcode() == Instr::OP_SET_GLOBAL)
-            .collect();
-
+        let set_globals = opcodes(&bc, Instr::OP_SET_GLOBAL);
         assert_eq!(set_globals.len(), 2);
         // 2 distinct read names (shared by literal) + 2 fresh SET sites; the
         // two non-global literals ("not a global", "field") hold no slot -
         // they would push this to 6 if literal count drove allocation.
         assert_eq!(bc.global_cache_slots, 4);
-        assert_eq!(get_globals[0].global_cache_slot(), Some(0));
-        assert_eq!(get_globals[1].global_cache_slot(), Some(0));
-        assert_eq!(get_globals[2].global_cache_slot(), Some(2));
-        assert_eq!(set_globals[0].global_cache_slot(), Some(1));
-        assert_eq!(set_globals[1].global_cache_slot(), Some(3));
+        assert_eq!(get_globals[0].cache_slot(), Some(0));
+        assert_eq!(get_globals[1].cache_slot(), Some(0));
+        assert_eq!(get_globals[2].cache_slot(), Some(2));
+        assert_eq!(set_globals[0].cache_slot(), Some(1));
+        assert_eq!(set_globals[1].cache_slot(), Some(3));
     }
 
     #[test]
     fn global_set_cache_uses_biased_fresh_slots_and_excludes_builtins() {
         let bc = compile("foo = 1; foo = 2; table = {}", None).expect("source compiles");
-        let set_globals: Vec<_> = bc
-            .code
-            .iter()
-            .filter(|inst| inst.opcode() == Instr::OP_SET_GLOBAL)
-            .collect();
+        let set_globals = opcodes(&bc, Instr::OP_SET_GLOBAL);
 
         assert_eq!(bc.global_cache_slots, 2);
         assert_eq!(set_globals.len(), 2);
-        assert_eq!(set_globals[0].global_cache_slot(), Some(0));
-        assert_eq!(set_globals[1].global_cache_slot(), Some(1));
-        assert!(
-            bc.code
-                .iter()
-                .any(|inst| inst.opcode() == Instr::OP_SET_BUILTIN)
-        );
+        assert_eq!(set_globals[0].cache_slot(), Some(0));
+        assert_eq!(set_globals[1].cache_slot(), Some(1));
+        assert!(!opcodes(&bc, Instr::OP_SET_BUILTIN).is_empty());
     }
 
     #[test]
@@ -557,46 +454,41 @@ mod runtime_cache_tests {
             .collect::<Vec<_>>()
             .join("; ");
         let bc = compile(source, None).expect("source compiles");
-        let set_globals: Vec<_> = bc
-            .code
-            .iter()
-            .filter(|inst| inst.opcode() == Instr::OP_SET_GLOBAL)
-            .collect();
+        let set_globals = opcodes(&bc, Instr::OP_SET_GLOBAL);
 
         assert_eq!(usize::from(bc.global_cache_slots), MAX_CACHE_SLOTS);
         assert_eq!(set_globals.len(), 256);
         for (idx, inst) in set_globals.iter().take(255).enumerate() {
-            assert_eq!(inst.global_cache_slot(), Some(idx as u8));
+            assert_eq!(inst.cache_slot(), Some(idx as u8));
         }
-        assert_eq!(set_globals[255].global_cache_slot(), None);
+        assert_eq!(set_globals[255].cache_slot(), None);
     }
 
     #[test]
-    fn field_lookup_cache_tracks_get_field_call_sites() {
+    fn field_lookup_cache_tracks_get_field_and_method_sites() {
         let bc = compile(
             r#"
             local t = { x = 1, y = 2 }
-            return t.x + t.x + t.y
+            local s = t.x + t.x + t.y
+            t:m()
             "#,
             None,
         )
         .unwrap();
 
-        let get_fields: Vec<_> = bc
-            .code
-            .iter()
-            .filter(|inst| inst.opcode() == Instr::OP_GET_FIELD)
-            .collect();
-
+        let get_fields = opcodes(&bc, Instr::OP_GET_FIELD);
+        let selves = opcodes(&bc, Instr::OP_SELF);
         assert_eq!(get_fields.len(), 3);
-        assert_eq!(bc.field_cache_slots, 3);
+        assert_eq!(selves.len(), 1);
+        assert_eq!(bc.field_cache_slots, 4);
         for (slot, inst) in get_fields.iter().enumerate() {
-            assert_eq!(inst.field_cache_slot(), Some(slot as u8));
+            assert_eq!(inst.cache_slot(), Some(slot as u8));
         }
+        assert_eq!(selves[0].cache_slot(), Some(3));
     }
 
     #[test]
-    fn set_field_lookup_cache_tracks_set_field_call_sites() {
+    fn set_field_lookup_cache_tracks_set_field_sites() {
         let bc = compile(
             r#"
             local t = { x = 0, y = 0 }
@@ -608,16 +500,11 @@ mod runtime_cache_tests {
         )
         .unwrap();
 
-        let set_fields: Vec<_> = bc
-            .code
-            .iter()
-            .filter(|inst| inst.opcode() == Instr::OP_SET_FIELD)
-            .collect();
-
+        let set_fields = opcodes(&bc, Instr::OP_SET_FIELD);
         assert_eq!(set_fields.len(), 3);
         assert_eq!(bc.set_field_cache_slots, 3);
         for (slot, inst) in set_fields.iter().enumerate() {
-            assert_eq!(inst.set_field_cache_slot(), Some(slot as u8));
+            assert_eq!(inst.cache_slot(), Some(slot as u8));
         }
     }
 
@@ -629,125 +516,6 @@ mod runtime_cache_tests {
         twice.assign_cache_slots();
         assert_eq!(twice, once);
         assert!(once.set_field_cache_slots > 0 && once.tfor_cursor_slots == 1);
-    }
-
-    fn transfer(opcode: u8, offset: i16) -> Instr {
-        assert!(Instr::is_transfer(opcode));
-        let a = if matches!(
-            opcode,
-            Instr::OP_FOR_PREP | Instr::OP_FOR_LOOP | Instr::OP_TFOR_LOOP
-        ) {
-            7
-        } else {
-            0
-        };
-        Instr::op_a_sbx(opcode, a, offset)
-    }
-
-    #[test]
-    fn strip_remaps_every_transfer_forward_and_backward() {
-        for opcode in (u8::MIN..=u8::MAX).filter(|opcode| Instr::is_transfer(*opcode)) {
-            let expected_a = transfer(opcode, 0).a();
-            let mut forward = Bytecode {
-                code: vec![
-                    transfer(opcode, 2),
-                    Instr::nop(),
-                    Instr::push_nil(),
-                    Instr::ret(crate::RetCount::Fixed(0)),
-                ],
-                line_info: vec![10, 11, 12, 13],
-                ..Bytecode::default()
-            };
-            strip_dead_instructions(&mut forward).expect("forward transfer strips");
-            assert_eq!(forward.code[0].sbx(), 1, "opcode {opcode}");
-            assert_eq!(forward.code[0].a(), expected_a);
-            assert_eq!(forward.line_info, vec![10, 12, 13]);
-
-            let mut backward = Bytecode {
-                code: vec![
-                    Instr::push_nil(),
-                    Instr::nop(),
-                    Instr::push_nil(),
-                    transfer(opcode, -4),
-                    Instr::ret(crate::RetCount::Fixed(0)),
-                ],
-                line_info: vec![20, 21, 22, 23, 24],
-                ..Bytecode::default()
-            };
-            strip_dead_instructions(&mut backward).expect("backward transfer strips");
-            assert_eq!(backward.code[2].sbx(), -3, "opcode {opcode}");
-            assert_eq!(backward.code[2].a(), expected_a);
-            assert_eq!(backward.line_info, vec![20, 22, 23, 24]);
-        }
-    }
-
-    #[test]
-    fn strip_handles_removed_targets_and_consecutive_regions() {
-        let mut bytecode = Bytecode {
-            code: vec![
-                Instr::jump(2),
-                Instr::nop(),
-                Instr::nop(),
-                Instr::push_nil(),
-                Instr::ret(crate::RetCount::Fixed(0)),
-            ],
-            line_info: vec![1, 2, 3, 4, 5],
-            ..Bytecode::default()
-        };
-        strip_dead_instructions(&mut bytecode).expect("mixed dead region strips");
-        assert_eq!(
-            bytecode.code,
-            vec![
-                Instr::jump(0),
-                Instr::push_nil(),
-                Instr::ret(crate::RetCount::Fixed(0))
-            ]
-        );
-        assert_eq!(bytecode.line_info, vec![1, 4, 5]);
-
-        let mut removed_target = Bytecode {
-            code: vec![
-                Instr::jump(1),
-                Instr::push_nil(),
-                Instr::nop(),
-                Instr::push_nil(),
-                Instr::ret(crate::RetCount::Fixed(0)),
-            ],
-            line_info: vec![6, 7, 8, 9, 10],
-            ..Bytecode::default()
-        };
-        strip_dead_instructions(&mut removed_target).expect("removed target remaps");
-        assert_eq!(removed_target.code[0], Instr::jump(1));
-        assert_eq!(removed_target.line_info, vec![6, 7, 9, 10]);
-
-        let mut removal_before_endpoints = Bytecode {
-            code: vec![
-                Instr::nop(),
-                Instr::push_nil(),
-                Instr::jump(1),
-                Instr::push_nil(),
-                Instr::ret(crate::RetCount::Fixed(0)),
-            ],
-            line_info: vec![11, 12, 13, 14, 15],
-            ..Bytecode::default()
-        };
-        strip_dead_instructions(&mut removal_before_endpoints)
-            .expect("removal before endpoints remaps");
-        assert_eq!(removal_before_endpoints.code[1], Instr::jump(1));
-        assert_eq!(removal_before_endpoints.line_info, vec![12, 13, 14, 15]);
-
-        let mut close_kept = Bytecode {
-            code: vec![
-                Instr::close_upvalues(0),
-                Instr::nop(),
-                Instr::ret(crate::RetCount::Fixed(0)),
-            ],
-            line_info: vec![1, 2, 3],
-            ..Bytecode::default()
-        };
-        strip_dead_instructions(&mut close_kept).expect("nop strips beside a close");
-        assert_eq!(close_kept.code[0], Instr::close_upvalues(0));
-        assert_eq!(close_kept.line_info, vec![1, 3]);
     }
 
     #[test]
@@ -765,50 +533,10 @@ mod runtime_cache_tests {
         assert!(matches!(error.kind(), ErrorKind::InternalError(_)));
     }
 
-    #[test]
-    fn strip_rejects_bad_targets_and_unrepresentable_offsets() {
-        let mut bad_target = Bytecode {
-            code: vec![
-                Instr::jump(2),
-                Instr::nop(),
-                Instr::ret(crate::RetCount::Fixed(0)),
-            ],
-            line_info: vec![1, 2, 3],
-            ..Bytecode::default()
-        };
-        assert!(strip_dead_instructions(&mut bad_target).is_err());
-        assert!(checked_remapped_offset(i64::from(i16::MAX) + 1).is_err());
-    }
-
     fn assert_no_opcode_in_tree(bytecode: &Bytecode, opcode: u8) {
         assert!(bytecode.code.iter().all(|inst| inst.opcode() != opcode));
         for nested in &bytecode.nested {
             assert_no_opcode_in_tree(nested, opcode);
-        }
-    }
-
-    #[test]
-    fn fixed_calls_become_raw_nops_then_finalize_strips_them() {
-        let raw = parser::parse_unfinalized("f(1); obj:m(2)").expect("raw parser output compiles");
-        assert_eq!(
-            raw.code
-                .iter()
-                .filter(|inst| inst.opcode() == Instr::OP_NOP)
-                .count(),
-            2
-        );
-        let finalized = compile("f(1); obj:m(2)", None).expect("finalized output compiles");
-        assert_no_opcode_in_tree(&finalized, Instr::OP_NOP);
-
-        for source in ["local function f(...) end; f(...)", "f(g())"] {
-            let dynamic = parser::parse_unfinalized(source).expect("raw dynamic call compiles");
-            assert!(
-                dynamic
-                    .code
-                    .iter()
-                    .any(|inst| inst.opcode() == Instr::OP_MARK_CALL_BASE),
-                "{source} must retain the dynamic call marker"
-            );
         }
     }
 
@@ -821,32 +549,28 @@ mod runtime_cache_tests {
             None,
         )
         .expect("finalized nested functions compile");
-        assert_no_opcode_in_tree(&finalized.nested[0], Instr::OP_CLOSE_UPVALUES);
-        let closes: Vec<Instr> = finalized.nested[1]
-            .code
-            .iter()
-            .copied()
-            .filter(|inst| inst.opcode() == Instr::OP_CLOSE_UPVALUES)
-            .collect();
-        assert_eq!(closes, vec![Instr::close_upvalues(0)]);
+        assert_no_opcode_in_tree(&finalized.nested[0], Instr::OP_CLOSE);
+        let closes = opcodes(&finalized.nested[1], Instr::OP_CLOSE);
+        assert_eq!(closes, vec![Instr::close(0)]);
     }
 
     #[test]
     fn break_close_is_decided_at_loop_exit() {
         // The break precedes the loop's only capture textually, so deciding at
         // break emission would drop it; deciding at loop exit keeps it.
-        let raw = parser::parse_unfinalized(
+        let bc = compile(
             "while true do local z = 1; if z then break end; f = function() return z end end",
+            None,
         )
         .expect("break fixture compiles");
-        let closes: Vec<usize> = raw
+        let closes: Vec<usize> = bc
             .code
             .iter()
             .enumerate()
-            .filter(|(_, inst)| inst.opcode() == Instr::OP_CLOSE_UPVALUES)
+            .filter(|(_, inst)| inst.opcode() == Instr::OP_CLOSE)
             .map(|(index, _)| index)
             .collect();
-        let first_closure = raw
+        let first_closure = bc
             .code
             .iter()
             .position(|inst| inst.opcode() == Instr::OP_CLOSURE)
@@ -858,20 +582,11 @@ mod runtime_cache_tests {
     }
 
     #[test]
-    fn stripping_preserves_costs_and_decreases_only_instruction_counts() {
-        // The uncaptured loop's break close is NOP'd by the parser.
-        let mut raw = parser::parse_unfinalized(
-            "local x = 0; for i = 1, 3 do if i == 2 then break end; x = x + i end",
-        )
-        .expect("raw cost fixture compiles");
-        let before = crate::ScopeCost::analyze_chunk(&raw, "main".to_string());
-        finalize(&mut raw).expect("cost fixture finalizes");
-        let after = crate::ScopeCost::analyze_chunk(&raw, "main".to_string());
-        assert_eq!(after.own_cost, before.own_cost);
-        assert_eq!(after.total_cost, before.total_cost);
-        assert_eq!(after.arithmetic_ops(), before.arithmetic_ops());
-        assert_eq!(after.table_creations(), before.table_creations());
-        assert_eq!(after.table_writes(), before.table_writes());
-        assert!(after.instructions < before.instructions);
+    fn frames_reserve_parameters_locals_and_temporaries() {
+        let bc = compile("local a, b = 1, 2; return a + b * (a - b)", None).expect("compiles");
+        // Two locals plus at least one temporary for the nested operands.
+        assert!(usize::from(bc.max_stack) >= 3);
+        let empty = compile("return function(x, y) end", None).expect("compiles");
+        assert_eq!(empty.nested[0].max_stack, 2);
     }
 }

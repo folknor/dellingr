@@ -15,7 +15,7 @@
 use std::fmt;
 
 use crate::compiler::{Bytecode, UpvalueDesc};
-use crate::instr::{Instr, RetCount};
+use crate::instr::{ArgCount, ArithOp, ArithOperands, Instr, RetCount};
 
 /// A borrowed, displayable bytecode listing of a [`Program`](crate::Program).
 ///
@@ -58,8 +58,8 @@ fn write_function(f: &mut fmt::Formatter<'_>, bc: &Bytecode, path: &mut String) 
     }
     writeln!(
         f,
-        " params={} vararg={} local_slots={}",
-        bc.num_params, bc.is_vararg, bc.num_locals
+        " params={} vararg={} local_slots={} registers={}",
+        bc.num_params, bc.is_vararg, bc.num_locals, bc.max_stack
     )?;
     writeln!(
         f,
@@ -152,52 +152,68 @@ fn write_annotation(
     let mut notes = Notes { started: false };
     let op = inst.opcode();
 
-    // Literal-pool operands in Bx (the verifier's set of string-literal ops).
+    let write_number =
+        |f: &mut fmt::Formatter<'_>, idx: u16| match bc.number_literals.get(usize::from(idx)) {
+            Some(n) => write!(f, "{n:?}"),
+            None => f.write_str("<out of range>"),
+        };
+
+    // Literal-pool operands, in the field each opcode keeps them in.
     match op {
-        Instr::OP_PUSH_NUM => {
+        Instr::OP_LOAD_NUM => {
             notes.next(f)?;
-            match bc.number_literals.get(usize::from(inst.bx())) {
-                Some(n) => write!(f, "{n:?}")?,
-                None => f.write_str("<out of range>")?,
-            }
+            write_number(f, inst.b())?;
         }
-        Instr::OP_PUSH_STRING
+        Instr::OP_LOAD_STR
         | Instr::OP_GET_GLOBAL
         | Instr::OP_SET_GLOBAL
-        | Instr::OP_GET_FIELD
         | Instr::OP_SET_FIELD
         | Instr::OP_INIT_FIELD
-        | Instr::OP_INIT_FIELD_PINNED
-        | Instr::OP_SET_FIELD_AT => {
+        | Instr::OP_INIT_FIELD_PINNED => {
             notes.next(f)?;
-            write_string_ref(f, bc, inst.bx())?;
+            write_string_ref(f, bc, inst.b())?;
+        }
+        Instr::OP_GET_FIELD | Instr::OP_SELF => {
+            notes.next(f)?;
+            write_string_ref(f, bc, inst.c())?;
         }
         Instr::OP_NEW_TABLE_TEMPLATE => {
             notes.next(f)?;
-            write!(f, "template {}", inst.a())?;
+            write!(f, "template {}", inst.b())?;
         }
         Instr::OP_CLOSURE => {
             notes.next(f)?;
-            if usize::from(inst.a()) < bc.nested.len() {
-                write!(f, "function {path}/{}", inst.a())?;
+            if usize::from(inst.b()) < bc.nested.len() {
+                write!(f, "function {path}/{}", inst.b())?;
             } else {
                 f.write_str("function <out of range>")?;
             }
         }
-        _ => {}
+        _ => match ArithOp::decode(op) {
+            Some((_, ArithOperands::RegConst)) => {
+                notes.next(f)?;
+                write_number(f, inst.c())?;
+            }
+            Some((_, ArithOperands::ConstReg)) => {
+                notes.next(f)?;
+                write_number(f, inst.b())?;
+            }
+            _ => {}
+        },
     }
 
-    // Cache operands, decoded by `Instr`'s cache-slot decoders.
-    let cache = match op {
-        Instr::OP_GET_GLOBAL | Instr::OP_SET_GLOBAL => Some(inst.global_cache_slot()),
-        Instr::OP_GET_FIELD => Some(inst.field_cache_slot()),
-        Instr::OP_SET_FIELD => Some(inst.set_field_cache_slot()),
-        Instr::OP_TFOR_CALL => Some(inst.tfor_cursor_slot()),
-        _ => None,
-    };
-    if let Some(cache) = cache {
+    // Cache operands, decoded by `Instr`'s cache-slot decoder.
+    if matches!(
+        op,
+        Instr::OP_GET_GLOBAL
+            | Instr::OP_SET_GLOBAL
+            | Instr::OP_GET_FIELD
+            | Instr::OP_SELF
+            | Instr::OP_SET_FIELD
+            | Instr::OP_TFOR_CALL
+    ) {
         notes.next(f)?;
-        match cache {
+        match inst.cache_slot() {
             Some(slot) => write!(f, "cache slot {slot}")?,
             None => f.write_str("uncached")?,
         }
@@ -208,23 +224,36 @@ fn write_annotation(
             notes.next(f)?;
             f.write_str("all values")?;
         }
-        Instr::OP_SET_LIST if inst.a() == 0 => {
+        Instr::OP_RETURN if inst.return_count() == RetCount::All => {
             notes.next(f)?;
-            f.write_str("dynamic count")?;
+            f.write_str("all values")?;
+        }
+        Instr::OP_SET_LIST if inst.set_list_count().is_none() => {
+            notes.next(f)?;
+            f.write_str("open count")?;
+        }
+        Instr::OP_CALL => {
+            if inst.call_args() == ArgCount::Dynamic {
+                notes.next(f)?;
+                f.write_str("open arguments")?;
+            }
+            if inst.call_results() == RetCount::All {
+                notes.next(f)?;
+                f.write_str("all results")?;
+            }
+            if inst.call_is_method() {
+                notes.next(f)?;
+                f.write_str("method")?;
+            }
         }
         _ => {}
     }
 
     if Instr::is_transfer(op) {
         notes.next(f)?;
-        let offset = inst.sbx();
-        let target = pc.checked_add(1).and_then(|next| {
-            if offset >= 0 {
-                next.checked_add(offset as usize)
-            } else {
-                next.checked_sub(offset.unsigned_abs() as usize)
-            }
-        });
+        let target = pc
+            .checked_add(1)
+            .and_then(|next| next.checked_add_signed(inst.sj() as isize));
         match target {
             Some(target) if target < bc.code.len() => write!(f, "target={target}")?,
             _ => f.write_str("target=<out of range>")?,
@@ -263,15 +292,16 @@ mod tests {
     #[test]
     fn cache_slots_are_named() {
         let bc = with_code(vec![
-            Instr::get_global(0, None),
-            Instr::get_global(0, Some(254)),
-            Instr::set_global(0, None),
-            Instr::set_global(0, Some(254)),
-            Instr::get_field(0, None),
-            Instr::get_field(0, Some(3)),
-            Instr::set_field(0, None),
+            Instr::get_global(0, 0, None),
+            Instr::get_global(0, 0, Some(254)),
+            Instr::set_global(0, 0, None),
+            Instr::set_global(0, 0, Some(254)),
+            Instr::get_field(0, 0, 0, None),
+            Instr::get_field(0, 0, 0, Some(3)),
+            Instr::set_field(0, 0, 0, None),
             Instr::tfor_call(0, 1, None),
             Instr::tfor_call(0, 1, Some(254)),
+            Instr::self_(0, 0, 0, Some(5)),
         ]);
         assert_eq!(annotate(&bc, 0), "  ; \"x\\n\\xff\", uncached");
         assert_eq!(annotate(&bc, 1), "  ; \"x\\n\\xff\", cache slot 254");
@@ -282,25 +312,28 @@ mod tests {
         assert_eq!(annotate(&bc, 6), "  ; \"x\\n\\xff\", uncached");
         assert_eq!(annotate(&bc, 7), "  ; uncached");
         assert_eq!(annotate(&bc, 8), "  ; cache slot 254");
+        assert_eq!(annotate(&bc, 9), "  ; \"x\\n\\xff\", cache slot 5");
     }
 
     #[test]
     fn count_sentinels_pools_and_children_are_named() {
         let bc = with_code(vec![
-            Instr::vararg(RetCount::All),
-            Instr::vararg(RetCount::Fixed(2)),
-            Instr::set_list_batch(0, 1),
-            Instr::set_list_batch(3, 0),
-            Instr::push_num(0),
-            Instr::push_num(9),
-            Instr::closure(0),
-            Instr::closure(1),
-            Instr::new_table_template(0),
-            Instr::ret(RetCount::Fixed(0)),
+            Instr::vararg(0, RetCount::All),
+            Instr::vararg(0, RetCount::Fixed(2)),
+            Instr::set_list(0, None, 1),
+            Instr::set_list(0, Some(3), 0),
+            Instr::load_num(0, 0),
+            Instr::load_num(0, 9),
+            Instr::closure(0, 0),
+            Instr::closure(0, 1),
+            Instr::new_table_template(0, 0),
+            Instr::ret(0, RetCount::Fixed(0)),
+            Instr::call(0, ArgCount::Dynamic, RetCount::All, true),
+            Instr::arith(ArithOp::Add, ArithOperands::RegConst, 0, 1, 0),
         ]);
         assert_eq!(annotate(&bc, 0), "  ; all values");
         assert_eq!(annotate(&bc, 1), "");
-        assert_eq!(annotate(&bc, 2), "  ; dynamic count");
+        assert_eq!(annotate(&bc, 2), "  ; open count");
         assert_eq!(annotate(&bc, 3), "");
         assert_eq!(annotate(&bc, 4), "  ; -0.0");
         assert_eq!(annotate(&bc, 5), "  ; <out of range>");
@@ -308,6 +341,8 @@ mod tests {
         assert_eq!(annotate(&bc, 7), "  ; function <out of range>");
         assert_eq!(annotate(&bc, 8), "  ; template 0");
         assert_eq!(annotate(&bc, 9), "");
+        assert_eq!(annotate(&bc, 10), "  ; open arguments, all results, method");
+        assert_eq!(annotate(&bc, 11), "  ; -0.0");
     }
 
     #[test]
@@ -315,7 +350,7 @@ mod tests {
         let bc = with_code(vec![
             Instr::jump(1),
             Instr::for_prep(0, 2),
-            Instr::branch_false_less(-3),
+            Instr::branch_compare(crate::instr::CompareOp::Lt, 0, 1, -3),
             Instr::for_loop(0, -4),
             Instr::tfor_loop(0, -5),
             Instr::jump(-7),
