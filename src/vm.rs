@@ -115,9 +115,10 @@ pub(super) fn mark_gc_roots(state: &State, worklist: &mut Vec<ObjectPtr>) {
         entry.runtime.literals.mark_reachable(&state.heap, worklist);
     }
     state.transient_roots.mark_reachable(&state.heap, worklist);
-    for call in &state.call_stack {
-        call.closure.mark_reachable(&state.heap, worklist);
-        call.varargs.mark_reachable(&state.heap, worklist);
+    // The executing closures need no entry here: each sits in its function
+    // slot on the value stack, just below its frame, until it returns.
+    for varargs in &state.vararg_stack {
+        varargs.mark_reachable(&state.heap, worklist);
     }
     state.registry.mark_reachable(&state.heap, worklist);
     // Event names live for the whole State so dispatch never interns them.
@@ -161,7 +162,9 @@ pub(super) fn mark_gc_roots(state: &State, worklist: &mut Vec<ObjectPtr>) {
 /// One active Lua activation. `State::call_stack` holds exactly one per
 /// active Lua function call, innermost last, across every dispatch-loop
 /// invocation; tracebacks, `print` locations and the bytecode-cache sweep
-/// read it, and `mark_gc_roots` roots the values it owns.
+/// read it. The hot frame
+/// state of an activation is not here: each dispatch-loop invocation keeps
+/// its frames in a stack of its own (see `State::run_invocation`).
 pub(super) struct CallInfo {
     /// The bytecode being executed.
     pub(super) bytecode: Arc<Bytecode>,
@@ -169,17 +172,9 @@ pub(super) struct CallInfo {
     /// re-enter Lua or call a callback (see `Frame::record_call_site`). Not
     /// the live instruction pointer of the executing frame.
     pub(super) ip: usize,
-    /// The closure value being executed. Rooted here because the callee was
-    /// removed from the value stack, and its upvalue slots live only as long
-    /// as some closure holding them is reachable.
-    pub(super) closure: Val,
-    /// Extra arguments of a vararg function, read by `OP_VARARG`. Rooted.
-    pub(super) varargs: Vec<Val>,
-    /// The hot frame state of this activation while it is a suspended caller
-    /// inside the same dispatch-loop invocation as its callee. `None` while
-    /// the frame executes: the innermost activation of each invocation lives
-    /// in that loop's local `Frame`.
-    pub(in crate::vm) suspended: Option<frame::Frame>,
+    /// Whether this activation owns the top entry of `State::vararg_stack`
+    /// at the time it is innermost.
+    pub(super) has_varargs: bool,
     /// Non-function `__call` chain steps resolved to reach this activation.
     /// Each holds one unit of `metamethod_depth` and `call_chain_depth` until
     /// the call completes, result adjustment included.
@@ -282,6 +277,16 @@ pub struct State {
     /// Call stack for generating stack traces on errors.
     /// Each entry represents an active Lua function call.
     pub(super) call_stack: Vec<CallInfo>,
+    /// Spare frame stacks for dispatch-loop invocations, so a re-entry
+    /// allocates none in steady state. Always empty stacks: an invocation
+    /// takes one, and gives it back once its frames have all returned. Holds
+    /// no VM values (frames own only `Arc`s), so it is no GC root, and it is
+    /// capacity rather than state, so a snapshot ignores it.
+    pub(in crate::vm) frame_stacks: Vec<Vec<frame::Frame>>,
+    /// Extra arguments of the active vararg functions that received any,
+    /// innermost last, read by `OP_VARARG`; one entry per activation whose
+    /// `CallInfo::has_varargs` is set. A GC root.
+    pub(super) vararg_stack: Vec<Vec<Val>>,
     /// Host callbacks for print output, error handling, etc.
     pub(super) callbacks: Box<dyn HostCallbacks>,
     /// User-defined data that RustFuncs can access.
@@ -520,6 +525,8 @@ impl State {
             native_call_depth: 0,
             poisoned: false,
             call_stack: Vec::with_capacity(tuning::INITIAL_CALL_STACK_CAPACITY),
+            frame_stacks: Vec::new(),
+            vararg_stack: Vec::new(),
             callbacks,
             user_data: None,
             rng: VmRng::seed_from_u64(VmRng::DEFAULT_SEED),

@@ -404,6 +404,14 @@ impl GcHeap {
 
     /// Get the object as a Lua function (closure), if it is one.
     #[hotpath::measure]
+    /// Borrow the object as a Lua closure, if it is one, without cloning it.
+    pub(super) fn as_lua_function_ref(&self, ptr: ObjectPtr) -> Option<&Closure> {
+        match &self.get(ptr).raw {
+            RawObject::LuaFn(closure) => Some(closure),
+            _ => None,
+        }
+    }
+
     pub(super) fn as_lua_function(&self, ptr: ObjectPtr) -> Option<Closure> {
         match &self.get(ptr).raw {
             RawObject::LuaFn(closure) => Some((**closure).clone()),

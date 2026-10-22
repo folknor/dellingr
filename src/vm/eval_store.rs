@@ -523,11 +523,35 @@ impl State {
     #[inline(always)]
     #[hotpath::measure]
     pub(super) fn eval_float_float(&mut self, f: impl Fn(f64, f64) -> f64) -> Result<()> {
-        let n2 = self.pop_num()?;
-        let n1 = self.pop_num()?;
-        // Net-negative: two operands popped, one result pushed.
-        self.push_unchecked(Val::Num(f(n1, n2)));
-        Ok(())
+        // Read both operands where they lie and write the result over the
+        // first. Matching on the slots reads each tag and payload straight
+        // from the value stack; copying the operands out as whole `Val`s let
+        // the optimizer route them through a 16-byte stack temporary whose
+        // payload half it then reloaded, a store-forwarding stall on every
+        // arithmetic opcode.
+        let len = self.stack.len();
+        if let [.., Val::Num(n1), Val::Num(n2)] = self.stack[..] {
+            // Net-negative: two operands consumed, one result written.
+            self.stack[len - 2] = Val::Num(f(n1, n2));
+            self.stack.truncate(len - 1);
+            Ok(())
+        } else {
+            Err(self.arithmetic_operands_error())
+        }
+    }
+
+    /// The error for a non-number arithmetic operand, the right one checked
+    /// first. Consumes both operands, as the dispatch arm would have.
+    #[cold]
+    #[inline(never)]
+    fn arithmetic_operands_error(&mut self) -> crate::error::Error {
+        match self.pop_num() {
+            Ok(_) => match self.pop_num() {
+                Ok(_) => unreachable!("an arithmetic operand was not a number"),
+                Err(error) => error,
+            },
+            Err(error) => error,
+        }
     }
 
     pub(super) fn pop_num(&mut self) -> Result<f64> {

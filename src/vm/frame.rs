@@ -251,23 +251,23 @@ impl Frame {
         RetCount::from_u8(call.b())
     }
 
-    /// Run one dispatch-loop invocation from this frame, its entry
-    /// activation (the record at `floor_len - 1` of `State::call_stack`).
-    /// Lua calls switch `self` to the callee and returns switch it back, all
-    /// inside this one native frame; the loop returns when the entry
-    /// activation returns, or with an error, leaving `self` as the innermost
-    /// frame at that point for the caller to unwind from.
+    /// Run one dispatch-loop invocation over `frames`, which holds its entry
+    /// frame. Lua calls push the callee's frame and continue in it; returns
+    /// pop back to the caller; neither recurses natively. Returns when the
+    /// entry frame returns, with its result count, or with an error, leaving
+    /// `frames` as it was at the failing instruction for the caller to
+    /// unwind (`State::unwind_invocation`).
     ///
     /// Fixed opcode charges come from `Instr::static_units`. SET_LIST charges
     /// its live element count (the analyzer only knows its encoded prefix).
     /// Calls and access helpers can additionally charge native work, including
     /// strings, patterns, table traversal and metamethod callbacks.
-    pub(super) fn run(&mut self, state: &mut State, floor_len: usize) -> Result<RetCount> {
+    pub(super) fn run(frames: &mut Vec<Frame>, state: &mut State) -> Result<RetCount> {
         // Batch cost checking: accumulate locally and flush periodically.
-        // Every frame switch flushes first, so the pending batch always
-        // belongs to the frame in `self`.
+        // Calls and returns flush before leaving, so a batch never outlives
+        // the run of the frame that accrued it.
         let mut pending: u64 = 0;
-        let result = self.eval_batched(state, &mut pending, floor_len);
+        let result = Self::eval_batched(frames, state, &mut pending);
         if result.is_err() && pending > 0 {
             // An error leaving the dispatch loop must still charge the work
             // that already executed, or `cost_used` after a failed callback
@@ -287,10 +287,9 @@ impl Frame {
     /// not yet flushed opcode cost; the caller settles it on error.
     #[inline(always)]
     fn eval_batched(
-        &mut self,
+        frames: &mut Vec<Frame>,
         state: &mut State,
         local_cost: &mut u64,
-        floor_len: usize,
     ) -> Result<RetCount> {
         /// Macro to accumulate cost and flush when threshold is reached
         macro_rules! add_cost {
@@ -371,326 +370,351 @@ impl Frame {
             };
         }
 
-        loop {
-            let inst = self.get_instr();
-            match inst.opcode() {
-                // === Dispatch operations ===
+        // Lua calls and returns switch `frame` to another entry of `frames`
+        // and continue here: no native recursion and no re-entry of this
+        // function per call. Frames never move while they run; a pushed
+        // frame is written straight into its slot (`extend` from
+        // `once_with`), because a whole-frame move reads back fields the loop
+        // wrote one at a time with wide loads that cannot be store-forwarded.
+        'frames: loop {
+            let frame = frames.last_mut().expect("a running invocation has a frame");
+            loop {
+                let inst = frame.get_instr();
+                match inst.opcode() {
+                    // === Dispatch operations ===
 
-                // General control flow
-                Instr::OP_NOP => {}
-                Instr::OP_POP => {
-                    state.pop_val();
-                }
-                Instr::OP_DUP => {
-                    let val = *state
-                        .stack
-                        .last()
-                        .expect("Dup instruction requires a stack value");
-                    state.push_val(val)?;
-                }
-                Instr::OP_SWAP => {
-                    let len = state.stack.len();
-                    state.stack.swap(len - 1, len - 2);
-                }
-                Instr::OP_JUMP => self.jump(inst.sbx()),
-                Instr::OP_BRANCH_FALSE => state.instr_branch(self, false, inst.sbx(), false)?,
-                Instr::OP_BRANCH_FALSE_KEEP => state.instr_branch(self, false, inst.sbx(), true)?,
-                Instr::OP_BRANCH_TRUE_KEEP => state.instr_branch(self, true, inst.sbx(), true)?,
-
-                // Local variables
-                Instr::OP_GET_LOCAL => state.instr_get_local(inst.a())?,
-                Instr::OP_SET_LOCAL => state.instr_set_local(inst.a()),
-
-                // Upvalues
-                Instr::OP_GET_UPVALUE => state.instr_get_upvalue(self, inst.a())?,
-                Instr::OP_SET_UPVALUE => state.instr_set_upvalue(self, inst.a()),
-
-                // Globals
-                Instr::OP_GET_GLOBAL => state.instr_get_global(self, inst.bx(), inst.a())?,
-                Instr::OP_SET_GLOBAL => state.instr_set_global(self, inst.bx(), inst.a())?,
-
-                // Builtins (fast path for well-known globals)
-                Instr::OP_GET_BUILTIN => state.instr_get_builtin(inst.a())?,
-                Instr::OP_SET_BUILTIN => state.instr_set_builtin(inst.a()),
-
-                // Functions (calls and returns)
-                Instr::OP_CLOSURE => state.instr_closure(self, inst.a())?,
-                Instr::OP_CALL => {
-                    self.record_call_site(state);
-                    Self::flush_local_cost(state, local_cost)?;
-                    let args = self.call_args(state, ArgCount::from_u8(inst.a()))?;
-                    if let Some(callee) = state.call_from_lua(args, RetCount::from_u8(inst.b()))? {
-                        // Continue in the callee; the caller waits in its
-                        // activation record until the callee returns.
-                        let caller = std::mem::replace(self, callee);
-                        state.suspend_caller(caller);
+                    // General control flow
+                    Instr::OP_NOP => {}
+                    Instr::OP_POP => {
+                        state.pop_val();
                     }
-                }
-                Instr::OP_MARK_CALL_BASE => {
-                    // Verification proves a callee exists above this frame's
-                    // floor and the fixed adjustment is one slot.
-                    let base = state.stack.len() - 1;
-                    state.pending_bases.calls.push(base);
-                }
-                Instr::OP_CLOSE_UPVALUES => {
-                    // Close upvalues for locals at or above the given slot
-                    // Used at end of loop iterations to capture per-iteration locals
-                    let stack_level = state.stack_bottom + inst.a() as usize;
-                    state.close_upvalues(stack_level);
-                }
-                Instr::OP_RETURN => {
-                    // Flush any remaining accumulated cost before returning
-                    Self::flush_local_cost(state, local_cost)?;
-                    let ret_count = RetCount::from_u8(inst.a());
-                    if state.call_stack.len() == floor_len {
-                        return Ok(ret_count);
+                    Instr::OP_DUP => {
+                        let val = *state
+                            .stack
+                            .last()
+                            .expect("Dup instruction requires a stack value");
+                        state.push_val(val)?;
                     }
-                    state.return_to_caller(self, ret_count)?;
-                }
-                Instr::OP_VARARG => {
-                    let n = inst.a();
-                    // The executing activation is the innermost record.
-                    let varargs = &state
-                        .call_stack
-                        .last()
-                        .expect("an executing frame has an activation record")
-                        .varargs;
-                    let pushed = if n == u8::MAX {
-                        varargs.len()
-                    } else {
-                        n as usize
-                    };
-                    state.check_stack_space(pushed)?;
-                    // Push all varargs, or exactly n padded with nil.
-                    let varargs = &state
-                        .call_stack
-                        .last()
-                        .expect("an executing frame has an activation record")
-                        .varargs;
-                    let copied = pushed.min(varargs.len());
-                    state.stack.extend_from_slice(&varargs[..copied]);
-                    state
-                        .stack
-                        .resize(state.stack.len() + (pushed - copied), Val::Nil);
-                }
+                    Instr::OP_SWAP => {
+                        let len = state.stack.len();
+                        state.stack.swap(len - 1, len - 2);
+                    }
+                    Instr::OP_JUMP => frame.jump(inst.sbx()),
+                    Instr::OP_BRANCH_FALSE => {
+                        state.instr_branch(frame, false, inst.sbx(), false)?;
+                    }
+                    Instr::OP_BRANCH_FALSE_KEEP => {
+                        state.instr_branch(frame, false, inst.sbx(), true)?;
+                    }
+                    Instr::OP_BRANCH_TRUE_KEEP => {
+                        state.instr_branch(frame, true, inst.sbx(), true)?;
+                    }
 
-                // Literals
-                Instr::OP_PUSH_NIL => state.push_val(Val::Nil)?,
-                Instr::OP_PUSH_BOOL => state.push_val(Val::Bool(inst.a() != 0))?,
-                Instr::OP_PUSH_NUM => {
-                    let n = self.get_number_constant(inst.bx());
-                    state.push_val(Val::Num(n))?;
-                }
-                Instr::OP_PUSH_STRING => {
-                    let val = self.literal(inst.bx());
-                    state.push_val(val)?;
-                }
+                    // Local variables
+                    Instr::OP_GET_LOCAL => state.instr_get_local(inst.a())?,
+                    Instr::OP_SET_LOCAL => state.instr_set_local(inst.a()),
 
-                // Equality
-                Instr::OP_EQUAL => {
-                    let val2 = state.pop_val();
-                    let val1 = state.pop_val();
-                    state.push_unchecked(Val::Bool(val1 == val2));
-                }
-                Instr::OP_NOT_EQUAL => {
-                    let val2 = state.pop_val();
-                    let val1 = state.pop_val();
-                    state.push_unchecked(Val::Bool(val1 != val2));
-                }
+                    // Upvalues
+                    Instr::OP_GET_UPVALUE => state.instr_get_upvalue(frame, inst.a())?,
+                    Instr::OP_SET_UPVALUE => state.instr_set_upvalue(frame, inst.a()),
 
-                // Orderings
-                // Supports both number and string comparisons
-                Instr::OP_LESS => state.eval_compare(Instr::LESS_ORDER.0, Instr::LESS_ORDER.1)?,
-                Instr::OP_GREATER => {
-                    state.eval_compare(Instr::GREATER_ORDER.0, Instr::GREATER_ORDER.1)?;
-                }
-                Instr::OP_LESS_EQUAL => {
-                    state.eval_compare(Instr::LESS_EQUAL_ORDER.0, Instr::LESS_EQUAL_ORDER.1)?;
-                }
-                Instr::OP_GREATER_EQUAL => state
-                    .eval_compare(Instr::GREATER_EQUAL_ORDER.0, Instr::GREATER_EQUAL_ORDER.1)?,
+                    // Globals
+                    Instr::OP_GET_GLOBAL => state.instr_get_global(frame, inst.bx(), inst.a())?,
+                    Instr::OP_SET_GLOBAL => state.instr_set_global(frame, inst.bx(), inst.a())?,
 
-                // Fused comparison + BranchFalse: pop two
-                // operands, jump when the comparison is false. One range arm
-                // with the variant decode outlined - per-variant arms here
-                // measurably perturbed the dispatch loop's codegen.
-                Instr::OP_BRANCH_FALSE_LESS..=Instr::OP_BRANCH_FALSE_NOT_EQUAL => {
-                    state.instr_branch_fused(self, inst.opcode(), inst.sbx())?;
-                }
+                    // Builtins (fast path for well-known globals)
+                    Instr::OP_GET_BUILTIN => state.instr_get_builtin(inst.a())?,
+                    Instr::OP_SET_BUILTIN => state.instr_set_builtin(inst.a()),
 
-                // `for` loops
-                Instr::OP_FOR_LOOP => state.instr_for_loop(self, inst.a(), inst.sbx())?,
-                Instr::OP_FOR_PREP => state.instr_for_prep(self, inst.a(), inst.sbx())?,
+                    // Functions (calls and returns)
+                    Instr::OP_CLOSURE => state.instr_closure(frame, inst.a())?,
+                    Instr::OP_CALL => {
+                        frame.record_call_site(state);
+                        Self::flush_local_cost(state, local_cost)?;
+                        let args = frame.call_args(state, ArgCount::from_u8(inst.a()))?;
+                        if state.call_from_lua(args, RetCount::from_u8(inst.b()))? {
+                            frames.extend(std::iter::once_with(|| state.admitted_frame()));
+                            continue 'frames;
+                        }
+                    }
+                    Instr::OP_MARK_CALL_BASE => {
+                        // Verification proves a callee exists above this frame's
+                        // floor and the fixed adjustment is one slot.
+                        let base = state.stack.len() - 1;
+                        state.pending_bases.calls.push(base);
+                    }
+                    Instr::OP_CLOSE_UPVALUES => {
+                        // Close upvalues for locals at or above the given slot
+                        // Used at end of loop iterations to capture per-iteration locals
+                        let stack_level = state.stack_bottom + inst.a() as usize;
+                        state.close_upvalues(stack_level);
+                    }
+                    Instr::OP_RETURN => {
+                        // Flush any remaining accumulated cost before returning
+                        Self::flush_local_cost(state, local_cost)?;
+                        let ret_count = RetCount::from_u8(inst.a());
+                        if frames.len() == 1 {
+                            // The entry frame: its Rust caller finishes the call.
+                            return Ok(ret_count);
+                        }
+                        state.return_to_caller(frames, ret_count)?;
+                        continue 'frames;
+                    }
+                    Instr::OP_VARARG => {
+                        let n = inst.a();
+                        // The executing activation is the innermost record; its
+                        // varargs, if it received any, are the innermost entry.
+                        let has_varargs = state
+                            .call_stack
+                            .last()
+                            .expect("an executing frame has an activation record")
+                            .has_varargs;
+                        let available = if has_varargs {
+                            state.vararg_stack.last().map_or(0, Vec::len)
+                        } else {
+                            0
+                        };
+                        let pushed = if n == u8::MAX { available } else { n as usize };
+                        state.check_stack_space(pushed)?;
+                        // Push all varargs, or exactly n padded with nil.
+                        let copied = pushed.min(available);
+                        if copied > 0 {
+                            let varargs = state
+                                .vararg_stack
+                                .last()
+                                .expect("an activation with varargs has an entry");
+                            state.stack.extend_from_slice(&varargs[..copied]);
+                        }
+                        state
+                            .stack
+                            .resize(state.stack.len() + (pushed - copied), Val::Nil);
+                    }
 
-                // Generic `for` loops
-                Instr::OP_TFOR_PREP => state.instr_tfor_prep(inst.a()),
-                Instr::OP_TFOR_CALL => {
-                    self.record_call_site(state);
-                    Self::flush_local_cost(state, local_cost)?;
-                    state.instr_tfor_call(inst.a(), inst.b(), inst.c(), &self.runtime.caches)?;
-                }
-                Instr::OP_TFOR_LOOP => state.instr_tfor_loop(self, inst.a(), inst.sbx())?,
+                    // Literals
+                    Instr::OP_PUSH_NIL => state.push_val(Val::Nil)?,
+                    Instr::OP_PUSH_BOOL => state.push_val(Val::Bool(inst.a() != 0))?,
+                    Instr::OP_PUSH_NUM => {
+                        let n = frame.get_number_constant(inst.bx());
+                        state.push_val(Val::Num(n))?;
+                    }
+                    Instr::OP_PUSH_STRING => {
+                        let val = frame.literal(inst.bx());
+                        state.push_val(val)?;
+                    }
 
-                // Length helpers may charge native work.
-                Instr::OP_LENGTH => {
-                    self.record_call_site(state);
-                    state.instr_length(local_cost)?;
-                }
+                    // Equality
+                    Instr::OP_EQUAL => {
+                        let val2 = state.pop_val();
+                        let val1 = state.pop_val();
+                        state.push_unchecked(Val::Bool(val1 == val2));
+                    }
+                    Instr::OP_NOT_EQUAL => {
+                        let val2 = state.pop_val();
+                        let val1 = state.pop_val();
+                        state.push_unchecked(Val::Bool(val1 != val2));
+                    }
 
-                // Logical not
-                Instr::OP_NOT => state.instr_not(),
+                    // Orderings
+                    // Supports both number and string comparisons
+                    Instr::OP_LESS => {
+                        state.eval_compare(Instr::LESS_ORDER.0, Instr::LESS_ORDER.1)?;
+                    }
+                    Instr::OP_GREATER => {
+                        state.eval_compare(Instr::GREATER_ORDER.0, Instr::GREATER_ORDER.1)?;
+                    }
+                    Instr::OP_LESS_EQUAL => {
+                        state.eval_compare(Instr::LESS_EQUAL_ORDER.0, Instr::LESS_EQUAL_ORDER.1)?;
+                    }
+                    Instr::OP_GREATER_EQUAL => state
+                        .eval_compare(Instr::GREATER_EQUAL_ORDER.0, Instr::GREATER_EQUAL_ORDER.1)?,
 
-                // Table reads
-                Instr::OP_GET_FIELD => {
-                    self.record_call_site(state);
-                    state.instr_get_field(self, inst.bx(), inst.a(), local_cost)?;
-                }
-                Instr::OP_GET_TABLE => {
-                    self.record_call_site(state);
-                    state.instr_get_table(local_cost)?;
-                }
+                    // Fused comparison + BranchFalse: pop two
+                    // operands, jump when the comparison is false. One range arm
+                    // with the variant decode outlined - per-variant arms here
+                    // measurably perturbed the dispatch loop's codegen.
+                    Instr::OP_BRANCH_FALSE_LESS..=Instr::OP_BRANCH_FALSE_NOT_EQUAL => {
+                        state.instr_branch_fused(frame, inst.opcode(), inst.sbx())?;
+                    }
 
-                // Operand A is the chain length (>= 2). Chained `..` collapses
-                // into one OP_CONCAT so a long concat has only one intermediate
-                // allocation.
-                //
-                // The bytes the operator emits are deliberately uncharged: the
-                // budget is a game-design instrument rather than a CPU meter
-                // (docs/budget.md), and `..` is structural syntax that a
-                // legible refactor must not make more expensive. The size is
-                // still bounded by `checked_string_growth` (MAX_STRING_BYTES),
-                // so the uncharged work is capped. Library calls that emit
-                // bytes (`table.concat`, `string.format`, ...) charge them;
-                // the operator does not.
-                Instr::OP_CONCAT => state.concat_helper(inst.a() as usize)?,
+                    // `for` loops
+                    Instr::OP_FOR_LOOP => state.instr_for_loop(frame, inst.a(), inst.sbx())?,
+                    Instr::OP_FOR_PREP => state.instr_for_prep(frame, inst.a(), inst.sbx())?,
 
-                // === Fixed-charge operations ===
+                    // Generic `for` loops
+                    Instr::OP_TFOR_PREP => state.instr_tfor_prep(inst.a()),
+                    Instr::OP_TFOR_CALL => {
+                        frame.record_call_site(state);
+                        Self::flush_local_cost(state, local_cost)?;
+                        state.instr_tfor_call(
+                            inst.a(),
+                            inst.b(),
+                            inst.c(),
+                            &frame.runtime.caches,
+                        )?;
+                    }
+                    Instr::OP_TFOR_LOOP => state.instr_tfor_loop(frame, inst.a(), inst.sbx())?,
 
-                // Arithmetic expands from the opcode rows, keeping each
-                // operation a direct call to its function item.
-                crate::instr::opcode_rows!(arithmetic_opcode_pattern, (), inst, f) => {
-                    crate::instr::opcode_rows!(
-                        arithmetic_dispatch,
-                        (state, local_cost, inst),
-                        inst,
-                        f
-                    );
-                }
+                    // Length helpers may charge native work.
+                    Instr::OP_LENGTH => {
+                        frame.record_call_site(state);
+                        state.instr_length(local_cost)?;
+                    }
 
-                // Unary negation
-                Instr::OP_NEGATE => {
-                    add_cost!(
-                        state,
-                        local_cost,
-                        const { Instr::op(Instr::OP_NEGATE).static_units() }
-                    );
-                    state.instr_negate()?;
-                }
+                    // Logical not
+                    Instr::OP_NOT => state.instr_not(),
 
-                // Table creation
-                Instr::OP_NEW_TABLE => {
-                    add_cost!(
-                        state,
-                        local_cost,
-                        const { Instr::op(Instr::OP_NEW_TABLE).static_units() }
-                    );
-                    state.push_new_table()?;
-                }
-                Instr::OP_NEW_TABLE_PRESIZED => {
-                    add_cost!(
-                        state,
-                        local_cost,
-                        const { Instr::op(Instr::OP_NEW_TABLE_PRESIZED).static_units() }
-                    );
-                    // A is a hash-capacity hint: the parser encodes the
-                    // constructor's keyed-field count. The array part is
-                    // reserved per SET_LIST batch instead. Bytecode from older
-                    // compilers encoded the total field count; it is still a
-                    // valid (oversized) hint.
-                    state.new_table_with_capacity(inst.a() as usize)?;
-                }
-                Instr::OP_NEW_TABLE_TEMPLATE => {
-                    add_cost!(
-                        state,
-                        local_cost,
-                        const { Instr::op(Instr::OP_NEW_TABLE_TEMPLATE).static_units() }
-                    );
-                    state.instr_new_table_template(self, inst.a())?;
-                }
-                Instr::OP_NEW_TABLE_TRACKED => {
-                    add_cost!(
-                        state,
-                        local_cost,
-                        const { Instr::op(Instr::OP_NEW_TABLE_TRACKED).static_units() }
-                    );
-                    let table_idx = state.stack.len();
-                    state.new_table_with_capacity(inst.a() as usize)?;
-                    state.pending_bases.constructors.push(table_idx);
-                }
+                    // Table reads
+                    Instr::OP_GET_FIELD => {
+                        frame.record_call_site(state);
+                        state.instr_get_field(frame, inst.bx(), inst.a(), local_cost)?;
+                    }
+                    Instr::OP_GET_TABLE => {
+                        frame.record_call_site(state);
+                        state.instr_get_table(local_cost)?;
+                    }
 
-                // Table writes
-                Instr::OP_INIT_FIELD => {
-                    add_cost!(
-                        state,
-                        local_cost,
-                        const { Instr::op(Instr::OP_INIT_FIELD).static_units() }
-                    );
-                    state.instr_init_field(self, inst.a(), inst.bx())?;
-                }
-                Instr::OP_INIT_FIELD_PINNED => {
-                    add_cost!(
-                        state,
-                        local_cost,
-                        const { Instr::op(Instr::OP_INIT_FIELD_PINNED).static_units() }
-                    );
-                    state.instr_init_field_pinned(self, inst.bx(), inst.a())?;
-                }
-                Instr::OP_INIT_INDEX => {
-                    add_cost!(
-                        state,
-                        local_cost,
-                        const { Instr::op(Instr::OP_INIT_INDEX).static_units() }
-                    );
-                    state.instr_init_index(inst.a())?;
-                }
-                Instr::OP_SET_FIELD => {
-                    self.record_call_site(state);
-                    add_cost!(
-                        state,
-                        local_cost,
-                        const { Instr::op(Instr::OP_SET_FIELD).static_units() }
-                    );
-                    state.instr_set_field(self, 0, inst.bx(), inst.a(), local_cost)?;
-                }
-                Instr::OP_SET_FIELD_AT => {
-                    self.record_call_site(state);
-                    add_cost!(
-                        state,
-                        local_cost,
-                        const { Instr::op(Instr::OP_SET_FIELD_AT).static_units() }
-                    );
-                    state.instr_set_field(self, inst.a(), inst.bx(), u8::MAX, local_cost)?;
-                }
-                Instr::OP_SET_TABLE => {
-                    self.record_call_site(state);
-                    add_cost!(
-                        state,
-                        local_cost,
-                        const { Instr::op(Instr::OP_SET_TABLE).static_units() }
-                    );
-                    state.instr_set_table(inst.a(), local_cost)?;
-                }
+                    // Operand A is the chain length (>= 2). Chained `..` collapses
+                    // into one OP_CONCAT so a long concat has only one intermediate
+                    // allocation.
+                    //
+                    // The bytes the operator emits are deliberately uncharged: the
+                    // budget is a game-design instrument rather than a CPU meter
+                    // (docs/budget.md), and `..` is structural syntax that a
+                    // legible refactor must not make more expensive. The size is
+                    // still bounded by `checked_string_growth` (MAX_STRING_BYTES),
+                    // so the uncharged work is capped. Library calls that emit
+                    // bytes (`table.concat`, `string.format`, ...) charge them;
+                    // the operator does not.
+                    Instr::OP_CONCAT => state.concat_helper(inst.a() as usize)?,
 
-                // Array initialization
-                Instr::OP_SET_LIST => {
-                    let n = inst.a();
-                    let count = state.instr_set_list_count(self, n)?;
-                    add_cost!(state, local_cost, count as u64);
-                    state.instr_set_list(self, n, inst.bx())?;
-                }
+                    // === Fixed-charge operations ===
 
-                // Admission rejects unknown opcodes, including dead code.
-                _ => unreachable!("verified bytecode contains an unknown opcode"),
+                    // Arithmetic expands from the opcode rows, keeping each
+                    // operation a direct call to its function item.
+                    crate::instr::opcode_rows!(arithmetic_opcode_pattern, (), inst, f) => {
+                        crate::instr::opcode_rows!(
+                            arithmetic_dispatch,
+                            (state, local_cost, inst),
+                            inst,
+                            f
+                        );
+                    }
+
+                    // Unary negation
+                    Instr::OP_NEGATE => {
+                        add_cost!(
+                            state,
+                            local_cost,
+                            const { Instr::op(Instr::OP_NEGATE).static_units() }
+                        );
+                        state.instr_negate()?;
+                    }
+
+                    // Table creation
+                    Instr::OP_NEW_TABLE => {
+                        add_cost!(
+                            state,
+                            local_cost,
+                            const { Instr::op(Instr::OP_NEW_TABLE).static_units() }
+                        );
+                        state.push_new_table()?;
+                    }
+                    Instr::OP_NEW_TABLE_PRESIZED => {
+                        add_cost!(
+                            state,
+                            local_cost,
+                            const { Instr::op(Instr::OP_NEW_TABLE_PRESIZED).static_units() }
+                        );
+                        // A is a hash-capacity hint: the parser encodes the
+                        // constructor's keyed-field count. The array part is
+                        // reserved per SET_LIST batch instead. Bytecode from older
+                        // compilers encoded the total field count; it is still a
+                        // valid (oversized) hint.
+                        state.new_table_with_capacity(inst.a() as usize)?;
+                    }
+                    Instr::OP_NEW_TABLE_TEMPLATE => {
+                        add_cost!(
+                            state,
+                            local_cost,
+                            const { Instr::op(Instr::OP_NEW_TABLE_TEMPLATE).static_units() }
+                        );
+                        state.instr_new_table_template(frame, inst.a())?;
+                    }
+                    Instr::OP_NEW_TABLE_TRACKED => {
+                        add_cost!(
+                            state,
+                            local_cost,
+                            const { Instr::op(Instr::OP_NEW_TABLE_TRACKED).static_units() }
+                        );
+                        let table_idx = state.stack.len();
+                        state.new_table_with_capacity(inst.a() as usize)?;
+                        state.pending_bases.constructors.push(table_idx);
+                    }
+
+                    // Table writes
+                    Instr::OP_INIT_FIELD => {
+                        add_cost!(
+                            state,
+                            local_cost,
+                            const { Instr::op(Instr::OP_INIT_FIELD).static_units() }
+                        );
+                        state.instr_init_field(frame, inst.a(), inst.bx())?;
+                    }
+                    Instr::OP_INIT_FIELD_PINNED => {
+                        add_cost!(
+                            state,
+                            local_cost,
+                            const { Instr::op(Instr::OP_INIT_FIELD_PINNED).static_units() }
+                        );
+                        state.instr_init_field_pinned(frame, inst.bx(), inst.a())?;
+                    }
+                    Instr::OP_INIT_INDEX => {
+                        add_cost!(
+                            state,
+                            local_cost,
+                            const { Instr::op(Instr::OP_INIT_INDEX).static_units() }
+                        );
+                        state.instr_init_index(inst.a())?;
+                    }
+                    Instr::OP_SET_FIELD => {
+                        frame.record_call_site(state);
+                        add_cost!(
+                            state,
+                            local_cost,
+                            const { Instr::op(Instr::OP_SET_FIELD).static_units() }
+                        );
+                        state.instr_set_field(frame, 0, inst.bx(), inst.a(), local_cost)?;
+                    }
+                    Instr::OP_SET_FIELD_AT => {
+                        frame.record_call_site(state);
+                        add_cost!(
+                            state,
+                            local_cost,
+                            const { Instr::op(Instr::OP_SET_FIELD_AT).static_units() }
+                        );
+                        state.instr_set_field(frame, inst.a(), inst.bx(), u8::MAX, local_cost)?;
+                    }
+                    Instr::OP_SET_TABLE => {
+                        frame.record_call_site(state);
+                        add_cost!(
+                            state,
+                            local_cost,
+                            const { Instr::op(Instr::OP_SET_TABLE).static_units() }
+                        );
+                        state.instr_set_table(inst.a(), local_cost)?;
+                    }
+
+                    // Array initialization
+                    Instr::OP_SET_LIST => {
+                        let n = inst.a();
+                        let count = state.instr_set_list_count(frame, n)?;
+                        add_cost!(state, local_cost, count as u64);
+                        state.instr_set_list(frame, n, inst.bx())?;
+                    }
+
+                    // Admission rejects unknown opcodes, including dead code.
+                    _ => unreachable!("verified bytecode contains an unknown opcode"),
+                }
             }
         }
     }

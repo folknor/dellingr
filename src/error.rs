@@ -840,8 +840,17 @@ pub enum TypeError {
 impl Error {
     /// Construct an error with explicit source location.
     pub fn new(kind: impl Into<ErrorKind>, line_num: u32, column: u32) -> Self {
+        Self::boxed(kind.into(), line_num, column)
+    }
+
+    /// The one allocation site. Cold and out of line so the allocation is
+    /// not inlined into every fallible fast path, the dispatch loop included,
+    /// where it would cost code size and registers on paths that never fail.
+    #[cold]
+    #[inline(never)]
+    fn boxed(kind: ErrorKind, line_num: u32, column: u32) -> Self {
         Error(Box::new(ErrorRepr {
-            kind: kind.into(),
+            kind,
             line_num,
             column,
             context: None,
@@ -852,7 +861,7 @@ impl Error {
     /// Construct an error without source-location information. Used for
     /// errors raised before any chunk has been parsed (e.g. host API misuse).
     pub fn without_location(kind: ErrorKind) -> Self {
-        Error::new(kind, 0, 0)
+        Self::boxed(kind, 0, 0)
     }
 
     pub(crate) fn internal_fault(fault: InternalFault) -> Self {

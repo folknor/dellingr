@@ -122,7 +122,8 @@ macro_rules! snapshot_in_flight {
 }
 
 snapshot_in_flight! {
-    collections: [stack, pending_bytecode_caches, open_upvalues, pending_bases, call_stack],
+    collections: [stack, pending_bytecode_caches, open_upvalues, pending_bases, call_stack,
+        vararg_stack],
     scalars: [stack_bottom = 0, metamethod_depth = 0, call_chain_depth = 0,
         call_depth = 0, native_call_depth = 0],
     optionals: [active_rust_fn],

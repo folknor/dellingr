@@ -394,7 +394,10 @@ fn gc_host_controlled() {
     // Should have more objects now
     assert!(state.object_count() > initial_objects);
 
-    // Manually trigger GC - tables are reachable so they survive
+    // Manually trigger GC - tables are reachable so they survive. The first
+    // collection frees the chunk's own closure, which `eval_chunk` places in
+    // the call's function slot like any call and is garbage once it returns.
+    state.gc_collect();
     let before_gc = state.object_count();
     state.gc_collect();
     assert_eq!(state.object_count(), before_gc); // All tables are reachable
