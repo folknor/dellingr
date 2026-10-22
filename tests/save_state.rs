@@ -49,6 +49,51 @@ fn deep_global_chain_saves_and_loads_iteratively() {
     );
 }
 
+/// Run `source` as chunk `t`, calling global `go`, and return the rendered
+/// traceback frames of the error.
+fn traceback_frames(state: &mut State, source: &str) -> Vec<String> {
+    dellingr::Program::compile(source, Some(b"t".as_slice()))
+        .and_then(|program| state.load(&program))
+        .unwrap();
+    let error = state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+        .expect_err("program must fail");
+    error
+        .stack_trace()
+        .iter()
+        .map(ToString::to_string)
+        .collect()
+}
+
+#[test]
+fn traceback_labels_are_identical_before_and_after_save_load() {
+    let mut original = State::new();
+    dellingr::Program::compile(
+        "anon = function()\n  error('x')\nend\n\nfunction named()\n  anon()\nend\n",
+        Some(b"t".as_slice()),
+    )
+    .and_then(|program| original.load(&program))
+    .unwrap();
+    original
+        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+        .unwrap();
+
+    let call = "named()";
+    let before = traceback_frames(&mut original, call);
+    assert_eq!(
+        before,
+        [
+            "t:2: in function <t:1>",
+            "t:6: in function 'named'",
+            "t:1: in main chunk",
+        ]
+    );
+
+    let mut loaded = reload(&original);
+    let after = traceback_frames(&mut loaded, call);
+    assert_eq!(before, after);
+}
+
 #[test]
 fn global_environment_preserves_non_string_key_identity_across_save_load() {
     let mut state = State::new();

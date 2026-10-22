@@ -1116,6 +1116,7 @@ fn test28() {
     let string_literals = vec!["x".into()];
     let nested = vec![Arc::new(Bytecode {
         code: vec![Instr::ret(RetCount::Fixed(0))],
+        defined_line: 1,
         ..Bytecode::default()
     })];
     let chunk = Bytecode {
@@ -1138,6 +1139,7 @@ fn test29() {
         ],
         number_literals: vec![7.0],
         num_locals: 1,
+        defined_line: 1,
         ..Bytecode::default()
     };
     let outer_chunk = Bytecode {
@@ -1169,10 +1171,12 @@ fn test30() {
         ],
         number_literals: vec![21.0],
         num_locals: 1,
+        defined_line: 2,
         ..Bytecode::default()
     };
     let y = Bytecode {
         code: vec![Instr::ret(RetCount::Fixed(0))],
+        defined_line: 4,
         ..Bytecode::default()
     };
     let x = Bytecode {
@@ -1187,6 +1191,7 @@ fn test30() {
         ],
         nested: vec![Arc::new(y)],
         num_locals: 1,
+        defined_line: 3,
         ..Bytecode::default()
     };
     let outer_chunk = Bytecode {

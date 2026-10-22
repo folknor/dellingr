@@ -31,7 +31,7 @@ pub(super) enum TailKind {
 /// and a call needs at least a few bytes, so no call can open on a line at or
 /// past 2^24. The `min` is only a guard against wraparound.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct CallSite(u32);
+pub(super) struct CallSite(u32, bool);
 
 // Every call opens on a line strictly below the source byte cap, so the cap
 // must fit the packed line field.
@@ -40,8 +40,16 @@ const _: () = assert!(crate::limits::MAX_SOURCE_BYTES <= CallSite::LINE_MASK as 
 impl CallSite {
     const LINE_MASK: u32 = (1 << 24) - 1;
 
-    pub(super) fn new(num_args: ArgCount, line: u32) -> Self {
-        Self((u32::from(num_args.to_u8()) << 24) | line.min(Self::LINE_MASK))
+    pub(super) fn new(num_args: ArgCount, line: u32, method: bool) -> Self {
+        Self(
+            (u32::from(num_args.to_u8()) << 24) | line.min(Self::LINE_MASK),
+            method,
+        )
+    }
+
+    /// Whether this is the call of a method call (`obj:m()`).
+    pub(super) fn is_method(self) -> bool {
+        self.1
     }
 
     pub(super) fn num_args(self) -> ArgCount {

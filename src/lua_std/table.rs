@@ -254,7 +254,12 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
             // behavior, they prove the count and destination key arithmetic
             // below cannot overflow.
             if !(f > 0 || e < i64::MAX + f) {
-                return Err(state.library_error(LibraryError::TooManyMoveElements));
+                return Err(super::argument_error(
+                    state,
+                    3,
+                    "move",
+                    ArgDetail::TooManyElementsToMove,
+                ));
             }
             let count = e - f + 1;
             if t > i64::MAX - count + 1 {

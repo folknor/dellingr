@@ -34,6 +34,13 @@ shared string metatable's `__tostring`. `State::tostring_rendering` owns the
 `bad argument #N to 'name' (...)`; when no name was supplied or resolved, it
 prints `<anonymous>`.
 
+When the failing callback was invoked by a method call (`obj:name()`, marked in
+the call instruction), the display counts arguments without the receiver and
+calls a bad first argument `calling 'name' on bad self (...)`, as reference Lua
+does. `ArgError::arg_number` keeps the callee's own position. The innermost
+callback that returns the error decides, so an outer method call that merely
+propagates an error from a nested callback does not renumber it.
+
 The host-facing `State::check_any` and `State::check_type` helpers set the
 function name only when validation fails. They ask the active Rust callback for
 its name while that callback is running. `check_optional_type` uses the same
@@ -67,7 +74,10 @@ lookup above. This includes the current `math.*` validators.
 ## Stack trace names
 
 Stack trace frames for Lua code use the function name stored in bytecode. An
-unnamed frame is displayed as `main chunk`. Rust callbacks are not traceback
+unnamed frame is displayed as `main chunk` only for a main chunk; any other
+unnamed function is `function <source:line>` with the line it was defined on
+(`StackFrame::defined_line`, 0 for a main chunk). Snapshots store each
+function's definition line, so labels survive save and load. Rust callbacks are not traceback
 frames, so a callback called by Lua appears only through its Lua caller frames.
 This traceback naming is separate from the optional function name in an
 `ArgError`.

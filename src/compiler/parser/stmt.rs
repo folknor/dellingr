@@ -69,7 +69,10 @@ impl<'a> Parser<'a> {
             }
             PrefixExp::FunctionCall(call) => {
                 let (num_args, line) = (call.num_args(), call.line());
-                self.push_at_line(Instr::call(num_args, RetCount::Fixed(0)), line);
+                self.push_at_line(
+                    Instr::call_site(num_args, RetCount::Fixed(0), call.is_method()),
+                    line,
+                );
                 Ok(())
             }
             PrefixExp::Place(first_place) => self.parse_assign(first_place),

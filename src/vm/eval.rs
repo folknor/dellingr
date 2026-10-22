@@ -123,13 +123,14 @@ impl State {
         old_stack_bottom: usize,
     ) -> Result<()> {
         let mut charges = 0;
-        let num_ret_actual = match self.begin_call(idx, num_args, old_stack_bottom, &mut charges)? {
-            Some(n) => n,
-            None => match self.run_invocation(old_stack_bottom) {
-                Ok(n) => n,
-                Err(e) => return Err(self.fail_call(e, idx, old_stack_bottom, &mut charges)),
-            },
-        };
+        let num_ret_actual =
+            match self.begin_call(idx, num_args, old_stack_bottom, &mut charges, false)? {
+                Some(n) => n,
+                None => match self.run_invocation(old_stack_bottom) {
+                    Ok(n) => n,
+                    Err(e) => return Err(self.fail_call(e, idx, old_stack_bottom, &mut charges)),
+                },
+            };
         self.finish_call(
             idx,
             old_stack_bottom,
@@ -153,11 +154,12 @@ impl State {
         &mut self,
         num_args: u8,
         num_ret_expected: RetCount,
+        method: bool,
     ) -> Result<bool> {
         let idx = self.call_base(num_args)?;
         let old_stack_bottom = self.stack_bottom;
         let mut charges = 0;
-        match self.begin_call(idx, num_args, old_stack_bottom, &mut charges)? {
+        match self.begin_call(idx, num_args, old_stack_bottom, &mut charges, method)? {
             Some(n) => {
                 self.finish_call(idx, old_stack_bottom, num_ret_expected, n, charges)?;
                 Ok(false)
@@ -227,13 +229,14 @@ impl State {
         num_args: u8,
         old_stack_bottom: usize,
         charges: &mut u32,
+        method: bool,
     ) -> Result<Option<u8>> {
         // The two function cases inline into the call sites; only a
         // callable object pays for the resolution loop's setup.
         let func_val = self.stack[idx];
         if let Val::RustFn(f) = func_val {
             self.stack.remove(idx);
-            return match self.invoke_rust_fn(f, idx) {
+            return match self.invoke_rust_fn(f, idx, method) {
                 Ok(n) => Ok(Some(n)),
                 Err(e) => Err(self.fail_call(e, idx, old_stack_bottom, charges)),
             };
@@ -244,7 +247,7 @@ impl State {
                 Err(e) => Err(self.fail_call(e, idx, old_stack_bottom, charges)),
             };
         }
-        self.begin_callable_call(idx, num_args, old_stack_bottom, charges)
+        self.begin_callable_call(idx, num_args, old_stack_bottom, charges, method)
     }
 
     /// `begin_call` for a callee that is not a function: the general
@@ -256,6 +259,7 @@ impl State {
         num_args: u8,
         old_stack_bottom: usize,
         charges: &mut u32,
+        method: bool,
     ) -> Result<Option<u8>> {
         let mut num_args = num_args;
         loop {
@@ -264,7 +268,7 @@ impl State {
                 // The Rust callback ABI: the callee's frame starts at the
                 // first argument, with the function value gone.
                 self.stack.remove(idx);
-                return match self.invoke_rust_fn(f, idx) {
+                return match self.invoke_rust_fn(f, idx, method) {
                     Ok(n) => Ok(Some(n)),
                     Err(e) => Err(self.fail_call(e, idx, old_stack_bottom, charges)),
                 };
@@ -395,7 +399,12 @@ impl State {
     /// included) does not enlarge `begin_call`'s frame, which stays live
     /// across every native re-entry.
     #[inline(never)]
-    pub(super) fn invoke_rust_fn(&mut self, f: RustFunc, call_base: usize) -> Result<u8> {
+    pub(super) fn invoke_rust_fn(
+        &mut self,
+        f: RustFunc,
+        call_base: usize,
+        method: bool,
+    ) -> Result<u8> {
         let old_stack_bottom = self.stack_bottom;
         self.stack_bottom = call_base;
 
@@ -419,7 +428,9 @@ impl State {
             Ok(n) => n,
             Err(e) => {
                 self.truncate_call_frame(call_base, old_stack_bottom);
-                return Err(self.report_call_error(e));
+                // The argument numbering of an argument error is settled
+                // here, by the call that directly invoked the callback.
+                return Err(self.report_call_error(e.settle_method_call(method)));
             }
         };
 

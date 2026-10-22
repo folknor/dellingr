@@ -214,6 +214,7 @@ fn fail_with_trace(_state: &mut State) -> dellingr::Result<u8> {
                 function_name: Some("host".into()),
                 source: Some(b"host-source".as_slice().into()),
                 line: 7,
+                defined_line: 0,
             }],
         ),
     )

@@ -197,6 +197,7 @@ impl Frame {
             function_name: self.bytecode.name.clone(),
             source: self.bytecode.source.clone(),
             line: self.current_line(),
+            defined_line: self.bytecode.defined_line,
         }
     }
 
@@ -434,7 +435,7 @@ impl Frame {
                         frame.record_call_site(state);
                         Self::flush_local_cost(state, local_cost)?;
                         let args = frame.call_args(state, inst.call_args())?;
-                        if state.call_from_lua(args, inst.call_results())? {
+                        if state.call_from_lua(args, inst.call_results(), inst.call_is_method())? {
                             frames.extend(std::iter::once_with(|| state.admitted_frame()));
                             continue 'frames;
                         }

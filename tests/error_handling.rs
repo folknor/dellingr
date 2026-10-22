@@ -1080,7 +1080,7 @@ fn table_move_rejects_overflow_ranges_before_mutating() {
     for (code, message) in [
         (
             "table.move(t, -1024, 9223372036854774784, 1)",
-            "too many elements to move",
+            "bad argument #3 to 'move' (too many elements to move)",
         ),
         (
             "table.move(t, 1, 2000, 9223372036854774784)",
@@ -1093,7 +1093,7 @@ fn table_move_rejects_overflow_ranges_before_mutating() {
         let err = state
             .call(ArgCount::Fixed(0), RetCount::Fixed(0))
             .expect_err("overflow range must fail cleanly");
-        assert!(matches!(err.kind(), ErrorKind::LibraryError(got) if got.to_string() == message));
+        assert_eq!(err.kind().to_string(), message);
 
         state.get_global("t").unwrap();
         for (index, expected) in [10.0, 20.0, 30.0].into_iter().enumerate() {

@@ -489,7 +489,10 @@ impl<'a> Parser<'a> {
     pub(super) fn open_tail(&mut self, tail: TailKind, want: RetCount) -> Result<()> {
         let (replacement, expected_opcode) = match tail {
             TailKind::Vararg => (Instr::vararg(want), Instr::OP_VARARG),
-            TailKind::FunctionCall(call) => (Instr::call(call.num_args(), want), Instr::OP_CALL),
+            TailKind::FunctionCall(call) => (
+                Instr::call_site(call.num_args(), want, call.is_method()),
+                Instr::OP_CALL,
+            ),
         };
         if self.funcs.chunk.code.last().map(|instr| instr.opcode()) != Some(expected_opcode) {
             return Err(self.internal_error(ParserFault::MultiValueTailMissingInstruction));
@@ -652,7 +655,10 @@ impl<'a> Parser<'a> {
         match exp {
             PrefixExp::FunctionCall(call) => {
                 let (num_args, line) = (call.num_args(), call.line());
-                self.push_at_line(Instr::call(num_args, RetCount::Fixed(1)), line);
+                self.push_at_line(
+                    Instr::call_site(num_args, RetCount::Fixed(1), call.is_method()),
+                    line,
+                );
             }
             PrefixExp::Parenthesized => (),
             PrefixExp::Place(place) => {

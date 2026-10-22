@@ -27,6 +27,7 @@ fn frame(line: u32) -> StackFrame {
         function_name: None,
         source: None,
         line,
+        defined_line: 0,
     }
 }
 

@@ -558,7 +558,7 @@ macro_rules! opcode_rows {
             OP_TFOR_CALL = 52, 0x000000, false, Free,
                 write!($f, "TForCall({}, {}, {:?})",
                     $inst.a(), $inst.b(), $inst.tfor_cursor_slot());
-            OP_CALL = 53, 0x0000ff, false, Call,
+            OP_CALL = 53, 0x0000fe, false, Call,
                 write!($f, "Call({:?}, {:?})", $inst.call_args(), $inst.call_results());
             OP_INIT_FIELD_PINNED = 54, 0x000000, false, TableWrite,
                 write!($f, "InitFieldPinned({}, {})", $inst.a(), $inst.bx());
@@ -660,12 +660,6 @@ impl Instr {
     #[inline]
     pub(crate) const fn op_a(opcode: u8, a: u8) -> Self {
         Instr((opcode as u32) << 24 | (a as u32) << 16)
-    }
-
-    /// Create an instruction with two u8 operands (A, B).
-    #[inline]
-    pub(crate) const fn op_ab(opcode: u8, a: u8, b: u8) -> Self {
-        Instr((opcode as u32) << 24 | (a as u32) << 16 | (b as u32) << 8)
     }
 
     /// Create an instruction with three u8 operands (A, B, C).
@@ -964,8 +958,26 @@ impl Instr {
         debug_assert!(self.opcode() == Self::OP_TFOR_CALL);
         decode_cache_slot(self.c())
     }
+    #[cfg(test)]
     pub(crate) fn call(num_args: ArgCount, num_rets: RetCount) -> Self {
-        Self::op_ab(Self::OP_CALL, num_args.to_u8(), num_rets.to_u8())
+        Self::call_site(num_args, num_rets, false)
+    }
+    /// An `OP_CALL`, marked when it is the call of a method call (`obj:m()`).
+    /// The mark changes nothing at execution; a failing library function reads
+    /// it to number its arguments the way the script author wrote them.
+    pub(crate) fn call_site(num_args: ArgCount, num_rets: RetCount, method: bool) -> Self {
+        Self::op_abc(
+            Self::OP_CALL,
+            num_args.to_u8(),
+            num_rets.to_u8(),
+            u8::from(method),
+        )
+    }
+    /// Whether an `OP_CALL` is the call of a method call (`obj:m()`).
+    #[inline(always)]
+    pub(crate) const fn call_is_method(self) -> bool {
+        debug_assert!(self.opcode() == Self::OP_CALL);
+        self.c() != 0
     }
     /// The argument count of an `OP_CALL`.
     #[inline(always)]

@@ -323,7 +323,7 @@ impl Parser<'_> {
                 // called that instead of the callee.
                 self.eval_prefix_exp(base_expr);
                 let mark_idx = self.mark_call_base();
-                self.finish_call(mark_idx, 0, line)?
+                self.finish_call(mark_idx, 0, line, false)?
             }
             TokenType::Colon => {
                 let line = self.input.peek()?.line;
@@ -352,7 +352,7 @@ impl Parser<'_> {
                 self.push(Instr::swap());
                 // Stack: [method, obj]
 
-                let call = self.finish_call(mark_idx, 1, line)?;
+                let call = self.finish_call(mark_idx, 1, line, true)?;
                 // Stack: [method, obj, arg1, arg2, ...]
                 call
             }
@@ -376,6 +376,7 @@ impl Parser<'_> {
         mark_idx: usize,
         implicit_args: usize,
         line: u32,
+        method: bool,
     ) -> Result<PrefixExp> {
         let (num_args, last_exp) = self.parse_call_args()?;
         let num_args = match last_exp {
@@ -390,7 +391,9 @@ impl Parser<'_> {
                 ArgCount::Fixed(self.checked_fixed_arg_count(num_args as usize, implicit_args)?)
             }
         };
-        Ok(PrefixExp::FunctionCall(CallSite::new(num_args, line)))
+        Ok(PrefixExp::FunctionCall(CallSite::new(
+            num_args, line, method,
+        )))
     }
 
     /// Parses a 'base' expression, after eliminating any operators. This can be:

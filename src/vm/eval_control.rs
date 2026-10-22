@@ -329,7 +329,7 @@ impl State {
         self.push_unchecked(state);
         self.push_unchecked(control);
 
-        let num_ret_reported = self.invoke_rust_fn(f, call_base)?;
+        let num_ret_reported = self.invoke_rust_fn(f, call_base, false)?;
 
         if let Err(e) = self.balance_stack(num_vars as usize, num_ret_reported as usize) {
             self.stack.truncate(call_base);

@@ -67,6 +67,10 @@ pub(crate) struct Bytecode {
     /// Optional function name (for debugging/analysis), shared with the
     /// trace frames and VM faults that report it.
     pub(crate) name: Option<Arc<str>>,
+    /// Source line where this function was defined, for tracebacks of
+    /// unnamed functions. Zero marks a main chunk (lines are 1-based). Saved
+    /// in snapshots, so tracebacks match before and after a restore.
+    pub(crate) defined_line: u32,
     /// Shared chunk name (file path or other identifier), byte-exact as the
     /// host gave it to `Program::compile`.
     pub(crate) source: Option<Arc<[u8]>>,

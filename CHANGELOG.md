@@ -63,6 +63,28 @@ All notable changes to dellingr are documented here. The format follows
   and the CLI's `--analyze` names the chunk (file path or `stdin`) in a
   parse error, as running and `--dump-bytecode` already did, because it
   compiles through the same `Program::compile` call.
+- Diagnostics that mislead are corrected. Costs are unchanged.
+  - Method calls number arguments as the script wrote them, as reference Lua
+    does: `s:sub(1.5)` is now `bad argument #1 to 'sub' (number has no integer
+    representation)` (was `#2`), and a bad receiver, as in
+    `local t = {sub = string.sub}; t:sub(1)`, is now `calling 'sub' on bad
+    self (string expected, got table)` (was `bad argument #1 to 'sub' (string
+    expected, got table)`). This applies to every library function called
+    with `:`. The call instruction carries the mark in its previously
+    reserved third operand byte, so a snapshot of code containing a method
+    call stores that word as 1 instead of 0 (the loader accepts both).
+    `ArgError::arg_number` still reports the callee's own position;
+    `ArgError::is_method_call` says whether the rendering shifted it.
+  - Tracebacks call only the main chunk `main chunk`. An unnamed function is
+    now `in function <source:line>` with the line it was defined on (was `in
+    main chunk`). `StackFrame` gains `defined_line` (0 for a main chunk).
+    Snapshots store each function's definition line (a u32 beside its name,
+    still format version 10), so a restored function's traceback labels match
+    the original run.
+  - `table.move`'s `too many elements to move` is now `bad argument #3 to
+    'move' (too many elements to move)`. It is `ErrorKind::ArgError` with
+    the new `ArgDetail::TooManyElementsToMove`; `LibraryError::TooManyMoveElements`
+    is removed.
 
 - Snapshot format version 10. Every bytecode inline-cache operand
   (`GET_GLOBAL`, `SET_GLOBAL`, `GET_FIELD`, `SET_FIELD` and the generic-for

@@ -132,6 +132,7 @@ impl<'a> Parser<'a> {
     /// optional diagnostic name. A `method` (`function t:m()`) gets the
     /// implicit leading `self` parameter.
     pub(super) fn parse_fndef(&mut self, name: Option<String>, method: bool) -> Result<()> {
+        let defined_line = self.input.peek()?.line;
         let (mut params, is_vararg) = self.parse_params()?;
         if method {
             params.insert(0, "self");
@@ -145,6 +146,7 @@ impl<'a> Parser<'a> {
 
         let mut new_chunk = self.parse_chunk(&params, is_vararg)?;
         new_chunk.name = name.map(Arc::from);
+        new_chunk.defined_line = defined_line;
 
         let index = self.bounded_u8(
             self.funcs.chunk.nested.len(),

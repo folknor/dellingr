@@ -37,6 +37,10 @@ pub struct StackFrame {
     pub source: Option<Arc<[u8]>>,
     /// Line number where the call occurred (1-indexed).
     pub line: u32,
+    /// Line where the function was defined (1-indexed), or 0 for a main
+    /// chunk. `Display` uses it to label an unnamed function that is not the
+    /// main chunk, as `function <source:line>`.
+    pub defined_line: u32,
 }
 
 /// Instruction context for an internal error escaping Lua dispatch.
@@ -343,9 +347,13 @@ impl ErrorContext {
 impl fmt::Display for StackFrame {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let source = LossyBytes(self.source.as_deref().unwrap_or(b"[C]"));
-        let func_desc = match &self.function_name {
-            Some(name) => format!("function '{name}'"),
-            None => "main chunk".to_string(),
+        let func_desc = match (&self.function_name, self.defined_line) {
+            (Some(name), _) => format!("function '{name}'"),
+            (None, 0) => "main chunk".to_string(),
+            (None, defined) => match self.source.as_deref() {
+                Some(chunk) => format!("function <{}:{defined}>", LossyBytes(chunk)),
+                None => format!("function <?:{defined}>"),
+            },
         };
         write!(f, "{}:{}: in {}", source, self.line, func_desc)
     }
@@ -752,8 +760,6 @@ pub enum LibraryError {
         /// The one-based index of the invalid element.
         index: i64,
     },
-    /// A `table.move` operation would exceed the supported element count.
-    TooManyMoveElements,
     /// A `table.move` destination calculation would wrap around.
     MoveDestinationWrapAround,
     /// An integer key range cannot be represented exactly by Lua numbers.
@@ -813,6 +819,15 @@ pub struct ArgError {
     expected: Option<LuaType>,
     /// Lua type the caller actually supplied.
     received: Option<LuaType>,
+    /// Whether the failing call was written as a method call (`obj:name()`).
+    /// `arg_number` keeps the callee's own position; the rendering counts
+    /// from the first argument the script author typed, as reference Lua
+    /// does, and calls a bad receiver "bad self".
+    method_call: bool,
+    /// Set once the innermost Rust callback that returned this error has
+    /// decided `method_call`, so an outer call that merely propagates the
+    /// error cannot reinterpret it.
+    settled: bool,
 }
 
 use crate::limits::MAX_RESULTS;
@@ -853,6 +868,9 @@ pub enum ArgDetail {
     StringFunctionOrTableExpected,
     /// A table sequence position is outside its supported range.
     PositionOutOfBounds,
+    /// `table.move` was asked to move more elements than it supports; the
+    /// argument is the end of the source range.
+    TooManyElementsToMove,
 }
 
 impl ArgDetail {
@@ -868,6 +886,7 @@ impl ArgDetail {
             Self::TableOrStringExpected => Some("table or string expected"),
             Self::StringFunctionOrTableExpected => Some("string/function/table expected"),
             Self::PositionOutOfBounds => Some("position out of bounds"),
+            Self::TooManyElementsToMove => Some("too many elements to move"),
             Self::TypeMismatch => None,
         }
     }
@@ -1068,6 +1087,19 @@ impl Error {
     /// Give an argument error the explicit standard-library function name.
     /// Updating the kind in place keeps this error's source and reporting
     /// state attached.
+    /// Record whether the call whose Rust callback produced this error was a
+    /// method call. Only the first (innermost) callback to return an argument
+    /// error decides; outer calls propagating it leave it alone.
+    pub(crate) fn settle_method_call(mut self, method: bool) -> Self {
+        if let ErrorKind::ArgError(argument) = &mut self.0.kind
+            && !argument.settled
+        {
+            argument.settled = true;
+            argument.method_call = method;
+        }
+        self
+    }
+
     pub(crate) fn with_argument_function_name(mut self, function_name: &str) -> Self {
         if let ErrorKind::ArgError(argument) = &mut self.0.kind {
             argument.func_name = Some(function_name.to_owned());
@@ -1156,6 +1188,8 @@ impl ErrorKind {
             detail,
             expected: None,
             received: None,
+            method_call: false,
+            settled: false,
         })
     }
 
@@ -1197,6 +1231,14 @@ impl ArgError {
         self.received
     }
 
+    /// Whether the failing call was a method call (`obj:name()`). The
+    /// rendered message then counts arguments without the receiver, and
+    /// reports a bad first argument as a bad `self`; [`Self::arg_number`] is
+    /// still the callee's own position.
+    pub fn is_method_call(&self) -> bool {
+        self.method_call
+    }
+
     /// Build an error for a required argument without an expected type.
     pub(crate) fn required(arg_number: isize, func_name: Option<&str>) -> Self {
         Self {
@@ -1205,6 +1247,8 @@ impl ArgError {
             detail: ArgDetail::TypeMismatch,
             expected: None,
             received: None,
+            method_call: false,
+            settled: false,
         }
     }
 
@@ -1221,6 +1265,8 @@ impl ArgError {
             detail: ArgDetail::TypeMismatch,
             expected: Some(expected),
             received,
+            method_call: false,
+            settled: false,
         }
     }
 }
@@ -1447,6 +1493,12 @@ impl fmt::Display for ArgError {
                 .to_owned(),
         };
 
+        if self.method_call && self.arg_number > 0 {
+            return match self.arg_number - 1 {
+                0 => write!(f, "calling '{func_name}' on bad self ({extra})"),
+                number => write!(f, "bad argument #{number} to '{func_name}' ({extra})"),
+            };
+        }
         write!(
             f,
             "bad argument #{} to '{}' ({})",
@@ -1489,7 +1541,6 @@ impl fmt::Display for LibraryError {
                 f,
                 "invalid value ({value_type}) at index {index} in table for 'concat'"
             ),
-            Self::TooManyMoveElements => f.write_str("too many elements to move"),
             Self::MoveDestinationWrapAround => f.write_str("destination wrap around"),
             Self::IntegerKeyRangeExceeded { function } => write!(
                 f,

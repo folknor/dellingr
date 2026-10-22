@@ -40,13 +40,9 @@ removed.
 - `error(42)` gets a `chunk:line:` location prefix; reference Lua adds the
   position only to string messages. Older than the typed `ErrorValue`, not
   listed in `docs/compatibility.md`. Either match reference or document it.
-- Tracebacks label every unnamed frame "main chunk" (`StackFrame`'s
-  `Display` in `src/error.rs`), so an error inside
-  `(function() error("x") end)()` shows two "main chunk" lines; reference
-  prints `in function <file:line>`. Looks like a bug.
-- Method calls report argument numbers one too high: `s:sub(1.5)` says
-  "bad argument #2 to 'sub'", both reference Luas say #1 (they renumber for
-  method calls). Affects every string method called with `:`.
+- `table.move`'s "destination wrap around" error names no argument;
+  reference reports it against argument #4. Same defect the "too many
+  elements to move" error had.
 - `docs/compatibility.md` gaps, all matching 5.4 or deliberate but unlisted
   (the "Position arguments" section of the `src/lua_std.rs` module doc has
   the rules): non-integer positions raise where 5.2 truncates; `gsub` with
@@ -54,11 +50,6 @@ removed.
   is 5.4-only; `unpack` and `concat` raise across +/-2^53 where 5.4 returns
   nils. The page's `move` +/-2^53 wording is also inaccurate: a single exact
   key outside the range is accepted.
-- Error texts that differ from reference: `select()` says "value expected"
-  (reference "number expected, got no value"); `table.move`'s "too many
-  elements to move" lacks the "bad argument #3 to 'move'" prefix; `unpack`
-  says "too many results (limit 255)" (reference "too many results to
-  unpack").
 - Still stringly typed after the typed-errors pass: `LibraryFunction::Other(String)`
   and `SnapshotError::InvalidBytecode { reason: String }`.
 - Two ignored crmath oracle tests (matched by `brokkr test golden`) fail on

@@ -1395,6 +1395,7 @@ impl State {
                 function_name: call_info.bytecode.name.clone(),
                 source: call_info.bytecode.source.clone(),
                 line,
+                defined_line: call_info.bytecode.defined_line,
             });
         }
 

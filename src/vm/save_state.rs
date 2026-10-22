@@ -571,6 +571,7 @@ struct SavedBytecode {
     upvalues: Vec<SavedUpvalueDesc>,
     is_vararg: bool,
     name: Option<String>,
+    defined_line: u32,
     source: Option<Arc<[u8]>>,
     line_info: Vec<u32>,
 }
@@ -1526,6 +1527,7 @@ impl<'a> SaveBuilder<'a> {
             upvalues: Vec::new(),
             is_vararg: false,
             name: None,
+            defined_line: 0,
             source: None,
             line_info: Vec::new(),
         });
@@ -1553,6 +1555,7 @@ impl<'a> SaveBuilder<'a> {
             upvalues: bc.upvalues.clone(),
             is_vararg: bc.is_vararg,
             name: bc.name.as_deref().map(str::to_owned),
+            defined_line: bc.defined_line,
             source: bc.source.clone(),
             line_info: bc.line_info.clone(),
         };
@@ -2486,6 +2489,7 @@ fn build_bytecode_node(
         upvalues: src.upvalues.clone(),
         is_vararg: src.is_vararg,
         name: src.name.as_deref().map(Arc::from),
+        defined_line: src.defined_line,
         source,
         line_info: src.line_info.clone(),
     })
@@ -3058,6 +3062,7 @@ impl SavedBytecode {
         write_vec(out, &self.upvalues, |out, item| item.encode(out))?;
         out.write_bool(self.is_vararg);
         out.write_option_string(self.name.as_deref(), ByteField::ChunkName)?;
+        out.write_u32(self.defined_line);
         out.write_option_bytes(self.source.as_deref(), ByteField::ChunkSource)?;
         write_vec(out, &self.line_info, |out, line| {
             out.write_u32(*line);
@@ -3082,6 +3087,7 @@ impl SavedBytecode {
             upvalues: read_vec(input, SavedUpvalueDesc::decode)?,
             is_vararg: input.read_bool()?,
             name: input.read_option_string(ByteField::ChunkName)?,
+            defined_line: input.read_u32()?,
             // Chunk names are byte-exact, so unlike function names they are
             // not required to be UTF-8.
             source: input
@@ -3249,6 +3255,7 @@ mod tests {
             upvalues: Vec::new(),
             is_vararg: false,
             name: None,
+            defined_line: 0,
             source: None,
             line_info: vec![1],
         }
@@ -4338,6 +4345,11 @@ mod tests {
     }
 
     #[test]
+    fn saved_main_chunk_keeps_zero_defined_line() {
+        roundtrip!(SavedBytecode, valid_saved_bytecode());
+    }
+
+    #[test]
     fn saved_bytecode_round_trips() {
         roundtrip!(
             SavedBytecode,
@@ -4356,6 +4368,7 @@ mod tests {
                 upvalues: vec![SavedUpvalueDesc::Local(1), SavedUpvalueDesc::Upvalue(2)],
                 is_vararg: true,
                 name: Some("f".to_string()),
+                defined_line: 9,
                 source: None,
                 line_info: vec![10, 11, 12],
             }
