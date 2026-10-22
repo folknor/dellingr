@@ -6,37 +6,15 @@ get deleted as they ship or stop being worth tracking.
 
 ## Next up
 
-### Run the crmath contract on a second platform (do first)
-
-What: `src/crmath/` (c2932f8) promises bit-identical transcendentals and
-`^` on every host, but every run so far was x86-64 with FMA on plantasjen,
-built with `target-cpu=native` (set globally in `~/.cargo/config.toml`).
-Two code paths have never executed: the run-time-detected no-FMA x86 path
-(it is only compile-checked) and aarch64, where `crmath::fma` is `mul_add`
-lowering to `fmadd`. wasm has not run either. The soft `soft_fma` itself is
-exercised by the forced-FMA tests, but `tests/fixtures/crmath_golden.txt`
-only proves cross-platform agreement when it runs somewhere else.
-
-Sketch: run the crmath tests in a baseline `x86-64` build (override the
-global `target-cpu=native` for that run), then the golden test on aarch64
-(qemu user-mode or real hardware). The ignored release sweeps
-(`brokkr test sweep_ --release`, about 7M CORE-MATH worst cases) are the
-stronger check where time allows.
-
-Signal: any disagreement is a replay divergence, the exact bug HYG-067
-removed.
-
 ### Housekeeping left from the 2026-10-22 loops
 
-- libbeef 0.1.1 bugs the crmath test oracle works around, possibly worth
-  reporting upstream. Outward-facing; the user deferred it on 2026-10-22.
-  If it is picked up: confirm each still reproduces on the latest release,
-  draft one issue per bug with a minimal reproduction, and post only after
-  the user approves the text. `BigFloat::pi`
-  returns 0 and high-precision `atan` returns 0 with it; the power-of-two
-  base `pow` shortcut truncates the exponent (`4^0.25` gives 1); `sin` on
-  huge arguments panics (its Ziv loop never converges); `to_f64` mishandles
-  the bottom of the subnormal range.
+- libbeef 0.1.1 bugs the crmath test oracle works around, reported
+  upstream on 2026-10-22: lifthrasiir/libbeef#2 (`pi` returns 0 from 688
+  bits up, taking `atan` with it), #3 (power-of-two base `pow` truncates
+  the exponent), #4 (`sin` panics on huge arguments), #5 (`to_f64`
+  misrounds small inexact subnormals). When a release fixes them, bump the
+  dev-dependency and drop the matching workarounds in
+  `src/crmath/tests/oracle.rs` (and the `pow` note in Cargo.toml).
 - Possible CORE-MATH bug: `is_exact` in pow.c measures the bit length of `m`
   rather than `m^y`. Ported as is; unobservable here (the sweeps pass).
 
@@ -80,9 +58,7 @@ and closure-clone rewrites), `fields/polymorphic` / `same_obj_cached` /
 loop, ~100ms/call, footer 30) and register both pins (the bench/ port
 as `file`, the examples/ original as `hotpath_file`).
 
-Also open: a math workload (no registered workload isolates the cost of
-`crmath` transcendentals or `^`; `bench/benchmark.lua` calls `math.sin` in
-one section only, so c2932f8's cost is unmeasured), a seconds-scale parse
+Also open: a seconds-scale parse
 workload (`large_source` at a second, larger size), and a Rust-driven
 snapshot bench
 (optimizations.md "Snapshot path" - needs harness support, not a .lua

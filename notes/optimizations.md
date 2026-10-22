@@ -18,52 +18,6 @@ plantasjen) unless noted.
 
 ## Investigate
 
-Recommended next speed loop (2026-10-22): recover what that day's
-correctness commits cost, as one spar loop with `--hotpath` profiling:
-the `bench/benchmark` regression below, the array-window append path, and
-the call-path leftovers under "Call path after the frame-stack flattening"
-(whose frame shrinking would also let `MAX_NATIVE_CALL_DEPTH` return to
-200). Register a math workload first (todo.md) so `crmath` cost is covered.
-
-### bench/benchmark +6% after the frame-stack flattening (2026-10-22)
-
-What: plantasjen, `--commit` builds, efcd88f against 2bcc71e: 7200 vs
-6800 ms in an interleaved pair, and the agent that landed the flattening
-measured 7100 vs 6800 best-of-3 with WARM_BLOCK averages of 138.6 vs
-132.5 ms and tight in-run spread. The same comparison put arithmetic at
--2.5%, method level, constants +3.4%, closure +2.8% and patterns -4%, all
-within this host's binary-layout band, so benchmark is the one delta that
-holds. Cause not found; candidates are the call-path leftovers below and
-the per-invocation frame-stack borrow. Start with `--hotpath` on
-`examples/composite/benchmark.lua` at both commits and compare per-function
-shares section by section.
-
-Signal: a function whose share moved, or a matched pair back at 2bcc71e's
-number after a call-path change.
-
-### Array-window append path: list_literals +4-6%, fill +3% (2026-10-22)
-
-What: the array part became a window over its logical length in 2bcc71e
-(queue-growth fix). Interleaved `--commit` pairs on plantasjen against
-c2932f8: `list_literals` 5100/5200 ms vs 4900/4900, `fill` 3200/3200 vs
-3100/3100, while the untouched `arithmetic` control (3900 both) and
-`benchmark`, `mixed` held level and `pairs` flipped sign between pairs
-(noise). Two sign-consistent table workloads with a flat control point at
-the mechanism rather than layout: every append now runs `prepare_append`
-and `advance_lead` (bounded catch-up of up to `LEAD_CATCH_UP` slots), and
-every array read and write subtracts and compares against the window
-base. `record_tables` measured 4000 vs 4200 in one pair (unconfirmed).
-
-Sketch: `--hotpath` on `examples/tables/fill.lua` and
-`examples/tables/list_literals.lua` at both commits to see which of the two
-costs dominates; then a fast path for the common `base == 0`, `lead == 0`
-case (a plain dense array that has never shifted), or batching the lead
-catch-up into `SET_LIST` instead of per element.
-
-Signal: a hotpath distribution showing `prepare_append`/`advance_lead`
-share above noise, or a matched pair after a fast path landing back at the
-c2932f8 numbers.
-
 ### bench/arithmetic +11% wall after compare-and-branch fusion landed (2026-09-03)
 
 What: after A-O7 (commits fd4d333..6cc8493), `bench/arithmetic` measures
@@ -103,6 +57,15 @@ launches), a commit whose changes are all off the fill hot path. `--hotpath`
 on both showed identical call counts and unchanged per-function shares, and
 the instrumented build's warm average differed by only 1.3%. Same signature
 as above: a property of the binary, not of the executed path.
+
+Third instance (plantasjen, 2026-10-22): afcd2f0 against c2932f8 in two
+interleaved `--commit` pairs, `bench/benchmark` 7100/7100 vs 6900/6800 and
+`bench/constants` 3100/3100 vs 3000/3000, with the `arithmetic` control
+level. `--hotpath` on `constants` showed identical per-function shares (the
+rest is the dispatch loop itself); on `benchmark` only
+`instr_branch_fused` moved (15 to 22 ns, unchanged code), and reading the
+compare operands in place, as `eval_float_float` does, did not move the
+walls. afcd2f0's own `benchmark` cells spread 7100-7300 across that day.
 
 ### Residual ~2x in `strings/patterns` - decided not to chase (2026-07-25)
 
@@ -158,7 +121,11 @@ Lua-to-Lua calls run in one dispatch loop over a per-invocation frame stack
 since 27ee714. What B-O1 listed and is still open:
 
 - `Closure` Arc bumps per call: `admitted_frame` clones bytecode, runtime and
-  upvalues from the heap closure, plus the `CallInfo` bytecode clone.
+  upvalues from the heap closure, plus the `CallInfo` bytecode clone. The
+  closure is also looked up twice per call (`lua_function_bytecode` at
+  admission, then `admitted_frame`); on `composite/benchmark` at afcd2f0
+  (plantasjen) the two lookups' instrumented total matched c2932f8's single
+  lookup plus `initialize_frame`, so this is not a measured regression.
 - `CallInfo` still parallels the frame stack (bytecode + ip for tracebacks,
   `print` locations and the cache sweep). Merging needs the traceback to read
   every invocation's frames, including the current frame of each natively
@@ -291,104 +258,6 @@ record-shape access is on Map-storage tables (>4 fields), where the
 slow path's hash lookup is expensive enough to amortize the extra
 work, or (b) a way to add the cross-receiver path without
 perturbing the same-ptr branch's codegen.
-
-### Array part for dense integer keys
-
-What: a third `TableStorage` variant (`Array { values: Vec<Val> }`) for
-tables with consecutive integer keys 1..N. Skips hashing entirely for
-`arr[i]` access.
-
-Sketch: when a fresh table receives integer keys 1, 2, 3, ... in order,
-keep them in a Vec instead of an IndexMap. `get(Val::Num(n))` becomes a
-range check + Vec index. Promote to `Map` on hash-key insert or sparse
-integer insert (`arr[100] = x` when len < 100).
-
-Why deferred: invasive. Touches every Table operation, including `next()`,
-`pairs()` iteration, the metatable interactions, and the `set_at_index`
-hot path. Real Lua VMs do this, but our `IndexMap` baseline is competitive
-enough that the engineering cost has not earned itself.
-
-First, a clarification the original sketch glossed over: there are
-really two designs hiding under "array part," and most hidden costs
-attach only to the heavier one.
-
-- **Dense-only with one-way promotion** (the sketch above): an
-  `Array(Vec<Val>)` storage variant for tables built from sequential
-  integer keys, which promotes irreversibly to `Map` on the first
-  sparse or non-integer write. After promotion, behavior is exactly
-  today's. Iteration order can be preserved by materializing the map
-  in insertion order during promotion. No permanent array/hash
-  boundary, no `next(k)` boundary handoff.
-- **Dual array+hash storage** (real Lua-style): both parts coexist
-  for the lifetime of the table. `pairs()` iterates array-first, then
-  hash; `next(k)` crosses the boundary. Rehash heuristics decide when
-  to migrate keys between parts.
-
-Several of the hidden costs below apply only to the dual-storage
-variant; the dense-only one is genuinely cheaper.
-
-Hidden costs that aren't obvious from the outside:
-
-- Rehash / O(N) work and cost-accounting (both variants, mostly
-  worsens an existing condition). A SET that triggers an array-hash
-  migration does O(N) work invisible to `analyze_cost`. The
-  blind-spot category isn't actually new: `Table::array_insert` /
-  `array_remove` already do whole-array shifts charged as 1 (worse than
-  O(N) today - see todo.md "Open findings"), `IndexMap`
-  rehashes on capacity growth, and `lua_std::table.insert` /
-  `table.remove` charge O(1) for O(N) work today. The array-part
-  proposal extends that gap to plain `t[k] = v`, but doesn't create
-  a new class of problem. The fix that doesn't require punching a
-  hole through the table layer: have `Table::insert` return the
-  work-done, and let the OP_SET caller charge the dynamic count -
-  which is how `OP_SET_LIST` already handles its variable cost.
-  `Table` doesn't need access to `State`.
-- Iteration-order shift breaks replay compat (dual storage only).
-  Switching from IndexMap insertion order to "array first, then hash"
-  is observable via `pairs()`. This isn't a determinism break in the
-  reference-Lua-spec sense (the spec leaves `pairs()` order
-  unspecified); it's a *replay-compat* break against dellingr's
-  self-imposed insertion-order contract. The right unblock is
-  replay-versioning, which several other deferrable optimizations
-  also want; framing this as an array-part-specific cost is
-  misleading.
-- `next(k)` continuation across the boundary (dual storage only).
-  Distinct index ranges for array vs. hash and careful handoff at
-  the boundary; reference VMs have shipped fixes here repeatedly.
-- `#t` cost (mostly already paid). `compute_array_len` already does
-  the doubling-then-bisect today; an array part *simplifies* `#t`
-  for the array-only case (`return values.len()`) and only
-  complicates the mixed case. Net code-size could go either way.
-- Inline storage interaction (narrower than first written).
-  `TableStorage::Inline` only loses to a dense `Array` variant for
-  *small dense-integer-only* tables - record-shaped tables
-  (`{x=…, y=…, z=…}`) stay in `Inline` regardless. And in the
-  dense-int small case, `Inline` (no alloc, ≤4 compares) is
-  plausibly already faster than `Vec<Val>` (heap alloc + bounds
-  check), so the affected case may be the case where Inline wins
-  on cycles anyway. A smallvec-style Array-with-inline-buffer
-  would erase this concern entirely - whether that's worth the
-  engineering is open.
-- Dispatch-site / traversal-site multiplication (corrected from an
-  earlier "GC barrier" framing). dellingr is stop-the-world
-  mark-sweep with no write barriers, so the correct cost is
-  match-arm proliferation across `TableStorage` dispatch sites
-  (~8-10 functions: `mark_values`, `get`, `get_with_index`,
-  `insert`, `remove`, `next`, `promote_to_map`, `ensure_map`, …),
-  each gaining one arm per new variant. This is real engineering
-  cost but has no GC-safety implication.
-
-Signal that would promote it: `tables/numeric_index` and `tables/fill` becoming
-the dominant slowness in a real game-script workload. The dynamic
-numeric fast path in `Table::get` already covers loop-variable
-integer indexing on Map storage; the full storage split is only
-justified if that proves insufficient and the loss is specifically
-on the per-allocation path rather than per-access. Note that integer
-keys today are `Val::Num` (a stack-resident enum variant), not
-separately allocated - so "boxing" isn't the cost mechanism. The
-actual per-allocation cost in dellingr is the IndexMap's
-bucket-and-entry storage growing at promotion-from-Inline; whether a
-dense `Vec<Val>` beats that for typical workloads is unmeasured.
 
 ### Compiler-recognized field-update fusion
 
@@ -654,11 +523,6 @@ in todo.md's workload-registry entry).
 
 ## Micro / take-or-leave
 
-- **Constructor presize reserves hash space for positional items:**
-  `OP_NEW_TABLE_PRESIZED`/`TRACKED` pass the constructor's total field count
-  to `Table::with_capacity`, which reserves IndexMap space even when every
-  item goes to the array part (`{1,2,3,4,5}`). Split the parser's presize
-  count into array and hash halves, or reserve the array instead.
 
 - **Error-path cost flush costs ~3.6% on `arithmetic`:** charging pending
   batched cost on runtime errors moved the dispatch loop into an inner

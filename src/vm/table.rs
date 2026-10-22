@@ -1165,6 +1165,28 @@ impl Table {
         self.vlen += 1;
     }
 
+    /// Add `n` keys to the logical array.
+    fn grow_vlen_by(&mut self, n: usize) {
+        assert!(
+            n <= MAX_ARRAY_LEN - self.vlen,
+            "table array part cannot exceed MAX_ARRAY_LEN keys"
+        );
+        self.vlen += n;
+    }
+
+    /// Whether an append, and every append after it with no other write in
+    /// between, is a bare push: the window's first slot is live (so the
+    /// dead-prefix hint is 0 and cannot advance, and no prefix is dropped or
+    /// window reset), the window ends at `vlen`, and the hash part holds no
+    /// live entry to migrate. Appends keep all three true, nil values
+    /// included.
+    #[inline]
+    fn appends_are_plain(&self) -> bool {
+        matches!(self.array.first(), Some(first) if !matches!(first, Val::Nil))
+            && self.base + self.array.len() == self.vlen
+            && self.hash_live_len() == 0
+    }
+
     /// Append `value` at key `vlen + 1`, then migrate the following keys from
     /// the hash part. A nil value is still a structural append: constructors
     /// and `table.insert` inside a full sequence extend the array with it.
@@ -1471,19 +1493,30 @@ impl Table {
     pub(super) fn set_list(
         &mut self,
         first: usize,
-        values: impl ExactSizeIterator<Item = Val>,
+        mut values: impl ExactSizeIterator<Item = Val>,
     ) -> std::result::Result<(), TableError> {
         let count = values.len();
         if count > 0 && first <= self.vlen + 1 && self.base + self.array.len() == self.vlen {
             let last = first.saturating_add(count - 1);
             self.array.reserve(last.saturating_sub(self.vlen));
         }
-        for (key, value) in (first..).zip(values) {
+        let mut key = first;
+        while let Some(value) = values.next() {
+            if key == self.vlen + 1 && self.appends_are_plain() {
+                // Every remaining key is an append whose window preparation
+                // and hash migration would do nothing, so the rest of the
+                // batch lands in one extend with the same end state.
+                self.grow_vlen_by(1 + values.len());
+                self.array.push(value);
+                self.array.extend(values);
+                break;
+            }
             if key == self.vlen + 1 {
                 self.append(value);
             } else {
                 self.insert(Val::Num(key as f64), value)?;
             }
+            key += 1;
         }
         #[cfg(debug_assertions)]
         self.debug_assert_invariants();
@@ -2209,6 +2242,61 @@ mod tests {
             .unwrap();
         t.insert(n(3), Val::Nil).unwrap();
         assert_eq!(t.array_len(), 1);
+    }
+
+    /// `set_list` extends a plain run of appends in one step; the table it
+    /// leaves must match key-by-key appends exactly, window included.
+    #[test]
+    fn set_list_bulk_appends_match_key_by_key_appends() {
+        fn key_by_key(t: &mut Table, first: usize, values: &[Val]) {
+            for (key, value) in (first..).zip(values.iter().copied()) {
+                if key == t.vlen + 1 {
+                    t.append(value);
+                } else {
+                    t.insert(n(key), value).unwrap();
+                }
+            }
+        }
+        let live = Val::Bool(true);
+        let batches: [&[Val]; 4] = [
+            &[live, Val::Nil, live, live],
+            &[Val::Nil, live, live, Val::Nil],
+            &[live; 9],
+            &[Val::Nil, Val::Nil, live],
+        ];
+        let setups: [fn(&mut Table); 5] = [
+            |_| {},
+            |t| fill(t, 1..=3),
+            |t| t.insert(n(3), Val::Bool(false)).unwrap(),
+            |t| fill_hash(t, 1..=2),
+            |t| {
+                fill(t, 1..=20);
+                for i in 1..=15 {
+                    t.insert(n(i), Val::Nil).unwrap();
+                }
+            },
+        ];
+        for setup in setups {
+            for batch in batches {
+                let mut bulk = Table::default();
+                let mut reference = Table::default();
+                setup(&mut bulk);
+                setup(&mut reference);
+                let first = bulk.vlen + 1;
+                bulk.set_list(first, batch.iter().copied()).unwrap();
+                key_by_key(&mut reference, first, batch);
+                assert_eq!(bulk.array, reference.array);
+                assert_eq!(
+                    (bulk.base, bulk.vlen, bulk.lead),
+                    (reference.base, reference.vlen, reference.lead)
+                );
+                assert_eq!(bulk.hash_live_len(), reference.hash_live_len());
+                for key in 1..=40 {
+                    assert_eq!(bulk.get(&n(key)), reference.get(&n(key)));
+                    assert_eq!(bulk.get(&h(key)), reference.get(&h(key)));
+                }
+            }
+        }
     }
 
     #[test]

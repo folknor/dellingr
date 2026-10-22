@@ -209,7 +209,7 @@ on-demand recurring-stack probe in default and snapshot configurations.
 
 ```
 examples/hotpath.rs        # harness (parse / cold call / warm calls)
-examples/numerics/         # arithmetic, constants
+examples/numerics/         # arithmetic, constants, math
 examples/calls/            # global, local, method, vararg, fixedarg, many_literals, ...
 examples/fields/           # same_obj_read, same_obj_write, polymorphic, ...
 examples/globals/          # write

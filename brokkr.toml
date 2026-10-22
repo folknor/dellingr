@@ -91,6 +91,12 @@ xxh128 = "78d3fe1436826a60c8df7d9b3123d0ce"
 hotpath_file = "examples/numerics/constants.lua"
 hotpath_xxh128 = "0986d40dc16ad2a193952a404c627ac5"
 
+[dellingr.workloads.math]
+file = "bench/math.lua"
+xxh128 = "3f1ae9f39d8bc1d7a5136967d7d46900"
+hotpath_file = "examples/numerics/math.lua"
+hotpath_xxh128 = "5a68562ecd5cb972846370183167701c"
+
 [dellingr.workloads.pairs]
 file = "bench/pairs.lua"
 xxh128 = "40f694a23ec14829b96e0403b9a0b6dd"
