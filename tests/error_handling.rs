@@ -403,7 +403,9 @@ fn budget_flushes_pending_caller_cost_before_nested_call() {
 
 #[test]
 fn call_depth_exceeded_error() {
-    on_deep_stack(|| {
+    stack::on_limit_test_stack("call_depth_exceeded_error", || {
+        // Rejected with exactly MAX_CALL_DEPTH activations live: every call
+        // up to the limit was admitted, and only the next one refused.
         let err = expect_error(
             r#"
             local function recurse(n)
@@ -412,19 +414,22 @@ fn call_depth_exceeded_error() {
             recurse(0)
         "#,
         );
-        assert!(
-            matches!(err.kind(), ErrorKind::CallDepthExceeded { .. }),
-            "Expected CallDepthExceeded, got: {err}"
-        );
+        match err.kind() {
+            ErrorKind::CallDepthExceeded { depth, limit } => {
+                assert_eq!(*depth, dellingr::limits::MAX_CALL_DEPTH);
+                assert_eq!(*limit, dellingr::limits::MAX_CALL_DEPTH);
+            }
+            other => panic!("Expected CallDepthExceeded, got: {other}"),
+        }
     });
 }
 
-/// The same limit reached through Lua -> RustFn -> Lua recursion, so every
-/// level keeps a Rust callback frame (its unwind guard included) live on the
-/// native stack.
+/// Lua -> RustFn -> Lua recursion keeps a Rust callback frame and a fresh
+/// dispatch loop live on the native stack per level, so it is bounded by the
+/// native call limit, not by the Lua call depth.
 #[test]
-fn call_depth_exceeded_through_rust_callbacks() {
-    on_deep_stack(|| {
+fn native_call_depth_exceeded_through_rust_callbacks() {
+    stack::on_limit_test_stack("native_call_depth_exceeded_through_rust_callbacks", || {
         let err = expect_error(
             r#"
             local function recurse(n)
@@ -437,24 +442,14 @@ fn call_depth_exceeded_through_rust_callbacks() {
             recurse(0)
         "#,
         );
-        assert!(
-            matches!(err.kind(), ErrorKind::CallDepthExceeded { .. }),
-            "Expected CallDepthExceeded, got: {err}"
-        );
+        match err.kind() {
+            ErrorKind::NativeCallDepthExceeded { depth, limit } => {
+                assert_eq!(*depth, dellingr::limits::MAX_NATIVE_CALL_DEPTH);
+                assert_eq!(*limit, dellingr::limits::MAX_NATIVE_CALL_DEPTH);
+            }
+            other => panic!("Expected NativeCallDepthExceeded, got: {other}"),
+        }
     });
-}
-
-/// Runs `f` on a dedicated thread with a generous stack. MAX_CALL_DEPTH Lua
-/// frames recurse natively through the dispatch loop, and unoptimized dev
-/// builds spend more than 8KB of native stack per Lua call, overflowing the
-/// 2MB default test-thread stack before the depth limit is reached.
-fn on_deep_stack(f: impl FnOnce() + Send + 'static) {
-    std::thread::Builder::new()
-        .stack_size(stack::DEEP_RECURSION_TEST_STACK_BYTES)
-        .spawn(f)
-        .expect("spawning the test thread should succeed")
-        .join()
-        .expect("deep-stack test thread should not panic");
 }
 
 // -- Table operation tests --
@@ -1467,7 +1462,7 @@ fn dotted_method_declaration_is_supported() {
 
 #[test]
 fn error_msg_call_depth_shows_overflow() {
-    on_deep_stack(|| {
+    stack::on_limit_test_stack("error_msg_call_depth_shows_overflow", || {
         let err = expect_error("local function r(n) return r(n+1) end\nr(0)");
         let msg = format!("{err}");
         assert!(

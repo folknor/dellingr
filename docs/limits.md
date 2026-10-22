@@ -57,9 +57,11 @@ Violations are reported as errors at load time, never silently truncated.
 
 - `MAX_STRING_BYTES`: size of any Lua string.
 - `MAX_CALL_DEPTH`: simultaneously active Lua function calls. Only Lua
-  frames count: a Rust callback that calls another Rust function through
-  the host API recurses without consuming this budget, so it does not bound
-  all calls. See "Native stack" below.
+  frames count, and Lua-to-Lua calls hold their frames on the heap, so
+  reaching it needs no native stack per level.
+- `MAX_NATIVE_CALL_DEPTH`: simultaneously active calls made from Rust, which
+  are the calls that run on the native stack. See "Native stack" below.
+  Exceeding it raises `NativeCallDepthExceeded`.
 - `MAX_STACK_SIZE`: values on the shared Lua/Rust value stack.
 - `MAX_METAMETHOD_DEPTH`: active steps in an index, newindex or
   non-function call chain. Table-library writes through metamethods share it.
@@ -210,18 +212,22 @@ The cap applies to Lua functions as well as Rust callbacks:
 
 ## Native stack
 
-Lua calls recurse on the host thread's native stack.
+Every recursion limit is a logical count, identical on every host, build
+profile and thread size; none depends on how much native stack is left.
 
-- `MAX_CALL_DEPTH` and `MAX_METAMETHOD_DEPTH` bound logical recursion. They
-  cannot guarantee that a small native stack reaches those limits before a
-  process-aborting stack overflow.
-- Rust callbacks that call Rust functions through the host API, directly or
-  mutually, recurse with no VM-side depth limit. Bounding that recursion is
-  the embedder's responsibility.
-- Embedders must provision and validate thread stack space for their target,
-  build profile and callback call paths.
-- Debug builds use more native stack per call than optimized builds.
-- The deep-recursion regression test runs on a dedicated large thread stack.
-  That is a tested configuration, not a portable minimum.
-- The syntax-depth bound exists for the same reason on the parse side: without
-  it, deeply nested source would overflow the native stack.
+- A Lua function calling a Lua function, directly or through a `__call`
+  handler, does not recurse natively: the dispatch loop suspends the caller
+  in the State's activation records and continues in the callee.
+- Every call made from Rust runs on the native stack: host `call` and
+  `call_anchor`, metamethod handlers, generic-for iterator functions, and
+  library callbacks such as `table.sort` comparators and `string.gsub`
+  replacement functions. Each starts a nested dispatch loop or Rust callback,
+  and `MAX_NATIVE_CALL_DEPTH` bounds how many can be active at once. The
+  host's own call is one of them, and so is a Rust callback calling another
+  Rust function through `State::call`.
+- Other native recursion has its own bound: `__index` and `__newindex` table
+  chains (`MAX_METAMETHOD_DEPTH`), the parser (`MAX_SYNTAX_DEPTH`) and the
+  pattern matcher (`MAXCCALLS`).
+- The counters are per State. A callback that runs another State nests that
+  State's whole stack use on top of this one's, which is the embedder's to
+  provision.

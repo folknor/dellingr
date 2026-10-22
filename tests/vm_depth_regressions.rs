@@ -36,12 +36,10 @@ fn cyclic_call_metamethod_returns_depth_error_and_state_recovers() {
 
 #[test]
 fn recursion_through_a_function_valued_call_metamethod_is_not_capped_at_metamethod_depth() {
-    std::thread::Builder::new()
-        .stack_size(stack::DEEP_RECURSION_TEST_STACK_BYTES)
-        .spawn(function_valued_call_recursion)
-        .expect("spawning the test thread should succeed")
-        .join()
-        .expect("deep-stack test thread should not panic");
+    stack::on_limit_test_stack(
+        "recursion_through_a_function_valued_call_metamethod",
+        function_valued_call_recursion,
+    );
 }
 
 fn function_valued_call_recursion() {

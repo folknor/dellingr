@@ -113,6 +113,7 @@ fn reset_and_quiescence_share_the_snapshot_inventory() {
     state.metamethod_depth = 1;
     state.call_chain_depth = 1;
     state.call_depth = 1;
+    state.native_call_depth = 1;
     assert_eq!(state.validate_quiescent(), Err(SaveError::NotQuiescent));
     state.reset_in_flight();
     assert!(state.validate_quiescent().is_ok());

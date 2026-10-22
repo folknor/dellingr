@@ -132,8 +132,18 @@ pub(crate) fn checked_string_growth(current: usize, additional: usize) -> Result
     Ok(size)
 }
 
-/// Maximum simultaneously active Lua calls; not a native-stack guarantee.
+/// Maximum simultaneously active Lua function calls. Lua-to-Lua calls run in
+/// one dispatch loop with heap-held frames, so reaching this limit needs no
+/// native stack per level.
 pub const MAX_CALL_DEPTH: u32 = 1000;
+/// Maximum simultaneously active calls made from Rust: host `call` and
+/// `call_anchor`, metamethod handlers (`__index`, `__newindex`, `__len`,
+/// `__tostring`, `__pairs`), generic-for iterator functions, and library
+/// callbacks such as `table.sort` comparators and `string.gsub` replacement
+/// functions. Each such call runs on the native stack, so this is the limit
+/// that bounds native recursion; the counterpart of reference Lua's
+/// `LUAI_MAXCCALLS`. See docs/limits.md, "Native stack".
+pub const MAX_NATIVE_CALL_DEPTH: u32 = 200;
 /// Maximum values on the shared Lua/Rust stack, not a host-memory quota.
 pub const MAX_STACK_SIZE: usize = 1_000_000;
 /// Maximum active steps in an index, newindex, or non-function call chain.

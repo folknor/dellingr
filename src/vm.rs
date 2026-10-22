@@ -115,6 +115,10 @@ pub(super) fn mark_gc_roots(state: &State, worklist: &mut Vec<ObjectPtr>) {
         entry.runtime.literals.mark_reachable(&state.heap, worklist);
     }
     state.transient_roots.mark_reachable(&state.heap, worklist);
+    for call in &state.call_stack {
+        call.closure.mark_reachable(&state.heap, worklist);
+        call.varargs.mark_reachable(&state.heap, worklist);
+    }
     state.registry.mark_reachable(&state.heap, worklist);
     // Event names live for the whole State so dispatch never interns them.
     state.meta_names.mark(&state.heap);
@@ -154,13 +158,32 @@ pub(super) fn mark_gc_roots(state: &State, worklist: &mut Vec<ObjectPtr>) {
     }
 }
 
-/// Information about an active function call, used for stack traces.
-#[derive(Clone)]
+/// One active Lua activation. `State::call_stack` holds exactly one per
+/// active Lua function call, innermost last, across every dispatch-loop
+/// invocation; tracebacks, `print` locations and the bytecode-cache sweep
+/// read it, and `mark_gc_roots` roots the values it owns.
 pub(super) struct CallInfo {
     /// The bytecode being executed.
     pub(super) bytecode: Arc<Bytecode>,
-    /// Current instruction pointer.
+    /// Call-site snapshot: the instruction after the last one that could
+    /// re-enter Lua or call a callback (see `Frame::record_call_site`). Not
+    /// the live instruction pointer of the executing frame.
     pub(super) ip: usize,
+    /// The closure value being executed. Rooted here because the callee was
+    /// removed from the value stack, and its upvalue slots live only as long
+    /// as some closure holding them is reachable.
+    pub(super) closure: Val,
+    /// Extra arguments of a vararg function, read by `OP_VARARG`. Rooted.
+    pub(super) varargs: Vec<Val>,
+    /// The hot frame state of this activation while it is a suspended caller
+    /// inside the same dispatch-loop invocation as its callee. `None` while
+    /// the frame executes: the innermost activation of each invocation lives
+    /// in that loop's local `Frame`.
+    pub(in crate::vm) suspended: Option<frame::Frame>,
+    /// Non-function `__call` chain steps resolved to reach this activation.
+    /// Each holds one unit of `metamethod_depth` and `call_chain_depth` until
+    /// the call completes, result adjustment included.
+    pub(super) chain_charges: u32,
 }
 
 /// State-local runtime data for one immutable bytecode chunk.
@@ -241,8 +264,15 @@ pub struct State {
     pub(super) call_chain_depth: u32,
     /// Active native callback, restored across nested Rust calls.
     pub(super) active_rust_fn: Option<RustFunc>,
-    /// Current function call depth. Prevents stack overflow from deep recursion.
+    /// Active Lua activations (the length of `call_stack`, kept as a counter
+    /// for the hot depth check). Lua-to-Lua calls run in one dispatch loop
+    /// and cost no native stack, so this bounds heap-held frames only.
     pub(super) call_depth: u32,
+    /// Active calls made from Rust: host `call`/`call_anchor`, metamethod
+    /// handlers, generic-for iterators and library callbacks, each of which
+    /// starts a native dispatch-loop invocation or Rust callback. Bounded by
+    /// `MAX_NATIVE_CALL_DEPTH`; see docs/limits.md, "Native stack".
+    pub(super) native_call_depth: u32,
     /// Set once a panic has unwound through VM execution. A panic skips every
     /// pop and restore on its way out, so call_stack, stack_bottom, the
     /// pending bases, transient roots and open upvalues no longer describe
@@ -487,6 +517,7 @@ impl State {
             call_chain_depth: 0,
             active_rust_fn: None,
             call_depth: 0,
+            native_call_depth: 0,
             poisoned: false,
             call_stack: Vec::with_capacity(tuning::INITIAL_CALL_STACK_CAPACITY),
             callbacks,

@@ -76,8 +76,6 @@ pub(super) struct Frame {
     /// (and any other active frames on it) - never mutated through the
     /// frame; writes go through the `UpvaluePool` slots.
     pub(super) upvalues: Arc<[UpvalueRef]>,
-    /// The varargs passed to this function (if it's a vararg function).
-    varargs: Vec<Val>,
     /// Lengths of `State::pending_bases` when this frame started; entries
     /// below belong to callers.
     pub(super) pending_floor: PendingFloor,
@@ -93,7 +91,6 @@ impl Frame {
         bytecode: Arc<Bytecode>,
         runtime: Arc<BytecodeRuntime>,
         upvalues: Arc<[UpvalueRef]>,
-        varargs: Vec<Val>,
         stack_bottom: usize,
         pending_floor: PendingFloor,
     ) -> Self {
@@ -103,7 +100,6 @@ impl Frame {
             runtime,
             ip,
             upvalues,
-            varargs,
             pending_floor,
             stack_bottom,
         }
@@ -245,16 +241,33 @@ impl Frame {
         Ok(())
     }
 
-    /// Start evaluating instructions from the current position.
+    /// The `RetCount` operand of the `OP_CALL` this suspended frame is
+    /// waiting on. A suspended frame's `ip` points just past that call, and
+    /// its bytecode is immutable, so the instruction can be read back rather
+    /// than stored per activation.
+    pub(super) fn pending_call_results(&self) -> RetCount {
+        let call = self.bytecode.code[self.ip - 1];
+        debug_assert_eq!(call.opcode(), Instr::OP_CALL);
+        RetCount::from_u8(call.b())
+    }
+
+    /// Run one dispatch-loop invocation from this frame, its entry
+    /// activation (the record at `floor_len - 1` of `State::call_stack`).
+    /// Lua calls switch `self` to the callee and returns switch it back, all
+    /// inside this one native frame; the loop returns when the entry
+    /// activation returns, or with an error, leaving `self` as the innermost
+    /// frame at that point for the caller to unwind from.
     ///
     /// Fixed opcode charges come from `Instr::static_units`. SET_LIST charges
     /// its live element count (the analyzer only knows its encoded prefix).
     /// Calls and access helpers can additionally charge native work, including
     /// strings, patterns, table traversal and metamethod callbacks.
-    pub(super) fn eval(&mut self, state: &mut State) -> Result<RetCount> {
-        // Batch cost checking: accumulate locally and flush periodically
+    pub(super) fn run(&mut self, state: &mut State, floor_len: usize) -> Result<RetCount> {
+        // Batch cost checking: accumulate locally and flush periodically.
+        // Every frame switch flushes first, so the pending batch always
+        // belongs to the frame in `self`.
         let mut pending: u64 = 0;
-        let result = self.eval_batched(state, &mut pending);
+        let result = self.eval_batched(state, &mut pending, floor_len);
         if result.is_err() && pending > 0 {
             // An error leaving the dispatch loop must still charge the work
             // that already executed, or `cost_used` after a failed callback
@@ -270,10 +283,15 @@ impl Frame {
         result
     }
 
-    /// Dispatch loop body for [`Frame::eval`]. `local_cost` holds accrued but
+    /// Dispatch loop body for [`Frame::run`]. `local_cost` holds accrued but
     /// not yet flushed opcode cost; the caller settles it on error.
     #[inline(always)]
-    fn eval_batched(&mut self, state: &mut State, local_cost: &mut u64) -> Result<RetCount> {
+    fn eval_batched(
+        &mut self,
+        state: &mut State,
+        local_cost: &mut u64,
+        floor_len: usize,
+    ) -> Result<RetCount> {
         /// Macro to accumulate cost and flush when threshold is reached
         macro_rules! add_cost {
             ($state:expr, $local:expr, $cost:expr) => {{
@@ -401,7 +419,12 @@ impl Frame {
                     self.record_call_site(state);
                     Self::flush_local_cost(state, local_cost)?;
                     let args = self.call_args(state, ArgCount::from_u8(inst.a()))?;
-                    state.call_op(args, RetCount::from_u8(inst.b()))?;
+                    if let Some(callee) = state.call_from_lua(args, RetCount::from_u8(inst.b()))? {
+                        // Continue in the callee; the caller waits in its
+                        // activation record until the callee returns.
+                        let caller = std::mem::replace(self, callee);
+                        state.suspend_caller(caller);
+                    }
                 }
                 Instr::OP_MARK_CALL_BASE => {
                     // Verification proves a callee exists above this frame's
@@ -418,28 +441,37 @@ impl Frame {
                 Instr::OP_RETURN => {
                     // Flush any remaining accumulated cost before returning
                     Self::flush_local_cost(state, local_cost)?;
-                    return Ok(RetCount::from_u8(inst.a()));
+                    let ret_count = RetCount::from_u8(inst.a());
+                    if state.call_stack.len() == floor_len {
+                        return Ok(ret_count);
+                    }
+                    state.return_to_caller(self, ret_count)?;
                 }
                 Instr::OP_VARARG => {
                     let n = inst.a();
-                    if n == u8::MAX {
-                        // Push all varargs
-                        state.check_stack_space(self.varargs.len())?;
-                        for val in &self.varargs {
-                            state.push_unchecked(*val);
-                        }
+                    // The executing activation is the innermost record.
+                    let varargs = &state
+                        .call_stack
+                        .last()
+                        .expect("an executing frame has an activation record")
+                        .varargs;
+                    let pushed = if n == u8::MAX {
+                        varargs.len()
                     } else {
-                        // Push exactly n values, padding with nil if needed
-                        let n = n as usize;
-                        state.check_stack_space(n)?;
-                        for i in 0..n {
-                            if i < self.varargs.len() {
-                                state.push_unchecked(self.varargs[i]);
-                            } else {
-                                state.push_unchecked(Val::Nil);
-                            }
-                        }
-                    }
+                        n as usize
+                    };
+                    state.check_stack_space(pushed)?;
+                    // Push all varargs, or exactly n padded with nil.
+                    let varargs = &state
+                        .call_stack
+                        .last()
+                        .expect("an executing frame has an activation record")
+                        .varargs;
+                    let copied = pushed.min(varargs.len());
+                    state.stack.extend_from_slice(&varargs[..copied]);
+                    state
+                        .stack
+                        .resize(state.stack.len() + (pushed - copied), Val::Nil);
                 }
 
                 // Literals
@@ -690,14 +722,7 @@ mod tests {
             literals: Box::new([]),
             caches: crate::vm::caches::RuntimeCaches::new(&bytecode),
         });
-        let mut frame = Frame::new(
-            bytecode,
-            runtime,
-            Arc::from([]),
-            Vec::new(),
-            0,
-            PendingFloor::default(),
-        );
+        let mut frame = Frame::new(bytecode, runtime, Arc::from([]), 0, PendingFloor::default());
         frame.ip = i16::MIN.unsigned_abs() as usize;
 
         frame.jump(i16::MIN);

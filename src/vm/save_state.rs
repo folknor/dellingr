@@ -124,7 +124,7 @@ macro_rules! snapshot_in_flight {
 snapshot_in_flight! {
     collections: [stack, pending_bytecode_caches, open_upvalues, pending_bases, call_stack],
     scalars: [stack_bottom = 0, metamethod_depth = 0, call_chain_depth = 0,
-        call_depth = 0],
+        call_depth = 0, native_call_depth = 0],
     optionals: [active_rust_fn],
     roots: transient_roots
 }
@@ -3814,8 +3814,8 @@ mod tests {
     fn decoder_rejects_oversized_string_literal() {
         // Bytecode literals intern during materialization now that the
         // per-Bytecode literal cache exists (through the no-GC resolver,
-        // which cannot surface a size error), and the per-call eval_closure
-        // size backstop is gone with it. The decoder's read_lua_string_bytes
+        // which cannot surface a size error), and the per-call size
+        // backstop is gone with it. The decoder's read_lua_string_bytes
         // cap is therefore the load path's ONLY guard against a forged
         // oversized literal - this pins it so it cannot be relaxed without
         // reintroducing the unbounded-allocation hole. (Compile-time literals

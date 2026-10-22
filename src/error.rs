@@ -410,6 +410,16 @@ pub enum ErrorKind {
         /// Maximum permitted by the corresponding `limits` constant.
         limit: u32,
     },
+    /// Too many nested calls made from Rust (host calls, metamethod
+    /// handlers, iterator functions, library callbacks such as `table.sort`
+    /// comparators): the `limits::MAX_NATIVE_CALL_DEPTH` bound on native
+    /// recursion.
+    NativeCallDepthExceeded {
+        /// Calls from Rust already active at the failing call.
+        depth: u32,
+        /// Maximum permitted by the corresponding `limits` constant.
+        limit: u32,
+    },
     /// Stack size exceeded (too many values on stack).
     StackOverflow {
         /// Stack size that triggered the overflow.
@@ -469,11 +479,8 @@ pub enum ErrorKind {
     /// An error explicitly raised by script code through `error()`. Hosts can
     /// use this to tell deliberate script termination from a VM-detected fault.
     ///
-    /// The prefix location lives here rather than on [`Error`] deliberately:
-    /// only `error()` can set it, and `Error` is returned by value through
-    /// every level of the Lua call recursion, so widening it costs stack on a
-    /// path that already runs to `MAX_CALL_DEPTH`. `ErrorKind` is sized by its
-    /// largest variant, which this is not.
+    /// The prefix location lives here rather than on [`Error`] because only
+    /// `error()` can set it.
     ScriptError {
         /// The message the script passed to `error()`.
         message: String,
@@ -1250,6 +1257,12 @@ impl fmt::Display for ErrorKind {
             }
             CallDepthExceeded { depth, limit } => {
                 write!(f, "call stack overflow (depth {depth}, limit {limit})")
+            }
+            NativeCallDepthExceeded { depth, limit } => {
+                write!(
+                    f,
+                    "native call stack overflow (depth {depth}, limit {limit})"
+                )
             }
             StackOverflow { size, limit } => {
                 write!(f, "stack overflow ({size} values, limit {limit})")

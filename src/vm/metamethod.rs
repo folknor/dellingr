@@ -20,9 +20,12 @@ impl State {
     ///
     /// `__index` and `__newindex` steps count against the limit even when the
     /// handler is a function, so a memoising `__index` that recurses through
-    /// its own table stops at `MAX_METAMETHOD_DEPTH` levels. That is deliberate
-    /// and matches reference Lua, whose C stack bounds the same recursion near
-    /// 200. A `__call` function handler is exempt (see `State::call`) because
+    /// its own table stops within `MAX_METAMETHOD_DEPTH` levels; a function
+    /// handler is also a call made from Rust, and with the host's own call
+    /// counted, `MAX_NATIVE_CALL_DEPTH` refuses it one level earlier. That is
+    /// deliberate and matches reference Lua, whose C stack bounds the same
+    /// recursion near 200. A `__call` function handler is exempt (see
+    /// `State::begin_call`) because
     /// guarding it would also cap ordinary recursion through callable objects,
     /// which reference Lua does not limit this way.
     ///
@@ -167,7 +170,7 @@ impl State {
                     // also leaves no temporaries behind.
                     Frame::flush_local_cost(self, local_cost)?;
                     // Cost settlement does not call user code. The receiver
-                    // remains rooted at this index until call_op establishes
+                    // remains rooted at this index until the call establishes
                     // a separate callee frame above it.
                     let table_val = self.stack[table_idx];
                     self.check_stack_space(3)?;

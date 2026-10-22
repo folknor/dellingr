@@ -209,7 +209,7 @@ impl State {
         // Call with 2 args (state, control), expecting num_vars returns
         self.call_unguarded(ArgCount::Fixed(2), RetCount::Fixed(num_vars))?;
 
-        // The call preserves caller slot positions (see call_op); user code
+        // The call preserves caller slot positions (see call_from_rust); user code
         // may change captured values, but cannot remove these loop slots.
         // Move results from stack to loop variable slots (base + 3, base + 4, ...)
         let results_start = self.stack.len() - num_vars as usize;

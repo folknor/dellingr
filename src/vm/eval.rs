@@ -14,6 +14,16 @@ use super::{
 };
 use crate::error::InternalFault;
 use crate::instr::{ArgCount, RetCount};
+use crate::limits::{MAX_METAMETHOD_DEPTH, MAX_NATIVE_CALL_DEPTH};
+
+/// What `State::begin_call` resolved a call to.
+enum CallTarget {
+    /// A Rust function ran to completion; this many results sit at the call
+    /// base.
+    Rust(u8),
+    /// A Lua closure was admitted; its frame is laid out and ready to run.
+    Lua(Frame),
+}
 
 impl State {
     /// Calls a function.
@@ -50,6 +60,11 @@ impl State {
     /// VM-internal caller (metamethod dispatch, the generic-for iterator
     /// call, the standard library) uses this one; see `State::guarded` for
     /// why the boundary must only face host code.
+    ///
+    /// This is the one way Rust code calls a function, and therefore the one
+    /// place native recursion can grow: each active call made through here
+    /// counts against `MAX_NATIVE_CALL_DEPTH`. Lua-to-Lua calls never come
+    /// through here; the dispatch loop runs them in place.
     pub(crate) fn call_unguarded(
         &mut self,
         num_args: ArgCount,
@@ -59,69 +74,169 @@ impl State {
         // its own pending base. Hosts never own such a base, so the public
         // entry point rejects Dynamic before touching any state.
         //
-        // This and call_op's InvalidStackIndex preflight are returned without
-        // notifying on_error: they are host misuse detected before anything
-        // executes, which the on_error doc in host.rs excludes by contract.
-        // Every failure after dispatch reaches an error-reporting boundary.
+        // This and the InvalidStackIndex preflight below are returned
+        // without notifying on_error: they are host misuse detected before
+        // anything executes, which the on_error doc in host.rs excludes by
+        // contract. Every failure after dispatch reaches an error-reporting
+        // boundary.
         let num_args = match num_args {
             ArgCount::Fixed(num_args) => num_args,
             ArgCount::Dynamic => {
                 return Err(Error::internal_fault(InternalFault::CallDynamicArguments));
             }
         };
-        self.call_op(num_args, num_ret_expected)
+        let idx = self.call_base(num_args)?;
+        let old_stack_bottom = self.stack_bottom;
+        if self.native_call_depth >= MAX_NATIVE_CALL_DEPTH {
+            // Rejected before dispatch, but after the callee was named, so it
+            // fails like a call that started: the callee and its arguments
+            // are cleared. It can only happen inside a callback, whose
+            // enclosing boundary reports it.
+            self.truncate_call_frame(idx, old_stack_bottom);
+            return Err(self.error(ErrorKind::NativeCallDepthExceeded {
+                depth: self.native_call_depth,
+                limit: MAX_NATIVE_CALL_DEPTH,
+            }));
+        }
+        self.native_call_depth += 1;
+        let result = self.call_from_rust(idx, num_args, num_ret_expected, old_stack_bottom);
+        self.native_call_depth -= 1;
+        result
     }
 
-    /// Shared call entry after the executing Frame resolves dynamic arguments.
-    ///
-    /// The callee owns only slots at or above its new stack_bottom. Public
-    /// stack operations reject indices and truncations below that boundary;
-    /// nested Lua locals and temporaries are also placed above it. Returning
-    /// restores the caller's slot positions even if pushes reallocate the
-    /// buffer. Captured locals can still be written through explicit upvalues.
-    pub(super) fn call_op(&mut self, num_args: u8, num_ret_expected: RetCount) -> Result<()> {
+    /// Stack index of the callee of a call with `num_args` arguments on top
+    /// of the current frame.
+    fn call_base(&self, num_args: u8) -> Result<usize> {
         let required = usize::from(num_args) + 1;
         let offset = self.get_top().checked_sub(required).ok_or_else(|| {
             self.error(ErrorKind::InvalidStackIndex {
                 index: -isize::from(num_args) - 1,
             })
         })?;
-        let idx = self.stack_bottom + offset;
-        let actual_num_args = num_args;
-        let old_stack_bottom = self.stack_bottom;
-        let func_val = self.stack.remove(idx);
-        let num_ret_actual = if let Val::RustFn(f) = func_val {
-            self.invoke_rust_fn(f, idx)?
-        } else if let Some(closure) = func_val.as_lua_function(&self.heap) {
-            // Deliberately a manual push/pop rather than `with_rooted_value`.
-            // This is the recursive Lua-call path, and the helper's closure plus
-            // catch_unwind landing pad add enough per-level stack-frame bloat to
-            // abort `call_depth_exceeded_error`, which recurses to
-            // MAX_CALL_DEPTH (the same constraint AGENTS.md records for
-            // #[hotpath::measure] on this path). A Rust panic unwinding through
-            // here therefore leaks this root - but it also leaves call_stack,
-            // string_literals, stack_bottom and the pending bases inconsistent,
-            // none of which are unwound either. That is why a panic poisons
-            // the State (marked by `invoke_rust_fn`, the unwind guards and the
-            // public `State::guarded` boundary) and every public entry point
-            // then refuses it: nothing here needs to be unwind-safe, and the
-            // recursive path carries no landing pad.
-            self.transient_roots.values.push(func_val);
-            let result = self.eval_closure(closure, actual_num_args);
-            let popped = self
-                .transient_roots
-                .values
-                .pop()
-                .expect("active call root missing after Lua call");
-            debug_assert!(popped == func_val);
-            match result {
+        Ok(self.stack_bottom + offset)
+    }
+
+    /// A call made from Rust: resolve the callee, run it to completion on
+    /// this native stack (a Lua callee gets its own dispatch-loop
+    /// invocation), and adjust its results.
+    ///
+    /// The callee owns only slots at or above its new stack_bottom. Public
+    /// stack operations reject indices and truncations below that boundary;
+    /// nested Lua locals and temporaries are also placed above it. Returning
+    /// restores the caller's slot positions even if pushes reallocate the
+    /// buffer. Captured locals can still be written through explicit upvalues.
+    fn call_from_rust(
+        &mut self,
+        idx: usize,
+        num_args: u8,
+        num_ret_expected: RetCount,
+        old_stack_bottom: usize,
+    ) -> Result<()> {
+        let mut charges = 0;
+        let num_ret_actual = match self.begin_call(idx, num_args, old_stack_bottom, &mut charges)? {
+            CallTarget::Rust(n) => n,
+            CallTarget::Lua(frame) => match self.run_invocation(frame, old_stack_bottom) {
                 Ok(n) => n,
-                Err(e) => {
-                    self.truncate_call_frame(idx, old_stack_bottom);
-                    return Err(self.report_call_error(e));
-                }
+                Err(e) => return Err(self.fail_call(e, idx, old_stack_bottom, &mut charges)),
+            },
+        };
+        self.finish_call(
+            idx,
+            old_stack_bottom,
+            num_ret_expected,
+            num_ret_actual,
+            charges,
+        )
+    }
+
+    /// A call made by the dispatch loop's `OP_CALL`. A Rust callee runs to
+    /// completion here; a Lua callee is admitted and its frame returned, for
+    /// the loop to continue in without native recursion. The admitted
+    /// activation takes ownership of any `__call` chain charges.
+    pub(super) fn call_from_lua(
+        &mut self,
+        num_args: u8,
+        num_ret_expected: RetCount,
+    ) -> Result<Option<Frame>> {
+        let idx = self.call_base(num_args)?;
+        let old_stack_bottom = self.stack_bottom;
+        let mut charges = 0;
+        match self.begin_call(idx, num_args, old_stack_bottom, &mut charges)? {
+            CallTarget::Rust(n) => {
+                self.finish_call(idx, old_stack_bottom, num_ret_expected, n, charges)?;
+                Ok(None)
             }
-        } else {
+            CallTarget::Lua(frame) => {
+                self.call_stack
+                    .last_mut()
+                    .expect("an admitted Lua call has an activation record")
+                    .chain_charges = charges;
+                Ok(Some(frame))
+            }
+        }
+    }
+
+    /// Adjust a completed call's results to the expected count, then release
+    /// the `__call` chain charges its resolution held.
+    fn finish_call(
+        &mut self,
+        idx: usize,
+        old_stack_bottom: usize,
+        num_ret_expected: RetCount,
+        num_ret_actual: u8,
+        mut charges: u32,
+    ) -> Result<()> {
+        // RetCount::All means "return all" - don't adjust the stack
+        if let RetCount::Fixed(expected) = num_ret_expected {
+            // Padding the results up to `expected` can hit the cap. Clear the
+            // call's frame on failure like every other error path here, so the
+            // caller is not left holding a partial result set.
+            if let Err(e) = self.balance_stack(expected as usize, num_ret_actual as usize) {
+                return Err(self.fail_call(e, idx, old_stack_bottom, &mut charges));
+            }
+        }
+        self.release_chain_charges(charges);
+        Ok(())
+    }
+
+    /// Resolve the callable at `idx` (with `num_args` arguments above it)
+    /// and start the call. A Rust callee runs to completion; a Lua callee is
+    /// admitted (activation record pushed, frame laid out) but not run.
+    ///
+    /// A callable object is resolved iteratively through `__call`. A
+    /// function-valued handler is free; each handler that is itself not a
+    /// function adds one unit to `metamethod_depth` and `call_chain_depth`,
+    /// recorded in `charges`, and those units stay held until the whole call
+    /// completes: the caller owns their release on success. Only that case
+    /// counts against the metamethod depth: a Lua function handler is bounded
+    /// by call_depth like any other Lua call, and guarding it too would cap
+    /// legitimate recursion through callable objects at MAX_METAMETHOD_DEPTH.
+    ///
+    /// On error the charges are released, the call's slots are cleared, the
+    /// caller's stack_bottom is restored, and the error has passed through
+    /// `report_call_error`.
+    fn begin_call(
+        &mut self,
+        idx: usize,
+        num_args: u8,
+        old_stack_bottom: usize,
+        charges: &mut u32,
+    ) -> Result<CallTarget> {
+        let mut num_args = num_args;
+        loop {
+            let func_val = self.stack.remove(idx);
+            if let Val::RustFn(f) = func_val {
+                return match self.invoke_rust_fn(f, idx) {
+                    Ok(n) => Ok(CallTarget::Rust(n)),
+                    Err(e) => Err(self.fail_call(e, idx, old_stack_bottom, charges)),
+                };
+            }
+            if let Some(closure) = func_val.as_lua_function(&self.heap) {
+                return match self.admit_lua_call(closure, func_val, num_args, old_stack_bottom) {
+                    Ok(frame) => Ok(CallTarget::Lua(frame)),
+                    Err(e) => Err(self.fail_call(e, idx, old_stack_bottom, charges)),
+                };
+            }
             // Check for a __call metamethod: a table's own metatable, or the
             // metatable all strings share (reference Lua makes `("x")(...)`
             // callable once `getmetatable("").__call` is set). This branch is
@@ -134,102 +249,79 @@ impl State {
                 Val::Str(_) => self.string_metatable,
                 _ => None,
             };
-
-            if let Some(mt_ptr) = metatable_ptr {
+            let call_handler = metatable_ptr.map_or(Val::Nil, |mt_ptr| {
                 let call_key = self.meta_names.get(super::MetaName::Call);
-                let call_handler = self
-                    .heap
+                self.heap
                     .as_table_ref(mt_ptr)
-                    .map_or(Val::Nil, |mt| mt.get(&call_key));
-
-                if !matches!(call_handler, Val::Nil) {
-                    // Insert the receiver as first argument and call the handler
-                    // Stack is currently: [arg1, arg2, ..., argN]
-                    // We need: [handler, receiver, arg1, arg2, ..., argN]
-                    let combined = match actual_num_args.checked_add(1) {
-                        Some(c) => c,
-                        None => {
-                            // Match the other call error paths: clear the frame
-                            // (the callable was already removed above) so a direct
-                            // host call does not leave the arguments visible.
-                            self.truncate_call_frame(idx, old_stack_bottom);
-                            let error = self.error(ErrorKind::TooManyArguments {
-                                limit: crate::limits::MAX_ARGUMENTS,
-                            });
-                            return Err(self.report_call_error(error));
-                        }
-                    };
-                    // The callable was already removed, so inserting handler
-                    // and receiver is exactly one slot more than the call began
-                    // with; preflighting 2 against the shortened stack is the
-                    // precise bound, not an over-estimate.
-                    if let Err(e) = self.check_stack_space(2) {
-                        self.truncate_call_frame(idx, old_stack_bottom);
-                        return Err(self.report_call_error(e));
-                    }
-                    self.stack.insert(idx, func_val);
-                    self.stack.insert(idx, call_handler);
-                    // Now call with actual_num_args + 1 (receiver is first arg).
-                    //
-                    // Only a handler that is itself not a function re-enters
-                    // __call resolution without passing through a Lua or Rust
-                    // frame, so only that case counts against the metamethod
-                    // depth. A Lua function handler is bounded by call_depth
-                    // like any other Lua call; a Rust handler is bounded only
-                    // where its recursion passes through a Lua frame, as for
-                    // every Rust callback. Guarding them too would cap legitimate
-                    // recursion through callable objects at
-                    // MAX_METAMETHOD_DEPTH, and would add the guard's closure
-                    // frame to every level of the recursive Lua-call path (see
-                    // the comment on the Lua-function branch above).
-                    let handler_is_function = matches!(call_handler, Val::RustFn(_))
-                        || call_handler.as_lua_function(&self.heap).is_some();
-                    let mut result = if handler_is_function {
-                        self.call_unguarded(ArgCount::Fixed(combined), num_ret_expected)
-                    } else {
-                        self.call_chain_depth += 1;
-                        let result = self.with_metamethod_depth(|state| {
-                            state.call_unguarded(ArgCount::Fixed(combined), num_ret_expected)
-                        });
-                        self.call_chain_depth -= 1;
-                        result
-                    };
-                    if result.is_err() {
-                        self.truncate_call_frame(idx, old_stack_bottom);
-                    }
-                    if !handler_is_function
-                        && let Err(error) = &mut result
-                        && self.is_outermost_host_boundary()
-                    {
-                        // Errors from a non-function __call chain can pass
-                        // through here without a Lua frame or RustFn reporting
-                        // boundary. Only the outermost host call sees the depth
-                        // restored to zero, so it reports the error once.
-                        self.host_error(error);
-                    }
-                    return result;
+                    .map_or(Val::Nil, |mt| mt.get(&call_key))
+            });
+            if matches!(call_handler, Val::Nil) {
+                // Resolving a callable is execution, even when it has no
+                // handler, so this reaches the reporting boundary too.
+                let error = self.type_error(TypeError::FunctionCall(func_val.typ(&self.heap)));
+                return Err(self.fail_call(error, idx, old_stack_bottom, charges));
+            }
+            // Insert the receiver as first argument and call the handler.
+            // Stack is currently: [arg1, arg2, ..., argN]
+            // We need: [handler, receiver, arg1, arg2, ..., argN]
+            let Some(combined) = num_args.checked_add(1) else {
+                let error = self.error(ErrorKind::TooManyArguments {
+                    limit: crate::limits::MAX_ARGUMENTS,
+                });
+                return Err(self.fail_call(error, idx, old_stack_bottom, charges));
+            };
+            // The callable was already removed, so inserting handler and
+            // receiver is exactly one slot more than the call began with;
+            // preflighting 2 against the shortened stack is the precise
+            // bound, not an over-estimate.
+            if let Err(e) = self.check_stack_space(2) {
+                return Err(self.fail_call(e, idx, old_stack_bottom, charges));
+            }
+            self.stack.insert(idx, func_val);
+            self.stack.insert(idx, call_handler);
+            num_args = combined;
+            let handler_is_function = matches!(call_handler, Val::RustFn(_))
+                || call_handler.as_lua_function(&self.heap).is_some();
+            if !handler_is_function {
+                if self.metamethod_depth >= MAX_METAMETHOD_DEPTH {
+                    let error = self.error(ErrorKind::MetamethodDepthExceeded {
+                        depth: self.metamethod_depth,
+                        limit: MAX_METAMETHOD_DEPTH,
+                    });
+                    return Err(self.fail_call(error, idx, old_stack_bottom, charges));
                 }
-            }
-            self.truncate_call_frame(idx, old_stack_bottom);
-            let mut error = self.type_error(TypeError::FunctionCall(func_val.typ(&self.heap)));
-            // Resolving a callable is execution, even when it has no handler.
-            // Nested chains defer to their outer boundary, as Rust failures do.
-            if self.is_outermost_host_boundary() {
-                self.host_error(&mut error);
-            }
-            return Err(error);
-        };
-        // RetCount::All means "return all" - don't adjust the stack
-        if let RetCount::Fixed(expected) = num_ret_expected {
-            // Padding the results up to `expected` can hit the cap. Clear the
-            // call's frame on failure like every other error path here, so the
-            // caller is not left holding a partial result set.
-            if let Err(e) = self.balance_stack(expected as usize, num_ret_actual as usize) {
-                self.truncate_call_frame(idx, old_stack_bottom);
-                return Err(self.report_call_error(e));
+                self.metamethod_depth += 1;
+                self.call_chain_depth += 1;
+                *charges += 1;
             }
         }
-        Ok(())
+    }
+
+    /// Error exit of a call that started at `idx`: clear its slots, restore
+    /// the caller's stack_bottom, release its `__call` chain charges, and
+    /// report the error if this is the outermost host boundary.
+    ///
+    /// Errors from a non-function `__call` chain can pass through here
+    /// without a Lua frame or RustFn reporting boundary. Releasing the
+    /// charges first lets the outermost host call see the chain depth back at
+    /// zero, so it reports the error once.
+    #[cold]
+    #[inline(never)]
+    fn fail_call(
+        &mut self,
+        error: Error,
+        idx: usize,
+        old_stack_bottom: usize,
+        charges: &mut u32,
+    ) -> Error {
+        self.truncate_call_frame(idx, old_stack_bottom);
+        self.release_chain_charges(std::mem::take(charges));
+        self.report_call_error(error)
+    }
+
+    fn release_chain_charges(&mut self, charges: u32) {
+        self.metamethod_depth -= charges;
+        self.call_chain_depth -= charges;
     }
 
     /// The one place a Rust callback is invoked. Every RustFn call - `call_op`
@@ -258,8 +350,9 @@ impl State {
     /// The public `State::guarded` boundary turns the marker into
     /// `StatePoisoned`.
     ///
-    /// Kept out of line so the Rust-call machinery does not enlarge
-    /// `call_op`'s frame on the recursive Lua call path.
+    /// Kept out of line so the Rust-call machinery (its unwind landing pad
+    /// included) does not enlarge `begin_call`'s frame, which stays live
+    /// across every native re-entry.
     #[inline(never)]
     pub(super) fn invoke_rust_fn(&mut self, f: RustFunc, call_base: usize) -> Result<u8> {
         let old_stack_bottom = self.stack_bottom;
@@ -421,8 +514,20 @@ impl State {
         Ok(())
     }
 
-    pub(super) fn eval_closure(&mut self, closure: Closure, num_args: u8) -> Result<u8> {
-        // Check call depth limit
+    /// Admit a Lua call: check the call depth, push the activation record,
+    /// and lay out the callee's frame above the arguments, whose first slot
+    /// becomes its stack_bottom. The callee value was already removed from the
+    /// value stack; the record roots it from here on.
+    ///
+    /// On error nothing stays admitted: the call stack, call depth and
+    /// stack_bottom are restored and the frame's slots cleared.
+    pub(super) fn admit_lua_call(
+        &mut self,
+        closure: Closure,
+        func_val: Val,
+        num_args: u8,
+        old_stack_bottom: usize,
+    ) -> Result<Frame> {
         if self.call_depth >= MAX_CALL_DEPTH {
             return Err(self.error(ErrorKind::CallDepthExceeded {
                 depth: self.call_depth,
@@ -430,70 +535,245 @@ impl State {
             }));
         }
         self.call_depth += 1;
-
-        let result = self.eval_closure_inner(closure, num_args);
-
-        self.call_depth -= 1;
-        result
-    }
-
-    fn eval_closure_inner(&mut self, closure: Closure, num_args: u8) -> Result<u8> {
-        let old_stack_bottom = self.stack_bottom;
-        self.stack_bottom = self.stack.len() - num_args as usize;
+        let frame_bottom = self.stack.len() - num_args as usize;
+        self.stack_bottom = frame_bottom;
 
         let num_params = closure.bytecode.num_params;
+        let num_locals = closure.bytecode.num_locals;
         let is_vararg = closure.bytecode.is_vararg;
 
-        // Push call info for stack traces
+        // Extra arguments of a vararg function leave the value stack for the
+        // activation record, which roots them.
+        let varargs = if is_vararg && num_args > num_params {
+            let num_varargs = (num_args - num_params) as usize;
+            self.collect_varargs(self.stack.len() - num_varargs)
+        } else {
+            Vec::new()
+        };
         self.call_stack.push(CallInfo {
             bytecode: Arc::clone(&closure.bytecode),
             ip: 0,
+            closure: func_val,
+            varargs,
+            suspended: None,
+            chain_charges: 0,
         });
 
-        // Collect and root varargs only for a frame that has extra arguments.
-        // Calls without extra varargs intentionally avoid all root bookkeeping.
-        if is_vararg && num_args > num_params {
-            let num_varargs = (num_args - num_params) as usize;
-            let vararg_start = self.stack.len() - num_varargs;
-            let varargs = self.collect_varargs(vararg_start);
-            // Root from the slice before moving `varargs` into the frame:
-            // with_rooted_values copies into transient_roots anyway, so cloning
-            // the Vec first would allocate twice per vararg call for nothing.
-            // This guard does not make a panic recoverable: a panic poisons
-            // the State (see `State::guarded`), which then refuses every
-            // public entry point. The guard only keeps this frame's own root
-            // bookkeeping balanced and marks the poison, and it is affordable
-            // here because only vararg frames with extra arguments pay for the
-            // landing pad, never the plain recursive path.
-            let watermark = self.transient_roots.values.len();
-            self.transient_roots.values.extend_from_slice(&varargs);
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                self.eval_closure_frame(closure, old_stack_bottom, num_args, varargs)
-            }));
-            self.transient_roots.values.truncate(watermark);
-            return match result {
-                Ok(result) => result,
-                Err(payload) => {
-                    self.poisoned = true;
-                    std::panic::resume_unwind(payload)
-                }
-            };
+        // Check stack space for parameters and locals
+        let extra_params = if num_args < num_params {
+            (num_params - num_args) as usize
+        } else {
+            0
+        };
+        if let Err(e) = self.check_stack_space(extra_params + num_locals as usize) {
+            return Err(self.reject_admission(e, closure, frame_bottom, old_stack_bottom));
         }
 
-        self.eval_closure_frame(closure, old_stack_bottom, num_args, Vec::new())
+        match num_args.cmp(&num_params) {
+            Ordering::Less => {
+                for _ in num_args..num_params {
+                    self.push_unchecked(Val::Nil);
+                }
+            }
+            Ordering::Greater => {
+                // A public fixed call prevalidates these argument slots, so
+                // this pop cannot fail through the host API. Keep reporting
+                // here for a future internal caller that violates that invariant.
+                if !is_vararg && let Err(e) = self.pop_n((num_args - num_params) as isize) {
+                    return Err(self.reject_admission(e, closure, frame_bottom, old_stack_bottom));
+                }
+                // If is_vararg, we already collected the extra args above
+            }
+            Ordering::Equal => (),
+        }
+
+        for _ in 0..num_locals {
+            self.push_unchecked(Val::Nil);
+        }
+
+        Ok(self.initialize_frame(closure))
     }
 
-    /// Drain the frame's extra arguments into the per-frame vararg Vec.
+    /// Drain the frame's extra arguments into the per-activation vararg Vec.
     ///
     /// A one-line helper so the allocation has its own hotpath measurement
-    /// point: the enclosing call machinery stays live across the recursive
-    /// descent and must not carry `#[hotpath::measure]` (see AGENTS.md), so
-    /// without this extraction the per-vararg-call Vec attributes to the root
-    /// guard. `#[inline]` keeps plain builds at the original codegen.
+    /// point. `#[inline]` keeps plain builds at the original codegen.
     #[hotpath::measure]
     #[inline]
     fn collect_varargs(&mut self, vararg_start: usize) -> Vec<Val> {
         self.stack.drain(vararg_start..).collect()
+    }
+
+    /// Report an error raised after admission but before the frame starts
+    /// executing, then undo the admission.
+    ///
+    /// Out of line and cold so the temporary `Frame` built for the traceback
+    /// stays off the call path.
+    #[cold]
+    #[inline(never)]
+    fn reject_admission(
+        &mut self,
+        error: Error,
+        closure: Closure,
+        frame_bottom: usize,
+        old_stack_bottom: usize,
+    ) -> Error {
+        let frame = self.initialize_frame(closure);
+        let error = self.report_frame_error(error, &frame);
+        self.stack.truncate(frame_bottom);
+        self.stack_bottom = old_stack_bottom;
+        self.call_stack.pop();
+        self.call_depth -= 1;
+        error
+    }
+
+    /// Run an admitted Lua activation to completion in a fresh dispatch-loop
+    /// invocation. Lua calls it makes run in the same loop; only calls made
+    /// from Rust start another invocation (see `call_unguarded`). On success
+    /// the activation's results sit at its stack_bottom and the caller's
+    /// stack_bottom is restored.
+    ///
+    /// The invocation owns the activation records from its entry upwards:
+    /// on error it unwinds exactly those, never an outer invocation's.
+    pub(super) fn run_invocation(
+        &mut self,
+        mut frame: Frame,
+        old_stack_bottom: usize,
+    ) -> Result<u8> {
+        let floor_len = self.call_stack.len();
+        let result = frame.run(self, floor_len);
+        let error = match result {
+            Ok(ret_count) => match self.collect_returns(&frame, ret_count) {
+                Ok(count) => {
+                    self.stack_bottom = old_stack_bottom;
+                    self.call_stack.pop();
+                    self.call_depth -= 1;
+                    return Ok(count);
+                }
+                Err(error) => error,
+            },
+            Err(error) => error,
+        };
+        Err(self.unwind_invocation(frame, error, floor_len, old_stack_bottom))
+    }
+
+    /// Unwind every activation of one dispatch-loop invocation after an
+    /// error, innermost first, giving each the cleanup a returning frame
+    /// gets: its pending bases dropped, the error located and reported
+    /// (`report_frame_error` keeps whatever location, fault and traceback the
+    /// error already carries, and reports it to the host once), its upvalues
+    /// closed before its slots go, and its `__call` chain charges released
+    /// before the caller sees the error.
+    #[cold]
+    #[inline(never)]
+    fn unwind_invocation(
+        &mut self,
+        mut frame: Frame,
+        mut error: Error,
+        floor_len: usize,
+        old_stack_bottom: usize,
+    ) -> Error {
+        loop {
+            self.pending_bases.truncate(frame.pending_floor);
+            error = self.report_frame_error(error, &frame);
+            let frame_bottom = frame.stack_bottom;
+            self.close_upvalues(frame_bottom);
+            self.stack.truncate(frame_bottom);
+            let info = self
+                .call_stack
+                .pop()
+                .expect("an unwinding frame has an activation record");
+            self.call_depth -= 1;
+            self.release_chain_charges(info.chain_charges);
+            if self.call_stack.len() < floor_len {
+                self.stack_bottom = old_stack_bottom;
+                return error;
+            }
+            frame = self.resume_caller();
+        }
+    }
+
+    /// Take the suspended frame of the activation that is now innermost and
+    /// make its stack_bottom current again.
+    fn resume_caller(&mut self) -> Frame {
+        let caller = self
+            .call_stack
+            .last_mut()
+            .and_then(|info| info.suspended.take())
+            .expect("a Lua callee's caller in the same invocation is suspended");
+        self.stack_bottom = caller.stack_bottom;
+        caller
+    }
+
+    /// Suspend `caller` in its activation record, now second from the top
+    /// beneath the callee `OP_CALL` just admitted.
+    pub(super) fn suspend_caller(&mut self, caller: Frame) {
+        let index = self.call_stack.len() - 2;
+        self.call_stack[index].suspended = Some(caller);
+    }
+
+    /// Finish a returning frame's results: count them, close the frame's
+    /// upvalues, and slide the results down to its stack_bottom. Fails,
+    /// before changing anything, only when a dynamic count exceeds
+    /// `MAX_RESULTS`; that error belongs to the returning frame.
+    fn collect_returns(&mut self, frame: &Frame, ret_count: RetCount) -> Result<u8> {
+        // A balanced frame consumed every base it pushed, so this is a no-op.
+        self.pending_bases.truncate(frame.pending_floor);
+        // Handle RetCount::All which means "return all values on stack"
+        let actual_num_returned = match ret_count {
+            RetCount::All => {
+                // Calculate how many values are above the frame's locals
+                let frame_base = frame.stack_bottom
+                    + frame.bytecode().num_params as usize
+                    + frame.bytecode().num_locals as usize;
+                let count = self.stack.len() - frame_base;
+                crate::error::results_count(count).map_err(|kind| self.error(kind))?
+            }
+            RetCount::Fixed(n) => n,
+        };
+
+        // Close open upvalues BEFORE moving anything: they point at the
+        // frame's local slots, which sit below `ret_start` and must still
+        // hold their values when the close reads them. The returns are
+        // transient operands above the locals, so no upvalue can point at
+        // them.
+        self.close_upvalues(frame.stack_bottom);
+
+        // Slide the return values down over the frame in one memmove: drain
+        // the params/locals/operands beneath them and let the tail shift.
+        // The stack only ever shrinks here, so the cap needs no preflight.
+        let ret_start = self.stack.len() - actual_num_returned as usize;
+        self.stack.drain(frame.stack_bottom..ret_start);
+        Ok(actual_num_returned)
+    }
+
+    /// `OP_RETURN` from a frame whose caller is a suspended Lua frame of the
+    /// same invocation: finish the results, pop the activation, resume the
+    /// caller in `frame`, and adjust the results to the count the caller's
+    /// `OP_CALL` expects. A failure to finish the results belongs to the
+    /// returning frame (still in `frame`); a failure to pad them belongs to
+    /// the caller's call instruction, as it does for a call made from Rust.
+    pub(super) fn return_to_caller(
+        &mut self,
+        frame: &mut Frame,
+        ret_count: RetCount,
+    ) -> Result<()> {
+        let count = self.collect_returns(frame, ret_count)?;
+        let callee_bottom = frame.stack_bottom;
+        let info = self
+            .call_stack
+            .pop()
+            .expect("a returning frame has an activation record");
+        self.call_depth -= 1;
+        *frame = self.resume_caller();
+        let expected = frame.pending_call_results();
+        self.finish_call(
+            callee_bottom,
+            frame.stack_bottom,
+            expected,
+            count,
+            info.chain_charges,
+        )
     }
 
     /// Fill in a runtime error's source line from the frame it surfaced in.
@@ -515,7 +795,7 @@ impl State {
     #[inline(never)]
     fn report_frame_error(&mut self, mut error: Error, frame: &Frame) -> Error {
         // Preserve the innermost fault even when a callback already attached a
-        // traceback. Allocate metadata only here, outside recursive dispatch.
+        // traceback. Allocate metadata only here, outside the dispatch loop.
         error = frame.locate_fault(error);
         if error.stack_trace().is_empty() {
             error = Self::locate_in_frame(error, frame);
@@ -525,144 +805,12 @@ impl State {
         error
     }
 
-    /// Report an error raised before the frame starts executing.
-    ///
-    /// Out of line and cold so the temporary `Frame` built for the traceback
-    /// does not enlarge `eval_closure_frame`'s stack frame, which stays live
-    /// across every level of Lua call recursion.
-    #[cold]
-    #[inline(never)]
-    fn report_setup_error(&mut self, error: Error, closure: Closure, varargs: Vec<Val>) -> Error {
-        let frame = self.initialize_frame(closure, varargs);
-        self.report_frame_error(error, &frame)
-    }
-
-    fn cleanup_closure_frame(
-        &mut self,
-        frame_bottom: usize,
-        old_stack_bottom: usize,
-        close_upvalues: bool,
-    ) {
-        if close_upvalues {
-            self.close_upvalues(frame_bottom);
-        }
-        self.stack.truncate(frame_bottom);
-        self.stack_bottom = old_stack_bottom;
-        self.call_stack.pop();
-    }
-
-    fn eval_closure_frame(
-        &mut self,
-        closure: Closure,
-        old_stack_bottom: usize,
-        num_args: u8,
-        varargs: Vec<Val>,
-    ) -> Result<u8> {
-        let frame_bottom = self.stack_bottom;
-        let num_params = closure.bytecode.num_params;
-        let num_locals = closure.bytecode.num_locals;
-        let is_vararg = closure.bytecode.is_vararg;
-        // Check stack space for parameters and locals
-        let extra_params = if num_args < num_params {
-            (num_params - num_args) as usize
-        } else {
-            0
-        };
-        if let Err(e) = self.check_stack_space(extra_params + num_locals as usize) {
-            let e = self.report_setup_error(e, closure, varargs);
-            self.cleanup_closure_frame(frame_bottom, old_stack_bottom, false);
-            return Err(e);
-        }
-
-        match num_args.cmp(&num_params) {
-            Ordering::Less => {
-                for _ in num_args..num_params {
-                    self.push_unchecked(Val::Nil);
-                }
-            }
-            Ordering::Greater => {
-                // A public fixed call prevalidates these argument slots, so
-                // this pop cannot fail through the host API. Keep reporting
-                // here for a future internal caller that violates that invariant.
-                if !is_vararg && let Err(e) = self.pop_n((num_args - num_params) as isize) {
-                    let e = self.report_setup_error(e, closure, varargs);
-                    self.cleanup_closure_frame(frame_bottom, old_stack_bottom, false);
-                    return Err(e);
-                }
-                // If is_vararg, we already collected the extra args above
-            }
-            Ordering::Equal => (),
-        }
-
-        for _ in 0..num_locals {
-            self.push_unchecked(Val::Nil);
-        }
-
-        let mut frame = self.initialize_frame(closure, varargs);
-        let result = frame.eval(self);
-        // A balanced frame consumed every base it pushed, so this is a no-op
-        // on success; after an error it drops the bases left between a push
-        // and its consumer, which keeps the State reusable and saveable.
-        self.pending_bases.truncate(frame.pending_floor);
-        let ret_count = match result {
-            Ok(count) => count,
-            Err(e) => {
-                let e = self.report_frame_error(e, &frame);
-                self.cleanup_closure_frame(frame_bottom, old_stack_bottom, true);
-                return Err(e);
-            }
-        };
-
-        // Handle RetCount::All which means "return all values on stack"
-        let actual_num_returned = match ret_count {
-            RetCount::All => {
-                // Calculate how many values are above the frame's locals
-                let frame_base = self.stack_bottom + num_params as usize + num_locals as usize;
-                let count = self.stack.len() - frame_base;
-                match crate::error::results_count(count) {
-                    Ok(n) => n,
-                    Err(kind) => {
-                        let e = self.error(kind);
-                        let e = self.report_frame_error(e, &frame);
-                        self.cleanup_closure_frame(frame_bottom, old_stack_bottom, true);
-                        return Err(e);
-                    }
-                }
-            }
-            RetCount::Fixed(n) => n,
-        };
-
-        // Close open upvalues BEFORE moving anything: they point at the
-        // frame's local slots, which sit below `ret_start` and must still
-        // hold their values when the close reads them. The returns are
-        // transient operands above the locals, so no upvalue can point at
-        // them - closing first observes exactly what the old
-        // drain-then-close order did.
-        self.close_upvalues(self.stack_bottom);
-
-        // Slide the return values down over the frame in one memmove: drain
-        // the params/locals/operands beneath them and let the tail shift.
-        // This replaces a per-returning-call Vec allocation (measured at
-        // 16 B x 1.1M returns = 80% of arithmetic's process allocation) with
-        // zero allocations; the stack only ever shrinks here, so the cap
-        // needs no preflight.
-        let ret_start = self.stack.len() - actual_num_returned as usize;
-        self.stack.drain(self.stack_bottom..ret_start);
-        self.stack_bottom = old_stack_bottom;
-
-        // Pop call info
-        self.call_stack.pop();
-
-        Ok(actual_num_returned)
-    }
-
     #[hotpath::measure]
-    pub(super) fn initialize_frame(&mut self, closure: Closure, varargs: Vec<Val>) -> Frame {
+    pub(super) fn initialize_frame(&mut self, closure: Closure) -> Frame {
         Frame::new(
             closure.bytecode,
             closure.runtime,
             closure.upvalues,
-            varargs,
             self.stack_bottom,
             self.pending_bases.floor(),
         )
@@ -749,6 +897,8 @@ impl State {
             runtime,
             upvalues: Arc::from([]),
         };
-        self.eval_closure(closure, num_args)
+        let old_stack_bottom = self.stack_bottom;
+        let frame = self.admit_lua_call(closure, Val::Nil, num_args, old_stack_bottom)?;
+        self.run_invocation(frame, old_stack_bottom)
     }
 }
