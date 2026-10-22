@@ -15,7 +15,10 @@
 //! closure, its bytecode and then its upvalues in vector order.
 //!
 //! To refresh deliberately after an intentional format change, run
-//! `brokkr run --release --features snapshot regenerate_save_golden`.
+//! `brokkr run --debug --features snapshot regenerate_save_golden`. The
+//! fixture must come from the profile the tests run under: a release build
+//! can fold identical Rust functions (`unpack` and `table.unpack`), and the
+//! save then writes the smallest id for both, so its bytes differ.
 
 use std::path::PathBuf;
 
@@ -63,7 +66,7 @@ fn every_save_fixture_is_declared_and_referenced() {
 }
 
 // After an intentional serializer format change, regenerate with
-// `brokkr run --release --features snapshot regenerate_save_golden`.
+// `brokkr run --debug --features snapshot regenerate_save_golden`.
 #[test]
 fn save_traversal_order_matches_golden_fixture() {
     let expected = std::fs::read(current_fixture_path()).expect(

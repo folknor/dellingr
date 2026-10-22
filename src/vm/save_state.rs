@@ -580,6 +580,9 @@ struct SavePayload {
     upvalues: Vec<SavedVal>,
     objects: Vec<SavedObject>,
     user_globals: Vec<(String, SavedVal)>,
+    /// Whether the saving State had sealed its globals; the loaded one takes
+    /// the same phase.
+    globals_sealed: bool,
     env_deltas: Vec<SavedEnvDelta>,
     next_format_pointer_id: u64,
     format_pointer_ids: Vec<(SavedVal, u64)>,
@@ -981,8 +984,11 @@ impl<'a> SaveBuilder<'a> {
         // `print = function ... end` or `math = {}`, which live in `globals`
         // under a builtin name but no longer hold the canonical value.
         let mut user_globals = Vec::new();
+        // Tombstones are saved too, in slot order: they suppress names load
+        // setup reinstalls, and they let the loaded environment compact
+        // exactly when the saving one would have.
         for (name, val) in self.state.global_env.iter() {
-            let saved = self.encode_root(*val, name)?;
+            let saved = self.encode_root(val, name)?;
             user_globals.push((name.clone(), saved));
         }
         let env_deltas = self.encode_env_deltas()?;
@@ -1046,6 +1052,7 @@ impl<'a> SaveBuilder<'a> {
             upvalues,
             objects,
             user_globals,
+            globals_sealed: self.state.global_env.is_sealed(),
             env_deltas,
             next_format_pointer_id: self.state.next_format_pointer_id,
             format_pointer_ids,
@@ -1618,6 +1625,7 @@ impl State {
         // Drop any inherited anchors before setup; anchors created by setup are
         // deliberately retained and participate in the final collection.
         state.registry.clear();
+        state.global_env.begin_load_setup();
         setup(&mut state).map_err(LoadError::Setup)?;
         if state.poisoned {
             return Err(LoadError::StatePoisoned);
@@ -2100,10 +2108,13 @@ fn materialize_payload(
         }
     }
 
+    let mut user_globals = Vec::with_capacity(payload.user_globals.len());
     for (name, saved) in payload.user_globals {
-        let val = decode_val(&saved, &ctx)?;
-        state.global_env.restore_binding(name, val);
+        user_globals.push((name, decode_val(&saved, &ctx)?));
     }
+    state
+        .global_env
+        .restore(user_globals, payload.globals_sealed);
     state.rng = VmRng::from_state(payload.rng_state);
     state.cost = payload.cost;
     state.next_format_pointer_id = payload.next_format_pointer_id;
@@ -2753,6 +2764,7 @@ impl SavePayload {
             out.write_string(name, ByteField::GlobalName)?;
             val.encode(out)
         })?;
+        out.write_bool(self.globals_sealed);
         write_vec(out, &self.env_deltas, |out, delta| delta.encode(out))?;
         out.write_u64(self.next_format_pointer_id);
         write_vec(out, &self.format_pointer_ids, |out, (value, id)| {
@@ -2787,6 +2799,7 @@ impl SavePayload {
                     SavedVal::decode(input)?,
                 ))
             })?,
+            globals_sealed: input.read_bool()?,
             env_deltas: read_vec(input, SavedEnvDelta::decode)?,
             next_format_pointer_id: input.read_u64()?,
             format_pointer_ids: read_vec(input, |input| {
@@ -3219,6 +3232,7 @@ mod tests {
             upvalues: Vec::new(),
             objects,
             user_globals,
+            globals_sealed: false,
             env_deltas: Vec::new(),
             next_format_pointer_id: 1,
             format_pointer_ids: Vec::new(),
@@ -3825,6 +3839,7 @@ mod tests {
             upvalues: Vec::new(),
             objects: Vec::new(),
             user_globals: Vec::new(),
+            globals_sealed: false,
             env_deltas: Vec::new(),
             next_format_pointer_id: 1,
             format_pointer_ids: Vec::new(),

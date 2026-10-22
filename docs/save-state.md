@@ -31,8 +31,26 @@ callbacks, host user-data. Saving is valid only while the VM is quiescent.
   land.
 - Adding a field to a library table in a later build does not corrupt old
   saves.
-- Globals are saved whole. An unshadowed builtin encodes as a token; a shadow
-  is preserved as the user's value.
+- Globals are saved whole, in binding order, nil tombstones included. An
+  unshadowed builtin encodes as a token; a shadow is preserved as the user's
+  value.
+
+## Sealed globals
+
+- `State::seal_globals` ends global initialization (see
+  [limits](limits.md)). Bindings written before it are pinned: their nil
+  tombstones are never compacted, so a deleted name that load setup reinstalls
+  stays deleted after the load.
+- The save records whether the State was sealed. The loaded State takes that
+  phase: a call to `seal_globals` inside the load setup is deferred to it.
+- Pins are not saved. A sealed load pins exactly the names its setup left
+  bound or tombstoned, so the setup must replay the initialization the saving
+  State performed before sealing, including names it set and then cleared.
+  Under that contract the loaded State compacts exactly when the saving one
+  would, and later saves of both stay byte-identical. A setup that differs
+  re-derives the pin set from the new setup.
+- Loading rebuilds the bindings in saved order. Names the setup installed that
+  the save does not mention follow the saved ones, in setup order.
 
 ## Numbers
 

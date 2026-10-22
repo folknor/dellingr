@@ -146,11 +146,15 @@ capacity; what a collection frees is the payloads and entries it removes.
 - Never reclaimed while reachable: a live table's storage. The array part
   never shrinks, and a collection does not compact a live table, so one
   rooted table can retain large storage while counting as one heap object.
-- Never reclaimed for the life of the environment: every global name that
-  has held a non-nil value keeps its binding slot after being set to nil,
-  since removing it would change iteration and snapshot order. A script that
-  writes computed names through `_G` grows this without bound. Bindings
-  created inside `with_restricted_env` go away with that environment.
+- Never reclaimed for the life of the environment: a global binding written
+  before `State::seal_globals` keeps its slot after being set to nil, because a
+  load's setup may reinstall that name and the saved nil is what keeps it
+  deleted. Until the host seals, that covers every global, so a script that
+  writes computed names through `_G` grows the bindings without bound. After
+  sealing, bindings first created by later writes are reclaimed: once their
+  nil tombstones make up half the bindings, the next new name compacts them.
+  The map's allocated capacity stays at its peak. Bindings created inside
+  `with_restricted_env` go away with that environment.
 - Never reclaimed: with the `snapshot` feature, Rust function registrations
   persist while unreachable, one per registered id.
 

@@ -10,6 +10,7 @@ fn empty_payload() -> SavePayload {
         upvalues: Vec::new(),
         objects: Vec::new(),
         user_globals: Vec::new(),
+        globals_sealed: false,
         env_deltas: Vec::new(),
         next_format_pointer_id: 1,
         format_pointer_ids: Vec::new(),

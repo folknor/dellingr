@@ -975,6 +975,29 @@ impl State {
         Ok(())
     }
 
+    /// Ends global-environment initialization.
+    ///
+    /// Until sealed, every global binding is kept for the life of the State
+    /// once it has held a value, even after it is set to nil. Bindings first
+    /// created after sealing are reclaimed some time after they are set to
+    /// nil, so a script that writes computed names through `_G` stays bounded.
+    ///
+    /// Call it once the host has installed its environment (libraries, host
+    /// functions, any setup Lua) and before gameplay scripts run. With the
+    /// `snapshot` feature, a `load_state` setup must replay the same
+    /// initialization the saving State performed before it sealed; the loaded
+    /// State takes the saved State's sealed or unsealed phase, and a call to
+    /// this method inside that setup is deferred to it. Sealing is one-way;
+    /// calling it again does nothing.
+    pub fn seal_globals(&mut self) {
+        self.global_env.seal();
+    }
+
+    /// Whether [`State::seal_globals`] has ended global initialization.
+    pub fn globals_sealed(&self) -> bool {
+        self.global_env.is_sealed()
+    }
+
     // Keep native context out of CallInfo: those entries represent Lua frames,
     // and widening them would add work and storage to every Lua call. Capture
     // only a function pointer at Rust dispatch; resolve names on errors only.
@@ -986,7 +1009,7 @@ impl State {
         let function = self.active_rust_fn?;
         for (name, value) in self.global_env.iter() {
             if let Val::RustFn(candidate) = value
-                && *candidate as usize == function as usize
+                && candidate as usize == function as usize
             {
                 return Some(name.clone());
             }

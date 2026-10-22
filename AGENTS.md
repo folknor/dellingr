@@ -164,7 +164,9 @@ value stack, not total host memory, and enforcing it charges no cost.
 - Unit tests live alongside their modules (e.g. `src/vm/object.rs` has GC tests).
 - To intentionally refresh `tests/fixtures/save_golden_current.bin` after a
   serializer format change, run
-  `brokkr run --release --features snapshot regenerate_save_golden`.
+  `brokkr run --debug --features snapshot regenerate_save_golden`. Use the
+  debug profile the tests run under: release builds fold identical Rust
+  functions, which changes the saved function ids.
 
 ## Hotpath benchmarks
 

@@ -8,6 +8,12 @@ All notable changes to dellingr are documented here. The format follows
 
 ### Changed (breaking)
 
+- Snapshot `FORMAT_VERSION` is 8; older saves are rejected. The payload
+  records whether the globals were sealed. **Replay-visible (snapshot
+  contents):** loading now rebuilds the globals in saved order instead of
+  keeping the setup's order and appending saved-only names, so a State whose
+  host set globals in a different order than its load setup now reloads to
+  byte-identical saves.
 - `LoadError<E>` now has three variants: `Setup(E)`, `StatePoisoned`, and
   `Snapshot(SnapshotError)`. Every other former `LoadError` variant moved,
   unchanged, to the new exported `SnapshotError` (so `LoadError::BadMagic`
@@ -109,6 +115,13 @@ All notable changes to dellingr are documented here. The format follows
 
 ### Added
 
+- `State::seal_globals` and `State::globals_sealed`. Sealing ends global
+  initialization: global bindings first written afterwards are reclaimed once
+  set to nil, so a script writing computed names through `_G` no longer grows
+  the globals without bound. An unsealed State keeps every binding, as before.
+  With the `snapshot` feature, the save records the phase and a load restores
+  it; a sealed load's setup must replay the saving State's initialization
+  (`docs/save-state.md`).
 - `Program::disassemble`, returning a displayable `Disassembly` listing of the
   finalized bytecode, and the CLI flag `--dump-bytecode`, which prints that
   listing without executing the script. The listing format is diagnostic and

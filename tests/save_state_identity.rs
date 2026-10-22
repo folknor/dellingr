@@ -127,3 +127,99 @@ fn nil_global_tombstones_preserve_snapshot_bytes_and_insertion_order() {
         );
     }
 }
+
+/// Shared initialization for a fresh State and its loads: setup Lua that
+/// leaves a tombstone, then a seal (deferred to the saved phase on load).
+fn sealing_setup(state: &mut State) -> Result<(), std::convert::Infallible> {
+    run(state, "configured = 1; scratch = 1; scratch = nil");
+    state.seal_globals();
+    Ok(())
+}
+
+fn churn(state: &mut State, tag: &str) {
+    run(
+        state,
+        &format!(
+            "for i = 1, 300 do _G['{tag}' .. i] = i; _G['{tag}' .. i] = nil end
+             {tag}_live = 1"
+        ),
+    );
+}
+
+#[test]
+fn sealed_global_compaction_continues_identically_after_load() {
+    let mut state = State::new();
+    sealing_setup(&mut state).unwrap();
+    run(&mut state, "print = nil; configured = nil; early = 1");
+    churn(&mut state, "a");
+    let save = state.save_state().unwrap();
+
+    let mut loaded =
+        State::load_state(&save.bytes, Box::new(DefaultCallbacks), sealing_setup).unwrap();
+    assert!(loaded.globals_sealed());
+    assert_eq!(loaded.save_state().unwrap().bytes, save.bytes);
+
+    for current in [&mut state, &mut loaded] {
+        churn(current, "b");
+        run(current, "early = nil");
+        churn(current, "c");
+        run(current, "early = 2");
+        // Names setup installs stay deleted: their tombstones are pinned,
+        // so no compaction drops them and no load reinstalls them.
+        assert_eq!(global_str(current, "print"), "nil");
+        assert_eq!(global_str(current, "configured"), "nil");
+    }
+    let continued = loaded.save_state().unwrap().bytes;
+    assert_eq!(continued, state.save_state().unwrap().bytes);
+
+    // A save of the loaded State reloads and continues identically too.
+    let mut reloaded =
+        State::load_state(&continued, Box::new(DefaultCallbacks), sealing_setup).unwrap();
+    assert!(reloaded.globals_sealed());
+    assert_eq!(reloaded.save_state().unwrap().bytes, continued);
+    for current in [&mut state, &mut reloaded] {
+        run(current, "early = nil");
+        churn(current, "d");
+    }
+    assert_eq!(
+        reloaded.save_state().unwrap().bytes,
+        state.save_state().unwrap().bytes
+    );
+}
+
+#[test]
+fn unsealed_save_loads_unsealed_even_if_setup_seals() {
+    let mut state = State::new();
+    run(&mut state, "configured = 1; scratch = 1; scratch = nil");
+    churn(&mut state, "a");
+    let save = state.save_state().unwrap();
+
+    let mut loaded =
+        State::load_state(&save.bytes, Box::new(DefaultCallbacks), sealing_setup).unwrap();
+    assert!(!loaded.globals_sealed());
+    assert_eq!(loaded.save_state().unwrap().bytes, save.bytes);
+    for current in [&mut state, &mut loaded] {
+        churn(current, "b");
+    }
+    assert_eq!(
+        loaded.save_state().unwrap().bytes,
+        state.save_state().unwrap().bytes
+    );
+}
+
+#[test]
+fn load_restores_saved_global_order_over_setup_order() {
+    // The saving State set `late` before `host_value`; setup installs only
+    // `host_value`. The loaded order must follow the save, not setup.
+    let mut state = State::new();
+    run(&mut state, "late = 1");
+    state.push_number(2.0).unwrap();
+    state.set_global("host_value").unwrap();
+    let save = state.save_state().unwrap();
+    let loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), |state| {
+        state.push_number(2.0)?;
+        state.set_global("host_value")
+    })
+    .unwrap();
+    assert_eq!(loaded.save_state().unwrap().bytes, save.bytes);
+}

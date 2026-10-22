@@ -79,6 +79,100 @@ fn nil_assignment_does_not_create_unknown_globals_including_builtins() {
     assert!(state.global_env.is_empty());
 }
 
+fn run_lua(state: &mut State, source: &str) {
+    state.load_string(source).unwrap();
+    state
+        .call(crate::instr::ArgCount::Fixed(0), RetCount::Fixed(0))
+        .unwrap();
+}
+
+const COMPUTED_NAME_CHURN: &str = "
+    for i = 1, 2000 do
+        _G['k' .. i] = i
+        _G['k' .. i] = nil
+    end
+    for i = 1, 2000 do
+        local name = 'c' .. i
+        c_cached = i
+        c_cached = nil
+        _G[name] = true
+        _G[name] = nil
+    end
+";
+
+#[test]
+fn sealed_globals_compact_computed_name_churn() {
+    let mut state = State::new();
+    run_lua(&mut state, "setup_value = 1; setup_value = nil");
+    state.seal_globals();
+    let baseline = state.global_env.len();
+    run_lua(&mut state, COMPUTED_NAME_CHURN);
+    // The map stays within twice its live-plus-pinned size, whatever the
+    // number of names the script has used.
+    assert!(state.global_env.len() <= 2 * baseline + 2);
+    // A tombstone written before sealing survives every compaction.
+    assert_eq!(state.global_env.get("setup_value"), Some(&Val::Nil));
+}
+
+#[test]
+fn unsealed_globals_keep_every_tombstone() {
+    let mut state = State::new();
+    let baseline = state.global_env.len();
+    run_lua(&mut state, COMPUTED_NAME_CHURN);
+    assert_eq!(state.global_env.len(), baseline + 4001);
+}
+
+#[test]
+fn compaction_keeps_live_order_and_cached_writes() {
+    let mut state = State::new();
+    state.seal_globals();
+    let baseline = state.global_env.len();
+    // `bump` warms its GET_GLOBAL/SET_GLOBAL caches on `kept`, compaction then
+    // moves `kept` down by the five `t` tombstones before it, and the second
+    // call reuses the same instructions. The stale index stays in bounds and
+    // now names `u5`, so only the version bump keeps the write off it.
+    run_lua(
+        &mut state,
+        "
+        function bump() kept = kept + 1 end
+        for i = 1, 5 do _G['t' .. i] = i end
+        kept = 0
+        for i = 1, 10 do _G['u' .. i] = i end
+        for i = 1, 200 do _G['v' .. i] = i end
+        bump()
+        for i = 1, 5 do _G['t' .. i] = nil end
+        for i = 1, 200 do _G['v' .. i] = nil end
+        last = 1
+        bump()
+        ",
+    );
+    let names: Vec<&str> = state
+        .global_env
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .skip(baseline)
+        .collect();
+    let mut expected = vec!["bump".to_string(), "kept".to_string()];
+    expected.extend((1..=10).map(|i| format!("u{i}")));
+    expected.push("last".to_string());
+    assert_eq!(names, expected);
+    assert_eq!(state.global_env.get("kept"), Some(&Val::Num(2.0)));
+    assert_eq!(state.global_env.get("u5"), Some(&Val::Num(5.0)));
+}
+
+#[test]
+fn restricted_env_counts_a_repeated_whitelist_name_once() {
+    let mut state = State::new();
+    state.seal_globals();
+    run_lua(&mut state, "x = 1; x = nil");
+    state
+        .with_restricted_env(&["x", "x"], |state| {
+            // Collection checks the tombstone count in debug builds.
+            state.gc_collect();
+        })
+        .unwrap();
+}
+
 #[test]
 fn vm_test02() {
     let mut state = State::new();
