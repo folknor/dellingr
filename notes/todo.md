@@ -15,6 +15,21 @@ or divergences sections.
 
 Signal: a script author reaching for it.
 
+### Sparse storage for the array part's stragglers
+
+What: a table's array part stores one contiguous window of its logical
+array (`src/vm/table.rs`), which handles FIFOs and cleared prefixes but not
+an id-keyed registry (`entities[next_id] = e`, entities dying in any order)
+where one long-lived low id keeps every slot up to the newest id stored.
+Reference Lua rehashes such a table into its hash part, which would change
+`pairs` order here. An order-preserving fix keeps the logical array as it is
+and stores keys outside a dense window in a sorted side structure, so
+`pairs` still visits array keys ascending; the window could then drop a
+mostly-dead prefix even past a live straggler.
+
+Signal: a game script holding a sparse long-lived id map, or a heap profile
+showing an array window far larger than its live count.
+
 ### CLI: read the script from stdin on `-`
 
 What: `parse_args` in `src/main.rs` special-cases `"-"` so it is not

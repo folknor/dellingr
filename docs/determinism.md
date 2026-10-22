@@ -46,8 +46,8 @@ are hosts and are exempt.
 - A table's array part (keys `1..n`, grown by appending `n + 1`) is visited
   first, in key order.
 - Every other key follows in insertion order.
-- Snapshots preserve the array part's shape, so a loaded state continues with
-  the same order and `#` results.
+- `n` never shrinks, even when the low keys are cleared. Snapshots preserve
+  it, so a loaded state continues with the same order and `#` results.
 
 ## Object identity in output
 

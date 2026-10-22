@@ -529,10 +529,15 @@ enum SavedVal {
 #[derive(Clone, Debug, PartialEq)]
 enum SavedObject {
     Table {
-        /// The array-part length. The first `array_len` entries are the array
-        /// slots, keys `1..=array_len` in order, with `Nil` values for empty
-        /// slots; the rest are live hash entries in insertion order.
-        array_len: u32,
+        /// The logical array length: integer keys `1..=array_len` are array
+        /// keys, never hash entries, and `array_len + 1` is the append key.
+        array_len: u64,
+        /// The first `array_slots` entries are array slots with consecutive
+        /// keys, from the first live array key to the last, with `Nil` values
+        /// for the empty slots between; every other array key is nil. Zero
+        /// slots means an all-nil array. The rest are live hash entries in
+        /// insertion order.
+        array_slots: u32,
         entries: Vec<(SavedVal, SavedVal)>,
         /// A metatable can be a user object (`Obj`) or an environment object
         /// (`EnvObj`, e.g. `setmetatable(t, math)`), so it goes through the
@@ -822,7 +827,7 @@ impl<'a> PathFinder<'a> {
                 PathTask::Object { ptr, path } => {
                     let children = match &self.state.heap.get(ptr).raw {
                         RawObject::Table(table) => {
-                            let (_, entries) = table.snapshot_entries();
+                            let (_, _, entries) = table.snapshot_entries();
                             PathObjectChildren::Table {
                                 entries,
                                 metatable: table.get_metatable(),
@@ -947,7 +952,8 @@ fn render_path(breadcrumbs: &[Breadcrumb], path: PathId) -> String {
 
 enum PendingObject {
     Table {
-        array_len: u32,
+        array_len: u64,
+        array_slots: u32,
         entries: Vec<(Option<SavedVal>, Option<SavedVal>)>,
         metatable: Option<Option<SavedVal>>,
     },
@@ -1155,13 +1161,12 @@ impl<'a> SaveBuilder<'a> {
             // The array part's shape (its nil slots included) decides where
             // later integer writes land, so it must round-trip; replaying the
             // upserts alone would rebuild only its live prefix.
-            let array = if table.array_part().is_empty() {
+            let virtual_array = table.virtual_array();
+            let array = if virtual_array.is_empty() {
                 None
             } else {
                 Some(
-                    table
-                        .array_part()
-                        .to_vec()
+                    virtual_array
                         .into_iter()
                         .map(|value| self.encode_root(value, &token))
                         .collect::<Result<Vec<_>, SaveError>>()?,
@@ -1342,10 +1347,12 @@ impl<'a> SaveBuilder<'a> {
     ) -> Result<(), SaveError> {
         let pending = match &self.state.heap.get(ptr).raw {
             RawObject::Table(table) => {
-                let (array_len, entries) = table.snapshot_entries();
-                let array_len = u32::try_from(array_len).map_err(|_| SaveError::TooLarge {
+                let (array_len, array_slots, entries) = table.snapshot_entries();
+                // MAX_ARRAY_LEN keeps the logical length below 2^53.
+                let array_len = array_len as u64;
+                let array_slots = u32::try_from(array_slots).map_err(|_| SaveError::TooLarge {
                     what: "table array slots",
-                    count: array_len,
+                    count: array_slots,
                 })?;
                 let entry_count = entries.len();
                 let metatable = table.get_metatable();
@@ -1373,6 +1380,7 @@ impl<'a> SaveBuilder<'a> {
                 }
                 PendingObject::Table {
                     array_len,
+                    array_slots,
                     entries: vec![(None, None); entry_count],
                     metatable: metatable.map(|_| None),
                 }
@@ -1455,10 +1463,12 @@ impl<'a> SaveBuilder<'a> {
         match object {
             PendingObject::Table {
                 array_len,
+                array_slots,
                 entries,
                 metatable,
             } => Ok(SavedObject::Table {
                 array_len,
+                array_slots,
                 entries: entries
                     .into_iter()
                     .map(|(key, value)| {
@@ -1772,6 +1782,7 @@ fn materialize_payload(
         match saved_obj {
             SavedObject::Table {
                 array_len,
+                array_slots,
                 entries,
                 metatable,
             } => {
@@ -1818,8 +1829,13 @@ fn materialize_payload(
                         SaveLocation::Objects,
                     )
                 })?;
+                // The verifier bounds `array_len` by MAX_ARRAY_LEN, so it fits.
+                let array_len = match usize::try_from(*array_len) {
+                    Ok(len) => len,
+                    Err(_) => usize::MAX,
+                };
                 table
-                    .rebuild_from_snapshot(*array_len as usize, entries)
+                    .rebuild_from_snapshot(array_len, *array_slots as usize, entries)
                     .map_err(|error| SnapshotError::InvalidTable {
                         location: TableLoadLocation::Object(idx),
                         reason: error.to_string(),
@@ -1942,7 +1958,7 @@ fn materialize_payload(
                 })?;
                 (
                     table.entries(),
-                    table.array_part().to_vec(),
+                    table.virtual_array(),
                     table.get_metatable(),
                 )
             };
@@ -2014,7 +2030,7 @@ fn materialize_payload(
                     .filter(|(key, _)| runtime_array_slot(*key, array.len()).is_none()),
             );
             table
-                .rebuild_from_snapshot(array.len(), entries)
+                .rebuild_from_snapshot(array.len(), array.len(), entries)
                 .map_err(|error| {
                     invalid_environment_table(
                         &delta.token,
@@ -2046,7 +2062,7 @@ fn materialize_payload(
             // Setup can have added later slots. Retain their shape and values
             // beyond the saved range, just like other setup-only entries.
             let saved_len = array.len();
-            array.extend(table.array_part().iter().skip(saved_len).copied());
+            array.extend(table.virtual_array().into_iter().skip(saved_len));
             let append_key = Val::Num((array.len() + 1) as f64);
             let append_value = table.get(&append_key);
             let mut entries: Vec<(Val, Val)> = array
@@ -2058,7 +2074,7 @@ fn materialize_payload(
                 runtime_array_slot(*key, array.len()).is_none() && *key != append_key
             }));
             table
-                .rebuild_from_snapshot(array.len(), entries)
+                .rebuild_from_snapshot(array.len(), array.len(), entries)
                 .map_err(|error| {
                     invalid_environment_table(
                         &delta.token,
@@ -2930,11 +2946,13 @@ impl SavedObject {
         match self {
             SavedObject::Table {
                 array_len,
+                array_slots,
                 entries,
                 metatable,
             } => {
                 out.write_u8(0);
-                out.write_u32(*array_len);
+                out.write_u64(*array_len);
+                out.write_u32(*array_slots);
                 write_vec(out, entries, |out, (key, value)| {
                     key.encode(out)?;
                     value.encode(out)
@@ -2963,7 +2981,8 @@ impl SavedObject {
         let tag_offset = input.pos;
         match input.read_u8()? {
             0 => {
-                let array_len = input.read_u32()?;
+                let array_len = input.read_u64()?;
+                let array_slots = input.read_u32()?;
                 let entries = read_vec(input, |input| {
                     Ok((SavedVal::decode(input)?, SavedVal::decode(input)?))
                 })?;
@@ -2974,6 +2993,7 @@ impl SavedObject {
                 };
                 Ok(SavedObject::Table {
                     array_len,
+                    array_slots,
                     entries,
                     metatable,
                 })
@@ -4242,7 +4262,8 @@ mod tests {
         roundtrip!(
             SavedObject,
             SavedObject::Table {
-                array_len: 1,
+                array_len: 1 << 40,
+                array_slots: 1,
                 entries: vec![
                     (SavedVal::Num(1.0f64.to_bits()), SavedVal::Nil),
                     (SavedVal::Str(0), SavedVal::Num(1.0f64.to_bits())),
@@ -4255,6 +4276,7 @@ mod tests {
             SavedObject,
             SavedObject::Table {
                 array_len: 0,
+                array_slots: 0,
                 entries: vec![],
                 metatable: Some(SavedVal::Obj(4)),
             }
@@ -4263,6 +4285,7 @@ mod tests {
             SavedObject,
             SavedObject::Table {
                 array_len: 0,
+                array_slots: 0,
                 entries: vec![(SavedVal::Str(2), SavedVal::Nil)],
                 metatable: Some(SavedVal::EnvObj("string".to_string())),
             }

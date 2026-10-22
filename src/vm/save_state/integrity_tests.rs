@@ -50,11 +50,13 @@ fn corrupt_metatable_names_its_owner_instead_of_zero() {
     payload.objects = vec![
         SavedObject::Table {
             array_len: 0,
+            array_slots: 0,
             entries: Vec::new(),
             metatable: None,
         },
         SavedObject::Table {
             array_len: 0,
+            array_slots: 0,
             entries: Vec::new(),
             metatable: Some(SavedVal::Bool(false)),
         },

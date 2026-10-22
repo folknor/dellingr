@@ -180,7 +180,7 @@ examples/calls/            # global, local, method, vararg, fixedarg, many_liter
 examples/fields/           # same_obj_read, same_obj_write, polymorphic, ...
 examples/globals/          # write
 examples/iter/             # pairs, ipairs
-examples/tables/           # fill, mixed, numeric_index
+examples/tables/           # fill, mixed, numeric_index, queue
 examples/alloc/            # closure, short_tables, record_tables, gc_churn
 examples/strings/          # mixed, patterns, literal_find
 examples/parse/            # large_source (+ generate.py, see below)

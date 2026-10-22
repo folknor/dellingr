@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::compiler::verify::{self, BytecodeView};
 
-use super::super::table::{array_index, integer_index, is_append_key};
+use super::super::table::{MAX_ARRAY_LEN, array_index, integer_index, is_append_key};
 use super::{
     SaveLocation, SavePayload, SavedBytecode, SavedObject, SnapshotError, corrupt_arena as corrupt,
 };
@@ -402,27 +402,69 @@ fn validate_references(payload: &SavePayload) -> Result<(), SnapshotError> {
     for (object_index, object) in payload.objects.iter().enumerate() {
         if let SavedObject::Table {
             array_len,
+            array_slots,
             entries,
             metatable,
         } = object
         {
-            let array_len = *array_len as usize;
-            if array_len > entries.len() {
+            let location = SaveLocation::TableEntries {
+                object: object_index,
+            };
+            let array_slots = *array_slots as usize;
+            if array_slots > entries.len() {
                 return Err(corrupt(
-                    "saved table array length exceeds its entries",
-                    array_len,
-                    SaveLocation::TableEntries {
-                        object: object_index,
-                    },
+                    "saved table array slots exceed its entries",
+                    array_slots,
+                    location,
+                ));
+            }
+            // The logical length is not backed by stored slots, so bound it
+            // explicitly: past MAX_ARRAY_LEN array keys stop being exact,
+            // distinct numbers and tagged slot indices could collide.
+            let array_len = match usize::try_from(*array_len) {
+                Ok(len) if len <= MAX_ARRAY_LEN => Some(len),
+                _ => None,
+            };
+            let Some(array_len) = array_len else {
+                return Err(corrupt(
+                    "saved table array length exceeds the array limit",
+                    object_index,
+                    location,
+                ));
+            };
+            // The stored span is canonical: consecutive keys inside the
+            // logical array, starting and ending at a live slot.
+            let first_slot = match entries.first() {
+                Some((super::SavedVal::Num(bits), _)) if array_slots > 0 => {
+                    array_index(f64::from_bits(*bits), array_len)
+                        .filter(|slot| slot + array_slots <= array_len)
+                }
+                _ => Some(0),
+            };
+            let Some(first_slot) = first_slot else {
+                return Err(corrupt(
+                    "saved table array slot has the wrong key",
+                    0,
+                    location,
+                ));
+            };
+            if array_slots > 0
+                && (matches!(entries[0].1, super::SavedVal::Nil)
+                    || matches!(entries[array_slots - 1].1, super::SavedVal::Nil))
+            {
+                return Err(corrupt(
+                    "saved table array span does not end at live slots",
+                    0,
+                    location,
                 ));
             }
             let mut keys = BTreeSet::new();
             for (entry_index, (key, value)) in entries.iter().enumerate() {
                 validate_value(key, payload)?;
                 validate_value(value, payload)?;
-                if entry_index < array_len {
+                if entry_index < array_slots {
                     // Array slots carry their implied key, and may be empty.
-                    if !matches!(key, super::SavedVal::Num(bits) if array_index(f64::from_bits(*bits), array_len) == Some(entry_index))
+                    if !matches!(key, super::SavedVal::Num(bits) if array_index(f64::from_bits(*bits), array_len) == Some(first_slot + entry_index))
                     {
                         return Err(corrupt(
                             "saved table array slot has the wrong key",
@@ -433,6 +475,18 @@ fn validate_references(payload: &SavePayload) -> Result<(), SnapshotError> {
                         ));
                     }
                 } else {
+                    // Every array key is stored in the array span or is nil,
+                    // so no engine save holds a hash entry for one.
+                    if matches!(key, super::SavedVal::Num(bits) if array_index(f64::from_bits(*bits), array_len).is_some())
+                    {
+                        return Err(corrupt(
+                            "saved table hash entry belongs in the array",
+                            entry_index,
+                            SaveLocation::TableEntries {
+                                object: object_index,
+                            },
+                        ));
+                    }
                     if matches!(value, super::SavedVal::Nil) {
                         return Err(corrupt(
                             "saved table entry stores nil",
@@ -921,6 +975,7 @@ mod tests {
             objects: vec![
                 super::super::SavedObject::Table {
                     array_len: 0,
+                    array_slots: 0,
                     entries,
                     metatable: None,
                 },
@@ -1084,10 +1139,13 @@ mod tests {
     fn saved_table_array_prefix_is_checked() {
         let num = |n: f64| super::super::SavedVal::Num(n.to_bits());
         let with_table =
-            |array_len: u32, entries: Vec<(super::super::SavedVal, super::super::SavedVal)>| {
+            |array_len: u64,
+             array_slots: u32,
+             entries: Vec<(super::super::SavedVal, super::super::SavedVal)>| {
                 let mut payload = gmatch_payload(false, num(1.0));
                 payload.objects = vec![super::super::SavedObject::Table {
                     array_len,
+                    array_slots,
                     entries,
                     metatable: None,
                 }];
@@ -1096,33 +1154,77 @@ mod tests {
             };
         let nil = super::super::SavedVal::Nil;
         let live = super::super::SavedVal::Bool(true);
-        // Empty array slots are legal; a gap key in the hash part is too.
-        assert!(
-            validate_references(&with_table(
-                2,
+        // Empty slots inside the stored span are legal, the span may start
+        // above key 1 and end below the logical length, and a gap key in the
+        // hash part is legal too.
+        for (array_len, array_slots, entries) in [
+            (
+                4,
+                3,
                 vec![
-                    (num(1.0), nil.clone()),
                     (num(2.0), live.clone()),
-                    (num(4.0), live.clone())
-                ]
-            ))
-            .is_ok()
-        );
-        for (array_len, entries) in [
-            // Longer than its entries.
-            (2, vec![(num(1.0), live.clone())]),
+                    (num(3.0), nil.clone()),
+                    (num(4.0), live.clone()),
+                    (num(6.0), live.clone()),
+                ],
+            ),
+            (1 << 40, 1, vec![(num(7.0), live.clone())]),
+            (9, 0, vec![(num(11.0), live.clone())]),
+        ] {
+            assert!(validate_references(&with_table(array_len, array_slots, entries)).is_ok());
+        }
+        for (array_len, array_slots, entries) in [
+            // More slots than entries.
+            (2, 2, vec![(num(1.0), live.clone())]),
+            // Span reaching past the logical length.
+            (
+                2,
+                2,
+                vec![(num(2.0), live.clone()), (num(3.0), live.clone())],
+            ),
             // Array slot with the wrong key.
-            (1, vec![(num(2.0), live.clone())]),
-            // Live hash entry at the append key.
-            (1, vec![(num(1.0), live.clone()), (num(2.0), live.clone())]),
-            (0, vec![(num(1.0), live.clone())]),
-            // Nil outside the array prefix.
-            (0, vec![(num(5.0), nil.clone())]),
+            (
+                3,
+                2,
+                vec![(num(1.0), live.clone()), (num(3.0), live.clone())],
+            ),
+            // A span must start and end at live slots.
+            (
+                2,
+                2,
+                vec![(num(1.0), nil.clone()), (num(2.0), live.clone())],
+            ),
+            (
+                2,
+                2,
+                vec![(num(1.0), live.clone()), (num(2.0), nil.clone())],
+            ),
+            // Live hash entry at the append key or at an unstored array key.
+            (
+                1,
+                1,
+                vec![(num(1.0), live.clone()), (num(2.0), live.clone())],
+            ),
+            (0, 0, vec![(num(1.0), live.clone())]),
+            (
+                5,
+                1,
+                vec![(num(4.0), live.clone()), (num(2.0), live.clone())],
+            ),
+            // Nil outside the array span.
+            (0, 0, vec![(num(5.0), nil.clone())]),
             // Array key repeated in the hash part.
-            (1, vec![(num(1.0), nil.clone()), (num(1.0), live.clone())]),
+            (
+                1,
+                1,
+                vec![(num(1.0), live.clone()), (num(1.0), live.clone())],
+            ),
+            // Logical length beyond the representation limit.
+            (u64::MAX, 0, vec![]),
+            (MAX_ARRAY_LEN as u64 + 1, 0, vec![]),
         ] {
             assert!(matches!(
-                validate_references(&with_table(array_len, entries)),
+                validate_references(&with_table(array_len, array_slots, entries)),
                 Err(SnapshotError::CorruptArena { .. })
             ));
         }
@@ -1137,11 +1239,13 @@ mod tests {
             payload.objects = vec![
                 super::super::SavedObject::Table {
                     array_len: 0,
+                    array_slots: 0,
                     entries: Vec::new(),
                     metatable: Some(mt),
                 },
                 super::super::SavedObject::Table {
                     array_len: 0,
+                    array_slots: 0,
                     entries: Vec::new(),
                     metatable: None,
                 },

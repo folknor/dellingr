@@ -25,7 +25,9 @@ callbacks, host user-data. Saving is valid only while the VM is quiescent.
   - keys deleted from the baseline;
   - keys added or changed;
   - the key order, only when replaying the first two would not reproduce it;
-  - the whole array part, nil slots included, when there is one;
+  - the whole logical array part, nil slots included, when there is one
+    (ordinary tables save only the span from their first live array key to
+    their last, plus the logical length; see Byte stability);
   - the metatable: unchanged, cleared, or replaced.
 - The array shape is saved because it decides where later integer writes
   land.
@@ -106,6 +108,11 @@ callbacks, host user-data. Saving is valid only while the VM is quiescent.
   It is bounds-checked, and reservations are capped at the remaining bytes.
 - Two saves of the same logical state are byte-identical with the same crate
   version. The crate version string is part of the blob.
+- A table saves its logical array length and the slots from its first live
+  array key to its last, never where its stored window happens to sit, so a
+  table's history (a queue that has drained and moved on, or one loaded from
+  a save) does not reach the bytes. A loaded State and the continuous run it
+  came from keep saving identical bytes.
 - A host that content-hashes saves across upgrades must hash the payload after
   the header, or accept that a version bump changes the bytes.
 - Saves are user-editable input. Authenticate them if tampering with future

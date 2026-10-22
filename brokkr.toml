@@ -103,6 +103,12 @@ xxh128 = "2d409aa1bb5f82a2a841f80aa69f54a5"
 hotpath_file = "examples/tables/fill.lua"
 hotpath_xxh128 = "0ca74ee6bbe329be1e1a74d45b3ba364"
 
+[dellingr.workloads.queue]
+file = "bench/queue.lua"
+xxh128 = "b02dfb55c808e62f08a1311046988351"
+hotpath_file = "examples/tables/queue.lua"
+hotpath_xxh128 = "53c18d7a34328f8d6917fab4d5eb0399"
+
 [dellingr.workloads.mixed]
 file = "bench/mixed.lua"
 xxh128 = "4193f315750f157ff7fb2b1ec6f30165"

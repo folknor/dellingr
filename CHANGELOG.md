@@ -21,9 +21,13 @@ All notable changes to dellingr are documented here. The format follows
   snapshot contents. Drops on another thread take effect at whichever
   collection follows them; synchronize them when that boundary matters to a
   replay.
-- Snapshot `FORMAT_VERSION` is 8; older saves are rejected. The payload
-  records whether the globals were sealed. **Replay-visible (snapshot
-  contents):** loading now rebuilds the globals in saved order instead of
+- Snapshot `FORMAT_VERSION` is 9; older saves are rejected. The payload
+  records whether the globals were sealed. A table saves its logical array
+  length (now 64-bit) and only the slots from its first live array key to
+  its last, instead of every slot back to key 1, so two tables holding the
+  same contents save the same bytes whatever their history.
+  **Replay-visible (snapshot contents):** loading now rebuilds the globals in
+  saved order instead of
   keeping the setup's order and appending saved-only names, so a State whose
   host set globals in a different order than its load setup now reloads to
   byte-identical saves.
@@ -208,6 +212,17 @@ All notable changes to dellingr are documented here. The format follows
   closure's code keeps its `%p` id across save and load, instead of rendering
   a fresh id after load. Snapshots of such states carry the literal's id; the
   snapshot format is unchanged.
+- A table used as a FIFO (`q[tail] = v; q[head] = nil`) no longer grows with
+  its history. The array part is now a logical length plus a stored window
+  of it: an append drops the window's dead prefix once it is half the
+  window, an all-dead window restarts at the next write, so storage, `pairs`
+  and `next` starts, and snapshot size track the live span instead of every
+  key ever pushed. Which keys are array keys, `#`, `pairs` order and where
+  later writes land are unchanged, so script behaviour and cost are
+  identical. A table that keeps one old key alive while the rest of a long
+  array dies still stores the span between them. On a 32-bit host, growing
+  an array past 2^31 - 2 keys now panics with a message rather than
+  exhausting memory.
 
 ## [0.5.0] - 2026-10-14
 

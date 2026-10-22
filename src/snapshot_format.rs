@@ -3,4 +3,4 @@
 /// Snapshot compatibility is exact-match only. Change this only when encoded
 /// fields change, keeping opcode fixtures available in non-snapshot builds.
 #[cfg_attr(not(feature = "snapshot"), allow(dead_code))]
-pub(crate) const FORMAT_VERSION: u16 = 8;
+pub(crate) const FORMAT_VERSION: u16 = 9;

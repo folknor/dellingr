@@ -99,6 +99,7 @@ pub(crate) enum GmatchStateFault {
 #[derive(Debug)]
 pub(crate) enum SnapshotTableFault {
     ArrayLengthExceedsEntries,
+    ArrayLengthExceedsLimit,
     ArraySlotHasWrongKey,
     HashEntryBelongsInArray,
 }
@@ -233,6 +234,7 @@ impl fmt::Display for SnapshotTableFault {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = match self {
             Self::ArrayLengthExceedsEntries => "snapshot array length exceeds its entries",
+            Self::ArrayLengthExceedsLimit => "snapshot array length exceeds the array limit",
             Self::ArraySlotHasWrongKey => "snapshot array slot has the wrong key",
             Self::HashEntryBelongsInArray => "snapshot hash entry belongs in the array",
         };

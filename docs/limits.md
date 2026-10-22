@@ -144,9 +144,21 @@ capacity; what a collection frees is the payloads and entries it removes.
     the State's next collection or anchor creation;
   - each `with_restricted_env` nesting level retains its environment until
     the call returns.
-- Never reclaimed while reachable: a live table's storage. The array part
-  never shrinks, and a collection does not compact a live table, so one
-  rooted table can retain large storage while counting as one heap object.
+- Reclaimed only by writes to the table, never by a collection: a live
+  table's storage. The array part stores a window from its first live key
+  to its last. An append drops a dead prefix once it makes up half the
+  window, and an all-dead window is released at the next append or array
+  write outside it, so a FIFO (`q[tail] = v; q[head] = nil`) keeps storage
+  proportional to its backlog, after catching up within a bounded number of
+  pushes when it starts from a large dead prefix. The window cannot skip
+  holes: one old key that stays alive keeps every slot from it to the
+  newest key stored, and nil writes alone never release anything. The hash
+  part compacts its tombstones once they reach its live count. A collection
+  does not compact a live table, so one rooted table can retain large
+  storage while counting as one heap object.
+- A table's logical array length (the keys `#` and placement treat as array
+  keys) never shrinks. It is capped at `min(2^53, 2^(pointer bits - 1)) - 2`
+  keys; growing past it panics, and a save beyond it is rejected on load.
 - Never reclaimed for the life of the environment: a global binding written
   before `State::seal_globals` keeps its slot after being set to nil, because a
   load's setup may reinstall that name and the saved nil is what keeps it

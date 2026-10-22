@@ -223,3 +223,68 @@ fn load_restores_saved_global_order_over_setup_order() {
     .unwrap();
     assert_eq!(loaded.save_state().unwrap().bytes, save.bytes);
 }
+
+/// One queue step: push `count` values, pop all but `keep`, and summarize
+/// what scripts can observe (`#`, `pairs` order, where an out-of-window write
+/// lands).
+const QUEUE_STEP: &str = r#"
+    q = q or {}
+    head = head or 1
+    tail = tail or 0
+    for _ = 1, count do
+        tail = tail + 1
+        q[tail] = tail
+        if tail - head >= keep then
+            q[head] = nil
+            head = head + 1
+        end
+    end
+    local keys = {}
+    for k in pairs(q) do keys[#keys + 1] = tostring(k) end
+    seen = #q .. ":" .. table.concat(keys, ",")
+"#;
+
+fn queue_step(state: &mut State, count: u32, keep: u32) -> String {
+    state.push_number(f64::from(count)).unwrap();
+    state.set_global("count").unwrap();
+    state.push_number(f64::from(keep)).unwrap();
+    state.set_global("keep").unwrap();
+    run(state, QUEUE_STEP);
+    global_str(state, "seen")
+}
+
+#[test]
+fn queue_saves_stay_small_and_identical_across_load() {
+    let mut state = State::new();
+    queue_step(&mut state, 20, 3);
+    let small = state.save_state().unwrap().bytes.len();
+    queue_step(&mut state, 20_000, 3);
+    let save = state.save_state().unwrap();
+    // The dead history is not saved: a queue holding three values saves
+    // about as much after twenty thousand pushes as after twenty.
+    assert!(
+        save.bytes.len() < small + 64,
+        "queue save grew from {small} to {} bytes",
+        save.bytes.len()
+    );
+    let mut loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), |_| {
+        Ok::<(), std::convert::Infallible>(())
+    })
+    .unwrap();
+    assert_eq!(loaded.save_state().unwrap().bytes, save.bytes);
+    // Both continue identically, including a write far below the window
+    // and the border it leaves.
+    for current in [&mut state, &mut loaded] {
+        run(current, "q[5] = 'low'");
+    }
+    for keep in [3, 0, 5] {
+        assert_eq!(
+            queue_step(&mut loaded, 50, keep),
+            queue_step(&mut state, 50, keep)
+        );
+        assert_eq!(
+            loaded.save_state().unwrap().bytes,
+            state.save_state().unwrap().bytes
+        );
+    }
+}

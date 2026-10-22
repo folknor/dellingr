@@ -75,23 +75,6 @@ native-stack setting, which widens the embedding surface.
 
 ## Replay- or cost-visible changes
 
-## HYG-058 - Array part never shrinks, so queue-style tables grow with history
-
-Reported by the heap hunter.
-
-A FIFO written the obvious way (`q[tail] = v` / `q[head] = nil`) appends at
-`array.len() + 1` while clearing the front, growing the `Vec<Val>` by one slot per
-push forever: 16 bytes per historical push; `next_live_from` scans the dead
-prefix, so every `pairs`/`next` start is O(total pushes). This is a memory and
-performance problem, not a cost-model one (`docs/budget.md`): the fix is to stop
-the growth, not to charge for it;
-`snapshot_entries` emits one `(key, Nil)` per array slot, so save size and
-verify/materialize work grow with history. Clearing the first half of a large
-array has the same effect on traversal. The no-shrink rule protects `pairs`
-assigning nil and cached slot indices; shrinking only when no traversal can be
-mid-flight (save time, or GC) preserves both. `#` on trailing nils is
-replay-visible, so any change must be called out.
-
 ## HYG-001 - Cache-slot operand encoding has four owners and two sentinel conventions
 
 Reported by the compiler and VM-core hunters.
