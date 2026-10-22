@@ -65,8 +65,10 @@ fn parse_integer_with_base(bytes: &[u8], base: u32) -> Option<f64> {
     if negative { Some(-value) } else { Some(value) }
 }
 
-// Keep a separate callback address for the global name. Active callback-name
-// lookup and snapshot reverse lookup are keyed by the Rust function address.
+// A separate wrapper so the global name gets its own callback address where the
+// build keeps one. Active callback-name lookup and snapshot reverse lookup are
+// keyed by the Rust function address. Release LTO folds it with
+// `table.unpack`'s identical wrapper, so there both resolve to one id.
 fn base_unpack_values(state: &mut State) -> Result<u8> {
     super::unpack_values(state)
 }

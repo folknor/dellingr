@@ -9,8 +9,9 @@ use crate::instr::{ArgCount, RetCount};
 use crate::numeral::{MAX_EXACT_INTEGER, exact_i64, parse_lua_numeral};
 use crate::vm::MetaName;
 
-// Keep a separate callback address for the `table.unpack` snapshot id. If this
-// aliases global `unpack`, reverse callback-name lookup resolves only one id.
+// A separate wrapper so `table.unpack` gets its own callback address where the
+// build keeps one. Release LTO folds it with global `unpack`'s identical
+// wrapper, and then reverse callback-name lookup resolves both to one id.
 fn table_unpack_values(state: &mut State) -> crate::Result<u8> {
     super::unpack_values(state)
 }

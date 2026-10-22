@@ -1144,12 +1144,13 @@ impl State {
         // as the smallest id, so a build that does not fold them loads the
         // second as the first, and Lua == between them can differ from the
         // saving build. Embedders needing distinct identity must keep function
-        // bodies observably distinct (as table.unpack keeps its own wrapper).
-        // Refusing shared addresses would break aliasing and release LTO builds.
+        // bodies observably distinct; a thin wrapper around a shared body is
+        // not enough (table.unpack and base unpack have separate wrappers, and
+        // release LTO folds them). Refusing shared addresses would break
+        // aliasing and release LTO builds.
         // Rust function identity is by address everywhere: `Val` equality
         // (script-visible `f == g`), the TFORCALL fast paths for next and the
-        // ipairs iterator, the active-function name, and this reverse map. That
-        // is why table.unpack and base unpack keep separate callbacks. The
+        // ipairs iterator, the active-function name, and this reverse map. The
         // smallest-id rule makes `Fn` ids in save bytes depend on whether the
         // build folded functions, so cross-build snapshot bytes are only
         // guaranteed identical for the same build (see docs/save-state.md).

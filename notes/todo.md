@@ -68,17 +68,6 @@ mostly-dead prefix even past a live straggler.
 Signal: a game script holding a sparse long-lived id map, or a heap profile
 showing an array window far larger than its live count.
 
-### CLI: read the script from stdin on `-`
-
-Duplicate of BUG-010 in deferred.md; resolve them together and delete both.
-
-What: `parse_args` in `src/main.rs` special-cases `"-"` so it is not
-rejected as an unknown option (the conventional stdin spelling), then hands
-it to `fs::read_to_string` as a file literally named `-`. Nothing documents
-stdin support. Either implement it or drop the special case.
-
-Signal: anyone wanting to pipe a script into the CLI.
-
 ### Grow the brokkr workload registry to the full candidate surface
 
 What: `bench/` ports only the curated benches registered in brokkr.toml.
