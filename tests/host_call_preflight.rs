@@ -53,17 +53,19 @@ fn call_anchor_preflight_misuse_does_not_notify() {
     let anchor = state.anchor_function().unwrap();
 
     let err = state
-        .call_anchor(anchor, ArgCount::Fixed(2), RetCount::Fixed(0))
+        .call_anchor(&anchor, ArgCount::Fixed(2), RetCount::Fixed(0))
         .expect_err("too few stack values");
     assert!(matches!(err.kind(), ErrorKind::InvalidStackIndex { .. }));
     state
-        .call_anchor(anchor, ArgCount::Dynamic, RetCount::Fixed(0))
+        .call_anchor(&anchor, ArgCount::Dynamic, RetCount::Fixed(0))
         .expect_err("Dynamic is bytecode-only");
 
-    assert!(state.release_anchor(anchor));
+    let mut other = State::new();
+    other.load_string("return 1").unwrap();
+    let foreign = other.anchor_function().unwrap();
     let err = state
-        .call_anchor(anchor, ArgCount::Fixed(0), RetCount::Fixed(0))
-        .expect_err("released anchor");
+        .call_anchor(&foreign, ArgCount::Fixed(0), RetCount::Fixed(0))
+        .expect_err("wrong-State anchor");
     assert!(matches!(err.kind(), ErrorKind::InvalidAnchor));
 
     assert_eq!(state.get_top(), 0);
@@ -76,7 +78,7 @@ fn call_anchor_dispatch_error_notifies_once() {
     state.load_string("error('boom')").unwrap();
     let anchor = state.anchor_function().unwrap();
     state
-        .call_anchor(anchor, ArgCount::Fixed(0), RetCount::Fixed(0))
+        .call_anchor(&anchor, ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect_err("script raises");
     assert_eq!(count(&counter), 1);
 }
@@ -91,10 +93,13 @@ fn call_anchor_without_room_for_callee_does_not_notify() {
         .set_top(isize::try_from(cap).expect("stack cap fits in isize"))
         .expect("filler fits up to the cap");
     let err = state
-        .call_anchor(anchor, ArgCount::Fixed(0), RetCount::Fixed(0))
+        .call_anchor(&anchor, ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect_err("inserting the callee would exceed the cap");
     assert!(matches!(err.kind(), ErrorKind::StackOverflow { .. }));
     assert_eq!(state.get_top(), cap);
-    assert_eq!(state.anchor_type(anchor), Some(dellingr::LuaType::Function));
+    assert_eq!(
+        state.anchor_type(&anchor),
+        Some(dellingr::LuaType::Function)
+    );
     assert_eq!(count(&counter), 0);
 }

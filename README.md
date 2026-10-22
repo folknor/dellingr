@@ -147,9 +147,10 @@ dellingr = "0.5"
   once on the engine, load into many states with `state.load(&program)`.
 - `State` (`Send`) - VM instance with cost-bounded execution. Movable
   across threads; pair with `Mutex<State>` if you need to share one.
-- `Anchor` (`Copy + Send + Sync + 'static`) - retain a Lua value (function, table, etc.)
-  across host calls without using globals. State-scoped; cross-state
-  misuse and use-after-release surface as errors, not silent corruption.
+- `Anchor` (`Send + Sync + 'static`) - owned handle that retains a Lua value
+  (function, table, etc.) across host calls without using globals. Dropping
+  it releases the value. State-scoped; cross-state misuse surfaces as an
+  error, not silent corruption.
 - `HostCallbacks` trait (`: Send`) - embedders redirect `print`, hook
   errors, etc.
 - `RustFunc` - expose Rust functions to Lua scripts.

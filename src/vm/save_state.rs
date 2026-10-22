@@ -1622,9 +1622,8 @@ impl State {
         } else {
             State::empty_with_callbacks(callbacks)
         };
-        // Drop any inherited anchors before setup; anchors created by setup are
-        // deliberately retained and participate in the final collection.
-        state.registry.clear();
+        // Anchors created by setup are deliberately retained and participate
+        // in the final collection.
         state.global_env.begin_load_setup();
         setup(&mut state).map_err(LoadError::Setup)?;
         if state.poisoned {

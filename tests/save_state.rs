@@ -709,7 +709,7 @@ fn ordered_environment_replay_invalidates_setup_field_caches() {
         state.load_string("local m = math return function() return m.floor end")?;
         state.call(ArgCount::Fixed(0), RetCount::Fixed(1))?;
         let anchor = state.anchor_function()?;
-        state.call_anchor(anchor, ArgCount::Fixed(0), RetCount::Fixed(1))?;
+        state.call_anchor(&anchor, ArgCount::Fixed(0), RetCount::Fixed(1))?;
         assert_eq!(state.typ(-1), LuaType::Function);
         state.pop(1)?;
         probe = Some(anchor);
@@ -718,7 +718,7 @@ fn ordered_environment_replay_invalidates_setup_field_caches() {
     .expect("state loads after warming a cache in setup");
     loaded
         .call_anchor(
-            probe.expect("setup retained the probe"),
+            probe.as_ref().expect("setup retained the probe"),
             ArgCount::Fixed(0),
             RetCount::Fixed(1),
         )
@@ -765,7 +765,7 @@ fn setup_anchor_survives_load_final_gc() {
     })
     .expect("state loads");
     loaded
-        .push_anchor(setup_anchor.expect("setup produced anchor"))
+        .push_anchor(setup_anchor.as_ref().expect("setup produced anchor"))
         .unwrap();
     assert_eq!(loaded.to_number(-1).unwrap(), 42.0);
     loaded.pop(1).unwrap();

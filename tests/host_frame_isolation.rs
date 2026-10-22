@@ -104,7 +104,7 @@ fn set_global_on_empty_stack_errors_instead_of_panicking() {
 fn call_anchor_short_of_args(state: &mut State) -> dellingr::Result<u8> {
     state.get_global("h")?;
     let h = state.anchor_function()?;
-    let rejected = match state.call_anchor(h, ArgCount::Fixed(1), RetCount::Fixed(0)) {
+    let rejected = match state.call_anchor(&h, ArgCount::Fixed(1), RetCount::Fixed(0)) {
         Err(e) => matches!(e.kind(), ErrorKind::InvalidStackIndex { .. }),
         Ok(()) => false,
     };

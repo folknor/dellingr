@@ -93,6 +93,8 @@ impl State {
         // own reference to the program.
         self.patterns.clear();
         self.pattern_bytes = 0;
+        // Anchors the host dropped stop rooting their values here.
+        self.registry.drain_released();
         // Mark all roots
         let mut worklist = self.heap.take_mark_worklist();
         mark_gc_roots(self, &mut worklist);

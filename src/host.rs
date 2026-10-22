@@ -50,7 +50,7 @@ pub trait HostCallbacks: Send {
     /// the metamethod depth limit, and direct calls of non-callable values.
     /// It is NOT fired for host API misuse that `call()` or `call_anchor()`
     /// rejects before dispatch, when nothing has executed: `ArgCount::Dynamic`,
-    /// insufficient stack values for the call, a dead anchor, or no stack
+    /// insufficient stack values for the call, a wrong-State anchor, or no stack
     /// room to insert the anchored callee. The host observes those solely
     /// through the `Result`. Once dispatch begins, setup failures (Lua frame
     /// setup, `__call` argument insertion, result padding) do notify.

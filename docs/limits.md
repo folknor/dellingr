@@ -139,8 +139,9 @@ capacity; what a collection frees is the payloads and entries it removes.
     collection: creating and discarding capturing closures grows the pool
     even when the number of live closures stays constant.
 - Reclaimed only by the host:
-  - anchors stay registered, and rooted, until `release_anchor`; dropping an
-    `Anchor` handle does not release it;
+  - anchors stay registered, and rooted, while their `Anchor` handle lives.
+    `release_anchor` frees the slot at once; dropping the handle frees it at
+    the State's next collection or anchor creation;
   - each `with_restricted_env` nesting level retains its environment until
     the call returns.
 - Never reclaimed while reachable: a live table's storage. The array part

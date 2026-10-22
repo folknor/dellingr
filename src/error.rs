@@ -438,9 +438,8 @@ pub enum ErrorKind {
         /// The conflicting stable function id.
         id: String,
     },
-    /// Anchor handle is stale (released, generation mismatch) or belongs
-    /// to a different `State`. Operations that need a live value return
-    /// this rather than aliasing into the wrong slot.
+    /// Anchor handle belongs to a different `State`. Operations that need a
+    /// live value return this rather than aliasing into the wrong slot.
     InvalidAnchor,
     /// Attempted to anchor `nil`. `nil` carries no GC weight and has no
     /// use case for a stable handle; embedders that need an "absent" value
@@ -1255,12 +1254,7 @@ impl fmt::Display for ErrorKind {
             DuplicateFunctionRegistration { id } => {
                 write!(f, "duplicate Rust function registration: {id}")
             }
-            InvalidAnchor => {
-                write!(
-                    f,
-                    "invalid anchor (released, stale generation, or wrong State)"
-                )
-            }
+            InvalidAnchor => write!(f, "invalid anchor (issued by a different State)"),
             AnchorNil => {
                 write!(f, "cannot anchor nil")
             }

@@ -71,6 +71,8 @@ const _: () = {
     assert_send::<State>();
     assert_send_sync::<Engine>();
     assert_send_sync::<Program>();
+    // A handle may be dropped on any thread; its release queue is a Mutex.
+    assert_send_sync::<Anchor>();
 };
 
 /// Custom result type for evaluating Lua.

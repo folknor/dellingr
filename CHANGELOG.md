@@ -8,6 +8,19 @@ All notable changes to dellingr are documented here. The format follows
 
 ### Changed (breaking)
 
+- `Anchor` is an owned handle: no longer `Copy` or `Clone`, and dropping it
+  releases the anchored value (the State reclaims the slot at its next
+  collection or anchor creation). `release_anchor(Anchor)` consumes the
+  handle and releases at once; `push_anchor`, `call_anchor` and
+  `anchor_type` take `&Anchor`. A released or stale handle can no longer
+  exist, so `ErrorKind::InvalidAnchor` now means only a handle from another
+  State, and its message says so. `anchor_count` counts live handles.
+  **Replay-visible:** a value whose handle is dropped becomes collectable,
+  where it used to stay rooted until `release_anchor`, so collections can
+  free more, which can change rendered `tostring`/`%p` identities and
+  snapshot contents. Drops on another thread take effect at whichever
+  collection follows them; synchronize them when that boundary matters to a
+  replay.
 - Snapshot `FORMAT_VERSION` is 8; older saves are rejected. The payload
   records whether the globals were sealed. **Replay-visible (snapshot
   contents):** loading now rebuilds the globals in saved order instead of
