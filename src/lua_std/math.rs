@@ -1,25 +1,24 @@
 //! Lua's Math Library
 //!
 //! `math.random` draws from the in-crate seeded `VmRng`, so a fixed seed yields
-//! the same stream on every platform. The registered functions `sin`, `cos`,
-//! `tan`, `asin`, `acos`, `atan`, `atan2`, `exp`, and `log` delegate to the
-//! platform's `f64` / libm implementation; their last ULP may differ across
-//! architectures or libm versions. `math.pow` is not registered, but the `^`
-//! operator has the same property: the VM evaluates it with the host's
-//! `f64::powf`. The compiler never constant-folds `^` (it does fold the
-//! IEEE-exact `+ - * / %`), so compiled bytecode and snapshots carry no
-//! host-computed `^` results; a replay evaluates every `^` on the replaying
-//! host. `sqrt` is correctly rounded by IEEE 754. Basic arithmetic
-//! (`+ - * / %` and unary minus), comparisons, `sqrt`, and `math.random` are
-//! bit-stable across platforms, except for the sign and payload of a NaN they
-//! produce (x86-64's default NaN is negative, aarch64's positive). No Lua
-//! operation observes those bits: `string.format` and `tostring` both
-//! canonicalise NaN to an unsigned `nan`, and `%q` prints `(0/0)`.
+//! the same stream on every platform. `sin`, `cos`, `tan`, `asin`, `acos`,
+//! `atan`, `atan2`, `exp` and `log` come from `crate::crmath`, in-crate ports
+//! of the CORE-MATH correctly rounded functions that give the same bits on
+//! every supported host (as does the `^` operator, whose opcode uses
+//! `crmath::pow`); `docs/determinism.md` states the guarantee and
+//! `reference/deterministic-math.md` how it is built. `sqrt` is correctly
+//! rounded by IEEE 754. Basic arithmetic (`+ - * / %` and unary minus),
+//! comparisons, `sqrt`, and `math.random` are bit-stable across platforms too.
+//! The sign and payload of a NaN any of them produce are not (x86-64's
+//! default NaN is negative, aarch64's positive), but no Lua operation observes
+//! those bits: `string.format` and `tostring` both canonicalise NaN to an
+//! unsigned `nan`, and `%q` prints `(0/0)`.
 
 use super::{MATH_LIBRARY_CAPACITY, arg_integer, check_type_named};
 use crate::LuaType;
 use crate::Result;
 use crate::State;
+use crate::crmath;
 use crate::error::{ArgDetail, ErrorKind, LibraryError, LibraryFunction};
 use std::f64::consts::PI;
 
@@ -45,7 +44,7 @@ pub(super) const MATH_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         check_type_named(state, 1, LuaType::Number, "sin")?;
         let x = state.to_number(1)?;
         state.set_top(0)?;
-        state.push_number(x.sin())?;
+        state.push_number(crmath::sin(x))?;
         Ok(1)
     }),
     // math.cos(x) - costs 1
@@ -54,7 +53,7 @@ pub(super) const MATH_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         check_type_named(state, 1, LuaType::Number, "cos")?;
         let x = state.to_number(1)?;
         state.set_top(0)?;
-        state.push_number(x.cos())?;
+        state.push_number(crmath::cos(x))?;
         Ok(1)
     }),
     // math.atan2(y, x) - costs 1
@@ -65,7 +64,7 @@ pub(super) const MATH_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         let y = state.to_number(1)?;
         let x = state.to_number(2)?;
         state.set_top(0)?;
-        state.push_number(y.atan2(x))?;
+        state.push_number(crmath::atan2(y, x))?;
         Ok(1)
     }),
     // math.sqrt(x) - costs 1
@@ -202,7 +201,7 @@ pub(super) const MATH_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         check_type_named(state, 1, LuaType::Number, "tan")?;
         let x = state.to_number(1)?;
         state.set_top(0)?;
-        state.push_number(x.tan())?;
+        state.push_number(crmath::tan(x))?;
         Ok(1)
     }),
     // math.acos(x) - costs 1
@@ -211,7 +210,7 @@ pub(super) const MATH_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         check_type_named(state, 1, LuaType::Number, "acos")?;
         let x = state.to_number(1)?;
         state.set_top(0)?;
-        state.push_number(x.acos())?;
+        state.push_number(crmath::acos(x))?;
         Ok(1)
     }),
     // math.asin(x) - costs 1
@@ -220,7 +219,7 @@ pub(super) const MATH_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         check_type_named(state, 1, LuaType::Number, "asin")?;
         let x = state.to_number(1)?;
         state.set_top(0)?;
-        state.push_number(x.asin())?;
+        state.push_number(crmath::asin(x))?;
         Ok(1)
     }),
     // math.atan(y [, x]) - Lua 5.3+ style - costs 1
@@ -233,9 +232,9 @@ pub(super) const MATH_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         let result = if state.get_top() >= 2 {
             check_type_named(state, 2, LuaType::Number, "atan")?;
             let x = state.to_number(2)?;
-            y.atan2(x)
+            crmath::atan2(y, x)
         } else {
-            y.atan()
+            crmath::atan(y)
         };
         state.set_top(0)?;
         state.push_number(result)?;
@@ -265,7 +264,7 @@ pub(super) const MATH_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         check_type_named(state, 1, LuaType::Number, "exp")?;
         let x = state.to_number(1)?;
         state.set_top(0)?;
-        state.push_number(x.exp())?;
+        state.push_number(crmath::exp(x))?;
         Ok(1)
     }),
     // math.log(x [, base]) - natural log, or log with base - costs 1
@@ -280,11 +279,18 @@ pub(super) const MATH_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
             // math.log(1000, 10) exactly 3 rather than 2.9999999999999996.
             // An exact comparison is what is wanted here: only the literal
             // base 10 takes that path, as in reference.
+            // Any other base is the quotient of two correctly rounded natural
+            // logarithms, rounded once more: deterministic, but not a
+            // correctly rounded log_base.
             #[allow(clippy::float_cmp)]
             let is_base_ten = base == 10.0;
-            if is_base_ten { x.log10() } else { x.log(base) }
+            if is_base_ten {
+                crmath::log10(x)
+            } else {
+                crmath::ln(x) / crmath::ln(base)
+            }
         } else {
-            x.ln()
+            crmath::ln(x)
         };
         state.set_top(0)?;
         state.push_number(result)?;

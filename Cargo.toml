@@ -96,6 +96,10 @@ hotpath = "0.28.6"
 
 [dev-dependencies]
 libc = "0.2.190"
+# Correctly rounded arbitrary-precision reference for the src/crmath kernels'
+# test oracle (directed-rounding enclosures). Its own `pow` is not used: a
+# power-of-two-base shortcut truncates the exponent.
+libbeef = "0.1.1"
 
 [[example]]
 name = "hotpath"

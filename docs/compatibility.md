@@ -16,8 +16,15 @@ differences carry a `-- DIFF:` comment in the example.
   C Lua on x86-64 prints `-nan` for `0/0`. `%q` prints `(0/0)`.
 - `tonumber(s, base)` accumulates in floating point, as Lua 5.2 does. Lua 5.4
   wraps to a 64-bit integer.
-- `math.log(x, 2)` uses Lua 5.2's general-base calculation. The last bit can
-  differ from Lua 5.4 (for example `math.log(3, 2)`).
+- `math.sin`, `cos`, `tan`, `asin`, `acos`, `atan` (one and two arguments),
+  `atan2`, `exp`, `log` and the `^` operator are correctly rounded and
+  computed in-crate rather than by the C library, so the last bit can differ
+  from reference Lua, whose results come from the host libm. See
+  `determinism.md`.
+- `math.log(x, base)` uses Lua 5.2's general-base calculation: `log10(x)` for
+  base 10, otherwise the quotient of two correctly rounded natural logarithms,
+  which is not itself a correctly rounded `log_base`. The last bit can differ
+  from Lua 5.4 (for example `math.log(3, 2)`, where 5.4 uses `log2`).
 - `math.random` uses the in-crate seeded generator, so its stream differs from
   reference Lua's.
 - Table keys that are integers stop being distinct beyond +/-2^53. See

@@ -207,14 +207,11 @@ impl Parser<'_> {
             exp_desc = ExpDesc::Other;
             self.parse_unary()?;
             // `^` is deliberately never constant-folded, unlike `+ - * / %`.
-            // Those are IEEE-exact, so a folded literal equals what any host
-            // computes at runtime. `pow` comes from the platform libm, which is
-            // not guaranteed bit-identical across targets; folding would bake
-            // the compiling host's result into bytecode, and a snapshot replayed
-            // on another host would then mix that constant with the replaying
-            // host's runtime `powf`. Leaving it to runtime keeps every `^` on
-            // one implementation per host (literal `^` is charged as a normal
-            // instruction).
+            // The runtime `pow` is the in-crate correctly rounded one
+            // (`crmath::pow`), identical on every host, so folding would be
+            // bit-safe; it stays unfolded because a folded literal is free
+            // while a runtime `^` is charged as an instruction, and folding
+            // would move cost charges and change compiled bytecode.
             self.push_at_line(Instr::pow(), token.line);
         }
 

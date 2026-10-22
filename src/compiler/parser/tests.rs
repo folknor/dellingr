@@ -204,8 +204,8 @@ fn test01() {
 
 #[test]
 fn test02() {
-    // ^ binds tighter than unary minus. `^` is never folded (its result is
-    // host-libm dependent), so the negation has no literal to fold into.
+    // ^ binds tighter than unary minus. `^` is never folded (a folded literal
+    // would not be charged), so the negation has no literal to fold into.
     let text = "x = -5^2";
     let out = Bytecode {
         code: vec![
@@ -2114,7 +2114,7 @@ fn constant_folding_collapses_literal_arithmetic() {
     assert_no_opcode("return 10 - 4", Instr::OP_SUBTRACT);
     assert_no_opcode("return 10 / 4", Instr::OP_DIVIDE);
     assert_no_opcode("return 10 % 3", Instr::OP_MOD);
-    // `^` evaluates through the host libm, so it is never baked into bytecode.
+    // `^` is never folded: runtime `^` is charged, a folded literal would not be.
     assert_has_opcode("return 2 ^ 10", Instr::OP_POW);
     assert_has_opcode("return 2 ^ 0.5 + 1", Instr::OP_ADD);
     assert_no_opcode("return -5", Instr::OP_NEGATE);

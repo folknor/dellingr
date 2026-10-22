@@ -1,0 +1,94 @@
+# Deterministic math
+
+Every transcendental result a script can observe comes from `src/crmath/`:
+`math.sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `exp`, `log`
+(natural and base 10) and the `^` operator (`OP_POW`). Nothing in the library
+calls the platform libm for these, and `clippy.toml` bans the `f64`/`f32`
+transcendental methods, `powi` and `mul_add` so new code cannot slip back.
+
+## Why
+
+Game replays must reproduce bit for bit on any host. The Rust `f64` methods
+lower to the host libm, or to compiler-builtins' weak symbols depending on
+link order, and different libms round differently in the last place, so a
+replay recorded on one host could branch differently on another.
+
+## Two properties
+
+1. **Same bits on every supported host.** Each kernel is a fixed sequence of
+   operations whose results IEEE 754 specifies exactly: binary64 `+ - * /` and
+   `sqrt`, integer and bit manipulation, and fused multiply-add through
+   `crmath::fma`. Rust never contracts `a * b + c` into an FMA and never
+   reassociates floating-point expressions, so the sequence written is the
+   sequence executed. This property does not rely on the kernels being
+   correctly rounded.
+2. **Correct rounding.** The kernels are ports of CORE-MATH's binary64
+   implementations, which certify the rounding of every result. Correct
+   rounding has one valid answer, so it also matches any other correctly
+   rounded libm, and replacing the implementation with another correct one
+   would not change replays. Two qualifications:
+   - `pow` and `atan2` end in a 256-bit or 192-bit phase whose final rounding
+     test could, in principle, fail; upstream then aborts. No binary64 input
+     is known to get there (CORE-MATH's worst-case files pass). The port
+     rounds the high-precision approximation instead, which keeps property 1
+     but could be off by one unit in the last place. A later correction of
+     such a case would be replay-visible.
+   - `math.log(x, base)` for a base other than 10 is `ln(x) / ln(base)`, each
+     logarithm correctly rounded and the quotient rounded once more.
+
+## FMA
+
+`crmath::fma` must be the correctly rounded IEEE operation everywhere, since
+CORE-MATH's error analysis depends on it:
+
+- x86/x86_64: the `vfmadd` instruction, chosen at compile time when the build
+  targets FMA and otherwise after run-time CPU detection (std caches it);
+- aarch64: `f64::mul_add`, which always lowers to `fmadd` there;
+- elsewhere, and on x86 CPUs without FMA: `crmath::soft_fma`, an integer
+  implementation.
+
+All of these return the same bits, so the choice never reaches results.
+`f64::mul_add` is not used where it could become a library call: the `fma`
+symbol it would reach may be compiler-builtins' generic one, which is not
+correctly rounded (rust-lang/compiler-builtins issue 1353).
+
+## Supported hosts
+
+Binary64 arithmetic exactly as IEEE 754 specifies, with gradual underflow and
+the default floating-point environment (round to nearest, no flush-to-zero).
+Rust assumes the same environment. x87-only targets (32-bit x86 without SSE2)
+evaluate with excess range and are not supported. NaN sign and payload bits
+are not part of the guarantee: no kernel branches on them, every NaN is
+treated as quiet (so `pow(NaN, 0)` and `pow(1, NaN)` are 1 whatever the
+NaN's bits), and the VM never lets a script observe them.
+
+## Porting conventions
+
+- The port is literal: C unsigned arithmetic becomes wrapping arithmetic,
+  shifts that C leaves undefined at the limb width are made total, and every
+  `__builtin_fma` becomes `crmath::fma`.
+- Hex float literals are written as `h!("0x1.921fb54442d18p+0")`, evaluated at
+  compile time by `crmath::hf`, which rejects any literal that is not exactly
+  representable.
+- The constant tables in `src/crmath/tables/` are generated from the upstream
+  C sources by `scripts/crmath_tables.py` and are not edited by hand.
+- Directed rounding, `errno`, exception flags and upstream's exception-flag
+  save/restore are removed; only round-to-nearest is implemented.
+- The upstream commit and licence notices are in
+  `src/crmath/LICENSE-CORE-MATH`.
+
+## Tests
+
+- `crmath::tests::fma`: `soft_fma` against the hardware instruction and
+  against exact big-float arithmetic, including the tie and overflow shapes
+  that broke compiler-builtins.
+- `crmath::tests::golden`: `tests/fixtures/crmath_golden.txt` pins special
+  values, random inputs and a sample of CORE-MATH's worst cases for every
+  kernel. Each line is checked under every FMA path the host can run. The
+  same file has to pass on every supported host; it is the cross-platform
+  guarantee in executable form.
+- `crmath::tests::oracle`: an interval Ziv procedure over `libbeef` in
+  directed rounding, which certifies the expected values. Ignored tests
+  regenerate the golden file and sweep all of CORE-MATH's worst-case files
+  (several million inputs) from a checkout under `research/core-math`; run
+  them in release (`brokkr test sweep_ --release`).

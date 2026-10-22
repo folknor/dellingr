@@ -522,9 +522,8 @@ fn format_float(number: f64, directive: &Directive, kind: FloatKind) -> Vec<u8> 
     // NaN is canonicalised here, at output, rather than in the arithmetic.
     // The sign of a hardware-generated NaN is platform-specific (x86-64's
     // default NaN has the sign bit set, aarch64's does not), and NaNs reach
-    // the VM from many producers: runtime `/` and `%`, `sqrt`,
-    // the libm-backed math functions, `^` via `powf`, and host
-    // `push_number`. Dropping the sign here makes formatted NaNs identical
+    // the VM from many producers: runtime `/` and `%`, `sqrt`, the
+    // `crmath` functions behind `math.*` and `^`, and host `push_number`. Dropping the sign here makes formatted NaNs identical
     // on every host. `tostring` also prints unsigned `nan`, `%q` prints
     // `(0/0)`, NaN never compares equal and cannot be a table key, and
     // snapshots canonicalise its bits. Reference C Lua prints

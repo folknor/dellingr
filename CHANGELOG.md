@@ -161,6 +161,19 @@ All notable changes to dellingr are documented here. The format follows
 
 ### Changed
 
+- **Replay-visible:** `math.sin`, `cos`, `tan`, `asin`, `acos`, `atan`,
+  `atan2`, `exp`, `log` and the `^` operator no longer call the platform libm.
+  They are in-crate ports of the CORE-MATH correctly rounded binary64
+  functions (`src/crmath`, MIT, notices in `src/crmath/LICENSE-CORE-MATH`),
+  with fused multiply-adds done by the hardware instruction or an in-crate
+  software FMA that agrees with it bit for bit. Results are now the same on
+  every supported host instead of depending on the host's libm, so they can
+  differ in the last place from what the same script produced before on any
+  given host, and from reference Lua. `math.log(x, b)` keeps the Lua 5.2
+  formula (`log10` for base 10, otherwise `ln(x) / ln(b)`). Cost charges are
+  unchanged and `^` is still not constant-folded. Supported hosts are those
+  with IEEE binary64 arithmetic in the default floating-point environment;
+  x87-only 32-bit x86 is not. `docs/determinism.md` has the details.
 - **Replay-visible:** the metamethod event names (`__index`, `__newindex`,
   `__call`, `__len`, `__tostring`, `__metatable`) are interned once when a
   State is built and stay live for its lifetime, instead of being interned at

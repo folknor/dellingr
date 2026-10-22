@@ -41,9 +41,10 @@ pub(crate) fn lua_div(a: f64, b: f64) -> f64 {
 /// mapping, and both the folder and runtime dispatch use the same function
 /// items.
 ///
-/// Exponentiation is deliberately excluded: its result depends on the host
-/// `powf` implementation, so folding it would bake a platform-specific result
-/// into bytecode.
+/// Exponentiation is deliberately excluded. Its runtime function is the
+/// deterministic `crmath::pow`, so a folded result would match the runtime
+/// one, but folding `^` would make literal powers free and so move cost
+/// charges and change compiled bytecode.
 pub(crate) fn arith_fn(opcode: u8) -> Option<fn(f64, f64) -> f64> {
     Instr::arithmetic_fn(opcode)
 }
@@ -277,7 +278,6 @@ fn scale_finite_by_power_of_two(value: f64, scale: i64) -> f64 {
     let bits = value.to_bits();
     let encoded_exponent = ((bits >> 52) & 0x7ff) as i64;
     let value_exponent = encoded_exponent.saturating_sub(1023);
-    let normalized = f64::from_bits((bits & FRACTION_MASK) | ONE_EXPONENT_BITS);
     let exponent = scale.saturating_add(value_exponent);
 
     if exponent > MAX_NORMAL_EXPONENT {
@@ -291,8 +291,18 @@ fn scale_finite_by_power_of_two(value: f64, scale: i64) -> f64 {
         exponent >= MIN_NORMAL_EXPONENT,
         "normal hex scaling must not receive a subnormal exponent"
     );
-    let exponent = exponent as i32;
-    normalized * 2_f64.powi(exponent)
+    if exponent >= MIN_NORMAL_EXPONENT {
+        // The result is normal: assemble its encoding directly, with no
+        // floating-point operation at all.
+        return f64::from_bits((bits & FRACTION_MASK) | (((exponent + 1023) as u64) << 52));
+    }
+    // Not reached (see the assertion); kept correct anyway. Both scalings are
+    // by exact powers of two, the first exact and the second the only
+    // rounding.
+    let normalized = f64::from_bits((bits & FRACTION_MASK) | ONE_EXPONENT_BITS);
+    let first = f64::from_bits(1_u64 << 52); // 2^-1022
+    let second = f64::from_bits(((exponent + 1022 + 1023).max(1) as u64) << 52);
+    normalized * first * second
 }
 
 fn split_exponent(bytes: &[u8], lower: u8, upper: u8) -> Option<(&[u8], Option<&[u8]>)> {

@@ -90,15 +90,14 @@ The full list is in [docs/compatibility.md](docs/compatibility.md).
 
 Execution is deterministic: the same script and inputs produce the same result
 and the same cost on a given build. `math.random` draws from an in-crate seeded
-RNG (`set_rng_seed`), so it is bit-stable across platforms. The one caveat is
-`math`'s transcendental functions (`sin`, `cos`, `exp`, `log`, ...) and the `^`
-operator, which delegate to the platform `f64`/libm implementation: results are
-deterministic per build+platform but the last ULP may differ across
-architectures or libm versions. Replays that must be bit-identical across
-heterogeneous hosts should avoid depending on exact results of those; basic
-arithmetic, comparisons, `sqrt` and `math.random` are bit-stable everywhere.
-The exact contract lives in [`src/lua_std/math.rs`](src/lua_std/math.rs); see
-also [docs/determinism.md](docs/determinism.md).
+RNG (`set_rng_seed`), so it is bit-stable across platforms. `math`'s
+transcendental functions (`sin`, `cos`, `exp`, `log`, ...) and the `^` operator
+never call the platform libm: they are in-crate ports of the correctly rounded
+CORE-MATH implementations and give the same bits on every supported host, as do
+basic arithmetic, comparisons and `sqrt`. See
+[docs/determinism.md](docs/determinism.md) for the exact guarantee and
+[reference/deterministic-math.md](reference/deterministic-math.md) for how it
+is built.
 
 ## Save state
 

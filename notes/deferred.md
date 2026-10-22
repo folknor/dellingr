@@ -57,22 +57,6 @@ output. On the host side, `Engine::compile`/`compile_named` never reference
 `Engine` for `Program::compile` + `State::new`/`raw`, or move real configuration
 (budget defaults, RNG seed, callbacks factory) into it.
 
-## HYG-067 - libm transcendental functions and `powf` make replay output host-dependent
-
-Reported by the compiler, stdlib and host-surface hunters.
-
-`math.sin/cos/tan/asin/acos/atan/atan2/exp/log` call `f64` methods lowering to
-platform libm (the module doc admits last-ULP differences); `vm/frame.rs`
-`OP_POW` calls `f64::powf`. The compiler carefully refuses to fold `^` so
-bytecode carries no host result, but runtime `^` still produces host bits. A
-replay recorded on glibc x86-64 and replayed on aarch64 or musl can diverge once a
-script branches on such a result. `numeral.rs`'s `2_f64.powi` is exact for powers
-of two but still an intrinsic. The clippy ban list covers clock, env and RNG, not
-this. Fix: a fixed pure-Rust implementation (e.g. `libm` crate software paths or
-core-math ports) owned by `numeral.rs`/`math.rs`, plus `disallowed-methods` for
-`f64::sin`, `powf`, `powi`, `exp` and kin; or `docs/determinism.md` states plainly
-that cross-platform replay is not guaranteed for these. Enforceable by clippy.
-
 ## HYG-068 - Native stack size is an implicit configuration value
 
 Reported by the compiler, VM-core and host-surface hunters.
@@ -97,8 +81,10 @@ Reported by the heap hunter.
 
 A FIFO written the obvious way (`q[tail] = v` / `q[head] = nil`) appends at
 `array.len() + 1` while clearing the front, growing the `Vec<Val>` by one slot per
-push forever: 16 bytes per historical push, uncharged; `next_live_from` scans the
-dead prefix, so every `pairs`/`next` start is O(total pushes) for a flat charge;
+push forever: 16 bytes per historical push; `next_live_from` scans the dead
+prefix, so every `pairs`/`next` start is O(total pushes). This is a memory and
+performance problem, not a cost-model one (`docs/budget.md`): the fix is to stop
+the growth, not to charge for it;
 `snapshot_entries` emits one `(key, Nil)` per array slot, so save size and
 verify/materialize work grow with history. Clearing the first half of a large
 array has the same effect on traversal. The no-shrink rule protects `pairs`

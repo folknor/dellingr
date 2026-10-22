@@ -433,7 +433,7 @@ macro_rules! opcode_rows {
                 write!($f, "Multiply");
             OP_DIVIDE = 8, 0xffffff, false, Arithmetic [lua_div, true],
                 write!($f, "Divide");
-            OP_POW = 9, 0xffffff, false, Arithmetic [f64::powf, false],
+            OP_POW = 9, 0xffffff, false, Arithmetic [crate::crmath::pow, false],
                 write!($f, "Pow");
             OP_MOD = 10, 0xffffff, false, Arithmetic [lua_modulo, true],
                 write!($f, "Mod");

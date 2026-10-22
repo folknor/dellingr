@@ -13,16 +13,25 @@ are hosts and are exempt.
   owner within each state and prevents accidental generator forks.
 - Basic arithmetic, comparisons, `sqrt` and `math.random` are bit-stable
   across platforms.
-- `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `exp`, `log` and the
-  `^` operator use the platform `f64` / libm. Results are deterministic per
-  build and platform, but the last ULP can differ across architectures or
-  libm versions.
-- The compiler never constant-folds `^`, so bytecode and snapshots carry no
-  host-computed `^` results. A replay evaluates every `^` on the replaying
-  host.
-- The authoritative contract is the module doc of `src/lua_std/math.rs`.
-- Replays that must be bit-identical across heterogeneous hosts should not
-  depend on exact results from the libm-backed functions.
+- `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `exp`, `log` (with or
+  without a base) and the `^` operator are computed in-crate, never by the
+  platform libm, and give the same bits on every supported host. They are
+  ports of the CORE-MATH correctly rounded implementations; see
+  `reference/deterministic-math.md` for how the guarantee is built.
+- They are also correctly rounded, with two qualifications. `math.log(x, b)`
+  for a base other than 10 is the quotient of two correctly rounded natural
+  logarithms, rounded again. `^`, `atan2` and two-argument `atan` end in a final
+  high-precision phase that could, in principle, fail to certify a rounding;
+  no input is known to reach that point, and the result is then the rounding
+  of the high-precision approximation: still the same on every host, but
+  possibly one unit in the last place off. Correcting such a case later would
+  be a replay-visible change.
+- The supported hosts are those that evaluate binary64 arithmetic exactly as
+  IEEE 754 specifies, with gradual underflow and the default floating-point
+  environment (round to nearest, no flush-to-zero), which is also what Rust
+  assumes. x87-only targets (32-bit x86 without SSE2) are not supported.
+- The compiler never constant-folds `^` (a folded literal would be free where
+  a runtime `^` is charged), so bytecode carries no precomputed `^` results.
 
 ## Number rendering
 

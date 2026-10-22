@@ -28,6 +28,7 @@
 
 mod compiler;
 mod cost_meter;
+mod crmath;
 mod det_hash;
 mod disassemble;
 mod gmatch_schema;
