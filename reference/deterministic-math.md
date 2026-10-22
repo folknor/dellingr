@@ -88,7 +88,13 @@ NaN's bits), and the VM never lets a script observe them.
   same file has to pass on every supported host; it is the cross-platform
   guarantee in executable form.
 - `crmath::tests::oracle`: an interval Ziv procedure over `libbeef` in
-  directed rounding, which certifies the expected values. Ignored tests
-  regenerate the golden file and sweep all of CORE-MATH's worst-case files
-  (several million inputs) from a checkout under `research/core-math`; run
-  them in release (`brokkr test sweep_ --release`).
+  directed rounding, which certifies the expected values. Ignored tests in
+  `crmath::tests::golden` regenerate the golden file and sweep all of
+  CORE-MATH's worst-case files (several million inputs) from a checkout
+  under `research/core-math`; run them in release
+  (`brokkr test sweep_ --release`). The worst-case files are read to the
+  values CORE-MATH's own checkers get from `%la`: a trailing annotation after
+  the number is ignored and a hex literal is rounded to nearest binary64, so
+  pow's inexact subnormal bases test their rounded value. The reader covers
+  the shapes those files use, not all of `%la`; a line it cannot read fails
+  the sweep rather than being skipped.

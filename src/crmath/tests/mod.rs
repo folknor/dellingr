@@ -6,10 +6,13 @@
 //! - `golden`: every kernel against `tests/fixtures/crmath_golden.txt`, under
 //!   each FMA path this host can run. The expected bits there were certified
 //!   by the oracle below; the same file must pass on every target, which is
-//!   the cross-platform replay contract in executable form.
-//! - `oracle`: an interval Ziv procedure over `libbeef` in directed rounding.
-//!   Its tests are `#[ignore]`d: one regenerates the golden file, another
-//!   sweeps CORE-MATH's worst-case files from a local checkout.
+//!   the cross-platform replay contract in executable form. The module's
+//!   `#[ignore]`d tests regenerate the golden file, sweep CORE-MATH's
+//!   worst-case files from a local checkout, and check random inputs against
+//!   the oracle. A name filter that matches the module path (`golden`) runs
+//!   the regenerator too, which rewrites the fixture.
+//! - `oracle`: an interval Ziv procedure over `libbeef` in directed rounding,
+//!   and the reader for CORE-MATH's worst-case files.
 
 use std::cell::Cell;
 

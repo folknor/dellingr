@@ -163,23 +163,22 @@ fn worst_cases(f: Func) -> Vec<(f64, f64)> {
         return Vec::new();
     };
     let mut out = Vec::new();
-    for line in text.lines() {
+    for (index, line) in text.lines().enumerate() {
         let line = line.split('#').next().unwrap_or_default().trim();
         if line.is_empty() {
             continue;
         }
+        // A line that does not yield every operand fails the run rather than
+        // being skipped: a dropped worst case is silently lost coverage.
         let mut tokens = line.split(',');
-        let Some(x) = tokens.next().and_then(parse_wc_token) else {
-            continue;
+        let mut operand = || {
+            tokens
+                .next()
+                .and_then(parse_wc_token)
+                .unwrap_or_else(|| panic!("{path}:{}: missing operand", index + 1))
         };
-        let y = if f.binary() {
-            match tokens.next().and_then(parse_wc_token) {
-                Some(y) => y,
-                None => continue,
-            }
-        } else {
-            0.0
-        };
+        let x = operand();
+        let y = if f.binary() { operand() } else { 0.0 };
         out.push((x, y));
     }
     out

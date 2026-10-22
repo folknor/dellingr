@@ -52,9 +52,10 @@ removed.
   key outside the range is accepted.
 - Still stringly typed after the typed-errors pass: `LibraryFunction::Other(String)`
   and `SnapshotError::InvalidBytecode { reason: String }`.
-- Two ignored crmath oracle tests (matched by `brokkr test golden`) fail on
-  their own with "hex float exponents are decimal" in
-  `src/crmath/tests/oracle.rs`. Unverified; seen during the 2026-10-22 loops.
+- The ignored crmath sweeps read CORE-MATH's worst-case files from an
+  unpinned local checkout under `research/`; only the c2932f8 commit message
+  records the upstream commit (`0ce0cbc`). Pin it somewhere the sweeps or
+  `reference/deterministic-math.md` can check.
 - The `State::set_user_data` doc example is still marked `ignore`.
 - Possible CORE-MATH bug: `is_exact` in pow.c measures the bit length of `m`
   rather than `m^y`. Ported as is; unobservable here (the sweeps pass).

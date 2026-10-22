@@ -595,9 +595,17 @@ pub(crate) fn certify(f: Func, x: f64, y: f64) -> Result<f64, String> {
     }
 }
 
-/// Parses a token of CORE-MATH's worst-case files.
+/// Parses one comma-separated field of CORE-MATH's worst-case files to the
+/// value CORE-MATH's own checkers get from `sscanf("%la")`, for the shapes
+/// those files use; it is not a general `%la` implementation. The first
+/// whitespace-delimited word is the number and anything after it is an
+/// annotation (sin.wc has lines like `0x1.4f1d73be27a31p+1 44`), and a hex
+/// literal with more digits than binary64 holds is rounded to nearest even
+/// (pow.wc has subnormal bases such as `0x1.08fa30093e7d8p-1074`). Returns
+/// `None` only for an empty field; a shape it does not support panics, since
+/// skipping it would silently drop a worst case.
 pub(crate) fn parse_wc_token(token: &str) -> Option<f64> {
-    let token = token.trim();
+    let token = token.split_whitespace().next()?;
     let (negative, body) = match token.as_bytes().first() {
         Some(b'-') => (true, &token[1..]),
         Some(b'+') => (false, &token[1..]),
@@ -608,7 +616,7 @@ pub(crate) fn parse_wc_token(token: &str) -> Option<f64> {
         "inf" => f64::INFINITY,
         _ if body.starts_with("0x") || body.starts_with("0X") => {
             if body.contains(['p', 'P']) {
-                parse_hex_float(body)?
+                parse_hex_float(body)
             } else {
                 u64::from_str_radix(&body[2..], 16).expect("worst-case integers are hex") as f64
             }
@@ -618,9 +626,13 @@ pub(crate) fn parse_wc_token(token: &str) -> Option<f64> {
     Some(if negative { -value } else { value })
 }
 
-/// A run-time, non-panicking hexadecimal float parser for exact literals.
-fn parse_hex_float(body: &str) -> Option<f64> {
-    let (mantissa, exponent) = body[2..].split_once(['p', 'P'])?;
+/// A run-time hexadecimal float parser: `0x<hex>[.<hex>]p<decimal>`, rounded
+/// to the nearest binary64, ties to even, as C's `%la` does. Panics on a
+/// malformed literal.
+fn parse_hex_float(body: &str) -> f64 {
+    let (mantissa, exponent) = body[2..]
+        .split_once(['p', 'P'])
+        .expect("hex float literals have a binary exponent");
     let exponent: i64 = exponent.parse().expect("hex float exponents are decimal");
     let (int_part, frac_part) = mantissa.split_once('.').unwrap_or((mantissa, ""));
     let digits = format!("{int_part}{frac_part}");
@@ -630,8 +642,30 @@ fn parse_hex_float(body: &str) -> Option<f64> {
         .mul_exp2(64)
         .add(&BigFloat::from_u64(value as u64), EXACT)
         .mul_exp2(shift);
-    let rounded = to_f64(&exact);
-    // Worst-case inputs are binary64 values; refuse anything that rounded.
-    (BigFloat::from_f64(rounded).cmp_num(&exact) == Some(std::cmp::Ordering::Equal))
-        .then_some(rounded)
+    to_f64(&exact)
+}
+
+#[test]
+fn worst_case_tokens_read_like_c_la() {
+    let bits = |token: &str| parse_wc_token(token).map(f64::to_bits);
+    assert_eq!(bits("0x1.4f1d73be27a31p+1 44"), Some(0x4004_f1d7_3be2_7a31));
+    assert_eq!(bits(" -0x1.8p-1 "), Some((-0.75f64).to_bits()));
+    assert_eq!(bits("+inf"), Some(f64::INFINITY.to_bits()));
+    assert_eq!(bits(""), None);
+    assert_eq!(bits("   "), None);
+    // Inexact subnormals round to nearest, ties to even.
+    assert_eq!(bits("0x1.08fa30093e7d8p-1074"), Some(1));
+    assert_eq!(bits("0x1.4p-1074"), Some(1));
+    assert_eq!(bits("0x1.8p-1074"), Some(2));
+    assert_eq!(bits("0x1.cp-1074"), Some(2));
+    assert_eq!(bits("0x1p-1075"), Some(0));
+    assert_eq!(bits("0x1.0000000000001p-1075"), Some(1));
+    assert_eq!(bits("-0x1p-1076"), Some((-0.0f64).to_bits()));
+    // Normal range: 53 significant bits, tie to even.
+    assert_eq!(bits("0x1.00000000000008p+0"), Some(1.0f64.to_bits()));
+    assert_eq!(bits("0x1.00000000000018p+0"), Some(0x3ff0_0000_0000_0002));
+    assert_eq!(
+        bits("0x1.fffffffffffff8p+1023"),
+        Some(f64::INFINITY.to_bits())
+    );
 }
