@@ -21,10 +21,10 @@ impl State {
     /// `__index` and `__newindex` steps count against the limit even when the
     /// handler is a function, so a memoising `__index` that recurses through
     /// its own table stops within `MAX_METAMETHOD_DEPTH` levels; a function
-    /// handler is also a call made from Rust, and with the host's own call
-    /// counted, `MAX_NATIVE_CALL_DEPTH` refuses it one level earlier. That is
-    /// deliberate and matches reference Lua, whose C stack bounds the same
-    /// recursion near 200. A `__call` function handler is exempt (see
+    /// handler is also a call made from Rust, so the lower
+    /// `MAX_NATIVE_CALL_DEPTH` refuses that recursion first. That is
+    /// deliberate and matches reference Lua, whose C call limit bounds the
+    /// same recursion near 200. A `__call` function handler is exempt (see
     /// `State::begin_call`) because
     /// guarding it would also cap ordinary recursion through callable objects,
     /// which reference Lua does not limit this way.

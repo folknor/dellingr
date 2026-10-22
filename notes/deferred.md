@@ -57,22 +57,6 @@ output. On the host side, `Engine::compile`/`compile_named` never reference
 `Engine` for `Program::compile` + `State::new`/`raw`, or move real configuration
 (budget defaults, RNG seed, callbacks factory) into it.
 
-## HYG-068 - Native stack size is an implicit configuration value
-
-Reported by the compiler, VM-core and host-surface hunters.
-
-`MAX_CALL_DEPTH` plus `MAX_METAMETHOD_DEPTH` assume enough native stack; on a
-small-stack embedder thread deep recursion aborts instead of returning
-`CallDepthExceeded`. Documented in `docs/limits.md` but undetected (no
-stack-remaining probe such as `stacker`/`psm`, no per-State override). The
-`eval.rs` rules (no `catch_unwind`, no hotpath on the recursive path) show
-per-frame bytes are already load-bearing. `call_depth_exceeded_error` enforces it
-only at the test thread's stack size. Test thread stacks are now named constants
-(`DEEP_PARSE_TEST_STACK_BYTES`, `DEEP_RECURSION_TEST_STACK_BYTES`), but frames
-outgrowing them still fail as an abort, not an assertion. What remains is
-detection or configurability: a stack-remaining probe or a per-State
-native-stack setting, which widens the embedding surface.
-
 ## Replay- or cost-visible changes
 
 ## HYG-001 - Cache-slot operand encoding has four owners and two sentinel conventions

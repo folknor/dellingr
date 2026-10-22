@@ -8,26 +8,28 @@ All notable changes to dellingr are documented here. The format follows
 
 ### Changed (breaking)
 
-- Lua-to-Lua calls no longer recurse on the native stack: the dispatch loop
-  keeps suspended callers in the State's activation records and continues in
-  the callee, so `MAX_CALL_DEPTH` (1000) is reached without native stack per
-  level in every build profile and on any thread. What still runs on the
-  native stack is every call made from Rust - host `call`/`call_anchor`,
+- Lua-to-Lua calls no longer recurse on the native stack: each dispatch-loop
+  invocation runs over a frame stack of its own and continues in the callee,
+  so `MAX_CALL_DEPTH` (1000) is reached without native stack per level in
+  every build profile and on any thread. What still runs on the native stack
+  is every call made from Rust - host `call`/`call_anchor`,
   `__index`/`__newindex`/`__len`/`__tostring`/`__pairs` handlers, generic-for
   iterator functions, `table.sort` comparators, `string.gsub` replacement
   functions - and those are now bounded by the new
-  `limits::MAX_NATIVE_CALL_DEPTH` (200, reference Lua's `LUAI_MAXCCALLS`),
-  raising the new `ErrorKind::NativeCallDepthExceeded`. Recursion through such
-  calls used to be bounded only by `MAX_CALL_DEPTH` (Lua frames) or not at all
-  (a callback calling Rust functions through `State::call`).
-  **Replay-visible:** a script that recursed between 200 and 1000 levels
+  `limits::MAX_NATIVE_CALL_DEPTH` (150; reference Lua's `LUAI_MAXCCALLS` is
+  200), raising the new `ErrorKind::NativeCallDepthExceeded`. The value is
+  what lets every recursion limit at once fit a 2 MiB thread in an
+  unoptimized build; docs/limits.md, "Native stack", states the envelope.
+  Recursion through such calls used to be bounded only by `MAX_CALL_DEPTH`
+  (Lua frames) or not at all (a callback calling Rust functions through
+  `State::call`).
+  **Replay-visible:** a script that recursed between 150 and 1000 levels
   deep through such calls (a recursive `table.sort` comparator, a recursive
   `gsub` replacement function, a recursive iterator) now fails with
-  `NativeCallDepthExceeded` at 200 nested calls from Rust instead of running
-  or failing at `MAX_CALL_DEPTH`. The host's own call counts as one of the
-  200, so a recursive `__index` or `__newindex` function now stops with
-  `NativeCallDepthExceeded` one level before the `MetamethodDepthExceeded`
-  it used to raise.
+  `NativeCallDepthExceeded` at 150 nested calls from Rust, the host's own
+  call included, instead of running or failing at `MAX_CALL_DEPTH`; a
+  recursive `__index` or `__newindex` function stops there too, instead of
+  at the `MetamethodDepthExceeded` it raised at 200.
 - `Error` is one pointer wide (its fields live behind a `Box`), which shrinks
   every `Result` on the native stack; in the dev profile a Lua call level
   needed about 43 KB of native stack before and 6 KB after, before the call

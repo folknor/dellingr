@@ -18,6 +18,29 @@ plantasjen) unless noted.
 
 ## Investigate
 
+Recommended next speed loop (2026-10-22): recover what that day's
+correctness commits cost, as one spar loop with `--hotpath` profiling:
+the `bench/benchmark` regression below, the array-window append path, and
+the call-path leftovers under "Call path after the frame-stack flattening"
+(whose frame shrinking would also let `MAX_NATIVE_CALL_DEPTH` return to
+200). Register a math workload first (todo.md) so `crmath` cost is covered.
+
+### bench/benchmark +6% after the frame-stack flattening (2026-10-22)
+
+What: plantasjen, `--commit` builds, efcd88f against 2bcc71e: 7200 vs
+6800 ms in an interleaved pair, and the agent that landed the flattening
+measured 7100 vs 6800 best-of-3 with WARM_BLOCK averages of 138.6 vs
+132.5 ms and tight in-run spread. The same comparison put arithmetic at
+-2.5%, method level, constants +3.4%, closure +2.8% and patterns -4%, all
+within this host's binary-layout band, so benchmark is the one delta that
+holds. Cause not found; candidates are the call-path leftovers below and
+the per-invocation frame-stack borrow. Start with `--hotpath` on
+`examples/composite/benchmark.lua` at both commits and compare per-function
+shares section by section.
+
+Signal: a function whose share moved, or a matched pair back at 2bcc71e's
+number after a call-path change.
+
 ### Array-window append path: list_literals +4-6%, fill +3% (2026-10-22)
 
 What: the array part became a window over its logical length in 2bcc71e
@@ -129,39 +152,37 @@ product decision to version, same as any replay-affecting change. Subsumes
 the field-update fusion and GET/SET cache-slot-sharing entries below, which
 become natural in a register IR.
 
-### Flatten the interpreter into an explicit State-owned frame stack (B-O1)
+### Call path after the frame-stack flattening (B-O1 remainder)
 
-What: today every Lua-to-Lua call recurses through Rust (`State::call` ->
-`eval_closure` -> `eval_closure_inner` -> `Frame::eval`), with per-call costs
-that are all consequences of the frame being a Rust stack local:
+Lua-to-Lua calls run in one dispatch loop over a per-invocation frame stack
+since 27ee714. What B-O1 listed and is still open:
 
-- `Closure` clone per call (`GcHeap::as_lua_function`, `object.rs`): three
-  Arc refcount bumps since 2026-07-26 (upvalues became `Arc<[UpvalueRef]>`,
-  commit eeb406a, killing the per-call heap allocation) - still a copy that
-  a flattened loop would not make at all.
-- Duplicate frame bookkeeping: `CallInfo` push (another `Arc<Bytecode>`
-  clone) parallel to the `Frame` itself.
-- `stack.remove(idx)` to extract the callee (O(args) memmove, `State::call`).
-- varargs `drain(..).collect()` Vec per vararg call (`collect_varargs`).
-- (per-call string-literal interning was on this list until the per-Bytecode
-  runtime cache shipped on 2026-07-26; the frame handoff is now pure Arc
-  moves. The return-value drain-to-Vec left on 2026-07-26 too, commit
-  a96cff4 - `eval_closure_frame` now slides the results down in place.)
+- `Closure` Arc bumps per call: `admitted_frame` clones bytecode, runtime and
+  upvalues from the heap closure, plus the `CallInfo` bytecode clone.
+- `CallInfo` still parallels the frame stack (bytecode + ip for tracebacks,
+  `print` locations and the cache sweep). Merging needs the traceback to read
+  every invocation's frames, including the current frame of each natively
+  suspended invocation.
+- Generic-for Lua iterators and `__index`/`__newindex` function handlers
+  still re-enter natively per call (one `run_invocation` each). Flattening
+  them needs a continuation per frame (where the results go). That would also
+  take them off `MAX_NATIVE_CALL_DEPTH`.
 
-Sketch: a single dispatch loop over a State-owned `Vec<FrameState>` (bytecode
-Arc, ip, base, vararg span, cache ptr) eliminates every item above, merges
-`Frame` with `CallInfo` (stack traces read the real frames), and makes frames
-visible to `mark_gc_roots` directly - the vararg/temporary rooting that today
-rides on `transient_roots` watermarks becomes structural. Calls become "push
-frame record, continue loop"; returns become "memmove rets down, pop frame
-record". MAX_CALL_DEPTH becomes a plain length check, and the AGENTS.md
-concern about Rust-stack bloat per recursion level (the hotpath-annotation
-caveat) disappears.
+Measurement lesson worth keeping: on plantasjen (Zen 3) the first flattened
+version moved frames and records by value and lost 14-22% to store-forwarding
+stalls although callgrind instruction counts were within 1-4% of the
+recursive path; check `vm/eval.rs` comments before moving a `Frame` or
+`CallInfo` whole. Perf counters are not available to unprivileged users on
+that host; callgrind instruction-level counts plus objdump of the hot
+function located the stalls.
 
-Why deferred: highest-leverage rewrite in the execution core, and priced like
-it. Call-heavy benches (`calls/*`, `benchmark`) are the ones sitting at
-3.4-4.4x lua5.5. Pre-1.0, internal-only: `State::call`'s public signature can stay.
-Subsumes the call-path micro cleanup below.
+Native-stack follow-up: `MAX_NATIVE_CALL_DEPTH` is 150, not reference Lua's
+200, because 200 did not fit 2 MiB in the dev profile. Dev-profile bytes per
+nested call made from Rust at 27ee714 plus the gsub split: gsub replacement
+function 8416, table.sort comparator 7568, `__index` function 6205, host
+callthrough 5760, generic-for Lua iterator 4944 (the shared floor, mostly the
+dispatch loop's own frame). Shrinking the dispatch loop's debug frame and the
+sort path would let the limit rise; raising it is replay-visible.
 
 ### 8-byte NaN-boxed `Val` (C-O7)
 

@@ -231,3 +231,27 @@ profile and thread size; none depends on how much native stack is left.
 - The counters are per State. A callback that runs another State nests that
   State's whole stack use on top of this one's, which is the embedder's to
   provision.
+
+### Envelope
+
+The limits are sized so that all of them at once fit a 2 MiB thread, the
+Rust default for spawned threads, in an unoptimized (dev profile) build;
+optimized builds need several times less. "At once" means: the host call
+plus nested calls made from Rust up to `MAX_NATIVE_CALL_DEPTH`, through any
+of them (sort comparators, `gsub` replacement functions, metamethod
+handlers, iterator functions, a callback calling `State::call`), with an
+`__index` table chain held across them at `MAX_METAMETHOD_DEPTH`, and at the
+deepest point a pattern match near `MAXCCALLS`, collections with a chunk
+tree nested near `MAX_CHUNK_NESTING` alive, and the refusal of the next call
+with its traceback. `tests/native_stack.rs` drives exactly that, for each
+kind of call, on a 2 MiB thread in the dev profile, and parsing at the
+syntax budget runs on 2 MiB threads too.
+
+Outside the envelope, and the embedder's to provision:
+
+- the host's own native frames below its first call into the State;
+- what a Rust callback itself puts on the stack, per level of nesting;
+- library work a callback starts at the deepest level besides the above,
+  such as compiling source (`load_string`, `analyze_cost`), which needs the
+  parser's own stack on top of the nested calls;
+- `hotpath`-instrumented builds, whose timing guards add to every level.

@@ -405,6 +405,51 @@ fn append_templated_replacement(
     Ok(())
 }
 
+/// The function-replacement arm of `append_gsub_replacement`, out of line
+/// so its temporaries are not live while the replacement function runs.
+#[inline(never)]
+fn append_function_replacement(
+    state: &mut State,
+    out: &mut Vec<u8>,
+    bytes: &[u8],
+    captures: &[LuaCapture],
+) -> Result<()> {
+    let args = if captures.len() > 1 {
+        &captures[1..]
+    } else {
+        &captures[..1]
+    };
+    preflight_capture_bytes(state, args.iter().copied(), StringPatternFunction::Gsub)?;
+    state.push_value(3)?;
+    if captures.len() > 1 {
+        for cap in &captures[1..] {
+            push_capture_value(state, bytes, *cap, StringPatternFunction::Gsub)?;
+        }
+        let argument_count =
+            crate::error::results_count(captures.len() - 1).map_err(|kind| state.error(kind))?;
+        state.call_unguarded(ArgCount::Fixed(argument_count), RetCount::Fixed(1))?;
+    } else {
+        push_capture_value(state, bytes, captures[0], StringPatternFunction::Gsub)?;
+        state.call_unguarded(ArgCount::Fixed(1), RetCount::Fixed(1))?;
+    }
+    let keep_original = gsub_replacement_keeps_original(state, -1);
+    if keep_original {
+        state.pop(1)?;
+        append_capture_bytes(state, out, bytes, captures[0], StringPatternFunction::Gsub)?;
+    } else {
+        let t = state.typ(-1);
+        if !matches!(t, LuaType::String | LuaType::Number) {
+            return Err(
+                state.library_error(LibraryError::InvalidGsubReplacementValue { value_type: t })
+            );
+        }
+        let val = state.bytes_with_default_string_coercion(-1)?;
+        state.pop(1)?;
+        append_bytes(state, out, &val)?;
+    }
+    Ok(())
+}
+
 fn append_gsub_replacement(
     state: &mut State,
     out: &mut Vec<u8>,
@@ -466,41 +511,7 @@ fn append_gsub_replacement(
             }
         }
         LuaType::Function => {
-            let args = if captures.len() > 1 {
-                &captures[1..]
-            } else {
-                &captures[..1]
-            };
-            preflight_capture_bytes(state, args.iter().copied(), StringPatternFunction::Gsub)?;
-            state.push_value(3)?;
-            if captures.len() > 1 {
-                for cap in &captures[1..] {
-                    push_capture_value(state, bytes, *cap, StringPatternFunction::Gsub)?;
-                }
-                let argument_count = crate::error::results_count(captures.len() - 1)
-                    .map_err(|kind| state.error(kind))?;
-                state.call_unguarded(ArgCount::Fixed(argument_count), RetCount::Fixed(1))?;
-            } else {
-                push_capture_value(state, bytes, captures[0], StringPatternFunction::Gsub)?;
-                state.call_unguarded(ArgCount::Fixed(1), RetCount::Fixed(1))?;
-            }
-            let keep_original = gsub_replacement_keeps_original(state, -1);
-            if keep_original {
-                state.pop(1)?;
-                append_capture_bytes(state, out, bytes, captures[0], StringPatternFunction::Gsub)?;
-            } else {
-                let t = state.typ(-1);
-                if !matches!(t, LuaType::String | LuaType::Number) {
-                    return Err(
-                        state.library_error(LibraryError::InvalidGsubReplacementValue {
-                            value_type: t,
-                        }),
-                    );
-                }
-                let val = state.bytes_with_default_string_coercion(-1)?;
-                state.pop(1)?;
-                append_bytes(state, out, &val)?;
-            }
+            append_function_replacement(state, out, bytes, captures)?;
         }
         _ => append_capture_bytes(state, out, bytes, captures[0], StringPatternFunction::Gsub)?,
     }
@@ -770,131 +781,16 @@ pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
             return Ok(2);
         }
 
-        let mut template = None;
-
+        // Each path is its own out-of-line function so that only the path
+        // in use is live on the native stack while a replacement function
+        // runs (docs/limits.md, "Native stack").
         if pattern.is_empty() {
-            let mut result = Vec::with_capacity(s.len());
-            let mut count = 0usize;
-            for i in 0..=s.len() {
-                if max_replacements.is_none_or(|max| count < max) {
-                    let captures = [LuaCapture::Bytes { start: i, end: i }];
-                    append_gsub_replacement(
-                        state,
-                        &mut result,
-                        &repl_type,
-                        &s,
-                        &captures,
-                        &mut template,
-                    )?;
-                    count += 1;
-                }
-                if i < s.len() {
-                    append_bytes(state, &mut result, &s[i..=i])?;
-                }
-            }
-
-            state.set_top(0)?;
-            state.push_bytes(result)?;
-            state.push_number(count as f64)?;
-            return Ok(2);
+            gsub_empty_pattern(state, &s, &repl_type, max_replacements)
+        } else if crate::patterns::is_plain(&pattern) {
+            gsub_plain_pattern(state, &s, &pattern, &repl_type, max_replacements)
+        } else {
+            gsub_lua_pattern(state, &s, &pattern, &repl_type, max_replacements)
         }
-
-        if crate::patterns::is_plain(&pattern) {
-            let mut result = Vec::with_capacity(s.len());
-            let mut pos = 0usize;
-            let mut count = 0usize;
-
-            while pos < s.len() {
-                if max_replacements.is_some_and(|max| count >= max) {
-                    break;
-                }
-
-                let search = &s[pos..];
-                let Some(match_start) = find_subslice(state, search, &pattern)? else {
-                    break;
-                };
-
-                let start = pos + match_start;
-                let end = start + pattern.len();
-                append_bytes(state, &mut result, &s[pos..start])?;
-
-                let captures = [LuaCapture::Bytes { start, end }];
-                append_gsub_replacement(
-                    state,
-                    &mut result,
-                    &repl_type,
-                    &s,
-                    &captures,
-                    &mut template,
-                )?;
-
-                pos = end;
-                count += 1;
-            }
-
-            append_bytes(state, &mut result, &s[pos..])?;
-            state.set_top(0)?;
-            state.push_bytes(result)?;
-            state.push_number(count as f64)?;
-            return Ok(2);
-        }
-
-        let mut matcher = pattern_matcher(state, &pattern)?;
-        let mut result = Vec::with_capacity(s.len());
-        let mut captures = Vec::new();
-        let mut pos = 0usize;
-        let mut count = 0usize;
-        let anchored = pattern.first() == Some(&b'^');
-        // Lua 5.4 empty-match semantics (`lastmatch`): a match is rejected
-        // when it is empty and ends where the previous accepted match ended,
-        // and the scan then copies one byte and moves on. So
-        // `("abc"):gsub("%a*", "-")` is `"-", 1`, not 5.2's `"--", 2`. A
-        // rejected match always starts at `pos` (any match found further on
-        // ends past the previous one), so the search-based matcher only has to
-        // check the match it found.
-        let mut lastmatch = None;
-
-        loop {
-            if max_replacements.is_some_and(|max| count >= max) {
-                break;
-            }
-
-            let matched = {
-                let mut meter = state.cost_meter();
-                matcher.matches_bytes_from(&s, pos, &mut meter)
-            }
-            .map_err(|err| match_error(state, StringPatternFunction::Gsub, err))?;
-            if !matched {
-                break;
-            }
-
-            let range = matcher.range();
-            if range.start == range.end && lastmatch == Some(range.end) {
-                if pos == s.len() {
-                    break;
-                }
-                append_bytes(state, &mut result, &s[pos..=pos])?;
-                pos += 1;
-                continue;
-            }
-            append_bytes(state, &mut result, &s[pos..range.start])?;
-            captures.clear();
-            captures.extend((0..matcher.num_matches()).map(|i| matcher.capture(i)));
-            append_gsub_replacement(state, &mut result, &repl_type, &s, &captures, &mut template)?;
-            count += 1;
-            pos = range.end;
-            lastmatch = Some(range.end);
-            if anchored {
-                break;
-            }
-        }
-
-        append_bytes(state, &mut result, &s[pos..])?;
-
-        state.set_top(0)?;
-        state.push_bytes(result)?;
-        state.push_number(count as f64)?;
-        Ok(2)
     }),
 ];
 
@@ -904,6 +800,141 @@ pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
 /// coerced to `pattern` has no interned key and compiles fresh. Compilation
 /// is free in the cost model either way, and a cached program raises its lazy
 /// malformed-pattern errors at exactly the points a fresh one would.
+#[inline(never)]
+fn gsub_empty_pattern(
+    state: &mut State,
+    s: &[u8],
+    repl_type: &LuaType,
+    max_replacements: Option<usize>,
+) -> Result<u8> {
+    let mut template = None;
+    let mut result = Vec::with_capacity(s.len());
+    let mut count = 0usize;
+    for i in 0..=s.len() {
+        if max_replacements.is_none_or(|max| count < max) {
+            let captures = [LuaCapture::Bytes { start: i, end: i }];
+            append_gsub_replacement(state, &mut result, repl_type, s, &captures, &mut template)?;
+            count += 1;
+        }
+        if i < s.len() {
+            append_bytes(state, &mut result, &s[i..=i])?;
+        }
+    }
+
+    state.set_top(0)?;
+    state.push_bytes(result)?;
+    state.push_number(count as f64)?;
+    Ok(2)
+}
+
+#[inline(never)]
+fn gsub_plain_pattern(
+    state: &mut State,
+    s: &[u8],
+    pattern: &[u8],
+    repl_type: &LuaType,
+    max_replacements: Option<usize>,
+) -> Result<u8> {
+    let mut template = None;
+    let mut result = Vec::with_capacity(s.len());
+    let mut pos = 0usize;
+    let mut count = 0usize;
+
+    while pos < s.len() {
+        if max_replacements.is_some_and(|max| count >= max) {
+            break;
+        }
+
+        let search = &s[pos..];
+        let Some(match_start) = find_subslice(state, search, pattern)? else {
+            break;
+        };
+
+        let start = pos + match_start;
+        let end = start + pattern.len();
+        append_bytes(state, &mut result, &s[pos..start])?;
+
+        let captures = [LuaCapture::Bytes { start, end }];
+        append_gsub_replacement(state, &mut result, repl_type, s, &captures, &mut template)?;
+
+        pos = end;
+        count += 1;
+    }
+
+    append_bytes(state, &mut result, &s[pos..])?;
+    state.set_top(0)?;
+    state.push_bytes(result)?;
+    state.push_number(count as f64)?;
+    Ok(2)
+}
+
+#[inline(never)]
+fn gsub_lua_pattern(
+    state: &mut State,
+    s: &[u8],
+    pattern: &[u8],
+    repl_type: &LuaType,
+    max_replacements: Option<usize>,
+) -> Result<u8> {
+    let mut template = None;
+    let mut matcher = pattern_matcher(state, pattern)?;
+    let mut result = Vec::with_capacity(s.len());
+    let mut captures = Vec::new();
+    let mut pos = 0usize;
+    let mut count = 0usize;
+    let anchored = pattern.first() == Some(&b'^');
+    // Lua 5.4 empty-match semantics (`lastmatch`): a match is rejected
+    // when it is empty and ends where the previous accepted match ended,
+    // and the scan then copies one byte and moves on. So
+    // `("abc"):gsub("%a*", "-")` is `"-", 1`, not 5.2's `"--", 2`. A
+    // rejected match always starts at `pos` (any match found further on
+    // ends past the previous one), so the search-based matcher only has to
+    // check the match it found.
+    let mut lastmatch = None;
+
+    loop {
+        if max_replacements.is_some_and(|max| count >= max) {
+            break;
+        }
+
+        let matched = {
+            let mut meter = state.cost_meter();
+            matcher.matches_bytes_from(s, pos, &mut meter)
+        }
+        .map_err(|err| match_error(state, StringPatternFunction::Gsub, err))?;
+        if !matched {
+            break;
+        }
+
+        let range = matcher.range();
+        if range.start == range.end && lastmatch == Some(range.end) {
+            if pos == s.len() {
+                break;
+            }
+            append_bytes(state, &mut result, &s[pos..=pos])?;
+            pos += 1;
+            continue;
+        }
+        append_bytes(state, &mut result, &s[pos..range.start])?;
+        captures.clear();
+        captures.extend((0..matcher.num_matches()).map(|i| matcher.capture(i)));
+        append_gsub_replacement(state, &mut result, repl_type, s, &captures, &mut template)?;
+        count += 1;
+        pos = range.end;
+        lastmatch = Some(range.end);
+        if anchored {
+            break;
+        }
+    }
+
+    append_bytes(state, &mut result, &s[pos..])?;
+
+    state.set_top(0)?;
+    state.push_bytes(result)?;
+    state.push_number(count as f64)?;
+    Ok(2)
+}
+
 fn pattern_matcher(state: &mut State, pattern: &[u8]) -> Result<LuaPattern> {
     if state.typ(2) == LuaType::String {
         state.cached_pattern_matcher(2)

@@ -1,7 +1,15 @@
 //! Fixed resource, encoding, and reference-pinned library limits.
 //!
 //! These are build-wide constants, not per-State settings. Native stack space
-//! needed to reach recursion limits depends on the target and build profile.
+//! needed to reach recursion limits depends on the target and build profile;
+//! docs/limits.md, "Native stack", states the envelope they are sized for.
+//!
+//! No limit consults the native stack itself. A remaining-stack probe (as
+//! `stacker`/`psm` offer) would make the depth at which a script fails
+//! depend on the thread, the build profile and inlining, which breaks replay
+//! determinism, and growing the stack on demand would add a C-toolchain
+//! build dependency to a pure-Rust crate. A per-State native-stack setting
+//! would likewise make identical scripts behave differently per embedder.
 //!
 //! Fixed limits have no per-State injection point. Scripts must behave
 //! identically for every embedder and across save/restore, so changing a
@@ -143,7 +151,11 @@ pub const MAX_CALL_DEPTH: u32 = 1000;
 /// functions. Each such call runs on the native stack, so this is the limit
 /// that bounds native recursion; the counterpart of reference Lua's
 /// `LUAI_MAXCCALLS`. See docs/limits.md, "Native stack".
-pub const MAX_NATIVE_CALL_DEPTH: u32 = 200;
+// Sized so that every limit at once fits a 2 MiB thread in an unoptimized
+// build, which `tests/native_stack.rs` drives; 200, reference Lua's value,
+// did not fit there with the current frame sizes. Raising it changes which
+// scripts run, so it is a replay-visible change.
+pub const MAX_NATIVE_CALL_DEPTH: u32 = 150;
 /// Maximum values on the shared Lua/Rust stack, not a host-memory quota.
 pub const MAX_STACK_SIZE: usize = 1_000_000;
 /// Maximum active steps in an index, newindex, or non-function call chain.

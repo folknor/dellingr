@@ -4,6 +4,44 @@ Forward-looking feature/refactor ideas. Not optimizations - those live in
 [optimizations.md](optimizations.md). This is a working backlog; entries
 get deleted as they ship or stop being worth tracking.
 
+## Next up
+
+### Run the crmath contract on a second platform (do first)
+
+What: `src/crmath/` (c2932f8) promises bit-identical transcendentals and
+`^` on every host, but every run so far was x86-64 with FMA on plantasjen,
+built with `target-cpu=native` (set globally in `~/.cargo/config.toml`).
+Two code paths have never executed: the run-time-detected no-FMA x86 path
+(it is only compile-checked) and aarch64, where `crmath::fma` is `mul_add`
+lowering to `fmadd`. wasm has not run either. The soft `soft_fma` itself is
+exercised by the forced-FMA tests, but `tests/fixtures/crmath_golden.txt`
+only proves cross-platform agreement when it runs somewhere else.
+
+Sketch: run the crmath tests in a baseline `x86-64` build (override the
+global `target-cpu=native` for that run), then the golden test on aarch64
+(qemu user-mode or real hardware). The ignored release sweeps
+(`brokkr test sweep_ --release`, about 7M CORE-MATH worst cases) are the
+stronger check where time allows.
+
+Signal: any disagreement is a replay divergence, the exact bug HYG-067
+removed.
+
+### Housekeeping left from the 2026-10-22 loops
+
+- `src/lua_std/table.rs` (above `table_unpack_values`) and the
+  `register_rust_fn` comment in `src/vm.rs` claim the separate `unpack` and
+  `table.unpack` wrappers keep distinct callback addresses. Release LTO folds
+  them: the release-built golden save writes `table.unpack` for both.
+  Reword both comments to what is actually guaranteed.
+- libbeef 0.1.1 bugs the crmath test oracle works around, possibly worth
+  reporting upstream (outward-facing; the user decides): `BigFloat::pi`
+  returns 0 and high-precision `atan` returns 0 with it; the power-of-two
+  base `pow` shortcut truncates the exponent (`4^0.25` gives 1); `sin` on
+  huge arguments panics (its Ziv loop never converges); `to_f64` mishandles
+  the bottom of the subnormal range.
+- Possible CORE-MATH bug: `is_exact` in pow.c measures the bit length of `m`
+  rather than `m^y`. Ported as is; unobservable here (the sweeps pass).
+
 ## Deferred forward-looking ideas
 
 ### `\u{XXX}` string escapes
@@ -32,6 +70,8 @@ showing an array window far larger than its live count.
 
 ### CLI: read the script from stdin on `-`
 
+Duplicate of BUG-010 in deferred.md; resolve them together and delete both.
+
 What: `parse_args` in `src/main.rs` special-cases `"-"` so it is not
 rejected as an unknown option (the conventional stdin spelling), then hands
 it to `fs::read_to_string` as a file literally named `-`. Nothing documents
@@ -53,8 +93,11 @@ and closure-clone rewrites), `fields/polymorphic` / `same_obj_cached` /
 loop, ~100ms/call, footer 30) and register both pins (the bench/ port
 as `file`, the examples/ original as `hotpath_file`).
 
-Also open: a seconds-scale parse workload (`large_source` at a second,
-larger size), and a Rust-driven snapshot bench
+Also open: a math workload (no registered workload isolates the cost of
+`crmath` transcendentals or `^`; `bench/benchmark.lua` calls `math.sin` in
+one section only, so c2932f8's cost is unmeasured), a seconds-scale parse
+workload (`large_source` at a second, larger size), and a Rust-driven
+snapshot bench
 (optimizations.md "Snapshot path" - needs harness support, not a .lua
 file).
 
@@ -64,32 +107,6 @@ premature batch work.
 
 Signal that would promote it: active work starting on any candidate
 whose tracker is still examples/-only.
-
-### Depth limits are not stack-safe in unoptimized builds
-
-What: `MAX_CALL_DEPTH` and `MAX_SYNTAX_DEPTH` (see `src/limits.rs`) are meant to
-turn runaway recursion into a clean `CallDepthExceeded` /
-`TooManySyntaxLevels` error. In an opt-level 0 build the native frames
-are fat enough that a 2MB thread (the `cargo test` / `std::thread`
-default) overflows its stack before either limit trips: the call-depth
-recursion needs more than 8KB of native stack per Lua call. Release
-builds are fine. A host running scripts on a default-sized thread in a
-debug build gets a process abort instead of a script error.
-
-Today the three affected tests (`call_depth_exceeded_error`,
-`error_msg_call_depth_shows_overflow`, `syntax_depth_limit`) run on
-dedicated large-stack threads, which hides the problem rather than
-fixing it.
-
-Options: shrink the recursive frames (move bulky locals out of
-`eval_closure` and the parser's expression ladder, box rarely-used
-state); make the call path non-recursive for Lua-to-Lua calls; or
-document a minimum stack size for embedders and pick the limits to fit
-it. A cheap guard would be a regression test that hits each limit on a
-plain 2MB thread in the dev profile.
-
-Signal that would promote it: the game host (or any embedder) running
-scripts off the main thread in debug builds.
 
 ### Configurable per-category cost weights
 
