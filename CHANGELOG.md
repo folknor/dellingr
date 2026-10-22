@@ -33,9 +33,10 @@ All notable changes to dellingr are documented here. The format follows
   becomes `LoadError::Snapshot(SnapshotError::BadMagic)`);
   `LoadError::snapshot()` returns it, and `Error::source` exposes it. Display
   text is unchanged.
-- `error::StackFrame::source` is `Option<Arc<str>>` instead of
-  `Option<String>`: trace frames share the chunk's source-name allocation
-  rather than copying it per frame per error. `as_deref()` reads it as before.
+- `error::StackFrame::source` and `function_name`, and
+  `error::VmFault::function_name`, are `Option<Arc<str>>` instead of
+  `Option<String>`: they share the chunk's own allocations rather than
+  copying the names per frame per error. `as_deref()` reads them as before.
 - `limits::GMATCH_PATTERN_CACHE_ENTRIES` and `limits::GMATCH_PATTERN_CACHE_BYTES`
   are renamed `limits::PATTERN_CACHE_ENTRIES` and `limits::PATTERN_CACHE_BYTES`
   (same values): the per-State compiled-pattern cache they bound now also

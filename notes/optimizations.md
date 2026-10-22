@@ -505,6 +505,21 @@ NaN-boxing plan), and snapshot encoding. That is rewrite-class, not a
 stdlib cleanup; only worth doing as part of a broader Val/callable rework,
 or if `strings/patterns` profiling shows the wrapper call dominating.
 
+### Keep the compiled-pattern cache across collections
+
+What: `State.patterns` (compiled patterns keyed by the pattern string's
+`StringPtr`) is cleared at the top of every collection, because sweep may
+free a key string and a later allocation may reuse its pointer. A script that
+allocates while it matches therefore recompiles its patterns after every
+collection. Instead, prune only the entries whose key string was not marked
+(weak keys, decided after marking and before sweep), or key the cache by the
+pattern bytes so pointer reuse cannot alias.
+
+Why deferred: unmeasured. No registered workload matches while allocating
+enough to collect often; `strings/patterns` and `alloc/gc_churn` each cover
+only one half. Write that workload first and check how much compile time a
+collection actually costs before changing the cache.
+
 ---
 
 ## IC extensions (same shape as existing ICs)

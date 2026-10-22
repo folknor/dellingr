@@ -60,8 +60,9 @@ pub(crate) struct Bytecode {
     pub(crate) upvalues: Vec<UpvalueDesc>,
     /// Whether this function accepts varargs (...).
     pub(crate) is_vararg: bool,
-    /// Optional function name (for debugging/analysis).
-    pub(crate) name: Option<String>,
+    /// Optional function name (for debugging/analysis), shared with the
+    /// trace frames and VM faults that report it.
+    pub(crate) name: Option<Arc<str>>,
     /// Shared source name (file path or chunk identifier like "[string]").
     pub(crate) source: Option<Arc<str>>,
     /// Maps instruction index to source line number.
@@ -287,14 +288,14 @@ fn finalize_at_depth(bc: &mut Bytecode, depth: usize) -> Result<()> {
     verify::validate_depth(depth).map_err(|error| validation_error(bc, &error))?;
     // Diagnostic names are not identifiers used by execution. Bound them at
     // compilation so every emitted chunk fits the unchanged snapshot field.
-    if let Some(name) = &mut bc.name
+    if let Some(name) = &bc.name
         && name.len() > crate::limits::MAX_CHUNK_NAME_BYTES
     {
         let mut end = crate::limits::MAX_CHUNK_NAME_BYTES;
         while !name.is_char_boundary(end) {
             end -= 1;
         }
-        name.truncate(end);
+        bc.name = Some(Arc::from(&name[..end]));
     }
     if bc.code.len() != bc.line_info.len() {
         return Err(internal_error(error::CompilerFault::LineInfoDesynced));

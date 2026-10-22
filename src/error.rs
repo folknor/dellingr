@@ -12,8 +12,8 @@ use crate::limits::{
 /// A single frame in a stack trace.
 #[derive(Debug, Clone)]
 pub struct StackFrame {
-    /// Function name (if known).
-    pub function_name: Option<String>,
+    /// Function name (if known), shared with the chunk that executed.
+    pub function_name: Option<Arc<str>>,
     /// Source file or chunk name, shared with the chunk that executed.
     pub source: Option<Arc<str>>,
     /// Line number where the call occurred (1-indexed).
@@ -30,8 +30,8 @@ pub struct VmFault {
     pub instruction: usize,
     /// Opcode byte at that instruction.
     pub opcode: u8,
-    /// Diagnostic function name, if the chunk has one.
-    pub function_name: Option<String>,
+    /// Diagnostic function name, if the chunk has one, shared with the chunk.
+    pub function_name: Option<Arc<str>>,
 }
 
 pub(crate) enum InternalFault {
@@ -969,13 +969,13 @@ impl Error {
         mut self,
         instruction: usize,
         opcode: u8,
-        function_name: Option<&str>,
+        function_name: Option<&Arc<str>>,
     ) -> Self {
         if matches!(self.kind, ErrorKind::InternalError(_)) && self.vm_fault().is_none() {
             self.context_mut().vm_fault = Some(VmFault {
                 instruction,
                 opcode,
-                function_name: function_name.map(str::to_owned),
+                function_name: function_name.cloned(),
             });
         }
         self

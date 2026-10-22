@@ -152,7 +152,7 @@ impl<'a> Parser<'a> {
         }
 
         let mut new_chunk = self.parse_chunk(&params, is_vararg)?;
-        new_chunk.name = name;
+        new_chunk.name = name.map(Arc::from);
 
         let index = self.bounded_u8(
             self.funcs.chunk.nested.len(),

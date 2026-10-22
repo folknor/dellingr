@@ -1538,7 +1538,7 @@ impl<'a> SaveBuilder<'a> {
             nested,
             upvalues: bc.upvalues.clone(),
             is_vararg: bc.is_vararg,
-            name: bc.name.clone(),
+            name: bc.name.as_deref().map(str::to_owned),
             source: bc.source.clone(),
             line_info: bc.line_info.clone(),
         };
@@ -2464,7 +2464,7 @@ fn build_bytecode_node(
         nested,
         upvalues: src.upvalues.clone(),
         is_vararg: src.is_vararg,
-        name: src.name.clone(),
+        name: src.name.as_deref().map(Arc::from),
         source,
         line_info: src.line_info.clone(),
     })

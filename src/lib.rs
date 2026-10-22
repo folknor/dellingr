@@ -175,7 +175,7 @@ impl ScopeCost {
         let mut anonymous_count = 0usize;
         for nested_chunk in &chunk.nested {
             let nested_name = match &nested_chunk.name {
-                Some(name) => name.clone(),
+                Some(name) => name.to_string(),
                 None => {
                     anonymous_count += 1;
                     format!("anonymous #{anonymous_count}")

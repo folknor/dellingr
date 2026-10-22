@@ -101,3 +101,31 @@ fn trace_frames_share_the_chunk_source_and_outlive_the_state() {
     assert!(Arc::ptr_eq(current, caller));
     assert_eq!(error.to_string(), before);
 }
+
+#[test]
+fn trace_frames_share_the_function_name() {
+    let mut state = State::new();
+    load_and_run(
+        &mut state,
+        "function rec(n)\n if n == 0 then error('boom') end\n rec(n - 1)\nend",
+        "recursive",
+    );
+    state.get_global("rec").expect("rec is installed");
+    state.push_number(2.0).expect("argument fits");
+    let error = state
+        .call(ArgCount::Fixed(1), RetCount::Fixed(0))
+        .expect_err("rec fails at the bottom");
+    drop(state);
+    let trace = error.stack_trace();
+    // Every frame of the recursion names the same chunk, from both the
+    // executing frame and the call stack, through one allocation.
+    let current = trace[0]
+        .function_name
+        .as_ref()
+        .expect("current frame is named");
+    assert_eq!(&**current, "rec");
+    for frame in &trace[1..3] {
+        let name = frame.function_name.as_ref().expect("caller is named");
+        assert!(Arc::ptr_eq(current, name));
+    }
+}

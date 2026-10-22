@@ -173,7 +173,7 @@ impl Frame {
         let Some(inst) = self.bytecode.code.get(instruction) else {
             return error;
         };
-        error.with_vm_fault(instruction, inst.opcode(), self.bytecode.name.as_deref())
+        error.with_vm_fault(instruction, inst.opcode(), self.bytecode.name.as_ref())
     }
 
     /// Get the current line number (1-indexed), or 0 if unknown.
