@@ -775,7 +775,9 @@ fn setup_anchor_survives_load_final_gc() {
 fn unsupported_format_versions_fail_before_setup() {
     let state = fresh();
     let save = state.save_state().expect("state saves");
-    for version in [8_u16, 10_u16] {
+    // The header's format version follows the "DLGS" magic.
+    let current = u16::from_le_bytes([save.bytes[4], save.bytes[5]]);
+    for version in [current - 1, current + 1] {
         let mut bytes = save.bytes.clone();
         bytes[4..6].copy_from_slice(&version.to_le_bytes());
         let setup_ran = Arc::new(AtomicBool::new(false));
@@ -785,8 +787,8 @@ fn unsupported_format_versions_fail_before_setup() {
                 observed.store(true, Ordering::SeqCst);
                 Ok::<(), std::convert::Infallible>(())
             }),
-            Err(LoadError::Snapshot(SnapshotError::UnsupportedVersion { found, expected: 9 }))
-                if found == version
+            Err(LoadError::Snapshot(SnapshotError::UnsupportedVersion { found, expected }))
+                if found == version && expected == current
         ));
         assert!(!setup_ran.load(Ordering::SeqCst));
     }

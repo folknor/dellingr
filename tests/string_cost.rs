@@ -95,6 +95,56 @@ fn basic_native_charges_are_exact() {
     }
 }
 
+/// gmatch reads a leading `^` as a literal byte by compiling it that way, not
+/// by rewriting the pattern to `%^`, so `^a` and `%^a` run the same matcher
+/// program and differ only by the one extra pattern byte `%^a` is charged at
+/// creation and again at its first-call compilation.
+#[test]
+fn gmatch_leading_caret_is_charged_as_written() {
+    fn cost(pattern: &str) -> u64 {
+        run_cost(&format!(
+            "local n = 0 for w in string.gmatch('^a^a', '{pattern}') do n = n + #w end \
+             if n ~= 4 then error('two literal-caret matches expected') end"
+        ))
+    }
+    assert_eq!(cost("%^a") - cost("^a"), 2);
+    // Subject 4 + pattern 2 at creation, 2 to compile on the first call,
+    // 5 + 5 + 2 matcher steps for two matches and the final miss, 2 + 2
+    // returned match bytes, and the two loop adds.
+    assert_eq!(cost("^a"), 26);
+}
+
+/// `find` and `match` have no empty-pattern special case: the plain search
+/// and the matcher find an empty pattern for free. Each call here charges
+/// only its up-front `max(1, subject + pattern)` plus `max(1, pattern)`,
+/// wherever `init` falls.
+#[test]
+fn empty_find_and_match_charge_only_their_up_front_units() {
+    for (source, results) in [
+        ("return string.find('abc', '', 4)", "4 3"),
+        ("return string.find('abc', '', 5)", "nil"),
+        ("return string.find('abc', '', 2, true)", "2 1"),
+        ("return string.match('abc', '', 3)", ""),
+        ("return string.match('abc', '', 5)", "nil"),
+    ] {
+        let mut state = State::new();
+        state
+            .load_string(format!(
+                "local r = table.pack({}) local out = {{}} \
+                 for i = 1, r.n do out[i] = tostring(r[i]) end \
+                 result = table.concat(out, ' ')",
+                source.trim_start_matches("return ")
+            ))
+            .expect("test program compiles");
+        state
+            .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+            .expect("test program runs");
+        state.get_global("result").expect("result is set");
+        assert_eq!(state.to_string(-1).expect("result is a string"), results);
+        assert_eq!(run_cost(source), 4, "{source}");
+    }
+}
+
 #[test]
 fn matcher_refusal_is_a_budget_error_at_the_exact_budget() {
     let mut state = State::new();

@@ -28,13 +28,11 @@ removed.
 
 ### Housekeeping left from the 2026-10-22 loops
 
-- `src/lua_std/table.rs` (above `table_unpack_values`) and the
-  `register_rust_fn` comment in `src/vm.rs` claim the separate `unpack` and
-  `table.unpack` wrappers keep distinct callback addresses. Release LTO folds
-  them: the release-built golden save writes `table.unpack` for both.
-  Reword both comments to what is actually guaranteed.
 - libbeef 0.1.1 bugs the crmath test oracle works around, possibly worth
-  reporting upstream (outward-facing; the user decides): `BigFloat::pi`
+  reporting upstream. Outward-facing; the user deferred it on 2026-10-22.
+  If it is picked up: confirm each still reproduces on the latest release,
+  draft one issue per bug with a minimal reproduction, and post only after
+  the user approves the text. `BigFloat::pi`
   returns 0 and high-precision `atan` returns 0 with it; the power-of-two
   base `pow` shortcut truncates the exponent (`4^0.25` gives 1); `sin` on
   huge arguments panics (its Ziv loop never converges); `to_f64` mishandles

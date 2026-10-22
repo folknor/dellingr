@@ -19,7 +19,20 @@ their IDs; cross-references to other IDs point back into those two documents.
 Entries are moved whole, so some carry a small part that is fixable as written;
 the category names the part that kept them out of the loop.
 
-## Widens the project
+## Approved, not yet implemented
+
+The user walked through these one by one on 2026-10-22 and approved each
+decision below. Entries are removed as they ship.
+
+They land together as one breaking release, so the game host migrates once:
+
+- HYG-079 and HYG-035 change the public host API.
+- The snapshot format is already bumped to 10 in this release (the
+  cache-operand unification). If HYG-079's chunk names are persisted, that
+  change rides on the same unreleased bump; do not bump again.
+- The cost model is already bumped to 6 in this release (gmatch's literal
+  `^`).
+- CHANGELOG.md calls out each replay-visible change.
 
 ## HYG-079 - Host boundary assumes UTF-8: lossy `print`, UTF-8-only source
 
@@ -29,9 +42,30 @@ Reported by the stdlib and host-surface hunters.
 scripts can print arbitrary bytes and the host sees U+FFFD, and the 3x expansion
 preflight in `print` and `error` exists only because of it. `load_string(&str)` is
 the only load API, so the CLI's `fs::read_to_string` refuses non-UTF-8 sources
-(a clean refusal naming the path) although Lua strings are bytes; non-UTF-8 paths
-become the chunk name via `to_string_lossy`, silently degrading the identifier.
-Fix pre-1.0: byte-exact `on_print(&[u8])` and a `load_bytes`.
+(a clean refusal naming the path; stdin input is refused the same way) although
+Lua strings are bytes; non-UTF-8 paths become the chunk name via
+`to_string_lossy`, silently degrading the identifier.
+
+Decision: the full fix, with errors typed properly.
+
+- `on_print` takes the message as `&[u8]`.
+- A byte source load, which becomes the single compile entry point (see
+  HYG-035); the CLI uses it for files and stdin.
+- Chunk names are byte-exact, or follow one stated conversion rule.
+- `ErrorKind::ScriptError` carries a typed payload instead of
+  `message: String`: nil, boolean, number, or string as exact bytes. Values
+  that cannot outlive the State's GC (tables, functions, ...) carry their type
+  plus their `__tostring` rendering as bytes. `error()` with no argument is
+  the nil payload, not a made-up message. `Display` renders today's text, so
+  CLI output for valid UTF-8 is unchanged.
+- The remaining `ErrorKind::RuntimeError(String)` and `InternalError(String)`
+  construction sites (`src/compiler.rs`, `src/compiler/parser.rs`,
+  `src/vm_aux.rs`, `src/error.rs`) get typed variants or reasons, as the
+  library and pattern errors already have.
+- The 3x preflight goes from `print` and `error`. `State::to_string` keeps
+  its checked lossy conversion: it promises a `String`.
+- Replay-visible: invalid UTF-8 in printed text and error values reaches the
+  host as the script's bytes instead of U+FFFD.
 
 ## HYG-035 - Thin wrapper layers and a facade with one bool of payload
 
@@ -44,77 +78,14 @@ two layers of `parse_str`/`parse_str_named` (`compiler::` wraps `parser::`).
 output. On the host side, `Engine::compile`/`compile_named` never reference
 `self` (Engine's only state is `install_stdlib: bool`); `analyze_cost(source)` and
 `Engine::analyze_cost(&program)` are two entries to one thing;
-`State::load_string(_named)` is a third compile path. Fix: one
-`compile(source, name)` (test helper for pre-finalize output); either drop
-`Engine` for `Program::compile` + `State::new`/`raw`, or move real configuration
-(budget defaults, RNG seed, callbacks factory) into it.
+`State::load_string(_named)` is a third compile path.
 
-## Replay- or cost-visible changes
-
-## HYG-001 - Cache-slot operand encoding has four owners and two sentinel conventions
-
-Reported by the compiler and VM-core hunters.
-
-- `GET_GLOBAL`/`GET_FIELD`/`SET_FIELD` use 255 for "uncached"; the VM relies on
-  `caches.x.get(255)` returning `None` because no cache vector reaches 256
-  entries, which nothing asserts. `frame.rs` passes a literal `u8::MAX` for
-  `SET_FIELD_AT` to mean "no cache".
-- `SET_GLOBAL`/`TFOR_CALL` bias by one (0 = uncached), decoded with
-  `checked_sub(1)` in `eval_store.rs::instr_set_global` and
-  `eval_control.rs::instr_tfor_call_next`. `SET_FIELD_AT` with A=0 means "not yet
-  rewritten". All persisted.
-- Each rule is spelled in the `instr.rs` constructors, `assign_cache_slots`, the
-  verifier (`compiler/verify.rs`) and the VM decode sites. `RuntimeCaches::new`
-  recomputes the TFOR cursor count a third way (max C operand) because storing a
-  fourth count would change the snapshot format.
-- The verifier copy is a deliberate independent check, and `finalize` runs
-  `validate_bytecode` on every compile, so drift fails every compile (the
-  verify.rs comment undersells this by naming only the corpus test). The VM
-  decode copy has no checker.
-- Related sentinel copies: `OP_VARARG` checks `n == u8::MAX` for "all values" in
-  `frame.rs` and `verify.rs` instead of `RetCount::from_u8`; `ArgCount`/`RetCount`
-  panic messages hard-code "below 255" beside `limits::MAX_FIXED_ARGS = u8::MAX -
-  1` and `MAX_ARGUMENTS = u8::MAX`.
-
-Fix: typed operand decoders on `Instr` paired with the encoders
-(`global_get_slot(self) -> Option<u8>` etc.) used by VM, verifier and finalizer;
-at the next format bump unify on one convention (biased, 0 = uncached) and store
-the TFOR count beside the others, retiring the recomputation. Format the panic
-strings from the const. Enforceable: decoders make raw decodes stand out; a grep
-for `== u8::MAX` / `inst.a()` near cache opcodes in `src/vm/`; a verifier test
-pinning cache vectors below the sentinel.
-
-## HYG-074 - Anchor and empty-pattern handling decided in several places; gmatch rewrite charges an extra unit
-
-Reported by the stdlib hunter.
-
-`luapat::Compiler::compile` decides `anchored` from the first byte; `gsub`
-decides again from `pattern.first() == Some(&b'^')`; `gmatch` rewrites a leading
-`^` to `%^` by byte surgery to reuse the compiler. The rewrite makes
-`charge_bytes` see `len + 1`, one extra replay-visible cost unit per iterator from
-an implementation detail. Empty-pattern fast paths in find, match, gsub and
-gmatch are four special cases with their own return shapes. Fix:
-`CompiledPattern::is_anchored()`; an `AnchorMode::{Honour, Literal}` compiler
-flag for gmatch (removes the rewrite and the extra unit, a cost change to call
-out); decide once whether the empty fast paths are needed (`str_match` already
-handles an empty item list).
-
-## Unmeasured performance
-
-## HYG-045 - Error-path cleanup decided per site
-
-Reported by the VM-core hunter; the panic-safety half shipped as the poison
-flag. Remaining: `call_op` restores its frame with several
-`truncate_call_frame` calls, `eval_closure_frame` with several
-`cleanup_closure_frame` calls, and `handle_index_metamethod_inner` and
-`index_string` truncate temporaries by hand. A guard or `frame_scope` helper
-would make "every exit restores" structural. Not done because it cannot be
-a Drop guard (the guard would hold `&mut State` while the body uses it), so
-it is either a closure helper - the frame bloat `call_op` already rejected
-for `with_rooted_value` on the recursive path - or a plain struct that every
-`Ok` exit must disarm by hand, which keeps the per-site count it was meant to
-remove. Revisit only with a native-stack-per-level measurement of the
-recursive path showing the closure form is frame-neutral.
+Decision: collapse the internals and drop `Engine`. One internal
+`compile(source, name)`, with a test helper for pre-finalize output; the
+parser forwarders and `describe_token_type` fold away. Publicly,
+`Program::compile` plus `State::new`/`raw` replace `Engine`, and one
+`analyze_cost` remains. The byte source load from HYG-079 is the one compile
+path, not a byte variant beside each of today's three.
 
 ## HYG-077 - Small stdlib duplications and unreachable checks
 
@@ -131,6 +102,30 @@ Reported by the stdlib hunter.
   false`), so the checks are unreachable from Lua (a host could call them). Noted
   so nobody cites them as precedent.
 
-## Comment or doc only
+Decision: split it up. The first bullet lands with HYG-079, whose byte-exact
+`error` and `print` rework the same conversion: `tostring_bytes` owns the
+rule, with `error`'s opposite rule beside it. The second gets one short
+section listing the per-function index rules (`reference/` or a comment
+block in `src/lua_std.rs`). The third gets a comment at the `_G` handlers.
+Then the entry is removed.
 
-## Decisions for the user
+## Unmeasured performance
+
+## HYG-045 - Error-path cleanup decided per site
+
+Reported by the VM-core hunter; the panic-safety half shipped as the poison
+flag. Remaining, as of the call flattening (bc37227, 27ee714):
+`truncate_call_frame` restores the frame from several sites in
+`src/vm/eval.rs` (`call_unguarded`, `fail_call`, `invoke_rust_fn`), and
+`handle_index_metamethod_inner` and `index_string` truncate temporaries by
+hand. A guard or `frame_scope` helper would make "every exit restores"
+structural. Not done because it cannot be a Drop guard (the guard would hold
+`&mut State` while the body uses it), so it is either a closure helper - the
+frame bloat `call_unguarded` already rejected for `with_rooted_value`, and it
+is still on the native re-entry path that `MAX_NATIVE_CALL_DEPTH` is sized
+for - or a plain struct that every `Ok` exit must disarm by hand, which keeps
+the per-site count it was meant to remove. Revisit only with a
+native-stack-per-level measurement of `call_unguarded` showing the closure
+form is frame-neutral.
+
+Decision (2026-10-22): deferred; stays here.

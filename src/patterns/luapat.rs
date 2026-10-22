@@ -119,11 +119,44 @@ enum Item {
     Fail(PatternError),
 }
 
+/// What a leading `^` means to the compiler.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) enum AnchorMode {
+    /// A leading `^` anchors the match at the start position (`find`,
+    /// `match`, `gsub`).
+    Honour,
+    /// A leading `^` is an ordinary literal byte, as reference `gmatch`
+    /// treats it: anchoring would stop the iteration after one match.
+    Literal,
+}
+
+impl AnchorMode {
+    /// The mode that decides how `pattern` compiles. The two modes differ only
+    /// on a leading `^`, so every other pattern compiles to the same program
+    /// under either and normalises to `Honour`. Compiled-pattern caches key on
+    /// this, so `gmatch` and the other string functions share one cache entry
+    /// for a pattern without a leading `^`.
+    pub(crate) fn effective(self, pattern: &[u8]) -> AnchorMode {
+        if pattern.first() == Some(&b'^') {
+            self
+        } else {
+            AnchorMode::Honour
+        }
+    }
+}
+
 pub(super) struct CompiledPattern {
     items: Vec<Item>,
     classes: Vec<ByteClass>,
     anchored: bool,
     captures: usize,
+}
+
+impl CompiledPattern {
+    /// Whether a match may start only at the initial position.
+    pub(super) fn is_anchored(&self) -> bool {
+        self.anchored
+    }
 }
 
 struct Compiler<'a> {
@@ -267,8 +300,12 @@ impl<'a> Compiler<'a> {
     /// an `Item::Fail` that raises when (and only when) a match reaches it. An
     /// unclosed `(` is not malformed at all at this level - it surfaces as a
     /// `LuaCapture::Unfinished` result, see there.
-    fn compile(mut self) -> CompiledPattern {
-        let anchored = self.pattern.first() == Some(&b'^');
+    ///
+    /// Under `AnchorMode::Literal` a leading `^` is not skipped, so
+    /// `compile_items` reads it as an ordinary literal atom, repeat suffix
+    /// included: `^*` is zero or more carets, exactly as `%^*` would be.
+    fn compile(mut self, mode: AnchorMode) -> CompiledPattern {
+        let anchored = mode == AnchorMode::Honour && self.pattern.first() == Some(&b'^');
         if anchored {
             self.pos = 1;
         }
@@ -679,8 +716,8 @@ impl<'data, 'meter, 'cost> MatchState<'data, 'meter, 'cost> {
     }
 }
 
-pub(super) fn compile(pattern: &[u8]) -> CompiledPattern {
-    Compiler::new(pattern).compile()
+pub(super) fn compile(pattern: &[u8], mode: AnchorMode) -> CompiledPattern {
+    Compiler::new(pattern).compile(mode)
 }
 
 pub(super) fn str_match(
@@ -690,10 +727,13 @@ pub(super) fn str_match(
     out: &mut [LuaCapture; LUA_MAXMATCHES],
     meter: &mut CostMeter<'_>,
 ) -> MatchResult<usize> {
-    // `""` and `"^"` match the empty range at `init` without consulting the
-    // matcher, so they charge no matcher step. Every caller has already
-    // charged the pattern and subject lengths, and the result is the same
-    // deterministic cost every time.
+    // `""`, and `"^"` under `AnchorMode::Honour`, compile to no items and
+    // match the empty range at `init` without consulting the
+    // matcher, so they charge no matcher step (`match_at` charges one on
+    // entry). Every caller has already charged the pattern and subject
+    // lengths, and the result is the same deterministic cost every time.
+    // `string.match` has no empty-pattern special case of its own because
+    // this one is free; removing it is a cost change.
     if pattern.items.is_empty() {
         out[0] = LuaCapture::Bytes {
             start: init,
@@ -707,7 +747,7 @@ pub(super) fn str_match(
         if let Some(end) = state.match_at(pos, 0, 0)? {
             return Ok(state.captures(pos, end, out));
         }
-        if pattern.anchored || pos == subject.len() {
+        if pattern.is_anchored() || pos == subject.len() {
             return Ok(0);
         }
         pos += 1;

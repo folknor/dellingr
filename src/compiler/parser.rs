@@ -505,7 +505,7 @@ impl<'a> Parser<'a> {
     /// Changes a typed final call or vararg to provide every requested tail value.
     pub(super) fn open_tail(&mut self, tail: TailKind, want: RetCount) -> Result<()> {
         let (replacement, expected_opcode) = match tail {
-            TailKind::Vararg => (Instr::vararg(want.to_u8()), Instr::OP_VARARG),
+            TailKind::Vararg => (Instr::vararg(want), Instr::OP_VARARG),
             TailKind::FunctionCall(call) => (Instr::call(call.num_args(), want), Instr::OP_CALL),
         };
         if self.funcs.chunk.code.last().map(|instr| instr.opcode()) != Some(expected_opcode) {

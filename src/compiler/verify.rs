@@ -1,5 +1,5 @@
 use super::{Bytecode, UpvalueDesc};
-use crate::instr::{Builtin, Instr};
+use crate::instr::{ArgCount, Builtin, Instr, RetCount};
 use crate::limits::{
     MAX_FRAME_SLOTS, MAX_LITERALS, MAX_NESTED, MAX_TABLE_TEMPLATE_FIELDS, MAX_TABLE_TEMPLATES,
     MAX_UPVALUES, MAX_VERIFIER_MARKER_DEPTH,
@@ -130,6 +130,7 @@ pub(crate) trait BytecodeView {
     fn global_cache_slots(&self) -> u8;
     fn field_cache_slots(&self) -> u8;
     fn set_field_cache_slots(&self) -> u8;
+    fn tfor_cursor_slots(&self) -> u8;
     fn num_params(&self) -> u8;
     fn num_locals(&self) -> u8;
     fn nested_len(&self) -> usize;
@@ -163,6 +164,9 @@ impl BytecodeView for Bytecode {
     }
     fn set_field_cache_slots(&self) -> u8 {
         self.set_field_cache_slots
+    }
+    fn tfor_cursor_slots(&self) -> u8 {
+        self.tfor_cursor_slots
     }
     fn num_params(&self) -> u8 {
         self.num_params
@@ -264,7 +268,6 @@ fn verify_stack_discipline(view: &impl BytecodeView) -> Result<(), BytecodeValid
         let inst = Instr::from_raw(view.raw_instruction(pc));
         let op = inst.opcode();
         let a = inst.a();
-        let b = inst.b();
         let mut next = state;
 
         let require_known = |height: &Height| {
@@ -401,13 +404,15 @@ fn verify_stack_discipline(view: &impl BytecodeView) -> Result<(), BytecodeValid
                 )?;
                 next.height.remove(count, pc)?;
             }
-            Instr::OP_VARARG if a == u8::MAX => {
-                let floor = next.height.floor();
-                next.height = Height::Dyn { floor };
-            }
-            Instr::OP_VARARG => next.height.add(u32::from(a), pc)?,
-            Instr::OP_CALL => {
-                if a == u8::MAX {
+            Instr::OP_VARARG => match inst.vararg_count() {
+                RetCount::All => {
+                    let floor = next.height.floor();
+                    next.height = Height::Dyn { floor };
+                }
+                RetCount::Fixed(n) => next.height.add(u32::from(n), pc)?,
+            },
+            Instr::OP_CALL => match (inst.call_args(), inst.call_results()) {
+                (ArgCount::Dynamic, results) => {
                     let base = match next.call_bases.pop() {
                         Some(base) => base,
                         None => return Err(err(Some(pc), "dynamic call has no call-base marker")),
@@ -416,28 +421,28 @@ fn verify_stack_discipline(view: &impl BytecodeView) -> Result<(), BytecodeValid
                         .checked_add(1)
                         .ok_or_else(|| err(Some(pc), "operand stack height overflows"))?;
                     require_at_least(&next.height, minimum)?;
-                    next.height = if b == u8::MAX {
-                        Height::Dyn { floor: base }
-                    } else {
-                        Height::Known(
-                            base.checked_add(u32::from(b))
+                    next.height = match results {
+                        RetCount::All => Height::Dyn { floor: base },
+                        RetCount::Fixed(n) => Height::Known(
+                            base.checked_add(u32::from(n))
                                 .ok_or_else(|| err(Some(pc), "operand stack height overflows"))?,
-                        )
+                        ),
                     };
-                } else if b == u8::MAX {
-                    let inputs = u32::from(a)
-                        .checked_add(1)
-                        .ok_or_else(|| err(Some(pc), "operand stack height overflows"))?;
-                    next.height.remove(inputs, pc)?;
-                    let floor = next.height.floor();
-                    next.height = Height::Dyn { floor };
-                } else {
-                    let inputs = u32::from(a)
-                        .checked_add(1)
-                        .ok_or_else(|| err(Some(pc), "operand stack height overflows"))?;
-                    next.height.adjust(inputs, u32::from(b), pc)?;
                 }
-            }
+                (ArgCount::Fixed(args), results) => {
+                    let inputs = u32::from(args)
+                        .checked_add(1)
+                        .ok_or_else(|| err(Some(pc), "operand stack height overflows"))?;
+                    match results {
+                        RetCount::All => {
+                            next.height.remove(inputs, pc)?;
+                            let floor = next.height.floor();
+                            next.height = Height::Dyn { floor };
+                        }
+                        RetCount::Fixed(n) => next.height.adjust(inputs, u32::from(n), pc)?,
+                    }
+                }
+            },
             Instr::OP_TFOR_PREP => next.height.remove(3, pc)?,
             // Both work entirely within the locals region: `TFOR_CALL` drives
             // the iterator through local slots and is internally balanced, and
@@ -471,9 +476,9 @@ fn verify_stack_discipline(view: &impl BytecodeView) -> Result<(), BytecodeValid
                 if !next.call_bases.is_empty() || !next.table_bases.is_empty() {
                     return Err(err(Some(pc), "return leaves a live stack marker"));
                 }
-                if a != u8::MAX {
+                if let RetCount::Fixed(n) = inst.return_count() {
                     let height = require_known(&next.height)?;
-                    if height < u32::from(a) {
+                    if height < u32::from(n) {
                         return Err(err(Some(pc), "return values exceed operand stack height"));
                     }
                 }
@@ -632,20 +637,41 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
         }
     }
     let slots = view.num_params() as usize + view.num_locals() as usize;
-    let mut global_slots = vec![None; view.string_literals().len()];
+    let mut global_slots: Vec<Option<usize>> = vec![None; view.string_literals().len()];
     let mut global_name_checked = vec![false; view.string_literals().len()];
     let mut next_global_slot = 0usize;
-    let mut next_field_slot = 0u8;
+    let mut next_field_slot = 0usize;
     let mut next_set_field_slot = 0usize;
-    // This loop deliberately restates the cache-slot allocation policy of
-    // `Bytecode::assign_cache_slots` (first-use order for globals, instruction
-    // order for fields, set-fields and TFOR_CALL cursors). The duplication is
-    // the point: the verifier is the independent check on a snapshot's cached
-    // operands, and a shared helper would let a policy bug validate itself. Any
-    // change to the allocation policy must change both. Compiler finalization
-    // runs this validation on every compile, and the examples corpus test
-    // checks that the two policies stay aligned.
     let mut next_tfor_cursor_slot = 0usize;
+    // This loop deliberately restates the cache-slot allocation policy of
+    // `Bytecode::assign_cache_slots` (first-use order for globals, a fresh
+    // global slot per SET_GLOBAL, instruction order for fields, set-fields and
+    // TFOR_CALL cursors). The duplication is the point: the verifier is the
+    // independent check on a snapshot's cached operands, and a shared helper
+    // would let a policy bug validate itself. Any change to the allocation
+    // policy must change both. Compiler finalization runs this validation on
+    // every compile, so a drift between the two fails every compile that
+    // reaches the changed case. The operand encoding itself is not restated:
+    // both sides decode through the `Instr` cache-slot decoders.
+    //
+    // Uncached operands are accepted anywhere and consume no slot. Sequential
+    // allocation plus the final count equality prove every admitted slot is
+    // below its family's declared count, which the runtime cache vectors are
+    // sized from.
+    let sequential = |pc: usize,
+                      slot: u8,
+                      next: &mut usize,
+                      what: &str|
+     -> Result<(), BytecodeValidationError> {
+        if usize::from(slot) != *next {
+            return Err(err(
+                Some(pc),
+                format!("{what} cache slot does not match instruction order"),
+            ));
+        }
+        *next += 1;
+        Ok(())
+    };
     for pc in 0..code_len {
         let inst = Instr::from_raw(view.raw_instruction(pc));
         let op = inst.opcode();
@@ -654,7 +680,6 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
         }
         let a = inst.a();
         let b = inst.b();
-        let c = inst.c();
         let bx = inst.bx();
         let reserved_zero = inst.reserved_bytes_zero();
         if !reserved_zero {
@@ -666,8 +691,6 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
                 ),
             ));
         }
-        // Interpret the opcode-specific cache bytes in the persisted snapshot
-        // representation. A common sentinel requires a format version bump.
         match op {
             Instr::OP_PUSH_NUM => {
                 check_index(pc, bx, view.number_literals_len(), "number literal")?;
@@ -683,65 +706,46 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
                     }
                     global_name_checked[bx as usize] = true;
                 }
-                // The sentinel means "deliberately uncached" and is valid
-                // anywhere, not only once the slots are exhausted. The compiler
-                // never emits it early, but a hand-built or deliberately
-                // uncached snapshot is still semantically valid, and the
-                // runtime handles it by taking the slow path.
-                if op == Instr::OP_GET_GLOBAL && a != u8::MAX {
-                    let expected = match global_slots[bx as usize] {
-                        Some(slot) => slot,
-                        None => {
-                            let slot = next_global_slot;
-                            if slot < u8::MAX as usize {
-                                next_global_slot += 1;
-                            }
-                            global_slots[bx as usize] = Some(slot);
-                            slot
+                // "Uncached" is valid anywhere, not only once the slots are
+                // exhausted. The compiler never emits it early, but a
+                // hand-built or deliberately uncached snapshot is still
+                // semantically valid, and the runtime takes the slow path.
+                // An uncached read neither reserves a slot for its name nor
+                // marks the name exhausted.
+                let global_order_error =
+                    || err(Some(pc), "global cache slot does not match first-use order");
+                match (op, inst.global_cache_slot()) {
+                    (_, None) => {}
+                    (Instr::OP_GET_GLOBAL, Some(slot)) => {
+                        // A cached read reuses its name's slot, or allocates
+                        // the next one on the name's first cached read.
+                        let expected = *global_slots[bx as usize].get_or_insert_with(|| {
+                            next_global_slot += 1;
+                            next_global_slot - 1
+                        });
+                        if usize::from(slot) != expected {
+                            return Err(global_order_error());
                         }
-                    };
-                    if a as usize != expected {
-                        return Err(err(
-                            Some(pc),
-                            "global cache slot does not match first-use order",
-                        ));
                     }
-                }
-                if op == Instr::OP_SET_GLOBAL && a != 0 {
-                    let expected = next_global_slot;
-                    if expected >= u8::MAX as usize || a as usize - 1 != expected {
-                        return Err(err(
-                            Some(pc),
-                            "global cache slot does not match first-use order",
-                        ));
+                    // A cached write always takes a fresh slot.
+                    (_, Some(slot)) => {
+                        if usize::from(slot) != next_global_slot {
+                            return Err(global_order_error());
+                        }
+                        next_global_slot += 1;
                     }
-                    next_global_slot += 1;
                 }
             }
             Instr::OP_GET_FIELD => {
                 check_index(pc, bx, view.string_literals().len(), "string literal")?;
-                // As above: the sentinel is accepted anywhere and excluded from
-                // the sequential slot count.
-                if a != u8::MAX {
-                    if a != next_field_slot {
-                        return Err(err(
-                            Some(pc),
-                            "field cache slot does not match instruction order",
-                        ));
-                    }
-                    next_field_slot += 1;
+                if let Some(slot) = inst.field_cache_slot() {
+                    sequential(pc, slot, &mut next_field_slot, "field")?;
                 }
             }
             Instr::OP_SET_FIELD => {
                 check_index(pc, bx, view.string_literals().len(), "string literal")?;
-                if a != u8::MAX && a as usize != next_set_field_slot {
-                    return Err(err(
-                        Some(pc),
-                        "set-field cache slot does not match instruction order",
-                    ));
-                }
-                if a != u8::MAX {
-                    next_set_field_slot += 1;
+                if let Some(slot) = inst.set_field_cache_slot() {
+                    sequential(pc, slot, &mut next_set_field_slot, "set-field")?;
                 }
             }
             // Every remaining opcode that names a string literal in Bx. Merged
@@ -778,14 +782,8 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
                     return Err(err(Some(pc), "TFOR_CALL requires at least one result"));
                 }
                 check_slots(pc, a, 3 + b as usize, slots)?;
-                if c != 0 {
-                    if c as usize - 1 != next_tfor_cursor_slot {
-                        return Err(err(
-                            Some(pc),
-                            "TFOR_CALL cursor slot does not match instruction order",
-                        ));
-                    }
-                    next_tfor_cursor_slot += 1;
+                if let Some(slot) = inst.tfor_cursor_slot() {
+                    sequential(pc, slot, &mut next_tfor_cursor_slot, "TFOR_CALL cursor")?;
                 }
             }
             Instr::OP_CLOSE_UPVALUES if (a as usize) > slots => {
@@ -819,9 +817,10 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
             }
         }
     }
-    if view.global_cache_slots() as usize != next_global_slot
-        || view.field_cache_slots() != next_field_slot
-        || view.set_field_cache_slots() as usize != next_set_field_slot
+    if usize::from(view.global_cache_slots()) != next_global_slot
+        || usize::from(view.field_cache_slots()) != next_field_slot
+        || usize::from(view.set_field_cache_slots()) != next_set_field_slot
+        || usize::from(view.tfor_cursor_slots()) != next_tfor_cursor_slot
     {
         return Err(err(None, "declared cache slots do not match instructions"));
     }
@@ -852,6 +851,97 @@ mod tree_tests {
                 ..Bytecode::default()
             };
             assert_eq!(validate_child(&parent, &child).is_ok(), valid);
+        }
+    }
+
+    /// Each cache family filled past capacity: 255 cached sites, then an
+    /// uncached one. The runtime sizes each cache vector from the declared
+    /// count and looks slots up by decoded index, so admission must keep every
+    /// cached slot below that count and the count within `MAX_CACHE_SLOTS`.
+    #[test]
+    fn cache_families_cap_below_the_encodable_limit() {
+        use super::validate_bytecode;
+        use crate::instr::{Instr, MAX_CACHE_SLOTS};
+
+        type Slot = fn(Instr) -> Option<u8>;
+        type Count = fn(&mut Bytecode) -> &mut u8;
+        let sites = |site: &dyn Fn(usize) -> String| {
+            (0..=MAX_CACHE_SLOTS)
+                .map(site)
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let families: [(String, u8, Slot, Count); 5] = [
+            (
+                sites(&|i| format!("if get_{i} then end")),
+                Instr::OP_GET_GLOBAL,
+                Instr::global_cache_slot,
+                |bc| &mut bc.global_cache_slots,
+            ),
+            (
+                sites(&|i| format!("set_{i} = 1")),
+                Instr::OP_SET_GLOBAL,
+                Instr::global_cache_slot,
+                |bc| &mut bc.global_cache_slots,
+            ),
+            (
+                format!("local t = {{}}\n{}", sites(&|_| "if t.x then end".into())),
+                Instr::OP_GET_FIELD,
+                Instr::field_cache_slot,
+                |bc| &mut bc.field_cache_slots,
+            ),
+            (
+                format!("local t = {{}}\n{}", sites(&|_| "t.x = 1".into())),
+                Instr::OP_SET_FIELD,
+                Instr::set_field_cache_slot,
+                |bc| &mut bc.set_field_cache_slots,
+            ),
+            (
+                format!(
+                    "local t = {{}}\n{}",
+                    sites(&|_| "for _ in pairs(t) do end".into())
+                ),
+                Instr::OP_TFOR_CALL,
+                Instr::tfor_cursor_slot,
+                |bc| &mut bc.tfor_cursor_slots,
+            ),
+        ];
+
+        for (source, opcode, slot_of, count_of) in families {
+            let mut bc = crate::compiler::parse_str(&source).expect("capacity source compiles");
+            validate_bytecode(&bc).expect("compiler output at capacity verifies");
+            assert_eq!(usize::from(*count_of(&mut bc)), MAX_CACHE_SLOTS);
+            let sites: Vec<usize> = (0..bc.code.len())
+                .filter(|pc| bc.code[*pc].opcode() == opcode)
+                .collect();
+            assert_eq!(sites.len(), MAX_CACHE_SLOTS + 1, "opcode {opcode}");
+            for (expected, pc) in sites.iter().take(MAX_CACHE_SLOTS).enumerate() {
+                assert_eq!(slot_of(bc.code[*pc]), Some(expected as u8));
+            }
+            let overflow = sites[MAX_CACHE_SLOTS];
+            assert_eq!(slot_of(bc.code[overflow]), None);
+
+            // Caching the overflow site as a repeat of the last slot is
+            // rejected: it would alias slot 254 rather than fit a 256th.
+            let mut aliased = bc.clone();
+            let last = aliased.code[sites[MAX_CACHE_SLOTS - 1]];
+            let mut raw = aliased.code[overflow].raw();
+            raw = if opcode == Instr::OP_TFOR_CALL {
+                (raw & !0xff) | (last.raw() & 0xff)
+            } else {
+                (raw & !0x00ff_0000) | (last.raw() & 0x00ff_0000)
+            };
+            aliased.code[overflow] = Instr::from_raw(raw);
+            assert_eq!(slot_of(aliased.code[overflow]), Some(254));
+            assert!(validate_bytecode(&aliased).is_err(), "opcode {opcode}");
+
+            // A declared count that disagrees with the operands is rejected,
+            // in either direction.
+            for declared in [MAX_CACHE_SLOTS as u8 - 1, 0] {
+                let mut miscounted = bc.clone();
+                *count_of(&mut miscounted) = declared;
+                assert!(validate_bytecode(&miscounted).is_err(), "opcode {opcode}");
+            }
         }
     }
 

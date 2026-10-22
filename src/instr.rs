@@ -3,12 +3,49 @@
 //! Format: [opcode:8][A:8][B:8][C:8] or [opcode:8][A:8][sBx:16]
 //! Each instruction is stored in one `u32`.
 
+use crate::limits::{MAX_FIXED_ARGS, MAX_FIXED_RESULTS};
 use crate::numeral::{lua_add, lua_div, lua_modulo, lua_mul, lua_sub};
+
+// The fixed-count limits are exactly the counts below the shared 255 sentinel.
+const _: () = assert!(MAX_FIXED_ARGS == u8::MAX as usize - 1);
+const _: () = assert!(MAX_FIXED_RESULTS == u8::MAX as usize - 1);
+
+/// Inline-cache slots available to one cache family of one function. Cache
+/// operands are biased by one: operand 0 means uncached and operands 1..=255
+/// name slots 0..=254, so a family holds at most this many slots and its
+/// declared count (a `u8`) can never name an unencodable slot.
+pub(crate) const MAX_CACHE_SLOTS: usize = u8::MAX as usize;
+
+/// Encode a cache-slot operand: `None` (uncached) is 0, slot `n` is `n + 1`.
+///
+/// # Panics
+///
+/// Panics if the slot is not below [`MAX_CACHE_SLOTS`].
+#[inline]
+fn encode_cache_slot(slot: Option<u8>) -> u8 {
+    match slot {
+        None => 0,
+        Some(slot) => {
+            assert!(
+                usize::from(slot) < MAX_CACHE_SLOTS,
+                "cache slot must be below {MAX_CACHE_SLOTS}"
+            );
+            slot + 1
+        }
+    }
+}
+
+/// Decode a cache-slot operand written by [`encode_cache_slot`].
+#[inline(always)]
+const fn decode_cache_slot(operand: u8) -> Option<u8> {
+    operand.checked_sub(1)
+}
 
 /// Argument count for function calls.
 ///
-/// Bytecode supports fixed counts 0-254 or a dynamic count. Host calls can
-/// also use `Fixed(255)`; that runtime count cannot be encoded in bytecode.
+/// Bytecode supports fixed counts 0 through `limits::MAX_FIXED_ARGS` or a
+/// dynamic count. Host calls can also use `Fixed(255)`; that runtime count
+/// cannot be encoded in bytecode.
 /// Keeping the runtime count is necessary when `__call` adds a receiver to
 /// 254 arguments. Only instruction encoding rejects the sentinel alias.
 //
@@ -33,14 +70,15 @@ impl ArgCount {
     ///
     /// # Panics
     ///
-    /// Panics if this is `Fixed(255)`, which aliases `Dynamic` in bytecode.
+    /// Panics if this is a fixed count above `limits::MAX_FIXED_ARGS`, which
+    /// would alias `Dynamic` in bytecode.
     #[inline]
-    pub(crate) const fn to_u8(self) -> u8 {
+    pub(crate) fn to_u8(self) -> u8 {
         match self {
             ArgCount::Fixed(n) => {
                 assert!(
-                    n < u8::MAX,
-                    "fixed bytecode argument count must be below 255"
+                    usize::from(n) <= MAX_FIXED_ARGS,
+                    "fixed bytecode argument count must be at most {MAX_FIXED_ARGS}"
                 );
                 n
             }
@@ -76,12 +114,16 @@ impl RetCount {
     ///
     /// # Panics
     ///
-    /// Panics if this is `Fixed(255)`, which aliases `All` in bytecode.
+    /// Panics if this is a fixed count above `limits::MAX_FIXED_RESULTS`,
+    /// which would alias `All` in bytecode.
     #[inline]
-    pub(crate) const fn to_u8(self) -> u8 {
+    pub(crate) fn to_u8(self) -> u8 {
         match self {
             RetCount::Fixed(n) => {
-                assert!(n < u8::MAX, "fixed bytecode result count must be below 255");
+                assert!(
+                    usize::from(n) <= MAX_FIXED_RESULTS,
+                    "fixed bytecode result count must be at most {MAX_FIXED_RESULTS}"
+                );
                 n
             }
             RetCount::All => u8::MAX,
@@ -470,9 +512,9 @@ macro_rules! opcode_rows {
             OP_NOP = 26, 0xffffff, false, Free,
                 write!($f, "Nop");
             OP_GET_GLOBAL = 30, 0x000000, false, Free,
-                write!($f, "GetGlobal({}, {})", $inst.a(), $inst.bx());
+                write!($f, "GetGlobal({}, {:?})", $inst.bx(), $inst.global_cache_slot());
             OP_SET_GLOBAL = 31, 0x000000, false, Free,
-                write!($f, "SetGlobal({}, {})", $inst.a(), $inst.bx());
+                write!($f, "SetGlobal({}, {:?})", $inst.bx(), $inst.global_cache_slot());
             OP_GET_LOCAL = 32, 0x00ffff, false, Free,
                 write!($f, "GetLocal({})", $inst.a());
             OP_SET_LOCAL = 33, 0x00ffff, false, Free,
@@ -482,7 +524,7 @@ macro_rules! opcode_rows {
             OP_SET_UPVALUE = 35, 0x00ffff, false, Free,
                 write!($f, "SetUpvalue({})", $inst.a());
             OP_GET_FIELD = 36, 0x000000, false, Free,
-                write!($f, "GetField({}, {})", $inst.a(), $inst.bx());
+                write!($f, "GetField({}, {:?})", $inst.bx(), $inst.field_cache_slot());
             OP_INIT_INDEX = 37, 0x00ffff, false, TableWrite,
                 write!($f, "InitIndex({})", $inst.a());
             OP_PUSH_NUM = 38, 0xff0000, false, Free,
@@ -492,13 +534,13 @@ macro_rules! opcode_rows {
             OP_TFOR_PREP = 40, 0x00ffff, false, Free,
                 write!($f, "TForPrep({})", $inst.a());
             OP_RETURN = 41, 0x00ffff, false, Free,
-                write!($f, "Return({:?})", RetCount::from_u8($inst.a()));
+                write!($f, "Return({:?})", $inst.return_count());
             OP_CLOSE_UPVALUES = 42, 0x00ffff, false, Free,
                 write!($f, "CloseUpvalues({})", $inst.a());
             OP_CLOSURE = 43, 0x00ffff, false, Free,
                 write!($f, "Closure({})", $inst.a());
             OP_VARARG = 44, 0x00ffff, false, Free,
-                write!($f, "Vararg({})", $inst.a());
+                write!($f, "Vararg({:?})", $inst.vararg_count());
             OP_SET_LIST = 45, 0x000000, false, ArrayElements,
                 write!($f, "SetList({}, {})", $inst.a(), $inst.bx());
             OP_SET_TABLE = 46, 0x00ffff, false, TableWrite,
@@ -510,14 +552,14 @@ macro_rules! opcode_rows {
             OP_SET_BUILTIN = 49, 0x00ffff, false, Free,
                 write!($f, "SetBuiltin({:?})", Builtin::from_u8($inst.a()));
             OP_SET_FIELD = 50, 0x000000, false, TableWrite,
-                write!($f, "SetField({}, {})", $inst.a(), $inst.bx());
+                write!($f, "SetField({}, {:?})", $inst.bx(), $inst.set_field_cache_slot());
             OP_INIT_FIELD = 51, 0x000000, false, TableWrite,
                 write!($f, "InitField({}, {})", $inst.a(), $inst.bx());
             OP_TFOR_CALL = 52, 0x000000, false, Free,
-                write!($f, "TForCall({}, {}, {})", $inst.a(), $inst.b(), $inst.c());
+                write!($f, "TForCall({}, {}, {:?})",
+                    $inst.a(), $inst.b(), $inst.tfor_cursor_slot());
             OP_CALL = 53, 0x0000ff, false, Call,
-                write!($f, "Call({:?}, {:?})",
-                    ArgCount::from_u8($inst.a()), RetCount::from_u8($inst.b()));
+                write!($f, "Call({:?}, {:?})", $inst.call_args(), $inst.call_results());
             OP_INIT_FIELD_PINNED = 54, 0x000000, false, TableWrite,
                 write!($f, "InitFieldPinned({}, {})", $inst.a(), $inst.bx());
             OP_SET_FIELD_AT = 55, 0x000000, false, TableWrite,
@@ -604,6 +646,9 @@ define_comparisons! {
 // Typed constructors remain explicit: boolean conversion, count sentinels,
 // biased cache operands and signed offsets are distinct encoding contracts.
 // The declaration table owns reserved bits; it must not infer these values.
+// Every sentinel-bearing operand has a typed decoder beside its constructor;
+// the VM, the verifier, the finalizer and the disassembler read those operands
+// only through the decoders, never as raw bytes.
 impl Instr {
     /// Create an instruction with no operands.
     #[inline]
@@ -781,24 +826,27 @@ impl Instr {
         Self::op(Self::OP_PUSH_NIL)
     }
 
-    // Cache operands are serialized as raw instruction words. Changing the
-    // opcode-specific sentinel encodings requires a snapshot format version
-    // bump and coordinated updates to the writer, loader, verifier, and VM.
+    // Cache operands are serialized as raw instruction words, so changing
+    // their encoding requires a snapshot format version bump. Every cache
+    // operand (GET_GLOBAL, SET_GLOBAL, GET_FIELD and SET_FIELD in A, TFOR_CALL
+    // in C) uses the one biased encoding of `encode_cache_slot`: 0 is uncached.
     // Literal-bearing forms: the pool id is a u16 in Bx, and A carries the
-    // inline-cache slot (255 = uncached), a stack offset, or is reserved as 0.
-    pub(crate) const fn get_global(idx: u16) -> Self {
-        Self::op_a_bx(Self::OP_GET_GLOBAL, u8::MAX, idx)
+    // inline-cache slot, a stack offset, or is reserved as 0.
+    pub(crate) fn get_global(idx: u16, cache_slot: Option<u8>) -> Self {
+        Self::op_a_bx(Self::OP_GET_GLOBAL, encode_cache_slot(cache_slot), idx)
     }
-    pub(crate) const fn get_global_cached(idx: u16, cache_idx: u8) -> Self {
-        Self::op_a_bx(Self::OP_GET_GLOBAL, cache_idx, idx)
+    pub(crate) fn set_global(idx: u16, cache_slot: Option<u8>) -> Self {
+        Self::op_a_bx(Self::OP_SET_GLOBAL, encode_cache_slot(cache_slot), idx)
     }
-    pub(crate) const fn set_global(idx: u16) -> Self {
-        Self::op_a_bx(Self::OP_SET_GLOBAL, 0, idx)
-    }
-    /// `SET_GLOBAL` uses a biased cache encoding: zero is uncached, while one through 255 name cache slots zero
-    /// through 254. This differs from `GET_GLOBAL`'s 255 sentinel.
-    pub(crate) const fn set_global_cached(idx: u16, cache_idx: u8) -> Self {
-        Self::op_a_bx(Self::OP_SET_GLOBAL, cache_idx + 1, idx)
+    /// The global-lookup cache slot of a `GET_GLOBAL` or `SET_GLOBAL`. Both
+    /// opcodes draw from the one global cache of their function.
+    #[inline(always)]
+    pub(crate) const fn global_cache_slot(self) -> Option<u8> {
+        debug_assert!(matches!(
+            self.opcode(),
+            Self::OP_GET_GLOBAL | Self::OP_SET_GLOBAL
+        ));
+        decode_cache_slot(self.a())
     }
     pub(crate) const fn get_local(slot: u8) -> Self {
         Self::op_a(Self::OP_GET_LOCAL, slot)
@@ -812,11 +860,14 @@ impl Instr {
     pub(crate) const fn set_upvalue(idx: u8) -> Self {
         Self::op_a(Self::OP_SET_UPVALUE, idx)
     }
-    pub(crate) const fn get_field(idx: u16) -> Self {
-        Self::op_a_bx(Self::OP_GET_FIELD, u8::MAX, idx)
+    pub(crate) fn get_field(idx: u16, cache_slot: Option<u8>) -> Self {
+        Self::op_a_bx(Self::OP_GET_FIELD, encode_cache_slot(cache_slot), idx)
     }
-    pub(crate) const fn get_field_cached(idx: u16, cache_idx: u8) -> Self {
-        Self::op_a_bx(Self::OP_GET_FIELD, cache_idx, idx)
+    /// The field-lookup cache slot of a `GET_FIELD`.
+    #[inline(always)]
+    pub(crate) const fn field_cache_slot(self) -> Option<u8> {
+        debug_assert!(self.opcode() == Self::OP_GET_FIELD);
+        decode_cache_slot(self.a())
     }
     pub(crate) const fn init_index(offset: u8) -> Self {
         Self::op_a(Self::OP_INIT_INDEX, offset)
@@ -830,8 +881,14 @@ impl Instr {
     pub(crate) const fn tfor_prep(slot: u8) -> Self {
         Self::op_a(Self::OP_TFOR_PREP, slot)
     }
-    pub(crate) const fn ret(n: RetCount) -> Self {
+    pub(crate) fn ret(n: RetCount) -> Self {
         Self::op_a(Self::OP_RETURN, n.to_u8())
+    }
+    /// The result count of an `OP_RETURN`.
+    #[inline(always)]
+    pub(crate) const fn return_count(self) -> RetCount {
+        debug_assert!(self.opcode() == Self::OP_RETURN);
+        RetCount::from_u8(self.a())
     }
     pub(crate) const fn close_upvalues(level: u8) -> Self {
         Self::op_a(Self::OP_CLOSE_UPVALUES, level)
@@ -839,8 +896,16 @@ impl Instr {
     pub(crate) const fn closure(idx: u8) -> Self {
         Self::op_a(Self::OP_CLOSURE, idx)
     }
-    pub(crate) const fn vararg(n: u8) -> Self {
-        Self::op_a(Self::OP_VARARG, n)
+    /// Push `n` varargs padded with nil, or every available vararg for
+    /// `RetCount::All`.
+    pub(crate) fn vararg(n: RetCount) -> Self {
+        Self::op_a(Self::OP_VARARG, n.to_u8())
+    }
+    /// The value count of an `OP_VARARG`.
+    #[inline(always)]
+    pub(crate) const fn vararg_count(self) -> RetCount {
+        debug_assert!(self.opcode() == Self::OP_VARARG);
+        RetCount::from_u8(self.a())
     }
     /// Test-only: production emission always names its batch explicitly through
     /// `set_list_batch`, so this shorthand for batch 0 exists for assertions.
@@ -864,14 +929,20 @@ impl Instr {
         Self::op_a(Self::OP_SET_BUILTIN, slot.to_u8())
     }
 
-    // Field writes: `set_field_at` carries an explicit receiver offset and is
-    // never cached; `set_field_cached` implies offset 0 and uses A for its
-    // cache slot. Finalization rewrites offset-zero sites to the cached form.
+    // Field writes: `set_field_at` carries an explicit receiver offset in A
+    // and has no cache operand; `set_field` implies offset 0 and uses A for
+    // its cache slot. Finalization rewrites offset-zero sites to `set_field`.
     pub(crate) const fn set_field_at(offset: u8, idx: u16) -> Self {
         Self::op_a_bx(Self::OP_SET_FIELD_AT, offset, idx)
     }
-    pub(crate) const fn set_field_cached(idx: u16, cache_idx: u8) -> Self {
-        Self::op_a_bx(Self::OP_SET_FIELD, cache_idx, idx)
+    pub(crate) fn set_field(idx: u16, cache_slot: Option<u8>) -> Self {
+        Self::op_a_bx(Self::OP_SET_FIELD, encode_cache_slot(cache_slot), idx)
+    }
+    /// The set-field cache slot of a `SET_FIELD`.
+    #[inline(always)]
+    pub(crate) const fn set_field_cache_slot(self) -> Option<u8> {
+        debug_assert!(self.opcode() == Self::OP_SET_FIELD);
+        decode_cache_slot(self.a())
     }
     pub(crate) const fn init_field(offset: u8, idx: u16) -> Self {
         Self::op_a_bx(Self::OP_INIT_FIELD, offset, idx)
@@ -879,16 +950,34 @@ impl Instr {
     pub(crate) const fn init_field_pinned(key_idx: u16, entry_idx: u8) -> Self {
         Self::op_a_bx(Self::OP_INIT_FIELD_PINNED, entry_idx, key_idx)
     }
-    pub(crate) const fn tfor_call(slot: u8, num_vars: u8) -> Self {
-        Self::op_ab(Self::OP_TFOR_CALL, slot, num_vars)
+    pub(crate) fn tfor_call(slot: u8, num_vars: u8, cursor_slot: Option<u8>) -> Self {
+        Self::op_abc(
+            Self::OP_TFOR_CALL,
+            slot,
+            num_vars,
+            encode_cache_slot(cursor_slot),
+        )
     }
-    /// `TFOR_CALL` uses a biased cursor encoding: zero is uncached, while one through 255 are cursor slots
-    /// zero through 254.
-    pub(crate) const fn tfor_call_cached(slot: u8, num_vars: u8, cache_idx: u8) -> Self {
-        Self::op_abc(Self::OP_TFOR_CALL, slot, num_vars, cache_idx + 1)
+    /// The `pairs` cursor cache slot of a `TFOR_CALL`.
+    #[inline(always)]
+    pub(crate) const fn tfor_cursor_slot(self) -> Option<u8> {
+        debug_assert!(self.opcode() == Self::OP_TFOR_CALL);
+        decode_cache_slot(self.c())
     }
-    pub(crate) const fn call(num_args: ArgCount, num_rets: RetCount) -> Self {
+    pub(crate) fn call(num_args: ArgCount, num_rets: RetCount) -> Self {
         Self::op_ab(Self::OP_CALL, num_args.to_u8(), num_rets.to_u8())
+    }
+    /// The argument count of an `OP_CALL`.
+    #[inline(always)]
+    pub(crate) const fn call_args(self) -> ArgCount {
+        debug_assert!(self.opcode() == Self::OP_CALL);
+        ArgCount::from_u8(self.a())
+    }
+    /// The result count an `OP_CALL` asks for.
+    #[inline(always)]
+    pub(crate) const fn call_results(self) -> RetCount {
+        debug_assert!(self.opcode() == Self::OP_CALL);
+        RetCount::from_u8(self.b())
     }
 
     // Jump instructions (signed 16-bit offset)
@@ -941,7 +1030,8 @@ mod tests {
 
     // This fixture is deliberately independent of the declaration tables.
     // Snapshot version changes must review this entire encoding contract,
-    // including holes and builtin slots, rather than blessing reordered data.
+    // including holes, builtin slots and cache operands, rather than blessing
+    // reordered data.
     #[test]
     fn persisted_encodings_match_fixture() {
         use std::fmt::Write;
@@ -959,6 +1049,26 @@ mod tests {
         for (builtin, name) in Builtin::ALL {
             writeln!(actual, "builtin:{name}={}", builtin.to_u8())
                 .expect("writing into String cannot fail");
+        }
+        // Cache operands are persisted inside raw instruction words: pin the
+        // uncached, first and last slot encodings of every cache family.
+        type CacheFamily = (&'static str, fn(Option<u8>) -> Instr);
+        let cache_families: [CacheFamily; 5] = [
+            ("OP_GET_GLOBAL", |s| Instr::get_global(7, s)),
+            ("OP_SET_GLOBAL", |s| Instr::set_global(7, s)),
+            ("OP_GET_FIELD", |s| Instr::get_field(7, s)),
+            ("OP_SET_FIELD", |s| Instr::set_field(7, s)),
+            ("OP_TFOR_CALL", |s| Instr::tfor_call(3, 2, s)),
+        ];
+        for (name, encode) in cache_families {
+            writeln!(
+                actual,
+                "cache:{name}={:08x},{:08x},{:08x}",
+                encode(None).raw(),
+                encode(Some(0)).raw(),
+                encode(Some(254)).raw()
+            )
+            .expect("writing into String cannot fail");
         }
         assert_eq!(
             actual, expected,
@@ -1019,15 +1129,99 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "fixed bytecode argument count must be below 255")]
+    #[should_panic(expected = "fixed bytecode argument count must be at most 254")]
     fn fixed_sentinel_argument_cannot_be_encoded() {
         let _ = Instr::call(ArgCount::Fixed(255), RetCount::Fixed(0));
     }
 
     #[test]
-    #[should_panic(expected = "fixed bytecode result count must be below 255")]
+    #[should_panic(expected = "fixed bytecode result count must be at most 254")]
     fn fixed_sentinel_result_cannot_be_encoded() {
         let _ = Instr::ret(RetCount::Fixed(255));
+    }
+
+    #[test]
+    #[should_panic(expected = "fixed bytecode result count must be at most 254")]
+    fn fixed_sentinel_vararg_cannot_be_encoded() {
+        let _ = Instr::vararg(RetCount::Fixed(255));
+    }
+
+    #[test]
+    #[should_panic(expected = "cache slot must be below 255")]
+    fn cache_slot_255_cannot_be_encoded() {
+        let _ = Instr::get_field(0, Some(u8::MAX));
+    }
+
+    // Snapshot data: every cache operand is biased by one with 0 = uncached,
+    // so the largest slot (254) encodes as 255 and no slot aliases "uncached".
+    #[test]
+    fn cache_operands_share_one_biased_encoding() {
+        type Family = (
+            fn(Option<u8>) -> Instr,
+            fn(Instr) -> u8,
+            fn(Instr) -> Option<u8>,
+        );
+        let families: [Family; 5] = [
+            (
+                |s| Instr::get_global(7, s),
+                Instr::a,
+                Instr::global_cache_slot,
+            ),
+            (
+                |s| Instr::set_global(7, s),
+                Instr::a,
+                Instr::global_cache_slot,
+            ),
+            (
+                |s| Instr::get_field(7, s),
+                Instr::a,
+                Instr::field_cache_slot,
+            ),
+            (
+                |s| Instr::set_field(7, s),
+                Instr::a,
+                Instr::set_field_cache_slot,
+            ),
+            (
+                |s| Instr::tfor_call(3, 2, s),
+                Instr::c,
+                Instr::tfor_cursor_slot,
+            ),
+        ];
+        assert_eq!(super::MAX_CACHE_SLOTS, 255);
+        for (encode, operand, decode) in families {
+            assert_eq!(operand(encode(None)), 0);
+            assert_eq!(decode(encode(None)), None);
+            for slot in 0..u8::MAX {
+                let inst = encode(Some(slot));
+                assert_eq!(operand(inst), slot + 1);
+                assert_eq!(decode(inst), Some(slot));
+            }
+        }
+        // The operands that are not the cache are untouched by the encoding.
+        assert_eq!(Instr::get_global(7, Some(3)).bx(), 7);
+        let tfor = Instr::tfor_call(3, 2, Some(9));
+        assert_eq!((tfor.a(), tfor.b()), (3, 2));
+    }
+
+    #[test]
+    fn count_operands_decode_through_their_count_types() {
+        let call = Instr::call(ArgCount::Dynamic, RetCount::All);
+        assert_eq!(call.call_args(), ArgCount::Dynamic);
+        assert_eq!(call.call_results(), RetCount::All);
+        let call = Instr::call(ArgCount::Fixed(254), RetCount::Fixed(0));
+        assert_eq!(call.call_args(), ArgCount::Fixed(254));
+        assert_eq!(call.call_results(), RetCount::Fixed(0));
+        assert_eq!(Instr::ret(RetCount::All).return_count(), RetCount::All);
+        assert_eq!(
+            Instr::ret(RetCount::Fixed(3)).return_count(),
+            RetCount::Fixed(3)
+        );
+        assert_eq!(Instr::vararg(RetCount::All).vararg_count(), RetCount::All);
+        assert_eq!(
+            Instr::vararg(RetCount::Fixed(254)).vararg_count(),
+            RetCount::Fixed(254)
+        );
     }
 
     #[test]

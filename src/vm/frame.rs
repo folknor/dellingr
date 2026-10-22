@@ -246,9 +246,7 @@ impl Frame {
     /// its bytecode is immutable, so the instruction can be read back rather
     /// than stored per activation.
     pub(super) fn pending_call_results(&self) -> RetCount {
-        let call = self.bytecode.code[self.ip - 1];
-        debug_assert_eq!(call.opcode(), Instr::OP_CALL);
-        RetCount::from_u8(call.b())
+        self.bytecode.code[self.ip - 1].call_results()
     }
 
     /// Run one dispatch-loop invocation over `frames`, which holds its entry
@@ -419,8 +417,12 @@ impl Frame {
                     Instr::OP_SET_UPVALUE => state.instr_set_upvalue(frame, inst.a()),
 
                     // Globals
-                    Instr::OP_GET_GLOBAL => state.instr_get_global(frame, inst.bx(), inst.a())?,
-                    Instr::OP_SET_GLOBAL => state.instr_set_global(frame, inst.bx(), inst.a())?,
+                    Instr::OP_GET_GLOBAL => {
+                        state.instr_get_global(frame, inst.bx(), inst.global_cache_slot())?;
+                    }
+                    Instr::OP_SET_GLOBAL => {
+                        state.instr_set_global(frame, inst.bx(), inst.global_cache_slot())?;
+                    }
 
                     // Builtins (fast path for well-known globals)
                     Instr::OP_GET_BUILTIN => state.instr_get_builtin(inst.a())?,
@@ -431,8 +433,8 @@ impl Frame {
                     Instr::OP_CALL => {
                         frame.record_call_site(state);
                         Self::flush_local_cost(state, local_cost)?;
-                        let args = frame.call_args(state, ArgCount::from_u8(inst.a()))?;
-                        if state.call_from_lua(args, RetCount::from_u8(inst.b()))? {
+                        let args = frame.call_args(state, inst.call_args())?;
+                        if state.call_from_lua(args, inst.call_results())? {
                             frames.extend(std::iter::once_with(|| state.admitted_frame()));
                             continue 'frames;
                         }
@@ -452,7 +454,7 @@ impl Frame {
                     Instr::OP_RETURN => {
                         // Flush any remaining accumulated cost before returning
                         Self::flush_local_cost(state, local_cost)?;
-                        let ret_count = RetCount::from_u8(inst.a());
+                        let ret_count = inst.return_count();
                         if frames.len() == 1 {
                             // The entry frame: its Rust caller finishes the call.
                             return Ok(ret_count);
@@ -461,7 +463,6 @@ impl Frame {
                         continue 'frames;
                     }
                     Instr::OP_VARARG => {
-                        let n = inst.a();
                         // The executing activation is the innermost record; its
                         // varargs, if it received any, are the innermost entry.
                         let has_varargs = state
@@ -474,7 +475,10 @@ impl Frame {
                         } else {
                             0
                         };
-                        let pushed = if n == u8::MAX { available } else { n as usize };
+                        let pushed = match inst.vararg_count() {
+                            RetCount::All => available,
+                            RetCount::Fixed(n) => usize::from(n),
+                        };
                         state.check_stack_space(pushed)?;
                         // Push all varargs, or exactly n padded with nil.
                         let copied = pushed.min(available);
@@ -548,7 +552,7 @@ impl Frame {
                         state.instr_tfor_call(
                             inst.a(),
                             inst.b(),
-                            inst.c(),
+                            inst.tfor_cursor_slot(),
                             &frame.runtime.caches,
                         )?;
                     }
@@ -566,7 +570,12 @@ impl Frame {
                     // Table reads
                     Instr::OP_GET_FIELD => {
                         frame.record_call_site(state);
-                        state.instr_get_field(frame, inst.bx(), inst.a(), local_cost)?;
+                        state.instr_get_field(
+                            frame,
+                            inst.bx(),
+                            inst.field_cache_slot(),
+                            local_cost,
+                        )?;
                     }
                     Instr::OP_GET_TABLE => {
                         frame.record_call_site(state);
@@ -683,7 +692,13 @@ impl Frame {
                             local_cost,
                             const { Instr::op(Instr::OP_SET_FIELD).static_units() }
                         );
-                        state.instr_set_field(frame, 0, inst.bx(), inst.a(), local_cost)?;
+                        state.instr_set_field(
+                            frame,
+                            0,
+                            inst.bx(),
+                            inst.set_field_cache_slot(),
+                            local_cost,
+                        )?;
                     }
                     Instr::OP_SET_FIELD_AT => {
                         frame.record_call_site(state);
@@ -692,7 +707,8 @@ impl Frame {
                             local_cost,
                             const { Instr::op(Instr::OP_SET_FIELD_AT).static_units() }
                         );
-                        state.instr_set_field(frame, inst.a(), inst.bx(), u8::MAX, local_cost)?;
+                        // A is the receiver offset; this form has no cache.
+                        state.instr_set_field(frame, inst.a(), inst.bx(), None, local_cost)?;
                     }
                     Instr::OP_SET_TABLE => {
                         frame.record_call_site(state);

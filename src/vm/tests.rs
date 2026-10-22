@@ -181,7 +181,7 @@ fn vm_test02() {
             Instr::push_string(1),
             Instr::push_string(2),
             Instr::concat(2),
-            Instr::set_global(0),
+            Instr::set_global(0, None),
             Instr::ret(RetCount::Fixed(0)),
         ],
         string_literals: vec!["key".into(), "a".into(), "b".into()],
@@ -200,7 +200,7 @@ fn vm_test04() {
             Instr::push_num(0),
             Instr::push_num(0),
             Instr::equal(),
-            Instr::set_global(0),
+            Instr::set_global(0, None),
             Instr::ret(RetCount::Fixed(0)),
         ],
         number_literals: vec![2.5],
@@ -220,7 +220,7 @@ fn vm_test05() {
             Instr::branch_false_keep(2),
             Instr::pop(),
             Instr::push_bool(false),
-            Instr::set_global(0),
+            Instr::set_global(0, None),
             Instr::ret(RetCount::Fixed(0)),
         ],
         string_literals: vec!["key".into()],
@@ -237,7 +237,7 @@ fn vm_test06() {
         Instr::push_bool(true),
         Instr::branch_false(3),
         Instr::push_num(0),
-        Instr::set_global(0),
+        Instr::set_global(0, None),
         Instr::ret(RetCount::Fixed(0)),
     ];
     let chunk = Bytecode {
@@ -259,7 +259,7 @@ fn vm_test07() {
         Instr::less(),
         Instr::branch_false(2),
         Instr::push_bool(true),
-        Instr::set_global(0),
+        Instr::set_global(0, None),
         Instr::ret(RetCount::Fixed(0)),
     ];
     let chunk = Bytecode {
@@ -276,15 +276,15 @@ fn vm_test07() {
 fn vm_test08() {
     let code = vec![
         Instr::push_num(2), // a = 2
-        Instr::set_global(0),
-        Instr::get_global(0), // a <0
+        Instr::set_global(0, None),
+        Instr::get_global(0, None), // a <0
         Instr::push_num(0),
         Instr::less(),
         Instr::branch_false(5),
-        Instr::get_global(0),
+        Instr::get_global(0, None),
         Instr::push_num(1),
         Instr::add(),
-        Instr::set_global(0),
+        Instr::set_global(0, None),
         Instr::jump(-9),
         Instr::ret(RetCount::Fixed(0)),
     ];
@@ -318,7 +318,7 @@ fn vm_test09() {
         Instr::set_local(0),
         Instr::jump(-9),
         Instr::get_local(0),
-        Instr::set_global(0),
+        Instr::set_global(0, None),
         Instr::ret(RetCount::Fixed(0)),
     ];
     let chunk = Bytecode {
@@ -343,7 +343,7 @@ fn vm_test10() {
         // Start loop
         Instr::for_prep(0, 3),
         Instr::push_num(0),
-        Instr::set_global(0), // a = 2
+        Instr::set_global(0, None), // a = 2
         // End loop
         Instr::for_loop(0, -3),
         Instr::ret(RetCount::Fixed(0)),

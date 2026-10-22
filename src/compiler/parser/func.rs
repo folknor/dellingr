@@ -51,7 +51,7 @@ impl<'a> Parser<'a> {
         let mut last_field_id = self.find_or_add_string(last_field)?;
 
         while self.input.try_pop(TokenType::Dot)?.is_some() {
-            self.push(Instr::get_field(last_field_id));
+            self.push(Instr::get_field(last_field_id, None));
             last_field = self.expect_identifier()?;
             full_name.push('.');
             full_name.push_str(last_field);
@@ -59,7 +59,7 @@ impl<'a> Parser<'a> {
         }
 
         if self.input.try_pop(TokenType::Colon)?.is_some() {
-            self.push(Instr::get_field(last_field_id));
+            self.push(Instr::get_field(last_field_id, None));
             let method_name = self.expect_identifier()?;
             full_name.push(':');
             full_name.push_str(method_name);

@@ -346,7 +346,7 @@ impl Parser<'_> {
                 self.push(Instr::dup());
                 // Stack: [obj, obj]
                 // Get the method from the object
-                self.push(Instr::get_field(name_idx));
+                self.push(Instr::get_field(name_idx, None));
                 // Stack: [obj, method]
                 // Swap so method is below obj (Call expects [func, args...])
                 self.push(Instr::swap());
@@ -426,7 +426,7 @@ impl Parser<'_> {
                     return Err(self.error_here(SyntaxError::VarargOutsideVarargFunction));
                 }
                 // Default: push 1 value (will be adjusted if in tail position)
-                self.push(Instr::vararg(1));
+                self.push(Instr::vararg(RetCount::Fixed(1)));
                 return Ok(ExpDesc::MultiTail(TailKind::Vararg));
             }
             _ => {

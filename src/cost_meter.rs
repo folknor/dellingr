@@ -21,13 +21,16 @@
 /// callback counts every executed costed opcode. The table library also runs
 /// sequence-library metamethods with their normal execution costs, and
 /// output-byte charges change through unsigned NaN formatting and decimal
-/// integral `%q` output.
-pub const COST_MODEL_VERSION: u16 = 5;
+/// integral `%q` output. Version 6 compiles a `string.gmatch` pattern's
+/// leading `^` as a literal byte instead of rewriting it to `%^`, so the
+/// iterator's first-call compilation charge for such a pattern is one unit
+/// lower.
+pub const COST_MODEL_VERSION: u16 = 6;
 
 /// Fingerprint of the fixed source and cost corpus in `tests/cost_golden.rs`,
 /// including `COST_MODEL_VERSION`.
 #[doc(hidden)]
-pub const COST_MODEL_GOLDEN_FINGERPRINT: u64 = 0xec0d_1c77_2501_886a;
+pub const COST_MODEL_GOLDEN_FINGERPRINT: u64 = 0x7dfa_d881_2436_3847;
 
 /// Owned runtime accounting, with one representation of an optional budget.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

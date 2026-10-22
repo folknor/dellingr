@@ -17,25 +17,24 @@ impl<'a> Parser<'a> {
         self.input.next()?; // 'return' keyword
 
         // Check if there's an expression following return
-        let n = if self.is_expr_start()? {
+        let count = if self.is_expr_start()? {
             let (n, last_exp) = self.parse_explist()?;
             match last_exp {
                 ExpDesc::MultiTail(tail) => {
                     self.open_tail(tail, RetCount::All)?;
-                    u8::MAX
+                    RetCount::All
                 }
-                _ => n,
+                // At a return statement boundary the operand stack contains
+                // exactly this expression list, so more fixed expressions
+                // than bytecode can count deliberately return All: rejecting
+                // the source would remove an existing accepted program.
+                _ if usize::from(n) > MAX_FIXED_RESULTS => RetCount::All,
+                _ => RetCount::Fixed(n),
             }
         } else {
-            0
+            RetCount::Fixed(0)
         };
-
-        // At a return statement boundary the operand stack contains exactly
-        // this expression list. 255 fixed expressions deliberately use All:
-        // the bytecode has no fixed-255 encoding, while rejecting this source
-        // would remove an existing accepted program. Tail calls/varargs also
-        // select All explicitly via the same decoded sentinel above.
-        self.push(Instr::ret(RetCount::from_u8(n)));
+        self.push(Instr::ret(count));
         self.input.try_pop(TokenType::Semi)?;
         Ok(())
     }
@@ -346,7 +345,7 @@ impl<'a> Parser<'a> {
         // Jump back to TForCall
 
         let loop_start = self.funcs.chunk.code.len();
-        self.push(Instr::tfor_call(base_slot, num_loop_vars));
+        self.push(Instr::tfor_call(base_slot, num_loop_vars, None));
         let tforloop_index = self.funcs.chunk.code.len();
         self.push(Instr::tfor_loop(base_slot, 0)); // placeholder offset
 

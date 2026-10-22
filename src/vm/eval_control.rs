@@ -172,7 +172,7 @@ impl State {
         &mut self,
         local_slot: u8,
         num_vars: u8,
-        cursor_operand: u8,
+        cursor_slot: Option<u8>,
         caches: &RuntimeCaches,
     ) -> Result<()> {
         let base = local_slot as usize + self.stack_bottom;
@@ -189,7 +189,7 @@ impl State {
             let base_next_fn: RustFunc = base_next;
             let base_ipairs_iter_fn: RustFunc = base_ipairs_iter;
             if std::ptr::fn_addr_eq(f, base_next_fn)
-                && self.instr_tfor_call_next(base, state, control, num_vars, cursor_operand, caches)
+                && self.instr_tfor_call_next(base, state, control, num_vars, cursor_slot, caches)
             {
                 return Ok(());
             }
@@ -245,7 +245,7 @@ impl State {
         state: Val,
         control: Val,
         num_vars: u8,
-        cursor_operand: u8,
+        cursor_slot: Option<u8>,
         caches: &RuntimeCaches,
     ) -> bool {
         let Some(table_ptr) = state.as_object_ptr() else {
@@ -255,9 +255,7 @@ impl State {
             return false;
         };
 
-        let cursor = cursor_operand
-            .checked_sub(1)
-            .and_then(|index| caches.tfor_cursor.get(index as usize));
+        let cursor = caches.tfor_cursor(cursor_slot);
         let next = match cursor.and_then(TforCursorSlot::get) {
             Some(entry) if entry.table == table_ptr => {
                 match tbl.next_from_matching_index(entry.index, &control) {

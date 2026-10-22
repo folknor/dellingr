@@ -7,16 +7,15 @@
 //! compiled program, but its format carries no cross-version guarantee and it
 //! is not replay data.
 //!
-//! The annotations restate the operand conventions of `instr.rs`
-//! (literal-pool operands, cache sentinels, count sentinels, transfer
-//! targets). The verifier restates them too, deliberately; this copy is only
-//! descriptive, and the unit tests below pin each convention so a change to
-//! the encoding fails here rather than silently misdescribing it.
+//! The annotations describe the operands of `instr.rs`: literal-pool
+//! operands, cache slots, counts and transfer targets. Cache slots and counts
+//! are read through `Instr`'s typed decoders, so they cannot drift from the
+//! encoding; the unit tests below pin the rendering.
 
 use std::fmt;
 
 use crate::compiler::{Bytecode, UpvalueDesc};
-use crate::instr::Instr;
+use crate::instr::{Instr, RetCount};
 
 /// A borrowed, displayable bytecode listing of a [`Program`](crate::Program).
 ///
@@ -65,10 +64,7 @@ fn write_function(f: &mut fmt::Formatter<'_>, bc: &Bytecode, path: &mut String) 
     writeln!(
         f,
         "  cache slots: global={} field={} set_field={} tfor_cursor={}",
-        bc.global_cache_slots,
-        bc.field_cache_slots,
-        bc.set_field_cache_slots,
-        tfor_cursor_slots(bc)
+        bc.global_cache_slots, bc.field_cache_slots, bc.set_field_cache_slots, bc.tfor_cursor_slots
     )?;
 
     if !bc.upvalues.is_empty() {
@@ -123,17 +119,6 @@ fn write_function(f: &mut fmt::Formatter<'_>, bc: &Bytecode, path: &mut String) 
         path.truncate(len);
     }
     Ok(())
-}
-
-/// The runtime derives the cursor count the same way: finalization does not
-/// store it (a fourth stored count would change the snapshot format).
-fn tfor_cursor_slots(bc: &Bytecode) -> u8 {
-    bc.code
-        .iter()
-        .filter(|inst| inst.opcode() == Instr::OP_TFOR_CALL)
-        .map(|inst| inst.c())
-        .max()
-        .unwrap_or(0)
 }
 
 fn write_string_ref(f: &mut fmt::Formatter<'_>, bc: &Bytecode, idx: u16) -> fmt::Result {
@@ -202,14 +187,12 @@ fn write_annotation(
         _ => {}
     }
 
-    // Cache operands: GET_GLOBAL, GET_FIELD and SET_FIELD use 255 for
-    // "uncached"; SET_GLOBAL (A) and TFOR_CALL (C) are biased, 0 = uncached.
+    // Cache operands, decoded by `Instr`'s cache-slot decoders.
     let cache = match op {
-        Instr::OP_GET_GLOBAL | Instr::OP_GET_FIELD | Instr::OP_SET_FIELD => {
-            Some((inst.a() != u8::MAX).then_some(inst.a()))
-        }
-        Instr::OP_SET_GLOBAL => Some(inst.a().checked_sub(1)),
-        Instr::OP_TFOR_CALL => Some(inst.c().checked_sub(1)),
+        Instr::OP_GET_GLOBAL | Instr::OP_SET_GLOBAL => Some(inst.global_cache_slot()),
+        Instr::OP_GET_FIELD => Some(inst.field_cache_slot()),
+        Instr::OP_SET_FIELD => Some(inst.set_field_cache_slot()),
+        Instr::OP_TFOR_CALL => Some(inst.tfor_cursor_slot()),
         _ => None,
     };
     if let Some(cache) = cache {
@@ -221,7 +204,7 @@ fn write_annotation(
     }
 
     match op {
-        Instr::OP_VARARG if inst.a() == u8::MAX => {
+        Instr::OP_VARARG if inst.vararg_count() == RetCount::All => {
             notes.next(f)?;
             f.write_str("all values")?;
         }
@@ -253,7 +236,6 @@ fn write_annotation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::instr::RetCount;
     use std::sync::Arc;
 
     fn annotate(bc: &Bytecode, pc: usize) -> String {
@@ -279,17 +261,17 @@ mod tests {
     }
 
     #[test]
-    fn cache_sentinels_decode_both_conventions() {
+    fn cache_slots_are_named() {
         let bc = with_code(vec![
-            Instr::get_global(0),
-            Instr::get_global_cached(0, 254),
-            Instr::set_global(0),
-            Instr::set_global_cached(0, 254),
-            Instr::get_field(0),
-            Instr::get_field_cached(0, 3),
-            Instr::set_field_cached(0, u8::MAX),
-            Instr::tfor_call(0, 1),
-            Instr::tfor_call_cached(0, 1, 254),
+            Instr::get_global(0, None),
+            Instr::get_global(0, Some(254)),
+            Instr::set_global(0, None),
+            Instr::set_global(0, Some(254)),
+            Instr::get_field(0, None),
+            Instr::get_field(0, Some(3)),
+            Instr::set_field(0, None),
+            Instr::tfor_call(0, 1, None),
+            Instr::tfor_call(0, 1, Some(254)),
         ]);
         assert_eq!(annotate(&bc, 0), "  ; \"x\\n\\xff\", uncached");
         assert_eq!(annotate(&bc, 1), "  ; \"x\\n\\xff\", cache slot 254");
@@ -300,14 +282,13 @@ mod tests {
         assert_eq!(annotate(&bc, 6), "  ; \"x\\n\\xff\", uncached");
         assert_eq!(annotate(&bc, 7), "  ; uncached");
         assert_eq!(annotate(&bc, 8), "  ; cache slot 254");
-        assert_eq!(tfor_cursor_slots(&bc), 255);
     }
 
     #[test]
     fn count_sentinels_pools_and_children_are_named() {
         let bc = with_code(vec![
-            Instr::vararg(u8::MAX),
-            Instr::vararg(2),
+            Instr::vararg(RetCount::All),
+            Instr::vararg(RetCount::Fixed(2)),
             Instr::set_list_batch(0, 1),
             Instr::set_list_batch(3, 0),
             Instr::push_num(0),

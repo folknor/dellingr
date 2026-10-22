@@ -15,6 +15,7 @@ mod luapat;
 use self::luapat::{CompiledPattern, LUA_MAXMATCHES, compile, str_match};
 
 pub(crate) use self::errors::{MatchError, PatternError};
+pub(crate) use self::luapat::AnchorMode;
 pub(crate) use self::luapat::LuaCapture;
 
 /// Whether every byte in `pattern` is literal to the Lua pattern compiler.
@@ -42,8 +43,8 @@ pub(crate) struct SharedPattern(Arc<CompiledPattern>);
 
 impl SharedPattern {
     /// Compile `bytes` into a shareable program. Compilation cannot fail.
-    pub(crate) fn compile(bytes: &[u8]) -> SharedPattern {
-        SharedPattern(Arc::new(compile(bytes)))
+    pub(crate) fn compile(bytes: &[u8], mode: AnchorMode) -> SharedPattern {
+        SharedPattern(Arc::new(compile(bytes, mode)))
     }
 
     /// A matcher over this program with empty capture output.
@@ -79,8 +80,16 @@ impl LuaPattern {
     /// `matches_bytes_from` at the point reference would raise them.
     /// An unclosed capture is reported as
     /// `LuaCapture::Unfinished` for the consumer to reject.
+    ///
+    /// A leading `^` anchors the match (`AnchorMode::Honour`).
     pub(crate) fn new(bytes: &[u8]) -> LuaPattern {
-        LuaPattern::from_compiled(Arc::new(compile(bytes)))
+        LuaPattern::from_compiled(Arc::new(compile(bytes, AnchorMode::Honour)))
+    }
+
+    /// Whether the program matches only at the initial position (a leading
+    /// `^` compiled under `AnchorMode::Honour`).
+    pub(crate) fn is_anchored(&self) -> bool {
+        self.compiled.is_anchored()
     }
 
     /// Match a slice of bytes with this pattern, searching from the start.
@@ -671,6 +680,73 @@ mod tests {
         assert_eq!(captures.capture(1), LuaCapture::Position(1));
         assert_eq!(captures.capture(2), LuaCapture::Bytes { start: 1, end: 2 });
         assert_eq!(captures.capture(3), LuaCapture::Position(2));
+    }
+
+    /// `AnchorMode::Literal` must run exactly the program the old `%^`
+    /// rewrite produced: same matches, captures, lazy errors and matcher
+    /// cost, with no anchoring.
+    #[test]
+    fn literal_anchor_mode_matches_the_escaped_caret_program() {
+        let patterns: &[&[u8]] = &[
+            b"^",
+            b"^a",
+            b"^*",
+            b"^+a",
+            b"^-a",
+            b"^?a",
+            b"^(a)",
+            b"^()",
+            b"^%",
+            b"^(a",
+            b"^[",
+            b"^)",
+            b"^%f[%a]a",
+            b"^%b()",
+            b"^%1",
+            b"^$",
+        ];
+        let subjects: &[&[u8]] = &[b"", b"a", b"^a", b"x^a^^a", b"^(a)", b"^^^"];
+        for pattern in patterns {
+            let escaped = [b"%".as_slice(), pattern].concat();
+            let literal = SharedPattern::compile(pattern, AnchorMode::Literal);
+            assert!(!literal.matcher().is_anchored(), "{pattern:?}");
+            for subject in subjects {
+                for init in 0..=subject.len() {
+                    let (mut used_literal, mut used_escaped) = (0, 0);
+                    let mut literal = literal.matcher();
+                    let mut escaped = LuaPattern::new(&escaped);
+                    let a = literal.matches_bytes_from(
+                        subject,
+                        init,
+                        &mut count_only(&mut used_literal),
+                    );
+                    let b = escaped.matches_bytes_from(
+                        subject,
+                        init,
+                        &mut count_only(&mut used_escaped),
+                    );
+                    let context = format!("{pattern:?} on {subject:?} from {init}");
+                    assert_eq!(format!("{a:?}"), format!("{b:?}"), "{context}");
+                    assert_eq!(used_literal, used_escaped, "{context}");
+                    if matches!(a, Ok(true)) {
+                        assert_eq!(literal.num_matches(), escaped.num_matches(), "{context}");
+                        for i in 0..literal.num_matches() {
+                            assert_eq!(literal.capture(i), escaped.capture(i), "{context}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn anchor_modes_differ_only_on_a_leading_caret() {
+        assert_eq!(AnchorMode::Literal.effective(b"^a"), AnchorMode::Literal);
+        assert_eq!(AnchorMode::Literal.effective(b"a^"), AnchorMode::Honour);
+        assert_eq!(AnchorMode::Literal.effective(b""), AnchorMode::Honour);
+        assert_eq!(AnchorMode::Honour.effective(b"^a"), AnchorMode::Honour);
+        assert!(LuaPattern::new(b"^a").is_anchored());
+        assert!(!LuaPattern::new(b"a^").is_anchored());
     }
 
     #[test]

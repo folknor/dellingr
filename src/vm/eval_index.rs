@@ -45,14 +45,14 @@ impl State {
         &mut self,
         frame: &mut Frame,
         field_id: u16,
-        cache_idx: u8,
+        cache_slot: Option<u8>,
         local_cost: &mut u64,
     ) -> Result<()> {
         // Pop value, handle both tables and strings
         let val = self.pop_val();
         let key = frame.literal(field_id);
 
-        let cache = frame.runtime.caches.field_lookup.get(cache_idx as usize);
+        let cache = frame.runtime.caches.field(cache_slot);
 
         // Direct results replace the receiver popped above and need no
         // preflight. Metamethod and string-library helpers check their own
@@ -460,10 +460,10 @@ impl State {
         &mut self,
         frame: &Frame,
         string_num: u16,
-        cache_idx: u8,
+        cache_slot: Option<u8>,
     ) -> Result<()> {
         let s = &frame.bytecode().string_literals[string_num as usize];
-        let cache = frame.runtime.caches.global_lookup.get(cache_idx as usize);
+        let cache = frame.runtime.caches.global(cache_slot);
         // Net-positive by one slot, matching the uncached `get_global` path.
         if let Some(val) = cache.and_then(|cache| self.get_cached_global(cache)) {
             self.check_stack_space(1)?;

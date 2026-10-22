@@ -45,7 +45,7 @@ use super::error::StackFrame;
 use super::error::TypeError;
 use super::host::{DefaultCallbacks, HostCallbacks};
 use super::instr::{ArgCount, Builtin, RetCount};
-use super::patterns::{LuaPattern, SharedPattern};
+use super::patterns::{AnchorMode, LuaPattern, SharedPattern};
 
 use anchor::Registry;
 use global_env::GlobalEnv;
@@ -238,13 +238,16 @@ pub struct State {
     /// `string.gsub` and `string.gmatch` iterators.
     ///
     /// Keys are interned string pointers, so cache lookup does not compare
-    /// pattern bytes. Insertion order makes eviction deterministic.
+    /// pattern bytes, paired with the effective `AnchorMode`: `gmatch` reads
+    /// a leading `^` literally where the other functions anchor, so the same
+    /// string can need two programs. Insertion order makes eviction
+    /// deterministic.
     /// It is an implementation cache only: no charge depends on residency,
     /// iterator state remains entirely in Lua values, and a snapshot simply
     /// rebuilds entries on later use. Entries are reference-counted, so an
     /// operation that calls back into Lua (a gsub replacement function) keeps
     /// its program alive across GC clearing or eviction.
-    patterns: IndexMap<StringPtr, PatternCacheEntry>,
+    patterns: IndexMap<(StringPtr, AnchorMode), PatternCacheEntry>,
     pattern_bytes: usize,
     #[cfg(debug_assertions)]
     pattern_compilations: u64,
@@ -630,19 +633,20 @@ impl State {
     /// No caller charges for compilation itself, so residency is invisible to
     /// the cost model. Malformed pattern points are encoded in the program and
     /// raise only when a match reaches them, cached or not.
-    fn cached_pattern_at(&mut self, idx: usize) -> SharedPattern {
+    fn cached_pattern_at(&mut self, idx: usize, mode: AnchorMode) -> SharedPattern {
         let val = &self.stack[idx];
         let ptr = val
             .as_string_ptr()
             .expect("expect_string_at validated the value's string type");
-        if let Some(entry) = self.patterns.get(&ptr) {
-            return entry.pattern.clone();
-        }
         let bytes = val
             .as_string(&self.heap)
             .expect("string pointer came from a string value");
+        let key = (ptr, mode.effective(bytes));
+        if let Some(entry) = self.patterns.get(&key) {
+            return entry.pattern.clone();
+        }
         let pattern_len = bytes.len();
-        let compiled = SharedPattern::compile(bytes);
+        let compiled = SharedPattern::compile(bytes, key.1);
         #[cfg(debug_assertions)]
         {
             self.pattern_compilations = self.pattern_compilations.saturating_add(1);
@@ -658,7 +662,7 @@ impl State {
         }
         self.pattern_bytes = self.pattern_bytes.saturating_add(pattern_len);
         self.patterns.insert(
-            ptr,
+            key,
             PatternCacheEntry {
                 pattern: compiled.clone(),
                 byte_len: pattern_len,
@@ -667,16 +671,18 @@ impl State {
         compiled
     }
 
-    /// A matcher for the string pattern at 1-based stack index `idx`, from cache.
+    /// A matcher for the string pattern at 1-based stack index `idx`, from
+    /// cache, with a leading `^` anchoring the match.
     ///
     /// The matcher owns a reference to its program, so the caller may run Lua
     /// (and so allocate, collect or evict) while holding it.
     pub(crate) fn cached_pattern_matcher(&mut self, idx: isize) -> Result<LuaPattern> {
         let idx = self.expect_string_at(idx)?;
-        Ok(self.cached_pattern_at(idx).matcher())
+        Ok(self.cached_pattern_at(idx, AnchorMode::Honour).matcher())
     }
 
-    /// Run a gmatch search with the cached matcher for its pattern.
+    /// Run a gmatch search with the cached matcher for its pattern, in which
+    /// a leading `^` is a literal byte, as in reference `gmatch`.
     pub(crate) fn with_gmatch_matcher<T>(
         &mut self,
         subject_idx: isize,
@@ -686,7 +692,9 @@ impl State {
         // Preserve the argument-type contract before touching the cache.
         let subject_idx = self.expect_string_at(subject_idx)?;
         let pattern_idx = self.expect_string_at(pattern_idx)?;
-        let mut matcher = self.cached_pattern_at(pattern_idx).matcher();
+        let mut matcher = self
+            .cached_pattern_at(pattern_idx, AnchorMode::Literal)
+            .matcher();
         let State {
             stack, heap, cost, ..
         } = self;

@@ -192,7 +192,7 @@ fn test01() {
     let out = Bytecode {
         code: vec![
             Instr::push_num(2),
-            Instr::set_global(0),
+            Instr::set_global(0, None),
             Instr::ret(RetCount::Fixed(0)),
         ],
         number_literals: vec![5.0, 6.0, 11.0],
@@ -213,7 +213,7 @@ fn test02() {
             Instr::push_num(1),
             Instr::pow(),
             Instr::negate(),
-            Instr::set_global(0),
+            Instr::set_global(0, None),
             Instr::ret(RetCount::Fixed(0)),
         ],
         number_literals: vec![5.0, 2.0],
@@ -233,7 +233,7 @@ fn test03() {
             Instr::add(),
             Instr::push_string(1),
             Instr::concat(2),
-            Instr::set_global(0),
+            Instr::set_global(0, None),
             Instr::ret(RetCount::Fixed(0)),
         ],
         number_literals: vec![5.0],
@@ -252,7 +252,7 @@ fn test04() {
             Instr::push_num(0),
             Instr::push_num(3),
             Instr::concat(2),
-            Instr::set_global(0),
+            Instr::set_global(0, None),
             Instr::ret(RetCount::Fixed(0)),
         ],
         number_literals: vec![1.0, 2.0, 3.0, 5.0],
@@ -272,7 +272,7 @@ fn concat_chain_emits_single_n_ary_concat() {
             Instr::push_string(3),
             Instr::push_string(4),
             Instr::concat(4),
-            Instr::set_global(0),
+            Instr::set_global(0, None),
             Instr::ret(RetCount::Fixed(0)),
         ],
         string_literals: vec!["x".into(), "a".into(), "b".into(), "c".into(), "d".into()],
@@ -290,7 +290,7 @@ fn test05() {
             Instr::push_num(0),
             Instr::push_num(2),
             Instr::pow(),
-            Instr::set_global(0),
+            Instr::set_global(0, None),
             Instr::ret(RetCount::Fixed(0)),
         ],
         number_literals: vec![2.0, 3.0, -3.0],
@@ -308,7 +308,7 @@ fn test06() {
             Instr::push_num(0),
             Instr::not(),
             Instr::not(),
-            Instr::set_global(0),
+            Instr::set_global(0, None),
             Instr::ret(RetCount::Fixed(0)),
         ],
         number_literals: vec![1.0],
@@ -324,7 +324,7 @@ fn test07() {
     let output = Bytecode {
         code: vec![
             Instr::push_num(0),
-            Instr::set_global(0),
+            Instr::set_global(0, None),
             Instr::ret(RetCount::Fixed(0)),
         ],
         number_literals: vec![5.0],
@@ -343,7 +343,7 @@ fn test08() {
             Instr::branch_false_keep(2),
             Instr::pop(),
             Instr::push_bool(false),
-            Instr::set_global(0),
+            Instr::set_global(0, None),
             Instr::ret(RetCount::Fixed(0)),
         ],
         string_literals: vec!["x".into()],
@@ -363,7 +363,7 @@ fn test09() {
         Instr::branch_false_keep(2),
         Instr::pop(),
         Instr::push_bool(true),
-        Instr::set_global(0),
+        Instr::set_global(0, None),
         Instr::ret(RetCount::Fixed(0)),
     ];
     let output = Bytecode {
@@ -382,7 +382,7 @@ fn test10() {
         Instr::push_bool(true),
         Instr::branch_false(2),
         Instr::push_num(0),
-        Instr::set_global(0),
+        Instr::set_global(0, None),
         Instr::ret(RetCount::Fixed(0)),
     ];
     let chunk = Bytecode {
@@ -401,11 +401,11 @@ fn test11() {
         Instr::push_bool(true),
         Instr::branch_false(6),
         Instr::push_num(0),
-        Instr::set_global(0),
+        Instr::set_global(0, None),
         Instr::push_bool(true),
         Instr::branch_false(2),
         Instr::push_num(1),
-        Instr::set_global(1),
+        Instr::set_global(1, None),
         Instr::ret(RetCount::Fixed(0)),
     ];
     let chunk = Bytecode {
@@ -424,10 +424,10 @@ fn test12() {
         Instr::push_bool(true),
         Instr::branch_false(3),
         Instr::push_num(0),
-        Instr::set_global(0),
+        Instr::set_global(0, None),
         Instr::jump(2),
         Instr::push_num(1),
-        Instr::set_global(0),
+        Instr::set_global(0, None),
         Instr::ret(RetCount::Fixed(0)),
     ];
     let chunk = Bytecode {
@@ -447,16 +447,16 @@ fn test13() {
         Instr::push_bool(true),
         Instr::branch_false(3),
         Instr::push_num(0),
-        Instr::set_global(0),
+        Instr::set_global(0, None),
         Instr::jump(8),
         Instr::push_num(1),
         Instr::push_num(2),
         Instr::branch_false_equal(3),
         Instr::push_num(3),
-        Instr::set_global(0),
+        Instr::set_global(0, None),
         Instr::jump(2),
         Instr::push_num(4),
-        Instr::set_global(0),
+        Instr::set_global(0, None),
         Instr::ret(RetCount::Fixed(0)),
     ];
     let chunk = Bytecode {
@@ -473,13 +473,13 @@ fn test14() {
     // The loop condition ends in a comparison, so the test branch fuses.
     let text = "while a < 10 do a = a + 1 end";
     let code = vec![
-        Instr::get_global(0),
+        Instr::get_global(0, None),
         Instr::push_num(0),
         Instr::branch_false_less(5),
-        Instr::get_global(0),
+        Instr::get_global(0, None),
         Instr::push_num(1),
         Instr::add(),
-        Instr::set_global(0),
+        Instr::set_global(0, None),
         Instr::jump(-8),
         Instr::ret(RetCount::Fixed(0)),
     ];
@@ -500,11 +500,11 @@ fn test15() {
     let code = vec![
         Instr::push_num(0),
         Instr::set_local(0),
-        Instr::get_global(0),
-        Instr::get_global(1),
+        Instr::get_global(0, None),
+        Instr::get_global(1, None),
         Instr::branch_false_equal(-5),
         Instr::push_num(1),
-        Instr::set_global(2),
+        Instr::set_global(2, None),
         Instr::ret(RetCount::Fixed(0)),
     ];
     let chunk = Bytecode {
@@ -569,9 +569,9 @@ fn test18() {
         Instr::push_nil(),
         Instr::set_local(1),
         Instr::get_local(1),
-        Instr::set_global(0),
+        Instr::set_global(0, None),
         Instr::get_local(0),
-        Instr::set_global(0),
+        Instr::set_global(0, None),
         Instr::ret(RetCount::Fixed(0)),
     ];
     let chunk = Bytecode {
@@ -590,9 +590,9 @@ fn test19() {
         Instr::push_nil(),
         Instr::set_local(0),
         Instr::get_local(0),
-        Instr::set_global(0),
-        Instr::get_global(1),
-        Instr::set_global(0),
+        Instr::set_global(0, None),
+        Instr::get_global(1, None),
+        Instr::set_global(0, None),
         Instr::ret(RetCount::Fixed(0)),
     ];
     let chunk = Bytecode {
@@ -616,7 +616,7 @@ fn test20() {
         Instr::set_local(1),
         Instr::jump(2),
         Instr::get_local(0),
-        Instr::set_global(0),
+        Instr::set_global(0, None),
         Instr::ret(RetCount::Fixed(0)),
     ];
     let chunk = Bytecode {
@@ -637,7 +637,7 @@ fn test21() {
         Instr::push_num(0),
         Instr::for_prep(0, 3),
         Instr::get_local(3),
-        Instr::set_global(0),
+        Instr::set_global(0, None),
         Instr::for_loop(0, -3),
         Instr::ret(RetCount::Fixed(0)),
     ];
@@ -657,13 +657,13 @@ fn generic_for_bytecode_keeps_control_and_visible_slots() {
     let code = vec![
         Instr::get_builtin(Builtin::Pairs),
         Instr::nop(),
-        Instr::get_global(0),
+        Instr::get_global(0, None),
         Instr::call(ArgCount::Fixed(1), RetCount::Fixed(3)),
         Instr::tfor_prep(0),
-        Instr::tfor_call(0, 2),
+        Instr::tfor_call(0, 2, None),
         Instr::tfor_loop(0, 3),
         Instr::get_local(3),
-        Instr::set_global(1),
+        Instr::set_global(1, None),
         Instr::jump(-5),
         Instr::ret(RetCount::Fixed(0)),
     ];
@@ -691,8 +691,8 @@ fn test22() {
     let code = vec![
         Instr::push_num(0),
         Instr::push_nil(),
-        Instr::set_global(1),
-        Instr::set_global(0),
+        Instr::set_global(1, None),
+        Instr::set_global(0, None),
         Instr::ret(RetCount::Fixed(0)),
     ];
     let chunk = Bytecode {
@@ -710,8 +710,8 @@ fn test23() {
     let code = vec![
         Instr::push_num(0),
         Instr::push_num(1),
-        Instr::set_global(1),
-        Instr::set_global(0),
+        Instr::set_global(1, None),
+        Instr::set_global(0, None),
         Instr::ret(RetCount::Fixed(0)),
     ];
     let chunk = Bytecode {
@@ -731,8 +731,8 @@ fn test24() {
         Instr::push_num(1),
         Instr::push_num(2),
         Instr::pop(),
-        Instr::set_global(1),
-        Instr::set_global(0),
+        Instr::set_global(1, None),
+        Instr::set_global(0, None),
         Instr::ret(RetCount::Fixed(0)),
     ];
     let chunk = Bytecode {
@@ -748,7 +748,7 @@ fn test24() {
 fn test25() {
     let text = "puts()";
     let code = vec![
-        Instr::get_global(0),
+        Instr::get_global(0, None),
         Instr::nop(),
         Instr::call(ArgCount::Fixed(0), RetCount::Fixed(0)),
         Instr::ret(RetCount::Fixed(0)),
@@ -768,7 +768,7 @@ fn test26() {
         Instr::new_table(),
         Instr::push_num(0),
         Instr::init_field(0, 1),
-        Instr::set_global(0),
+        Instr::set_global(0, None),
         Instr::ret(RetCount::Fixed(0)),
     ];
     let chunk = Bytecode {
@@ -795,7 +795,7 @@ fn table_constructor_presizes_larger_literals() {
         Instr::init_field_pinned(4, 3),
         Instr::push_num(4),
         Instr::init_field_pinned(5, 4),
-        Instr::set_global(0),
+        Instr::set_global(0, None),
         Instr::ret(RetCount::Fixed(0)),
     ];
     let chunk = Bytecode {
@@ -830,7 +830,7 @@ fn duplicate_table_constructor_keys_use_presized_table() {
         Instr::init_field(0, 4),
         Instr::push_num(4),
         Instr::init_field(0, 1),
-        Instr::set_global(0),
+        Instr::set_global(0, None),
         Instr::ret(RetCount::Fixed(0)),
     ];
     let chunk = Bytecode {
@@ -855,10 +855,10 @@ fn computed_table_constructor_keys_use_presized_table() {
         Instr::init_field(0, 3),
         Instr::push_num(3),
         Instr::init_field(0, 4),
-        Instr::get_global(5),
+        Instr::get_global(5, None),
         Instr::push_num(4),
         Instr::init_index(0),
-        Instr::set_global(0),
+        Instr::set_global(0, None),
         Instr::ret(RetCount::Fixed(0)),
     ];
     let chunk = Bytecode {
@@ -930,7 +930,7 @@ fn table_constructor_expands_only_final_bare_call_or_vararg() {
         final_vararg
             .code
             .iter()
-            .any(|instr| instr == &Instr::vararg(u8::MAX))
+            .any(|instr| instr == &Instr::vararg(RetCount::All))
     );
     assert!(
         final_vararg
@@ -944,7 +944,7 @@ fn table_constructor_expands_only_final_bare_call_or_vararg() {
         non_final_vararg
             .code
             .iter()
-            .any(|instr| instr == &Instr::vararg(1))
+            .any(|instr| instr == &Instr::vararg(RetCount::Fixed(1)))
     );
     assert!(
         non_final_vararg
@@ -1075,7 +1075,7 @@ fn table_constructor_does_not_expand_non_bare_tails() {
         paren_vararg
             .code
             .iter()
-            .any(|instr| instr == &Instr::vararg(1))
+            .any(|instr| instr == &Instr::vararg(RetCount::Fixed(1)))
     );
     assert!(
         paren_vararg
@@ -1089,9 +1089,9 @@ fn table_constructor_does_not_expand_non_bare_tails() {
 fn test27() {
     let text = "local x = t.x.y";
     let code = vec![
-        Instr::get_global(0),
-        Instr::get_field(1),
-        Instr::get_field(2),
+        Instr::get_global(0, None),
+        Instr::get_field(1, None),
+        Instr::get_field(2, None),
         Instr::set_local(0),
         Instr::ret(RetCount::Fixed(0)),
     ];
@@ -1109,7 +1109,7 @@ fn test28() {
     let text = "x = function () end";
     let code = vec![
         Instr::closure(0),
-        Instr::set_global(0),
+        Instr::set_global(0, None),
         Instr::ret(RetCount::Fixed(0)),
     ];
     let string_literals = vec!["x".into()];
@@ -1142,7 +1142,7 @@ fn test29() {
     let outer_chunk = Bytecode {
         code: vec![
             Instr::closure(0),
-            Instr::set_global(0),
+            Instr::set_global(0, None),
             Instr::ret(RetCount::Fixed(0)),
         ],
         string_literals: vec!["x".into()],
@@ -1191,9 +1191,9 @@ fn test30() {
     let outer_chunk = Bytecode {
         code: vec![
             Instr::closure(0),
-            Instr::set_global(0),
+            Instr::set_global(0, None),
             Instr::closure(1),
-            Instr::set_global(1),
+            Instr::set_global(1, None),
             Instr::ret(RetCount::Fixed(0)),
         ],
         nested: vec![Arc::new(z), Arc::new(x)],
@@ -1301,7 +1301,7 @@ fn test34() {
         Instr::push_nil(),
         Instr::set_local(0),
         Instr::jump(-5),
-        Instr::get_global(0),
+        Instr::get_global(0, None),
         Instr::nop(),
         Instr::call(ArgCount::Fixed(0), RetCount::Fixed(0)),
         Instr::ret(RetCount::Fixed(0)),
@@ -1323,9 +1323,9 @@ fn assignment_tail_vararg_expands_to_lvalue_count() {
     assert_eq!(
         function.code,
         vec![
-            Instr::vararg(2),
-            Instr::set_global(1),
-            Instr::set_global(0),
+            Instr::vararg(RetCount::Fixed(2)),
+            Instr::set_global(1, None),
+            Instr::set_global(0, None),
             Instr::ret(RetCount::Fixed(0)),
         ]
     );
@@ -1371,7 +1371,7 @@ fn local_vararg_assignment_bytecode_is_unchanged() {
     assert_eq!(
         function.code,
         vec![
-            Instr::vararg(3),
+            Instr::vararg(RetCount::Fixed(3)),
             Instr::set_local(2),
             Instr::set_local(1),
             Instr::set_local(0),
@@ -1388,7 +1388,7 @@ fn local_tail_call_assignment_bytecode_is_unchanged() {
     assert_eq!(
         function.code,
         vec![
-            Instr::get_global(0),
+            Instr::get_global(0, None),
             Instr::nop(),
             Instr::call(ArgCount::Fixed(0), RetCount::Fixed(3)),
             Instr::set_local(2),
@@ -1512,7 +1512,7 @@ fn nested_chunks_preserve_shape_and_source_name() {
         chunk.code,
         vec![
             Instr::closure(0),
-            Instr::set_global(0),
+            Instr::set_global(0, None),
             Instr::ret(RetCount::Fixed(0)),
         ]
     );
@@ -1524,7 +1524,7 @@ fn nested_chunks_preserve_shape_and_source_name() {
         f.code,
         vec![
             Instr::closure(0),
-            Instr::set_global(0),
+            Instr::set_global(0, None),
             Instr::ret(RetCount::Fixed(0)),
         ]
     );
@@ -2414,7 +2414,9 @@ fn nested_dynamic_call_arguments_survive_tail_rewrites() {
     ] {
         let bytecode = parse_str(source).expect("nested dynamic calls compile");
         assert!(bytecode.code.iter().any(|inst| {
-            inst.opcode() == Instr::OP_CALL && inst.a() == u8::MAX && inst.b() == u8::MAX
+            inst.opcode() == Instr::OP_CALL
+                && inst.call_args() == ArgCount::Dynamic
+                && inst.call_results() == RetCount::All
         }));
     }
 }
@@ -2453,10 +2455,10 @@ fn block_exit_restores_shadowed_capture_slot_without_closing_parent_on_function_
             Instr::push_nil(),
             Instr::set_local(1),
             Instr::closure(0),
-            Instr::set_global(0),
+            Instr::set_global(0, None),
             Instr::close_upvalues(1),
             Instr::closure(1),
-            Instr::set_global(1),
+            Instr::set_global(1, None),
             Instr::ret(RetCount::Fixed(0)),
         ]
     );

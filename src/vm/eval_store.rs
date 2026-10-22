@@ -211,17 +211,13 @@ impl State {
         frame: &Frame,
         stack_offset: u8,
         field_id: u16,
-        cache_idx: u8,
+        cache_slot: Option<u8>,
         local_cost: &mut u64,
     ) -> Result<()> {
         let val = self.pop_val();
         let idx = self.stack.len() - stack_offset as usize - 1;
         let key = frame.literal(field_id);
-        let cache = frame
-            .runtime
-            .caches
-            .set_field_lookup
-            .get(cache_idx as usize);
+        let cache = frame.runtime.caches.set_field(cache_slot);
 
         if !matches!(val, Val::Nil)
             && let Some(ptr) = self.stack[idx].as_object_ptr()
@@ -367,12 +363,10 @@ impl State {
         &mut self,
         frame: &Frame,
         string_num: u16,
-        cache_idx: u8,
+        cache_slot: Option<u8>,
     ) -> Result<()> {
         let val = self.pop_val();
-        let cache = cache_idx
-            .checked_sub(1)
-            .and_then(|idx| frame.runtime.caches.global_lookup.get(idx as usize));
+        let cache = frame.runtime.caches.global(cache_slot);
         if let Some(cache) = cache
             && self.try_set_global_cached(cache, val)
         {

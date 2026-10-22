@@ -555,19 +555,17 @@ pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         let pattern_is_plain = { plain || crate::patterns::is_plain_for_find(&pattern) };
 
         if pattern_is_plain {
-            let result = {
-                if pattern.is_empty() {
-                    (init <= subject.len()).then_some((init + 1, init))
-                } else if init >= subject.len() {
-                    None
-                } else {
-                    let search = &subject[init..];
-                    find_subslice(state, search, &pattern)?.map(|pos| {
-                        let start = init + pos + 1;
-                        let end = start + pattern.len() - 1;
-                        (start, end)
-                    })
-                }
+            // An empty needle is found, uncharged, at `init` itself, up to
+            // and including the end of the subject, so `start - 1` is its
+            // inclusive end.
+            let result = if init > subject.len() {
+                None
+            } else {
+                let search = &subject[init..];
+                find_subslice(state, search, &pattern)?.map(|pos| {
+                    let start = init + pos + 1;
+                    (start, start + pattern.len() - 1)
+                })
             };
 
             state.set_top(0)?;
@@ -681,11 +679,6 @@ pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
             state.push_nil()?;
             return Ok(1);
         }
-        if pattern.is_empty() {
-            state.set_top(0)?;
-            state.push_bytes(b"")?;
-            return Ok(1);
-        }
         let mut matcher = pattern_matcher(state, &pattern)?;
         state.set_top(0)?;
         let matched = {
@@ -710,17 +703,13 @@ pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         let init = opt_integer(state, 3, "gmatch")?
             .map_or(0, |init| lua_start_index(s.len(), init))
             .min(s.len() + 1);
-        let pattern = if pattern.first() == Some(&b'^') {
-            let escaped_len = crate::limits::checked_string_growth(pattern.len(), 1)?;
-            let mut escaped = Vec::with_capacity(escaped_len);
-            escaped.extend_from_slice(b"%^");
-            escaped.extend_from_slice(&pattern[1..]);
-            escaped
-        } else {
-            pattern
-        };
+        // The pattern is stored as given: a leading `^` is literal because
+        // the iterator compiles it under `AnchorMode::Literal`.
         state.set_top(0)?;
 
+        // The general iterator would charge `max(1, 0)` for compiling an
+        // empty pattern on its first call; this one charges nothing, so it
+        // stays a separate iterator (with its own persisted schema).
         if pattern.is_empty() {
             state.new_table()?;
             state.push_string(gmatch_schema::POSITION_FIELD)?;
@@ -784,6 +773,13 @@ pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         // Each path is its own out-of-line function so that only the path
         // in use is live on the native stack while a replacement function
         // runs (docs/limits.md, "Native stack").
+        //
+        // The empty pattern keeps its own path: the plain path would never
+        // advance, and the Lua-pattern path gives the same results and
+        // unbudgeted total but, once a replacement limit stops it, appends
+        // the rest of the subject in one charge where this path charges per
+        // byte. A finite budget can run out inside that tail, so the two
+        // differ in where exhaustion is reported.
         if pattern.is_empty() {
             gsub_empty_pattern(state, &s, &repl_type, max_replacements)
         } else if crate::patterns::is_plain(&pattern) {
@@ -882,7 +878,7 @@ fn gsub_lua_pattern(
     let mut captures = Vec::new();
     let mut pos = 0usize;
     let mut count = 0usize;
-    let anchored = pattern.first() == Some(&b'^');
+    let anchored = matcher.is_anchored();
     // Lua 5.4 empty-match semantics (`lastmatch`): a match is rejected
     // when it is empty and ends where the previous accepted match ended,
     // and the scan then copies one byte and moves on. So

@@ -16,6 +16,7 @@ use std::sync::Arc;
 use super::Instr;
 use super::Result;
 use super::error;
+use crate::instr::MAX_CACHE_SLOTS;
 
 /// Describes where an upvalue comes from when creating a closure.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -49,10 +50,13 @@ pub(crate) struct Bytecode {
     /// Cache slot indices are baked into `OP_GET_GLOBAL` and `OP_SET_GLOBAL`
     /// instructions.
     pub(crate) global_cache_slots: u8,
-    /// Number of slots in this function's field lookup cache.
+    /// Number of slots in this function's field lookup cache (`OP_GET_FIELD`).
     pub(crate) field_cache_slots: u8,
-    /// Number of slots in this function's set-field lookup cache.
+    /// Number of slots in this function's set-field lookup cache
+    /// (`OP_SET_FIELD`).
     pub(crate) set_field_cache_slots: u8,
+    /// Number of `pairs` cursor slots (`OP_TFOR_CALL`).
+    pub(crate) tfor_cursor_slots: u8,
     pub(crate) num_params: u8,
     pub(crate) num_locals: u8,
     pub(crate) nested: Vec<Arc<Bytecode>>,
@@ -75,82 +79,73 @@ impl Bytecode {
     /// allocated slot index, and record per-cache slot counts on the
     /// `Bytecode`. The State allocates one runtime cache bundle per Bytecode
     /// identity, sized from these counts. Cache operands are persisted as raw
-    /// instruction words, so changing their opcode-specific sentinels requires
-    /// a snapshot format version bump as well as matching verifier and runtime
-    /// changes.
+    /// instruction words, so changing their encoding (the `Instr` cache-slot
+    /// codec) requires a snapshot format version bump. The verifier restates
+    /// this allocation policy on purpose; see `validate_bytecode`.
+    ///
+    /// Every cache-bearing operand is rewritten, whatever it held before, so
+    /// the pass is idempotent: an already-finalized `SET_FIELD` is allocated
+    /// again exactly like the offset-zero `SET_FIELD_AT` it came from.
     fn assign_cache_slots(&mut self) {
-        let mut global_cache_indices = vec![None; self.string_literals.len()];
-        let mut global_cache_len = 0usize;
-        let mut field_cache_len = 0usize;
-        let mut set_field_cache_len = 0usize;
-        // Counted only to assign cursor slots and deliberately not stored: a
-        // fourth count field would change the snapshot format.
-        // The VM runtime cache recomputes it as the maximum C operand over the
-        // code, and the verifier's sequential slot check keeps the two in step.
+        /// Allocate the next slot of one cache family, or `None` once the
+        /// family holds `MAX_CACHE_SLOTS` slots.
+        fn allocate(len: &mut usize) -> Option<u8> {
+            if *len >= MAX_CACHE_SLOTS {
+                return None;
+            }
+            // Below MAX_CACHE_SLOTS, so it fits a u8.
+            let slot = *len as u8;
+            *len += 1;
+            Some(slot)
+        }
+
+        // Per string literal: `None` until the name's first GET_GLOBAL, then
+        // that reference's slot, `Some(None)` when the cache was exhausted
+        // there (every later read of the name stays uncached as well).
+        let mut global_slots: Vec<Option<Option<u8>>> = vec![None; self.string_literals.len()];
+        let mut global_len = 0usize;
+        let mut field_len = 0usize;
+        let mut set_field_len = 0usize;
         let mut tfor_cursor_len = 0usize;
 
         for inst in &mut self.code {
             match inst.opcode() {
                 Instr::OP_GET_GLOBAL => {
-                    let string_idx = inst.bx() as usize;
-                    let Some(cache_idx) = global_cache_indices.get_mut(string_idx) else {
-                        continue;
-                    };
-                    let cache_idx = match *cache_idx {
-                        Some(cache_idx) => cache_idx,
-                        None => {
-                            let next_idx = if global_cache_len < u8::MAX as usize {
-                                global_cache_len as u8
-                            } else {
-                                u8::MAX
-                            };
-                            *cache_idx = Some(next_idx);
-                            if next_idx != u8::MAX {
-                                global_cache_len += 1;
-                            }
-                            next_idx
-                        }
-                    };
-                    *inst = Instr::get_global_cached(inst.bx(), cache_idx);
+                    // An out-of-range literal id has no slot entry; it stays
+                    // uncached and the verifier rejects it right after.
+                    let slot = global_slots
+                        .get_mut(usize::from(inst.bx()))
+                        .and_then(|entry| *entry.get_or_insert_with(|| allocate(&mut global_len)));
+                    *inst = Instr::get_global(inst.bx(), slot);
                 }
+                // Each SET_GLOBAL site takes a fresh slot of the shared global
+                // cache, never one a GET_GLOBAL name owns.
                 Instr::OP_SET_GLOBAL => {
-                    if global_cache_len < u8::MAX as usize {
-                        let cache_idx = global_cache_len as u8;
-                        global_cache_len += 1;
-                        *inst = Instr::set_global_cached(inst.bx(), cache_idx);
-                    }
+                    *inst = Instr::set_global(inst.bx(), allocate(&mut global_len));
                 }
                 Instr::OP_GET_FIELD => {
-                    let cache_idx = if field_cache_len < u8::MAX as usize {
-                        let cache_idx = field_cache_len as u8;
-                        field_cache_len += 1;
-                        cache_idx
-                    } else {
-                        u8::MAX
-                    };
-                    *inst = Instr::get_field_cached(inst.bx(), cache_idx);
+                    *inst = Instr::get_field(inst.bx(), allocate(&mut field_len));
                 }
+                Instr::OP_SET_FIELD => {
+                    *inst = Instr::set_field(inst.bx(), allocate(&mut set_field_len));
+                }
+                // A nonzero SET_FIELD_AT offset names a deeper receiver and is
+                // never cached.
                 Instr::OP_SET_FIELD_AT if inst.a() == 0 => {
-                    let cache_idx = if set_field_cache_len < u8::MAX as usize {
-                        let cache_idx = set_field_cache_len as u8;
-                        set_field_cache_len += 1;
-                        cache_idx
-                    } else {
-                        u8::MAX
-                    };
-                    *inst = Instr::set_field_cached(inst.bx(), cache_idx);
+                    *inst = Instr::set_field(inst.bx(), allocate(&mut set_field_len));
                 }
-                Instr::OP_TFOR_CALL if tfor_cursor_len < u8::MAX as usize => {
-                    *inst = Instr::tfor_call_cached(inst.a(), inst.b(), tfor_cursor_len as u8);
-                    tfor_cursor_len += 1;
+                Instr::OP_TFOR_CALL => {
+                    *inst = Instr::tfor_call(inst.a(), inst.b(), allocate(&mut tfor_cursor_len));
                 }
                 _ => {}
             }
         }
 
-        self.global_cache_slots = global_cache_len as u8;
-        self.field_cache_slots = field_cache_len as u8;
-        self.set_field_cache_slots = set_field_cache_len as u8;
+        // `allocate` caps every family at MAX_CACHE_SLOTS, which fits a u8.
+        self.global_cache_slots = global_len as u8;
+        self.field_cache_slots = field_len as u8;
+        self.set_field_cache_slots = set_field_len as u8;
+        self.tfor_cursor_slots = tfor_cursor_len as u8;
     }
 }
 
@@ -360,10 +355,16 @@ mod runtime_cache_tests {
             match instruction.opcode() {
                 Instr::OP_MARK_CALL_BASE => seen.mark_call_base = true,
                 Instr::OP_NEW_TABLE_TRACKED => seen.new_table_tracked = true,
-                Instr::OP_CALL if instruction.a() == u8::MAX => seen.dynamic_call = true,
+                Instr::OP_CALL if instruction.call_args() == crate::ArgCount::Dynamic => {
+                    seen.dynamic_call = true;
+                }
                 Instr::OP_SET_LIST if instruction.a() == 0 => seen.dynamic_set_list = true,
-                Instr::OP_RETURN if instruction.a() == u8::MAX => seen.return_all = true,
-                Instr::OP_VARARG if instruction.a() == u8::MAX => seen.vararg_all = true,
+                Instr::OP_RETURN if instruction.return_count() == crate::RetCount::All => {
+                    seen.return_all = true;
+                }
+                Instr::OP_VARARG if instruction.vararg_count() == crate::RetCount::All => {
+                    seen.vararg_all = true;
+                }
                 _ => {}
             }
         }
@@ -447,7 +448,8 @@ mod runtime_cache_tests {
             "the call chain must stop where the syntax budget says it does"
         );
         let call_marker_peak = marker_peak(&call_chain, Instr::OP_MARK_CALL_BASE, |instruction| {
-            instruction.opcode() == Instr::OP_CALL && instruction.a() == u8::MAX
+            instruction.opcode() == Instr::OP_CALL
+                && instruction.call_args() == crate::ArgCount::Dynamic
         });
         assert!(
             call_marker_peak <= MAX_VERIFIER_MARKER_DEPTH,
@@ -527,10 +529,11 @@ mod runtime_cache_tests {
         // two non-global literals ("not a global", "field") hold no slot -
         // they would push this to 6 if literal count drove allocation.
         assert_eq!(bc.global_cache_slots, 4);
-        assert_eq!(get_globals[0].a(), get_globals[1].a());
-        assert_ne!(get_globals[0].a(), get_globals[2].a());
-        assert_eq!(set_globals[0].a(), 2);
-        assert_eq!(set_globals[1].a(), 4);
+        assert_eq!(get_globals[0].global_cache_slot(), Some(0));
+        assert_eq!(get_globals[1].global_cache_slot(), Some(0));
+        assert_eq!(get_globals[2].global_cache_slot(), Some(2));
+        assert_eq!(set_globals[0].global_cache_slot(), Some(1));
+        assert_eq!(set_globals[1].global_cache_slot(), Some(3));
     }
 
     #[test]
@@ -544,8 +547,8 @@ mod runtime_cache_tests {
 
         assert_eq!(bc.global_cache_slots, 2);
         assert_eq!(set_globals.len(), 2);
-        assert_eq!(set_globals[0].a(), 1);
-        assert_eq!(set_globals[1].a(), 2);
+        assert_eq!(set_globals[0].global_cache_slot(), Some(0));
+        assert_eq!(set_globals[1].global_cache_slot(), Some(1));
         assert!(
             bc.code
                 .iter()
@@ -566,12 +569,12 @@ mod runtime_cache_tests {
             .filter(|inst| inst.opcode() == Instr::OP_SET_GLOBAL)
             .collect();
 
-        assert_eq!(bc.global_cache_slots, u8::MAX);
+        assert_eq!(usize::from(bc.global_cache_slots), MAX_CACHE_SLOTS);
         assert_eq!(set_globals.len(), 256);
         for (idx, inst) in set_globals.iter().take(255).enumerate() {
-            assert_eq!(inst.a(), idx as u8 + 1);
+            assert_eq!(inst.global_cache_slot(), Some(idx as u8));
         }
-        assert_eq!(set_globals[255].a(), 0);
+        assert_eq!(set_globals[255].global_cache_slot(), None);
     }
 
     #[test]
@@ -592,9 +595,9 @@ mod runtime_cache_tests {
 
         assert_eq!(get_fields.len(), 3);
         assert_eq!(bc.field_cache_slots, 3);
-        assert_eq!(get_fields[0].a(), 0);
-        assert_eq!(get_fields[1].a(), 1);
-        assert_eq!(get_fields[2].a(), 2);
+        for (slot, inst) in get_fields.iter().enumerate() {
+            assert_eq!(inst.field_cache_slot(), Some(slot as u8));
+        }
     }
 
     #[test]
@@ -617,9 +620,19 @@ mod runtime_cache_tests {
 
         assert_eq!(set_fields.len(), 3);
         assert_eq!(bc.set_field_cache_slots, 3);
-        assert_eq!(set_fields[0].a(), 0);
-        assert_eq!(set_fields[1].a(), 1);
-        assert_eq!(set_fields[2].a(), 2);
+        for (slot, inst) in set_fields.iter().enumerate() {
+            assert_eq!(inst.set_field_cache_slot(), Some(slot as u8));
+        }
+    }
+
+    #[test]
+    fn cache_assignment_is_idempotent() {
+        let source = "local t = {}; for k in pairs(t) do t.x = g.y end; h = t.x; local a, b = {}, {}; a.f, b.f = 1, 2";
+        let once = parse_str(source).expect("source compiles");
+        let mut twice = once.clone();
+        twice.assign_cache_slots();
+        assert_eq!(twice, once);
+        assert!(once.set_field_cache_slots > 0 && once.tfor_cursor_slots == 1);
     }
 
     fn transfer(opcode: u8, offset: i16) -> Instr {

@@ -3,7 +3,6 @@
 use std::cell::Cell;
 
 use crate::compiler::Bytecode;
-use crate::instr::Instr;
 
 use super::lua_val::Val;
 use super::object::ObjectPtr;
@@ -163,31 +162,42 @@ pub(super) struct RuntimeCaches {
 unsafe impl Sync for RuntimeCaches {}
 
 impl RuntimeCaches {
+    /// Size every cache from the counts the Bytecode declares. Verification
+    /// proves each decoded cache operand is below its family's count.
     pub(super) fn new(bc: &Bytecode) -> Self {
-        Self {
-            global_lookup: (0..bc.global_cache_slots as usize)
-                .map(|_| GlobalLookupCacheSlot::default())
-                .collect(),
-            field_lookup: (0..bc.field_cache_slots as usize)
-                .map(|_| FieldLookupCacheSlot::default())
-                .collect(),
-            set_field_lookup: (0..bc.set_field_cache_slots as usize)
-                .map(|_| SetFieldLookupCacheSlot::default())
-                .collect(),
-            // Cursor slots deliberately have no Bytecode count: the three
-            // existing cache counts are part of the snapshot format, and a
-            // fourth would change that format. Verified C operands make this
-            // high-water mark the exact allocation count.
-            tfor_cursor: (0..bc
-                .code
-                .iter()
-                .filter(|inst| inst.opcode() == Instr::OP_TFOR_CALL)
-                .map(|inst| inst.c() as usize)
-                .max()
-                .unwrap_or(0))
-                .map(|_| TforCursorSlot::default())
-                .collect(),
+        fn slots<T: Default>(count: u8) -> Vec<T> {
+            (0..count).map(|_| T::default()).collect()
         }
+        Self {
+            global_lookup: slots(bc.global_cache_slots),
+            field_lookup: slots(bc.field_cache_slots),
+            set_field_lookup: slots(bc.set_field_cache_slots),
+            tfor_cursor: slots(bc.tfor_cursor_slots),
+        }
+    }
+
+    // Lookups by a decoded cache operand (`None` is uncached). They stay
+    // checked: a hand-built chunk that skipped verification falls back to the
+    // uncached path instead of panicking.
+
+    #[inline(always)]
+    pub(super) fn global(&self, slot: Option<u8>) -> Option<&GlobalLookupCacheSlot> {
+        self.global_lookup.get(usize::from(slot?))
+    }
+
+    #[inline(always)]
+    pub(super) fn field(&self, slot: Option<u8>) -> Option<&FieldLookupCacheSlot> {
+        self.field_lookup.get(usize::from(slot?))
+    }
+
+    #[inline(always)]
+    pub(super) fn set_field(&self, slot: Option<u8>) -> Option<&SetFieldLookupCacheSlot> {
+        self.set_field_lookup.get(usize::from(slot?))
+    }
+
+    #[inline(always)]
+    pub(super) fn tfor_cursor(&self, slot: Option<u8>) -> Option<&TforCursorSlot> {
+        self.tfor_cursor.get(usize::from(slot?))
     }
 }
 
@@ -213,9 +223,10 @@ mod tests {
 
         assert_eq!(calls.len(), 256);
         for (index, inst) in calls.iter().take(255).enumerate() {
-            assert_eq!(inst.c(), index as u8 + 1);
+            assert_eq!(inst.tfor_cursor_slot(), Some(index as u8));
         }
-        assert_eq!(calls[255].c(), 0);
+        assert_eq!(calls[255].tfor_cursor_slot(), None);
+        assert_eq!(bc.tfor_cursor_slots, 255);
         assert_eq!(RuntimeCaches::new(&bc).tfor_cursor.len(), 255);
     }
 }

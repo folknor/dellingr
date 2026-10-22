@@ -75,8 +75,10 @@ String library:
   run. `gsub` also charges replacement text bytes. With a replacement limit
   of zero it charges the subject length.
 - `gmatch`: `max(1, subject bytes + pattern bytes)` when the iterator is
-  created; `max(1, pattern bytes)` on the iterator's first call, and matching
-  work as it runs.
+  created; `max(1, pattern bytes)` on the iterator's first call that reaches
+  the matcher, and matching work as it runs. A leading `^`, which `gmatch`
+  matches as a literal byte, counts as the one byte it is. An empty pattern
+  charges nothing after creation.
 - `format`: format string bytes, at least 1, plus bytes appended to the output
   and bytes of string arguments consumed.
 

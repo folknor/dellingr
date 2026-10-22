@@ -8,6 +8,24 @@ All notable changes to dellingr are documented here. The format follows
 
 ### Changed (breaking)
 
+- Snapshot format version 10. Every bytecode inline-cache operand
+  (`GET_GLOBAL`, `SET_GLOBAL`, `GET_FIELD`, `SET_FIELD` and the generic-for
+  `pairs` cursor) now uses one encoding: biased by one, 0 meaning uncached;
+  `GET_GLOBAL`, `GET_FIELD` and `SET_FIELD` used 255 for uncached before.
+  Each saved function also stores its `pairs`-cursor count beside the other
+  cache counts instead of the loader recomputing it from the code. Capacity
+  is unchanged at 255 cached sites per cache family per function.
+  **Replay-visible:** saves from earlier format versions are refused with
+  `UnsupportedVersion`; there is no migration. Execution, costs and `pairs`
+  order are unchanged.
+- Cost model version 6: `string.gmatch` compiles a pattern's leading `^` as
+  a literal byte instead of rewriting the pattern to `%^`, so such an
+  iterator's first matching call charges the pattern's actual length, one
+  unit less than before. **Replay-visible:** `cost_used` drops by one per such
+  iterator, and a saved gmatch iterator stores its pattern as written (`^x`,
+  not `%^x`). A leading-`^` gmatch pattern of exactly the maximum string size
+  is no longer rejected at iterator creation; the rewrite made it one byte too
+  long. Results are unchanged.
 - Lua-to-Lua calls no longer recurse on the native stack: each dispatch-loop
   invocation runs over a frame stack of its own and continues in the callee,
   so `MAX_CALL_DEPTH` (1000) is reached without native stack per level in

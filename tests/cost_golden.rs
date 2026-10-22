@@ -37,6 +37,13 @@ const CORPUS: &[(&str, &str, u64)] = &[
         103,
     ),
     (
+        "gmatch_leading_caret",
+        "local n = 0 for w in string.gmatch('^a^a', '^a') do n = n + #w end",
+        // The literal caret is charged as the one pattern byte it is, at
+        // creation and at first-call compilation.
+        26,
+    ),
+    (
         "sequence_len_handler",
         "local t = setmetatable({}, {__len = function() local n = 1 return n + 1 end}) table.insert(t, 7)",
         // Two tables, one initializer write, one handler add and one append.

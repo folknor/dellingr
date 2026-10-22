@@ -564,6 +564,7 @@ struct SavedBytecode {
     global_cache_slots: u8,
     field_cache_slots: u8,
     set_field_cache_slots: u8,
+    tfor_cursor_slots: u8,
     num_params: u8,
     num_locals: u8,
     nested: Vec<u32>,
@@ -1518,6 +1519,7 @@ impl<'a> SaveBuilder<'a> {
             global_cache_slots: 0,
             field_cache_slots: 0,
             set_field_cache_slots: 0,
+            tfor_cursor_slots: 0,
             num_params: 0,
             num_locals: 0,
             nested: Vec::new(),
@@ -1544,6 +1546,7 @@ impl<'a> SaveBuilder<'a> {
             global_cache_slots: bc.global_cache_slots,
             field_cache_slots: bc.field_cache_slots,
             set_field_cache_slots: bc.set_field_cache_slots,
+            tfor_cursor_slots: bc.tfor_cursor_slots,
             num_params: bc.num_params,
             num_locals: bc.num_locals,
             nested,
@@ -2476,6 +2479,7 @@ fn build_bytecode_node(
         global_cache_slots: src.global_cache_slots,
         field_cache_slots: src.field_cache_slots,
         set_field_cache_slots: src.set_field_cache_slots,
+        tfor_cursor_slots: src.tfor_cursor_slots,
         num_params: src.num_params,
         num_locals: src.num_locals,
         nested,
@@ -3030,6 +3034,7 @@ impl SavedBytecode {
         out.write_u8(self.global_cache_slots);
         out.write_u8(self.field_cache_slots);
         out.write_u8(self.set_field_cache_slots);
+        out.write_u8(self.tfor_cursor_slots);
         out.write_u8(self.num_params);
         out.write_u8(self.num_locals);
         write_vec(out, &self.nested, |out, id| {
@@ -3056,6 +3061,7 @@ impl SavedBytecode {
             global_cache_slots: input.read_u8()?,
             field_cache_slots: input.read_u8()?,
             set_field_cache_slots: input.read_u8()?,
+            tfor_cursor_slots: input.read_u8()?,
             num_params: input.read_u8()?,
             num_locals: input.read_u8()?,
             nested: read_vec(input, Decoder::read_u32)?,
@@ -3220,6 +3226,7 @@ mod tests {
             global_cache_slots: 0,
             field_cache_slots: 0,
             set_field_cache_slots: 0,
+            tfor_cursor_slots: 0,
             num_params: 0,
             num_locals: 0,
             nested: Vec::new(),
@@ -3488,26 +3495,28 @@ mod tests {
         bad_cache.string_literals.push(b"x".to_vec());
         bad_cache
             .code
-            .insert(0, Instr::get_global_cached(0, 1).raw());
+            .insert(0, Instr::get_global(0, Some(1)).raw());
         bad_cache.line_info.insert(0, 1);
         assert!(matches!(
             rejected_bytecode(vec![bad_cache], Vec::new()),
             SnapshotError::InvalidBytecode { .. }
         ));
 
-        let mut legacy_set = valid_saved_bytecode();
-        legacy_set.string_literals.push(b"x".to_vec());
-        legacy_set.code.insert(0, Instr::set_global(0).raw());
-        legacy_set.code.insert(0, Instr::push_nil().raw());
-        legacy_set.line_info = vec![1; legacy_set.code.len()];
-        assert!(load_bytecode(vec![legacy_set], Vec::new()).is_ok());
+        let mut uncached_set = valid_saved_bytecode();
+        uncached_set.string_literals.push(b"x".to_vec());
+        uncached_set
+            .code
+            .insert(0, Instr::set_global(0, None).raw());
+        uncached_set.code.insert(0, Instr::push_nil().raw());
+        uncached_set.line_info = vec![1; uncached_set.code.len()];
+        assert!(load_bytecode(vec![uncached_set], Vec::new()).is_ok());
 
         let mut valid_set = valid_saved_bytecode();
         valid_set.string_literals.push(b"x".to_vec());
         valid_set.global_cache_slots = 1;
         valid_set
             .code
-            .insert(0, Instr::set_global_cached(0, 0).raw());
+            .insert(0, Instr::set_global(0, Some(0)).raw());
         valid_set.code.insert(0, Instr::push_nil().raw());
         valid_set.line_info = vec![1; valid_set.code.len()];
         assert!(load_bytecode(vec![valid_set], Vec::new()).is_ok());
@@ -3517,7 +3526,7 @@ mod tests {
         out_of_range_set.global_cache_slots = 1;
         out_of_range_set
             .code
-            .insert(0, Instr::set_global_cached(0, 1).raw());
+            .insert(0, Instr::set_global(0, Some(1)).raw());
         out_of_range_set.code.insert(0, Instr::push_nil().raw());
         out_of_range_set.line_info = vec![1; out_of_range_set.code.len()];
         assert_invalid(
@@ -3531,9 +3540,9 @@ mod tests {
         wrong_order_set.global_cache_slots = 2;
         wrong_order_set.code = vec![
             Instr::push_nil().raw(),
-            Instr::set_global_cached(0, 1).raw(),
+            Instr::set_global(0, Some(1)).raw(),
             Instr::push_nil().raw(),
-            Instr::set_global_cached(0, 0).raw(),
+            Instr::set_global(0, Some(0)).raw(),
             Instr::ret(RetCount::Fixed(0)).raw(),
         ];
         wrong_order_set.line_info = vec![1; wrong_order_set.code.len()];
@@ -3629,14 +3638,14 @@ mod tests {
     }
 
     #[test]
-    fn legacy_uncached_set_cannot_alias_a_warmed_get_slot() {
+    fn uncached_set_cannot_alias_a_warmed_get_slot() {
         let mut bytecode = valid_saved_bytecode();
         bytecode.code = vec![
-            Instr::get_global_cached(0, 0).raw(),
+            Instr::get_global(0, Some(0)).raw(),
             Instr::pop().raw(),
             Instr::push_num(0).raw(),
-            // Legacy v6 encoding: A=0 is uncached, never global slot zero.
-            Instr::set_global(1).raw(),
+            // Operand 0 is uncached, never global slot zero.
+            Instr::set_global(1, None).raw(),
             Instr::ret(RetCount::Fixed(0)).raw(),
         ];
         bytecode.number_literals.push(42.0f64.to_bits());
@@ -3655,7 +3664,7 @@ mod tests {
                 ("writer".to_string(), SavedVal::Obj(0)),
             ],
         )
-        .expect("legacy fixture loads");
+        .expect("uncached-set fixture loads");
 
         for _ in 0..2 {
             state.get_global("writer").expect("writer exists");
@@ -3671,22 +3680,23 @@ mod tests {
     }
 
     #[test]
-    fn forged_tfor_cursor_operands_validate_and_round_trip_without_metadata() {
-        let mut legacy = valid_saved_bytecode();
-        legacy.code = vec![
-            Instr::tfor_call(0, 1).raw(),
+    fn forged_tfor_cursor_operands_validate_against_the_declared_count() {
+        let mut uncached = valid_saved_bytecode();
+        uncached.code = vec![
+            Instr::tfor_call(0, 1, None).raw(),
             Instr::ret(RetCount::Fixed(0)).raw(),
         ];
-        legacy.num_locals = 4;
-        legacy.line_info = vec![1; legacy.code.len()];
-        assert!(load_bytecode(vec![legacy.clone()], Vec::new()).is_ok());
+        uncached.num_locals = 4;
+        uncached.line_info = vec![1; uncached.code.len()];
+        assert!(load_bytecode(vec![uncached.clone()], Vec::new()).is_ok());
 
-        let mut sequential = legacy.clone();
+        let mut sequential = uncached.clone();
         sequential.code = vec![
-            Instr::tfor_call_cached(0, 1, 0).raw(),
-            Instr::tfor_call_cached(0, 1, 1).raw(),
+            Instr::tfor_call(0, 1, Some(0)).raw(),
+            Instr::tfor_call(0, 1, Some(1)).raw(),
             Instr::ret(RetCount::Fixed(0)).raw(),
         ];
+        sequential.tfor_cursor_slots = 2;
         sequential.line_info = vec![1; sequential.code.len()];
         assert!(load_bytecode(vec![sequential.clone()], Vec::new()).is_ok());
         let mut restored = load_bytecode_with_globals(
@@ -3712,30 +3722,28 @@ mod tests {
                 .iter()
                 .all(|slot| slot.get().is_none())
         );
-        roundtrip!(SavedBytecode, sequential);
+        roundtrip!(SavedBytecode, sequential.clone());
 
-        for code in [
-            vec![
-                Instr::tfor_call_cached(0, 1, 1),
-                Instr::ret(RetCount::Fixed(0)),
-            ],
-            vec![
-                Instr::tfor_call_cached(0, 1, 254),
-                Instr::ret(RetCount::Fixed(0)),
-            ],
-            vec![
-                Instr::tfor_call_cached(0, 1, 0),
-                Instr::tfor_call_cached(0, 1, 0),
-                Instr::ret(RetCount::Fixed(0)),
-            ],
-            vec![
-                Instr::tfor_call_cached(0, 1, 1),
-                Instr::tfor_call_cached(0, 1, 0),
-                Instr::ret(RetCount::Fixed(0)),
-            ],
+        // A declared count that disagrees with the operands, either way.
+        for declared in [0, 1, 3] {
+            let mut miscounted = sequential.clone();
+            miscounted.tfor_cursor_slots = declared;
+            assert_invalid(rejected_bytecode(vec![miscounted], Vec::new()), 0, None);
+        }
+
+        for (code, declared) in [
+            (vec![Some(1)], 1),
+            (vec![Some(254)], 1),
+            (vec![Some(0), Some(0)], 1),
+            (vec![Some(1), Some(0)], 2),
         ] {
-            let mut forged = legacy.clone();
-            forged.code = code.into_iter().map(Instr::raw).collect();
+            let mut forged = uncached.clone();
+            forged.code = code
+                .into_iter()
+                .map(|slot| Instr::tfor_call(0, 1, slot).raw())
+                .chain([Instr::ret(RetCount::Fixed(0)).raw()])
+                .collect();
+            forged.tfor_cursor_slots = declared;
             forged.line_info = vec![1; forged.code.len()];
             assert!(matches!(
                 rejected_bytecode(vec![forged], Vec::new()),
@@ -3749,7 +3757,7 @@ mod tests {
         let mut bytecode = valid_saved_bytecode();
         bytecode.code = vec![
             Instr::push_num(0).raw(),
-            Instr::set_global_cached(0, 0).raw(),
+            Instr::set_global(0, Some(0)).raw(),
             Instr::ret(RetCount::Fixed(0)).raw(),
         ];
         bytecode.number_literals.push(7.0f64.to_bits());
@@ -3973,7 +3981,7 @@ mod tests {
         bad_global_name.string_literals.push(vec![255]);
         bad_global_name
             .code
-            .insert(0, Instr::get_global_cached(0, 0).raw());
+            .insert(0, Instr::get_global(0, Some(0)).raw());
         bad_global_name.global_cache_slots = 1;
         bad_global_name.line_info.insert(0, 1);
         assert_invalid(
@@ -4052,7 +4060,7 @@ mod tests {
         bad_cache_count.string_literals.push(b"x".to_vec());
         bad_cache_count
             .code
-            .insert(0, Instr::get_global_cached(0, 0).raw());
+            .insert(0, Instr::get_global(0, Some(0)).raw());
         bad_cache_count.line_info.insert(0, 1);
         assert_invalid(
             rejected_bytecode(vec![bad_cache_count], Vec::new()),
@@ -4328,6 +4336,7 @@ mod tests {
                 global_cache_slots: 7,
                 field_cache_slots: 9,
                 set_field_cache_slots: 3,
+                tfor_cursor_slots: 4,
                 num_params: 2,
                 num_locals: 5,
                 nested: vec![0, 1, 2],

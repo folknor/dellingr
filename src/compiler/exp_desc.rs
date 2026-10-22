@@ -115,9 +115,9 @@ impl PlaceExp {
         match self {
             Self::Local(index) => Instr::get_local(*index),
             Self::Upvalue(index) => Instr::get_upvalue(*index),
-            Self::Global(index) => Instr::get_global(*index),
+            Self::Global(index) => Instr::get_global(*index, None),
             Self::Builtin(builtin) => Instr::get_builtin(*builtin),
-            Self::FieldAccess(index) => Instr::get_field(*index),
+            Self::FieldAccess(index) => Instr::get_field(*index, None),
             Self::TableIndex => Instr::get_table(),
         }
     }
@@ -126,7 +126,7 @@ impl PlaceExp {
         match self {
             Self::Local(index) => Instr::set_local(*index),
             Self::Upvalue(index) => Instr::set_upvalue(*index),
-            Self::Global(index) => Instr::set_global(*index),
+            Self::Global(index) => Instr::set_global(*index, None),
             Self::Builtin(builtin) => Instr::set_builtin(*builtin),
             Self::FieldAccess(index) => Instr::set_field_at(stack_offset, *index),
             Self::TableIndex => Instr::set_table(stack_offset),
