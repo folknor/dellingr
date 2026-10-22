@@ -158,24 +158,21 @@ impl GlobalEnv {
     }
 
     /// Overwrite the binding at `index`, keeping its slot, and account for a
-    /// tombstone appearing or disappearing.
+    /// tombstone appearing or disappearing. False if `index` is out of range.
     #[inline(always)]
-    fn write_at(&mut self, index: usize, val: Val) {
+    fn write_at(&mut self, index: usize, val: Val) -> bool {
         let pin = self.phase != Phase::Sealed;
         let Some((_, binding)) = self.globals.get_index_mut(index) else {
-            return;
+            return false;
         };
-        let was_compactable = binding.is_compactable();
+        let was_compactable = usize::from(binding.is_compactable());
         binding.val = val;
         binding.pinned |= pin;
-        let is_compactable = binding.is_compactable();
-        if was_compactable != is_compactable {
-            if is_compactable {
-                self.compactable += 1;
-            } else {
-                self.compactable -= 1;
-            }
-        }
+        // Branch-free: the count includes this binding when `was` is 1, so
+        // adding before subtracting cannot underflow.
+        self.compactable =
+            self.compactable + usize::from(binding.is_compactable()) - was_compactable;
+        true
     }
 
     /// Append a new non-nil binding, compacting first when unpinned
@@ -263,11 +260,10 @@ impl GlobalEnv {
         let Some(entry) = cache.get() else {
             return false;
         };
-        if entry.globals_version != self.version || entry.index >= self.globals.len() {
+        if entry.globals_version != self.version {
             return false;
         }
-        self.write_at(entry.index, val);
-        true
+        self.write_at(entry.index, val)
     }
 
     /// Replace the setup environment with the saved bindings, in saved slot
