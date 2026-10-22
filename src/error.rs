@@ -391,11 +391,15 @@ struct ErrorRepr {
     stack_trace: Vec<StackFrame>,
 }
 
-/// Which source location an error renders as its `chunk:line:` prefix.
+/// Which source location an error renders as its `chunk:line:` prefix: the
+/// prefix policy of an [`ErrorKind::ScriptError`].
 ///
-/// Set by `error(msg, level)`: level 1 (the default) blames the frame that
-/// raised the error, level 0 suppresses the prefix, and level N blames N-1
-/// frames further up the traceback.
+/// `error(msg, level)` chooses it for a string value: level 1 (the default)
+/// blames the frame that raised the error, level 0 suppresses the prefix, and
+/// level N blames N-1 frames further up the traceback. For any other value it
+/// records `Suppressed`, as Lua 5.4 adds position information only to
+/// strings (Lua 5.2 also adds it to numbers). A host that builds a `ScriptError` itself controls the rendering
+/// directly.
 ///
 /// This is a closed set: every level maps to the current frame, no prefix, or
 /// a frame selected from the trace. `TraceFrame` represents all non-default
@@ -514,8 +518,8 @@ pub enum ErrorKind {
     /// against, so a host must use `ArgCount::Fixed`. Rejected before
     /// anything executes.
     DynamicArgumentsUnsupported {
-        /// The host API that was called: `"call"` or `"call_anchor"`.
-        api: &'static str,
+        /// The host API that was called.
+        api: HostCallApi,
     },
     /// Invalid stack index passed to a host API.
     InvalidStackIndex {
@@ -553,12 +557,14 @@ pub enum ErrorKind {
     /// An error explicitly raised by script code through `error()`. Hosts can
     /// use this to tell deliberate script termination from a VM-detected fault.
     ///
-    /// The prefix location lives here rather than on [`Error`] because only
-    /// `error()` can set it.
+    /// The prefix policy lives here rather than on [`Error`] because no other
+    /// kind has one; every other kind renders the current location.
     ScriptError {
         /// The value the script passed to `error()`, byte-exact.
         value: ErrorValue,
         /// Which frame supplies the rendered `chunk:line:` prefix.
+        /// `error()` records [`PrefixLocation::Suppressed`] for a value that
+        /// is not a string.
         prefix: PrefixLocation,
     },
     /// Internal error: corrupt bytecode or a dellingr bug; report these as
@@ -567,6 +573,26 @@ pub enum ErrorKind {
     /// context via [`Error::vm_fault`] without widening `Error` on the
     /// recursive evaluation path.
     InternalError(InternalError),
+}
+
+/// The host call API named by [`ErrorKind::DynamicArgumentsUnsupported`].
+/// `Display` renders the method name.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostCallApi {
+    /// `State::call`.
+    Call,
+    /// `State::call_anchor`.
+    CallAnchor,
+}
+
+impl fmt::Display for HostCallApi {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Call => "call",
+            Self::CallAnchor => "call_anchor",
+        })
+    }
 }
 
 /// The value a script passed to `error()`.
@@ -668,7 +694,7 @@ pub enum StringPatternFunction {
 
 /// Standard library function named by a typed library error.
 #[non_exhaustive]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LibraryFunction {
     /// `math.random`.
     Random,
@@ -684,26 +710,10 @@ pub enum LibraryFunction {
     Concat,
     /// `table.sort`'s default comparator.
     Sort,
-    /// Another library function name, for an internal caller not yet listed.
-    Other(String),
 }
 
 impl LibraryFunction {
-    /// Resolve the stable names used by standard library helpers.
-    pub(crate) fn from_name(name: &str) -> Self {
-        match name {
-            "random" => Self::Random,
-            "insert" => Self::Insert,
-            "remove" => Self::Remove,
-            "move" => Self::Move,
-            "unpack" => Self::Unpack,
-            "concat" => Self::Concat,
-            "sort" => Self::Sort,
-            other => Self::Other(other.to_owned()),
-        }
-    }
-
-    fn as_str(&self) -> &str {
+    fn as_str(self) -> &'static str {
         match self {
             Self::Random => "random",
             Self::Insert => "insert",
@@ -712,7 +722,6 @@ impl LibraryFunction {
             Self::Unpack => "unpack",
             Self::Concat => "concat",
             Self::Sort => "sort",
-            Self::Other(name) => name,
         }
     }
 }
@@ -760,8 +769,6 @@ pub enum LibraryError {
         /// The one-based index of the invalid element.
         index: i64,
     },
-    /// A `table.move` destination calculation would wrap around.
-    MoveDestinationWrapAround,
     /// An integer key range cannot be represented exactly by Lua numbers.
     IntegerKeyRangeExceeded {
         /// The function whose key range was rejected.
@@ -871,6 +878,9 @@ pub enum ArgDetail {
     /// `table.move` was asked to move more elements than it supports; the
     /// argument is the end of the source range.
     TooManyElementsToMove,
+    /// `table.move`'s destination range would run past the largest integer;
+    /// the argument is the destination start.
+    DestinationWrapAround,
 }
 
 impl ArgDetail {
@@ -887,6 +897,7 @@ impl ArgDetail {
             Self::StringFunctionOrTableExpected => Some("string/function/table expected"),
             Self::PositionOutOfBounds => Some("position out of bounds"),
             Self::TooManyElementsToMove => Some("too many elements to move"),
+            Self::DestinationWrapAround => Some("destination wrap around"),
             Self::TypeMismatch => None,
         }
     }
@@ -946,13 +957,159 @@ pub enum SyntaxError {
     UnfinishedLongComment,
     /// A required token was missing before another token.
     ExpectedToken {
-        /// Spelling of the token the grammar required.
-        expected: &'static str,
+        /// The token the grammar required.
+        expected: TokenKind,
+        /// The source bytes of the token actually found, exactly as written.
+        found: Vec<u8>,
+    },
+    /// A token that cannot start an expression or statement where one was
+    /// required.
+    UnexpectedSymbol {
+        /// The source bytes of the offending token, exactly as written.
+        found: Vec<u8>,
+    },
+    /// An expression statement that is neither a call nor an assignment to a
+    /// variable, such as `x + 1`, `(x) = 1` or `f() = 1`.
+    MalformedStatement {
+        /// The source bytes of the token after the expression, exactly as
+        /// written.
+        found: Vec<u8>,
+    },
+    /// A `for` loop's first name was followed by neither `=` nor `in`.
+    ForSeparatorExpected {
+        /// The source bytes of the token actually found, exactly as written.
+        found: Vec<u8>,
+    },
+    /// A method call's `:name` was not followed by call arguments.
+    FunctionArgumentsExpected {
         /// The source bytes of the token actually found, exactly as written.
         found: Vec<u8>,
     },
     /// `...` was used outside a vararg function.
     VarargOutsideVarargFunction,
+}
+
+/// A kind of Lua token, as named by [`SyntaxError::ExpectedToken`].
+///
+/// `Display` renders it as reference Lua does: keywords and symbols quoted
+/// (`'end'`, `'='`), names, literals and end of input as their unquoted
+/// category (`<name>`, `<number>`, `<string>`, `<eof>`).
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TokenKind {
+    /// `and`.
+    And,
+    /// `break`.
+    Break,
+    /// `do`.
+    Do,
+    /// `else`.
+    Else,
+    /// `elseif`.
+    ElseIf,
+    /// `end`.
+    End,
+    /// `false`.
+    False,
+    /// `for`.
+    For,
+    /// `function`.
+    Function,
+    /// `if`.
+    If,
+    /// `in`.
+    In,
+    /// `local`.
+    Local,
+    /// `nil`.
+    Nil,
+    /// `not`.
+    Not,
+    /// `or`.
+    Or,
+    /// `repeat`.
+    Repeat,
+    /// `return`.
+    Return,
+    /// `then`.
+    Then,
+    /// `true`.
+    True,
+    /// `until`.
+    Until,
+    /// `while`.
+    While,
+    /// `+`.
+    Plus,
+    /// `-`.
+    Minus,
+    /// `*`.
+    Star,
+    /// `/`.
+    Slash,
+    /// `%`.
+    Mod,
+    /// `^`.
+    Caret,
+    /// `#`.
+    Hash,
+    /// `==`.
+    Equal,
+    /// `~=`.
+    NotEqual,
+    /// `<=`.
+    LessEqual,
+    /// `>=`.
+    GreaterEqual,
+    /// `<`.
+    Less,
+    /// `>`.
+    Greater,
+    /// `(`.
+    LParen,
+    /// `)`.
+    RParen,
+    /// `{`.
+    LCurly,
+    /// `}`.
+    RCurly,
+    /// `[`.
+    LSquare,
+    /// `]`.
+    RSquare,
+    /// `;`.
+    Semi,
+    /// `:`.
+    Colon,
+    /// `,`.
+    Comma,
+    /// `.`.
+    Dot,
+    /// `..`.
+    DotDot,
+    /// `...`.
+    DotDotDot,
+    /// `=`.
+    Assign,
+    /// A name.
+    Identifier,
+    /// A numeric literal.
+    LiteralNumber,
+    /// A string literal.
+    LiteralString,
+    /// End of input.
+    EndOfFile,
+}
+
+impl fmt::Display for TokenKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Identifier | Self::LiteralNumber | Self::LiteralString | Self::EndOfFile => {
+                f.write_str(self.spelling())
+            }
+            _ => write!(f, "'{}'", self.spelling()),
+        }
+    }
 }
 
 /// Type errors raised by arithmetic, comparison, indexing, and concat.
@@ -1116,11 +1273,11 @@ impl Error {
     }
 
     /// Standard-library function responsible for this error, if known.
-    pub fn library_function(&self) -> Option<&LibraryFunction> {
+    pub fn library_function(&self) -> Option<LibraryFunction> {
         self.0
             .context
             .as_deref()
-            .and_then(|context| context.library_function.as_ref())
+            .and_then(|context| context.library_function)
     }
 
     pub(crate) fn with_pattern_function(mut self, function: StringPatternFunction) -> Self {
@@ -1541,7 +1698,6 @@ impl fmt::Display for LibraryError {
                 f,
                 "invalid value ({value_type}) at index {index} in table for 'concat'"
             ),
-            Self::MoveDestinationWrapAround => f.write_str("destination wrap around"),
             Self::IntegerKeyRangeExceeded { function } => write!(
                 f,
                 "{} range exceeds the exactly representable integer keys",
@@ -1605,7 +1761,23 @@ impl fmt::Display for SyntaxError {
             UnexpectedEof => write!(f, "unexpected <eof>"),
             UnfinishedLongComment => write!(f, "unfinished long comment"),
             ExpectedToken { expected, found } => {
-                write!(f, "'{expected}' expected near '{}'", LossyBytes(found))
+                write!(f, "{expected} expected near '{}'", LossyBytes(found))
+            }
+            UnexpectedSymbol { found } => {
+                write!(f, "unexpected symbol near '{}'", LossyBytes(found))
+            }
+            MalformedStatement { found } => {
+                write!(f, "syntax error near '{}'", LossyBytes(found))
+            }
+            ForSeparatorExpected { found } => {
+                write!(f, "'=' or 'in' expected near '{}'", LossyBytes(found))
+            }
+            FunctionArgumentsExpected { found } => {
+                write!(
+                    f,
+                    "function arguments expected near '{}'",
+                    LossyBytes(found)
+                )
             }
             VarargOutsideVarargFunction => {
                 write!(f, "cannot use '...' outside a vararg function")

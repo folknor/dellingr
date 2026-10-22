@@ -44,9 +44,10 @@ All notable changes to dellingr are documented here. The format follows
   `InternalError` that only dellingr constructs, so it always means a
   dellingr bug; a host passing `ArgCount::Dynamic` to `call` or
   `call_anchor`, previously reported as an internal error, is the new
-  `ErrorKind::DynamicArgumentsUnsupported { api }`, whose text drops the
-  `internal error: ` prefix. `SyntaxError::ExpectedToken` holds `expected: &'static str`
-  and `found: Vec<u8>` (the token's source bytes); the never-constructed
+  `ErrorKind::DynamicArgumentsUnsupported { api: HostCallApi }`, whose text
+  drops the `internal error: ` prefix. `SyntaxError::ExpectedToken` holds
+  `expected: TokenKind` (the new public token vocabulary) and `found:
+  Vec<u8>` (the token's source bytes); the never-constructed
   `SyntaxError::UnexpectedTok` is removed; a stray non-UTF-8 byte in source
   is the new `SyntaxError::InvalidByte`. `LibraryError`'s format
   `directive` fields are `Vec<u8>`.
@@ -58,11 +59,12 @@ All notable changes to dellingr are documented here. The format follows
   not now prints, and such an `error` now raises its value instead of
   `StringSizeExceeded`. The CLI's `print` output is byte-exact, as reference
   Lua's is. Costs are unchanged.
-- Error text changes for valid UTF-8 are limited to: `error()` renders `nil`
-  (above); `ArgCount::Dynamic` refusals lose the `internal error: ` prefix;
-  and the CLI's `--analyze` names the chunk (file path or `stdin`) in a
-  parse error, as running and `--dump-bytecode` already did, because it
-  compiles through the same `Program::compile` call.
+- Error text changes from the byte-exact boundary are limited to: `error()`
+  renders `nil` (above); `ArgCount::Dynamic` refusals lose the `internal
+  error: ` prefix; and the CLI's `--analyze` names the chunk (file path or
+  `stdin`) in a parse error, as running and `--dump-bytecode` already did,
+  because it compiles through the same `Program::compile` call. The
+  corrected diagnostics below and the typed-reasons entry list the rest.
 - Diagnostics that mislead are corrected. Costs are unchanged.
   - Method calls number arguments as the script wrote them, as reference Lua
     does: `s:sub(1.5)` is now `bad argument #1 to 'sub' (number has no integer
@@ -84,7 +86,83 @@ All notable changes to dellingr are documented here. The format follows
   - `table.move`'s `too many elements to move` is now `bad argument #3 to
     'move' (too many elements to move)`. It is `ErrorKind::ArgError` with
     the new `ArgDetail::TooManyElementsToMove`; `LibraryError::TooManyMoveElements`
-    is removed.
+    is removed. Likewise `destination wrap around` is now `bad argument #4
+    to 'move' (destination wrap around)`, as in Lua 5.4: `ArgError` with the
+    new `ArgDetail::DestinationWrapAround`, and
+    `LibraryError::MoveDestinationWrapAround` is removed.
+  - `error(v)` adds the `chunk:line:` position only to a string value, as Lua
+    5.4 does; `error()` records `PrefixLocation::Suppressed` for any other
+    value. Before and after: `error(42)` was `t:1: 42`, now `42`;
+    `error(true)` was `t:1: true`, now `true`; `error(nil)` was `t:1: nil`,
+    now `nil`, and so is `error()` (see above); `error({})` was `t:1: table: 0x1`, now
+    `table: 0x1` (likewise functions and `__tostring` renderings). Strings
+    are unchanged. Lua 5.2 still prefixes numbers; docs/compatibility.md
+    records the choice.
+  - Syntax errors use reference Lua's wording instead of naming a token the
+    grammar never required. New `SyntaxError` variants `UnexpectedSymbol`,
+    `MalformedStatement`, `ForSeparatorExpected` and
+    `FunctionArgumentsExpected`, each with the offending token's `found`
+    bytes. The statement parser now stops only at a block end (`end`,
+    `else`, `elseif`, `until`, end of input), and an empty `return` only
+    before one or `;`, as reference Lua does. Before and after (columns
+    omitted):
+    - `local x = )`: `'nil' expected near ')'` is now `unexpected symbol near
+      ')'`; the same for any token that cannot start an expression.
+    - `x = 1 )` and `= 1` at top level: `'<eof>' expected near ')'` / `near
+      '='` are now `unexpected symbol near ...`; inside a block, `if x then )
+      end`: `'end' expected near ')'` is now `unexpected symbol near ')'`.
+    - `return )`: `'<eof>' expected near ')'` (or `'end' expected` in a
+      block) is now `unexpected symbol near ')'`.
+    - `a, ) = 1, 2` and `a, 1 = 1, 2`: `'<name>' expected near ...` is now
+      `unexpected symbol near ...`.
+    - `(x) = 1` and `a, f() = 1, 2`: `'=' expected near '='` is now `syntax
+      error near '='`; `f() = 1`: `'<eof>' expected near '='` is now `syntax
+      error near '='`; a bare expression such as `x;`, `x + 1` or `x do end`:
+      `'=' expected near ...` is now `syntax error near ...`.
+    - `for i do end`: `'=' expected near 'do'` is now `'=' or 'in' expected
+      near 'do'`.
+    - `a:b z`: `'(' expected near 'z'` is now `function arguments expected
+      near 'z'`.
+    - Expected names, literals and end of input are no longer quoted:
+      `'<name>' expected near '1'` is now `<name> expected near '1'`, and
+      `'<eof>' expected near 'end'` is now `<eof> expected near 'end'`.
+    Where the parser reaches the end of the source needing a token, the
+    error is still `unexpected <eof>` and still recoverable. No program that compiled before is rejected, and no
+    rejected one now compiles.
+- No error type carries text that describes what went wrong; every such
+  reason is an enum a host can match on. Strings that remain are data
+  (function names and ids, environment tokens, chunk names, rendered value
+  paths).
+  - `LibraryFunction::Other(String)` is removed (nothing constructed it);
+    `LibraryFunction` is `Copy` and `Error::library_function` returns it by
+    value.
+  - `ErrorKind::DynamicArgumentsUnsupported::api` is a `HostCallApi` (`Call`,
+    `CallAnchor`), rendering `call` / `call_anchor` as before.
+  - `SyntaxError::ExpectedToken::expected` is an `error::TokenKind`.
+  - Snapshot errors (`dellingr::snapshot`, a new module that also holds the
+    six types still exported at the root): `SnapshotError::DecodeError` is
+    `{ offset, reason: DecodeReason }` (an invalid bool or tag carries the
+    byte); `CorruptArena::reason` is a `CorruptionReason` (out-of-range
+    references, duplicates with the `KeyForm` that collided, nil and NaN
+    keys, and `Table`, `Environment` and `Gmatch` families);
+    `InvalidTable` is `{ location, step: TableRestoreStep, failure:
+    TableRestoreFailure }`; `InvalidBytecode::reason` is an
+    `InvalidBytecodeReason`, whose `Validation` variant carries the
+    verifier's now-public `ValidationReason` (with `BytecodeOperand`,
+    `BytecodePool` and `CacheFamily`); `FieldSizeExceeded::kind` becomes
+    `field: SnapshotField`; `SaveError::Internal` wraps an opaque
+    `SaveInternalError`; `SaveError::TooLarge` is `{ collection:
+    SaveCollection, count, limit }`. Every load error renders its previous
+    text.
+  - A save-side byte field over its limit, including a function id over
+    `MAX_SAVE_IDENTIFIER_BYTES` passed to `register_rust_fn`, is the new
+    `SaveError::FieldSizeExceeded { field, size, limit }` instead of
+    `TooLarge`, because its size is a byte length, not a count: `save function
+    id count 4097 exceeds the supported limit` is now `save function id size
+    4097 exceeds limit 4096`. A collection too long for its length prefix
+    names itself instead of `vector`: `save vector count N exceeds the
+    supported limit` is now, for example, `save table entries count N exceeds
+    the supported limit`.
 
 - Snapshot format version 10. Every bytecode inline-cache operand
   (`GET_GLOBAL`, `SET_GLOBAL`, `GET_FIELD`, `SET_FIELD` and the generic-for
@@ -278,10 +356,9 @@ All notable changes to dellingr are documented here. The format follows
   `LUA_MAXCAPTURES`, `MAX_FORMAT_LEN`, `MAX_FORMAT_FIELD_DIGITS`,
   `TONUMBER_BASE_MIN`, `TONUMBER_BASE_MAX` and `TABLE_SORT_MAX_LEN`. Values
   and error paths are unchanged.
-- Typed library error context: `LibraryError`, `LibraryFunction` and
-  `StringPatternFunction`, read through `Error::library_error`,
-  `Error::library_function` and `Error::pattern_function`. Message text is
-  unchanged.
+- Typed library error context: `LibraryError` (the payload of
+  `ErrorKind::LibraryError`), `LibraryFunction` and `StringPatternFunction`,
+  read through `Error::library_function` and `Error::pattern_function`.
 - `CostAnalysis::caveat()` and a `dellingr::cli` module with the CLI's output
   prefixes. The `--analyze` warning now prints that caveat, with new wording.
 - The CLI reads the script from stdin when the input is `-`, as reference Lua

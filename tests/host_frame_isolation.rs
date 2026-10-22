@@ -31,7 +31,9 @@ fn dynamic_call_from_callback(state: &mut State) -> dellingr::Result<u8> {
     let rejected = match state.call(ArgCount::Dynamic, RetCount::Fixed(0)) {
         Err(e) => matches!(
             e.kind(),
-            ErrorKind::DynamicArgumentsUnsupported { api: "call" }
+            ErrorKind::DynamicArgumentsUnsupported {
+                api: dellingr::error::HostCallApi::Call
+            }
         ),
         Ok(()) => false,
     };
@@ -65,7 +67,9 @@ fn host_dynamic_call_is_rejected_at_top_level() {
         .expect_err("hosts own no call base");
     assert!(matches!(
         err.kind(),
-        ErrorKind::DynamicArgumentsUnsupported { api: "call" }
+        ErrorKind::DynamicArgumentsUnsupported {
+            api: dellingr::error::HostCallApi::Call
+        }
     ));
     assert_eq!(state.get_top(), 1);
 }

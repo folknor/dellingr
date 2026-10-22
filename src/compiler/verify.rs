@@ -78,10 +78,16 @@ struct AbsState {
     table_bases: Vec<u32>,
 }
 
-/// Why the verifier rejected a chunk. Typed so neither the compiler's
-/// internal error nor a snapshot rejection carries a free-form string.
+/// Why the bytecode verifier rejected a function. Typed so neither the
+/// compiler's internal error nor a snapshot rejection carries a free-form
+/// string; public as the reason inside a snapshot's
+/// `InvalidBytecodeReason::Validation`.
+// Public through `dellingr::snapshot`, which exists only with the snapshot
+// feature; the compiler uses the type in every build.
+#[cfg_attr(not(feature = "snapshot"), allow(unreachable_pub))]
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ValidationReason {
+pub enum ValidationReason {
     /// operand stack height overflows
     StackOverflows,
     /// operand stack underflows
@@ -145,21 +151,131 @@ pub(crate) enum ValidationReason {
     /// declared cache slots do not match instructions
     CacheSlotCountMismatch,
     /// An operand indexes past its pool or table.
-    IndexOutOfRange { operand: &'static str },
+    IndexOutOfRange {
+        /// The pool the operand indexes.
+        operand: BytecodeOperand,
+    },
     /// A pool or descriptor list exceeds its limit.
-    TooMany { what: &'static str, limit: usize },
+    TooMany {
+        /// The list that is too long.
+        what: BytecodePool,
+        /// Its maximum length.
+        limit: usize,
+    },
     /// A table template has more fields than the template limit.
     TableTemplateTooLarge,
     /// Parameters plus locals exceed the frame slot limit.
     FrameSlotCountExceeded,
     /// A table template key does not name a string literal.
-    TemplateKeyInvalid { template: usize },
+    TemplateKeyInvalid {
+        /// Index of the template.
+        template: usize,
+    },
     /// A table template names one key twice.
-    TemplateKeyDuplicate { template: usize },
+    TemplateKeyDuplicate {
+        /// Index of the template.
+        template: usize,
+    },
     /// A cache family's slots are not allocated in instruction order.
-    CacheSlotOrder { family: &'static str },
+    CacheSlotOrder {
+        /// The cache family.
+        family: CacheFamily,
+    },
     /// An instruction's reserved operand bytes are not zero.
-    ReservedBytesNonZero { opcode: u8, raw: u32 },
+    ReservedBytesNonZero {
+        /// The instruction's opcode byte.
+        opcode: u8,
+        /// The whole instruction word.
+        raw: u32,
+    },
+}
+
+/// The pool an instruction operand indexes, named by
+/// [`ValidationReason::IndexOutOfRange`].
+// Public through `dellingr::snapshot`, which exists only with the snapshot
+// feature; the compiler uses the type in every build.
+#[cfg_attr(not(feature = "snapshot"), allow(unreachable_pub))]
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BytecodeOperand {
+    /// The number literal pool.
+    NumberLiteral,
+    /// The string literal pool.
+    StringLiteral,
+    /// The table template list.
+    TableTemplate,
+    /// The nested function list.
+    NestedChunk,
+    /// The upvalue list.
+    Upvalue,
+}
+
+impl std::fmt::Display for BytecodeOperand {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::NumberLiteral => "number literal",
+            Self::StringLiteral => "string literal",
+            Self::TableTemplate => "table template",
+            Self::NestedChunk => "nested chunk",
+            Self::Upvalue => "upvalue",
+        })
+    }
+}
+
+/// A per-function list with a length limit, named by
+/// [`ValidationReason::TooMany`].
+// Public through `dellingr::snapshot`, which exists only with the snapshot
+// feature; the compiler uses the type in every build.
+#[cfg_attr(not(feature = "snapshot"), allow(unreachable_pub))]
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BytecodePool {
+    /// Table templates.
+    TableTemplate,
+    /// Nested functions.
+    NestedChunk,
+    /// Upvalue descriptors.
+    UpvalueDescriptor,
+    /// Number or string literals; each pool has the same limit.
+    Literal,
+}
+
+impl std::fmt::Display for BytecodePool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::TableTemplate => "table template",
+            Self::NestedChunk => "nested chunk",
+            Self::UpvalueDescriptor => "upvalue descriptor",
+            Self::Literal => "literal",
+        })
+    }
+}
+
+/// An inline-cache family whose slots are allocated in instruction order,
+/// named by [`ValidationReason::CacheSlotOrder`]. Global caches have their
+/// own rule ([`ValidationReason::GlobalCacheSlotOrder`]).
+// Public through `dellingr::snapshot`, which exists only with the snapshot
+// feature; the compiler uses the type in every build.
+#[cfg_attr(not(feature = "snapshot"), allow(unreachable_pub))]
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CacheFamily {
+    /// `GET_FIELD` caches.
+    Field,
+    /// `SET_FIELD` caches.
+    SetField,
+    /// Generic-`for` `pairs` cursors.
+    TforCursor,
+}
+
+impl std::fmt::Display for CacheFamily {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Field => "field",
+            Self::SetField => "set-field",
+            Self::TforCursor => "TFOR_CALL cursor",
+        })
+    }
 }
 
 impl std::fmt::Display for ValidationReason {
@@ -355,7 +471,7 @@ fn check_index(
     pc: usize,
     value: u16,
     len: usize,
-    operand: &'static str,
+    operand: BytecodeOperand,
 ) -> Result<(), BytecodeValidationError> {
     if (value as usize) < len {
         Ok(())
@@ -727,12 +843,16 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
     }
     for (name, len, limit) in [
         (
-            "table template",
+            BytecodePool::TableTemplate,
             view.table_templates().len(),
             MAX_TABLE_TEMPLATES,
         ),
-        ("nested chunk", view.nested_len(), MAX_NESTED),
-        ("upvalue descriptor", view.upvalues_len(), MAX_UPVALUES),
+        (BytecodePool::NestedChunk, view.nested_len(), MAX_NESTED),
+        (
+            BytecodePool::UpvalueDescriptor,
+            view.upvalues_len(),
+            MAX_UPVALUES,
+        ),
     ] {
         if len > limit {
             return Err(err(None, ValidationReason::TooMany { what: name, limit }));
@@ -742,7 +862,7 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
         return Err(err(
             None,
             ValidationReason::TooMany {
-                what: "literal",
+                what: BytecodePool::Literal,
                 limit: MAX_LITERALS,
             },
         ));
@@ -816,7 +936,7 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
     let sequential = |pc: usize,
                       slot: u8,
                       next: &mut usize,
-                      family: &'static str|
+                      family: CacheFamily|
      -> Result<(), BytecodeValidationError> {
         if usize::from(slot) != *next {
             return Err(err(Some(pc), ValidationReason::CacheSlotOrder { family }));
@@ -845,10 +965,20 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
         }
         match op {
             Instr::OP_PUSH_NUM => {
-                check_index(pc, bx, view.number_literals_len(), "number literal")?;
+                check_index(
+                    pc,
+                    bx,
+                    view.number_literals_len(),
+                    BytecodeOperand::NumberLiteral,
+                )?;
             }
             Instr::OP_GET_GLOBAL | Instr::OP_SET_GLOBAL => {
-                check_index(pc, bx, view.string_literals().len(), "string literal")?;
+                check_index(
+                    pc,
+                    bx,
+                    view.string_literals().len(),
+                    BytecodeOperand::StringLiteral,
+                )?;
                 // Check each name once: re-scanning a long name at every
                 // reference would cost references x name length. The first
                 // reference to a bad name still reports.
@@ -888,15 +1018,25 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
                 }
             }
             Instr::OP_GET_FIELD => {
-                check_index(pc, bx, view.string_literals().len(), "string literal")?;
+                check_index(
+                    pc,
+                    bx,
+                    view.string_literals().len(),
+                    BytecodeOperand::StringLiteral,
+                )?;
                 if let Some(slot) = inst.field_cache_slot() {
-                    sequential(pc, slot, &mut next_field_slot, "field")?;
+                    sequential(pc, slot, &mut next_field_slot, CacheFamily::Field)?;
                 }
             }
             Instr::OP_SET_FIELD => {
-                check_index(pc, bx, view.string_literals().len(), "string literal")?;
+                check_index(
+                    pc,
+                    bx,
+                    view.string_literals().len(),
+                    BytecodeOperand::StringLiteral,
+                )?;
                 if let Some(slot) = inst.set_field_cache_slot() {
-                    sequential(pc, slot, &mut next_set_field_slot, "set-field")?;
+                    sequential(pc, slot, &mut next_set_field_slot, CacheFamily::SetField)?;
                 }
             }
             // Every remaining opcode that names a string literal in Bx. Merged
@@ -906,23 +1046,38 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
             | Instr::OP_INIT_FIELD_PINNED
             | Instr::OP_SET_FIELD_AT
             | Instr::OP_INIT_FIELD => {
-                check_index(pc, bx, view.string_literals().len(), "string literal")?;
+                check_index(
+                    pc,
+                    bx,
+                    view.string_literals().len(),
+                    BytecodeOperand::StringLiteral,
+                )?;
             }
             Instr::OP_NEW_TABLE_TEMPLATE => {
                 check_index(
                     pc,
                     u16::from(a),
                     view.table_templates().len(),
-                    "table template",
+                    BytecodeOperand::TableTemplate,
                 )?;
             }
-            Instr::OP_CLOSURE => check_index(pc, u16::from(a), view.nested_len(), "nested chunk")?,
+            Instr::OP_CLOSURE => check_index(
+                pc,
+                u16::from(a),
+                view.nested_len(),
+                BytecodeOperand::NestedChunk,
+            )?,
             Instr::OP_GET_BUILTIN | Instr::OP_SET_BUILTIN if (a as usize) >= Builtin::COUNT => {
                 return Err(err(Some(pc), ValidationReason::BuiltinSlotOutOfRange));
             }
             Instr::OP_GET_LOCAL | Instr::OP_SET_LOCAL => check_slots(pc, a, 1, slots)?,
             Instr::OP_GET_UPVALUE | Instr::OP_SET_UPVALUE => {
-                check_index(pc, u16::from(a), view.upvalues_len(), "upvalue")?;
+                check_index(
+                    pc,
+                    u16::from(a),
+                    view.upvalues_len(),
+                    BytecodeOperand::Upvalue,
+                )?;
             }
             Instr::OP_FOR_PREP | Instr::OP_FOR_LOOP | Instr::OP_TFOR_LOOP => {
                 check_slots(pc, a, 4, slots)?;
@@ -934,7 +1089,12 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
                 }
                 check_slots(pc, a, 3 + b as usize, slots)?;
                 if let Some(slot) = inst.tfor_cursor_slot() {
-                    sequential(pc, slot, &mut next_tfor_cursor_slot, "TFOR_CALL cursor")?;
+                    sequential(
+                        pc,
+                        slot,
+                        &mut next_tfor_cursor_slot,
+                        CacheFamily::TforCursor,
+                    )?;
                 }
             }
             Instr::OP_CLOSE_UPVALUES if (a as usize) > slots => {
@@ -1093,6 +1253,93 @@ mod tree_tests {
                 *count_of(&mut miscounted) = declared;
                 assert!(validate_bytecode(&miscounted).is_err(), "opcode {opcode}");
             }
+        }
+    }
+
+    /// The typed operands render the sentences the verifier carried as
+    /// strings before they were typed.
+    #[test]
+    fn typed_operands_keep_their_sentences() {
+        use super::{BytecodeOperand, BytecodePool, CacheFamily, ValidationReason};
+        for (reason, text) in [
+            (
+                ValidationReason::IndexOutOfRange {
+                    operand: BytecodeOperand::NumberLiteral,
+                },
+                "number literal index is out of range",
+            ),
+            (
+                ValidationReason::IndexOutOfRange {
+                    operand: BytecodeOperand::StringLiteral,
+                },
+                "string literal index is out of range",
+            ),
+            (
+                ValidationReason::IndexOutOfRange {
+                    operand: BytecodeOperand::TableTemplate,
+                },
+                "table template index is out of range",
+            ),
+            (
+                ValidationReason::IndexOutOfRange {
+                    operand: BytecodeOperand::NestedChunk,
+                },
+                "nested chunk index is out of range",
+            ),
+            (
+                ValidationReason::IndexOutOfRange {
+                    operand: BytecodeOperand::Upvalue,
+                },
+                "upvalue index is out of range",
+            ),
+            (
+                ValidationReason::TooMany {
+                    what: BytecodePool::TableTemplate,
+                    limit: 3,
+                },
+                "too many table templates (limit 3)",
+            ),
+            (
+                ValidationReason::TooMany {
+                    what: BytecodePool::NestedChunk,
+                    limit: 3,
+                },
+                "too many nested chunks (limit 3)",
+            ),
+            (
+                ValidationReason::TooMany {
+                    what: BytecodePool::UpvalueDescriptor,
+                    limit: 3,
+                },
+                "too many upvalue descriptors (limit 3)",
+            ),
+            (
+                ValidationReason::TooMany {
+                    what: BytecodePool::Literal,
+                    limit: 3,
+                },
+                "too many literals (limit 3)",
+            ),
+            (
+                ValidationReason::CacheSlotOrder {
+                    family: CacheFamily::Field,
+                },
+                "field cache slot does not match instruction order",
+            ),
+            (
+                ValidationReason::CacheSlotOrder {
+                    family: CacheFamily::SetField,
+                },
+                "set-field cache slot does not match instruction order",
+            ),
+            (
+                ValidationReason::CacheSlotOrder {
+                    family: CacheFamily::TforCursor,
+                },
+                "TFOR_CALL cursor cache slot does not match instruction order",
+            ),
+        ] {
+            assert_eq!(reason.to_string(), text);
         }
     }
 

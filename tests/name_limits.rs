@@ -64,11 +64,22 @@ fn registration_limits_are_checked_before_mutation() {
     let error = state
         .register_rust_fn(&format!("{id}f"), callback)
         .expect_err("oversized function id is rejected");
-    assert!(matches!(
+    assert_eq!(
         error,
-        dellingr::SaveError::TooLarge { what: "function id", count }
-            if count == dellingr::limits::MAX_SAVE_IDENTIFIER_BYTES + 1
-    ));
+        dellingr::SaveError::FieldSizeExceeded {
+            field: dellingr::snapshot::SnapshotField::FunctionId,
+            size: dellingr::limits::MAX_SAVE_IDENTIFIER_BYTES + 1,
+            limit: dellingr::limits::MAX_SAVE_IDENTIFIER_BYTES,
+        }
+    );
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "save function id size {} exceeds limit {}",
+            dellingr::limits::MAX_SAVE_IDENTIFIER_BYTES + 1,
+            dellingr::limits::MAX_SAVE_IDENTIFIER_BYTES
+        )
+    );
     assert_eq!(
         state
             .save_state()

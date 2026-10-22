@@ -61,6 +61,22 @@ pub use vm::State;
 #[cfg(feature = "snapshot")]
 pub use vm::{LoadError, SaveDiagnostics, SaveError, SaveState, SnapshotError, TableLoadLocation};
 
+/// Save and load (the `snapshot` feature): the result types and every typed
+/// reason inside a [`SaveError`] or [`SnapshotError`]. The six main types are
+/// also exported at the crate root.
+#[cfg(feature = "snapshot")]
+pub mod snapshot {
+    pub use crate::compiler::verify::{
+        BytecodeOperand, BytecodePool, CacheFamily, ValidationReason,
+    };
+    pub use crate::vm::{
+        CorruptionReason, DecodeReason, DuplicateEntry, EnvironmentCorruption, GmatchCorruption,
+        InvalidBytecodeReason, KeyForm, LoadError, MaterializedPart, SaveCollection,
+        SaveDiagnostics, SaveError, SaveInternalError, SaveState, SavedReference, SnapshotError,
+        SnapshotField, TableCorruption, TableLoadLocation, TableRestoreFailure, TableRestoreStep,
+    };
+}
+
 use compiler::Bytecode;
 use instr::Instr;
 use std::sync::Arc;

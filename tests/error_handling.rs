@@ -151,7 +151,9 @@ fn public_call_rejects_dynamic_without_base_without_panicking() {
         .expect_err("host Dynamic call without a base must return an error");
     assert!(matches!(
         err.kind(),
-        ErrorKind::DynamicArgumentsUnsupported { api: "call" }
+        ErrorKind::DynamicArgumentsUnsupported {
+            api: dellingr::error::HostCallApi::Call
+        }
     ));
     assert_eq!(state.get_top(), 1);
     assert_eq!(state.typ(-1), LuaType::Function);
@@ -1084,7 +1086,7 @@ fn table_move_rejects_overflow_ranges_before_mutating() {
         ),
         (
             "table.move(t, 1, 2000, 9223372036854774784)",
-            "destination wrap around",
+            "bad argument #4 to 'move' (destination wrap around)",
         ),
     ] {
         dellingr::Program::compile(code, None)

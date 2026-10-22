@@ -338,7 +338,9 @@ impl State {
                 // host owns no such base. Reject it explicitly, as
                 // State::call does.
                 return Err(super::Error::without_location(
-                    ErrorKind::DynamicArgumentsUnsupported { api: "call_anchor" },
+                    ErrorKind::DynamicArgumentsUnsupported {
+                        api: crate::error::HostCallApi::CallAnchor,
+                    },
                 ));
             }
         };

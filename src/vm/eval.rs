@@ -71,7 +71,9 @@ impl State {
             ArgCount::Fixed(num_args) => num_args,
             ArgCount::Dynamic => {
                 return Err(Error::without_location(
-                    ErrorKind::DynamicArgumentsUnsupported { api: "call" },
+                    ErrorKind::DynamicArgumentsUnsupported {
+                        api: crate::error::HostCallApi::Call,
+                    },
                 ));
             }
         };

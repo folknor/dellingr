@@ -1,8 +1,11 @@
 //! Pins the wording of diagnostics that a script author reads: argument
-//! numbers of method calls, traceback labels of unnamed functions, and the
-//! argument named by `table.move`'s element-count error.
+//! numbers of method calls, traceback labels of unnamed functions, the
+//! arguments named by `table.move`'s range errors, `error()`'s position
+//! prefix, and syntax errors.
 
-use dellingr::error::{Error, ErrorKind};
+use dellingr::error::{
+    ArgDetail, Error, ErrorKind, ErrorValue, HostCallApi, PrefixLocation, SyntaxError, TokenKind,
+};
 use dellingr::{ArgCount, RetCount, State};
 
 fn run_error(code: &str) -> Error {
@@ -124,6 +127,200 @@ fn named_functions_keep_their_names_in_tracebacks() {
         ["t:2: in function 'boom'", "t:4: in main chunk"],
         "{error}"
     );
+}
+
+#[test]
+fn table_move_blames_the_destination_for_wrap_around() {
+    let error = run_error("table.move({10, 20, 30}, 1, 2000, 9223372036854774784)");
+    let ErrorKind::ArgError(argument) = error.kind() else {
+        panic!("expected an argument error, got {:?}", error.kind());
+    };
+    assert_eq!(argument.arg_number(), 4);
+    assert_eq!(argument.func_name(), Some("move"));
+    assert_eq!(argument.detail(), &ArgDetail::DestinationWrapAround);
+    assert_eq!(
+        error.kind().to_string(),
+        "bad argument #4 to 'move' (destination wrap around)"
+    );
+}
+
+/// The first line of an uncaught error: prefix plus rendered value.
+fn first_line(code: &str) -> String {
+    let rendered = run_error(code).to_string();
+    rendered
+        .lines()
+        .next()
+        .expect("an error renders at least one line")
+        .to_owned()
+}
+
+#[test]
+fn error_prefixes_only_string_values() {
+    // As Lua 5.4 does: position information is added only to a string, at
+    // any level. Lua 5.2 also prefixes numbers.
+    for (code, expected) in [
+        ("error('m')", "t:1: m"),
+        ("error('m', 1)", "t:1: m"),
+        ("error('m', 0)", "m"),
+        ("local function f() error('m', 2) end\nf()", "t:2: m"),
+        ("error('42')", "t:1: 42"),
+        ("error(42)", "42"),
+        ("error(1.5, 1)", "1.5"),
+        ("local function f() error(42, 2) end\nf()", "42"),
+        ("error(true)", "true"),
+        ("error(nil)", "nil"),
+        ("error()", "nil"),
+        ("error({})", "table: 0x1"),
+        (
+            "error(setmetatable({}, {__tostring = function() return 'custom' end}), 2)",
+            "custom",
+        ),
+        ("error(print)", "function: 0x1"),
+    ] {
+        assert_eq!(first_line(code), expected, "{code}");
+    }
+}
+
+#[test]
+fn error_records_suppressed_prefix_for_non_strings() {
+    for code in ["error(42)", "error({}, 2)", "error(false, 1)", "error()"] {
+        let error = run_error(code);
+        let ErrorKind::ScriptError { prefix, .. } = error.kind() else {
+            panic!("expected a script error, got {:?}", error.kind());
+        };
+        assert!(matches!(prefix, PrefixLocation::Suppressed), "{code}");
+    }
+    let error = run_error("error('m')");
+    let ErrorKind::ScriptError { value, prefix } = error.kind() else {
+        panic!("expected a script error, got {:?}", error.kind());
+    };
+    assert_eq!(value, &ErrorValue::String(b"m".to_vec()));
+    assert!(matches!(prefix, PrefixLocation::Current));
+}
+
+#[test]
+fn error_validates_its_level_for_every_value() {
+    // The level is checked whatever the value, as in both references. A
+    // table's `__tostring` runs first, so its own error wins.
+    assert_eq!(
+        kind_text("error(42, 'x')"),
+        "bad argument #2 to 'error' (number expected, got string)"
+    );
+    assert_eq!(
+        kind_text("error({}, 1.5)"),
+        "bad argument #2 to 'error' (number has no integer representation)"
+    );
+    assert_eq!(
+        kind_text("error(setmetatable({}, {__tostring = function() error('inner', 0) end}), 'x')"),
+        "inner"
+    );
+}
+
+fn syntax_error(code: &str) -> Error {
+    dellingr::Program::compile(code, Some(b"t".as_slice()))
+        .expect_err("test source must not compile")
+}
+
+#[test]
+fn syntax_errors_name_what_reference_lua_names() {
+    for (code, expected) in [
+        ("local x = )", "unexpected symbol near ')'"),
+        ("x = 1 )", "unexpected symbol near ')'"),
+        ("= 1", "unexpected symbol near '='"),
+        ("if x then ) end", "unexpected symbol near ')'"),
+        ("a, ) = 1, 2", "unexpected symbol near ')'"),
+        ("return )", "unexpected symbol near ')'"),
+        ("do return ) end", "unexpected symbol near ')'"),
+        ("(x) = 1", "syntax error near '='"),
+        ("f() = 1", "syntax error near '='"),
+        ("a, f() = 1, 2", "syntax error near '='"),
+        ("x;", "syntax error near ';'"),
+        ("x + 1", "syntax error near '+'"),
+        ("for i do end", "'=' or 'in' expected near 'do'"),
+        ("a:b z", "function arguments expected near 'z'"),
+        ("function 1() end", "<name> expected near '1'"),
+        ("x = 1 end", "<eof> expected near 'end'"),
+        ("return; )", "<eof> expected near ')'"),
+        ("for i = 1, 2 x end", "'do' expected near 'x'"),
+        ("t = {[1] 2}", "'=' expected near '2'"),
+    ] {
+        assert_eq!(syntax_error(code).kind().to_string(), expected, "{code}");
+    }
+}
+
+#[test]
+fn syntax_error_variants_are_typed() {
+    let found = |code: &str| match syntax_error(code).into_kind() {
+        ErrorKind::SyntaxError(error) => error,
+        other => panic!("expected a syntax error for {code}, got {other:?}"),
+    };
+    assert!(matches!(
+        found("local x = )"),
+        SyntaxError::UnexpectedSymbol { found } if found == b")"
+    ));
+    assert!(matches!(
+        found("x + 1"),
+        SyntaxError::MalformedStatement { found } if found == b"+"
+    ));
+    assert!(matches!(
+        found("for i do end"),
+        SyntaxError::ForSeparatorExpected { found } if found == b"do"
+    ));
+    assert!(matches!(
+        found("a:b z"),
+        SyntaxError::FunctionArgumentsExpected { found } if found == b"z"
+    ));
+    assert!(matches!(
+        found("local 1 = 2"),
+        SyntaxError::ExpectedToken { expected: TokenKind::Identifier, found } if found == b"1"
+    ));
+    assert!(matches!(
+        found("while x y"),
+        SyntaxError::ExpectedToken {
+            expected: TokenKind::Do,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn parser_reaching_end_of_input_stays_recoverable() {
+    // Whatever the parser was looking for, reaching the end-of-input token is
+    // `UnexpectedEof`, which a REPL reads as "keep reading".
+    for code in ["local x =", "x", "(x)", "a:b", "x = 1 +", "if x then", "f("] {
+        let error = syntax_error(code);
+        assert!(
+            matches!(
+                error.kind(),
+                ErrorKind::SyntaxError(SyntaxError::UnexpectedEof)
+            ),
+            "{code}: {:?}",
+            error.kind()
+        );
+        assert!(error.is_recoverable(), "{code}");
+        assert_eq!(error.kind().to_string(), "unexpected <eof>", "{code}");
+    }
+}
+
+#[test]
+fn token_kinds_render_with_reference_quoting() {
+    for (token, expected) in [
+        (TokenKind::End, "'end'"),
+        (TokenKind::Assign, "'='"),
+        (TokenKind::DotDotDot, "'...'"),
+        (TokenKind::Identifier, "<name>"),
+        (TokenKind::LiteralNumber, "<number>"),
+        (TokenKind::LiteralString, "<string>"),
+        (TokenKind::EndOfFile, "<eof>"),
+    ] {
+        assert_eq!(token.to_string(), expected);
+    }
+}
+
+#[test]
+fn host_call_api_names_the_method() {
+    assert_eq!(HostCallApi::Call.to_string(), "call");
+    assert_eq!(HostCallApi::CallAnchor.to_string(), "call_anchor");
 }
 
 #[test]

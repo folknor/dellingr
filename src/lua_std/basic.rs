@@ -179,6 +179,14 @@ pub(super) const NON_BUILTIN_GLOBALS: &[(&str, crate::RustFunc)] = &[
                 PrefixLocation::TraceFrame(error_trace_frame(level))
             }
         };
+        // Position information is added only to a string, as Lua 5.4 does
+        // (5.2 also prefixes numbers). The level is still validated above
+        // for every value, as in both references.
+        let prefix_location = if matches!(value, ErrorValue::String(_)) {
+            prefix_location
+        } else {
+            PrefixLocation::Suppressed
+        };
         Err(state.error(ErrorKind::ScriptError {
             value,
             prefix: prefix_location,

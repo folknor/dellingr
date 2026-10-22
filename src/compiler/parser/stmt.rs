@@ -6,7 +6,7 @@ use super::PrefixExp;
 use super::Result;
 use super::RetCount;
 use super::SyntaxError;
-use super::TokenType;
+use super::TokenKind;
 use crate::error::ParserFault;
 use crate::limits::{MAX_ASSIGNMENT_OFFSET, MAX_FIXED_RESULTS};
 
@@ -16,8 +16,11 @@ impl<'a> Parser<'a> {
     pub(super) fn parse_return(&mut self) -> Result<()> {
         self.input.next()?; // 'return' keyword
 
-        // Check if there's an expression following return
-        let count = if self.is_expr_start()? {
+        // As in reference Lua, only a block follower or `;` ends an empty
+        // return; anything else must parse as an expression list, so a stray
+        // token is an unexpected symbol rather than trailing input.
+        let next = self.input.peek_type()?;
+        let count = if !(Self::is_block_follow(next) || next == TokenKind::Semi) {
             let (n, last_exp) = self.parse_explist()?;
             match last_exp {
                 ExpDesc::MultiTail(tail) => {
@@ -35,39 +38,25 @@ impl<'a> Parser<'a> {
             RetCount::Fixed(0)
         };
         self.push(Instr::ret(count));
-        self.input.try_pop(TokenType::Semi)?;
+        self.input.try_pop(TokenKind::Semi)?;
         Ok(())
     }
 
-    /// Returns true if the next token could be the start of an expression.
-    fn is_expr_start(&mut self) -> Result<bool> {
-        let ok = matches!(
-            self.input.peek_type()?,
-            TokenType::Identifier
-                | TokenType::LParen
-                | TokenType::LCurly
-                | TokenType::LiteralNumber
-                | TokenType::LiteralString
-                | TokenType::Function
-                | TokenType::Nil
-                | TokenType::False
-                | TokenType::True
-                | TokenType::Not
-                | TokenType::Hash
-                | TokenType::Minus
-                | TokenType::DotDotDot
-        );
-        Ok(ok)
-    }
-
     /// Parses a statement which could be a variable assignment or a function call.
+    ///
+    /// As in reference Lua's `exprstat`, the token after the completed prefix
+    /// expression decides: `=` or `,` makes it an assignment, which needs a
+    /// variable; anything else makes it a call statement, which needs a call.
+    /// Any other combination is a [`SyntaxError::MalformedStatement`] near
+    /// that token.
     pub(super) fn parse_assign_or_call(&mut self) -> Result<()> {
-        match self.parse_prefix_exp()? {
-            PrefixExp::Parenthesized => {
-                let tok = self.input.next()?;
-                Err(self.err_unexpected(tok, TokenType::Assign))
-            }
-            PrefixExp::FunctionCall(call) => {
+        let prefix = self.parse_prefix_exp()?;
+        let assigning = matches!(
+            self.input.peek_type()?,
+            TokenKind::Assign | TokenKind::Comma
+        );
+        match prefix {
+            PrefixExp::FunctionCall(call) if !assigning => {
                 let (num_args, line) = (call.num_args(), call.line());
                 self.push_at_line(
                     Instr::call_site(num_args, RetCount::Fixed(0), call.is_method()),
@@ -75,18 +64,27 @@ impl<'a> Parser<'a> {
                 );
                 Ok(())
             }
-            PrefixExp::Place(first_place) => self.parse_assign(first_place),
+            PrefixExp::Place(first_place) if assigning => self.parse_assign(first_place),
+            _ => Err(self.malformed_statement()),
+        }
+    }
+
+    /// A [`SyntaxError::MalformedStatement`] near the next token.
+    fn malformed_statement(&mut self) -> super::Error {
+        match self.input.next() {
+            Ok(tok) => self.err_near(tok, |found| SyntaxError::MalformedStatement { found }),
+            Err(error) => error,
         }
     }
 
     /// Parses a variable assignment.
     fn parse_assign(&mut self, first_exp: PlaceExp) -> Result<()> {
         let mut places = vec![first_exp];
-        while self.input.try_pop(TokenType::Comma)?.is_some() {
+        while self.input.try_pop(TokenKind::Comma)?.is_some() {
             places.push(self.parse_place_exp()?);
         }
 
-        self.expect(TokenType::Assign)?;
+        self.expect(TokenKind::Assign)?;
         let (num_rvals, last_exp) = self.parse_explist()?;
         let num_lvals = places.len();
         self.adjust_multi_assign(num_lvals, usize::from(num_rvals), &last_exp)?;
@@ -115,8 +113,7 @@ impl<'a> Parser<'a> {
     fn parse_place_exp(&mut self) -> Result<PlaceExp> {
         match self.parse_prefix_exp()? {
             PrefixExp::Parenthesized | PrefixExp::FunctionCall(_) => {
-                let tok = self.input.next()?;
-                Err(self.err_unexpected(tok, TokenType::Assign))
+                Err(self.malformed_statement())
             }
             PrefixExp::Place(place) => Ok(place),
         }
@@ -127,7 +124,7 @@ impl<'a> Parser<'a> {
         self.input.next()?; // `local` keyword
 
         // Check for `local function name(...) ... end`
-        if self.input.check_type(TokenType::Function)? {
+        if self.input.check_type(TokenKind::Function)? {
             return self.parse_local_function();
         }
 
@@ -136,7 +133,7 @@ impl<'a> Parser<'a> {
         let names = self.parse_namelist()?;
 
         let num_names = names.len();
-        if self.input.try_pop(TokenType::Assign)?.is_some() {
+        if self.input.try_pop(TokenKind::Assign)?.is_some() {
             // Also perform the assignment
             let (num_rvalues, last_exp) = self.parse_explist()?;
             self.adjust_multi_assign(num_names, usize::from(num_rvalues), &last_exp)?;
@@ -189,7 +186,7 @@ impl<'a> Parser<'a> {
     /// Parse a comma-separated list of identifiers.
     fn parse_namelist(&mut self) -> Result<Vec<&'a str>> {
         let mut names = vec![self.expect_identifier()?];
-        while self.input.try_pop(TokenType::Comma)?.is_some() {
+        while self.input.try_pop(TokenKind::Comma)?.is_some() {
             names.push(self.expect_identifier()?);
         }
         Ok(names)
@@ -204,18 +201,18 @@ impl<'a> Parser<'a> {
 
         // Check what follows the first identifier to determine loop type
         match self.input.peek_type()? {
-            TokenType::Assign => {
+            TokenKind::Assign => {
                 // Numeric for: for i = start, stop [, step] do
                 self.input.next()?; // consume '='
                 self.parse_numeric_for(first_name)?;
             }
-            TokenType::Comma | TokenType::In => {
+            TokenKind::Comma | TokenKind::In => {
                 // Generic for: for var1, var2, ... in explist do
                 self.parse_generic_for(first_name)?;
             }
             _ => {
                 let tok = self.input.next()?;
-                return Err(self.err_unexpected(tok, TokenType::Assign));
+                return Err(self.err_near(tok, |found| SyntaxError::ForSeparatorExpected { found }));
             }
         }
         self.level_down()?;
@@ -234,7 +231,7 @@ impl<'a> Parser<'a> {
 
         // First, all 3 control expressions are evaluated.
         self.parse_expr()?;
-        self.expect(TokenType::Comma)?;
+        self.expect(TokenKind::Comma)?;
         self.parse_expr()?;
 
         // optional step value
@@ -255,7 +252,7 @@ impl<'a> Parser<'a> {
         // body
         self.enter_loop(current_local_slot);
         self.parse_statements()?;
-        self.expect(TokenType::End)?;
+        self.expect(TokenKind::End)?;
 
         // Close the visible loop variable and body locals before its slot is
         // reused, giving a captured loop variable a fresh upvalue per iteration.
@@ -282,17 +279,17 @@ impl<'a> Parser<'a> {
     fn parse_numeric_for_step(&mut self) -> Result<()> {
         let next_token = self.input.next()?;
         match next_token.typ {
-            TokenType::Comma => {
+            TokenKind::Comma => {
                 self.parse_expr()?;
-                self.expect(TokenType::Do)?;
+                self.expect(TokenKind::Do)?;
                 Ok(())
             }
-            TokenType::Do => {
+            TokenKind::Do => {
                 let i = self.find_or_add_number(1.0)?;
                 self.push(Instr::push_num(i));
                 Ok(())
             }
-            _ => Err(self.err_unexpected(next_token, TokenType::Do)),
+            _ => Err(self.err_unexpected(next_token, TokenKind::Do)),
         }
     }
 
@@ -300,10 +297,10 @@ impl<'a> Parser<'a> {
     fn parse_generic_for(&mut self, first_name: &'a str) -> Result<()> {
         // Collect all loop variable names
         let mut names = vec![first_name];
-        while self.input.try_pop(TokenType::Comma)?.is_some() {
+        while self.input.try_pop(TokenKind::Comma)?.is_some() {
             names.push(self.expect_identifier()?);
         }
-        self.expect(TokenType::In)?;
+        self.expect(TokenKind::In)?;
 
         let num_loop_vars = self.bounded_u8(
             names.len(),
@@ -336,7 +333,7 @@ impl<'a> Parser<'a> {
             self.add_local(name)?;
         }
 
-        self.expect(TokenType::Do)?;
+        self.expect(TokenKind::Do)?;
 
         // TForPrep: pop 3 values into the hidden locals
         self.push(Instr::tfor_prep(base_slot));
@@ -355,7 +352,7 @@ impl<'a> Parser<'a> {
         // body
         self.enter_loop(base_slot);
         self.parse_statements()?;
-        self.expect(TokenType::End)?;
+        self.expect(TokenKind::End)?;
 
         // Close the visible loop variables and body locals before their slots are reused.
         // Omitted when nothing in the loop scope was captured.
@@ -421,7 +418,7 @@ impl<'a> Parser<'a> {
         self.input.next()?; // `do` keyword
         self.level_up();
         self.parse_statements()?;
-        self.expect(TokenType::End)?;
+        self.expect(TokenKind::End)?;
         self.level_down()?;
         Ok(())
     }
@@ -437,7 +434,7 @@ impl<'a> Parser<'a> {
         let body_start = self.funcs.chunk.code.len();
         self.enter_loop(body_locals_start);
         self.parse_statements()?;
-        self.expect(TokenType::Until)?;
+        self.expect(TokenKind::Until)?;
         self.parse_expr()?;
 
         // Close upvalues for any locals declared inside the loop body
@@ -466,7 +463,7 @@ impl<'a> Parser<'a> {
         self.level_up();
         let condition_start = self.funcs.chunk.code.len();
         self.parse_expr()?;
-        self.expect(TokenType::Do)?;
+        self.expect(TokenKind::Do)?;
 
         let (test_position, test_constructor) = self.push_branch_false();
 
@@ -475,7 +472,7 @@ impl<'a> Parser<'a> {
 
         self.enter_loop(body_locals_start);
         self.parse_statements()?;
-        self.expect(TokenType::End)?;
+        self.expect(TokenKind::End)?;
 
         // Close upvalues for any captured locals declared inside the loop body
         if self.local_slot_count()? > body_locals_start && self.loop_body_captured() {
@@ -513,7 +510,7 @@ impl<'a> Parser<'a> {
         loop {
             self.input.next()?; // `if` or `elseif` keyword
             self.parse_expr()?;
-            self.expect(TokenType::Then)?;
+            self.expect(TokenKind::Then)?;
             self.level_up();
 
             let (branch_instr_index, branch_constructor) = self.push_branch_false();
@@ -528,7 +525,7 @@ impl<'a> Parser<'a> {
             self.level_down()?;
 
             let next = self.input.peek_type()?;
-            if !arm_returns && matches!(next, TokenType::ElseIf | TokenType::Else) {
+            if !arm_returns && matches!(next, TokenKind::ElseIf | TokenKind::Else) {
                 end_jumps.push(self.funcs.chunk.code.len());
                 self.push(Instr::jump(0));
             }
@@ -536,13 +533,13 @@ impl<'a> Parser<'a> {
             let next_arm_index = self.funcs.chunk.code.len();
             self.patch_jump(branch_instr_index, next_arm_index, branch_constructor)?;
             match next {
-                TokenType::ElseIf => {}
-                TokenType::Else => {
+                TokenKind::ElseIf => {}
+                TokenKind::Else => {
                     self.parse_else()?;
                     break;
                 }
                 _ => {
-                    self.expect(TokenType::End)?;
+                    self.expect(TokenKind::End)?;
                     break;
                 }
             }
@@ -559,7 +556,7 @@ impl<'a> Parser<'a> {
         self.level_up();
         self.input.next()?; // `else` keyword
         self.parse_statements()?;
-        self.expect(TokenType::End)?;
+        self.expect(TokenKind::End)?;
         self.level_down()?;
         Ok(())
     }

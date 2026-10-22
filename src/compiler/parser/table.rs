@@ -5,7 +5,7 @@ use super::Result;
 use super::RetCount;
 use super::SyntaxError;
 use super::TailKind;
-use super::TokenType;
+use super::TokenKind;
 use crate::limits::tuning::{INLINE_TEMPLATE_FIELDS, TABLE_INLINE_CAPACITY};
 use crate::limits::{MAX_TABLE_BATCH_SIZE, MAX_TABLE_TEMPLATE_FIELDS, MAX_TABLE_TEMPLATES};
 
@@ -72,10 +72,10 @@ impl Parser<'_> {
         // Skip any leading separators (handles {;} and {,}). This is an
         // intentional divergence from Lua 5.2/5.4, which reject a leading or
         // lone separator; docs/compatibility.md documents it.
-        while let TokenType::Comma | TokenType::Semi = self.input.peek_type()? {
+        while let TokenKind::Comma | TokenKind::Semi = self.input.peek_type()? {
             self.input.next()?;
         }
-        if self.input.try_pop(TokenType::RCurly)?.is_none() {
+        if self.input.try_pop(TokenKind::RCurly)?.is_none() {
             // i is the number of array-style entries.
             let mut i = 0;
             let mut batch = 0u16;
@@ -101,15 +101,15 @@ impl Parser<'_> {
                 field_count = field_count.saturating_add(1);
                 template_candidate.push(named_field);
 
-                if !matches!(self.input.peek_type()?, TokenType::Comma | TokenType::Semi) {
+                if !matches!(self.input.peek_type()?, TokenKind::Comma | TokenKind::Semi) {
                     break tail;
                 }
                 self.input.next()?;
-                if self.input.check_type(TokenType::RCurly)? {
+                if self.input.check_type(TokenKind::RCurly)? {
                     break tail;
                 }
             };
-            self.expect(TokenType::RCurly)?;
+            self.expect(TokenKind::RCurly)?;
 
             if let Some(tail) = last_tail.as_ref() {
                 self.open_tail(*tail, RetCount::All)?;
@@ -136,19 +136,19 @@ impl Parser<'_> {
     #[hotpath::measure]
     fn parse_table_entry(&mut self, counter: u8) -> Result<ParsedTableEntry> {
         match self.input.peek_type()? {
-            TokenType::Identifier if self.input.peek2_type()? == TokenType::Assign => {
+            TokenKind::Identifier if self.input.peek2_type()? == TokenKind::Assign => {
                 let index = self.expect_identifier_id()?;
-                self.expect(TokenType::Assign)?;
+                self.expect(TokenKind::Assign)?;
                 self.parse_expr()?;
                 let instr_idx = self.funcs.chunk.code.len();
                 self.push(Instr::init_field(counter, index));
                 Ok((counter, None, Some((index, instr_idx))))
             }
-            TokenType::LSquare => {
+            TokenKind::LSquare => {
                 self.input.next()?;
                 self.parse_expr()?;
-                self.expect(TokenType::RSquare)?;
-                self.expect(TokenType::Assign)?;
+                self.expect(TokenKind::RSquare)?;
+                self.expect(TokenKind::Assign)?;
                 self.parse_expr()?;
                 self.push(Instr::init_index(counter));
                 Ok((counter, None, None))

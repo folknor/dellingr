@@ -3,36 +3,19 @@ use std::ops::Range;
 /// A lexical unit in the source code.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct Token {
-    pub(super) typ: TokenType,
+    pub(super) typ: TokenKind,
     pub(super) start: usize,
     pub(super) len: u32,
     /// One-based source line captured when this token starts.
     pub(super) line: u32,
 }
 
-#[rustfmt::skip]
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(super) enum TokenType {
-    // Keywords
-    And, Break, Do, Else, ElseIf, End, False, For, Function, If, In, Local,
-    Nil, Not, Or, Repeat, Return, Then, True, Until, While,
-    // Operator symbols
-    Plus, Minus, Star, Slash, Mod, Caret, Hash,
-    // Comparisons
-    Equal, NotEqual, LessEqual, GreaterEqual, Less, Greater,
-    // L/R stuff
-    LParen, RParen, LCurly, RCurly, LSquare, RSquare,
-    // Other symbols
-    Semi, Colon, Comma, Dot, DotDot, DotDotDot, Assign,
-    // Others
-    Identifier,
-    LiteralNumber,
-    LiteralString,
+// The token vocabulary is public, as `error::TokenKind`, because syntax errors
+// name the token the grammar expected. Its definition lives there; the lexer
+// helpers and the spelling table stay here.
+pub(super) use crate::error::TokenKind;
 
-    EndOfFile,
-}
-
-impl TokenType {
+impl TokenKind {
     // Keep this list sorted by `spelling()` for keyword binary search.
     const KEYWORDS: &[Self] = &[
         Self::And,
@@ -67,7 +50,10 @@ impl TokenType {
         }
     }
 
-    pub(super) const fn spelling(self) -> &'static str {
+    /// The token's source spelling, or its category in angle brackets for
+    /// names, literals and end of input. Unquoted: keyword lookup compares
+    /// against it, and `Display` adds reference Lua's quoting.
+    pub(crate) const fn spelling(self) -> &'static str {
         match self {
             Self::And => "and",
             Self::Break => "break",

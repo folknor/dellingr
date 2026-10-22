@@ -4,7 +4,9 @@ use crate::compiler::verify::{self, BytecodeView};
 
 use super::super::table::{MAX_ARRAY_LEN, array_index, integer_index, is_append_key};
 use super::{
-    SaveLocation, SavePayload, SavedBytecode, SavedObject, SnapshotError, corrupt_arena as corrupt,
+    CorruptionReason, DuplicateEntry, EnvironmentCorruption, GmatchCorruption,
+    InvalidBytecodeReason, KeyForm, SaveLocation, SavePayload, SavedBytecode, SavedObject,
+    SavedReference, SnapshotError, TableCorruption, corrupt_arena as corrupt,
 };
 
 use crate::gmatch_schema;
@@ -79,19 +81,27 @@ impl BytecodeView for SavedBytecode {
 
 // Preserve structured chunk/instruction fields here. SnapshotError owns their
 // rendering, while the shared verifier owns the reason and compiler display.
-fn invalid(chunk: usize, instruction: Option<u32>, reason: impl Into<String>) -> SnapshotError {
+fn invalid(chunk: usize, instruction: Option<u32>, reason: InvalidBytecodeReason) -> SnapshotError {
     SnapshotError::InvalidBytecode {
         chunk: u32::try_from(chunk)
             .expect("saved chunk indices are bounded by a u32 length prefix"),
         instruction,
-        reason: reason.into(),
+        reason,
     }
+}
+
+fn rejected(chunk: usize, error: &verify::BytecodeValidationError) -> SnapshotError {
+    invalid(
+        chunk,
+        error.instruction,
+        InvalidBytecodeReason::Validation(error.reason),
+    )
 }
 
 fn insert_unique<T: Ord>(
     set: &mut BTreeSet<T>,
     key: T,
-    reason: &'static str,
+    reason: CorruptionReason,
     index: usize,
     location: SaveLocation,
 ) -> Result<(), SnapshotError> {
@@ -109,16 +119,16 @@ fn validate_nested_graph(bytecode: &[SavedBytecode]) -> Result<(), SnapshotError
             let child = *child as usize;
             if child >= bytecode.len() {
                 return Err(corrupt(
-                    "nested chunk id is out of range",
+                    CorruptionReason::IdOutOfRange(SavedReference::NestedChunk),
                     child,
                     SaveLocation::Bytecode,
                 ));
             }
             indegree[child] = indegree[child]
                 .checked_add(1)
-                .ok_or_else(|| invalid(parent, None, "nested graph is too large"))?;
+                .ok_or_else(|| invalid(parent, None, InvalidBytecodeReason::NestedGraphTooLarge))?;
             verify::validate_child(chunk, &bytecode[child])
-                .map_err(|error| invalid(parent, error.instruction, error.reason.to_string()))?;
+                .map_err(|error| rejected(parent, &error))?;
         }
     }
     let mut depths = vec![0usize; bytecode.len()];
@@ -136,8 +146,7 @@ fn validate_nested_graph(bytecode: &[SavedBytecode]) -> Result<(), SnapshotError
             let child = *child as usize;
             let depth = depths[parent] + 1;
             depths[child] = depths[child].max(depth);
-            verify::validate_depth(depths[child])
-                .map_err(|error| invalid(child, error.instruction, error.reason.to_string()))?;
+            verify::validate_depth(depths[child]).map_err(|error| rejected(child, &error))?;
             indegree[child] -= 1;
             if indegree[child] == 0 {
                 ready.push_back(child);
@@ -145,7 +154,7 @@ fn validate_nested_graph(bytecode: &[SavedBytecode]) -> Result<(), SnapshotError
         }
     }
     if visited != bytecode.len() {
-        return Err(invalid(0, None, "nested chunk graph contains a cycle"));
+        return Err(invalid(0, None, InvalidBytecodeReason::NestedGraphCycle));
     }
     Ok(())
 }
@@ -158,7 +167,7 @@ fn validate_closures(payload: &SavePayload) -> Result<(), SnapshotError> {
         let chunk = *chunk as usize;
         let Some(bytecode) = payload.bytecode.get(chunk) else {
             return Err(corrupt(
-                "closure chunk id is out of range",
+                CorruptionReason::IdOutOfRange(SavedReference::ClosureChunk),
                 chunk,
                 SaveLocation::Bytecode,
             ));
@@ -167,13 +176,13 @@ fn validate_closures(payload: &SavePayload) -> Result<(), SnapshotError> {
             return Err(invalid(
                 chunk,
                 None,
-                "closure upvalue count does not match bytecode",
+                InvalidBytecodeReason::ClosureUpvalueCountMismatch,
             ));
         }
         for id in upvalues {
             if (*id as usize) >= payload.upvalues.len() {
                 return Err(corrupt(
-                    "closure upvalue id is out of range",
+                    CorruptionReason::IdOutOfRange(SavedReference::ClosureUpvalue),
                     *id as usize,
                     SaveLocation::Upvalues,
                 ));
@@ -186,12 +195,12 @@ fn validate_closures(payload: &SavePayload) -> Result<(), SnapshotError> {
 fn validate_value(value: &super::SavedVal, payload: &SavePayload) -> Result<(), SnapshotError> {
     match value {
         super::SavedVal::Str(id) if (*id as usize) >= payload.strings.len() => Err(corrupt(
-            "string id is out of range",
+            CorruptionReason::IdOutOfRange(SavedReference::String),
             *id as usize,
             SaveLocation::Strings,
         )),
         super::SavedVal::Obj(id) if (*id as usize) >= payload.objects.len() => Err(corrupt(
-            "object id is out of range",
+            CorruptionReason::IdOutOfRange(SavedReference::Object),
             *id as usize,
             SaveLocation::Objects,
         )),
@@ -205,7 +214,10 @@ fn validate_environment_deltas(payload: &SavePayload) -> Result<(), SnapshotErro
         insert_unique(
             &mut tokens,
             &delta.token,
-            "duplicate environment token",
+            CorruptionReason::Duplicate {
+                entry: DuplicateEntry::EnvironmentToken,
+                form: KeyForm::Saved,
+            },
             delta_index,
             SaveLocation::EnvironmentDeltas,
         )?;
@@ -225,7 +237,10 @@ fn validate_environment_deltas(payload: &SavePayload) -> Result<(), SnapshotErro
             insert_unique(
                 &mut deleted,
                 resolved,
-                "duplicate deleted environment key",
+                CorruptionReason::Duplicate {
+                    entry: DuplicateEntry::DeletedEnvironmentKey,
+                    form: KeyForm::Saved,
+                },
                 key_index,
                 SaveLocation::EnvironmentDeleted(delta_index),
             )?;
@@ -236,7 +251,7 @@ fn validate_environment_deltas(payload: &SavePayload) -> Result<(), SnapshotErro
             validate_value(value, payload)?;
             if matches!(value, super::SavedVal::Nil) {
                 return Err(corrupt(
-                    "environment upsert stores nil",
+                    CorruptionReason::Environment(EnvironmentCorruption::UpsertStoresNil),
                     entry_index,
                     SaveLocation::EnvironmentUpserts(delta_index),
                 ));
@@ -249,14 +264,19 @@ fn validate_environment_deltas(payload: &SavePayload) -> Result<(), SnapshotErro
             insert_unique(
                 &mut upserts,
                 resolved,
-                "duplicate environment upsert key",
+                CorruptionReason::Duplicate {
+                    entry: DuplicateEntry::EnvironmentUpsertKey,
+                    form: KeyForm::Saved,
+                },
                 entry_index,
                 SaveLocation::EnvironmentUpserts(delta_index),
             )?;
         }
         if !deleted.is_disjoint(&upserts) {
             return Err(corrupt(
-                "environment key is both deleted and upserted",
+                CorruptionReason::Environment(EnvironmentCorruption::KeyDeletedAndUpserted(
+                    KeyForm::Saved,
+                )),
                 delta_index,
                 SaveLocation::EnvironmentDeltas,
             ));
@@ -272,7 +292,9 @@ fn validate_environment_deltas(payload: &SavePayload) -> Result<(), SnapshotErro
                 )?;
                 if deleted.contains(&key) {
                     return Err(corrupt(
-                        "environment order contains a deleted key",
+                        CorruptionReason::Environment(
+                            EnvironmentCorruption::OrderContainsDeletedKey(KeyForm::Saved),
+                        ),
                         key_index,
                         SaveLocation::EnvironmentOrder(delta_index),
                     ));
@@ -280,14 +302,19 @@ fn validate_environment_deltas(payload: &SavePayload) -> Result<(), SnapshotErro
                 insert_unique(
                     &mut order_keys,
                     key,
-                    "duplicate environment order key",
+                    CorruptionReason::Duplicate {
+                        entry: DuplicateEntry::EnvironmentOrderKey,
+                        form: KeyForm::Saved,
+                    },
                     key_index,
                     SaveLocation::EnvironmentOrder(delta_index),
                 )?;
             }
             if !upserts.is_subset(&order_keys) {
                 return Err(corrupt(
-                    "environment order omits an upserted key",
+                    CorruptionReason::Environment(EnvironmentCorruption::OrderOmitsUpsertedKey(
+                        KeyForm::Saved,
+                    )),
                     delta_index,
                     SaveLocation::EnvironmentDeltas,
                 ));
@@ -306,7 +333,9 @@ fn validate_environment_deltas(payload: &SavePayload) -> Result<(), SnapshotErro
             if let super::SavedVal::Num(bits) = key {
                 if is_append_key(f64::from_bits(*bits), array.len()) {
                     return Err(corrupt(
-                        "environment hash entry belongs in the array",
+                        CorruptionReason::Environment(
+                            EnvironmentCorruption::HashEntryBelongsInArray,
+                        ),
                         entry_index,
                         SaveLocation::EnvironmentUpserts(delta_index),
                     ));
@@ -323,7 +352,7 @@ fn validate_environment_deltas(payload: &SavePayload) -> Result<(), SnapshotErro
                 || (!matches!(value, super::SavedVal::Nil) && upsert != Some(value))
             {
                 return Err(corrupt(
-                    "environment array disagrees with upserts",
+                    CorruptionReason::Environment(EnvironmentCorruption::ArrayDisagreesWithUpserts),
                     slot,
                     SaveLocation::EnvironmentArray(delta_index),
                 ));
@@ -336,7 +365,9 @@ fn validate_environment_deltas(payload: &SavePayload) -> Result<(), SnapshotErro
                     && ordered.next() != Some(&super::SavedVal::Num(((slot + 1) as f64).to_bits()))
                 {
                     return Err(corrupt(
-                        "environment order disagrees with array",
+                        CorruptionReason::Environment(
+                            EnvironmentCorruption::OrderDisagreesWithArray,
+                        ),
                         slot,
                         SaveLocation::EnvironmentArray(delta_index),
                     ));
@@ -347,7 +378,9 @@ fn validate_environment_deltas(payload: &SavePayload) -> Result<(), SnapshotErro
                     let n = f64::from_bits(*bits);
                     if array_index(n, array.len()).is_some() || is_append_key(n, array.len()) {
                         return Err(corrupt(
-                            "environment hash order belongs in the array",
+                            CorruptionReason::Environment(
+                                EnvironmentCorruption::HashOrderBelongsInArray,
+                            ),
                             delta_index,
                             SaveLocation::EnvironmentDeltas,
                         ));
@@ -358,7 +391,7 @@ fn validate_environment_deltas(payload: &SavePayload) -> Result<(), SnapshotErro
         if let super::SavedMetatableDelta::Set(value) = &delta.metatable {
             if !matches!(value, super::SavedVal::Obj(_) | super::SavedVal::EnvObj(_)) {
                 return Err(corrupt(
-                    "environment metatable is not an object",
+                    CorruptionReason::Environment(EnvironmentCorruption::MetatableNotObject),
                     delta_index,
                     SaveLocation::EnvironmentDeltas,
                 ));
@@ -367,7 +400,9 @@ fn validate_environment_deltas(payload: &SavePayload) -> Result<(), SnapshotErro
             validate_metatable(
                 value,
                 payload,
-                "environment metatable is not a table",
+                CorruptionReason::Environment(EnvironmentCorruption::MetatableNotTable(
+                    KeyForm::Saved,
+                )),
                 delta_index,
                 SaveLocation::EnvironmentMetatable(delta_index),
             )?;
@@ -384,7 +419,7 @@ fn validate_environment_deltas(payload: &SavePayload) -> Result<(), SnapshotErro
 fn validate_metatable(
     value: &super::SavedVal,
     payload: &SavePayload,
-    reason: &'static str,
+    reason: CorruptionReason,
     owner_index: usize,
     location: SaveLocation,
 ) -> Result<(), SnapshotError> {
@@ -416,7 +451,7 @@ fn validate_references(payload: &SavePayload) -> Result<(), SnapshotError> {
             let array_slots = *array_slots as usize;
             if array_slots > entries.len() {
                 return Err(corrupt(
-                    "saved table array slots exceed its entries",
+                    CorruptionReason::Table(TableCorruption::ArraySlotsExceedEntries),
                     array_slots,
                     location,
                 ));
@@ -430,7 +465,7 @@ fn validate_references(payload: &SavePayload) -> Result<(), SnapshotError> {
             };
             let Some(array_len) = array_len else {
                 return Err(corrupt(
-                    "saved table array length exceeds the array limit",
+                    CorruptionReason::Table(TableCorruption::ArrayLengthExceedsLimit),
                     object_index,
                     location,
                 ));
@@ -446,7 +481,7 @@ fn validate_references(payload: &SavePayload) -> Result<(), SnapshotError> {
             };
             let Some(first_slot) = first_slot else {
                 return Err(corrupt(
-                    "saved table array slot has the wrong key",
+                    CorruptionReason::Table(TableCorruption::ArraySlotWrongKey),
                     0,
                     location,
                 ));
@@ -456,7 +491,7 @@ fn validate_references(payload: &SavePayload) -> Result<(), SnapshotError> {
                     || matches!(entries[array_slots - 1].1, super::SavedVal::Nil))
             {
                 return Err(corrupt(
-                    "saved table array span does not end at live slots",
+                    CorruptionReason::Table(TableCorruption::ArraySpanEndpointsNotLive),
                     0,
                     location,
                 ));
@@ -470,7 +505,7 @@ fn validate_references(payload: &SavePayload) -> Result<(), SnapshotError> {
                     if !matches!(key, super::SavedVal::Num(bits) if array_index(f64::from_bits(*bits), array_len) == Some(first_slot + entry_index))
                     {
                         return Err(corrupt(
-                            "saved table array slot has the wrong key",
+                            CorruptionReason::Table(TableCorruption::ArraySlotWrongKey),
                             entry_index,
                             SaveLocation::TableEntries {
                                 object: object_index,
@@ -483,7 +518,7 @@ fn validate_references(payload: &SavePayload) -> Result<(), SnapshotError> {
                     if matches!(key, super::SavedVal::Num(bits) if array_index(f64::from_bits(*bits), array_len).is_some())
                     {
                         return Err(corrupt(
-                            "saved table hash entry belongs in the array",
+                            CorruptionReason::Table(TableCorruption::HashEntryBelongsInArray),
                             entry_index,
                             SaveLocation::TableEntries {
                                 object: object_index,
@@ -492,7 +527,7 @@ fn validate_references(payload: &SavePayload) -> Result<(), SnapshotError> {
                     }
                     if matches!(value, super::SavedVal::Nil) {
                         return Err(corrupt(
-                            "saved table entry stores nil",
+                            CorruptionReason::Table(TableCorruption::EntryStoresNil),
                             entry_index,
                             SaveLocation::TableEntries {
                                 object: object_index,
@@ -504,7 +539,7 @@ fn validate_references(payload: &SavePayload) -> Result<(), SnapshotError> {
                     if matches!(key, super::SavedVal::Num(bits) if is_append_key(f64::from_bits(*bits), array_len))
                     {
                         return Err(corrupt(
-                            "saved table hash entry belongs in the array",
+                            CorruptionReason::Table(TableCorruption::HashEntryBelongsInArray),
                             entry_index,
                             SaveLocation::TableEntries {
                                 object: object_index,
@@ -522,7 +557,10 @@ fn validate_references(payload: &SavePayload) -> Result<(), SnapshotError> {
                 insert_unique(
                     &mut keys,
                     key,
-                    "duplicate saved table key",
+                    CorruptionReason::Duplicate {
+                        entry: DuplicateEntry::TableKey,
+                        form: KeyForm::Saved,
+                    },
                     entry_index,
                     SaveLocation::TableEntries {
                         object: object_index,
@@ -534,7 +572,7 @@ fn validate_references(payload: &SavePayload) -> Result<(), SnapshotError> {
                 validate_metatable(
                     value,
                     payload,
-                    "saved table metatable is not a table",
+                    CorruptionReason::Table(TableCorruption::MetatableNotTable),
                     object_index,
                     SaveLocation::Objects,
                 )?;
@@ -546,7 +584,10 @@ fn validate_references(payload: &SavePayload) -> Result<(), SnapshotError> {
         insert_unique(
             &mut global_names,
             name.as_str(),
-            "duplicate saved global name",
+            CorruptionReason::Duplicate {
+                entry: DuplicateEntry::GlobalName,
+                form: KeyForm::Saved,
+            },
             index,
             SaveLocation::Globals,
         )?;
@@ -599,7 +640,7 @@ fn gmatch_integer_field(
     table_id: u32,
     field: &[u8],
     maximum: usize,
-    reason: &'static str,
+    reason: CorruptionReason,
 ) -> Result<usize, SnapshotError> {
     let Some(super::SavedVal::Num(bits)) = table_field(payload, table_id, field) else {
         return Err(corrupt(reason, table_id as usize, SaveLocation::Objects));
@@ -626,7 +667,7 @@ fn validate_gmatch_last_match(
             table_id,
             gmatch_schema::LAST_MATCH_FIELD.as_bytes(),
             subject_len,
-            "gmatch last match is invalid",
+            CorruptionReason::Gmatch(GmatchCorruption::LastMatchInvalid),
         )?;
     }
     Ok(())
@@ -640,21 +681,21 @@ fn validate_gmatch_compile_state(
         table_numeric_field(payload, table_id, gmatch_schema::COMPILE_CHARGED_SLOT)
     else {
         return Err(corrupt(
-            "gmatch compile flag key is missing",
+            CorruptionReason::Gmatch(GmatchCorruption::CompileFlagKeyMissing),
             table_id as usize,
             SaveLocation::Objects,
         ));
     };
     let Some(cache_key) = payload.strings.get(*cache_key_id as usize) else {
         return Err(corrupt(
-            "gmatch compile flag key is out of range",
+            CorruptionReason::Gmatch(GmatchCorruption::CompileFlagKeyOutOfRange),
             table_id as usize,
             SaveLocation::Objects,
         ));
     };
     if cache_key.as_slice() != gmatch_schema::COMPILE_CHARGED_FIELD.as_bytes() {
         return Err(corrupt(
-            "gmatch compile flag key is invalid",
+            CorruptionReason::Gmatch(GmatchCorruption::CompileFlagKeyInvalid),
             table_id as usize,
             SaveLocation::Objects,
         ));
@@ -668,7 +709,7 @@ fn validate_gmatch_compile_state(
         None | Some(super::SavedVal::Bool(true))
     ) {
         return Err(corrupt(
-            "gmatch compile flag is invalid",
+            CorruptionReason::Gmatch(GmatchCorruption::CompileFlagInvalid),
             table_id as usize,
             SaveLocation::Objects,
         ));
@@ -688,18 +729,18 @@ fn validate_gmatch_state(
             table_id,
             gmatch_schema::LENGTH_FIELD.as_bytes(),
             crate::limits::MAX_STRING_BYTES,
-            "empty gmatch length is missing or invalid",
+            CorruptionReason::Gmatch(GmatchCorruption::EmptyLengthInvalid),
         )?;
         let pos = gmatch_integer_field(
             payload,
             table_id,
             gmatch_schema::POSITION_FIELD.as_bytes(),
             maximum_position,
-            "empty gmatch position is missing or invalid",
+            CorruptionReason::Gmatch(GmatchCorruption::EmptyPositionInvalid),
         )?;
         if pos > len.saturating_add(1) {
             return Err(corrupt(
-                "empty gmatch position exceeds its length",
+                CorruptionReason::Gmatch(GmatchCorruption::EmptyPositionExceedsLength),
                 table_id as usize,
                 SaveLocation::Objects,
             ));
@@ -711,14 +752,14 @@ fn validate_gmatch_state(
         table_field(payload, table_id, gmatch_schema::SUBJECT_FIELD.as_bytes())
     else {
         return Err(corrupt(
-            "gmatch subject is missing or invalid",
+            CorruptionReason::Gmatch(GmatchCorruption::SubjectInvalid),
             table_id as usize,
             SaveLocation::Objects,
         ));
     };
     let Some(subject) = payload.strings.get(*subject_id as usize) else {
         return Err(corrupt(
-            "gmatch subject string id is out of range",
+            CorruptionReason::Gmatch(GmatchCorruption::SubjectStringOutOfRange),
             *subject_id as usize,
             SaveLocation::Strings,
         ));
@@ -728,7 +769,7 @@ fn validate_gmatch_state(
         Some(super::SavedVal::Str(_))
     ) {
         return Err(corrupt(
-            "gmatch pattern is missing or invalid",
+            CorruptionReason::Gmatch(GmatchCorruption::PatternInvalid),
             table_id as usize,
             SaveLocation::Objects,
         ));
@@ -738,11 +779,11 @@ fn validate_gmatch_state(
         table_id,
         gmatch_schema::POSITION_FIELD.as_bytes(),
         maximum_position,
-        "gmatch position is missing or invalid",
+        CorruptionReason::Gmatch(GmatchCorruption::PositionInvalid),
     )?;
     if pos > subject.len().saturating_add(1) {
         return Err(corrupt(
-            "gmatch position exceeds its subject",
+            CorruptionReason::Gmatch(GmatchCorruption::PositionExceedsSubject),
             table_id as usize,
             SaveLocation::Objects,
         ));
@@ -766,7 +807,7 @@ fn validate_gmatch_iterators(payload: &SavePayload) -> Result<(), SnapshotError>
         for upvalue_id in upvalues {
             let value = payload.upvalues.get(*upvalue_id as usize).ok_or_else(|| {
                 corrupt(
-                    "gmatch closure upvalue is out of range",
+                    CorruptionReason::Gmatch(GmatchCorruption::ClosureUpvalueOutOfRange),
                     closure_index,
                     SaveLocation::Objects,
                 )
@@ -775,7 +816,7 @@ fn validate_gmatch_iterators(payload: &SavePayload) -> Result<(), SnapshotError>
                 super::SavedVal::Fn(id) if id == gmatch_schema::ITERATOR_ID => {
                     if iterator_kind.replace(false).is_some() {
                         return Err(corrupt(
-                            "gmatch closure captures multiple iterators",
+                            CorruptionReason::Gmatch(GmatchCorruption::MultipleIterators),
                             closure_index,
                             SaveLocation::Objects,
                         ));
@@ -784,7 +825,7 @@ fn validate_gmatch_iterators(payload: &SavePayload) -> Result<(), SnapshotError>
                 super::SavedVal::Fn(id) if id == gmatch_schema::EMPTY_ITERATOR_ID => {
                     if iterator_kind.replace(true).is_some() {
                         return Err(corrupt(
-                            "gmatch closure captures multiple iterators",
+                            CorruptionReason::Gmatch(GmatchCorruption::MultipleIterators),
                             closure_index,
                             SaveLocation::Objects,
                         ));
@@ -803,14 +844,14 @@ fn validate_gmatch_iterators(payload: &SavePayload) -> Result<(), SnapshotError>
         };
         if multiple_objects {
             return Err(corrupt(
-                "gmatch closure captures multiple state objects",
+                CorruptionReason::Gmatch(GmatchCorruption::MultipleStateObjects),
                 closure_index,
                 SaveLocation::Objects,
             ));
         }
         let Some(table_id) = state_table else {
             return Err(corrupt(
-                "gmatch closure state table is missing",
+                CorruptionReason::Gmatch(GmatchCorruption::StateTableMissing),
                 closure_index,
                 SaveLocation::Objects,
             ));
@@ -820,7 +861,7 @@ fn validate_gmatch_iterators(payload: &SavePayload) -> Result<(), SnapshotError>
             Some(super::SavedObject::Table { .. })
         ) {
             return Err(corrupt(
-                "gmatch closure state is not a table",
+                CorruptionReason::Gmatch(GmatchCorruption::StateNotTable),
                 table_id as usize,
                 SaveLocation::Objects,
             ));
@@ -848,14 +889,17 @@ fn validate_pointer_ids(payload: &SavePayload) -> Result<(), SnapshotError> {
                 insert_unique(
                     &mut values,
                     key,
-                    "duplicate format pointer value",
+                    CorruptionReason::Duplicate {
+                        entry: DuplicateEntry::FormatPointerValue,
+                        form: KeyForm::Saved,
+                    },
                     index,
                     SaveLocation::PointerIds,
                 )?;
             }
             _ => {
                 return Err(corrupt(
-                    "invalid format pointer value",
+                    CorruptionReason::InvalidFormatPointerValue,
                     index,
                     SaveLocation::PointerIds,
                 ));
@@ -864,7 +908,10 @@ fn validate_pointer_ids(payload: &SavePayload) -> Result<(), SnapshotError> {
         insert_unique(
             &mut ids,
             *id,
-            "duplicate format pointer id",
+            CorruptionReason::Duplicate {
+                entry: DuplicateEntry::FormatPointerId,
+                form: KeyForm::Saved,
+            },
             index,
             SaveLocation::PointerIds,
         )?;
@@ -873,7 +920,7 @@ fn validate_pointer_ids(payload: &SavePayload) -> Result<(), SnapshotError> {
         // render the same identity as a live one.
         if *id >= payload.next_format_pointer_id {
             return Err(corrupt(
-                "format pointer id not below next id",
+                CorruptionReason::FormatPointerIdNotBelowNext,
                 index,
                 SaveLocation::PointerIds,
             ));
@@ -885,8 +932,7 @@ fn validate_pointer_ids(payload: &SavePayload) -> Result<(), SnapshotError> {
 
 pub(super) fn verify_payload(payload: SavePayload) -> Result<VerifiedSavePayload, SnapshotError> {
     for (chunk, bytecode) in payload.bytecode.iter().enumerate() {
-        verify::validate_bytecode(bytecode)
-            .map_err(|error| invalid(chunk, error.instruction, error.reason.to_string()))?;
+        verify::validate_bytecode(bytecode).map_err(|error| rejected(chunk, &error))?;
     }
     // This precedes materialization, including build_bytecode's out[idx] access.
     validate_nested_graph(&payload.bytecode)?;
@@ -1107,7 +1153,7 @@ mod tests {
         assert!(matches!(
             validate_gmatch_iterators(&gmatch_payload(false, malformed.clone())),
             Err(SnapshotError::CorruptArena {
-                reason: "gmatch position is missing or invalid",
+                reason: CorruptionReason::Gmatch(GmatchCorruption::PositionInvalid),
                 index: 0,
                 location: SaveLocation::Objects,
             })
@@ -1115,7 +1161,7 @@ mod tests {
         assert!(matches!(
             validate_gmatch_iterators(&gmatch_payload(true, malformed)),
             Err(SnapshotError::CorruptArena {
-                reason: "empty gmatch position is missing or invalid",
+                reason: CorruptionReason::Gmatch(GmatchCorruption::EmptyPositionInvalid),
                 index: 0,
                 location: SaveLocation::Objects,
             })
@@ -1131,7 +1177,7 @@ mod tests {
         assert!(matches!(
             validate_gmatch_iterators(&invalid_length),
             Err(SnapshotError::CorruptArena {
-                reason: "empty gmatch length is missing or invalid",
+                reason: CorruptionReason::Gmatch(GmatchCorruption::EmptyLengthInvalid),
                 index: 0,
                 location: SaveLocation::Objects,
             })

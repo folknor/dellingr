@@ -1,4 +1,5 @@
 use super::*;
+use std::convert::Infallible;
 
 fn empty_payload() -> SavePayload {
     SavePayload {
@@ -39,7 +40,7 @@ fn corrupt_environment_key_names_its_delta_and_section() {
         Err(SnapshotError::CorruptArena {
             index: 0,
             location: SaveLocation::EnvironmentDeleted(1),
-            reason: "nil is not a table key",
+            reason: CorruptionReason::NilKey,
         })
     ));
 }
@@ -66,7 +67,7 @@ fn corrupt_metatable_names_its_owner_instead_of_zero() {
         Err(SnapshotError::CorruptArena {
             index: 1,
             location: SaveLocation::Objects,
-            reason: "saved table metatable is not a table",
+            reason: CorruptionReason::Table(TableCorruption::MetatableNotTable),
         })
     ));
 }

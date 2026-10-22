@@ -5,7 +5,7 @@ use super::Parser;
 use super::PlaceExp;
 use super::Result;
 use super::SyntaxError;
-use super::TokenType;
+use super::TokenKind;
 use crate::error::ParserFault;
 use crate::limits::{MAX_CHUNK_NESTING, MAX_NESTED};
 
@@ -16,8 +16,8 @@ impl<'a> Parser<'a> {
         self.input.next()?; // 'function' keyword
         let name = self.expect_identifier()?;
         match self.input.peek_type()? {
-            TokenType::Dot => self.parse_fndecl_table(name),
-            TokenType::Colon => self.parse_fndecl_method(name),
+            TokenKind::Dot => self.parse_fndecl_table(name),
+            TokenKind::Colon => self.parse_fndecl_method(name),
             _ => self.parse_fndecl_basic(name),
         }
     }
@@ -44,13 +44,13 @@ impl<'a> Parser<'a> {
 
         // Parse all the fields, building the full name (e.g., "foo.bar.baz").
         let mut full_name = table_name.to_string();
-        self.expect(TokenType::Dot)?;
+        self.expect(TokenKind::Dot)?;
         let mut last_field = self.expect_identifier()?;
         full_name.push('.');
         full_name.push_str(last_field);
         let mut last_field_id = self.find_or_add_string(last_field)?;
 
-        while self.input.try_pop(TokenType::Dot)?.is_some() {
+        while self.input.try_pop(TokenKind::Dot)?.is_some() {
             self.push(Instr::get_field(last_field_id, None));
             last_field = self.expect_identifier()?;
             full_name.push('.');
@@ -58,7 +58,7 @@ impl<'a> Parser<'a> {
             last_field_id = self.find_or_add_string(last_field)?;
         }
 
-        if self.input.try_pop(TokenType::Colon)?.is_some() {
+        if self.input.try_pop(TokenKind::Colon)?.is_some() {
             self.push(Instr::get_field(last_field_id, None));
             let method_name = self.expect_identifier()?;
             full_name.push(':');
@@ -82,7 +82,7 @@ impl<'a> Parser<'a> {
         self.push(table.get_instr());
 
         // Consume the colon and get the method name.
-        self.expect(TokenType::Colon)?;
+        self.expect(TokenKind::Colon)?;
         let method_name = self.expect_identifier()?;
         let full_name = format!("{table_name}:{method_name}");
         let method_name_id = self.find_or_add_string(method_name)?;
@@ -98,33 +98,33 @@ impl<'a> Parser<'a> {
     fn parse_params(&mut self) -> Result<(Vec<&'a str>, bool)> {
         let lparen_tok = self.input.next()?;
         match lparen_tok.typ {
-            TokenType::LParen => (),
-            _ => return Err(self.err_unexpected(lparen_tok, TokenType::LParen)),
+            TokenKind::LParen => (),
+            _ => return Err(self.err_unexpected(lparen_tok, TokenKind::LParen)),
         }
         let mut args = Vec::new();
         let mut is_vararg = false;
 
-        if self.input.try_pop(TokenType::RParen)?.is_some() {
+        if self.input.try_pop(TokenKind::RParen)?.is_some() {
             return Ok((args, is_vararg));
         }
 
         // Check for vararg-only function: function(...)
-        if self.input.try_pop(TokenType::DotDotDot)?.is_some() {
+        if self.input.try_pop(TokenKind::DotDotDot)?.is_some() {
             is_vararg = true;
-            self.expect(TokenType::RParen)?;
+            self.expect(TokenKind::RParen)?;
             return Ok((args, is_vararg));
         }
 
         args.push(self.expect_identifier()?);
-        while self.input.try_pop(TokenType::Comma)?.is_some() {
+        while self.input.try_pop(TokenKind::Comma)?.is_some() {
             // Check for vararg after comma: function(a, b, ...)
-            if self.input.try_pop(TokenType::DotDotDot)?.is_some() {
+            if self.input.try_pop(TokenKind::DotDotDot)?.is_some() {
                 is_vararg = true;
                 break;
             }
             args.push(self.expect_identifier()?);
         }
-        self.expect(TokenType::RParen)?;
+        self.expect(TokenKind::RParen)?;
         Ok((args, is_vararg))
     }
 
@@ -155,7 +155,7 @@ impl<'a> Parser<'a> {
         )?;
         self.funcs.chunk.nested.push(Arc::new(new_chunk));
         self.push(Instr::closure(index));
-        self.expect(TokenType::End)?;
+        self.expect(TokenKind::End)?;
         Ok(())
     }
 }

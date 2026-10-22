@@ -1,5 +1,4 @@
 use std::cell::Cell;
-use std::fmt;
 use std::hash::{Hash, Hasher};
 
 use indexmap::Equivalent;
@@ -66,17 +65,6 @@ pub(super) enum TableError {
     InvalidKey(InvalidTableKey),
     #[cfg(feature = "snapshot")]
     InvalidSnapshot(SnapshotTableFault),
-}
-
-impl fmt::Display for TableError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidKey(InvalidTableKey::Nil) => f.write_str("table index was nil"),
-            Self::InvalidKey(InvalidTableKey::Nan) => f.write_str("table index was NaN"),
-            #[cfg(feature = "snapshot")]
-            Self::InvalidSnapshot(fault) => write!(f, "internal error: {fault}"),
-        }
-    }
 }
 
 impl From<TableError> for Error {

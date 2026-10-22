@@ -15,7 +15,7 @@ use super::exp_desc::PrefixExp;
 use super::exp_desc::TailKind;
 use super::lexer::TokenStream;
 use super::token::Token;
-use super::token::TokenType;
+use super::token::TokenKind;
 use crate::det_hash::{IndexMap, IndexSet};
 use crate::error::{InternalFault, ParserFault};
 use crate::instr::{ArgCount, Builtin, RetCount};
@@ -211,23 +211,45 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    /// Constructs an error for when a specific `TokenType` was expected but not found.
+    /// Constructs an error for when a specific `TokenKind` was expected but not found.
     #[must_use]
-    fn err_unexpected(&self, token: Token, expected: TokenType) -> Error {
-        let error_kind = if token.typ == TokenType::EndOfFile {
+    fn err_unexpected(&self, token: Token, expected: TokenKind) -> Error {
+        self.err_near(token, |found| SyntaxError::ExpectedToken {
+            expected,
+            found,
+        })
+    }
+
+    /// Constructs a syntax error about `token` from the token's source bytes.
+    /// An end-of-input token is always [`SyntaxError::UnexpectedEof`],
+    /// whatever was being parsed, because that is the parser kind
+    /// `is_recoverable` reports. (Lexer errors at the end of the source keep
+    /// their own kinds.)
+    #[must_use]
+    fn err_near(&self, token: Token, error: impl FnOnce(Vec<u8>) -> SyntaxError) -> Error {
+        let error_kind = if token.typ == TokenKind::EndOfFile {
             SyntaxError::UnexpectedEof
         } else {
-            SyntaxError::ExpectedToken {
-                expected: expected.spelling(),
-                found: self.input.source_bytes(token.range()).to_vec(),
-            }
+            error(self.input.source_bytes(token.range()).to_vec())
         };
         self.error_at(error_kind, token.start)
     }
 
+    /// Reference Lua's `block_follow`: the tokens that end a statement list.
+    fn is_block_follow(typ: TokenKind) -> bool {
+        matches!(
+            typ,
+            TokenKind::Else
+                | TokenKind::ElseIf
+                | TokenKind::End
+                | TokenKind::Until
+                | TokenKind::EndOfFile
+        )
+    }
+
     /// Pulls a token off the input and checks it against `expected`.
     /// Returns the token if it matches, `Err` otherwise.
-    fn expect(&mut self, expected: TokenType) -> Result<Token> {
+    fn expect(&mut self, expected: TokenKind) -> Result<Token> {
         let token = self.input.next()?;
         if token.typ == expected {
             Ok(token)
@@ -238,7 +260,7 @@ impl<'a> Parser<'a> {
 
     /// Expects an identifier token and returns the identifier as a string.
     fn expect_identifier(&mut self) -> Result<&'a str> {
-        let token = self.expect(TokenType::Identifier)?;
+        let token = self.expect(TokenKind::Identifier)?;
         self.get_text(token)
     }
 
@@ -295,7 +317,7 @@ impl<'a> Parser<'a> {
     fn get_literal_string_contents(&mut self, tok: Token) -> Result<Vec<u8>> {
         use super::lexer::LiteralStringContents;
 
-        if tok.typ != TokenType::LiteralString || tok.len < 2 {
+        if tok.typ != TokenKind::LiteralString || tok.len < 2 {
             return Err(self.internal_error_at(ParserFault::InvalidStringToken, tok.start));
         }
 
@@ -570,10 +592,10 @@ impl<'a> Parser<'a> {
         if !self.funcs.frames.is_empty() {
             return Err(self.internal_error(ParserFault::CompletedSourceRetainsFunctionFrames));
         }
-        if let TokenType::EndOfFile = token.typ {
+        if let TokenKind::EndOfFile = token.typ {
             Ok(c)
         } else {
-            Err(self.err_unexpected(token, TokenType::EndOfFile))
+            Err(self.err_unexpected(token, TokenKind::EndOfFile))
         }
     }
 
@@ -627,25 +649,33 @@ impl<'a> Parser<'a> {
     fn parse_statements_inner(&mut self) -> Result<bool> {
         loop {
             match self.input.peek_type()? {
-                TokenType::Identifier | TokenType::LParen => {
+                TokenKind::Identifier | TokenKind::LParen => {
                     self.parse_assign_or_call()?;
                 }
-                TokenType::If => self.parse_if_arm()?,
-                TokenType::While => self.parse_while()?,
-                TokenType::Repeat => self.parse_repeat()?,
-                TokenType::Do => self.parse_do()?,
-                TokenType::Local => self.parse_locals()?,
-                TokenType::For => self.parse_for()?,
-                TokenType::Function => self.parse_fndecl()?,
-                TokenType::Semi => {
+                TokenKind::If => self.parse_if_arm()?,
+                TokenKind::While => self.parse_while()?,
+                TokenKind::Repeat => self.parse_repeat()?,
+                TokenKind::Do => self.parse_do()?,
+                TokenKind::Local => self.parse_locals()?,
+                TokenKind::For => self.parse_for()?,
+                TokenKind::Function => self.parse_fndecl()?,
+                TokenKind::Semi => {
                     self.input.next()?;
                 }
-                TokenType::Return => break self.parse_return().map(|()| true),
-                TokenType::Break => {
+                TokenKind::Return => break self.parse_return().map(|()| true),
+                TokenKind::Break => {
                     self.input.next()?; // consume 'break' keyword
                     self.add_break()?;
                 }
-                _ => break Ok(false),
+                typ if Self::is_block_follow(typ) => break Ok(false),
+                // Reference Lua parses any other token as the start of an
+                // expression statement, which fails at its first token.
+                _ => {
+                    let token = self.input.next()?;
+                    break Err(
+                        self.err_near(token, |found| SyntaxError::UnexpectedSymbol { found })
+                    );
+                }
             }
         }
     }
@@ -703,16 +733,20 @@ impl<'a> Parser<'a> {
     fn parse_call_args(&mut self) -> Result<(u8, ExpDesc)> {
         let tok = self.input.next()?;
         match tok.typ {
-            TokenType::LParen => self.parse_parenthesized_call_args(),
-            TokenType::LiteralString => {
+            TokenKind::LParen => self.parse_parenthesized_call_args(),
+            TokenKind::LiteralString => {
                 self.push_literal_string(tok)?;
                 Ok((1, ExpDesc::Other))
             }
-            TokenType::LCurly => {
+            TokenKind::LCurly => {
                 self.parse_table()?;
                 Ok((1, ExpDesc::Other))
             }
-            _ => Err(self.err_unexpected(tok, TokenType::LParen)),
+            _ => Err(
+                self.err_near(tok, |found| SyntaxError::FunctionArgumentsExpected {
+                    found,
+                }),
+            ),
         }
     }
 
@@ -720,12 +754,12 @@ impl<'a> Parser<'a> {
     /// Returns the number of arguments.
     #[hotpath::measure]
     fn parse_parenthesized_call_args(&mut self) -> Result<(u8, ExpDesc)> {
-        let tup = if self.input.check_type(TokenType::RParen)? {
+        let tup = if self.input.check_type(TokenKind::RParen)? {
             (0, ExpDesc::Other)
         } else {
             self.parse_explist()?
         };
-        self.expect(TokenType::RParen)?;
+        self.expect(TokenKind::RParen)?;
         Ok(tup)
     }
 }

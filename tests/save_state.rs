@@ -938,7 +938,10 @@ fn bad_or_truncated_bytes_error_without_panicking() {
     };
     assert!(matches!(
         truncated,
-        LoadError::Snapshot(SnapshotError::DecodeError(_))
+        LoadError::Snapshot(SnapshotError::DecodeError {
+            reason: dellingr::snapshot::DecodeReason::TruncatedPayload,
+            ..
+        })
     ));
 }
 

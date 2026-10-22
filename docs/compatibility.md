@@ -51,6 +51,33 @@ does.
   for example `{,}` and `{;}`. Lua 5.2 and 5.4 reject those forms.
 - Errors kill the callback. There is no `pcall`, `xpcall` or `assert`.
 
+## Errors
+
+- `error(v, level)` adds the `chunk:line:` position only when `v` is a
+  string, as Lua 5.4 does; Lua 5.2 also adds it to a number, so `error(42)`
+  renders `42` where 5.2 renders `chunk:1: 42`. The level is validated for
+  every value, as in both references.
+- A table or function passed to `error()` is rendered when it is raised: its
+  `__tostring` runs then, before the level argument is validated, so an error
+  inside that handler (or its cost) wins over a bad level. Reference Lua keeps
+  the value itself and renders it only if the host does. A value without
+  `__tostring` renders as `tostring` would (`table: 0x1`, `nil`, `true`),
+  where the reference interpreter prints `(error object is a table value)`.
+  The host gets the typed value either way (`ErrorValue`).
+- Syntax errors carry a column, `chunk:line:column:`.
+- When the parser reaches the end of the source where it needed a token, the
+  error is `unexpected <eof>` (`SyntaxError::UnexpectedEof`, which
+  `Error::is_recoverable` reports), where reference Lua names what it
+  expected, for example `'end' expected near <eof>`. Errors the lexer raises
+  at the end of the source keep their own kind (`unfinished string`,
+  `malformed number`, `unfinished long comment`).
+- Lexer errors (`malformed number`, `unfinished string`, invalid escapes)
+  name no `near` token, and a missing closing bracket on a later line does
+  not add reference Lua's `(to close '(' at line N)`. The parser's other
+  errors (`unexpected symbol`, `syntax error`, `'X' expected`, `'=' or 'in'
+  expected`, `function arguments expected`, each `near` the offending token)
+  use the reference wording.
+
 ## Globals and metatables
 
 - Global `unpack` exists, as in Lua 5.2, alongside `table.unpack`.

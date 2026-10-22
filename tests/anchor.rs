@@ -281,7 +281,9 @@ fn call_anchor_rejects_dynamic_arg_count() {
         .expect_err("Dynamic args have no host-API call-base, must be rejected");
     assert!(matches!(
         err.kind(),
-        ErrorKind::DynamicArgumentsUnsupported { api: "call_anchor" }
+        ErrorKind::DynamicArgumentsUnsupported {
+            api: dellingr::error::HostCallApi::CallAnchor
+        }
     ));
 }
 

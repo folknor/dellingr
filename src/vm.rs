@@ -26,7 +26,10 @@ pub use lua_val::RustFunc;
 pub(crate) use lua_val::number_to_string;
 #[cfg(feature = "snapshot")]
 pub use save_state::{
-    LoadError, SaveDiagnostics, SaveError, SaveState, SnapshotError, TableLoadLocation,
+    CorruptionReason, DecodeReason, DuplicateEntry, EnvironmentCorruption, GmatchCorruption,
+    InvalidBytecodeReason, KeyForm, LoadError, MaterializedPart, SaveCollection, SaveDiagnostics,
+    SaveError, SaveInternalError, SaveState, SavedReference, SnapshotError, SnapshotField,
+    TableCorruption, TableLoadLocation, TableRestoreFailure, TableRestoreStep,
 };
 pub(crate) use table_ops::TostringRendering;
 
@@ -1125,9 +1128,10 @@ impl State {
             return Err(save_state::SaveError::StatePoisoned);
         }
         if id.len() > crate::limits::MAX_SAVE_IDENTIFIER_BYTES {
-            return Err(save_state::SaveError::TooLarge {
-                what: "function id",
-                count: id.len(),
+            return Err(save_state::SaveError::FieldSizeExceeded {
+                field: save_state::SnapshotField::FunctionId,
+                size: id.len(),
+                limit: crate::limits::MAX_SAVE_IDENTIFIER_BYTES,
             });
         }
         let addr = func as usize;

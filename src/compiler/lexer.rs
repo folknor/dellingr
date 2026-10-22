@@ -9,7 +9,7 @@ use super::Result;
 use super::error::Error;
 use super::error::SyntaxError;
 use super::token::Token;
-use super::token::TokenType::{self, *};
+use super::token::TokenKind::{self, *};
 use crate::numeral::{hex_value, is_lua_whitespace, is_newline_pair, parse_lua_numeral};
 
 use std::ops::Range;
@@ -117,23 +117,23 @@ impl<'a> TokenStream<'a> {
     }
 
     /// Returns the type of the next token.
-    pub(super) fn peek_type(&mut self) -> Result<TokenType> {
+    pub(super) fn peek_type(&mut self) -> Result<TokenKind> {
         Ok(self.peek()?.typ)
     }
 
     /// Returns the type of the token after the next token.
-    pub(super) fn peek2_type(&mut self) -> Result<TokenType> {
+    pub(super) fn peek2_type(&mut self) -> Result<TokenKind> {
         Ok(self.peek2()?.typ)
     }
 
     /// Returns whether the next token is of the given type.
-    pub(super) fn check_type(&mut self, expected_type: TokenType) -> Result<bool> {
+    pub(super) fn check_type(&mut self, expected_type: TokenKind) -> Result<bool> {
         Ok(self.peek_type()? == expected_type)
     }
 
     /// Checks the next token's type. If it matches `expected_type`, it is popped off and
     /// returned as `Some`. Otherwise, returns `None`.
-    pub(super) fn try_pop(&mut self, expected_type: TokenType) -> Result<Option<Token>> {
+    pub(super) fn try_pop(&mut self, expected_type: TokenKind) -> Result<Option<Token>> {
         if self.check_type(expected_type)? {
             Ok(Some(self.next()?))
         } else {
@@ -397,7 +397,7 @@ impl<'a> Lexer<'a> {
 
     /// The lexer just read a `.`.
     /// Determines whether it is part of a `Dot`, `DotDot`, `DotDotDot` or `Number`.
-    fn peek_dot(&mut self) -> Result<TokenType> {
+    fn peek_dot(&mut self) -> Result<TokenKind> {
         let typ = match self.peek_char() {
             Some(b'.') => {
                 self.next_char();
@@ -423,7 +423,7 @@ impl<'a> Lexer<'a> {
     /// Returns `Err` if the first character is `~` and it is not paired with a
     /// `=`.
     #[allow(clippy::panic)] // Only the four operator characters call this helper.
-    fn peek_equals(&mut self, first_char: u8) -> Result<TokenType> {
+    fn peek_equals(&mut self, first_char: u8) -> Result<TokenKind> {
         if self.try_next(b'=') {
             let typ = match first_char {
                 b'=' => Equal,
@@ -451,7 +451,7 @@ impl<'a> Lexer<'a> {
     /// malformed string appears after an earlier syntax error. Bytes other
     /// than the quote, backslash and line breaks are copied verbatim, so a
     /// literal holds exactly the source's bytes, valid UTF-8 or not.
-    fn lex_string(&mut self, quote: u8, token_start: usize) -> Result<TokenType> {
+    fn lex_string(&mut self, quote: u8, token_start: usize) -> Result<TokenKind> {
         let body_start = self.pos;
         let mut decoded = Vec::new();
         let mut failure = None;
@@ -623,7 +623,7 @@ impl<'a> Lexer<'a> {
     }
 
     /// Reads in a number which starts with a digit (as opposed to a decimal point).
-    fn lex_full_number(&mut self, first_char: u8, tok_start: usize) -> Result<TokenType> {
+    fn lex_full_number(&mut self, first_char: u8, tok_start: usize) -> Result<TokenKind> {
         // Check for hex values (both 0x and 0X)
         if first_char == b'0' && (self.try_next(b'x') || self.try_next(b'X')) {
             // Mantissa: hex digits with an optional fraction (Lua 5.2 hex
@@ -721,7 +721,7 @@ impl<'a> Lexer<'a> {
     }
 
     /// Reads a word and returns it as an identifier or keyword.
-    fn lex_word(&mut self, tok_start: usize) -> TokenType {
+    fn lex_word(&mut self, tok_start: usize) -> TokenKind {
         while let Some(c) = self.peek_char() {
             if is_identifier_continue(c) {
                 self.next_char();
@@ -730,7 +730,7 @@ impl<'a> Lexer<'a> {
             }
         }
 
-        TokenType::keyword_match(&self.source[tok_start..self.pos])
+        TokenKind::keyword_match(&self.source[tok_start..self.pos])
     }
 
     /// Returns the current position of the `Lexer`.
@@ -749,7 +749,7 @@ impl<'a> Lexer<'a> {
     #[must_use]
     const fn end_of_file(&self, line: u32) -> Token {
         Token {
-            typ: TokenType::EndOfFile,
+            typ: TokenKind::EndOfFile,
             start: self.pos,
             len: 0,
             line,
@@ -765,7 +765,7 @@ fn is_identifier_continue(c: u8) -> bool {
 mod tests {
     use super::*;
 
-    fn check(input: &str, tokens: &[(TokenType, usize, u32)], lines: &[usize]) {
+    fn check(input: &str, tokens: &[(TokenKind, usize, u32)], lines: &[usize]) {
         let mut lexer = Lexer::new(input.as_bytes());
         let mut tokens = tokens.iter().map(|&(typ, start, len)| Token {
             typ,
@@ -775,7 +775,7 @@ mod tests {
         });
         loop {
             let actual = lexer.next_token().unwrap();
-            if actual.typ == TokenType::EndOfFile {
+            if actual.typ == TokenKind::EndOfFile {
                 break;
             }
             if actual.typ == LiteralNumber {
@@ -792,7 +792,7 @@ mod tests {
         assert_eq!(lines, lexer.linebreaks.as_slice());
     }
 
-    fn check_line(input: &str, tokens: &[(TokenType, usize, u32)]) {
+    fn check_line(input: &str, tokens: &[(TokenKind, usize, u32)]) {
         check(input, tokens, &[0]);
     }
 
@@ -862,8 +862,8 @@ mod tests {
         }
         src.push('x');
         let mut lexer = Lexer::new(src.as_bytes());
-        assert_eq!(lexer.next_token().unwrap().typ, TokenType::Identifier);
-        assert_eq!(lexer.next_token().unwrap().typ, TokenType::EndOfFile);
+        assert_eq!(lexer.next_token().unwrap().typ, TokenKind::Identifier);
+        assert_eq!(lexer.next_token().unwrap().typ, TokenKind::EndOfFile);
     }
 
     #[test]
@@ -1045,7 +1045,7 @@ mod tests {
             let mut lexer = Lexer::new(input.as_bytes());
             let mut result = lexer.next_token();
             while let Ok(token) = &result {
-                if token.typ == TokenType::EndOfFile {
+                if token.typ == TokenKind::EndOfFile {
                     break;
                 }
                 result = lexer.next_token();
@@ -1260,7 +1260,7 @@ mod tests {
             loop {
                 let token = lexer.next_token().expect("line fixture must lex");
                 actual_lines.push(token.line);
-                if token.typ == TokenType::EndOfFile {
+                if token.typ == TokenKind::EndOfFile {
                     break;
                 }
             }
@@ -1281,7 +1281,7 @@ mod tests {
     #[test]
     fn line_and_col_keeps_newline_boundary_tie_breaks() {
         let mut lexer = Lexer::new("a\r\nb\n\rc".as_bytes());
-        while lexer.next_token().expect("boundary fixture must lex").typ != TokenType::EndOfFile {}
+        while lexer.next_token().expect("boundary fixture must lex").typ != TokenKind::EndOfFile {}
 
         for (pos, expected) in [
             (0, (1, 1)),

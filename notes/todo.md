@@ -37,12 +37,12 @@ removed.
   base `pow` shortcut truncates the exponent (`4^0.25` gives 1); `sin` on
   huge arguments panics (its Ziv loop never converges); `to_f64` mishandles
   the bottom of the subnormal range.
-- `error(42)` gets a `chunk:line:` location prefix; reference Lua adds the
-  position only to string messages. Older than the typed `ErrorValue`, not
-  listed in `docs/compatibility.md`. Either match reference or document it.
-- `table.move`'s "destination wrap around" error names no argument;
-  reference reports it against argument #4. Same defect the "too many
-  elements to move" error had.
+- Syntax-error wording still short of reference: at end of input the parser
+  always reports `unexpected <eof>`; lexer errors name no `near` token; an
+  unclosed bracket on a later line lacks `(to close ... at line N)`.
+- `Error::library_function` is set only for `table.sort`; other library
+  errors carry their function inside the `LibraryError` variant. Decide
+  whether the accessor should cover them or go.
 - `docs/compatibility.md` gaps, all matching 5.4 or deliberate but unlisted
   (the "Position arguments" section of the `src/lua_std.rs` module doc has
   the rules): non-integer positions raise where 5.2 truncates; `gsub` with
@@ -50,8 +50,6 @@ removed.
   is 5.4-only; `unpack` and `concat` raise across +/-2^53 where 5.4 returns
   nils. The page's `move` +/-2^53 wording is also inaccurate: a single exact
   key outside the range is accepted.
-- Still stringly typed after the typed-errors pass: `LibraryFunction::Other(String)`
-  and `SnapshotError::InvalidBytecode { reason: String }`.
 - The ignored crmath sweeps read CORE-MATH's worst-case files from an
   unpinned local checkout under `research/`; only the c2932f8 commit message
   records the upstream commit (`0ce0cbc`). Pin it somewhere the sweeps or

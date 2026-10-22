@@ -8,7 +8,7 @@ use super::Result;
 use super::RetCount;
 use super::SyntaxError;
 use super::TailKind;
-use super::TokenType;
+use super::TokenKind;
 use crate::compiler::exp_desc::CallSite;
 use crate::error::ParserFault;
 use crate::limits::{MAX_EXPRESSIONS, SYNTAX_SUFFIX_COST};
@@ -22,7 +22,7 @@ impl Parser<'_> {
         // An explist has to have at least one expression.
         let mut last_exp_desc = self.parse_expr()?;
         let mut num_expressions = 1;
-        while let Some(token) = self.input.try_pop(TokenType::Comma)? {
+        while let Some(token) = self.input.try_pop(TokenKind::Comma)? {
             if num_expressions == MAX_EXPRESSIONS {
                 return Err(self.error_at(SyntaxError::TooManyExpressions, token.start));
             }
@@ -47,7 +47,7 @@ impl Parser<'_> {
     fn parse_or(&mut self) -> Result<ExpDesc> {
         let mut exp_desc = self.parse_and()?;
 
-        while self.input.try_pop(TokenType::Or)?.is_some() {
+        while self.input.try_pop(TokenKind::Or)?.is_some() {
             exp_desc = ExpDesc::Other;
             let branch_instr_index = self.funcs.chunk.code.len();
             self.push(Instr::branch_true_keep(0));
@@ -68,7 +68,7 @@ impl Parser<'_> {
     fn parse_and(&mut self) -> Result<ExpDesc> {
         let mut exp_desc = self.parse_comparison()?;
 
-        while self.input.try_pop(TokenType::And)?.is_some() {
+        while self.input.try_pop(TokenKind::And)?.is_some() {
             exp_desc = ExpDesc::Other;
             let branch_instr_index = self.funcs.chunk.code.len();
             self.push(Instr::branch_false_keep(0));
@@ -92,12 +92,12 @@ impl Parser<'_> {
         let mut exp_desc = self.parse_concat()?;
         loop {
             let instr = match self.input.peek_type()? {
-                TokenType::Less => Instr::less(),
-                TokenType::LessEqual => Instr::less_equal(),
-                TokenType::Greater => Instr::greater(),
-                TokenType::GreaterEqual => Instr::greater_equal(),
-                TokenType::Equal => Instr::equal(),
-                TokenType::NotEqual => Instr::not_equal(),
+                TokenKind::Less => Instr::less(),
+                TokenKind::LessEqual => Instr::less_equal(),
+                TokenKind::Greater => Instr::greater(),
+                TokenKind::GreaterEqual => Instr::greater_equal(),
+                TokenKind::Equal => Instr::equal(),
+                TokenKind::NotEqual => Instr::not_equal(),
                 _ => break,
             };
             exp_desc = ExpDesc::Other;
@@ -116,7 +116,7 @@ impl Parser<'_> {
         let mut exp_desc = self.parse_addition()?;
         let mut count: usize = 1;
         let mut line = None;
-        while let Some(token) = self.input.try_pop(TokenType::DotDot)? {
+        while let Some(token) = self.input.try_pop(TokenKind::DotDot)? {
             // A flattened chain reports its first operator, as Lua does when
             // it merges the right-associative concatenation instructions.
             line = line.or(Some(token.line));
@@ -142,8 +142,8 @@ impl Parser<'_> {
         let mut exp_desc = self.parse_multiplication()?;
         loop {
             let instr = match self.input.peek_type()? {
-                TokenType::Plus => Instr::add(),
-                TokenType::Minus => Instr::subtract(),
+                TokenKind::Plus => Instr::add(),
+                TokenKind::Minus => Instr::subtract(),
                 _ => break,
             };
             exp_desc = ExpDesc::Other;
@@ -160,9 +160,9 @@ impl Parser<'_> {
         let mut exp_desc = self.parse_unary()?;
         loop {
             let instr = match self.input.peek_type()? {
-                TokenType::Star => Instr::multiply(),
-                TokenType::Slash => Instr::divide(),
-                TokenType::Mod => Instr::modulo(),
+                TokenKind::Star => Instr::multiply(),
+                TokenKind::Slash => Instr::divide(),
+                TokenKind::Mod => Instr::modulo(),
                 _ => break,
             };
             exp_desc = ExpDesc::Other;
@@ -182,16 +182,16 @@ impl Parser<'_> {
     fn parse_unary_inner(&mut self) -> Result<ExpDesc> {
         let token_type = self.input.peek_type()?;
         let instr = match token_type {
-            TokenType::Not => Instr::not(),
-            TokenType::Hash => Instr::length(),
-            TokenType::Minus => Instr::negate(),
+            TokenKind::Not => Instr::not(),
+            TokenKind::Hash => Instr::length(),
+            TokenKind::Minus => Instr::negate(),
             _ => {
                 return self.parse_pow();
             }
         };
         let line = self.input.next()?.line;
         self.parse_unary()?;
-        if token_type == TokenType::Minus {
+        if token_type == TokenKind::Minus {
             self.push_negate(line)?;
         } else {
             self.push_at_line(instr, line);
@@ -203,7 +203,7 @@ impl Parser<'_> {
     /// Parse an exponentiation expression (`^`). Right-associative, Precedence 1.
     fn parse_pow(&mut self) -> Result<ExpDesc> {
         let mut exp_desc = self.parse_primary()?;
-        if let Some(token) = self.input.try_pop(TokenType::Caret)? {
+        if let Some(token) = self.input.try_pop(TokenKind::Caret)? {
             exp_desc = ExpDesc::Other;
             self.parse_unary()?;
             // `^` is deliberately never constant-folded, unlike `+ - * / %`.
@@ -221,7 +221,7 @@ impl Parser<'_> {
     /// Parses a 'primary' expression. See `parse_prefix_exp` and `parse_expr_base` for details.
     fn parse_primary(&mut self) -> Result<ExpDesc> {
         match self.input.peek_type()? {
-            TokenType::Identifier | TokenType::LParen => {
+            TokenKind::Identifier | TokenKind::LParen => {
                 let prefix = self.parse_prefix_exp()?;
                 self.eval_prefix_exp(&prefix);
                 Ok(prefix.into())
@@ -237,18 +237,18 @@ impl Parser<'_> {
     pub(super) fn parse_prefix_exp(&mut self) -> Result<PrefixExp> {
         let tok = self.input.next()?;
         let prefix = match tok.typ {
-            TokenType::Identifier => {
+            TokenKind::Identifier => {
                 let text = self.get_text(tok)?;
                 let place = self.parse_prefix_identifier(text)?;
                 place.into()
             }
-            TokenType::LParen => {
+            TokenKind::LParen => {
                 self.parse_expr()?;
-                self.expect(TokenType::RParen)?;
+                self.expect(TokenKind::RParen)?;
                 PrefixExp::Parenthesized
             }
             _ => {
-                return Err(self.err_unexpected(tok, TokenType::Identifier));
+                return Err(self.err_near(tok, |found| SyntaxError::UnexpectedSymbol { found }));
             }
         };
         self.parse_prefix_extension(prefix)
@@ -270,7 +270,7 @@ impl Parser<'_> {
             // charge size and its reason live on SYNTAX_SUFFIX_COST.
             let nested = matches!(
                 self.input.peek_type()?,
-                TokenType::LSquare | TokenType::LParen | TokenType::LCurly | TokenType::Colon
+                TokenKind::LSquare | TokenKind::LParen | TokenKind::LCurly | TokenKind::Colon
             );
             let result = if nested {
                 self.with_syntax_level(SYNTAX_SUFFIX_COST, |parser| {
@@ -291,21 +291,21 @@ impl Parser<'_> {
     /// nothing) when the next token does not start a suffix.
     fn parse_prefix_suffix(&mut self, base_expr: &PrefixExp) -> Result<Option<PrefixExp>> {
         let next = match self.input.peek_type()? {
-            TokenType::Dot => {
+            TokenKind::Dot => {
                 self.eval_prefix_exp(base_expr);
                 self.input.next()?;
                 let field_name = self.expect_identifier()?;
                 let name_idx = self.find_or_add_string(field_name)?;
                 PlaceExp::FieldAccess(name_idx).into()
             }
-            TokenType::LSquare => {
+            TokenKind::LSquare => {
                 self.eval_prefix_exp(base_expr);
                 self.input.next()?;
                 self.parse_expr()?;
-                self.expect(TokenType::RSquare)?;
+                self.expect(TokenKind::RSquare)?;
                 PlaceExp::TableIndex.into()
             }
-            TokenType::LParen | TokenType::LiteralString | TokenType::LCurly => {
+            TokenKind::LParen | TokenKind::LiteralString | TokenKind::LCurly => {
                 let line = self.input.peek()?.line;
                 // Evaluate the callee FIRST, then mark. The mark records where
                 // this call's frame begins, and after the callee is evaluated
@@ -325,7 +325,7 @@ impl Parser<'_> {
                 let mark_idx = self.mark_call_base();
                 self.finish_call(mark_idx, 0, line, false)?
             }
-            TokenType::Colon => {
+            TokenKind::Colon => {
                 let line = self.input.peek()?.line;
                 // Method call: obj:method(args) becomes obj.method(obj, args).
                 //
@@ -406,8 +406,8 @@ impl Parser<'_> {
     fn parse_expr_base(&mut self) -> Result<ExpDesc> {
         let tok = self.input.next()?;
         match tok.typ {
-            TokenType::LCurly => self.parse_table()?,
-            TokenType::LiteralNumber => {
+            TokenKind::LCurly => self.parse_table()?,
+            TokenKind::LiteralNumber => {
                 // The lexer determines token boundaries; this shared parser
                 // owns conversion and validates the complete numeral.
                 let text = self.input.source_bytes(tok.range());
@@ -416,14 +416,14 @@ impl Parser<'_> {
                 let idx = self.find_or_add_number(number)?;
                 self.push(Instr::push_num(idx));
             }
-            TokenType::LiteralString => {
+            TokenKind::LiteralString => {
                 self.push_literal_string(tok)?;
             }
-            TokenType::Function => self.parse_fndef(None, false)?,
-            TokenType::Nil => self.push(Instr::push_nil()),
-            TokenType::False => self.push(Instr::push_bool(false)),
-            TokenType::True => self.push(Instr::push_bool(true)),
-            TokenType::DotDotDot => {
+            TokenKind::Function => self.parse_fndef(None, false)?,
+            TokenKind::Nil => self.push(Instr::push_nil()),
+            TokenKind::False => self.push(Instr::push_bool(false)),
+            TokenKind::True => self.push(Instr::push_bool(true)),
+            TokenKind::DotDotDot => {
                 // Check if we're in a vararg function
                 if !self.funcs.chunk.is_vararg {
                     return Err(self.error_here(SyntaxError::VarargOutsideVarargFunction));
@@ -433,7 +433,7 @@ impl Parser<'_> {
                 return Ok(ExpDesc::MultiTail(TailKind::Vararg));
             }
             _ => {
-                return Err(self.err_unexpected(tok, TokenType::Nil));
+                return Err(self.err_near(tok, |found| SyntaxError::UnexpectedSymbol { found }));
             }
         }
         Ok(ExpDesc::Other)

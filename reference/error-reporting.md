@@ -17,16 +17,30 @@ a `RustFunc`'s own `std::error::Error`, which `Error::source` returns and
 
 Bytes a script controls reach the host exactly: an `ErrorValue::String` is the
 script's string, a table or function error value carries its `tostring`
-rendering as bytes, `SyntaxError::ExpectedToken::found` is the offending
+rendering as bytes, the `found` field of a `SyntaxError` is the offending
 token's source bytes, `string.format` directives in `LibraryError` are the
 format string's bytes, and chunk names (`Error::source_name`,
 `StackFrame::source`) are the bytes given to `Program::compile`. Only
 `Display` converts, rendering each invalid UTF-8 sequence as U+FFFD.
 
+The same holds for save and load (`dellingr::snapshot`): every reason inside
+a `SaveError` or `SnapshotError` is an enum (`CorruptionReason`,
+`DecodeReason`, `InvalidBytecodeReason` with the verifier's
+`ValidationReason`, `TableRestoreStep` and `TableRestoreFailure`,
+`SaveCollection`, `SnapshotField`), and `SaveError::Internal` wraps an opaque
+`SaveInternalError`, an encoder bug. The strings that remain in either surface
+are data: function names and ids, environment tokens, chunk names, and the
+best-effort value path of `SaveError::UnregisteredFunction`.
+
 `error()`'s value rule is the opposite of `tostring`'s for strings: a string
 passed to `error()` is the error value itself and never goes through the
 shared string metatable's `__tostring`. `State::tostring_rendering` owns the
 `tostring` rule and `State::error_value`, beside it, the `error()` rule.
+
+`error()` records the position prefix (`ScriptError::prefix`) from its level
+for a string value and `PrefixLocation::Suppressed` for any other value, as
+Lua 5.4 adds position information only to strings. `Display` follows the
+recorded policy, so a host that builds a `ScriptError` itself chooses its own.
 
 ## Argument error names
 

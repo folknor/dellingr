@@ -193,7 +193,7 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
 
         // Keys past +-2^53 would round onto each other as f64 keys; refuse
         // such ranges as table.move, insert and remove do.
-        check_sequence_keys(state, i, j, "concat")?;
+        check_sequence_keys(state, i, j, LibraryFunction::Concat)?;
 
         let mut result = Vec::new();
         for idx in i..=j {
@@ -263,7 +263,12 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
             }
             let count = e - f + 1;
             if t > i64::MAX - count + 1 {
-                return Err(state.library_error(LibraryError::MoveDestinationWrapAround));
+                return Err(super::argument_error(
+                    state,
+                    4,
+                    "move",
+                    ArgDetail::DestinationWrapAround,
+                ));
             }
             count
         } else {
@@ -371,12 +376,10 @@ pub(super) fn check_sequence_keys(
     state: &State,
     first: i64,
     last: i64,
-    function: &str,
+    function: LibraryFunction,
 ) -> Result<()> {
     if !check_integer_key_range(first, last) {
-        return Err(state.library_error(LibraryError::IntegerKeyRangeExceeded {
-            function: LibraryFunction::from_name(function),
-        }));
+        return Err(state.library_error(LibraryError::IntegerKeyRangeExceeded { function }));
     }
     Ok(())
 }
@@ -498,7 +501,7 @@ fn insert_through_metamethods(state: &mut State, num_args: usize) -> Result<u8> 
         first_empty
     };
     // A negative length can admit pos > first_empty, where only pos is written.
-    check_sequence_keys(state, pos, first_empty.max(pos), "insert")?;
+    check_sequence_keys(state, pos, first_empty.max(pos), LibraryFunction::Insert)?;
     let mut i = first_empty;
     while i > pos {
         state.push_number(i as f64)?;
@@ -525,7 +528,7 @@ fn remove_through_metamethods(state: &mut State) -> Result<u8> {
     if pos != size && pos.wrapping_sub(1).cast_unsigned() > size.cast_unsigned() {
         return Err(position_out_of_bounds(state, "remove"));
     }
-    check_sequence_keys(state, pos, size.max(pos), "remove")?;
+    check_sequence_keys(state, pos, size.max(pos), LibraryFunction::Remove)?;
     state.set_top(1)?;
     state.push_number(pos as f64)?;
     state.get_table_unguarded(1)?; // Stack: [t, removed]

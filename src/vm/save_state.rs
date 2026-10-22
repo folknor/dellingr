@@ -42,8 +42,6 @@
 //!   that content-hashes saves across upgrades must hash the payload after
 //!   the header, or accept that a version bump changes the bytes.
 
-use std::convert::Infallible;
-use std::fmt;
 use std::sync::Arc;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -54,7 +52,8 @@ use super::lua_val::RustFunc;
 use super::object::{GcHeap, RawObject, StringPtr, Upvalue, UpvalueRef};
 use super::rng::VmRng;
 use super::table::{
-    InvalidTableKey, NormalizedTableKey, TableKey, TableKeyInput, array_index, normalize_table_key,
+    InvalidTableKey, NormalizedTableKey, TableError, TableKey, TableKeyInput, array_index,
+    normalize_table_key,
 };
 use super::{ObjectPtr, PointerIdKey, State, Val};
 use crate::COST_MODEL_VERSION;
@@ -63,14 +62,19 @@ use crate::cost_meter::CostState;
 use crate::host::HostCallbacks;
 use crate::instr::Instr;
 use crate::instr::snapshot_format::FORMAT_VERSION;
-use crate::limits::{
-    MAX_CHUNK_NAME_BYTES, MAX_ENGINE_VERSION_BYTES, MAX_ENVIRONMENT_TOKEN_BYTES,
-    MAX_SAVE_IDENTIFIER_BYTES, MAX_SOURCE_NAME_BYTES,
-};
 
+mod error;
 #[cfg(test)]
 mod integrity_tests;
 mod verify;
+
+use error::SaveFault;
+pub use error::{
+    CorruptionReason, DecodeReason, DuplicateEntry, EnvironmentCorruption, GmatchCorruption,
+    InvalidBytecodeReason, KeyForm, LoadError, MaterializedPart, SaveCollection, SaveError,
+    SaveInternalError, SavedReference, SnapshotError, SnapshotField, TableCorruption,
+    TableLoadLocation, TableRestoreFailure, TableRestoreStep,
+};
 
 // Token spellings belong to the snapshot schema, not the global-name API.
 // Keep the order stable: aliases are classified by the last captured token.
@@ -132,7 +136,6 @@ snapshot_in_flight! {
 
 const MAGIC: [u8; 4] = *b"DLGS";
 use crate::limits::tuning::{
-    SAVE_LOGGED_USER_TEXT_BYTES as MAX_LOGGED_USER_TEXT_BYTES,
     SAVE_PATH_GLOBAL_BYTES as MAX_PATH_GLOBAL_BYTES,
     SAVE_RENDERED_PATH_BYTES as MAX_RENDERED_PATH_BYTES,
     SAVE_RENDERED_PATH_SEGMENTS as MAX_RENDERED_PATH_SEGMENTS,
@@ -154,350 +157,17 @@ pub struct SaveDiagnostics {
     pub anchor_count: usize,
 }
 
-/// Errors produced while saving a [`State`].
-///
-/// Save and load failures are returned directly and do not call
-/// [`HostCallbacks::on_error`].
-#[non_exhaustive]
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub enum SaveError {
-    /// The VM has an active stack/call frame/open upvalue and cannot be snapshotted.
-    NotQuiescent,
-    /// A panic unwound through the State, so its contents no longer
-    /// describe a consistent VM and are not snapshotted.
-    StatePoisoned,
-    /// A reachable Rust function has no stable save/load id.
-    UnregisteredFunction {
-        /// Best-effort path to the value that made the function reachable.
-        reachable_from: String,
-    },
-    /// One save/load id was registered for two different Rust functions.
-    ///
-    /// Registration currently reports this through `SaveError` because the
-    /// registration API and its error type are outside this module's scope.
-    DuplicateFunctionRegistration {
-        /// The id that was bound to conflicting function addresses.
-        id: String,
-    },
-    /// A reachable upvalue was still open.
-    OpenUpvalueReachable,
-    /// A save-time invariant failed inside the codec.
-    Internal(&'static str),
-    /// A saved value or collection exceeded the codec's representable limit.
-    TooLarge {
-        /// Resource that exceeded its limit.
-        what: &'static str,
-        /// Requested size or count.
-        count: usize,
-    },
-}
-
-/// Errors produced while loading a saved [`State`].
-///
-/// Decoding, verification and trailing-byte rejection all run before the
-/// setup closure, so a [`LoadError::Snapshot`] from those stages means setup
-/// never ran.
-#[non_exhaustive]
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub enum LoadError<E = Infallible> {
-    /// The host's load-time setup closure failed.
-    Setup(E),
-    /// The load-time setup closure returned success on a State a panic had
-    /// unwound through (it caught the panic), so the snapshot is not loaded
-    /// into it.
-    StatePoisoned,
-    /// The snapshot could not be restored: its bytes are malformed or
-    /// unsupported, or they reference something the load-time environment
-    /// does not provide.
-    Snapshot(SnapshotError),
-}
-
-impl<E> From<SnapshotError> for LoadError<E> {
-    fn from(error: SnapshotError) -> Self {
-        Self::Snapshot(error)
+/// A collection longer than the format's u32 length prefix.
+fn too_large(collection: SaveCollection, count: usize) -> SaveError {
+    SaveError::TooLarge {
+        collection,
+        count,
+        limit: u32::MAX as usize,
     }
 }
 
-impl<E> LoadError<E> {
-    /// The snapshot failure, if this is one.
-    pub fn snapshot(&self) -> Option<&SnapshotError> {
-        match self {
-            Self::Snapshot(error) => Some(error),
-            Self::Setup(_) | Self::StatePoisoned => None,
-        }
-    }
-}
-
-impl<E: fmt::Display> fmt::Display for LoadError<E> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            LoadError::Setup(error) => write!(f, "load setup failed: {error}"),
-            LoadError::StatePoisoned => write!(f, "load setup left the state poisoned by a panic"),
-            LoadError::Snapshot(error) => error.fmt(f),
-        }
-    }
-}
-
-impl<E: fmt::Debug + fmt::Display + 'static> std::error::Error for LoadError<E> {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            LoadError::Snapshot(error) => Some(error),
-            LoadError::Setup(_) | LoadError::StatePoisoned => None,
-        }
-    }
-}
-
-/// Why a snapshot could not be restored, independent of the host's setup.
-///
-/// Not every variant means corrupt bytes: [`SnapshotError::UnknownFunction`]
-/// and [`SnapshotError::UnknownEnvObject`] can come from a valid save loaded
-/// into an environment that does not register what it references.
-#[non_exhaustive]
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub enum SnapshotError {
-    /// Save bytes did not start with the dellingr save magic.
-    BadMagic,
-    /// Save format version is not supported by this build.
-    UnsupportedVersion {
-        /// Format version in the save.
-        found: u16,
-        /// Format version supported by this build.
-        expected: u16,
-    },
-    /// Save cost model version is not supported by this build.
-    UnsupportedCostModelVersion {
-        /// Cost model version in the save.
-        found: u16,
-        /// Cost model version supported by this build.
-        expected: u16,
-    },
-    /// A saved function id was not registered by the load-time environment.
-    UnknownFunction(String),
-    /// A saved environment-object token was not present at load time.
-    UnknownEnvObject(String),
-    /// Binary payload could not be decoded.
-    DecodeError(String),
-    /// A bounded metadata field exceeded its per-field resource limit.
-    FieldSizeExceeded {
-        /// Field whose limit was exceeded.
-        kind: &'static str,
-        /// Size requested by the save.
-        size: usize,
-        /// Maximum permitted size.
-        limit: usize,
-    },
-    /// A saved Lua string exceeded the fixed resource limit.
-    StringSizeExceeded {
-        /// Size requested by the save.
-        size: usize,
-        /// Maximum permitted string size.
-        limit: usize,
-    },
-    /// Arena indices or object graph contents were corrupt.
-    CorruptArena {
-        /// Saved arena or collection invariant that failed.
-        reason: &'static str,
-        /// Index within the collection identified by `location`.
-        index: usize,
-        /// Arena or nested collection containing the invalid entry.
-        location: TableLoadLocation,
-    },
-    /// A runtime table rejected entries while restoring a save.
-    InvalidTable {
-        /// Object arena index, or environment delta token and local operation index.
-        location: TableLoadLocation,
-        /// Operation and the underlying table failure.
-        reason: String,
-    },
-    /// A saved bytecode program violates VM structural invariants.
-    InvalidBytecode {
-        /// Saved bytecode arena id.
-        chunk: u32,
-        /// Bytecode index when the failure is instruction-specific.
-        instruction: Option<u32>,
-        /// Deterministic explanation for diagnostics.
-        reason: String,
-    },
-}
-
-/// Location of a table restoration failure or corrupt snapshot collection.
-///
-/// `Object` and `Environment` identify materialized tables; the other variants
-/// qualify the separate entry index in [`SnapshotError::CorruptArena`].
-#[derive(Debug, Clone, Eq, PartialEq)]
-#[non_exhaustive]
-pub enum TableLoadLocation {
-    /// Interned string arena.
-    Strings,
-    /// Saved object arena.
-    Objects,
-    /// Saved bytecode arena.
-    Bytecode,
-    /// Closed upvalue arena.
-    Upvalues,
-    /// Ordered user globals.
-    Globals,
-    /// Rendered pointer identity records.
-    PointerIds,
-    /// Entries of a saved table object.
-    TableEntries {
-        /// Owner in the object arena.
-        object: usize,
-    },
-    /// Ordered environment deltas.
-    EnvironmentDeltas,
-    /// Deleted keys of the environment delta at this index.
-    EnvironmentDeleted(usize),
-    /// Upserts of the environment delta at this index.
-    EnvironmentUpserts(usize),
-    /// Key order of the environment delta at this index.
-    EnvironmentOrder(usize),
-    /// Array slots of the environment delta at this index.
-    EnvironmentArray(usize),
-    /// Metatable of the environment delta at this index.
-    EnvironmentMetatable(usize),
-    /// A table in the saved object arena.
-    Object(usize),
-    /// A library or host environment table.
-    Environment {
-        /// Stable environment-object token.
-        token: String,
-        /// Entry index for a deletion or upsert; absent for a whole-table rebuild.
-        entry: Option<usize>,
-    },
-}
-
-// The existing exported location type also covers corruption diagnostics.
-// Keep one public location vocabulary for both snapshot failure paths.
+// Corruption reports share the location vocabulary of table restoration.
 type SaveLocation = TableLoadLocation;
-
-impl fmt::Display for TableLoadLocation {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Object(index) => write!(f, "object[{index}]"),
-            Self::Environment { token, entry } => {
-                f.write_str("environment ")?;
-                write_bounded_user_text(f, token)?;
-                if let Some(entry) = entry {
-                    write!(f, " entry[{entry}]")?;
-                }
-                Ok(())
-            }
-            Self::Strings => f.write_str("string arena"),
-            Self::Objects => f.write_str("object arena"),
-            Self::Bytecode => f.write_str("bytecode arena"),
-            Self::Upvalues => f.write_str("upvalue arena"),
-            Self::Globals => f.write_str("globals"),
-            Self::PointerIds => f.write_str("format pointer ids"),
-            Self::TableEntries { object } => write!(f, "object[{object}] entries"),
-            Self::EnvironmentDeltas => f.write_str("environment deltas"),
-            Self::EnvironmentDeleted(delta) => write!(f, "environment delta[{delta}] deleted keys"),
-            Self::EnvironmentUpserts(delta) => write!(f, "environment delta[{delta}] upserts"),
-            Self::EnvironmentOrder(delta) => write!(f, "environment delta[{delta}] order"),
-            Self::EnvironmentArray(delta) => write!(f, "environment delta[{delta}] array"),
-            Self::EnvironmentMetatable(delta) => {
-                write!(f, "environment delta[{delta}] metatable")
-            }
-        }
-    }
-}
-
-impl fmt::Display for SaveError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            SaveError::NotQuiescent => write!(f, "state is not quiescent"),
-            SaveError::StatePoisoned => write!(f, "state poisoned by a panic"),
-            SaveError::UnregisteredFunction { reachable_from } => {
-                f.write_str("unregistered Rust function reachable from ")?;
-                write_bounded_user_text(f, reachable_from)
-            }
-            SaveError::DuplicateFunctionRegistration { id } => {
-                f.write_str("id ")?;
-                write_bounded_user_text(f, id)?;
-                f.write_str(" registered for two different Rust functions")
-            }
-            SaveError::OpenUpvalueReachable => write!(f, "open upvalue reachable during save"),
-            SaveError::Internal(reason) => write!(f, "save encode invariant failed: {reason}"),
-            SaveError::TooLarge { what, count } => {
-                write!(f, "save {what} count {count} exceeds the supported limit")
-            }
-        }
-    }
-}
-
-impl std::error::Error for SaveError {}
-
-impl fmt::Display for SnapshotError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            SnapshotError::BadMagic => write!(f, "bad save magic"),
-            SnapshotError::UnsupportedVersion { found, expected } => {
-                write!(
-                    f,
-                    "unsupported save format version {found}; expected {expected}"
-                )
-            }
-            SnapshotError::UnsupportedCostModelVersion { found, expected } => {
-                write!(
-                    f,
-                    "unsupported save cost model version {found}; expected {expected}"
-                )
-            }
-            SnapshotError::UnknownFunction(id) => {
-                f.write_str("unknown saved function id ")?;
-                write_bounded_user_text(f, id)
-            }
-            SnapshotError::UnknownEnvObject(id) => {
-                f.write_str("unknown saved environment object ")?;
-                write_bounded_user_text(f, id)
-            }
-            SnapshotError::DecodeError(err) => write!(f, "save decode error: {err}"),
-            SnapshotError::FieldSizeExceeded { kind, size, limit } => {
-                write!(f, "save {kind} size {size} exceeds limit {limit}")
-            }
-            SnapshotError::StringSizeExceeded { size, limit } => {
-                write!(f, "string size {size} exceeds limit {limit}")
-            }
-            SnapshotError::CorruptArena {
-                reason,
-                index,
-                location,
-            } => {
-                write!(f, "corrupt save {location} at index {index}: {reason}")
-            }
-            SnapshotError::InvalidTable { location, reason } => {
-                write!(f, "invalid saved table at {location}: {reason}")
-            }
-            SnapshotError::InvalidBytecode {
-                chunk,
-                instruction,
-                reason,
-            } => {
-                write!(f, "invalid bytecode chunk {chunk}")?;
-                if let Some(instruction) = instruction {
-                    write!(f, " at instruction {instruction}")?;
-                }
-                write!(f, ": {reason}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for SnapshotError {}
-
-fn write_bounded_user_text(f: &mut fmt::Formatter<'_>, text: &str) -> fmt::Result {
-    let mut written = 0usize;
-    for character in text.chars() {
-        let escaped = character.escape_debug().to_string();
-        if written.saturating_add(escaped.len()) > MAX_LOGGED_USER_TEXT_BYTES {
-            f.write_str("...")?;
-            return Ok(());
-        }
-        f.write_str(&escaped)?;
-        written += escaped.len();
-    }
-    Ok(())
-}
 
 fn truncate_utf8(text: &str, max_bytes: usize) -> String {
     let mut end = 0usize;
@@ -1044,12 +714,14 @@ impl<'a> SaveBuilder<'a> {
         let objects = self
             .objects
             .into_iter()
-            .map(|obj| Self::finish_object(obj.ok_or(SaveError::Internal("unfilled object slot"))?))
+            .map(|obj| {
+                Self::finish_object(obj.ok_or(SaveError::from(SaveFault::UnfilledObjectSlot))?)
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let upvalues = self
             .upvalues
             .into_iter()
-            .map(|value| value.ok_or(SaveError::Internal("unfilled upvalue slot")))
+            .map(|value| value.ok_or(SaveError::from(SaveFault::UnfilledUpvalueSlot)))
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(SavePayload {
@@ -1098,12 +770,12 @@ impl<'a> SaveBuilder<'a> {
                 .state
                 .heap
                 .as_table_ref(ptr)
-                .ok_or(SaveError::Internal("environment object is not a table"))?;
+                .ok_or(SaveError::from(SaveFault::EnvironmentObjectNotTable))?;
             let baseline = self
                 .state
                 .env_baselines
                 .get(&ptr)
-                .ok_or(SaveError::Internal("missing environment baseline"))?;
+                .ok_or(SaveError::from(SaveFault::MissingEnvironmentBaseline))?;
             let live = table.entries();
             // One membership map per side, built once per table. `TableKey`
             // hashes and compares with runtime key equality (-0.0 equals
@@ -1199,10 +871,8 @@ impl<'a> SaveBuilder<'a> {
         if let Some(id) = self.string_ids.get(&ptr) {
             return Ok(*id);
         }
-        let id = u32::try_from(self.strings.len()).map_err(|_| SaveError::TooLarge {
-            what: "strings",
-            count: self.strings.len(),
-        })?;
+        let id = u32::try_from(self.strings.len())
+            .map_err(|_| too_large(SaveCollection::Strings, self.strings.len()))?;
         self.strings.push(self.state.heap.get_string(ptr).to_vec());
         self.string_ids.insert(ptr, id);
         Ok(id)
@@ -1214,7 +884,7 @@ impl<'a> SaveBuilder<'a> {
         self.run_tasks(val, global, root)?;
         self.roots[root]
             .take()
-            .ok_or(SaveError::Internal("unfilled root slot"))
+            .ok_or(SaveError::from(SaveFault::UnfilledRootSlot))
     }
 
     fn run_tasks(&mut self, root: Val, global: &str, root_slot: usize) -> Result<(), SaveError> {
@@ -1235,8 +905,8 @@ impl<'a> SaveBuilder<'a> {
                             let Some(id) = self.state.rust_fn_ids_by_addr.get(&addr) else {
                                 let reachable_from = PathFinder::new(self.state, &self.env_reverse)
                                     .find(root, global, func)
-                                    .ok_or(SaveError::Internal(
-                                        "unregistered function path was not found from its root",
+                                    .ok_or(SaveError::from(
+                                        SaveFault::UnregisteredFunctionPathNotFound,
                                     ))?;
                                 return Err(SaveError::UnregisteredFunction { reachable_from });
                             };
@@ -1262,7 +932,7 @@ impl<'a> SaveBuilder<'a> {
                             .state
                             .heap
                             .as_table_ref(ptr)
-                            .ok_or(SaveError::Internal("environment object is not a table"))?;
+                            .ok_or(SaveError::from(SaveFault::EnvironmentObjectNotTable))?;
                         if let Some(metatable) = table.get_metatable() {
                             tasks.push(EncodeTask::Value {
                                 val: Val::Obj(metatable),
@@ -1295,10 +965,7 @@ impl<'a> SaveBuilder<'a> {
                         *id
                     } else {
                         let id = u32::try_from(self.upvalues.len()).map_err(|_| {
-                            SaveError::TooLarge {
-                                what: "upvalues",
-                                count: self.upvalues.len(),
-                            }
+                            too_large(SaveCollection::Upvalues, self.upvalues.len())
                         })?;
                         self.upvalue_ids.insert(key, id);
                         self.upvalues.push(None);
@@ -1314,13 +981,13 @@ impl<'a> SaveBuilder<'a> {
                     let pending = self
                         .objects
                         .get_mut(object as usize)
-                        .ok_or(SaveError::Internal("missing object slot"))?;
+                        .ok_or(SaveError::from(SaveFault::MissingObjectSlot))?;
                     let Some(PendingObject::Closure { upvalues, .. }) = pending else {
-                        return Err(SaveError::Internal("upvalue destination is not a closure"));
+                        return Err(SaveError::from(SaveFault::UpvalueDestinationNotClosure));
                     };
                     let slot = upvalues
                         .get_mut(index)
-                        .ok_or(SaveError::Internal("missing closure upvalue slot"))?;
+                        .ok_or(SaveError::from(SaveFault::MissingClosureUpvalueSlot))?;
                     *slot = Some(id);
                 }
             }
@@ -1332,10 +999,8 @@ impl<'a> SaveBuilder<'a> {
         if let Some(id) = self.object_ids.get(&ptr) {
             return Ok(*id);
         }
-        let id = u32::try_from(self.objects.len()).map_err(|_| SaveError::TooLarge {
-            what: "objects",
-            count: self.objects.len(),
-        })?;
+        let id = u32::try_from(self.objects.len())
+            .map_err(|_| too_large(SaveCollection::Objects, self.objects.len()))?;
         self.object_ids.insert(ptr, id);
         self.objects.push(None);
         tasks.push(EncodeTask::Object { ptr, id });
@@ -1353,10 +1018,8 @@ impl<'a> SaveBuilder<'a> {
                 let (array_len, array_slots, entries) = table.snapshot_entries();
                 // MAX_ARRAY_LEN keeps the logical length below 2^53.
                 let array_len = array_len as u64;
-                let array_slots = u32::try_from(array_slots).map_err(|_| SaveError::TooLarge {
-                    what: "table array slots",
-                    count: array_slots,
-                })?;
+                let array_slots = u32::try_from(array_slots)
+                    .map_err(|_| too_large(SaveCollection::TableArraySlots, array_slots))?;
                 let entry_count = entries.len();
                 let metatable = table.get_metatable();
                 if let Some(mt) = metatable {
@@ -1406,7 +1069,7 @@ impl<'a> SaveBuilder<'a> {
         let slot = self
             .objects
             .get_mut(id as usize)
-            .ok_or(SaveError::Internal("missing object slot"))?;
+            .ok_or(SaveError::from(SaveFault::MissingObjectSlot))?;
         *slot = Some(pending);
         Ok(())
     }
@@ -1421,26 +1084,26 @@ impl<'a> SaveBuilder<'a> {
                 *self
                     .roots
                     .get_mut(index)
-                    .ok_or(SaveError::Internal("missing root slot"))? = Some(value);
+                    .ok_or(SaveError::from(SaveFault::MissingRootSlot))? = Some(value);
             }
             ValueDestination::Upvalue(id) => {
                 *self
                     .upvalues
                     .get_mut(id as usize)
-                    .ok_or(SaveError::Internal("missing upvalue slot"))? = Some(value);
+                    .ok_or(SaveError::from(SaveFault::MissingUpvalueSlot))? = Some(value);
             }
             ValueDestination::TableKey { object, entry }
             | ValueDestination::TableValue { object, entry } => {
                 let pending = self
                     .objects
                     .get_mut(object as usize)
-                    .ok_or(SaveError::Internal("missing object slot"))?;
+                    .ok_or(SaveError::from(SaveFault::MissingObjectSlot))?;
                 let Some(PendingObject::Table { entries, .. }) = pending else {
-                    return Err(SaveError::Internal("table destination is not a table"));
+                    return Err(SaveError::from(SaveFault::TableDestinationNotTable));
                 };
                 let slot = entries
                     .get_mut(entry)
-                    .ok_or(SaveError::Internal("missing table entry slot"))?;
+                    .ok_or(SaveError::from(SaveFault::MissingTableEntrySlot))?;
                 if matches!(destination, ValueDestination::TableKey { .. }) {
                     slot.0 = Some(value);
                 } else {
@@ -1451,9 +1114,9 @@ impl<'a> SaveBuilder<'a> {
                 let pending = self
                     .objects
                     .get_mut(object as usize)
-                    .ok_or(SaveError::Internal("missing object slot"))?;
+                    .ok_or(SaveError::from(SaveFault::MissingObjectSlot))?;
                 let Some(PendingObject::Table { metatable, .. }) = pending else {
-                    return Err(SaveError::Internal("metatable destination is not a table"));
+                    return Err(SaveError::from(SaveFault::MetatableDestinationNotTable));
                 };
                 *metatable = Some(Some(value));
             }
@@ -1476,8 +1139,8 @@ impl<'a> SaveBuilder<'a> {
                     .into_iter()
                     .map(|(key, value)| {
                         Ok((
-                            key.ok_or(SaveError::Internal("unfilled table key slot"))?,
-                            value.ok_or(SaveError::Internal("unfilled table value slot"))?,
+                            key.ok_or(SaveError::from(SaveFault::UnfilledTableKeySlot))?,
+                            value.ok_or(SaveError::from(SaveFault::UnfilledTableValueSlot))?,
                         ))
                     })
                     .collect::<Result<Vec<_>, SaveError>>()?,
@@ -1485,7 +1148,7 @@ impl<'a> SaveBuilder<'a> {
                     None => None,
                     Some(Some(value)) => Some(value),
                     Some(None) => {
-                        return Err(SaveError::Internal("unfilled metatable slot"));
+                        return Err(SaveError::from(SaveFault::UnfilledMetatableSlot));
                     }
                 },
             }),
@@ -1493,7 +1156,9 @@ impl<'a> SaveBuilder<'a> {
                 chunk,
                 upvalues: upvalues
                     .into_iter()
-                    .map(|value| value.ok_or(SaveError::Internal("unfilled closure upvalue slot")))
+                    .map(|value| {
+                        value.ok_or(SaveError::from(SaveFault::UnfilledClosureUpvalueSlot))
+                    })
                     .collect::<Result<Vec<_>, _>>()?,
             }),
         }
@@ -1503,10 +1168,8 @@ impl<'a> SaveBuilder<'a> {
         if let Some(id) = self.bytecode_ids.get(&key) {
             return Ok(*id);
         }
-        let id = u32::try_from(self.bytecode.len()).map_err(|_| SaveError::TooLarge {
-            what: "chunks",
-            count: self.bytecode.len(),
-        })?;
+        let id = u32::try_from(self.bytecode.len())
+            .map_err(|_| too_large(SaveCollection::Chunks, self.bytecode.len()))?;
         self.bytecode_ids.insert(key, id);
 
         // Reserve the arena slot before recursively encoding children. Nested
@@ -1586,7 +1249,7 @@ impl State {
         // and is intentionally not compared on load.
         encoder.write_bytes(
             env!("CARGO_PKG_VERSION").as_bytes(),
-            ByteField::EngineVersion,
+            SnapshotField::EngineVersion,
         )?;
         payload.encode(&mut encoder)?;
         Ok(SaveState {
@@ -1629,7 +1292,7 @@ impl State {
         // enforced by the format and cost-model versions in
         // read_magic_and_versions above; this string is metadata, not a compat
         // gate, so it is deliberately not compared.
-        let _engine_version = decoder.read_bytes(ByteField::EngineVersion)?;
+        let _engine_version = decoder.read_bytes(SnapshotField::EngineVersion)?;
         let decoded = SavePayload::decode(&mut decoder)?;
         let payload = verify::verify_payload(decoded)?;
         decoder.finish()?;
@@ -1684,7 +1347,7 @@ fn saved_num_bits(n: f64) -> u64 {
     }
 }
 
-fn corrupt_arena(reason: &'static str, index: usize, location: SaveLocation) -> SnapshotError {
+fn corrupt_arena(reason: CorruptionReason, index: usize, location: SaveLocation) -> SnapshotError {
     SnapshotError::CorruptArena {
         reason,
         index,
@@ -1697,15 +1360,16 @@ fn corrupt_arena(reason: &'static str, index: usize, location: SaveLocation) -> 
 fn invalid_environment_table(
     token: &str,
     entry: Option<usize>,
-    operation: &str,
-    error: impl fmt::Display,
+    step: TableRestoreStep,
+    error: TableError,
 ) -> SnapshotError {
     SnapshotError::InvalidTable {
         location: TableLoadLocation::Environment {
             token: token.to_owned(),
             entry,
         },
-        reason: format!("{operation}: {error}"),
+        step,
+        failure: error.into(),
     }
 }
 
@@ -1757,7 +1421,7 @@ fn materialize_payload(
             } => {
                 let bc = Arc::clone(bytecode.get(*chunk as usize).ok_or_else(|| {
                     corrupt_arena(
-                        "closure chunk id is out of range",
+                        CorruptionReason::IdOutOfRange(SavedReference::ClosureChunk),
                         *chunk as usize,
                         SaveLocation::Bytecode,
                     )
@@ -1804,7 +1468,10 @@ fn materialize_payload(
                             key,
                             &state.heap,
                             entry_index,
-                            "duplicate materialized table key",
+                            CorruptionReason::Duplicate {
+                                entry: DuplicateEntry::TableKey,
+                                form: KeyForm::Materialized,
+                            },
                             SaveLocation::TableEntries { object: idx },
                         )?;
                         Ok((key, decode_val(value, &ctx)?))
@@ -1821,7 +1488,7 @@ fn materialize_payload(
                         }
                         _ => {
                             return Err(corrupt_arena(
-                                "saved table metatable is not a table",
+                                CorruptionReason::Table(TableCorruption::MetatableNotTable),
                                 idx,
                                 SaveLocation::Objects,
                             ));
@@ -1831,7 +1498,7 @@ fn materialize_payload(
                 let ptr = objects[idx];
                 let table = state.heap.as_table(ptr).ok_or_else(|| {
                     corrupt_arena(
-                        "materialized table object has wrong type",
+                        CorruptionReason::Table(TableCorruption::MaterializedWrongType),
                         idx,
                         SaveLocation::Objects,
                     )
@@ -1845,7 +1512,8 @@ fn materialize_payload(
                     .rebuild_from_snapshot(array_len, *array_slots as usize, entries)
                     .map_err(|error| SnapshotError::InvalidTable {
                         location: TableLoadLocation::Object(idx),
-                        reason: error.to_string(),
+                        step: TableRestoreStep::ObjectRebuild,
+                        failure: error.into(),
                     })?;
                 if metatable.is_some() {
                     table.set_metatable(metatable);
@@ -1872,7 +1540,10 @@ fn materialize_payload(
                 decode_val(key, &ctx)?,
                 &state.heap,
                 key_index,
-                "duplicate materialized deleted key",
+                CorruptionReason::Duplicate {
+                    entry: DuplicateEntry::DeletedEnvironmentKey,
+                    form: KeyForm::Materialized,
+                },
                 SaveLocation::EnvironmentDeleted(delta_index),
             )?;
         }
@@ -1883,13 +1554,18 @@ fn materialize_payload(
                 decode_val(key, &ctx)?,
                 &state.heap,
                 entry_index,
-                "duplicate materialized upsert key",
+                CorruptionReason::Duplicate {
+                    entry: DuplicateEntry::EnvironmentUpsertKey,
+                    form: KeyForm::Materialized,
+                },
                 SaveLocation::EnvironmentUpserts(delta_index),
             )?;
         }
         if !deleted_keys.is_disjoint(&upsert_keys) {
             return Err(corrupt_arena(
-                "materialized key is both deleted and upserted",
+                CorruptionReason::Environment(EnvironmentCorruption::KeyDeletedAndUpserted(
+                    KeyForm::Materialized,
+                )),
                 delta_index,
                 SaveLocation::EnvironmentDeltas,
             ));
@@ -1902,20 +1578,27 @@ fn materialize_payload(
                     decode_val(key, &ctx)?,
                     &state.heap,
                     key_index,
-                    "duplicate materialized environment order key",
+                    CorruptionReason::Duplicate {
+                        entry: DuplicateEntry::EnvironmentOrderKey,
+                        form: KeyForm::Materialized,
+                    },
                     SaveLocation::EnvironmentOrder(delta_index),
                 )?;
             }
             if !deleted_keys.is_disjoint(&order_keys) {
                 return Err(corrupt_arena(
-                    "materialized environment order contains a deleted key",
+                    CorruptionReason::Environment(EnvironmentCorruption::OrderContainsDeletedKey(
+                        KeyForm::Materialized,
+                    )),
                     delta_index,
                     SaveLocation::EnvironmentDeltas,
                 ));
             }
             if !upsert_keys.is_subset(&order_keys) {
                 return Err(corrupt_arena(
-                    "materialized environment order omits an upserted key",
+                    CorruptionReason::Environment(EnvironmentCorruption::OrderOmitsUpsertedKey(
+                        KeyForm::Materialized,
+                    )),
                     delta_index,
                     SaveLocation::EnvironmentDeltas,
                 ));
@@ -1924,7 +1607,7 @@ fn materialize_payload(
         {
             let table = state.heap.as_table(ptr).ok_or_else(|| {
                 corrupt_arena(
-                    "environment token does not resolve to a table",
+                    CorruptionReason::Environment(EnvironmentCorruption::TokenNotTable),
                     delta_index,
                     SaveLocation::EnvironmentDeltas,
                 )
@@ -1936,7 +1619,7 @@ fn materialize_payload(
                         invalid_environment_table(
                             &delta.token,
                             Some(key_index),
-                            "deleted environment key is invalid",
+                            TableRestoreStep::DeleteEnvironmentKey,
                             error,
                         )
                     })?;
@@ -1948,7 +1631,7 @@ fn materialize_payload(
                         invalid_environment_table(
                             &delta.token,
                             Some(entry_index),
-                            "environment upsert is invalid",
+                            TableRestoreStep::UpsertEnvironmentEntry,
                             error,
                         )
                     })?;
@@ -1958,7 +1641,7 @@ fn materialize_payload(
             let (current, array, metatable) = {
                 let table = state.heap.as_table(ptr).ok_or_else(|| {
                     corrupt_arena(
-                        "environment token does not resolve to a table",
+                        CorruptionReason::Environment(EnvironmentCorruption::TokenNotTable),
                         delta_index,
                         SaveLocation::EnvironmentDeltas,
                     )
@@ -1991,7 +1674,7 @@ fn materialize_payload(
                     SaveLocation::EnvironmentOrder(delta_index),
                 )?) else {
                     return Err(corrupt_arena(
-                        "environment order key is absent from the table",
+                        CorruptionReason::Environment(EnvironmentCorruption::OrderKeyAbsent),
                         key_index,
                         SaveLocation::EnvironmentOrder(delta_index),
                     ));
@@ -2016,7 +1699,7 @@ fn materialize_payload(
             }
             let table = state.heap.as_table(ptr).ok_or_else(|| {
                 corrupt_arena(
-                    "environment token does not resolve to a table",
+                    CorruptionReason::Environment(EnvironmentCorruption::TokenNotTable),
                     delta_index,
                     SaveLocation::EnvironmentDeltas,
                 )
@@ -2042,7 +1725,7 @@ fn materialize_payload(
                     invalid_environment_table(
                         &delta.token,
                         None,
-                        "saved environment order is invalid",
+                        TableRestoreStep::RestoreEnvironmentOrder,
                         error,
                     )
                 })?;
@@ -2060,7 +1743,7 @@ fn materialize_payload(
                 .collect::<Result<Vec<_>, SnapshotError>>()?;
             let table = state.heap.as_table(ptr).ok_or_else(|| {
                 corrupt_arena(
-                    "environment token does not resolve to a table",
+                    CorruptionReason::Environment(EnvironmentCorruption::TokenNotTable),
                     delta_index,
                     SaveLocation::EnvironmentDeltas,
                 )
@@ -2086,7 +1769,7 @@ fn materialize_payload(
                     invalid_environment_table(
                         &delta.token,
                         None,
-                        "saved environment array is invalid",
+                        TableRestoreStep::RestoreEnvironmentArray,
                         error,
                     )
                 })?;
@@ -2097,7 +1780,7 @@ fn materialize_payload(
                     invalid_environment_table(
                         &delta.token,
                         None,
-                        "setup environment append is invalid",
+                        TableRestoreStep::SetupEnvironmentAppend,
                         error,
                     )
                 })?;
@@ -2111,7 +1794,9 @@ fn materialize_payload(
                 Val::Obj(mt_ptr) if state.heap.as_table_ref(mt_ptr).is_some() => Some(Some(mt_ptr)),
                 _ => {
                     return Err(corrupt_arena(
-                        "saved environment metatable is not a table",
+                        CorruptionReason::Environment(EnvironmentCorruption::MetatableNotTable(
+                            KeyForm::Materialized,
+                        )),
                         delta_index,
                         SaveLocation::EnvironmentDeltas,
                     ));
@@ -2120,7 +1805,7 @@ fn materialize_payload(
         };
         let table = state.heap.as_table(ptr).ok_or_else(|| {
             corrupt_arena(
-                "environment token does not resolve to a table",
+                CorruptionReason::Environment(EnvironmentCorruption::TokenNotTable),
                 delta_index,
                 SaveLocation::EnvironmentDeltas,
             )
@@ -2154,7 +1839,10 @@ fn materialize_payload(
         {
             if !seen_pointer_ids.insert(*id) {
                 return Err(corrupt_arena(
-                    "duplicate format pointer id",
+                    CorruptionReason::Duplicate {
+                        entry: DuplicateEntry::FormatPointerId,
+                        form: KeyForm::Saved,
+                    },
                     index,
                     SaveLocation::PointerIds,
                 ));
@@ -2167,12 +1855,18 @@ fn materialize_payload(
             value,
             &state.heap,
             index,
-            "duplicate materialized format pointer value",
+            CorruptionReason::Duplicate {
+                entry: DuplicateEntry::FormatPointerValue,
+                form: KeyForm::Materialized,
+            },
             SaveLocation::PointerIds,
         )?;
         if !seen_pointer_ids.insert(*id) {
             return Err(corrupt_arena(
-                "duplicate format pointer id",
+                CorruptionReason::Duplicate {
+                    entry: DuplicateEntry::FormatPointerId,
+                    form: KeyForm::Saved,
+                },
                 index,
                 SaveLocation::PointerIds,
             ));
@@ -2180,7 +1874,7 @@ fn materialize_payload(
         // The verifier admits only pointer-like saved values here.
         let key = PointerIdKey::from_val(value).ok_or_else(|| {
             corrupt_arena(
-                "invalid format pointer value",
+                CorruptionReason::InvalidFormatPointerValue,
                 index,
                 SaveLocation::PointerIds,
             )
@@ -2196,7 +1890,7 @@ fn materialize_payload(
 fn upvalues_ref(upvalues: &[UpvalueRef], id: u32) -> Result<&UpvalueRef, SnapshotError> {
     upvalues.get(id as usize).ok_or_else(|| {
         corrupt_arena(
-            "upvalue id is out of range",
+            CorruptionReason::IdOutOfRange(SavedReference::Upvalue),
             id as usize,
             SaveLocation::Upvalues,
         )
@@ -2206,7 +1900,7 @@ fn upvalues_ref(upvalues: &[UpvalueRef], id: u32) -> Result<&UpvalueRef, Snapsho
 fn object_ref(objects: &[ObjectPtr], id: u32) -> Result<&ObjectPtr, SnapshotError> {
     objects.get(id as usize).ok_or_else(|| {
         corrupt_arena(
-            "object id is out of range",
+            CorruptionReason::IdOutOfRange(SavedReference::Object),
             id as usize,
             SaveLocation::Objects,
         )
@@ -2244,7 +1938,7 @@ impl SavedVal {
             SavedVal::Str(id) => {
                 TableKeyInput::String(strings.get(*id as usize).cloned().ok_or_else(|| {
                     corrupt_arena(
-                        "table key string id is out of range",
+                        CorruptionReason::IdOutOfRange(SavedReference::TableKeyString),
                         *id as usize,
                         SaveLocation::Strings,
                     )
@@ -2267,8 +1961,8 @@ fn invalid_key_error(
     location: SaveLocation,
 ) -> SnapshotError {
     match error {
-        InvalidTableKey::Nil => corrupt_arena("nil is not a table key", index, location),
-        InvalidTableKey::Nan => corrupt_arena("NaN is not a table key", index, location),
+        InvalidTableKey::Nil => corrupt_arena(CorruptionReason::NilKey, index, location),
+        InvalidTableKey::Nan => corrupt_arena(CorruptionReason::NanKey, index, location),
     }
 }
 
@@ -2299,7 +1993,7 @@ fn insert_runtime_key(
     value: Val,
     heap: &GcHeap,
     index: usize,
-    reason: &'static str,
+    reason: CorruptionReason,
     location: SaveLocation,
 ) -> Result<(), SnapshotError> {
     if keys.insert(runtime_table_key(value, heap, index, location.clone())?) {
@@ -2317,7 +2011,7 @@ fn decode_val(saved: &SavedVal, ctx: &DecodeCtx<'_>) -> Result<Val, SnapshotErro
         SavedVal::Str(id) => Ok(Val::Str(*ctx.strings.get(*id as usize).ok_or_else(
             || {
                 corrupt_arena(
-                    "string id is out of range",
+                    CorruptionReason::IdOutOfRange(SavedReference::String),
                     *id as usize,
                     SaveLocation::Strings,
                 )
@@ -2354,7 +2048,7 @@ fn materialize_bytecode(
         .map(|(index, bc)| {
             bc.ok_or_else(|| {
                 corrupt_arena(
-                    "bytecode chunk was not materialized",
+                    CorruptionReason::NotMaterialized(MaterializedPart::Chunk),
                     index,
                     SaveLocation::Bytecode,
                 )
@@ -2403,7 +2097,7 @@ fn build_bytecode_tree(
         let idx = *idx;
         let src = saved.get(idx).ok_or_else(|| {
             corrupt_arena(
-                "bytecode chunk id is out of range",
+                CorruptionReason::IdOutOfRange(SavedReference::BytecodeChunk),
                 idx,
                 SaveLocation::Bytecode,
             )
@@ -2415,7 +2109,7 @@ fn build_bytecode_tree(
                 .get(child)
                 .ok_or_else(|| {
                     corrupt_arena(
-                        "nested chunk id is out of range",
+                        CorruptionReason::IdOutOfRange(SavedReference::NestedChunk),
                         child,
                         SaveLocation::Bytecode,
                     )
@@ -2426,7 +2120,7 @@ fn build_bytecode_tree(
             }
             if visiting[child] {
                 return Err(corrupt_arena(
-                    "nested chunk graph contains a cycle",
+                    CorruptionReason::NestedChunkCycle,
                     child,
                     SaveLocation::Bytecode,
                 ));
@@ -2444,7 +2138,7 @@ fn build_bytecode_tree(
                     .map(Arc::clone)
                     .ok_or_else(|| {
                         corrupt_arena(
-                            "nested bytecode chunk was not materialized",
+                            CorruptionReason::NotMaterialized(MaterializedPart::NestedChunk),
                             *child as usize,
                             SaveLocation::Bytecode,
                         )
@@ -2453,7 +2147,7 @@ fn build_bytecode_tree(
             .collect::<Result<Vec<_>, SnapshotError>>()?;
         let source = source_names.get(idx).cloned().ok_or_else(|| {
             corrupt_arena(
-                "bytecode source name was not materialized",
+                CorruptionReason::NotMaterialized(MaterializedPart::SourceName),
                 idx,
                 SaveLocation::Bytecode,
             )
@@ -2497,44 +2191,6 @@ fn build_bytecode_node(
 
 struct Encoder {
     bytes: Vec<u8>,
-}
-
-// Resource caps for length-prefixed byte fields. They do not change the
-// encoding below each cap; the writer enforces the same policy as the reader.
-#[derive(Clone, Copy)]
-enum ByteField {
-    EngineVersion,
-    LuaString,
-    GlobalName,
-    FunctionId,
-    EnvironmentToken,
-    ChunkName,
-    ChunkSource,
-}
-
-impl ByteField {
-    const fn name(self) -> &'static str {
-        match self {
-            Self::EngineVersion => "engine version",
-            Self::LuaString => "Lua string",
-            Self::GlobalName => "global name",
-            Self::FunctionId => "function id",
-            Self::EnvironmentToken => "environment token",
-            Self::ChunkName => "chunk name",
-            Self::ChunkSource => "chunk source",
-        }
-    }
-
-    const fn limit(self) -> usize {
-        match self {
-            Self::EngineVersion => MAX_ENGINE_VERSION_BYTES,
-            Self::LuaString | Self::GlobalName => crate::limits::MAX_STRING_BYTES,
-            Self::FunctionId => MAX_SAVE_IDENTIFIER_BYTES,
-            Self::EnvironmentToken => MAX_ENVIRONMENT_TOKEN_BYTES,
-            Self::ChunkName => MAX_CHUNK_NAME_BYTES,
-            Self::ChunkSource => MAX_SOURCE_NAME_BYTES,
-        }
-    }
 }
 
 impl Encoder {
@@ -2586,35 +2242,49 @@ impl Encoder {
         self.bytes.extend_from_slice(&n.to_le_bytes());
     }
 
-    fn write_len(&mut self, len: usize, what: &'static str) -> Result<(), SaveError> {
-        let len = u32::try_from(len).map_err(|_| SaveError::TooLarge { what, count: len })?;
+    fn write_len(&mut self, len: usize, collection: SaveCollection) -> Result<(), SaveError> {
+        let len = u32::try_from(len).map_err(|_| too_large(collection, len))?;
         self.write_u32(len);
         Ok(())
     }
 
-    fn write_bytes(&mut self, bytes: &[u8], field: ByteField) -> Result<(), SaveError> {
-        if bytes.len() > field.limit() {
-            return Err(SaveError::TooLarge {
-                what: field.name(),
-                count: bytes.len(),
-            });
-        }
-        self.write_len(bytes.len(), field.name())?;
+    fn write_bytes(&mut self, bytes: &[u8], field: SnapshotField) -> Result<(), SaveError> {
+        // Every field limit fits the u32 length prefix (asserted where
+        // `SnapshotField` is defined), so the limit is the only rejection.
+        let len = match u32::try_from(bytes.len()) {
+            Ok(len) if bytes.len() <= field.limit() => len,
+            _ => {
+                return Err(SaveError::FieldSizeExceeded {
+                    field,
+                    size: bytes.len(),
+                    limit: field.limit(),
+                });
+            }
+        };
+        self.write_u32(len);
         self.bytes.extend_from_slice(bytes);
         Ok(())
     }
 
-    fn write_string(&mut self, s: &str, field: ByteField) -> Result<(), SaveError> {
+    fn write_string(&mut self, s: &str, field: SnapshotField) -> Result<(), SaveError> {
         self.write_bytes(s.as_bytes(), field)
     }
 
-    fn write_option_string(&mut self, s: Option<&str>, field: ByteField) -> Result<(), SaveError> {
+    fn write_option_string(
+        &mut self,
+        s: Option<&str>,
+        field: SnapshotField,
+    ) -> Result<(), SaveError> {
         self.write_option_bytes(s.map(str::as_bytes), field)
     }
 
     /// The same encoding as `write_option_string`: a presence flag, then a
     /// length-prefixed byte field.
-    fn write_option_bytes(&mut self, s: Option<&[u8]>, field: ByteField) -> Result<(), SaveError> {
+    fn write_option_bytes(
+        &mut self,
+        s: Option<&[u8]>,
+        field: SnapshotField,
+    ) -> Result<(), SaveError> {
         match s {
             Some(s) => {
                 self.write_bool(true);
@@ -2640,12 +2310,12 @@ impl<'a> Decoder<'a> {
         if self.pos == self.bytes.len() {
             Ok(())
         } else {
-            Err(self.decode_error_at(self.pos, "trailing bytes"))
+            Err(self.decode_error_at(self.pos, DecodeReason::TrailingBytes))
         }
     }
 
-    fn decode_error_at(&self, offset: usize, message: &str) -> SnapshotError {
-        SnapshotError::DecodeError(format!("at byte {offset}: {message}"))
+    fn decode_error_at(&self, offset: usize, reason: DecodeReason) -> SnapshotError {
+        SnapshotError::DecodeError { offset, reason }
     }
 
     /// Bytes not yet consumed. Used to bound speculative allocations so a
@@ -2681,11 +2351,11 @@ impl<'a> Decoder<'a> {
         let end = self
             .pos
             .checked_add(len)
-            .ok_or_else(|| self.decode_error_at(start, "length overflow"))?;
+            .ok_or_else(|| self.decode_error_at(start, DecodeReason::LengthOverflow))?;
         let slice = self
             .bytes
             .get(self.pos..end)
-            .ok_or_else(|| self.decode_error_at(start, "truncated payload"))?;
+            .ok_or_else(|| self.decode_error_at(start, DecodeReason::TruncatedPayload))?;
         self.pos = end;
         Ok(slice)
     }
@@ -2698,7 +2368,10 @@ impl<'a> Decoder<'a> {
         match self.read_u8()? {
             0 => Ok(false),
             1 => Ok(true),
-            _ => Err(self.decode_error_at(self.pos.saturating_sub(1), "invalid bool")),
+            byte => {
+                Err(self
+                    .decode_error_at(self.pos.saturating_sub(1), DecodeReason::InvalidBool(byte)))
+            }
         }
     }
 
@@ -2734,21 +2407,21 @@ impl<'a> Decoder<'a> {
         Ok(self.read_u32()? as usize)
     }
 
-    fn read_bytes(&mut self, field: ByteField) -> Result<Vec<u8>, SnapshotError> {
+    fn read_bytes(&mut self, field: SnapshotField) -> Result<Vec<u8>, SnapshotError> {
         self.read_bounded(field)
     }
 
-    fn read_bounded(&mut self, field: ByteField) -> Result<Vec<u8>, SnapshotError> {
+    fn read_bounded(&mut self, field: SnapshotField) -> Result<Vec<u8>, SnapshotError> {
         let len = self.read_len()?;
         if len > field.limit() {
-            if matches!(field, ByteField::LuaString) {
+            if matches!(field, SnapshotField::LuaString) {
                 return Err(SnapshotError::StringSizeExceeded {
                     size: len,
                     limit: field.limit(),
                 });
             }
             return Err(SnapshotError::FieldSizeExceeded {
-                kind: field.name(),
+                field,
                 size: len,
                 limit: field.limit(),
             });
@@ -2757,16 +2430,19 @@ impl<'a> Decoder<'a> {
     }
 
     fn read_lua_string_bytes(&mut self) -> Result<Vec<u8>, SnapshotError> {
-        self.read_bounded(ByteField::LuaString)
+        self.read_bounded(SnapshotField::LuaString)
     }
 
-    fn read_string(&mut self, field: ByteField) -> Result<String, SnapshotError> {
+    fn read_string(&mut self, field: SnapshotField) -> Result<String, SnapshotError> {
         let start = self.pos;
         String::from_utf8(self.read_bounded(field)?)
-            .map_err(|_| self.decode_error_at(start, "string is not UTF-8"))
+            .map_err(|_| self.decode_error_at(start, DecodeReason::StringNotUtf8))
     }
 
-    fn read_option_string(&mut self, field: ByteField) -> Result<Option<String>, SnapshotError> {
+    fn read_option_string(
+        &mut self,
+        field: SnapshotField,
+    ) -> Result<Option<String>, SnapshotError> {
         if self.read_bool()? {
             Ok(Some(self.read_string(field)?))
         } else {
@@ -2774,7 +2450,10 @@ impl<'a> Decoder<'a> {
         }
     }
 
-    fn read_option_bytes(&mut self, field: ByteField) -> Result<Option<Vec<u8>>, SnapshotError> {
+    fn read_option_bytes(
+        &mut self,
+        field: SnapshotField,
+    ) -> Result<Option<Vec<u8>>, SnapshotError> {
         if self.read_bool()? {
             Ok(Some(self.read_bytes(field)?))
         } else {
@@ -2792,24 +2471,48 @@ impl SavePayload {
         out.write_i64(limit);
         out.write_bool(configured);
         out.write_u64(used);
-        write_vec(out, &self.strings, |out, bytes| {
-            out.write_bytes(bytes, ByteField::LuaString)
+        write_vec(out, SaveCollection::Strings, &self.strings, |out, bytes| {
+            out.write_bytes(bytes, SnapshotField::LuaString)
         })?;
-        write_vec(out, &self.bytecode, |out, item| item.encode(out))?;
-        write_vec(out, &self.upvalues, |out, item| item.encode(out))?;
-        write_vec(out, &self.objects, |out, item| item.encode(out))?;
-        write_vec(out, &self.user_globals, |out, (name, val)| {
-            out.write_string(name, ByteField::GlobalName)?;
-            val.encode(out)
+        write_vec(out, SaveCollection::Chunks, &self.bytecode, |out, item| {
+            item.encode(out)
         })?;
+        write_vec(
+            out,
+            SaveCollection::Upvalues,
+            &self.upvalues,
+            |out, item| item.encode(out),
+        )?;
+        write_vec(out, SaveCollection::Objects, &self.objects, |out, item| {
+            item.encode(out)
+        })?;
+        write_vec(
+            out,
+            SaveCollection::Globals,
+            &self.user_globals,
+            |out, (name, val)| {
+                out.write_string(name, SnapshotField::GlobalName)?;
+                val.encode(out)
+            },
+        )?;
         out.write_bool(self.globals_sealed);
-        write_vec(out, &self.env_deltas, |out, delta| delta.encode(out))?;
+        write_vec(
+            out,
+            SaveCollection::EnvironmentDeltas,
+            &self.env_deltas,
+            |out, delta| delta.encode(out),
+        )?;
         out.write_u64(self.next_format_pointer_id);
-        write_vec(out, &self.format_pointer_ids, |out, (value, id)| {
-            value.encode(out)?;
-            out.write_u64(*id);
-            Ok(())
-        })?;
+        write_vec(
+            out,
+            SaveCollection::FormatPointerIds,
+            &self.format_pointer_ids,
+            |out, (value, id)| {
+                value.encode(out)?;
+                out.write_u64(*id);
+                Ok(())
+            },
+        )?;
         Ok(())
     }
 
@@ -2825,7 +2528,7 @@ impl SavePayload {
                     input.read_bool()?,
                     input.read_u64()?,
                 )
-                .ok_or_else(|| input.decode_error_at(offset, "inconsistent cost meter"))?
+                .ok_or_else(|| input.decode_error_at(offset, DecodeReason::InconsistentCostMeter))?
             },
             strings: read_vec(input, Decoder::read_lua_string_bytes)?,
             bytecode: read_vec(input, SavedBytecode::decode)?,
@@ -2833,7 +2536,7 @@ impl SavePayload {
             objects: read_vec(input, SavedObject::decode)?,
             user_globals: read_vec(input, |input| {
                 Ok((
-                    input.read_string(ByteField::GlobalName)?,
+                    input.read_string(SnapshotField::GlobalName)?,
                     SavedVal::decode(input)?,
                 ))
             })?,
@@ -2849,23 +2552,40 @@ impl SavePayload {
 
 impl SavedEnvDelta {
     fn encode(&self, out: &mut Encoder) -> Result<(), SaveError> {
-        out.write_string(&self.token, ByteField::EnvironmentToken)?;
-        write_vec(out, &self.deleted, |out, key| key.encode(out))?;
-        write_vec(out, &self.upserts, |out, (key, value)| {
-            key.encode(out)?;
-            value.encode(out)
-        })?;
+        out.write_string(&self.token, SnapshotField::EnvironmentToken)?;
+        write_vec(
+            out,
+            SaveCollection::EnvironmentDeletedKeys,
+            &self.deleted,
+            |out, key| key.encode(out),
+        )?;
+        write_vec(
+            out,
+            SaveCollection::EnvironmentUpserts,
+            &self.upserts,
+            |out, (key, value)| {
+                key.encode(out)?;
+                value.encode(out)
+            },
+        )?;
         match &self.order {
             Some(order) => {
                 out.write_bool(true);
-                write_vec(out, order, |out, key| key.encode(out))?;
+                write_vec(out, SaveCollection::EnvironmentOrder, order, |out, key| {
+                    key.encode(out)
+                })?;
             }
             None => out.write_bool(false),
         }
         match &self.array {
             Some(array) => {
                 out.write_bool(true);
-                write_vec(out, array, |out, value| value.encode(out))?;
+                write_vec(
+                    out,
+                    SaveCollection::EnvironmentArray,
+                    array,
+                    |out, value| value.encode(out),
+                )?;
             }
             None => out.write_bool(false),
         }
@@ -2874,7 +2594,7 @@ impl SavedEnvDelta {
 
     fn decode(input: &mut Decoder<'_>) -> Result<Self, SnapshotError> {
         Ok(Self {
-            token: input.read_string(ByteField::EnvironmentToken)?,
+            token: input.read_string(SnapshotField::EnvironmentToken)?,
             deleted: read_vec(input, SavedVal::decode)?,
             upserts: read_vec(input, |input| {
                 Ok((SavedVal::decode(input)?, SavedVal::decode(input)?))
@@ -2911,7 +2631,10 @@ impl SavedMetatableDelta {
             0 => Ok(Self::Unchanged),
             1 => Ok(Self::Cleared),
             2 => Ok(Self::Set(SavedVal::decode(input)?)),
-            _ => Err(input.decode_error_at(tag_offset, "invalid environment metatable mode")),
+            tag => Err(input.decode_error_at(
+                tag_offset,
+                DecodeReason::InvalidEnvironmentMetatableMode(tag),
+            )),
         }
     }
 }
@@ -2936,11 +2659,11 @@ impl SavedVal {
             }
             SavedVal::Fn(id) => {
                 out.write_u8(6);
-                out.write_string(id, ByteField::FunctionId)?;
+                out.write_string(id, SnapshotField::FunctionId)?;
             }
             SavedVal::EnvObj(token) => {
                 out.write_u8(7);
-                out.write_string(token, ByteField::EnvironmentToken)?;
+                out.write_string(token, SnapshotField::EnvironmentToken)?;
             }
         }
         Ok(())
@@ -2955,11 +2678,11 @@ impl SavedVal {
             3 => Ok(SavedVal::Num(input.read_u64()?)),
             4 => Ok(SavedVal::Str(input.read_u32()?)),
             5 => Ok(SavedVal::Obj(input.read_u32()?)),
-            6 => Ok(SavedVal::Fn(input.read_string(ByteField::FunctionId)?)),
+            6 => Ok(SavedVal::Fn(input.read_string(SnapshotField::FunctionId)?)),
             7 => Ok(SavedVal::EnvObj(
-                input.read_string(ByteField::EnvironmentToken)?,
+                input.read_string(SnapshotField::EnvironmentToken)?,
             )),
-            _ => Err(input.decode_error_at(tag_offset, "invalid value tag")),
+            tag => Err(input.decode_error_at(tag_offset, DecodeReason::InvalidValueTag(tag))),
         }
     }
 }
@@ -2976,10 +2699,15 @@ impl SavedObject {
                 out.write_u8(0);
                 out.write_u64(*array_len);
                 out.write_u32(*array_slots);
-                write_vec(out, entries, |out, (key, value)| {
-                    key.encode(out)?;
-                    value.encode(out)
-                })?;
+                write_vec(
+                    out,
+                    SaveCollection::TableEntries,
+                    entries,
+                    |out, (key, value)| {
+                        key.encode(out)?;
+                        value.encode(out)
+                    },
+                )?;
                 match metatable {
                     Some(mt) => {
                         out.write_bool(true);
@@ -2991,7 +2719,7 @@ impl SavedObject {
             SavedObject::Closure { chunk, upvalues } => {
                 out.write_u8(1);
                 out.write_u32(*chunk);
-                write_vec(out, upvalues, |out, id| {
+                write_vec(out, SaveCollection::ClosureUpvalues, upvalues, |out, id| {
                     out.write_u32(*id);
                     Ok(())
                 })?;
@@ -3025,49 +2753,77 @@ impl SavedObject {
                 chunk: input.read_u32()?,
                 upvalues: read_vec(input, Decoder::read_u32)?,
             }),
-            _ => Err(input.decode_error_at(tag_offset, "invalid object tag")),
+            tag => Err(input.decode_error_at(tag_offset, DecodeReason::InvalidObjectTag(tag))),
         }
     }
 }
 
 impl SavedBytecode {
     fn encode(&self, out: &mut Encoder) -> Result<(), SaveError> {
-        write_vec(out, &self.code, |out, raw| {
+        write_vec(out, SaveCollection::Instructions, &self.code, |out, raw| {
             out.write_u32(*raw);
             Ok(())
         })?;
-        write_vec(out, &self.number_literals, |out, bits| {
-            out.write_u64(*bits);
-            Ok(())
-        })?;
-        write_vec(out, &self.string_literals, |out, bytes| {
-            out.write_bytes(bytes, ByteField::LuaString)
-        })?;
-        write_vec(out, &self.table_templates, |out, keys| {
-            write_vec(out, keys, |out, key| {
-                out.write_u16(*key);
+        write_vec(
+            out,
+            SaveCollection::NumberLiterals,
+            &self.number_literals,
+            |out, bits| {
+                out.write_u64(*bits);
                 Ok(())
-            })
-        })?;
+            },
+        )?;
+        write_vec(
+            out,
+            SaveCollection::StringLiterals,
+            &self.string_literals,
+            |out, bytes| out.write_bytes(bytes, SnapshotField::LuaString),
+        )?;
+        write_vec(
+            out,
+            SaveCollection::TableTemplates,
+            &self.table_templates,
+            |out, keys| {
+                write_vec(out, SaveCollection::TableTemplateKeys, keys, |out, key| {
+                    out.write_u16(*key);
+                    Ok(())
+                })
+            },
+        )?;
         out.write_u8(self.global_cache_slots);
         out.write_u8(self.field_cache_slots);
         out.write_u8(self.set_field_cache_slots);
         out.write_u8(self.tfor_cursor_slots);
         out.write_u8(self.num_params);
         out.write_u8(self.num_locals);
-        write_vec(out, &self.nested, |out, id| {
-            out.write_u32(*id);
-            Ok(())
-        })?;
-        write_vec(out, &self.upvalues, |out, item| item.encode(out))?;
+        write_vec(
+            out,
+            SaveCollection::NestedChunks,
+            &self.nested,
+            |out, id| {
+                out.write_u32(*id);
+                Ok(())
+            },
+        )?;
+        write_vec(
+            out,
+            SaveCollection::UpvalueDescriptors,
+            &self.upvalues,
+            |out, item| item.encode(out),
+        )?;
         out.write_bool(self.is_vararg);
-        out.write_option_string(self.name.as_deref(), ByteField::ChunkName)?;
+        out.write_option_string(self.name.as_deref(), SnapshotField::ChunkName)?;
         out.write_u32(self.defined_line);
-        out.write_option_bytes(self.source.as_deref(), ByteField::ChunkSource)?;
-        write_vec(out, &self.line_info, |out, line| {
-            out.write_u32(*line);
-            Ok(())
-        })?;
+        out.write_option_bytes(self.source.as_deref(), SnapshotField::ChunkSource)?;
+        write_vec(
+            out,
+            SaveCollection::LineInfo,
+            &self.line_info,
+            |out, line| {
+                out.write_u32(*line);
+                Ok(())
+            },
+        )?;
         Ok(())
     }
 
@@ -3086,12 +2842,12 @@ impl SavedBytecode {
             nested: read_vec(input, Decoder::read_u32)?,
             upvalues: read_vec(input, SavedUpvalueDesc::decode)?,
             is_vararg: input.read_bool()?,
-            name: input.read_option_string(ByteField::ChunkName)?,
+            name: input.read_option_string(SnapshotField::ChunkName)?,
             defined_line: input.read_u32()?,
             // Chunk names are byte-exact, so unlike function names they are
             // not required to be UTF-8.
             source: input
-                .read_option_bytes(ByteField::ChunkSource)?
+                .read_option_bytes(SnapshotField::ChunkSource)?
                 .map(Arc::<[u8]>::from),
             line_info: read_vec(input, Decoder::read_u32)?,
         })
@@ -3118,17 +2874,18 @@ impl SavedUpvalueDesc {
         match input.read_u8()? {
             0 => Ok(SavedUpvalueDesc::Local(input.read_u8()?)),
             1 => Ok(SavedUpvalueDesc::Upvalue(input.read_u8()?)),
-            _ => Err(input.decode_error_at(tag_offset, "invalid upvalue tag")),
+            tag => Err(input.decode_error_at(tag_offset, DecodeReason::InvalidUpvalueTag(tag))),
         }
     }
 }
 
 fn write_vec<T>(
     out: &mut Encoder,
+    collection: SaveCollection,
     items: &[T],
     mut write_item: impl FnMut(&mut Encoder, &T) -> Result<(), SaveError>,
 ) -> Result<(), SaveError> {
-    out.write_len(items.len(), "vector")?;
+    out.write_len(items.len(), collection)?;
     for item in items {
         write_item(out, item)?;
     }
@@ -3153,6 +2910,7 @@ fn read_vec<'a, T>(
 mod tests {
     use super::*;
     use crate::instr::{ArgCount, RetCount};
+    use std::convert::Infallible;
 
     fn no_setup(_: &mut State) -> std::result::Result<(), Infallible> {
         Ok(())
@@ -3231,8 +2989,13 @@ mod tests {
             encoder.write_u64(used);
             let mut decoder = Decoder::new(&encoder.bytes);
             match SavePayload::decode(&mut decoder) {
-                Err(SnapshotError::DecodeError(message)) => {
-                    assert!(message.contains("inconsistent cost meter"));
+                Err(error @ SnapshotError::DecodeError { offset, reason }) => {
+                    // The meter fields start after the environment flag and RNG.
+                    assert_eq!((offset, reason), (9, DecodeReason::InconsistentCostMeter));
+                    assert_eq!(
+                        error.to_string(),
+                        "save decode error: at byte 9: inconsistent cost meter"
+                    );
                 }
                 _ => panic!("inconsistent meter must fail before decoding the arena"),
             }
@@ -3294,7 +3057,7 @@ mod tests {
         let encoded = encoder
             .write_bytes(
                 env!("CARGO_PKG_VERSION").as_bytes(),
-                ByteField::EngineVersion,
+                SnapshotField::EngineVersion,
             )
             .and_then(|()| payload.encode(&mut encoder));
         if let Err(error) = encoded {
@@ -3318,18 +3081,17 @@ mod tests {
         }
     }
 
-    fn assert_invalid(error: SnapshotError, chunk: u32, instruction: Option<u32>) {
+    fn assert_invalid(error: &SnapshotError, chunk: u32, instruction: Option<u32>) {
         let SnapshotError::InvalidBytecode {
             chunk: actual_chunk,
             instruction: actual_instruction,
-            reason,
+            ..
         } = error
         else {
             panic!("fixture must return InvalidBytecode");
         };
-        assert_eq!(actual_chunk, chunk);
-        assert_eq!(actual_instruction, instruction);
-        drop(reason);
+        assert_eq!(*actual_chunk, chunk);
+        assert_eq!(*actual_instruction, instruction);
     }
 
     fn stack_rejection(code: Vec<Instr>, num_locals: u8, instruction: u32) {
@@ -3338,7 +3100,7 @@ mod tests {
         bytecode.line_info = vec![1; bytecode.code.len()];
         bytecode.num_locals = num_locals;
         assert_invalid(
-            rejected_bytecode(vec![bytecode], Vec::new()),
+            &rejected_bytecode(vec![bytecode], Vec::new()),
             0,
             Some(instruction),
         );
@@ -3476,7 +3238,7 @@ mod tests {
         ];
         bad_set_field_at.line_info = vec![1; bad_set_field_at.code.len()];
         assert_invalid(
-            rejected_bytecode(vec![bad_set_field_at], Vec::new()),
+            &rejected_bytecode(vec![bad_set_field_at], Vec::new()),
             0,
             Some(0),
         );
@@ -3553,7 +3315,7 @@ mod tests {
         out_of_range_set.code.insert(0, Instr::push_nil().raw());
         out_of_range_set.line_info = vec![1; out_of_range_set.code.len()];
         assert_invalid(
-            rejected_bytecode(vec![out_of_range_set], Vec::new()),
+            &rejected_bytecode(vec![out_of_range_set], Vec::new()),
             0,
             Some(1),
         );
@@ -3570,7 +3332,7 @@ mod tests {
         ];
         wrong_order_set.line_info = vec![1; wrong_order_set.code.len()];
         assert_invalid(
-            rejected_bytecode(vec![wrong_order_set], Vec::new()),
+            &rejected_bytecode(vec![wrong_order_set], Vec::new()),
             0,
             Some(1),
         );
@@ -3633,7 +3395,18 @@ mod tests {
         let SnapshotError::InvalidBytecode { reason, .. } = &error else {
             panic!("malformed nop must be InvalidBytecode, got {error:?}");
         };
-        assert!(reason.contains("reserved operand bytes"), "{reason}");
+        assert!(
+            matches!(
+                reason,
+                InvalidBytecodeReason::Validation(
+                    crate::compiler::verify::ValidationReason::ReservedBytesNonZero {
+                        opcode: Instr::OP_NOP,
+                        ..
+                    }
+                )
+            ),
+            "{reason}"
+        );
     }
 
     #[test]
@@ -3750,7 +3523,7 @@ mod tests {
         for declared in [0, 1, 3] {
             let mut miscounted = sequential.clone();
             miscounted.tfor_cursor_slots = declared;
-            assert_invalid(rejected_bytecode(vec![miscounted], Vec::new()), 0, None);
+            assert_invalid(&rejected_bytecode(vec![miscounted], Vec::new()), 0, None);
         }
 
         for (code, declared) in [
@@ -3900,7 +3673,7 @@ mod tests {
         encoder
             .write_bytes(
                 env!("CARGO_PKG_VERSION").as_bytes(),
-                ByteField::EngineVersion,
+                SnapshotField::EngineVersion,
             )
             .expect("engine version fits");
         payload
@@ -3930,16 +3703,17 @@ mod tests {
 
     #[test]
     fn encoder_enforces_field_limits() {
-        let limit = ByteField::ChunkSource.limit();
+        let limit = SnapshotField::ChunkSource.limit();
         let mut encoder = Encoder::new();
         encoder
-            .write_bytes(&vec![b's'; limit], ByteField::ChunkSource)
+            .write_bytes(&vec![b's'; limit], SnapshotField::ChunkSource)
             .expect("a field at its limit encodes");
         assert_eq!(
-            encoder.write_bytes(&vec![b's'; limit + 1], ByteField::ChunkSource),
-            Err(SaveError::TooLarge {
-                what: ByteField::ChunkSource.name(),
-                count: limit + 1,
+            encoder.write_bytes(&vec![b's'; limit + 1], SnapshotField::ChunkSource),
+            Err(SaveError::FieldSizeExceeded {
+                field: SnapshotField::ChunkSource,
+                size: limit + 1,
+                limit,
             })
         );
     }
@@ -3951,7 +3725,7 @@ mod tests {
         assert_eq!(
             rejected_bytecode(vec![missing_child], Vec::new()),
             SnapshotError::CorruptArena {
-                reason: "nested chunk id is out of range",
+                reason: CorruptionReason::IdOutOfRange(SavedReference::NestedChunk),
                 index: 1,
                 location: SaveLocation::Bytecode,
             }
@@ -4008,7 +3782,7 @@ mod tests {
         bad_global_name.global_cache_slots = 1;
         bad_global_name.line_info.insert(0, 1);
         assert_invalid(
-            rejected_bytecode(vec![bad_global_name], Vec::new()),
+            &rejected_bytecode(vec![bad_global_name], Vec::new()),
             0,
             Some(0),
         );
@@ -4018,7 +3792,11 @@ mod tests {
             .code
             .insert(0, Instr::op_a(Instr::OP_GET_BUILTIN, 255).raw());
         bad_builtin.line_info.insert(0, 1);
-        assert_invalid(rejected_bytecode(vec![bad_builtin], Vec::new()), 0, Some(0));
+        assert_invalid(
+            &rejected_bytecode(vec![bad_builtin], Vec::new()),
+            0,
+            Some(0),
+        );
 
         let mut bad_template = valid_saved_bytecode();
         bad_template
@@ -4026,7 +3804,7 @@ mod tests {
             .insert(0, Instr::new_table_template(0).raw());
         bad_template.line_info.insert(0, 1);
         assert_invalid(
-            rejected_bytecode(vec![bad_template], Vec::new()),
+            &rejected_bytecode(vec![bad_template], Vec::new()),
             0,
             Some(0),
         );
@@ -4034,7 +3812,7 @@ mod tests {
         let mut bad_template_key = valid_saved_bytecode();
         bad_template_key.table_templates.push(vec![u16::MAX]);
         assert_invalid(
-            rejected_bytecode(vec![bad_template_key], Vec::new()),
+            &rejected_bytecode(vec![bad_template_key], Vec::new()),
             0,
             None,
         );
@@ -4048,7 +3826,7 @@ mod tests {
                 .table_templates
                 .push(duplicate.to_vec());
             assert_invalid(
-                rejected_bytecode(vec![duplicate_template_key], Vec::new()),
+                &rejected_bytecode(vec![duplicate_template_key], Vec::new()),
                 0,
                 None,
             );
@@ -4057,24 +3835,28 @@ mod tests {
         let mut bad_local = valid_saved_bytecode();
         bad_local.code.insert(0, Instr::get_local(0).raw());
         bad_local.line_info.insert(0, 1);
-        assert_invalid(rejected_bytecode(vec![bad_local], Vec::new()), 0, Some(0));
+        assert_invalid(&rejected_bytecode(vec![bad_local], Vec::new()), 0, Some(0));
 
         let mut bad_upvalue = valid_saved_bytecode();
         bad_upvalue.code.insert(0, Instr::get_upvalue(0).raw());
         bad_upvalue.line_info.insert(0, 1);
-        assert_invalid(rejected_bytecode(vec![bad_upvalue], Vec::new()), 0, Some(0));
+        assert_invalid(
+            &rejected_bytecode(vec![bad_upvalue], Vec::new()),
+            0,
+            Some(0),
+        );
 
         let mut bad_reserved = valid_saved_bytecode();
         bad_reserved.code[0] = Instr::op_a(Instr::OP_PUSH_NIL, 1).raw();
         assert_invalid(
-            rejected_bytecode(vec![bad_reserved], Vec::new()),
+            &rejected_bytecode(vec![bad_reserved], Vec::new()),
             0,
             Some(0),
         );
 
         let mut unknown = valid_saved_bytecode();
         unknown.code[0] = Instr::op(255).raw();
-        assert_invalid(rejected_bytecode(vec![unknown], Vec::new()), 0, Some(0));
+        assert_invalid(&rejected_bytecode(vec![unknown], Vec::new()), 0, Some(0));
     }
 
     #[test]
@@ -4086,20 +3868,20 @@ mod tests {
             .insert(0, Instr::get_global(0, Some(0)).raw());
         bad_cache_count.line_info.insert(0, 1);
         assert_invalid(
-            rejected_bytecode(vec![bad_cache_count], Vec::new()),
+            &rejected_bytecode(vec![bad_cache_count], Vec::new()),
             0,
             None,
         );
 
         let mut bad_line_info = valid_saved_bytecode();
         bad_line_info.code.insert(0, Instr::push_nil().raw());
-        assert_invalid(rejected_bytecode(vec![bad_line_info], Vec::new()), 0, None);
+        assert_invalid(&rejected_bytecode(vec![bad_line_info], Vec::new()), 0, None);
 
         let mut negative_jump = valid_saved_bytecode();
         negative_jump.code.insert(0, Instr::jump(-2).raw());
         negative_jump.line_info.insert(0, 1);
         assert_invalid(
-            rejected_bytecode(vec![negative_jump], Vec::new()),
+            &rejected_bytecode(vec![negative_jump], Vec::new()),
             0,
             Some(0),
         );
@@ -4108,22 +3890,22 @@ mod tests {
         parent.nested.push(1);
         let mut child = valid_saved_bytecode();
         child.upvalues.push(SavedUpvalueDesc::Local(0));
-        assert_invalid(rejected_bytecode(vec![parent, child], Vec::new()), 0, None);
+        assert_invalid(&rejected_bytecode(vec![parent, child], Vec::new()), 0, None);
 
         let mut first = valid_saved_bytecode();
         first.nested.push(1);
         let mut second = valid_saved_bytecode();
         second.nested.push(0);
-        assert_invalid(rejected_bytecode(vec![first, second], Vec::new()), 0, None);
+        assert_invalid(&rejected_bytecode(vec![first, second], Vec::new()), 0, None);
 
         let mut deep_self = valid_saved_bytecode();
         deep_self.nested.push(0);
-        assert_invalid(rejected_bytecode(vec![deep_self], Vec::new()), 0, None);
+        assert_invalid(&rejected_bytecode(vec![deep_self], Vec::new()), 0, None);
 
         let mut nested_bad_opcode = valid_saved_bytecode();
         nested_bad_opcode.code[0] = Instr::op(255).raw();
         assert_invalid(
-            rejected_bytecode(vec![valid_saved_bytecode(), nested_bad_opcode], Vec::new()),
+            &rejected_bytecode(vec![valid_saved_bytecode(), nested_bad_opcode], Vec::new()),
             1,
             Some(0),
         );
@@ -4160,7 +3942,7 @@ mod tests {
         .expect("a chain at the parser depth limit is valid save data");
 
         assert_invalid(
-            rejected_bytecode(chunk_chain(max_depth + 1), Vec::new()),
+            &rejected_bytecode(chunk_chain(max_depth + 1), Vec::new()),
             max_depth,
             None,
         );
@@ -4230,7 +4012,7 @@ mod tests {
             Instr::ret(RetCount::Fixed(0)).raw(),
         ];
         underflow.line_info = vec![1; underflow.code.len()];
-        assert_invalid(rejected_bytecode(vec![underflow], Vec::new()), 0, Some(1));
+        assert_invalid(&rejected_bytecode(vec![underflow], Vec::new()), 0, Some(1));
 
         // Jump target past the end of the code.
         let mut oob = valid_saved_bytecode();
@@ -4241,7 +4023,7 @@ mod tests {
             Instr::ret(RetCount::Fixed(0)).raw(),
         ];
         oob.line_info = vec![1; oob.code.len()];
-        assert_invalid(rejected_bytecode(vec![oob], Vec::new()), 0, Some(2));
+        assert_invalid(&rejected_bytecode(vec![oob], Vec::new()), 0, Some(2));
 
         // The A byte is reserved and must be zero.
         let mut reserved = valid_saved_bytecode();
@@ -4252,7 +4034,7 @@ mod tests {
             Instr::ret(RetCount::Fixed(0)).raw(),
         ];
         reserved.line_info = vec![1; reserved.code.len()];
-        assert_invalid(rejected_bytecode(vec![reserved], Vec::new()), 0, Some(2));
+        assert_invalid(&rejected_bytecode(vec![reserved], Vec::new()), 0, Some(2));
 
         // The well-formed shape is accepted.
         let mut ok = valid_saved_bytecode();
