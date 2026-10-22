@@ -92,7 +92,14 @@ NaN's bits), and the VM never lets a script observe them.
   `crmath::tests::golden` regenerate the golden file and sweep all of
   CORE-MATH's worst-case files (several million inputs) from a checkout
   under `research/core-math`; run them in release
-  (`brokkr test sweep_ --release`). The worst-case files are read to the
+  (`brokkr test sweep_ --release`). The checkout must be upstream commit
+  `0ce0cbc15935e24c656280e5a46c34e89f301b7a`, the one the port was taken at
+  (`CORE_MATH_COMMIT` in `src/crmath/tests/golden.rs`, which the golden
+  file's header also names). The reader pins each function's parsed input
+  count and a digest of those inputs, so the sweeps, the regeneration and
+  the cheap ignored `core_math_corpus_matches_pin` fail on a missing,
+  damaged or different corpus instead of testing other inputs; nothing
+  else about the checkout is verified. The worst-case files are read to the
   values CORE-MATH's own checkers get from `%la`: a trailing annotation after
   the number is ignored and a hex literal is rounded to nearest binary64, so
   pow's inexact subnormal bases test their rounded value. The reader covers

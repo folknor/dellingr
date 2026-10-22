@@ -42,6 +42,23 @@ String-to-number coercion is not implicit in:
 `string.format`'s numeric conversions accept numeral strings, as reference Lua
 does.
 
+## Library arguments
+
+- Integer arguments must be numbers with an exact integer value that fits a
+  64-bit signed integer. That covers string and table positions, `gsub`'s
+  count, `select`'s index, `error`'s level, `tonumber`'s base,
+  `math.random`'s bounds and `string.format`'s integer conversions. Anything
+  else, `1.5` or `2^63` alike, raises `bad argument #n to 'f' (number has no
+  integer representation)`, as in Lua 5.4; Lua 5.2 truncates `1.5` to `1`. A
+  numeral string is a type error (see "Coercion"), except in
+  `string.format`.
+- `string.gsub(s, pattern, repl, n)` with a negative `n` replaces nothing and
+  returns `s` and `0`, as with `n = 0` and as in Lua 5.4. Lua 5.2 treats a
+  negative `n` as no limit. An absent or nil `n` is unlimited.
+- `string.gmatch(s, pattern, init)` accepts Lua 5.4's optional `init`, with
+  the same position rules as `string.find`. Lua 5.2 has no `init` and
+  ignores a third argument.
+
 ## Control flow and syntax
 
 - A numeric `for` with a zero step skips its body in both directions. Lua 5.2
@@ -131,11 +148,19 @@ does.
   handler reads and writes during its quicksort, so a handler that observes
   call order sees a different sequence. Stable handlers and a consistent
   comparator give the same sorted values. Tie order is unspecified.
-- `table.move` rejects nonempty ranges whose source or destination endpoints
-  fall outside +/-2^53, where consecutive f64 integer keys stop being
-  distinct.
-- Metamethod-driven `table.insert` and `table.remove` reject key ranges that
-  would round integer positions.
+- Integer keys are f64, and beyond +/-2^53 consecutive integers stop being
+  distinct keys. The functions that walk a range of keys therefore refuse a
+  range of two or more keys that reaches outside -2^53..2^53 (inclusive),
+  raising `<function> range exceeds the exactly representable integer keys`
+  instead of reading or writing keys that round onto each other. That
+  applies to `table.concat` and `unpack` (global or `table.`) over `i..j`,
+  to `table.move`'s source and destination ranges, and to the shifted range
+  of a metamethod-driven `table.insert` or `table.remove`. A range of one key
+  passes this check wherever it lies, as long as the key itself is an exact
+  f64 (an append one past a huge `__len` can fail it); an empty range never reaches it,
+  and the functions' other argument checks still apply first. Lua 5.4 has
+  integer keys and walks such ranges; for `unpack` it returns the missing
+  elements as nils.
 - `table.concat` reports a non-string, non-number element with its type and
   index, in the reference wording.
 - Field misses on plain tables return nil. There is no implicit table-library

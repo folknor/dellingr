@@ -6,6 +6,7 @@ Ground rules that are easy to get wrong (the `docs/` pages have the detail):
 
 - **The cost budget is a game-design instrument, not a CPU meter** (`docs/budget.md`). Charges are design decisions: flat and free charges are often deliberate, and structural semantics are free on purpose. Host work that is out of proportion to its charge is a performance concern, not a cost-model defect.
 - **Deliberate divergences from reference Lua** are listed in `docs/compatibility.md`. Check there before treating a difference from lua5.2/lua5.4 as a bug.
+- **Matching reference Lua is not a goal in itself.** A difference is a defect only when it hurts determinism, the cost model, or the script author (wrong results, a misleading message, a surprising behaviour). Don't report or "fix" a difference because it differs, and don't justify a change by "matches lua5.4" alone; error wording that already says what went wrong is fine as it is.
 - **Replay-visible changes must be called out**, never slipped in: `pairs` order, rendered numbers and strings, the RNG draw sequence, and snapshot contents all feed game replays.
 - Lua written for tests and examples has no `assert`; use `if not cond then error(...) end`.
 

@@ -17,6 +17,49 @@ const CORE_MATH: &str = concat!(
     "/research/core-math/src/binary64"
 );
 
+/// The CORE-MATH commit whose worst-case files the sweeps and the golden
+/// fixture's worst-case sample use: the commit the port was taken at
+/// (`src/crmath/LICENSE-CORE-MATH`). `research/core-math` must be a checkout
+/// of it (<https://gitlab.inria.fr/core-math/core-math>).
+const CORE_MATH_COMMIT: &str = "0ce0cbc15935e24c656280e5a46c34e89f301b7a";
+
+/// What [`worst_cases`] parses from each function's file at
+/// [`CORE_MATH_COMMIT`]: the input count and [`corpus_digest`] of the inputs.
+/// A checkout of another commit, or a damaged one, fails the reader instead
+/// of silently sweeping or sampling different inputs. This checks the parsed
+/// corpus only, not the rest of the checkout.
+const CORPUS_PINS: [(Func, usize, u64); 11] = [
+    (Func::Sin, 1_975_927, 0x05c2_721b_324a_6166),
+    (Func::Cos, 1_090_161, 0x6585_e470_0478_ad85),
+    (Func::Tan, 1_077_363, 0xa6c8_6f1c_c0a8_e821),
+    (Func::Asin, 249_134, 0xa09f_812d_8056_8269),
+    (Func::Acos, 264_099, 0x0329_d56d_91fe_eab9),
+    (Func::Atan, 55_770, 0x2929_b7e6_6cb1_9ae8),
+    (Func::Atan2, 28_123, 0x875c_2f65_d98c_b1f8),
+    (Func::Exp, 1_129_433, 0x2c00_671a_5a8a_4d0d),
+    (Func::Ln, 134_957, 0x9b65_4b99_4a74_718d),
+    (Func::Log10, 65_528, 0x1dfe_c613_b579_eff3),
+    (Func::Pow, 1_003_179, 0xafc4_e01e_0616_8eff),
+];
+
+/// FNV-1a (64-bit) over each input's `x` then `y` bit pattern, little-endian,
+/// in file order; a unary function's `y` is the reader's `0.0`.
+fn corpus_digest(inputs: &[(f64, f64)]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for &(x, y) in inputs {
+        for byte in x
+            .to_bits()
+            .to_le_bytes()
+            .into_iter()
+            .chain(y.to_bits().to_le_bytes())
+        {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    hash
+}
+
 fn parse_bits(token: &str) -> f64 {
     if token == "nan" {
         return f64::NAN;
@@ -156,12 +199,54 @@ fn typical_range(f: Func) -> (f64, f64, f64, f64) {
     }
 }
 
-/// Worst-case inputs from a local CORE-MATH checkout, if present.
+/// Worst-case inputs from the CORE-MATH checkout, checked against
+/// [`CORPUS_PINS`]. Panics if the file cannot be read or does not hold the
+/// pinned corpus.
 fn worst_cases(f: Func) -> Vec<(f64, f64)> {
+    let inputs = read_worst_cases(f);
+    if let Some(mismatch) = corpus_mismatch(f, &inputs) {
+        panic!("{mismatch}");
+    }
+    inputs
+}
+
+fn read_worst_cases(f: Func) -> Vec<(f64, f64)> {
     let path = format!("{CORE_MATH}/{0}/{0}.wc", f.name());
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return Vec::new();
-    };
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|error| {
+        panic!(
+            "cannot read {path} ({error}); research/core-math must be a checkout of \
+             CORE-MATH commit {CORE_MATH_COMMIT}"
+        )
+    });
+    parse_worst_cases(f, &path, &text)
+}
+
+/// `f`'s pinned input count and digest.
+fn corpus_pin(f: Func) -> (usize, u64) {
+    let &(_, count, digest) = CORPUS_PINS
+        .iter()
+        .find(|(pinned, ..)| *pinned == f)
+        .expect("every function has a corpus pin");
+    (count, digest)
+}
+
+/// Why `inputs` is not `f`'s pinned corpus, if it is not.
+fn corpus_mismatch(f: Func, inputs: &[(f64, f64)]) -> Option<String> {
+    let (count, digest) = corpus_pin(f);
+    let actual = (inputs.len(), corpus_digest(inputs));
+    (actual != (count, digest)).then(|| {
+        format!(
+            "{} worst cases parse to {} inputs with digest {:#018x}, but CORE-MATH \
+             commit {CORE_MATH_COMMIT} gives {count} with {digest:#018x}; check out \
+             that commit under research/core-math",
+            f.name(),
+            actual.0,
+            actual.1
+        )
+    })
+}
+
+fn parse_worst_cases(f: Func, path: &str, text: &str) -> Vec<(f64, f64)> {
     let mut out = Vec::new();
     for (index, line) in text.lines().enumerate() {
         let line = line.split('#').next().unwrap_or_default().trim();
@@ -251,13 +336,31 @@ fn check_inputs_quietly(f: Func, inputs: &[(f64, f64)]) -> Vec<String> {
     })
 }
 
+#[test]
+fn corpus_pins_cover_every_function_once() {
+    for f in Func::ALL {
+        let pins = CORPUS_PINS
+            .iter()
+            .filter(|(pinned, ..)| *pinned == f)
+            .count();
+        assert_eq!(pins, 1, "{} has {pins} corpus pins", f.name());
+    }
+}
+
+/// The local CORE-MATH checkout holds the pinned worst-case corpus for every
+/// function. Cheap next to the sweeps: it only reads and parses the files.
+#[test]
+#[ignore = "needs a CORE-MATH checkout under research/"]
+fn core_math_corpus_matches_pin() {
+    let mismatches: Vec<String> = Func::ALL
+        .into_iter()
+        .filter_map(|f| corpus_mismatch(f, &read_worst_cases(f)))
+        .collect();
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+}
+
 fn sweep(f: Func) {
     let inputs = worst_cases(f);
-    assert!(
-        !inputs.is_empty(),
-        "no worst-case file for {} under research/core-math",
-        f.name()
-    );
     let problems = check_inputs(f, &inputs);
     let shown: Vec<_> = problems.iter().take(100).cloned().collect();
     assert!(
@@ -274,7 +377,8 @@ macro_rules! sweeps {
     ($($name:ident => $func:expr,)*) => {
         $(
             /// Every CORE-MATH worst case for this function against the
-            /// oracle. Needs `research/core-math`; run in release.
+            /// oracle. Needs `research/core-math` at [`CORE_MATH_COMMIT`];
+            /// run in release.
             #[test]
             #[ignore = "long-running; needs a CORE-MATH checkout under research/"]
             fn $name() {
@@ -321,6 +425,8 @@ fn random_against_oracle() {
 #[test]
 #[ignore = "rewrites tests/fixtures/crmath_golden.txt"]
 fn regenerate_crmath_golden() {
+    // Read and check every corpus before certifying anything.
+    let corpora = Func::ALL.map(worst_cases);
     let mut out = String::new();
     out.push_str(
         "# Correctly rounded results of the deterministic math kernels (src/crmath).\n\
@@ -328,8 +434,13 @@ fn regenerate_crmath_golden() {
          # Certified by the interval oracle in src/crmath/tests/oracle.rs. Regenerate with\n\
          # `brokkr test regenerate_crmath_golden --release` (worst cases need research/core-math).\n",
     );
+    writeln!(
+        out,
+        "# Worst-case sample from CORE-MATH commit {CORE_MATH_COMMIT}."
+    )
+    .expect("writing to a String cannot fail");
     let mut rng = TestRng::new(0x601d);
-    for f in Func::ALL {
+    for (f, worst) in Func::ALL.into_iter().zip(corpora) {
         let mut inputs = Vec::new();
         if f.binary() {
             for &x in &binary_special_inputs() {
@@ -348,7 +459,6 @@ fn regenerate_crmath_golden() {
             let y = if f.binary() { rng.finite() } else { 0.0 };
             inputs.push((rng.finite(), y));
         }
-        let worst = worst_cases(f);
         let step = (worst.len() / 500).max(1);
         inputs.extend(worst.iter().step_by(step).copied());
         for (x, y) in inputs {

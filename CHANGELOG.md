@@ -312,6 +312,15 @@ All notable changes to dellingr are documented here. The format follows
 - `LibraryError` gains `InvalidNextKey`, `PositionOutOfBounds`, `ArrayTooBig`,
   `TostringMustReturnString` and `FormatPointerIdentitySpaceExhausted`; those
   runtime errors keep their message text.
+- `Error::library_function` answers for every typed library failure that
+  names a function, not only `table.sort`'s default comparison: it is the new
+  `LibraryError::function()` for an `ErrorKind::LibraryError`
+  (`WrongNumberOfArguments`, `IntegerKeyRangeExceeded`,
+  `ObjectLengthNotInteger`, `InvalidConcatValue` and `ArrayTooBig`), so the
+  variant is its one source. `LibraryError::ObjectLengthNotInteger` gains a
+  `function` field naming the caller of `__len` (`concat`, `unpack`,
+  `insert`, `remove` or `sort`), and `LibraryFunction::Sort` now means
+  `table.sort` in general. Message text is unchanged.
 - The root re-export `dellingr::MAX_STRING_BYTES` is removed; use
   `dellingr::limits::MAX_STRING_BYTES`. Likewise `dellingr::error::MAX_RESULTS`
   is removed in favour of `dellingr::limits::MAX_RESULTS`.

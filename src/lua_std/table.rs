@@ -167,7 +167,7 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     // reads raw.
     ("concat", |state| {
         check_type_named(state, 1, LuaType::Table, "concat")?;
-        let len = sequence_len(state, 1)?;
+        let len = sequence_len(state, 1, LibraryFunction::Concat)?;
 
         let sep = if check_optional_type_named(state, 2, LuaType::String, "concat")? {
             let bytes = state.to_bytes(2)?.to_vec();
@@ -434,12 +434,16 @@ fn has_sequence_metamethods(state: &mut State, idx: isize) -> Result<bool> {
 /// Lua 5.4's `luaL_len` for the table at the positive stack index `idx`: calls
 /// `__len` when the metatable defines it, else returns the raw border. The
 /// metamethod's result must be a number or numeral string with an exact
-/// integer value.
+/// integer value; `function` names the caller in the error raised otherwise.
 ///
 /// This lives here rather than in `State::table_len` (which is raw and used by
 /// raw fast paths); a shared metamethod-aware length belongs beside it in
 /// `vm/table_ops.rs` once more callers need one.
-pub(super) fn sequence_len(state: &mut State, idx: isize) -> Result<i64> {
+pub(super) fn sequence_len(
+    state: &mut State,
+    idx: isize,
+    function: LibraryFunction,
+) -> Result<i64> {
     // The array part is bounded by the stack and heap caps, far below i64::MAX.
     let raw = i64::try_from(state.table_len(idx)?).map_or(i64::MAX, i64::from);
     state.get_metatable_of(idx)?;
@@ -465,7 +469,7 @@ pub(super) fn sequence_len(state: &mut State, idx: isize) -> Result<i64> {
         _ => None,
     };
     state.pop(1)?;
-    len.ok_or_else(|| state.library_error(LibraryError::ObjectLengthNotInteger))
+    len.ok_or_else(|| state.library_error(LibraryError::ObjectLengthNotInteger { function }))
 }
 
 /// Lua 5.4's `lua_seti`/`lua_settable` for library code: does `t[k] = v`
@@ -482,7 +486,7 @@ fn set_index(state: &mut State, table_idx: isize) -> Result<()> {
 /// `tinsert`: length via `__len`, shifts through `__index`/`__newindex`.
 /// Charges like the raw path: the flat 1 already paid by the caller.
 fn insert_through_metamethods(state: &mut State, num_args: usize) -> Result<u8> {
-    let first_empty = sequence_len(state, 1)?.wrapping_add(1);
+    let first_empty = sequence_len(state, 1, LibraryFunction::Insert)?.wrapping_add(1);
     // Lua evaluates the length even when the argument count is invalid.
     if num_args != 2 && num_args != 3 {
         return Err(state.library_error(LibraryError::WrongNumberOfArguments {
@@ -521,7 +525,7 @@ fn insert_through_metamethods(state: &mut State, num_args: usize) -> Result<u8> 
 /// `table.remove` for a table with sequence metamethods, following Lua 5.4's
 /// `tremove`. Charges like the raw path.
 fn remove_through_metamethods(state: &mut State) -> Result<u8> {
-    let size = sequence_len(state, 1)?;
+    let size = sequence_len(state, 1, LibraryFunction::Remove)?;
     let mut pos = opt_integer(state, 2, "remove")?.unwrap_or(size);
     // 5.4's unsigned check: for nonnegative lengths, pos == size or
     // 1 <= pos <= size + 1. A negative length also admits negative positions.
@@ -554,7 +558,7 @@ fn remove_through_metamethods(state: &mut State) -> Result<u8> {
 /// same order and comparator call sequence. The charge is the original
 /// length, at least 1, paid before any read beyond `__len` or comparator call.
 fn sort_through_metamethods(state: &mut State, has_comp: bool) -> Result<u8> {
-    let len = sequence_len(state, 1)?;
+    let len = sequence_len(state, 1, LibraryFunction::Sort)?;
     let n = state.checked_table_sort_len(len)?;
     state.consume_cost(len.max(1).cast_unsigned())?;
     if len < 2 {

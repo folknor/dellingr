@@ -730,15 +730,39 @@ impl State {
     /// hands to the VM must be safe to move across threads with the State.
     ///
     /// # Example
-    /// ```ignore
-    /// let collector = Arc::new(Mutex::new(CommandCollector::default()));
-    /// state.set_user_data(collector.clone());
+    /// ```
+    /// use dellingr::{ArgCount, Program, RetCount, State};
     ///
+    /// #[derive(Default)]
+    /// struct CommandCollector {
+    ///     turns: Vec<f64>,
+    /// }
+    ///
+    /// let mut state = State::new();
+    /// state.set_user_data(CommandCollector::default());
+    ///
+    /// // A RustFunc is a plain function pointer, so the callback reaches the
+    /// // collector through the State rather than by capturing it.
     /// state.push_rust_fn(|state| {
-    ///     let collector = state.user_data::<Arc<Mutex<CommandCollector>>>().unwrap();
-    ///     collector.lock().unwrap().turn = Some(0.5);
+    ///     let turn = state.to_number(1)?;
+    ///     state
+    ///         .user_data_mut::<CommandCollector>()
+    ///         .expect("the host stores a CommandCollector before running scripts")
+    ///         .turns
+    ///         .push(turn);
     ///     Ok(0)
     /// })?;
+    /// state.set_global("turn")?;
+    ///
+    /// let program = Program::compile("turn(0.5) turn(-0.25)", None)?;
+    /// state.load(&program)?;
+    /// state.call(ArgCount::Fixed(0), RetCount::Fixed(0))?;
+    ///
+    /// let collector = state
+    ///     .user_data::<CommandCollector>()
+    ///     .expect("the collector is still stored");
+    /// assert_eq!(collector.turns, [0.5, -0.25]);
+    /// # Ok::<(), dellingr::error::Error>(())
     /// ```
     pub fn set_user_data<T: Send + 'static>(&mut self, data: T) {
         self.user_data = Some(Box::new(data));

@@ -323,7 +323,9 @@ struct ErrorContext {
     reported: bool,
     /// String function whose pattern operation produced this error, if any.
     pattern_function: Option<StringPatternFunction>,
-    /// Standard-library function responsible for this error, if any.
+    /// Standard-library function responsible for an error whose kind cannot
+    /// name it (the default `table.sort` comparison's `TypeError`). Never set
+    /// for an `ErrorKind::LibraryError`, which names its function itself.
     library_function: Option<LibraryFunction>,
     vm_fault: Option<VmFault>,
 }
@@ -708,7 +710,7 @@ pub enum LibraryFunction {
     Unpack,
     /// `table.concat`.
     Concat,
-    /// `table.sort`'s default comparator.
+    /// `table.sort`.
     Sort,
 }
 
@@ -775,7 +777,10 @@ pub enum LibraryError {
         function: LibraryFunction,
     },
     /// A table length metamethod returned a value without an exact integer.
-    ObjectLengthNotInteger,
+    ObjectLengthNotInteger {
+        /// The function that asked for the length.
+        function: LibraryFunction,
+    },
     /// A replacement string references a capture that does not exist.
     InvalidGsubCaptureIndex {
         /// The capture number read from the replacement string.
@@ -788,6 +793,35 @@ pub enum LibraryError {
         /// The type returned by the replacement.
         value_type: LuaType,
     },
+}
+
+impl LibraryError {
+    /// The [`LibraryFunction`] this failure belongs to, if it names one: the
+    /// `function` field of the variants that carry it, `Concat` for
+    /// [`Self::InvalidConcatValue`] and `Sort` for [`Self::ArrayTooBig`].
+    /// Failures of functions outside that enum (`next`, `string.format`,
+    /// `string.gsub`, ...) and of host APIs answer `None`.
+    pub fn function(&self) -> Option<LibraryFunction> {
+        match self {
+            Self::WrongNumberOfArguments { function }
+            | Self::IntegerKeyRangeExceeded { function }
+            | Self::ObjectLengthNotInteger { function } => Some(*function),
+            Self::InvalidConcatValue { .. } => Some(LibraryFunction::Concat),
+            Self::ArrayTooBig => Some(LibraryFunction::Sort),
+            Self::ProtectedMetatable
+            | Self::InvalidNextKey
+            | Self::PositionOutOfBounds
+            | Self::TostringMustReturnString
+            | Self::FormatPointerIdentitySpaceExhausted
+            | Self::InvalidFormatConversion { .. }
+            | Self::FormatDirectiveTooLong
+            | Self::QuotedFormatHasModifiers
+            | Self::InvalidFormatSpecification { .. }
+            | Self::InvalidGsubCaptureIndex { .. }
+            | Self::InvalidGsubEscape
+            | Self::InvalidGsubReplacementValue { .. } => None,
+        }
+    }
 }
 
 /// The specific malformed Lua pattern construct.
@@ -1241,9 +1275,6 @@ impl Error {
         &self.0.stack_trace
     }
 
-    /// Give an argument error the explicit standard-library function name.
-    /// Updating the kind in place keeps this error's source and reporting
-    /// state attached.
     /// Record whether the call whose Rust callback produced this error was a
     /// method call. Only the first (innermost) callback to return an argument
     /// error decides; outer calls propagating it leave it alone.
@@ -1257,6 +1288,9 @@ impl Error {
         self
     }
 
+    /// Give an argument error the explicit standard-library function name.
+    /// Updating the kind in place keeps this error's source and reporting
+    /// state attached.
     pub(crate) fn with_argument_function_name(mut self, function_name: &str) -> Self {
         if let ErrorKind::ArgError(argument) = &mut self.0.kind {
             argument.func_name = Some(function_name.to_owned());
@@ -1273,11 +1307,22 @@ impl Error {
     }
 
     /// Standard-library function responsible for this error, if known.
+    ///
+    /// For an [`ErrorKind::LibraryError`] this is [`LibraryError::function`].
+    /// The one other attributed error is the [`TypeError::Comparison`] that
+    /// `table.sort`'s default comparison raises, which answers `Sort`. Argument
+    /// errors name their function in [`ArgError::func_name`] instead, and an
+    /// error propagated out of a metamethod handler, comparator or other
+    /// callback the library called answers `None`.
     pub fn library_function(&self) -> Option<LibraryFunction> {
-        self.0
-            .context
-            .as_deref()
-            .and_then(|context| context.library_function)
+        match &self.0.kind {
+            ErrorKind::LibraryError(error) => error.function(),
+            _ => self
+                .0
+                .context
+                .as_deref()
+                .and_then(|context| context.library_function),
+        }
     }
 
     pub(crate) fn with_pattern_function(mut self, function: StringPatternFunction) -> Self {
@@ -1285,7 +1330,14 @@ impl Error {
         self
     }
 
+    /// Attribute an error whose kind cannot name its library function. A
+    /// `LibraryError` names its own, so attributing one here would create a
+    /// second source that `library_function` ignores.
     pub(crate) fn with_library_function(mut self, function: LibraryFunction) -> Self {
+        debug_assert!(
+            !matches!(self.0.kind, ErrorKind::LibraryError(_)),
+            "a LibraryError carries its function in its variant"
+        );
         self.context_mut().library_function = Some(function);
         self
     }
@@ -1703,7 +1755,7 @@ impl fmt::Display for LibraryError {
                 "{} range exceeds the exactly representable integer keys",
                 function.as_str()
             ),
-            Self::ObjectLengthNotInteger => f.write_str("object length is not an integer"),
+            Self::ObjectLengthNotInteger { .. } => f.write_str("object length is not an integer"),
             Self::InvalidGsubCaptureIndex { .. } => f.write_str("invalid capture index"),
             Self::InvalidGsubEscape => f.write_str("invalid use of '%' in replacement string"),
             Self::InvalidGsubReplacementValue { value_type } => {

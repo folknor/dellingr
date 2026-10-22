@@ -354,7 +354,7 @@ pub(super) fn unpack_values(state: &mut State) -> Result<u8> {
     // As in 5.4, `__len` runs only when no explicit end is given.
     let j = match opt_integer(state, 3, "unpack")? {
         Some(j) => j,
-        None => table::sequence_len(state, 1)?,
+        None => table::sequence_len(state, 1, crate::error::LibraryFunction::Unpack)?,
     };
     if i <= j {
         table::check_sequence_keys(state, i, j, crate::error::LibraryFunction::Unpack)?;

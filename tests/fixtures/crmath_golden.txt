@@ -2,6 +2,7 @@
 # Format: function x-bits [y-bits] result-bits, hex IEEE 754 binary64; nan is any NaN.
 # Certified by the interval oracle in src/crmath/tests/oracle.rs. Regenerate with
 # `brokkr test regenerate_crmath_golden --release` (worst cases need research/core-math).
+# Worst-case sample from CORE-MATH commit 0ce0cbc15935e24c656280e5a46c34e89f301b7a.
 sin 0000000000000000 0000000000000000
 sin 8000000000000000 8000000000000000
 sin 7ff0000000000000 nan
