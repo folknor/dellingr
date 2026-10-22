@@ -72,8 +72,42 @@ const OPTIONS: &[OptionSpec] = &[
     },
 ];
 
+/// Where the script comes from. `-` names stdin, as in reference Lua, even
+/// after `--`; a file literally named `-` is reachable as `./-`.
+enum Input {
+    Stdin,
+    File(OsString),
+}
+
+impl Input {
+    fn from_arg(arg: OsString) -> Self {
+        if arg == OsStr::new("-") {
+            Self::Stdin
+        } else {
+            Self::File(arg)
+        }
+    }
+
+    /// The chunk name that tracebacks and `print` locations show.
+    fn chunk_name(&self) -> String {
+        match self {
+            Self::Stdin => "stdin".to_owned(),
+            Self::File(path) => path.to_string_lossy().into_owned(),
+        }
+    }
+
+    fn read(&self) -> Result<String, String> {
+        match self {
+            Self::Stdin => io::read_to_string(io::stdin().lock())
+                .map_err(|error| format!("reading stdin: {error}")),
+            Self::File(path) => fs::read_to_string(path)
+                .map_err(|error| format!("reading {}: {error}", path.display())),
+        }
+    }
+}
+
 struct CliArgs {
-    filename: OsString,
+    input: Input,
     limit: Option<i64>,
     analyze: bool,
     dump_bytecode: bool,
@@ -91,7 +125,7 @@ fn usage_line() -> String {
         })
         .collect::<Vec<_>>()
         .join(" ");
-    format!("Usage: dellingr {options} [--] <file.lua>")
+    format!("Usage: dellingr {options} [--] <file.lua | ->")
 }
 
 fn help_text() -> String {
@@ -159,6 +193,7 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Option<CliArgs
                 continue;
             }
 
+            // A lone `-` is the stdin input, not an option.
             if arg != OsStr::new("-") && arg.to_string_lossy().starts_with('-') {
                 return Err(format!("unknown option '{}'", arg.to_string_lossy()));
             }
@@ -185,7 +220,7 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Option<CliArgs
 
     let filename = filename.ok_or_else(|| "an input file is required".to_owned())?;
     Ok(Some(CliArgs {
-        filename,
+        input: Input::from_arg(filename),
         limit,
         analyze,
         dump_bytecode,
@@ -269,9 +304,9 @@ fn main() {
         Err(error) => report_usage_error(&error),
     };
 
-    let source = match fs::read_to_string(&args.filename) {
+    let source = match args.input.read() {
         Ok(source) => source,
-        Err(error) => report_error(format!("reading {}: {error}", args.filename.display())),
+        Err(error) => report_error(error),
     };
 
     if args.analyze {
@@ -289,8 +324,7 @@ fn main() {
     }
 
     if args.dump_bytecode {
-        let filename = args.filename.to_string_lossy().into_owned();
-        match Engine::new().compile_named(&source, filename) {
+        match Engine::new().compile_named(&source, args.input.chunk_name()) {
             Ok(program) => write_stdout_or_exit(&program.disassemble().to_string()),
             Err(error) => report_error(error),
         }
@@ -302,9 +336,8 @@ fn main() {
         state.set_cost_budget(limit);
     }
 
-    let filename = args.filename.to_string_lossy().into_owned();
     let result = state
-        .load_string_named(&source, Some(filename))
+        .load_string_named(&source, Some(args.input.chunk_name()))
         .and_then(|()| state.call(ArgCount::Fixed(0), RetCount::Fixed(0)));
 
     if !args.quiet {

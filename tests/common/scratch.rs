@@ -59,7 +59,7 @@ pub(crate) struct ScratchScript {
 }
 
 impl ScratchScript {
-    pub(crate) fn new(name: &str, source: &str) -> Self {
+    pub(crate) fn new(name: &str, source: impl AsRef<[u8]>) -> Self {
         let directory = ScratchDirectory::new(name);
         let path = directory.path().join("script.lua");
         let mut script = Self::at(path, source);
@@ -67,8 +67,8 @@ impl ScratchScript {
         script
     }
 
-    pub(crate) fn at(path: PathBuf, source: &str) -> Self {
-        write_scratch_file(&path, source).expect("test script should be written");
+    pub(crate) fn at(path: PathBuf, source: impl AsRef<[u8]>) -> Self {
+        write_scratch_file(&path, source.as_ref()).expect("test script should be written");
         Self {
             path,
             _directory: None,
@@ -91,7 +91,7 @@ impl Drop for ScratchScript {
     }
 }
 
-fn write_scratch_file(path: &Path, source: &str) -> io::Result<()> {
+fn write_scratch_file(path: &Path, source: &[u8]) -> io::Result<()> {
     let scratch_root = fs::canonicalize(scratch_root())?;
     let parent = path
         .parent()
@@ -104,7 +104,7 @@ fn write_scratch_file(path: &Path, source: &str) -> io::Result<()> {
     }
 
     let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
-    if let Err(error) = file.write_all(source.as_bytes()) {
+    if let Err(error) = file.write_all(source) {
         drop(file);
         if let Err(remove_error) = fs::remove_file(path)
             && remove_error.kind() != io::ErrorKind::NotFound

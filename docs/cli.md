@@ -1,7 +1,7 @@
 # CLI
 
 ```
-dellingr [--limit N] [--analyze] [--dump-bytecode] [--quiet] [--help] [--] <file.lua>
+dellingr [--limit N] [--analyze] [--dump-bytecode] [--quiet] [--help] [--] <file.lua | ->
 ```
 
 Short forms: `-l`, `-a`, `-q`, `-h`. `--dump-bytecode` has none.
@@ -36,7 +36,10 @@ presenting an analysis.
 
 - `--` ends option parsing. A script whose name starts with `-` can be run as
   `dellingr -- -name.lua`.
-- Exactly one input file is required.
+- Exactly one input file is required. `-` reads the script from stdin, as in
+  reference Lua, also after `--`; a file named `-` is run as `dellingr ./-`.
+  A script read from stdin is named `stdin` in error messages and
+  `--dump-bytecode` output. Like a file, it must be valid UTF-8.
 - `--limit` takes a signed 64-bit integer and cannot be combined with
   `--analyze` or `--dump-bytecode`.
 - `--analyze` and `--dump-bytecode` cannot be combined. `--quiet` is accepted

@@ -21,14 +21,6 @@ the category names the part that kept them out of the loop.
 
 ## Widens the project
 
-## BUG-010 - CLI accepts `-` as a positional, then reads a file literally named `-`
-
-Source: host-surface hunter.
-
-`-` is excluded from the unknown-option check (the conventional stdin spelling)
-but is then read as a path. Either implement stdin or reject `-` with a message;
-`docs/cli.md` says nothing about it.
-
 ## HYG-079 - Host boundary assumes UTF-8: lossy `print`, UTF-8-only source
 
 Reported by the stdlib and host-surface hunters.

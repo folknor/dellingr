@@ -188,6 +188,9 @@ All notable changes to dellingr are documented here. The format follows
   unchanged.
 - `CostAnalysis::caveat()` and a `dellingr::cli` module with the CLI's output
   prefixes. The `--analyze` warning now prints that caveat, with new wording.
+- The CLI reads the script from stdin when the input is `-`, as reference Lua
+  does, under the chunk name `stdin`. It used to open a file named `-`; that
+  file is now run as `./-`.
 
 ### Changed
 
