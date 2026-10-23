@@ -144,7 +144,11 @@ instruction as the activation's call site before anything on it can call,
 or tracebacks and `print` locations name a stale line. The arms do not
 record on every execution: `State::record_call_site` explains where each
 existing path records, which for the table and length instructions is the
-first line of their outlined slow function.
+first line of their outlined handler-call function (`index_call`,
+`newindex_call`, `len_call`). The resolvers before those calls
+(`State::resolve_index`, `store_field`, `resolve_newindex`,
+`resolve_length`) call nothing and have returned before the handler runs,
+so they are not inventoried and add no frame to a path.
 
 `python3 scripts/native_calls.py sites` lists every call site with its
 marker, which is the quickest way to see what a change touched.
@@ -407,3 +411,56 @@ with a pre-guard terminal check grew every release cycle that reaches an
 loop, which returned the final handler for its caller to push and call,
 grew them by 80 (the returned handler, receiver and unit count stayed live
 across the call).
+
+### Register-native slow paths
+
+Measured on plantasjen (x86-64 Linux) on top of df80d81, when the table
+and length instructions stopped copying operands above the frame. Each read
+is one outlined resolver (`State::resolve_index`, which also absorbed the
+string receiver's step and string `__index` handlers, so `index_string` and
+its recursion are gone), each store one (`State::store_field`,
+`State::resolve_newindex`, which made `__newindex` table chains a loop),
+each length one (`State::resolve_length`). They return before any handler
+runs; the call is a 24-byte release frame of its own (`index_call`,
+`newindex_call`, `len_call`). The before figures are the ones recorded
+above for df80d81's code (the `__index` walk follow-up's after column, the
+vararg follow-up and the first table otherwise), not a fresh run of that
+commit. Cells are **before / after**, bytes per cycle:
+
+| Scenario | Dev, also snapshot | Release | Release + snapshot |
+|---|---|---|---|
+| `index_field`, `index_method` | 9296 / 7744 | 1520 / 1040 | 1568 / 1008 |
+| `index_key` | 8432 / 7712 | 1264 / 944 | 1312 / 912 |
+| `index_rust` | 11056 / 9504 | 1984 / 1504 | 2032 / 1472 |
+| `newindex_field` | 10192 / 7984 | 1392 / 944 | 1440 / 912 |
+| `newindex_key` | 9392 / 7760 | 1360 / 944 | 1408 / 912 |
+| `newindex_rust` | 11952 / 9744 | 1856 / 1408 | 1904 / 1376 |
+| `length` | 7984 / 7616 | 1168 / 944 | 1216 / 912 |
+| `index_string_handler` | 9664 / 7744 | 1648 / 1040 | 1696 / 1008 |
+| `host_get_table` | 9120 / 8912 | 1536 / 1344 | 1584 / 1312 |
+| `host_call` | 8560 / 8560 | 1296 / 1264 | 1344 / 1232 |
+| `tfor_lua` | 7776 / 7792 | 960 / 912 | 1008 / 880 |
+| `tfor_host_iterator` | 9136 / 9120 | 1248 / 1200 | 1296 / 1168 |
+| `gsub_pattern_function` | 14608 / 14608 | 3584 / 3552 | 3632 / 3520 |
+| `gsub_pattern_table` | 14720 / 14512 | 3712 / 3520 | 3760 / 3488 |
+| `chain_newindex` | 1168 / 0 | 208 / 0 | 208 / 0 |
+
+Every other release cycle shrinks with `Frame::run`. Release frames
+(`frame_sizes.py`): `Frame::run` 776 / 728 (824 / 696 with snapshot);
+`get_field_slow` (424), `get_table_slow` (168), `set_field_slow` (216),
+`set_table_slow` (184), `set_table_with_key` (200) and `len_slow` (200)
+are gone; `get_table_unguarded` 120 / 264, absorbing
+`get_table_with_key_tracking_call` (120) and the observed `call_unguarded`
+copy (168); `call_from_lua` 120 / 136, the one frame on these paths that
+grows (not attributed: it inlines admission, whose only change is the
+`FRAME_HEADROOM` term, and an equivalent spelling of that check measured
+the same); the
+non-reentrant resolvers are `resolve_index` 280, `store_field` 184,
+`resolve_newindex` 216, `resolve_length` 136. The dev `tfor_lua` cycle is
+16 bytes larger: the iterator call now keeps its call base to deliver
+results into the loop registers.
+
+The first build of this shape let the compiler inline the closure, template
+constructor and concatenation bodies into `Frame::run` (their buffers,
+capture list and runtime handle), which grew it to 808 in plain release.
+They are `inline(never)` now; no dispatch cycle pays for them.

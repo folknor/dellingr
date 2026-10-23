@@ -157,7 +157,7 @@ pub(super) fn mark_gc_roots(state: &State, worklist: &mut Vec<ObjectPtr>) {
         }
     }
     // Open upvalues point at live stack slots but may not yet be held by
-    // any closure (mid-capture in instr_closure); their pool slots are
+    // any closure (mid-capture in reg_closure); their pool slots are
     // roots for the pool sweep even though they hold no heap reference.
     for (_, uv_ref) in &state.open_upvalues {
         state.upvalue_pool.mark_slot(*uv_ref);

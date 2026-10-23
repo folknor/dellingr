@@ -688,8 +688,8 @@ const CHAINS: &[Chain] = &[
             function top() mark("top", 0) chain.missing = 1 end"#,
     },
     Chain {
-        // The string metatable's __index naming a string: every step is
-        // index_string recursing into itself.
+        // The string metatable's __index naming a string: every step is a
+        // string step of the same lookup, resolved in a loop.
         name: "string",
         held: false,
         lua: r#"function top()

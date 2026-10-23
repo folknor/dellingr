@@ -420,7 +420,7 @@ perturbing the same-ptr branch's codegen.
 
 Both conditions may now hold (2026-10-23). For (b): since f92638c the
 register VM's `reg_get_field` inlines only the same-table hit, and every
-miss goes to the outlined `get_field_direct`, so a key-at-index check
+miss goes to the outlined `State::resolve_index`, so a key-at-index check
 placed there, before the hash lookup, does not touch the hit path's
 codegen. For (a): `bench/record_tables` builds a fresh 8-field (Map)
 table per iteration and reads every field, so each read misses the
@@ -632,29 +632,27 @@ collection actually costs before changing the cache.
 
 ## IC extensions (same shape as existing ICs)
 
-### String method calls always take the stack slow path
+### String method calls take one outlined call
 
 What: `s:upper()` and every other method call on a string receiver is a
-`SELF` whose receiver is not a heap object, so the register VM's
-`get_field_direct` returns false at once and the op goes through
-`get_field_slow`: record the call site, push the receiver, run the
-stack-protocol `instr_get_field` (which reaches `index_string` and the
-string-method cache), then pop into the register. The cache usually
-answers without calling anything, but the push/pop round trip, the call
-site record and the extra native frame are paid every time.
+`SELF` whose receiver is not a heap object, so `reg_get_field`'s inline
+own-field hit cannot answer and the op calls the outlined
+`State::resolve_index`, whose string step answers from the string-method
+cache. Since the register-native rewrite on top of df80d81 there is no
+stack round trip, call-site record or reentrant frame on that path; what
+is left is the call itself and the resolver's prologue.
 
-Sketch: answer a string-method cache hit in the register path, before
-`get_field_slow`, with the same validation `get_cached_string_method`
-does today (string metatable `__index` slot and library table version), and
-leave everything else - a cache miss, a function or string `__index`,
-chains - on the stack path, which keeps metamethod depth and the
-call-site record where a call can happen. Mind
-`reference/native-calls.toml`: if the hit path moves, the edges from
-`instr_get_field` to `index_string` stay for the miss path only.
+Sketch: check the string-method cache inline in `reg_get_field`, after
+the own-field hit, with the validation `get_cached_string_method` does
+(string metatable `__index` slot and library table version). Mind
+`Frame::run`'s frame: `reg_get_field` inlines into it, and it is live
+across every native re-entry, so measure `native_bytes_per_level` too.
 
 Measure with `bench/patterns`, whose kernel calls string methods in its hot
 loop (`self:match`, `:reverse()`, `:gsub()`, and a `:trim()` added to the
-string library), though its time is dominated by the matching itself.
+string library), though its time is dominated by the matching itself; the
+rewrite moved it about 1.7% there (plantasjen, df80d81 against the
+rewrite), within the unrelated control's shift.
 
 ### Table-library fallback IC for the hit path (merged with B-O4/C-O5)
 
@@ -688,18 +686,20 @@ Why deferred: unmeasured in isolation. The 2026-10-23 sticky-miss removal
 already made that workload 10% faster (plantasjen, against 4a722cf); the
 remaining per-call cost is a few table reads.
 
-Signal: `--hotpath` on `examples/calls/method_polymorphic.lua` showing the
-uncached `get_index_table_field_direct` path hot.
+Signal: `--hotpath` on `examples/calls/method_polymorphic.lua` showing
+`State::resolve_index` hot. The register-native rewrite on top of df80d81
+made that workload about 8% faster again (plantasjen, matched pairs).
 
 Note: caching misses was tried and dropped. An exact absence proof (no hash
 slot for the key, unchanged version and slot count) is sound but validating
 it reads as many tables as the uncached miss, so it saved nothing on
-`bench/method_chain.lua`; the cost that remains there is the repeated direct
-attempt tracked in notes/bugs-runtime.md.
+`bench/method_chain.lua`. The repeated direct attempt that cost it its time
+is gone since the register-native rewrite (each table read once per
+lookup; 85.3 to 64.7 ms warm, plantasjen, df80d81 against the rewrite).
 
 ### GET_FIELD slow-path cache repopulation after `__index` resolution
 
-What: after `get_table_with_key` resolves through `__index`, the resolved value lives somewhere
+What: after `State::resolve_index` resolves through `__index`, the resolved value lives somewhere
 identifiable (the index table for the table-handler case). The method IC
 already caches this. The direct-field cache could also populate when the
 resolution happened to bottom out in a raw entry on a relevant table,

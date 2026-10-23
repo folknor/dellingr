@@ -1,4 +1,3 @@
-use super::super::compiler::UpvalueDesc;
 use super::super::error::TypeError;
 use super::Result;
 use super::State;
@@ -10,30 +9,6 @@ use crate::instr::{ArgCount, RetCount};
 use crate::lua_std::{base_ipairs_iter, base_next};
 
 impl State {
-    /// Push a closure of nested function `i`, capturing its upvalues from
-    /// the running frame.
-    #[hotpath::measure]
-    pub(super) fn instr_closure(&mut self, frame: &Frame, i: u16) -> Result<()> {
-        let bytecode = frame.get_nested_bytecode(i);
-        // Capture upvalues based on the bytecode's upvalue descriptors
-        let mut captured_upvalues = Vec::with_capacity(bytecode.upvalues.len());
-        for desc in &bytecode.upvalues {
-            let uv_ref = match desc {
-                UpvalueDesc::Local(idx) => {
-                    // Capture a local variable from the current frame's stack
-                    let stack_idx = frame.stack_bottom + *idx as usize;
-                    self.find_or_create_upvalue(stack_idx)
-                }
-                UpvalueDesc::Upvalue(idx) => {
-                    // Share an upvalue from the current frame's upvalues
-                    frame.upvalues[*idx as usize]
-                }
-            };
-            captured_upvalues.push(uv_ref);
-        }
-        self.push_closure(bytecode, captured_upvalues)
-    }
-
     /// Numeric-for setup over the registers from `slot`: start, limit and
     /// step, then the visible variable. Checks the step, then the limit, then
     /// the start, and moves the dispatch cursor `ip` past the loop when it
@@ -134,26 +109,39 @@ impl State {
             return self.instr_tfor_call_rust_fn(f, base, state, control, num_vars);
         }
 
+        let call_base = self.stack.len();
         self.check_stack_space(3)?;
         self.push_unchecked(iterator);
         self.push_unchecked(state);
         self.push_unchecked(control);
 
-        // Call with 2 args (state, control), expecting num_vars returns
+        // Call with 2 args (state, control) and take every result: they sit
+        // in storage the call already checked (a Lua callee's own frame, or
+        // what a Rust callee pushed), where padding to `num_vars` above the
+        // caller's frame could fail the stack cap after a successful call.
         // native-call: instr_tfor_call->call_unguarded
-        self.call_unguarded(ArgCount::Fixed(2), RetCount::Fixed(num_vars))?;
-
-        // The call preserves caller slot positions (see call_unguarded); user code
-        // may change captured values, but cannot remove these loop slots.
-        // Move results from stack to loop variable slots (base + 3, base + 4, ...)
-        let results_start = self.stack.len() - num_vars as usize;
-        for i in 0..num_vars as usize {
-            self.stack[base + 3 + i] = self.stack[results_start + i];
-        }
-        // Pop the results from stack
-        self.stack.truncate(results_start);
-
+        self.call_unguarded(ArgCount::Fixed(2), RetCount::All)?;
+        let returned = self.stack.len() - call_base;
+        self.take_tfor_results(base, num_vars, call_base, returned);
         Ok(())
+    }
+
+    /// Move the `returned` iterator results at `call_base` into the loop
+    /// variables (`base + 3..`), dropping extra results and setting missing
+    /// ones to nil in the registers themselves, then drop the results. The
+    /// call preserves the caller's slot positions (see `call_unguarded`);
+    /// user code may change captured values, but cannot remove these loop
+    /// slots.
+    #[inline(always)]
+    fn take_tfor_results(&mut self, base: usize, num_vars: u8, call_base: usize, returned: usize) {
+        for i in 0..num_vars as usize {
+            self.stack[base + 3 + i] = if i < returned {
+                self.stack[call_base + i]
+            } else {
+                Val::Nil
+            };
+        }
+        self.stack.truncate(call_base);
     }
 
     #[inline(always)]
@@ -265,24 +253,8 @@ impl State {
 
         // native-call: instr_tfor_call_rust_fn->invoke_rust_fn
         let num_ret_reported = self.invoke_rust_fn(f, call_base, false)?;
-
-        // This truncate is redundant: the error propagates into
-        // `unwind_invocation`, which truncates the whole frame. It stays
-        // because this function inlines into `Frame::run`, and deleting it
-        // re-packs that frame's spill slots one 16-byte alignment step larger
-        // in release, on every native re-entry cycle (measured with
-        // `tests/native_stack.rs`'s `native_bytes_per_level`). Keep it until
-        // a build shows the frame holds without it.
-        if let Err(e) = self.balance_stack(num_vars as usize, num_ret_reported as usize) {
-            self.stack.truncate(call_base);
-            return Err(e);
-        }
-        let results_start = self.stack.len() - num_vars as usize;
-        for i in 0..num_vars as usize {
-            self.stack[base + 3 + i] = self.stack[results_start + i];
-        }
-        self.stack.truncate(results_start);
-
+        // The callback's results are at `call_base`, in slots it pushed.
+        self.take_tfor_results(base, num_vars, call_base, usize::from(num_ret_reported));
         Ok(())
     }
 

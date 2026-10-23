@@ -219,13 +219,24 @@ capacity; what a collection frees is the payloads and entries it removes.
 - The host methods `push_*`, `new_table`, `get_global` and `open_libs` are
   fallible for this reason.
 - A Lua call reserves its function's whole register frame when it is
-  admitted. A call whose frame does not fit under the cap fails there with
-  `StackOverflow`, before its body runs, even when the path it would take
-  needs fewer registers. A call from Lua reports that refusal at the
-  caller's call instruction; the callee was never entered and is absent
-  from the traceback. A fixed number of results then lands in registers
-  that already exist, so such a return into a Lua caller never grows the
-  stack.
+  admitted, plus four free slots above it for the largest call window an
+  instruction opens (a `__newindex` function handler's). A call whose
+  reservation does not fit under the cap fails there with `StackOverflow`,
+  before its body runs, even when the path it would take needs fewer
+  registers. A call from Lua reports that refusal at the caller's call
+  instruction; the callee was never entered and is absent from the
+  traceback. A fixed number of results then lands in registers that already
+  exist, so such a return into a Lua caller never grows the stack.
+- An admitted function's own instructions therefore never fail the cap:
+  closures, constructors, concatenation, generic `for` result delivery and
+  every table read, store and length work in its registers, whatever the
+  spelling (`t.k`, `t["k"]`, `t:k()`, a string receiver, a new or existing
+  key) and however long the `__index` or `__newindex` table chain. Inside a
+  running function the cap is reached only by a call: a callee's admission
+  (a Lua function, or an `__index`, `__newindex`, `__len` or iterator
+  handler), the receiver a `__call` step inserts, or a Rust callee's own
+  pushes; and by open results (`...`, or a call's or return's open count)
+  growing past the frame.
 - The cap bounds the shared value stack, not total host memory. Enforcing it
   charges no cost.
 - A stack at the cap holds about 16 MB of values on a 64-bit host. Tests that
@@ -270,10 +281,11 @@ profile and thread size; none depends on how much native stack is left.
   and `MAX_NATIVE_CALL_DEPTH` bounds how many can be active at once. The
   host's own call is one of them, and so is a Rust callback calling another
   Rust function through `State::call`.
-- Other native recursion has its own bound: `__newindex` table chains and
-  `__index` chains through strings (`MAX_METAMETHOD_DEPTH`), the parser
-  (`MAX_SYNTAX_DEPTH`) and the pattern matcher (`MAXCCALLS`). An `__index`
-  chain of tables is resolved in a loop and adds no native frame per step.
+- Other native recursion has its own bound: the parser
+  (`MAX_SYNTAX_DEPTH`) and the pattern matcher (`MAXCCALLS`). `__index`
+  chains, through tables and strings alike, and `__newindex` table chains
+  are resolved in a loop and add no native frame per step; only
+  `MAX_METAMETHOD_DEPTH` bounds them.
 - The counters are per State. A callback that runs another State nests that
   State's whole stack use on top of this one's, which is the embedder's to
   provision.
@@ -333,9 +345,10 @@ How `tests/native_stack.rs` validates it, on x86-64 Linux:
   paths.
 - A `__call` chain through non-function values is resolved in a loop: each
   step holds a metamethod unit while the call runs but adds no native frame,
-  so it is not a chain kind of its own. An `__index` chain of tables is
-  resolved the same way; the test still holds one across the leaf (its
-  `index` chain kind), where its units cost no native stack per step.
+  so it is not a chain kind of its own. `__index` and `__newindex` chains
+  are resolved the same way; the test still holds a table chain of each
+  across the leaf (its `index` and `newindex` chain kinds), where their
+  units cost no native stack per step.
 - It runs in both settings, each with and without the `snapshot` feature.
   The `snapshot` runs validate that build configuration only.
 - The recurring cost per level is what its on-demand
@@ -365,6 +378,14 @@ stack, so the largest chain step is the `__newindex` one, 1,168 bytes in dev
 and 208 in release; the largest recurring cycle is 14,720 bytes in dev and
 3,760 in release with snapshot. The same loose bound is about 2.33 MiB in
 dev and 0.58 MiB in release with snapshot.
+
+The next one (plantasjen, on top of df80d81), taken when the table and
+length instructions stopped copying operands above the frame and
+`__newindex` and string `__index` steps became loops too, is recorded there
+under "Register-native slow paths": no chain step costs native stack in
+either setting, and the largest recurring cycle is 14,608 bytes in dev and
+3,552 in release (3,520 with snapshot). The loose bound is then about
+2.09 MiB in dev and 0.51 MiB in release.
 
 The release sort callback retains 32 bytes of frame growth for fallible
 array and root-copy allocation. The dispatch frame is 32 bytes smaller,

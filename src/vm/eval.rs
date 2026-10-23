@@ -12,6 +12,13 @@ use super::{Bytecode, CallInfo, Error, ErrorKind, MAX_CALL_DEPTH, Result, State,
 use crate::instr::{ArgCount, RetCount};
 use crate::limits::{MAX_ARGUMENTS, MAX_METAMETHOD_DEPTH, MAX_NATIVE_CALL_DEPTH};
 
+/// Stack slots a Lua frame's admission reserves, unfilled, above its
+/// registers: the largest call window an instruction pushes there, the
+/// `__newindex` function handler's `[handler, table, key, value]`. The
+/// `__index`, `__len` and generic-for iterator windows take three. Reference
+/// Lua reserves `EXTRA_STACK` for the same purpose.
+pub(super) const FRAME_HEADROOM: usize = 4;
+
 /// Entry observation is zero-sized for ordinary calls, including debug builds.
 /// Only direct function-valued index handlers carry a mutable commit flag.
 pub(crate) trait CallEntry {
@@ -519,12 +526,22 @@ impl State {
                 index: isize::try_from(n).map_or(isize::MIN, |n| -n),
             }));
         }
-        self.concat_helper(n)
+        let idx = self.stack.len() - n;
+        let val = self.concat_values(idx, n)?;
+        self.stack.truncate(idx);
+        self.push_unchecked(val); // Replaces the concatenation operands just removed.
+        Ok(())
     }
 
+    /// The concatenation of the `n` stack values from `idx`, read in place.
+    /// A rejection leaves them as they were; the caller consumes them.
+    /// Outlined: inlined into `OP_CONCAT`'s arm, its rendering and buffer
+    /// temporaries grow `Frame::run`, a frame live across every native
+    /// re-entry.
     #[hotpath::measure]
-    pub(super) fn concat_helper(&mut self, n: usize) -> Result<()> {
-        let idx = self.stack.len() - n;
+    #[inline(never)]
+    pub(super) fn concat_values(&mut self, idx: usize, n: usize) -> Result<Val> {
+        let operands = idx..idx + n;
 
         // First pass: type-check and compute the EXACT total byte length.
         //
@@ -536,7 +553,7 @@ impl State {
         // past the cap unchecked.
         let mut total_len = 0;
         let mut rendered_numbers = Vec::new();
-        for val in &self.stack[idx..] {
+        for val in &self.stack[operands.clone()] {
             if let Some(s) = val.as_string(&self.heap) {
                 total_len = crate::limits::checked_string_growth(total_len, s.len())?;
             } else if let Some(num) = val.as_num() {
@@ -551,7 +568,7 @@ impl State {
 
         let mut buffer = Vec::with_capacity(total_len);
         let mut rendered = rendered_numbers.iter();
-        for val in &self.stack[idx..] {
+        for val in &self.stack[operands] {
             if let Some(s) = val.as_string(&self.heap) {
                 buffer.extend_from_slice(s);
             } else if val.as_num().is_some() {
@@ -562,12 +579,9 @@ impl State {
             }
         }
 
-        // Intern before truncating, so a rejected concat leaves the operands on
-        // the stack rather than consuming them.
-        let val = self.alloc_string(&buffer)?;
-        self.stack.truncate(idx);
-        self.push_unchecked(val); // Replaces the concatenation operands just removed.
-        Ok(())
+        // The bytes are owned now, so interning (which may collect, with the
+        // operands still rooted where they are) reads nothing from the stack.
+        self.alloc_string(&buffer)
     }
 
     /// Admit a Lua call: check the call depth, push the activation record,
@@ -636,11 +650,17 @@ impl State {
         }
 
         // The frame reserves every register it can use, parameters, locals
-        // and temporaries, against the stack cap now, so its bytecode never
-        // checks it again. Missing arguments and every other register start
-        // nil.
+        // and temporaries, against the stack cap now, and `FRAME_HEADROOM`
+        // slots above them for the call window an instruction pushes. No
+        // instruction of its own can then fail the cap: every one works in
+        // its registers, and the largest window fits. Only a call can still
+        // be refused there (the callee's admission, `__call` receiver
+        // insertion, a Rust callee's own pushes), and so can growth past
+        // the frame by open results (`...`, a call's or return's open
+        // count), which that growth checks. Missing arguments and every
+        // other register start nil; the headroom is checked, not filled.
         let frame_top = frame_bottom + max_stack;
-        let grow = frame_top.saturating_sub(self.stack.len());
+        let grow = (frame_top + FRAME_HEADROOM).saturating_sub(self.stack.len());
         if let Err(e) = self.check_stack_space(grow) {
             return Err(self.reject_admission(e, frame_bottom, old_stack_bottom));
         }
@@ -951,6 +971,19 @@ impl State {
     ) -> Result<()> {
         self.check_stack_space(1)?;
         let runtime = self.resolve_bytecode_runtime(&bytecode)?;
+        let obj = self.alloc_closure(bytecode, runtime, upvalues);
+        self.push_unchecked(Val::Obj(obj));
+        Ok(())
+    }
+
+    /// Allocate a closure over `bytecode` with its resolved `runtime`. The
+    /// caller roots the result before anything else can collect.
+    pub(super) fn alloc_closure(
+        &mut self,
+        bytecode: Arc<Bytecode>,
+        runtime: Arc<super::BytecodeRuntime>,
+        upvalues: Vec<UpvalueRef>,
+    ) -> super::object::ObjectPtr {
         let identity = Arc::as_ptr(&bytecode) as usize;
         // No host callback or fallible operation occurs from this push through
         // its matching pop. The allocator's collection check must see the
@@ -972,8 +1005,7 @@ impl State {
             .pop()
             .expect("pending bytecode cache missing after closure allocation");
         debug_assert_eq!(pending, identity);
-        self.push_unchecked(Val::Obj(obj));
-        Ok(())
+        obj
     }
 
     /// Find an existing open upvalue for the given stack index, or create a new one.

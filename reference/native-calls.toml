@@ -115,55 +115,7 @@ name = "error_value"
 owner = "State"
 
 [[function]]
-name = "get_table_with_key"
-owner = "State"
-
-[[function]]
-name = "get_table_with_key_tracking_call"
-owner = "State"
-
-[[function]]
-name = "handle_index_metamethod"
-owner = "State"
-
-[[function]]
-name = "index_string"
-owner = "State"
-
-[[function]]
 name = "set_table"
-owner = "State"
-
-[[function]]
-name = "set_table_with_key"
-owner = "State"
-
-[[function]]
-name = "handle_newindex_metamethod"
-owner = "State"
-
-[[function]]
-name = "handle_newindex_metamethod_inner"
-owner = "State"
-
-[[function]]
-name = "instr_get_field"
-owner = "State"
-
-[[function]]
-name = "instr_get_table"
-owner = "State"
-
-[[function]]
-name = "instr_set_field"
-owner = "State"
-
-[[function]]
-name = "instr_set_table"
-owner = "State"
-
-[[function]]
-name = "instr_length"
 owner = "State"
 
 [[function]]
@@ -179,15 +131,11 @@ name = "reg_get_field"
 owner = "State"
 
 [[function]]
-name = "get_field_slow"
-owner = "State"
-
-[[function]]
 name = "reg_get_table"
 owner = "State"
 
 [[function]]
-name = "get_table_slow"
+name = "index_call"
 owner = "State"
 
 [[function]]
@@ -195,15 +143,11 @@ name = "reg_set_field"
 owner = "State"
 
 [[function]]
-name = "set_field_slow"
-owner = "State"
-
-[[function]]
 name = "reg_set_table"
 owner = "State"
 
 [[function]]
-name = "set_table_slow"
+name = "newindex_call"
 owner = "State"
 
 [[function]]
@@ -211,7 +155,7 @@ name = "reg_len"
 owner = "State"
 
 [[function]]
-name = "len_slow"
+name = "len_call"
 owner = "State"
 
 [[function]]
@@ -415,64 +359,28 @@ id = "run_frame->call_from_lua"
 
 # src/vm/registers.rs
 [[edge]]
-id = "reg_get_field->get_field_slow"
+id = "reg_get_field->index_call"
 
 [[edge]]
-id = "get_field_slow->instr_get_field"
+id = "reg_get_table->index_call"
 
 [[edge]]
-id = "reg_get_table->get_table_slow"
+id = "index_call->call_unguarded"
 
 [[edge]]
-id = "get_table_slow->instr_get_table"
+id = "reg_set_field->newindex_call"
 
 [[edge]]
-id = "reg_set_field->set_field_slow"
+id = "reg_set_table->newindex_call"
 
 [[edge]]
-id = "set_field_slow->instr_set_field"
+id = "newindex_call->call_unguarded"
 
 [[edge]]
-id = "reg_set_table->set_table_slow"
+id = "reg_len->len_call"
 
 [[edge]]
-id = "set_table_slow->instr_set_table"
-
-[[edge]]
-id = "reg_len->len_slow"
-
-[[edge]]
-id = "len_slow->instr_length"
-
-# src/vm/eval_index.rs
-[[edge]]
-id = "instr_get_field->get_table_with_key"
-
-[[edge]]
-id = "instr_get_field->index_string"
-
-[[edge]]
-id = "instr_get_table->index_string"
-
-[[edge]]
-id = "instr_get_table->get_table_with_key"
-
-[[edge]]
-id = "index_string->call_unguarded"
-
-[[edge]]
-id = "index_string->index_string"
-chains = ["string", "string_table"]
-
-# src/vm/eval_store.rs
-[[edge]]
-id = "instr_length->call_unguarded"
-
-[[edge]]
-id = "instr_set_field->set_table_with_key"
-
-[[edge]]
-id = "instr_set_table->set_table_with_key"
+id = "len_call->call_unguarded"
 
 # src/vm/eval_control.rs
 [[edge]]
@@ -483,35 +391,6 @@ id = "instr_tfor_call->call_unguarded"
 
 [[edge]]
 id = "instr_tfor_call_rust_fn->invoke_rust_fn"
-
-# src/vm/metamethod.rs
-[[edge]]
-id = "get_table_with_key->get_table_with_key_tracking_call"
-
-[[edge]]
-id = "get_table_with_key_tracking_call->handle_index_metamethod"
-
-[[edge]]
-id = "handle_index_metamethod->call_unguarded"
-
-[[edge]]
-id = "handle_index_metamethod->index_string"
-
-[[edge]]
-id = "set_table_with_key->handle_newindex_metamethod"
-
-[[edge]]
-id = "handle_newindex_metamethod->handle_newindex_metamethod_inner"
-
-[[edge]]
-id = "handle_newindex_metamethod_inner->set_table_with_key"
-chains = ["newindex"]
-
-[[edge]]
-id = "handle_newindex_metamethod_inner->call_unguarded:lua"
-
-[[edge]]
-id = "handle_newindex_metamethod_inner->call_unguarded:rust"
 
 # src/vm/anchor.rs
 [[edge]]
@@ -525,13 +404,10 @@ id = "call_anchor_unguarded->call_unguarded"
 id = "get_table->get_table_unguarded"
 
 [[edge]]
-id = "get_table_unguarded->index_string"
+id = "get_table_unguarded->call_unguarded"
 
 [[edge]]
-id = "get_table_unguarded->get_table_with_key_tracking_call"
-
-[[edge]]
-id = "set_table->set_table_with_key"
+id = "set_table->call_unguarded"
 
 [[edge]]
 id = "table_sort->table_sort_values:comparator"
@@ -758,46 +634,33 @@ rust = [
     "call_from_lua->begin_call",
     "begin_call->invoke_rust_fn",
 ]
+# An __index function handler reached from a field read; the resolver
+# (`State::resolve_index`) has returned before the call, so table, string
+# and handler chains all take this path.
 get_field = [
     "run_frame->reg_get_field:field",
-    "reg_get_field->get_field_slow",
-    "get_field_slow->instr_get_field",
+    "reg_get_field->index_call",
+    "index_call->call_unguarded",
 ]
 get_key = [
     "run_frame->reg_get_table",
-    "reg_get_table->get_table_slow",
-    "get_table_slow->instr_get_table",
+    "reg_get_table->index_call",
+    "index_call->call_unguarded",
 ]
+# A __newindex function handler reached from a field store.
 set_field = [
     "run_frame->reg_set_field",
-    "reg_set_field->set_field_slow",
-    "set_field_slow->instr_set_field",
-    "instr_set_field->set_table_with_key",
-]
-# An __index function handler, from the lookup that found it.
-index_function = [
-    "get_table_with_key_tracking_call->handle_index_metamethod",
-    "handle_index_metamethod->call_unguarded",
-]
-# A __newindex function handler, from the store that found it.
-newindex_function = [
-    "set_table_with_key->handle_newindex_metamethod",
-    "handle_newindex_metamethod->handle_newindex_metamethod_inner",
-    "handle_newindex_metamethod_inner->call_unguarded:lua",
+    "reg_set_field->newindex_call",
+    "newindex_call->call_unguarded",
 ]
 # A library or host read through __index.
 read = [
-    "get_table_unguarded->get_table_with_key_tracking_call",
-    "get_table_with_key_tracking_call->handle_index_metamethod",
-    "handle_index_metamethod->call_unguarded",
+    "get_table_unguarded->call_unguarded",
 ]
 # A table-library write through __newindex.
 write = [
     "set_index->set_table",
-    "set_table->set_table_with_key",
-    "set_table_with_key->handle_newindex_metamethod",
-    "handle_newindex_metamethod->handle_newindex_metamethod_inner",
-    "handle_newindex_metamethod_inner->call_unguarded:lua",
+    "set_table->call_unguarded",
 ]
 tostring = [
     "tostring_bytes_unguarded->tostring_rendering",
@@ -809,9 +672,6 @@ rust_handler = [
     "begin_call->invoke_rust_fn",
     "call->call_unguarded",
 ]
-string_handler = [
-    "index_string->call_unguarded",
-]
 sort_comparator = [
     "table_sort_less->call_unguarded",
 ]
@@ -820,106 +680,66 @@ sort_comparator = [
 
 [[scenario]]
 name = "index_field"
-path = [
-    "@lua", "@get_field",
-    "instr_get_field->get_table_with_key",
-    "get_table_with_key->get_table_with_key_tracking_call",
-    "@index_function",
-]
+path = ["@lua", "@get_field"]
 
 [[scenario]]
 name = "index_method"
 path = [
     "@lua",
     "run_frame->reg_get_field:self",
-    "reg_get_field->get_field_slow",
-    "get_field_slow->instr_get_field",
-    "instr_get_field->get_table_with_key",
-    "get_table_with_key->get_table_with_key_tracking_call",
-    "@index_function",
+    "reg_get_field->index_call",
+    "index_call->call_unguarded",
 ]
 
 [[scenario]]
 name = "index_key"
-path = [
-    "@lua", "@get_key",
-    "instr_get_table->get_table_with_key",
-    "get_table_with_key->get_table_with_key_tracking_call",
-    "@index_function",
-]
+path = ["@lua", "@get_key"]
 
 [[scenario]]
 name = "index_rust"
-path = [
-    "@lua", "@get_field",
-    "instr_get_field->get_table_with_key",
-    "get_table_with_key->get_table_with_key_tracking_call",
-    "get_table_with_key_tracking_call->handle_index_metamethod",
-    "handle_index_metamethod->call_unguarded",
-    "@rust_handler",
-]
+path = ["@lua", "@get_field", "@rust_handler"]
 
 [[scenario]]
 name = "newindex_field"
-path = ["@lua", "@set_field", "@newindex_function"]
+path = ["@lua", "@set_field"]
 
 [[scenario]]
 name = "newindex_key"
 path = [
     "@lua",
     "run_frame->reg_set_table",
-    "reg_set_table->set_table_slow",
-    "set_table_slow->instr_set_table",
-    "instr_set_table->set_table_with_key",
-    "@newindex_function",
+    "reg_set_table->newindex_call",
+    "newindex_call->call_unguarded",
 ]
 
 [[scenario]]
 name = "newindex_rust"
-path = [
-    "@lua", "@set_field",
-    "set_table_with_key->handle_newindex_metamethod",
-    "handle_newindex_metamethod->handle_newindex_metamethod_inner",
-    "handle_newindex_metamethod_inner->call_unguarded:rust",
-    "@rust_handler",
-]
+path = ["@lua", "@set_field", "@rust_handler"]
 
 [[scenario]]
 name = "length"
 path = [
     "@lua",
     "run_frame->reg_len",
-    "reg_len->len_slow",
-    "len_slow->instr_length",
-    "instr_length->call_unguarded",
+    "reg_len->len_call",
+    "len_call->call_unguarded",
 ]
 
 [[scenario]]
 name = "string_index_field"
-path = ["@lua", "@get_field", "instr_get_field->index_string", "@string_handler"]
+path = ["@lua", "@get_field"]
 
 [[scenario]]
 name = "string_index_key"
-path = ["@lua", "@get_key", "instr_get_table->index_string", "@string_handler"]
+path = ["@lua", "@get_key"]
 
 [[scenario]]
 name = "index_string_handler"
-path = [
-    "@lua", "@get_field",
-    "instr_get_field->get_table_with_key",
-    "get_table_with_key->get_table_with_key_tracking_call",
-    "get_table_with_key_tracking_call->handle_index_metamethod",
-    "handle_index_metamethod->index_string",
-    "@string_handler",
-]
+path = ["@lua", "@get_field"]
 
 [[scenario]]
 name = "string_library_index"
-path = [
-    "@lua", "@get_field",
-    "instr_get_field->index_string",
-    "@string_handler",
-]
+path = ["@lua", "@get_field"]
 
 [[scenario]]
 name = "host_get_table"
@@ -927,12 +747,7 @@ path = ["@lua", "@rust", "get_table->get_table_unguarded", "@read"]
 
 [[scenario]]
 name = "host_get_table_string"
-path = [
-    "@lua", "@rust",
-    "get_table->get_table_unguarded",
-    "get_table_unguarded->index_string",
-    "@string_handler",
-]
+path = ["@lua", "@rust", "get_table->get_table_unguarded", "@read"]
 
 [[scenario]]
 name = "host_call"
@@ -1077,8 +892,7 @@ path = [
     "@lua", "@rust",
     "lib:table.sort->sort_through_metamethods",
     "sort_through_metamethods->set_table",
-    "set_table->set_table_with_key",
-    "@newindex_function",
+    "set_table->call_unguarded",
 ]
 
 [[scenario]]

@@ -1113,26 +1113,30 @@ fn length_metamethod_preflights_three_slots_at_the_stack_cap() {
         .call(crate::ArgCount::Fixed(0), RetCount::Fixed(0))
         .unwrap();
     state.get_global("t").unwrap();
-    for entry_size in [MAX_STACK_SIZE - 1, MAX_STACK_SIZE] {
-        state.set_top((entry_size - 1) as isize).unwrap();
-        state.push_value(1).unwrap();
+    let table = state.stack[0];
+    for entry_size in [MAX_STACK_SIZE - 2, MAX_STACK_SIZE] {
+        state.set_top(entry_size as isize).unwrap();
         let error = state
-            .instr_length(&mut 0)
+            .resolve_length(table, &mut 0)
             .expect_err("three slots do not fit");
         assert!(matches!(
             error.kind(),
             crate::error::ErrorKind::StackOverflow { size, limit }
-                if *size == entry_size + 2 && *limit == MAX_STACK_SIZE
+                if *size == entry_size + 3 && *limit == MAX_STACK_SIZE
         ));
-        assert_eq!(state.get_top(), entry_size - 1);
+        assert_eq!(state.get_top(), entry_size);
         assert_eq!(*state.user_data::<usize>().unwrap(), 0);
     }
 
     state.set_top((MAX_STACK_SIZE - 3) as isize).unwrap();
-    state.push_value(1).unwrap();
+    let pending = state
+        .resolve_length(table, &mut 0)
+        .expect("three free slots");
+    assert!(pending.is_none(), "the handler's window is pushed");
+    assert_eq!(state.get_top(), MAX_STACK_SIZE);
     state
-        .instr_length(&mut 0)
-        .expect("three free slots after popping the operand");
+        .call(crate::ArgCount::Fixed(2), RetCount::Fixed(1))
+        .unwrap();
     assert_eq!(state.get_top(), MAX_STACK_SIZE - 2);
     assert_eq!(state.to_number(-1).unwrap(), 7.0);
     assert_eq!(*state.user_data::<usize>().unwrap(), 1);

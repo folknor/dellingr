@@ -19,10 +19,11 @@ use crate::limits::tuning;
 /// A `Frame` represents a single stack-frame of a Lua function.
 ///
 /// The frame's registers are the stack slots `[stack_bottom, top)`, reserved
-/// and nil-filled at admission. While its bytecode runs the stack is at least
-/// `top` long; it is exactly `top` except between an instruction that leaves
-/// open results and the one that consumes them, and while an instruction's
-/// own operands for a callback sit above the frame.
+/// and nil-filled at admission, with `FRAME_HEADROOM` checked free above
+/// them. While its bytecode runs the stack is at least `top` long; it is
+/// exactly `top` except between an instruction that leaves open results and
+/// the one that consumes them, and while an instruction's call window sits
+/// above the frame.
 pub(super) struct Frame {
     /// The bytecode being executed (shared via Arc; cheap to clone, immutable).
     bytecode: Arc<Bytecode>,
@@ -332,7 +333,7 @@ impl Frame {
                 }
                 Instr::OP_NEW_TABLE_TEMPLATE => {
                     add_cost!(const { Instr::fixed_units(Instr::OP_NEW_TABLE_TEMPLATE) });
-                    state.reg_new_table_template(frame, ra, inst.b())?;
+                    state.reg_new_table_template(frame, ra, inst.b());
                 }
 
                 // Table reads
@@ -572,9 +573,9 @@ impl State {
     /// Every path from a dispatch arm that can reach a call (into Lua or into
     /// a Rust function) must record first: `OP_CALL` and `OP_TFOR_CALL` in
     /// their arms, the table and length instructions first thing in their
-    /// outlined stack paths (`get_field_slow`, `get_table_slow`,
-    /// `set_field_slow`, `set_table_slow`, `len_slow`), so the cache hits
-    /// and direct paths that call nothing do not pay for it. The innermost
+    /// outlined handler-call functions (`index_call`, `newindex_call`,
+    /// `len_call`), so the cache hits and the resolvers that call nothing do
+    /// not pay for it. The innermost
     /// record is therefore stale while its activation runs, which nothing
     /// observes: a traceback skips the innermost record (the executing frame
     /// supplies that line), and `print` reads it only from a Rust function

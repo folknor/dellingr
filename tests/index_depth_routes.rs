@@ -415,11 +415,11 @@ fn call_near_cap(state: &mut State, function: &str, receiver: &str, headroom: us
 }
 
 #[test]
-fn a_cached_miss_expires_when_the_lookup_becomes_direct() {
-    // Each site first learns that the register path cannot answer (the
-    // method table lacks the key, or the handler is a function), then the
-    // heap changes so that it can. At the stack cap only the register path
-    // succeeds, so a stale miss would show as StackOverflow.
+fn a_site_answers_from_the_heap_after_it_changes() {
+    // Each site first resolves through a chain or a function handler, then
+    // the heap changes so that a one-level table answers. Run at the stack
+    // cap, where the table answer needs no room and a handler call would
+    // be refused, the site must give the new answer.
     for (change, receiver, expected) in [
         ("Derived.greet = 'derived'", "two", "derived"),
         (
@@ -453,19 +453,20 @@ fn stack_need_at_the_cap_does_not_depend_on_cache_history() {
         } else {
             ""
         });
-        // A one-level field read answers in its register, with no scratch,
-        // even after its site resolved an inherited method.
-        assert_eq!(
-            call_near_cap(&mut state, "cap_field", "one", 0),
-            value("one"),
-            "warm {warm}"
-        );
-        // A string method read needs the receiver copy and its result, the
-        // same two slots cold as with the string-method cache warm.
+        // A read that calls no handler answers in its register at the cap,
+        // whatever its chain length and whatever its site resolved before.
+        for (receiver, expected) in [("one", "one"), ("two", "base"), ("three", "base")] {
+            assert_eq!(
+                call_near_cap(&mut state, "cap_field", receiver, 0),
+                value(expected),
+                "warm {warm}: {receiver}"
+            );
+        }
+        // So does a string method read, cold or with its cache warm.
         state.push_string("x").expect("receiver fits");
         state.set_global("str").expect("receiver set");
         assert_eq!(
-            call_near_cap(&mut state, "cap_string", "str", 1),
+            call_near_cap(&mut state, "cap_string", "str", 0),
             value("X"),
             "warm {warm}"
         );

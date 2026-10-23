@@ -185,20 +185,6 @@ impl State {
         Ok(())
     }
 
-    #[hotpath::measure]
-    pub(super) fn new_table_with_template(
-        &mut self,
-        key_ids: &[u16],
-        literals: &[Val],
-    ) -> Result<()> {
-        self.check_stack_space(1)?;
-        let obj = self
-            .allocator()
-            .alloc_table_with_template(key_ids, literals);
-        self.push_unchecked(Val::Obj(obj));
-        Ok(())
-    }
-
     pub(crate) fn set_table_str_key_value(
         &mut self,
         table_idx: isize,
@@ -261,7 +247,7 @@ impl State {
     /// "index" event.
     ///
     /// A string receiver resolves through the shared string metatable exactly
-    /// as the `t[k]` opcode does (`index_string`), so `("abc")["upper"]` gives
+    /// as the `t[k]` opcode does (`State::resolve_index`), so `("abc")["upper"]` gives
     /// the host what it gives a script.
     ///
     /// Validation and dispatch preflight failures leave the stack unchanged.
@@ -297,25 +283,44 @@ impl State {
         };
         let top = self.stack.len();
         let key = self.pop_val();
+        let receiver = self.stack[idx];
         let mut local_cost = 0;
         let mut handler_called = false;
-        let result = if is_string {
-            let receiver = self.stack[idx];
-            // native-call: get_table_unguarded->index_string
-            self.index_string(receiver, key, None, &mut local_cost, &mut handler_called)
-        } else {
-            // native-call: get_table_unguarded->get_table_with_key_tracking_call
-            self.get_table_with_key_tracking_call(idx, key, &mut local_cost, &mut handler_called)
+        let result = match self.resolve_index(
+            receiver,
+            super::metamethod::IndexStart::Receiver,
+            key,
+            None,
+            &mut local_cost,
+        ) {
+            Ok(super::metamethod::IndexOutcome::Value(val)) => Ok(val),
+            Ok(super::metamethod::IndexOutcome::Call(units)) => {
+                // native-call: get_table_unguarded->call_unguarded
+                let called = self.call_unguarded(
+                    (ArgCount::Fixed(2), &mut handler_called),
+                    RetCount::Fixed(1),
+                );
+                self.metamethod_depth -= units;
+                called.map(|()| self.pop_val())
+            }
+            Err(error) => Err(error),
         };
-        if result.is_err() {
-            // Clear every handler-table temporary. Before handler entry the
-            // dispatch contract also preserves the popped key.
-            self.stack.truncate(top - 1);
-            if !handler_called {
-                self.push_unchecked(key);
+        match result {
+            // Replaces the key popped above: net zero.
+            Ok(val) => {
+                self.push_unchecked(val);
+                Ok(())
+            }
+            Err(error) => {
+                // Clear the call window. Before handler entry the dispatch
+                // contract also preserves the popped key.
+                self.stack.truncate(top - 1);
+                if !handler_called {
+                    self.push_unchecked(key);
+                }
+                Err(self.report_escaping(error))
             }
         }
-        result.map_err(|error| self.report_escaping(error))
     }
 
     /// Classify `get_table`'s operand rejection. Operand misuse (a bad index,
@@ -415,8 +420,25 @@ impl State {
         let key = self.stack[top - 2];
         let val = self.stack[top - 1];
         let mut local_cost = 0;
-        // native-call: set_table->set_table_with_key
-        self.set_table_with_key(idx, key, val, &mut local_cost)?;
+        let ptr = self.stack[idx]
+            .as_object_ptr()
+            .expect("table_operand_below_top validated the table");
+        let tbl = self
+            .heap
+            .as_table(ptr)
+            .expect("table_operand_below_top validated the table");
+        let pending = if matches!(tbl.get(&key), Val::Nil) {
+            self.store_new_key(ptr, key, val, &mut local_cost)?
+        } else {
+            tbl.insert(key, val)?;
+            None
+        };
+        if let Some(units) = pending {
+            // native-call: set_table->call_unguarded
+            let called = self.call_unguarded(ArgCount::Fixed(3), RetCount::Fixed(0));
+            self.metamethod_depth -= units;
+            called?;
+        }
         self.stack.truncate(top - 2);
         Ok(())
     }
@@ -497,7 +519,7 @@ impl State {
     /// metatable all strings share, as reference Lua does (`__index` = the
     /// string library table `open_libs` built; nil in a `State::raw` that
     /// never opened the libraries). It is a real table a script may modify;
-    /// `index_string` in `eval_index.rs` resolves string indexing through it.
+    /// `State::resolve_index` resolves string indexing through it.
     /// It cannot be replaced: `set_metatable_of` accepts only tables. Every
     /// other type has no metatable and returns nil.
     #[hotpath::measure]

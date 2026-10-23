@@ -1,19 +1,25 @@
-//! Register forms of the instructions whose work lives in the stack-top
-//! helpers.
+//! Register forms of the instructions that do more than move values.
 //!
-//! Each handler tries a fast path on the registers directly. When that path
-//! cannot finish (a metamethod, a string receiver, a cache miss that needs
-//! the general lookup), it copies its operands to the top of the stack,
-//! above the frame's registers, and runs the same helper the instruction has
-//! always used. Those copies are the instruction's own roots while any
-//! callback runs, the helpers already own cost flushing and error cleanup,
-//! and the result comes back off the top into the destination register.
+//! Every handler works on the registers in place: operands are read from
+//! their registers (or the literal pool) and the result is written straight
+//! into the destination register. Nothing is copied above the frame. The
+//! table and length instructions try an inline fast path, then an outlined
+//! resolver that calls nothing (`State::resolve_index`,
+//! `State::store_field`, `State::resolve_length`); only when that resolver
+//! ends at a function handler, with the call window pushed, does a small
+//! outlined call function (`index_call`, `newindex_call`, `len_call`) make
+//! the call. The window is the only stack an instruction uses above its
+//! frame, and admission reserves room for the largest one
+//! (`State::admit_lua_call`), so none of these instructions can fail the
+//! stack cap itself.
 
 use super::super::error::{ConstructorTableOperation, ErrorKind, InternalFault, TypeError};
 use super::frame::Frame;
+use super::metamethod::{IndexOutcome, IndexStart};
 use super::object::Upvalue;
 use super::{Error, Result, State, Val};
-use crate::instr::{CompareOp, Instr, RetCount};
+use crate::compiler::UpvalueDesc;
+use crate::instr::{ArgCount, CompareOp, Instr, RetCount};
 use crate::limits::MAX_TABLE_BATCH_SIZE;
 
 impl State {
@@ -71,23 +77,25 @@ impl State {
         self.global_env.write_named(name, val, cache);
     }
 
-    /// Take the value an existing helper left on top into register `dst`.
+    /// Take a handler's one result off the top into register `dst`.
     #[inline(always)]
     fn pop_into(&mut self, dst: usize) {
         let val = self.pop_val();
         self.stack[dst] = val;
     }
 
-    pub(super) fn reg_new_table_template(
-        &mut self,
-        frame: &Frame,
-        dst: usize,
-        template: u16,
-    ) -> Result<()> {
+    /// `R[dst] = {...}` from a constructor template. The registers are roots
+    /// while the allocator may collect, and the new table goes straight into
+    /// its register, as `OP_NEW_TABLE`'s does. Outlined, so the template
+    /// table's construction stays out of `Frame::run`.
+    #[hotpath::measure]
+    #[inline(never)]
+    pub(super) fn reg_new_table_template(&mut self, frame: &Frame, dst: usize, template: u16) {
         let template = &frame.bytecode().table_templates[usize::from(template)];
-        self.new_table_with_template(template, &frame.runtime.literals)?;
-        self.pop_into(dst);
-        Ok(())
+        let obj = self
+            .allocator()
+            .alloc_table_with_template(template, &frame.runtime.literals);
+        self.stack[dst] = Val::Obj(obj);
     }
 
     /// `R[dst] = receiver.name`. Only a current own-field cache hit runs in
@@ -97,12 +105,16 @@ impl State {
     /// probe's unshared debug locals out of `Frame::run`, a frame live across
     /// every native re-entry.
     ///
-    /// `call_site` is the dispatch cursor. The outlined stack path, the one
-    /// path that can call out, records it first (`State::record_call_site`);
-    /// the same holds for the other table and length handlers below. The
-    /// record stays out of this function and out of `Frame::run`: here it
-    /// tipped the release build into outlining this function, a call on the
-    /// hit path, and inlined into the dispatch loop it grew that frame.
+    /// Everything past the hit is one outlined resolver call, which reads
+    /// each table once and returns before any handler runs; only a function
+    /// handler continues into `index_call`.
+    ///
+    /// `call_site` is the dispatch cursor. The call function, the one path
+    /// that can call out, records it first (`State::record_call_site`); the
+    /// same holds for the other table and length handlers below. The record
+    /// stays out of this function and out of `Frame::run`: here it tipped
+    /// the release build into outlining this function, a call on the hit
+    /// path, and inlined into the dispatch loop it grew that frame.
     #[inline]
     pub(super) fn reg_get_field(
         &mut self,
@@ -118,13 +130,28 @@ impl State {
             self.stack[dst] = val;
             return Ok(());
         }
-        // The direct miss returns before the stack path starts, so its frame
-        // is not live across the handler calls that path can make.
-        if self.get_field_direct(frame, dst, receiver, inst.c(), cache_slot) {
-            return Ok(());
+        let key = frame.literal(inst.c());
+        let cache = frame.runtime.caches.field(cache_slot);
+        match self.resolve_index(receiver, IndexStart::Receiver, key, cache, local_cost)? {
+            IndexOutcome::Value(val) => self.stack[dst] = val,
+            // native-call: reg_get_field->index_call
+            IndexOutcome::Call(units) => self.index_call(dst, units, call_site)?,
         }
-        // native-call: reg_get_field->get_field_slow
-        self.get_field_slow(frame, inst, dst, receiver, local_cost, call_site)
+        Ok(())
+    }
+
+    /// Call the `__index` function handler whose window the resolver pushed
+    /// and take its result into `dst`, returning the resolver's units
+    /// whatever the outcome.
+    #[inline(never)]
+    fn index_call(&mut self, dst: usize, units: u32, call_site: usize) -> Result<()> {
+        self.record_call_site(call_site);
+        // native-call: index_call->call_unguarded
+        let result = self.call_unguarded(ArgCount::Fixed(2), RetCount::Fixed(1));
+        self.metamethod_depth -= units;
+        result?;
+        self.pop_into(dst);
+        Ok(())
     }
 
     #[inline]
@@ -133,66 +160,10 @@ impl State {
         self.get_current_cached_field(receiver.as_object_ptr()?, cache)
     }
 
-    /// The register-native part of a field read that missed the own-field
-    /// cache: the raw lookup (which refills that cache, and makes a plain
-    /// table's miss nil), then a direct `__index`-table lookup, both without
-    /// temporaries or handler calls. Only after the raw lookup has proved the
-    /// key absent may the method cache answer: a receiver's version does not
-    /// move when it gains a field, so nothing cheaper proves absence. False
-    /// leaves chains, handlers and string receivers to the stack path.
-    #[inline(never)]
-    fn get_field_direct(
-        &mut self,
-        frame: &Frame,
-        dst: usize,
-        receiver: Val,
-        name: u16,
-        cache_slot: Option<u8>,
-    ) -> bool {
-        let Some(ptr) = receiver.as_object_ptr() else {
-            return false;
-        };
-        let key = frame.literal(name);
-        let cache = frame.runtime.caches.field(cache_slot);
-        let Some((direct, metatable)) = self.get_table_field_direct(ptr, key, cache) else {
-            return false;
-        };
-        let result = match (direct, metatable) {
-            (Some(result), _) => result,
-            // A miss on a plain table is nil, exactly as `t["k"]` and
-            // `rawget` see it.
-            (None, None) => Val::Nil,
-            (None, Some(metatable)) => {
-                match self.get_index_table_field_direct(metatable, key, cache) {
-                    Some(result) => result,
-                    None => return false,
-                }
-            }
-        };
-        self.stack[dst] = result;
-        true
-    }
-
-    #[inline(never)]
-    fn get_field_slow(
-        &mut self,
-        frame: &Frame,
-        inst: Instr,
-        dst: usize,
-        receiver: Val,
-        local_cost: &mut u64,
-        call_site: usize,
-    ) -> Result<()> {
-        self.record_call_site(call_site);
-        self.check_stack_space(1)?;
-        self.push_unchecked(receiver);
-        // native-call: get_field_slow->instr_get_field
-        self.instr_get_field(frame, inst.c(), inst.cache_slot(), local_cost)?;
-        self.pop_into(dst);
-        Ok(())
-    }
-
-    /// `R[dst] = R[table][R[key]]`.
+    /// `R[dst] = R[table][R[key]]`. A plain table, or a raw hit, answers
+    /// inline; a raw miss on a table with a metatable continues past the
+    /// receiver's lookup it already did, and any other receiver resolves
+    /// from the start.
     pub(super) fn reg_get_table(
         &mut self,
         dst: usize,
@@ -203,40 +174,36 @@ impl State {
     ) -> Result<()> {
         let tbl_val = self.stack[table];
         let key_val = self.stack[key];
-        if let Some(tbl) = tbl_val
+        let start = match tbl_val
             .as_object_ptr()
             .and_then(|ptr| self.heap.as_table_ref(ptr))
         {
-            let val = tbl.get(&key_val);
-            if tbl.get_metatable().is_none() || !matches!(val, Val::Nil) {
-                self.stack[dst] = val;
-                return Ok(());
+            Some(tbl) => {
+                let val = tbl.get(&key_val);
+                match tbl.get_metatable() {
+                    Some(metatable) if matches!(val, Val::Nil) => {
+                        IndexStart::AfterRawMiss(metatable)
+                    }
+                    _ => {
+                        self.stack[dst] = val;
+                        return Ok(());
+                    }
+                }
             }
+            None => IndexStart::Receiver,
+        };
+        match self.resolve_index(tbl_val, start, key_val, None, local_cost)? {
+            IndexOutcome::Value(val) => self.stack[dst] = val,
+            // native-call: reg_get_table->index_call
+            IndexOutcome::Call(units) => self.index_call(dst, units, call_site)?,
         }
-        // native-call: reg_get_table->get_table_slow
-        self.get_table_slow(dst, tbl_val, key_val, local_cost, call_site)
-    }
-
-    #[inline(never)]
-    fn get_table_slow(
-        &mut self,
-        dst: usize,
-        table: Val,
-        key: Val,
-        local_cost: &mut u64,
-        call_site: usize,
-    ) -> Result<()> {
-        self.record_call_site(call_site);
-        self.check_stack_space(2)?;
-        self.push_unchecked(table);
-        self.push_unchecked(key);
-        // native-call: get_table_slow->instr_get_table
-        self.instr_get_table(local_cost)?;
-        self.pop_into(dst);
         Ok(())
     }
 
-    /// `R[table].name = R[src]`.
+    /// `R[table].name = R[src]`. Only a set-cache hit runs in the dispatch
+    /// loop; everything else is one outlined store (`State::store_field`),
+    /// and only a `__newindex` function handler continues into
+    /// `newindex_call`.
     pub(super) fn reg_set_field(
         &mut self,
         frame: &Frame,
@@ -249,43 +216,36 @@ impl State {
         let (name, cache_slot) = (inst.b(), inst.cache_slot());
         let receiver = self.stack[table];
         let val = self.stack[src];
+        let key = frame.literal(name);
+        let cache = frame.runtime.caches.set_field(cache_slot);
         if !matches!(val, Val::Nil)
             && let Some(ptr) = receiver.as_object_ptr()
+            && let Some(cache) = cache
+            && self.try_set_field_cached(ptr, key, val, cache)
         {
-            let key = frame.literal(name);
-            let cache = frame.runtime.caches.set_field(cache_slot);
-            if let Some(cache) = cache
-                && self.try_set_field_cached(ptr, key, val, cache)
-            {
-                return Ok(());
-            }
-            if self.try_set_field_direct(ptr, key, val, cache) {
-                return Ok(());
-            }
+            return Ok(());
         }
-        // native-call: reg_set_field->set_field_slow
-        self.set_field_slow(frame, inst, receiver, val, local_cost, call_site)
+        if let Some(units) = self.store_field(receiver, key, val, cache, local_cost)? {
+            // native-call: reg_set_field->newindex_call
+            self.newindex_call(units, call_site)?;
+        }
+        Ok(())
     }
 
+    /// Call the `__newindex` function handler whose window the resolver
+    /// pushed, returning the resolver's units whatever the outcome.
     #[inline(never)]
-    fn set_field_slow(
-        &mut self,
-        frame: &Frame,
-        inst: Instr,
-        receiver: Val,
-        val: Val,
-        local_cost: &mut u64,
-        call_site: usize,
-    ) -> Result<()> {
+    fn newindex_call(&mut self, units: u32, call_site: usize) -> Result<()> {
         self.record_call_site(call_site);
-        self.check_stack_space(2)?;
-        self.push_unchecked(receiver);
-        self.push_unchecked(val);
-        // native-call: set_field_slow->instr_set_field
-        self.instr_set_field(frame, 0, inst.b(), inst.cache_slot(), local_cost)
+        // native-call: newindex_call->call_unguarded
+        let result = self.call_unguarded(ArgCount::Fixed(3), RetCount::Fixed(0));
+        self.metamethod_depth -= units;
+        result
     }
 
-    /// `R[table][R[key]] = R[src]`.
+    /// `R[table][R[key]] = R[src]`. A plain table, or an existing key, is
+    /// stored inline; a key absent from a table with a metatable continues
+    /// past the lookup that proved it absent.
     pub(super) fn reg_set_table(
         &mut self,
         table: usize,
@@ -299,27 +259,27 @@ impl State {
         if self.try_insert_table_direct(table, key_val, val)? {
             return Ok(());
         }
-        let tbl_val = self.stack[table];
-        // native-call: reg_set_table->set_table_slow
-        self.set_table_slow(tbl_val, key_val, val, local_cost, call_site)
+        let ptr = self.stack[table]
+            .as_object_ptr()
+            .expect("the direct store accepted only a table");
+        if let Some(units) = self.store_absent_key(ptr, key_val, val, local_cost)? {
+            // native-call: reg_set_table->newindex_call
+            self.newindex_call(units, call_site)?;
+        }
+        Ok(())
     }
 
+    /// `State::store_new_key` outlined, for the store whose inline lookup
+    /// already proved the key absent.
     #[inline(never)]
-    fn set_table_slow(
+    fn store_absent_key(
         &mut self,
-        table: Val,
+        ptr: super::object::ObjectPtr,
         key: Val,
         val: Val,
         local_cost: &mut u64,
-        call_site: usize,
-    ) -> Result<()> {
-        self.record_call_site(call_site);
-        self.check_stack_space(3)?;
-        self.push_unchecked(table);
-        self.push_unchecked(key);
-        self.push_unchecked(val);
-        // native-call: set_table_slow->instr_set_table
-        self.instr_set_table(0, local_cost)
+    ) -> Result<Option<u32>> {
+        self.store_new_key(ptr, key, val, local_cost)
     }
 
     /// The constructor table in register `table`. Verification proves
@@ -445,33 +405,30 @@ impl State {
             self.stack[dst] = Val::Num(tbl.array_len() as f64);
             return Ok(());
         }
-        // native-call: reg_len->len_slow
-        self.len_slow(dst, val, local_cost, call_site)
+        match self.resolve_length(val, local_cost)? {
+            Some(len) => self.stack[dst] = len,
+            // native-call: reg_len->len_call
+            None => self.len_call(dst, call_site)?,
+        }
+        Ok(())
     }
 
+    /// Call the `__len` handler whose window `State::resolve_length` pushed
+    /// and take its result into `dst`.
     #[inline(never)]
-    fn len_slow(
-        &mut self,
-        dst: usize,
-        val: Val,
-        local_cost: &mut u64,
-        call_site: usize,
-    ) -> Result<()> {
+    fn len_call(&mut self, dst: usize, call_site: usize) -> Result<()> {
         self.record_call_site(call_site);
-        self.check_stack_space(1)?;
-        self.push_unchecked(val);
-        // native-call: len_slow->instr_length
-        self.instr_length(local_cost)?;
+        // native-call: len_call->call_unguarded
+        self.call_unguarded(ArgCount::Fixed(2), RetCount::Fixed(1))?;
         self.pop_into(dst);
         Ok(())
     }
 
-    /// `R[dst] = R[first] .. ... .. R[first + count - 1]`.
+    /// `R[dst] = R[first] .. ... .. R[first + count - 1]`, read from the
+    /// registers in place.
     pub(super) fn reg_concat(&mut self, dst: usize, first: usize, count: usize) -> Result<()> {
-        self.check_stack_space(count)?;
-        self.stack.extend_from_within(first..first + count);
-        self.concat_helper(count)?;
-        self.pop_into(dst);
+        let val = self.concat_values(first, count)?;
+        self.stack[dst] = val;
         Ok(())
     }
 
@@ -499,10 +456,30 @@ impl State {
         Ok(result.is_some_and(|result| if negate { !result } else { result }))
     }
 
-    /// `R[dst] = closure of nested function `nested``.
+    /// `R[dst] = closure of nested function `nested``, capturing its upvalues
+    /// from the running frame. The nested function's runtime is resolved
+    /// first, the one fallible step, so a refused closure has opened no
+    /// upvalue; capturing and allocating cannot fail. Outlined, so the
+    /// capture list and runtime handle stay out of `Frame::run`.
+    #[hotpath::measure]
+    #[inline(never)]
     pub(super) fn reg_closure(&mut self, frame: &Frame, dst: usize, nested: u16) -> Result<()> {
-        self.instr_closure(frame, nested)?;
-        self.pop_into(dst);
+        let bytecode = frame.get_nested_bytecode(nested);
+        let runtime = self.resolve_bytecode_runtime(&bytecode)?;
+        let mut captured_upvalues = Vec::with_capacity(bytecode.upvalues.len());
+        for desc in &bytecode.upvalues {
+            let uv_ref = match desc {
+                // A local of the running frame.
+                UpvalueDesc::Local(idx) => {
+                    self.find_or_create_upvalue(frame.stack_bottom + *idx as usize)
+                }
+                // Shared with the running closure.
+                UpvalueDesc::Upvalue(idx) => frame.upvalues[*idx as usize],
+            };
+            captured_upvalues.push(uv_ref);
+        }
+        let obj = self.alloc_closure(bytecode, runtime, captured_upvalues);
+        self.stack[dst] = Val::Obj(obj);
         Ok(())
     }
 

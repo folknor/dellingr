@@ -24,6 +24,21 @@ All notable changes to dellingr are documented here. The format follows
     fixed number of results returns into registers the caller already
     holds, so some assignments and calls that failed with `StackOverflow`
     near the cap now succeed.
+  - **Replay-visible at the stack cap:** admission also reserves four free
+    slots above the frame, the largest call window an instruction opens, so
+    a call (from Lua or the host) is refused four slots earlier. In return
+    an admitted function's own instructions never fail the cap: closures,
+    template constructors (`{x = 1}`), concatenation, generic `for` result
+    delivery and every table read, store and length that calls no handler
+    work in the registers. Near the cap these used to raise `StackOverflow`
+    depending on spelling (`obj.k` answered where `obj["k"]`, a string
+    receiver's method or `t.newkey = v` raised), on `__index`/`__newindex`
+    chain length, and on whether a loop had more variables than its Rust
+    iterator returned. A handler call can still be refused there, by the
+    handler's own admission.
+  - `__newindex` table chains and `__index` chains through strings are
+    resolved in a loop, without native recursion per step; their
+    metamethod-depth units are unchanged.
   - A register whose value is no longer used keeps that value reachable
     until the function overwrites it or returns, which can move when a
     collection reclaims it (and so `%p` and `tostring` ids of values rebuilt
