@@ -58,9 +58,10 @@ presenting an analysis.
 ## Exit status
 
 Bad arguments, unreadable files, parse errors, runtime errors and budget
-exhaustion exit 1. The cost summary is still attempted before a runtime error
-is reported. A closed stdout pipe during CLI output exits quietly with status
-0. The CLI only ever exits 0 or 1 (never 124, which `timeout(1)` uses for a
-timeout), so wrappers such as `scripts/diff_test.sh` can read 124 as a timeout
-unambiguously. The CLI is a development tool; hosts embed the library and see typed errors
-through the API.
+exhaustion exit 1. Parse errors are reported before execution and do not
+produce a cost summary; the cost summary is still attempted before an execution
+error is reported. A closed stdout pipe during CLI output exits quietly with
+status 0. The CLI's handled exit paths use 0 or 1, never 124, which `timeout(1)`
+uses for a timeout. Unhandled panics and process aborts can produce other
+statuses. The CLI is a development tool; hosts embed the library and see typed
+errors through the API.

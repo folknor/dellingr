@@ -216,7 +216,10 @@ impl ScopeCost {
         let pad = "  ".repeat(indent);
 
         if self.own_cost == 0 && self.nested.is_empty() && self.function_calls() == 0 {
-            writeln!(f, "{}{}: cost 0 (free)", pad, self.name)?;
+            // Open SET_LIST constructors still pay for table creation. TFOR_CALL
+            // is not an OP_CALL but can invoke a costed iterator, so zero here
+            // describes static cost only.
+            writeln!(f, "{}{}: cost 0 (static)", pad, self.name)?;
             return Ok(());
         }
 
@@ -468,6 +471,18 @@ mod tests {
         let fixed = analyze_cost("return {1, 2}").expect("fixed table constructor should parse");
         assert_eq!(fixed.root.own_cost, 3);
         assert_eq!(fixed.root.array_elements(), 2);
+    }
+
+    #[test]
+    fn zero_static_cost_generic_for_is_not_labeled_free() {
+        let analysis = analyze_cost("for value in iterator do end")
+            .expect("generic-for iterator program should parse");
+        assert_eq!(analysis.root.own_cost, 0);
+        assert_eq!(analysis.root.function_calls(), 0);
+
+        let rendered = analysis.to_string();
+        assert!(rendered.contains("main: cost 0 (static)"), "{rendered}");
+        assert!(!rendered.contains("(free)"), "{rendered}");
     }
 
     #[test]

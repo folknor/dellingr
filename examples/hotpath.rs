@@ -38,7 +38,7 @@
 use std::env;
 use std::fs;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 // Exit status is 1 for a failed run and 2 for a usage error. The process
 // status lets the harness caller distinguish a complete run from a failure.
 use std::process::exit;
@@ -202,6 +202,10 @@ fn parse_args() -> Result<Args, String> {
     parse_args_from(env::args().skip(1))
 }
 
+fn chunk_name(script_path: &Path) -> &[u8] {
+    script_path.as_os_str().as_encoded_bytes()
+}
+
 struct Metric {
     name: &'static str,
     value: String,
@@ -233,6 +237,7 @@ struct RunMetrics<'a> {
     warm_iterations: u32,
     warm_avg_us: f64,
     warm_avg_cost: u64,
+    warm_total_cost: u64,
     cost_per_us: f64,
     setup_heap_bytes: usize,
     setup_object_count: usize,
@@ -259,6 +264,7 @@ fn run_metrics(run: &RunMetrics<'_>) -> Vec<Metric> {
             u128::from(run.warm_avg_cost),
             Some(counter_value("warm_avg_cost", run.warm_avg_cost)),
         ),
+        integer_metric("warm_total_cost", u128::from(run.warm_total_cost), None),
         text_metric("cost_per_us", format!("{:.2}", run.cost_per_us)),
         integer_metric(
             "setup_heap_bytes",
@@ -402,10 +408,9 @@ fn main() {
     let state_new_us = state_start.elapsed().as_micros();
 
     // Phase 1: parse + codegen.
-    let chunk_name = format!("@{}", args.script_path.display());
     emit_marker("PARSE_START");
     let parse_start = Instant::now();
-    if let Err(e) = Program::compile(&source, Some(chunk_name.as_bytes()))
+    if let Err(e) = Program::compile(&source, Some(chunk_name(&args.script_path)))
         .and_then(|program| state.load(&program))
     {
         eprintln!("Parse error in {}: {e}", args.script_path.display());
@@ -478,7 +483,7 @@ fn main() {
     let warm_avg_cost = warm_total_cost / u64::from(iterations);
 
     let cost_per_us = if warm_avg_us > 0.0 {
-        warm_avg_cost as f64 / warm_avg_us
+        warm_total_cost as f64 / f64::from(iterations) / warm_avg_us
     } else {
         0.0
     };
@@ -494,6 +499,7 @@ fn main() {
         warm_iterations: iterations,
         warm_avg_us,
         warm_avg_cost,
+        warm_total_cost,
         cost_per_us,
         setup_heap_bytes,
         setup_object_count,
@@ -505,7 +511,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{RunMetrics, find_bench, parse_args_from, run_metrics, write_kvs};
+    use super::{RunMetrics, chunk_name, find_bench, parse_args_from, run_metrics, write_kvs};
     use dellingr::State;
     use std::path::PathBuf;
 
@@ -521,6 +527,14 @@ mod tests {
         assert_eq!(
             args.script_path,
             PathBuf::from("examples/numerics/arithmetic.lua")
+        );
+    }
+
+    #[test]
+    fn hotpath_chunk_name_uses_the_path_without_a_reference_lua_prefix() {
+        assert_eq!(
+            chunk_name(std::path::Path::new("bench/arithmetic.lua")),
+            b"bench/arithmetic.lua"
         );
     }
 
@@ -541,7 +555,8 @@ mod tests {
             warm_iterations: 20,
             warm_avg_us: 5.5,
             warm_avg_cost: 6,
-            cost_per_us: 1.09,
+            warm_total_cost: 123,
+            cost_per_us: 1.12,
             setup_heap_bytes: 7,
             setup_object_count: 8,
             final_heap_bytes: 9,
@@ -570,6 +585,7 @@ mod tests {
                 "warm_iterations",
                 "warm_avg_us",
                 "warm_avg_cost",
+                "warm_total_cost",
                 "cost_per_us",
                 "setup_heap_bytes",
                 "setup_object_count",
@@ -577,5 +593,8 @@ mod tests {
                 "final_object_count",
             ]
         );
+        assert!(output.contains("warm_avg_cost=6\n"));
+        assert!(output.contains("warm_total_cost=123\n"));
+        assert!(output.contains("cost_per_us=1.12\n"));
     }
 }

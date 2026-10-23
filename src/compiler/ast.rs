@@ -46,7 +46,7 @@ impl Expr {
     /// Whether this is a call or vararg whose value count follows its use.
     pub(super) fn is_multi(&self) -> bool {
         match &self.kind {
-            ExprKind::Vararg => true,
+            ExprKind::Vararg { .. } => true,
             ExprKind::Suffixed(suffixed) => {
                 matches!(
                     suffixed.suffixes.last(),
@@ -68,7 +68,9 @@ pub(super) enum ExprKind {
     /// A string literal by pool index.
     Str(u16),
     /// `...`.
-    Vararg,
+    Vararg {
+        line: u32,
+    },
     /// A local read, by register and declaration.
     Local {
         reg: u8,
@@ -132,7 +134,7 @@ impl ExprKind {
             | Self::False
             | Self::Num(_)
             | Self::Str(_)
-            | Self::Vararg
+            | Self::Vararg { .. }
             | Self::Local { .. }
             | Self::Upval(_)
             | Self::Global { .. }
@@ -307,6 +309,7 @@ pub(super) enum Stmt {
     LocalFunction {
         reg: u8,
         nested: u8,
+        line: u32,
     },
     /// `targets = values`, stored last target first at `line`.
     Assign {

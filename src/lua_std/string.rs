@@ -751,9 +751,6 @@ pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     ("gsub", |state| {
         let s = string_or_number_bytes(state, 1, "gsub")?;
         let pattern = string_or_number_bytes(state, 2, "gsub")?;
-        state.consume_cost((s.len() + pattern.len()).max(1) as u64)?;
-        charge_bytes(state, pattern.len())?;
-        let max_replacements = opt_integer(state, 4, "gsub")?.map(saturating_usize);
         let repl_type = state.typ(3);
 
         if !matches!(
@@ -767,6 +764,9 @@ pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
                 crate::error::ArgDetail::StringFunctionOrTableExpected,
             ));
         }
+        let max_replacements = opt_integer(state, 4, "gsub")?.map(saturating_usize);
+        state.consume_cost((s.len() + pattern.len()).max(1) as u64)?;
+        charge_bytes(state, pattern.len())?;
         if max_replacements == Some(0) {
             state.consume_cost(s.len() as u64)?;
             state.set_top(0)?;

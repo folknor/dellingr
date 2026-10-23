@@ -297,7 +297,9 @@ fn execution_stack_preflights_notify_once() {
         assert_eq!(count.load(Ordering::SeqCst), 1, "case {case}");
         assert_eq!(state.get_top(), dellingr::limits::MAX_STACK_SIZE - 1);
         if case == 0 {
-            assert!(!error.stack_trace().is_empty());
+            // The refused callee never entered, and a host call has no
+            // calling Lua frame, so no traceback names the callee.
+            assert!(error.stack_trace().is_empty());
         }
     }
 }

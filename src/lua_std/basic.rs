@@ -374,6 +374,7 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
     // Sets table[index] = value without invoking __newindex metamethod.
     // Returns the table.
     add!("rawset", |state| {
+        state.consume_cost(1)?;
         check_type_named(state, 1, LuaType::Table, "rawset")?;
         check_any_named(state, 2, "rawset")?;
         check_any_named(state, 3, "rawset")?;

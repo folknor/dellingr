@@ -530,6 +530,13 @@ impl GcHeap {
     /// The worklist traversal follows children, including closure upvalues.
     #[hotpath::measure]
     pub(super) fn mark(&self, ptr: ObjectPtr, worklist: &mut Vec<ObjectPtr>) {
+        // Marking accepts strong roots and graph edges only. Weak caches
+        // must be filtered by their owners. Table tombstone keys are strong
+        // edges until compaction, so they always name a live object.
+        debug_assert!(
+            self.objects.contains_key(ptr.0),
+            "GC marked a vacant object key"
+        );
         if let Some(obj) = self.objects.get(ptr.0)
             && obj.color.get() == Color::Unmarked
         {
@@ -631,15 +638,16 @@ impl GcHeap {
         }
     }
 
-    pub(super) fn reachable_lua_bytecodes(&self) -> Vec<Arc<Bytecode>> {
+    // Borrow bytecodes during the cache sweep: cloning an Arc per closure
+    // and collecting a temporary Vec adds work without extending any lifetime.
+    pub(super) fn reachable_lua_bytecodes(&self) -> impl Iterator<Item = &Arc<Bytecode>> {
         self.objects
             .values()
             .filter(|object| object.color.get() == Color::Reachable)
             .filter_map(|object| match &object.raw {
-                RawObject::LuaFn(closure) => Some(Arc::clone(&closure.bytecode)),
+                RawObject::LuaFn(closure) => Some(&closure.bytecode),
                 RawObject::Table(_) => None,
             })
-            .collect()
     }
 
     /// Every closure in the heap, for the debug check that each one's runtime
@@ -859,6 +867,10 @@ impl StringPool {
 
     /// Mark a string as reachable.
     pub(super) fn mark(&self, ptr: StringPtr) {
+        debug_assert!(
+            self.strings.contains_key(ptr.0),
+            "GC marked a vacant string key"
+        );
         if let Some(entry) = self.strings.get(ptr.0) {
             entry.color.set(Color::Reachable);
         }
@@ -899,6 +911,26 @@ impl StringPool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "GC marked a vacant object key")]
+    fn marking_a_swept_object_reports_the_stale_root() {
+        let mut heap = GcHeap::with_threshold(100);
+        let ptr = heap.no_gc_allocator().alloc_table();
+        heap.collect();
+        heap.mark(ptr, &mut Vec::new());
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "GC marked a vacant string key")]
+    fn marking_a_swept_string_reports_the_stale_root() {
+        let mut pool = StringPool::new();
+        let ptr = pool.insert_with_hash(Box::from(&b"unrooted"[..]), 1);
+        pool.collect();
+        pool.mark(ptr);
+    }
 
     #[test]
     fn test_basic_allocation() {

@@ -149,7 +149,7 @@ pub(super) fn mark_gc_roots(state: &State, worklist: &mut Vec<ObjectPtr>) {
             state.heap.mark(*ptr, worklist);
         }
         for baseline in state.env_baselines.values() {
-            for (key, value) in &baseline.entries {
+            for (key, value) in baseline.entries.iter().chain(&baseline.hash_slots) {
                 key.mark_reachable(&state.heap, worklist);
                 value.mark_reachable(&state.heap, worklist);
             }
@@ -306,10 +306,9 @@ pub struct State {
     /// iterator state remains entirely in Lua values, and a snapshot simply
     /// rebuilds entries on later use. Entries are reference-counted, so an
     /// operation that calls back into Lua (a gsub replacement function) keeps
-    /// its program alive across GC clearing or eviction.
+    /// its program alive across GC pruning or eviction.
     patterns: IndexMap<(StringPtr, AnchorMode), PatternCacheEntry>,
     pattern_bytes: usize,
-    #[cfg(debug_assertions)]
     pattern_compilations: u64,
     /// Depth of __index, __newindex and non-function __call chains.
     /// Prevents stack overflow from circular metamethod references.
@@ -406,6 +405,9 @@ pub(crate) struct PoisonUnwind;
 #[cfg(feature = "snapshot")]
 pub(super) struct EnvBaseline {
     pub(super) entries: Vec<(Val, Val)>,
+    /// Physical hash slots (`Table::snapshot_hash_slots`) at capture, which
+    /// a save compares against to decide whether hash history needs a delta.
+    pub(super) hash_slots: Vec<(Val, Val)>,
     pub(super) metatable: Option<Val>,
 }
 
@@ -530,6 +532,7 @@ impl State {
                     *ptr,
                     EnvBaseline {
                         entries: table.entries(),
+                        hash_slots: table.snapshot_hash_slots(),
                         metatable: table.get_metatable().map(Val::Obj),
                     },
                 )
@@ -577,7 +580,6 @@ impl State {
             cost: CostState::default(),
             patterns: IndexMap::default(),
             pattern_bytes: 0,
-            #[cfg(debug_assertions)]
             pattern_compilations: 0,
             metamethod_depth: 0,
             active_rust_fn: None,
@@ -648,7 +650,6 @@ impl State {
     }
 
     /// Test instrumentation for the compiled-pattern cache.
-    #[cfg(debug_assertions)]
     #[doc(hidden)]
     pub fn pattern_compilations(&self) -> u64 {
         self.pattern_compilations
@@ -706,10 +707,7 @@ impl State {
         }
         let pattern_len = bytes.len();
         let compiled = SharedPattern::compile(bytes, key.1);
-        #[cfg(debug_assertions)]
-        {
-            self.pattern_compilations = self.pattern_compilations.saturating_add(1);
-        }
+        self.pattern_compilations = self.pattern_compilations.saturating_add(1);
         while self.patterns.len() >= PATTERN_CACHE_ENTRIES
             || self.pattern_bytes.saturating_add(pattern_len) > PATTERN_CACHE_BYTES
         {
@@ -946,9 +944,13 @@ impl State {
     /// cross-version contract (`docs/determinism.md`), so that is allowed as
     /// a called-out change.
     fn sweep_bytecode_caches(&mut self) {
+        // Bytecode identity deduplication also covers nested prototypes and
+        // active/pending functions with no reachable heap closure. Keep one
+        // ordered set for all three sources rather than treating the heap's
+        // marked closures as the complete runtime-cache root set.
         let mut live = BTreeSet::new();
         for bytecode in self.heap.reachable_lua_bytecodes() {
-            Self::retain_bytecode_tree(&mut live, &bytecode);
+            Self::retain_bytecode_tree(&mut live, bytecode);
         }
         for call in &self.call_stack {
             Self::retain_bytecode_tree(&mut live, &call.bytecode);
@@ -1314,6 +1316,8 @@ impl State {
     /// `s:upper()` keeps working even when `"string"` is not whitelisted (as
     /// in reference Lua, where it reaches the library through that metatable).
     /// The original environment is restored after the function completes (or errors).
+    /// [`State::open_libs`] is refused inside `f` with
+    /// [`ErrorKind::OpenLibsInRestrictedEnv`].
     ///
     /// # Errors
     ///
@@ -1351,6 +1355,12 @@ impl State {
                 }
             }
         })
+    }
+
+    /// Whether a [`State::with_restricted_env`] callback is running, at any
+    /// nesting depth.
+    pub(super) fn in_restricted_env(&self) -> bool {
+        !self.transient_roots.suspended_envs.is_empty()
     }
 
     /// Refuse use of a poisoned State. One predictable branch; the error

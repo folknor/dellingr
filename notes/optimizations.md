@@ -776,10 +776,9 @@ in todo.md's workload-registry entry).
 - **Stdlib micro (E):** `string.format` should format into one output buffer
   instead of per-directive Vec round-trips (invasive across ~15 helper
   functions for a micro win; measure before bothering).
-  `is_plain_lua_pattern` treats `-` as magic even though a `-` with no
-  preceding class item at pattern start is literal; conservative is fine,
-  just noting the fast path misses hyphenated plain needles like
-  `"foo-bar"`.
+  The plain-pattern classifier treats `-` as magic even though a leading `-`
+  with no preceding class item is literal; conservative is fine, just noting
+  the fast path misses needles like `"-foo"`.
 - **String-pool index shape:** `StringPool` (`src/vm/object.rs`) computes
   an Fx hash and then `IndexMap<u64, Vec<StringKey>>` hashes that u64 again
   (now with foldhash). A `hashbrown::HashTable<StringKey>` keyed by the

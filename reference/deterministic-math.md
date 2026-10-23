@@ -71,7 +71,10 @@ NaN's bits), and the VM never lets a script observe them.
   compile time by `crmath::hf`, which rejects any literal that is not exactly
   representable.
 - The constant tables in `src/crmath/tables/` are generated from the upstream
-  C sources by `scripts/crmath_tables.py` and are not edited by hand.
+  C sources by `scripts/crmath_tables.py` and are not edited by hand. Run
+  `python3 scripts/crmath_tables.py --check` to verify the pinned upstream
+  commit and source files, the table registry, and every generated table byte
+  for byte; `--generate` rewrites the tables from that same pinned checkout.
 - Directed rounding, `errno`, exception flags and upstream's exception-flag
   save/restore are removed; only round-to-nearest is implemented.
 - The upstream commit and licence notices are in
@@ -88,9 +91,12 @@ NaN's bits), and the VM never lets a script observe them.
   same file has to pass on every supported host; it is the cross-platform
   guarantee in executable form.
 - `crmath::tests::oracle`: an interval Ziv procedure over `libbeef` in
-  directed rounding, which certifies the expected values. Ignored tests in
-  `crmath::tests::golden` regenerate the golden file and sweep all of
-  CORE-MATH's worst-case files (several million inputs) from a checkout
+  directed rounding, which certifies the expected values. It reports an error
+  instead of guessing if its explicit Ziv loop exceeds its precision cap: 512
+  bits for pi-dependent functions and 4096 bits for the others. This cap does
+  not constrain precision escalation internal to a `libbeef` primitive.
+  Ignored tests in `crmath::tests::golden` regenerate the golden file and sweep
+  all of CORE-MATH's worst-case files (several million inputs) from a checkout
   under `research/core-math`; run them in release
   (`brokkr test sweep_ --release`). The checkout must be upstream commit
   `0ce0cbc15935e24c656280e5a46c34e89f301b7a`, the one the port was taken at

@@ -12,6 +12,49 @@ use super::{Bytecode, CallInfo, Error, ErrorKind, MAX_CALL_DEPTH, Result, State,
 use crate::instr::{ArgCount, RetCount};
 use crate::limits::{MAX_METAMETHOD_DEPTH, MAX_NATIVE_CALL_DEPTH};
 
+/// Entry observation is zero-sized for ordinary calls, including debug builds.
+/// Only direct function-valued index handlers carry a mutable commit flag.
+pub(crate) trait CallEntry {
+    fn mark_entered(self);
+    fn tracks_entry(&self) -> bool;
+}
+
+impl CallEntry for () {
+    fn mark_entered(self) {}
+    fn tracks_entry(&self) -> bool {
+        false
+    }
+}
+
+impl CallEntry for &mut bool {
+    fn mark_entered(self) {
+        *self = true;
+    }
+    fn tracks_entry(&self) -> bool {
+        true
+    }
+}
+
+/// Call operands with an optional, statically selected entry observer.
+pub(crate) trait CallArguments {
+    type Entry: CallEntry;
+    fn into_parts(self) -> (ArgCount, Self::Entry);
+}
+
+impl CallArguments for ArgCount {
+    type Entry = ();
+    fn into_parts(self) -> (ArgCount, ()) {
+        (self, ())
+    }
+}
+
+impl<'a> CallArguments for (ArgCount, &'a mut bool) {
+    type Entry = &'a mut bool;
+    fn into_parts(self) -> (ArgCount, Self::Entry) {
+        self
+    }
+}
+
 impl State {
     /// Calls a function.
     ///
@@ -62,9 +105,11 @@ impl State {
     /// operations enforce that isolation, so a return or failure preserves
     /// the caller's slot positions even if pushes reallocate the buffer.
     /// Explicit upvalue writes can still change captured caller values.
+    /// A direct index handler may supply an entry observer with its count;
+    /// admission refusals leave that observer untouched.
     pub(crate) fn call_unguarded(
         &mut self,
-        num_args: ArgCount,
+        num_args: impl CallArguments,
         num_ret_expected: RetCount,
     ) -> Result<()> {
         // ArgCount::Dynamic is resolved by the executing Lua Frame against
@@ -76,7 +121,8 @@ impl State {
         // anything executes, which the on_error doc in host.rs excludes by
         // contract. Every failure after dispatch reaches an error-reporting
         // boundary.
-        let num_args = match num_args {
+        let (count, entered) = num_args.into_parts();
+        let num_args = match count {
             ArgCount::Fixed(num_args) => num_args,
             ArgCount::Dynamic => {
                 return Err(Error::without_location(
@@ -111,11 +157,12 @@ impl State {
             // `Frame::run`'s result, which grows this frame, live across
             // every native re-entry, in release.
             let result = 'call: {
-                // native-call: call_unguarded->begin_call
-                let admitted = match self.begin_call(idx, num_args, old_stack_bottom, false) {
-                    Ok(admitted) => admitted,
-                    Err(error) => break 'call Err(error),
-                };
+                let admitted =
+                    // native-call: call_unguarded->begin_call
+                    match self.begin_call(idx, num_args, old_stack_bottom, false, entered) {
+                        Ok(admitted) => admitted,
+                        Err(error) => break 'call Err(error),
+                    };
                 let num_ret_actual = match admitted {
                     Some(n) => n,
                     // native-call: call_unguarded->run_invocation
@@ -166,7 +213,7 @@ impl State {
         let idx = self.call_base(num_args)?;
         let old_stack_bottom = self.stack_bottom;
         // native-call: call_from_lua->begin_call
-        match self.begin_call(idx, num_args, old_stack_bottom, method)? {
+        match self.begin_call(idx, num_args, old_stack_bottom, method, ())? {
             Some(n) => {
                 self.finish_call(num_ret_expected, n)?;
                 Ok(false)
@@ -205,19 +252,25 @@ impl State {
         num_args: u8,
         old_stack_bottom: usize,
         method: bool,
+        entered: impl CallEntry,
     ) -> Result<Option<u8>> {
         // The two function cases inline into the call sites; only a
         // callable object pays for the resolution loop's setup.
         let func_val = self.stack[idx];
         if let Val::RustFn(f) = func_val {
+            entered.mark_entered();
             self.stack.remove(idx);
             // native-call: begin_call->invoke_rust_fn
             return self.invoke_rust_fn(f, idx, method).map(Some);
         }
         if let Some(bytecode) = self.lua_function_bytecode(func_val) {
             self.admit_lua_call(bytecode, num_args, old_stack_bottom)?;
+            entered.mark_entered();
             return Ok(None);
         }
+        // Observed calls are only made for direct Lua or Rust __index
+        // functions. Callable-object resolution has no host-read observer.
+        debug_assert!(!entered.tracks_entry());
         // native-call: begin_call->begin_callable_call
         self.begin_callable_call(idx, num_args, old_stack_bottom, method)
     }
@@ -566,7 +619,7 @@ impl State {
         }));
 
         // A public fixed call prevalidates these argument slots, so this pop
-        // cannot fail through the host API. Keep reporting here for a future
+        // cannot fail through the host API. Undo admission for a future
         // internal caller that violates that invariant. A vararg function's
         // extra arguments were already collected above.
         if num_args > num_params
@@ -627,11 +680,8 @@ impl State {
         self.stack.drain(vararg_start..).collect()
     }
 
-    /// Report an error raised after admission but before the frame starts
-    /// executing, then undo the admission.
-    ///
-    /// Out of line and cold so the temporary `Frame` built for the traceback
-    /// stays off the call path.
+    /// Undo a refused admission without reporting an unentered callee.
+    /// The caller owns the location and traceback at its call instruction.
     #[cold]
     #[inline(never)]
     fn reject_admission(
@@ -640,8 +690,6 @@ impl State {
         frame_bottom: usize,
         old_stack_bottom: usize,
     ) -> Error {
-        let frame = self.admitted_frame();
-        let error = self.report_frame_error(error, &frame);
         self.stack.truncate(frame_bottom);
         self.stack_bottom = old_stack_bottom;
         // The chain transfer happens after admission, so a rejected record

@@ -78,7 +78,7 @@ the class of bug.
 ## LIB-005 - Table-library charging is overstated in two docs, and the metamethod insert/remove loop has no cost bound
 
 From the `stdlib` hunter, rated low to medium: a doc defect plus a lateral
-hazard. LIB-006 covers a nearby charging claim with a different mechanism.
+hazard.
 
 **Claims broken**
 
@@ -124,30 +124,6 @@ Still, it is the one place where a single flat-charged library call does
 script-chosen work with no bound. If the flat charge stays, the hunter suggests
 capping the metamethod-path shift distance, for example at `TABLE_SORT_MAX_LEN`
 as `sort` does, so that one call is bounded.
-
-## LIB-006 - `rawset` writes a table for free while `t[k] = v` costs 1
-
-From the `stdlib` hunter, rated low to medium (a cost-model gap).
-
-`TableWrite` opcodes charge 1 (docs/budget.md, "Static opcode charges").
-`rawset(t, k, v)` performs the same write and charges nothing, since `Call` is 0
-and `rawset` never calls `consume_cost`. A script can fill tables without paying
-the `TableWrite` cost by writing `rawset(t, i, v)` instead of `t[i] = v`.
-
-budget.md has a "Free by design" list (`print`, `select`, `unpack`,
-`string.len`, `tostring`) and a "Native charges" list. `rawset` is in neither,
-and neither is the rest of the base library: `type`, `tonumber`, `rawget`,
-`rawequal`, `rawlen`, `next`, `pairs`, `ipairs` and its iterator,
-`getmetatable`, `setmetatable` and `error`. For all of these except `rawset`,
-being free plausibly matches the design, because reads are uncharged opcodes
-too. `rawset` is the exception: a free version of a charged operation, which
-reads as an oversight unless documented as deliberate.
-
-**Decided (user, 2026-10-23):** `rawset` charges 1, the same as a `TableWrite`
-opcode. That is a `COST_MODEL_VERSION` bump, a refreshed cost golden
-fingerprint and a CHANGELOG entry (script costs change). budget.md should then
-list `rawset` among the native charges, and add the rest of the base library,
-which only reads, to "Free by design".
 
 ## LIB-009 - gmatch iterator state can tear, or skip a match, on a refused stack push
 
@@ -210,8 +186,7 @@ From the `strings` hunter, raised as a performance observation outside the
 defect bar.
 
 Each call re-interns four or five field-name strings through `push_string`, which
-can run `maybe_collect` and so clear the pattern cache (see RT-017 in
-notes/bugs-runtime.md), and does about six raw table reads and writes. Folding
+can run `maybe_collect`, and does about six raw table reads and writes. Folding
 away the redundant `lastmatch` field from LIB-009 also removes a write per
 iteration.
 
@@ -242,24 +217,6 @@ would remove the process-global chunk, the `call_unguarded` native level in
 quirk at once. The hunter considers that structural improvement worth having on
 its own merits.
 
-## LIB-014 - AGENTS.md names string.rs helpers that do not exist
-
-From the `strings` hunter. Low; a doc defect.
-
-AGENTS.md's "Patterns" paragraph says "`string.rs` has helpers
-`is_plain_lua_pattern` (fast path) and `gsub_replacement`." Neither exists:
-
-- The plain-pattern classifiers are `crate::patterns::is_plain` (gsub) and
-  `is_plain_for_find` (find, which treats `)` as literal), in
-  `src/patterns/mod.rs`.
-- The replacement dispatcher is `append_gsub_replacement`, with
-  `append_templated_replacement` / `append_function_replacement` and the
-  `ReplTemplate` compiler.
-
-notes/optimizations.md also still refers to `is_plain_lua_pattern`. Per the
-documentation rule, reword AGENTS.md to describe the roles rather than re-pinning
-names that drift.
-
 ## LIB-015 - Pattern compilation does about 256x its byte charge in host work
 
 From the `strings` hunter, raised as a performance observation outside the
@@ -268,9 +225,9 @@ defect bar.
 Uncharged pattern compilation is `O(pattern bytes x 256)`, because every `%x`
 escape, inside or outside a bracket, loops over all 256 bytes. A pattern of up to
 `MAX_STRING_BYTES` can therefore cost about 256 times its byte charge in host
-work. It repeats on every call when the cache misses: every GC clears the whole
-pattern cache (RT-017 in notes/bugs-runtime.md), and a number-typed pattern
-always bypasses the cache. The `class_for_escape` comment documents this, and it
+work. It repeats on every call when the cache misses (a collection now keeps
+entries whose key survived, but a number-typed pattern always bypasses the
+cache). The `class_for_escape` comment documents this, and it
 fits the "structural work is free" framing. `match_class` results per escape
 letter could be a 22-entry static table of `ByteClass`es, which makes each escape
 a copy.
@@ -317,15 +274,3 @@ On the raw path, a comparator's writes to `t[1..n]` are overwritten by the final
 by that raw writeback. Reference Lua's behaviour here is also unspecified, so the
 hunter does not count it as a defect. compatibility.md's sort bullet documents
 the call-order difference only for the metamethod path, not this one.
-
-## LIB-020 - `string.gsub` charges before it rejects a bad argument 3
-
-Lateral from the first resolution wave's review. Dropping the early argument-3
-presence check (so errors name arguments in order) moved the arg-3 rejection
-after the up-front charge: `string.gsub` now charges
-`(len(s) + len(pattern)).max(1)` plus the pattern bytes, then raises
-`StringFunctionOrTableExpected` for a missing or wrong-typed argument 3. A
-failing call's `cost_used` changed, and under a tight budget the reported error
-can be budget exhaustion instead of the argument error. Other string functions
-validate every argument before charging. Moving the `repl_type` check ahead of
-the charge (it reads no pattern state) restores validate-then-charge.

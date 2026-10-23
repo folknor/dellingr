@@ -534,8 +534,12 @@ impl State {
             }
             RetCount::All => {
                 self.check_window(dst)?;
+                // Replacing the rest of the frame may leave less room than
+                // the current stack length suggests. Check the prospective
+                // top before changing the live registers.
+                let additional = available.saturating_sub(self.stack.len().saturating_sub(dst));
+                self.check_stack_space(additional)?;
                 self.stack.truncate(dst);
-                self.check_stack_space(available)?;
                 if available > 0 {
                     let varargs = self
                         .vararg_stack
@@ -546,5 +550,51 @@ impl State {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(all(test, feature = "fault-injection"))]
+mod tests {
+    use std::sync::Arc;
+
+    use super::{RetCount, State, Val};
+    use crate::compiler::Bytecode;
+    use crate::error::ErrorKind;
+    use crate::vm::CallInfo;
+
+    #[test]
+    fn refused_open_vararg_growth_preserves_the_live_register_window() {
+        let mut state = State::new();
+        let original = vec![
+            Val::Num(10.0),
+            Val::Num(20.0),
+            Val::Num(30.0),
+            Val::Num(40.0),
+        ];
+        state.stack.clone_from(&original);
+        state.vararg_stack.push(vec![
+            Val::Num(50.0),
+            Val::Num(60.0),
+            Val::Num(70.0),
+            Val::Num(80.0),
+        ]);
+        state.call_stack.push(CallInfo {
+            bytecode: Arc::new(Bytecode::default()),
+            ip: 0,
+            has_varargs: true,
+            chain_charges: 0,
+        });
+        state.arm_fault_injection(Some(1));
+
+        let error = state
+            .reg_vararg(1, RetCount::All)
+            .expect_err("the open vararg preflight is refused");
+
+        assert!(matches!(error.kind(), ErrorKind::StackOverflow { .. }));
+        assert_eq!(state.stack, original);
+        assert_eq!(
+            state.finish_fault_injection(),
+            vec![("stack_space", 1, true)]
+        );
     }
 }

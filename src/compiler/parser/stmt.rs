@@ -154,7 +154,7 @@ impl<'a> Parser<'a> {
     /// This is equivalent to `local name; name = function(...) ... end`
     /// The name is in scope within the function body, allowing direct recursion.
     fn parse_local_function(&mut self) -> Result<Stmt> {
-        self.input.next()?; // `function` keyword
+        let line = self.input.next()?.line; // `function` keyword
         let name = self.expect_identifier()?;
         let reg = self.local_slot_count()?;
 
@@ -163,7 +163,7 @@ impl<'a> Parser<'a> {
         self.add_local(name)?;
 
         let (nested, _) = self.parse_fndef(Some(name.to_string()), false)?;
-        Ok(Stmt::LocalFunction { reg, nested })
+        Ok(Stmt::LocalFunction { reg, nested, line })
     }
 
     /// Parse a comma-separated list of identifiers.

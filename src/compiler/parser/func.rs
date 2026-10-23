@@ -13,18 +13,18 @@ impl<'a> Parser<'a> {
     /// Parses a function declaration, which is any statement that starts with
     /// the keyword `function`.
     pub(super) fn parse_fndecl(&mut self) -> Result<Stmt> {
-        self.input.next()?; // 'function' keyword
+        let line = self.input.next()?.line; // 'function' keyword
         let name = self.expect_identifier()?;
         match self.input.peek_type()? {
-            TokenKind::Dot => self.parse_fndecl_table(name),
-            TokenKind::Colon => self.parse_fndecl_method(name),
-            _ => self.parse_fndecl_basic(name),
+            TokenKind::Dot => self.parse_fndecl_table(name, line),
+            TokenKind::Colon => self.parse_fndecl_method(name, line),
+            _ => self.parse_fndecl_basic(name, line),
         }
     }
 
     /// Parses a basic function declaration, which just assigns the function to
     /// a local, upvalue, or global variable.
-    fn parse_fndecl_basic(&mut self, name: &'a str) -> Result<Stmt> {
+    fn parse_fndecl_basic(&mut self, name: &'a str, line: u32) -> Result<Stmt> {
         let target = match self.parse_prefix_identifier(name)? {
             Variable::Local { reg, .. } => Place::Local(reg),
             Variable::Upval(index) => Place::Upval(index),
@@ -35,7 +35,7 @@ impl<'a> Parser<'a> {
         Ok(Stmt::Function {
             target,
             nested,
-            line: self.input.last_line(),
+            line,
         })
     }
 
@@ -46,7 +46,7 @@ impl<'a> Parser<'a> {
         Ok(variable_read(table, self.input.last_line()))
     }
 
-    fn parse_fndecl_table(&mut self, table_name: &'a str) -> Result<Stmt> {
+    fn parse_fndecl_table(&mut self, table_name: &'a str, line: u32) -> Result<Stmt> {
         let base = self.declaration_table(table_name)?;
         let mut suffixes = Vec::new();
 
@@ -90,13 +90,13 @@ impl<'a> Parser<'a> {
         Ok(Stmt::Function {
             target: Place::Field { object, name },
             nested,
-            line: self.input.last_line(),
+            line,
         })
     }
 
     /// Parses a method declaration: `function table:method()`
     /// This is sugar for `table.method = function(self, ...)`
-    fn parse_fndecl_method(&mut self, table_name: &'a str) -> Result<Stmt> {
+    fn parse_fndecl_method(&mut self, table_name: &'a str, line: u32) -> Result<Stmt> {
         let object = self.declaration_table(table_name)?;
 
         // Consume the colon and get the method name.
@@ -110,7 +110,7 @@ impl<'a> Parser<'a> {
         Ok(Stmt::Function {
             target: Place::Field { object, name },
             nested,
-            line: self.input.last_line(),
+            line,
         })
     }
 

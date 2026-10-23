@@ -155,13 +155,15 @@ enum SavedVal {
 enum SavedObject {
     Table {
         /// The logical array length: integer keys `1..=array_len` are array
-        /// keys, never hash entries, and `array_len + 1` is the append key.
+        /// keys; only dead controls may also have hash slots for these keys.
+        /// `array_len + 1` is the append key.
         array_len: u64,
         /// The first `array_slots` entries are array slots with consecutive
         /// keys, from the first live array key to the last, with `Nil` values
         /// for the empty slots between; every other array key is nil. Zero
-        /// slots means an all-nil array. The rest are live hash entries in
-        /// insertion order.
+        /// slots means an all-nil array. The rest are hash slots, including dead
+        /// controls and (Nil, Nil) vacant positions, in insertion order.
+        /// A leading (Nil, Bool(true)) marks map storage and is not a slot.
         array_slots: u32,
         entries: Vec<(SavedVal, SavedVal)>,
         /// A metatable can be a user object (`Obj`) or an environment object
@@ -281,6 +283,7 @@ struct SavedEnvDelta {
     order: Option<Vec<SavedVal>>,
     /// The table's whole array part, `Nil` for empty slots, when it has one.
     array: Option<Vec<SavedVal>>,
+    hash_slots: Option<Vec<(SavedVal, SavedVal)>>,
     metatable: SavedMetatableDelta,
 }
 
@@ -806,10 +809,31 @@ impl<'a> SaveBuilder<'a> {
                         .collect::<Result<Vec<_>, SaveError>>()?,
                 )
             };
+            // Preserve physical hash history even when the live contents match
+            // the baseline: a cleared traversal cursor can name a dead slot.
+            // Compare like with like: the baseline's own physical slots, not
+            // its live `pairs` entries, which never carry the map marker.
+            let slots = table.snapshot_hash_slots();
+            let hash_slots = if slots == baseline.hash_slots {
+                None
+            } else {
+                Some(
+                    slots
+                        .into_iter()
+                        .map(|(key, value)| {
+                            Ok((
+                                self.encode_root(key, &token)?,
+                                self.encode_root(value, &token)?,
+                            ))
+                        })
+                        .collect::<Result<Vec<_>, SaveError>>()?,
+                )
+            };
             if !deleted.is_empty()
                 || !upserts.is_empty()
                 || order.is_some()
                 || array.is_some()
+                || hash_slots.is_some()
                 || !matches!(metatable, SavedMetatableDelta::Unchanged)
             {
                 deltas.push(SavedEnvDelta {
@@ -818,6 +842,7 @@ impl<'a> SaveBuilder<'a> {
                     upserts,
                     order,
                     array,
+                    hash_slots,
                     metatable,
                 });
             }
@@ -1419,22 +1444,29 @@ fn materialize_payload(
                 metatable,
             } => {
                 let mut runtime_keys = BTreeSet::new();
+                let hash_start = *array_slots as usize;
                 let entries = entries
                     .iter()
                     .enumerate()
                     .map(|(entry_index, (key, value))| {
                         let key = decode_val(key, &ctx)?;
-                        insert_runtime_key(
-                            &mut runtime_keys,
-                            key,
-                            &state.heap,
-                            entry_index,
-                            CorruptionReason::Duplicate {
-                                entry: DuplicateEntry::TableKey,
-                                form: KeyForm::Materialized,
-                            },
-                            SaveLocation::TableEntries { object: idx },
-                        )?;
+                        // As in the verifier, uniqueness covers the hash part
+                        // only: array slots carry implied keys, which an older
+                        // dead hash control may repeat, and the map-storage
+                        // marker and vacant slots have a nil key.
+                        if entry_index >= hash_start && !matches!(key, Val::Nil) {
+                            insert_runtime_key(
+                                &mut runtime_keys,
+                                key,
+                                &state.heap,
+                                entry_index,
+                                CorruptionReason::Duplicate {
+                                    entry: DuplicateEntry::TableKey,
+                                    form: KeyForm::Materialized,
+                                },
+                                SaveLocation::TableEntries { object: idx },
+                            )?;
+                        }
                         Ok((key, decode_val(value, &ctx)?))
                     })
                     .collect::<Result<Vec<_>, SnapshotError>>()?;
@@ -1746,6 +1778,75 @@ fn materialize_payload(
                     )
                 })?;
             }
+            table.set_metatable(metatable);
+        }
+        if let Some(slots) = &delta.hash_slots {
+            let saved = slots
+                .iter()
+                .map(|(key, value)| Ok((decode_val(key, &ctx)?, decode_val(value, &ctx)?)))
+                .collect::<Result<Vec<_>, SnapshotError>>()?;
+            // Repeat the verifier's uniqueness check on resolved runtime keys,
+            // as for the other delta parts: two saved keys can name one runtime
+            // key, and a duplicate slot would corrupt the tombstone count.
+            let mut runtime_keys = BTreeSet::new();
+            for (entry_index, (key, _)) in saved.iter().enumerate() {
+                if !matches!(key, Val::Nil) {
+                    insert_runtime_key(
+                        &mut runtime_keys,
+                        *key,
+                        &state.heap,
+                        entry_index,
+                        CorruptionReason::Duplicate {
+                            entry: DuplicateEntry::TableKey,
+                            form: KeyForm::Materialized,
+                        },
+                        SaveLocation::EnvironmentUpserts(delta_index),
+                    )?;
+                }
+            }
+            let table = state.heap.as_table(ptr).ok_or_else(|| {
+                corrupt_arena(
+                    CorruptionReason::Environment(EnvironmentCorruption::TokenNotTable),
+                    delta_index,
+                    SaveLocation::EnvironmentDeltas,
+                )
+            })?;
+            let metatable = table.get_metatable();
+            let array = table.virtual_array();
+            let mut entries: Vec<_> = array
+                .iter()
+                .enumerate()
+                .map(|(index, value)| (Val::Num((index + 1) as f64), *value))
+                .collect();
+            // Keep setup-only fields after the saved slots, as for order deltas.
+            let mut saved_keys: DetSet<TableKey> =
+                DetSet::with_capacity_and_hasher(saved.len(), FixedState::default());
+            for (key, _) in &saved {
+                if !matches!(key, Val::Nil) {
+                    saved_keys.insert(TableKey::from_prevalidated(*key));
+                }
+            }
+            let extra: Vec<_> = table
+                .snapshot_hash_slots()
+                .into_iter()
+                .filter(|(key, value)| {
+                    !matches!(key, Val::Nil)
+                        && !matches!(value, Val::Nil)
+                        && !saved_keys.contains(&TableKey::from_prevalidated(*key))
+                })
+                .collect();
+            entries.extend(saved);
+            entries.extend(extra);
+            table
+                .rebuild_from_snapshot(array.len(), array.len(), entries)
+                .map_err(|error| {
+                    invalid_environment_table(
+                        &delta.token,
+                        None,
+                        TableRestoreStep::RestoreEnvironmentOrder,
+                        error,
+                    )
+                })?;
             table.set_metatable(metatable);
         }
         let new_metatable = match &delta.metatable {
@@ -2551,6 +2652,21 @@ impl SavedEnvDelta {
             }
             None => out.write_bool(false),
         }
+        match &self.hash_slots {
+            Some(slots) => {
+                out.write_bool(true);
+                write_vec(
+                    out,
+                    SaveCollection::EnvironmentUpserts,
+                    slots,
+                    |out, (key, value)| {
+                        key.encode(out)?;
+                        value.encode(out)
+                    },
+                )?;
+            }
+            None => out.write_bool(false),
+        }
         self.metatable.encode(out)
     }
 
@@ -2568,6 +2684,14 @@ impl SavedEnvDelta {
             array: input
                 .read_bool()?
                 .then(|| read_vec(input, SavedVal::decode))
+                .transpose()?,
+            hash_slots: input
+                .read_bool()?
+                .then(|| {
+                    read_vec(input, |input| {
+                        Ok((SavedVal::decode(input)?, SavedVal::decode(input)?))
+                    })
+                })
                 .transpose()?,
             metatable: SavedMetatableDelta::decode(input)?,
         })
@@ -4096,6 +4220,7 @@ mod tests {
                 upserts: vec![(SavedVal::Str(2), SavedVal::Obj(3))],
                 order: Some(vec![SavedVal::Str(2)]),
                 array: Some(vec![SavedVal::Nil, SavedVal::Bool(true)]),
+                hash_slots: Some(vec![(SavedVal::Str(2), SavedVal::Nil)]),
                 metatable: SavedMetatableDelta::Set(SavedVal::EnvObj("table".to_string())),
             }
         );

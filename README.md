@@ -70,9 +70,9 @@ Keeping these features out makes the VM more suitable for embedded use, especial
 
 The parser bounds syntax nesting (`limits::MAX_SYNTAX_DEPTH`) and raises `chunk has too many syntax levels` past that, the way reference Lua does with `LUAI_MAXCCALLS`. Without the bound, deeply nested source exhausts the native stack, and a Rust stack overflow aborts the host process rather than returning a catchable error.
 
-One divergence worth knowing: a nested parenthesis costs two levels rather than one, because each level descends through both the expression and unary parsers. Parentheses therefore nest about half as deep as other constructs. Flat `elseif` chains and expression suffix chains are parsed iteratively and do not consume the budget at all; only what they contain does. Real code does not come close to the limit.
+One divergence worth knowing: a nested parenthesis costs two levels because each level descends through both the expression and unary parsers. Table constructors in a field and `if` bodies also cost two; call and index nesting costs four, while unary operators and `do`, loop or function bodies cost one. Flat `elseif` chains and expression suffix chains are parsed iteratively and do not consume the budget at all; only what they contain does. Real code does not come close to the limit.
 
-Per-function ceilings (`limits::MAX_LOCALS`, `MAX_UPVALUES` and `MAX_LITERALS` per string or number pool) are reported as syntax errors rather than silently truncated. Table constructors and `t.f = v` assignment sites are effectively unbounded - array entries are written in batches, and assignment sites past `limits::MAX_TABLE_TEMPLATES` simply stop being inline-cached rather than being rejected.
+Per-function ceilings (`limits::MAX_LOCALS`, `MAX_UPVALUES` and `MAX_LITERALS` per string or number pool) are reported as syntax errors rather than silently truncated. Table constructors and `t.f = v` assignment sites have no source-count limit: array entries are written in batches, constructors beyond the inline-template limit use ordinary table construction, and field assignments beyond their cache-slot capacity use the uncached path.
 
 ## Runtime limits
 

@@ -30,9 +30,7 @@ pub(super) enum CodegenError {
     /// A jump spans `2^23` instructions or more.
     JumpTooFar,
     /// A function needs `count` registers, more than an operand can name.
-    TooManyRegisters {
-        count: usize,
-    },
+    TooManyRegisters { count: usize },
     /// Boxed so the variants stay within `variant_size_differences`.
     Internal(Box<ParserFault>),
 }
@@ -368,12 +366,12 @@ impl Generator<'_> {
                 }
                 self.nactive = self.freereg;
             }
-            Stmt::LocalFunction { reg, nested, .. } => {
+            Stmt::LocalFunction { reg, nested, line } => {
                 let reg = u16::from(*reg);
                 debug_assert_eq!(self.freereg, reg);
                 self.reserve(1)?;
                 self.nactive = self.freereg;
-                self.emit(Instr::closure(reg, u16::from(*nested)));
+                self.emit_at(Instr::closure(reg, u16::from(*nested)), *line);
             }
             Stmt::Assign {
                 targets,
@@ -720,21 +718,20 @@ impl Generator<'_> {
     fn function_stmt(&mut self, target: &Place, nested: u8, line: u32) -> Result<()> {
         match target {
             Place::Local(reg) => {
-                self.emit(Instr::closure(u16::from(*reg), u16::from(nested)));
+                self.emit_at(Instr::closure(u16::from(*reg), u16::from(nested)), line);
             }
             Place::Field { object, name } => {
                 let obj = self.expr(object)?;
                 let obj = self.any_reg(obj)?;
                 let closure = self.reserve(1)?;
-                self.emit(Instr::closure(closure, u16::from(nested)));
+                self.emit_at(Instr::closure(closure, u16::from(nested)), line);
                 self.emit_at(Instr::set_field(obj, *name, closure, None), line);
                 self.free_reg(closure);
                 self.free_reg(obj);
             }
             Place::Upval(_) | Place::Global(_) | Place::Builtin(_) => {
                 let closure = self.reserve(1)?;
-                self.emit(Instr::closure(closure, u16::from(nested)));
-                self.line = line;
+                self.emit_at(Instr::closure(closure, u16::from(nested)), line);
                 match target {
                     Place::Upval(index) => {
                         self.emit(Instr::set_upval(closure, u16::from(*index)));
@@ -838,9 +835,9 @@ impl Generator<'_> {
             ExprKind::False => Val::False,
             ExprKind::Num(idx) => Val::Num(*idx),
             ExprKind::Str(idx) => Val::Str(*idx),
-            ExprKind::Vararg => {
+            ExprKind::Vararg { line } => {
                 let reg = self.reserve(1)?;
-                Val::Vararg(self.emit(Instr::vararg(reg, RetCount::Fixed(1))))
+                Val::Vararg(self.emit_at(Instr::vararg(reg, RetCount::Fixed(1)), *line))
             }
             ExprKind::Local { reg, id } => Val::Local {
                 reg: u16::from(*reg),

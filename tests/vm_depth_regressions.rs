@@ -64,3 +64,41 @@ fn function_valued_call_recursion() {
         .expect("recursion below the call-depth limit through __call should succeed");
     assert_eq!(state.to_number(-1).expect("numeric result"), 500.0);
 }
+
+#[test]
+fn refused_lua_frame_is_located_at_the_callers_call_instruction() {
+    let mut state = State::new();
+    let results = vec!["1"; 64].join(", ");
+    dellingr::Program::compile(
+        format!("return function()\n return {results}\nend"),
+        Some(b"callee".as_slice()),
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
+    state.set_global("callee").unwrap();
+    let prefix = dellingr::limits::MAX_STACK_SIZE - 16;
+    state.set_top(prefix as isize).unwrap();
+    dellingr::Program::compile("\n\ncallee()", Some(b"caller".as_slice()))
+        .and_then(|program| state.load(&program))
+        .unwrap();
+    let error = state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+        .unwrap_err();
+    assert!(matches!(error.kind(), ErrorKind::StackOverflow { .. }));
+    assert_eq!(error.line_num(), 3);
+    assert_eq!(error.source_name(), Some(b"caller".as_slice()));
+    assert_eq!(error.stack_trace().len(), 1);
+    assert_eq!(error.stack_trace()[0].line, 3);
+    assert_eq!(
+        error.stack_trace()[0].source.as_deref(),
+        Some(b"caller".as_slice()),
+    );
+    assert_eq!(state.get_top(), prefix);
+    state.set_top(0).unwrap();
+    dellingr::Program::compile("return 7", None)
+        .and_then(|program| state.load(&program))
+        .unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
+    assert_eq!(state.to_number(-1).unwrap(), 7.0);
+}

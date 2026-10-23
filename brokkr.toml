@@ -240,6 +240,13 @@ match = "last-line"
 stream = "stdout"
 
 [[script_check]]
+name = "notes-sections"
+command = "python3 -B scripts/test_notes_sections.py"
+expect = "ok"
+match = "last-line"
+stream = "stdout"
+
+[[script_check]]
 name = "generated-large-source"
 command = "python3 examples/parse/generate.py --check"
 expect = "ok"

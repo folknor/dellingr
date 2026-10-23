@@ -23,6 +23,23 @@ const CORE_MATH: &str = concat!(
 /// of it (<https://gitlab.inria.fr/core-math/core-math>).
 const CORE_MATH_COMMIT: &str = "0ce0cbc15935e24c656280e5a46c34e89f301b7a";
 
+/// Specific regression inputs kept in the golden file across regeneration,
+/// even when they are absent from the sampled special and worst-case inputs.
+const PINNED_REGRESSIONS: [(Func, u64, u64, u64); 1] = [(
+    Func::Pow,
+    0x6a56_2a88_6136_29b6,
+    0x7f50_0000_0000_0000,
+    0x7ff0_0000_0000_0000,
+)];
+
+fn add_pinned_regression_inputs(f: Func, inputs: &mut Vec<(f64, f64)>) {
+    for &(case_func, x, y, _) in &PINNED_REGRESSIONS {
+        if case_func == f {
+            inputs.push((f64::from_bits(x), f64::from_bits(y)));
+        }
+    }
+}
+
 /// What [`worst_cases`] parses from each function's file at
 /// [`CORE_MATH_COMMIT`]: the input count and [`corpus_digest`] of the inputs.
 /// A checkout of another commit, or a damaged one, fails the reader instead
@@ -347,6 +364,18 @@ fn corpus_pins_cover_every_function_once() {
     }
 }
 
+#[test]
+fn pinned_regression_inputs_survive_golden_regeneration() {
+    for &(f, x, y, result) in &PINNED_REGRESSIONS {
+        let mut inputs = Vec::new();
+        add_pinned_regression_inputs(f, &mut inputs);
+        assert!(inputs.contains(&(f64::from_bits(x), f64::from_bits(y))));
+
+        let row = format!("{} {x:016x} {y:016x} {result:016x}", f.name());
+        assert!(GOLDEN.lines().any(|line| line == row), "missing {row}");
+    }
+}
+
 /// The local CORE-MATH checkout holds the pinned worst-case corpus for every
 /// function. Cheap next to the sweeps: it only reads and parses the files.
 #[test]
@@ -480,6 +509,7 @@ fn regenerate_crmath_golden() {
             let y = if f.binary() { rng.finite() } else { 0.0 };
             inputs.push((rng.finite(), y));
         }
+        add_pinned_regression_inputs(f, &mut inputs);
         let step = (worst.len() / 500).max(1);
         inputs.extend(worst.iter().step_by(step).copied());
         for (x, y) in inputs {

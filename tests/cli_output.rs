@@ -85,3 +85,22 @@ fn analyze_warning_uses_the_library_caveat() {
         format!("{ANALYSIS_WARNING_PREFIX}{}\n", CostAnalysis::caveat())
     );
 }
+
+#[test]
+fn parse_errors_share_context_and_do_not_print_a_cost_summary() {
+    let script = ScratchScript::new("output-parse-error", "local = \n");
+    let path = script.path().as_os_str();
+    let run_output = run([path]);
+    let analyze_output = run([OsStr::new("--analyze"), path]);
+    let dump_output = run([OsStr::new("--dump-bytecode"), path]);
+
+    for output in [&run_output, &analyze_output, &dump_output] {
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.starts_with("Error: parsing source: "), "{stderr}");
+        assert!(!stderr.contains("Cost used:"), "{stderr}");
+    }
+    assert_eq!(run_output.stderr, analyze_output.stderr);
+    assert_eq!(run_output.stderr, dump_output.stderr);
+}

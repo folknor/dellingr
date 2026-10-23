@@ -448,7 +448,7 @@ impl Parser<'_> {
                 if !self.funcs.chunk.is_vararg {
                     return Err(self.error_here(SyntaxError::VarargOutsideVarargFunction));
                 }
-                Expr::new(ExprKind::Vararg)
+                Expr::new(ExprKind::Vararg { line: tok.line })
             }
             _ => {
                 return Err(self.err_near(tok, |found| SyntaxError::UnexpectedSymbol { found }));

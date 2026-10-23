@@ -198,20 +198,9 @@ fn round_trip_preserves_data_graph_and_env_references() {
 }
 
 #[test]
-fn tombstones_are_omitted_from_snapshots() {
-    // Compare the payload against a table that never held the deleted key.
-    // Round-trip behavior alone cannot detect a leaked `(b, nil)` entry: loading
-    // it would call insert(b, nil), which is remove-semantics on an absent key
-    // and gets discarded, so the observable result is identical either way.
-    //
-    // Compare lengths rather than full bytes. The two scripts execute different
-    // numbers of operations, so the serialized cost counters legitimately
-    // differ - but those fields are fixed-width, so only a leaked entry can
-    // change the payload size.
-    // Build with assignments: named-field constructors reserve template slots
-    // in Map storage even at three entries. Assignments keep the smaller hash
-    // part inline and promote the larger ones. The final case re-adds b before
-    // saving, leaving a Vacant slot as well as the live entry at the back.
+fn tombstones_are_preserved_in_snapshots() {
+    // Both inline and map tombstones, including a vacated map position,
+    // are saved even though pairs skips them.
     for (tombstoned, clean, expected_order) in [
         (
             "t = {}; t.a = 1; t.b = 2; t.c = 3; t.b = nil",
@@ -237,10 +226,9 @@ fn tombstones_are_omitted_from_snapshots() {
         run(&mut without_tombstone, clean);
         let clean_bytes = without_tombstone.save_state().unwrap().bytes;
 
-        assert_eq!(
-            tombstoned_bytes.len(),
-            clean_bytes.len(),
-            "a tombstoned entry leaked into the snapshot payload for: {tombstoned}"
+        assert!(
+            tombstoned_bytes.len() > clean_bytes.len(),
+            "hash history must be saved for: {tombstoned}"
         );
 
         // And the live entries still round-trip with insertion order intact,
@@ -255,6 +243,81 @@ fn tombstones_are_omitted_from_snapshots() {
         assert_eq!(loaded.to_string(-1).unwrap(), expected_order);
         loaded.pop(1).unwrap();
     }
+}
+
+#[test]
+fn cleared_cursor_resumes_across_collection_and_snapshot() {
+    for setup in [
+        "work = {}; for i = 1, 3 do work['job' .. i] = i end",
+        "work = {}; for i = 1, 8 do work['job' .. i] = i end",
+        "work = {a = nil, b = 1, c = 2, d = 3, e = 4}; cursor = 'a'",
+        "work = {}; for i = 1, 8 do work[{}] = i end",
+        "work = math; work.job1 = 1; work.job2 = 2",
+    ] {
+        let mut original = State::new();
+        run(&mut original, setup);
+        run(
+            &mut original,
+            "function tick() local k = next(work, cursor); if k == nil then cursor = nil; return end; work[k] = nil; cursor = k end; tick()",
+        );
+        original.gc_collect();
+        let save = original.save_state().unwrap();
+        let mut loaded =
+            State::load_state(&save.bytes, Box::new(DefaultCallbacks), no_setup).unwrap();
+        assert_eq!(save.bytes, loaded.save_state().unwrap().bytes);
+        for _ in 0..12 {
+            run(&mut original, "tick()");
+            run(&mut loaded, "tick()");
+            original.gc_collect();
+            loaded.gc_collect();
+            assert_eq!(
+                original.save_state().unwrap().bytes,
+                loaded.save_state().unwrap().bytes,
+                "cursor state diverged for {setup}"
+            );
+        }
+    }
+}
+
+#[test]
+fn nil_template_control_survives_snapshot() {
+    let mut original = State::new();
+    // More than four named fields make the constructor a template, which
+    // pre-inserts every key as a dead slot.
+    run(
+        &mut original,
+        "work = {a = nil, b = 1, c = 2, d = 3, e = 4}",
+    );
+    let mut loaded = reload(&original);
+    run(
+        &mut original,
+        "if next(work, 'a') ~= 'b' then error('lost template cursor') end",
+    );
+    run(
+        &mut loaded,
+        "if next(work, 'a') ~= 'b' then error('lost template cursor') end",
+    );
+    run(&mut original, "work.a = 2; work.b = nil; work.c = 3");
+    run(&mut loaded, "work.a = 2; work.b = nil; work.c = 3");
+    assert_eq!(
+        original.save_state().unwrap().bytes,
+        loaded.save_state().unwrap().bytes
+    );
+}
+
+#[test]
+fn tombstone_is_the_only_root_of_its_collectable_key() {
+    let mut original = State::new();
+    run(
+        &mut original,
+        "work = {}; local key = {}; work[key] = 1; work[key] = nil",
+    );
+    let before = original.save_state().unwrap().bytes;
+    original.gc_collect();
+    assert_eq!(before, original.save_state().unwrap().bytes);
+    let mut loaded = State::load_state(&before, Box::new(DefaultCallbacks), no_setup).unwrap();
+    loaded.gc_collect();
+    assert_eq!(before, loaded.save_state().unwrap().bytes);
 }
 
 #[test]
@@ -812,7 +875,7 @@ fn unordered_environment_replay_places_setup_additions_before_new_keys() {
         "future = math.future; order = ''; for key in pairs(math) do if key == 'second' or key == 'first' or key == 'future' then order = order .. key .. ',' end end",
     );
     assert_eq!(global_num(&mut loaded, "future"), 99.0);
-    assert_eq!(global_str(&mut loaded, "order"), "future,second,first,");
+    assert_eq!(global_str(&mut loaded, "order"), "second,first,future,");
 }
 
 #[test]

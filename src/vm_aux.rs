@@ -129,9 +129,15 @@ impl State {
     }
 
     /// Opens all standard Lua libraries.
+    ///
+    /// Refused inside [`State::with_restricted_env`] with
+    /// [`ErrorKind::OpenLibsInRestrictedEnv`] before changing any state.
     #[hotpath::measure]
     pub fn open_libs(&mut self) -> Result<()> {
         self.check_poisoned()?;
+        if self.in_restricted_env() {
+            return Err(self.error(ErrorKind::OpenLibsInRestrictedEnv));
+        }
         lua_std::open_libs(self)?;
         #[cfg(feature = "snapshot")]
         self.capture_env_tokens();

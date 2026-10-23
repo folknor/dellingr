@@ -27,6 +27,12 @@ const CORPUS: &[(&str, &str, u64)] = &[
         296,
     ),
     (
+        "rawset",
+        "local t = {}; rawset(t, 1, 2)",
+        // One table creation and one flat rawset charge.
+        2,
+    ),
+    (
         "strings_and_patterns",
         "local s = 'hello world from lua' local a = s:find('wor') local b = s:gsub('o', '0') local c = s:match('(%a+) (%a+)') local u = s:upper()",
         193,

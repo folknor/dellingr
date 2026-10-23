@@ -238,7 +238,6 @@ impl TableKey {
         }
     }
 
-    #[cfg(feature = "snapshot")]
     #[inline]
     fn as_live(self) -> Option<Val> {
         match self.0 {
@@ -322,13 +321,8 @@ impl Hash for TableKey {
 /// parts use IndexMap to maintain insertion order for deterministic `pairs()`
 /// iteration.
 ///
-/// Invariant: the key of a dead (nil-valued or vacant) slot may dangle.
-/// `mark_values` only marks keys of live slots, so after a collection a
-/// tombstone's `StringPtr`/`ObjectPtr` key can point at a freed object. Any
-/// general-purpose walk that may dereference keys should use
-/// `live_hash_entries`, which never yields such keys. The GC's specialized
-/// hot loop checks for nil inline before reading a key. Debug invariant checks
-/// may inspect raw keys but do not dereference them.
+/// Dead slots retain their keys as strong references until compaction. This
+/// keeps cleared traversal controls valid across collection and snapshot load.
 #[derive(Debug)]
 enum TableStorage {
     /// Inline storage for small tables. Stores key-value pairs directly.
@@ -590,10 +584,12 @@ impl Table {
 
     /// Check the table shape and tombstone count while developing the VM.
     ///
-    /// The window lies inside the logical array, its hinted dead prefix is
-    /// nil, and a hash key at the append position would be migrated into the
-    /// array before it can become visible there. The tombstone count tracks
-    /// every nil-valued hash slot, including vacant map entries.
+    /// The window lies inside the logical array. Only the last 64 slots of
+    /// its hinted dead prefix are checked for nil. A live hash key at the
+    /// append position would be migrated into the array before becoming
+    /// visible. The tombstone count tracks every nil-valued hash slot,
+    /// including vacant map entries. Large maps check only the counter bound,
+    /// avoiding a full walk on each mutation.
     #[cfg(debug_assertions)]
     fn debug_assert_invariants(&self) {
         debug_assert!(
@@ -605,7 +601,7 @@ impl Table {
                 && self.array[self.lead.saturating_sub(64)..self.lead]
                     .iter()
                     .all(|value| matches!(value, Val::Nil)),
-            "the dead-prefix hint must cover only nil slots"
+            "the sampled tail of the dead-prefix hint must contain only nil slots"
         );
         let assert_hash_key_outside_array = |key: &Val| {
             debug_assert!(
@@ -632,7 +628,7 @@ impl Table {
                 if map.len() > crate::limits::tuning::TABLE_DEBUG_FULL_WALK_LIMIT {
                     debug_assert!(
                         self.dead_count <= map.len(),
-                        "dead_count must equal the number of nil-valued hash slots"
+                        "dead_count must not exceed the number of hash slots"
                     );
                     return;
                 }
@@ -762,7 +758,7 @@ impl Table {
     }
 
     /// Iterate live hash entries in insertion order with their physical slots.
-    /// Dead keys are never yielded, so callers may safely dereference them.
+    /// Dead keys (tombstones and vacant slots) are never yielded.
     #[cfg(feature = "snapshot")]
     fn live_hash_entries(&self) -> impl Iterator<Item = (usize, Val, Val)> + '_ {
         match &self.storage {
@@ -790,11 +786,11 @@ impl Table {
     /// entries that are array slots, and the entry list. The array slots run
     /// from the first live array key to the last one, with nil values for the
     /// empty slots between them; every array key outside that span is nil.
-    /// The live hash entries follow in insertion order.
+    /// All hash slots follow in insertion order; (nil, nil) marks a vacant slot.
     ///
     /// The form is canonical: it depends on the logical contents and `vlen`
-    /// only, never on where the window sits, so two tables holding the same
-    /// logical state save the same entries whatever their window history,
+    /// and hash-slot history, never on where the window sits. Tables with the
+    /// same logical shape save the same entries whatever their window history,
     /// and saving does not touch the table. `rebuild_from_snapshot` inverts
     /// it.
     #[cfg(feature = "snapshot")]
@@ -813,8 +809,25 @@ impl Table {
             .map(|(offset, value)| (Val::Num((self.base + first + offset + 1) as f64), *value))
             .collect();
         let array_slots = out.len();
-        self.extend_with_live_hash_entries(&mut out);
+        out.extend(self.snapshot_hash_slots());
         (self.vlen, array_slots, out)
+    }
+
+    /// All physical hash slots, including dead controls and vacant positions.
+    /// Maps begin with a (nil, true) storage marker, which is not a slot.
+    #[cfg(feature = "snapshot")]
+    pub(super) fn snapshot_hash_slots(&self) -> Vec<(Val, Val)> {
+        match &self.storage {
+            TableStorage::Inline { entries, len } => entries[..*len as usize].to_vec(),
+            // A leading (nil, true) is a storage-kind marker, not a slot.
+            // Templates can be maps even with fewer than INLINE_CAPACITY keys.
+            TableStorage::Map(map) => std::iter::once((Val::Nil, Val::Bool(true)))
+                .chain(
+                    map.iter()
+                        .map(|(key, value)| (key.as_live().unwrap_or(Val::Nil), *value)),
+                )
+                .collect(),
+        }
     }
 
     /// The whole logical array part, keys `1..=vlen` with nil for empty
@@ -847,9 +860,10 @@ impl Table {
     /// Rebuild from `snapshot_entries` output: `vlen` is the logical array
     /// length, the first `array_slots` entries are array slots with
     /// consecutive keys inside `1..=vlen` (nil values for empty slots), the
-    /// rest live hash entries in insertion order. The stored slots become the
-    /// window. The span need not be canonical: environment deltas pass the
-    /// whole logical array.
+    /// rest hash slots in insertion order, including tombstones and the
+    /// optional map marker. The stored array slots become the window. The
+    /// span need not be canonical: environment deltas pass the whole logical
+    /// array.
     #[cfg(feature = "snapshot")]
     pub(super) fn rebuild_from_snapshot(
         &mut self,
@@ -894,7 +908,13 @@ impl Table {
         // wrong slot. A per-table bump suffices: caches key on table identity,
         // which the rebuild preserves.
         let next_version = self.version().wrapping_add(1);
-        *self = Table::with_capacity(entries.len() - array_slots);
+        let is_map = matches!(entries.get(array_slots), Some((Val::Nil, Val::Bool(true))));
+        let capacity = entries.len() - array_slots - usize::from(is_map);
+        *self = Table::with_capacity(if is_map {
+            capacity.max(INLINE_CAPACITY + 1)
+        } else {
+            capacity
+        });
         let mut entries = entries.into_iter();
         let mut array = Vec::with_capacity(array_slots);
         for (position, (key, value)) in entries.by_ref().take(array_slots).enumerate() {
@@ -908,16 +928,34 @@ impl Table {
         self.array = array;
         self.base = base;
         self.vlen = vlen;
+        if is_map {
+            let _ = entries.next();
+        }
         for (key, value) in entries {
-            // A live hash entry at an array key or the append key would have
-            // been stored in the array, so it cannot have come from
-            // `snapshot_entries`.
-            if self.array_key(&key).is_some() || self.is_array_append_key(&key) {
+            let dead = matches!(value, Val::Nil);
+            if !dead && (self.array_key(&key).is_some() || self.is_array_append_key(&key)) {
                 return Err(TableError::InvalidSnapshot(
                     SnapshotTableFault::HashEntryBelongsInArray,
                 ));
             }
-            self.insert(key, value)?;
+            match &mut self.storage {
+                TableStorage::Inline { entries, len } => {
+                    // Vacant slots arise only in map storage, whose marker
+                    // keeps it a map on restore, so a nil key is invalid here.
+                    TableKey::new(key).map_err(TableError::InvalidKey)?;
+                    entries[*len as usize] = (key, value);
+                    *len += 1;
+                }
+                TableStorage::Map(map) => {
+                    let key = if matches!(key, Val::Nil) && dead {
+                        TableKey::vacant(map.len())
+                    } else {
+                        TableKey::new(key).map_err(TableError::InvalidKey)?
+                    };
+                    map.insert(key, value);
+                }
+            }
+            self.dead_count += usize::from(dead);
         }
         self.version.set(next_version);
         #[cfg(debug_assertions)]
@@ -1822,18 +1860,16 @@ impl Table {
         match &self.storage {
             TableStorage::Inline { entries, len } => {
                 for (key, value) in entries.iter().take(*len as usize) {
-                    if !matches!(value, Val::Nil) {
-                        key.mark_reachable(heap, worklist);
-                        value.mark_reachable(heap, worklist);
-                    }
+                    key.mark_reachable(heap, worklist);
+                    value.mark_reachable(heap, worklist);
                 }
             }
             TableStorage::Map(map) => {
                 for (key, value) in map {
-                    if !matches!(value, Val::Nil) {
-                        key.value().mark_reachable(heap, worklist);
-                        value.mark_reachable(heap, worklist);
+                    if let Some(key) = key.as_live() {
+                        key.mark_reachable(heap, worklist);
                     }
+                    value.mark_reachable(heap, worklist);
                 }
             }
         }

@@ -508,6 +508,10 @@ fn exact_pow(x: f64, y: f64, z: &Dint, exact: bool) -> Option<f64> {
         }
         let g = (e >> -f) * n as i64; // g = E * y
         let (big_g, k) = round_54(z); // z is rounded to k * 2^G
+        // The upstream bit-length quirk in `is_exact` only controls this
+        // conservative proximity check. The integer/exponent constraints
+        // below still gate the candidate; the checked worst-case corpus has
+        // exposed no result difference, so keep the quirk as ported.
         if !exact {
             let cnt = k.leading_zeros();
             let mut d = Dint {

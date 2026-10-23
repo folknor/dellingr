@@ -60,8 +60,6 @@ pub const MAX_SOURCE_BYTES: usize = MAX_STRING_BYTES;
 
 // Token lengths and the EOF line (at most source bytes + 1) must fit u32.
 const _: () = assert!(MAX_SOURCE_BYTES < u32::MAX as usize);
-// Call sites pack lines into 24 bits; the compiler asserts this cap against
-// that field's mask where the field is defined.
 
 /// Maximum UTF-8 source-name bytes attached to a compiled chunk.
 pub const MAX_SOURCE_NAME_BYTES: usize = 256 * 1024;
@@ -83,16 +81,21 @@ pub const MAX_ENVIRONMENT_TOKEN_BYTES: usize = 256;
 /// Maximum chunk-tree depth, including the root.
 pub const MAX_CHUNK_NESTING: usize = MAX_SYNTAX_DEPTH as usize;
 
-// These are counts: indices 0 through 254 name 255 values. Operand value 255
-// is reserved for dynamic argument and result counts.
+// Slot limits are counts: a limit of n permits indices 0 through n - 1.
 /// Maximum local slots in a function.
 pub const MAX_LOCALS: usize = u8::MAX as usize;
 /// Maximum upvalues in a function.
 pub const MAX_UPVALUES: usize = u8::MAX as usize;
-/// Maximum fixed arguments before the dynamic-count sentinel.
-pub const MAX_FIXED_ARGS: usize = u8::MAX as usize - 1;
-/// Maximum fixed results before the all-results sentinel.
-pub const MAX_FIXED_RESULTS: usize = MAX_FIXED_ARGS;
+// Runtime call counts are u8-wide. The fixed bytecode argument cap leaves one
+// value for a `__call` receiver. The fixed-result cap remains one below the
+// runtime ceiling to preserve the established accepted-program set. The only
+// open-count operand is instr::OPEN_COUNT (u16::MAX); the u8 maximum is an
+// ordinary fixed count.
+/// Maximum fixed arguments in a source call, leaving room for a `__call`
+/// receiver.
+pub const MAX_FIXED_ARGS: usize = MAX_ARGUMENTS as usize - 1;
+/// Maximum fixed results requested by a call or assignment.
+pub const MAX_FIXED_RESULTS: usize = MAX_RESULTS as usize - 1;
 /// Maximum expressions in one source construct.
 pub const MAX_EXPRESSIONS: u8 = u8::MAX;
 /// Maximum targets in one assignment.
@@ -111,7 +114,7 @@ pub const MAX_TABLE_TEMPLATES: usize = u8::MAX as usize;
 pub const MAX_TABLE_TEMPLATE_FIELDS: usize = u8::MAX as usize;
 /// Maximum array entries emitted in a table-constructor batch.
 pub const MAX_TABLE_BATCH_SIZE: u8 = u8::MAX;
-/// Maximum frame slots encoded by bytecode.
+/// Maximum frame slots permitted by the compiler and bytecode verifier.
 pub const MAX_FRAME_SLOTS: usize = u8::MAX as usize;
 
 /// Maximum size in bytes of any Lua string.

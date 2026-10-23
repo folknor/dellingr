@@ -25,6 +25,7 @@ fn empty_delta(token: &str) -> SavedEnvDelta {
         upserts: Vec::new(),
         order: None,
         array: None,
+        hash_slots: None,
         metatable: SavedMetatableDelta::Unchanged,
     }
 }

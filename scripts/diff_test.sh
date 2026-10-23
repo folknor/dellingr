@@ -199,9 +199,8 @@ do
 
     run_lua "$OUR_LUA" --quiet "$f" > "$OUR_OUT" 2>&1
     our_status=$?
-    # 124 is timeout(1)'s "timed out" status. It is unambiguous only because
-    # the dellingr CLI never exits 124: src/main.rs exits 0 or 1 (see its exit
-    # policy comment). Giving the CLI a new exit code means rechecking this.
+    # 124 is timeout(1)'s "timed out" status. The CLI's handled paths use 0 or
+    # 1; unhandled panics and aborts are also failures, but do not use 124.
     if [ "$our_status" -eq 124 ] && [ "$TIMEOUT_MODE" != none ]; then
         failures+=("TIMEOUT: $name (dellingr)")
         report_capture "dellingr" "$OUR_OUT"

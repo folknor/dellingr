@@ -207,9 +207,8 @@ impl State {
             state.push_unchecked(handler);
             state.push_unchecked(receiver);
             state.push_unchecked(key);
-            *handler_called = true;
             // native-call: call_string_index_handler->call_unguarded
-            state.call_unguarded(ArgCount::Fixed(2), RetCount::Fixed(1))?;
+            state.call_unguarded((ArgCount::Fixed(2), handler_called), RetCount::Fixed(1))?;
             Ok(())
         })
     }

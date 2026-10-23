@@ -33,13 +33,24 @@ impl State {
             .and_then(|ptr| self.heap.as_table(ptr))
         {
             Some(tbl) => {
-                let can_insert_direct =
-                    tbl.get_metatable().is_none() || !matches!(tbl.get(&key), Val::Nil);
-                if can_insert_direct {
+                if tbl.get_metatable().is_none() {
                     tbl.insert(key, val)?;
                     Ok(true)
                 } else {
-                    Ok(false)
+                    let Some((index, _)) = tbl.get_with_index(&key) else {
+                        return Ok(false);
+                    };
+                    if matches!(val, Val::Nil) {
+                        // Table has no indexed-removal helper for the
+                        // tombstone and ordering bookkeeping, so nil writes
+                        // must use insert and look up this key again.
+                        tbl.insert(key, val)?;
+                        Ok(true)
+                    } else {
+                        // A live existing entry can be updated by its slot,
+                        // so the presence lookup is also the write lookup.
+                        Ok(tbl.set_at_index(index, val))
+                    }
                 }
             }
             None => Err(self.type_error(TypeError::TableIndex(tbl_val.typ(&self.heap)))),

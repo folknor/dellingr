@@ -58,6 +58,9 @@ are hosts and are exempt.
 - Other keys still in the hash part follow in insertion order.
 - `n` never shrinks, even when the low keys are cleared. Snapshots preserve
   it, so a loaded state continues with the same order and `#` results.
+- Cleared hash keys remain valid `next` controls until insertion compacts
+  their slots. Collection keeps those keys alive, and snapshots preserve the
+  dead slots and storage kind so traversal can resume after load.
 
 ## Object identity in output
 

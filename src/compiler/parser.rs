@@ -351,6 +351,10 @@ impl<'a> Parser<'a> {
             Some(LiteralStringContents::Decoded(contents)) => Ok(contents),
             Some(LiteralStringContents::SyntaxError { kind, pos }) => Err(self.error_at(kind, pos)),
             Some(LiteralStringContents::StringSizeExceeded { size, limit }) => {
+                // Public parsing caps source bytes at MAX_STRING_BYTES, and
+                // decoding a quoted literal cannot grow beyond its source.
+                // This defensive branch is unreachable for admitted source,
+                // so its next-token location cannot misattribute a user error.
                 Err(self.error_here(ErrorKind::StringSizeExceeded { size, limit }))
             }
             None => Err(self.internal_error_at(ParserFault::MissingStringContents, tok.start)),

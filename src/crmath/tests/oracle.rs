@@ -312,9 +312,10 @@ const PI_TIMES_2_1700_HEX: &str = concat!(
 const DOWN: Rounding = Rounding::TowardNegative;
 const UP: Rounding = Rounding::TowardPositive;
 
-/// libbeef's pi primitive returns zero from 688 bits upward. Even the
-/// externally reduced trig path still calls pi-dependent primitives, so no
-/// such function may escalate beyond the last safe Ziv step (512 bits).
+/// libbeef's pi primitive returns zero from 688 bits upward. This cap bounds
+/// only the oracle's explicit Ziv loop; libbeef primitives can escalate
+/// internally beyond it. Even the externally reduced trig path still calls
+/// pi-dependent primitives, so the oracle stops at the last safe outer step.
 fn check_precision(f: Func, p: u64) -> Result<(), String> {
     let cap = match f {
         Func::Sin | Func::Cos | Func::Tan | Func::Asin | Func::Acos | Func::Atan | Func::Atan2 => {

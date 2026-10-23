@@ -59,8 +59,13 @@ counts zero for it; at runtime it charges the live number of elements.
 - `select`: it moves its arguments once, as passing `...` along does.
 - `unpack` and `table.unpack`: free however many elements they visit.
 - `string.len`, `tostring`.
+- Base-library operations `type`, `tonumber`, `rawget`, `rawequal`, `rawlen`,
+  `next`, `pairs`, `ipairs` and its iterator, `getmetatable`, `setmetatable`,
+  and `error`.
 
 ## Native charges
+
+Base library: `rawset` charges a flat 1, like a `TableWrite` opcode.
 
 Math library: each function charges a flat 1: `abs`, `acos`, `asin`, `atan`,
 `atan2`, `ceil`, `cos`, `deg`, `exp`, `floor`, `fmod`, `log`, `max`, `min`,

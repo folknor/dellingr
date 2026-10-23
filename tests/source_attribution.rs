@@ -195,3 +195,31 @@ fn chunk_names_and_printed_bytes_reach_the_host_exactly() {
     );
     assert_eq!(events.errors, vec![Some(name.to_vec())]);
 }
+
+#[test]
+fn named_function_stores_report_the_declaration_line() {
+    for declaration in ["function missing.field()", "function missing:method()"] {
+        let source = format!("print('previous')\n{declaration}\n\nend");
+        let mut state = State::new();
+        let program = Program::compile(&source, None).expect("declaration compiles");
+        state.load(&program).expect("chunk loads");
+        let error = state
+            .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+            .expect_err("storing a function on nil fails");
+        assert_eq!(error.stack_trace()[0].line, 2, "{source}: {error}");
+    }
+}
+
+#[test]
+fn named_function_newindex_handler_reports_the_declaration_line() {
+    let events = Arc::new(Mutex::new(Events::default()));
+    let mut state = State::with_callbacks(Box::new(Recorder(Arc::clone(&events))));
+    load_and_run(
+        &mut state,
+        "local t = setmetatable({}, {__newindex = print})\nprint('previous')\nfunction t.field()\nend\nfunction t:method()\nend",
+        b"declarations",
+    );
+    let events = events.lock().expect("event lock is healthy");
+    let lines: Vec<u32> = events.prints.iter().map(|(_, line, _)| *line).collect();
+    assert_eq!(lines, vec![2, 3, 5]);
+}

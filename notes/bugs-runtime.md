@@ -210,76 +210,6 @@ and unwinding closes those upvalues.
 Admission then fails up front, as limits.md describes. If the headroom is not
 wanted, fix the comment and limits.md to list the instructions that still check.
 
-## RT-003 - A Lua-to-Lua admission StackOverflow is located inside a function that never ran
-
-Reported independently by the `dispatch` hunter (its F3) and the `vm-core`
-hunter (its finding 2). Both rate it low; it misleads the script author.
-
-**Claims broken.** docs/limits.md says such a call "fails there with
-StackOverflow, before its body runs", which locates the failure at the call.
-The rendered location contradicts it. This is the misleading-message class
-AGENTS.md counts as a defect.
-
-**Mechanism.** `admit_lua_call` refuses two ways, and the two report different
-locations:
-
-- **`CallDepthExceeded`** is checked before the activation record is pushed.
-  The error reaches the caller's unwind and is located at the caller's
-  `OP_CALL` line.
-- **`StackOverflow`** from the frame reservation (`check_stack_space(grow)`)
-  comes after the record is pushed. `reject_admission` builds the callee's
-  frame with `ip = 0` (`admitted_frame()`) and calls `report_frame_error` on it,
-  so the error gets the callee's `line_info[0]` as its line. The traceback's
-  innermost entry, which `Display` uses for the `chunk:line:` prefix, is the
-  callee at its first instruction. The attached source name (`host_error` reads
-  `call_stack.last()`) is also the callee's chunk. `unwind_invocation` then
-  keeps that location and traceback, because the trace is already non-empty.
-
-The author sees `callee.lua:<first line of callee>: stack overflow` for a
-function whose body never ran, with a traceback line for it. Two refusals at the
-same call site, one per limit, point at different places.
-
-**Direction.** Return admission errors unreported and unlocated, as
-`CallDepthExceeded` does, and let the caller's unwind locate them at the call
-instruction (or pop the record before reporting, or build the trace from the
-caller frame). With nothing left to report, `reject_admission` reduces to the
-bookkeeping undo. The `dispatch` hunter checked that `reject_admission`
-otherwise undoes admission completely.
-
-## RT-004 - `reg_vararg` truncates the live frame before the stack preflight that can refuse
-
-From the `codegen` hunter, raised as a lateral observation outside its scope.
-
-In `vm/registers.rs::reg_vararg`, the `RetCount::All` arm runs
-`check_window(dst)?`, then `self.stack.truncate(dst)`, then
-`check_stack_space(available)?`. When the preflight refuses, the live frame's
-registers above `dst` are already gone. Today that is harmless:
-`unwind_invocation` owns the failed frame, and errors kill the callback. It is
-still the one stack-growth site in this area that changes the stack before the
-check that can refuse it. The project's preflight rule ("a rejected operation
-must leave the stack ... unchanged") and the fault-injection sweep's "surviving
-operands" check both expect a clean refusal.
-
-**Direction:** preflight `available - (frame.top - dst)` first, or preflight
-before the truncate.
-
-## RT-005 - Numeric `for` control errors claim arithmetic
-
-From the `dispatch` hunter. Low.
-
-`instr_for_prep` and `instr_for_loop` report a non-number start, limit or step
-as `TypeError::Arithmetic`, which renders as "attempt to perform arithmetic on a
-nil value". `for i = 1, n do` with `n` nil performs no arithmetic the author
-wrote, so the message names the wrong operation. That is a misleading message by
-AGENTS.md's own standard, not a request to match reference wording.
-
-Separately, `instr_for_loop` re-validates the three hidden control registers on
-every iteration. The script cannot write those registers, so the check is dead
-work on the hottest loop opcode.
-
-**Direction.** Add a `TypeError` variant naming the `for` field (initial value,
-limit, step). Drop the per-iteration re-checks, or make them `debug_assert`s.
-
 ## RT-006 - The method IC's `globals_version` guard rests on a rationale that does not hold
 
 From the `dispatch` hunter. Low: the comment is wrong, and the guard costs
@@ -351,85 +281,6 @@ exactly one. There is no swallowing case.
   reporting unconditionally.
 
 Then make the `on_error` doc say which one it is.
-
-## RT-008 - `open_libs` inside `with_restricted_env` leaves global state the restore does not undo
-
-From the `vm-core` hunter.
-
-**Claim broken.** `with_restricted_env` documents that "The original environment
-is restored after the function completes (or errors)".
-
-**Mechanism.** If the host calls `state.open_libs()` inside `f`, it:
-
-- installs fresh library tables into the restricted `GlobalEnv`, which is
-  discarded on restore;
-- replaces `string_metatable` (and resets `string_mt_index_shape`) State-wide.
-  That is not part of the env, so it is not restored, and `s:upper()` afterwards
-  resolves through a string library table that no global names;
-- with `snapshot`, has `capture_env_tokens` re-key `env_tokens` and
-  `env_baselines` to the restricted env's new tables. After the restore the real
-  `math`, `string`, `table` and `_G` objects no longer carry tokens, so a save
-  classifies them as user tables, and the orphaned canonical objects stay rooted
-  for the State's life.
-
-Nothing forbids the combination, and both are public `&mut self` APIs.
-
-**Decided (user, 2026-10-23):** refuse `open_libs` inside a restricted
-environment with an error.
-
-**Direction.** Refuse `open_libs` while `transient_roots.suspended_envs` is
-non-empty, or document the combination as unsupported.
-
-Related observation from the same hunter, outside the defect bar:
-`with_restricted_env` silently scopes `seal_globals()` and `globals_sealed()` to
-the restricted env, so a seal inside `f` is lost on restore. That is consistent
-with "bindings ... go away with that environment", but seal is documented as
-one-way and State-wide.
-
-## RT-009 - Host `get_table` drops the key on a refusal that never enters the handler
-
-From the `tables` hunter.
-
-**Claims broken**
-
-- The doc comment on `get_table_with_key_tracking_call` (src/vm/metamethod.rs):
-  "records the commit point for host reads: only entering a user function can
-  consume the key on failure".
-- `State::get_table` docs: "Validation and dispatch preflight failures leave the
-  stack unchanged".
-- AGENTS.md: `get_table_unguarded` "restores the key only before handler entry".
-
-**Mechanism.** `handle_index_metamethod_inner` (the function and RustFn arms) and
-`call_string_index_handler` (src/vm/eval_index.rs) set `*handler_called = true`
-before `call_unguarded`. `call_unguarded` can still refuse without entering
-anything:
-
-- `native_call_depth >= MAX_NATIVE_CALL_DEPTH` (`NativeCallDepthExceeded`);
-- `begin_call` -> `admit_lua_call`: `MAX_CALL_DEPTH`, and the callee frame's
-  `check_stack_space(grow)` (`StackOverflow`).
-
-On each of these, `fail_call` clears the three operands, and
-`get_table_unguarded` sees `handler_called` and does not push the key back. Two
-`StackOverflow` refusals of the same `get_table` call then leave different
-stacks:
-
-- With 0-2 free slots, the refusal comes from `check_stack_space(3)`, which runs
-  before the flag is set. The key is preserved, which is what
-  `tests/host_table_api_atomicity.rs::get_table_preserves_the_key_on_dispatch_preflight_failures`
-  asserts.
-- With 3 free slots but fewer than the handler's `max_stack`, the refusal comes
-  from the callee-frame admission. The key is consumed.
-
-The same split applies to a host `get_table` made from a Rust callback that is
-already at the native depth limit.
-
-**Direction.** Set the commit flag where the callee is actually entered, not
-before the call. One way is for `call_unguarded` to report whether it got past
-admission, for example a separate admission phase whose refusals carry an
-"operands untouched" outcome. The cleaner structural move is a
-`try_call_preflight` that runs every refusal check (native depth, Lua depth,
-callee stack) before anything is pushed. Then "preflight failure" means one
-thing for every host entry point, not just `get_table`.
 
 ## RT-010 - An all-dead array window grows instead of being released when the dead-prefix hint lags
 
@@ -504,8 +355,11 @@ RT-001 (user, 2026-10-23). The `try_insert_table_direct` bullet stands alone.
   twice, plus the push and pop of a copy of an already-rooted register. This is
   the same layering as RT-001 and RT-002, and the register-native rewrite
   proposed there removes it.
-- `try_insert_table_direct`, for a table with a metatable, calls `tbl.get(&key)`
-  and then `insert`, which repeats the lookup.
+- `try_insert_table_direct`, for a table with a metatable: the second resolution
+  wave made non-nil writes to an existing key one indexed lookup plus a slot
+  update. A nil write still calls `Table::insert` after the lookup, for its
+  removal bookkeeping. An indexed removal helper on `Table` (src/vm/table.rs)
+  that keeps that bookkeeping would let the nil case reuse the found index too.
 
 ## RT-015 - Inline caches that never populate: metatables without `__index`, and absent globals
 
@@ -536,46 +390,38 @@ Raised as performance observations outside the defect bar.
   `invoke_rust_fn`'s `rotate_right` moves the callback's whole frame when it
   returns fewer values than it left.
 
-## RT-017 - The pattern cache is cleared wholesale at every collection
+## RT-020 - `get_table_unguarded` carries `#[hotpath::measure]` though it stays live across native re-entry
 
-Reported as a performance observation outside the defect bar by both the
-`vm-core` and the `strings` hunter.
+Lateral from the second resolution wave. AGENTS.md forbids the annotation on
+functions that stay live across a native re-entry, because every native level
+then carries the instrumentation frame and the limit tests drive
+`MAX_NATIVE_CALL_DEPTH` levels on a fixed thread. `get_table_unguarded`
+(src/vm/table_ops.rs) is such a function: it calls into the `__index` handler
+path that reaches `call_unguarded`. Either drop the annotation or measure a
+callee that returns before the re-entry.
 
-`collect_garbage` clears the whole pattern cache. That is correct, because keys
-are string pointers and freed slots can be reused. But the default GC policy
-collects at `max(2 * live, 20)` allocations, so in allocation-heavy or
-pattern-heavy scripts the "compile once" cache is mostly cold and patterns
-recompile constantly. The `strings` hunter adds that `gmatch_iter`'s per-call
-`push_string` interning (see LIB-010 in notes/bugs-stdlib.md) can itself run
-`maybe_collect` and so clear the cache.
+## RT-022 - Generic `call_unguarded` and the admission-reporting move need their on-demand checks
 
-**Direction.** Keep entries whose key string survived the sweep. Either prune
-only dead keys after the sweep, as `format_pointer_ids` is pruned with
-`val_is_live` (the same safety argument holds, since keys are checked before any
-allocation can reuse a slot, and eviction stays deterministic), or key the cache
-by content hash plus bytes.
+Lateral from the second resolution wave. To mark handler entry only after
+admission succeeds, `call_unguarded` became generic over `impl CallArguments`
+and `begin_call` takes an `impl CallEntry`, so two monomorphized copies of
+functions that stay live across native re-entry now exist. The standing
+native-stack tests check that the envelope still fits; nobody has compared the
+per-level bytes. Run `brokkr test native_bytes_per_level` (dev and `--release`,
+default and `snapshot`) against the parent commit, and attribute any growth
+with `scripts/frame_sizes.py`.
 
-## RT-018 - Collector overhead and silent stale roots
+The same wave stopped `reject_admission` from reporting the unentered callee;
+host calls now report through `fail_call`. The on-demand
+`error_boundary_fault_sweep` (`--features fault-injection,snapshot`) checks
+notification counts per event and has not been run since.
 
-From the `vm-core` hunter, raised outside the defect bar.
+## RT-021 - `with_restricted_env` silently scopes `seal_globals` to the restricted environment
 
-- **Performance.** `sweep_bytecode_caches` builds a `Vec<Arc<Bytecode>>` of every
-  reachable closure (refcount traffic per live closure) plus a `BTreeSet` per
-  collection. Recording bytecode identities during `mark_children` would remove
-  the second heap walk and the `Arc` clones.
-- **Smell.** `GcHeap::mark` and `StringPool::mark` silently ignore a vacant key.
-  A stale root therefore shows up as a later "use-after-free detected" panic at
-  the access site instead of at marking. A `debug_assert!` that roots resolve
-  would move detection to where the root set is wrong.
-- **Smell.** `State::pattern_compilations` is a `pub` method that exists only
-  under `debug_assertions` (`#[doc(hidden)]`), so the public API surface differs
-  between profiles.
-
-## RT-019 - `debug_assert_invariants` messages say more than the code checks
-
-From the `tables` hunter (its L3), raised outside the defect bar.
-
-The O(1) branch for big maps uses the message "dead_count must equal the number
-of nil-valued hash slots" for a `<=` bound, and the lead check covers only the
-last 64 slots of the hinted prefix. Both shortcuts are deliberate, for speed.
-The messages and doc comments should say so, so that a failure is not misread.
+Lateral from the hunt, kept after the restricted-environment `open_libs` refusal
+landed. `seal_globals()` and `globals_sealed()` act on the current `GlobalEnv`,
+so a seal made inside `with_restricted_env` is discarded with the restricted
+environment on restore. That is consistent with "bindings ... go away with that
+environment", but `seal_globals` is documented as one-way and State-wide. Either
+refuse the seal inside a restricted environment, as `open_libs` now is, or say
+in its doc that it seals only the environment current at the call.

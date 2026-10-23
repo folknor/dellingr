@@ -5,8 +5,9 @@
 
 use dellingr::error::{
     ArgDetail, Error, ErrorKind, ErrorValue, HostCallApi, PrefixLocation, SyntaxError, TokenKind,
+    TypeError,
 };
-use dellingr::{ArgCount, RetCount, State};
+use dellingr::{ArgCount, LuaType, RetCount, State};
 
 fn run_error(code: &str) -> Error {
     let mut state = State::new();
@@ -58,6 +59,58 @@ fn method_call_numbering_covers_table_functions() {
         kind_text("local t = {concat = table.concat}\nt:concat({})"),
         "bad argument #1 to 'concat' (string expected, got table)"
     );
+}
+
+#[test]
+fn numeric_for_errors_name_the_invalid_control_field() {
+    for (code, expected) in [
+        (
+            "for i = nil, 1 do end",
+            "numeric for loop initial value must be a number, got nil",
+        ),
+        (
+            "for i = 1, nil do end",
+            "numeric for loop limit must be a number, got nil",
+        ),
+        (
+            "for i = 1, 2, nil do end",
+            "numeric for loop step must be a number, got nil",
+        ),
+    ] {
+        assert_eq!(kind_text(code), expected, "{code}");
+    }
+}
+
+#[test]
+fn numeric_for_control_errors_preserve_the_field_in_the_error_kind() {
+    enum Field {
+        InitialValue,
+        Limit,
+        Step,
+    }
+
+    for (code, field) in [
+        ("for i = nil, 1 do end", Field::InitialValue),
+        ("for i = 1, nil do end", Field::Limit),
+        ("for i = 1, 2, nil do end", Field::Step),
+    ] {
+        let error = run_error(code);
+        match field {
+            Field::InitialValue => assert!(matches!(
+                error.kind(),
+                ErrorKind::TypeError(TypeError::NumericForInitialValue(LuaType::Nil))
+            )),
+            Field::Limit => assert!(matches!(
+                error.kind(),
+                ErrorKind::TypeError(TypeError::NumericForLimit(LuaType::Nil))
+            )),
+            Field::Step => assert!(matches!(
+                error.kind(),
+                ErrorKind::TypeError(TypeError::NumericForStep(LuaType::Nil))
+            )),
+        }
+        assert!(error.kind().to_string().contains("numeric for loop"));
+    }
 }
 
 #[test]

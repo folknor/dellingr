@@ -1563,3 +1563,43 @@ fn block_exit_closes_a_shadowed_capture_slot() {
     assert_eq!(closes[0].1, Instr::close(1));
     assert!(closures[0] < closes[0].0 && closes[0].0 < closures[1]);
 }
+
+#[test]
+fn fallible_closures_and_varargs_have_their_own_line_stamps() {
+    for declaration in [
+        "local function f()\nend",
+        "function f()\nend",
+        "local f; function f()\nend",
+        "function print()\nend",
+        "local t = {}; function t.f()\nend",
+        "local t = {}; function t:f()\nend",
+    ] {
+        let source = format!("print('previous')\n{declaration}");
+        let chunk = parse_unfinalized(&source).expect("declaration compiles");
+        let lines: Vec<u32> = chunk
+            .code
+            .iter()
+            .zip(&chunk.line_info)
+            .filter(|(instruction, _)| instruction.opcode() == Instr::OP_CLOSURE)
+            .map(|(_, line)| *line)
+            .collect();
+        assert_eq!(lines, vec![2], "{source}");
+    }
+    let chunk = parse_unfinalized(
+        "local f; local function outer(...)\nprint('previous')\nfunction f()\nend\nreturn\n...\nend",
+    )
+    .expect("upvalue declaration and open varargs compile");
+    let outer = &chunk.nested[0];
+    assert_eq!(opcodes(outer, Instr::OP_CLOSURE).len(), 1);
+    assert_eq!(opcodes(outer, Instr::OP_VARARG).len(), 1);
+    for (instruction, line) in outer.code.iter().zip(&outer.line_info) {
+        match instruction.opcode() {
+            Instr::OP_CLOSURE => assert_eq!(*line, 3),
+            Instr::OP_VARARG => {
+                assert_eq!(instruction.vararg_count(), RetCount::All);
+                assert_eq!(*line, 6);
+            }
+            _ => {}
+        }
+    }
+}

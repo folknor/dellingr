@@ -6,17 +6,14 @@
 //! are 16-bit operands; a constant operand is its own opcode, never a flag
 //! bit. Each instruction is stored in one `u64`.
 
-use crate::limits::{MAX_FIXED_ARGS, MAX_FIXED_RESULTS};
-
-// Every fixed result count of a call fits below the open sentinel, and the
-// largest a return can name (255 listed expressions) fits a `u8`.
-const _: () = assert!(MAX_FIXED_RESULTS < u8::MAX as usize);
+use crate::limits::{MAX_ARGUMENTS, MAX_FIXED_ARGS, MAX_FIXED_RESULTS, MAX_RESULTS};
 use crate::numeral::{lua_add, lua_div, lua_modulo, lua_mul, lua_sub};
 
-// The fixed-count limits are exactly the counts below the shared 255 sentinel
-// of the runtime count types.
-const _: () = assert!(MAX_FIXED_ARGS == u8::MAX as usize - 1);
-const _: () = assert!(MAX_FIXED_RESULTS == u8::MAX as usize - 1);
+// The compiler caps fixed call arguments and results one below their runtime
+// count ceilings. A return may still name MAX_RESULTS fixed values; only
+// OPEN_COUNT denotes an open count operand.
+const _: () = assert!(MAX_FIXED_ARGS + 1 == MAX_ARGUMENTS as usize);
+const _: () = assert!(MAX_FIXED_RESULTS + 1 == MAX_RESULTS as usize);
 
 /// Inline-cache slots available to one cache family of one function. Cache
 /// operands are biased by one: operand 0 means uncached and operands 1..=255
@@ -59,22 +56,23 @@ const fn decode_cache_slot(operand: u8) -> Option<u8> {
 
 /// Argument count for function calls.
 ///
-/// Bytecode supports fixed counts 0 through `limits::MAX_FIXED_ARGS` or a
-/// dynamic count. Host calls can also use `Fixed(255)`; that runtime count
-/// cannot be encoded in bytecode.
-/// Keeping the runtime count is necessary when `__call` adds a receiver to
-/// 254 arguments. Only instruction encoding rejects the sentinel alias.
+/// Bytecode supports fixed counts through `limits::MAX_FIXED_ARGS` or a
+/// dynamic count. Host calls can use fixed counts through
+/// `limits::MAX_ARGUMENTS`. The narrower bytecode cap leaves room for a
+/// synthesized `__call` receiver within the runtime count width.
 //
 // A separate host-facing argument type (no `Dynamic`, no sentinel) was
-// considered and declined. `Fixed(255)` is not a live collision: runtime
-// counts never pass through `to_u8`, which asserts against the alias, and the
-// `__call` path needs runtime 255. Hosts naming `Dynamic` get a clean error
-// from `call`/`call_anchor` before any state changes. A new type would only
-// move that check to compile time, at the cost of breaking every host call
-// site; revisit if the host API is redesigned for 1.0.
+// considered and declined. The maximum fixed host count is distinct from the
+// dynamic bytecode operand: count operands are 16-bit and only `OPEN_COUNT`
+// denotes a dynamic count. The `__call` path needs one value of headroom in
+// the narrower fixed bytecode argument cap. Hosts naming `Dynamic` get a clean
+// error from `call`/`call_anchor` before any state changes. A new type would
+// only move that check to compile time, at the cost of breaking every host
+// call site; revisit if the host API is redesigned for 1.0.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ArgCount {
-    /// Fixed number of arguments (0-254 in bytecode, 0-255 at runtime).
+    /// Fixed number of arguments (through `limits::MAX_FIXED_ARGS` in
+    /// bytecode, through `limits::MAX_ARGUMENTS` at runtime).
     Fixed(u8),
     /// Bytecode-only: every value from the first argument register up to the
     /// top an open producer left. Public host calls reject this variant; use
@@ -87,9 +85,9 @@ impl ArgCount {
     ///
     /// # Panics
     ///
-    /// Panics on a fixed count above `limits::MAX_FIXED_ARGS`, which bytecode
-    /// never names: the runtime count 255 exists only for `__call` adding a
-    /// receiver to 254 arguments.
+    /// Panics on a fixed count above `limits::MAX_FIXED_ARGS`. Bytecode calls
+    /// leave room below the runtime maximum for a `__call` receiver; hosts may
+    /// still name the full runtime count.
     #[inline]
     pub(crate) fn to_operand(self) -> u16 {
         match self {
@@ -104,8 +102,8 @@ impl ArgCount {
         }
     }
 
-    /// Decode a 16-bit count operand. Values other than [`OPEN_COUNT`] above
-    /// 255 never pass verification; they decode saturated.
+    /// Decode a 16-bit count operand. Values outside the `u8` range other than
+    /// [`OPEN_COUNT`] never pass verification; they decode saturated.
     #[inline(always)]
     pub(crate) const fn from_operand(n: u16) -> Self {
         if n == OPEN_COUNT {
@@ -120,12 +118,12 @@ impl ArgCount {
 
 /// Return count for function calls and returns.
 ///
-/// Bytecode supports fixed counts or all available values. A `RETURN` may
-/// carry a fixed count of 255 (a return statement listing 255 expressions);
-/// every other count operand is at most `limits::MAX_FIXED_RESULTS`.
+/// Bytecode supports fixed counts or all available values. Call results,
+/// varargs and expanded assignments use `limits::MAX_FIXED_RESULTS`; a
+/// `RETURN` may carry a fixed count through `limits::MAX_RESULTS`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RetCount {
-    /// Fixed number of return values (0-255).
+    /// Fixed number of return values (through `limits::MAX_RESULTS`).
     Fixed(u8),
     /// Return/expect all available values.
     All,
@@ -133,7 +131,7 @@ pub enum RetCount {
 
 impl RetCount {
     /// Encode to a 16-bit count operand. All maps to [`OPEN_COUNT`]; every
-    /// fixed count, 255 included, is its own value.
+    /// fixed count is its own value.
     #[inline]
     pub(crate) const fn to_operand(self) -> u16 {
         match self {
@@ -142,8 +140,8 @@ impl RetCount {
         }
     }
 
-    /// Decode a 16-bit count operand. Values other than [`OPEN_COUNT`] above
-    /// 255 never pass verification; they decode saturated.
+    /// Decode a 16-bit count operand. Values outside the `u8` range other than
+    /// [`OPEN_COUNT`] never pass verification; they decode saturated.
     #[inline(always)]
     pub(crate) const fn from_operand(n: u16) -> Self {
         if n == OPEN_COUNT {

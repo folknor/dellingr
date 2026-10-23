@@ -58,7 +58,7 @@ fn write_function(f: &mut fmt::Formatter<'_>, bc: &Bytecode, path: &mut String) 
     }
     writeln!(
         f,
-        " params={} vararg={} local_slots={} registers={}",
+        " params={} vararg={} non_param_locals={} registers={}",
         bc.num_params, bc.is_vararg, bc.num_locals, bc.max_stack
     )?;
     writeln!(

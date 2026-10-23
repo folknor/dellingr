@@ -181,9 +181,8 @@ impl State {
                     self.push_unchecked(Val::Obj(ptr));
                     self.push_unchecked(table_val);
                     self.push_unchecked(key);
-                    *handler_called = true;
                     // native-call: handle_index_metamethod_inner->call_unguarded:lua
-                    self.call_unguarded(ArgCount::Fixed(2), RetCount::Fixed(1))?;
+                    self.call_unguarded((ArgCount::Fixed(2), handler_called), RetCount::Fixed(1))?;
                     Ok(())
                 } else {
                     Err(self
@@ -199,9 +198,8 @@ impl State {
                 self.push_unchecked(Val::RustFn(f));
                 self.push_unchecked(table_val);
                 self.push_unchecked(key);
-                *handler_called = true;
                 // native-call: handle_index_metamethod_inner->call_unguarded:rust
-                self.call_unguarded(ArgCount::Fixed(2), RetCount::Fixed(1))?;
+                self.call_unguarded((ArgCount::Fixed(2), handler_called), RetCount::Fixed(1))?;
                 Ok(())
             }
             // native-call: handle_index_metamethod_inner->index_string

@@ -375,6 +375,36 @@ All notable changes to dellingr are documented here. The format follows
 - The `debug_parser`, `debug_vm` and `debug_gc` cargo features are removed.
   They printed straight to stdout, bypassing `HostCallbacks`. Use the CLI's
   `--dump-bytecode` or `Program::disassemble` to inspect compiled bytecode.
+- **Replay-visible (cost):** `COST_MODEL_VERSION` is 8. `rawset` charges a
+  flat 1, like a table-write opcode, where it was free, and `string.gsub`
+  rejects an invalid replacement argument before charging for its subject
+  and pattern.
+- **Replay-visible (snapshot contents, GC timing):** snapshot
+  `FORMAT_VERSION` is 12; older saves are rejected. A cleared hash key now
+  stays a valid `next` control until insertion compacts its slot: the
+  collector keeps a tombstone's key alive, and saves record each table's
+  hash-slot history (dead keys, vacant positions and storage kind), for
+  ordinary tables and environment-table deltas alike, so a traversal that
+  clears keys as it goes resumes identically after a collection or a load.
+  Keys of cleared entries can therefore outlive their last reference until
+  compaction, which moves when collections reclaim them. In a loaded
+  environment table, keys that setup added and the save lacks now follow the
+  saved keys in `pairs` order.
+- **Replay-visible (lines):** a `function` statement (`function f()`,
+  `function t.f()`, `function t:m()`, `local function f()`) records the line
+  of its `function` keyword for the closure and the store, and `...` records
+  its own line, where they could take a later line such as that of the
+  function's closing `end`. Error
+  locations, tracebacks and snapshot bytes for multi-line declarations change.
+- A Lua-to-Lua call whose callee frame cannot be reserved now reports its
+  `StackOverflow` at the caller's call instruction; the never-entered callee
+  no longer appears in the traceback.
+- A non-numeric numeric `for` control raises the new
+  `TypeError::NumericForInitialValue`, `NumericForLimit` or `NumericForStep`
+  (`numeric for loop step must be a number, got nil`) instead of
+  `TypeError::Arithmetic`.
+- `State::open_libs` inside `State::with_restricted_env` is refused with the
+  new `ErrorKind::OpenLibsInRestrictedEnv`, before any state changes.
 
 ### Added
 
@@ -457,6 +487,13 @@ All notable changes to dellingr are documented here. The format follows
   `TFOR_CALL` result count above 255 (`TforCallResultCountExceeded`).
 - `CostAnalysis::caveat()` and the `--analyze` warning now say that every
   native library charge, flat or data-dependent, is left out.
+- The cost analysis labels a scope with no static cost `cost 0 (static)`
+  instead of `cost 0 (free)`: a generic `for` can still call a costed
+  iterator at runtime.
+- The CLI reports a parse error the same way for a run, `--analyze` and
+  `--dump-bytecode` (`Error: parsing source: ...`).
+- The disassembly header names the non-parameter local count
+  `non_param_locals` instead of `local_slots`.
 
 ### Fixed
 
@@ -515,6 +552,11 @@ All notable changes to dellingr are documented here. The format follows
 - Snapshot decoding caps a vector's initial reservation by its size in bytes,
   not by element count, so a forged length prefix can no longer reserve many
   times the input size.
+- Host `get_table` keeps its key on the stack when a function-valued
+  `__index` handler is refused before it runs (its frame does not fit, or a
+  call-depth limit is reached), as it does for other refusals.
+- An open `...` that is refused for lack of stack space leaves the
+  function's live registers untouched instead of truncating them first.
 
 ## [0.5.0] - 2026-10-14
 

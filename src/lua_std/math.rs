@@ -273,10 +273,10 @@ pub(super) const MATH_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         let x = state.to_number(1)?;
         let result = if check_optional_type_named(state, 2, LuaType::Number, "log")? {
             let base = state.to_number(2)?;
-            // Reference special-cases base 10 with log10, which makes
+            // Like Lua 5.2, this special-cases base 10 with log10, which makes
             // math.log(1000, 10) exactly 3 rather than 2.9999999999999996.
-            // An exact comparison is what is wanted here: only the literal
-            // base 10 takes that path, as in reference.
+            // Lua 5.4 also special-cases base 2 with log2; this VM deliberately
+            // uses the quotient of natural logs for every other base.
             // Any other base is the quotient of two correctly rounded natural
             // logarithms, rounded once more: deterministic, but not a
             // correctly rounded log_base.

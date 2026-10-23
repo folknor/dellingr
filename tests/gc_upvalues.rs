@@ -28,8 +28,9 @@ fn install_force_next_gc(state: &mut State) {
 
 #[test]
 fn tombstoned_keys_and_values_are_not_gc_roots() {
-    // Assignments keep the empty case inline. Eight fractional keys force
-    // map storage and keep compaction from removing the tombstones below.
+    // Dead slots retain their keys but never their values. Assignments keep
+    // the empty case inline. Eight fractional keys force map storage and keep
+    // compaction from removing the tombstones below.
     for preset in [0, 8] {
         let mut state = State::new();
         state.gc_disable_auto();
@@ -48,7 +49,10 @@ fn tombstoned_keys_and_values_are_not_gc_roots() {
             .unwrap();
         state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
         state.gc_collect();
-        assert_eq!(state.object_count(), baseline, "preset {preset}");
+        // A dead slot keeps its key as a strong reference until compaction, so
+        // a cleared traversal control stays valid; the cleared value is not
+        // retained.
+        assert_eq!(state.object_count(), baseline + 1, "preset {preset}");
 
         // Traverse and then force compaction with collected keys still in the
         // dead slots. Neither path may dereference or expose those keys.

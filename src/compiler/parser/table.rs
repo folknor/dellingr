@@ -94,6 +94,9 @@ impl Parser<'_> {
             let mut keyed_count = 0u8;
             let mut template_candidate = TableTemplateCandidate::new();
             let last_positional_multi = loop {
+                // Keep the encoded batch size: constructor assignment order is
+                // unspecified, and changing flush timing changes replayed values
+                // when positional and keyed fields overlap.
                 if i == MAX_TABLE_BATCH_SIZE {
                     table.items.push(TableItem::Flush {
                         count: Some(i),

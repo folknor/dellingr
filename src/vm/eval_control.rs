@@ -50,13 +50,13 @@ impl State {
         let step_val = self.stack[slot + 2];
         let step = step_val
             .as_num()
-            .ok_or_else(|| self.type_error(TypeError::Arithmetic(step_val.typ(&self.heap))))?;
+            .ok_or_else(|| self.type_error(TypeError::NumericForStep(step_val.typ(&self.heap))))?;
         let end = end_val
             .as_num()
-            .ok_or_else(|| self.type_error(TypeError::Arithmetic(end_val.typ(&self.heap))))?;
-        let start = start_val
-            .as_num()
-            .ok_or_else(|| self.type_error(TypeError::Arithmetic(start_val.typ(&self.heap))))?;
+            .ok_or_else(|| self.type_error(TypeError::NumericForLimit(end_val.typ(&self.heap))))?;
+        let start = start_val.as_num().ok_or_else(|| {
+            self.type_error(TypeError::NumericForInitialValue(start_val.typ(&self.heap)))
+        })?;
         if check_numeric_for_condition(start, end, step) {
             for (local_slot, n) in (slot..).zip([start, end, step, start]) {
                 self.stack[local_slot] = Val::Num(n);
@@ -76,15 +76,19 @@ impl State {
         ip: &mut usize,
         offset: i32,
     ) -> Result<()> {
-        let mut var = self.stack[slot].as_num().ok_or_else(|| {
-            self.type_error(TypeError::Arithmetic(self.stack[slot].typ(&self.heap)))
-        })?;
-        let limit = self.stack[slot + 1].as_num().ok_or_else(|| {
-            self.type_error(TypeError::Arithmetic(self.stack[slot + 1].typ(&self.heap)))
-        })?;
-        let step = self.stack[slot + 2].as_num().ok_or_else(|| {
-            self.type_error(TypeError::Arithmetic(self.stack[slot + 2].typ(&self.heap)))
-        })?;
+        // `instr_for_prep` converts all three hidden controls to numbers, and
+        // script code can only write the visible loop variable at `slot + 3`.
+        // Safe extraction from tagged `Val`s still checks their variants; the
+        // expects document the setup invariant without building Lua errors.
+        let mut var = self.stack[slot]
+            .as_num()
+            .expect("numeric for variable stays numeric after setup");
+        let limit = self.stack[slot + 1]
+            .as_num()
+            .expect("numeric for limit stays numeric after setup");
+        let step = self.stack[slot + 2]
+            .as_num()
+            .expect("numeric for step stays numeric after setup");
         var += step;
         if check_numeric_for_condition(var, limit, step) {
             self.stack[slot] = Val::Num(var);

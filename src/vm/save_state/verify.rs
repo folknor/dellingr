@@ -323,6 +323,15 @@ fn validate_environment_deltas(payload: &SavePayload) -> Result<(), SnapshotErro
                 ));
             }
         }
+        if let Some(slots) = &delta.hash_slots {
+            let shape = super::SavedObject::Table {
+                array_len: delta.array.as_ref().map_or(0, |array| array.len() as u64),
+                array_slots: 0,
+                entries: slots.clone(),
+                metatable: None,
+            };
+            validate_table_shape(payload, &shape, delta_index)?;
+        }
         for value in delta.array.iter().flatten() {
             validate_value(value, payload)?;
         }
@@ -436,157 +445,189 @@ fn validate_metatable(
     }
 }
 
+fn validate_table_shape(
+    payload: &SavePayload,
+    object: &SavedObject,
+    object_index: usize,
+) -> Result<(), SnapshotError> {
+    if let SavedObject::Table {
+        array_len,
+        array_slots,
+        entries,
+        metatable,
+    } = object
+    {
+        let location = SaveLocation::TableEntries {
+            object: object_index,
+        };
+        let array_slots = *array_slots as usize;
+        if array_slots > entries.len() {
+            return Err(corrupt(
+                CorruptionReason::Table(TableCorruption::ArraySlotsExceedEntries),
+                array_slots,
+                location,
+            ));
+        }
+        // The logical length is not backed by stored slots, so bound it
+        // explicitly: past MAX_ARRAY_LEN array keys stop being exact,
+        // distinct numbers and tagged slot indices could collide.
+        let array_len = match usize::try_from(*array_len) {
+            Ok(len) if len <= MAX_ARRAY_LEN => Some(len),
+            _ => None,
+        };
+        let Some(array_len) = array_len else {
+            return Err(corrupt(
+                CorruptionReason::Table(TableCorruption::ArrayLengthExceedsLimit),
+                object_index,
+                location,
+            ));
+        };
+        // Do not bound logical length by the live span plus fixed slack:
+        // constructors append nil structurally, so valid live tables can
+        // have arbitrarily long nil tails (or no live span at all).
+        // Rejecting those would break save/load for valid states. This
+        // representation bound alone does not bound later gap allocations;
+        // handling allocation failure belongs to the table write path.
+        // The stored span is canonical: consecutive keys inside the
+        // logical array, starting and ending at a live slot.
+        let first_slot = match entries.first() {
+            Some((super::SavedVal::Num(bits), _)) if array_slots > 0 => {
+                array_index(f64::from_bits(*bits), array_len)
+                    .filter(|slot| slot + array_slots <= array_len)
+            }
+            _ => Some(0),
+        };
+        let Some(first_slot) = first_slot else {
+            return Err(corrupt(
+                CorruptionReason::Table(TableCorruption::ArraySlotWrongKey),
+                0,
+                location,
+            ));
+        };
+        if array_slots > 0
+            && (matches!(entries[0].1, super::SavedVal::Nil)
+                || matches!(entries[array_slots - 1].1, super::SavedVal::Nil))
+        {
+            return Err(corrupt(
+                CorruptionReason::Table(TableCorruption::ArraySpanEndpointsNotLive),
+                0,
+                location,
+            ));
+        }
+        let mut keys = BTreeSet::new();
+        for (entry_index, (key, value)) in entries.iter().enumerate() {
+            validate_value(key, payload)?;
+            validate_value(value, payload)?;
+            if entry_index < array_slots {
+                // Array slots carry their implied key, and may be empty.
+                if !matches!(key, super::SavedVal::Num(bits) if array_index(f64::from_bits(*bits), array_len) == Some(first_slot + entry_index))
+                {
+                    return Err(corrupt(
+                        CorruptionReason::Table(TableCorruption::ArraySlotWrongKey),
+                        entry_index,
+                        SaveLocation::TableEntries {
+                            object: object_index,
+                        },
+                    ));
+                }
+            } else {
+                // Only dead controls may overlap the logical array; live
+                // values for these keys belong in the array span.
+                if !matches!(value, super::SavedVal::Nil)
+                    && matches!(key, super::SavedVal::Num(bits) if array_index(f64::from_bits(*bits), array_len).is_some())
+                {
+                    return Err(corrupt(
+                        CorruptionReason::Table(TableCorruption::HashEntryBelongsInArray),
+                        entry_index,
+                        SaveLocation::TableEntries {
+                            object: object_index,
+                        },
+                    ));
+                }
+                // A live hash entry at the array's append key would have
+                // migrated into the array, so no engine save holds one.
+                if !matches!(value, super::SavedVal::Nil)
+                    && matches!(key, super::SavedVal::Num(bits) if is_append_key(f64::from_bits(*bits), array_len))
+                {
+                    return Err(corrupt(
+                        CorruptionReason::Table(TableCorruption::HashEntryBelongsInArray),
+                        entry_index,
+                        SaveLocation::TableEntries {
+                            object: object_index,
+                        },
+                    ));
+                }
+            }
+            if entry_index == array_slots
+                && matches!(
+                    (key, value),
+                    (super::SavedVal::Nil, super::SavedVal::Bool(true))
+                )
+            {
+                continue;
+            }
+            if entry_index >= array_slots
+                && matches!((key, value), (super::SavedVal::Nil, super::SavedVal::Nil))
+            {
+                if !matches!(
+                    entries.get(array_slots),
+                    Some((super::SavedVal::Nil, super::SavedVal::Bool(true)))
+                ) {
+                    return Err(corrupt(
+                        CorruptionReason::Table(TableCorruption::EntryStoresNil),
+                        entry_index,
+                        SaveLocation::TableEntries {
+                            object: object_index,
+                        },
+                    ));
+                }
+                continue;
+            }
+            // Array keys are implied and may also have an older dead hash
+            // control slot. Check uniqueness only within the hash part.
+            if entry_index < array_slots {
+                continue;
+            }
+            let key = key.table_key(
+                &payload.strings,
+                entry_index,
+                SaveLocation::TableEntries {
+                    object: object_index,
+                },
+            )?;
+            insert_unique(
+                &mut keys,
+                key,
+                CorruptionReason::Duplicate {
+                    entry: DuplicateEntry::TableKey,
+                    form: KeyForm::Saved,
+                },
+                entry_index,
+                SaveLocation::TableEntries {
+                    object: object_index,
+                },
+            )?;
+        }
+        if let Some(value) = metatable {
+            validate_value(value, payload)?;
+            validate_metatable(
+                value,
+                payload,
+                CorruptionReason::Table(TableCorruption::MetatableNotTable),
+                object_index,
+                SaveLocation::Objects,
+            )?;
+        }
+    }
+    Ok(())
+}
+
 fn validate_references(payload: &SavePayload) -> Result<(), SnapshotError> {
     for value in &payload.upvalues {
         validate_value(value, payload)?;
     }
     for (object_index, object) in payload.objects.iter().enumerate() {
-        if let SavedObject::Table {
-            array_len,
-            array_slots,
-            entries,
-            metatable,
-        } = object
-        {
-            let location = SaveLocation::TableEntries {
-                object: object_index,
-            };
-            let array_slots = *array_slots as usize;
-            if array_slots > entries.len() {
-                return Err(corrupt(
-                    CorruptionReason::Table(TableCorruption::ArraySlotsExceedEntries),
-                    array_slots,
-                    location,
-                ));
-            }
-            // The logical length is not backed by stored slots, so bound it
-            // explicitly: past MAX_ARRAY_LEN array keys stop being exact,
-            // distinct numbers and tagged slot indices could collide.
-            let array_len = match usize::try_from(*array_len) {
-                Ok(len) if len <= MAX_ARRAY_LEN => Some(len),
-                _ => None,
-            };
-            let Some(array_len) = array_len else {
-                return Err(corrupt(
-                    CorruptionReason::Table(TableCorruption::ArrayLengthExceedsLimit),
-                    object_index,
-                    location,
-                ));
-            };
-            // Do not bound logical length by the live span plus fixed slack:
-            // constructors append nil structurally, so valid live tables can
-            // have arbitrarily long nil tails (or no live span at all).
-            // Rejecting those would break save/load for valid states. This
-            // representation bound alone does not bound later gap allocations;
-            // handling allocation failure belongs to the table write path.
-            // The stored span is canonical: consecutive keys inside the
-            // logical array, starting and ending at a live slot.
-            let first_slot = match entries.first() {
-                Some((super::SavedVal::Num(bits), _)) if array_slots > 0 => {
-                    array_index(f64::from_bits(*bits), array_len)
-                        .filter(|slot| slot + array_slots <= array_len)
-                }
-                _ => Some(0),
-            };
-            let Some(first_slot) = first_slot else {
-                return Err(corrupt(
-                    CorruptionReason::Table(TableCorruption::ArraySlotWrongKey),
-                    0,
-                    location,
-                ));
-            };
-            if array_slots > 0
-                && (matches!(entries[0].1, super::SavedVal::Nil)
-                    || matches!(entries[array_slots - 1].1, super::SavedVal::Nil))
-            {
-                return Err(corrupt(
-                    CorruptionReason::Table(TableCorruption::ArraySpanEndpointsNotLive),
-                    0,
-                    location,
-                ));
-            }
-            let mut keys = BTreeSet::new();
-            for (entry_index, (key, value)) in entries.iter().enumerate() {
-                validate_value(key, payload)?;
-                validate_value(value, payload)?;
-                if entry_index < array_slots {
-                    // Array slots carry their implied key, and may be empty.
-                    if !matches!(key, super::SavedVal::Num(bits) if array_index(f64::from_bits(*bits), array_len) == Some(first_slot + entry_index))
-                    {
-                        return Err(corrupt(
-                            CorruptionReason::Table(TableCorruption::ArraySlotWrongKey),
-                            entry_index,
-                            SaveLocation::TableEntries {
-                                object: object_index,
-                            },
-                        ));
-                    }
-                } else {
-                    // Every array key is stored in the array span or is nil,
-                    // so no engine save holds a hash entry for one.
-                    if matches!(key, super::SavedVal::Num(bits) if array_index(f64::from_bits(*bits), array_len).is_some())
-                    {
-                        return Err(corrupt(
-                            CorruptionReason::Table(TableCorruption::HashEntryBelongsInArray),
-                            entry_index,
-                            SaveLocation::TableEntries {
-                                object: object_index,
-                            },
-                        ));
-                    }
-                    if matches!(value, super::SavedVal::Nil) {
-                        return Err(corrupt(
-                            CorruptionReason::Table(TableCorruption::EntryStoresNil),
-                            entry_index,
-                            SaveLocation::TableEntries {
-                                object: object_index,
-                            },
-                        ));
-                    }
-                    // A live hash entry at the array's append key would have
-                    // migrated into the array, so no engine save holds one.
-                    if matches!(key, super::SavedVal::Num(bits) if is_append_key(f64::from_bits(*bits), array_len))
-                    {
-                        return Err(corrupt(
-                            CorruptionReason::Table(TableCorruption::HashEntryBelongsInArray),
-                            entry_index,
-                            SaveLocation::TableEntries {
-                                object: object_index,
-                            },
-                        ));
-                    }
-                }
-                let key = key.table_key(
-                    &payload.strings,
-                    entry_index,
-                    SaveLocation::TableEntries {
-                        object: object_index,
-                    },
-                )?;
-                insert_unique(
-                    &mut keys,
-                    key,
-                    CorruptionReason::Duplicate {
-                        entry: DuplicateEntry::TableKey,
-                        form: KeyForm::Saved,
-                    },
-                    entry_index,
-                    SaveLocation::TableEntries {
-                        object: object_index,
-                    },
-                )?;
-            }
-            if let Some(value) = metatable {
-                validate_value(value, payload)?;
-                validate_metatable(
-                    value,
-                    payload,
-                    CorruptionReason::Table(TableCorruption::MetatableNotTable),
-                    object_index,
-                    SaveLocation::Objects,
-                )?;
-            }
-        }
+        validate_table_shape(payload, object, object_index)?;
     }
     let mut global_names = BTreeSet::new();
     for (index, (name, value)) in payload.user_globals.iter().enumerate() {
@@ -1062,6 +1103,7 @@ mod tests {
             )],
             order: None,
             array: None,
+            hash_slots: None,
             metatable: unchanged.clone(),
         };
         assert!(matches!(
@@ -1078,6 +1120,7 @@ mod tests {
             )],
             order: None,
             array: None,
+            hash_slots: None,
             metatable: unchanged.clone(),
         };
         assert!(matches!(
@@ -1094,6 +1137,7 @@ mod tests {
             )],
             order: Some(Vec::new()),
             array: None,
+            hash_slots: None,
             metatable: unchanged,
         };
         assert!(matches!(
@@ -1116,6 +1160,7 @@ mod tests {
                 super::super::SavedVal::Nil,
                 live.clone(),
             ]),
+            hash_slots: None,
             metatable: super::super::SavedMetatableDelta::Unchanged,
         };
         assert!(verify_payload(payload(valid.clone())).is_ok());
@@ -1269,8 +1314,6 @@ mod tests {
                 1,
                 vec![(num(4.0), live.clone()), (num(2.0), live.clone())],
             ),
-            // Nil outside the array span.
-            (0, 0, vec![(num(5.0), nil.clone())]),
             // Array key repeated in the hash part.
             (
                 1,
@@ -1339,6 +1382,7 @@ mod tests {
             upserts: Vec::new(),
             order: None,
             array: None,
+            hash_slots: None,
             metatable: super::super::SavedMetatableDelta::Set(super::super::SavedVal::Obj(0)),
         });
         env.objects = vec![super::super::SavedObject::Closure {

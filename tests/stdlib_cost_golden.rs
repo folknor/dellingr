@@ -200,3 +200,23 @@ fn table_function_charges_match_fixed_inputs() {
     );
     assert_eq!(call_cost("table", "sort", &[Argument::EmptyTable]), 1);
 }
+
+#[test]
+fn rawset_charges_one_for_a_table_write() {
+    let mut state = State::new();
+    state
+        .get_global("rawset")
+        .expect("rawset is available in the base library");
+    state.new_table().expect("table argument fits on the stack");
+    state
+        .push_number(1.0)
+        .expect("key argument fits on the stack");
+    state
+        .push_number(2.0)
+        .expect("value argument fits on the stack");
+    state
+        .call(ArgCount::Fixed(3), RetCount::Fixed(0))
+        .expect("rawset should write a table entry");
+
+    assert_eq!(state.cost_used(), 1);
+}

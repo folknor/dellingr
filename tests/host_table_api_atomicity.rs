@@ -307,3 +307,139 @@ fn tostring_handler_failure_preserves_the_host_stack() {
     #[cfg(feature = "snapshot")]
     state.save_state().unwrap();
 }
+
+#[test]
+fn get_table_preserves_the_key_when_the_lua_handler_frame_cannot_fit() {
+    for string in [false, true] {
+        for chained in [false, true] {
+            let mut state = State::new();
+            let results = vec!["1"; 64].join(", ");
+            let handler = if chained {
+                "setmetatable({}, {__index = handler})"
+            } else {
+                "handler"
+            };
+            let receiver = if string {
+                format!("getmetatable('').__index = {handler}; return 'receiver'")
+            } else {
+                format!("return setmetatable({{}}, {{__index = {handler}}})")
+            };
+            dellingr::Program::compile(
+                format!("local handler = function() return {results} end; {receiver}"),
+                None,
+            )
+            .and_then(|program| state.load(&program))
+            .unwrap();
+            state
+                .call(dellingr::ArgCount::Fixed(0), dellingr::RetCount::Fixed(1))
+                .unwrap();
+            state
+                .set_top((dellingr::limits::MAX_STACK_SIZE - 4) as isize)
+                .unwrap();
+            state.push_string("missing").unwrap();
+            let top = state.get_top();
+            let error = state.get_table(1).unwrap_err();
+            assert!(matches!(error.kind(), ErrorKind::StackOverflow { .. }));
+            assert_eq!(state.get_top(), top);
+            assert_eq!(state.to_string(-1).unwrap(), "missing");
+            assert_eq!(
+                state.typ(1),
+                if string {
+                    LuaType::String
+                } else {
+                    LuaType::Table
+                },
+            );
+        }
+    }
+}
+
+fn probe_native_read_refusal(state: &mut State) -> dellingr::Result<u8> {
+    state.push_string("missing")?;
+    let top = state.get_top();
+    let error = state.get_table(1).unwrap_err();
+    assert!(matches!(
+        error.kind(),
+        ErrorKind::NativeCallDepthExceeded { .. }
+    ));
+    assert_eq!(state.get_top(), top);
+    assert_eq!(state.to_string(-1)?, "missing");
+    Ok(0)
+}
+
+fn recurse_host_read(state: &mut State) -> dellingr::Result<u8> {
+    let remaining = state.to_number(1)?;
+    state.get_global("recurse")?;
+    state.push_number(remaining)?;
+    state.call(dellingr::ArgCount::Fixed(1), dellingr::RetCount::Fixed(0))?;
+    Ok(0)
+}
+
+#[path = "common/stack.rs"]
+mod stack;
+
+fn host_read_native_refusal() -> dellingr::Result<()> {
+    for handler in ["function() return 1 end", "tostring"] {
+        let mut state = State::new();
+        state.push_rust_fn(probe_native_read_refusal)?;
+        state.set_global("probe")?;
+        state.push_rust_fn(recurse_host_read)?;
+        state.set_global("step")?;
+        dellingr::Program::compile(
+            format!(
+                "local t = setmetatable({{}}, {{__index = {handler}}})
+                 function recurse(n)
+                     if n == 0 then probe(t) else step(n - 1) end
+                 end
+                 recurse({})",
+                dellingr::limits::MAX_NATIVE_CALL_DEPTH - 1,
+            ),
+            None,
+        )
+        .and_then(|program| state.load(&program))?;
+        state.call(dellingr::ArgCount::Fixed(0), dellingr::RetCount::Fixed(0))?;
+        assert_eq!(state.get_top(), 0);
+    }
+    Ok(())
+}
+
+#[test]
+fn get_table_preserves_the_key_at_the_native_call_depth_limit() {
+    stack::on_limit_test_stack("host_read_native_refusal", || {
+        host_read_native_refusal().unwrap();
+    });
+}
+
+fn probe_lua_read_refusal(state: &mut State) -> dellingr::Result<u8> {
+    state.push_string("missing")?;
+    let top = state.get_top();
+    let error = state.get_table(1).unwrap_err();
+    assert!(matches!(error.kind(), ErrorKind::CallDepthExceeded { .. }));
+    assert_eq!(state.get_top(), top);
+    assert_eq!(state.to_string(-1)?, "missing");
+    Ok(0)
+}
+
+#[test]
+fn get_table_preserves_the_key_at_the_lua_call_depth_limit() {
+    let mut state = State::new();
+    state.push_rust_fn(probe_lua_read_refusal).unwrap();
+    state.set_global("probe").unwrap();
+    dellingr::Program::compile(
+        format!(
+            "local t = setmetatable({{}}, {{__index = function() return 1 end}})
+             local function recurse(n)
+                 if n == 0 then probe(t) else recurse(n - 1) end
+             end
+             recurse({})",
+            dellingr::limits::MAX_CALL_DEPTH - 2,
+        ),
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
+    state
+        .call(dellingr::ArgCount::Fixed(0), dellingr::RetCount::Fixed(0))
+        .unwrap();
+    assert_eq!(state.get_top(), 0);
+}

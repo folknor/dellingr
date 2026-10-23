@@ -28,6 +28,8 @@ callbacks, host user-data. Saving is valid only while the VM is quiescent.
   - the whole logical array part, nil slots included, when there is one
     (ordinary tables save only the span from their first live array key to
     their last, plus the logical length; see Byte stability);
+  - hash-slot history when it differs from the baseline, including dead keys,
+    vacant positions and the map storage marker;
   - the metatable: unchanged, cleared, or replaced.
 - The array shape is saved because it decides where later integer writes
   land.
@@ -91,8 +93,9 @@ callbacks, host user-data. Saving is valid only while the VM is quiescent.
 - The cost model version must match `COST_MODEL_VERSION` exactly.
 - Loading restores the saved cost counters. Hosts must call `set_cost_budget`
   afterwards.
-- Allocation during load never runs GC. The only collection happens after all
-  globals, deltas and setup anchors are in place.
+- Allocation during snapshot materialization never runs GC. Its collection
+  happens after all globals, deltas and setup anchors are in place. The setup
+  callback runs before materialization and may trigger automatic or explicit GC.
 - GC policy and the current threshold are host configuration, not snapshot
   data. A loaded State starts with the default automatic policy unless its
   setup callback changes it. If setup calls `gc_set_policy`, the final load
@@ -111,9 +114,11 @@ callbacks, host user-data. Saving is valid only while the VM is quiescent.
   version. The crate version string is part of the blob.
 - A table saves its logical array length and the slots from its first live
   array key to its last, never where its stored window happens to sit, so a
-  table's history (a queue that has drained and moved on, or one loaded from
-  a save) does not reach the bytes. A loaded State and the continuous run it
-  came from keep saving identical bytes.
+  stored array window history does not reach the bytes. Hash slots preserve
+  insertion history, storage kind, dead keys and vacant positions, so cleared
+  `next` controls and later compaction behave identically after load. Dead keys
+  remain GC roots until compaction removes their slots. A loaded State and the
+  continuous run it came from keep saving identical bytes.
 - A host that content-hashes saves across upgrades must hash the payload after
   the header, or accept that a version bump changes the bytes.
 - Saves are user-editable input. Authenticate them if tampering with future

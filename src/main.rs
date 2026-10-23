@@ -241,11 +241,9 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Option<CliArgs
     }))
 }
 
-// CLI input, parse and runtime failures exit 1. A broken stdout pipe exits
-// quietly with status 0 because there is no reader for additional output. This
-// CLI is a development tool; the game host embeds the library and sees typed
-// errors (error kinds, cost budget exhaustion) through the API, never through
-// this process's exit status, so distinct error codes would have no consumer.
+// The CLI's handled input, parse and runtime failures exit 1. A broken stdout
+// pipe exits quietly with status 0 because there is no reader for additional
+// output. Unhandled panics and process aborts are outside this exit policy.
 fn report_error(error: impl std::fmt::Display) -> ! {
     write_stderr(&format!("{ERROR_PREFIX}{error}\n"));
     exit(1);
@@ -327,27 +325,22 @@ fn main() {
         Err(error) => report_error(error),
     };
 
-    let compiled = Program::compile(&source, Some(args.input.chunk_name()));
+    let program = match Program::compile(&source, Some(args.input.chunk_name())) {
+        Ok(program) => program,
+        Err(error) => report_error(format!("parsing source: {error}")),
+    };
 
     if args.analyze {
-        match compiled {
-            Ok(program) => {
-                write_stdout_or_exit(&format!("{}\n", program.analyze_cost()));
-                write_stderr(&format!(
-                    "{ANALYSIS_WARNING_PREFIX}{}\n",
-                    CostAnalysis::caveat()
-                ));
-            }
-            Err(error) => report_error(format!("parsing source: {error}")),
-        }
+        write_stdout_or_exit(&format!("{}\n", program.analyze_cost()));
+        write_stderr(&format!(
+            "{ANALYSIS_WARNING_PREFIX}{}\n",
+            CostAnalysis::caveat()
+        ));
         return;
     }
 
     if args.dump_bytecode {
-        match compiled {
-            Ok(program) => write_stdout_or_exit(&program.disassemble().to_string()),
-            Err(error) => report_error(error),
-        }
+        write_stdout_or_exit(&program.disassemble().to_string());
         return;
     }
 
@@ -356,8 +349,8 @@ fn main() {
         state.set_cost_budget(limit);
     }
 
-    let result = compiled
-        .and_then(|program| state.load(&program))
+    let result = state
+        .load(&program)
         // native-call: main->call
         .and_then(|()| state.call(ArgCount::Fixed(0), RetCount::Fixed(0)));
 

@@ -102,6 +102,29 @@ fn basic_native_charges_are_exact() {
     }
 }
 
+#[test]
+fn gsub_rejects_an_invalid_replacement_before_charging() {
+    for source in [
+        "return string.gsub('subject', 'pattern')",
+        "return string.gsub('subject', 'pattern', false)",
+    ] {
+        let mut state = State::new();
+        state.set_cost_budget(0);
+        dellingr::Program::compile(source, None)
+            .and_then(|program| state.load(&program))
+            .expect("invalid-replacement source compiles");
+        let error = state
+            .call(ArgCount::Fixed(0), RetCount::Fixed(1))
+            .expect_err("gsub should reject the replacement type");
+
+        assert!(
+            error.to_string().contains("bad argument #3 to 'gsub'"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(state.cost_used(), 0);
+    }
+}
+
 /// gmatch reads a leading `^` as a literal byte by compiling it that way, not
 /// by rewriting the pattern to `%^`, so `^a` and `%^a` run the same matcher
 /// program and differ only by the one extra pattern byte `%^a` is charged at

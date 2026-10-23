@@ -46,13 +46,20 @@ Violations are reported as errors at load time, never silently truncated.
   Exceeding it raises `TooManyRegisters` with the requested count and the limit.
 - `MAX_NESTED`: direct child functions per chunk.
 - `MAX_LITERALS`: distinct entries per numeric pool and per string pool.
-- `MAX_FIXED_ARGS`, `MAX_FIXED_RESULTS`: fixed counts for calls and multiple
-  assignment. The dynamic-count sentinel is reserved.
+- `MAX_FIXED_ARGS`, `MAX_FIXED_RESULTS`: compiler limits for fixed call
+  arguments, call results and expanded assignments. `MAX_FIXED_ARGS` remains
+  one below `MAX_ARGUMENTS`, leaving room for a `__call` receiver. The fixed
+  result cap remains one below `MAX_RESULTS` to preserve the established
+  accepted-program set. `OPEN_COUNT` (`u16::MAX`) is the open-count marker; the
+  `u8` maximum remains an ordinary fixed count. A `RETURN` may still list
+  values up to `MAX_RESULTS`.
 - `MAX_EXPRESSIONS`, `MAX_ASSIGNMENT_OFFSET`, `MAX_FRAME_SLOTS`: fixed
   per-construct and per-function limits the compiler enforces.
-- `MAX_TABLE_TEMPLATES`, `MAX_TABLE_TEMPLATE_FIELDS`: inline table templates.
-  Field assignment sites past `MAX_TABLE_TEMPLATES` stop being inline-cached;
-  they are not rejected.
+- `MAX_TABLE_TEMPLATES`, `MAX_TABLE_TEMPLATE_FIELDS`: per-chunk constructor
+  templates and the fields in each template. Constructors past the template
+  limit use ordinary table construction. Field assignments have a separate
+  cache-slot capacity; sites past it use the uncached path and are not
+  rejected.
 - `MAX_TABLE_BATCH_SIZE`: array entries per constructor batch. Constructors
   have no overall entry limit.
 - Jump distance: a branch or loop may span fewer than 2^23 instructions of
@@ -164,9 +171,10 @@ capacity; what a collection frees is the payloads and entries it removes.
   pushes when it starts from a large dead prefix. The window cannot skip
   holes: one old key that stays alive keeps every slot from it to the
   newest key stored, and nil writes alone never release anything. The hash
-  part compacts its tombstones once they reach its live count. A collection
-  does not compact a live table, so one rooted table can retain large
-  storage while counting as one heap object.
+  part compacts its tombstones once they reach its live count. Until then a
+  tombstone keeps its key alive, so a cleared key's string or object
+  survives collections. A collection does not compact a live table, so one
+  rooted table can retain large storage while counting as one heap object.
 - A table's logical array length (the keys `#` and placement treat as array
   keys) never shrinks. It is capped at `min(2^53, 2^(pointer bits - 1)) - 2`
   keys; growing past it panics, and a save beyond it is rejected on load.
@@ -193,7 +201,9 @@ capacity; what a collection frees is the payloads and entries it removes.
 - A Lua call reserves its function's whole register frame when it is
   admitted. A call whose frame does not fit under the cap fails there with
   `StackOverflow`, before its body runs, even when the path it would take
-  needs fewer registers. A fixed number of results then lands in registers
+  needs fewer registers. A call from Lua reports that refusal at the
+  caller's call instruction; the callee was never entered and is absent
+  from the traceback. A fixed number of results then lands in registers
   that already exist, so such a return into a Lua caller never grows the
   stack.
 - The cap bounds the shared value stack, not total host memory. Enforcing it

@@ -514,6 +514,12 @@ pub enum ErrorKind {
         /// The host API that was called.
         api: HostCallApi,
     },
+    /// A host called `State::open_libs` inside `State::with_restricted_env`.
+    /// The libraries would land in the temporary environment, which is
+    /// discarded on restore, while the shared string metatable and the
+    /// snapshot token map they also replace outlive it; the call is refused
+    /// before any state changes.
+    OpenLibsInRestrictedEnv,
     /// Invalid stack index passed to a host API.
     InvalidStackIndex {
         /// The bad index, as supplied by the caller.
@@ -1147,12 +1153,19 @@ impl fmt::Display for TokenKind {
     }
 }
 
-/// Type errors raised by arithmetic, comparison, indexing, and concat.
+/// Type errors raised by arithmetic, numeric for loops, comparison, indexing,
+/// and concat.
 #[non_exhaustive]
 #[derive(Debug)]
 pub enum TypeError {
     /// Arithmetic op applied to a non-numeric value of the given type.
     Arithmetic(LuaType),
+    /// The initial value of a numeric `for` loop was not numeric.
+    NumericForInitialValue(LuaType),
+    /// The limit of a numeric `for` loop was not numeric.
+    NumericForLimit(LuaType),
+    /// The step of a numeric `for` loop was not numeric.
+    NumericForStep(LuaType),
     /// Comparison applied to incompatible types.
     Comparison(LuaType, LuaType),
     /// `..` (concat) applied to a non-string non-number of the given type.
@@ -1654,6 +1667,9 @@ impl fmt::Display for ErrorKind {
                     "{api} does not support ArgCount::Dynamic; use ArgCount::Fixed"
                 )
             }
+            OpenLibsInRestrictedEnv => {
+                f.write_str("cannot open libraries inside a restricted environment")
+            }
             InvalidStackIndex { index } => {
                 write!(f, "invalid stack index ({index})")
             }
@@ -1854,6 +1870,18 @@ impl fmt::Display for TypeError {
         use TypeError::*;
         match self {
             Arithmetic(typ) => write!(f, "attempt to perform arithmetic on a {typ} value"),
+            NumericForInitialValue(typ) => {
+                write!(
+                    f,
+                    "numeric for loop initial value must be a number, got {typ}"
+                )
+            }
+            NumericForLimit(typ) => {
+                write!(f, "numeric for loop limit must be a number, got {typ}")
+            }
+            NumericForStep(typ) => {
+                write!(f, "numeric for loop step must be a number, got {typ}")
+            }
             Comparison(type1, type2) if type1 == type2 => {
                 write!(f, "attempt to compare two {type1} values")
             }

@@ -87,12 +87,6 @@ impl State {
     /// because its execution is abandoned and every public entry refuses.
     #[hotpath::measure]
     fn collect_garbage(&mut self) {
-        // This is the only production caller of the heap sweep. Clear the
-        // pattern cache before freeing interned strings so no cached program
-        // survives its key's lifetime. A matcher already handed out keeps its
-        // own reference to the program.
-        self.patterns.clear();
-        self.pattern_bytes = 0;
         // Anchors the host dropped stop rooting their values here.
         self.registry.drain_released();
         // Mark all roots
@@ -107,6 +101,18 @@ impl State {
         // Weak references: clear cache entries naming what the sweep freed,
         // before any allocation can reuse those slots.
         self.drop_dead_cache_entries();
+        // Pattern keys are weak. Prune before any allocation can reuse a
+        // swept string slot; retain preserves insertion order, so the oldest
+        // surviving entry remains the next deterministic eviction victim.
+        let mut pattern_bytes = 0;
+        self.patterns.retain(|(ptr, _), entry| {
+            let live = self.heap.val_is_live(&Val::Str(*ptr));
+            if live {
+                pattern_bytes += entry.byte_len;
+            }
+            live
+        });
+        self.pattern_bytes = pattern_bytes;
         // Pool slots not marked via a reachable closure or an open-upvalue
         // entry can never be read again; recycle them.
         self.upvalue_pool.sweep();
@@ -116,5 +122,41 @@ impl State {
         // wrap), and to keep identity storage bounded by live `%p` usage.
         self.format_pointer_ids
             .retain(|key, _| self.heap.val_is_live(&key.as_val()));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::limits::PATTERN_CACHE_ENTRIES;
+    use crate::patterns::AnchorMode;
+
+    #[test]
+    fn pattern_cache_collection_keeps_live_entries_in_eviction_order() {
+        let mut state = State::new();
+        state.gc_disable_auto();
+        for index in 0..PATTERN_CACHE_ENTRIES {
+            state.push_string(format!("pattern{index}")).unwrap();
+            state.cached_pattern_at(index, AnchorMode::Honour);
+        }
+        let keys: Vec<_> = state.patterns.keys().copied().collect();
+        let bytes = state.pattern_bytes;
+        state.gc_collect();
+        assert_eq!(state.patterns.keys().copied().collect::<Vec<_>>(), keys);
+        assert_eq!(state.pattern_bytes, bytes);
+        let compilations = state.pattern_compilations();
+        state.cached_pattern_at(0, AnchorMode::Honour);
+        assert_eq!(state.pattern_compilations(), compilations);
+
+        state.push_string("extra pattern").unwrap();
+        state.cached_pattern_at(PATTERN_CACHE_ENTRIES, AnchorMode::Honour);
+        assert!(!state.patterns.contains_key(&keys[0]));
+        assert_eq!(state.patterns.get_index(0).unwrap().0, &keys[1]);
+        state
+            .pop(isize::try_from(PATTERN_CACHE_ENTRIES + 1).unwrap())
+            .unwrap();
+        state.gc_collect();
+        assert!(state.patterns.is_empty());
+        assert_eq!(state.pattern_bytes, 0);
     }
 }

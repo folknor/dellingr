@@ -20,104 +20,6 @@ rng.rs clean: the SplitMix64 step, the 53-bit `random_f64` scale and the
 rejection threshold are correct, and `math.random` validates and charges before
 drawing.
 
-## SNP-001 - A cleared hash key can resume `next` in a continuous run but not after save/load (replay divergence)
-
-From the `tables` hunter.
-
-**Claims broken**
-
-- docs/determinism.md "`pairs` order": "Snapshots preserve it, so a loaded state
-  continues with the same order".
-- docs/save-state.md "Byte stability": "A loaded State and the continuous run it
-  came from keep saving identical bytes".
-- AGENTS.md lists snapshot contents and `pairs` order as replay-visible.
-- Lua's own `next` contract: "you may clear existing fields" during a traversal.
-  dellingr implements that with hash tombstones: `Table::next_with_index` and
-  `next_from_matching_index` accept a dead slot as the control key ("A dead
-  control slot remains valid, matching Lua's `next` behaviour here").
-
-**Mechanism.** A cleared hash entry stays in the table as a tombstone
-(`hash_remove`). `next(t, k)` for that cleared `k` finds the tombstone's index
-and continues from it. Snapshot save keeps only live entries
-(`snapshot_entries` -> `live_hash_entries`), and `rebuild_from_snapshot`
-re-inserts only those. The loaded table therefore has no tombstones, and
-`next(t, k)` for the same cleared key returns `InvalidKey` ("invalid key to
-'next'"). The callback dies, while the continuous run goes on. Nothing compacts
-tombstones between callbacks unless a new key is inserted, which is already
-undefined during a traversal. A pure "clear as you go" cursor therefore works
-indefinitely in the continuous run and breaks on the first resume after a load.
-
-This is legal Lua and a natural pattern for budgeted per-tick game work:
-
-```lua
-work = {}  -- string keys, so hash part
-for i = 1, 10 do work["job" .. i] = i end
-cursor = nil
-function tick()                -- one call per frame
-  local k = next(work, cursor) -- continuous run: fine, tombstone resumes
-  if k == nil then cursor = nil return end
-  work[k] = nil                -- clearing an existing field: allowed
-  cursor = k                   -- cursor key held in a global, so it stays alive
-end
--- save after a tick, load, tick() -> "invalid key to 'next'"
-```
-
-**Template variant.** `{a = nil, b = 1}` creates a dead template slot for `a`
-(`with_template_keys` pre-inserts every key as nil). In the continuous run
-`next(t, "a")` returns `("b", 1)`; after a load it raises. Reference 5.4 also
-raises here, because it never inserts a nil-valued key, so the continuous run is
-the lenient one and only the snapshot boundary exposes it.
-
-**Secondary effect.** Tombstone keys are not marked (`mark_values` marks only
-live slots). Whether a cleared key whose only reference was the tombstone can
-still resume a traversal therefore depends on whether a collection freed and
-re-interned it, which ties the result to collection timing. A loaded State's
-collection timing differs from the continuous run's. See also SNP-002.
-
-**Decided (user, 2026-10-23):** the first option below. Save the dead hash
-slots as part of the table's saved shape, so a loaded table resumes `next`
-from a cleared key exactly as the continuous run does. That is a
-`FORMAT_VERSION` bump. Settle SNP-002 (mark tombstone keys, or prune them at
-collection) in the same change.
-
-**Fix options**
-
-- Make the dead slots part of the saved shape, the way environment deltas
-  already save the whole logical array. Save the hash part as slots with a dead
-  marker, so the loaded table has the same tombstones and the same compaction
-  schedule. Canonical bytes would then depend on history the same way the array
-  length already does. save-state.md's "never where its stored window happens to
-  sit" applies to the window, not to tombstones, so the doc would need a
-  sentence on this.
-- Or decide that a traversal cursor naming a cleared key does not survive a
-  save: say so in save-state.md ("Not saved: ...") and compatibility.md, and make
-  the continuous run refuse it too, so both runs agree. That means either never
-  resuming from a tombstone, which breaks the `for k in pairs(t) do t[k] = nil
-  end` idiom unless the tfor cursor alone carries it, or clearing tombstones at a
-  deterministic, save-aligned point.
-
-The hunter favours the first option, as the one that keeps both Lua's `next`
-contract and the replay contract.
-
-## SNP-002 - Tombstone keys are a weak reference that collection never prunes
-
-From the `tables` hunter. Lower severity; practically unreachable.
-
-**Claim at issue.** `val_is_live` in src/vm/object.rs notes that handles kept
-across allocations "can alias one, since generations wrap; that is why weak side
-tables ... are pruned with this at every collection". A tombstone's key is
-exactly such a weak handle (the `TableStorage` doc: "the key of a dead ... slot
-may dangle"), and it is never pruned.
-
-**Mechanism.** After a slot's generation wraps, a new object can compare equal
-to a dead tombstone key, and `next(t, newobj)` would then resume the traversal
-instead of raising "invalid key to 'next'". The `insert` and `get` paths stay
-correct, because re-add semantics apply. It takes 2^31 reuses of one arena slot.
-
-**Direction.** It is the one weak table the stated pruning rule does not cover.
-If SNP-001 is fixed by saving tombstones, decide at the same time whether
-tombstones keep their keys alive (mark them) or are pruned at collection.
-
 ## SNP-003 - Rendered identities of environment objects are dropped though the objects survive the load
 
 From the `snapshot` hunter.
@@ -294,16 +196,6 @@ materialize-side merge of setup slots beyond the saved range. The hunter
 considers it worth a rewrite of the delta array section. It changes the format,
 so it needs a `FORMAT_VERSION` bump.
 
-## SNP-010 - The load-time collection claim is imprecise
-
-From the `snapshot` hunter, raised outside the defect bar.
-
-docs/save-state.md says "Allocation during load never runs GC. The only
-collection happens after all globals, deltas and setup anchors are in place."
-Setup runs inside `load_state` and can run Lua under the automatic policy, so
-collections can happen during load, before materialization. The doc means the
-materialization phase and should say so.
-
 ## SNP-011 - Small load-path observations: setup's stack, error wording, misleading delta path
 
 From the `snapshot` hunter, raised outside the defect bar.
@@ -322,3 +214,29 @@ From the `snapshot` hunter, raised outside the defect bar.
   example `string.f = hostfn` with the `string` global deleted), `PathFinder` is
   rooted with `global = token`. The report then reads `global string ...` even
   though no global of that name holds it. Diagnostic only.
+
+## SNP-012 - Follow-ups to saving hash-slot history (format 12)
+
+Laterals from the second resolution wave's reconciliation and review, after
+dead hash slots became part of a table's saved shape.
+
+- **Env deltas grow on any value change.** An environment table's delta now
+  carries its whole `hash_slots` list whenever any value differs from the
+  baseline, not only on a structural change, because `snapshot_hash_slots`
+  includes values. Correct and byte-stable, but saves of a State that only
+  reassigned a library field carry the full slot list of that table. Emitting
+  slots only when the key layout differs from the baseline, with values in the
+  existing upsert list, would keep deltas proportional to the change.
+- **Misleading location for a corrupt env slot.** `validate_table_shape` is
+  reused for env `hash_slots` with `object_index = delta_index`, so a bad slot
+  is reported as `TableEntries { object: <delta index> }`, naming an object that
+  is not the one at fault. The input is still rejected.
+- **Dead env-table keys are invisible to the unsaveable-function path.**
+  `PathFinder` walks env tables with `entries()`, which yields live entries
+  only. An unregistered Rust function held only as a dead env-table key (a
+  tombstone, now kept alive and saved) still fails the save, but the report has
+  no "reachable from" path.
+- **Unaudited key trust.** Env hash-slot restore in `materialize_payload` calls
+  `TableKey::from_prevalidated` on decoded saved keys, relying on verify.rs
+  having validated them. Confirm the verifier covers every slot that reaches
+  that call.
