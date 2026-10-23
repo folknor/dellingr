@@ -73,6 +73,45 @@ fn nested_chunks_restore_source_and_attribute_error_to_running_frame() {
     assert_eq!(events.errors, vec![Some(b"A".to_vec())]);
 }
 
+/// `print` called directly as a handler runs inside the instruction's own
+/// activation, so its location is the call site that instruction recorded.
+/// Each instruction sits on its own line after a recorded `print` call, so a
+/// missing record would report an earlier line.
+#[test]
+fn print_as_a_handler_reports_the_instruction_line() {
+    let events = Arc::new(Mutex::new(Events::default()));
+    let mut state = State::with_callbacks(Box::new(Recorder(Arc::clone(&events))));
+    let program = Program::compile(
+        "local value = setmetatable({}, {__index = print, __newindex = print, __len = print})\n\
+         print('start')\n\
+         local a = value.field\n\
+         local key = 'field'\n\
+         local b = value[key]\n\
+         value.field = 1\n\
+         value[key] = 1\n\
+         local c = #value\n\
+         value:method()",
+        Some(b"handlers".as_slice()),
+    )
+    .expect("chunk compiles");
+    state.load(&program).expect("chunk loads");
+    let error = state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+        .expect_err("the method lookup yields nil, which cannot be called");
+    assert_eq!(error.stack_trace()[0].line, 9);
+    let events = events.lock().expect("event lock is healthy");
+    let lines: Vec<(Option<&[u8]>, u32)> = events
+        .prints
+        .iter()
+        .map(|(source, line, _)| (source.as_deref(), *line))
+        .collect();
+    let handlers = Some(b"handlers".as_slice());
+    assert_eq!(
+        lines,
+        [2, 3, 5, 6, 7, 8, 9].map(|line| (handlers, line)).to_vec()
+    );
+}
+
 #[test]
 fn trace_frames_share_the_chunk_source_and_outlive_the_state() {
     let mut state = State::new();

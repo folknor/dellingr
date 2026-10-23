@@ -18,6 +18,80 @@ plantasjen) unless noted.
 
 ## Investigate
 
+### Per-instruction weight of the register dispatch loop (2026-10-23)
+
+The entries below share one measurement. perf on plantasjen (Zen 3),
+register VM just before the field-read rework: a three-field
+`same_obj_read` variant ran about 33 cycles and about 86 machine
+instructions per VM op with only 0.14 branch misses per kernel iteration,
+so the cost is spread across every op, not mispredicts. The shared dispatch
+head was about 40% of `Frame::run` cycles; holding the cursor and base in
+locals (`Frame::run_frame`) took arithmetic from 3600 to 3400 ms and
+same_obj_read from about 3800 to 3600 (interleaved pairs, plantasjen), so
+part of that share was recoverable and part was the sample landing site of
+work in the handlers.
+
+Each suspect is independent. Work one at a time: perf before and after
+(`scripts/perf_hot_lines.py` filters the annotate output), interleaved
+`--bench` pairs on arithmetic, same_obj_read and the composite, and
+`brokkr test native_bytes_per_level` (dev and release) for anything that
+touches `Frame::run`, whose frame is live across every native re-entry.
+
+### Register access bounds checks
+
+What: every register read and write in the dispatch loop indexes
+`state.stack[...]`, a bounds-checked `Vec` access, although admission
+reserves `[base, base + max_stack)` and the verifier bounds every register
+operand by `max_stack`. An op like `ADD_RR` pays three checks.
+
+Sketch: give the dispatch loop a register view whose length is proved once
+per activation (a slice of the frame's window taken after admission), so
+LLVM can drop the per-access checks, or check the operand ranges once per
+instruction. Any `unsafe` access needs the verifier's register-range proof
+cited at the site.
+
+Signal: `cmp`/`jae` to a `panic_bounds_check` before each `state.stack`
+access in `perf annotate` of an arithmetic-heavy kernel.
+
+### Cost accounting on every arithmetic op
+
+What: `add_cost!` runs on every costed op: a saturating add into the local
+batch plus a compare against `COST_CHECK_INTERVAL` and a
+`cost_batch_needs_flush` load from `State`. Arithmetic ops cost 1 each, so
+the bookkeeping is a large fraction of their work.
+
+Sketch: charge straight-line runs of fixed-cost ops once per basic block
+(the compiler knows the block's static cost), or keep the batch in a
+register and check the flush condition only at block boundaries. Must keep
+the charged prefix and `cost_used` at `BudgetExceeded` byte-identical
+(docs/budget.md, `tests/cost_*`), which is the hard part.
+
+### `GET_UPVAL` indirection
+
+What: an upvalue read goes `frame.upvalues` (an `Arc<[UpvalueRef]>`) to a
+pool slot, then branches on open (read the stack slot) or closed (read the
+stored value). same_obj_read executes one per field read.
+
+Sketch: measure first; candidates are caching the upvalue slice pointer per
+activation (as the code slice now is) and a closed-upvalue fast path. A
+compiler-side alternative is hoisting a loop-invariant upvalue read into a
+register, which is a codegen change with its own aliasing rules (the
+upvalue can be written through another closure).
+
+### 16-byte `Val` copies that miss store forwarding
+
+What: a `Val` written as a tag byte plus two 8-byte words (payloads sit at
+offsets 1, 4 or 8 depending on the variant) and read back as one 16-byte
+vector load stalls on store forwarding. Seen in `ADD_RR` right after a
+`GET_FIELD` filled its operand, about 6% of samples on same_obj_read at the
+time. `#[repr(C, u8)]` on `Val` (every payload at offset 8) measured within
+noise, so layout alone is not the fix.
+
+Sketch: read operands as tag plus payload rather than as a whole `Val`
+where the handler only needs the number, or make producers and consumers
+use the same widths. The full answer is the 8-byte NaN-boxed `Val` under
+"Full coherent rewrites", which removes the split entirely.
+
 ### bench/arithmetic +11% wall after compare-and-branch fusion landed (2026-09-03)
 
 What: after A-O7 (commits fd4d333..6cc8493), `bench/arithmetic` measures
@@ -49,8 +123,8 @@ applies). What would settle it: a placebo experiment (rebuild 1efb68e
 with an unused-function-sized text shift and re-pair) to characterize
 dellingr's own binary-to-binary band, or an asm/alignment look at
 `Frame::eval` on this host. The register VM (2026-10-22) rebuilt this
-dispatch loop wholesale; the three instances below predate it, so
-re-measure on the register loop before acting on any of them.
+dispatch loop wholesale; the second and third instances below predate
+it, so re-measure on the register loop before acting on them.
 
 Second instance (bygg, 2026-10-14): `bench/fill` early WARM_BLOCKs went from
 52 ms at b33d4a1 to a flat 54 ms at 67f07aa (+4%, interleaved, stable across
@@ -67,6 +141,17 @@ rest is the dispatch loop itself); on `benchmark` only
 `instr_branch_fused` moved (15 to 22 ns, unchanged code), and reading the
 compare operands in place, as `eval_float_float` does, did not move the
 walls. afcd2f0's own `benchmark` cells spread 7100-7300 across that day.
+
+Fourth instance, on the register loop (plantasjen, 2026-10-23): the commit
+that moved call-site recording off the table-op hit paths (measured as
+eb034f1, the same code before a notes-only amend) against its parent
+6539ac7 in two interleaved `--commit` pairs. Warm averages: `same_obj_read` -2.0/-2.3%,
+`method` -3.5/-1.8%, `record_tables` -2.7/-1.8%, `fill` flat, while
+`arithmetic` went +1.5/+1.6% (walls 3400 to 3500 both rounds) and the
+composite +0.5/+0.5%. The arithmetic kernel executes none of the changed
+instructions; `perf annotate` of `Frame::run` shows the same hot sites with
+different register assignment and spill slots (the frame shrank 32 bytes),
+so it is the same binary-level signature.
 
 ### Residual ~2x in `strings/patterns` - decided not to chase (2026-07-25)
 
@@ -390,6 +475,27 @@ embedder asking.
 ---
 
 ## Stdlib / patterns
+
+### Lua-pattern gsub keeps the matcher live across the replacement call
+
+What: `gsub_lua_pattern` calls `append_gsub_replacement` (and through it a
+function replacement or a table replacement's `__index` handler) while its
+matcher state is still on the native stack, so every level of recursion
+through such a callback carries it. `native_bytes_per_level` on plantasjen
+when the envelope tests were widened: Lua-pattern gsub with a function
+replacement 14480 bytes per level in dev and about 3.7 KB in release, with
+a table replacement 15456 and 3872, against 11072 and 2080 for the plain
+pattern path. It is the heaviest native call path, so it sets the dev
+envelope's margin (about 2.3 MB of 4 MiB at `MAX_NATIVE_CALL_DEPTH`).
+
+Sketch: collect the match result (captures as offsets) and drop the
+matcher's frame state before invoking the replacement, so the callback
+runs from a frame no larger than the plain path's; or move the match loop
+into a helper that returns per match and is re-entered.
+
+Why deferred: it fits the envelope with room to spare and nothing is
+failing; this buys margin, not correctness. Signal: the envelope tests
+tightening, or a reason to raise `MAX_NATIVE_CALL_DEPTH`.
 
 ### gmatch: drop the Lua-side wrapper and table-backed iterator state (E-O2)
 

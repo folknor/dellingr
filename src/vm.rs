@@ -175,9 +175,10 @@ pub(super) fn mark_gc_roots(state: &State, worklist: &mut Vec<ObjectPtr>) {
 pub(super) struct CallInfo {
     /// The bytecode being executed.
     pub(super) bytecode: Arc<Bytecode>,
-    /// Call-site snapshot: the instruction after the last one that could
-    /// re-enter Lua or call a callback (see `Frame::record_call_site`). Not
-    /// the live instruction pointer of the executing frame.
+    /// Call-site snapshot: the instruction after the last one that took a
+    /// path that may call out of this activation (see
+    /// `State::record_call_site`). Not the live instruction pointer of the
+    /// executing frame; while this activation is innermost it may be stale.
     pub(super) ip: usize,
     /// Whether this activation owns the top entry of `State::vararg_stack`
     /// at the time it is innermost.

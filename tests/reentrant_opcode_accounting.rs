@@ -27,7 +27,7 @@ struct ReentryCase {
     expected_used: u64,
 }
 
-const CASES: [ReentryCase; 8] = [
+const CASES: [ReentryCase; 9] = [
     ReentryCase {
         name: "CALL with __call",
         source: "local prior = left + right\ncallable()",
@@ -49,6 +49,12 @@ const CASES: [ReentryCase; 8] = [
     ReentryCase {
         name: "GET_FIELD with __index",
         source: "local prior = left + right\nlocal result = indexed.field",
+        budget: 3,
+        expected_used: 3,
+    },
+    ReentryCase {
+        name: "SELF with __index",
+        source: "local prior = left + right\nlocal result = indexed:method()",
         budget: 3,
         expected_used: 3,
     },

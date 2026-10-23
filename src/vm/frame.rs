@@ -94,18 +94,6 @@ impl Frame {
         self.bytecode.line_info.get(idx).copied().unwrap_or(0)
     }
 
-    /// Record the instruction currently dispatching a call (`ip`, the
-    /// dispatch loop's cursor past it) into the active call-stack entry, so
-    /// outer traceback frames name the right call site. Every opcode that can
-    /// enter Lua through a call or metamethod must record its instruction
-    /// here before handing off; the regression test pins those caller lines.
-    #[inline]
-    fn record_call_site(state: &mut State, ip: usize) {
-        if let Some(call_info) = state.call_stack.last_mut() {
-            call_info.ip = ip;
-        }
-    }
-
     /// Create a StackFrame for error reporting.
     pub(super) fn to_stack_frame(&self) -> StackFrame {
         StackFrame {
@@ -370,60 +358,46 @@ impl Frame {
                 }
 
                 // Table reads
+                // Table reads. These and the table writes and length below
+                // pass the cursor down: their handlers record it as the call
+                // site only on the path that can call out
+                // (`State::record_call_site`).
                 Instr::OP_GET_FIELD => {
-                    Self::record_call_site(state, *ip);
                     let receiver = state.stack[base + inst.b() as usize];
                     // native-call: run_frame->reg_get_field:field
-                    state.reg_get_field(
-                        frame,
-                        ra,
-                        receiver,
-                        inst.c(),
-                        inst.cache_slot(),
-                        local_cost,
-                    )?;
+                    state.reg_get_field(frame, inst, ra, receiver, local_cost, *ip)?;
                 }
                 Instr::OP_SELF => {
-                    Self::record_call_site(state, *ip);
                     let receiver = state.stack[base + inst.b() as usize];
                     state.stack[ra + 1] = receiver;
                     // native-call: run_frame->reg_get_field:self
-                    state.reg_get_field(
-                        frame,
-                        ra,
-                        receiver,
-                        inst.c(),
-                        inst.cache_slot(),
-                        local_cost,
-                    )?;
+                    state.reg_get_field(frame, inst, ra, receiver, local_cost, *ip)?;
                 }
                 Instr::OP_GET_TABLE => {
-                    Self::record_call_site(state, *ip);
                     // native-call: run_frame->reg_get_table
                     state.reg_get_table(
                         ra,
                         base + inst.b() as usize,
                         base + inst.c() as usize,
                         local_cost,
+                        *ip,
                     )?;
                 }
 
                 // Table writes
                 Instr::OP_SET_FIELD => {
-                    Self::record_call_site(state, *ip);
                     add_cost!(const { Instr::fixed_units(Instr::OP_SET_FIELD) });
                     // native-call: run_frame->reg_set_field
                     state.reg_set_field(
                         frame,
+                        inst,
                         ra,
-                        inst.b(),
                         base + inst.c() as usize,
-                        inst.cache_slot(),
                         local_cost,
+                        *ip,
                     )?;
                 }
                 Instr::OP_SET_TABLE => {
-                    Self::record_call_site(state, *ip);
                     add_cost!(const { Instr::fixed_units(Instr::OP_SET_TABLE) });
                     // native-call: run_frame->reg_set_table
                     state.reg_set_table(
@@ -431,6 +405,7 @@ impl Frame {
                         base + inst.b() as usize,
                         base + inst.c() as usize,
                         local_cost,
+                        *ip,
                     )?;
                 }
                 Instr::OP_INIT_FIELD => {
@@ -493,9 +468,8 @@ impl Frame {
                     state.stack[ra] = Val::Bool(!state.stack[base + inst.b() as usize].truthy());
                 }
                 Instr::OP_LEN => {
-                    Self::record_call_site(state, *ip);
                     // native-call: run_frame->reg_len
-                    state.reg_len(ra, base + inst.b() as usize, local_cost)?;
+                    state.reg_len(ra, base + inst.b() as usize, local_cost, *ip)?;
                 }
 
                 // The bytes `..` emits are deliberately uncharged: the
@@ -547,7 +521,7 @@ impl Frame {
                 Instr::OP_FOR_PREP => state.instr_for_prep(ra, ip, inst.sj())?,
                 Instr::OP_FOR_LOOP => state.instr_for_loop(ra, ip, inst.sj())?,
                 Instr::OP_TFOR_CALL => {
-                    Self::record_call_site(state, *ip);
+                    state.record_call_site(*ip);
                     Self::flush_local_cost(state, local_cost)?;
                     // native-call: run_frame->instr_tfor_call
                     state.instr_tfor_call(
@@ -562,7 +536,7 @@ impl Frame {
                 // Functions (calls and returns)
                 Instr::OP_CLOSURE => state.reg_closure(frame, ra, inst.b())?,
                 Instr::OP_CALL => {
-                    Self::record_call_site(state, *ip);
+                    state.record_call_site(*ip);
                     Self::flush_local_cost(state, local_cost)?;
                     let args = state.call_window(ra, inst.call_args())?;
                     let results = inst.call_results();
@@ -603,6 +577,31 @@ enum Leave {
 }
 
 impl State {
+    /// Record `call_site`, the dispatch loop's cursor past the instruction
+    /// that is about to call out, into the running activation's record.
+    /// Tracebacks read it for every caller frame, and `print` reads the
+    /// innermost one while a Rust function runs.
+    ///
+    /// Every path from a dispatch arm that can reach a call (into Lua or into
+    /// a Rust function) must record first: `OP_CALL` and `OP_TFOR_CALL` in
+    /// their arms, the table and length instructions first thing in their
+    /// outlined stack paths (`get_field_slow`, `get_table_slow`,
+    /// `set_field_slow`, `set_table_slow`, `len_slow`), so the cache hits
+    /// and direct paths that call nothing do not pay for it. The innermost
+    /// record is therefore stale while its activation runs, which nothing
+    /// observes: a traceback skips the innermost record (the executing frame
+    /// supplies that line), and `print` reads it only from a Rust function
+    /// called through one of the recorded paths. Every suspended caller's
+    /// record names the instruction that suspended it. The native call
+    /// inventory under reference/ lists those paths; the traceback and
+    /// print-location tests pin each opcode's caller line.
+    #[inline]
+    pub(super) fn record_call_site(&mut self, call_site: usize) {
+        if let Some(call_info) = self.call_stack.last_mut() {
+            call_info.ip = call_site;
+        }
+    }
+
     /// Prepare a call's operand window at `callee`: with fixed arguments the
     /// stack ends right after them, dropping the dead registers above, and
     /// with open arguments the producer already left the top there. Returns

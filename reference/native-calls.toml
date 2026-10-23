@@ -211,7 +211,15 @@ name = "reg_set_table"
 owner = "State"
 
 [[function]]
+name = "set_table_slow"
+owner = "State"
+
+[[function]]
 name = "reg_len"
+owner = "State"
+
+[[function]]
+name = "len_slow"
 owner = "State"
 
 [[function]]
@@ -433,10 +441,16 @@ id = "reg_set_field->set_field_slow"
 id = "set_field_slow->instr_set_field"
 
 [[edge]]
-id = "reg_set_table->instr_set_table"
+id = "reg_set_table->set_table_slow"
 
 [[edge]]
-id = "reg_len->instr_length"
+id = "set_table_slow->instr_set_table"
+
+[[edge]]
+id = "reg_len->len_slow"
+
+[[edge]]
+id = "len_slow->instr_length"
 
 # src/vm/eval_index.rs
 [[edge]]
@@ -884,7 +898,8 @@ name = "newindex_key"
 path = [
     "@lua",
     "run_frame->reg_set_table",
-    "reg_set_table->instr_set_table",
+    "reg_set_table->set_table_slow",
+    "set_table_slow->instr_set_table",
     "instr_set_table->set_table_with_key",
     "@newindex_function",
 ]
@@ -904,7 +919,8 @@ name = "length"
 path = [
     "@lua",
     "run_frame->reg_len",
-    "reg_len->instr_length",
+    "reg_len->len_slow",
+    "len_slow->instr_length",
     "instr_length->call_unguarded",
 ]
 

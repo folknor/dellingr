@@ -13,7 +13,7 @@ use super::super::error::{ConstructorTableOperation, ErrorKind, InternalFault, T
 use super::frame::Frame;
 use super::object::Upvalue;
 use super::{Error, Result, State, Val};
-use crate::instr::{CompareOp, RetCount};
+use crate::instr::{CompareOp, Instr, RetCount};
 use crate::limits::MAX_TABLE_BATCH_SIZE;
 
 impl State {
@@ -96,27 +96,35 @@ impl State {
     /// than `inline(always)`: the dev profile ignores it, which keeps the
     /// probe's unshared debug locals out of `Frame::run`, a frame live across
     /// every native re-entry.
+    ///
+    /// `call_site` is the dispatch cursor. The outlined stack path, the one
+    /// path that can call out, records it first (`State::record_call_site`);
+    /// the same holds for the other table and length handlers below. The
+    /// record stays out of this function and out of `Frame::run`: here it
+    /// tipped the release build into outlining this function, a call on the
+    /// hit path, and inlined into the dispatch loop it grew that frame.
     #[inline]
     pub(super) fn reg_get_field(
         &mut self,
         frame: &Frame,
+        inst: Instr,
         dst: usize,
         receiver: Val,
-        name: u16,
-        cache_slot: Option<u8>,
         local_cost: &mut u64,
+        call_site: usize,
     ) -> Result<()> {
+        let cache_slot = inst.cache_slot();
         if let Some(val) = self.field_cache_hit(frame, receiver, cache_slot) {
             self.stack[dst] = val;
             return Ok(());
         }
         // The direct miss returns before the stack path starts, so its frame
         // is not live across the handler calls that path can make.
-        if self.get_field_direct(frame, dst, receiver, name, cache_slot) {
+        if self.get_field_direct(frame, dst, receiver, inst.c(), cache_slot) {
             return Ok(());
         }
         // native-call: reg_get_field->get_field_slow
-        self.get_field_slow(frame, dst, receiver, name, cache_slot, local_cost)
+        self.get_field_slow(frame, inst, dst, receiver, local_cost, call_site)
     }
 
     #[inline]
@@ -167,16 +175,17 @@ impl State {
     fn get_field_slow(
         &mut self,
         frame: &Frame,
+        inst: Instr,
         dst: usize,
         receiver: Val,
-        name: u16,
-        cache_slot: Option<u8>,
         local_cost: &mut u64,
+        call_site: usize,
     ) -> Result<()> {
+        self.record_call_site(call_site);
         self.check_stack_space(1)?;
         self.push_unchecked(receiver);
         // native-call: get_field_slow->instr_get_field
-        self.instr_get_field(frame, name, cache_slot, local_cost)?;
+        self.instr_get_field(frame, inst.c(), inst.cache_slot(), local_cost)?;
         self.pop_into(dst);
         Ok(())
     }
@@ -188,6 +197,7 @@ impl State {
         table: usize,
         key: usize,
         local_cost: &mut u64,
+        call_site: usize,
     ) -> Result<()> {
         let tbl_val = self.stack[table];
         let key_val = self.stack[key];
@@ -202,7 +212,7 @@ impl State {
             }
         }
         // native-call: reg_get_table->get_table_slow
-        self.get_table_slow(dst, tbl_val, key_val, local_cost)
+        self.get_table_slow(dst, tbl_val, key_val, local_cost, call_site)
     }
 
     #[inline(never)]
@@ -212,7 +222,9 @@ impl State {
         table: Val,
         key: Val,
         local_cost: &mut u64,
+        call_site: usize,
     ) -> Result<()> {
+        self.record_call_site(call_site);
         self.check_stack_space(2)?;
         self.push_unchecked(table);
         self.push_unchecked(key);
@@ -226,12 +238,13 @@ impl State {
     pub(super) fn reg_set_field(
         &mut self,
         frame: &Frame,
+        inst: Instr,
         table: usize,
-        name: u16,
         src: usize,
-        cache_slot: Option<u8>,
         local_cost: &mut u64,
+        call_site: usize,
     ) -> Result<()> {
+        let (name, cache_slot) = (inst.b(), inst.cache_slot());
         let receiver = self.stack[table];
         let val = self.stack[src];
         if !matches!(val, Val::Nil)
@@ -249,24 +262,25 @@ impl State {
             }
         }
         // native-call: reg_set_field->set_field_slow
-        self.set_field_slow(frame, receiver, name, val, cache_slot, local_cost)
+        self.set_field_slow(frame, inst, receiver, val, local_cost, call_site)
     }
 
     #[inline(never)]
     fn set_field_slow(
         &mut self,
         frame: &Frame,
+        inst: Instr,
         receiver: Val,
-        name: u16,
         val: Val,
-        cache_slot: Option<u8>,
         local_cost: &mut u64,
+        call_site: usize,
     ) -> Result<()> {
+        self.record_call_site(call_site);
         self.check_stack_space(2)?;
         self.push_unchecked(receiver);
         self.push_unchecked(val);
         // native-call: set_field_slow->instr_set_field
-        self.instr_set_field(frame, 0, name, cache_slot, local_cost)
+        self.instr_set_field(frame, 0, inst.b(), inst.cache_slot(), local_cost)
     }
 
     /// `R[table][R[key]] = R[src]`.
@@ -276,6 +290,7 @@ impl State {
         key: usize,
         src: usize,
         local_cost: &mut u64,
+        call_site: usize,
     ) -> Result<()> {
         let key_val = self.stack[key];
         let val = self.stack[src];
@@ -283,11 +298,25 @@ impl State {
             return Ok(());
         }
         let tbl_val = self.stack[table];
+        // native-call: reg_set_table->set_table_slow
+        self.set_table_slow(tbl_val, key_val, val, local_cost, call_site)
+    }
+
+    #[inline(never)]
+    fn set_table_slow(
+        &mut self,
+        table: Val,
+        key: Val,
+        val: Val,
+        local_cost: &mut u64,
+        call_site: usize,
+    ) -> Result<()> {
+        self.record_call_site(call_site);
         self.check_stack_space(3)?;
-        self.push_unchecked(tbl_val);
-        self.push_unchecked(key_val);
+        self.push_unchecked(table);
+        self.push_unchecked(key);
         self.push_unchecked(val);
-        // native-call: reg_set_table->instr_set_table
+        // native-call: set_table_slow->instr_set_table
         self.instr_set_table(0, local_cost)
     }
 
@@ -394,7 +423,13 @@ impl State {
     }
 
     /// `R[dst] = #R[src]`.
-    pub(super) fn reg_len(&mut self, dst: usize, src: usize, local_cost: &mut u64) -> Result<()> {
+    pub(super) fn reg_len(
+        &mut self,
+        dst: usize,
+        src: usize,
+        local_cost: &mut u64,
+        call_site: usize,
+    ) -> Result<()> {
         let val = self.stack[src];
         if let Some(s) = val.as_string(&self.heap) {
             self.stack[dst] = Val::Num(s.len() as f64);
@@ -408,9 +443,22 @@ impl State {
             self.stack[dst] = Val::Num(tbl.array_len() as f64);
             return Ok(());
         }
+        // native-call: reg_len->len_slow
+        self.len_slow(dst, val, local_cost, call_site)
+    }
+
+    #[inline(never)]
+    fn len_slow(
+        &mut self,
+        dst: usize,
+        val: Val,
+        local_cost: &mut u64,
+        call_site: usize,
+    ) -> Result<()> {
+        self.record_call_site(call_site);
         self.check_stack_space(1)?;
         self.push_unchecked(val);
-        // native-call: reg_len->instr_length
+        // native-call: len_slow->instr_length
         self.instr_length(local_cost)?;
         self.pop_into(dst);
         Ok(())

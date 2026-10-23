@@ -106,6 +106,13 @@ fn traceback_call_sites_cover_non_call_dispatch_and_host_calls() {
         3,
         6,
     );
+    // The handler fails during the method lookup, before the call that
+    // follows it could record its own site.
+    assert_trace_lines(
+        "local value = setmetatable({}, {\n  __index = function()\n    error('boom')\n  end,\n})\nvalue:method()",
+        3,
+        6,
+    );
     // A call spanning several lines is attributed to its opening line.
     assert_trace_lines(
         "local value = {2, 1}\ntable.sort(value, function()\n  error('boom')\nend)",
@@ -117,6 +124,41 @@ fn traceback_call_sites_cover_non_call_dispatch_and_host_calls() {
         3,
         6,
     );
+}
+
+/// A Rust handler (the builtin `tostring`) between the table or length
+/// instruction and the failing Lua `__tostring` has no activation record of
+/// its own, so the caller entry is the instruction's recorded call site. The
+/// `setmetatable` call on line 1 is the previous recorded site.
+#[test]
+fn traceback_call_sites_cross_rust_handlers() {
+    let setup = "local value = setmetatable({}, {\n  __index = tostring,\n  __newindex = tostring,\n  __len = tostring,\n  __tostring = function()\n    error('boom')\n  end,\n})\n";
+    for (name, statement) in [
+        ("GET_FIELD", "local result = value.field"),
+        ("SELF", "value:method()"),
+        (
+            "GET_TABLE",
+            "local key = 'field'\nlocal result = value[key]",
+        ),
+        ("SET_FIELD", "value.field = 1"),
+        ("SET_TABLE", "local key = 'field'\nvalue[key] = 1"),
+        ("LEN", "local result = #value"),
+    ] {
+        let code = format!("{setup}{statement}");
+        let line = u32::try_from(code.lines().count()).expect("the source is short");
+        let source = Some(b"trace".as_slice());
+        let mut state = State::new();
+        dellingr::Program::compile(&code, source)
+            .and_then(|program| state.load(&program))
+            .unwrap();
+        let error = state
+            .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+            .expect_err("trace program must fail");
+        let trace = error.stack_trace();
+        assert_eq!(trace.len(), 2, "{name}: {trace:?}");
+        assert_eq!(trace[0].line, 6, "{name}: {trace:?}");
+        assert_eq!(trace[1].line, line, "{name}: {trace:?}");
+    }
 }
 
 #[test]

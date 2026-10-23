@@ -139,5 +139,12 @@ that it is not listed. Then:
    to see the new path's bytes per level, and `brokkr check`, which runs the
    envelope in both profiles.
 
+A path that leaves a dispatch arm (`run_frame->...`) must also record the
+instruction as the activation's call site before anything on it can call,
+or tracebacks and `print` locations name a stale line. The arms do not
+record on every execution: `State::record_call_site` explains where each
+existing path records, which for the table and length instructions is the
+first line of their outlined slow function.
+
 `python3 scripts/native_calls.py sites` lists every call site with its
 marker, which is the quickest way to see what a change touched.
