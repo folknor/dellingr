@@ -342,6 +342,7 @@ enum EncodeTask {
 type PathId = usize;
 enum PathSegment {
     Global(String),
+    Environment(String),
     TableKey(usize),
     TableValue(usize),
     Metatable,
@@ -398,8 +399,19 @@ impl<'a> PathFinder<'a> {
         }
     }
 
-    fn find(mut self, root: Val, global: &str, target_function: RustFunc) -> Option<String> {
-        let root_path = push_path(&mut self.breadcrumbs, None, PathSegment::global(global));
+    fn find(
+        mut self,
+        root: Val,
+        global: &str,
+        environment: bool,
+        target_function: RustFunc,
+    ) -> Option<String> {
+        let segment = if environment {
+            PathSegment::Environment(truncate_utf8(global, MAX_PATH_GLOBAL_BYTES))
+        } else {
+            PathSegment::global(global)
+        };
+        let root_path = push_path(&mut self.breadcrumbs, None, segment);
         let mut tasks = vec![PathTask::Value {
             val: root,
             path: root_path,
@@ -416,7 +428,7 @@ impl<'a> PathFinder<'a> {
                         if self.environment_objects.insert(ptr) {
                             let table = self.state.heap.as_table_ref(ptr)?;
                             let metatable = table.get_metatable();
-                            let entries = table.entries();
+                            let (_, _, entries) = table.snapshot_entries();
                             if let Some(metatable) = metatable {
                                 let child_path = push_path(
                                     &mut self.breadcrumbs,
@@ -544,11 +556,16 @@ fn render_path(breadcrumbs: &[Breadcrumb], path: PathId) -> String {
     let mut ids = Vec::with_capacity(MAX_RENDERED_PATH_SEGMENTS);
     let mut current = Some(path);
     let mut global_name = None;
+    let mut environment = false;
     let mut skipped = false;
     while let Some(id) = current {
         let breadcrumb = &breadcrumbs[id];
         if let PathSegment::Global(name) = &breadcrumb.segment {
             global_name = Some(name.as_str());
+        }
+        if let PathSegment::Environment(name) = &breadcrumb.segment {
+            global_name = Some(name.as_str());
+            environment = true;
         }
         if ids.len() < MAX_RENDERED_PATH_SEGMENTS {
             ids.push(id);
@@ -559,7 +576,11 @@ fn render_path(breadcrumbs: &[Breadcrumb], path: PathId) -> String {
     }
     let mut text = String::new();
     if let Some(name) = global_name {
-        text.push_str("global ");
+        text.push_str(if environment {
+            "environment "
+        } else {
+            "global "
+        });
         text.push_str(name);
     }
     if skipped {
@@ -567,7 +588,7 @@ fn render_path(breadcrumbs: &[Breadcrumb], path: PathId) -> String {
     }
     for id in ids.into_iter().rev() {
         match &breadcrumbs[id].segment {
-            PathSegment::Global(_) => {}
+            PathSegment::Global(_) | PathSegment::Environment(_) => {}
             PathSegment::TableKey(index) => text.push_str(&format!(".key[{index}]")),
             PathSegment::TableValue(index) => text.push_str(&format!("[{index}]")),
             PathSegment::Metatable => text.push_str(".metatable"),
@@ -629,6 +650,19 @@ impl<'a> SaveBuilder<'a> {
             user_globals.push((name.clone(), saved));
         }
         let env_deltas = self.encode_env_deltas()?;
+        // Every canonical environment object is rebuilt on load, even when
+        // globals are shadowed. Expand these roots in token order so their
+        // strings and rendered identities survive too.
+        let mut environment: Vec<_> = self
+            .state
+            .env_tokens
+            .iter()
+            .map(|(ptr, token)| (token.clone(), *ptr))
+            .collect();
+        environment.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        for (token, ptr) in environment {
+            self.encode_environment_root(Val::Obj(ptr), &token)?;
+        }
         // Some strings stay observable without the saved graph reaching them
         // as values: metamethod event names are State roots for its whole
         // lifetime, and a string literal of a saved chunk is re-interned on
@@ -658,11 +692,11 @@ impl<'a> SaveBuilder<'a> {
         let mut format_pointer_ids = Vec::new();
         for (key, id) in pointer_ids {
             let val = key.as_val();
-            // A heap value unreachable from saved state cannot survive the
-            // load, so its id is dropped. A registered Rust function is
-            // different: it is not a heap object, the host can hold it and
-            // pass it back in after load, and it resolves by its stable
-            // registration id. Keep its rendered identity whether or not the
+            // A heap value unreachable from saved state or the rebuilt
+            // environment cannot survive the load, so its id is dropped. A
+            // registered Rust function is different: it is not a heap
+            // object, the host can hold it and pass it back in after load,
+            // and it resolves by its stable registration id. Keep its rendered identity whether or not the
             // saved graph reaches it (load skips one setup no longer
             // registers, see `materialize_payload`).
             if let Some(saved) = self.saved_reachable_pointer_value(val)
@@ -760,7 +794,7 @@ impl<'a> SaveBuilder<'a> {
             let mut deleted = Vec::new();
             for (key, _) in &baseline.entries {
                 if !live_keys.contains(&TableKey::from_prevalidated(*key)) {
-                    deleted.push(self.encode_root(*key, &token)?);
+                    deleted.push(self.encode_environment_root(*key, &token)?);
                 }
             }
             let mut upserts = Vec::new();
@@ -768,8 +802,8 @@ impl<'a> SaveBuilder<'a> {
                 match baseline_values.get(&TableKey::from_prevalidated(*key)) {
                     Some(base_value) if base_value == value => {}
                     _ => upserts.push((
-                        self.encode_root(*key, &token)?,
-                        self.encode_root(*value, &token)?,
+                        self.encode_environment_root(*key, &token)?,
+                        self.encode_environment_root(*value, &token)?,
                     )),
                 }
             }
@@ -786,14 +820,16 @@ impl<'a> SaveBuilder<'a> {
             let order = (replayed_order != live.iter().map(|(key, _)| *key).collect::<Vec<_>>())
                 .then(|| {
                     live.iter()
-                        .map(|(key, _)| self.encode_root(*key, &token))
+                        .map(|(key, _)| self.encode_environment_root(*key, &token))
                         .collect::<Result<Vec<_>, SaveError>>()
                 })
                 .transpose()?;
             let metatable = match (baseline.metatable, table.get_metatable().map(Val::Obj)) {
                 (before, after) if before == after => SavedMetatableDelta::Unchanged,
                 (_, None) => SavedMetatableDelta::Cleared,
-                (_, Some(value)) => SavedMetatableDelta::Set(self.encode_root(value, &token)?),
+                (_, Some(value)) => {
+                    SavedMetatableDelta::Set(self.encode_environment_root(value, &token)?)
+                }
             };
             // The array part's shape (its nil slots included) decides where
             // later integer writes land, so it must round-trip; replaying the
@@ -805,7 +841,7 @@ impl<'a> SaveBuilder<'a> {
                 Some(
                     virtual_array
                         .into_iter()
-                        .map(|value| self.encode_root(value, &token))
+                        .map(|value| self.encode_environment_root(value, &token))
                         .collect::<Result<Vec<_>, SaveError>>()?,
                 )
             };
@@ -813,6 +849,10 @@ impl<'a> SaveBuilder<'a> {
             // the baseline: a cleared traversal cursor can name a dead slot.
             // Compare like with like: the baseline's own physical slots, not
             // its live `pairs` entries, which never carry the map marker.
+            // Values are part of this comparison deliberately: restore applies
+            // these slots after upserts, including their values. Comparing only
+            // keys would require a different restore contract, especially for
+            // transitions between live entries and tombstones.
             let slots = table.snapshot_hash_slots();
             let hash_slots = if slots == baseline.hash_slots {
                 None
@@ -822,8 +862,8 @@ impl<'a> SaveBuilder<'a> {
                         .into_iter()
                         .map(|(key, value)| {
                             Ok((
-                                self.encode_root(key, &token)?,
-                                self.encode_root(value, &token)?,
+                                self.encode_environment_root(key, &token)?,
+                                self.encode_environment_root(value, &token)?,
                             ))
                         })
                         .collect::<Result<Vec<_>, SaveError>>()?,
@@ -865,13 +905,28 @@ impl<'a> SaveBuilder<'a> {
     fn encode_root(&mut self, val: Val, global: &str) -> Result<SavedVal, SaveError> {
         let root = self.roots.len();
         self.roots.push(None);
-        self.run_tasks(val, global, root)?;
+        self.run_tasks(val, global, root, false)?;
         self.roots[root]
             .take()
             .ok_or(SaveError::from(SaveFault::UnfilledRootSlot))
     }
 
-    fn run_tasks(&mut self, root: Val, global: &str, root_slot: usize) -> Result<(), SaveError> {
+    fn encode_environment_root(&mut self, val: Val, token: &str) -> Result<SavedVal, SaveError> {
+        let root = self.roots.len();
+        self.roots.push(None);
+        self.run_tasks(val, token, root, true)?;
+        self.roots[root]
+            .take()
+            .ok_or(SaveError::from(SaveFault::UnfilledRootSlot))
+    }
+
+    fn run_tasks(
+        &mut self,
+        root: Val,
+        global: &str,
+        root_slot: usize,
+        environment: bool,
+    ) -> Result<(), SaveError> {
         let mut tasks = vec![EncodeTask::Value {
             val: root,
             destination: ValueDestination::Root(root_slot),
@@ -888,7 +943,7 @@ impl<'a> SaveBuilder<'a> {
                             let addr = func as usize;
                             let Some(id) = self.state.rust_fn_ids_by_addr.get(&addr) else {
                                 let reachable_from = PathFinder::new(self.state, &self.env_reverse)
-                                    .find(root, global, func)
+                                    .find(root, global, environment, func)
                                     .ok_or(SaveError::from(
                                         SaveFault::UnregisteredFunctionPathNotFound,
                                     ))?;
@@ -923,7 +978,9 @@ impl<'a> SaveBuilder<'a> {
                                 destination: ValueDestination::Discard,
                             });
                         }
-                        for (key, value) in table.entries().into_iter().rev() {
+                        // Dead hash keys are retained and serialized too.
+                        let (_, _, entries) = table.snapshot_entries();
+                        for (key, value) in entries.into_iter().rev() {
                             tasks.push(EncodeTask::Value {
                                 val: value,
                                 destination: ValueDestination::Discard,
@@ -1800,7 +1857,7 @@ fn materialize_payload(
                             entry: DuplicateEntry::TableKey,
                             form: KeyForm::Materialized,
                         },
-                        SaveLocation::EnvironmentUpserts(delta_index),
+                        SaveLocation::EnvironmentHashSlots(delta_index),
                     )?;
                 }
             }

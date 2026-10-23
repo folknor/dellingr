@@ -104,3 +104,24 @@ fn new_save_with_cached_set_global_round_trips() {
     call_writer(&mut loaded, "writer", 2.0);
     assert_eq!(global_number(&mut loaded, "saved_x"), 2.0);
 }
+
+#[test]
+fn warmed_method_route_keeps_table_reference_across_global_swaps() {
+    let mut state = State::new();
+    run(
+        &mut state,
+        "local methods = { value = 7 }; string = methods; \
+         local receiver = setmetatable({}, { __index = string }); \
+         function read_method() method_value = receiver.value end; read_method(); \
+         string = nil; read_method()",
+    );
+    assert_eq!(global_number(&mut state, "method_value"), 7.0);
+    state
+        .with_restricted_env(&["read_method"], |state| {
+            run(state, "read_method()");
+            assert_eq!(global_number(state, "method_value"), 7.0);
+        })
+        .unwrap();
+    run(&mut state, "read_method()");
+    assert_eq!(global_number(&mut state, "method_value"), 7.0);
+}

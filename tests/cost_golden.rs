@@ -7,7 +7,11 @@
 //! version in `src/cost_meter.rs`, and update the expected values here.
 
 use dellingr::error::ErrorKind;
-use dellingr::{ArgCount, COST_MODEL_GOLDEN_FINGERPRINT, COST_MODEL_VERSION, RetCount, State};
+use dellingr::{ArgCount, COST_MODEL_VERSION, RetCount, State};
+
+/// Fingerprint of `CORPUS` together with `COST_MODEL_VERSION`. Refresh it
+/// whenever either changes.
+const COST_MODEL_GOLDEN_FINGERPRINT: u64 = 0x1328_bf4a_9cd2_c5fc;
 
 const CORPUS: &[(&str, &str, u64)] = &[
     (
@@ -279,7 +283,7 @@ fn golden_corpus_fingerprint_matches_cost_model_version() {
         golden_corpus_fingerprint(),
         COST_MODEL_GOLDEN_FINGERPRINT,
         "golden sources, expected costs, or COST_MODEL_VERSION changed; review the expected costs, \
-         bump the version for cost changes, and refresh the fingerprint in src/cost_meter.rs"
+         bump the version for cost changes, and refresh the fingerprint in this test"
     );
 }
 

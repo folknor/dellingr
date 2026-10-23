@@ -4,6 +4,16 @@ use std::ffi::OsStr;
 use std::path::Path;
 use std::process::{Command, Output};
 
+// The CLI's output prefixes, as `src/main.rs` prints them. Not every suite
+// that includes this file reads both, and each test binary checks dead code
+// on its own.
+/// Prefix of an error the CLI prints.
+#[allow(dead_code)]
+pub(crate) const ERROR_PREFIX: &str = "Error: ";
+/// Prefix of the CLI's cost summary line.
+#[allow(dead_code)]
+pub(crate) const COST_USED_PREFIX: &str = "Cost used: ";
+
 /// A `Command` for the CLI binary Cargo built for this test run, for tests
 /// that need to configure pipes themselves.
 pub(crate) fn command() -> Command {

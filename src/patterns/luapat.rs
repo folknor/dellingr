@@ -14,6 +14,8 @@ pub(super) const LUA_MAXMATCHES: usize = LUA_MAXCAPTURES + 1;
 const _: () = assert!(LUA_MAXMATCHES < u8::MAX as usize);
 const L_ESC: u8 = b'%';
 const PATTERN_MAGIC_BYTES: &[u8] = b"^$*+?.([%-)";
+// The static class table's indices follow this lower/upper pair order.
+const ESCAPE_CLASS_LETTERS: [u8; 22] = *b"aAcCdDgGlLpPsSuUwWxXzZ";
 
 pub(super) fn is_pattern_magic(byte: u8) -> bool {
     PATTERN_MAGIC_BYTES.contains(&byte)
@@ -54,24 +56,119 @@ struct Capture {
 #[derive(Copy, Clone)]
 struct ClassId(usize);
 
-#[derive(Clone)]
+#[derive(Copy, Clone)]
 struct ByteClass([u64; 4]);
 
 impl ByteClass {
-    fn empty() -> Self {
+    const fn empty() -> Self {
         Self([0; 4])
     }
-    fn insert(&mut self, byte: u8) {
-        self.0[usize::from(byte) / 64] |= 1 << (byte % 64);
+    const fn insert(&mut self, byte: u8) {
+        let word = match byte {
+            0..=63 => 0,
+            64..=127 => 1,
+            128..=191 => 2,
+            _ => 3,
+        };
+        self.0[word] |= 1 << (byte % 64);
     }
     fn contains(&self, byte: u8) -> bool {
         self.0[usize::from(byte) / 64] & (1 << (byte % 64)) != 0
+    }
+    fn union(&mut self, other: &Self) {
+        self.0[0] |= other.0[0];
+        self.0[1] |= other.0[1];
+        self.0[2] |= other.0[2];
+        self.0[3] |= other.0[3];
     }
     fn invert(&mut self) {
         for word in &mut self.0 {
             *word = !*word;
         }
     }
+}
+
+/// Character classes are fixed ASCII (the C locale), identical on every host.
+/// Reference Lua follows `setlocale`, so bytes 0x80..0xFF can classify
+/// differently there; this divergence is deliberate for determinism.
+///
+/// Const form used to build the immutable table. The unit test below compares
+/// every table entry with the per-byte classifier it replaced.
+const fn table_match_class(ch: u8, class: u8) -> bool {
+    let lower = class.to_ascii_lowercase();
+    let result = match lower {
+        b'a' => ch.is_ascii_alphabetic(),
+        b'c' => ch <= 0x1f || ch == 0x7f,
+        b'd' => ch.is_ascii_digit(),
+        b'g' => ch.is_ascii_graphic(),
+        b'l' => ch.is_ascii_lowercase(),
+        b'p' => ch.is_ascii_punctuation(),
+        b's' => crate::numeral::is_lua_whitespace(ch),
+        b'u' => ch.is_ascii_uppercase(),
+        b'w' => ch.is_ascii_alphanumeric(),
+        b'x' => ch.is_ascii_hexdigit(),
+        b'z' => ch == 0,
+        _ => return class == ch,
+    };
+    if class.is_ascii_uppercase() {
+        !result
+    } else {
+        result
+    }
+}
+
+const fn build_escape_classes() -> [ByteClass; ESCAPE_CLASS_LETTERS.len()] {
+    let mut classes = [ByteClass::empty(); ESCAPE_CLASS_LETTERS.len()];
+    let mut class_index = 0;
+    while class_index < ESCAPE_CLASS_LETTERS.len() {
+        let mut byte = u8::MIN;
+        loop {
+            if table_match_class(byte, ESCAPE_CLASS_LETTERS[class_index]) {
+                classes[class_index].insert(byte);
+            }
+            if byte == u8::MAX {
+                break;
+            }
+            byte += 1;
+        }
+        class_index += 1;
+    }
+    classes
+}
+
+static ESCAPE_CLASSES: [ByteClass; ESCAPE_CLASS_LETTERS.len()] = build_escape_classes();
+
+fn escape_class(class: u8) -> ByteClass {
+    let index = match class {
+        b'a' => 0,
+        b'A' => 1,
+        b'c' => 2,
+        b'C' => 3,
+        b'd' => 4,
+        b'D' => 5,
+        b'g' => 6,
+        b'G' => 7,
+        b'l' => 8,
+        b'L' => 9,
+        b'p' => 10,
+        b'P' => 11,
+        b's' => 12,
+        b'S' => 13,
+        b'u' => 14,
+        b'U' => 15,
+        b'w' => 16,
+        b'W' => 17,
+        b'x' => 18,
+        b'X' => 19,
+        b'z' => 20,
+        b'Z' => 21,
+        _ => {
+            let mut literal = ByteClass::empty();
+            literal.insert(class);
+            return literal;
+        }
+    };
+    ESCAPE_CLASSES[index]
 }
 
 #[derive(Copy, Clone)]
@@ -214,17 +311,8 @@ impl<'a> Compiler<'a> {
         self.intern_class(result)
     }
 
-    /// Loops over all 256 bytes per escape, uncharged; callers charge the
-    /// pattern length, so this is bounded structural work (at most 256 steps
-    /// per pattern byte) under the "structural work is free" framing of docs/budget.md.
     fn class_for_escape(&mut self, class: u8) -> ClassId {
-        let mut result = ByteClass::empty();
-        for byte in u8::MIN..=u8::MAX {
-            if match_class(byte, class) {
-                result.insert(byte);
-            }
-        }
-        self.intern_class(result)
+        self.intern_class(escape_class(class))
     }
 
     fn bracket_class(&mut self) -> Result<ClassId> {
@@ -233,8 +321,9 @@ impl<'a> Compiler<'a> {
             invert = true;
             self.pos += 1;
         }
-        let class_start = self.pos;
         let mut scan = self.pos;
+        // The first `]` is consumed as a candidate. Without a following byte
+        // the scan fails as a missing bracket, which also rejects `[]`/`[^]`.
         let close = loop {
             let Some(&byte) = self.pattern.get(scan) else {
                 return Err(PatternError::MalformedPattern(
@@ -254,11 +343,6 @@ impl<'a> Compiler<'a> {
                 break scan;
             }
         };
-        if class_start == close {
-            return Err(PatternError::MalformedPattern(
-                MalformedPattern::MissingBracket,
-            ));
-        }
         // The three arms below are mutually exclusive and ordered exactly as
         // reference `matchbracketclass`. Flattening them changes which bytes a
         // class contains: an escaped item can never also open a range, and a
@@ -271,11 +355,7 @@ impl<'a> Compiler<'a> {
             if byte == L_ESC && self.pos + 1 < close {
                 let escaped = self.pattern[self.pos + 1];
                 self.pos += 2;
-                for candidate in u8::MIN..=u8::MAX {
-                    if match_class(candidate, escaped) {
-                        class.insert(candidate);
-                    }
-                }
+                class.union(&escape_class(escaped));
             } else if self.pos + 2 < close && self.pattern[self.pos + 1] == b'-' {
                 let end = self.pattern[self.pos + 2];
                 self.pos += 3;
@@ -434,31 +514,6 @@ impl<'a> Compiler<'a> {
             self.pos += 1;
         }
         self.items.push(Item::Atom { class, repeat });
-    }
-}
-
-/// Character classes are fixed ASCII (the C locale), identical on every host.
-/// Reference Lua follows `setlocale`, so bytes 0x80..0xFF can classify
-/// differently there; this divergence is deliberate for determinism.
-fn match_class(ch: u8, class: u8) -> bool {
-    let result = match class.to_ascii_lowercase() {
-        b'a' => ch.is_ascii_alphabetic(),
-        b'c' => ch.is_ascii_control(),
-        b'd' => ch.is_ascii_digit(),
-        b'g' => ch.is_ascii_graphic(),
-        b'l' => ch.is_ascii_lowercase(),
-        b'p' => ch.is_ascii_punctuation(),
-        b's' => crate::numeral::is_lua_whitespace(ch),
-        b'u' => ch.is_ascii_uppercase(),
-        b'w' => ch.is_ascii_alphanumeric(),
-        b'x' => ch.is_ascii_hexdigit(),
-        b'z' => ch == 0,
-        _ => return class == ch,
-    };
-    if class.is_ascii_lowercase() {
-        result
-    } else {
-        !result
     }
 }
 
@@ -751,5 +806,49 @@ pub(super) fn str_match(
             return Ok(0);
         }
         pos += 1;
+    }
+}
+
+/// The per-byte classifier the static escape table replaced, kept as the
+/// test oracle for that table.
+#[cfg(test)]
+fn match_class(ch: u8, class: u8) -> bool {
+    let result = match class.to_ascii_lowercase() {
+        b'a' => ch.is_ascii_alphabetic(),
+        b'c' => ch.is_ascii_control(),
+        b'd' => ch.is_ascii_digit(),
+        b'g' => ch.is_ascii_graphic(),
+        b'l' => ch.is_ascii_lowercase(),
+        b'p' => ch.is_ascii_punctuation(),
+        b's' => crate::numeral::is_lua_whitespace(ch),
+        b'u' => ch.is_ascii_uppercase(),
+        b'w' => ch.is_ascii_alphanumeric(),
+        b'x' => ch.is_ascii_hexdigit(),
+        b'z' => ch == 0,
+        _ => return class == ch,
+    };
+    if class.is_ascii_lowercase() {
+        result
+    } else {
+        !result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ByteClass, escape_class, match_class};
+
+    #[test]
+    fn escape_class_table_matches_the_per_byte_classifier() {
+        for class in u8::MIN..=u8::MAX {
+            let actual = escape_class(class);
+            let mut expected = ByteClass::empty();
+            for byte in u8::MIN..=u8::MAX {
+                if match_class(byte, class) {
+                    expected.insert(byte);
+                }
+            }
+            assert_eq!(actual.0, expected.0, "escape byte {class:#04x}");
+        }
     }
 }

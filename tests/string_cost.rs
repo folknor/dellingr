@@ -47,29 +47,20 @@ fn captures_have_a_constant_cost_delta_independent_of_subject_size() {
     assert_eq!(short_delta, 600);
 }
 
-#[cfg(debug_assertions)]
+/// The compile-once half of this check is a crate unit test, since the
+/// compilation counter is test-only instrumentation.
 #[test]
 fn gmatch_full_scan_is_linear_in_its_subject() {
-    fn cost(words: usize) -> (u64, u64) {
+    fn cost(words: usize) -> u64 {
         let subject = "a ".repeat(words);
-        let mut state = State::new();
-        dellingr::Program::compile(
-            format!("for _ in string.gmatch('{subject}', '%a+') do end"),
-            None,
-        )
-        .and_then(|program| state.load(&program))
-        .expect("test program compiles");
-        state
-            .call(ArgCount::Fixed(0), RetCount::Fixed(0))
-            .expect("test program runs");
-        (state.cost_used(), state.pattern_compilations())
+        run_cost(&format!(
+            "for _ in string.gmatch('{subject}', '%a+') do end"
+        ))
     }
 
-    let (short, short_compilations) = cost(128);
-    let (long, long_compilations) = cost(256);
+    let short = cost(128);
+    let long = cost(256);
     assert!(long <= short.saturating_mul(3), "{short} -> {long}");
-    assert_eq!(short_compilations, 1);
-    assert_eq!(long_compilations, 1);
 }
 
 #[test]
@@ -309,8 +300,10 @@ fn gmatch_capture_refusal_does_not_advance_the_iterator() {
     );
 }
 
+/// The compile-once half of this check is a crate unit test, since the
+/// compilation counter is test-only instrumentation.
 #[test]
-fn malformed_gmatch_iterator_compiles_once() {
+fn malformed_gmatch_iterator_repeats_its_deferred_error() {
     let mut state = State::new();
     dellingr::Program::compile("iter = string.gmatch('abc', '%')", None)
         .and_then(|program| state.load(&program))
@@ -327,30 +320,6 @@ fn malformed_gmatch_iterator_compiles_once() {
             .expect_err("malformed iterator reports its deferred error");
         assert!(matches!(error.kind(), ErrorKind::PatternError(_)));
     }
-    #[cfg(debug_assertions)]
-    assert_eq!(state.pattern_compilations(), 1);
-}
-
-#[cfg(debug_assertions)]
-#[test]
-fn find_match_and_gsub_share_one_compiled_pattern() {
-    let mut state = State::new();
-    dellingr::Program::compile(
-        "local s = 'alpha beta gamma'
-             for _ = 1, 50 do
-                 string.find(s, '%a+')
-                 string.match(s, '%a+')
-                 string.gsub(s, '%a+', 'x')
-             end
-             for _ in string.gmatch(s, '%a+') do end",
-        None,
-    )
-    .and_then(|program| state.load(&program))
-    .expect("test program compiles");
-    state
-        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
-        .expect("test program runs");
-    assert_eq!(state.pattern_compilations(), 1);
 }
 
 #[test]

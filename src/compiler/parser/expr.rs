@@ -302,6 +302,7 @@ impl Parser<'_> {
         let base = match tok.typ {
             TokenKind::Identifier => {
                 let text = self.get_text(tok)?;
+                self.reject_environment_name(text, tok.start)?;
                 let variable = self.parse_prefix_identifier(text)?;
                 PrefixBase::Var(variable, self.input.last_line())
             }
@@ -438,8 +439,11 @@ impl Parser<'_> {
             }
             TokenKind::LiteralString => self.literal_string(tok)?,
             TokenKind::Function => {
-                let (nested, line) = self.parse_fndef(None, false)?;
-                Expr::new(ExprKind::Function { nested, line })
+                let (nested, _) = self.parse_fndef(None, false)?;
+                Expr::new(ExprKind::Function {
+                    nested,
+                    line: tok.line,
+                })
             }
             TokenKind::Nil => Expr::new(ExprKind::Nil),
             TokenKind::False => Expr::new(ExprKind::False),

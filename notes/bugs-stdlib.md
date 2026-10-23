@@ -75,121 +75,6 @@ the user reopens it.
 The hunter calls the second a patch over a leaky abstraction; the first removes
 the class of bug.
 
-## LIB-005 - Table-library charging is overstated in two docs, and the metamethod insert/remove loop has no cost bound
-
-From the `stdlib` hunter, rated low to medium: a doc defect plus a lateral
-hazard.
-
-**Claims broken**
-
-- README.md ("Budget"): "Data-dependent native work in the string, pattern, and
-  table libraries is charged: bytes examined or emitted, table elements visited
-  ...".
-- docs/compatibility.md ("Cost-related differences"): "Native string, pattern and
-  table work is charged per byte or element."
-
-Both are false for `insert`, `remove` and `pack` (flat 1) and for `unpack`
-(free). docs/budget.md documents all four as deliberate. The two general
-statements need the exceptions spelled out.
-
-**The hazard.** The gap matters most in the metamethod paths of `insert` and
-`remove` (`insert_through_metamethods`, `remove_through_metamethods`). The shift
-loop runs `first_empty - pos` or `size - pos` iterations, and that count comes
-from a script-controlled `__len`, not from storage that exists:
-
-```lua
-local t = setmetatable({}, {__len = function() return 2^53 end})
-table.insert(t, 1, 0)
-```
-
-This passes `check_sequence_keys` (the range ends at 2^53, inside the inclusive
-bound), then runs about 9e15 iterations of raw get plus raw set of nil inside one
-native call. The total charge is 1 plus the `__len` call's opcodes. A table with
-only `__len` takes the metamethod path but never re-enters Lua in the loop, so no
-opcode budget check ever runs.
-
-The raw path cannot do this, because its length is bounded by real array
-storage. The other walks are all bounded: `sort` charges `len` up front and caps
-it at `i32::MAX`, `move` and `concat` charge per element, and `unpack` caps at
-255.
-
-Under budget.md this is a performance concern, not a cost-model defect, and
-`while true do end` already shows the budget is not a termination guarantee.
-**Decided (user, 2026-10-23):** keep the flat charge, cap the metamethod-path
-shift distance (at `TABLE_SORT_MAX_LEN`, as `sort` does), and spell out the
-flat and free exceptions in the README and compatibility.md charging
-statements.
-
-Still, it is the one place where a single flat-charged library call does
-script-chosen work with no bound. If the flat charge stays, the hunter suggests
-capping the metamethod-path shift distance, for example at `TABLE_SORT_MAX_LEN`
-as `sort` does, so that one call is bounded.
-
-## LIB-009 - gmatch iterator state can tear, or skip a match, on a refused stack push
-
-From the `strings` hunter, rated medium.
-
-**Claims broken.** The 5.4 empty-match rule, which the lua_std.rs header and the
-string.rs comments both promise. The project's own preflight-before-mutate
-pattern: even `preflight_capture_bytes` is deliberately ordered before the
-writes "so errors leave nothing half-done", but it preflights only cost, not
-stack space.
-
-**Mechanism.** `gmatch_iter` (string.rs) writes its persistent iterator state
-before it has pushed what it returns, and nothing reserves the stack first:
-
-```rust
-state.push_string(gmatch_schema::POSITION_FIELD)?;
-state.push_number(range.end as f64)?;
-state.set_table_raw(1)?;                         // pos written
-state.push_string(gmatch_schema::LAST_MATCH_FIELD)?;   // can be refused here
-state.push_number(range.end as f64)?;
-state.set_table_raw(1)?;                         // lastmatch written
-... push_gmatch_capture(...)?                    // up to 32 pushes, each can be refused
-```
-
-Rust callbacks get no guaranteed headroom: `check_stack_slot` refuses at
-`MAX_STACK_SIZE` globally. Two things can go wrong:
-
-- **Torn state.** If the `LAST_MATCH_FIELD` push or its value push is refused,
-  `pos` has advanced but `lastmatch` still holds its old value (or nil). On the
-  next call, an empty match at the new `pos` is not rejected, because
-  `lastmatch != pos`, so the iterator yields an extra `""` that the empty-match
-  rule forbids. Example: `("abc"):gmatch("%a*")` yields `"abc"`, and then `""`
-  instead of ending.
-- **Skipped match.** If a capture push is refused after both fields are written,
-  the match is consumed but never returned, and the next call resumes past it.
-
-The State survives an error and can be reused. A gmatch closure stored in a
-global is reachable from the next callback, and a snapshot taken afterwards saves
-the bad state, which the verifier accepts. So this is a real continue-after-error
-hazard. The `fault-injection` sweep checks surviving operands and State reuse,
-but it does not re-drive the same iterator after an injected refusal, so this
-escapes it.
-
-**Fix.** `check_stack_space(2 + returned.len())` before the first
-`set_table_raw`. Better, restructure:
-
-- `lastmatch` is redundant: after any accepted match it always equals `pos`, and
-  `pos` is never moved on a miss. Store one `pos` plus a "has matched" boolean (or
-  encode "no match yet" as `lastmatch = nil` and drop the separate `pos` write),
-  so there is a single table write and nothing can tear.
-- Push the captures first and write the field last, so a refused push leaves the
-  iterator untouched.
-
-The snapshot schema (`gmatch_schema.rs`, `save_state/verify.rs`) would shrink
-with it.
-
-## LIB-010 - `gmatch_iter` per-call overhead
-
-From the `strings` hunter, raised as a performance observation outside the
-defect bar.
-
-Each call re-interns four or five field-name strings through `push_string`, which
-can run `maybe_collect`, and does about six raw table reads and writes. Folding
-away the redundant `lastmatch` field from LIB-009 also removes a write per
-iteration.
-
 ## LIB-011 - gmatch errors are located in the synthetic wrapper chunk, not the script
 
 From the `strings` hunter. Low.
@@ -210,6 +95,13 @@ the chunk name exists so errors "stay identifiable in traces", which accounts fo
 the traceback entry but not for taking over the primary location. No test pins
 the `string.gmatch:` prefix, which suggests nobody decided this is intended.
 
+The third resolution wave left a comment at the wrapper and found that the fix
+belongs to the VM's error-location code, not to string.rs: recognise the
+wrapper by bytecode identity (matching the source name alone would let a user
+chunk of the same name be mistaken for it), leave that implementation frame out
+of the primary location, and use the first script caller's chunk and call-site
+line.
+
 **Fix.** Locate errors raised through the wrapper at the caller's frame, or
 remove the wrapper. A RustFunc that can carry an upvalue or a bound argument
 would remove the process-global chunk, the `call_unguarded` native level in
@@ -217,60 +109,15 @@ would remove the process-global chunk, the `call_unguarded` native level in
 quirk at once. The hunter considers that structural improvement worth having on
 its own merits.
 
-## LIB-015 - Pattern compilation does about 256x its byte charge in host work
+## LIB-017 - `_G` proxy reads and writes allocate a `String` per access
 
-From the `strings` hunter, raised as a performance observation outside the
+From the `stdlib` hunter, raised as a performance observation outside the
 defect bar.
 
-Uncharged pattern compilation is `O(pattern bytes x 256)`, because every `%x`
-escape, inside or outside a bracket, loops over all 256 bytes. A pattern of up to
-`MAX_STRING_BYTES` can therefore cost about 256 times its byte charge in host
-work. It repeats on every call when the cache misses (a collection now keeps
-entries whose key survived, but a number-typed pattern always bypasses the
-cache). The `class_for_escape` comment documents this, and it
-fits the "structural work is free" framing. `match_class` results per escape
-letter could be a 22-entry static table of `ByteClass`es, which makes each escape
-a copy.
-
-## LIB-016 - Small string-library observations: dead check, double `%s` charge, capture-index wording
-
-From the `strings` hunter, raised outside the defect bar.
-
-- **Dead check in `bracket_class`** (luapat.rs). `if class_start == close` can
-  never be true: the scan loop always advances `scan` past `class_start` before it
-  can break with `close = scan`. The `[]` and `[^]` cases it seems to guard are
-  already rejected by the loop running off the end. Harmless, but the
-  comment-free check suggests a contract it does not enforce.
-- **`string.format` `%s` charges twice.** `%s` charges its rendering in
-  `format_argument` and charges the padded result again in `append_output`.
-  budget.md describes both ("bytes appended to the output and bytes of string
-  arguments consumed"), so this is consistent; `%s` simply costs about 2x per
-  byte.
-- **`InvalidGsubCaptureIndex` drops the index.** It displays as `invalid capture
-  index` without the `%N` it carries in its typed field, while the pattern-side
-  `InvalidCaptureIndex` renders `%N`. The hunter does not count it as a defect
-  under the wording rule, but calls it an easy consistency win.
-
-## LIB-017 - Global-key allocation and per-call `ipairs` registration
-
-From the `stdlib` hunter, raised as performance observations outside the defect
-bar.
-
-- `utf8_global_key` allocates a `String` (`name.to_owned()`) on every `_G.k` read
-  or write that reaches the proxy handlers. A borrow-then-lookup that does not
-  allocate, or interned-string keyed global access, would remove it.
-- Under `snapshot`, `base_ipairs` calls `push_lib_fn("ipairs.iter", ...)`, which
-  runs `register_rust_fn` (a string hash lookup) on every `ipairs(...)` call,
-  although `open_base` already registered the id. `base_pairs` uses a plain
-  `push_rust_fn(base_next)` and relies on the reverse address lookup. Pushing the
-  already-registered function directly in both would be cheaper and consistent.
-
-## LIB-019 - `table.sort` raw path overwrites comparator writes and bypasses a mid-sort metatable
-
-From the `stdlib` hunter, raised outside the defect bar.
-
-On the raw path, a comparator's writes to `t[1..n]` are overwritten by the final
-`set_array` writeback, and a metatable the comparator adds mid-sort is bypassed
-by that raw writeback. Reference Lua's behaviour here is also unspecified, so the
-hunter does not count it as a defect. compatibility.md's sort bullet documents
-the call-order difference only for the metamethod path, not this one.
+`utf8_global_key` allocates a `String` (`name.to_owned()`) on every `_G.k` read
+or write that reaches the proxy handlers. The third resolution wave found the
+allocation forced by borrowing: the key bytes are borrowed from `State`, while
+`get_global` and `set_global` need `&mut State`. Removing it needs a `State` API
+that does the global lookup or update from the key's existing stack slot with
+the borrowed UTF-8 name, then handles the stack. Tied to LIB-001's deferred
+`_G` redesign, which may remove the proxy handlers altogether.

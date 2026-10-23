@@ -6,6 +6,11 @@ use super::TokenKind;
 use super::expr::Prefix;
 use crate::limits::{MAX_ASSIGNMENT_OFFSET, MAX_ASSIGNMENT_TARGETS, MAX_FIXED_RESULTS};
 
+// The capped list's last zero-based target index is 254, below the assignment
+// receiver offset limit of 255. Keep this relation checked in every build so
+// the per-target runtime check is not needed for any currently accepted list.
+const _: () = assert!(MAX_ASSIGNMENT_TARGETS - 1 <= MAX_ASSIGNMENT_OFFSET);
+
 impl<'a> Parser<'a> {
     /// Parses a return statement. Return statements must always come last in a
     /// block.
@@ -78,20 +83,6 @@ impl<'a> Parser<'a> {
         let values = self.parse_explist()?;
         self.check_multi_assign(targets.len(), &values)?;
 
-        // Field and index targets stay bounded by their position in the
-        // target list, the limit the stack bytecode's store offsets set.
-        // While `MAX_ASSIGNMENT_TARGETS - 1 <= MAX_ASSIGNMENT_OFFSET`, the
-        // target cap above rejects every list this check would.
-        for (index, target) in targets.iter().enumerate().rev() {
-            if matches!(target, Place::Field { .. } | Place::Index { .. }) {
-                self.bounded_u8(
-                    index,
-                    MAX_ASSIGNMENT_OFFSET,
-                    SyntaxError::AssignmentOffsetTooLarge,
-                )?;
-            }
-        }
-
         Ok(Stmt::Assign {
             targets,
             values,
@@ -155,7 +146,7 @@ impl<'a> Parser<'a> {
     /// The name is in scope within the function body, allowing direct recursion.
     fn parse_local_function(&mut self) -> Result<Stmt> {
         let line = self.input.next()?.line; // `function` keyword
-        let name = self.expect_identifier()?;
+        let name = self.expect_variable_identifier()?;
         let reg = self.local_slot_count()?;
 
         // Add the local FIRST so it's in scope within the function body
@@ -168,9 +159,9 @@ impl<'a> Parser<'a> {
 
     /// Parse a comma-separated list of identifiers.
     fn parse_namelist(&mut self) -> Result<Vec<&'a str>> {
-        let mut names = vec![self.expect_identifier()?];
+        let mut names = vec![self.expect_variable_identifier()?];
         while self.input.try_pop(TokenKind::Comma)?.is_some() {
-            names.push(self.expect_identifier()?);
+            names.push(self.expect_variable_identifier()?);
         }
         Ok(names)
     }
@@ -179,7 +170,7 @@ impl<'a> Parser<'a> {
     /// numeric (`for i = 1,5 do`).
     pub(super) fn parse_for(&mut self) -> Result<Stmt> {
         self.input.next()?; // `for` keyword
-        let first_name = self.expect_identifier()?;
+        let first_name = self.expect_variable_identifier()?;
         self.level_up();
 
         // Check what follows the first identifier to determine loop type
@@ -284,7 +275,7 @@ impl<'a> Parser<'a> {
         // Collect all loop variable names
         let mut names = vec![first_name];
         while self.input.try_pop(TokenKind::Comma)?.is_some() {
-            names.push(self.expect_identifier()?);
+            names.push(self.expect_variable_identifier()?);
         }
         self.expect(TokenKind::In)?;
 

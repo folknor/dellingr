@@ -119,6 +119,11 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
 
         // Cost is charged inside table_sort BEFORE the comparator runs / the
         // table is mutated, so an exhausted budget blocks the sort.
+        // The raw path writes the sorted snapshot back as a whole. Comparator
+        // writes to array entries may be overwritten, and a metatable attached
+        // during comparison is not used for that writeback. Lua leaves these
+        // re-entrant mutations unspecified, so they are not a compatibility
+        // guarantee.
         // native-call: lib:table.sort->table_sort
         table_sort_result(state.table_sort(1, has_comp), has_comp)?;
         state.set_top(0)?;
@@ -526,6 +531,11 @@ fn insert_through_metamethods(state: &mut State, num_args: usize) -> Result<u8> 
     };
     // A negative length can admit pos > first_empty, where only pos is written.
     check_sequence_keys(state, pos, first_empty.max(pos), LibraryFunction::Insert)?;
+    check_shift_distance(
+        state,
+        first_empty.saturating_sub(pos),
+        LibraryFunction::Insert,
+    )?;
     let mut i = first_empty;
     while i > pos {
         state.push_number(i as f64)?;
@@ -557,6 +567,8 @@ fn remove_through_metamethods(state: &mut State) -> Result<u8> {
         return Err(position_out_of_bounds(state, "remove"));
     }
     check_sequence_keys(state, pos, size.max(pos), LibraryFunction::Remove)?;
+    // Before reading the removed value or invoking any shift handler.
+    check_shift_distance(state, size.saturating_sub(pos), LibraryFunction::Remove)?;
     state.set_top(1)?;
     state.push_number(pos as f64)?;
     // native-call: remove_through_metamethods->get_table_unguarded:removed
@@ -618,6 +630,17 @@ fn sort_through_metamethods(state: &mut State, has_comp: bool) -> Result<u8> {
     }
     state.set_top(0)?;
     Ok(0)
+}
+
+/// Bound the shifts of a metamethod-path `table.insert` or `table.remove`
+/// independently of their flat charge, before any shift handler runs. The
+/// exclusive limit is the one `table.sort` uses; the error names `function`.
+/// A distance of zero or less (an append, or a negative `__len`) always passes.
+fn check_shift_distance(state: &State, distance: i64, function: LibraryFunction) -> Result<()> {
+    if distance >= crate::limits::TABLE_SORT_MAX_LEN {
+        return Err(state.library_error(LibraryError::SequenceShiftTooLarge { function }));
+    }
+    Ok(())
 }
 
 fn position_out_of_bounds(state: &State, func_name: &str) -> crate::error::Error {

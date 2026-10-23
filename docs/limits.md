@@ -55,6 +55,9 @@ Violations are reported as errors at load time, never silently truncated.
   values up to `MAX_RESULTS`.
 - `MAX_EXPRESSIONS`, `MAX_ASSIGNMENT_OFFSET`, `MAX_FRAME_SLOTS`: fixed
   per-construct and per-function limits the compiler enforces.
+  `MAX_ASSIGNMENT_OFFSET` is enforced through the assignment target cap, which
+  a compile-time check keeps within it, so no accepted target list can exceed
+  it.
 - `MAX_TABLE_TEMPLATES`, `MAX_TABLE_TEMPLATE_FIELDS`: per-chunk constructor
   templates and the fields in each template. Constructors past the template
   limit use ordinary table construction. Field assignments have a separate
@@ -96,7 +99,10 @@ These values preserve the current Lua library behavior and error paths:
 - `TONUMBER_BASE_MIN`, `TONUMBER_BASE_MAX`: `tonumber(value, base)` accepts
   bases from 2 through 36. Other values raise `BaseOutOfRange`.
 - `TABLE_SORT_MAX_LEN`: `table.sort` rejects a length at or above `i32::MAX`
-  (Lua's `INT_MAX`) with `ArrayTooBig`.
+  (Lua's `INT_MAX`) with `ArrayTooBig`. `table.insert` and `table.remove`
+  through sequence metamethods reject a shift distance at or above the same
+  limit with `SequenceShiftTooLarge`, which names the function, before any
+  shift handler runs.
 
 ## Compatibility exports for implementation tuning
 
@@ -177,7 +183,13 @@ capacity; what a collection frees is the payloads and entries it removes.
   rooted table can retain large storage while counting as one heap object.
 - A table's logical array length (the keys `#` and placement treat as array
   keys) never shrinks. It is capped at `min(2^53, 2^(pointer bits - 1)) - 2`
-  keys; growing past it panics, and a save beyond it is rejected on load.
+  keys; growing past it returns `table growth failed`, and a save beyond it
+  is rejected on load. Array storage reservations are fallible too: an
+  impossible gap in an edited save and an allocator refusal while growing a
+  legitimate table both return that ordinary error and terminate the callback.
+  This does not impose a smaller logical-length limit or discard live values.
+  It does not make unrelated VM allocations fallible or protect against an
+  operating system killing the process after accepting an allocation.
 - Never reclaimed for the life of the environment: a global binding written
   before `State::seal_globals` keeps its slot after being set to nil, because a
   load's setup may reinstall that name and the saved nil is what keeps it

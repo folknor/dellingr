@@ -405,6 +405,25 @@ All notable changes to dellingr are documented here. The format follows
   `TypeError::Arithmetic`.
 - `State::open_libs` inside `State::with_restricted_env` is refused with the
   new `ErrorKind::OpenLibsInRestrictedEnv`, before any state changes.
+- Every variable use of `_ENV` (read, assignment, local, parameter, loop
+  variable, function name) is the new syntax error
+  `SyntaxError::UnsupportedEnvironmentName` ("the special name '_ENV' is not
+  supported"). Field names such as `t._ENV` are unaffected.
+- `SyntaxError::AssignmentOffsetTooLarge` is removed; the assignment target
+  cap rejects every list it could.
+- `State::gmatch_pattern_compilations` is removed; the compiled-pattern
+  counter is test-only instrumentation.
+- **Replay-visible (lines):** an anonymous `function ... end` expression
+  records its `function` keyword's line, as function statements do. Error
+  locations, tracebacks and snapshot bytes change.
+- **Replay-visible:** `table.insert` and `table.remove` through sequence
+  metamethods refuse a shift of `limits::TABLE_SORT_MAX_LEN` elements or more
+  with the new `LibraryError::SequenceShiftTooLarge` ("sequence shift too
+  large in 'insert'"), before any handler runs. `LibraryError::function()`
+  names `Insert` or `Remove`.
+- **Replay-visible (snapshot contents):** the `%p` and `tostring` identities
+  of environment objects, and of values reachable only from them, survive a
+  load, also when a global shadows the builtin. Saves carry those ids.
 
 ### Added
 
@@ -434,8 +453,9 @@ All notable changes to dellingr are documented here. The format follows
 - Typed library error context: `LibraryError` (the payload of
   `ErrorKind::LibraryError`), `LibraryFunction` and `StringPatternFunction`,
   read through `Error::library_function` and `Error::pattern_function`.
-- `CostAnalysis::caveat()` and a `dellingr::cli` module with the CLI's output
-  prefixes. The `--analyze` warning now prints that caveat, with new wording.
+- `CostAnalysis::caveat()` and a `dellingr::cli` module with the analysis
+  warning prefix. The `--analyze` warning now prints that caveat, with new
+  wording.
 - The CLI reads the script from stdin when the input is `-`, as reference Lua
   does, under the chunk name `stdin`. It used to open a file named `-`; that
   file is now run as `./-`.
@@ -494,6 +514,20 @@ All notable changes to dellingr are documented here. The format follows
   `--dump-bytecode` (`Error: parsing source: ...`).
 - The disassembly header names the non-parameter local count
   `non_param_locals` instead of `local_slots`.
+- `TooManyRegisters` reports the line of the construct that ran out of
+  registers instead of the function's last line.
+- `string.gsub`'s bad replacement capture names it: `invalid capture index
+  %2` (was `invalid capture index`).
+- Snapshot errors in an environment delta's hash slots name the new
+  `TableLoadLocation::EnvironmentHashSlots`.
+- docs/save-state.md states that values a `load_state` setup leaves on the
+  value stack are discarded.
+- Method-call inline caches no longer revalidate on every global rebind or
+  restricted-environment swap. Results are unchanged.
+- `ipairs` pushes its registered iterator directly instead of registering it
+  again on every call.
+- Pattern escape classes (`%a`, `%d`, ...) come from a constant table instead
+  of a 256-byte scan per escape.
 
 ### Fixed
 
@@ -517,8 +551,8 @@ All notable changes to dellingr are documented here. The format follows
   later writes land are unchanged, so script behaviour and cost are
   identical. A table that keeps one old key alive while the rest of a long
   array dies still stores the span between them. On a 32-bit host, growing
-  an array past 2^31 - 2 keys now panics with a message rather than
-  exhausting memory.
+  an array past 2^31 - 2 keys now fails with `table growth failed` rather
+  than exhausting memory.
 - A field read, field write or method lookup could return or overwrite the
   wrong field of a table after very long table churn. Inline caches remember
   a table by its heap handle, and only the handle's 32-bit generation told a
@@ -557,6 +591,14 @@ All notable changes to dellingr are documented here. The format follows
   call-depth limit is reached), as it does for other refusals.
 - An open `...` that is refused for lack of stack space leaves the
   function's live registers untouched instead of truncating them first.
+- Table array growth that cannot be reserved (a logical length past the
+  array limit, as an edited save can demand, or an allocator refusal) raises
+  the new `ErrorKind::TableGrowthFailed` ("table growth failed"), which kills
+  the callback and leaves the table unchanged, instead of panicking or
+  aborting. A load that hits it reports `TableRestoreFailure::GrowthFailed`.
+- **Replay-visible:** a `string.gmatch` iterator whose result push is refused
+  no longer skips the match or tears its saved position; the next call
+  returns that match.
 
 ## [0.5.0] - 2026-10-14
 

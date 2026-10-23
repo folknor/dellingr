@@ -309,6 +309,8 @@ pub struct State {
     /// its program alive across GC pruning or eviction.
     patterns: IndexMap<(StringPtr, AnchorMode), PatternCacheEntry>,
     pattern_bytes: usize,
+    /// Test instrumentation: how many patterns the cache has compiled.
+    #[cfg(test)]
     pattern_compilations: u64,
     /// Depth of __index, __newindex and non-function __call chains.
     /// Prevents stack overflow from circular metamethod references.
@@ -580,6 +582,7 @@ impl State {
             cost: CostState::default(),
             patterns: IndexMap::default(),
             pattern_bytes: 0,
+            #[cfg(test)]
             pattern_compilations: 0,
             metamethod_depth: 0,
             active_rust_fn: None,
@@ -650,8 +653,8 @@ impl State {
     }
 
     /// Test instrumentation for the compiled-pattern cache.
-    #[doc(hidden)]
-    pub fn pattern_compilations(&self) -> u64 {
+    #[cfg(test)]
+    pub(crate) fn pattern_compilations(&self) -> u64 {
         self.pattern_compilations
     }
 
@@ -707,7 +710,10 @@ impl State {
         }
         let pattern_len = bytes.len();
         let compiled = SharedPattern::compile(bytes, key.1);
-        self.pattern_compilations = self.pattern_compilations.saturating_add(1);
+        #[cfg(test)]
+        {
+            self.pattern_compilations = self.pattern_compilations.saturating_add(1);
+        }
         while self.patterns.len() >= PATTERN_CACHE_ENTRIES
             || self.pattern_bytes.saturating_add(pattern_len) > PATTERN_CACHE_BYTES
         {
@@ -1133,7 +1139,7 @@ impl State {
         Ok(())
     }
 
-    /// Ends global-environment initialization.
+    /// Ends initialization of the current global environment.
     ///
     /// Until sealed, every global binding is kept for the life of the State
     /// once it has held a value, even after it is set to nil. Bindings first
@@ -1146,12 +1152,19 @@ impl State {
     /// initialization the saving State performed before it sealed; the loaded
     /// State takes the saved State's sealed or unsealed phase, and a call to
     /// this method inside that setup is deferred to it. Sealing is one-way;
-    /// calling it again does nothing.
+    /// calling it again does nothing within that environment.
+    ///
+    /// Restricted environments created by [`State::with_restricted_env`] start
+    /// sealed. Calling this method inside one does nothing and does not seal
+    /// the suspended outer environment; its phase is restored on return.
     pub fn seal_globals(&mut self) {
         self.global_env.seal();
     }
 
-    /// Whether [`State::seal_globals`] has ended global initialization.
+    /// Whether the current global environment is sealed.
+    ///
+    /// Always true inside [`State::with_restricted_env`], including when the
+    /// suspended outer environment is still initializing.
     pub fn globals_sealed(&self) -> bool {
         self.global_env.is_sealed()
     }

@@ -257,6 +257,25 @@ impl<'a> Parser<'a> {
         self.get_text(token)
     }
 
+    /// Expects a variable name and rejects `_ENV`, whose Lua 5.2 environment
+    /// semantics are not implemented by this compiler.
+    fn expect_variable_identifier(&mut self) -> Result<&'a str> {
+        let token = self.expect(TokenKind::Identifier)?;
+        let name = self.get_text(token)?;
+        self.reject_environment_name(name, token.start)?;
+        Ok(name)
+    }
+
+    /// Rejects `_ENV` where an identifier denotes a variable. Field names
+    /// still use `expect_identifier`, since `t._ENV` is an ordinary field.
+    fn reject_environment_name(&self, name: &str, pos: usize) -> Result<()> {
+        if name == "_ENV" {
+            Err(self.error_at(SyntaxError::UnsupportedEnvironmentName, pos))
+        } else {
+            Ok(())
+        }
+    }
+
     /// Expects an identifier and returns the id of its string literal.
     fn expect_identifier_id(&mut self) -> Result<u16> {
         let name = self.expect_identifier()?;
@@ -498,9 +517,15 @@ impl<'a> Parser<'a> {
         };
         codegen::generate(&mut chunk, &function).map_err(|error| match error {
             codegen::CodegenError::JumpTooFar => self.error_here(SyntaxError::JumpTooFar),
-            codegen::CodegenError::TooManyRegisters { count } => {
-                self.error_here(SyntaxError::TooManyRegisters { count })
-            }
+            codegen::CodegenError::TooManyRegisters { count, line } => Error::new(
+                SyntaxError::TooManyRegisters { count },
+                if line == 0 {
+                    self.input.last_line()
+                } else {
+                    line
+                },
+                0,
+            ),
             codegen::CodegenError::Internal(fault) => self.internal_error(*fault),
         })?;
         Ok(chunk)

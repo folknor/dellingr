@@ -41,11 +41,7 @@ impl State {
                         return Ok(false);
                     };
                     if matches!(val, Val::Nil) {
-                        // Table has no indexed-removal helper for the
-                        // tombstone and ordering bookkeeping, so nil writes
-                        // must use insert and look up this key again.
-                        tbl.insert(key, val)?;
-                        Ok(true)
+                        Ok(tbl.remove_at_index(index))
                     } else {
                         // A live existing entry can be updated by its slot,
                         // so the presence lookup is also the write lookup.

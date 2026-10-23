@@ -53,3 +53,31 @@ fn refused_restricted_setup_preserves_snapshot_bytes() {
         .unwrap();
     assert_eq!(state.save_state().unwrap().bytes, before.bytes);
 }
+
+#[test]
+fn restricted_sealing_leaves_outer_initialization_phase_unchanged() {
+    let mut state = State::new();
+    assert!(!state.globals_sealed());
+    state
+        .with_restricted_env(&[], |state| {
+            assert!(state.globals_sealed());
+            state.seal_globals();
+            state
+                .with_restricted_env(&[], |state| {
+                    state.seal_globals();
+                    assert!(state.globals_sealed());
+                })
+                .unwrap();
+            assert!(state.globals_sealed());
+        })
+        .unwrap();
+    assert!(!state.globals_sealed());
+    state.seal_globals();
+    state
+        .with_restricted_env(&[], |state| {
+            state.seal_globals();
+            assert!(state.globals_sealed());
+        })
+        .unwrap();
+    assert!(state.globals_sealed());
+}

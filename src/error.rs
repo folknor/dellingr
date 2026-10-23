@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use crate::LuaType;
 use crate::limits::{
-    MAX_ASSIGNMENT_OFFSET, MAX_EXPRESSIONS, MAX_FIXED_ARGS, MAX_FIXED_RESULTS, MAX_LITERALS,
-    MAX_LOCALS, MAX_NESTED, MAX_UPVALUES,
+    MAX_EXPRESSIONS, MAX_FIXED_ARGS, MAX_FIXED_RESULTS, MAX_LITERALS, MAX_LOCALS, MAX_NESTED,
+    MAX_UPVALUES,
 };
 
 // Types
@@ -491,6 +491,13 @@ pub enum ErrorKind {
         /// Maximum permitted string size.
         limit: usize,
     },
+    /// A table's array part could not grow: the write would take its
+    /// logical length past the representable limit (in practice only a
+    /// restored snapshot's saved length gets there), or the allocator refused the
+    /// storage. The refused write leaves the table unchanged; writes an
+    /// operation made before it, such as earlier keys of a sort's writeback,
+    /// stay.
+    TableGrowthFailed,
     /// Source text handed to the compiler exceeded the fixed source-size
     /// limit. Raised before tokenising, so no partial chunk is produced.
     SourceSizeExceeded {
@@ -738,6 +745,13 @@ pub enum LibraryError {
     PositionOutOfBounds,
     /// A table sequence is too large to sort.
     ArrayTooBig,
+    /// A `table.insert` or `table.remove` through sequence metamethods would
+    /// shift at least `limits::TABLE_SORT_MAX_LEN` elements. Raised before
+    /// any shift handler runs.
+    SequenceShiftTooLarge {
+        /// The function whose shift was rejected.
+        function: LibraryFunction,
+    },
     /// A `__tostring` metamethod returned a value other than a string or number.
     TostringMustReturnString,
     /// The deterministic identity counter used to format a value was exhausted.
@@ -802,7 +816,8 @@ impl LibraryError {
         match self {
             Self::WrongNumberOfArguments { function }
             | Self::IntegerKeyRangeExceeded { function }
-            | Self::ObjectLengthNotInteger { function } => Some(*function),
+            | Self::ObjectLengthNotInteger { function }
+            | Self::SequenceShiftTooLarge { function } => Some(*function),
             Self::InvalidConcatValue { .. } => Some(LibraryFunction::Concat),
             Self::ArrayTooBig => Some(LibraryFunction::Sort),
             Self::ProtectedMetatable
@@ -949,6 +964,8 @@ pub enum SyntaxError {
     InvalidByte(u8),
     /// Escape sequence is not supported by Lua string literals.
     InvalidEscapeSequence,
+    /// `_ENV` is deliberately unsupported as a variable name.
+    UnsupportedEnvironmentName,
     /// A hexadecimal string escape did not contain two hexadecimal digits.
     HexadecimalDigitExpected,
     /// A decimal string escape exceeds the byte range.
@@ -967,8 +984,6 @@ pub enum SyntaxError {
         /// Number of registers requested.
         count: usize,
     },
-    /// An assignment target stack offset exceeds the bytecode operand width.
-    AssignmentOffsetTooLarge,
     /// More fixed assignment results than a result-count operand can encode.
     TooManyFixedResults,
     /// Function body has more locals than the VM accepts.
@@ -1655,6 +1670,7 @@ impl fmt::Display for ErrorKind {
             StringSizeExceeded { size, limit } => {
                 write!(f, "string size {size} exceeds limit {limit}")
             }
+            TableGrowthFailed => f.write_str("table growth failed"),
             SourceSizeExceeded { size, limit } => {
                 write!(f, "source size {size} exceeds limit {limit}")
             }
@@ -1740,6 +1756,9 @@ impl fmt::Display for LibraryError {
             Self::InvalidNextKey => f.write_str("invalid key to 'next'"),
             Self::PositionOutOfBounds => f.write_str("position out of bounds"),
             Self::ArrayTooBig => f.write_str("array too big"),
+            Self::SequenceShiftTooLarge { function } => {
+                write!(f, "sequence shift too large in '{}'", function.as_str())
+            }
             Self::TostringMustReturnString => f.write_str("'__tostring' must return a string"),
             Self::FormatPointerIdentitySpaceExhausted => {
                 f.write_str("format pointer identity space exhausted")
@@ -1773,7 +1792,9 @@ impl fmt::Display for LibraryError {
                 function.as_str()
             ),
             Self::ObjectLengthNotInteger { .. } => f.write_str("object length is not an integer"),
-            Self::InvalidGsubCaptureIndex { .. } => f.write_str("invalid capture index"),
+            Self::InvalidGsubCaptureIndex { index } => {
+                write!(f, "invalid capture index %{index}")
+            }
             Self::InvalidGsubEscape => f.write_str("invalid use of '%' in replacement string"),
             Self::InvalidGsubReplacementValue { value_type } => {
                 write!(f, "invalid replacement value (a {value_type})")
@@ -1793,6 +1814,9 @@ impl fmt::Display for SyntaxError {
             InvalidCharacter(c) => write!(f, "invalid character '{c}'"),
             InvalidByte(byte) => write!(f, "invalid character '<\\{byte}>'"),
             InvalidEscapeSequence => write!(f, "invalid escape sequence"),
+            UnsupportedEnvironmentName => {
+                write!(f, "the special name '_ENV' is not supported")
+            }
             HexadecimalDigitExpected => write!(f, "hexadecimal digit expected"),
             DecimalEscapeTooLarge => write!(f, "decimal escape too large"),
             LongStringUnsupported => write!(f, "long strings are not supported"),
@@ -1806,10 +1830,6 @@ impl fmt::Display for SyntaxError {
                 f,
                 "too many registers ({count}, limit {})",
                 crate::limits::MAX_REGISTERS
-            ),
-            AssignmentOffsetTooLarge => write!(
-                f,
-                "assignment receiver offset exceeds {MAX_ASSIGNMENT_OFFSET}"
             ),
             TooManyFixedResults => write!(
                 f,

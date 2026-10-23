@@ -346,7 +346,9 @@ fn format_argument(state: &mut State, argument: usize, directive: &Directive) ->
             Ok(format_float(number, directive, kind))
         }
         Conversion::String => {
-            // Charged on the full rendering, before precision truncation.
+            // Charge the full rendering before precision truncation. Appending
+            // the formatted bytes is charged separately: the budget counts
+            // both string argument bytes consumed and bytes emitted.
             // native-call: format_argument->tostring_bytes_unguarded
             let mut bytes = state.tostring_bytes_unguarded(idx)?;
             state.consume_cost(bytes.len() as u64)?;

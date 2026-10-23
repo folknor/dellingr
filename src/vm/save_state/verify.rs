@@ -330,7 +330,15 @@ fn validate_environment_deltas(payload: &SavePayload) -> Result<(), SnapshotErro
                 entries: slots.clone(),
                 metatable: None,
             };
-            validate_table_shape(payload, &shape, delta_index)?;
+            // Slots share the table-shape key validation below, including
+            // reference bounds, nil/NaN rejection and duplicate keys. Only
+            // the map marker and vacant controls bypass table_key.
+            validate_table_shape(
+                payload,
+                &shape,
+                delta_index,
+                &SaveLocation::EnvironmentHashSlots(delta_index),
+            )?;
         }
         for value in delta.array.iter().flatten() {
             validate_value(value, payload)?;
@@ -449,6 +457,7 @@ fn validate_table_shape(
     payload: &SavePayload,
     object: &SavedObject,
     object_index: usize,
+    location: &SaveLocation,
 ) -> Result<(), SnapshotError> {
     if let SavedObject::Table {
         array_len,
@@ -457,15 +466,12 @@ fn validate_table_shape(
         metatable,
     } = object
     {
-        let location = SaveLocation::TableEntries {
-            object: object_index,
-        };
         let array_slots = *array_slots as usize;
         if array_slots > entries.len() {
             return Err(corrupt(
                 CorruptionReason::Table(TableCorruption::ArraySlotsExceedEntries),
                 array_slots,
-                location,
+                location.clone(),
             ));
         }
         // The logical length is not backed by stored slots, so bound it
@@ -479,7 +485,7 @@ fn validate_table_shape(
             return Err(corrupt(
                 CorruptionReason::Table(TableCorruption::ArrayLengthExceedsLimit),
                 object_index,
-                location,
+                location.clone(),
             ));
         };
         // Do not bound logical length by the live span plus fixed slack:
@@ -501,7 +507,7 @@ fn validate_table_shape(
             return Err(corrupt(
                 CorruptionReason::Table(TableCorruption::ArraySlotWrongKey),
                 0,
-                location,
+                location.clone(),
             ));
         };
         if array_slots > 0
@@ -511,7 +517,7 @@ fn validate_table_shape(
             return Err(corrupt(
                 CorruptionReason::Table(TableCorruption::ArraySpanEndpointsNotLive),
                 0,
-                location,
+                location.clone(),
             ));
         }
         let mut keys = BTreeSet::new();
@@ -525,9 +531,7 @@ fn validate_table_shape(
                     return Err(corrupt(
                         CorruptionReason::Table(TableCorruption::ArraySlotWrongKey),
                         entry_index,
-                        SaveLocation::TableEntries {
-                            object: object_index,
-                        },
+                        location.clone(),
                     ));
                 }
             } else {
@@ -539,9 +543,7 @@ fn validate_table_shape(
                     return Err(corrupt(
                         CorruptionReason::Table(TableCorruption::HashEntryBelongsInArray),
                         entry_index,
-                        SaveLocation::TableEntries {
-                            object: object_index,
-                        },
+                        location.clone(),
                     ));
                 }
                 // A live hash entry at the array's append key would have
@@ -552,9 +554,7 @@ fn validate_table_shape(
                     return Err(corrupt(
                         CorruptionReason::Table(TableCorruption::HashEntryBelongsInArray),
                         entry_index,
-                        SaveLocation::TableEntries {
-                            object: object_index,
-                        },
+                        location.clone(),
                     ));
                 }
             }
@@ -576,9 +576,7 @@ fn validate_table_shape(
                     return Err(corrupt(
                         CorruptionReason::Table(TableCorruption::EntryStoresNil),
                         entry_index,
-                        SaveLocation::TableEntries {
-                            object: object_index,
-                        },
+                        location.clone(),
                     ));
                 }
                 continue;
@@ -588,13 +586,7 @@ fn validate_table_shape(
             if entry_index < array_slots {
                 continue;
             }
-            let key = key.table_key(
-                &payload.strings,
-                entry_index,
-                SaveLocation::TableEntries {
-                    object: object_index,
-                },
-            )?;
+            let key = key.table_key(&payload.strings, entry_index, location.clone())?;
             insert_unique(
                 &mut keys,
                 key,
@@ -603,9 +595,7 @@ fn validate_table_shape(
                     form: KeyForm::Saved,
                 },
                 entry_index,
-                SaveLocation::TableEntries {
-                    object: object_index,
-                },
+                location.clone(),
             )?;
         }
         if let Some(value) = metatable {
@@ -615,6 +605,8 @@ fn validate_table_shape(
                 payload,
                 CorruptionReason::Table(TableCorruption::MetatableNotTable),
                 object_index,
+                // The metatable belongs to the arena object, not its entries;
+                // environment hash slots never carry one.
                 SaveLocation::Objects,
             )?;
         }
@@ -627,7 +619,14 @@ fn validate_references(payload: &SavePayload) -> Result<(), SnapshotError> {
         validate_value(value, payload)?;
     }
     for (object_index, object) in payload.objects.iter().enumerate() {
-        validate_table_shape(payload, object, object_index)?;
+        validate_table_shape(
+            payload,
+            object,
+            object_index,
+            &SaveLocation::TableEntries {
+                object: object_index,
+            },
+        )?;
     }
     let mut global_names = BTreeSet::new();
     for (index, (name, value)) in payload.user_globals.iter().enumerate() {
@@ -1088,6 +1087,29 @@ mod tests {
             env_deltas: Vec::new(),
             next_format_pointer_id: 1,
             format_pointer_ids: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn invalid_environment_hash_slot_keys_name_the_delta() {
+        use super::super::{SavedEnvDelta, SavedMetatableDelta, SavedVal};
+        for key in [SavedVal::Num(f64::NAN.to_bits()), SavedVal::Nil] {
+            let delta = SavedEnvDelta {
+                token: "math".to_string(),
+                deleted: Vec::new(),
+                upserts: Vec::new(),
+                order: None,
+                array: None,
+                hash_slots: Some(vec![(key, SavedVal::Num(1.0f64.to_bits()))]),
+                metatable: SavedMetatableDelta::Unchanged,
+            };
+            assert!(matches!(
+                verify_payload(payload(delta)),
+                Err(SnapshotError::CorruptArena {
+                    location: SaveLocation::EnvironmentHashSlots(0),
+                    ..
+                })
+            ));
         }
     }
 

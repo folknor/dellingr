@@ -26,7 +26,6 @@ impl MethodLookupCacheEntry {
         index_handler: Val,
         method_table_version: u64,
         method_index: Option<usize>,
-        globals_version: u64,
     ) -> Self {
         Self {
             receiver_metatable,
@@ -34,7 +33,6 @@ impl MethodLookupCacheEntry {
             index_handler,
             method_table_version,
             method_index,
-            globals_version,
         }
     }
 }
@@ -364,7 +362,6 @@ impl State {
                     index_handler,
                     0,
                     None,
-                    self.global_env.version(),
                 ));
             }
             return None;
@@ -377,7 +374,6 @@ impl State {
                     index_handler,
                     0,
                     None,
-                    self.global_env.version(),
                 ));
             }
             return None;
@@ -391,7 +387,6 @@ impl State {
                     index_handler,
                     method_table_version,
                     None,
-                    self.global_env.version(),
                 ));
             }
             return None;
@@ -404,7 +399,6 @@ impl State {
                 index_handler,
                 method_table_version,
                 Some(method_index),
-                self.global_env.version(),
             ));
         }
 
@@ -420,16 +414,10 @@ impl State {
     ) -> Option<Option<Val>> {
         let entry = cache.get_method()?;
 
-        // Reject the cache when a builtin global has been rebound or
-        // sandboxed via with_restricted_env. The cached `index_handler`
-        // can point at a global library table that was reachable via
-        // `mt.__index = string` (or similar) and stays alive across the
-        // swap, so without this check a pre-warmed callsite resurrects
-        // the pre-swap binding inside the sandbox.
-        if entry.globals_version != self.global_env.version() {
-            return None;
-        }
-
+        // This route depends only on the receiver, its live __index handler,
+        // and the method table below. Rebinding a global or swapping global
+        // environments cannot change those table references: __index = string
+        // stores the table value, which cold lookup also continues to follow.
         let receiver_table = self.heap.as_table_ref(ptr)?;
         if receiver_table.get_metatable() != Some(entry.receiver_metatable) {
             return None;
@@ -469,7 +457,6 @@ impl State {
                 entry.index_handler,
                 method_table_version,
                 Some(method_index),
-                self.global_env.version(),
             ));
             Some(Some(method))
         } else {

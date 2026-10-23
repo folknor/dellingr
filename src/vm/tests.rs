@@ -1246,3 +1246,54 @@ fn internal_fault_keeps_innermost_instruction() {
         crate::error::ErrorKind::InternalError(_)
     ));
 }
+
+// The compiled-pattern cache's compilation counter is test-only
+// instrumentation, so these cache-sharing checks live beside the State.
+
+#[test]
+fn gmatch_full_scan_compiles_its_pattern_once() {
+    for words in [128, 256] {
+        let mut state = State::new();
+        let subject = "a ".repeat(words);
+        run_lua(
+            &mut state,
+            &format!("for _ in string.gmatch('{subject}', '%a+') do end"),
+        );
+        assert_eq!(state.pattern_compilations(), 1, "{words} words");
+    }
+}
+
+#[test]
+fn malformed_gmatch_iterator_compiles_once() {
+    let mut state = State::new();
+    run_lua(&mut state, "iter = string.gmatch('abc', '%')");
+    for _ in 0..2 {
+        crate::Program::compile("return iter()", None)
+            .and_then(|program| state.load(&program))
+            .unwrap();
+        let error = state
+            .call(crate::instr::ArgCount::Fixed(0), RetCount::Fixed(1))
+            .expect_err("malformed iterator reports its deferred error");
+        assert!(matches!(
+            error.kind(),
+            crate::error::ErrorKind::PatternError(_)
+        ));
+    }
+    assert_eq!(state.pattern_compilations(), 1);
+}
+
+#[test]
+fn find_match_gsub_and_gmatch_share_one_compiled_pattern() {
+    let mut state = State::new();
+    run_lua(
+        &mut state,
+        "local s = 'alpha beta gamma'
+         for _ = 1, 50 do
+             string.find(s, '%a+')
+             string.match(s, '%a+')
+             string.gsub(s, '%a+', 'x')
+         end
+         for _ in string.gmatch(s, '%a+') do end",
+    );
+    assert_eq!(state.pattern_compilations(), 1);
+}

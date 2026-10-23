@@ -78,7 +78,9 @@ fn base_unpack_values(state: &mut State) -> Result<u8> {
 pub(crate) fn base_ipairs(state: &mut State) -> Result<u8> {
     check_type_named(state, 1, LuaType::Table, "ipairs")?;
     state.set_top(1)?;
-    state.push_lib_fn("ipairs.iter", base_ipairs_iter)?;
+    // `open_base` registered this id once; pushing directly avoids another
+    // snapshot registry lookup on every ipairs call.
+    state.push_rust_fn(base_ipairs_iter)?;
     // Swap the table and function
     state.push_value(1)?;
     state.remove(1)?;
@@ -534,6 +536,9 @@ fn utf8_global_key(state: &State) -> Result<Option<String>> {
         return Ok(None);
     }
     match str::from_utf8(state.to_bytes(2)?) {
+        // `to_bytes` borrows State's heap, while get_global/set_global need
+        // `&mut State`. Avoiding this owned key needs a byte-key State API that
+        // does the global lookup/update before mutating the VM stack.
         Ok(name) => Ok(Some(name.to_owned())),
         Err(_) => Ok(None),
     }

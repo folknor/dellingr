@@ -91,7 +91,9 @@ Table library:
 
 - `insert`, `remove`, `pack`: flat 1, however many elements they shift or
   store. This is a deliberate cost-model choice. The metamethod path charges
-  the same.
+  the same. The metamethod paths for `insert` and `remove` reject a shift
+  distance at or above `TABLE_SORT_MAX_LEN` with `SequenceShiftTooLarge`
+  before any `__index` or `__newindex` shift access.
 - `move`: 1 per element copied, with an empty range charging 1.
 - `concat`: 1 per element visited, plus bytes consumed from the separator and
   element values, plus bytes of separators appended. An empty range with an

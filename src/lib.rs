@@ -40,7 +40,6 @@ mod instr;
 pub mod limits;
 mod lua_std;
 mod numeral;
-#[doc(hidden)]
 mod patterns;
 mod vm;
 mod vm_aux;
@@ -48,8 +47,6 @@ mod vm_aux;
 /// Error types returned by the VM and parser. Surfaced through [`Result`].
 pub mod error;
 
-#[doc(hidden)]
-pub use cost_meter::COST_MODEL_GOLDEN_FINGERPRINT;
 pub use cost_meter::COST_MODEL_VERSION;
 pub use disassemble::Disassembly;
 pub use host::{DefaultCallbacks, HostCallbacks};
@@ -99,16 +96,13 @@ const _: () = {
 /// Custom result type for evaluating Lua.
 pub type Result<T> = std::result::Result<T, error::Error>;
 
-/// Shared textual fragments used by the command-line interface.
+/// Shared text used by the command-line interface and library hosts.
+///
+/// Hosts can pair this warning prefix with [`CostAnalysis::caveat`] when
+/// presenting a static analysis.
 pub mod cli {
     /// Prefix used for the static analysis caveat.
     pub const ANALYSIS_WARNING_PREFIX: &str = "Warning: ";
-
-    /// Prefix used for errors printed by the command-line interface.
-    pub const ERROR_PREFIX: &str = "Error: ";
-
-    /// Prefix used for the command-line cost summary.
-    pub const COST_USED_PREFIX: &str = "Cost used: ";
 }
 
 /// Cost breakdown for a single scope (function or main chunk).

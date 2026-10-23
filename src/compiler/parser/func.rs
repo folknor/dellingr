@@ -14,7 +14,7 @@ impl<'a> Parser<'a> {
     /// the keyword `function`.
     pub(super) fn parse_fndecl(&mut self) -> Result<Stmt> {
         let line = self.input.next()?.line; // 'function' keyword
-        let name = self.expect_identifier()?;
+        let name = self.expect_variable_identifier()?;
         match self.input.peek_type()? {
             TokenKind::Dot => self.parse_fndecl_table(name, line),
             TokenKind::Colon => self.parse_fndecl_method(name, line),
@@ -136,14 +136,14 @@ impl<'a> Parser<'a> {
             return Ok((args, is_vararg));
         }
 
-        args.push(self.expect_identifier()?);
+        args.push(self.expect_variable_identifier()?);
         while self.input.try_pop(TokenKind::Comma)?.is_some() {
             // Check for vararg after comma: function(a, b, ...)
             if self.input.try_pop(TokenKind::DotDotDot)?.is_some() {
                 is_vararg = true;
                 break;
             }
-            args.push(self.expect_identifier()?);
+            args.push(self.expect_variable_identifier()?);
         }
         self.expect(TokenKind::RParen)?;
         Ok((args, is_vararg))

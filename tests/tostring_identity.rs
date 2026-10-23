@@ -150,3 +150,38 @@ fn metamethod_name_identity_survives_collection_save_and_load() {
     eval_one(&mut loaded, render);
     assert_eq!(loaded.to_string(-1).unwrap(), before);
 }
+
+#[cfg(feature = "snapshot")]
+#[test]
+fn hidden_environment_identities_survive_save_and_load() {
+    use dellingr::DefaultCallbacks;
+    let mut state = State::new();
+    // Keep only rendered strings, so no saved global reaches either table.
+    eval_one(
+        &mut state,
+        "meta_before = tostring(getmetatable(''))
+         library_before = tostring(string)
+         key_ids = ''
+         for key in pairs(string) do key_ids = key_ids .. string.format('%p', key) .. ',' end
+         string = false
+         return true",
+    );
+    state.pop(1).unwrap();
+    let save = state.save_state().unwrap();
+    let mut loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), |_| {
+        Ok::<(), std::convert::Infallible>(())
+    })
+    .unwrap();
+    assert_eq!(loaded.save_state().unwrap().bytes, save.bytes);
+    eval_one(
+        &mut loaded,
+        "local library = getmetatable('').__index
+         if meta_before ~= tostring(getmetatable('')) then error('metatable identity') end
+         if library_before ~= tostring(library) then error('library identity') end
+         local after = ''
+         for key in pairs(library) do after = after .. library.format('%p', key) .. ',' end
+         if key_ids ~= after then error('key identity') end
+         return string == false",
+    );
+    assert!(loaded.to_boolean(-1));
+}

@@ -33,11 +33,6 @@
 /// its subject and pattern.
 pub const COST_MODEL_VERSION: u16 = 8;
 
-/// Fingerprint of the fixed source and cost corpus in `tests/cost_golden.rs`,
-/// including `COST_MODEL_VERSION`.
-#[doc(hidden)]
-pub const COST_MODEL_GOLDEN_FINGERPRINT: u64 = 0x1328_bf4a_9cd2_c5fc;
-
 /// Owned runtime accounting, with one representation of an optional budget.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct CostState {

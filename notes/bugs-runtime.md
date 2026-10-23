@@ -210,32 +210,6 @@ and unwinding closes those upvalues.
 Admission then fails up front, as limits.md describes. If the headroom is not
 wanted, fix the comment and limits.md to list the instructions that still check.
 
-## RT-006 - The method IC's `globals_version` guard rests on a rationale that does not hold
-
-From the `dispatch` hunter. Low: the comment is wrong, and the guard costs
-performance.
-
-`get_cached_index_table_field` rejects an entry when `globals_version` moved.
-The comment says that otherwise "a pre-warmed callsite resurrects the pre-swap
-binding inside the sandbox" when `mt.__index = string`.
-
-The cached route already re-validates everything that uncached resolution
-reads: the receiver's metatable identity; the `__index` slot's key, with its
-value equal to the cached handler; and the method table's version, or the key at
-the cached index. None of that reads globals. `mt.__index = string` stores the
-table value, so after a `with_restricted_env` swap, uncached resolution also
-goes through that same table. A cached hit cannot return anything a cold lookup
-would not.
-
-The guard only invalidates. `write_builtin_slot` bumps the version on every
-builtin write, so a script assigning to any builtin name (`print = myprint` in a
-loop, say) dumps every method IC and every global cache entry. Global caches
-never cache builtins (`GlobalEnv::read` returns before populating), so they do
-not need that bump either.
-
-**Direction.** Remove the field and the bump on builtin writes. If there is a
-hazard the hunter missed, the comment needs to name it.
-
 ## RT-007 - `on_error` fires for a swallowed nested error only if it came from a Lua frame
 
 From the `vm-core` hunter.
@@ -343,8 +317,8 @@ table or nil".
 From the `dispatch` hunter (its L1) and the `tables` hunter (its L2). Raised as
 performance observations outside the defect bar.
 
-The slow-path bullets go with the register-native rewrite and are deferred with
-RT-001 (user, 2026-10-23). The `try_insert_table_direct` bullet stands alone.
+Deferred with RT-001 (user, 2026-10-23): these go with the register-native
+rewrite.
 
 - `get_field_slow` -> `instr_get_field` re-runs `get_table_field_direct` and
   `get_index_table_field_direct`, both of which just failed in
@@ -355,11 +329,6 @@ RT-001 (user, 2026-10-23). The `try_insert_table_direct` bullet stands alone.
   twice, plus the push and pop of a copy of an already-rooted register. This is
   the same layering as RT-001 and RT-002, and the register-native rewrite
   proposed there removes it.
-- `try_insert_table_direct`, for a table with a metatable: the second resolution
-  wave made non-nil writes to an existing key one indexed lookup plus a slot
-  update. A nil write still calls `Table::insert` after the lookup, for its
-  removal bookkeeping. An indexed removal helper on `Table` (src/vm/table.rs)
-  that keeps that bookkeeping would let the nil case reuse the found index too.
 
 ## RT-015 - Inline caches that never populate: metatables without `__index`, and absent globals
 
@@ -390,16 +359,6 @@ Raised as performance observations outside the defect bar.
   `invoke_rust_fn`'s `rotate_right` moves the callback's whole frame when it
   returns fewer values than it left.
 
-## RT-020 - `get_table_unguarded` carries `#[hotpath::measure]` though it stays live across native re-entry
-
-Lateral from the second resolution wave. AGENTS.md forbids the annotation on
-functions that stay live across a native re-entry, because every native level
-then carries the instrumentation frame and the limit tests drive
-`MAX_NATIVE_CALL_DEPTH` levels on a fixed thread. `get_table_unguarded`
-(src/vm/table_ops.rs) is such a function: it calls into the `__index` handler
-path that reaches `call_unguarded`. Either drop the annotation or measure a
-callee that returns before the re-entry.
-
 ## RT-022 - Generic `call_unguarded` and the admission-reporting move need their on-demand checks
 
 Lateral from the second resolution wave. To mark handler entry only after
@@ -416,12 +375,23 @@ host calls now report through `fail_call`. The on-demand
 `error_boundary_fault_sweep` (`--features fault-injection,snapshot`) checks
 notification counts per event and has not been run since.
 
-## RT-021 - `with_restricted_env` silently scopes `seal_globals` to the restricted environment
+The third wave added more that the standing gate does not exercise:
+`gmatch_refused_push_preserves_the_next_match` (tests/string_bytes.rs) is gated
+on `fault-injection`, and `brokkr check --features hotpath` has not been run
+since annotations moved (`get_table_unguarded` lost its `hotpath::measure`).
+Fallible table growth also reshaped `append`, `insert` and
+`try_insert_table_direct` (inlined into `Frame::run`), so the
+`native_bytes_per_level` comparison covers that too.
 
-Lateral from the hunt, kept after the restricted-environment `open_libs` refusal
-landed. `seal_globals()` and `globals_sealed()` act on the current `GlobalEnv`,
-so a seal made inside `with_restricted_env` is discarded with the restricted
-environment on restore. That is consistent with "bindings ... go away with that
-environment", but `seal_globals` is documented as one-way and State-wide. Either
-refuse the seal inside a restricted environment, as `open_libs` now is, or say
-in its doc that it seals only the environment current at the call.
+## RT-023 - Fallible array growth adds work to every append
+
+Lateral from the third resolution wave's review. Every `Table::append` now runs
+`check_vlen_growth`, a `try_reserve` through `reserve_append`, and
+`append_growth`. For a table whose hash part has live entries, `append_growth`
+looks up `vlen + 2` to count the migration run, and `migrate_from_hash` then
+looks the same key up again to remove it: two lookups per append where there
+was one. Unmeasured. Measure with `brokkr dellingr --bench` on the table and
+allocation workloads (`fill`, `mixed`, `queue`, `short_tables`,
+`record_tables`) against the commit before the change, interleaved per the
+benchmarking rules, and fold the counting into the migration walk if the delta
+is real.

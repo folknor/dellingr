@@ -8,9 +8,9 @@ use crate::compiler::UpvalueDesc;
 use crate::error::{ErrorKind, SyntaxError};
 use crate::instr::{ArgCount, ArithOp, ArithOperands, CompareOp, Instr, RetCount};
 use crate::limits::{
-    MAX_ASSIGNMENT_OFFSET, MAX_ASSIGNMENT_TARGETS, MAX_CHUNK_NESTING, MAX_EXPRESSIONS,
-    MAX_FIXED_ARGS, MAX_FIXED_RESULTS, MAX_LITERALS, MAX_LOCALS, MAX_NESTED, MAX_SOURCE_BYTES,
-    MAX_TABLE_BATCH_SIZE, MAX_TABLE_TEMPLATE_FIELDS, MAX_TABLE_TEMPLATES, SYNTAX_SUFFIX_COST,
+    MAX_ASSIGNMENT_TARGETS, MAX_CHUNK_NESTING, MAX_EXPRESSIONS, MAX_FIXED_ARGS, MAX_FIXED_RESULTS,
+    MAX_LITERALS, MAX_LOCALS, MAX_NESTED, MAX_SOURCE_BYTES, MAX_TABLE_BATCH_SIZE,
+    MAX_TABLE_TEMPLATE_FIELDS, MAX_TABLE_TEMPLATES, SYNTAX_SUFFIX_COST,
 };
 
 fn assert_line_info_matches_code_len(chunk: &Bytecode) {
@@ -910,9 +910,7 @@ fn fixed_result_limit_matches_its_error_message() {
 #[test]
 fn field_targets_reach_the_assignment_target_cap() {
     // The last field target sits at offset `MAX_ASSIGNMENT_TARGETS - 1`, so
-    // the target cap rejects a longer list before any receiver offset can
-    // pass `MAX_ASSIGNMENT_OFFSET`.
-    const _: () = assert!(MAX_ASSIGNMENT_TARGETS - 1 <= MAX_ASSIGNMENT_OFFSET);
+    // the production compile-time bound keeps it below the receiver limit.
     let targets = vec!["t.k"; MAX_ASSIGNMENT_TARGETS].join(", ");
     parse_unfinalized(&format!("{targets} = 1"))
         .expect("the maximum number of field targets must compile");
@@ -1585,6 +1583,17 @@ fn fallible_closures_and_varargs_have_their_own_line_stamps() {
             .collect();
         assert_eq!(lines, vec![2], "{source}");
     }
+    let chunk = parse_unfinalized("print('previous')\nlocal f = function()\nend")
+        .expect("anonymous function expression compiles");
+    let closure_lines: Vec<u32> = chunk
+        .code
+        .iter()
+        .zip(&chunk.line_info)
+        .filter(|(instruction, _)| instruction.opcode() == Instr::OP_CLOSURE)
+        .map(|(_, line)| *line)
+        .collect();
+    assert_eq!(closure_lines, vec![2]);
+
     let chunk = parse_unfinalized(
         "local f; local function outer(...)\nprint('previous')\nfunction f()\nend\nreturn\n...\nend",
     )

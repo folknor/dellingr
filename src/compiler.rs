@@ -290,6 +290,18 @@ mod runtime_cache_tests {
     }
 
     fn deepest_accepted_program(source_for_depth: impl Fn(usize) -> String) -> (usize, Bytecode) {
+        deepest_accepted_program_until(source_for_depth, |kind| {
+            matches!(
+                kind,
+                ErrorKind::SyntaxError(SyntaxError::TooManySyntaxLevels)
+            )
+        })
+    }
+
+    fn deepest_accepted_program_until(
+        source_for_depth: impl Fn(usize) -> String,
+        is_expected_limit: impl Fn(&ErrorKind) -> bool,
+    ) -> (usize, Bytecode) {
         let mut deepest = None;
         let mut first_rejected = None;
         for depth in 1..=(MAX_SYNTAX_DEPTH as usize + 1) {
@@ -297,10 +309,7 @@ mod runtime_cache_tests {
             match compile(&source, None) {
                 Ok(bytecode) => deepest = Some((depth, bytecode)),
                 Err(error) => {
-                    assert!(matches!(
-                        error.kind(),
-                        ErrorKind::SyntaxError(SyntaxError::TooManySyntaxLevels)
-                    ));
+                    assert!(is_expected_limit(error.kind()), "{source}: {error}");
                     first_rejected = Some(depth);
                     break;
                 }
@@ -312,6 +321,15 @@ mod runtime_cache_tests {
         (depth, bytecode)
     }
 
+    fn deepest_shape_compiles(
+        source_for_depth: impl Fn(usize) -> String,
+        is_expected_limit: impl Fn(&ErrorKind) -> bool,
+    ) -> usize {
+        let (depth, bytecode) = deepest_accepted_program_until(source_for_depth, is_expected_limit);
+        verify::validate_bytecode(&bytecode).expect("deep compiler output verifies");
+        depth
+    }
+
     #[test]
     fn deepest_nested_programs_compile_within_the_test_stack() {
         std::thread::Builder::new()
@@ -320,6 +338,94 @@ mod runtime_cache_tests {
             .expect("spawning the nesting test thread should succeed")
             .join()
             .expect("nesting test thread should not panic");
+    }
+
+    #[test]
+    fn nested_statement_and_expression_shapes_compile_within_the_test_stack() {
+        std::thread::Builder::new()
+            .stack_size(parser::DEEP_PARSE_TEST_STACK_BYTES)
+            .spawn(nested_statement_and_expression_shapes_body)
+            .expect("spawning the nesting test thread should succeed")
+            .join()
+            .unwrap_or_else(|payload| std::panic::resume_unwind(payload));
+    }
+
+    fn nested_statement_and_expression_shapes_body() {
+        let syntax_limit = |kind: &ErrorKind| {
+            matches!(
+                kind,
+                ErrorKind::SyntaxError(SyntaxError::TooManySyntaxLevels)
+            )
+        };
+
+        for (open, close) in [
+            ("do ", "end "),
+            ("while false do ", "end "),
+            ("repeat ", "until true "),
+            ("if true then ", "end "),
+        ] {
+            deepest_shape_compiles(
+                |depth| format!("{}return 1 {}", open.repeat(depth), close.repeat(depth)),
+                syntax_limit,
+            );
+        }
+
+        deepest_shape_compiles(
+            |depth| {
+                format!(
+                    "{}return 1 {}",
+                    "function f() ".repeat(depth),
+                    "end ".repeat(depth)
+                )
+            },
+            syntax_limit,
+        );
+
+        // Nested loops retain their hidden control locals, so MAX_LOCALS
+        // rejects them before the syntax budget; still compile the deepest
+        // admitted numeric and generic loop trees through codegen.
+        let locals_limit =
+            |kind: &ErrorKind| matches!(kind, ErrorKind::SyntaxError(SyntaxError::TooManyLocals));
+        deepest_shape_compiles(
+            |depth| {
+                format!(
+                    "{}return 1 {}",
+                    "for i = 1, 1 do ".repeat(depth),
+                    "end ".repeat(depth)
+                )
+            },
+            locals_limit,
+        );
+        deepest_shape_compiles(
+            |depth| {
+                format!(
+                    "{}return 1 {}",
+                    "for key in iterator do ".repeat(depth),
+                    "end ".repeat(depth)
+                )
+            },
+            locals_limit,
+        );
+
+        deepest_shape_compiles(
+            |depth| format!("return {}value", "- ".repeat(depth)),
+            syntax_limit,
+        );
+        deepest_shape_compiles(
+            |depth| format!("return {}value", "not ".repeat(depth)),
+            syntax_limit,
+        );
+        deepest_shape_compiles(
+            |depth| format!("return {}value", "value^".repeat(depth)),
+            syntax_limit,
+        );
+        // Nested non-multi parentheses are normalized by the parser, and a
+        // parenthesized call retains only one Paren node; this exercises the
+        // accepted source depth without implying a recursive codegen chain.
+        deepest_shape_compiles(
+            |depth| format!("return {}value(){}", "(".repeat(depth), ")".repeat(depth)),
+            syntax_limit,
+        );
     }
 
     fn deepest_nested_programs_body() {

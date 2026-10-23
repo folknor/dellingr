@@ -302,6 +302,44 @@ fn syntax_errors_name_what_reference_lua_names() {
 }
 
 #[test]
+fn unsupported_environment_name_is_a_located_syntax_error() {
+    for code in [
+        "local _ENV = {}",
+        "local value, _ENV = 1, 2",
+        "local function f(_ENV) end",
+        "function f(_ENV) end",
+        "local function _ENV() end",
+        "function _ENV() end",
+        "for _ENV = 1, 2 do end",
+        "for key, _ENV in iterator do end",
+        "_ENV = 1",
+        "print(_ENV)",
+    ] {
+        let error = syntax_error(code);
+        assert!(
+            matches!(
+                error.kind(),
+                ErrorKind::SyntaxError(SyntaxError::UnsupportedEnvironmentName)
+            ),
+            "{code}: {error}"
+        );
+        assert_eq!(
+            error.kind().to_string(),
+            "the special name '_ENV' is not supported",
+            "{code}"
+        );
+    }
+
+    let error = syntax_error("print(1)\nlocal _ENV = {}");
+    assert_eq!(error.line_num(), 2);
+
+    // `_ENV` remains an ordinary field spelling; only variable-name uses
+    // would imply the unsupported environment behavior.
+    dellingr::Program::compile("local t = {_ENV = 1}; return t._ENV", None)
+        .expect("field names named _ENV remain valid");
+}
+
+#[test]
 fn syntax_error_variants_are_typed() {
     let found = |code: &str| match syntax_error(code).into_kind() {
         ErrorKind::SyntaxError(error) => error,

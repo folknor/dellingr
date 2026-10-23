@@ -4,8 +4,7 @@ mod common;
 #[path = "common/scratch.rs"]
 mod scratch;
 
-use cli::run;
-use dellingr::cli::COST_USED_PREFIX;
+use cli::{COST_USED_PREFIX, run};
 use scratch::ScratchScript;
 
 #[test]

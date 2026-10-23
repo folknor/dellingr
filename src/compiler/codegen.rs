@@ -30,7 +30,8 @@ pub(super) enum CodegenError {
     /// A jump spans `2^23` instructions or more.
     JumpTooFar,
     /// A function needs `count` registers, more than an operand can name.
-    TooManyRegisters { count: usize },
+    /// `line` is the best source line hint tracked during generation.
+    TooManyRegisters { count: usize, line: u32 },
     /// Boxed so the variants stay within `variant_size_differences`.
     Internal(Box<ParserFault>),
 }
@@ -47,6 +48,7 @@ pub(super) fn generate(chunk: &mut Bytecode, body: &FunctionBody) -> Result<()> 
         code: Vec::new(),
         lines: Vec::new(),
         line: 0,
+        error_line: 0,
         freereg: u16::from(body.num_params),
         nactive: u16::from(body.num_params),
         max_stack: u16::from(body.num_params),
@@ -105,6 +107,9 @@ struct Generator<'f> {
     lines: Vec<u32>,
     /// The stamp for the next emitted instruction.
     line: u32,
+    /// Best source line for an allocation failure, kept separate from
+    /// instruction stamps so diagnostics do not change bytecode line info.
+    error_line: u32,
     freereg: u16,
     nactive: u16,
     max_stack: u16,
@@ -128,6 +133,14 @@ impl Generator<'_> {
         CodegenError::Internal(Box::new(fault))
     }
 
+    fn error_source_line(&self) -> u32 {
+        if self.error_line == 0 {
+            self.line
+        } else {
+            self.error_line
+        }
+    }
+
     // Registers
 
     fn reserve(&mut self, n: u16) -> Result<u16> {
@@ -135,7 +148,12 @@ impl Generator<'_> {
         let count = usize::from(first) + usize::from(n);
         self.freereg = match u16::try_from(count) {
             Ok(top) if top < OPEN_COUNT => top,
-            _ => return Err(CodegenError::TooManyRegisters { count }),
+            _ => {
+                return Err(CodegenError::TooManyRegisters {
+                    count,
+                    line: self.error_source_line(),
+                });
+            }
         };
         self.max_stack = self.max_stack.max(self.freereg);
         Ok(first)
@@ -367,6 +385,7 @@ impl Generator<'_> {
                 self.nactive = self.freereg;
             }
             Stmt::LocalFunction { reg, nested, line } => {
+                self.error_line = *line;
                 let reg = u16::from(*reg);
                 debug_assert_eq!(self.freereg, reg);
                 self.reserve(1)?;
@@ -464,6 +483,7 @@ impl Generator<'_> {
                 scope_close,
                 ..
             } => {
+                self.error_line = *prep_line;
                 let saved = self.nactive;
                 let base = u16::from(*base);
                 debug_assert_eq!(self.freereg, base);
@@ -498,6 +518,7 @@ impl Generator<'_> {
                 break_close,
                 scope_close,
             } => {
+                self.error_line = *call_line;
                 let saved = self.nactive;
                 let base = u16::from(*base);
                 debug_assert_eq!(self.freereg, base);
@@ -578,7 +599,10 @@ impl Generator<'_> {
     fn explist_to_regs(&mut self, values: &[Expr], want: usize) -> Result<()> {
         let base = self.freereg;
         let count = usize::from(base).saturating_add(want);
-        let want = u16::try_from(want).map_err(|_| CodegenError::TooManyRegisters { count })?;
+        let want = u16::try_from(want).map_err(|_| CodegenError::TooManyRegisters {
+            count,
+            line: self.error_source_line(),
+        })?;
         for (index, value) in values.iter().enumerate() {
             let val = self.expr(value)?;
             let last = index + 1 == values.len();
@@ -602,6 +626,7 @@ impl Generator<'_> {
     }
 
     fn single_assign(&mut self, target: &Place, value: &Expr, line: u32) -> Result<()> {
+        self.error_line = line;
         match target {
             Place::Local(reg) => {
                 let val = self.expr(value)?;
@@ -659,6 +684,7 @@ impl Generator<'_> {
     /// fresh register, so the stores, last target first, see the operands
     /// and values as they were evaluated.
     fn multi_assign(&mut self, targets: &[Place], values: &[Expr], line: u32) -> Result<()> {
+        self.error_line = line;
         let operands_base = self.freereg;
         let mut place_regs = Vec::with_capacity(targets.len());
         for target in targets {
@@ -680,7 +706,8 @@ impl Generator<'_> {
         self.explist_to_regs(values, targets.len())?;
         for (index, (target, (obj, key))) in targets.iter().zip(&place_regs).enumerate().rev() {
             let count = usize::from(values_base).saturating_add(index);
-            let src = u16::try_from(count).map_err(|_| CodegenError::TooManyRegisters { count })?;
+            let src =
+                u16::try_from(count).map_err(|_| CodegenError::TooManyRegisters { count, line })?;
             self.line = line;
             match target {
                 Place::Local(reg) => {
@@ -716,6 +743,7 @@ impl Generator<'_> {
     }
 
     fn function_stmt(&mut self, target: &Place, nested: u8, line: u32) -> Result<()> {
+        self.error_line = line;
         match target {
             Place::Local(reg) => {
                 self.emit_at(Instr::closure(u16::from(*reg), u16::from(nested)), line);
@@ -754,6 +782,7 @@ impl Generator<'_> {
     }
 
     fn return_stmt(&mut self, values: &[Expr], line: u32) -> Result<()> {
+        self.error_line = line;
         match values {
             [] => {
                 self.emit_at(Instr::ret(0, RetCount::Fixed(0)), line);
@@ -836,6 +865,7 @@ impl Generator<'_> {
             ExprKind::Num(idx) => Val::Num(*idx),
             ExprKind::Str(idx) => Val::Str(*idx),
             ExprKind::Vararg { line } => {
+                self.error_line = *line;
                 let reg = self.reserve(1)?;
                 Val::Vararg(self.emit_at(Instr::vararg(reg, RetCount::Fixed(1)), *line))
             }
@@ -851,7 +881,10 @@ impl Generator<'_> {
             ExprKind::Function { nested, line } => {
                 Val::Reloc(self.emit_at(Instr::closure(0, u16::from(*nested)), *line))
             }
-            ExprKind::Table(table) => self.table(table)?,
+            ExprKind::Table(table) => {
+                self.error_line = table.line;
+                self.table(table)?
+            }
             ExprKind::Suffixed(suffixed) => {
                 let mut val = self.expr(&suffixed.base)?;
                 for suffix in &suffixed.suffixes {
@@ -898,18 +931,21 @@ impl Generator<'_> {
             ExprKind::Or(operands) => self.logical(operands, true)?,
             ExprKind::Not { operand, line } => {
                 let val = self.expr(operand)?;
+                self.error_line = *line;
                 let reg = self.any_reg(val)?;
                 self.free_reg(reg);
                 Val::Reloc(self.emit_at(Instr::not(0, reg), *line))
             }
             ExprKind::Len { operand, line } => {
                 let val = self.expr(operand)?;
+                self.error_line = *line;
                 let reg = self.any_reg(val)?;
                 self.free_reg(reg);
                 Val::Reloc(self.emit_at(Instr::len(0, reg), *line))
             }
             ExprKind::Neg { operand, line } => {
                 let val = self.expr(operand)?;
+                self.error_line = *line;
                 let reg = self.any_reg(val)?;
                 self.free_reg(reg);
                 Val::Reloc(self.emit_at(Instr::unm(0, reg), *line))
@@ -919,6 +955,7 @@ impl Generator<'_> {
 
     /// `left op right` for an arithmetic operator.
     fn arith(&mut self, op: ArithOp, left: Val, right: &Expr, line: u32) -> Result<Val> {
+        self.error_line = line;
         let left = self.operand_before(left, right.may_execute)?;
         let rhs = self.expr(right)?;
         let rhs = match self.discharge(rhs) {
@@ -957,6 +994,7 @@ impl Generator<'_> {
 
     /// `left op right` for a comparison producing a boolean.
     fn compare_value(&mut self, op: CompareOp, left: Val, right: &Expr, line: u32) -> Result<Val> {
+        self.error_line = line;
         let left = self.operand_before(left, right.may_execute)?;
         let (lhs_reg, left) = self.operand_reg(left)?;
         let rhs = self.expr(right)?;
@@ -1036,6 +1074,7 @@ impl Generator<'_> {
     }
 
     fn call(&mut self, callee: Val, call: &CallSuffix) -> Result<Val> {
+        self.error_line = call.line;
         let base = self.next_reg(callee)?;
         let args = self.call_args(&call.args, 0)?;
         let pc = self.emit_at(
@@ -1048,6 +1087,7 @@ impl Generator<'_> {
     }
 
     fn method_call(&mut self, object: Val, method: &MethodSuffix) -> Result<Val> {
+        self.error_line = method.lookup_line;
         let obj = self.any_reg(object)?;
         self.free_reg(obj);
         let base = self.reserve(2)?;
@@ -1131,6 +1171,7 @@ mod tests {
             code: Vec::new(),
             lines: Vec::new(),
             line: 1,
+            error_line: 2,
             freereg: 0,
             nactive: 0,
             max_stack: 0,
@@ -1141,7 +1182,7 @@ mod tests {
         for extra in [1, 2] {
             assert!(matches!(
                 generator.reserve(extra),
-                Err(CodegenError::TooManyRegisters { count })
+                Err(CodegenError::TooManyRegisters { count, line: 2 })
                     if count == usize::from(u16::MAX - 1) + usize::from(extra)
             ));
             assert_eq!(generator.freereg, u16::MAX - 1);
@@ -1158,6 +1199,7 @@ mod tests {
             code: Vec::new(),
             lines: Vec::new(),
             line: 1,
+            error_line: 0,
             freereg: 0,
             nactive: 0,
             max_stack: 0,

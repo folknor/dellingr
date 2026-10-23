@@ -105,3 +105,44 @@ fn raw_and_metamethod_sorts_share_order_and_comparator_calls() {
         "#
     ));
 }
+
+#[test]
+fn nil_writes_to_existing_metatable_keys_keep_removal_order_and_dispatch() {
+    assert!(run_boolean(
+        r#"
+        local function exercise(count)
+            local t = {10, 20}
+            for i = 1, count do t["k" .. i] = i end
+            local calls = 0
+            setmetatable(t, {
+                __newindex = function(self, key, value)
+                    calls = calls + 1
+                    rawset(self, key, value)
+                end
+            })
+            t[1] = nil
+            t.k1 = nil
+            if calls ~= 0 or t[1] ~= nil or t.k1 ~= nil then return false end
+            -- A tombstone remains a valid next control key.
+            local successor = next(t, "k1")
+            if count > 1 and successor ~= "k2" then return false end
+            t.k1 = 99
+            if calls ~= 1 then return false end
+            local expected = 2
+            for key, value in pairs(t) do
+                if expected == 2 then
+                    if key ~= 2 or value ~= 20 then return false end
+                elseif expected <= count + 1 then
+                    local i = expected - 1
+                    if key ~= "k" .. i or value ~= i then return false end
+                else
+                    if key ~= "k1" or value ~= 99 then return false end
+                end
+                expected = expected + 1
+            end
+            return expected == count + 3
+        end
+        return exercise(1) and exercise(24)
+        "#
+    ));
+}

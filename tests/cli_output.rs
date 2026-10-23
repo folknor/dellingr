@@ -7,10 +7,9 @@ mod scratch;
 use std::ffi::OsStr;
 use std::process::{ExitStatus, Stdio};
 
+use cli::{ERROR_PREFIX, command, run};
 use dellingr::CostAnalysis;
-use dellingr::cli::{ANALYSIS_WARNING_PREFIX, ERROR_PREFIX};
-
-use cli::{command, run};
+use dellingr::cli::ANALYSIS_WARNING_PREFIX;
 use scratch::ScratchScript;
 
 fn status_with_closed_stdout(argument: &OsStr) -> ExitStatus {

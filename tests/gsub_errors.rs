@@ -438,11 +438,11 @@ fn gsub_validates_replacement_grammar_only_for_actual_replacements() {
     assert!(
         matches!(
             err.kind(),
-            ErrorKind::LibraryError(error) if error.to_string() == "invalid capture index"
+            ErrorKind::LibraryError(error) if error.to_string() == "invalid capture index %2"
         ),
         "expected runtime invalid capture index error, got {err:?}"
     );
-    assert_eq!(err.kind().to_string(), "invalid capture index");
+    assert_eq!(err.kind().to_string(), "invalid capture index %2");
 
     // A bad replacement is not validated when there is no match or the
     // substitution limit is zero. Bind each gsub's two results to locals so all

@@ -69,6 +69,14 @@ does.
   raises an error.
 - Table constructors accept leading and lone comma or semicolon separators,
   for example `{,}` and `{;}`. Lua 5.2 and 5.4 reject those forms.
+- `_ENV` is not a variable. Every variable use of the name - reading it,
+  assigning it, and declaring it as a local, parameter, loop variable or
+  function name - is the syntax error "the special name '_ENV' is not
+  supported", so there is no lexical environment rebinding. Field names such
+  as `t._ENV` remain ordinary.
+- Lua 5.4 `\u{XXXX}` string escapes are rejected as invalid escape sequences.
+  The `<const>` and `<close>` local attributes are absent and raise syntax
+  errors.
 - Errors kill the callback. There is no `pcall`, `xpcall` or `assert`.
 
 ## Errors
@@ -153,6 +161,9 @@ does.
   handler reads and writes during its quicksort, so a handler that observes
   call order sees a different sequence. Stable handlers and a consistent
   comparator give the same sorted values. Tie order is unspecified.
+- On the raw path, comparator writes to the array can be overwritten by the
+  sorted snapshot's writeback, and a metatable attached during comparison is
+  not used for that writeback. Lua does not specify these comparator mutations.
 - Integer keys are f64, and beyond +/-2^53 consecutive integers stop being
   distinct keys. The functions that walk a range of keys therefore refuse a
   range of two or more keys that reaches outside -2^53..2^53 (inclusive),
@@ -176,4 +187,7 @@ does.
 These have no reference-Lua analogue. See `budget.md`.
 
 - `while true do end` is free.
-- Native string, pattern and table work is charged per byte or element.
+- Native string, pattern and table work is generally charged for bytes,
+  elements or matcher primitives. `table.insert`, `table.remove` and
+  `table.pack` each cost a flat 1 regardless of elements shifted or stored;
+  global `unpack` and `table.unpack` are free regardless of elements visited.

@@ -56,6 +56,10 @@ Designed for sandboxed embedding, not as a general-purpose Lua replacement. Thes
 - Dynamic code and module loading (`load`, `loadstring`, `dofile`, `require`,
   and the `package` library); script-controlled collection (`collectgarbage`)
 - `math.randomseed` (the host seeds the stream with `State::set_rng_seed`)
+- `_ENV`: every variable use of the name is a syntax error - reading it,
+  assigning it, and declaring it as a local, parameter, loop variable or
+  function name. Field names such as `t._ENV` are unaffected.
+- Lua 5.4 `\u{XXXX}` string escapes and `<const>` / `<close>` local attributes
 - Integer-specific `math` members (`math.type`, `math.tointeger`, `math.ult`,
   `math.maxinteger`, `math.mininteger`), and the Lua 5.2-only
   `math.pow`, `math.ldexp`, `math.frexp`, `math.cosh`, `math.sinh`,
@@ -86,7 +90,7 @@ This is a bound on the value stack, **not** a total host-memory quota. It stops 
 
 There's a few gotchas with the current instruction-cost accounting. For example, `while true do end` is free, which means that a users Lua script could run forever. This is a known trade-off made in the full light of day - the main consumer of dellingr does not want to penalise the user (that is, subtract from their per-gametick budget) for structural semantics. Users should be encouraged to write more code, not less.
 
-Data-dependent native work in the string, pattern, and table libraries is charged: bytes examined or emitted, table elements visited, and matcher primitives each consume budget. Structural semantics remain free by design. A helper extraction, an intermediate name, or another legible refactor should not make a script more expensive, because the budget is a game-design instrument rather than a CPU meter. Per-function charges are listed in [docs/budget.md](docs/budget.md).
+Data-dependent native work in the string, pattern, and table libraries is generally charged for bytes examined or emitted, table elements visited, and matcher primitives. `table.insert`, `table.remove`, and `table.pack` instead cost a flat 1 regardless of elements shifted or stored; global `unpack` and `table.unpack` are free regardless of elements visited. Structural semantics remain free by design. A helper extraction, an intermediate name, or another legible refactor should not make a script more expensive, because the budget is a game-design instrument rather than a CPU meter. Per-function charges are listed in [docs/budget.md](docs/budget.md).
 
 This cost model changed in 0.4.0. Embedders must re-measure their tick budgets: the increase depends on string lengths, output expansion, pattern matches and backtracking, and table contents.
 

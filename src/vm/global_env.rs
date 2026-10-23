@@ -117,11 +117,6 @@ impl GlobalEnv {
     }
 
     #[inline(always)]
-    pub(super) fn version(&self) -> u64 {
-        self.version
-    }
-
-    #[inline(always)]
     pub(super) fn builtin(&self, slot: u8) -> Val {
         self.builtins[slot as usize]
     }
@@ -213,8 +208,9 @@ impl GlobalEnv {
     #[inline(always)]
     fn write_builtin_slot(&mut self, slot: u8, val: Val) {
         self.builtins[slot as usize] = val;
-        // Builtin writes also invalidate conservatively guarded method caches.
-        self.version = self.version.wrapping_add(1);
+        // Builtin reads bypass global slot caches. Updating an existing
+        // binding leaves all cached indices valid; insertion/compaction and
+        // environment replacement own any structural invalidation needed.
     }
 
     #[inline(always)]
@@ -354,5 +350,29 @@ impl Markable for GlobalEnv {
             binding.val.mark_reachable(heap, worklist);
         }
         self.builtins.mark_reachable(heap, worklist);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GlobalEnv;
+    use crate::instr::Builtin;
+    use crate::vm::Val;
+    use crate::vm::caches::GlobalLookupCacheSlot;
+
+    #[test]
+    fn builtin_rebind_keeps_global_slot_cache_valid() {
+        let mut env = GlobalEnv::new();
+        env.write("target".to_owned(), Val::Num(7.0));
+        env.write_builtin(Builtin::Print as u8, Val::Nil);
+        let cache = GlobalLookupCacheSlot::default();
+        env.read("target", Some(&cache));
+        let version = env.version;
+        env.write_builtin(Builtin::Print as u8, Val::Num(1.0));
+        assert_eq!(env.version, version);
+        assert_eq!(env.read_cached(&cache), Some(Val::Num(7.0)));
+        env.write("print".to_owned(), Val::Nil);
+        assert_eq!(env.version, version);
+        assert_eq!(env.read_cached(&cache), Some(Val::Num(7.0)));
     }
 }

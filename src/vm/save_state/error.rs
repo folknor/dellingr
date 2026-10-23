@@ -829,7 +829,9 @@ impl fmt::Display for EnvironmentCorruption {
             Self::HashOrderBelongsInArray => "environment hash order belongs in the array",
             Self::MetatableNotObject => "environment metatable is not an object",
             Self::MetatableNotTable(Saved) => "environment metatable is not a table",
-            Self::MetatableNotTable(Materialized) => "saved environment metatable is not a table",
+            Self::MetatableNotTable(Materialized) => {
+                "materialized environment metatable is not a table"
+            }
             Self::TokenNotTable => "environment token does not resolve to a table",
             Self::OrderKeyAbsent => "environment order key is absent from the table",
         })
@@ -953,6 +955,9 @@ pub enum TableRestoreFailure {
     ArraySlotHasWrongKey,
     /// A hash entry's key belongs to the array part; a dellingr bug, as above.
     HashEntryBelongsInArray,
+    /// Growing the table's array part failed: the saved logical length left
+    /// no room for the restored keys, or the allocator refused the storage.
+    GrowthFailed,
 }
 
 impl From<TableError> for TableRestoreFailure {
@@ -960,6 +965,7 @@ impl From<TableError> for TableRestoreFailure {
         match error {
             TableError::InvalidKey(InvalidTableKey::Nil) => Self::NilKey,
             TableError::InvalidKey(InvalidTableKey::Nan) => Self::NanKey,
+            TableError::GrowthFailed => Self::GrowthFailed,
             TableError::InvalidSnapshot(fault) => match fault {
                 SnapshotTableFault::ArrayLengthExceedsEntries => Self::ArrayLengthExceedsEntries,
                 SnapshotTableFault::ArrayLengthExceedsLimit => Self::ArrayLengthExceedsLimit,
@@ -975,6 +981,7 @@ impl fmt::Display for TableRestoreFailure {
         let fault = match self {
             Self::NilKey => return f.write_str("table index was nil"),
             Self::NanKey => return f.write_str("table index was NaN"),
+            Self::GrowthFailed => return f.write_str("table growth failed"),
             Self::ArrayLengthExceedsEntries => SnapshotTableFault::ArrayLengthExceedsEntries,
             Self::ArrayLengthExceedsLimit => SnapshotTableFault::ArrayLengthExceedsLimit,
             Self::ArraySlotHasWrongKey => SnapshotTableFault::ArraySlotHasWrongKey,
@@ -1046,6 +1053,8 @@ pub enum TableLoadLocation {
     EnvironmentOrder(usize),
     /// Array slots of the environment delta at this index.
     EnvironmentArray(usize),
+    /// Physical hash slots of the environment delta at this index.
+    EnvironmentHashSlots(usize),
     /// Metatable of the environment delta at this index.
     EnvironmentMetatable(usize),
     /// A table in the saved object arena.
@@ -1083,6 +1092,7 @@ impl fmt::Display for TableLoadLocation {
             Self::EnvironmentUpserts(delta) => write!(f, "environment delta[{delta}] upserts"),
             Self::EnvironmentOrder(delta) => write!(f, "environment delta[{delta}] order"),
             Self::EnvironmentArray(delta) => write!(f, "environment delta[{delta}] array"),
+            Self::EnvironmentHashSlots(delta) => write!(f, "environment delta[{delta}] hash slots"),
             Self::EnvironmentMetatable(delta) => {
                 write!(f, "environment delta[{delta}] metatable")
             }
@@ -1364,7 +1374,7 @@ mod tests {
                 CorruptionReason::Environment(EnvironmentCorruption::MetatableNotTable(
                     KeyForm::Materialized,
                 )),
-                "saved environment metatable is not a table",
+                "materialized environment metatable is not a table",
             ),
             (
                 CorruptionReason::Environment(EnvironmentCorruption::TokenNotTable),
@@ -1515,9 +1525,14 @@ mod tests {
                 TableError::InvalidSnapshot(SnapshotTableFault::ArraySlotHasWrongKey),
                 TableRestoreFailure::ArraySlotHasWrongKey,
             ),
+            (TableError::GrowthFailed, TableRestoreFailure::GrowthFailed),
         ] {
             assert_eq!(TableRestoreFailure::from(error), failure);
         }
+        assert_eq!(
+            TableRestoreFailure::GrowthFailed.to_string(),
+            "table growth failed"
+        );
     }
 
     #[test]

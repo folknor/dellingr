@@ -6,7 +6,7 @@
 //! The success-path behaviour against reference Lua 5.4 lives in
 //! `examples/tables/metamethod_sequence.lua`.
 
-use dellingr::error::ErrorKind;
+use dellingr::error::{ErrorKind, LibraryError, LibraryFunction};
 use dellingr::{ArgCount, RetCount, State};
 
 fn run(code: &str) -> dellingr::Result<()> {
@@ -101,6 +101,70 @@ fn move_rejects_keys_past_exact_integer_range() {
     // The boundary itself is still exact.
     run("local t = {1}\ntable.move(t, 1, 1, 2^53)\nif t[2^53] ~= 1 then error(\"lost\") end")
         .unwrap();
+}
+
+#[test]
+fn metamethod_insert_and_remove_reject_oversized_shifts_before_access() {
+    let limit = dellingr::limits::TABLE_SORT_MAX_LEN;
+    let scripts = [
+        (
+            LibraryFunction::Insert,
+            "sequence shift too large in 'insert'",
+            format!(
+                "local t = setmetatable({{}}, {{__len = function() return {limit} end, \
+                 __index = function() error('insert shift started') end, \
+                 __newindex = function() error('insert shift write started') end}})\n\
+                 table.insert(t, 1, 0)"
+            ),
+        ),
+        (
+            LibraryFunction::Remove,
+            "sequence shift too large in 'remove'",
+            format!(
+                "local t = setmetatable({{}}, {{__len = function() return {} end, \
+                 __index = function() error('remove shift started') end, \
+                 __newindex = function() error('remove shift write started') end}})\n\
+                 table.remove(t, 1)",
+                limit + 1
+            ),
+        ),
+    ];
+
+    for (function, message, script) in scripts {
+        let err = run(&script).expect_err("an oversized shift is refused before access");
+        assert!(
+            matches!(
+                err.kind(),
+                ErrorKind::LibraryError(error @ LibraryError::SequenceShiftTooLarge { .. })
+                    if error.function() == Some(function)
+            ),
+            "expected a shift error naming {function:?}, got {err}"
+        );
+        assert!(
+            err.to_string().contains(message),
+            "expected {message:?}, got {err}"
+        );
+    }
+}
+
+#[test]
+fn metamethod_insert_allows_large_length_when_shift_distance_is_zero() {
+    let limit = dellingr::limits::TABLE_SORT_MAX_LEN;
+    run(&format!(
+        r#"
+        local writes = 0
+        local t = setmetatable({{}}, {{
+            __len = function() return {limit} + 1 end,
+            __newindex = function(_, key, value)
+                if key ~= {limit} + 2 or value ~= 9 then error("wrong append") end
+                writes = writes + 1
+            end,
+        }})
+        table.insert(t, {limit} + 2, 9)
+        if writes ~= 1 then error("append did not reach __newindex") end
+        "#
+    ))
+    .unwrap();
 }
 
 #[test]

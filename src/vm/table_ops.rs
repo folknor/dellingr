@@ -271,7 +271,8 @@ impl State {
 
     /// [`State::get_table`] without the poison boundary, for the standard
     /// library and other VM-internal callers.
-    #[hotpath::measure]
+    // This frame survives __index re-entry; instrumentation would add to
+    // every level of the bounded native stack. Measure non-reentrant callees.
     pub(crate) fn get_table_unguarded(&mut self, i: isize) -> Result<()> {
         let receiver_idx = self.convert_idx(i)?;
         let is_string = self.stack.len() >= receiver_idx + 2
@@ -520,6 +521,7 @@ impl State {
     /// from the top value that will be popped. The value is popped from the
     /// stack. `pos` must be in `1..=raw_len(table_idx) + 1`; a bad index, a
     /// non-table or an invalid position leaves the stack and table unchanged.
+    /// Growth failure also leaves the value on the stack.
     /// Charges no cost; the Lua `table.insert` wrapper charges a flat 1.
     #[hotpath::measure]
     pub fn table_insert_at(&mut self, table_idx: isize, pos: usize) -> Result<()> {
@@ -531,12 +533,13 @@ impl State {
         if !(1..=self.table_array_len_at(idx) + 1).contains(&pos) {
             return Err(self.library_error(LibraryError::PositionOutOfBounds));
         }
-        let value = self.pop_val();
+        let value = self.stack[self.stack.len() - 1];
         self.stack[idx]
             .as_object_ptr()
             .and_then(|ptr| self.heap.as_table(ptr))
             .expect("table_operand_below_top validated the table")
-            .array_insert(pos, value);
+            .array_insert(pos, value)?;
+        self.pop_val();
         Ok(())
     }
 
@@ -566,7 +569,7 @@ impl State {
             .as_object_ptr()
             .and_then(|ptr| self.heap.as_table(ptr))
             .expect("table_operand_below_top validated the table")
-            .array_remove(pos);
+            .array_remove(pos)?;
         self.push_unchecked(removed);
         Ok(())
     }
@@ -647,7 +650,7 @@ impl State {
         let obj_ptr = self.stack[idx].as_object_ptr();
         match obj_ptr.and_then(|ptr| self.heap.as_table(ptr)) {
             Some(t) => {
-                t.set_array(arr);
+                t.set_array(arr)?;
                 Ok(n)
             }
             None => Err(self.type_error(TypeError::TableIndex(typ))),

@@ -22,7 +22,11 @@ end
 
 // This chunk is immutable. Runtime caches are State-local, and snapshot bytecode
 // ids are assigned per save, so sharing the Arc does not share mutable state.
-// Its source name keeps errors raised in the wrapper identifiable in traces.
+// Its source name keeps the wrapper identifiable in traces. It also means an
+// error raised through the iterator, such as a lazy pattern error, is
+// currently located in this synthetic chunk rather than at the script's call
+// site. Moving that location belongs to the VM's error-location code, which
+// would have to recognise this frame by bytecode identity, not by name.
 // It is process-global and compiled on the first gmatch in the process,
 // whichever State that is (a RustFunc cannot carry upvalues, hence the shim).
 // Compilation is deterministic and charges no cost, so which State pays for it
@@ -283,7 +287,8 @@ fn append_bytes(state: &mut State, out: &mut Vec<u8>, bytes: &[u8]) -> Result<()
 fn invalid_gsub_capture_error(state: &State, index: usize) -> Error {
     // Replacement-template errors stay runtime errors: PatternError describes
     // errors in the pattern, while this index refers to a replacement template.
-    // Keep the index in typed error context without changing its rendered text.
+    // The index is the replacement's `%N` digit, and the message renders it as
+    // `%N`, the same spelling the pattern-side capture-index error uses.
     state.library_error(LibraryError::InvalidGsubCaptureIndex { index })
 }
 
@@ -1056,11 +1061,13 @@ fn gmatch_empty_iter(state: &mut State) -> Result<u8> {
         return Ok(1);
     }
 
+    // Stage the result and update operands before advancing. A refused push
+    // must leave this boundary available to a later call of the same closure.
+    state.push_bytes(b"")?;
     state.push_string(gmatch_schema::POSITION_FIELD)?;
     state.push_number((pos + 1) as f64)?;
     state.set_table_raw(1)?;
-    state.set_top(0)?;
-    state.push_bytes(b"")?;
+    state.remove(1)?;
     Ok(1)
 }
 
@@ -1204,22 +1211,25 @@ fn gmatch_iter(state: &mut State) -> Result<u8> {
             returned.iter().copied(),
             StringPatternFunction::Gmatch,
         )?;
+        let num_returns =
+            crate::error::results_count(returned.len()).map_err(|kind| state.error(kind))?;
+        for capture in returned {
+            push_gmatch_capture(state, *capture)?;
+        }
+
+        // Stage both writes before committing either. Each push can refuse
+        // independently, even after a batch stack preflight. Once staged, the
+        // private table's valid keys and bounded size make both raw writes
+        // infallible, and the remaining stack operations only shrink it.
+        // Keep the persisted fields: removing one would change saved bytes
+        // and require a coordinated snapshot schema migration for a minor
+        // per-call saving. Field interning is host work, not an extra charge.
         state.push_string(gmatch_schema::POSITION_FIELD)?;
         state.push_number(range.end as f64)?;
-        state.set_table_raw(1)?;
         state.push_string(gmatch_schema::LAST_MATCH_FIELD)?;
         state.push_number(range.end as f64)?;
         state.set_table_raw(1)?;
-
-        let num_returns = if captures.len() > 1 {
-            for capture in captures.iter().skip(1) {
-                push_gmatch_capture(state, *capture)?;
-            }
-            crate::error::results_count(captures.len() - 1).map_err(|kind| state.error(kind))?
-        } else {
-            push_gmatch_capture(state, captures[0])?;
-            1
-        };
+        state.set_table_raw(1)?;
         state.remove(3)?;
         state.remove(2)?;
         state.remove(1)?;

@@ -5,7 +5,7 @@ use indexmap::Equivalent;
 
 use crate::det_hash::{IndexMap, map_with_capacity};
 
-// Storage reports key and snapshot-shape failures locally. The conversion to
+// Storage reports key, growth and snapshot-shape failures locally. The conversion to
 // VM `Error` preserves script-visible text; snapshot loading keeps its
 // location in `LoadError` when it consumes the local reason directly.
 use super::Error;
@@ -29,9 +29,8 @@ const ARRAY_SLOT_TAG: usize = 1 << (usize::BITS - 1);
 /// representation limit, not a semantic one: below it every key in
 /// `1..=len + 1` is an exact, distinct `f64`, `len + 1` cannot overflow, and
 /// `ARRAY_SLOT_TAG | (key - 1)` cannot collide with the tag. Growing past it
-/// panics, the same failure class as the physical allocation the logical
-/// length used to be (2^53 appends on a 64-bit host, 2^31 on a 32-bit one).
-/// Snapshot loading rejects a larger length rather than panicking.
+/// returns a table-growth error. Snapshot loading rejects a larger length.
+/// Physical array growth also returns an error if its reservation fails.
 pub(super) const MAX_ARRAY_LEN: usize = {
     const EXACT_F64_LIMIT: u64 = (1 << 53) - 2;
     let tag_limit = (ARRAY_SLOT_TAG - 2) as u64;
@@ -63,6 +62,7 @@ pub(super) enum InvalidTableKey {
 #[derive(Debug)]
 pub(super) enum TableError {
     InvalidKey(InvalidTableKey),
+    GrowthFailed,
     #[cfg(feature = "snapshot")]
     InvalidSnapshot(SnapshotTableFault),
 }
@@ -70,6 +70,7 @@ pub(super) enum TableError {
 impl From<TableError> for Error {
     fn from(error: TableError) -> Self {
         match error {
+            TableError::GrowthFailed => Self::new(crate::error::ErrorKind::TableGrowthFailed, 0, 0),
             TableError::InvalidKey(InvalidTableKey::Nil) => Self::new(TypeError::TableKeyNil, 0, 0),
             TableError::InvalidKey(InvalidTableKey::Nan) => Self::new(TypeError::TableKeyNan, 0, 0),
             #[cfg(feature = "snapshot")]
@@ -1022,6 +1023,43 @@ impl Table {
         updated
     }
 
+    /// Remove a live entry found by `get_with_index`, without hashing again.
+    /// Keep tombstones and array-prefix bookkeeping identical to keyed removal.
+    pub(super) fn remove_at_index(&mut self, index: usize) -> bool {
+        if index & ARRAY_SLOT_TAG != 0 {
+            let Some(position) = self.window_position(index & !ARRAY_SLOT_TAG) else {
+                return false;
+            };
+            if matches!(self.array[position], Val::Nil) {
+                return false;
+            }
+            self.write_window(position, Val::Nil);
+        } else {
+            let slot = match &mut self.storage {
+                TableStorage::Inline { entries, len } => {
+                    if index >= usize::from(*len) {
+                        return false;
+                    }
+                    &mut entries[index].1
+                }
+                TableStorage::Map(map) => {
+                    let Some((_, value)) = map.get_index_mut(index) else {
+                        return false;
+                    };
+                    value
+                }
+            };
+            if matches!(*slot, Val::Nil) {
+                return false;
+            }
+            *slot = Val::Nil;
+            self.dead_count += 1;
+        }
+        #[cfg(debug_assertions)]
+        self.debug_assert_invariants();
+        true
+    }
+
     /// Initializes a reserved template slot without exposing dead slots to caches.
     pub(super) fn init_at_index(&mut self, index: usize, key: Val, value: Val) -> bool {
         if index & ARRAY_SLOT_TAG != 0 {
@@ -1122,12 +1160,12 @@ impl Table {
         }
 
         if self.is_array_append_key(&key) {
-            self.append(value);
+            self.append(value)?;
             return Ok(());
         }
 
         if let Some(array_key) = self.array_key(&key) {
-            self.write_outside_window(array_key, value);
+            self.write_outside_window(array_key, value)?;
             return Ok(());
         }
 
@@ -1223,22 +1261,53 @@ impl Table {
         }
     }
 
-    /// Add one key to the logical array.
-    fn grow_vlen(&mut self) {
-        assert!(
-            self.vlen < MAX_ARRAY_LEN,
-            "table array part cannot exceed MAX_ARRAY_LEN keys"
-        );
-        self.vlen += 1;
+    /// Make room for a window of `len` slots, fallibly. Growth paths call this
+    /// before touching the logical length or removing migrated hash keys, so a
+    /// refusal leaves the table logically unchanged. A snapshot may
+    /// legitimately omit an arbitrarily long nil tail, so neither rejecting
+    /// that tail on load nor discarding live slots is safe; the gap's
+    /// allocation is what has to be able to fail.
+    fn reserve_array(&mut self, len: usize) -> std::result::Result<(), TableError> {
+        self.array
+            .try_reserve(len.saturating_sub(self.array.len()))
+            .map_err(|_| TableError::GrowthFailed)
     }
 
-    /// Add `n` keys to the logical array.
-    fn grow_vlen_by(&mut self, n: usize) {
-        assert!(
-            n <= MAX_ARRAY_LEN - self.vlen,
-            "table array part cannot exceed MAX_ARRAY_LEN keys"
-        );
-        self.vlen += n;
+    /// Refuse `n` more logical array keys past `MAX_ARRAY_LEN`.
+    fn check_vlen_growth(&self, n: usize) -> std::result::Result<(), TableError> {
+        if n > MAX_ARRAY_LEN - self.vlen {
+            return Err(TableError::GrowthFailed);
+        }
+        Ok(())
+    }
+
+    /// How many keys an append adds to the logical array: the appended key
+    /// plus every live hash key `migrate_from_hash` will then pull in. Refused
+    /// when that run would pass `MAX_ARRAY_LEN`, so migration itself never
+    /// has to check the limit.
+    fn append_growth(&self) -> std::result::Result<usize, TableError> {
+        self.check_vlen_growth(1)?;
+        let mut end = self.vlen + 1;
+        if self.hash_live_len() == 0 {
+            return Ok(1);
+        }
+        while !matches!(self.get(&Val::Num((end + 1) as f64)), Val::Nil) {
+            if end == MAX_ARRAY_LEN {
+                return Err(TableError::GrowthFailed);
+            }
+            end += 1;
+        }
+        Ok(end - self.vlen)
+    }
+
+    fn reserve_append(&mut self) -> std::result::Result<(), TableError> {
+        let end = self.vlen + self.append_growth()?;
+        let len = if self.lead == self.array.len() {
+            end - self.vlen
+        } else {
+            end - self.base
+        };
+        self.reserve_array(len)
     }
 
     /// Whether an append, and every append after it with no other write in
@@ -1258,11 +1327,14 @@ impl Table {
     /// the hash part. A nil value is still a structural append: constructors
     /// and `table.insert` inside a full sequence extend the array with it.
     /// Ordinary nil writes never reach here.
-    fn append(&mut self, value: Val) {
-        self.prepare_append();
-        self.grow_vlen();
+    fn append(&mut self, value: Val) -> std::result::Result<(), TableError> {
+        self.check_vlen_growth(1)?;
+        self.prepare_append()?;
+        self.reserve_append()?;
+        self.vlen += 1;
         self.array.push(value);
         self.migrate_from_hash();
+        Ok(())
     }
 
     /// Make the window end at `vlen` so an append can push. This is the one
@@ -1270,14 +1342,14 @@ impl Table {
     /// append key, and a dead prefix of at least half the window is dropped.
     /// Both run only on an append, never on a nil write, so a traversal that
     /// clears keys never sees the window move.
-    fn prepare_append(&mut self) {
+    fn prepare_append(&mut self) -> std::result::Result<(), TableError> {
         self.advance_lead();
         let len = self.array.len();
         if self.lead == len {
             if len > 0 || self.base != self.vlen {
                 self.reset_window(self.vlen);
             }
-            return;
+            return Ok(());
         }
         if self.lead * 2 >= len {
             self.drop_dead_prefix();
@@ -1286,10 +1358,10 @@ impl Table {
             // A snapshot omits trailing nil slots, even after structural nil
             // appends. The gap is therefore legitimate and unbounded by the
             // saved span. Resetting this window would discard its live values.
-            // This allocation needs a fallible write boundary to handle an
-            // untrusted logical length without aborting on allocation failure.
+            self.reserve_array(self.vlen - self.base)?;
             self.array.resize(self.vlen - self.base, Val::Nil);
         }
+        Ok(())
     }
 
     /// Drop the hinted dead prefix from the window. The memmove costs at most
@@ -1312,12 +1384,38 @@ impl Table {
         self.lead = 0;
     }
 
+    /// Reserve the storage `write_outside_window(key, ..)` will need once the
+    /// window has grown by `extra` pushed slots. The arithmetic mirrors that
+    /// function's three cases and must change with it.
+    fn reserve_outside_window(
+        &mut self,
+        key: usize,
+        extra: usize,
+    ) -> std::result::Result<(), TableError> {
+        let len = self.array.len() + extra;
+        let needed = if self.lead == len {
+            1
+        } else if key <= self.base {
+            let pad = (key - 1).min((len - self.lead).div_ceil(2));
+            len.checked_add(self.base - (key - 1 - pad))
+                .ok_or(TableError::GrowthFailed)?
+        } else {
+            key - self.base
+        };
+        self.reserve_array(needed)
+    }
+
     /// Store a live `value` at array key `key`, which lies outside the
     /// window. An all-dead window restarts at `key`; otherwise the window
     /// extends to cover it with nil fill. Extending downward pads below `key`
     /// by about half the window's live span, so repeated pushes at the front
     /// of a deque stay amortized O(1).
-    fn write_outside_window(&mut self, key: usize, value: Val) {
+    fn write_outside_window(
+        &mut self,
+        key: usize,
+        value: Val,
+    ) -> std::result::Result<(), TableError> {
+        self.reserve_outside_window(key, 0)?;
         debug_assert!(!matches!(value, Val::Nil));
         let len = self.array.len();
         if self.lead == len {
@@ -1337,6 +1435,7 @@ impl Table {
         }
         #[cfg(debug_assertions)]
         self.debug_assert_invariants();
+        Ok(())
     }
 
     /// After the array grew, move any live hash entries for the keys that now
@@ -1357,7 +1456,7 @@ impl Table {
             let next = Val::Num((self.vlen + 1) as f64);
             match self.hash_remove(&next) {
                 Some(value) => {
-                    self.grow_vlen();
+                    self.vlen += 1;
                     self.array.push(value);
                     migrated = true;
                 }
@@ -1570,7 +1669,11 @@ impl Table {
         let count = values.len();
         if count > 0 && first <= self.vlen + 1 && self.base + self.array.len() == self.vlen {
             let last = first.saturating_add(count - 1);
-            self.array.reserve(last.saturating_sub(self.vlen));
+            self.reserve_array(
+                self.array
+                    .len()
+                    .saturating_add(last.saturating_sub(self.vlen)),
+            )?;
         }
         let mut key = first;
         while let Some(value) = values.next() {
@@ -1578,13 +1681,16 @@ impl Table {
                 // Every remaining key is an append whose window preparation
                 // and hash migration would do nothing, so the rest of the
                 // batch lands in one extend with the same end state.
-                self.grow_vlen_by(1 + values.len());
+                let count = 1 + values.len();
+                self.check_vlen_growth(count)?;
+                self.reserve_array(self.array.len().saturating_add(count))?;
+                self.vlen += count;
                 self.array.push(value);
                 self.array.extend(values);
                 break;
             }
             if key == self.vlen + 1 {
-                self.append(value);
+                self.append(value)?;
             } else {
                 self.insert(Val::Num(key as f64), value)?;
             }
@@ -1605,7 +1711,11 @@ impl Table {
     /// like an append. No slot moves to another key's index, so the version
     /// is untouched.
     #[hotpath::measure]
-    pub(super) fn array_insert(&mut self, pos: usize, value: Val) {
+    pub(super) fn array_insert(
+        &mut self,
+        pos: usize,
+        value: Val,
+    ) -> std::result::Result<(), TableError> {
         let len = self.array_len();
         debug_assert!(
             (1..=len + 1).contains(&pos),
@@ -1613,17 +1723,26 @@ impl Table {
         );
         if pos == len + 1 {
             // Nothing shifts. Nil is a no-op, as `t[#t + 1] = nil` is.
-            self.insert(Val::Num(pos as f64), value)
-                .expect("array_insert: integer key insert cannot fail");
+            self.insert(Val::Num(pos as f64), value)?;
             #[cfg(debug_assertions)]
             self.debug_assert_invariants();
-            return;
+            return Ok(());
         }
         // `pos <= len`, so key `len` is live and lies inside the window; key
         // `len + 1` is nil and becomes the slot the rotation consumes.
         let structural = len == self.vlen;
+        let extra = if structural {
+            self.append_growth()?
+        } else {
+            usize::from(len == self.base + self.array.len())
+        };
+        if pos <= self.base && !matches!(value, Val::Nil) {
+            self.reserve_outside_window(pos, extra)?;
+        } else {
+            self.reserve_array(self.array.len() + extra)?;
+        }
         if structural {
-            self.grow_vlen();
+            self.vlen += 1;
             self.array.push(Val::Nil);
         } else if len == self.base + self.array.len() {
             self.array.push(Val::Nil);
@@ -1641,10 +1760,11 @@ impl Table {
         if pos > self.base {
             self.write_window(pos - self.base - 1, value);
         } else if !matches!(value, Val::Nil) {
-            self.write_outside_window(pos, value);
+            self.write_outside_window(pos, value)?;
         }
         #[cfg(debug_assertions)]
         self.debug_assert_invariants();
+        Ok(())
     }
 
     /// Removes and returns the value at the given position, shifting later
@@ -1652,10 +1772,15 @@ impl Table {
     /// position outside `1..=array_len()` (only 0 for an empty sequence, or
     /// `array_len() + 1`) it returns `t[pos]` and clears it.
     #[hotpath::measure]
-    pub(super) fn array_remove(&mut self, pos: usize) -> Val {
+    pub(super) fn array_remove(&mut self, pos: usize) -> std::result::Result<Val, TableError> {
         let len = self.array_len();
         if (1..=len).contains(&pos) {
             // Key `len` is live, so it lies inside the window.
+            if pos <= self.base && !matches!(self.array[0], Val::Nil) {
+                // The shift resets lead to zero before extending downward.
+                let pad = (self.base - 1).min(self.array.len().div_ceil(2));
+                self.reserve_array(self.array.len() + 1 + pad)?;
+            }
             let removed = self.array_value(pos);
             let end = len - self.base;
             if pos > self.base {
@@ -1671,19 +1796,19 @@ impl Table {
                 self.array[end - 1] = Val::Nil;
                 self.lead = 0;
                 if !matches!(first, Val::Nil) {
-                    self.write_outside_window(self.base, first);
+                    self.write_outside_window(self.base, first)?;
                 }
             }
             #[cfg(debug_assertions)]
             self.debug_assert_invariants();
-            return removed;
+            return Ok(removed);
         }
         let key = Val::Num(pos as f64);
         let removed = self.get(&key);
         self.remove(&key);
         #[cfg(debug_assertions)]
         self.debug_assert_invariants();
-        removed
+        Ok(removed)
     }
 
     /// Returns the sequence `t[1..=#t]` as a Vec for sorting.
@@ -1702,13 +1827,13 @@ impl Table {
     /// the original sort range survive even if a comparator added them.
     /// Each write is O(1), so the writeback is linear in the sorted range.
     #[hotpath::measure]
-    pub(super) fn set_array(&mut self, values: Vec<Val>) {
+    pub(super) fn set_array(&mut self, values: Vec<Val>) -> std::result::Result<(), TableError> {
         for (i, v) in values.into_iter().enumerate() {
-            self.insert(Val::Num((i + 1) as f64), v)
-                .expect("set_array: integer key insert cannot fail");
+            self.insert(Val::Num((i + 1) as f64), v)?;
         }
         #[cfg(debug_assertions)]
         self.debug_assert_invariants();
+        Ok(())
     }
 
     /// Returns the metatable of this table, if any.
@@ -2129,13 +2254,13 @@ mod tests {
                         let len = m.border();
                         let pos = 1 + next(len + 1);
                         let value = if next(4) == 0 { Val::Nil } else { value };
-                        t.array_insert(pos, value);
+                        t.array_insert(pos, value).unwrap();
                         m.array_insert(pos, value);
                     }
                     _ => {
                         let len = m.border();
                         let pos = if len == 0 { next(2) } else { 1 + next(len + 1) };
-                        assert_eq!(t.array_remove(pos), m.array_remove(pos));
+                        assert_eq!(t.array_remove(pos).unwrap(), m.array_remove(pos));
                     }
                 }
                 assert_eq!(t.array_len(), m.border(), "round {round} step {step}");
@@ -2321,7 +2446,7 @@ mod tests {
         fn key_by_key(t: &mut Table, first: usize, values: &[Val]) {
             for (key, value) in (first..).zip(values.iter().copied()) {
                 if key == t.vlen + 1 {
-                    t.append(value);
+                    t.append(value).unwrap();
                 } else {
                     t.insert(n(key), value).unwrap();
                 }
@@ -2378,7 +2503,7 @@ mod tests {
             t.insert(n(i), Val::Num(i as f64)).unwrap();
         }
         let version = t.version();
-        assert_eq!(t.array_remove(1), Val::Num(1.0));
+        assert_eq!(t.array_remove(1).unwrap(), Val::Num(1.0));
         assert_eq!(t.array_len(), 999);
         assert_eq!(t.get(&n(1)), Val::Num(2.0));
         assert_eq!(t.get(&n(999)), Val::Num(1000.0));
@@ -2388,19 +2513,19 @@ mod tests {
         assert_eq!(order.first(), Some(&n(1)));
         assert_eq!(order.last(), Some(&Val::Bool(false)));
         // Queue idiom: push at the border, pop the front.
-        t.array_insert(1000, Val::Num(-1.0));
+        t.array_insert(1000, Val::Num(-1.0)).unwrap();
         assert_eq!(t.array.len(), 1000);
         assert_eq!(t.array_len(), 1000);
-        assert_eq!(t.array_remove(1000), Val::Num(-1.0));
+        assert_eq!(t.array_remove(1000).unwrap(), Val::Num(-1.0));
     }
 
     #[test]
     fn array_remove_outside_the_sequence_reads_and_clears_the_key() {
         let mut t = Table::default();
         t.insert(n(0), Val::Bool(true)).unwrap();
-        assert_eq!(t.array_remove(0), Val::Bool(true));
+        assert_eq!(t.array_remove(0).unwrap(), Val::Bool(true));
         assert_eq!(t.get(&n(0)), Val::Nil);
-        assert_eq!(t.array_remove(0), Val::Nil);
+        assert_eq!(t.array_remove(0).unwrap(), Val::Nil);
     }
 
     #[test]
@@ -2408,13 +2533,13 @@ mod tests {
         let mut t = Table::default();
         fill(&mut t, 1..=3);
         t.insert(n(5), Val::Num(5.0)).unwrap();
-        t.array_insert(1, Val::Num(0.0));
+        t.array_insert(1, Val::Num(0.0)).unwrap();
         assert_eq!(t.array_len(), 5);
         assert_eq!(t.get(&n(1)), Val::Num(0.0));
         assert_eq!(t.get(&n(5)), Val::Num(5.0));
         assert_eq!(keys(&t), (1..=5).map(n).collect::<Vec<_>>());
         // Appending nil is a no-op.
-        t.array_insert(6, Val::Nil);
+        t.array_insert(6, Val::Nil).unwrap();
         assert_eq!(t.array.len(), 5);
     }
 
@@ -2427,7 +2552,7 @@ mod tests {
         }
         let mut values = t.get_array();
         values.reverse();
-        t.set_array(values);
+        t.set_array(values).unwrap();
         assert_eq!(t.get(&n(1)), Val::Num(1.0));
         assert_eq!(t.get(&n(5)), Val::Num(5.0));
         assert_eq!(t.dead_count, 0);
@@ -2733,6 +2858,177 @@ mod tests {
             .unwrap();
         assert_eq!(t.version(), 2);
         assert_eq!(t.get_index(0).map(|(key, _)| key), Some(h(1)));
+    }
+
+    #[test]
+    fn array_capacity_overflow_returns_an_error_without_mutation() {
+        let mut table = Table::default();
+        table.insert(n(1), Val::Bool(true)).unwrap();
+        assert!(matches!(
+            table.reserve_array(usize::MAX),
+            Err(TableError::GrowthFailed)
+        ));
+        assert_eq!(table.get(&n(1)), Val::Bool(true));
+        assert_eq!(table.vlen, 1);
+    }
+
+    #[test]
+    fn indexed_removal_matches_keyed_removal_for_all_storage_shapes() {
+        for hash_count in [1, INLINE_CAPACITY + 2] {
+            for remove in [n(1), h(0)] {
+                let make = || {
+                    let mut table = Table::default();
+                    table.insert(n(1), Val::Bool(true)).unwrap();
+                    for i in 0..hash_count {
+                        table.insert(h(i), Val::Bool(true)).unwrap();
+                    }
+                    table
+                };
+                let mut indexed = make();
+                let mut keyed = make();
+                let (index, _) = indexed.get_with_index(&remove).unwrap();
+                assert!(indexed.remove_at_index(index));
+                assert!(!indexed.remove_at_index(index));
+                keyed.insert(remove, Val::Nil).unwrap();
+                assert_eq!(indexed.dead_count, keyed.dead_count);
+                assert_eq!(indexed.lead, keyed.lead);
+                assert_eq!(indexed.version(), keyed.version());
+                assert_eq!(keys(&indexed), keys(&keyed));
+                indexed.insert(remove, Val::Bool(false)).unwrap();
+                keyed.insert(remove, Val::Bool(false)).unwrap();
+                assert_eq!(keys(&indexed), keys(&keyed));
+            }
+        }
+    }
+
+    #[cfg(feature = "snapshot")]
+    #[test]
+    fn snapshot_gap_growth_refuses_append_and_both_window_extensions() {
+        let len = MAX_ARRAY_LEN / 2;
+        for (live_key, write_key) in [(1, len + 1), (1, len), (len, 1)] {
+            let mut table = Table::default();
+            table
+                .rebuild_from_snapshot(len, 1, vec![(n(live_key), Val::Bool(true))])
+                .unwrap();
+            let before = table.snapshot_entries();
+            assert!(matches!(
+                table.insert(n(write_key), Val::Bool(false)),
+                Err(TableError::GrowthFailed)
+            ));
+            assert_eq!(table.snapshot_entries(), before);
+        }
+    }
+
+    #[cfg(feature = "snapshot")]
+    #[test]
+    fn snapshot_length_limit_refuses_append_insert_and_migration() {
+        let mut empty = Table::default();
+        empty
+            .rebuild_from_snapshot(MAX_ARRAY_LEN, 0, vec![])
+            .unwrap();
+        assert!(matches!(
+            empty.insert(n(MAX_ARRAY_LEN + 1), Val::Bool(true)),
+            Err(TableError::GrowthFailed)
+        ));
+        assert_eq!(empty.vlen, MAX_ARRAY_LEN);
+
+        let mut table = Table::default();
+        table
+            .rebuild_from_snapshot(MAX_ARRAY_LEN, 1, vec![(n(MAX_ARRAY_LEN), Val::Bool(true))])
+            .unwrap();
+        assert!(matches!(
+            table.array_insert(1, Val::Bool(false)),
+            Err(TableError::GrowthFailed)
+        ));
+        assert!(matches!(
+            table.set_list(MAX_ARRAY_LEN + 1, [Val::Nil, Val::Nil].into_iter()),
+            Err(TableError::GrowthFailed)
+        ));
+        assert_eq!(table.get(&n(MAX_ARRAY_LEN)), Val::Bool(true));
+
+        let mut migration = Table::default();
+        migration
+            .rebuild_from_snapshot(
+                MAX_ARRAY_LEN - 1,
+                0,
+                vec![(n(MAX_ARRAY_LEN + 1), Val::Bool(true))],
+            )
+            .unwrap();
+        assert!(matches!(
+            migration.insert(n(MAX_ARRAY_LEN), Val::Bool(false)),
+            Err(TableError::GrowthFailed)
+        ));
+        assert_eq!(migration.vlen, MAX_ARRAY_LEN - 1);
+        assert_eq!(migration.get(&n(MAX_ARRAY_LEN + 1)), Val::Bool(true));
+    }
+
+    #[cfg(feature = "snapshot")]
+    #[test]
+    fn host_insert_growth_failure_preserves_operands() {
+        use crate::State;
+        use crate::error::ErrorKind;
+
+        let mut state = State::new();
+        state.new_table().unwrap();
+        let ptr = state.stack[0].as_object_ptr().unwrap();
+        state
+            .heap
+            .as_table(ptr)
+            .unwrap()
+            .rebuild_from_snapshot(MAX_ARRAY_LEN, 1, vec![(n(MAX_ARRAY_LEN), Val::Bool(true))])
+            .unwrap();
+        state.push_boolean(false).unwrap();
+        let before = state.stack.clone();
+        let error = state.table_insert_at(1, 1).unwrap_err();
+        assert!(matches!(error.kind(), ErrorKind::TableGrowthFailed));
+        assert_eq!(state.stack, before);
+        assert_eq!(
+            state.heap.as_table_ref(ptr).unwrap().get(&n(MAX_ARRAY_LEN)),
+            Val::Bool(true)
+        );
+    }
+
+    #[cfg(feature = "snapshot")]
+    #[test]
+    fn snapshot_growth_failure_reaches_the_callback_as_an_ordinary_error() {
+        use crate::error::ErrorKind;
+        use crate::{ArgCount, Program, RetCount, State};
+
+        let len = MAX_ARRAY_LEN / 2;
+        for source in [
+            format!("t[{}] = false; reached = true", len + 1),
+            format!("rawset(t, {len}, false); reached = true"),
+            "table.insert(t, false); reached = true".to_owned(),
+        ] {
+            let mut state = State::new();
+            let setup = Program::compile("t = {}", None).unwrap();
+            state.load(&setup).unwrap();
+            state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
+            state.get_global("t").unwrap();
+            let ptr = state.pop_val().as_object_ptr().unwrap();
+            let table = state.heap.as_table(ptr).unwrap();
+            let (logical_len, live_key) = if source.starts_with("table.insert") {
+                (MAX_ARRAY_LEN, MAX_ARRAY_LEN)
+            } else {
+                (len, 1)
+            };
+            table
+                .rebuild_from_snapshot(logical_len, 1, vec![(n(live_key), Val::Bool(true))])
+                .unwrap();
+            let program = Program::compile(&source, None).unwrap();
+            state.load(&program).unwrap();
+            let error = state
+                .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+                .unwrap_err();
+            assert!(matches!(error.kind(), ErrorKind::TableGrowthFailed));
+            assert!(error.to_string().contains("table growth failed"));
+            state.get_global("reached").unwrap();
+            assert!(matches!(state.pop_val(), Val::Nil));
+            assert_eq!(
+                state.heap.as_table_ref(ptr).unwrap().get(&n(live_key)),
+                Val::Bool(true)
+            );
+        }
     }
 
     #[cfg(feature = "snapshot")]

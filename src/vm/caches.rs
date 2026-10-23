@@ -65,11 +65,6 @@ pub(super) struct MethodLookupCacheEntry {
     pub(super) index_handler: Val,
     pub(super) method_table_version: u64,
     pub(super) method_index: Option<usize>,
-    /// Snapshot of the global environment version when the entry was populated.
-    /// Bumped on builtin rebind / `with_restricted_env` swap, so a cached
-    /// `index_handler` that resolved through a global library table
-    /// (e.g. `__index = string`) re-validates after the binding changes.
-    pub(super) globals_version: u64,
 }
 
 /// Cache for `s:method()` style calls where the receiver is a string and
@@ -311,7 +306,6 @@ impl CacheEntry for MethodLookupCacheEntry {
             index_handler,
             method_table_version: _,
             method_index: _,
-            globals_version: _,
         } = self;
         f(Val::Obj(*receiver_metatable));
         // A table, function or string handler is a handle; other values

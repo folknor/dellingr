@@ -405,3 +405,63 @@ fn end_position_patterns_match_once() {
     assert_eq!(state.to_number(-2).unwrap(), 3.0);
     assert_eq!(state.to_number(-1).unwrap(), 1.0);
 }
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn gmatch_refused_push_preserves_the_next_match() {
+    // Sweep every structural refusal in one iterator call, then retry that
+    // same globally rooted closure. Merely checking State reuse misses an
+    // iterator that has silently consumed its result or torn its end marker.
+    let cases = [
+        ("abc".to_owned(), "%a*".to_owned(), vec!["abc"]),
+        ("ab".to_owned(), "(.)".to_owned(), vec!["a"]),
+        ("ab".to_owned(), String::new(), vec![""]),
+        ("a".repeat(32), "(a)".repeat(32), vec!["a"; 32]),
+    ];
+    for (subject, pattern, expected) in cases {
+        let setup = format!("iterator = string.gmatch({subject:?}, {pattern:?})");
+        let prepare = || {
+            let mut state = run_one(&setup);
+            state.set_top(0).unwrap();
+            state.get_global("iterator").unwrap();
+            state
+        };
+        let mut baseline = prepare();
+        baseline.arm_fault_injection(None);
+        baseline.call(ArgCount::Fixed(0), RetCount::All).unwrap();
+        let count = baseline.finish_fault_injection().len();
+        assert_eq!(baseline.get_top(), expected.len());
+        for target in 1..=count {
+            let mut state = prepare();
+            state.arm_fault_injection(Some(u32::try_from(target).unwrap()));
+            let result = state.call(ArgCount::Fixed(0), RetCount::All);
+            let events = state.finish_fault_injection();
+            // Ineligible checks are recorded too, but cannot fire.
+            if !events.iter().any(|event| event.2) {
+                assert!(result.is_ok());
+                continue;
+            }
+            assert!(result.is_err(), "target {target}: {events:?}");
+            assert_eq!(state.get_top(), 0);
+            state.get_global("iterator").unwrap();
+            state.call(ArgCount::Fixed(0), RetCount::All).unwrap();
+            assert_eq!(state.get_top(), expected.len(), "target {target}");
+            for (index, value) in expected.iter().enumerate() {
+                assert_eq!(
+                    state.to_bytes(isize::try_from(index + 1).unwrap()).unwrap(),
+                    value.as_bytes(),
+                    "target {target}"
+                );
+            }
+            state.set_top(0).unwrap();
+            state.get_global("iterator").unwrap();
+            state.call(ArgCount::Fixed(0), RetCount::All).unwrap();
+            if pattern == "%a*" || expected.len() == 32 {
+                assert_eq!(state.typ(1), dellingr::LuaType::Nil, "target {target}");
+            } else {
+                let next: &[u8] = if pattern.is_empty() { b"" } else { b"b" };
+                assert_eq!(state.to_bytes(1).unwrap(), next, "target {target}");
+            }
+        }
+    }
+}

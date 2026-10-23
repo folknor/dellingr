@@ -7,11 +7,15 @@ in the module doc of `src/vm/save_state.rs`.
 
 - User globals, with the reachable tables, closures, upvalues and strings.
 - The RNG stream and the cost counters.
-- State-local object identities that `tostring` and `%p` have rendered.
+- State-local object identities that `tostring` and `%p` have rendered,
+  including those of the environment objects `open_libs` rebuilds on load.
 - Standard-library tables as deltas against the pristine environment.
 
 Not saved: call stack, program counter, open upvalues, coroutines, anchors,
 callbacks, host user-data. Saving is valid only while the VM is quiescent.
+The load setup callback configures the rebuilt environment and function
+registrations. Values it leaves on the value stack are discarded before load
+returns; the loaded State starts with an empty stack.
 
 ## Environment objects and deltas
 
@@ -89,6 +93,13 @@ callbacks, host user-data. Saving is valid only while the VM is quiescent.
 - Duplicate saved global names are rejected, not silently replaced.
 - Strings above `limits::MAX_STRING_BYTES` are rejected, also in saves written
   by earlier builds with the same format version.
+- A table's saved logical array length is accepted up to the array limit
+  without storage behind it (see [limits](limits.md)). A later write whose
+  array growth cannot be reserved, such as one an edited save's impossible
+  gap demands, raises the ordinary `table growth failed` error, which kills
+  the callback and leaves the table unchanged. A restore step that cannot
+  grow a table rejects the load as `InvalidTable` with
+  `TableRestoreFailure::GrowthFailed`.
 - An older format version is rejected as unsupported before other checks.
 - The cost model version must match `COST_MODEL_VERSION` exactly.
 - Loading restores the saved cost counters. Hosts must call `set_cost_budget`

@@ -14,8 +14,11 @@ use std::fs;
 use std::io::{self, Read, Write};
 use std::process::exit;
 
-use dellingr::cli::{ANALYSIS_WARNING_PREFIX, COST_USED_PREFIX, ERROR_PREFIX};
+use dellingr::cli::ANALYSIS_WARNING_PREFIX;
 use dellingr::{ArgCount, CostAnalysis, HostCallbacks, Program, RetCount, State};
+
+const ERROR_PREFIX: &str = "Error: ";
+const COST_USED_PREFIX: &str = "Cost used: ";
 
 #[derive(Clone, Copy)]
 enum OptionKind {

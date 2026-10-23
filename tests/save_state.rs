@@ -1713,3 +1713,42 @@ fn environment_array_replay_preserves_setup_append_keys() {
     assert_eq!(global_num(&mut loaded, "length"), 3.0);
     assert_eq!(global_str(&mut loaded, "order"), "123");
 }
+
+#[test]
+fn load_discards_setup_stack_values() {
+    let saved = State::new().save_state().unwrap();
+    let loaded = State::load_state(&saved.bytes, Box::new(DefaultCallbacks), |state| {
+        state.push_number(42.0)
+    })
+    .unwrap();
+    assert_eq!(loaded.get_top(), 0);
+}
+
+#[test]
+fn dead_environment_function_keys_have_reachability_paths() {
+    fn host_fn(_: &mut State) -> dellingr::Result<u8> {
+        Ok(0)
+    }
+    for shadow in [false, true] {
+        let mut state = State::new();
+        state.push_rust_fn(host_fn).unwrap();
+        state.set_global("host_fn").unwrap();
+        run(
+            &mut state,
+            "string[host_fn] = true; string[host_fn] = nil; host_fn = nil",
+        );
+        if shadow {
+            run(&mut state, "string = nil");
+        }
+        match state.save_state().unwrap_err() {
+            SaveError::UnregisteredFunction { reachable_from } => {
+                if shadow {
+                    assert_eq!(reachable_from, "environment string");
+                } else {
+                    assert!(reachable_from.starts_with("global string.key["));
+                }
+            }
+            error => panic!("unexpected save error: {error}"),
+        }
+    }
+}
