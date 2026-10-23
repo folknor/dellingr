@@ -18,6 +18,10 @@ impl HostCallbacks for Notifications {
 const CASES: &[(&str, &str)] = &[
     ("lua", "local function f(x) return x + 1 end return f(7)"),
     (
+        "varargs",
+        "local function f(a, ...) local function g(x, ...) return x end return g(...) end return f(nil, 8, {})",
+    ),
+    (
         "chain",
         "local t = setmetatable({}, {__call = function() return 8 end}) return setmetatable({}, {__call = t})()",
     ),

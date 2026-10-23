@@ -614,3 +614,58 @@ fn break_closes_direct_while_local_before_slot_reuse() {
         5.0
     );
 }
+
+#[test]
+fn nested_vararg_arena_roots_and_releases_each_activation() {
+    let mut state = State::new();
+    install_force_gc(&mut state);
+    // Collect, then report how many tables and closures are still reachable.
+    state
+        .push_rust_fn(|state| {
+            state.gc_collect();
+            state.push_number(state.object_count() as f64)?;
+            Ok(1)
+        })
+        .unwrap();
+    state.set_global("live_objects").unwrap();
+    // Each inner call's tables are reachable only through its arena suffix.
+    // Once it returns, a collection must free them: the reachable count after
+    // the call equals the count before it. If the arena kept a returned
+    // activation's values, they would stay rooted and the count would grow.
+    dellingr::Program::compile(
+        r#"
+            local function empty()
+                force_gc()
+            end
+            local function inner(...)
+                empty()
+                force_gc()
+                local value = ...
+                if value.marker ~= 23 then error("inner vararg lost") end
+            end
+            local function outer(...)
+                local before = live_objects()
+                inner({ marker = 23 })
+                if live_objects() ~= before then
+                    error("returned single vararg stayed reachable")
+                end
+                inner({ marker = 23 }, {}, {})
+                if live_objects() ~= before then
+                    error("returned varargs stayed reachable")
+                end
+                empty()
+                force_gc()
+                local value, missing, text = ...
+                if value.marker ~= 42 or missing ~= nil or text ~= "kept" then
+                    error("outer varargs changed")
+                end
+            end
+            outer({ marker = 42 }, nil, "kept")
+            outer({ marker = 42 }, nil, "kept")
+        "#,
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
+}

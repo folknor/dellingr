@@ -333,6 +333,31 @@ How `tests/native_stack.rs` validates it, on x86-64 Linux:
   error construction, unwinding) are covered by the full-depth runs, not by
   the probe.
 
+The 2026-10-23 x86-64 Linux measurement, comparing 97973d1 with the
+22a263a fixes and an explicitly inlined invocation driver, records the full
+scenario and frame tables in [the native-call reference](../reference/native-calls.md#measured-native-stack-2026-10-23).
+The largest recurring cycle changes from 15,344 to 15,600 bytes in dev
+(also with snapshot), from 3,824 to 3,776 in release, and from 3,872 to
+3,840 in release with snapshot (3,824 after the shared vararg arena
+follow-up recorded there, which leaves dev and plain release unchanged).
+The largest table-chain step is 1,232
+bytes in dev and 208 in release. A deliberately loose bound of 150 largest
+cycles plus 200 largest chain steps is about 2.47 MiB in dev and 0.59 MiB
+in release with snapshot, leaving about 1.53 and 1.41 MiB respectively
+for fixed frames and transient work. This is recurring-stack headroom,
+not a measurement of the transient peak; the unchanged full-depth tests
+validate those peaks on the stated threads.
+
+The release sort callback retains 32 bytes of frame growth for fallible
+array and root-copy allocation. The dispatch frame is 32 bytes smaller,
+and inlining the invocation driver into both call variants recovers the
+extra 128 bytes per ordinary release cycle introduced when the generic
+call path caused the compiler to outline it. Dev retains growth from the
+fallible table operations, entry observation and result-copy path; the
+two-native-level Rust-handler cycles grow more when the driver is inlined
+into their Rust-only call arm. These changes fit the existing envelope;
+neither the logical limits nor the test thread sizes change.
+
 Parsing keeps the stricter promise: parsing at the syntax budget fits a
 2 MiB thread in both settings.
 

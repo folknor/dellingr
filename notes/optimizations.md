@@ -752,13 +752,14 @@ in todo.md's workload-registry entry).
   the error (e.g. `Err((e, pending))` from the inner loop) so it can stay in
   a register.
 
-- **Call-path cleanup worthwhile even if the frame-stack rewrite lands
-  later (B-O5):** the return-value half shipped 2026-07-26 (commit
-  a96cff4); `eval_closure_frame` now does an in-place `drain`. What remains
-  is the `State::call` fixed-arg path, which still does `stack.remove(idx)`
-  to extract the callee - an O(args) memmove per call. Avoid it
-  by treating the callee slot as frame slot -1 (adjust `stack_bottom`);
-  pairs naturally with the rewrite.
+- **Rust-callee `stack.remove(idx)` (B-O5), rejected:** the return-value
+  half shipped 2026-07-26 (commit a96cff4). Keeping the callee as frame
+  slot -1 to skip the O(args) memmove in `begin_call` was rejected: the
+  contiguous Rust callback ABI may use every slot up to the global stack
+  cap, so a retained callee would refuse a callback push one slot earlier
+  (`rust_call_releases_callee_slot_before_callback_push` in
+  tests/host_call_preflight.rs). Moving the callee elsewhere still shifts
+  the arguments; see the comment at the remove in src/vm/eval.rs.
 - **Dispatch micro-items, verify with asm/bench first (B-O6):** opcode space
   is 0-26, 30-55, 60-72 - only two small holes (27-29, 56-59) since the
   fused branches filled 64-69, so a dense renumbering (or `#[repr(u8)]`

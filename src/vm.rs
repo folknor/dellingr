@@ -124,9 +124,7 @@ pub(super) fn mark_gc_roots(state: &State, worklist: &mut Vec<ObjectPtr>) {
     state.transient_roots.mark_reachable(&state.heap, worklist);
     // The executing closures need no entry here: each sits in its function
     // slot on the value stack, just below its frame, until it returns.
-    for varargs in &state.vararg_stack {
-        varargs.mark_reachable(&state.heap, worklist);
-    }
+    state.vararg_stack.mark_reachable(&state.heap, worklist);
     state.registry.mark_reachable(&state.heap, worklist);
     // Event names live for the whole State so dispatch never interns them.
     state.meta_names.mark(&state.heap);
@@ -180,9 +178,10 @@ pub(super) struct CallInfo {
     /// `State::record_call_site`). Not the live instruction pointer of the
     /// executing frame; while this activation is innermost it may be stale.
     pub(super) ip: usize,
-    /// Whether this activation owns the top entry of `State::vararg_stack`
-    /// at the time it is innermost.
-    pub(super) has_varargs: bool,
+    /// Start of this activation's extra arguments in `State::vararg_stack`.
+    /// The innermost activation owns the suffix, including an empty suffix.
+    /// Call depth times MAX_ARGUMENTS bounds the arena below u32::MAX.
+    pub(super) vararg_start: u32,
     /// Non-function `__call` chain steps resolved to reach this activation.
     /// Each holds one unit of metamethod_depth. Resolution transfers these
     /// for calls from Rust and Lua alike; popping the activation releases
@@ -341,10 +340,10 @@ pub struct State {
     /// no VM values (frames own only `Arc`s), so it is no GC root, and it is
     /// capacity rather than state, so a snapshot ignores it.
     pub(in crate::vm) frame_stacks: Vec<Vec<frame::Frame>>,
-    /// Extra arguments of the active vararg functions that received any,
-    /// innermost last, read by `OP_VARARG`; one entry per activation whose
-    /// `CallInfo::has_varargs` is set. A GC root.
-    pub(super) vararg_stack: Vec<Vec<Val>>,
+    /// Extra arguments of active Lua functions, in activation order. Each
+    /// record owns the suffix from `CallInfo::vararg_start` while innermost.
+    /// Only the live length is a GC root; retained capacity is not saved.
+    pub(super) vararg_stack: Vec<Val>,
     /// Host callbacks for print output, error handling, etc.
     pub(super) callbacks: Box<dyn HostCallbacks>,
     /// User-defined data that RustFuncs can access.

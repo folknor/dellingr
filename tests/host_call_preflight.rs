@@ -113,3 +113,21 @@ fn call_anchor_without_room_for_callee_does_not_notify() {
     );
     assert_eq!(count(&counter), 0);
 }
+
+#[test]
+fn rust_call_releases_callee_slot_before_callback_push() {
+    let mut state = State::new();
+    let cap = dellingr::limits::MAX_STACK_SIZE;
+    state.set_top((cap - 2) as isize).unwrap();
+    state
+        .push_rust_fn(|state| {
+            assert_eq!(state.to_number(1)?, 42.0);
+            state.push_number(23.0)?;
+            Ok(1)
+        })
+        .unwrap();
+    state.push_number(42.0).unwrap();
+    // The stack is full; removing the callee frees the callback's result slot.
+    state.call(ArgCount::Fixed(1), RetCount::Fixed(1)).unwrap();
+    assert_eq!(state.to_number(-1).unwrap(), 23.0);
+}

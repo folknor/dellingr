@@ -79,11 +79,11 @@ exclude = ["tests/string_bytes.rs"]
 # workload; interpret its timing as a parse/codegen diagnostic, so both modes
 # use the same generated source.
 #
-# The pairing is kept by hand and by the hash pins, not by a test: the pairs are
-# scaled differently (the composite is ~1/100, the seconds-scale loops are
-# calibrated per kernel), so no single cost ratio could be asserted, and a
-# per-pair ratio table here would just be a second thing to re-pin on every
-# edit. Re-check the pair by eye when either file changes.
+# tests/bench_scripts.rs checks matching cost fingerprints for each pair's
+# kernel and shared helpers. The wrappers are scaled differently (the composite
+# is ~1/100, the seconds-scale loops are calibrated per kernel), so re-check
+# their proportions by eye when either file changes; the fingerprints do not
+# compare wrapper repeat counts.
 
 [dellingr]
 example = "hotpath"

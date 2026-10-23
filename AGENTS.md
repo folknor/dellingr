@@ -150,7 +150,7 @@ Compilation pipeline: source bytes to `compiler::compile` (the parser builds eac
 - `heap: GcHeap` (mark-and-sweep, in `vm/object.rs`); strings are interned
 - `upvalue_pool` + `open_upvalues` (sorted by stack index for efficient close-on-return)
 - `cost: CostState` (`cost_meter.rs`) - a `used: u64` counter plus an optional budget (`limit`, `remaining: i64`); no budget means count-only. The signed `remaining` lets the operation that pushes you over budget complete, then the next costed op fails
-- `call_stack: Vec<CallInfo>` - one activation record per active Lua call, innermost last, across every dispatch-loop invocation: tracebacks, `print` locations and the bytecode-cache sweep read it; `vararg_stack` holds the varargs of the records that have any (a GC root)
+- `call_stack: Vec<CallInfo>` - one activation record per active Lua call, innermost last, across every dispatch-loop invocation: tracebacks, `print` locations and the bytecode-cache sweep read it; `vararg_stack` is one shared arena of extra arguments, each record owning the suffix from its `vararg_start` while innermost and releasing it on pop (its live length is a GC root)
 - `callbacks: Box<dyn HostCallbacks>` and a typed `user_data` slot
 - `rng: VmRng` (in-crate SplitMix64) seeded via `set_rng_seed`
 

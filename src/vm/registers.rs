@@ -507,27 +507,19 @@ impl State {
     /// Copy varargs to `R[dst..]`: exactly `n` padded with nil, or every one,
     /// leaving the top after the last for the consumer that follows.
     pub(super) fn reg_vararg(&mut self, dst: usize, count: RetCount) -> Result<()> {
-        // The executing activation is the innermost record; its varargs, if
-        // it received any, are the innermost entry.
-        let has_varargs = self
+        // While innermost, the activation owns the arena suffix.
+        let start = self
             .call_stack
             .last()
             .expect("an executing frame has an activation record")
-            .has_varargs;
-        let available = if has_varargs {
-            self.vararg_stack.last().map_or(0, Vec::len)
-        } else {
-            0
-        };
+            .vararg_start as usize;
+        let available = self.vararg_stack.len() - start;
         match count {
             RetCount::Fixed(n) => {
                 let n = usize::from(n);
                 let copied = n.min(available);
                 if copied > 0 {
-                    let varargs = self
-                        .vararg_stack
-                        .last()
-                        .expect("an activation with varargs has an entry");
+                    let varargs = &self.vararg_stack[start..];
                     self.stack[dst..dst + copied].copy_from_slice(&varargs[..copied]);
                 }
                 self.stack[dst + copied..dst + n].fill(Val::Nil);
@@ -541,10 +533,7 @@ impl State {
                 self.check_stack_space(additional)?;
                 self.stack.truncate(dst);
                 if available > 0 {
-                    let varargs = self
-                        .vararg_stack
-                        .last()
-                        .expect("an activation with varargs has an entry");
+                    let varargs = &self.vararg_stack[start..];
                     self.stack.extend_from_slice(varargs);
                 }
             }
@@ -572,7 +561,7 @@ mod tests {
             Val::Num(40.0),
         ];
         state.stack.clone_from(&original);
-        state.vararg_stack.push(vec![
+        state.vararg_stack.extend_from_slice(&[
             Val::Num(50.0),
             Val::Num(60.0),
             Val::Num(70.0),
@@ -581,7 +570,7 @@ mod tests {
         state.call_stack.push(CallInfo {
             bytecode: Arc::new(Bytecode::default()),
             ip: 0,
-            has_varargs: true,
+            vararg_start: 0,
             chain_charges: 0,
         });
         state.arm_fault_injection(Some(1));

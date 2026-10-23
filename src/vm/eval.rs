@@ -10,7 +10,7 @@ use super::lua_val::{RustFunc, Val};
 use super::object::{Upvalue, UpvalueRef};
 use super::{Bytecode, CallInfo, Error, ErrorKind, MAX_CALL_DEPTH, Result, State, TypeError};
 use crate::instr::{ArgCount, RetCount};
-use crate::limits::{MAX_METAMETHOD_DEPTH, MAX_NATIVE_CALL_DEPTH};
+use crate::limits::{MAX_ARGUMENTS, MAX_METAMETHOD_DEPTH, MAX_NATIVE_CALL_DEPTH};
 
 /// Entry observation is zero-sized for ordinary calls, including debug builds.
 /// Only direct function-valued index handlers carry a mutable commit flag.
@@ -259,13 +259,15 @@ impl State {
         let func_val = self.stack[idx];
         if let Val::RustFn(f) = func_val {
             entered.mark_entered();
-            // Removing the function shifts arguments, but preserves the shared
-            // Rust-call ABI: invoke_rust_fn receives the first argument slot
-            // and returns results into it. Keeping the function below that
-            // slot instead needs a separate result destination and coordinated
-            // cleanup changes, including the iterator's function-free path.
-            // Do not add that bookkeeping to native-live frames without
-            // measuring their sizes and checking refusal/unwind boundaries.
+            // The contiguous Rust ABI needs these arguments relocated: the
+            // callback starts at idx and may use every slot up to the global
+            // stack cap. Leaving the function at idx and starting at idx + 1
+            // would refuse a callback push one slot earlier. Copying results
+            // back afterwards does not recover that space during the call.
+            // Moving the function elsewhere still shifts the same arguments;
+            // a separate result destination adds native-live bookkeeping
+            // without removing the relocation required by the stack cap.
+            // Keep the single remove (zero copied values for zero arguments).
             self.stack.remove(idx);
             // native-call: begin_call->invoke_rust_fn
             return self.invoke_rust_fn(f, idx, method).map(Some);
@@ -614,11 +616,15 @@ impl State {
 
         // Extra arguments of a vararg function leave the value stack for the
         // activation record, which roots them.
-        let has_varargs = is_vararg && num_args > num_params;
-        if has_varargs {
+        // Every admitted activation contributes at most MAX_ARGUMENTS values.
+        // Prove narrowing safe without adding a fallible admission boundary.
+        const {
+            assert!(MAX_CALL_DEPTH as u64 * MAX_ARGUMENTS as u64 <= u32::MAX as u64);
+        }
+        let vararg_start = self.vararg_stack.len() as u32;
+        if is_vararg && num_args > num_params {
             let num_varargs = (num_args - num_params) as usize;
-            let varargs = self.collect_varargs(self.stack.len() - num_varargs);
-            self.vararg_stack.push(varargs);
+            self.collect_varargs(self.stack.len() - num_varargs);
         }
         // Extended from `once_with` so the record is written straight into
         // its slot; see the frame push in `drive_invocation` for why a plain
@@ -627,7 +633,7 @@ impl State {
             bytecode,
             ip: 0,
             chain_charges: 0,
-            has_varargs,
+            vararg_start,
         }));
 
         // A public fixed call prevalidates these argument slots, so this pop
@@ -682,19 +688,15 @@ impl State {
         )
     }
 
-    /// Drain the frame's extra arguments into the per-activation vararg Vec.
-    ///
-    /// A one-line helper so the allocation has its own hotpath measurement
-    /// point. `#[inline]` keeps plain builds at the original codegen.
-    /// A shared arena requires coordinated changes to State, CallInfo,
-    /// mark_gc_roots, snapshot quiescence and pop_activation: offsets must
-    /// release exactly the owning activation's values on return and unwind,
-    /// and inactive arena capacity must never become a GC root. Reusing storage
-    /// here alone cannot establish that ownership and root-set contract.
+    /// Move extra arguments to the shared arena. Admission records the old
+    /// length before appending; pop_activation releases exactly that suffix on
+    /// return or refusal/unwind. No allocator here triggers VM collection.
     #[hotpath::measure]
     #[inline]
-    fn collect_varargs(&mut self, vararg_start: usize) -> Vec<Val> {
-        self.stack.drain(vararg_start..).collect()
+    fn collect_varargs(&mut self, vararg_start: usize) {
+        self.vararg_stack
+            .extend_from_slice(&self.stack[vararg_start..]);
+        self.stack.truncate(vararg_start);
     }
 
     /// Undo a refused admission without reporting an unentered callee.
@@ -736,6 +738,10 @@ impl State {
     /// on every call and return. The invocation owns the activation records
     /// from its entry upwards: on error it unwinds exactly those, never an
     /// outer invocation's.
+    // Keep the invocation driver in both call_unguarded monomorphizations.
+    // Sharing an out-of-line copy adds its frame at every native level;
+    // inlining lets its slots overlap the admission and result machinery.
+    #[inline(always)]
     pub(super) fn run_invocation(&mut self, old_stack_bottom: usize) -> Result<u8> {
         let mut frames = self.frame_stacks.pop().unwrap_or_default();
         frames.push(self.admitted_frame());
@@ -833,7 +839,7 @@ impl State {
     /// The release comes first, and stays inside: the record owns the
     /// units, so popping it is what releases them, and a count returned for
     /// the caller to release would be live across the record's drop (an
-    /// `Arc` decrement and the vararg Vec's free) in a callee-saved register.
+    /// `Arc` decrement) in a callee-saved register.
     /// In `run_invocation`, inlined into `call_unguarded`, that one extra
     /// live value spilled `old_stack_bottom` and split the result slot
     /// `Frame::run` and `begin_callable_call` had shared, growing a frame
@@ -842,9 +848,7 @@ impl State {
         let len = self.call_stack.len();
         let info = &self.call_stack[len - 1];
         self.metamethod_depth -= info.chain_charges;
-        if info.has_varargs {
-            self.vararg_stack.pop();
-        }
+        self.vararg_stack.truncate(info.vararg_start as usize);
         self.call_stack.truncate(len - 1);
         self.call_depth -= 1;
     }

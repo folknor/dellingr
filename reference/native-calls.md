@@ -148,3 +148,210 @@ first line of their outlined slow function.
 
 `python3 scripts/native_calls.py sites` lists every call site with its
 marker, which is the quickest way to see what a change touched.
+
+## Measured native stack, 2026-10-23
+
+Measured on x86-64 Linux with the repository's dev and release settings.
+The baseline is 97973d1; the middle column of each cell is unmodified
+22a263a; the last is 22a263a with `run_invocation` forced inline into both
+`call_unguarded` monomorphizations. These are compiler-dependent measurements,
+not additional limits or assertions of headroom for another build.
+
+`brokkr test native_bytes_per_level` runs all four configured sweeps;
+`--release` runs the two release feature shapes. The default and snapshot dev
+figures agree in each revision. An old checkout's probe needs an isolated
+`CARGO_TARGET_DIR`: sharing the current checkout's target directory reused
+current binaries in the first baseline attempt. The isolated rerun rebuilt
+all four shapes. Both release harnesses were built with one
+`brokkr dellingr --lua queue` run (with `--commit 97973d1` for the baseline).
+
+Each cell below is **97973d1 / 22a263a / inlined**, in bytes per scenario
+cycle. `index_rust` and `newindex_rust` take two native levels per cycle;
+other scenarios take one. The two `chain_` rows instead measure a single
+metamethod table step, without a native level. Transient deepest-point work
+is excluded; the full-depth envelope tests cover it separately.
+
+| Scenario | Dev, also snapshot | Release | Release + snapshot |
+|---|---|---|---|
+| `index_field` | 10368 / 10576 / 10544 | 1680 / 1776 / 1648 | 1728 / 1840 / 1712 |
+| `index_method` | 10368 / 10576 / 10544 | 1680 / 1776 / 1648 | 1728 / 1840 / 1712 |
+| `index_key` | 9104 / 9360 / 9328 | 1360 / 1456 / 1328 | 1408 / 1520 / 1392 |
+| `index_rust` | 11744 / 12032 / 12304 | 2064 / 2192 / 2112 | 2112 / 2256 / 2176 |
+| `newindex_field` | 10096 / 10272 / 10240 | 1424 / 1520 / 1392 | 1472 / 1584 / 1456 |
+| `newindex_key` | 9232 / 9472 / 9440 | 1392 / 1488 / 1360 | 1440 / 1552 / 1424 |
+| `newindex_rust` | 11472 / 11728 / 12000 | 1808 / 1936 / 1856 | 1856 / 2000 / 1920 |
+| `length` | 7840 / 8016 / 7984 | 1200 / 1296 / 1168 | 1248 / 1360 / 1232 |
+| `string_index_field` | 10880 / 11072 / 11040 | 1728 / 1824 / 1696 | 1776 / 1888 / 1760 |
+| `string_index_key` | 9616 / 9856 / 9824 | 1408 / 1504 / 1376 | 1456 / 1568 / 1440 |
+| `index_string_handler` | 12112 / 12336 / 12304 | 1920 / 2016 / 1888 | 1968 / 2080 / 1952 |
+| `string_library_index` | 11696 / 11904 / 11872 | 1920 / 2016 / 1888 | 1968 / 2080 / 1952 |
+| `host_get_table` | 9744 / 10032 / 10000 | 1632 / 1728 / 1600 | 1680 / 1792 / 1664 |
+| `host_get_table_string` | 10288 / 10560 / 10528 | 1680 / 1776 / 1648 | 1728 / 1840 / 1712 |
+| `host_call` | 8384 / 8592 / 8560 | 1328 / 1424 / 1296 | 1376 / 1488 / 1360 |
+| `host_anchor` | 8880 / 9088 / 9056 | 1440 / 1536 / 1408 | 1488 / 1600 / 1472 |
+| `host_tostring_bytes` | 9216 / 9424 / 9392 | 1696 / 1792 / 1664 | 1744 / 1856 / 1728 |
+| `host_to_string_with_meta` | 9376 / 9584 / 9552 | 1728 / 1824 / 1696 | 1776 / 1888 / 1760 |
+| `tostring` | 8592 / 8800 / 8768 | 1504 / 1600 / 1472 | 1552 / 1664 / 1536 |
+| `print` | 8976 / 9184 / 9152 | 1664 / 1760 / 1632 | 1712 / 1824 / 1696 |
+| `format` | 11056 / 11264 / 11232 | 2000 / 2096 / 1968 | 2048 / 2160 / 2032 |
+| `error_tostring` | 9136 / 9344 / 9312 | 1648 / 1744 / 1616 | 1696 / 1808 / 1680 |
+| `sort_comparator` | 10208 / 10656 / 10624 | 1904 / 2032 / 1904 | 1952 / 2096 / 1968 |
+| `sort_comparator_right` | 10208 / 10656 / 10624 | 1904 / 2032 / 1904 | 1952 / 2096 / 1968 |
+| `sort_comparator_sortdown` | 10208 / 10656 / 10624 | 1904 / 2032 / 1904 | 1952 / 2096 / 1968 |
+| `callable_rust` | 10624 / 11072 / 11040 | 2144 / 2272 / 2144 | 2192 / 2336 / 2208 |
+| `sort_metamethods_comparator` | 9696 / 9904 / 9872 | 1840 / 1968 / 1840 | 1888 / 2032 / 1904 |
+| `sort_metamethods_length` | 8800 / 9008 / 8976 | 1584 / 1712 / 1584 | 1632 / 1776 / 1648 |
+| `sort_metamethods_read` | 10048 / 10336 / 10304 | 1760 / 1888 / 1760 | 1808 / 1952 / 1824 |
+| `sort_metamethods_write` | 9936 / 10144 / 10112 | 1728 / 1856 / 1728 | 1776 / 1920 / 1792 |
+| `insert_length` | 8752 / 8976 / 8944 | 1536 / 1632 / 1504 | 1584 / 1696 / 1568 |
+| `insert_shift_read` | 10000 / 10304 / 10272 | 1712 / 1808 / 1680 | 1760 / 1872 / 1744 |
+| `insert_shift_write` | 9904 / 10128 / 10096 | 1600 / 1696 / 1568 | 1648 / 1760 / 1632 |
+| `insert_value` | 9904 / 10128 / 10096 | 1680 / 1776 / 1648 | 1728 / 1840 / 1712 |
+| `remove_length` | 8736 / 8944 / 8912 | 1536 / 1584 / 1456 | 1584 / 1648 / 1520 |
+| `remove_read` | 9984 / 10272 / 10240 | 1712 / 1760 / 1632 | 1760 / 1824 / 1696 |
+| `remove_shift_read` | 9984 / 10272 / 10240 | 1712 / 1760 / 1632 | 1760 / 1824 / 1696 |
+| `remove_shift_write` | 9888 / 10096 / 10064 | 1600 / 1728 / 1600 | 1648 / 1792 / 1664 |
+| `remove_clear` | 9888 / 10096 / 10064 | 1680 / 1728 / 1600 | 1728 / 1792 / 1664 |
+| `concat_length` | 10016 / 10224 / 10192 | 1584 / 1680 / 1552 | 1632 / 1744 / 1616 |
+| `concat_read` | 11264 / 11552 / 11520 | 1760 / 1856 / 1728 | 1808 / 1920 / 1792 |
+| `move_read` | 10320 / 10608 / 10576 | 1824 / 1920 / 1792 | 1872 / 1984 / 1856 |
+| `move_write` | 10224 / 10432 / 10400 | 1712 / 1808 / 1680 | 1760 / 1872 / 1744 |
+| `unpack_length` | 8608 / 8816 / 8784 | 1536 / 1632 / 1504 | 1584 / 1696 / 1568 |
+| `unpack_read` | 9856 / 10144 / 10112 | 1712 / 1808 / 1680 | 1760 / 1872 / 1744 |
+| `gsub_empty_function` | 10992 / 11200 / 11168 | 2000 / 2080 / 1952 | 2048 / 2144 / 2016 |
+| `gsub_plain_function` | 11024 / 11232 / 11200 | 2048 / 2128 / 2000 | 2096 / 2192 / 2064 |
+| `gsub_pattern_function` | 14432 / 14640 / 14608 | 3632 / 3712 / 3584 | 3680 / 3776 / 3648 |
+| `gsub_pattern_captures` | 14432 / 14640 / 14608 | 3632 / 3712 / 3584 | 3680 / 3776 / 3648 |
+| `gsub_empty_table` | 11904 / 12192 / 12160 | 2192 / 2272 / 2144 | 2240 / 2336 / 2208 |
+| `gsub_plain_table` | 11936 / 12224 / 12192 | 2240 / 2320 / 2192 | 2288 / 2384 / 2256 |
+| `gsub_pattern_table` | 15344 / 15632 / 15600 | 3824 / 3904 / 3776 | 3872 / 3968 / 3840 |
+| `tfor_lua` | 7632 / 7808 / 7776 | 992 / 1088 / 960 | 1040 / 1152 / 1024 |
+| `tfor_ipairs` | 10144 / 10416 / 10384 | 1536 / 1632 / 1504 | 1584 / 1696 / 1568 |
+| `tfor_host_iterator` | 8976 / 9168 / 9136 | 1200 / 1376 / 1248 | 1248 / 1440 / 1312 |
+| `chain_index` | 1200 / 1232 / 1232 | 192 / 192 / 192 | 192 / 192 / 192 |
+| `chain_newindex` | 1216 / 1216 / 1216 | 208 / 208 / 208 | 208 / 208 / 208 |
+
+### Frame attribution
+
+Release harness prologues measured with `scripts/frame_sizes.py` (stack
+allocation plus pushes, excluding the return address). `inline` means that
+there is no separate frame on this path. Sizes are **97973d1 / 22a263a /
+inlined**, in bytes.
+
+| Function | Frame sizes |
+|---|---|
+| `call_unguarded`, ordinary | 168 / 120 / 168 |
+| `call_unguarded`, entry observer | absent / 120 / 168 |
+| `begin_call` | inline / inline / inline |
+| `begin_callable_call` | 232 / 232 / 232 |
+| `run_invocation` | inline / 168 / inline |
+| `Frame::run` | 808 / 776 / 776 |
+| `invoke_rust_fn` | 120 / 120 / 120 |
+| `call_from_lua` | 120 / 120 / 120 |
+| `get_table_unguarded` | 120 / 120 / 120 |
+| `get_table_with_key_tracking_call` | 184 / 184 / 184 |
+| `get_field_slow` | 488 / 488 / 488 |
+| `get_table_slow` | 168 / 168 / 168 |
+| `set_field_slow` | 216 / 216 / 216 |
+| `set_table_slow` | 184 / 184 / 184 |
+| `set_table_with_key` | 200 / 200 / 200 |
+| `len_slow` | 200 / 200 / 200 |
+| `index_string` | 232 / 232 / 232 |
+| `base_ipairs_iter` | 88 / 88 / 88 |
+| `tostring_bytes_unguarded` | 56 / 56 / 56 |
+| `tostring_rendering` | 168 / 168 / 168 |
+| table sort callback | 184 / 216 / 216 |
+| table remove callback | 136 / 88 / 88 |
+| gsub callback | 168 / 152 / 152 |
+
+The index/newindex handler helpers and generic-for Lua iterator helpers have
+no separate release harness symbols: they are inlined into the listed
+parents, including `Frame::run`. `--calls` shows that the baseline's
+`call_unguarded` calls `Frame::run` directly, whereas unmodified 22a263a calls
+a separate `run_invocation`. Restoring inlining removes 128 bytes including
+the extra return address from each ordinary release cycle. A Rust-handler
+cycle saves 80 bytes: its Rust-only call arm has no live invocation driver,
+and its now-combined call frame grows by 48 bytes instead.
+
+The sort callback's 32-byte growth is retained. Its `--calls` and `--body`
+diffs show the new fallible `get_array`, root-copy reservations and
+`set_array` paths replacing infallible allocation and cloning. `asm_diff.py
+--slots` shows the changed temporary and spill layout (14 distinct offsets
+before, 21 after). Removing those checks would undo ordinary-error handling
+for table allocation failures. The smaller dispatch frame cancels that
+growth in the default release comparator cycle; snapshot's compiler layout
+leaves that cycle 16 bytes larger than the baseline (until the vararg arena
+follow-up below, whose 16-byte snapshot saving brings it back level).
+
+Dev probe binaries also explain the retained growth: `Frame::run` is
+6456 / 6568 bytes (baseline / inlined), `invoke_rust_fn` 264 / 280,
+`call_from_lua` 200 / 216, the index handler body 600 / 632,
+`instr_set_table` 344 / 376, `reg_set_table` 328 / 360,
+`instr_get_field` 1640 / 1592, and raw `table_sort` 664 / 904.
+These reflect fallible table operations, entry observation and the retained
+result-copy path. The baseline's call and invocation frames are 344 and 328
+bytes; the inlined ordinary call is 712 and the observed call 760. Folding
+the driver into the Rust-only arm therefore increases the two-native-level
+Rust-handler cycles in dev, although ordinary cycles shrink by 32 bytes
+relative to unmodified 22a263a. Both dev feature shapes still pass the
+unchanged 4 MiB full-depth envelope.
+
+### Shared vararg arena follow-up
+
+The shared vararg arena preserves every number in the **inlined** column
+above for dev (both feature shapes) and plain release. Release with snapshot
+saves 16 bytes in every native scenario cycle, including the two-native-level
+Rust-handler cycles; `chain_index` and `chain_newindex` remain 192 and 208.
+All 57 scenarios were rerun in all four shapes with
+`brokkr test native_bytes_per_level`, followed by the explicit `--release`
+run (default and snapshot). Representative final bytes per cycle:
+
+| Scenario | Dev, also snapshot | Release | Release + snapshot |
+|---|---|---|---|
+| `index_field` | 10544 | 1648 | 1696 |
+| `index_rust` | 12304 | 2112 | 2160 |
+| `host_call` | 8560 | 1296 | 1344 |
+| `tfor_lua` | 7776 | 960 | 1008 |
+| `tfor_ipairs` | 10384 | 1504 | 1552 |
+| `tfor_host_iterator` | 9136 | 1248 | 1296 |
+| `gsub_pattern_function` | 14608 | 3584 | 3632 |
+
+`frame_sizes.py` on the rebuilt plain release harness confirms every frame
+listed in the attribution table is unchanged from **inlined**: both
+`call_unguarded` copies are 168, `begin_callable_call` 232, `Frame::run` 776,
+`invoke_rust_fn` and `call_from_lua` 120; `begin_call` and `run_invocation`
+remain inline. The table sort/remove/gsub callback frames remain 216/88/152.
+The only other changed VM symbol is `return_to_caller`, 72 -> 56; it does not
+stay live across re-entry. The release snapshot probe has `Frame::run` 824,
+both call copies 168, callable resolution 232 and Rust invocation 120. Dev
+still has dispatch 6568, ordinary/observed calls 712/760 and Rust invocation
+280. No frame live across native re-entry grows.
+
+The arena uses a u32 start offset per activation, including empty
+suffixes, keeping the x86-64 activation record at 24 bytes. Call depth times
+MAX_ARGUMENTS bounds the arena below u32::MAX, checked at compile time.
+Admission appends extra arguments and pop_activation truncates to the recorded start on return,
+refused admission and unwind. mark_gc_roots marks only the arena's live
+length; quiescence still requires it empty. Capacity remains unsaved, and
+the snapshot format and opcode charges are unchanged. Warm vararg-heavy
+calls should avoid one allocation and free per call after arena capacity
+has reached the active high-water mark.
+
+Iterator bookkeeping was tried both inside the iterator helper and behind
+a separate direct-path probe in the dispatch arm. Plain release dispatch
+grew from 776 to 792 and 808 bytes respectively. Removing the Rust iterator
+fallback's redundant error truncate did not reduce either figure. The eager
+record/flush stays, with the reason at its site pointing here; pairs/ipairs are
+therefore expected to stay unchanged.
+
+Rust callee removal also stays. The contiguous callback ABI exposes every
+slot freed by removing the callee; retaining it below the arguments would
+refuse a push one slot earlier at the global cap. A regression fills the
+stack before calling a one-argument Rust function that then pushes its
+result. Moving the function elsewhere still relocates the arguments, while
+a separate result destination alone cannot recover that slot during the
+callback. No rust_boundary or ordinary calls speedup is expected from this
+item. Nested arena GC/reuse and callback stack-cap regressions supplement
+the existing refusal, error-unwind and snapshot-quiescence coverage. A nested
+vararg case was also added to the budget and single-refusal corpus so failed
+admission and open-vararg growth check arena quiescence explicitly.
