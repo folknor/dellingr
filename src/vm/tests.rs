@@ -1138,6 +1138,37 @@ fn length_metamethod_preflights_three_slots_at_the_stack_cap() {
     assert_eq!(*state.user_data::<usize>().unwrap(), 1);
 }
 
+/// Default rendering that runs out of pointer identities is an execution
+/// failure of `tostring_bytes`, so it notifies like a failed `__tostring`.
+#[test]
+fn exhausted_format_pointer_rendering_notifies_once() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Count(Arc<AtomicUsize>);
+    impl crate::HostCallbacks for Count {
+        fn on_print(&mut self, _: Option<&[u8]>, _: u32, _: &[u8]) {}
+        fn on_error(&mut self, _: &crate::error::Error) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    let count = Arc::new(AtomicUsize::new(0));
+    let mut state = State::with_callbacks(Box::new(Count(Arc::clone(&count))));
+    state.new_table().unwrap();
+    state.next_format_pointer_id = u64::MAX;
+    let error = state
+        .tostring_bytes(1)
+        .expect_err("no identity is left for the table");
+    assert!(matches!(
+        error.kind(),
+        crate::error::ErrorKind::LibraryError(
+            crate::error::LibraryError::FormatPointerIdentitySpaceExhausted
+        )
+    ));
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+}
+
 #[test]
 fn exhausted_format_pointer_counter_does_not_wrap_or_mutate() {
     let mut state = State::raw();

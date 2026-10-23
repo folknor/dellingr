@@ -634,6 +634,22 @@ All notable changes to dellingr are documented here. The format follows
   that replays the saving State's initialization now continues with the same
   ids as the saving State; before, such a value took a new id when next
   rendered (`docs/save-state.md`).
+- `HostCallbacks::on_error` fires for every execution error before host code
+  can see it, at any depth. A Rust callback that called `State::call` (or
+  `call_anchor`, `get_table`, `tostring_bytes`) and handled the error instead
+  of returning it used to leave `on_error` silent unless the failure came out
+  of a Lua frame: calling a non-callable value, a `__call` chain hitting its
+  depth or argument limit, a Rust function returning `Err`, result padding
+  overflowing the stack and the native call depth limit were never reported.
+  They now notify once, with the same location, traceback and source name as
+  the error the callback receives; an error that propagates instead is
+  reported exactly as before. Host `get_table` and `tostring_bytes` now also
+  notify for failures that never reached a call: a receiver that cannot be
+  indexed, a non-function `__index` handler, an `__index` chain at the
+  metamethod depth limit, a `__tostring` result that is not a string or
+  number, and running out of `%p` identities. Operand misuse (invalid
+  index, missing key) still does not notify. The `on_error` doc states the
+  rule.
 - Loading a save into a build that folds two rendered Rust functions the
   saving build kept apart no longer fails as a duplicate: the folded function
   keeps the smaller of the two identities. Two such functions used as keys of

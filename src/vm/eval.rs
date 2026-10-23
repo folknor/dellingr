@@ -143,8 +143,8 @@ impl State {
             self.native_call_depth > 0,
         );
         let result = if injected || self.native_call_depth >= MAX_NATIVE_CALL_DEPTH {
-            // Only a nested call can exhaust the native bracket. Its enclosing
-            // activation or callback owns reporting, through the common arm.
+            // Only a nested call can exhaust the native bracket. The common
+            // arm reports it like any other failure after dispatch.
             Err(self.error(ErrorKind::NativeCallDepthExceeded {
                 depth: self.native_call_depth,
                 limit: MAX_NATIVE_CALL_DEPTH,
@@ -392,7 +392,9 @@ impl State {
 
     /// The single error arm for a call made from Rust. Inner owners have
     /// restored their bookkeeping; this boundary clears the operand suffix
-    /// and reports errors that have no enclosing activation or Rust callback.
+    /// and reports the error before its Rust caller sees it, whether that
+    /// caller is the host, a callback that may handle it, or VM code that
+    /// propagates it (`report_escaping`).
     #[cold]
     #[inline(never)]
     fn fail_call(&mut self, error: Error, idx: usize, old_stack_bottom: usize) -> Error {
@@ -401,7 +403,7 @@ impl State {
         debug_assert!(self.open_upvalues.iter().all(|(slot, _)| *slot < idx));
         self.stack.truncate(idx);
         self.stack_bottom = old_stack_bottom;
-        self.report_call_error(error)
+        self.report_escaping(error)
     }
 
     fn release_chain_charges(&mut self, charges: u32) {
@@ -500,20 +502,6 @@ impl State {
     #[inline(never)]
     fn abandon_poisoned() -> ! {
         std::panic::resume_unwind(Box::new(super::PoisonUnwind))
-    }
-
-    // Used only on error exits, never in the bytecode dispatch loop.
-    fn report_call_error(&mut self, mut error: Error) -> Error {
-        if self.is_outermost_host_boundary() {
-            self.host_error(&mut error);
-        }
-        error
-    }
-
-    fn is_outermost_host_boundary(&self) -> bool {
-        // Any still-held chain units belong to an enclosing activation or
-        // Rust callback, already excluded by these two checks.
-        self.call_depth == 0 && self.active_rust_fn.is_none()
     }
 
     /// Pops `n` values from the stack, concatenates them, and pushes the
@@ -875,30 +863,54 @@ impl State {
         Ok(returned)
     }
 
-    /// Fill in a runtime error's source line from the frame it surfaced in.
-    ///
-    /// Every error-return path out of a Lua frame must go through this, so that
-    /// the line rendered alongside the traceback's source always comes from the
-    /// same frame. An error that already carries a location keeps it - that is
-    /// how parser errors survive with their own line and column.
-    fn locate_in_frame(error: Error, frame: &Frame) -> Error {
-        if error.line_num() == 0 {
-            let column = error.column();
-            error.with_location(frame.current_line(), column)
-        } else {
-            error
-        }
-    }
-
+    /// Locate and report an error leaving the Lua frame it surfaced in.
     #[cold]
     #[inline(never)]
-    fn report_frame_error(&mut self, mut error: Error, frame: &Frame) -> Error {
-        // Preserve the innermost fault even when a callback already attached a
-        // traceback. Allocate metadata only here, outside the dispatch loop.
-        error = frame.locate_fault(error);
+    fn report_frame_error(&mut self, error: Error, frame: &Frame) -> Error {
+        let mut error = self.locate_error(error, frame.bytecode(), frame.cursor());
+        self.host_error(&mut error);
+        error
+    }
+
+    /// Report an execution error at the point it is returned to Rust code
+    /// that may handle it rather than propagate it: a call made from Rust
+    /// (`fail_call`), a host table read or a `tostring` rendering. Errors a
+    /// Lua frame already reported pass through unchanged. Otherwise the error
+    /// is first located exactly as the next Lua frame unwind would locate it:
+    /// that frame is the innermost activation, suspended at the call site its
+    /// record holds (every dispatch path that can call out records it first,
+    /// see `State::record_call_site`), and no Rust frame in between alters
+    /// the error. Propagating it there then finds a reported error with a
+    /// trace and changes nothing, so the error and the one notification are
+    /// the same whether a callback handles it or returns it. With no Lua
+    /// activation (a host-initiated call) there is nothing to locate.
+    #[cold]
+    #[inline(never)]
+    pub(super) fn report_escaping(&mut self, mut error: Error) -> Error {
+        if error.is_reported() {
+            return error;
+        }
+        if let Some(info) = self.call_stack.last() {
+            error = self.locate_error(error, &info.bytecode, info.ip);
+        }
+        self.host_error(&mut error);
+        error
+    }
+
+    /// Fill in what an error lacks from the innermost activation, whose code
+    /// is `bytecode` at `cursor`: the innermost fault, then, for an error
+    /// with no traceback yet, the traceback and the source line. An error
+    /// that already carries a location keeps it - that is how parser errors
+    /// survive with their own line and column - and one that carries a
+    /// traceback (a nested frame's, or a host-supplied one) keeps both.
+    /// Allocates metadata only here, outside the dispatch loop.
+    fn locate_error(&self, mut error: Error, bytecode: &Arc<Bytecode>, cursor: usize) -> Error {
+        // Preserve the innermost fault even when a callback already attached
+        // a traceback.
+        error = Self::locate_fault(error, bytecode, cursor);
         if error.stack_trace().is_empty() {
-            let trace = self.build_stack_trace(frame);
-            if Self::is_gmatch_wrapper(frame.bytecode()) {
+            let trace = self.build_stack_trace(bytecode, cursor);
+            if Self::is_gmatch_wrapper(bytecode) {
                 if let Some(caller) = trace.first() {
                     if error.line_num() == 0 {
                         let column = error.column();
@@ -906,13 +918,25 @@ impl State {
                     }
                     error = error.with_source_name(caller.source.clone());
                 }
-            } else {
-                error = Self::locate_in_frame(error, frame);
+            } else if error.line_num() == 0 {
+                let column = error.column();
+                error = error.with_location(Self::line_before(bytecode, cursor), column);
             }
             error = error.with_stack_trace(trace);
         }
-        self.host_error(&mut error);
         error
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn locate_fault(error: Error, bytecode: &Bytecode, cursor: usize) -> Error {
+        let Some(instruction) = cursor.checked_sub(1) else {
+            return error;
+        };
+        let Some(inst) = bytecode.code.get(instruction) else {
+            return error;
+        };
+        error.with_vm_fault(instruction, inst.opcode(), bytecode.name.as_ref())
     }
 
     pub(crate) fn push_chunk(&mut self, bytecode: Arc<Bytecode>) -> Result<()> {

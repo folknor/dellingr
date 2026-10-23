@@ -269,6 +269,11 @@ impl State {
     /// handler temporaries, preserving every earlier stack slot. Writes made
     /// by the handler survive the error.
     ///
+    /// An invalid index or a missing key is host misuse and does not fire
+    /// [`HostCallbacks::on_error`](crate::HostCallbacks::on_error); a
+    /// receiver that cannot be indexed, and every failure of the lookup
+    /// itself, notify as `call`'s errors do.
+    ///
     /// Guarded like [`State::call`]: refused on a poisoned State, and a
     /// panic out of a metamethod poisons it.
     pub fn get_table(&mut self, i: isize) -> Result<()> {
@@ -287,7 +292,8 @@ impl State {
         let idx = if is_string {
             receiver_idx
         } else {
-            self.table_operand_below_top(i, 1)?
+            self.table_operand_below_top(i, 1)
+                .map_err(|error| self.report_index_receiver_error(error))?
         };
         let top = self.stack.len();
         let key = self.pop_val();
@@ -309,7 +315,23 @@ impl State {
                 self.push_unchecked(key);
             }
         }
-        result
+        result.map_err(|error| self.report_escaping(error))
+    }
+
+    /// Classify `get_table`'s operand rejection. Operand misuse (a bad index,
+    /// no key above the receiver) is returned unreported, as `call`'s
+    /// preflight is (see the on_error doc in host.rs). A receiver that cannot
+    /// be indexed is a runtime type error, as indexing it in a script is, so
+    /// it is reported like the failures after dispatch. Either way the stack
+    /// is unchanged.
+    #[cold]
+    #[inline(never)]
+    fn report_index_receiver_error(&mut self, error: Error) -> Error {
+        if matches!(error.kind(), ErrorKind::TypeError(_)) {
+            self.report_escaping(error)
+        } else {
+            error
+        }
     }
 
     /// Resolves `i` to a table that sits below the top `operands` values, and
@@ -729,7 +751,10 @@ impl State {
     /// a `__tostring` metamethod. Invalid UTF-8 bytes (from a Lua string or a
     /// `__tostring` result) are converted lossily; use
     /// [`State::tostring_bytes`] for the exact bytes. A converted result over
-    /// `MAX_STRING_BYTES` is an error, checked before conversion.
+    /// `MAX_STRING_BYTES` is an error, checked before conversion. That check
+    /// is host-side conversion, not execution, so it does not fire
+    /// [`HostCallbacks::on_error`](crate::HostCallbacks::on_error); rendering
+    /// errors notify as for [`State::tostring_bytes`].
     ///
     /// Guarded like [`State::call`]: refused on a poisoned State, and a
     /// panic out of `__tostring` poisons it.
@@ -751,6 +776,11 @@ impl State {
     ///
     /// A handler failure leaves the stack as it was. Writes made by the
     /// handler survive the error.
+    ///
+    /// An invalid index is host misuse and does not fire
+    /// [`HostCallbacks::on_error`](crate::HostCallbacks::on_error); every
+    /// rendering failure, a failed or wrong-typed `__tostring` result
+    /// included, notifies as `call`'s errors do.
     ///
     /// Guarded like [`State::call`]: refused on a poisoned State, and a
     /// panic out of `__tostring` poisons it.
@@ -778,6 +808,10 @@ impl State {
     /// coercion. The handler must return a string or a number.
     ///
     /// `error_value` applies the opposite rule to strings on purpose.
+    ///
+    /// An invalid index is host misuse and is returned unreported; every
+    /// failure after it is reported here (`report_escaping`), so a host
+    /// callback that handles a `tostring_bytes` error has seen it notified.
     pub(crate) fn tostring_rendering(&mut self, idx: isize) -> Result<TostringRendering> {
         let i = self.convert_idx(idx)?;
         let val = self.stack[i];
@@ -785,9 +819,11 @@ impl State {
         if !matches!(tostring_handler, Val::Nil) {
             // Handler plus receiver: net-positive by two slots until the
             // call consumes them.
-            self.check_stack_space(2)?;
+            self.check_stack_space(2)
+                .map_err(|error| self.report_escaping(error))?;
             self.push_unchecked(tostring_handler);
             self.push_unchecked(val);
+            // A failed handler call is reported by the call's own boundary.
             // native-call: tostring_rendering->call_unguarded
             self.call_unguarded(ArgCount::Fixed(1), RetCount::Fixed(1))?;
             let result = self.pop_val();
@@ -798,13 +834,16 @@ impl State {
             {
                 return Ok(TostringRendering::Bytes(bytes));
             }
-            return Err(self.library_error(LibraryError::TostringMustReturnString));
+            return Err(
+                self.report_escaping(self.library_error(LibraryError::TostringMustReturnString))
+            );
         }
         if matches!(val, Val::Str(_)) {
             return Ok(TostringRendering::Itself);
         }
         self.bytes_with_default_string_coercion(idx)
             .map(TostringRendering::Bytes)
+            .map_err(|error| self.report_escaping(error))
     }
 
     /// The value `error()` raises, built from the stack value at `idx`.

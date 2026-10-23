@@ -5,7 +5,7 @@ use std::sync::Arc;
 // declared with each opcode in `instr.rs`.
 use crate::numeral::{lua_add, lua_div, lua_modulo, lua_mul, lua_sub};
 
-use super::super::error::{Error, StackFrame};
+use super::super::error::Error;
 use super::Bytecode;
 use super::BytecodeRuntime;
 use super::Instr;
@@ -75,33 +75,11 @@ impl Frame {
         self.runtime.literals[i as usize]
     }
 
-    #[cold]
-    #[inline(never)]
-    pub(super) fn locate_fault(&self, error: Error) -> Error {
-        let Some(instruction) = self.ip.get().checked_sub(1) else {
-            return error;
-        };
-        let Some(inst) = self.bytecode.code.get(instruction) else {
-            return error;
-        };
-        error.with_vm_fault(instruction, inst.opcode(), self.bytecode.name.as_ref())
-    }
-
-    /// Get the current line number (1-indexed), or 0 if unknown.
-    pub(super) fn current_line(&self) -> u32 {
-        // ip points to the NEXT instruction, so use ip-1 for current
-        let idx = self.ip.get().saturating_sub(1);
-        self.bytecode.line_info.get(idx).copied().unwrap_or(0)
-    }
-
-    /// Create a StackFrame for error reporting.
-    pub(super) fn to_stack_frame(&self) -> StackFrame {
-        StackFrame {
-            function_name: self.bytecode.name.clone(),
-            source: self.bytecode.source.clone(),
-            line: self.current_line(),
-            defined_line: self.bytecode.defined_line,
-        }
+    /// The published cursor, the index of the instruction after the one the
+    /// frame last executed. Error location reads it once the dispatch loop
+    /// has published it on the error's way out (see `ip`).
+    pub(super) fn cursor(&self) -> usize {
+        self.ip.get()
     }
 
     // Static bytecode contracts are checked at compile/load admission, not

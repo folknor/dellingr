@@ -44,21 +44,38 @@ pub trait HostCallbacks: Send {
     /// * `message` - The rendered arguments, joined with tabs; no newline
     fn on_print(&mut self, source: Option<&[u8]>, line: u32, message: &[u8]);
 
-    /// Called when an error is raised while executing code reached through
-    /// `call()`. Fired exactly once per error, in addition to that error being
-    /// returned from `call()`. Use it for logging or telemetry.
+    /// Called when execution fails. Use it for logging or telemetry.
     ///
-    /// This covers errors raised in Lua bytecode and failures of Rust functions
-    /// invoked from Lua, as well as a Rust function that fails when a host calls
-    /// it directly (with no Lua frame on the stack). Errors from host-initiated
-    /// table `__call` chains are covered too, including cyclic chains that reach
-    /// the metamethod depth limit, and direct calls of non-callable values.
-    /// It is NOT fired for host API misuse that `call()` or `call_anchor()`
-    /// rejects before dispatch, when nothing has executed: `ArgCount::Dynamic`,
-    /// insufficient stack values for the call, a wrong-State anchor, or no stack
-    /// room to insert the anchored callee. The host observes those solely
-    /// through the `Result`. Once dispatch begins, setup failures (Lua frame
-    /// setup, `__call` argument insertion, result padding) do notify.
+    /// Each execution error is reported exactly once, before any host code
+    /// can see it: before it is returned from `call()`, `call_anchor()`,
+    /// `get_table()`, `tostring_bytes()` or `to_string_with_meta()`. That holds
+    /// at every depth: when a Rust callback makes one of these calls and
+    /// handles the error instead of returning it, `on_error` has already
+    /// fired for it. Reporting follows the `Error` value: propagating the same
+    /// error further, or returning it again later, does not report it again,
+    /// while a different `Error` a callback builds from it is a new error.
+    /// Where a Lua activation encloses the failure, the error carries the
+    /// location, traceback and source name it is returned with; an error
+    /// from a host-initiated call of a Rust function has no Lua context.
+    ///
+    /// Execution errors are those raised in Lua bytecode, by Rust functions
+    /// (invoked from Lua or directly by the host), by limits and budgets, and
+    /// in resolving and setting up a call: calling a non-callable value,
+    /// `__call` chains (including cyclic chains that reach the metamethod
+    /// depth limit, and argument insertion), Lua frame setup, result padding
+    /// and the native call depth limit. A host table read or `tostring`
+    /// rendering fails the same way: a receiver that cannot be indexed, any
+    /// failure of `__index` resolution or `__tostring`, or a `__tostring`
+    /// result that is not a string or number.
+    ///
+    /// It is NOT fired for host API misuse rejected before anything executes:
+    /// `ArgCount::Dynamic`, insufficient stack values for a call, an invalid
+    /// stack index, a missing `get_table` key, a wrong-State anchor, or no
+    /// stack room to insert the anchored callee. Nor for a refusal of a
+    /// poisoned State (`StatePoisoned`), or for `to_string_with_meta()`'s
+    /// UTF-8 size check after rendering succeeded. The host observes those
+    /// solely through the `Result`; a callback that returns one of them as its
+    /// own failure reports it then, like any other callback error.
     ///
     /// Function labels in displayed argument errors are best-effort diagnostic
     /// text. Generic Rust callback checks can resolve a label from current
@@ -66,7 +83,8 @@ pub trait HostCallbacks: Send {
     /// settings can affect the result. Do not treat that label as a stable id.
     ///
     /// # Arguments
-    /// * `error` - The error that occurred (includes source name and stack trace)
+    /// * `error` - The error that occurred (with source name and stack trace
+    ///   where a Lua activation encloses it)
     fn on_error(&mut self, error: &Error) {
         // Default: no-op (host handles via Result)
         let _ = error;

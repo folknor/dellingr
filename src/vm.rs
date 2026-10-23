@@ -1523,11 +1523,12 @@ impl State {
 
     /// Construct an [`Error`] of the given kind with no source position.
     ///
-    /// The position is filled in later, on the way out of the Lua frame the
-    /// error surfaced in (see `locate_in_frame`), because that is the first
-    /// point with access to the frame's line information. Errors that never
-    /// unwind through a Lua frame - those raised by a host `RustFunc` called
-    /// directly - keep a zero position.
+    /// The position is filled in later from the innermost Lua activation,
+    /// when the error is first reported or leaves that frame (see
+    /// `locate_error`), because that is the first point with access to the
+    /// frame's line information. Errors with no enclosing Lua activation -
+    /// those raised by a host `RustFunc` called directly - keep a zero
+    /// position.
     pub fn error(&self, kind: ErrorKind) -> Error {
         // Retain this public compatibility helper. Frame exit supplies the
         // location; locating here would confuse parser and caller locations.
@@ -1538,16 +1539,42 @@ impl State {
         self.error(ErrorKind::TypeError(e))
     }
 
-    /// Build a stack trace from the current call stack and the active frame.
-    /// The frame represents the innermost (current) function where the error occurred.
-    #[allow(private_interfaces)]
-    pub(super) fn build_stack_trace(&self, current_frame: &frame::Frame) -> Vec<StackFrame> {
+    /// The source line of the instruction before `cursor` in `bytecode`, the
+    /// one a frame suspended or failed at (0 if unknown). A cursor of 0 reads
+    /// the first instruction's line.
+    pub(super) fn line_before(bytecode: &Bytecode, cursor: usize) -> u32 {
+        bytecode
+            .line_info
+            .get(cursor.saturating_sub(1))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn trace_frame(bytecode: &Bytecode, cursor: usize) -> StackFrame {
+        StackFrame {
+            function_name: bytecode.name.clone(),
+            source: bytecode.source.clone(),
+            line: Self::line_before(bytecode, cursor),
+            defined_line: bytecode.defined_line,
+        }
+    }
+
+    /// Build a stack trace for an error located in the innermost activation,
+    /// `call_stack.last()`, whose code is `bytecode` at `cursor`: the
+    /// executing frame's own cursor when it unwinds, or the record's call
+    /// site when the error is returned from a call it suspended at. The
+    /// callers come from `call_stack`, each at its recorded call site.
+    pub(super) fn build_stack_trace(
+        &self,
+        bytecode: &Arc<Bytecode>,
+        cursor: usize,
+    ) -> Vec<StackFrame> {
         let mut trace = Vec::with_capacity(self.call_stack.len() + 1);
 
         // First entry: the current frame where the error occurred
         // A host may call the iterator without a script caller. Keep its
         // implementation location in that case rather than inventing one.
-        let shim_with_script_caller = Self::is_gmatch_wrapper(current_frame.bytecode())
+        let shim_with_script_caller = Self::is_gmatch_wrapper(bytecode)
             && self
                 .call_stack
                 .iter()
@@ -1555,33 +1582,17 @@ impl State {
                 .skip(1)
                 .any(|info| !Self::is_gmatch_wrapper(&info.bytecode));
         if !shim_with_script_caller {
-            trace.push(current_frame.to_stack_frame());
+            trace.push(Self::trace_frame(bytecode, cursor));
         }
 
         // Add entries from call_stack (most recent first).
-        // Skip the last entry (current function) since we already have it from current_frame.
+        // Skip the last entry (current function) since we already have it.
         // The remaining entries are the callers, with ip pointing to their call sites.
         for call_info in self.call_stack.iter().rev().skip(1) {
             if Self::is_gmatch_wrapper(&call_info.bytecode) {
                 continue;
             }
-            // Get line number from the ip (call site)
-            let line = if call_info.ip > 0 {
-                call_info
-                    .bytecode
-                    .line_info
-                    .get(call_info.ip - 1)
-                    .copied()
-                    .unwrap_or(0)
-            } else {
-                call_info.bytecode.line_info.first().copied().unwrap_or(0)
-            };
-            trace.push(StackFrame {
-                function_name: call_info.bytecode.name.clone(),
-                source: call_info.bytecode.source.clone(),
-                line,
-                defined_line: call_info.bytecode.defined_line,
-            });
+            trace.push(Self::trace_frame(&call_info.bytecode, call_info.ip));
         }
 
         trace

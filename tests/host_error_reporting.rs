@@ -1,10 +1,14 @@
 //! Host error callback behavior at host initiated call boundaries.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
-use dellingr::error::{Error, ErrorKind};
+use dellingr::error::{Error, ErrorKind, LibraryError};
 use dellingr::{ArgCount, HostCallbacks, RetCount, State};
+
+#[path = "common/stack.rs"]
+#[allow(dead_code)]
+mod stack;
 
 struct ErrorCounter(Arc<AtomicUsize>);
 
@@ -473,4 +477,335 @@ fn nonfunction_chain_resolution_and_admission_report_once() {
             }
         }
     }
+}
+
+/// Every notification, rendered, in the order `on_error` saw them.
+struct Recorder(Arc<Mutex<Vec<String>>>);
+
+impl HostCallbacks for Recorder {
+    fn on_print(&mut self, _source: Option<&[u8]>, _line: u32, _message: &[u8]) {}
+
+    fn on_error(&mut self, error: &Error) {
+        self.0.lock().unwrap().push(error.to_string());
+    }
+}
+
+/// One failing host operation, run either by the test or by a callback.
+type Attempt = fn(&mut State) -> dellingr::Result<()>;
+
+/// What the swallowing callback runs, and the errors it handled.
+struct Harness {
+    attempt: Attempt,
+    swallowed: Vec<Error>,
+}
+
+fn harness(state: &mut State) -> dellingr::Result<&mut Harness> {
+    state
+        .user_data_mut::<Harness>()
+        .ok_or_else(|| Error::without_location(ErrorKind::HostError("no harness".into())))
+}
+
+/// A callback that runs the harness attempt and handles its error instead of
+/// returning it: it restores its frame and carries on successfully.
+fn swallow(state: &mut State) -> dellingr::Result<u8> {
+    let attempt = harness(state)?.attempt;
+    let top = state.get_top() as isize;
+    if let Err(error) = attempt(state) {
+        state.set_top(top)?;
+        harness(state)?.swallowed.push(error);
+    }
+    Ok(0)
+}
+
+const HARNESS_SETUP: &str = r#"
+    cyclic = {}; setmetatable(cyclic, { __call = cyclic })
+    callable = setmetatable({}, { __call = function() end })
+    function lua_fail() error("lua failed") end
+    index_false = setmetatable({}, { __index = false })
+    index_cycle = {}; setmetatable(index_cycle, { __index = index_cycle })
+    index_rust = setmetatable({}, { __index = fail })
+    renders_table = setmetatable({}, { __tostring = function() return {} end })
+    renders_fail = setmetatable({}, { __tostring = fail })
+"#;
+
+fn attempt_non_callable(state: &mut State) -> dellingr::Result<()> {
+    state.push_number(42.0)?;
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(0))
+}
+
+fn attempt_cyclic_chain(state: &mut State) -> dellingr::Result<()> {
+    state.get_global("cyclic")?;
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(0))
+}
+
+fn attempt_chain_arguments(state: &mut State) -> dellingr::Result<()> {
+    state.get_global("callable")?;
+    for _ in 0..dellingr::limits::MAX_ARGUMENTS {
+        state.push_nil()?;
+    }
+    state.call(
+        ArgCount::Fixed(dellingr::limits::MAX_ARGUMENTS),
+        RetCount::Fixed(0),
+    )
+}
+
+fn attempt_rust_error(state: &mut State) -> dellingr::Result<()> {
+    state.push_rust_fn(fail_fn)?;
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(0))
+}
+
+/// Fill the stack to one slot short of the cap and call a callback that
+/// returns nothing into two fixed results: the nil padding cannot fit.
+fn attempt_result_padding(state: &mut State) -> dellingr::Result<()> {
+    while state.push_nil().is_ok() {}
+    state.pop(1)?;
+    state.push_rust_fn(return_nothing)?;
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(2))
+}
+
+fn attempt_lua_error(state: &mut State) -> dellingr::Result<()> {
+    state.get_global("lua_fail")?;
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(0))
+}
+
+fn attempt_index(state: &mut State, receiver: &str) -> dellingr::Result<()> {
+    state.get_global(receiver)?;
+    state.push_string("key")?;
+    state.get_table(-2)
+}
+
+fn attempt_index_number(state: &mut State) -> dellingr::Result<()> {
+    state.push_number(1.0)?;
+    state.push_string("key")?;
+    state.get_table(-2)
+}
+
+fn attempt_index_false(state: &mut State) -> dellingr::Result<()> {
+    attempt_index(state, "index_false")
+}
+
+fn attempt_index_cycle(state: &mut State) -> dellingr::Result<()> {
+    attempt_index(state, "index_cycle")
+}
+
+fn attempt_index_rust(state: &mut State) -> dellingr::Result<()> {
+    attempt_index(state, "index_rust")
+}
+
+fn attempt_render_table(state: &mut State) -> dellingr::Result<()> {
+    state.get_global("renders_table")?;
+    state.tostring_bytes(-1).map(drop)
+}
+
+fn attempt_render_fail(state: &mut State) -> dellingr::Result<()> {
+    state.get_global("renders_fail")?;
+    state.tostring_bytes(-1).map(drop)
+}
+
+fn attempt_get_table_bad_index(state: &mut State) -> dellingr::Result<()> {
+    state.push_string("key")?;
+    state.get_table(5)
+}
+
+fn attempt_get_table_missing_key(state: &mut State) -> dellingr::Result<()> {
+    state.new_table()?;
+    state.get_table(-1)
+}
+
+fn attempt_tostring_bad_index(state: &mut State) -> dellingr::Result<()> {
+    state.tostring_bytes(7).map(drop)
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Mode {
+    /// The test itself, as the outermost host, makes the failing call.
+    Host,
+    /// The host calls a callback that makes the call and handles the error.
+    Callback,
+    /// A Lua chunk calls that callback.
+    FromLua,
+}
+
+/// Run `attempt` in `mode`; return the failure and the notifications.
+fn run_attempt(attempt: Attempt, mode: Mode) -> (Error, Vec<String>) {
+    let notifications = Arc::new(Mutex::new(Vec::new()));
+    let mut state = State::with_callbacks(Box::new(Recorder(Arc::clone(&notifications))));
+    state.push_rust_fn(fail_fn).unwrap();
+    state.set_global("fail").unwrap();
+    state.push_rust_fn(swallow).unwrap();
+    state.set_global("swallow").unwrap();
+    dellingr::Program::compile(HARNESS_SETUP, Some(b"setup"))
+        .and_then(|program| state.load(&program))
+        .unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
+    state.set_user_data(Harness {
+        attempt,
+        swallowed: Vec::new(),
+    });
+    let error = match mode {
+        Mode::Host => {
+            let error = attempt(&mut state).expect_err("the attempt fails");
+            state.set_top(0).unwrap();
+            error
+        }
+        Mode::Callback | Mode::FromLua => {
+            if let Mode::FromLua = mode {
+                dellingr::Program::compile("local before = 1\nswallow()", Some(b"swallow-caller"))
+                    .and_then(|program| state.load(&program))
+                    .unwrap();
+            } else {
+                state.push_rust_fn(swallow).unwrap();
+            }
+            state
+                .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+                .expect("the callback handles the error and succeeds");
+            let mut swallowed =
+                std::mem::take(&mut state.user_data_mut::<Harness>().unwrap().swallowed);
+            assert_eq!(swallowed.len(), 1, "{mode:?}");
+            swallowed.remove(0)
+        }
+    };
+    assert_eq!(state.get_top(), 0, "{mode:?}: {error}");
+    let notifications = notifications.lock().unwrap().clone();
+    (error, notifications)
+}
+
+#[test]
+fn execution_errors_notify_once_whether_returned_or_handled() {
+    type Case = (&'static str, Attempt, fn(&ErrorKind) -> bool);
+    let cases: [Case; 12] = [
+        ("non_callable", attempt_non_callable, |kind| {
+            matches!(kind, ErrorKind::TypeError(_))
+        }),
+        ("cyclic_chain", attempt_cyclic_chain, |kind| {
+            matches!(kind, ErrorKind::MetamethodDepthExceeded { .. })
+        }),
+        ("chain_arguments", attempt_chain_arguments, |kind| {
+            matches!(kind, ErrorKind::TooManyArguments { .. })
+        }),
+        ("rust_error", attempt_rust_error, |kind| {
+            matches!(kind, ErrorKind::HostError(_))
+        }),
+        ("result_padding", attempt_result_padding, |kind| {
+            matches!(kind, ErrorKind::StackOverflow { .. })
+        }),
+        ("lua_error", attempt_lua_error, |kind| {
+            matches!(kind, ErrorKind::ScriptError { .. })
+        }),
+        ("index_number", attempt_index_number, |kind| {
+            matches!(kind, ErrorKind::TypeError(_))
+        }),
+        ("index_false", attempt_index_false, |kind| {
+            matches!(kind, ErrorKind::TypeError(_))
+        }),
+        ("index_cycle", attempt_index_cycle, |kind| {
+            matches!(kind, ErrorKind::MetamethodDepthExceeded { .. })
+        }),
+        ("index_rust", attempt_index_rust, |kind| {
+            matches!(kind, ErrorKind::HostError(_))
+        }),
+        ("render_table", attempt_render_table, |kind| {
+            matches!(
+                kind,
+                ErrorKind::LibraryError(LibraryError::TostringMustReturnString)
+            )
+        }),
+        ("render_fail", attempt_render_fail, |kind| {
+            matches!(kind, ErrorKind::HostError(_))
+        }),
+    ];
+    for (name, attempt, expected) in cases {
+        for mode in [Mode::Host, Mode::Callback, Mode::FromLua] {
+            let (error, notifications) = run_attempt(attempt, mode);
+            assert!(expected(error.kind()), "{name} {mode:?}: {error:?}");
+            // The one notification is the error the caller received.
+            assert_eq!(notifications, vec![error.to_string()], "{name} {mode:?}");
+            if name == "lua_error" {
+                // Raised in its own frame, which locates it.
+                assert_eq!(error.source_name(), Some(b"setup".as_slice()));
+                let callers = usize::from(matches!(mode, Mode::FromLua));
+                assert_eq!(error.stack_trace().len(), 1 + callers, "{name} {mode:?}");
+            } else if let Mode::FromLua = mode {
+                // Located at the script line whose call reached the callback.
+                assert_eq!(error.line_num(), 2, "{name}: {error}");
+                assert_eq!(error.source_name(), Some(b"swallow-caller".as_slice()));
+                assert_eq!(error.stack_trace().len(), 1, "{name}: {error}");
+                assert_eq!(error.stack_trace()[0].line, 2, "{name}");
+            } else {
+                // No Lua activation encloses the failure.
+                assert!(error.stack_trace().is_empty(), "{name} {mode:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn host_api_misuse_does_not_notify_at_any_depth() {
+    let cases: [(&str, Attempt); 3] = [
+        ("get_table_bad_index", attempt_get_table_bad_index),
+        ("get_table_missing_key", attempt_get_table_missing_key),
+        ("tostring_bad_index", attempt_tostring_bad_index),
+    ];
+    for (name, attempt) in cases {
+        for mode in [Mode::Host, Mode::Callback, Mode::FromLua] {
+            let (error, notifications) = run_attempt(attempt, mode);
+            assert!(
+                matches!(error.kind(), ErrorKind::InvalidStackIndex { .. }),
+                "{name} {mode:?}: {error:?}"
+            );
+            assert!(
+                notifications.is_empty(),
+                "{name} {mode:?}: {notifications:?}"
+            );
+        }
+    }
+}
+
+/// Each level calls itself again through `State::call` until the native
+/// call depth limit refuses the call; the deepest level handles that error.
+fn recurse_until_refused(state: &mut State) -> dellingr::Result<u8> {
+    state.push_rust_fn(recurse_until_refused)?;
+    if let Err(error) = state.call(ArgCount::Fixed(0), RetCount::Fixed(0)) {
+        state
+            .user_data_mut::<Vec<Error>>()
+            .ok_or_else(|| Error::without_location(ErrorKind::HostError("no slot".into())))?
+            .push(error);
+    }
+    Ok(0)
+}
+
+#[test]
+fn handled_native_call_depth_refusal_notifies_once() {
+    stack::on_limit_test_stack("handled_native_call_depth_refusal", || {
+        for from_lua in [false, true] {
+            let notifications = Arc::new(Mutex::new(Vec::new()));
+            let mut state = State::with_callbacks(Box::new(Recorder(Arc::clone(&notifications))));
+            state.set_user_data(Vec::<Error>::new());
+            if from_lua {
+                state.push_rust_fn(recurse_until_refused).unwrap();
+                state.set_global("recurse").unwrap();
+                dellingr::Program::compile("local before = 1\nrecurse()", Some(b"depth-caller"))
+                    .and_then(|program| state.load(&program))
+                    .unwrap();
+            } else {
+                state.push_rust_fn(recurse_until_refused).unwrap();
+            }
+            state
+                .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+                .expect("the deepest level handles the refusal");
+            let swallowed = std::mem::take(state.user_data_mut::<Vec<Error>>().unwrap());
+            assert_eq!(swallowed.len(), 1);
+            let error = &swallowed[0];
+            assert!(
+                matches!(error.kind(), ErrorKind::NativeCallDepthExceeded { .. }),
+                "{error:?}"
+            );
+            assert_eq!(*notifications.lock().unwrap(), vec![error.to_string()]);
+            if from_lua {
+                assert_eq!(error.line_num(), 2);
+                assert_eq!(error.source_name(), Some(b"depth-caller".as_slice()));
+            }
+            assert_eq!(state.get_top(), 0);
+        }
+    });
 }

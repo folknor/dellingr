@@ -74,3 +74,23 @@ the user reopens it.
 
 The hunter calls the second a patch over a leaky abstraction; the first removes
 the class of bug.
+
+## LIB-002 - Default `table.sort` may claim comparison errors raised inside `__index` handlers
+
+A lateral from the RT-007 resolution (2026-10-23). Read from the code, not yet
+confirmed by a test.
+
+**Mechanism.** `table_sort_result` (table.rs) tags every
+`TypeError::Comparison` error with `LibraryFunction::Sort` when no comparator
+was given. A default sort over a proxy table reads its elements through
+`__index`, so a comparison error raised by Lua code inside that handler (for
+example `if a < b` on mismatched types) would come back labelled as sort's own
+comparison failure, which points the script author at the wrong code.
+
+**Host-visible split.** `on_error` reports the error before the tag is added,
+so the notification and the error returned from `call()` differ in that
+attribution.
+
+**Direction.** First write a test that confirms it. If it holds, tag only the
+comparisons sort itself performs (at the comparison site, not on every error
+leaving the sort) and leave errors from nested handlers untouched.

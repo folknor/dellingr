@@ -210,52 +210,6 @@ and unwinding closes those upvalues.
 Admission then fails up front, as limits.md describes. If the headroom is not
 wanted, fix the comment and limits.md to list the instructions that still check.
 
-## RT-007 - `on_error` fires for a swallowed nested error only if it came from a Lua frame
-
-From the `vm-core` hunter.
-
-**Claim broken.** `HostCallbacks::on_error` (src/host.rs) is "Fired exactly once
-per error, in addition to that error being returned from `call()`". It lists
-"direct calls of non-callable values", `__call` chains and "result padding" as
-covered.
-
-**Mechanism.** How reporting is decided:
-
-- An error that surfaces inside a Lua frame is reported unconditionally by
-  `unwind_invocation` -> `report_frame_error` -> `host_error`.
-- An error raised at a call boundary goes through `fail_call` ->
-  `report_call_error`. That reports only when `is_outermost_host_boundary()`
-  holds (`call_depth == 0 && active_rust_fn.is_none()`). Otherwise reporting is
-  left to "the enclosing activation or callback", which reports only if the
-  error propagates back to it.
-
-So when a Rust callback calls `state.call(...)` and handles the `Err` instead of
-returning it, the outcome depends on where the nested error came from:
-
-- If the callee is a Lua function that raises (`error()`, a type error, the
-  budget), `on_error` fires once.
-- If the callee is a non-callable value, a `__call` chain that hits
-  `MetamethodDepthExceeded` or `TooManyArguments`, or a Rust function that
-  returns `Err`, or if a fixed result count's nil padding overflows the stack,
-  or the call is refused with `NativeCallDepthExceeded`, then `on_error` never
-  fires, although `call()` returned the error.
-
-`tests/host_error_reporting.rs` covers only callbacks that propagate the nested
-error (`rust_callback_propagating_nested_*`), where both kinds come out at
-exactly one. There is no swallowing case.
-
-**Deferred (user, 2026-10-23).**
-
-**Direction.** Decide which rule is the contract:
-
-- "Report at the first boundary that returns it to code that may continue": then
-  `fail_call` reports whenever it returns into a callback, not only at the
-  outermost boundary. `mark_reported` already makes later boundaries idempotent.
-- "Report only what reaches the host": then the Lua-frame unwind must stop
-  reporting unconditionally.
-
-Then make the `on_error` doc say which one it is.
-
 ## RT-014 - Every slow-path entry repeats the fast-path lookup
 
 From the `dispatch` hunter (its L1) and the `tables` hunter (its L2). Raised as

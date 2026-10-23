@@ -1276,6 +1276,14 @@ impl Error {
         })
     }
 
+    /// Whether `on_error` has already been notified for this error.
+    pub(crate) fn is_reported(&self) -> bool {
+        self.0
+            .context
+            .as_deref()
+            .is_some_and(|context| context.reported)
+    }
+
     pub(crate) fn mark_reported(&mut self) -> bool {
         let context = self.context_mut();
         let first_report = !context.reported;
