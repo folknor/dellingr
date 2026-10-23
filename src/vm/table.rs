@@ -1337,23 +1337,34 @@ impl Table {
     /// the hash part. A nil value is still a structural append: constructors
     /// and `table.insert` inside a full sequence extend the array with it.
     /// Ordinary nil writes never reach here.
+    #[inline]
     fn append(&mut self, value: Val) -> std::result::Result<(), TableError> {
-        self.check_vlen_growth(1)?;
-        self.prepare_append()?;
-        if self.hash_live_len() == 0 {
-            // FIFO appends usually reuse capacity after dropping the dead
-            // prefix. Do not repeat the logical growth check or enter the
-            // hash migration preflight for this single-slot push.
-            if self.array.len() == self.array.capacity() {
-                self.reserve_array(self.array.len() + 1)?;
-            }
-            self.vlen += 1;
-            self.array.push(value);
-            self.array_live += usize::from(!matches!(value, Val::Nil));
-            #[cfg(debug_assertions)]
-            self.debug_assert_invariants();
-            return Ok(());
+        self.advance_lead();
+        let len = self.array.len();
+        if self.vlen == MAX_ARRAY_LEN
+            || self.array_live == 0
+            || self.lead * 2 >= len
+            || self.base + len < self.vlen
+            || len == self.array.capacity()
+            || self.hash_live_len() != 0
+        {
+            return self.append_slow(value);
         }
+        self.vlen += 1;
+        self.array.push(value);
+        self.array_live += usize::from(!matches!(value, Val::Nil));
+        #[cfg(debug_assertions)]
+        self.debug_assert_invariants();
+        Ok(())
+    }
+
+    /// Finish an append after lead catch-up when window maintenance, growth
+    /// or hash migration is needed. Keep fallible allocation off the hot path.
+    #[cold]
+    #[inline(never)]
+    fn append_slow(&mut self, value: Val) -> std::result::Result<(), TableError> {
+        self.check_vlen_growth(1)?;
+        self.prepare_append_after_lead()?;
         self.reserve_append()?;
         self.vlen += 1;
         self.array.push(value);
@@ -1369,6 +1380,14 @@ impl Table {
     /// clears keys never sees the window move.
     fn prepare_append(&mut self) -> std::result::Result<(), TableError> {
         self.advance_lead();
+        self.prepare_append_after_lead()
+    }
+
+    /// Release dead storage and fill a saved nil tail after lead catch-up.
+    /// Not cold: `prepare_list_append` reaches it once per constructor batch
+    /// at the append position. The cold path is `append_slow`.
+    #[inline(never)]
+    fn prepare_append_after_lead(&mut self) -> std::result::Result<(), TableError> {
         let len = self.array.len();
         if self.array_live == 0 {
             if len > 0 || self.base != self.vlen {

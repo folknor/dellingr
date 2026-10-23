@@ -317,38 +317,3 @@ since annotations moved (`get_table_unguarded` lost its `hotpath::measure`).
 Fallible table growth also reshaped `append`, `insert` and
 `try_insert_table_direct` (inlined into `Frame::run`), so the
 `native_bytes_per_level` comparison covers that too.
-
-## RT-023 - Fallible array growth made the FIFO workload about a third slower
-
-**Measured** on plantasjen (performance governor), `brokkr dellingr --bench`,
-interleaved A/B cells, bench/ workloads, 100 ms reporting granularity:
-
-| workload | bc4f1bf (before) | 9ae4e4b (fallible growth) | 717edae (plus live count) |
-|---|---|---|---|
-| queue | 2101, 2201, 2101, 2101 | 2701, 2801 | 2801, 2801, 2801 |
-| fill | 2601, 2601, 2501 | - | 2701, 2601, 2601 |
-| mixed | 3501 | - | 3601 |
-| record_tables | 3901 | - | 3801 |
-| benchmark | 6401 | - | 6401 |
-
-`queue` (append at the tail, nil write at the head, so the dead prefix is
-dropped repeatedly and the window moves) regressed by about 700 ms, roughly
-+33%, sign-consistent in every pair, and the regression arrived with 9ae4e4b,
-the fallible-growth commit; the live count added little or nothing on top.
-Plain appends (`fill`) and the other table workloads are flat within the
-reporting step. So the cost is on the FIFO path specifically, not on appends
-in general: look at what fallible growth added around dead-prefix release and
-window moves - `reserve_append` / `try_reserve` sizing against a window that
-`prepare_append` is about to shrink, `append_growth` / `check_vlen_growth`
-per append, and any reserve that now runs before `drop_dead_prefix` and so
-reallocates instead of reusing the freed prefix. The `--hotpath` profile of
-examples/tables/queue.lua at 717edae shows only `table::insert` at about 10%
-of its instrumented run, since the growth helpers are inlined.
-
-Also from the third wave's review, outside the FIFO path: for a table whose
-hash part has live entries, `append_growth` looks up `vlen + 2` to count the
-migration run and `migrate_from_hash` looks the same key up again; folding the
-count into the migration walk removes one lookup per such append.
-
-Fixing this must keep growth fallible. Verify with the same interleaved
-`queue` cells against bc4f1bf.
