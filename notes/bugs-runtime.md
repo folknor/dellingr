@@ -19,138 +19,6 @@ hunters read the code statically and built or ran nothing, so every repro here
 is traced by hand, not executed. The `tables` hunter asks that each repro become
 a test before anyone acts on it.
 
-## RT-001 - Whether an instruction succeeds depends on inline-cache history and syntax (replay divergence)
-
-From the `dispatch` hunter, rated medium: it breaks determinism, but only at a
-limit edge. The sticky-miss mechanism it rests on was also reported by the
-`tables` hunter (as a performance issue, its L1) and by the `dispatch` hunter's
-own lateral L2. Those accounts are merged here.
-
-**Claims broken**
-
-- docs/determinism.md: "The same script and inputs produce the same result and
-  the same cost on a given build." A save and load in between must not change
-  results. That is the replay contract, and the reason caches are kept out of
-  snapshots.
-- The `RuntimeCaches` doc in caches.rs presents caches as an unobservable
-  acceleration: rebuilt cold on load, cleared on collection, with "a hit trusts
-  a matching handle". Being cold is observable here.
-- docs/limits.md `MAX_METAMETHOD_DEPTH`: "active steps in an index, newindex or
-  non-function call chain". Whether a one-step `__index` lookup counts depends
-  on whether the site was written `.k` or `["k"]`, and on cache history.
-
-**Two routes for one lookup.** For `obj.k` or `obj:k()` on a table whose raw
-lookup misses and whose metatable `__index` is a table, `reg_get_field` has two
-routes:
-
-- **Direct route** (`get_field_direct` -> `get_index_table_field_direct`). It
-  answers from the `__index` table with no temporaries, no
-  `with_metamethod_depth` and no stack check.
-- **Slow route** (`get_field_slow` -> `instr_get_field` -> `get_table_with_key`
-  -> `handle_index_metamethod`). It needs one slot above the frame top
-  (`check_stack_space(1)` in `get_field_slow`) and enters
-  `with_metamethod_depth`, which refuses with `MetamethodDepthExceeded` when
-  `metamethod_depth >= MAX_METAMETHOD_DEPTH`.
-
-**Cache state picks the route.** `get_index_table_field_direct` begins with:
-
-```rust
-if cache
-    .and_then(FieldLookupCacheSlot::get_method)
-    .is_some_and(|entry| entry.method_index.is_none())
-{
-    return None;
-}
-```
-
-This check runs before any validation, and `set_method` is only called further
-down the same function, so the entry is never replaced. The miss is not
-revalidated against the method table's version, and it is not keyed on the
-receiver's metatable. A miss entry is therefore permanent for the site. It is
-written whenever the site once saw any of these:
-
-- a receiver whose `__index` is a function;
-- a receiver whose `__index` is a non-table;
-- a receiver whose `__index` table lacked the key. That is ordinary two-level
-  inheritance: `Derived.__index = Derived`,
-  `setmetatable(Derived, {__index = Base})`, then a `Base` method called on a
-  `Derived` instance.
-
-From then on every receiver at that site takes the slow route, including
-receivers whose method is one level up. With a cold cache (a fresh closure
-runtime, or any State after `load_state`, because caches "are never serialized
-and are rebuilt cold when a snapshot is loaded"), the same receiver takes the
-direct route. The `Some(None)` "known miss" arms in
-`get_cached_index_table_field` cannot be reached from its only caller.
-
-**Divergence at the limit edges.** The same instruction on the same receiver
-succeeds or fails depending on which receivers the site saw earlier:
-
-- **Metamethod depth at the limit.** A script reaches it without native
-  recursion. Lua-to-Lua recursion through a non-function `__call` chain holds
-  one chain unit per level: `obj()` where `obj`'s `__call` is a table whose
-  `__call` is a Lua function. `begin_callable_call` charges the unit and hands
-  it to the admitted record, so 200 levels (`MAX_METAMETHOD_DEPTH`, well under
-  `MAX_CALL_DEPTH` = 1000) sit at the limit with native depth 1. There,
-  `self.name` on a one-level class instance works with a cold cache and raises
-  `MetamethodDepthExceeded` with a warm miss cache.
-- **Stack cap.** Admission reserves whole frames. `max_stack` is a u16, and call
-  arguments nested in call arguments push it into the hundreds or thousands, so
-  `MAX_CALL_DEPTH` frames can reach `MAX_STACK_SIZE` from script alone (a host
-  can also push there). With the frame top at the cap, the same `obj.k` succeeds
-  through the direct route and raises `StackOverflow` through the slow route.
-
-A continuous run and a run resumed from a snapshot of the same logical state
-therefore diverge: one kills the callback, the other continues.
-
-**Syntax picks the route too, with no caches involved.** `reg_get_table` has no
-direct `__index` route; its fast path covers only a raw hit or a table without
-a metatable. At the depth limit, `obj.k` succeeds and `obj["k"]` raises
-`MetamethodDepthExceeded`. String receivers are a third variant:
-`index_string`'s first step into the string library table takes no depth unit
-at all, cached or not.
-
-**Performance side of the same mechanism.** Results stay correct away from the
-limits, but the cost is real. notes/optimizations.md tracks the sticky miss as
-"vanishingly rare"; the `dispatch` hunter argues that polymorphic OOP makes it
-ordinary. One inherited (two-level) method call through a `self:m()` site that
-serves several classes disables the IC for every class at that site, including
-the one-level ones. The `tables` hunter's repro:
-
-```lua
-local Base = {}
-local o = setmetatable({}, {__index = Base})
-local function get(x) return x.greet end
-get(o)              -- miss is cached as "method_index = None"
-Base.greet = print
-for i = 1, 1e6 do get(o) end   -- always the slow path, for every receiver
-```
-
-**Deferred (user, 2026-10-23),** together with RT-002 and the register-native
-slow-path rewrite they share. When reopened, the user's ruling on the depth
-question is: a non-nesting `__index` table step never counts against the depth
-limit; only steps that recurse take a unit, on every route.
-
-**Direction**
-
-- Decide what one non-nesting `__index` table step costs against the depth
-  limit, and make every route implement that one rule. Either never count it
-  (only steps that recurse, such as a second table level or a handler call,
-  take a unit), or always count it (the direct route then checks the limit
-  too). The first matches what the direct route does today and needs no stack.
-- Stop the sticky miss from deciding the route. Either re-resolve on a miss
-  entry, revalidate negative entries against the version (the check is already
-  there) and let them repopulate, drop the early return and let
-  `get_cached_index_table_field`'s validation handle it, or stop caching misses.
-- Structurally: the slow paths exist only to reuse the stack-protocol helpers
-  (`instr_get_field`, `instr_set_field`, `instr_get_table`, `instr_length`).
-  Those helpers repeat the fast-path lookups and need scratch for operands that
-  are already rooted in registers. Rewriting them register-native, with
-  operands by value, results written to `dst`, and stack use only for an actual
-  handler call window, removes this whole class of route-dependent behaviour.
-  It also removes the double lookup in RT-014. RT-002 covers the slow route's
-  stack scratch.
-
 ## RT-002 - "Its bytecode never checks it again" is false: register ops still fail StackOverflow mid-body
 
 From the `dispatch` hunter, rated low to medium: a contract statement is wrong,
@@ -178,12 +46,22 @@ the frame top and check the cap. None of them is a metamethod path:
   operand above the frame, then concatenates there. So `a .. b .. c` needs 3
   free slots above a frame that already owns `a`, `b` and `c`.
 - Every slow path needs scratch: `get_field_slow` 1, `get_table_slow` 2,
-  `set_field_slow` 2, `set_table_slow` 3, `len_slow` 1, plus 3 or 4 more for a
-  handler call. Through RT-001 this need depends on cache state.
-- `index_string`'s cache-hit path does `check_stack_space(1)` and a push, which
-  the register path then pops. notes/optimizations.md already tracks "string
-  method calls always take the stack slow path"; this is the same scratch
-  dependency.
+  `set_field_slow` 2, `set_table_slow` 3, `len_slow` 1, plus 1 for an
+  `__index` result and 3 or 4 more for a handler call (an `__index` chain of
+  tables no longer needs a slot per table). Which reads take a slow path no
+  longer depends on cache state, but it still depends on spelling: at the cap,
+  `obj.k` through a one-level `__index` answers in its register, while
+  `obj["k"]` (no direct `__index` route in `reg_get_table`) and every string
+  receiver take a slow path and can raise `StackOverflow`.
+  `tests/index_depth_routes.rs` pins only that cache history does not matter,
+  so this rewrite may change those outcomes. Writes split the same way:
+  `t.newkey = v` on a plain table always takes `set_field_slow` (2 scratch
+  slots), because the direct store route only updates existing keys, while
+  `t[k] = v` inserts directly, so at the cap only the first spelling raises.
+- `index_string`'s cache-hit path (`string_index_handler`) does
+  `check_stack_space(1)` and a push, which the register path then pops.
+  notes/optimizations.md already tracks "string method calls always take the
+  stack slow path"; this is the same scratch dependency.
 
 A frame whose top sits within a few slots of `MAX_STACK_SIZE` is admitted, then
 dies partway through its body on a closure, a template constructor or a
@@ -195,7 +73,8 @@ which inserts into `open_upvalues` and allocates pool slots, before
 side-effect free. It is harmless only because the error always kills the frame,
 and unwinding closes those upvalues.
 
-**Deferred (user, 2026-10-23),** together with RT-001.
+**Deferred (user, 2026-10-23),** together with RT-014 and the register-native
+slow-path rewrite.
 
 **Direction.** Make the claim true rather than reword it:
 
@@ -215,8 +94,8 @@ wanted, fix the comment and limits.md to list the instructions that still check.
 From the `dispatch` hunter (its L1) and the `tables` hunter (its L2). Raised as
 performance observations outside the defect bar.
 
-Deferred with RT-001 (user, 2026-10-23): these go with the register-native
-rewrite.
+Deferred (user, 2026-10-23): these go with the register-native rewrite, with
+RT-002.
 
 - `get_field_slow` -> `instr_get_field` re-runs `get_table_field_direct` and
   `get_index_table_field_direct`, both of which just failed in
@@ -225,5 +104,30 @@ rewrite.
   `try_set_field_direct`.
 - Every `__index` function or two-level chain read therefore pays the lookups
   twice, plus the push and pop of a copy of an already-rooted register. This is
-  the same layering as RT-001 and RT-002, and the register-native rewrite
-  proposed there removes it.
+  the same layering as RT-002, and the register-native rewrite proposed there
+  removes it.
+- Since the method cache stopped caching misses (a miss could not be proved
+  exactly as cheaply as the lookup itself), a two-level inheritance site pays
+  the direct attempt in full, twice per read. Measured 2026-10-23 on
+  plantasjen against 4a722cf, `bench/method_chain.lua` (a monomorphic `s:inc()`
+  inherited two levels up) is 14% slower, warm medians 75.8 ms vs 86.5 ms; an
+  attribution build that skipped only the repeated attempt saved about 8 ms.
+  Removing the double lookup is the recovery; do not bring back an
+  unvalidated miss entry.
+
+## RT-015 - A terminal `__newindex` table step still takes a metamethod-depth unit
+
+A residual of the RT-001 resolution (2026-10-23). The read-side rule is now
+"a terminal step is free": an `__index` table that answers from its own
+contents takes no depth unit, and only steps that continue the chain or call a
+handler hold one. The write side was not covered by that ruling and still
+charges a unit for every `__newindex` table step, terminal or not. So at the
+depth limit `obj.k` through a one-level `__index` table succeeds while
+`obj.k = v` through a one-level `__newindex` table raises
+`MetamethodDepthExceeded`.
+
+**Direction.** Decide whether the write side follows the same rule. If it
+does, apply it on every store route (`.k`, `["k"]`, host `set_table`) and pin it
+with limit-edge tests like `tests/index_depth_routes.rs`; if it does not,
+docs/limits.md's `MAX_METAMETHOD_DEPTH` wording should say why reads and writes
+differ.

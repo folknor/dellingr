@@ -1724,7 +1724,7 @@ mod runtime_tests {
         fn handles(self) -> Vec<Val> {
             match self {
                 Self::Field(e) | Self::SetField(e) => vec![Val::Obj(e.table)],
-                Self::Method(e) => vec![Val::Obj(e.receiver_metatable), e.index_handler],
+                Self::Method(e) => vec![Val::Obj(e.receiver_metatable), Val::Obj(e.method_table)],
                 Self::StringMethod(e) => vec![Val::Obj(e.string_lib)],
                 Self::Tfor(e) => vec![Val::Obj(e.table)],
             }
@@ -1765,9 +1765,10 @@ mod runtime_tests {
     /// Each family is warmed against objects that then become unreachable
     /// while the functions holding the sites stay reachable, and against
     /// objects that stay alive. Method entries name two handles, so each is
-    /// also exercised dying alone: handlers of every kind (table, function,
-    /// string) replaced under a surviving metatable, and a dead metatable
-    /// whose handler survives.
+    /// also exercised dying alone: a method table replaced under a surviving
+    /// metatable, and a dead metatable whose method table survives. Method
+    /// entries cache hits only, so a miss and function or string handlers
+    /// leave none.
     #[test]
     fn collection_clears_cache_entries_naming_freed_objects() {
         let mut state = State::new();
@@ -1778,7 +1779,8 @@ mod runtime_tests {
              function method(t) return t.m end \
              function smethod(s) return s.up end \
              function iter(t) for _ in pairs(t) do end end \
-             function thandler(t) return t.z end \
+             function thandler(t) return t.m end \
+             function tabsent(t) return t.z end \
              function fhandler(t) return t.z end \
              function shandler(t) return t.z end \
              function mtdead(t) return t.m end \
@@ -1794,10 +1796,12 @@ mod runtime_tests {
              mt_t = { __index = { m = 1 } } \
              mt_f = { __index = function() return 1 end } \
              mt_s = { __index = 'h' .. n } \
+             mt_a = { __index = {} } \
              thandler(setmetatable({}, mt_t)) \
+             tabsent(setmetatable({}, mt_a)) \
              fhandler(setmetatable({}, mt_f)) \
              shandler(setmetatable({}, mt_s)) \
-             mt_t.__index = nil mt_f.__index = nil mt_s.__index = nil \
+             mt_t.__index = nil mt_a.__index = nil mt_f.__index = nil mt_s.__index = nil \
              keep_handler = { m = 1 } \
              mtdead(setmetatable({}, { __index = keep_handler })) \
              function get_live(t) return t.k end \
@@ -1820,19 +1824,6 @@ mod runtime_tests {
             .expect("cache warmup runs");
 
         let before = cache_cells(&state);
-        // Method handler kinds, read while every handler still resolves.
-        let handler_kinds: Vec<_> = before
-            .iter()
-            .map(|(_, cell)| match cell {
-                CachedEntry::Method(e) => match e.index_handler {
-                    Val::Obj(ptr) if state.heap.as_table_ref(ptr).is_some() => "table",
-                    Val::Obj(_) => "function",
-                    Val::Str(_) => "string",
-                    _ => "other",
-                },
-                _ => "",
-            })
-            .collect();
         state.gc_collect();
         let after = cache_cells(&state);
 
@@ -1857,29 +1848,28 @@ mod runtime_tests {
                 "{family}: no warmed entry named only survivors"
             );
         }
-        for (kind, label) in [
-            ("table", "a table handler"),
-            ("function", "a function handler"),
-            ("string", "a string handler"),
-        ] {
-            assert!(
-                before.iter().zip(&handler_kinds).any(|((_, cell), k)| {
-                    *k == kind
-                        && matches!(cell, CachedEntry::Method(e)
-                            if live(&Val::Obj(e.receiver_metatable)) && !live(&e.index_handler))
-                }),
-                "no method entry had {label} freed under a surviving metatable"
-            );
-        }
         assert!(
             before
                 .iter()
                 .any(|(_, cell)| matches!(cell, CachedEntry::Method(e)
-                if !live(&Val::Obj(e.receiver_metatable))
-                    && matches!(e.index_handler, Val::Obj(_))
-                    && live(&e.index_handler))),
-            "no method entry had a freed metatable with a surviving handler"
+                if live(&Val::Obj(e.receiver_metatable)) && !live(&Val::Obj(e.method_table)))),
+            "no method entry had its method table freed under a surviving metatable"
         );
+        assert!(
+            before
+                .iter()
+                .any(|(_, cell)| matches!(cell, CachedEntry::Method(e)
+                if !live(&Val::Obj(e.receiver_metatable)) && live(&Val::Obj(e.method_table)))),
+            "no method entry had a freed metatable with a surviving method table"
+        );
+        let method_entries = before
+            .iter()
+            .filter(|(_, cell)| matches!(cell, CachedEntry::Method(_)))
+            .count();
+        // method, thandler, mtdead and method_live; the miss behind tabsent
+        // and the function and string handlers behind fhandler and shandler
+        // are never cached.
+        assert_eq!(method_entries, 4, "only proven hits are cached");
 
         for (key, cell) in &before {
             let kept = after.iter().find(|(k, _)| k == key).map(|(_, c)| c);

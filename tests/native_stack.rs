@@ -155,12 +155,14 @@ const SCENARIOS: &[Scenario] = &[
         raises: false,
     },
     Scenario {
+        // The library table's own __index nests, so that step holds a unit
+        // as well as the function handler's.
         name: "string_library_index",
         setup: "setmetatable(string, {__index = function() return HANDLER() end})",
         step: "HANDLER = function() DESCEND return 4 end
             if ('x').missing ~= 4 then error('string library') end",
         native: 1,
-        meta: 1,
+        meta: 2,
         raises: false,
     },
     Scenario {
@@ -698,7 +700,8 @@ const CHAINS: &[Chain] = &[
     },
     Chain {
         // Alternating string and table steps: the string metatable's
-        // __index is a table whose own __index is a string.
+        // __index is a table whose own __index is a string. Both steps nest,
+        // so each takes a unit.
         name: "string_table",
         held: false,
         lua: r#"function top()
@@ -761,10 +764,12 @@ const LEAVES: &[Leaf] = &[
         outcome: Outcome::NativeRefused,
     },
     Leaf {
+        // A step that nests: the outer handler table dispatches its own
+        // __index. A one-level miss is terminal and takes no unit.
         name: "meta_refused",
         headroom: 0,
         meta_room: false,
-        lua: "local _ = setmetatable({}, {__index = {}}).x",
+        lua: "local _ = setmetatable({}, {__index = setmetatable({}, {__index = {}})}).x",
         outcome: Outcome::MetaRefused,
     },
     Leaf {

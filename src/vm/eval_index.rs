@@ -11,30 +11,13 @@ use super::caches::{
     StringMethodCacheEntry,
 };
 use super::frame::Frame;
+use super::metamethod::{IndexStart, IndexTarget};
 use super::object::ObjectPtr;
 use crate::instr::{ArgCount, RetCount};
 
 /// Global names are verified UTF-8 at load time; this is not fallible host input.
 pub(super) fn verified_global_name(bytes: &[u8]) -> &str {
     str::from_utf8(bytes).expect("verified global name is UTF-8")
-}
-
-impl MethodLookupCacheEntry {
-    fn new(
-        receiver_metatable: ObjectPtr,
-        index_field_index: usize,
-        index_handler: Val,
-        method_table_version: u64,
-        method_index: Option<usize>,
-    ) -> Self {
-        Self {
-            receiver_metatable,
-            index_field_index,
-            index_handler,
-            method_table_version,
-            method_index,
-        }
-    }
 }
 
 impl State {
@@ -56,21 +39,21 @@ impl State {
         // preflight. Metamethod and string-library helpers check their own
         // temporary stack growth.
         if let Some(ptr) = val.as_object_ptr()
-            && let Some((direct, has_metatable)) = self.get_table_field_direct(ptr, key, cache)
+            && let Some((direct, metatable)) = self.get_table_field_direct(ptr, key, cache)
         {
             if let Some(result) = direct {
                 self.push_unchecked(result);
                 return Ok(());
             }
 
-            if !has_metatable {
+            let Some(metatable) = metatable else {
                 // A miss on a plain table is nil, exactly as `t["k"]` and
                 // `rawget` see it.
                 self.push_unchecked(Val::Nil);
                 return Ok(());
-            }
+            };
 
-            if let Some(result) = self.get_index_table_field_direct(ptr, key, cache) {
+            if let Some(result) = self.get_index_table_field_direct(metatable, key, cache) {
                 self.push_unchecked(result);
                 return Ok(());
             }
@@ -101,13 +84,16 @@ impl State {
     /// working, and a script assigning `getmetatable("").__index` redirects
     /// it. A table `__index` is indexed with its own metamethods, a function is
     /// called as `__index(receiver, key)`, and a string is indexed again
-    /// (bounded by the metamethod depth limit). Without a string metatable
+    /// (bounded by the metamethod depth limit, under the same rule as table
+    /// receivers: a terminal table step is free, every other step takes a
+    /// unit). Without a string metatable
     /// (`State::raw`) or with a nil `__index`, indexing a string is the usual
     /// "attempt to index a string value" error.
     ///
     /// Receiver and key are rooted here across dispatch-time interning. The
-    /// final result grows the stack by one slot, and table/function dispatch
-    /// needs additional temporary room; every push is preflighted here.
+    /// final result grows the stack by one slot, which is all a table step
+    /// needs; a function handler needs its three-slot call window. Every
+    /// push is preflighted (`State::walk_index_tables`).
     pub(super) fn index_string(
         &mut self,
         receiver: Val,
@@ -116,12 +102,50 @@ impl State {
         local_cost: &mut u64,
         handler_called: &mut bool,
     ) -> Result<()> {
+        let Some(handler) = self.string_index_handler(key, cache)? else {
+            return Ok(());
+        };
+
+        // The same walk a table receiver's handler takes. A terminal table
+        // step pushes only its result, one slot, as the cache hit above
+        // does: warm and cold need the same stack.
+        let mut units = 0;
+        let start = IndexStart::Handler(handler);
+        let result = match self.walk_index_tables(receiver, start, key, local_cost, &mut units) {
+            IndexTarget::Done(result) => result,
+            IndexTarget::Call => {
+                // native-call: index_string->call_unguarded
+                self.call_unguarded((ArgCount::Fixed(2), handler_called), RetCount::Fixed(1))
+            }
+            IndexTarget::Str(handler) => {
+                // native-call: index_string->index_string
+                self.index_string(handler, key, None, local_cost, handler_called)
+            }
+        };
+        self.metamethod_depth -= units;
+        result
+    }
+
+    /// The string metatable's `__index` handler for an `index_string`
+    /// lookup of `key`, or `None` when the string-method cache answered
+    /// (the method is pushed). A missing metatable or handler is the usual
+    /// "attempt to index a string value" error.
+    ///
+    /// Outlined, with the cache population, so that their temporaries stay
+    /// out of `index_string`'s frame, which stays live across a handler's
+    /// re-entry.
+    #[inline(never)]
+    fn string_index_handler(
+        &mut self,
+        key: Val,
+        cache: Option<&FieldLookupCacheSlot>,
+    ) -> Result<Option<Val>> {
         if let Some(cache) = cache
             && let Some(method) = self.get_cached_string_method(key, cache)
         {
             self.check_stack_space(1)?;
             self.push_unchecked(method);
-            return Ok(());
+            return Ok(None);
         }
 
         let Some(mt_ptr) = self.string_metatable else {
@@ -137,78 +161,26 @@ impl State {
             None => (Val::Nil, None),
         };
 
-        match handler {
-            Val::Obj(lib_ptr) if self.heap.as_table_ref(lib_ptr).is_some() => {
-                // Populate the IC from the raw slot before the lookup: when the
-                // key is present raw, the lookup below returns exactly it and
-                // runs no handler that could change the metatable.
-                if let Some(cache) = cache
-                    && let Some(shape) = shape
-                    && let Some(tbl) = self.heap.as_table_ref(lib_ptr)
-                    && let Some((index, _)) = tbl.get_with_index(&key)
-                {
-                    self.string_mt_index_shape = Some(shape);
-                    cache.set_string_method(StringMethodCacheEntry {
-                        string_lib: lib_ptr,
-                        version: tbl.version(),
-                        index,
-                    });
-                }
-                self.check_stack_space(1)?;
-                self.push_unchecked(handler);
-                let handler_idx = self.stack.len() - 1;
-                // native-call: index_string->get_table_with_key_tracking_call
-                self.get_table_with_key_tracking_call(
-                    handler_idx,
-                    key,
-                    local_cost,
-                    handler_called,
-                )?;
-                let result = self.pop_val();
-                self.pop_val();
-                // Replaces the handler popped above: net-neutral.
-                self.push_unchecked(result);
-                Ok(())
-            }
-            Val::Obj(_) | Val::RustFn(_)
-                if matches!(handler, Val::RustFn(_))
-                    || handler
-                        .as_object_ptr()
-                        .is_some_and(|ptr| self.heap.as_lua_function_ref(ptr).is_some()) =>
-            {
-                // native-call: index_string->call_string_index_handler
-                self.call_string_index_handler(handler, receiver, key, local_cost, handler_called)
-            }
-            Val::Str(_) => self.with_metamethod_depth(|state| {
-                // native-call: index_string->index_string
-                state.index_string(handler, key, None, local_cost, handler_called)
-            }),
-            Val::Nil => Err(self.type_error(TypeError::TableIndex(LuaType::String))),
-            other => Err(self.type_error(TypeError::TableIndex(other.typ(&self.heap)))),
+        if matches!(handler, Val::Nil) {
+            return Err(self.type_error(TypeError::TableIndex(LuaType::String)));
         }
-    }
-
-    /// Calls a function-valued string `__index` as `handler(receiver, key)`.
-    fn call_string_index_handler(
-        &mut self,
-        handler: Val,
-        receiver: Val,
-        key: Val,
-        local_cost: &mut u64,
-        handler_called: &mut bool,
-    ) -> Result<()> {
-        self.with_metamethod_depth(|state| {
-            // Settle batched cost and preflight first, so a rejection leaves
-            // no temporaries behind.
-            Frame::flush_local_cost(state, local_cost)?;
-            state.check_stack_space(3)?;
-            state.push_unchecked(handler);
-            state.push_unchecked(receiver);
-            state.push_unchecked(key);
-            // native-call: call_string_index_handler->call_unguarded
-            state.call_unguarded((ArgCount::Fixed(2), handler_called), RetCount::Fixed(1))?;
-            Ok(())
-        })
+        // Populate the IC from the raw slot: when the key is present raw in
+        // a library table, the walk ends at that terminal step and returns
+        // exactly it, running no handler that could change the metatable.
+        if let Some(cache) = cache
+            && let Some(shape) = shape
+            && let Some(lib_ptr) = handler.as_object_ptr()
+            && let Some(tbl) = self.heap.as_table_ref(lib_ptr)
+            && let Some((index, _)) = tbl.get_with_index(&key)
+        {
+            self.string_mt_index_shape = Some(shape);
+            cache.set_string_method(StringMethodCacheEntry {
+                string_lib: lib_ptr,
+                version: tbl.version(),
+                index,
+            });
+        }
+        Ok(Some(handler))
     }
 
     #[inline(always)]
@@ -217,9 +189,9 @@ impl State {
         ptr: ObjectPtr,
         key: Val,
         cache: Option<&FieldLookupCacheSlot>,
-    ) -> Option<(Option<Val>, bool)> {
+    ) -> Option<(Option<Val>, Option<ObjectPtr>)> {
         if let Some(val) = cache.and_then(|cache| self.get_cached_field(ptr, key, cache)) {
-            return Some((Some(val), false));
+            return Some((Some(val), None));
         }
 
         let tbl = self.heap.as_table_ref(ptr)?;
@@ -231,10 +203,10 @@ impl State {
                     index,
                 });
             }
-            return Some((Some(val), tbl.get_metatable().is_some()));
+            return Some((Some(val), None));
         }
 
-        Some((None, tbl.get_metatable().is_some()))
+        Some((None, tbl.get_metatable()))
     }
 
     #[inline(always)]
@@ -329,141 +301,97 @@ impl State {
         }
     }
 
+    /// The direct answer for a receiver whose raw lookup has already missed,
+    /// given the receiver's metatable: the key's value in the receiver's
+    /// `__index` table, when that table holds it raw. Only after the raw
+    /// lookup has proved the key absent may the method cache answer: a
+    /// receiver's version does not move when it gains a field, so nothing
+    /// cheaper proves absence there. `None` leaves every other case (no
+    /// `__index`, a handler that is not a table, a miss there, chains) to the
+    /// stack path. A raw hit there is a terminal `__index` step, which takes
+    /// no metamethod-depth unit on the stack path either
+    /// (`State::walk_index_tables`), so the two routes agree on depth; what
+    /// they still differ in is stack scratch, which the stack path needs and
+    /// this one does not.
+    ///
+    /// The method cache can only skip the lookups, never change the answer:
+    /// it holds proven hits only (`MethodLookupCacheEntry`), so whether this
+    /// route answers is a function of the heap alone, the same with a cold
+    /// cache, after a snapshot load, or after the site saw other receivers.
     #[inline(always)]
     pub(super) fn get_index_table_field_direct(
         &self,
-        ptr: ObjectPtr,
+        receiver_metatable: ObjectPtr,
         key: Val,
         cache: Option<&FieldLookupCacheSlot>,
     ) -> Option<Val> {
-        if cache
-            .and_then(FieldLookupCacheSlot::get_method)
-            .is_some_and(|entry| entry.method_index.is_none())
+        if let Some(method) = cache
+            .and_then(|cache| self.get_cached_index_table_field(receiver_metatable, key, cache))
         {
-            return None;
-        }
-
-        if let Some(cached) =
-            cache.and_then(|cache| self.get_cached_index_table_field(ptr, key, cache))
-        {
-            return cached;
+            return Some(method);
         }
 
         let index_key = self.meta_names.get(MetaName::Index);
-        let receiver_table = self.heap.as_table_ref(ptr)?;
-        let receiver_metatable = receiver_table.get_metatable()?;
         let metatable = self.heap.as_table_ref(receiver_metatable)?;
-        // Do not cache a missing __index as a direct nil result here. Even a
-        // cold direct nil would bypass get_field_slow's stack preflight;
-        // warming a miss must never decide which lookup route is taken.
-        // Removing that slow route needs the same admission/headroom contract
-        // as the register-native handler paths, rather than a sticky miss IC.
         let (index_field_index, index_handler) = metatable.get_with_index(&index_key)?;
-        let Some(index_table) = index_handler.as_object_ptr() else {
-            if let Some(cache) = cache {
-                cache.set_method(MethodLookupCacheEntry::new(
-                    receiver_metatable,
-                    index_field_index,
-                    index_handler,
-                    0,
-                    None,
-                ));
-            }
-            return None;
-        };
-        let Some(method_table) = self.heap.as_table_ref(index_table) else {
-            if let Some(cache) = cache {
-                cache.set_method(MethodLookupCacheEntry::new(
-                    receiver_metatable,
-                    index_field_index,
-                    index_handler,
-                    0,
-                    None,
-                ));
-            }
-            return None;
-        };
-        let method_table_version = method_table.version();
-        let Some((method_index, method)) = method_table.get_with_index(&key) else {
-            if let Some(cache) = cache {
-                cache.set_method(MethodLookupCacheEntry::new(
-                    receiver_metatable,
-                    index_field_index,
-                    index_handler,
-                    method_table_version,
-                    None,
-                ));
-            }
-            return None;
-        };
+        let method_table_ptr = index_handler.as_object_ptr()?;
+        let method_table = self.heap.as_table_ref(method_table_ptr)?;
+        let (method_index, method) = method_table.get_with_index(&key)?;
 
         if let Some(cache) = cache {
-            cache.set_method(MethodLookupCacheEntry::new(
+            cache.set_method(MethodLookupCacheEntry {
                 receiver_metatable,
                 index_field_index,
-                index_handler,
-                method_table_version,
-                Some(method_index),
-            ));
+                method_table: method_table_ptr,
+                method_table_version: method_table.version(),
+                method_index,
+            });
         }
 
         Some(method)
     }
 
+    /// The method-cache hit alone, for a receiver with metatable
+    /// `receiver_metatable`: it is the cached metatable, whose `__index`
+    /// slot still holds the cached table, which still holds the key at the
+    /// cached index with a live value. `None` is only "not answered here".
     #[inline(always)]
-    pub(super) fn get_cached_index_table_field(
+    fn get_cached_index_table_field(
         &self,
-        ptr: ObjectPtr,
+        receiver_metatable: ObjectPtr,
         key: Val,
         cache: &FieldLookupCacheSlot,
-    ) -> Option<Option<Val>> {
+    ) -> Option<Val> {
         let entry = cache.get_method()?;
 
         // This route depends only on the receiver, its live __index handler,
         // and the method table below. Rebinding a global or swapping global
         // environments cannot change those table references: __index = string
         // stores the table value, which cold lookup also continues to follow.
-        let receiver_table = self.heap.as_table_ref(ptr)?;
-        if receiver_table.get_metatable() != Some(entry.receiver_metatable) {
+        if receiver_metatable != entry.receiver_metatable {
             return None;
         }
-
-        let metatable = self.heap.as_table_ref(entry.receiver_metatable)?;
+        let metatable = self.heap.as_table_ref(receiver_metatable)?;
         let (index_key, index_handler) = metatable.get_index(entry.index_field_index)?;
-        if index_key != self.meta_names.get(MetaName::Index) || index_handler != entry.index_handler
+        if index_key != self.meta_names.get(MetaName::Index)
+            || index_handler != Val::Obj(entry.method_table)
         {
             return None;
         }
 
-        let Some(index_table) = entry.index_handler.as_object_ptr() else {
-            return Some(None);
-        };
-        let Some(method_table) = self.heap.as_table_ref(index_table) else {
-            return Some(None);
-        };
+        let method_table = self.heap.as_table_ref(entry.method_table)?;
         let method_table_version = method_table.version();
-        let Some(method_index) = entry.method_index else {
-            return if entry.method_table_version == method_table_version {
-                Some(None)
-            } else {
-                None
-            };
-        };
-
         if entry.method_table_version == method_table_version {
-            return method_table.get_index_value(method_index).map(Some);
+            return method_table.get_index_value(entry.method_index);
         }
 
-        let (cached_key, method) = method_table.get_index(method_index)?;
+        let (cached_key, method) = method_table.get_index(entry.method_index)?;
         if cached_key == key {
-            cache.set_method(MethodLookupCacheEntry::new(
-                entry.receiver_metatable,
-                entry.index_field_index,
-                entry.index_handler,
+            cache.set_method(MethodLookupCacheEntry {
                 method_table_version,
-                Some(method_index),
-            ));
-            Some(Some(method))
+                ..entry
+            });
+            Some(method)
         } else {
             None
         }

@@ -15,11 +15,36 @@ use crate::instr::{ArgCount, RetCount};
 
 use crate::limits::MAX_METAMETHOD_DEPTH;
 
+/// Where an `__index` walk starts (`State::walk_index_tables`).
+#[derive(Clone, Copy)]
+pub(super) enum IndexStart {
+    /// The receiver is a table: its raw lookup first, then its `__index`.
+    Receiver,
+    /// The receiver's `__index` handler, already read (a string receiver's).
+    Handler(Val),
+}
+
+/// Where an `__index` lookup goes once its table steps are done.
+pub(super) enum IndexTarget {
+    /// Resolved: the result was pushed, or the lookup failed.
+    Done(Result<()>),
+    /// A function handler: its unit is taken and its call window
+    /// `[handler, receiver, key]` pushed, for a call with two arguments and
+    /// one result.
+    Call,
+    /// A string handler, its unit taken: index that string again.
+    Str(Val),
+}
+
 impl State {
     /// Run one metamethod step while enforcing the shared recursion limit.
     ///
-    /// `__index` and `__newindex` steps count against the limit even when the
-    /// handler is a function, so a memoising `__index` that recurses through
+    /// Every `__newindex` step counts, and every `__index` step that nests:
+    /// a table that continues to its own `__index`, a string handler, or a
+    /// function handler. A terminal `__index` table step, one answered from
+    /// the table's raw contents, takes no unit on any route
+    /// (`State::handle_index_metamethod`). Function handlers count even
+    /// though they are calls, so a memoising `__index` that recurses through
     /// its own table stops within `MAX_METAMETHOD_DEPTH` levels; a function
     /// handler is also a call made from Rust, so the lower
     /// `MAX_NATIVE_CALL_DEPTH` refuses that recursion first. That is
@@ -35,6 +60,15 @@ impl State {
         &mut self,
         operation: impl FnOnce(&mut Self) -> Result<T>,
     ) -> Result<T> {
+        self.take_metamethod_unit()?;
+        let result = operation(self);
+        self.metamethod_depth -= 1;
+        result
+    }
+
+    /// Take one unit of the metamethod depth, or refuse at the limit. The
+    /// caller returns it.
+    fn take_metamethod_unit(&mut self) -> Result<()> {
         #[cfg(not(feature = "fault-injection"))]
         let injected = false;
         #[cfg(feature = "fault-injection")]
@@ -46,9 +80,7 @@ impl State {
             }));
         }
         self.metamethod_depth += 1;
-        let result = operation(self);
-        self.metamethod_depth -= 1;
-        result
+        Ok(())
     }
 
     /// Internal helper for table access with __index support.
@@ -71,140 +103,157 @@ impl State {
         local_cost: &mut u64,
         handler_called: &mut bool,
     ) -> Result<()> {
-        let table_val = self.stack[idx];
-        let obj_ptr = table_val.as_object_ptr();
-
-        // Get the value and metatable pointer in one heap access
-        let (val, mt_ptr) = match obj_ptr.and_then(|ptr| self.heap.as_table_ref(ptr)) {
-            Some(t) => {
-                let val = t.get(&key);
-                let mt_ptr = t.get_metatable();
-                (val, mt_ptr)
-            }
-            None => {
-                return Err(self.type_error(super::TypeError::TableIndex(
-                    self.stack[idx].typ(&self.heap),
-                )));
-            }
-        };
-
-        if matches!(val, Val::Nil) {
-            // Check for __index metamethod
-            if let Some(mt_ptr) = mt_ptr {
-                let index_key = self.meta_names.get(MetaName::Index);
-                let index_handler = self
-                    .heap
-                    .as_table_ref(mt_ptr)
-                    .map_or(Val::Nil, |mt| mt.get(&index_key));
-
-                if !matches!(index_handler, Val::Nil) {
-                    // native-call: get_table_with_key_tracking_call->handle_index_metamethod
-                    return self.handle_index_metamethod(
-                        index_handler,
-                        idx,
-                        key,
-                        local_cost,
-                        handler_called,
-                    );
-                }
-            }
+        let receiver = self.stack[idx];
+        if receiver
+            .as_object_ptr()
+            .and_then(|ptr| self.heap.as_table_ref(ptr))
+            .is_none()
+        {
+            return Err(self.index_handler_error(receiver));
         }
-
-        self.check_stack_space(1)?;
-        self.push_unchecked(val);
-        Ok(())
+        // native-call: get_table_with_key_tracking_call->handle_index_metamethod
+        self.handle_index_metamethod(receiver, key, local_cost, handler_called)
     }
 
-    /// Handle the __index metamethod which can be a table or a function.
+    /// The error for an `__index` handler that can be neither indexed nor
+    /// called. Kept out of line, away from the frames that stay live across
+    /// a handler's re-entry.
+    #[cold]
+    #[inline(never)]
+    fn index_handler_error(&self, handler: Val) -> super::Error {
+        self.type_error(super::TypeError::TableIndex(handler.typ(&self.heap)))
+    }
+
+    /// Resolve `receiver[key]` for a table receiver, through its `__index`
+    /// if the raw lookup misses, pushing the result.
+    ///
+    /// This is where the depth rule for `__index` lives. A table step is
+    /// terminal when the table holds the key raw or has no `__index` of its
+    /// own to continue to: it calls nothing and recurses nowhere, so it
+    /// takes no metamethod-depth unit. A table step that continues holds one
+    /// until the lookup ends, and so does a function or string handler. A
+    /// handler that can be neither indexed nor called is rejected without
+    /// one, since it recurses nowhere either. Table receivers and string
+    /// receivers (`State::index_string`) take the same walk, the register
+    /// path's direct answer covers only terminal steps, and the method cache
+    /// only skips lookups, so whether a lookup fits under the limit depends
+    /// on neither spelling (`t.k`, `t["k"]`, `t:k()`) nor cache history.
+    ///
+    /// Inlined into its only caller, so that the frame live across the
+    /// handler call is that caller's alone: the walk is outlined and has
+    /// returned, with the call window already pushed, before the call.
+    #[inline(always)]
     fn handle_index_metamethod(
         &mut self,
-        handler: Val,
-        table_idx: usize,
+        receiver: Val,
         key: Val,
         local_cost: &mut u64,
         handler_called: &mut bool,
     ) -> Result<()> {
-        self.with_metamethod_depth(|state| {
-            // native-call: handle_index_metamethod->handle_index_metamethod_inner
-            state.handle_index_metamethod_inner(handler, table_idx, key, local_cost, handler_called)
-        })
+        let mut units = 0;
+        let start = IndexStart::Receiver;
+        let result = match self.walk_index_tables(receiver, start, key, local_cost, &mut units) {
+            IndexTarget::Done(result) => result,
+            IndexTarget::Call => {
+                // native-call: handle_index_metamethod->call_unguarded
+                self.call_unguarded((ArgCount::Fixed(2), handler_called), RetCount::Fixed(1))
+            }
+            IndexTarget::Str(handler) => {
+                // native-call: handle_index_metamethod->index_string
+                self.index_string(handler, key, None, local_cost, handler_called)
+            }
+        };
+        self.metamethod_depth -= units;
+        result
     }
 
-    fn handle_index_metamethod_inner(
+    /// The part of an `__index` lookup that calls nothing
+    /// (`State::handle_index_metamethod`). Table steps run as a loop, like
+    /// the non-function `__call` steps in `State::begin_callable_call`: a
+    /// chain of tables adds no native frame per step, each table is read
+    /// once, and no code runs between the steps, so the tables passed over
+    /// need no rooting. The walk ends at a terminal step, whose result it
+    /// pushes; at a function handler, for which it takes the unit, settles
+    /// batched cost and pushes the call window `[handler, receiver, key]`
+    /// with the table whose metatable named it as the receiver; or at a
+    /// string handler, for which it takes the unit. Every unit it takes is
+    /// counted in `units`, for the caller to return once the lookup ends.
+    #[inline(never)]
+    pub(super) fn walk_index_tables(
         &mut self,
-        handler: Val,
-        table_idx: usize,
+        receiver: Val,
+        start: IndexStart,
         key: Val,
         local_cost: &mut u64,
-        handler_called: &mut bool,
-    ) -> Result<()> {
-        match handler {
-            Val::Obj(ptr) => {
-                // Check if it's a table or function
-                let is_table = self.heap.as_table_ref(ptr).is_some();
-                let is_function = self.heap.as_lua_function_ref(ptr).is_some();
-
-                if is_table {
-                    // __index is a table: look up key in that table
-                    self.check_stack_space(1)?;
-                    self.push_unchecked(Val::Obj(ptr));
-                    let new_idx = self.stack.len() - 1;
-                    // The enclosing boundary clears this handler temporary
-                    // if recursive lookup fails.
-                    // native-call: handle_index_metamethod_inner->get_table_with_key_tracking_call
-                    self.get_table_with_key_tracking_call(
-                        new_idx,
-                        key,
-                        local_cost,
-                        handler_called,
-                    )?;
-                    // Stack: [... __index_table, result]
-                    // Remove the __index table, keep the result
-                    let val = self.pop_val();
-                    self.pop_n(1)?;
-                    // Net-negative: two values popped above, one pushed back,
-                    // so this cannot cross the cap and needs no preflight.
-                    self.push_unchecked(val);
-                    Ok(())
-                } else if is_function {
-                    // __index is a function: call it with (table, key).
-                    // Net-positive by three slots; preflight so a rejection
-                    // leaves the operand stack exactly as it was.
-                    // Settle batched cost first too, so a budget failure
-                    // also leaves no temporaries behind.
-                    Frame::flush_local_cost(self, local_cost)?;
-                    // Cost settlement does not call user code. The receiver
-                    // remains rooted at this index until the call establishes
-                    // a separate callee frame above it.
-                    let table_val = self.stack[table_idx];
-                    self.check_stack_space(3)?;
-                    self.push_unchecked(Val::Obj(ptr));
-                    self.push_unchecked(table_val);
-                    self.push_unchecked(key);
-                    // native-call: handle_index_metamethod_inner->call_unguarded:lua
-                    self.call_unguarded((ArgCount::Fixed(2), handler_called), RetCount::Fixed(1))?;
-                    Ok(())
-                } else {
-                    Err(self
-                        .type_error(super::TypeError::TableIndex(Val::Obj(ptr).typ(&self.heap))))
+        units: &mut u32,
+    ) -> IndexTarget {
+        let index_key = self.meta_names.get(MetaName::Index);
+        let (mut receiver, mut handler, mut receiver_step) = match start {
+            IndexStart::Receiver => (receiver, receiver, true),
+            IndexStart::Handler(handler) => (receiver, handler, false),
+        };
+        loop {
+            let Some(table) = handler
+                .as_object_ptr()
+                .and_then(|ptr| self.heap.as_table_ref(ptr))
+            else {
+                let calls = match handler {
+                    Val::Obj(ptr) => self.heap.as_lua_function_ref(ptr).is_some(),
+                    Val::RustFn(_) => true,
+                    Val::Str(_) => {
+                        if let Err(error) = self.take_metamethod_unit() {
+                            return IndexTarget::Done(Err(error));
+                        }
+                        *units += 1;
+                        return IndexTarget::Str(handler);
+                    }
+                    _ => false,
+                };
+                if !calls {
+                    return IndexTarget::Done(Err(self.index_handler_error(handler)));
                 }
-            }
-            Val::RustFn(f) => {
-                // __index is a Rust function: call it with (table, key).
-                // Net-positive by three slots; preflight before any mutation.
-                Frame::flush_local_cost(self, local_cost)?;
-                let table_val = self.stack[table_idx];
-                self.check_stack_space(3)?;
-                self.push_unchecked(Val::RustFn(f));
-                self.push_unchecked(table_val);
+                if let Err(error) = self.take_metamethod_unit() {
+                    return IndexTarget::Done(Err(error));
+                }
+                *units += 1;
+                // Settle batched cost and preflight before any push, so a
+                // rejection leaves no temporaries. Cost settlement runs no
+                // user code; the receiver is rooted as an argument from here.
+                if let Err(error) = Frame::flush_local_cost(self, local_cost)
+                    .and_then(|()| self.check_stack_space(3))
+                {
+                    return IndexTarget::Done(Err(error));
+                }
+                self.push_unchecked(handler);
+                self.push_unchecked(receiver);
                 self.push_unchecked(key);
-                // native-call: handle_index_metamethod_inner->call_unguarded:rust
-                self.call_unguarded((ArgCount::Fixed(2), handler_called), RetCount::Fixed(1))?;
-                Ok(())
+                return IndexTarget::Call;
+            };
+            let val = table.get(&key);
+            let next = match (val, table.get_metatable()) {
+                (Val::Nil, Some(mt_ptr)) => self
+                    .heap
+                    .as_table_ref(mt_ptr)
+                    .map_or(Val::Nil, |mt| mt.get(&index_key)),
+                _ => Val::Nil,
+            };
+            if matches!(next, Val::Nil) {
+                return IndexTarget::Done(
+                    self.check_stack_space(1).map(|()| self.push_unchecked(val)),
+                );
             }
-            // native-call: handle_index_metamethod_inner->index_string
-            Val::Str(_) => self.index_string(handler, key, None, local_cost, handler_called),
-            _ => Err(self.type_error(super::TypeError::TableIndex(handler.typ(&self.heap)))),
+            // A table step that continues holds a unit until the lookup
+            // ends. The receiver's own lookup is not an `__index` step.
+            if receiver_step {
+                receiver_step = false;
+            } else {
+                if let Err(error) = self.take_metamethod_unit() {
+                    return IndexTarget::Done(Err(error));
+                }
+                *units += 1;
+            }
+            receiver = handler;
+            handler = next;
         }
     }
 

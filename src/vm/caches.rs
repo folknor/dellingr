@@ -65,15 +65,27 @@ pub(super) struct FieldLookupCacheEntry {
     pub(super) index: usize,
 }
 
+/// A proven hit one `__index` table up: the receiver's metatable names
+/// `method_table` as its `__index`, and that table holds the key at
+/// `method_index`.
+///
+/// Only hits are cached. A valid hit returns exactly what the uncached lookup
+/// returns, so the cache never decides which route a lookup takes, and with
+/// it whether the lookup needs stack. A miss would have to prove absence
+/// exactly to keep that, and the shape version does not move when a key is
+/// added. An exact proof is possible (no hash slot for the key, and an
+/// unchanged version and slot count), but validating it walks the same
+/// tables as the uncached miss, so measured on a two-level inheritance site
+/// it saved nothing; the miss is simply looked up again.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct MethodLookupCacheEntry {
     pub(super) receiver_metatable: ObjectPtr,
     /// Slot of `__index` in `receiver_metatable`; the key it must still hold
     /// is the State's interned `MetaName::Index`.
     pub(super) index_field_index: usize,
-    pub(super) index_handler: Val,
+    pub(super) method_table: ObjectPtr,
     pub(super) method_table_version: u64,
-    pub(super) method_index: Option<usize>,
+    pub(super) method_index: usize,
 }
 
 /// Cache for `s:method()` style calls where the receiver is a string and
@@ -140,7 +152,13 @@ impl SetFieldLookupCacheSlot {
 /// These are never shared across `State`s: cached `ObjectPtr` keys are only
 /// valid inside the heap of the State that wrote them, and version cells are
 /// keyed to that State's global environment version and table versions. They are never
-/// serialized and are rebuilt cold when a snapshot is loaded. Their handles
+/// serialized and are rebuilt cold when a snapshot is loaded, which is sound
+/// only because warmth is unobservable: an entry answers only what the
+/// uncached lookup would answer the same way, by the same route, so whether an
+/// instruction needs stack, takes a metamethod-depth unit or succeeds never
+/// depends on which values a site saw before. A negative entry has to prove
+/// absence exactly to keep that (absent globals do, by binding count); field
+/// and method entries cache hits only. Their handles
 /// are weak: every collection clears the entries naming what it freed
 /// (`drop_dead_entries`), so no entry outlives its referent.
 ///
@@ -312,14 +330,12 @@ impl CacheEntry for MethodLookupCacheEntry {
         let Self {
             receiver_metatable,
             index_field_index: _,
-            index_handler,
+            method_table,
             method_table_version: _,
             method_index: _,
         } = self;
         f(Val::Obj(*receiver_metatable));
-        // A table, function or string handler is a handle; other values
-        // are always live.
-        f(*index_handler);
+        f(Val::Obj(*method_table));
     }
 }
 

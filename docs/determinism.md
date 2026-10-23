@@ -84,6 +84,15 @@ keeps its id only if no collection ran in between. The metamethod event names
 never collected, so their ids are stable for the State's lifetime and across a
 snapshot round trip.
 
+## Inline caches
+
+Lookup sites cache what they found, but the caches are an acceleration
+only: whether an instruction succeeds, what it returns and costs, how much
+value stack it needs and how much metamethod depth it uses never depend on
+which values the site saw before. Snapshots do not save caches, so a State
+resumed from a snapshot starts them cold and continues exactly as the State
+that saved it would have.
+
 ## Garbage collection timing
 
 Collections fire on allocation-count thresholds, so their timing is

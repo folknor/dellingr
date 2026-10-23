@@ -163,6 +163,18 @@ xxh128 = "04d0824886560a272b218449d5fbdd96"
 hotpath_file = "examples/calls/method.lua"
 hotpath_xxh128 = "6372dbfbd4aea331f0642f73b0662aa5"
 
+[dellingr.workloads.method_chain]
+file = "bench/method_chain.lua"
+xxh128 = "592fe9284df75909e4e2ea2386da19b1"
+hotpath_file = "examples/calls/method_chain.lua"
+hotpath_xxh128 = "9b56093e886cde38db25b4f9103372b4"
+
+[dellingr.workloads.method_polymorphic]
+file = "bench/method_polymorphic.lua"
+xxh128 = "9a54ab4456ea475ecbb9335505a1a329"
+hotpath_file = "examples/calls/method_polymorphic.lua"
+hotpath_xxh128 = "191d9faa08b1dcc258ea0f89b583f9eb"
+
 [dellingr.workloads.write]
 file = "bench/write.lua"
 xxh128 = "e083a0a88b2838c78d0b684dd2bbd1dc"
@@ -221,14 +233,14 @@ hotpath_xxh128 = "4df913d61046b591ea1f67ce6381e776"
 # share names with inventoried functions.
 [[textlint]]
 name = "native-call-marker"
-pattern = '\b(?:append_function_replacement|append_gsub_replacement|base_ipairs_iter|base_unpack_values|begin_call|begin_callable_call|call|call_anchor|call_anchor_unguarded|call_from_lua|call_string_index_handler|call_unguarded|error_value|eval_batched|format|format_argument|get_field_slow|get_table|get_table_slow|get_table_unguarded|get_table_with_key|get_table_with_key_tracking_call|gsub_empty_pattern|gsub_lua_pattern|gsub_plain_pattern|handle_index_metamethod|handle_index_metamethod_inner|handle_newindex_metamethod|handle_newindex_metamethod_inner|index_string|insert_through_metamethods|instr_get_field|instr_get_table|instr_length|instr_set_field|instr_set_table|instr_tfor_call|instr_tfor_call_rust_fn|invoke_rust_fn|len_slow|main|move_element|push_gmatch_wrapper|reg_get_field|reg_get_table|reg_len|reg_set_field|reg_set_table|remove_through_metamethods|run|run_frame|run_invocation|sequence_len|set_field_slow|set_index|set_table|set_table_slow|set_table_with_key|sort_through_metamethods|table_sort|table_sort_heap|table_sort_less|table_sort_scratch|table_sort_sift_down|table_sort_values|table_unpack_values|to_string_with_meta|tostring_bytes|tostring_bytes_unguarded|tostring_rendering|unpack_values)\s*(?:::\s*<[^>]*>\s*)?\('
+pattern = '\b(?:append_function_replacement|append_gsub_replacement|base_ipairs_iter|base_unpack_values|begin_call|begin_callable_call|call|call_anchor|call_anchor_unguarded|call_from_lua|call_unguarded|error_value|eval_batched|format|format_argument|get_field_slow|get_table|get_table_slow|get_table_unguarded|get_table_with_key|get_table_with_key_tracking_call|gsub_empty_pattern|gsub_lua_pattern|gsub_plain_pattern|handle_index_metamethod|handle_newindex_metamethod|handle_newindex_metamethod_inner|index_string|insert_through_metamethods|instr_get_field|instr_get_table|instr_length|instr_set_field|instr_set_table|instr_tfor_call|instr_tfor_call_rust_fn|invoke_rust_fn|len_slow|main|move_element|push_gmatch_wrapper|reg_get_field|reg_get_table|reg_len|reg_set_field|reg_set_table|remove_through_metamethods|run|run_frame|run_invocation|sequence_len|set_field_slow|set_index|set_table|set_table_slow|set_table_with_key|sort_through_metamethods|table_sort|table_sort_heap|table_sort_less|table_sort_scratch|table_sort_sift_down|table_sort_values|table_unpack_values|to_string_with_meta|tostring_bytes|tostring_bytes_unguarded|tostring_rendering|unpack_values)\s*(?:::\s*<[^>]*>\s*)?\('
 paths = ["src/**/*.rs"]
 exclude = ["src/compiler/**"]
 region = "code"
 test_code = "skip"
 allow_marker = "native-call:"
 allow_marker_above = 1
-except = ['\bfn\s+(?:append_function_replacement|append_gsub_replacement|base_ipairs_iter|base_unpack_values|begin_call|begin_callable_call|call|call_anchor|call_anchor_unguarded|call_from_lua|call_string_index_handler|call_unguarded|error_value|eval_batched|format|format_argument|get_field_slow|get_table|get_table_slow|get_table_unguarded|get_table_with_key|get_table_with_key_tracking_call|gsub_empty_pattern|gsub_lua_pattern|gsub_plain_pattern|handle_index_metamethod|handle_index_metamethod_inner|handle_newindex_metamethod|handle_newindex_metamethod_inner|index_string|insert_through_metamethods|instr_get_field|instr_get_table|instr_length|instr_set_field|instr_set_table|instr_tfor_call|instr_tfor_call_rust_fn|invoke_rust_fn|len_slow|main|move_element|push_gmatch_wrapper|reg_get_field|reg_get_table|reg_len|reg_set_field|reg_set_table|remove_through_metamethods|run|run_frame|run_invocation|sequence_len|set_field_slow|set_index|set_table|set_table_slow|set_table_with_key|sort_through_metamethods|table_sort|table_sort_heap|table_sort_less|table_sort_scratch|table_sort_sift_down|table_sort_values|table_unpack_values|to_string_with_meta|tostring_bytes|tostring_bytes_unguarded|tostring_rendering|unpack_values)\b']
+except = ['\bfn\s+(?:append_function_replacement|append_gsub_replacement|base_ipairs_iter|base_unpack_values|begin_call|begin_callable_call|call|call_anchor|call_anchor_unguarded|call_from_lua|call_unguarded|error_value|eval_batched|format|format_argument|get_field_slow|get_table|get_table_slow|get_table_unguarded|get_table_with_key|get_table_with_key_tracking_call|gsub_empty_pattern|gsub_lua_pattern|gsub_plain_pattern|handle_index_metamethod|handle_newindex_metamethod|handle_newindex_metamethod_inner|index_string|insert_through_metamethods|instr_get_field|instr_get_table|instr_length|instr_set_field|instr_set_table|instr_tfor_call|instr_tfor_call_rust_fn|invoke_rust_fn|len_slow|main|move_element|push_gmatch_wrapper|reg_get_field|reg_get_table|reg_len|reg_set_field|reg_set_table|remove_through_metamethods|run|run_frame|run_invocation|sequence_len|set_field_slow|set_index|set_table|set_table_slow|set_table_with_key|sort_through_metamethods|table_sort|table_sort_heap|table_sort_less|table_sort_scratch|table_sort_sift_down|table_sort_values|table_unpack_values|to_string_with_meta|tostring_bytes|tostring_bytes_unguarded|tostring_rendering|unpack_values)\b']
 must_scan = ["src/vm/eval.rs", "src/lua_std/table.rs"]
 message = "a call to a function that can call back into Lua needs a `// native-call: <edge-id>` marker on or directly above it, and an edge in reference/native-calls.toml (see reference/native-calls.md)"
 

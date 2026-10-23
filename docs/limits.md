@@ -79,7 +79,14 @@ Violations are reported as errors at load time, never silently truncated.
   Exceeding it raises `NativeCallDepthExceeded`.
 - `MAX_STACK_SIZE`: values on the shared Lua/Rust value stack.
 - `MAX_METAMETHOD_DEPTH`: active steps in an index, newindex or
-  non-function call chain. Table-library writes through metamethods share it.
+  non-function call chain. An `__index` step counts only when it continues:
+  a handler table that answers from its own contents (it holds the key, or
+  has no `__index` to continue to) takes nothing, while one that continues
+  to its own `__index`, and a function or string handler, each take one until
+  the lookup ends. The same holds however the lookup is written (`t.k`,
+  `t["k"]`, `t:k()`), for string receivers, host reads and library reads,
+  and whatever the site looked up before. Table-library writes through
+  metamethods share the limit.
 - `MAX_ARGUMENTS`, `MAX_RESULTS`: values carried by one call or return.
   See below.
 
@@ -263,9 +270,10 @@ profile and thread size; none depends on how much native stack is left.
   and `MAX_NATIVE_CALL_DEPTH` bounds how many can be active at once. The
   host's own call is one of them, and so is a Rust callback calling another
   Rust function through `State::call`.
-- Other native recursion has its own bound: `__index` and `__newindex` table
-  chains (`MAX_METAMETHOD_DEPTH`), the parser (`MAX_SYNTAX_DEPTH`) and the
-  pattern matcher (`MAXCCALLS`).
+- Other native recursion has its own bound: `__newindex` table chains and
+  `__index` chains through strings (`MAX_METAMETHOD_DEPTH`), the parser
+  (`MAX_SYNTAX_DEPTH`) and the pattern matcher (`MAXCCALLS`). An `__index`
+  chain of tables is resolved in a loop and adds no native frame per step.
 - The counters are per State. A callback that runs another State nests that
   State's whole stack use on top of this one's, which is the embedder's to
   provision.
@@ -325,7 +333,9 @@ How `tests/native_stack.rs` validates it, on x86-64 Linux:
   paths.
 - A `__call` chain through non-function values is resolved in a loop: each
   step holds a metamethod unit while the call runs but adds no native frame,
-  so it is not a chain kind of its own.
+  so it is not a chain kind of its own. An `__index` chain of tables is
+  resolved the same way; the test still holds one across the leaf (its
+  `index` chain kind), where its units cost no native stack per step.
 - It runs in both settings, each with and without the `snapshot` feature.
   The `snapshot` runs validate that build configuration only.
 - The recurring cost per level is what its on-demand
@@ -347,6 +357,14 @@ in release with snapshot, leaving about 1.53 and 1.41 MiB respectively
 for fixed frames and transient work. This is recurring-stack headroom,
 not a measurement of the transient peak; the unchanged full-depth tests
 validate those peaks on the stated threads.
+
+A later x86-64 Linux measurement (plantasjen, on top of 4a722cf), taken when
+`__index` table steps became a loop, is recorded in the same reference
+under "`__index` walk follow-up": an `__index` table step costs no native
+stack, so the largest chain step is the `__newindex` one, 1,168 bytes in dev
+and 208 in release; the largest recurring cycle is 14,720 bytes in dev and
+3,760 in release with snapshot. The same loose bound is about 2.33 MiB in
+dev and 0.58 MiB in release with snapshot.
 
 The release sort callback retains 32 bytes of frame growth for fallible
 array and root-copy allocation. The dispatch frame is 32 bytes smaller,

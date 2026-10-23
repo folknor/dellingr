@@ -161,6 +161,9 @@ pub const MAX_NATIVE_CALL_DEPTH: u32 = 150;
 /// Maximum values on the shared Lua/Rust stack, not a host-memory quota.
 pub const MAX_STACK_SIZE: usize = 1_000_000;
 /// Maximum active steps in an index, newindex, or non-function call chain.
+/// An `__index` table that answers from its own contents is not a step; one
+/// that continues to its own `__index` is, as is a function or string
+/// handler. See docs/limits.md.
 pub const MAX_METAMETHOD_DEPTH: u32 = 200;
 /// Maximum argument count accepted by the runtime call ABI. This is a runtime
 /// cap on every call, not only on Rust callbacks: a dynamic call such as

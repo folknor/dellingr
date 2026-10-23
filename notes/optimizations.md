@@ -676,22 +676,26 @@ without any per-site cache.
 Signal: a workload where `t:insert(...)`-style sugar fires in a tight
 loop.
 
-### Method IC: refresh "no method" entries on mutation
+### Method IC: one entry per site ping-pongs between classes
 
-What: the method IC's "method_index = None" cache entry is currently
-sticky - once a callsite is flagged as "no directly-cacheable method",
-subsequent calls take the slow path forever, even if the receiver's
-metatable or its `__index` table later gains the method.
+What: the method IC holds one entry per site, and every one-level hit
+overwrites it. A `shape:area()` site serving two one-level classes in
+alternation (`bench/method_polymorphic.lua` has Circle and Square) misses
+its entry on every other call and redoes the direct lookup. A two-entry or
+small polymorphic entry would keep both.
 
-Why deferred: the slow path returns the right answer, so this is a
-performance pessimization, not a correctness issue. Refreshing requires
-running the full validation chain (metatable identity check, __index
-key/handler check, method-table version compare) on every call to a
-non-cached site, which costs more than the slow path itself for cases
-that genuinely have no resolvable method.
+Why deferred: unmeasured in isolation. The 2026-10-23 sticky-miss removal
+already made that workload 10% faster (plantasjen, against 4a722cf); the
+remaining per-call cost is a few table reads.
 
-Signal: a workload that mutates index tables to add methods after first
-access, where this miss path becomes hot. Vanishingly rare in practice.
+Signal: `--hotpath` on `examples/calls/method_polymorphic.lua` showing the
+uncached `get_index_table_field_direct` path hot.
+
+Note: caching misses was tried and dropped. An exact absence proof (no hash
+slot for the key, unchanged version and slot count) is sound but validating
+it reads as many tables as the uncached miss, so it saved nothing on
+`bench/method_chain.lua`; the cost that remains there is the repeated direct
+attempt tracked in notes/bugs-runtime.md.
 
 ### GET_FIELD slow-path cache repopulation after `__index` resolution
 

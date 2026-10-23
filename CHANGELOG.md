@@ -654,6 +654,25 @@ All notable changes to dellingr are documented here. The format follows
   saving build kept apart no longer fails as a duplicate: the folded function
   keeps the smaller of the two identities. Two such functions used as keys of
   one table still reject the load, now documented.
+- **Replay-visible:** whether an `__index` lookup succeeds at the
+  metamethod depth limit or the stack cap no longer depends on the lookup
+  site's history or on how the lookup is written. A field-read site that
+  had once resolved an inherited method, a function `__index` or a miss
+  sent every later receiver down the general path for good, so the same
+  `obj.k` at the depth limit or the stack cap succeeded on a fresh State,
+  after a snapshot load or a collection, and failed on a State that had run
+  longer; `obj["k"]` and string receivers counted the one-level step
+  differently again. The rule is now one for every route: an `__index`
+  table that answers from its own contents takes no depth unit, a table
+  that continues to its own `__index` takes one, and a function or string
+  handler takes one (`docs/limits.md`). Compared with before, one-level
+  `__index` reads at the limit now succeed on every route; a string
+  receiver whose library table continues to another `__index` takes one
+  more unit; a handler that is neither a table nor callable reports its
+  type error without taking a unit; and an `__index` chain of tables needs no
+  value-stack slot per table and no native stack per step. Inherited method
+  calls through one site that serves several classes no longer slow the
+  others down. Results and `cost_used` are otherwise unchanged.
 
 ## [0.5.0] - 2026-10-14
 

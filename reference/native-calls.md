@@ -44,8 +44,8 @@ graph, each listed with its kind and the evidence for it:
 - `binary`: the CLI's `main`.
 
 An edge id is `caller->callee`, with a `:tag` when one caller calls one
-callee from several sites (`handle_index_metamethod_inner->call_unguarded:lua`
-and `...:rust`). Each edge is either covered or excluded:
+callee from several sites (`run_frame->reg_get_field:field` and `...:self`).
+Each edge is either covered or excluded:
 
 - covered by the scenarios whose path runs it, or by the `chains` or
   `leaves` it names (the metamethod chain kinds and deepest-point work in
@@ -355,3 +355,55 @@ item. Nested arena GC/reuse and callback stack-cap regressions supplement
 the existing refusal, error-unwind and snapshot-quiescence coverage. A nested
 vararg case was also added to the budget and single-refusal corpus so failed
 admission and open-vararg growth check arena quiescence explicitly.
+
+### `__index` walk follow-up
+
+Measured on plantasjen (x86-64 Linux), 4a722cf against the working tree on
+top of it in which `__index` table steps became a loop
+(`State::walk_index_tables`): the receiver's raw lookup and every handler
+table are read in one outlined function, which also takes the handler's
+depth unit and pushes its call window, so the frames that stay live across
+the handler call are only the caller's. A table chain no longer recurses
+natively, `call_string_index_handler` and the separate handler dispatch
+frame are gone, and `index_string` outlines its metatable prelude
+(`State::string_index_handler`). Cells are **4a722cf / after**, bytes per
+cycle; scenarios not listed are unchanged, except that every `__newindex`
+dev cycle is 48 bytes smaller (layout only).
+
+| Scenario | Dev, also snapshot | Release | Release + snapshot |
+|---|---|---|---|
+| `index_field`, `index_method` | 10544 / 9296 | 1648 / 1520 | 1696 / 1568 |
+| `index_key` | 9328 / 8432 | 1328 / 1264 | 1376 / 1312 |
+| `index_rust` | 12304 / 11056 | 2112 / 1984 | 2160 / 2032 |
+| `string_index_field` | 11040 / 9296 | 1696 / 1520 | 1744 / 1568 |
+| `string_index_key` | 9824 / 8432 | 1376 / 1264 | 1424 / 1312 |
+| `index_string_handler` | 12304 / 9664 | 1888 / 1648 | 1936 / 1696 |
+| `string_library_index` | 11872 / 9296 | 1888 / 1520 | 1936 / 1568 |
+| `host_get_table` | 10016 / 9120 | 1600 / 1536 | 1648 / 1584 |
+| `host_get_table_string` | 10544 / 9152 | 1648 / 1536 | 1696 / 1584 |
+| library reads | each 896 less | each 64 less | each 64 less |
+| `gsub_pattern_table` | 15616 / 14720 | 3776 / 3712 | 3824 / 3760 |
+| `tfor_ipairs` | 10400 / 9504 | 1504 / 1440 | 1552 / 1488 |
+| `chain_index` | 1232 / 0 | 192 / 0 | 192 / 0 |
+| `chain_newindex` | 1216 / 1168 | 208 / 208 | 208 / 208 |
+
+The library-read row covers `sort_metamethods_read`, `insert_shift_read`,
+`remove_read`, `remove_shift_read`, `concat_read`, `move_read`,
+`unpack_read` and the other two `gsub_*_table` cycles. `string_library_index` holds
+two units per cycle now (its library table continues to a function), where
+it held one.
+
+Release frames (`frame_sizes.py`, plain and snapshot alike):
+`get_table_with_key_tracking_call` 184 / 120, `index_string` 232 / 120,
+`get_field_slow` 488 / 424, `get_field_direct` 456 / 376; the new
+`walk_index_tables` (216) and `string_index_handler` (248) have returned
+before any handler call. `Frame::run` is unchanged (776, and 824 with
+snapshot).
+
+Two intermediate shapes were measured and dropped: a recursive table step
+with a pre-guard terminal check grew every release cycle that reaches an
+`__index` function through `get_table_with_key_tracking_call` by 96 bytes
+(the dispatcher gained a second caller and an outlined frame), and the first
+loop, which returned the final handler for its caller to push and call,
+grew them by 80 (the returned handler, receiver and unit count stayed live
+across the call).

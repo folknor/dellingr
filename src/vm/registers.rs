@@ -154,18 +154,20 @@ impl State {
         };
         let key = frame.literal(name);
         let cache = frame.runtime.caches.field(cache_slot);
-        let Some((direct, has_metatable)) = self.get_table_field_direct(ptr, key, cache) else {
+        let Some((direct, metatable)) = self.get_table_field_direct(ptr, key, cache) else {
             return false;
         };
-        let result = match direct {
-            Some(result) => result,
+        let result = match (direct, metatable) {
+            (Some(result), _) => result,
             // A miss on a plain table is nil, exactly as `t["k"]` and
             // `rawget` see it.
-            None if !has_metatable => Val::Nil,
-            None => match self.get_index_table_field_direct(ptr, key, cache) {
-                Some(result) => result,
-                None => return false,
-            },
+            (None, None) => Val::Nil,
+            (None, Some(metatable)) => {
+                match self.get_index_table_field_direct(metatable, key, cache) {
+                    Some(result) => result,
+                    None => return false,
+                }
+            }
         };
         self.stack[dst] = result;
         true

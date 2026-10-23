@@ -127,15 +127,7 @@ name = "handle_index_metamethod"
 owner = "State"
 
 [[function]]
-name = "handle_index_metamethod_inner"
-owner = "State"
-
-[[function]]
 name = "index_string"
-owner = "State"
-
-[[function]]
-name = "call_string_index_handler"
 owner = "State"
 
 [[function]]
@@ -466,18 +458,11 @@ id = "instr_get_table->index_string"
 id = "instr_get_table->get_table_with_key"
 
 [[edge]]
-id = "index_string->get_table_with_key_tracking_call"
-chains = ["string_table"]
-
-[[edge]]
-id = "index_string->call_string_index_handler"
+id = "index_string->call_unguarded"
 
 [[edge]]
 id = "index_string->index_string"
-chains = ["string"]
-
-[[edge]]
-id = "call_string_index_handler->call_unguarded"
+chains = ["string", "string_table"]
 
 # src/vm/eval_store.rs
 [[edge]]
@@ -507,21 +492,10 @@ id = "get_table_with_key->get_table_with_key_tracking_call"
 id = "get_table_with_key_tracking_call->handle_index_metamethod"
 
 [[edge]]
-id = "handle_index_metamethod->handle_index_metamethod_inner"
+id = "handle_index_metamethod->call_unguarded"
 
 [[edge]]
-id = "handle_index_metamethod_inner->get_table_with_key_tracking_call"
-chains = ["index"]
-
-[[edge]]
-id = "handle_index_metamethod_inner->call_unguarded:lua"
-
-[[edge]]
-id = "handle_index_metamethod_inner->call_unguarded:rust"
-
-[[edge]]
-id = "handle_index_metamethod_inner->index_string"
-chains = ["string_table"]
+id = "handle_index_metamethod->index_string"
 
 [[edge]]
 id = "set_table_with_key->handle_newindex_metamethod"
@@ -803,8 +777,7 @@ set_field = [
 # An __index function handler, from the lookup that found it.
 index_function = [
     "get_table_with_key_tracking_call->handle_index_metamethod",
-    "handle_index_metamethod->handle_index_metamethod_inner",
-    "handle_index_metamethod_inner->call_unguarded:lua",
+    "handle_index_metamethod->call_unguarded",
 ]
 # A __newindex function handler, from the store that found it.
 newindex_function = [
@@ -816,8 +789,7 @@ newindex_function = [
 read = [
     "get_table_unguarded->get_table_with_key_tracking_call",
     "get_table_with_key_tracking_call->handle_index_metamethod",
-    "handle_index_metamethod->handle_index_metamethod_inner",
-    "handle_index_metamethod_inner->call_unguarded:lua",
+    "handle_index_metamethod->call_unguarded",
 ]
 # A table-library write through __newindex.
 write = [
@@ -838,8 +810,7 @@ rust_handler = [
     "call->call_unguarded",
 ]
 string_handler = [
-    "index_string->call_string_index_handler",
-    "call_string_index_handler->call_unguarded",
+    "index_string->call_unguarded",
 ]
 sort_comparator = [
     "table_sort_less->call_unguarded",
@@ -884,8 +855,7 @@ path = [
     "instr_get_field->get_table_with_key",
     "get_table_with_key->get_table_with_key_tracking_call",
     "get_table_with_key_tracking_call->handle_index_metamethod",
-    "handle_index_metamethod->handle_index_metamethod_inner",
-    "handle_index_metamethod_inner->call_unguarded:rust",
+    "handle_index_metamethod->call_unguarded",
     "@rust_handler",
 ]
 
@@ -939,8 +909,7 @@ path = [
     "instr_get_field->get_table_with_key",
     "get_table_with_key->get_table_with_key_tracking_call",
     "get_table_with_key_tracking_call->handle_index_metamethod",
-    "handle_index_metamethod->handle_index_metamethod_inner",
-    "handle_index_metamethod_inner->index_string",
+    "handle_index_metamethod->index_string",
     "@string_handler",
 ]
 
@@ -949,8 +918,7 @@ name = "string_library_index"
 path = [
     "@lua", "@get_field",
     "instr_get_field->index_string",
-    "index_string->get_table_with_key_tracking_call",
-    "@index_function",
+    "@string_handler",
 ]
 
 [[scenario]]

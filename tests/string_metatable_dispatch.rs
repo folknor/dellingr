@@ -53,8 +53,34 @@ fn host_get_table_on_string_without_index_leaves_the_stack() {
 }
 
 #[test]
+fn host_get_table_on_string_replaces_the_key_at_the_stack_cap() {
+    // Table steps push only their result into the key's slot, as a raw
+    // table read does, so they need no room above the cap: a terminal
+    // library step, and one that continues to another table.
+    for setup in [
+        "",
+        "getmetatable('').__index = setmetatable({}, {__index = string})",
+    ] {
+        let mut state = State::new();
+        run(&mut state, setup);
+        state.push_string("abc").unwrap();
+        let cap = dellingr::limits::MAX_STACK_SIZE;
+        state.set_top(isize::try_from(cap - 1).unwrap()).unwrap();
+        state.push_string("upper").unwrap();
+        state.get_table(1).unwrap();
+        assert_eq!(state.get_top(), cap, "{setup}");
+        assert_eq!(state.typ(-1), LuaType::Function, "{setup}");
+    }
+}
+
+#[test]
 fn host_get_table_on_string_preserves_operands_at_the_stack_cap() {
+    // A function handler behind the library table needs its call window.
     let mut state = State::new();
+    run(
+        &mut state,
+        "getmetatable('').__index = setmetatable({}, {__index = function() return 1 end})",
+    );
     state.push_string("abc").unwrap();
     let cap = dellingr::limits::MAX_STACK_SIZE;
     state.set_top(isize::try_from(cap - 1).unwrap()).unwrap();
