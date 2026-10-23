@@ -39,19 +39,52 @@ touches `Frame::run`, whose frame is live across every native re-entry.
 
 ### Register access bounds checks
 
+Measured 2026-10-23 at eb52657 on plantasjen and not pursued: insufficient
+demonstrated payoff. Kept so the experiments are not rerun.
+
 What: every register read and write in the dispatch loop indexes
-`state.stack[...]`, a bounds-checked `Vec` access, although admission
-reserves `[base, base + max_stack)` and the verifier bounds every register
-operand by `max_stack`. An op like `ADD_RR` pays three checks.
+`state.stack[...]`, a bounds-checked `Vec` access (`cmp len, idx` / `jae
+panic_bounds_check`, with the stack pointer and length reloaded from `State`
+at each access), although admission reserves `[base, base + max_stack)` and
+the verifier bounds every register operand by `max_stack`.
 
-Sketch: give the dispatch loop a register view whose length is proved once
-per activation (a slice of the frame's window taken after admission), so
-LLVM can drop the per-access checks, or check the operand ranges once per
-instruction. Any `unsafe` access needs the verifier's register-range proof
-cited at the site.
+Three throwaway experiments, each against HEAD built by `--commit`, harness
+`warm_avg_us`, interleaved `--bench 3` cells (A had a launch spread under 1%
+on every workload):
 
-Signal: `cmp`/`jae` to a `panic_bounds_check` before each `state.stack`
-access in `perf annotate` of an arithmetic-heavy kernel.
+- **Checks removed, pointer still reloaded** (`get_unchecked` on every
+  register access in `run_frame`, the `registers.rs` fast paths and the
+  numeric-for helpers). Whole-process retired instructions fell 4-8% and
+  branches 8-15%, but cycles moved between about -2% and +2%: arithmetic
+  -2.0/-2.3%, same_obj_read +0.5/+1.6% (slower, more branch misses), the
+  composite +0.3/-0.7%. The checks are predicted and fused; removing them
+  alone buys nothing outside the layout band.
+- **Activation-wide raw register pointer, unchecked** (held in a local,
+  refreshed after every arm whose helper may push). Arithmetic -1.3/-1.7%,
+  composite +0.3/-0.7% (cycles +1.1%), same_obj_read -3.6/-6.6% with its
+  branch misses halved and a 3-4% launch spread of its own. The field-read
+  gain beat every A launch, but its mechanism is unresolved (layout is
+  plausible), and its soundness rests on every arm remembering to refresh.
+- **The same pointer plus a cached length, checks kept** (the best a safe
+  borrowed-slice view could compile to with today's helper boundaries).
+  same_obj_read -0.8/-1.8%, arithmetic about -1.5% (one cell), composite
+  0.0% (one cell).
+
+None clears a repeatable gain on representative work, and the composite is
+flat in all three. Note the composite does not stress repeated reads of one
+persistent object; same_obj_read does, and is where the only large delta was.
+Untested residue: a split-borrow design whose field-cache hit writes through
+the retained register slice (no refresh after a hit). Revisit only with
+evidence that persistent-object field reads dominate real callbacks.
+
+The original sketch overpromised: a slice of length `max_stack` does not let
+LLVM drop checks on dynamic operands, since the verifier's proof is not
+visible to it; only `unsafe` or a per-instruction range proof removes them.
+
+Lateral: in every build measured, the dispatch head reloads the code slice's
+pointer and length from spill slots (`cmp 0x298(%rsp)` / `mov 0x2e8(%rsp)`)
+each instruction. Not shown to be recoverable: keeping them resident competes
+for the same registers as handler temporaries.
 
 ### Cost accounting on every arithmetic op
 
