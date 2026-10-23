@@ -37,6 +37,15 @@ All notable changes to dellingr are documented here. The format follows
   - `--dump-bytecode` prints the register instruction set and each
     function's register count.
 
+- Native-stack envelope split by build. Every runtime recursion limit at
+  once is now promised to fit a 2 MiB thread in release builds and a 4 MiB
+  thread in debug builds, where it was 2 MiB for both. A debug build of a
+  host that runs scripts on threads it spawns with the default 2 MiB should
+  give them 4 MiB (`std::thread::Builder::stack_size`); otherwise a deeply
+  recursive script can abort the process instead of failing with a limit
+  error. Parsing at the syntax budget still fits 2 MiB in both. The limits
+  themselves are unchanged. See docs/limits.md, "Envelope".
+
 - One compile path, byte-exact. `Program::compile(source, name)` is the only
   way to compile Lua: `source` is `impl AsRef<[u8]>` and `name` is
   `Option<&[u8]>`, so non-UTF-8 sources load (string literals keep their

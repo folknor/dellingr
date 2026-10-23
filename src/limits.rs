@@ -145,10 +145,11 @@ pub const MAX_CALL_DEPTH: u32 = 1000;
 /// functions. Each such call runs on the native stack, so this is the limit
 /// that bounds native recursion; the counterpart of reference Lua's
 /// `LUAI_MAXCCALLS`. See docs/limits.md, "Native stack".
-// Sized so that every limit at once fits a 2 MiB thread in an unoptimized
-// build, which `tests/native_stack.rs` drives; 200, reference Lua's value,
-// did not fit there with the current frame sizes. Raising it changes which
-// scripts run, so it is a replay-visible change.
+// Sized so that every limit at once fits the native-stack envelope in
+// docs/limits.md, which `tests/native_stack.rs` drives. It was set when that
+// envelope was 2 MiB for unoptimized builds too, where 200, reference Lua's
+// value, did not fit. Raising it changes which scripts run, so it is a
+// replay-visible change.
 pub const MAX_NATIVE_CALL_DEPTH: u32 = 150;
 /// Maximum values on the shared Lua/Rust stack, not a host-memory quota.
 pub const MAX_STACK_SIZE: usize = 1_000_000;

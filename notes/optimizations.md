@@ -127,12 +127,12 @@ default blocks unprivileged sampling); with it, `perf record` cycles plus
 `perf annotate` of `Frame::run` attribute stalls to instructions directly.
 
 Native-stack follow-up: `MAX_NATIVE_CALL_DEPTH` is 150, not reference Lua's
-200, because 200 did not fit 2 MiB in the dev profile. Dev-profile bytes per
-nested call made from Rust at 27ee714 plus the gsub split: gsub replacement
-function 8416, table.sort comparator 7568, `__index` function 6205, host
-callthrough 5760, generic-for Lua iterator 4944 (the shared floor, mostly the
-dispatch loop's own frame). Shrinking the dispatch loop's debug frame and the
-sort path would let the limit rise; raising it is replay-visible.
+200, because 200 did not fit the envelope of the time, 2 MiB in the dev
+profile. Since the envelope split it is 4 MiB in dev and 2 MiB in release
+(docs/limits.md), which 200 fits on the per-level sizes measured then
+(about 11 KB dev, 2.3 KB release, plantasjen). What holds it at 150 now is
+demand, not stack: raising it is replay-visible, so it waits for a script
+that legitimately nests calls made from Rust past 150.
 
 ### 8-byte NaN-boxed `Val` (C-O7)
 

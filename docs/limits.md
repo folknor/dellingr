@@ -245,18 +245,34 @@ profile and thread size; none depends on how much native stack is left.
 
 ### Envelope
 
-The limits are sized so that all of them at once fit a 2 MiB thread, the
-Rust default for spawned threads, in an unoptimized (dev profile) build;
-optimized builds need several times less. "At once" means: the host call
-plus nested calls made from Rust up to `MAX_NATIVE_CALL_DEPTH`, through any
-of them (sort comparators, `gsub` replacement functions, metamethod
-handlers, iterator functions, a callback calling `State::call`), with an
-`__index` table chain held across them at `MAX_METAMETHOD_DEPTH`, and at the
-deepest point a pattern match near `MAXCCALLS`, collections with a chunk
-tree nested near `MAX_CHUNK_NESTING` alive, and the refusal of the next call
-with its traceback. `tests/native_stack.rs` drives exactly that, for each
-kind of call, on a 2 MiB thread in the dev profile, and parsing at the
-syntax budget runs on 2 MiB threads too.
+The runtime limits are sized so that all of them at once fit:
+
+- a **2 MiB** thread, the Rust default for spawned threads, in this
+  repository's release build settings;
+- a **4 MiB** thread in its dev (unoptimized) build settings, whose frames
+  are several times larger.
+
+"At once" means: the host call plus nested calls made from Rust up to
+`MAX_NATIVE_CALL_DEPTH`, through any of them (sort comparators, `gsub`
+replacement functions, metamethod handlers, iterator functions, a callback
+calling `State::call`), with an `__index` table chain held across them at
+`MAX_METAMETHOD_DEPTH`, and at the deepest point a pattern match near
+`MAXCCALLS`, collections with a chunk tree nested near `MAX_CHUNK_NESTING`
+alive, and the refusal of the next call with its traceback.
+`tests/native_stack.rs` drives exactly that for each kind of call it
+enumerates, in both settings, with and without the `snapshot` feature, on
+x86-64 Linux.
+
+Parsing keeps the stricter promise: parsing at the syntax budget fits a
+2 MiB thread in both settings.
+
+What this means for an embedder: a debug build that runs scripts on a
+thread it spawns with the default 2 MiB can overflow and abort the process
+before a recursion limit is reached. Give such threads 4 MiB with
+`std::thread::Builder::stack_size` (the main thread usually has 8 MiB
+already). Other build configurations - a host's own optimization levels or
+profile overrides for its dependencies, other targets - are the embedder's
+to validate; the stated sizes are what this repository tests.
 
 Outside the envelope, and the embedder's to provision:
 

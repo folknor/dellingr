@@ -1,6 +1,7 @@
 //! Recursion limits that bound native-stack growth, driven to their
 //! boundaries together on a thread with the stack docs/limits.md states
-//! they fit in (`LIMIT_TEST_STACK_BYTES`), unoptimized builds included.
+//! they fit in (`LIMIT_TEST_STACK_BYTES`, which depends on the repository
+//! profile). The gate runs this file in both profiles, default and snapshot.
 //!
 //! Every scenario recurses through one kind of call made from Rust until
 //! `MAX_NATIVE_CALL_DEPTH` is exhausted, holds a `__index` table chain
@@ -204,10 +205,10 @@ fn recursive_index_function_stops_at_the_native_call_limit() {
 /// The parser's deepest accepted nesting, with the innermost function
 /// resolving a name from the outermost scope (the upvalue walk recurses
 /// through every enclosing function while the parse descent is live), and
-/// the first rejected one, both on the limit-test stack.
+/// the first rejected one, both on the parse-test stack.
 #[test]
-fn deepest_nested_functions_parse_on_the_limit_test_stack() {
-    stack::on_limit_test_stack("deepest_nested_functions", || {
+fn deepest_nested_functions_parse_on_the_parse_test_stack() {
+    stack::on_parse_test_stack("deepest_nested_functions", || {
         let source = |depth: usize| {
             format!(
                 "local outer = 1 {}return outer{}",
