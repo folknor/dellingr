@@ -10,7 +10,8 @@ fn empty_payload() -> SavePayload {
         bytecode: Vec::new(),
         upvalues: Vec::new(),
         objects: Vec::new(),
-        user_globals: Vec::new(),
+        globals: SavedObject::empty_table(),
+        global_pins: Vec::new(),
         globals_sealed: false,
         env_deltas: Vec::new(),
         next_format_pointer_id: 1,
@@ -111,7 +112,7 @@ fn reset_and_quiescence_share_the_snapshot_inventory() {
     state
         .transient_roots
         .suspended_envs
-        .push(super::super::global_env::GlobalEnv::new());
+        .push(super::super::global_env::SuspendedEnv::detached());
     state.metamethod_depth = 1;
     state.call_depth = 1;
     state.native_call_depth = 1;
@@ -134,7 +135,6 @@ fn canonical_environment_tokens_survive_load_without_renaming() {
             "math",
             "string",
             "table",
-            "_G",
             "_G.metatable",
             "string.metatable"
         ])

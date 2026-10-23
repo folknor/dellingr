@@ -210,6 +210,77 @@ fn unsealed_save_loads_unsealed_even_if_setup_seals() {
 }
 
 #[test]
+fn a_pinned_deletion_survives_a_setup_that_drops_the_name() {
+    // `configured` is installed during initialization, then deleted, and its
+    // tombstone compacts away. A load whose setup no longer installs it, and
+    // the immediate resave, must still remember the deletion, so a later
+    // setup that installs it again does not resurrect it.
+    let mut state = State::new();
+    sealing_setup(&mut state).unwrap();
+    run(&mut state, "configured = nil");
+    churn(&mut state, "a");
+    let save = state.save_state().unwrap();
+    let lean = |state: &mut State| {
+        state.seal_globals();
+        Ok::<(), std::convert::Infallible>(())
+    };
+    let loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), lean).unwrap();
+    let resaved = loaded.save_state().unwrap();
+    let mut reloaded =
+        State::load_state(&resaved.bytes, Box::new(DefaultCallbacks), sealing_setup).unwrap();
+    assert_eq!(global_str(&mut reloaded, "configured"), "nil");
+}
+
+#[test]
+fn the_save_owns_every_non_string_global_key() {
+    // Setup's non-string keys never merge: the saved table decides them.
+    let setup = |state: &mut State| {
+        run(state, "_G[1] = 'setup'; _G[true] = 'setup'");
+        state.seal_globals();
+        Ok::<(), std::convert::Infallible>(())
+    };
+    let mut state = State::new();
+    setup(&mut state).unwrap();
+    run(&mut state, "_G[1] = nil; _G[true] = nil; _G[2.5] = 'saved'");
+    let save = state.save_state().unwrap();
+    let mut loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), setup).unwrap();
+    run(
+        &mut loaded,
+        "if _G[1] ~= nil or _G[true] ~= nil or _G[2.5] ~= 'saved' then error('keys') end",
+    );
+    assert_eq!(loaded.save_state().unwrap().bytes, save.bytes);
+}
+
+#[test]
+fn raw_globals_and_pairs_order_survive_a_load() {
+    let mut state = State::new();
+    run(
+        &mut state,
+        "rawset(_G, 'raw_one', 1); two = 2; rawset(_G, 'three', 3); two = nil; two = 22",
+    );
+    let order = |state: &mut State| {
+        run(
+            state,
+            "local names = {} \
+             for k in pairs(_G) do \
+                 if k == 'raw_one' or k == 'two' or k == 'three' then names[#names + 1] = k end \
+             end \
+             order = table.concat(names, ',')",
+        );
+        global_str(state, "order")
+    };
+    let before = order(&mut state);
+    assert_eq!(before, "raw_one,two,three");
+    let save = state.save_state().unwrap();
+    let mut loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), |_| {
+        Ok::<(), std::convert::Infallible>(())
+    })
+    .unwrap();
+    assert_eq!(order(&mut loaded), before);
+    assert_eq!(global_str(&mut loaded, "three"), "3");
+}
+
+#[test]
 fn load_restores_saved_global_order_over_setup_order() {
     // The saving State set `late` before `host_value`; setup installs only
     // `host_value`. The loaded order must follow the save, not setup.

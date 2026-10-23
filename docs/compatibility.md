@@ -111,9 +111,17 @@ does.
 - Global `unpack` exists, as in Lua 5.2, alongside `table.unpack`.
 - `pairs` ignores `__pairs`, which Lua 5.2 and 5.4 honor.
 - `ipairs` reads each item through `__index`; Lua 5.2 reads those items raw.
-- `getmetatable(_G)` returns `false`, not `nil`. `_G` is a proxy over the
-  global table and its metatable is protected: `setmetatable(_G, ...)` raises
-  "cannot change a protected metatable".
+- `getmetatable(_G)` returns `false`, not `nil`. `_G` is the global table
+  itself (`pairs`, `next`, `rawget` and `rawset` see every global), but it
+  carries a protected metatable that changes nothing else:
+  `setmetatable(_G, ...)` raises "cannot change a protected metatable".
+- Global variable access is raw: it never consults the global table's
+  metatable, as reference Lua's `_ENV` access does. Scripts cannot give it
+  one; a host that installs `__index` or `__newindex` there through the raw
+  table API affects `_G.x` field access only, not `x`.
+- In `pairs(_G)`, a global set to nil and later redefined keeps its earlier
+  place, where an ordinary table moves a re-added key to the end. Order is
+  deterministic either way; reference Lua's is unspecified.
 - All strings share one metatable, as in reference Lua.
   - `getmetatable("")` returns it.
   - Its `__index` is the string library by default.

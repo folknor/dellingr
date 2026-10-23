@@ -47,13 +47,10 @@ impl State {
     #[inline(always)]
     pub(super) fn read_global(&self, frame: &Frame, name: u16, cache_slot: Option<u8>) -> Val {
         let cache = frame.runtime.caches.global(cache_slot);
-        if let Some(val) = cache.and_then(|cache| self.get_cached_global(cache)) {
+        if let Some(val) = cache.and_then(|cache| self.global_env.read_cached(&self.heap, cache)) {
             return val;
         }
-        let name = super::eval_index::verified_global_name(
-            &frame.bytecode().string_literals[usize::from(name)],
-        );
-        self.global_env.read(name, cache)
+        self.global_env.read(&self.heap, frame.literal(name), cache)
     }
 
     /// Write global `name` through its lookup cache.
@@ -67,14 +64,12 @@ impl State {
     ) {
         let cache = frame.runtime.caches.global(cache_slot);
         if let Some(cache) = cache
-            && self.global_env.write_cached(cache, val)
+            && self.global_env.write_cached(&mut self.heap, cache, val)
         {
             return;
         }
-        let name = super::eval_index::verified_global_name(
-            &frame.bytecode().string_literals[usize::from(name)],
-        );
-        self.global_env.write_named(name, val, cache);
+        self.global_env
+            .write(&mut self.heap, frame.literal(name), val, cache);
     }
 
     /// Take a handler's one result off the top into register `dst`.

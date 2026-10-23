@@ -7,18 +7,25 @@ use crate::compiler::Bytecode;
 use super::lua_val::Val;
 use super::object::{GcHeap, ObjectPtr};
 
+/// A lookup in the global table, valid while its shape version is `version`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct GlobalLookupCacheEntry {
-    pub(super) globals_version: u64,
+    pub(super) version: u64,
     pub(super) index: GlobalLookupIndex,
+    /// The key is a builtin name, so a store through this entry must move
+    /// the global table's mutation epoch (see `GlobalEnv::builtin_mirror`).
+    pub(super) builtin: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum GlobalLookupIndex {
+    /// The key's hash slot. Its value is read live: a tombstone there is the
+    /// answer nil, since the key keeps its slot until the version moves.
     Present(usize),
-    /// No binding existed at this map length. Appending a binding invalidates
-    /// misses without invalidating positive slot caches. Compaction and swaps
-    /// are guarded separately by `globals_version`.
+    /// The key had no live slot at this hash slot count. Appending a slot
+    /// invalidates misses without invalidating positive slot caches; every
+    /// other way a key can come alive moves the version
+    /// (`Table::hash_slot_count`).
     Absent(usize),
 }
 
@@ -151,13 +158,13 @@ impl SetFieldLookupCacheSlot {
 ///
 /// These are never shared across `State`s: cached `ObjectPtr` keys are only
 /// valid inside the heap of the State that wrote them, and version cells are
-/// keyed to that State's global environment version and table versions. They are never
+/// keyed to that State's table versions (the global table's included). They are never
 /// serialized and are rebuilt cold when a snapshot is loaded, which is sound
 /// only because warmth is unobservable: an entry answers only what the
 /// uncached lookup would answer the same way, by the same route, so whether an
 /// instruction needs stack, takes a metamethod-depth unit or succeeds never
 /// depends on which values a site saw before. A negative entry has to prove
-/// absence exactly to keep that (absent globals do, by binding count); field
+/// absence exactly to keep that (absent globals do, by hash slot count); field
 /// and method entries cache hits only. Their handles
 /// are weak: every collection clears the entries naming what it freed
 /// (`drop_dead_entries`), so no entry outlives its referent.
@@ -305,11 +312,13 @@ trait CacheEntry {
 
 impl CacheEntry for GlobalLookupCacheEntry {
     fn for_each_handle(&self, _: &mut dyn FnMut(Val)) {
-        // Indexes the global environment, which is not a heap object; the
-        // version is a never-reset counter that advances across swaps.
+        // Indexes the global table, which lives as long as the State and is
+        // a GC root, so the entry names no handle that can die; its version
+        // advances across content swaps and never resets.
         let Self {
-            globals_version: _,
+            version: _,
             index: _,
+            builtin: _,
         } = self;
     }
 }

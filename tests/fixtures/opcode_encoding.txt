@@ -1,4 +1,4 @@
-format=12
+format=13
 OP_MOVE=0
 OP_LOAD_NIL=1
 OP_LOAD_BOOL=2

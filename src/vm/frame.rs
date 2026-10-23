@@ -313,11 +313,13 @@ impl Frame {
                     state.write_global(frame, inst.b(), inst.cache_slot(), val);
                 }
                 Instr::OP_GET_BUILTIN => {
-                    state.stack[ra] = state.global_env.builtin(inst.b() as u8);
+                    state.stack[ra] = state.global_env.read_builtin(&state.heap, inst.b() as u8);
                 }
                 Instr::OP_SET_BUILTIN => {
                     let val = state.stack[ra];
-                    state.global_env.write_builtin(inst.b() as u8, val);
+                    state
+                        .global_env
+                        .write_builtin(&mut state.heap, inst.b() as u8, val);
                 }
 
                 // Table creation

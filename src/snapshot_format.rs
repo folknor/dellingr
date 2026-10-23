@@ -2,8 +2,7 @@
 
 /// Snapshot compatibility is exact-match only. Change this only when encoded
 /// fields change, keeping opcode fixtures available in non-snapshot builds.
-// Version 12 covers both the environment-delta hash-slot history and the
-// canonical live-span environment arrays: the second changed the encoding
-// before any release had shipped version 12, so it shares the number.
+// Version 13: the global table is saved whole, with its pins, in place of the
+// named bindings and the `_G` proxy's environment delta.
 #[cfg_attr(not(feature = "snapshot"), allow(dead_code))]
-pub(crate) const FORMAT_VERSION: u16 = 12;
+pub(crate) const FORMAT_VERSION: u16 = 13;

@@ -1,18 +1,10 @@
-use std::str;
-
 use super::MetaName;
 use super::State;
 use super::Val;
 use super::caches::{
-    FieldLookupCacheEntry, FieldLookupCacheSlot, GlobalLookupCacheSlot, MethodLookupCacheEntry,
-    StringMethodCacheEntry,
+    FieldLookupCacheEntry, FieldLookupCacheSlot, MethodLookupCacheEntry, StringMethodCacheEntry,
 };
 use super::object::ObjectPtr;
-
-/// Global names are verified UTF-8 at load time; this is not fallible host input.
-pub(super) fn verified_global_name(bytes: &[u8]) -> &str {
-    str::from_utf8(bytes).expect("verified global name is UTF-8")
-}
 
 impl State {
     /// The receiver's own lookup for table `ptr`: the field cache (with its
@@ -185,10 +177,5 @@ impl State {
         } else {
             None
         }
-    }
-
-    #[inline(always)]
-    pub(super) fn get_cached_global(&self, cache: &GlobalLookupCacheSlot) -> Option<Val> {
-        self.global_env.read_cached(cache)
     }
 }

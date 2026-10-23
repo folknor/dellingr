@@ -149,13 +149,7 @@ pub(crate) fn base_pairs(state: &mut State) -> Result<u8> {
     Ok(3)
 }
 
-// Keep _G's metatable entries in their historical insertion order.
-pub(super) const GLOBAL_ENV_METAMETHODS: &[(&str, crate::RustFunc)] = &[
-    (MetaName::Index.as_str(), global_env_index),
-    (MetaName::NewIndex.as_str(), global_env_newindex),
-];
-
-// This field is installed after the proxy metamethods.
+// The whole of `_G`'s metatable: protection, and nothing that changes access.
 pub(super) const GLOBAL_ENV_PROTECTION_FIELDS: &[(&str, bool)] =
     &[(MetaName::Metatable.as_str(), false)];
 
@@ -476,21 +470,17 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
         crate::error::results_count(count).map_err(|kind| state.error(kind))
     });
 
-    // _G - Global environment table (proxy with metamethods)
-    state.new_table()?; // _G table
+    // _G - the global table itself, so `pairs(_G)`, `rawget(_G, k)` and
+    // `rawset(_G, k, v)` see and change the real globals.
+    state.push_global_table()?;
     state.new_table()?; // metatable
 
-    for &(name, func) in GLOBAL_ENV_METAMETHODS {
-        state.register_lib_fn(-1, "_G", name, func)?;
-    }
-
-    // Protect the proxy metatable. It is the only thing connecting `_G` to
-    // `globals`; unprotected, `setmetatable(_G, nil)` or
-    // `getmetatable(_G).__index = f` silently detached `_G` from the real
-    // globals for the rest of the State. Reference `_G` has no metatable, so
-    // `getmetatable(_G)` is nil there and false here (both falsy), and
-    // `setmetatable(_G, mt)` - which reference allows - now errors loudly
-    // instead of silently breaking `_G`.
+    // Protect it with a metatable that changes nothing else. Bare global
+    // access is raw, so a script-set `__index` or `__newindex` would apply to
+    // `_G.x` but not to `x` and split the two. Reference `_G` has no
+    // metatable, so `getmetatable(_G)` is nil there and false here (both
+    // falsy), and `setmetatable(_G, mt)` - which reference allows - errors
+    // loudly instead.
     for &(name, value) in GLOBAL_ENV_PROTECTION_FIELDS {
         state.push_string(name)?;
         state.push_boolean(value)?;
@@ -521,36 +511,4 @@ fn raw_metafield(state: &mut State, idx: isize) -> Result<bool> {
         state.pop(2)?;
         Ok(false)
     }
-}
-
-// Only UTF-8 string keys name globals. Other keys remain raw proxy entries;
-// the State helpers borrow the key bytes without making lossy aliases.
-// The missing-argument errors of the `check_any_named` calls in this handler
-// and `global_env_newindex` cannot be reached from Lua: VM dispatch always
-// passes `__index` two arguments and `__newindex` three (a nil value included),
-// and `__metatable = false` keeps scripts from fetching either handler. Only a
-// host that takes them from the raw metatable (`State::get_metatable_of`) can
-// call them, or hand them to Lua, short of arguments. Not a precedent for
-// argument checks in Lua-callable library functions.
-fn global_env_index(state: &mut State) -> Result<u8> {
-    check_any_named(state, 2, "_G.__index")?;
-    if !state.global_proxy_read()? {
-        state.push_value(2)?;
-        state.get_table_raw(1)?;
-    }
-    Ok(1)
-}
-
-// Its missing-argument errors are unreachable from Lua without host
-// intervention; see `global_env_index`.
-fn global_env_newindex(state: &mut State) -> Result<u8> {
-    check_any_named(state, 2, "_G.__newindex")?;
-    check_any_named(state, 3, "_G.__newindex")?;
-    if !state.global_proxy_write()? {
-        state.push_value(2)?;
-        state.push_value(3)?;
-        state.set_table_raw(1)?;
-    }
-    state.set_top(0)?;
-    Ok(0)
 }

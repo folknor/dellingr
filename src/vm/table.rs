@@ -333,13 +333,27 @@ enum TableStorage {
         len: u8,
     },
     /// IndexMap storage for larger tables. Maintains insertion order.
-    Map(IndexMap<TableKey, Val>),
+    ///
+    /// Only map storage carries a slot policy (`Table::set_slot_policy`), so
+    /// it costs no space in the larger inline variant.
+    Map(IndexMap<TableKey, Val>, SlotPolicy),
+}
+
+/// How a map keeps its hash slots. The default is every table's; the global
+/// table uses the other two settings (see `vm/global_env.rs`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct SlotPolicy {
+    /// A tombstoned key written live again takes its old slot back, keeping
+    /// its place in `pairs` order, instead of moving to the back. No slot is
+    /// vacated, so the slot count never grows from re-adding a key.
+    pub(super) revive_in_place: bool,
+    /// Tombstones are never compacted: every key once written keeps its slot.
+    pub(super) retain_dead: bool,
 }
 
 /// Iterates occupied hash slots in insertion order, yielding only keys whose
 /// values are live. The index is the original physical slot, including any
 /// tombstones skipped before it.
-#[cfg(feature = "snapshot")]
 enum LiveHashEntries<'a> {
     Inline {
         entries: &'a [(Val, Val)],
@@ -352,7 +366,6 @@ enum LiveHashEntries<'a> {
     },
 }
 
-#[cfg(feature = "snapshot")]
 impl Iterator for LiveHashEntries<'_> {
     type Item = (usize, Val, Val);
 
@@ -506,7 +519,7 @@ impl Table {
             Self::default()
         } else {
             Self {
-                storage: TableStorage::Map(map_with_capacity(capacity)),
+                storage: TableStorage::Map(map_with_capacity(capacity), SlotPolicy::default()),
                 ..Self::default()
             }
         }
@@ -528,7 +541,7 @@ impl Table {
         // array part.
         let dead_count = map.len();
         let table = Self {
-            storage: TableStorage::Map(map),
+            storage: TableStorage::Map(map, SlotPolicy::default()),
             dead_count,
             ..Self::default()
         };
@@ -633,7 +646,7 @@ impl Table {
                 }
                 dead_count
             }
-            TableStorage::Map(map) => {
+            TableStorage::Map(map, _) => {
                 // Past a small size, check only the O(1) counter bound.
                 if map.len() > crate::limits::tuning::TABLE_DEBUG_FULL_WALK_LIMIT {
                     debug_assert!(
@@ -689,7 +702,9 @@ impl Table {
                 }
                 Val::Nil
             }
-            TableStorage::Map(map) => map.get(&TableLookupKey(*key)).copied().unwrap_or_default(),
+            TableStorage::Map(map, _) => {
+                map.get(&TableLookupKey(*key)).copied().unwrap_or_default()
+            }
         }
     }
 
@@ -714,7 +729,7 @@ impl Table {
                 }
                 None
             }
-            TableStorage::Map(map) => {
+            TableStorage::Map(map, _) => {
                 let (idx, _, value) = map.get_full(&TableLookupKey(*key))?;
                 (!matches!(value, Val::Nil)).then_some((idx, *value))
             }
@@ -738,7 +753,7 @@ impl Table {
                     None
                 }
             }
-            TableStorage::Map(map) => map.get_index(index).and_then(|(key, value)| {
+            TableStorage::Map(map, _) => map.get_index(index).and_then(|(key, value)| {
                 (!matches!(value, Val::Nil)).then(|| (key.value(), *value))
             }),
         }
@@ -761,23 +776,119 @@ impl Table {
                     }
                     entries[index].1
                 }
-                TableStorage::Map(map) => *map.get_index(index)?.1,
+                TableStorage::Map(map, _) => *map.get_index(index)?.1,
             }
         };
         (!matches!(value, Val::Nil)).then_some(value)
     }
 
+    /// The value in hash slot `index`, nil for a tombstone or vacant slot;
+    /// `None` only past the last slot. The global table's lookup caches read
+    /// this: under an unchanged version the slot still holds the cached key,
+    /// so a nil here is the answer, not a miss.
+    #[inline]
+    pub(super) fn hash_slot_value(&self, index: usize) -> Option<Val> {
+        match &self.storage {
+            TableStorage::Inline { entries, len } => {
+                (index < usize::from(*len)).then(|| entries[index].1)
+            }
+            TableStorage::Map(map, _) => map.get_index(index).map(|(_, value)| *value),
+        }
+    }
+
+    /// The hash slot holding `key`, live or a tombstone, and its value (nil
+    /// for a tombstone). Unlike [`Self::get_with_index`] it finds dead keys
+    /// too; the global table caches their slot, because a revived global
+    /// takes the same slot back.
+    #[inline]
+    pub(super) fn hash_slot_of(&self, key: &Val) -> Option<(usize, Val)> {
+        if !is_valid_table_key(key) {
+            return None;
+        }
+        match &self.storage {
+            TableStorage::Inline { entries, len } => entries
+                .iter()
+                .take(usize::from(*len))
+                .position(|(entry_key, _)| entry_key == key)
+                .map(|index| (index, entries[index].1)),
+            TableStorage::Map(map, _) => map
+                .get_full(&TableLookupKey(*key))
+                .map(|(index, _, value)| (index, *value)),
+        }
+    }
+
+    /// Write `value` into hash slot `index` in place, whether the slot is
+    /// live or a tombstone: nil makes it a tombstone, a live value revives
+    /// one. For a table that revives keys in place
+    /// (`SlotPolicy::revive_in_place`), whose caller found the slot by its
+    /// key under the current version; no index moves, so the version stays.
+    /// False, changing nothing, for a vacant or missing slot. Outlined: the
+    /// global table's steady-state store is `set_at_index`.
+    #[inline(never)]
+    pub(super) fn write_slot(&mut self, index: usize, value: Val) -> bool {
+        debug_assert!(
+            matches!(&self.storage, TableStorage::Map(_, policy) if policy.revive_in_place),
+            "only a table that revives keys in place writes slots directly"
+        );
+        let slot = match &mut self.storage {
+            TableStorage::Inline { entries, len } if index < usize::from(*len) => {
+                &mut entries[index].1
+            }
+            TableStorage::Map(map, _) => match map.get_index_mut(index) {
+                Some((key, slot)) if key.as_live().is_some() => slot,
+                _ => return false,
+            },
+            TableStorage::Inline { .. } => return false,
+        };
+        let was_dead = matches!(*slot, Val::Nil);
+        let now_dead = matches!(value, Val::Nil);
+        *slot = value;
+        self.dead_count = self.dead_count + usize::from(now_dead) - usize::from(was_dead);
+        #[cfg(debug_assertions)]
+        self.debug_assert_invariants();
+        true
+    }
+
+    /// The number of occupied hash slots, tombstones and vacant slots
+    /// included. A key with no slot at all can gain one only by appending a
+    /// slot, which grows this; everything that removes or reorders slots
+    /// (compaction, a rebuild, a content swap) bumps the version. So the pair
+    /// (version, slot count) proves that a key which had no slot still has
+    /// none.
+    #[inline]
+    pub(super) fn hash_slot_count(&self) -> usize {
+        match &self.storage {
+            TableStorage::Inline { len, .. } => usize::from(*len),
+            TableStorage::Map(map, _) => map.len(),
+        }
+    }
+
+    /// Reserve room for `additional` more hash slots. Inline storage has its
+    /// fixed capacity and reserves nothing.
+    pub(super) fn reserve_hash(&mut self, additional: usize) {
+        if let TableStorage::Map(map, _) = &mut self.storage {
+            map.reserve(additional);
+        }
+    }
+
+    /// Move the shape version past both this table's and `other`, so no
+    /// cache entry captured against either matches. The global table swaps
+    /// its contents with a restricted environment's this way.
+    pub(super) fn advance_version_past(&self, other: u64) {
+        self.version
+            .set(self.version.get().max(other).wrapping_add(1));
+    }
+
     /// Iterate live hash entries in insertion order with their physical slots.
     /// Dead keys (tombstones and vacant slots) are never yielded.
-    #[cfg(feature = "snapshot")]
-    fn live_hash_entries(&self) -> impl Iterator<Item = (usize, Val, Val)> + '_ {
+    pub(super) fn live_hash_entries(&self) -> impl Iterator<Item = (usize, Val, Val)> + '_ {
         match &self.storage {
             TableStorage::Inline { entries, len } => LiveHashEntries::Inline {
                 entries,
                 len: *len as usize,
                 index: 0,
             },
-            TableStorage::Map(map) => LiveHashEntries::Map {
+            TableStorage::Map(map, _) => LiveHashEntries::Map {
                 entries: map.iter(),
                 index: 0,
             },
@@ -831,7 +942,7 @@ impl Table {
             TableStorage::Inline { entries, len } => entries[..*len as usize].to_vec(),
             // A leading (nil, true) is a storage-kind marker, not a slot.
             // Templates can be maps even with fewer than INLINE_CAPACITY keys.
-            TableStorage::Map(map) => std::iter::once((Val::Nil, Val::Bool(true)))
+            TableStorage::Map(map, _) => std::iter::once((Val::Nil, Val::Bool(true)))
                 .chain(
                     map.iter()
                         .map(|(key, value)| (key.as_live().unwrap_or(Val::Nil), *value)),
@@ -949,7 +1060,7 @@ impl Table {
                     entries[*len as usize] = (key, value);
                     *len += 1;
                 }
-                TableStorage::Map(map) => {
+                TableStorage::Map(map, _) => {
                     let key = if matches!(key, Val::Nil) && dead {
                         TableKey::vacant(map.len())
                     } else {
@@ -1005,7 +1116,7 @@ impl Table {
                         false
                     }
                 }
-                TableStorage::Map(map) => {
+                TableStorage::Map(map, _) => {
                     let Some((_, v)) = map.get_index_mut(index) else {
                         return false;
                     };
@@ -1044,7 +1155,7 @@ impl Table {
                     }
                     &mut entries[index].1
                 }
-                TableStorage::Map(map) => {
+                TableStorage::Map(map, _) => {
                     let Some((_, value)) = map.get_index_mut(index) else {
                         return false;
                     };
@@ -1083,7 +1194,7 @@ impl Table {
                 *existing_value = value;
                 (was_live, !matches!(value, Val::Nil))
             }
-            TableStorage::Map(map) => {
+            TableStorage::Map(map, _) => {
                 let Some((existing_key, existing_value)) = map.get_index_mut(index) else {
                     return false;
                 };
@@ -1189,7 +1300,7 @@ impl Table {
                     false
                 }
             }
-            TableStorage::Map(_) => false,
+            TableStorage::Map(..) => false,
         };
         if updated_live_inline_entry {
             #[cfg(debug_assertions)]
@@ -1227,7 +1338,7 @@ impl Table {
                     self.promote_to_map(table_key, value);
                 }
             }
-            TableStorage::Map(_) => self.insert_into_map_with_tombstones(table_key, value),
+            TableStorage::Map(..) => self.insert_into_map_with_tombstones(table_key, value),
         }
         #[cfg(debug_assertions)]
         self.debug_assert_invariants();
@@ -1525,7 +1636,7 @@ impl Table {
     fn hash_live_len(&self) -> usize {
         let occupied = match &self.storage {
             TableStorage::Inline { len, .. } => *len as usize,
-            TableStorage::Map(map) => map.len(),
+            TableStorage::Map(map, _) => map.len(),
         };
         occupied - self.dead_count
     }
@@ -1547,7 +1658,7 @@ impl Table {
                         matches!(value, Val::Nil) || !matches!(key, Val::Num(_))
                     })
             }
-            TableStorage::Map(map) => {
+            TableStorage::Map(map, _) => {
                 map.len() <= count
                     && map.iter().all(|(key, value)| {
                         matches!(value, Val::Nil) || !matches!(key.as_live(), Some(Val::Num(_)))
@@ -1558,7 +1669,7 @@ impl Table {
 
     fn insert_into_map_with_tombstones(&mut self, key: TableKey, value: Val) {
         let existing = match &mut self.storage {
-            TableStorage::Map(map) => map.get_full_mut(&key).map(|(index, _, existing)| {
+            TableStorage::Map(map, _) => map.get_full_mut(&key).map(|(index, _, existing)| {
                 let was_live = !matches!(*existing, Val::Nil);
                 if was_live {
                     *existing = value;
@@ -1573,9 +1684,19 @@ impl Table {
             return;
         }
         if let Some((index, false)) = existing {
-            let TableStorage::Map(map) = &mut self.storage else {
+            let TableStorage::Map(map, policy) = &mut self.storage else {
                 unreachable!("map insertion requires map storage");
             };
+            if policy.revive_in_place {
+                // The key keeps its slot and index; only the value changes,
+                // so no cached index moves and the version stays put.
+                let (_, slot) = map.get_index_mut(index).expect("the index was just found");
+                *slot = value;
+                self.dead_count -= 1;
+                #[cfg(debug_assertions)]
+                self.debug_assert_invariants();
+                return;
+            }
             // Re-adding a tombstoned key: vacate its old slot in place (it
             // stays a tombstone, so `dead_count` is unchanged) and append the
             // key below, moving it to the back of `pairs()` order. The key's
@@ -1589,13 +1710,13 @@ impl Table {
         // tombstones (vacated slots included) reach the live count keeps the
         // part within twice its live size at amortised O(1) per write.
         let live_count = match &self.storage {
-            TableStorage::Map(map) => map.len() - self.dead_count,
+            TableStorage::Map(map, _) => map.len() - self.dead_count,
             TableStorage::Inline { .. } => unreachable!("map insertion requires map storage"),
         };
         if self.dead_count >= live_count && self.compact_dead() {
             self.bump_version();
         }
-        if let TableStorage::Map(map) = &mut self.storage {
+        if let TableStorage::Map(map, _) = &mut self.storage {
             map.insert(key, value);
         }
         #[cfg(debug_assertions)]
@@ -1619,7 +1740,7 @@ impl Table {
                     self.promote_to_map(key, value);
                 }
             }
-            TableStorage::Map(map) => {
+            TableStorage::Map(map, _) => {
                 map.insert(key, value);
             }
         }
@@ -1643,7 +1764,34 @@ impl Table {
                 map.insert(key, v);
             }
             map.insert(new_key, new_value);
-            self.storage = TableStorage::Map(map);
+            self.storage = TableStorage::Map(map, SlotPolicy::default());
+        }
+        #[cfg(debug_assertions)]
+        self.debug_assert_invariants();
+    }
+
+    /// Set how the hash part keeps its slots (`SlotPolicy`). The global table
+    /// revives keys in place, which keeps a global's place in `pairs(_G)`
+    /// however often it is cleared and set, and retains every tombstone
+    /// while its environment initializes, which is what lets a snapshot
+    /// remember every name initialization wrote.
+    ///
+    /// Only map storage carries a policy: inline storage shifts a re-added
+    /// key out and compacts to make room before it promotes. Inline storage
+    /// is therefore moved to a map first, every slot (tombstones included) at
+    /// the same index, so no cached index moves and the version stays put.
+    /// A snapshot rebuild resets the policy; its owner sets it again.
+    pub(super) fn set_slot_policy(&mut self, policy: SlotPolicy) {
+        if let TableStorage::Inline { entries, len } = &mut self.storage {
+            let mut map: IndexMap<TableKey, Val> =
+                map_with_capacity((INLINE_CAPACITY + 1).next_power_of_two());
+            for (key, value) in entries.iter_mut().take(usize::from(*len)) {
+                let (key, value) = (std::mem::take(key), std::mem::take(value));
+                map.insert(TableKey::from_prevalidated(key), value);
+            }
+            self.storage = TableStorage::Map(map, policy);
+        } else if let TableStorage::Map(_, current) = &mut self.storage {
+            *current = policy;
         }
         #[cfg(debug_assertions)]
         self.debug_assert_invariants();
@@ -1679,7 +1827,7 @@ impl Table {
                 }
                 removed
             }
-            TableStorage::Map(map) => {
+            TableStorage::Map(map, _) => {
                 let value = map.get_mut(&TableLookupKey(*key))?;
                 let removed = std::mem::replace(value, Val::Nil);
                 if matches!(removed, Val::Nil) {
@@ -1695,9 +1843,12 @@ impl Table {
         removed
     }
 
-    /// Stably remove logically absent hash slots. The caller owns version changes.
+    /// Stably remove logically absent hash slots. The caller owns version
+    /// changes. A retaining map (`SlotPolicy::retain_dead`) keeps them all.
     fn compact_dead(&mut self) -> bool {
-        if self.dead_count == 0 {
+        if self.dead_count == 0
+            || matches!(self.storage, TableStorage::Map(_, policy) if policy.retain_dead)
+        {
             #[cfg(debug_assertions)]
             self.debug_assert_invariants();
             return false;
@@ -1719,7 +1870,7 @@ impl Table {
                 *entries = packed;
                 *len = write as u8;
             }
-            TableStorage::Map(map) => map.retain(|_, value| !matches!(value, Val::Nil)),
+            TableStorage::Map(map, _) => map.retain(|_, value| !matches!(value, Val::Nil)),
         }
         self.dead_count = 0;
         #[cfg(debug_assertions)]
@@ -2001,7 +2152,7 @@ impl Table {
                         value: *value,
                     }
                 }),
-            TableStorage::Map(map) => map
+            TableStorage::Map(map, _) => map
                 .iter()
                 .enumerate()
                 .skip(hash_start)
@@ -2035,7 +2186,7 @@ impl Table {
                 .iter()
                 .take(*len as usize)
                 .position(|(key, _)| key == control),
-            TableStorage::Map(map) => map.get_index_of(&TableLookupKey(*control)),
+            TableStorage::Map(map, _) => map.get_index_of(&TableLookupKey(*control)),
         };
         index.map_or(TableNextWithIndex::InvalidKey, |index| {
             self.next_live_from(Position::Hash(index.saturating_add(1)))
@@ -2064,7 +2215,7 @@ impl Table {
             TableStorage::Inline { entries, len } => {
                 index < *len as usize && entries[index].0 == *control
             }
-            TableStorage::Map(map) => map
+            TableStorage::Map(map, _) => map
                 .get_index(index)
                 .is_some_and(|(key, _)| TableLookupKey(*control).equivalent(key)),
         };
@@ -2103,7 +2254,7 @@ impl Table {
                     value.mark_reachable(heap, worklist);
                 }
             }
-            TableStorage::Map(map) => {
+            TableStorage::Map(map, _) => {
                 for (key, value) in map {
                     if let Some(key) = key.as_live() {
                         key.mark_reachable(heap, worklist);
@@ -3384,7 +3535,7 @@ mod tests {
 
     fn map_slots(t: &Table) -> usize {
         match &t.storage {
-            TableStorage::Map(map) => map.len(),
+            TableStorage::Map(map, _) => map.len(),
             TableStorage::Inline { .. } => panic!("expected map storage"),
         }
     }

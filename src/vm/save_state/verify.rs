@@ -687,11 +687,36 @@ fn validate_references(payload: &SavePayload) -> Result<(), SnapshotError> {
             },
         )?;
     }
-    let mut global_names = BTreeSet::new();
-    for (index, (name, value)) in payload.user_globals.iter().enumerate() {
+    // The global table is a table in the arena's form, but not in the arena.
+    if !matches!(payload.globals, SavedObject::Table { .. }) {
+        return Err(corrupt(
+            CorruptionReason::Table(TableCorruption::MaterializedWrongType),
+            0,
+            SaveLocation::Globals,
+        ));
+    }
+    validate_table_shape(payload, &payload.globals, 0, &SaveLocation::Globals)?;
+    // Pins are distinct strings, and only a sealed save has any.
+    let mut pins = BTreeSet::new();
+    for (index, pin) in payload.global_pins.iter().enumerate() {
+        let super::SavedVal::Str(id) = pin else {
+            return Err(corrupt(
+                CorruptionReason::InvalidGlobalPin,
+                index,
+                SaveLocation::Globals,
+            ));
+        };
+        if !payload.globals_sealed {
+            return Err(corrupt(
+                CorruptionReason::InvalidGlobalPin,
+                index,
+                SaveLocation::Globals,
+            ));
+        }
+        validate_value(pin, payload)?;
         insert_unique(
-            &mut global_names,
-            name.as_str(),
+            &mut pins,
+            *id,
             CorruptionReason::Duplicate {
                 entry: DuplicateEntry::GlobalName,
                 form: KeyForm::Saved,
@@ -699,7 +724,6 @@ fn validate_references(payload: &SavePayload) -> Result<(), SnapshotError> {
             index,
             SaveLocation::Globals,
         )?;
-        validate_value(value, payload)?;
     }
     Ok(())
 }
@@ -1065,7 +1089,8 @@ mod tests {
             bytecode: Vec::new(),
             upvalues: Vec::new(),
             objects: Vec::new(),
-            user_globals: Vec::new(),
+            globals: super::super::SavedObject::empty_table(),
+            global_pins: Vec::new(),
             globals_sealed: false,
             env_deltas: vec![delta],
             next_format_pointer_id: 1,
@@ -1141,7 +1166,8 @@ mod tests {
                     upvalues: vec![0, 1],
                 },
             ],
-            user_globals: Vec::new(),
+            globals: super::super::SavedObject::empty_table(),
+            global_pins: Vec::new(),
             globals_sealed: false,
             env_deltas: Vec::new(),
             next_format_pointer_id: 1,
@@ -1489,7 +1515,8 @@ mod tests {
             bytecode: Vec::new(),
             upvalues: Vec::new(),
             objects: Vec::new(),
-            user_globals: Vec::new(),
+            globals: super::super::SavedObject::empty_table(),
+            global_pins: Vec::new(),
             globals_sealed: false,
             env_deltas: Vec::new(),
             next_format_pointer_id: next,
@@ -1505,28 +1532,51 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_global_names_are_rejected() {
-        let with_globals = |globals: Vec<(String, super::super::SavedVal)>| SavePayload {
+    fn duplicate_global_names_and_malformed_pins_are_rejected() {
+        use super::super::SavedVal::{Bool, Str};
+        let with_globals = |entries: Vec<(super::super::SavedVal, super::super::SavedVal)>,
+                            pins: Vec<super::super::SavedVal>,
+                            sealed: bool| SavePayload {
             has_standard_environment: true,
             rng_state: 0,
             cost: crate::cost_meter::CostState::default(),
-            strings: Vec::new(),
+            strings: vec![b"a".to_vec(), b"b".to_vec()],
             bytecode: Vec::new(),
             upvalues: Vec::new(),
             objects: Vec::new(),
-            user_globals: globals,
-            globals_sealed: false,
+            globals: super::super::SavedObject::Table {
+                array_len: 0,
+                array_slots: 0,
+                entries,
+                metatable: None,
+            },
+            global_pins: pins,
+            globals_sealed: sealed,
             env_deltas: Vec::new(),
             next_format_pointer_id: 0,
             format_pointer_ids: Vec::new(),
         };
-        let one = (String::from("a"), super::super::SavedVal::Bool(true));
-        let two = (String::from("a"), super::super::SavedVal::Bool(false));
-        let other = (String::from("b"), super::super::SavedVal::Bool(false));
-        assert!(validate_references(&with_globals(vec![one.clone(), other])).is_ok());
+        let one = (Str(0), Bool(true));
+        let two = (Str(0), Bool(false));
+        let other = (Str(1), Bool(false));
+        assert!(
+            validate_references(&with_globals(vec![one.clone(), other], vec![], false)).is_ok()
+        );
         assert!(matches!(
-            validate_references(&with_globals(vec![one, two])),
+            validate_references(&with_globals(vec![one.clone(), two], vec![], false)),
             Err(SnapshotError::CorruptArena { .. })
         ));
+        // Pins: strings, distinct, and only in a sealed save.
+        assert!(validate_references(&with_globals(vec![], vec![Str(0), Str(1)], true)).is_ok());
+        for (pins, sealed) in [
+            (vec![Str(0)], false),
+            (vec![Bool(true)], true),
+            (vec![Str(0), Str(0)], true),
+        ] {
+            assert!(matches!(
+                validate_references(&with_globals(vec![], pins, sealed)),
+                Err(SnapshotError::CorruptArena { .. })
+            ));
+        }
     }
 }

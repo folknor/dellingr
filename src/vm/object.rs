@@ -16,7 +16,7 @@ use std::cell::Cell;
 use std::fmt;
 use std::sync::Arc;
 
-use slotmap::{SlotMap, new_key_type};
+use slotmap::{Key, SlotMap, new_key_type};
 
 use super::Bytecode;
 use super::BytecodeRuntime;
@@ -359,6 +359,15 @@ pub(crate) struct GcHeap {
     /// construction stays allocation-free (a fresh `Arc<[_]>` would pay an
     /// Arc-header allocation where a `Vec::new` paid nothing).
     empty_upvalues: Arc<[UpvalueRef]>,
+    /// The object whose mutation `watched_epoch` counts: the global table,
+    /// once the State has one (`watch`).
+    watched: ObjectPtr,
+    /// Advances on every mutable access to `watched` through `get_mut`, the
+    /// one mutable route to an object, so an unchanged epoch proves the
+    /// object unchanged without reaching it through the slot map, except for
+    /// the stores `watched_table_unmarked` admits. The builtin mirror
+    /// (`GlobalEnv`) is validated by it.
+    watched_epoch: u64,
 }
 
 impl GcHeap {
@@ -370,7 +379,21 @@ impl GcHeap {
             strings: StringPool::new(),
             mark_worklist: Vec::new(),
             empty_upvalues: Arc::from([]),
+            watched: ObjectPtr(ObjectKey::null()),
+            watched_epoch: 0,
         }
+    }
+
+    /// Count mutable accesses to `ptr` in [`Self::watched_epoch`] from now on.
+    pub(super) fn watch(&mut self, ptr: ObjectPtr) {
+        self.watched = ptr;
+        self.watched_epoch = self.watched_epoch.wrapping_add(1);
+    }
+
+    /// The watched object's mutation epoch (see the field).
+    #[inline(always)]
+    pub(super) fn watched_epoch(&self) -> u64 {
+        self.watched_epoch
     }
 
     /// Create a heap with a chosen threshold for collector tests.
@@ -383,6 +406,8 @@ impl GcHeap {
             strings: StringPool::new(),
             mark_worklist: Vec::new(),
             empty_upvalues: Arc::from([]),
+            watched: ObjectPtr(ObjectKey::null()),
+            watched_epoch: 0,
         }
     }
 
@@ -408,9 +433,32 @@ impl GcHeap {
     /// Panics if the key is invalid (use-after-free detection).
     #[inline]
     pub(super) fn get_mut(&mut self, ptr: ObjectPtr) -> &mut WrappedObject {
+        if ptr == self.watched {
+            self.watched_epoch = self.watched_epoch.wrapping_add(1);
+        }
         self.objects
             .get_mut(ptr.0)
             .expect("Invalid ObjectPtr: object was freed (use-after-free detected)")
+    }
+
+    /// Move the watched object's epoch, for a store made through
+    /// [`Self::watched_table_unmarked`] that can change what it guards.
+    #[inline]
+    pub(super) fn mark_watched_changed(&mut self) {
+        self.watched_epoch = self.watched_epoch.wrapping_add(1);
+    }
+
+    /// The watched table, mutably, without moving its epoch. Only for a
+    /// store that provably cannot change what the epoch guards (the global
+    /// table's cached store to a slot whose key is not a builtin name, which
+    /// neither moves a slot nor touches a builtin's value), or whose caller
+    /// moved it with [`Self::mark_watched_changed`].
+    #[inline]
+    pub(super) fn watched_table_unmarked(&mut self) -> Option<&mut Table> {
+        match &mut self.objects.get_mut(self.watched.0)?.raw {
+            RawObject::Table(table) => Some(table),
+            RawObject::LuaFn(_) => None,
+        }
     }
 
     /// Borrow the object as a Lua closure, if it is one, without cloning it.
@@ -452,6 +500,14 @@ impl GcHeap {
     /// Panics if the string was freed (use-after-free detection).
     pub(super) fn get_string(&self, ptr: StringPtr) -> &[u8] {
         self.strings.get(ptr)
+    }
+
+    /// The interned string with these bytes, if one exists. Never allocates,
+    /// so a lookup by name leaves the string pool unchanged: a name nothing
+    /// has interned cannot be a table key.
+    pub(super) fn find_string(&self, bytes: &[u8]) -> Option<StringPtr> {
+        self.strings
+            .find_by_hash(bytes, crate::det_hash::hash_bytes(bytes))
     }
 
     // ========================================================================

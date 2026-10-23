@@ -18,6 +18,18 @@ plantasjen) unless noted.
 
 ## Investigate
 
+### Release-snapshot native frame grew 64 bytes per level with `_G` as a real table (2026-10-23)
+
+Making the global environment a heap table moved `native_bytes_per_level` on
+plantasjen, base f4c7ed0: dev 7744 to 6800, release 1040 to 1024, but release
+with the `snapshot` feature 1008 to 1072. Every scenario shifted by the same
+amount, so it is a frame that is live on every native level (`Frame::run` or
+something inlined into it), and only in the snapshot shape. Not attributed:
+the run that measured it could not reach the binary for
+`scripts/frame_sizes.py`. Attribute it with `frame_sizes.py` and
+`asm_diff.py` on both builds before deciding whether to recover it; the
+envelope tests still pass.
+
 ### Per-instruction weight of the register dispatch loop (2026-10-23)
 
 The entries below share one measurement. perf on plantasjen (Zen 3),

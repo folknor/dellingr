@@ -457,16 +457,43 @@ All notable changes to dellingr are documented here. The format follows
   The same holds for an error inside `string.gmatch` while it builds the
   iterator, such as budget exhaustion: it is located at the calling line, not
   `string.gmatch:<n>:`.
+- `_G` is the global table itself, no longer an empty proxy whose handlers
+  forwarded to a separate store. `pairs(_G)` and `next(_G)` enumerate the
+  globals, `rawget(_G, "print")` is `print`, and `rawset(_G, "x", 1)` defines
+  the global `x`; before, a raw write created a second `x` that `_G.x` read
+  and `x` did not. Every key type is a global table key; non-UTF-8 and other
+  non-string keys written inside `with_restricted_env` no longer outlive the
+  restriction, which now swaps the table's contents, so every reference to
+  `_G` sees the environment in force. `State::raw` has a global table too,
+  without a `_G` binding. `getmetatable(_G)` stays `false` and
+  `setmetatable(_G, ...)` still errors; the metatable no longer has
+  `__index`/`__newindex` handlers. Reopening the libraries keeps the same
+  `_G` object. Global access, `_G` field access and costs are otherwise
+  unchanged.
+  - **Replay-visible (`pairs` order):** `pairs(_G)` now yields the globals,
+    in binding order (a cleared and redefined global keeps its place).
+  - **Replay-visible (snapshot contents):** `FORMAT_VERSION` 13. The global
+    table is saved whole with its pins, in place of the named bindings and
+    the proxy's environment delta; older saves are refused. Load setup now
+    contributes only string-keyed globals the save does not mention, and a
+    sealed load keeps a pinned deletion even through a setup that no longer
+    installs the name.
+  - **Replay-visible (sealed globals):** after sealing, tombstones of names
+    written during initialization compact like any other (the pins remember
+    them for a load), so the globals compact at different points than before.
+  - Error messages that name a callback by its global use the first binding
+    in table order whose key is a UTF-8 string.
 
 ### Added
 
 - `State::seal_globals` and `State::globals_sealed`. Sealing ends global
-  initialization: global bindings first written afterwards are reclaimed once
-  set to nil, so a script writing computed names through `_G` no longer grows
-  the globals without bound. An unsealed State keeps every binding, as before.
-  With the `snapshot` feature, the save records the phase and a load restores
-  it; a sealed load's setup must replay the saving State's initialization
-  (`docs/save-state.md`).
+  initialization: from then on globals set to nil are reclaimed as in any
+  table, so a script writing computed names through `_G` no longer grows the
+  globals without bound. An unsealed State keeps every global's slot, as
+  before. With the `snapshot` feature, sealing records the names written
+  until then as pins, the save records the phase and the pins, and a load
+  restores both; a sealed load's setup must replay the saving State's
+  initialization (`docs/save-state.md`).
 - `Program::disassemble`, returning a displayable `Disassembly` listing of the
   finalized bytecode, and the CLI flag `--dump-bytecode`, which prints that
   listing without executing the script. The listing format is diagnostic and

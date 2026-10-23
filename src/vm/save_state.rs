@@ -23,17 +23,20 @@
 //!   [`State::register_rust_fn`]) and the save fails fast if one is
 //!   unregistered. The stdlib registers itself under dotted paths
 //!   (`math.sin`, ...) during `open_libs`.
-//! - **Environment objects are rebuilt, not copied.** `math`/`string`/`table`/
-//!   `_G`, `_G`'s metatable and the shared string metatable are reconstructed by
+//! - **Environment objects are rebuilt, not copied.** `math`/`string`/`table`,
+//!   `_G`'s metatable and the shared string metatable are reconstructed by
 //!   `open_libs` on load and referenced by token. The object->token map is
 //!   refreshed at each successful `open_libs` (`State.env_tokens`), not read
-//!   from the live `builtins`
-//!   slots, so shadowing a builtin global (`math = {}`) can't misclassify the
+//!   from the live builtin bindings,
+//!   so shadowing a builtin global (`math = {}`) can't misclassify the
 //!   user's table as an environment object. Adding `math.foo` in a later build
 //!   therefore doesn't corrupt old saves.
-//! - **Globals are persisted whole.** An unshadowed builtin encodes to a cheap
-//!   `EnvObj`/`Fn` token; a *shadow* (`print = ...`) is preserved as the user's
-//!   value. Skipping builtin names would silently drop shadows.
+//! - **The global table is persisted whole.** Every State has one, so its
+//!   token `_G` is permanent rather than an `open_libs` capture, and its
+//!   contents are a payload section of their own: every slot, tombstones
+//!   included, plus the pins sealing recorded. An unshadowed builtin encodes
+//!   to a cheap `EnvObj`/`Fn` token; a *shadow* (`print = ...`) is preserved
+//!   as the user's value. Skipping builtin names would silently drop shadows.
 //! - **In-crate codec.** Little-endian, length-prefixed, `f64` by bit pattern
 //!   (NaNs canonicalized, -0.0 exact), explicit enum tags, bounds-checked with
 //!   initial vector reservations capped in bytes at remaining input. No
@@ -83,8 +86,12 @@ pub(super) const BUILTIN_ENV_TOKENS: &[(crate::instr::Builtin, &str)] = &[
     (crate::instr::Builtin::Math, "math"),
     (crate::instr::Builtin::String, "string"),
     (crate::instr::Builtin::Table, "table"),
-    (crate::instr::Builtin::G, "_G"),
 ];
+/// The global table's token. Unlike the environment objects above it is
+/// permanent (a raw State has a global table too), so it is not in
+/// `State.env_tokens`: the save walker and loader add it themselves, and its
+/// contents travel in the payload's `globals` section, not as a delta.
+pub(super) const GLOBALS_TOKEN: &str = "_G";
 pub(super) const GLOBAL_METATABLE_TOKEN: &str = "_G.metatable";
 pub(super) const STRING_METATABLE_TOKEN: &str = "string.metatable";
 
@@ -203,6 +210,19 @@ struct SavedBytecode {
     line_info: Vec<u32>,
 }
 
+#[cfg(test)]
+impl SavedObject {
+    /// An empty saved table, for payload fixtures with no globals.
+    fn empty_table() -> Self {
+        Self::Table {
+            array_len: 0,
+            array_slots: 0,
+            entries: Vec::new(),
+            metatable: None,
+        }
+    }
+}
+
 type SavedUpvalueDesc = UpvalueDesc;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -214,7 +234,12 @@ struct SavePayload {
     bytecode: Vec<SavedBytecode>,
     upvalues: Vec<SavedVal>,
     objects: Vec<SavedObject>,
-    user_globals: Vec<(String, SavedVal)>,
+    /// The global table, whole: always the `Table` variant (the verifier
+    /// rejects anything else). It is not an arena object: `EnvObj("_G")`
+    /// names it, and it is restored into the loaded State's own global table.
+    globals: SavedObject,
+    /// The pin list (`GlobalEnv`): string ids, empty unless sealed.
+    global_pins: Vec<SavedVal>,
     /// Whether the saving State had sealed its globals; the loaded one takes
     /// the same phase.
     globals_sealed: bool,
@@ -245,7 +270,11 @@ impl SavePayload {
                 })
             })
             .saturating_add(self.upvalues.len())
-            .saturating_add(self.user_globals.len().saturating_mul(2));
+            .saturating_add(match &self.globals {
+                SavedObject::Table { entries, .. } => entries.len().saturating_mul(2),
+                SavedObject::Closure { .. } => 0,
+            })
+            .saturating_add(self.global_pins.len());
         let bytecode_bytes = self.bytecode.iter().fold(0usize, |sum, chunk| {
             let literal_bytes = chunk.string_literals.iter().fold(0usize, |sum, literal| {
                 sum.saturating_add(literal.len()).saturating_add(4)
@@ -637,20 +666,7 @@ impl<'a> SaveBuilder<'a> {
     }
 
     fn finish(mut self) -> Result<SavePayload, SaveError> {
-        // Persist every global, builtins included. An unshadowed builtin
-        // encodes to a cheap EnvObj/Fn token (resolved against the rebuilt
-        // environment on load), so we pay almost nothing for it. Skipping
-        // builtin *names* would silently drop user shadows like
-        // `print = function ... end` or `math = {}`, which live in `globals`
-        // under a builtin name but no longer hold the canonical value.
-        let mut user_globals = Vec::new();
-        // Tombstones are saved too, in slot order: they suppress names load
-        // setup reinstalls, and they let the loaded environment compact
-        // exactly when the saving one would have.
-        for (name, val) in self.state.global_env.iter() {
-            let saved = self.encode_root(val, name)?;
-            user_globals.push((name.clone(), saved));
-        }
+        let (globals, global_pins) = self.encode_globals()?;
         let env_deltas = self.encode_env_deltas()?;
         // Every canonical environment object is rebuilt on load, even when
         // globals are shadowed. Expand these roots in token order so their
@@ -666,12 +682,16 @@ impl<'a> SaveBuilder<'a> {
             self.encode_environment_root(Val::Obj(ptr), &token)?;
         }
         // Some strings stay observable without the saved graph reaching them
-        // as values: metamethod event names are State roots for its whole
-        // lifetime, and a string literal of a saved chunk is re-interned on
-        // load to the same string a script reads through that chunk. Carry a
-        // `%p` identity on either through the arena; strings without an
-        // identity add nothing to the payload.
+        // as values: metamethod event and builtin names are State roots for
+        // its whole lifetime, and a string literal of a saved chunk is
+        // re-interned on load to the same string a script reads through that
+        // chunk. Carry a `%p` identity on either through the arena; strings
+        // without an identity add nothing to the payload.
         let mut identity_strings: Vec<Val> = self.state.meta_names.iter().collect();
+        identity_strings.extend(
+            (0..crate::instr::Builtin::COUNT)
+                .map(|slot| self.state.global_env.builtin_key(slot as u8)),
+        );
         // Address keys are lookup-only: arena ids carry graph traversal order.
         // Sorting by address would make identity-only strings allocator-dependent.
         let mut chunks: Vec<_> = self.bytecode_ids.iter().collect();
@@ -730,7 +750,8 @@ impl<'a> SaveBuilder<'a> {
             bytecode: self.bytecode,
             upvalues,
             objects,
-            user_globals,
+            globals,
+            global_pins,
             globals_sealed: self.state.global_env.is_sealed(),
             env_deltas,
             next_format_pointer_id: self.state.next_format_pointer_id,
@@ -755,6 +776,76 @@ impl<'a> SaveBuilder<'a> {
                 .or_else(|| self.object_ids.get(&ptr).copied().map(SavedVal::Obj)),
             Val::Nil | Val::Bool(_) | Val::Num(_) => None,
         }
+    }
+
+    /// The global table, whole, and the pin list.
+    ///
+    /// Every slot is saved in physical order, tombstones and vacant slots
+    /// included: a saved tombstone suppresses the name load setup reinstalls,
+    /// and the loaded table compacts exactly when the saving one would have.
+    /// Builtins included: an unshadowed one encodes to a cheap `EnvObj`/`Fn`
+    /// token, and skipping builtin names would drop user shadows such as
+    /// `print = function ... end`. Encoded first, each value as a root
+    /// labelled by its global name, so an unregistered function is reported
+    /// by the global that reaches it. The table is marked expanded first so a
+    /// `_G` self-reference encodes as its token alone, and its rendered
+    /// identity survives whether or not any saved value still references it.
+    fn encode_globals(&mut self) -> Result<(SavedObject, Vec<SavedVal>), SaveError> {
+        let ptr = self.state.global_env.table();
+        self.expanded_environment_objects.insert(ptr);
+        self.reachable_pointer_values
+            .insert(SavedVal::EnvObj(GLOBALS_TOKEN.to_owned()));
+        let table = self
+            .state
+            .heap
+            .as_table_ref(ptr)
+            .ok_or(SaveError::from(SaveFault::EnvironmentObjectNotTable))?;
+        let (array_len, array_slots, entries) = table.snapshot_entries();
+        let metatable = table.get_metatable();
+        let array_slots = u32::try_from(array_slots)
+            .map_err(|_| too_large(SaveCollection::TableArraySlots, array_slots))?;
+        let mut saved = Vec::with_capacity(entries.len());
+        for (key, value) in entries {
+            // Only a UTF-8 string key reads as a global's name.
+            let name = match key {
+                Val::Str(name) => match str::from_utf8(self.state.heap.get_string(name)) {
+                    Ok(name) => Some(name.to_owned()),
+                    Err(_) => None,
+                },
+                _ => None,
+            };
+            let (key, value) = match name {
+                Some(name) => (
+                    self.encode_root(key, &name)?,
+                    self.encode_root(value, &name)?,
+                ),
+                None => (
+                    self.encode_environment_root(key, GLOBALS_TOKEN)?,
+                    self.encode_environment_root(value, GLOBALS_TOKEN)?,
+                ),
+            };
+            saved.push((key, value));
+        }
+        let metatable = metatable
+            .map(|mt| self.encode_environment_root(Val::Obj(mt), GLOBALS_TOKEN))
+            .transpose()?;
+        let mut pins = Vec::with_capacity(self.state.global_env.pins().len());
+        for pin in self.state.global_env.pins() {
+            let pin = SavedVal::Str(self.string_id(*pin)?);
+            // A pin can outlive every slot naming it, and stays a root.
+            self.reachable_pointer_values.insert(pin.clone());
+            pins.push(pin);
+        }
+        Ok((
+            SavedObject::Table {
+                // MAX_ARRAY_LEN keeps the logical length below 2^53.
+                array_len: array_len as u64,
+                array_slots,
+                entries: saved,
+                metatable,
+            },
+            pins,
+        ))
     }
 
     fn encode_env_deltas(&mut self) -> Result<Vec<SavedEnvDelta>, SaveError> {
@@ -1379,7 +1470,9 @@ impl State {
 /// canonical snapshot captured at construction, so a shadowed builtin slot
 /// (`math = {}`) never causes a user table to be misread as an env object.
 fn build_env_reverse(state: &State) -> BTreeMap<ObjectPtr, String> {
-    state.env_tokens.clone()
+    let mut reverse = state.env_tokens.clone();
+    reverse.insert(state.global_env.table(), GLOBALS_TOKEN.to_owned());
+    reverse
 }
 
 /// Token -> object map for the load-time environment, inverting the freshly
@@ -1387,11 +1480,13 @@ fn build_env_reverse(state: &State) -> BTreeMap<ObjectPtr, String> {
 /// Loading does not reconstruct token names from builtin names or literals;
 /// capture uses this module's token schema on both sides of the round trip.
 fn build_env_forward(state: &State) -> BTreeMap<String, ObjectPtr> {
-    state
+    let mut forward: BTreeMap<String, ObjectPtr> = state
         .env_tokens
         .iter()
         .map(|(ptr, token)| (token.clone(), *ptr))
-        .collect()
+        .collect();
+    forward.insert(GLOBALS_TOKEN.to_owned(), state.global_env.table());
+    forward
 }
 
 /// Bit pattern a number is saved as. Every NaN is written as the one canonical
@@ -1940,13 +2035,13 @@ fn materialize_payload(
         }
     }
 
-    let mut user_globals = Vec::with_capacity(payload.user_globals.len());
-    for (name, saved) in payload.user_globals {
-        user_globals.push((name, decode_val(&saved, &ctx)?));
-    }
-    state
-        .global_env
-        .restore(user_globals, payload.globals_sealed);
+    restore_globals(
+        state,
+        &payload.globals,
+        &payload.global_pins,
+        payload.globals_sealed,
+        &ctx,
+    )?;
     state.rng = VmRng::from_state(payload.rng_state);
     state.cost = payload.cost;
     state.next_format_pointer_id = payload.next_format_pointer_id;
@@ -2030,6 +2125,97 @@ fn materialize_payload(
     state.gc_collect();
     merge_setup_pointer_ids(state, setup_pointer_ids, &seen_pointer_ids);
     Ok(())
+}
+
+/// Decode the saved global table and pins and restore them into the loaded
+/// State's global table (`GlobalEnv::restore` owns the merge with setup).
+fn restore_globals(
+    state: &mut State,
+    globals: &SavedObject,
+    pins: &[SavedVal],
+    sealed: bool,
+    ctx: &DecodeCtx<'_>,
+) -> Result<(), SnapshotError> {
+    let SavedObject::Table {
+        array_len,
+        array_slots,
+        entries,
+        metatable,
+    } = globals
+    else {
+        return Err(corrupt_arena(
+            CorruptionReason::Table(TableCorruption::MaterializedWrongType),
+            0,
+            SaveLocation::Globals,
+        ));
+    };
+    // As for arena tables: uniqueness of the resolved hash keys, which the
+    // verifier can only check in saved form.
+    let mut runtime_keys = BTreeSet::new();
+    let hash_start = *array_slots as usize;
+    let mut decoded = Vec::with_capacity(entries.len());
+    for (entry_index, (key, value)) in entries.iter().enumerate() {
+        let key = decode_val(key, ctx)?;
+        if entry_index >= hash_start && !matches!(key, Val::Nil) {
+            insert_runtime_key(
+                &mut runtime_keys,
+                key,
+                &state.heap,
+                entry_index,
+                CorruptionReason::Duplicate {
+                    entry: DuplicateEntry::TableKey,
+                    form: KeyForm::Materialized,
+                },
+                SaveLocation::Globals,
+            )?;
+        }
+        decoded.push((key, decode_val(value, ctx)?));
+    }
+    let metatable = match metatable {
+        None => None,
+        Some(mt) => match decode_val(mt, ctx)? {
+            Val::Obj(mt_ptr) if state.heap.as_table_ref(mt_ptr).is_some() => Some(mt_ptr),
+            _ => {
+                return Err(corrupt_arena(
+                    CorruptionReason::Table(TableCorruption::MetatableNotTable),
+                    0,
+                    SaveLocation::Globals,
+                ));
+            }
+        },
+    };
+    let mut saved_pins = Vec::with_capacity(pins.len());
+    for (index, pin) in pins.iter().enumerate() {
+        match decode_val(pin, ctx)? {
+            Val::Str(ptr) => saved_pins.push(ptr),
+            _ => {
+                return Err(corrupt_arena(
+                    CorruptionReason::InvalidGlobalPin,
+                    index,
+                    SaveLocation::Globals,
+                ));
+            }
+        }
+    }
+    // The verifier bounds `array_len` by MAX_ARRAY_LEN, so it fits.
+    let array_len = match usize::try_from(*array_len) {
+        Ok(len) => len,
+        Err(_) => usize::MAX,
+    };
+    state
+        .global_env
+        .restore(
+            &mut state.heap,
+            (array_len, hash_start, decoded),
+            metatable,
+            sealed,
+            saved_pins,
+        )
+        .map_err(|error| SnapshotError::InvalidTable {
+            location: TableLoadLocation::Globals,
+            step: TableRestoreStep::ObjectRebuild,
+            failure: error.into(),
+        })
 }
 
 /// Merge the identities load setup rendered into the restored ones.
@@ -2697,14 +2883,12 @@ impl SavePayload {
         write_vec(out, SaveCollection::Objects, &self.objects, |out, item| {
             item.encode(out)
         })?;
+        self.globals.encode(out)?;
         write_vec(
             out,
             SaveCollection::Globals,
-            &self.user_globals,
-            |out, (name, val)| {
-                out.write_string(name, SnapshotField::GlobalName)?;
-                val.encode(out)
-            },
+            &self.global_pins,
+            |out, pin| pin.encode(out),
         )?;
         out.write_bool(self.globals_sealed);
         write_vec(
@@ -2745,12 +2929,8 @@ impl SavePayload {
             bytecode: read_vec(input, SavedBytecode::decode)?,
             upvalues: read_vec(input, SavedVal::decode)?,
             objects: read_vec(input, SavedObject::decode)?,
-            user_globals: read_vec(input, |input| {
-                Ok((
-                    input.read_string(SnapshotField::GlobalName)?,
-                    SavedVal::decode(input)?,
-                ))
-            })?,
+            globals: SavedObject::decode(input)?,
+            global_pins: read_vec(input, SavedVal::decode)?,
             globals_sealed: input.read_bool()?,
             env_deltas: read_vec(input, SavedEnvDelta::decode)?,
             next_format_pointer_id: input.read_u64()?,
@@ -3350,15 +3530,34 @@ mod tests {
         objects: Vec<SavedObject>,
         user_globals: Vec<(String, SavedVal)>,
     ) -> Result<State, SnapshotError> {
+        // The names are the string arena; the globals table binds them.
+        let strings = user_globals
+            .iter()
+            .map(|(name, _)| name.as_bytes().to_vec())
+            .collect();
+        let entries = std::iter::once((SavedVal::Nil, SavedVal::Bool(true)))
+            .chain(
+                user_globals
+                    .into_iter()
+                    .enumerate()
+                    .map(|(id, (_, value))| (SavedVal::Str(id as u32), value)),
+            )
+            .collect();
         let payload = SavePayload {
             has_standard_environment: false,
             rng_state: 0,
             cost: CostState::default(),
-            strings: Vec::new(),
+            strings,
             bytecode,
             upvalues: Vec::new(),
             objects,
-            user_globals,
+            globals: SavedObject::Table {
+                array_len: 0,
+                array_slots: 0,
+                entries,
+                metatable: None,
+            },
+            global_pins: Vec::new(),
             globals_sealed: false,
             env_deltas: Vec::new(),
             next_format_pointer_id: 1,
@@ -3927,7 +4126,8 @@ mod tests {
             bytecode: vec![bytecode],
             upvalues: Vec::new(),
             objects: Vec::new(),
-            user_globals: Vec::new(),
+            globals: SavedObject::empty_table(),
+            global_pins: Vec::new(),
             globals_sealed: false,
             env_deltas: Vec::new(),
             next_format_pointer_id: 1,

@@ -97,16 +97,17 @@ const TABLE_LIBRARY_CAPACITY: usize = table::TABLE_FUNCTIONS.len();
 // `Builtin::COUNT` covers all standard globals except `error`.
 pub(crate) const STDLIB_NON_BUILTIN_GLOBALS: usize = basic::NON_BUILTIN_GLOBALS.len();
 
-// `_G`, its metatable, the math, string and table library tables, and the
-// string metatable.
-pub(crate) const STDLIB_HEAP_TABLES: usize = 6;
+// `_G`'s metatable, the math, string and table library tables, and the
+// string metatable. `_G` itself is the global table, which exists already.
+pub(crate) const STDLIB_HEAP_TABLES: usize = 5;
 
-// Function and constant keys in the library tables, plus the `_G` metamethod
-// and protection keys. Keep the count next to the lists that define its inputs.
+// Function and constant keys in the library tables, the non-builtin global
+// names, plus the `_G` protection key. Keep the count next to the lists that
+// define its inputs.
 pub(crate) const STDLIB_INTERNED_TABLE_KEYS: usize = MATH_LIBRARY_CAPACITY
     + STRING_LIBRARY_CAPACITY
     + TABLE_LIBRARY_CAPACITY
-    + basic::GLOBAL_ENV_METAMETHODS.len()
+    + STDLIB_NON_BUILTIN_GLOBALS
     + basic::GLOBAL_ENV_PROTECTION_FIELDS.len();
 
 /// Headroom the library setup reserves on the value stack.
@@ -243,7 +244,7 @@ impl State {
         self.set_global_named_rust_fn(name, name, func)
             .map_err(Self::registration_error)?;
         #[cfg(not(feature = "snapshot"))]
-        self.set_global_rust_fn(name, func);
+        self.set_global_rust_fn(name, func)?;
         Ok(())
     }
 }

@@ -198,15 +198,18 @@ capacity; what a collection frees is the payloads and entries it removes.
   This does not impose a smaller logical-length limit or discard live values.
   It does not make unrelated VM allocations fallible or protect against an
   operating system killing the process after accepting an allocation.
-- Never reclaimed for the life of the environment: a global binding written
-  before `State::seal_globals` keeps its slot after being set to nil, because a
-  load's setup may reinstall that name and the saved nil is what keeps it
-  deleted. Until the host seals, that covers every global, so a script that
-  writes computed names through `_G` grows the bindings without bound. After
-  sealing, bindings first created by later writes are reclaimed: once their
-  nil tombstones make up half the bindings, the next new name compacts them.
-  The map's allocated capacity stays at its peak. Bindings created inside
+- Never reclaimed until `State::seal_globals`: the global table keeps a slot
+  for every global written after it was set to nil, because a load's setup may
+  reinstall that name and the saved nil is what keeps it deleted. A script
+  that writes computed names through `_G` before the host seals grows the
+  table without bound. Sealing records those names as pins (with the
+  `snapshot` feature), and from then on the table's tombstones compact as in
+  any table: once they reach its live entries, the next new key compacts them.
+  The table's allocated capacity stays at its peak. Clearing and redefining
+  the same global reuses its slot in every phase. Globals created inside
   `with_restricted_env` go away with that environment.
+- Never reclaimed, with the `snapshot` feature: the pins, one interned string
+  per name initialization wrote, plus any a sealed load's setup adds.
 - Never reclaimed: with the `snapshot` feature, Rust function registrations
   persist while unreachable, one per registered id.
 

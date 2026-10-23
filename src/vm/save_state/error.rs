@@ -183,7 +183,7 @@ pub enum SaveCollection {
     Upvalues,
     /// The object arena.
     Objects,
-    /// The user globals.
+    /// The global table's pins.
     Globals,
     /// The environment deltas.
     EnvironmentDeltas,
@@ -611,6 +611,8 @@ pub enum CorruptionReason {
     Environment(EnvironmentCorruption),
     /// A saved `string.gmatch` iterator is malformed.
     Gmatch(GmatchCorruption),
+    /// A global pin is not a string, or an unsealed save carries pins.
+    InvalidGlobalPin,
 }
 
 impl fmt::Display for CorruptionReason {
@@ -627,6 +629,7 @@ impl fmt::Display for CorruptionReason {
             Self::Table(reason) => fmt::Display::fmt(reason, f),
             Self::Environment(reason) => fmt::Display::fmt(reason, f),
             Self::Gmatch(reason) => fmt::Display::fmt(reason, f),
+            Self::InvalidGlobalPin => f.write_str("invalid global pin"),
         }
     }
 }
@@ -1034,7 +1037,7 @@ pub enum TableLoadLocation {
     Bytecode,
     /// Closed upvalue arena.
     Upvalues,
-    /// Ordered user globals.
+    /// The saved global table and its pins.
     Globals,
     /// Rendered pointer identity records.
     PointerIds,

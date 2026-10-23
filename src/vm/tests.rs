@@ -68,7 +68,10 @@ fn vm_test01() {
     let mut state = State::new();
     let input = compile_unnamed("a = 1").unwrap();
     state.eval_chunk(input, 0).unwrap();
-    assert_eq!(Val::Num(1.0), *state.global_env.get("a").unwrap());
+    assert_eq!(
+        Val::Num(1.0),
+        state.global_env.get(&state.heap, "a").unwrap()
+    );
 }
 
 #[test]
@@ -80,12 +83,12 @@ fn nil_assignment_does_not_create_unknown_globals_including_builtins() {
     state
         .call(crate::instr::ArgCount::Fixed(0), RetCount::Fixed(0))
         .unwrap();
-    assert!(state.global_env.is_empty());
+    assert!(state.global_env.is_empty(&state.heap));
     for name in ["never_set", "print"] {
         state.push_nil().unwrap();
         state.set_global(name).unwrap();
     }
-    assert!(state.global_env.is_empty());
+    assert!(state.global_env.is_empty(&state.heap));
 }
 
 fn run_lua(state: &mut State, source: &str) {
@@ -116,28 +119,58 @@ fn sealed_globals_compact_computed_name_churn() {
     let mut state = State::new();
     run_lua(&mut state, "setup_value = 1; setup_value = nil");
     state.seal_globals();
-    let baseline = state.global_env.len();
+    let baseline = state.global_env.len(&state.heap);
     run_lua(&mut state, COMPUTED_NAME_CHURN);
-    // The map stays within twice its live-plus-pinned size, whatever the
-    // number of names the script has used.
-    assert!(state.global_env.len() <= 2 * baseline + 2);
-    // A tombstone written before sealing survives every compaction.
-    assert_eq!(state.global_env.get("setup_value"), Some(&Val::Nil));
+    // The table stays within twice its live size, whatever the number of
+    // names the script has used.
+    assert!(state.global_env.len(&state.heap) <= 2 * baseline + 2);
+    // A name written before sealing is pinned, so a load keeps it deleted
+    // even once its tombstone has compacted away.
+    #[cfg(feature = "snapshot")]
+    {
+        let pinned: Vec<&[u8]> = state
+            .global_env
+            .pins()
+            .iter()
+            .map(|pin| state.heap.get_string(*pin))
+            .collect();
+        assert!(pinned.contains(&&b"setup_value"[..]));
+    }
+}
+
+#[test]
+fn a_toggled_global_keeps_its_slot_in_every_phase() {
+    // Clearing and setting one global must not grow the table: the global
+    // takes its slot back, before sealing (when nothing compacts) and after.
+    let mut state = State::new();
+    for seal in [false, true] {
+        if seal {
+            state.seal_globals();
+        }
+        let before = state.global_env.len(&state.heap);
+        run_lua(
+            &mut state,
+            "for i = 1, 1000 do target = i; target = nil end \
+             for i = 1, 1000 do _G.other = i; _G.other = nil end \
+             for i = 1, 1000 do rawset(_G, 'third', i); rawset(_G, 'third', nil) end",
+        );
+        assert!(state.global_env.len(&state.heap) <= before + 3);
+    }
 }
 
 #[test]
 fn unsealed_globals_keep_every_tombstone() {
     let mut state = State::new();
-    let baseline = state.global_env.len();
+    let baseline = state.global_env.len(&state.heap);
     run_lua(&mut state, COMPUTED_NAME_CHURN);
-    assert_eq!(state.global_env.len(), baseline + 4001);
+    assert_eq!(state.global_env.len(&state.heap), baseline + 4001);
 }
 
 #[test]
 fn compaction_keeps_live_order_and_cached_writes() {
     let mut state = State::new();
     state.seal_globals();
-    let baseline = state.global_env.len();
+    let baseline = state.global_env.len(&state.heap);
     // `bump` warms its GET_GLOBAL/SET_GLOBAL caches on `kept`, compaction then
     // moves `kept` down by the five `t` tombstones before it, and the second
     // call reuses the same instructions. The stale index stays in bounds and
@@ -157,18 +190,21 @@ fn compaction_keeps_live_order_and_cached_writes() {
         bump()
         ",
     );
-    let names: Vec<&str> = state
+    let names: Vec<String> = state
         .global_env
-        .iter()
-        .map(|(name, _)| name.as_str())
+        .names(&state.heap)
+        .into_iter()
         .skip(baseline)
         .collect();
     let mut expected = vec!["bump".to_string(), "kept".to_string()];
     expected.extend((1..=10).map(|i| format!("u{i}")));
     expected.push("last".to_string());
     assert_eq!(names, expected);
-    assert_eq!(state.global_env.get("kept"), Some(&Val::Num(2.0)));
-    assert_eq!(state.global_env.get("u5"), Some(&Val::Num(5.0)));
+    assert_eq!(
+        state.global_env.get(&state.heap, "kept"),
+        Some(Val::Num(2.0))
+    );
+    assert_eq!(state.global_env.get(&state.heap, "u5"), Some(Val::Num(5.0)));
 }
 
 #[test]
@@ -200,7 +236,7 @@ fn vm_test02() {
         ..Bytecode::default()
     };
     state.eval_chunk(input, 0).unwrap();
-    let val = state.global_env.get("key").unwrap();
+    let val = state.global_env.get(&state.heap, "key").unwrap();
     assert_eq!(val.as_string(&state.heap), Some(&b"ab"[..]));
 }
 
@@ -221,7 +257,10 @@ fn vm_test04() {
         ..Bytecode::default()
     };
     state.eval_chunk(input, 0).unwrap();
-    assert_eq!(Val::Bool(true), *state.global_env.get("a").unwrap());
+    assert_eq!(
+        Val::Bool(true),
+        state.global_env.get(&state.heap, "a").unwrap()
+    );
 }
 
 #[test]
@@ -241,7 +280,10 @@ fn vm_test05() {
         ..Bytecode::default()
     };
     state.eval_chunk(input, 0).unwrap();
-    assert_eq!(Val::Bool(false), *state.global_env.get("key").unwrap());
+    assert_eq!(
+        Val::Bool(false),
+        state.global_env.get(&state.heap, "key").unwrap()
+    );
 }
 
 #[test]
@@ -262,7 +304,10 @@ fn vm_test06() {
         ..Bytecode::default()
     };
     state.eval_chunk(chunk, 0).unwrap();
-    assert_eq!(Val::Num(5.0), *state.global_env.get("a").unwrap());
+    assert_eq!(
+        Val::Num(5.0),
+        state.global_env.get(&state.heap, "a").unwrap()
+    );
 }
 
 #[test]
@@ -284,7 +329,7 @@ fn vm_test07() {
         ..Bytecode::default()
     };
     state.eval_chunk(chunk, 0).unwrap();
-    assert!(state.global_env.get("a").is_none());
+    assert!(state.global_env.get(&state.heap, "a").is_none());
 }
 
 #[test]
@@ -311,7 +356,10 @@ fn vm_test08() {
     };
     let mut state = State::new();
     state.eval_chunk(chunk, 0).unwrap();
-    assert_eq!(Val::Num(10.0), *state.global_env.get("a").unwrap());
+    assert_eq!(
+        Val::Num(10.0),
+        state.global_env.get(&state.heap, "a").unwrap()
+    );
 }
 
 #[test]
@@ -340,7 +388,10 @@ fn vm_test09() {
     };
     let mut state = State::new();
     state.eval_chunk(chunk, 0).unwrap();
-    assert_eq!(Val::Num(10.0), *state.global_env.get("x").unwrap());
+    assert_eq!(
+        Val::Num(10.0),
+        state.global_env.get(&state.heap, "x").unwrap()
+    );
 }
 
 #[test]
@@ -368,7 +419,7 @@ fn vm_test10() {
     };
     let mut state = State::new();
     state.eval_chunk(chunk, 0).unwrap();
-    assert!(state.global_env.get("a").is_none());
+    assert!(state.global_env.get(&state.heap, "a").is_none());
 }
 
 #[test]
@@ -381,7 +432,12 @@ fn vm_test11() {
     let chunk = compile_unnamed(text).unwrap();
     let mut state = State::new();
     state.eval_chunk(chunk, 0).unwrap();
-    let a = state.global_env.get("a").unwrap().as_num().unwrap();
+    let a = state
+        .global_env
+        .get(&state.heap, "a")
+        .unwrap()
+        .as_num()
+        .unwrap();
     assert_eq!(a, 6.0);
 }
 
@@ -446,14 +502,12 @@ fn gc_collect_preserves_disabled_auto_gc() {
 fn gc_preserves_nested_suspended_environments() {
     let mut state = State::new();
     state.new_table().unwrap();
-    let original = state.pop_val();
-    state.set_global_value("original", original);
+    state.set_global("original").unwrap();
 
     state
         .with_restricted_env(&[], |state| {
             state.new_table().unwrap();
-            let outer = state.pop_val();
-            state.set_global_value("outer", outer);
+            state.set_global("outer").unwrap();
 
             state
                 .with_restricted_env(&[], |state| {
@@ -461,9 +515,9 @@ fn gc_preserves_nested_suspended_environments() {
                 })
                 .expect("state is not poisoned");
 
-            let outer = *state
+            let outer = state
                 .global_env
-                .get("outer")
+                .get(&state.heap, "outer")
                 .expect("outer restricted value must be restored");
             // Dereference through the heap. `as_object_ptr().is_some()` only
             // inspects the Val variant, so a swept generational pointer still
@@ -475,15 +529,17 @@ fn gc_preserves_nested_suspended_environments() {
         })
         .expect("state is not poisoned");
 
-    let original = *state
+    let original = state
         .global_env
-        .get("original")
+        .get(&state.heap, "original")
         .expect("original value must be restored");
     assert!(
         live_table(&state, original),
         "original global was collected"
     );
-    let math = state.global_env.builtin(crate::instr::Builtin::Math as u8);
+    let math = state
+        .global_env
+        .read_builtin(&state.heap, crate::instr::Builtin::Math as u8);
     assert!(live_table(&state, math), "math library table was collected");
 }
 
@@ -499,7 +555,9 @@ fn live_table(state: &State, val: Val) -> bool {
 #[test]
 fn gc_preserves_frame_varargs() {
     let mut state = State::new();
-    state.set_global_value("force_gc", Val::RustFn(force_gc));
+    state
+        .set_global_value("force_gc", Val::RustFn(force_gc))
+        .unwrap();
     let input = compile_unnamed(
         r#"
         local function f(...)
@@ -519,7 +577,9 @@ fn gc_preserves_frame_varargs() {
 #[test]
 fn table_sort_array_survives_comparator_collection() {
     let mut state = State::new();
-    state.set_global_value("force_gc", Val::RustFn(force_gc));
+    state
+        .set_global_value("force_gc", Val::RustFn(force_gc))
+        .unwrap();
     let input = compile_unnamed(
         r#"
         local t = {}
@@ -596,30 +656,33 @@ fn gc_threshold_control() {
 
 #[test]
 fn string_allocations_drive_automatic_gc_threshold() {
+    const THRESHOLD: usize = 40;
     let mut state = State::raw();
     // An automatic policy, not a fixed host threshold, so collection adapts.
-    state.gc_set_policy(20, 20, 2);
+    state.gc_set_policy(THRESHOLD, THRESHOLD, 2);
 
     // Keep enough distinct strings rooted to reach the threshold. The State's
-    // interned metamethod names are live strings from construction on.
-    for i in 0..20 - super::MetaName::ALL.len() {
+    // global table and its interned metamethod and builtin names are live
+    // from construction on.
+    let permanent_strings = super::MetaName::ALL.len() + crate::instr::Builtin::COUNT;
+    for i in 0..THRESHOLD - 1 - permanent_strings {
         state
             .push_string(format!("live-{i}"))
             .expect("short test string fits");
     }
 
-    assert_eq!(state.object_count(), 0);
-    assert_eq!(state.string_count(), 20);
+    assert_eq!(state.object_count(), 1);
+    assert_eq!(state.string_count(), THRESHOLD - 1);
     assert!(state.gc_should_run());
 
-    // This allocation must collect first. All 20 strings survive, so the
-    // adaptive threshold must include them and grow to 40.
+    // This allocation must collect first. Everything survives, so the
+    // adaptive threshold must include it all and double.
     state
         .push_string("trigger")
         .expect("short test string fits");
 
-    assert_eq!(state.string_count(), 21);
-    assert_eq!(state.gc_threshold(), 40);
+    assert_eq!(state.string_count(), THRESHOLD);
+    assert_eq!(state.gc_threshold(), 2 * THRESHOLD);
     assert!(!state.gc_should_run());
 
     // Drop every live string, then verify string-only churn is collected
@@ -632,7 +695,7 @@ fn string_allocations_drive_automatic_gc_threshold() {
         state.pop(1).unwrap();
     }
 
-    assert_eq!(state.object_count(), 0);
+    assert_eq!(state.object_count(), 1);
     assert!(
         state.string_count() <= state.gc_threshold(),
         "temporary strings should have triggered automatic collection"
@@ -922,7 +985,7 @@ fn open_libs_is_all_or_nothing_against_the_cap() {
     // must refuse up front rather than installing part of the standard library.
     let mut state = State::raw();
     assert!(
-        state.global_env.is_empty(),
+        state.global_env.is_empty(&state.heap),
         "empty() starts with no globals"
     );
 
@@ -935,7 +998,7 @@ fn open_libs_is_all_or_nothing_against_the_cap() {
 
     assert!(state.open_libs().is_err(), "no headroom for library setup");
     assert!(
-        state.global_env.is_empty(),
+        state.global_env.is_empty(&state.heap),
         "a rejected open_libs must not install any globals"
     );
 }
@@ -1074,7 +1137,9 @@ fn gc_sweeps_dead_upvalue_pool_slots_and_reuses_them() {
 #[test]
 fn live_upvalues_survive_the_pool_sweep_and_keep_working() {
     let mut state = State::new();
-    state.set_global_value("force_gc", Val::RustFn(force_gc));
+    state
+        .set_global_value("force_gc", Val::RustFn(force_gc))
+        .unwrap();
     let input = compile_unnamed(
         r#"
         local n = 10
@@ -1105,7 +1170,9 @@ fn length_metamethod_preflights_three_slots_at_the_stack_cap() {
 
     let mut state = State::new();
     state.set_user_data(0usize);
-    state.set_global_value("len_handler", Val::RustFn(len_handler));
+    state
+        .set_global_value("len_handler", Val::RustFn(len_handler))
+        .unwrap();
     crate::Program::compile("t = setmetatable({}, { __len = len_handler })", None)
         .and_then(|program| state.load(&program))
         .unwrap();

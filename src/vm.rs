@@ -55,7 +55,7 @@ use super::instr::{ArgCount, Builtin, RetCount};
 use super::patterns::{AnchorMode, LuaPattern, SharedPattern};
 
 use anchor::Registry;
-use global_env::GlobalEnv;
+use global_env::{GlobalEnv, SuspendedEnv};
 pub(crate) use meta_name::MetaName;
 use meta_name::MetaNames;
 
@@ -89,7 +89,7 @@ struct PatternCacheEntry {
 /// Values temporarily held outside the visible VM stack.
 pub(super) struct TransientRoots {
     values: Vec<Val>,
-    suspended_envs: Vec<GlobalEnv>,
+    suspended_envs: Vec<SuspendedEnv>,
 }
 
 impl TransientRoots {
@@ -257,7 +257,8 @@ struct BytecodeCacheEntry {
 pub struct State {
     #[cfg(feature = "fault-injection")]
     fault_injection: fault_injection::FaultInjection,
-    /// Global bindings and their cache invalidation policy.
+    /// The global table (which `_G` names), its builtin caches and its
+    /// initialization phase.
     global_env: GlobalEnv,
     /// The metatable shared by every string, as in reference Lua. Built by
     /// `open_libs` with `__index` = the string library table it created, so
@@ -380,8 +381,9 @@ pub struct State {
     /// that order would differ between processes and leak into snapshot bytes.
     #[cfg(feature = "snapshot")]
     pub(super) rust_fn_ids_by_addr: BTreeMap<usize, String>,
-    /// Canonical environment objects (library tables, `_G`, `_G`'s metatable,
-    /// and the shared string metatable) captured after each successful open_libs,
+    /// Canonical environment objects (library tables, `_G`'s metatable, and
+    /// the shared string metatable; the global table's token is permanent and
+    /// not kept here) captured after each successful open_libs,
     /// each mapped to its save token. The public `open_libs` refreshes this map,
     /// and with_callbacks uses that same helper.
     /// Keyed on the objects `open_libs` built, so user shadowing of a builtin
@@ -506,15 +508,19 @@ impl State {
         // existing token instead of rebuilding this map from live builtin slots.
         let mut map = BTreeMap::new();
         for &(slot, token) in save_state::BUILTIN_ENV_TOKENS {
-            if let Val::Obj(ptr) = self.global_env.builtin(slot as u8) {
+            if let Val::Obj(ptr) = self.global_env.read_builtin(&self.heap, slot as u8) {
                 map.insert(ptr, token.to_string());
-                if slot == Builtin::G
-                    && let Some(table) = self.heap.as_table_ref(ptr)
-                    && let Some(mt) = table.get_metatable()
-                {
-                    map.insert(mt, save_state::GLOBAL_METATABLE_TOKEN.to_string());
-                }
             }
+        }
+        // The global table itself is not an environment object: its token is
+        // permanent (see `save_state::GLOBALS_TOKEN`) and its contents are
+        // saved whole. Its protected metatable is rebuilt by `open_libs`.
+        if let Some(mt) = self
+            .heap
+            .as_table_ref(self.global_env.table())
+            .and_then(Table::get_metatable)
+        {
+            map.insert(mt, save_state::GLOBAL_METATABLE_TOKEN.to_string());
         }
         // The shared string metatable is rebuilt by `open_libs` too, so a
         // script holding it (`local mt = getmetatable("")`) reloads it as the
@@ -562,8 +568,9 @@ impl State {
         let state_id = anchor::next_state_id();
         let mut heap = GcHeap::with_policy(gc_policy);
         let meta_names = MetaNames::intern(&mut heap);
+        let global_env = GlobalEnv::new(&mut heap);
         Self {
-            global_env: GlobalEnv::new(),
+            global_env,
             string_metatable: None,
             string_mt_index_shape: None,
             meta_names,
@@ -612,6 +619,7 @@ impl State {
 
     pub(crate) fn reserve_stdlib_capacity(&mut self) {
         self.global_env.reserve(
+            &mut self.heap,
             Builtin::COUNT + STDLIB_NON_BUILTIN_GLOBALS + tuning::HOST_GLOBAL_CAPACITY_HEADROOM,
         );
         self.heap
@@ -1122,8 +1130,13 @@ impl State {
     #[hotpath::measure]
     pub fn get_global(&mut self, name: &str) -> Result<()> {
         self.check_poisoned()?;
-        let val = self.global_env.read(name, None);
+        let val = self.global_env.read_name(&self.heap, name);
         self.push_val(val)
+    }
+
+    /// Pushes the global table, which `open_libs` binds to `_G`.
+    pub(crate) fn push_global_table(&mut self) -> Result<()> {
+        self.push_val(Val::Obj(self.global_env.table()))
     }
 
     /// Pops a value from the stack and sets it as the new value of global
@@ -1140,50 +1153,37 @@ impl State {
         if self.get_top() == 0 {
             return Err(self.error(ErrorKind::InvalidStackIndex { index: -1 }));
         }
+        // Intern the name while the value is still on the stack: interning
+        // can collect, and the stack slot is the value's only root.
+        let key = self.global_name_key(name, self.stack[self.stack.len() - 1])?;
         let val = self.pop_val();
-        self.set_global_value(name, val);
+        if let Some(key) = key {
+            self.global_env.write_key(&mut self.heap, key, val);
+        }
         Ok(())
     }
 
-    /// Resolve a proxy key before changing the stack, borrowing its interned
-    /// bytes rather than allocating an owned name on each access.
-    pub(crate) fn global_proxy_read(&mut self) -> Result<bool> {
-        self.check_poisoned()?;
-        let key = self.convert_idx(2)?;
-        let Some(bytes) = self.stack[key].as_string(&self.heap) else {
-            return Ok(false);
-        };
-        let Ok(name) = str::from_utf8(bytes) else {
-            return Ok(false);
-        };
-        let value = self.global_env.read(name, None);
-        self.set_top(0)?;
-        self.push_val(value)?;
-        Ok(true)
-    }
-
-    /// Update through a borrowed proxy key. Only inserting a new binding owns
-    /// a name; existing bindings and nil writes to absent names allocate none.
-    pub(crate) fn global_proxy_write(&mut self) -> Result<bool> {
-        self.check_poisoned()?;
-        let key = self.convert_idx(2)?;
-        let value = self.stack[self.convert_idx(3)?];
-        let Some(bytes) = self.stack[key].as_string(&self.heap) else {
-            return Ok(false);
-        };
-        let Ok(name) = str::from_utf8(bytes) else {
-            return Ok(false);
-        };
-        self.global_env.write_named(name, value, None);
-        Ok(true)
+    /// The interned key for global `name` before storing `val` under it, or
+    /// `None` when there is nothing to store: a nil write to a name nothing
+    /// has interned cannot change a binding, so it allocates no string.
+    /// Interning may collect, so `val` must already be rooted unless it is a
+    /// value the collector never frees.
+    fn global_name_key(&mut self, name: &str, val: Val) -> Result<Option<StringPtr>> {
+        if matches!(val, Val::Nil) {
+            return Ok(self.heap.find_string(name.as_bytes()));
+        }
+        check_string_size(name.len())?;
+        Ok(Some(self.allocator().alloc_string(name.as_bytes())))
     }
 
     /// Ends initialization of the current global environment.
     ///
-    /// Until sealed, every global binding is kept for the life of the State
-    /// once it has held a value, even after it is set to nil. Bindings first
-    /// created after sealing are reclaimed some time after they are set to
-    /// nil, so a script that writes computed names through `_G` stays bounded.
+    /// Until sealed, every global keeps its slot in the global table for the
+    /// life of the State once it has held a value, even after it is set to
+    /// nil. After sealing, globals set to nil are reclaimed as in any table,
+    /// so a script that writes computed names through `_G` stays bounded;
+    /// with the `snapshot` feature, sealing records the names written until
+    /// then, so a load still keeps a deleted one deleted.
     ///
     /// Call it once the host has installed its environment (libraries, host
     /// functions, any setup Lua) and before gameplay scripts run. With the
@@ -1197,7 +1197,7 @@ impl State {
     /// sealed. Calling this method inside one does nothing and does not seal
     /// the suspended outer environment; its phase is restored on return.
     pub fn seal_globals(&mut self) {
-        self.global_env.seal();
+        self.global_env.seal(&mut self.heap);
     }
 
     /// Whether the current global environment is sealed.
@@ -1212,16 +1212,18 @@ impl State {
     // and widening them would add work and storage to every Lua call. Capture
     // only a function pointer at Rust dispatch; resolve names on errors only.
     // RustFn values carry no registration identity. Multiple global aliases
-    // (or functions merged by LTO) therefore use the first installed global
-    // still bound to that address; an unregistered callback stays anonymous.
-    // Snapshot ids are a fallback, not names inferred from the Lua caller.
+    // (or functions merged by LTO) therefore use the first live binding to
+    // that address in global table order whose key is a UTF-8 string; an
+    // unregistered callback stays anonymous. Snapshot ids are a fallback, not
+    // names inferred from the Lua caller.
     pub(crate) fn active_rust_function_name(&self) -> Option<String> {
         let function = self.active_rust_fn?;
-        for (name, value) in self.global_env.iter() {
+        for (name, value) in self.global_env.live_string_bindings(&self.heap) {
             if let Val::RustFn(candidate) = value
                 && candidate as usize == function as usize
+                && let Ok(name) = str::from_utf8(self.heap.get_string(name))
             {
-                return Some(name.clone());
+                return Some(name.to_owned());
             }
         }
         #[cfg(feature = "snapshot")]
@@ -1232,8 +1234,8 @@ impl State {
     }
 
     #[cfg(not(feature = "snapshot"))]
-    pub(crate) fn set_global_rust_fn(&mut self, name: &str, func: RustFunc) {
-        self.set_global_value(name, Val::RustFn(func));
+    pub(crate) fn set_global_rust_fn(&mut self, name: &str, func: RustFunc) -> Result<()> {
+        self.set_global_value(name, Val::RustFn(func))
     }
 
     /// Register a Rust function under a stable id and install it as a global.
@@ -1250,8 +1252,20 @@ impl State {
         if self.poisoned {
             return Err(SaveError::StatePoisoned);
         }
+        // Checked before registering, so a rejected name registers nothing.
+        if name.len() > crate::limits::MAX_STRING_BYTES {
+            return Err(SaveError::FieldSizeExceeded {
+                field: save_state::SnapshotField::GlobalName,
+                size: name.len(),
+                limit: crate::limits::MAX_STRING_BYTES,
+            });
+        }
         self.register_rust_fn(id, func)?;
-        self.set_global_value(name, Val::RustFn(func));
+        // The length is checked, and a Rust function needs no rooting while
+        // interning collects.
+        let key = self.allocator().alloc_string(name.as_bytes());
+        self.global_env
+            .write_key(&mut self.heap, key, Val::RustFn(func));
         Ok(())
     }
 
@@ -1334,12 +1348,14 @@ impl State {
         Ok(())
     }
 
-    pub(super) fn set_global_value(&mut self, name: &str, val: Val) {
-        self.set_global_value_owned(name.to_string(), val);
-    }
-
-    pub(super) fn set_global_value_owned(&mut self, name: String, val: Val) {
-        self.global_env.write(name, val);
+    /// Store global `name`. Interning the name may collect, so a heap `val`
+    /// must be rooted by the caller.
+    #[cfg(any(test, not(feature = "snapshot")))]
+    pub(super) fn set_global_value(&mut self, name: &str, val: Val) -> Result<()> {
+        if let Some(key) = self.global_name_key(name, val)? {
+            self.global_env.write_key(&mut self.heap, key, val);
+        }
+        Ok(())
     }
 
     /// Builds the shared string metatable with `__index` = the table at the
@@ -1368,6 +1384,10 @@ impl State {
     /// `s:upper()` keeps working even when `"string"` is not whitelisted (as
     /// in reference Lua, where it reaches the library through that metatable).
     /// The original environment is restored after the function completes (or errors).
+    /// The global table keeps its identity: inside `f` it holds only the
+    /// whitelisted globals, so `_G` (when whitelisted) and every reference to
+    /// the table taken before the call see the restricted environment, and
+    /// whatever `f` stores in it, raw keys included, is discarded with it.
     /// [`State::open_libs`] is refused inside `f` with
     /// [`ErrorKind::OpenLibsInRestrictedEnv`].
     ///
@@ -1383,7 +1403,7 @@ impl State {
         F: FnOnce(&mut Self) -> R,
     {
         self.guarded(|state| {
-            let saved = state.global_env.restrict(whitelist);
+            let saved = state.global_env.restrict(&mut state.heap, whitelist);
             state.transient_roots.suspended_envs.push(saved);
 
             // Restore the environment on unwind too. This keeps the global
@@ -1397,7 +1417,7 @@ impl State {
                 .suspended_envs
                 .pop()
                 .expect("suspended environment missing during restoration");
-            state.global_env.replace(saved);
+            state.global_env.resume(&mut state.heap, saved);
 
             match result {
                 Ok(r) => Ok(r),
@@ -1612,7 +1632,10 @@ mod runtime_tests {
     #[test]
     fn standard_library_initialization_populates_every_builtin_slot() {
         let state = State::new();
-        assert!((0..Builtin::COUNT).all(|slot| state.global_env.builtin(slot as u8) != Val::Nil));
+        assert!(
+            (0..Builtin::COUNT)
+                .all(|slot| state.global_env.read_builtin(&state.heap, slot as u8) != Val::Nil)
+        );
     }
 
     #[test]
@@ -1691,8 +1714,9 @@ mod runtime_tests {
         state.gc_collect();
         assert!(state.bytecode_caches.is_empty());
         // Removed entries were roots for the collection that removed them.
-        // The interned metamethod names are permanent roots on top of that.
-        let names = MetaName::ALL.len();
+        // The interned metamethod and builtin names are permanent roots on
+        // top of that.
+        let names = MetaName::ALL.len() + Builtin::COUNT;
         assert_eq!(state.string_count(), names + 1);
         state.gc_collect();
         assert_eq!(state.string_count(), names);
@@ -1938,11 +1962,16 @@ mod snapshot_env_alias_tests {
             .set_global("string")
             .expect("string builtin can be rebound");
 
-        let Val::Obj(shared_table) = state.global_env.builtin(Builtin::Math as u8) else {
+        let Val::Obj(shared_table) = state
+            .global_env
+            .read_builtin(&state.heap, Builtin::Math as u8)
+        else {
             panic!("math builtin is a table");
         };
         assert_eq!(
-            state.global_env.builtin(Builtin::String as u8),
+            state
+                .global_env
+                .read_builtin(&state.heap, Builtin::String as u8),
             Val::Obj(shared_table)
         );
 

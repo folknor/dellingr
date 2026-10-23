@@ -18,6 +18,23 @@ get deleted as they ship or stop being worth tracking.
 - Possible CORE-MATH bug: `is_exact` in pow.c measures the bit length of `m`
   rather than `m^y`. Ported as is; unobservable here (the sweeps pass).
 
+### Housekeeping left from the `_G`-as-real-table change (2026-10-23)
+
+- The header comments of `examples/globals/write.lua` and
+  `examples/calls/global.lua` still describe the old global store (IndexMap
+  lookups, no SET_GLOBAL inline cache). Both are hash-pinned workloads, so
+  rewording them means re-hashing their `brokkr.toml` pins.
+- The README's `globals/write` ratio row predates the change and may be stale.
+- The compiler verifier still requires GET/SET_GLOBAL names to be UTF-8,
+  although the runtime keys the global table with the interned literal and no
+  longer needs it. Either drop the check or say why it stays.
+- `SnapshotField::GlobalName` now only serves the name-length error in
+  `set_global_named_rust_fn`; fold it or rename it to what it covers.
+- Strict-mode globals (`setmetatable(_G, {__index = ..., __newindex = ...})`)
+  remain unavailable: `_G`'s metatable is protected and bare global access is
+  raw. Supporting it would mean GET/SET_GLOBAL honouring `__index` and
+  `__newindex`, a feature decision rather than a fix.
+
 ## Deferred forward-looking ideas
 
 ### `\u{XXX}` string escapes

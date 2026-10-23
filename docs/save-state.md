@@ -19,9 +19,13 @@ returns; the loaded State starts with an empty stack.
 
 ## Environment objects and deltas
 
-- `math`, `string`, `table`, `_G`, the metatable of `_G` and the shared string
+- `math`, `string`, `table`, the metatable of `_G` and the shared string
   metatable are rebuilt by `open_libs` on load and referenced by token. The
   string metatable's token is `string.metatable`.
+- The global table, which `_G` names, exists in every State (a raw one
+  included). A reference to it is saved as the token `_G` and resolves to the
+  loaded State's global table; its contents are saved whole (see Globals
+  below), not as a delta.
 - The object-to-token map is refreshed at each successful `open_libs`, not
   read from the live builtin slots. Shadowing a builtin (`math = {}`) cannot
   misclassify the user's table as an environment object.
@@ -41,26 +45,36 @@ returns; the loaded State starts with an empty stack.
   an append key; setup-only nil tails are not merged into the saved shape.
 - Adding a field to a library table in a later build does not corrupt old
   saves.
-- Globals are saved whole, in binding order, nil tombstones included. An
-  unshadowed builtin encodes as a token; a shadow is preserved as the user's
-  value.
+## Globals
+
+- The global table is saved whole, like any table: its array part and every
+  hash slot in physical order, nil tombstones included, so the loaded table
+  iterates and compacts exactly as the saving one would. An unshadowed builtin
+  encodes as a token; a shadow is preserved as the user's value. Keys of any
+  type are kept, non-UTF-8 strings included.
+- The save is authoritative for every key it holds, tombstones included, and
+  for the array part. Load setup contributes only string-keyed globals the
+  save mentions nowhere (neither as a slot nor as a pin); they follow the
+  saved slots, in setup order. Setup's other keys (numbers, booleans, tables,
+  functions) are discarded.
 
 ## Sealed globals
 
 - `State::seal_globals` ends global initialization (see
-  [limits](limits.md)). Bindings written before it are pinned: their nil
-  tombstones are never compacted, so a deleted name that load setup reinstalls
-  stays deleted after the load.
-- The save records whether the State was sealed. The loaded State takes that
-  phase: a call to `seal_globals` inside the load setup is deferred to it.
-- Pins are not saved. A sealed load pins exactly the names its setup left
-  bound or tombstoned, so the setup must replay the initialization the saving
-  State performed before sealing, including names it set and then cleared.
-  Under that contract the loaded State compacts exactly when the saving one
-  would, and later saves of both stay byte-identical. A setup that differs
-  re-derives the pin set from the new setup.
-- Loading rebuilds the bindings in saved order. Names the setup installed that
-  the save does not mention follow the saved ones, in setup order.
+  [limits](limits.md)). Until then the global table keeps every tombstone.
+  Sealing records the pins: every string key with a slot at that moment,
+  which is every name initialization wrote, including ones it set and then
+  cleared. After sealing, tombstones compact as in any table.
+- The save records whether the State was sealed, and its pins. The loaded
+  State takes that phase: a call to `seal_globals` inside the load setup is
+  deferred to it. A pinned name absent from the saved table was deleted and
+  compacted away, so a load keeps it deleted even when setup reinstalls it.
+- A sealed load pins the saved pins followed by every other string key the
+  setup gave a slot, so a deletion inherited from a save survives a setup that
+  no longer installs the name, and the resave after it. With a setup that
+  replays the saving State's initialization, the loaded pins equal the saved
+  ones, the loaded State compacts exactly when the saving one would, and later
+  saves of both stay byte-identical. An unsealed save has no pins.
 
 ## Numbers
 
@@ -107,7 +121,8 @@ returns; the loaded State starts with an empty stack.
   saving one would. A setup that differs can print an id that a saved value
   also shows after the load, or that a value collected before the save had
   shown; no two live values share an id.
-- Duplicate saved global names are rejected, not silently replaced.
+- Duplicate keys in the saved global table and duplicate pins are rejected,
+  not silently replaced, as are pins in an unsealed save.
 - Strings above `limits::MAX_STRING_BYTES` are rejected, also in saves written
   by earlier builds with the same format version.
 - A table's saved logical array length is accepted up to the array limit
