@@ -753,18 +753,20 @@ def list_sites():
         print("STRAY", stray)
 
 
-def main():
+def main() -> int:
     if sys.argv[1:] == ["sites"]:
         list_sites()
-        return
+        return 0
     if sys.argv[1:]:
         sys.exit(f"usage: {sys.argv[0]} [sites]")
     problems = check()
     for problem in problems:
         print(problem)
-    if not problems:
-        print("ok")
+    if problems:
+        return 1
+    print("ok")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

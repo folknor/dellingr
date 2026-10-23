@@ -109,7 +109,7 @@ if [ "$TIMEOUT_MODE" = external ]; then
 fi
 
 if [ -z "$OUR_LUA" ]; then
-    OUR_LUA="$(dellingr_bin release)" || exit 1
+    OUR_LUA="$(dellingr_bin_built release)" || exit 1
 fi
 if [ ! -x "$OUR_LUA" ]; then
     echo "FAIL: dellingr binary is not executable: $OUR_LUA" >&2

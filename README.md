@@ -51,6 +51,16 @@ Designed for sandboxed embedding, not as a general-purpose Lua replacement. Thes
 - `goto`/labels - simplifies VM, prevents obfuscated control flow
 - `string.rep`, `string.byte`, `string.char`
 - Arithmetic/comparison/concat metamethods
+- The `__pairs`, `__mode`, `__gc`, `__close` and `__name` fields are ignored:
+  no pairs hook, weak tables, finalizers, close handlers or custom type names
+- Dynamic code and module loading (`load`, `loadstring`, `dofile`, `require`,
+  and the `package` library); script-controlled collection (`collectgarbage`)
+- `math.randomseed` (the host seeds the stream with `State::set_rng_seed`)
+- Integer-specific `math` members (`math.type`, `math.tointeger`, `math.ult`,
+  `math.maxinteger`, `math.mininteger`), and the Lua 5.2-only
+  `math.pow`, `math.ldexp`, `math.frexp`, `math.cosh`, `math.sinh`,
+  `math.tanh`, `math.log10`
+- `table.maxn`
 - Implicit string-to-number coercion in arithmetic and numeric control expressions
 - Long strings (`[[...]]`, `[=[...]=]`)
 

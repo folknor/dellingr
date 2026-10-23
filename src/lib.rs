@@ -270,8 +270,9 @@ impl CostAnalysis {
     pub const fn caveat() -> &'static str {
         concat!(
             "Static cost analysis counts each costed opcode once across the main chunk and every nested function body, ",
-            "whether or not that body runs. Loops and branches count once. It excludes data-dependent native work in ",
-            "the string, pattern, and table libraries, so it is not a runtime-cost bound or a native-cost estimate."
+            "whether or not that body runs. Loops and branches count once. ",
+            "Call opcodes have no static charge, and the analyzer does not inspect their callees, ",
+            "so it excludes all native library charges, flat and data-dependent. It is not a runtime-cost bound or a native-cost estimate."
         )
     }
 
@@ -514,19 +515,19 @@ mod tests {
     }
 
     #[test]
-    fn static_analysis_excludes_data_dependent_native_work() {
-        let analysis =
-            analyze_cost("return string.upper('abcd')").expect("string.upper program should parse");
+    fn static_analysis_excludes_flat_and_data_dependent_native_charges() {
+        let source = "math.floor(1.5); table.pack(1); string.upper('abcd')";
+        let analysis = analyze_cost(source).expect("native-call program should parse");
         assert_eq!(analysis.root.total_cost, 0);
 
         let mut state = State::new();
-        crate::Program::compile("return string.upper('abcd')", None)
+        crate::Program::compile(source, None)
             .and_then(|program| state.load(&program))
-            .expect("string.upper program should load");
+            .expect("native-call program should load");
         state
-            .call(ArgCount::Fixed(0), RetCount::Fixed(1))
-            .expect("string.upper program should run");
-        assert_eq!(state.cost_used(), 4);
+            .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+            .expect("native-call program should run");
+        assert_eq!(state.cost_used(), 6);
     }
 
     #[test]

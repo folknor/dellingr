@@ -359,6 +359,27 @@ fn core_math_corpus_matches_pin() {
     assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
 }
 
+/// Regeneration must reproduce every checked-in table byte-for-byte at the
+/// pinned upstream commit, without invoking a Rust build or formatter.
+#[test]
+#[ignore = "needs Python and a CORE-MATH checkout under research/"]
+fn core_math_tables_match_pin() {
+    let output = std::process::Command::new("python3")
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/scripts/crmath_tables.py"
+        ))
+        .arg("--check")
+        .output()
+        .expect("Python must be available to check generated tables");
+    assert!(
+        output.status.success(),
+        "table check failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 fn sweep(f: Func) {
     let inputs = worst_cases(f);
     let problems = check_inputs(f, &inputs);

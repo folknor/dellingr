@@ -163,7 +163,7 @@ fn dint_tod(a: &Dint) -> f64 {
                 r *= 2.0;
                 e = h!("0x1p+1023");
             } else {
-                r = f64::MAX;
+                r = if a.sgn != 0 { -f64::MAX } else { f64::MAX };
                 e = f64::MAX;
             }
         } else {
@@ -477,6 +477,17 @@ fn exact_pow(x: f64, y: f64, z: &Dint, exact: bool) -> Option<f64> {
     if m == 1 {
         // x is a power of 2.
         let g = e as f64 * y;
+        // Keep the scaling exponent in range before converting to an integer.
+        if g >= 1024.0 {
+            return Some(if z.sgn != 0 {
+                f64::NEG_INFINITY
+            } else {
+                f64::INFINITY
+            });
+        }
+        if g < -1075.0 {
+            return Some(if z.sgn != 0 { -0.0 } else { 0.0 });
+        }
         if is_int(g) {
             let r = if z.sgn != 0 { -1.0 } else { 1.0 };
             return Some(pow2(r, g as i64));
@@ -843,14 +854,24 @@ pub(crate) fn pow(x: f64, y: f64) -> f64 {
         x = -x;
     }
 
-    // Phase 1 (Algorithm phase_1 of the reference).
-    let (mut lh, mut ll, cancel) = log_1(x);
-    // Avoid spurious underflow or overflow in y * log(x).
+    // Outside this exponent range, no approximation is needed. For finite
+    // positive x, |ln(x)| < 745; the tiny-y product rounds exp to 1.
+    // For x != 1, |ln(x)| > 2^-54, so huge y forces overflow or underflow.
+    // This also keeps the extended-precision phases inside their domains.
     let ey = (uy >> 52) & 0x7ff;
-    if !(0x36..0x7f5).contains(&ey) {
-        lh = f64::NAN;
-        ll = f64::NAN;
+    if ey < 0x36 || x == 1.0 {
+        return s;
     }
+    if ey >= 0x7f5 {
+        return if (x > 1.0) == (y > 0.0) {
+            s * f64::INFINITY
+        } else {
+            s * 0.0
+        };
+    }
+
+    // Phase 1 (Algorithm phase_1 of the reference).
+    let (lh, ll, cancel) = log_1(x);
     let (rh, rl) = s_mul(y, lh, ll);
     let (res_h, res_l) = exp_1(rh, rl, s);
     const ERR: [f64; 2] = [h!("0x1.27p-64"), h!("0x1.57p-58")];
@@ -887,6 +908,11 @@ pub(crate) fn pow(x: f64, y: f64) -> f64 {
         // Underflow: rounds to a zero of the right sign.
         return 0.5 * (s * h!("0x1p-1074"));
     }
+    if r.ex > 1024 {
+        // exp_2's overflow sentinel has no result significand. Do not feed
+        // its logarithm-product bits to rounding tests or exact detection.
+        return s * f64::INFINITY;
+    }
     let rd = if r.ex < -1022 {
         // Subnormal: 2^-1075 <= R < 2^-1022.
         let ex = (-(1022 + r.ex)) as u64; // 1 <= ex <= 53
@@ -916,24 +942,101 @@ pub(crate) fn pow(x: f64, y: f64) -> f64 {
     let r1 = (q_z.hh << 54) | (q_z.hl >> 10);
     let r2 = (q_z.hl << 54) | (q_z.lh >> 10);
     let r3 = (q_z.lh << 54) | (q_z.ll >> 10);
-    let near_boundary = (r1 == 0 && r2 == 0 && r3 <= ERR_BND_3)
-        || (!r1 == 0 && !r2 == 0 && r3.wrapping_add(2 * ERR_BND_3) <= ERR_BND_3);
+    let near_boundary = near_rounding_boundary(r1, r2, r3, ERR_BND_3);
     q_z.sgn = u64::from(s == -1.0);
     if !near_boundary {
         q_z.ll &= !0u64 << 10;
         return qint_tod(&q_z);
     }
-    // x^y very close to 1: for |qR| < 2^-55, exp(qR) rounds to the
-    // neighbour of 1 on qR's side, or to 1.
+    // For |qR| < 2^-56, exp(qR) rounds to 1 in round-to-nearest mode.
     if q_r.ex < -56 {
-        return if q_r.sgn == 0x0 {
-            1.0 + h!("0x1p-100")
-        } else {
-            1.0 - h!("0x1p-100")
-        };
+        return 1.0;
     }
     // Upstream aborts here ("unexpected worst case"). No input is known to
     // reach this point. Rounding the 256-bit approximation keeps the result
     // deterministic; it may differ from the correctly rounded value.
     qint_tod(&q_z)
+}
+
+/// Whether the three-limb tail lies within `error` units of a boundary.
+fn near_rounding_boundary(r1: u64, r2: u64, r3: u64, error: u64) -> bool {
+    (r1 == 0 && r2 == 0 && r3 <= error)
+        || (r1 == u64::MAX && r2 == u64::MAX && r3 != 0 && r3.wrapping_neg() <= error)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rounding_boundary_window() {
+        for distance in [1u64, 59, 60] {
+            assert!(near_rounding_boundary(
+                u64::MAX,
+                u64::MAX,
+                distance.wrapping_neg(),
+                60
+            ));
+        }
+        for distance in [61u64, 119, 120, 121] {
+            assert!(!near_rounding_boundary(
+                u64::MAX,
+                u64::MAX,
+                distance.wrapping_neg(),
+                60
+            ));
+        }
+        assert!(!near_rounding_boundary(u64::MAX, u64::MAX, 0, 60));
+        assert!(near_rounding_boundary(0, 0, 60, 60));
+        assert!(!near_rounding_boundary(0, 0, 61, 60));
+        assert!(!near_rounding_boundary(0, u64::MAX, u64::MAX, 60));
+    }
+
+    #[test]
+    fn extreme_exponents_and_signed_scaling() {
+        for mode in crate::crmath::tests::fma_modes() {
+            crate::crmath::tests::with_forced_fma(mode, || {
+                let huge = h!("0x1p+1014");
+                for x in [0.5, 2.0, h!("0x1.62a88613629b6p+678")] {
+                    for y in [huge, -huge] {
+                        let expected: f64 = if (x > 1.0) == (y > 0.0) {
+                            f64::INFINITY
+                        } else {
+                            0.0
+                        };
+                        assert_eq!(pow(x, y).to_bits(), expected.to_bits());
+                    }
+                }
+                for x in [f64::MAX, h!("0x1p-1074")] {
+                    assert_eq!(pow(x, h!("0x1p-970")).to_bits(), 1.0f64.to_bits());
+                }
+                let z = Dint {
+                    hi: 1 << 63,
+                    lo: 0,
+                    ex: 0,
+                    sgn: 1,
+                };
+                assert_eq!(
+                    dint_tod(&Dint { ex: 1025, ..z }).to_bits(),
+                    f64::NEG_INFINITY.to_bits()
+                );
+                let q = Qint {
+                    hh: 1 << 63,
+                    hl: 0,
+                    lh: 0,
+                    ll: 0,
+                    ex: 1025,
+                    sgn: 1,
+                };
+                assert_eq!(qint_tod(&q).to_bits(), f64::NEG_INFINITY.to_bits());
+                assert_eq!(exact_pow(2.0, huge, &z, true), Some(f64::NEG_INFINITY));
+                assert_eq!(
+                    exact_pow(2.0, -huge, &z, true)
+                        .expect("power of two is exact")
+                        .to_bits(),
+                    (-0.0f64).to_bits()
+                );
+            });
+        }
+    }
 }

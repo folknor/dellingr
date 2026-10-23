@@ -13,6 +13,14 @@ are hosts and are exempt.
   owner within each state and prevents accidental generator forks.
 - Basic arithmetic, comparisons, `sqrt` and `math.random` are bit-stable
   across platforms.
+- `math.fmod` uses Rust's binary64 remainder operation; Lua `%` uses the same
+  operation and then applies its floor-sign correction. The underlying
+  remainder is exact for binary64 operands on supported hosts, though a build
+  may lower it to the platform's `fmod`; it is not an in-crate CORE-MATH
+  function.
+- A singleton integer range, as in `math.random(1)` or `math.random(m, m)`,
+  returns its only value without advancing the RNG stream. This is part of the
+  replay-visible draw sequence.
 - `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `exp`, `log` (with or
   without a base) and the `^` operator are computed in-crate, never by the
   platform libm, and give the same bits on every supported host. They are
@@ -43,9 +51,11 @@ are hosts and are exempt.
 
 ## `pairs` order
 
-- A table's array part (keys `1..n`, grown by appending `n + 1`) is visited
-  first, in key order.
-- Every other key follows in insertion order.
+- The array part is visited first, in ascending key order. Appending `n + 1`
+  also moves any already-present consecutive keys `n + 2`, `n + 3`, and so on
+  from the hash part into the array part. Those migrated keys are therefore
+  visited before remaining hash entries, even if they were inserted earlier.
+- Other keys still in the hash part follow in insertion order.
 - `n` never shrinks, even when the low keys are cleared. Snapshots preserve
   it, so a loaded state continues with the same order and `#` results.
 

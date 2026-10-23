@@ -14,5 +14,5 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 cd "$SCRIPT_DIR/.." || exit 1
 . "$SCRIPT_DIR/lib.sh"
 
-DEBUG_BIN="$(dellingr_bin debug)" || exit 1
+DEBUG_BIN="$(dellingr_bin_built debug)" || exit 1
 exec bash "$SCRIPT_DIR/diff_test.sh" --bin "$DEBUG_BIN" "$@"

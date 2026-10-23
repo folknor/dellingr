@@ -176,7 +176,7 @@ impl State {
                 if matches!(handler, Val::RustFn(_))
                     || handler
                         .as_object_ptr()
-                        .is_some_and(|ptr| self.heap.as_lua_function(ptr).is_some()) =>
+                        .is_some_and(|ptr| self.heap.as_lua_function_ref(ptr).is_some()) =>
             {
                 // native-call: index_string->call_string_index_handler
                 self.call_string_index_handler(handler, receiver, key, local_cost, handler_called)

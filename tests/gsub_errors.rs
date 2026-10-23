@@ -322,6 +322,30 @@ fn assert_runtime_error(code: &str, expected: &str) {
 }
 
 #[test]
+fn gsub_checks_subject_and_pattern_before_the_replacement() {
+    for (code, argument_number) in [
+        (r#"return string.gsub()"#, 1),
+        (r#"return string.gsub("x", {})"#, 2),
+    ] {
+        let mut state = State::new();
+        dellingr::Program::compile(code, None)
+            .and_then(|program| state.load(&program))
+            .expect("regression script compiles");
+        let error = state
+            .call(ArgCount::Fixed(0), RetCount::Fixed(2))
+            .expect_err("invalid subject or pattern fails");
+        let ErrorKind::ArgError(argument) = error.kind() else {
+            panic!("expected an argument error for {code}, got {error}");
+        };
+        assert_eq!(argument.arg_number(), argument_number, "{code}");
+        assert!(
+            argument.to_string().contains("to 'gsub'"),
+            "{code}: {argument}"
+        );
+    }
+}
+
+#[test]
 fn malformed_patterns_are_pattern_errors_in_all_wrappers() {
     for code in [
         r#"return string.find("abc", "[")"#,

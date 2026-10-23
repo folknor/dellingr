@@ -445,7 +445,7 @@ fn main() {
     // the sidecar sees within-process spread without flooding the FIFO.
     let iterations = args.iterations;
     require_bench(&mut state, &args.script_path, "warm");
-    let block_size = (iterations / MAX_WARM_BLOCKS).max(1);
+    let block_size = iterations.div_ceil(MAX_WARM_BLOCKS);
     emit_marker("WARM_START");
     let mut warm_elapsed = Duration::ZERO;
     let mut done = 0u32;

@@ -4,7 +4,7 @@ use super::Result;
 use super::SyntaxError;
 use super::TokenKind;
 use super::expr::Prefix;
-use crate::limits::{MAX_ASSIGNMENT_OFFSET, MAX_FIXED_RESULTS};
+use crate::limits::{MAX_ASSIGNMENT_OFFSET, MAX_ASSIGNMENT_TARGETS, MAX_FIXED_RESULTS};
 
 impl<'a> Parser<'a> {
     /// Parses a return statement. Return statements must always come last in a
@@ -66,6 +66,11 @@ impl<'a> Parser<'a> {
     fn parse_assign(&mut self, first: Place) -> Result<Stmt> {
         let mut targets = vec![first];
         while self.input.try_pop(TokenKind::Comma)?.is_some() {
+            if targets.len() == MAX_ASSIGNMENT_TARGETS {
+                return Err(self.error_here(SyntaxError::TooManyAssignmentTargets {
+                    count: targets.len() + 1,
+                }));
+            }
             targets.push(self.parse_place_exp()?);
         }
 
@@ -74,8 +79,9 @@ impl<'a> Parser<'a> {
         self.check_multi_assign(targets.len(), &values)?;
 
         // Field and index targets stay bounded by their position in the
-        // target list, the limit the stack bytecode's store offsets set;
-        // keeping it keeps the set of accepted programs unchanged.
+        // target list, the limit the stack bytecode's store offsets set.
+        // While `MAX_ASSIGNMENT_TARGETS - 1 <= MAX_ASSIGNMENT_OFFSET`, the
+        // target cap above rejects every list this check would.
         for (index, target) in targets.iter().enumerate().rev() {
             if matches!(target, Place::Field { .. } | Place::Index { .. }) {
                 self.bounded_u8(
@@ -261,6 +267,11 @@ impl<'a> Parser<'a> {
                 Ok(step)
             }
             TokenKind::Do => {
+                // The implicit step is a required bytecode constant, unlike an
+                // optional folded result. LOAD_NUM has no immediate-number
+                // form, so it needs a pool slot even without a source numeral.
+                // Synthesizing 1 through arithmetic would charge extra cost and
+                // make a full pool change loop setup semantics.
                 let i = self.find_or_add_number(1.0)?;
                 Ok(Expr::new(ExprKind::Num(i)))
             }

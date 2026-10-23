@@ -125,14 +125,14 @@ pub(crate) enum ParserFault {
     ChunkCompletionWithoutFunctionFrame,
     CompletedFunctionRetainsScopes,
     NamedFunctionTargetNotVariable,
-    EmptyMultiAssignment,
+    EmptyReturnList,
+    ReturnCountOutOfRange,
+    AssignmentPlaceRegistersMissing,
     EmptyComparisonChain,
     /// A folded operand names a number literal that is not in the pool.
     FoldedLiteralOutOfRange,
     /// A resolved local has no declaration in its function.
     LocalWithoutDeclaration,
-    /// A function needs more registers than an operand can name.
-    RegisterLimit,
     /// Identifier and numeral tokens are ASCII by construction in the byte
     /// lexer, and the parser reads them as `&str`.
     TokenTextNotUtf8,
@@ -239,11 +239,12 @@ impl ParserFault {
                 "completed function retains loop or block scopes"
             }
             Self::NamedFunctionTargetNotVariable => "a named function target must be a variable",
-            Self::EmptyMultiAssignment => "multi-assignment requires a nonempty expression list",
+            Self::EmptyReturnList => "return emission requires a nonempty expression list",
+            Self::ReturnCountOutOfRange => "return count exceeds the parsed expression limit",
+            Self::AssignmentPlaceRegistersMissing => "assignment place operands have no registers",
             Self::EmptyComparisonChain => "comparison chain requires an operator",
             Self::FoldedLiteralOutOfRange => "folded operand names a literal outside the pool",
             Self::LocalWithoutDeclaration => "resolved local has no declaration",
-            Self::RegisterLimit => "function needs more registers than operands can name",
             Self::TokenTextNotUtf8 => "lexer produced a non-UTF-8 identifier or numeral token",
         }
     }
@@ -950,6 +951,16 @@ pub enum SyntaxError {
     LongStringUnsupported,
     /// More expressions in a single source construct than the VM accepts.
     TooManyExpressions,
+    /// An assignment has more targets than the compiler accepts.
+    TooManyAssignmentTargets {
+        /// Target count at the first rejected target.
+        count: usize,
+    },
+    /// A function needs more temporary registers than bytecode can encode.
+    TooManyRegisters {
+        /// Number of registers requested.
+        count: usize,
+    },
     /// An assignment target stack offset exceeds the bytecode operand width.
     AssignmentOffsetTooLarge,
     /// More fixed assignment results than a result-count operand can encode.
@@ -1770,6 +1781,16 @@ impl fmt::Display for SyntaxError {
             DecimalEscapeTooLarge => write!(f, "decimal escape too large"),
             LongStringUnsupported => write!(f, "long strings are not supported"),
             TooManyExpressions => write!(f, "too many expressions (limit {MAX_EXPRESSIONS})"),
+            TooManyAssignmentTargets { count } => write!(
+                f,
+                "too many assignment targets ({count}, limit {})",
+                crate::limits::MAX_ASSIGNMENT_TARGETS
+            ),
+            TooManyRegisters { count } => write!(
+                f,
+                "too many registers ({count}, limit {})",
+                crate::limits::MAX_REGISTERS
+            ),
             AssignmentOffsetTooLarge => write!(
                 f,
                 "assignment receiver offset exceeds {MAX_ASSIGNMENT_OFFSET}"

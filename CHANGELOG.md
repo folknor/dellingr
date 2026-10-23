@@ -445,6 +445,18 @@ All notable changes to dellingr are documented here. The format follows
 - Metatable lookups for `__index`, `__newindex` and string `__index` no
   longer reserve temporary stack slots, so near `MAX_STACK_SIZE` an access
   that used to fail with a stack overflow may now succeed.
+- An assignment takes at most `limits::MAX_ASSIGNMENT_TARGETS` (255)
+  targets; one more is the syntax error `TooManyAssignmentTargets`. A function
+  that needs more registers than bytecode can name now fails with the syntax
+  error `TooManyRegisters` (both carry the observed count and the limit), where
+  it reported an internal compiler error, or with enough targets a verifier
+  rejection that panicked debug builds. Assignments of 256 to 65534 targets
+  that used to compile are now rejected.
+- Bytecode verification names the actual defect for a frame size of
+  `OPEN_COUNT` (`ValidationReason::FrameSizeUnencodable`) and for a
+  `TFOR_CALL` result count above 255 (`TforCallResultCountExceeded`).
+- `CostAnalysis::caveat()` and the `--analyze` warning now say that every
+  native library charge, flat or data-dependent, is left out.
 
 ### Fixed
 
@@ -482,6 +494,27 @@ All notable changes to dellingr are documented here. The format follows
   so no entry outlives its object. Results, `cost_used` and snapshots are
   unchanged; collections do a little more work, proportional to the inline
   caches of the live code.
+- **Replay-visible:** saves are byte-stable when several saved functions
+  carry string literals that `%p` rendered. Those literals got their string
+  ids in the order the functions' bytecode happened to sit in memory, so a
+  loaded State, a different allocator or another host could save the same
+  logical state with different bytes. They now take ids in the save's own
+  function order. Affected saves change bytes once; the snapshot format and
+  `FORMAT_VERSION` are unchanged, and older saves still load.
+- An explicit nil optional argument takes its default: `error(msg, nil)`
+  raises `msg` at level 1 instead of an argument error, and
+  `math.atan(y, nil)` and `math.log(x, nil)` act as the one-argument forms.
+- `table.concat` accepts a number separator and converts it to a string, as
+  reference Lua does.
+- `string.gsub` checks its subject and pattern before the replacement, so
+  `string.gsub()` and `string.gsub("x", {})` blame argument 1 or 2 instead of 3.
+- **Replay-visible:** `x ^ y` with `|y| >= 2^1014` returns the overflowed or
+  underflowed result directly. For rare inputs the old path carried an
+  out-of-range intermediate into later phases, which could panic a debug
+  build and left the release result to chance.
+- Snapshot decoding caps a vector's initial reservation by its size in bytes,
+  not by element count, so a forged length prefix can no longer reserve many
+  times the input size.
 
 ## [0.5.0] - 2026-10-14
 

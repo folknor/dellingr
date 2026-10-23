@@ -8,9 +8,9 @@ use crate::compiler::UpvalueDesc;
 use crate::error::{ErrorKind, SyntaxError};
 use crate::instr::{ArgCount, ArithOp, ArithOperands, CompareOp, Instr, RetCount};
 use crate::limits::{
-    MAX_ASSIGNMENT_OFFSET, MAX_CHUNK_NESTING, MAX_EXPRESSIONS, MAX_FIXED_ARGS, MAX_FIXED_RESULTS,
-    MAX_LITERALS, MAX_LOCALS, MAX_NESTED, MAX_SOURCE_BYTES, MAX_TABLE_BATCH_SIZE,
-    MAX_TABLE_TEMPLATE_FIELDS, MAX_TABLE_TEMPLATES, SYNTAX_SUFFIX_COST,
+    MAX_ASSIGNMENT_OFFSET, MAX_ASSIGNMENT_TARGETS, MAX_CHUNK_NESTING, MAX_EXPRESSIONS,
+    MAX_FIXED_ARGS, MAX_FIXED_RESULTS, MAX_LITERALS, MAX_LOCALS, MAX_NESTED, MAX_SOURCE_BYTES,
+    MAX_TABLE_BATCH_SIZE, MAX_TABLE_TEMPLATE_FIELDS, MAX_TABLE_TEMPLATES, SYNTAX_SUFFIX_COST,
 };
 
 fn assert_line_info_matches_code_len(chunk: &Bytecode) {
@@ -908,21 +908,27 @@ fn fixed_result_limit_matches_its_error_message() {
 }
 
 #[test]
-fn assignment_offset_limit_matches_its_error_message() {
-    let targets = vec!["t.k"; MAX_ASSIGNMENT_OFFSET + 1].join(", ");
-    parse_unfinalized(&format!("{targets} = 1")).expect("the maximum receiver offset must compile");
+fn field_targets_reach_the_assignment_target_cap() {
+    // The last field target sits at offset `MAX_ASSIGNMENT_TARGETS - 1`, so
+    // the target cap rejects a longer list before any receiver offset can
+    // pass `MAX_ASSIGNMENT_OFFSET`.
+    const _: () = assert!(MAX_ASSIGNMENT_TARGETS - 1 <= MAX_ASSIGNMENT_OFFSET);
+    let targets = vec!["t.k"; MAX_ASSIGNMENT_TARGETS].join(", ");
+    parse_unfinalized(&format!("{targets} = 1"))
+        .expect("the maximum number of field targets must compile");
 
-    let targets = vec!["t.k"; MAX_ASSIGNMENT_OFFSET + 2].join(", ");
+    let targets = vec!["t.k"; MAX_ASSIGNMENT_TARGETS + 1].join(", ");
     let error = parse_unfinalized(&format!("{targets} = 1"))
-        .expect_err("an offset past MAX_ASSIGNMENT_OFFSET must fail");
+        .expect_err("a target past MAX_ASSIGNMENT_TARGETS must fail");
     assert!(matches!(
         error.kind(),
-        ErrorKind::SyntaxError(SyntaxError::AssignmentOffsetTooLarge)
+        ErrorKind::SyntaxError(SyntaxError::TooManyAssignmentTargets { count })
+            if *count == MAX_ASSIGNMENT_TARGETS + 1
     ));
     assert!(
         error
             .to_string()
-            .contains(&format!("{MAX_ASSIGNMENT_OFFSET}"))
+            .contains(&format!("limit {MAX_ASSIGNMENT_TARGETS}"))
     );
 }
 

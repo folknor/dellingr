@@ -95,6 +95,10 @@ pub const MAX_FIXED_ARGS: usize = u8::MAX as usize - 1;
 pub const MAX_FIXED_RESULTS: usize = MAX_FIXED_ARGS;
 /// Maximum expressions in one source construct.
 pub const MAX_EXPRESSIONS: u8 = u8::MAX;
+/// Maximum targets in one assignment.
+pub const MAX_ASSIGNMENT_TARGETS: usize = MAX_EXPRESSIONS as usize;
+/// Maximum registers reserved by one compiled function.
+pub const MAX_REGISTERS: usize = u16::MAX as usize - 1;
 /// Maximum assignment receiver offset the compiler accepts.
 pub const MAX_ASSIGNMENT_OFFSET: usize = u8::MAX as usize;
 /// Maximum direct child functions in a chunk.

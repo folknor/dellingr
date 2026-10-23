@@ -23,6 +23,8 @@ pub enum ValidationReason {
     RegisterOutOfRange,
     /// the frame reserves fewer registers than its parameters and locals
     FrameTooSmall,
+    /// the frame size uses the reserved open-count encoding
+    FrameSizeUnencodable,
     /// a count operand is neither a valid fixed count nor open
     CountOperandInvalid,
     /// an instruction leaving open results is not followed by its consumer
@@ -47,6 +49,8 @@ pub enum ValidationReason {
     BuiltinSlotOutOfRange,
     /// TFOR_CALL requires at least one result
     TforCallWithoutResults,
+    /// TFOR_CALL result count exceeds the fixed-count limit
+    TforCallResultCountExceeded,
     /// vararg instruction in non-vararg function
     VarargInNonVarargFunction,
     /// boolean operand is invalid
@@ -190,6 +194,7 @@ impl std::fmt::Display for ValidationReason {
             Self::ChunkDepthExceeded => "nested chunk depth exceeds parser limit",
             Self::RegisterOutOfRange => "register operand is beyond the frame",
             Self::FrameTooSmall => "frame reserves fewer registers than its locals",
+            Self::FrameSizeUnencodable => "frame size uses the reserved open-count encoding",
             Self::CountOperandInvalid => "count operand is invalid",
             Self::OpenResultsNotConsumed => "open results are not consumed by the next instruction",
             Self::OpenResultsWithoutProducer => "open results are read without a producer",
@@ -202,6 +207,7 @@ impl std::fmt::Display for ValidationReason {
             Self::GlobalCacheSlotOrder => "global cache slot does not match first-use order",
             Self::BuiltinSlotOutOfRange => "builtin slot is out of range",
             Self::TforCallWithoutResults => "TFOR_CALL requires at least one result",
+            Self::TforCallResultCountExceeded => "TFOR_CALL result count exceeds 255",
             Self::VarargInNonVarargFunction => "vararg instruction in non-vararg function",
             Self::BooleanOperandInvalid => "boolean operand is invalid",
             Self::ConcatTooFewValues => "concat requires at least two values",
@@ -479,7 +485,10 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
         return Err(err(None, ValidationReason::FrameSlotCountExceeded));
     }
     let frame = usize::from(view.max_stack());
-    if frame < slots || view.max_stack() == OPEN_COUNT {
+    if view.max_stack() == OPEN_COUNT {
+        return Err(err(None, ValidationReason::FrameSizeUnencodable));
+    }
+    if frame < slots {
         return Err(err(None, ValidationReason::FrameTooSmall));
     }
     if !matches!(
@@ -789,7 +798,10 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
                 check_registers(pc, a, 4, frame)?;
             }
             Instr::OP_TFOR_CALL => {
-                if b == 0 || b > u16::from(u8::MAX) {
+                if b > u16::from(u8::MAX) {
+                    return Err(err(Some(pc), ValidationReason::TforCallResultCountExceeded));
+                }
+                if b == 0 {
                     return Err(err(Some(pc), ValidationReason::TforCallWithoutResults));
                 }
                 check_registers(pc, a, 3 + usize::from(b), frame)?;
@@ -905,6 +917,45 @@ mod tree_tests {
             max_stack,
             is_vararg: true,
             ..Bytecode::default()
+        }
+    }
+
+    #[test]
+    fn malformed_sizes_report_the_actual_defect() {
+        use super::ValidationReason;
+        use crate::instr::OPEN_COUNT;
+
+        let reserved = chunk(vec![Instr::ret(0, RetCount::Fixed(0))], OPEN_COUNT);
+        assert_eq!(
+            validate_bytecode(&reserved)
+                .expect_err("reserved frame size")
+                .reason,
+            ValidationReason::FrameSizeUnencodable
+        );
+        let mut small = chunk(vec![Instr::ret(0, RetCount::Fixed(0))], 0);
+        small.num_params = 1;
+        assert_eq!(
+            validate_bytecode(&small)
+                .expect_err("missing parameter slot")
+                .reason,
+            ValidationReason::FrameTooSmall
+        );
+        for (count, reason) in [
+            (0, ValidationReason::TforCallWithoutResults),
+            (256, ValidationReason::TforCallResultCountExceeded),
+            (OPEN_COUNT, ValidationReason::TforCallResultCountExceeded),
+        ] {
+            let instruction = Instr::from_raw(
+                (Instr::tfor_call(0, 1, None).raw() & !(0xffff_u64 << 24))
+                    | (u64::from(count) << 24),
+            );
+            let invalid = chunk(vec![instruction, Instr::ret(0, RetCount::Fixed(0))], 300);
+            assert_eq!(
+                validate_bytecode(&invalid)
+                    .expect_err("invalid result count")
+                    .reason,
+                reason
+            );
         }
     }
 

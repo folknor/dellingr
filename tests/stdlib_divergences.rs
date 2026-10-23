@@ -141,6 +141,29 @@ fn string_sub_checks_argument_one_first() {
 }
 
 #[test]
+fn optional_math_nil_arguments_use_their_defaults() {
+    let mut state = State::new();
+    run(
+        &mut state,
+        r#"
+        if math.atan(0.75, nil) ~= math.atan(0.75) then error('atan nil default') end
+        if math.log(8, nil) ~= math.log(8) then error('log nil default') end
+        "#,
+    )
+    .expect("nil optional math arguments use the default");
+}
+
+#[test]
+fn table_concat_coerces_a_numeric_separator() {
+    let mut state = State::new();
+    run(
+        &mut state,
+        r#"if table.concat({1, 2}, 0) ~= '102' then error('numeric separator') end"#,
+    )
+    .expect("number separator is converted to its string representation");
+}
+
+#[test]
 fn table_concat_names_the_bad_element_and_index() {
     for (source, expected) in [
         (

@@ -27,6 +27,9 @@ differences carry a `-- DIFF:` comment in the example.
   from Lua 5.4 (for example `math.log(3, 2)`, where 5.4 uses `log2`).
 - `math.random` uses the in-crate seeded generator, so its stream differs from
   reference Lua's.
+- `math.random(0)` raises an empty-interval error. Lua 5.4 instead returns a
+  random integer covering the full 64-bit range, which this f64-only VM cannot
+  represent as an integer result.
 - Table keys that are integers stop being distinct beyond +/-2^53. See
   "Table library" below.
 
@@ -98,6 +101,8 @@ does.
 ## Globals and metatables
 
 - Global `unpack` exists, as in Lua 5.2, alongside `table.unpack`.
+- `pairs` ignores `__pairs`, which Lua 5.2 and 5.4 honor.
+- `ipairs` reads each item through `__index`; Lua 5.2 reads those items raw.
 - `getmetatable(_G)` returns `false`, not `nil`. `_G` is a proxy over the
   global table and its metatable is protected: `setmetatable(_G, ...)` raises
   "cannot change a protected metatable".

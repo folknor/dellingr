@@ -283,7 +283,8 @@ pub struct State {
     bytecode_caches: IndexMap<usize, BytecodeCacheEntry>,
     /// Identities being turned into closure shells, retained during a GC sweep.
     pending_bytecode_caches: Vec<usize>,
-    /// Lua closure objects removed from the visible stack while they execute.
+    /// Temporary VM values and suspended environments retained across
+    /// allocation or re-entry.
     pub(super) transient_roots: TransientRoots,
     /// Pool for upvalue storage. Avoids per-upvalue heap allocations.
     pub(super) upvalue_pool: UpvaluePool,

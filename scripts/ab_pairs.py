@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Interleaved A/B benchmark cells through brokkr.
 
-For each workload, ROUNDS alternating `--bench --commit A` and
-`--bench --commit B` runs, one at a time, so drift between cells lands on
+For each workload, ROUNDS alternating A/B and B/A pairs of
+`--bench --commit` runs, one at a time, so drift between cells lands on
 both arms. Results land in .brokkr/results.db; read them with
 `brokkr results -n <cells>`.
 
@@ -23,7 +23,8 @@ def main() -> int:
     a, b, rounds = sys.argv[1], sys.argv[2], int(sys.argv[3])
     for workload in sys.argv[4:]:
         for i in range(1, rounds + 1):
-            for commit in (a, b):
+            commits = (a, b) if i % 2 else (b, a)
+            for commit in commits:
                 print(f"== {workload} round {i} @ {commit}", flush=True)
                 proc = subprocess.run(
                     ["brokkr", "dellingr", "--lua", workload, "--bench", "--commit", commit],

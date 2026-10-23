@@ -80,7 +80,7 @@ def main() -> int:
         body = line.split("\t", 1)[1].strip() if "\t" in line else ""
         if body_dump:
             # Addresses stripped so two builds diff on instructions alone.
-            print(re.sub(r"\b[0-9a-f]{4,}\b", "ADDR", body))
+            print(re.sub(r"\b(?=[0-9a-f]*[0-9])[0-9a-f]{4,}\b", "ADDR", body))
             continue
         c = call.search(body)
         if c and c.group(1) not in targets:

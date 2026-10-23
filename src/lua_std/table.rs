@@ -175,12 +175,17 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         // native-call: lib:table.concat->sequence_len
         let len = sequence_len(state, 1, LibraryFunction::Concat)?;
 
-        let sep = if check_optional_type_named(state, 2, LuaType::String, "concat")? {
-            let bytes = state.to_bytes(2)?.to_vec();
+        let sep = if state.is_none_or_nil(2)? {
+            Vec::new()
+        } else {
+            let bytes = if state.typ(2) == LuaType::Number {
+                state.bytes_with_default_string_coercion(2)?
+            } else {
+                check_type_named(state, 2, LuaType::String, "concat")?;
+                state.to_bytes(2)?.to_vec()
+            };
             state.consume_cost(bytes.len() as u64)?;
             bytes
-        } else {
-            Vec::new()
         };
 
         let i = opt_integer(state, 3, "concat")?.unwrap_or(1);

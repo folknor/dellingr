@@ -1,6 +1,8 @@
 use super::Result;
 use super::State;
-use super::object::{Closure, GcHeap, ObjectPtr, StringPtr};
+#[cfg(test)]
+use super::object::Closure;
+use super::object::{GcHeap, ObjectPtr, StringPtr};
 
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -114,6 +116,8 @@ use Val::*;
 impl Val {
     /// Get this value as a Lua function (closure), if it is one.
     /// Requires heap access since the function data is stored in the GC heap.
+    /// Test-only: runtime paths borrow through `GcHeap::as_lua_function_ref`.
+    #[cfg(test)]
     pub(super) fn as_lua_function(&self, heap: &GcHeap) -> Option<Closure> {
         if let Obj(o) = self {
             heap.as_lua_function(*o)
@@ -145,7 +149,7 @@ impl Val {
     }
 
     /// Get the ObjectPtr if this is an object, without checking what kind.
-    /// Use heap.as_table() or heap.as_lua_function() to check the actual type.
+    /// Use heap.as_table_ref() or heap.as_lua_function_ref() to inspect its type.
     pub(super) fn as_object_ptr(&self) -> Option<ObjectPtr> {
         if let Obj(o) = self { Some(*o) } else { None }
     }

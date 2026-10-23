@@ -58,7 +58,7 @@ Binary64 arithmetic exactly as IEEE 754 specifies, with gradual underflow and
 the default floating-point environment (round to nearest, no flush-to-zero).
 Rust assumes the same environment. x87-only targets (32-bit x86 without SSE2)
 evaluate with excess range and are not supported. NaN sign and payload bits
-are not part of the guarantee: no kernel branches on them, every NaN is
+are not part of the guarantee: they never affect a non-NaN result, every NaN is
 treated as quiet (so `pow(NaN, 0)` and `pow(1, NaN)` are 1 whatever the
 NaN's bits), and the VM never lets a script observe them.
 

@@ -175,7 +175,7 @@ pub(super) const NON_BUILTIN_GLOBALS: &[(&str, crate::RustFunc)] = &[
         let prefix_location = if state.get_top() < 2 {
             PrefixLocation::Current
         } else {
-            let level = super::arg_integer(state, 2, "error")?;
+            let level = super::opt_integer(state, 2, "error")?.unwrap_or(1);
             if level <= 0 {
                 PrefixLocation::Suppressed
             } else {
@@ -318,8 +318,9 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
 
     // unpack(list [, i [, j]])
     //
-    // Returns list[i], list[i+1], ..., list[j]. Defaults to 1..#list,
-    // matching Lua 5.2's global unpack.
+    // Returns list[i], list[i+1], ..., list[j]. Defaults to 1..#list. The
+    // implementation is shared with `table.unpack`; see `unpack_values` for
+    // its length and lookup behavior.
     add!("unpack", base_unpack_values);
 
     // getmetatable(object)

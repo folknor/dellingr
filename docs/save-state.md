@@ -105,7 +105,8 @@ callbacks, host user-data. Saving is valid only while the VM is quiescent.
 ## Byte stability
 
 - The codec is little-endian and length-prefixed, with explicit enum tags.
-  It is bounds-checked, and reservations are capped at the remaining bytes.
+  It is bounds-checked. Initial vector reservations, measured in bytes, are
+  capped at the remaining input; vectors then grow as elements are decoded.
 - Two saves of the same logical state are byte-identical with the same crate
   version. The crate version string is part of the blob.
 - A table saves its logical array length and the slots from its first live

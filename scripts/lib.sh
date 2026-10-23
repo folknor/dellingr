@@ -113,14 +113,6 @@ dellingr_bin_built() {
     cargo_artifact "$1" dellingr bin
 }
 
-dellingr_bin() {
-    if [ "$#" -ne 1 ]; then
-        echo "usage: dellingr_bin <debug|release>" >&2
-        return 2
-    fi
-    dellingr_bin_built "$1"
-}
-
 # This is a curated benchmark subset from brokkr.toml, not an examples corpus walk.
 workload_hotpath_files() {
     if [ "$#" -gt 1 ]; then

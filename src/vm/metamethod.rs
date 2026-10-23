@@ -25,9 +25,9 @@ impl State {
     /// `MAX_NATIVE_CALL_DEPTH` refuses that recursion first. That is
     /// deliberate and matches reference Lua, whose C call limit bounds the
     /// same recursion near 200. A `__call` function handler is exempt (see
-    /// `State::begin_call`) because
-    /// guarding it would also cap ordinary recursion through callable objects,
-    /// which reference Lua does not limit this way.
+    /// `State::begin_callable_call`) because guarding it would also cap
+    /// ordinary recursion through callable objects, which reference Lua does
+    /// not limit this way.
     ///
     /// The depth counter is restored for every VM error path. A Rust panic
     /// leaves the State unusable, like other interrupted VM execution paths.
@@ -142,7 +142,7 @@ impl State {
             Val::Obj(ptr) => {
                 // Check if it's a table or function
                 let is_table = self.heap.as_table_ref(ptr).is_some();
-                let is_function = self.heap.as_lua_function(ptr).is_some();
+                let is_function = self.heap.as_lua_function_ref(ptr).is_some();
 
                 if is_table {
                     // __index is a table: look up key in that table
@@ -294,7 +294,7 @@ impl State {
             Val::Obj(ptr) => {
                 // Check if it's a table or function
                 let is_table = self.heap.as_table_ref(ptr).is_some();
-                let is_function = self.heap.as_lua_function(ptr).is_some();
+                let is_function = self.heap.as_lua_function_ref(ptr).is_some();
 
                 if is_table {
                     // __newindex is a table: set the value in that table instead

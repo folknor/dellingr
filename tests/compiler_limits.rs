@@ -413,3 +413,32 @@ fn uncached_slots_templates_and_wide_set_field_at_execute() {
         255.0
     );
 }
+
+#[test]
+fn assignment_target_count_is_bounded_before_codegen() {
+    let targets = std::iter::repeat_n("a", 255).collect::<Vec<_>>().join(",");
+    Program::compile(format!("local a; {targets} = 1"), None)
+        .expect("255 fixed assignment targets fit");
+    for count in [256, 65_535, 65_536, 65_537, 65_538] {
+        let targets = std::iter::repeat_n("a", count)
+            .collect::<Vec<_>>()
+            .join(",");
+        for prefix in ["", "local a; "] {
+            expect_syntax_error(&format!("{prefix}{targets} = 1"), |kind| {
+                matches!(kind, SyntaxError::TooManyAssignmentTargets { count: 256 })
+            });
+        }
+    }
+}
+
+#[test]
+fn compiler_limit_diagnostics_include_observed_counts() {
+    assert_eq!(
+        SyntaxError::TooManyAssignmentTargets { count: 256 }.to_string(),
+        "too many assignment targets (256, limit 255)"
+    );
+    assert_eq!(
+        SyntaxError::TooManyRegisters { count: 65_535 }.to_string(),
+        "too many registers (65535, limit 65534)"
+    );
+}

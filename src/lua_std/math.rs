@@ -14,7 +14,7 @@
 //! those bits: `string.format` and `tostring` both canonicalise NaN to an
 //! unsigned `nan`, and `%q` prints `(0/0)`.
 
-use super::{MATH_LIBRARY_CAPACITY, arg_integer, check_type_named};
+use super::{MATH_LIBRARY_CAPACITY, arg_integer, check_optional_type_named, check_type_named};
 use crate::LuaType;
 use crate::Result;
 use crate::State;
@@ -229,8 +229,7 @@ pub(super) const MATH_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         state.consume_cost(1)?;
         check_type_named(state, 1, LuaType::Number, "atan")?;
         let y = state.to_number(1)?;
-        let result = if state.get_top() >= 2 {
-            check_type_named(state, 2, LuaType::Number, "atan")?;
+        let result = if check_optional_type_named(state, 2, LuaType::Number, "atan")? {
             let x = state.to_number(2)?;
             crmath::atan2(y, x)
         } else {
@@ -272,8 +271,7 @@ pub(super) const MATH_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         state.consume_cost(1)?;
         check_type_named(state, 1, LuaType::Number, "log")?;
         let x = state.to_number(1)?;
-        let result = if state.get_top() >= 2 {
-            check_type_named(state, 2, LuaType::Number, "log")?;
+        let result = if check_optional_type_named(state, 2, LuaType::Number, "log")? {
             let base = state.to_number(2)?;
             // Reference special-cases base 10 with log10, which makes
             // math.log(1000, 10) exactly 3 rather than 2.9999999999999996.

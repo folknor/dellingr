@@ -494,7 +494,10 @@ impl<'a> Parser<'a> {
         };
         codegen::generate(&mut chunk, &function).map_err(|error| match error {
             codegen::CodegenError::JumpTooFar => self.error_here(SyntaxError::JumpTooFar),
-            codegen::CodegenError::Internal(fault) => self.internal_error(fault),
+            codegen::CodegenError::TooManyRegisters { count } => {
+                self.error_here(SyntaxError::TooManyRegisters { count })
+            }
+            codegen::CodegenError::Internal(fault) => self.internal_error(*fault),
         })?;
         Ok(chunk)
     }

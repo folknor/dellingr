@@ -14,7 +14,7 @@
 # Standard library defects: base, table, math, string, patterns
 
 Filed from the 2026-10-23 defect hunt at a22d9c0 (scopes `stdlib` and
-`strings`, plus one lateral note from `crmath`). The hunters read the code
+`strings`). The hunters read the code
 statically and built or ran nothing. The `stdlib` hunter quotes reference
 behaviour from the 5.2.4 and 5.4 C sources (`lbaselib.c`, `lmathlib.c`,
 `ltablib.c`), not from running the interpreters.
@@ -62,6 +62,9 @@ they are bugs. They also fail AGENTS.md's surprising-behaviour test: a script
 that writes through `rawset(_G, ...)`, a common idiom for defining globals under
 a strict-mode `__newindex`, silently defines nothing.
 
+**Deferred (user, 2026-10-23).** Not to be picked up by a resolution wave until
+the user reopens it.
+
 **Structural options**
 
 - Make the global environment a real table, so that `_G` is that table and the
@@ -72,73 +75,10 @@ a strict-mode `__newindex`, silently defines nothing.
 The hunter calls the second a patch over a leaky abstraction; the first removes
 the class of bug.
 
-## LIB-002 - An explicit nil in an optional argument is rejected
-
-From the `stdlib` hunter, rated low to medium. The `crmath` hunter reported the
-`math.atan` and `math.log` cases independently as a lateral note.
-
-**Claim broken.** The module doc of `src/lua_std.rs` states the library's
-convention: "An optional argument that is absent or nil takes its default".
-`opt_integer`, `check_optional_type_named` and `tonumber`'s `is_none_or_nil` all
-follow it. None of the cases below is in compatibility.md.
-
-**Mechanism.** Three functions test for an optional argument with `get_top()`
-instead of `is_none_or_nil`:
-
-- `error(msg, nil)` (basic.rs, the `error` closure): `get_top() >= 2`, so
-  `arg_integer(2)` fails on the nil and raises `bad argument #2 to 'error' (number
-  expected, got nil)`. Both references read the level with
-  `luaL_optint` / `luaL_optinteger(L, 2, 1)`, so nil means level 1. The author's
-  own error message is replaced by an argument error, which is the worst case:
-  the message that explains the failure is lost.
-- `math.log(x, nil)` (math.rs `log`): `get_top() >= 2` followed by
-  `check_type_named(2, Number)` raises. Both references check
-  `lua_isnoneornil(L, 2)` and return the natural log.
-- `math.atan(y, nil)` (math.rs `atan`): the same pattern. 5.4 uses
-  `luaL_optnumber(L, 2, 1)`, and 5.2 ignores the second argument.
-
-The likely trigger is forwarding a possibly-nil value, as in `error(msg, lvl)` or
-`math.log(x, base)`.
-
-**Fix.** `error` should use `opt_integer(state, 2, "error")` with a default of 1,
-and `log` and `atan` should use `check_optional_type_named`.
-
-## LIB-003 - `table.concat` rejects a number separator
-
-From the `stdlib` hunter. Low.
-
-`concat` (table.rs) calls `check_optional_type_named(state, 2, LuaType::String,
-"concat")`, which raises `string expected, got number` for `table.concat(t, 0)`.
-Both references read the separator with `luaL_optlstring`, which converts a
-number to its string, so they return `"102"` for `{1, 2}`. The elements in the
-same function do accept numbers (`bytes_with_default_string_coercion`). The
-"Coercion" section of compatibility.md covers only string-to-number coercion, so
-number-to-string coercion of the separator is an unlisted divergence.
-
-## LIB-004 - Other unlisted divergences: `__pairs`, `ipairs` through `__index`, `math.random(0)`
-
-From the `stdlib` hunter. Low. None of these is in compatibility.md.
-
-- `pairs` ignores `__pairs`: `base_pairs` pushes `next` without consulting the
-  metatable. Both 5.2 and 5.4 call `__pairs` when it is present. The "Globals and
-  metatables" section lists which metatable fields are implemented, which only
-  implies that `__pairs` is not.
-- `ipairs` reads through `__index` (`base_ipairs_iter` uses
-  `get_table_unguarded`). That matches 5.4, but 5.2's `ipairsaux` uses
-  `lua_rawgeti`. The table-library bullet that lists 5.4 metamethod semantics does
-  not mention `ipairs`.
-- `math.random(0)` raises `interval is empty`. In 5.4, `math.random(0)` returns a
-  random integer covering all 64 bits. The module doc of `src/lua_std.rs` claims
-  "`math.random` follows Lua 5.4's interval and error behavior", and this case
-  breaks that claim. A full-width integer makes little sense with f64-only
-  numbers, so the hunter expects the fix to be a doc line, but as written the
-  claim is wrong.
-
 ## LIB-005 - Table-library charging is overstated in two docs, and the metamethod insert/remove loop has no cost bound
 
 From the `stdlib` hunter, rated low to medium: a doc defect plus a lateral
-hazard. LIB-006 and SRF-003 (notes/bugs-surface.md) cover nearby charging claims
-with different mechanisms.
+hazard. LIB-006 covers a nearby charging claim with a different mechanism.
 
 **Claims broken**
 
@@ -175,6 +115,11 @@ it at `i32::MAX`, `move` and `concat` charge per element, and `unpack` caps at
 
 Under budget.md this is a performance concern, not a cost-model defect, and
 `while true do end` already shows the budget is not a termination guarantee.
+**Decided (user, 2026-10-23):** keep the flat charge, cap the metamethod-path
+shift distance (at `TABLE_SORT_MAX_LEN`, as `sort` does), and spell out the
+flat and free exceptions in the README and compatibility.md charging
+statements.
+
 Still, it is the one place where a single flat-charged library call does
 script-chosen work with no bound. If the flat charge stays, the hunter suggests
 capping the metamethod-path shift distance, for example at `TABLE_SORT_MAX_LEN`
@@ -198,40 +143,11 @@ being free plausibly matches the design, because reads are uncharged opcodes
 too. `rawset` is the exception: a free version of a charged operation, which
 reads as an oversight unless documented as deliberate.
 
-**Direction.** Either charge `rawset` 1 (a `COST_MODEL_VERSION` bump), or add it
-and the rest of the base library to "Free by design".
-
-## LIB-007 - Stale comment on global `unpack`
-
-From the `stdlib` hunter. Trivial.
-
-In basic.rs, the comment above `add!("unpack", base_unpack_values)` says
-"Defaults to 1..#list, matching Lua 5.2's global unpack." The implementation
-(`lua_std::unpack_values`) follows 5.4: the length comes from `__len`, and reads
-go through `__index`, as the doc comment on `unpack_values` itself states. The
-comment should describe the 5.4 semantics or simply point to `unpack_values`.
-
-## LIB-008 - The README "Won't implement" list is incomplete
-
-From the `stdlib` hunter. Low; a doc defect. CMP-004 (notes/bugs-compiler.md)
-covers the same gap for `_ENV`, `\u{XXXX}` and local attributes.
-
-compatibility.md delegates the list of absent features to the README, which
-lists coroutines, io/os/debug, pcall/xpcall/assert, goto, `//`, bitwise
-operators, `string.rep/byte/char`, arithmetic, comparison and concat
-metamethods, implicit coercion, and long strings. These are absent from this
-scope's libraries but not listed:
-
-- `load`, `loadstring`, `dofile`, `require`, `collectgarbage`;
-- `math.randomseed` (the host's `set_rng_seed` replaces it), `math.type`,
-  `math.tointeger`, `math.ult`, `math.maxinteger`, `math.mininteger`, and 5.2's
-  `math.pow`, `ldexp`, `frexp`, `cosh`, `sinh`, `tanh`, `log10`;
-- `table.maxn`;
-- the metatable fields `__pairs`, `__gc`, `__mode`, `__close` and `__name`.
-
-`__mode` matters most: a script that builds a weak-keyed cache with
-`setmetatable({}, {__mode = "k"})` gets no error, and a cache that never releases
-its entries.
+**Decided (user, 2026-10-23):** `rawset` charges 1, the same as a `TableWrite`
+opcode. That is a `COST_MODEL_VERSION` bump, a refreshed cost golden
+fingerprint and a CHANGELOG entry (script costs change). budget.md should then
+list `rawset` among the native charges, and add the rest of the base library,
+which only reads, to "Free by design".
 
 ## LIB-009 - gmatch iterator state can tear, or skip a match, on a refused stack push
 
@@ -326,42 +242,6 @@ would remove the process-global chunk, the `call_unguarded` native level in
 quirk at once. The hunter considers that structural improvement worth having on
 its own merits.
 
-## LIB-012 - `string.gsub` reports a missing argument 3 before checking arguments 1 and 2
-
-From the `strings` hunter. Low.
-
-**Claim broken.** The doc comment on `check_string_or_number` in string.rs: "an
-argument must be validated before later arguments are read, so errors name the
-arguments in the reference's order". `sub` follows the rule explicitly.
-
-**Mechanism.** `gsub` calls `check_any_named(state, 3, "gsub")` before arguments 1
-and 2 are type-checked:
-
-- `string.gsub("x", {})` raises `bad argument #3 to 'gsub' (value expected)`,
-  though the first problem is argument 2, a table where a pattern was expected.
-  Reference 5.4 reports `#2 ... string expected, got table`.
-- `string.gsub()` raises the `#3` error, where reference reports `#1`.
-
-The message points the author at the wrong argument, so this is not merely a
-wording difference. The `check_any_named(3)` call is also redundant: the
-`repl_type` check further down already rejects an absent argument with
-`StringFunctionOrTableExpected`, which is the reference's own message.
-
-**Fix.** Drop the call.
-
-## LIB-013 - The `pattern_matcher` doc comment sits on `gsub_empty_pattern`
-
-From the `strings` hunter. Low; a doc defect.
-
-In string.rs, the block that begins "The matcher for argument 2 of `find`,
-`match` or `gsub`. A string pattern comes from the State's compiled-pattern
-cache; a number coerced to `pattern` has no interned key and compiles fresh..."
-sits directly above `#[inline(never)] fn gsub_empty_pattern`. Rustdoc and IDE
-hovers therefore describe `gsub_empty_pattern` as the pattern-matcher helper,
-while `fn pattern_matcher`, further down the file, has no doc comment.
-
-**Fix.** Move the comment.
-
 ## LIB-014 - AGENTS.md names string.rs helpers that do not exist
 
 From the `strings` hunter. Low; a doc defect.
@@ -428,21 +308,6 @@ bar.
   `push_rust_fn(base_next)` and relies on the reverse address lookup. Pushing the
   already-registered function directly in both would be cheaper and consistent.
 
-## LIB-018 - Undocumented replay-relevant properties: libm `fmod`, and degenerate `math.random` ranges
-
-From the `stdlib` hunter, raised outside the defect bar.
-
-- `math.fmod`, and `numeral::lua_modulo` (the VM's `%`), use Rust's f64 `%`,
-  which LLVM lowers to a libm `fmod` call on most targets. `fmod` is exact, so
-  every conforming libm agrees and replays are safe. It is still a host-libm
-  dependency that docs/determinism.md does not mention next to its "computed
-  in-crate, never by the platform libm" wording.
-- `VmRng::random_range_i64` returns early without drawing when `end <= start`,
-  so `math.random(1)` and `math.random(m, m)` do not advance the stream, while
-  5.4 always draws. This is deterministic and fine, but it is a replay-visible
-  property of the RNG draw sequence that docs/determinism.md does not state. If
-  it ever changed, every replay that hits a degenerate range would diverge.
-
 ## LIB-019 - `table.sort` raw path overwrites comparator writes and bypasses a mid-sort metatable
 
 From the `stdlib` hunter, raised outside the defect bar.
@@ -452,3 +317,15 @@ On the raw path, a comparator's writes to `t[1..n]` are overwritten by the final
 by that raw writeback. Reference Lua's behaviour here is also unspecified, so the
 hunter does not count it as a defect. compatibility.md's sort bullet documents
 the call-order difference only for the metamethod path, not this one.
+
+## LIB-020 - `string.gsub` charges before it rejects a bad argument 3
+
+Lateral from the first resolution wave's review. Dropping the early argument-3
+presence check (so errors name arguments in order) moved the arg-3 rejection
+after the up-front charge: `string.gsub` now charges
+`(len(s) + len(pattern)).max(1)` plus the pattern bytes, then raises
+`StringFunctionOrTableExpected` for a missing or wrong-typed argument 3. A
+failing call's `cost_used` changed, and under a tight budget the reported error
+can be budget exhaustion instead of the argument error. Other string functions
+validate every argument before charging. Moving the `repl_type` check ahead of
+the charge (it reads no pattern state) restores validate-then-charge.

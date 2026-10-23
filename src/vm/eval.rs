@@ -303,7 +303,9 @@ impl State {
             self.stack.insert(idx + 1, func_val);
             num_args = combined;
             let handler_is_function = matches!(call_handler, Val::RustFn(_))
-                || call_handler.as_lua_function(&self.heap).is_some();
+                || call_handler
+                    .as_object_ptr()
+                    .is_some_and(|ptr| self.heap.as_lua_function_ref(ptr).is_some());
             if !handler_is_function {
                 #[cfg(not(feature = "fault-injection"))]
                 let injected = false;

@@ -126,6 +126,11 @@ Base.greet = print
 for i = 1, 1e6 do get(o) end   -- always the slow path, for every receiver
 ```
 
+**Deferred (user, 2026-10-23),** together with RT-002 and the register-native
+slow-path rewrite they share. When reopened, the user's ruling on the depth
+question is: a non-nesting `__index` table step never counts against the depth
+limit; only steps that recurse take a unit, on every route.
+
 **Direction**
 
 - Decide what one non-nesting `__index` table step costs against the depth
@@ -189,6 +194,8 @@ which inserts into `open_upvalues` and allocates pool slots, before
 `push_closure`'s preflight refuses. The rejected instruction is therefore not
 side-effect free. It is harmless only because the error always kills the frame,
 and unwinding closes those upvalues.
+
+**Deferred (user, 2026-10-23),** together with RT-001.
 
 **Direction.** Make the claim true rather than reword it:
 
@@ -333,6 +340,8 @@ returning it, the outcome depends on where the nested error came from:
 error (`rust_callback_propagating_nested_*`), where both kinds come out at
 exactly one. There is no swallowing case.
 
+**Deferred (user, 2026-10-23).**
+
 **Direction.** Decide which rule is the contract:
 
 - "Report at the first boundary that returns it to code that may continue": then
@@ -364,6 +373,9 @@ is restored after the function completes (or errors)".
   for the State's life.
 
 Nothing forbids the combination, and both are public `&mut self` APIs.
+
+**Decided (user, 2026-10-23):** refuse `open_libs` inside a restricted
+environment with an error.
 
 **Direction.** Refuse `open_libs` while `transient_roots.suspended_envs` is
 non-empty, or document the combination as unsupported.
@@ -460,35 +472,6 @@ accelerator for `next` and `mark_values`, but release decisions should never
 depend on it. The downward pad in `write_outside_window` should then use the
 live count, not `len - lead`.
 
-## RT-011 - determinism.md's `pairs` order rule leaves out migration, so it predicts the wrong order
-
-From the `tables` hunter.
-
-**Claim broken.** docs/determinism.md "`pairs` order": "A table's array part
-(keys `1..n`, grown by appending `n + 1`) is visited first, in key order. Every
-other key follows in insertion order." This is the replay contract for `pairs`.
-
-**Mechanism.** Growing the array also migrates any live hash entries for the
-following keys into the array (`migrate_from_hash`). A key inserted into the
-hash part before some other key can therefore be visited ahead of it:
-
-```lua
-local t = {}
-t.x = 1
-t[3] = "c"   -- not an append (n = 0): hash part, inserted after x
-t[1] = "a"   -- append
-t[2] = "b"   -- append, then key 3 migrates into the array
-for k in pairs(t) do print(k) end
--- code: 1 2 3 x     the doc's rule predicts: 1 2 x 3
-```
-
-The code is self-consistent and matches the `Table` struct doc ("after which any
-live hash entries for the following keys migrate into the array"). The durable
-doc that a script author or replay tool reads is the one that is wrong.
-
-**Direction.** Add the migration rule to determinism.md: "appending `n + 1` also
-moves keys `n + 2, n + 3, ...` that are already present into the array part".
-
 ## RT-012 - `set_metatable_of` rejects a bad metatable as "attempt to index a X value"
 
 From the `tables` hunter. Lower severity.
@@ -504,34 +487,13 @@ the host it is the misleading-message case AGENTS.md counts as a defect.
 **Direction.** Give it its own error kind, for example "metatable must be a
 table or nil".
 
-## RT-013 - Stale doc comments in the VM core
-
-From the `vm-core` hunter. In each case the code is right and the comment is
-not.
-
-- `State.transient_roots` field doc: "Lua closure objects removed from the
-  visible stack while they execute." No executing closure is held there any more,
-  as `mark_gc_roots` itself says. It now holds `with_rooted_values` and
-  `resolve_bytecode_runtime` temporaries and suspended restricted environments.
-- `Closure::upvalues` doc (src/vm/object.rs): "the closure is cloned on every
-  Lua-to-Lua call (`as_lua_function`)". Lua calls now go through
-  `lua_function_bytecode` and `admitted_frame`, which clone three `Arc`s, not the
-  closure. The `Arc<[_]>` choice is still right for that reason.
-- `GcHeap::mark` doc: "The upvalue_pool is needed to mark closed upvalues
-  referenced by closures." `mark` takes no pool; `drain_mark_worklist` does.
-- `GcHeap::as_lua_function_ref` carries two doc lines with `#[hotpath::measure]`
-  between them. The first ("Get the object as a Lua function (closure)") belongs
-  to `as_lua_function`.
-- `with_metamethod_depth` doc: "A `__call` function handler is exempt (see
-  `State::begin_call`)". The exemption is in `begin_callable_call`.
-
-The limits.rs and instr.rs sentinel comments from the same hunter are filed with
-the other reports of them in notes/bugs-compiler.md (CMP-005, CMP-006).
-
 ## RT-014 - Every slow-path entry repeats the fast-path lookup
 
 From the `dispatch` hunter (its L1) and the `tables` hunter (its L2). Raised as
 performance observations outside the defect bar.
+
+The slow-path bullets go with the register-native rewrite and are deferred with
+RT-001 (user, 2026-10-23). The `try_insert_table_direct` bullet stands alone.
 
 - `get_field_slow` -> `instr_get_field` re-runs `get_table_field_direct` and
   `get_index_table_field_direct`, both of which just failed in
@@ -558,7 +520,7 @@ outside the defect bar.
   hit, so `if OPTIONAL_FLAG then` pays `Builtin::from_name` plus a hash probe
   every time.
 
-## RT-016 - Call-path overheads: TFOR_CALL bookkeeping, vararg allocation, argument memmoves, `as_lua_function` clones
+## RT-016 - Call-path overheads: TFOR_CALL bookkeeping, vararg allocation, argument memmoves
 
 Raised as performance observations outside the defect bar.
 
@@ -573,13 +535,6 @@ Raised as performance observations outside the defect bar.
   `self.stack.remove(idx)` memmoves the arguments for every Rust callee.
   `invoke_rust_fn`'s `rotate_right` moves the callback's whole frame when it
   returns fewer values than it left.
-- **`as_lua_function` used for `.is_some()` checks** (vm-core hunter).
-  `as_lua_function` makes an owned `Closure` clone (three `Arc` increments and
-  decrements) and is used in production only for `.is_some()` checks:
-  `metamethod.rs` (`__index` and `__newindex` handler classification), `eval.rs`
-  `begin_callable_call`, and `eval_index.rs` `index_string`.
-  `as_lua_function_ref` is the right call; after that, the owned API has only
-  test callers.
 
 ## RT-017 - The pattern cache is cleared wholesale at every collection
 

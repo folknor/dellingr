@@ -74,6 +74,12 @@ still resume a traversal therefore depends on whether a collection freed and
 re-interned it, which ties the result to collection timing. A loaded State's
 collection timing differs from the continuous run's. See also SNP-002.
 
+**Decided (user, 2026-10-23):** the first option below. Save the dead hash
+slots as part of the table's saved shape, so a loaded table resumes `next`
+from a cleared key exactly as the continuous run does. That is a
+`FORMAT_VERSION` bump. Settle SNP-002 (mark tombstone keys, or prune them at
+collection) in the same change.
+
 **Fix options**
 
 - Make the dead slots part of the saved shape, the way environment deltas
@@ -163,45 +169,6 @@ expansion. Simpler still: keep every `EnvObj` and every string or function
 reachable from an environment object. Tests should pin `getmetatable("")` and a
 shadowed `string` table across a round trip.
 
-## SNP-004 - Identity strings get arena ids in heap-address order (byte stability)
-
-From the `snapshot` hunter.
-
-**Claim broken.** docs/save-state.md "Byte stability": "Two saves of the same
-logical state are byte-identical" and "A loaded State and the continuous run it
-came from keep saving identical bytes."
-
-**Mechanism.** In `SaveBuilder::finish`, after the graph walk:
-
-```rust
-for key in self.bytecode_ids.keys() {
-    if let Some(entry) = self.state.bytecode_caches.get(key) {
-        identity_strings.extend(entry.runtime.literals.iter().copied());
-    }
-}
-```
-
-`bytecode_ids` is a `BTreeMap<usize, u32>` keyed by
-`Arc::as_ptr(bytecode) as usize`, so this loop runs in heap-address order. Each
-identity-bearing literal the graph walk has not already reached gets its
-string-arena id from `string_id` in that order. Those ids appear in the
-`strings` section and in `format_pointer_ids` (`SavedVal::Str(id)`).
-
-Two saved chunks are enough. Each needs a string literal that was rendered with
-`%p` (for example `string.format("%p", "abc")` in `f` and
-`string.format("%p", "xyz")` in `g`) and is not otherwise stored. The order of
-those two strings in the arena then follows the allocator's placement of the two
-`Bytecode` Arcs. Within one process history the order is generally the same. It
-differs between the continuous run, where codegen allocates nested chunks, and a
-loaded State, where `build_bytecode_tree` allocates chunks in arena order. It
-can also differ across allocators and hosts.
-
-**Direction.** Iterate chunks in arena-id order: walk `self.bytecode` by index,
-or sort `bytecode_ids` by value. More structurally, nothing in the encoder should
-iterate an address-keyed map. `bytecode_ids` is the only one iterated today
-(`object_ids` is keyed by slotmap key, and `upvalue_ids` and `string_ids` are
-lookups only). Make that a rule, or key the map by arena id.
-
 ## SNP-005 - A forged logical array length turns the next append into a host abort or panic
 
 From the `snapshot` hunter.
@@ -234,49 +201,30 @@ The forged save can carry the triggering bytecode itself, and the cost budget
 does not charge the resize. A save the load verifier accepts can therefore kill
 the host on the first script write.
 
-**Direction.** Tie a table's logical length to what the save carries:
+**Decided (user, 2026-10-23):** make table growth fallible, as described under
+"What remains".
 
-- Bound `array_len` by the stored span end plus a slack the format can justify.
-  Live tables reach a large `vlen` with a small window only through a FIFO, and
-  their window sits at the tail, so one bound is
-  `first_slot + array_slots <= array_len <= first_slot + array_slots + k`. Check
-  that bound against what `snapshot_entries` can produce for a FIFO. A live
-  FIFO's dead prefix is not saved, so `first_slot` can be large; that case is
-  fine.
-- Or make `prepare_append`'s gap fill fail-safe: treat a gap larger than the
-  window as a window reset, not a resize. This is arguably right for live tables
-  too, since nothing promises that the slots between `base + len` and `vlen` hold
-  storage.
+**Both proposed directions were refused** in the first resolution wave, with
+comments left in src/vm/save_state/verify.rs and src/vm/table.rs and a test
+pinning the constraint:
 
-Both `grow_vlen` asserts are a panic the host cannot catch, but docs/limits.md
-documents that one.
+- Bounding `array_len` by the stored span plus a slack rejects valid saves: a
+  live table can end in a long structural nil tail, so `array_len` legitimately
+  exceeds the stored span by any amount.
+- Resetting the window on a large gap discards live values.
 
-## SNP-006 - "Reservations are capped at the remaining bytes" counts elements, not bytes
+**What remains.** The gap fill has to become fallible: table growth returns an
+error instead of aborting or asserting, and that error propagates through table
+writes. The fixer named `array_insert` (to return `Result`) and its caller
+`table_ops.rs::table_insert_at` as the first sites. `write_outside_window` can
+allocate an equally large gap and needs the same treatment; fixing only the
+append path leaves it exposed. docs/limits.md's "growing past it panics" and
+the `MAX_ARRAY_LEN` doc then need to match whatever error the growth path
+returns.
 
-From the `snapshot` hunter.
-
-**Claim broken.** docs/save-state.md "Byte stability" and the module doc of
-save_state.rs: the codec is bounds-checked "and reservations are capped at the
-remaining bytes."
-
-**Mechanism.** `read_vec` reserves `Vec::with_capacity(len.min(input.remaining()))`.
-That caps the element count at the remaining byte count, so the reservation in
-bytes is `remaining * size_of::<T>()`. For the bytecode arena,
-`T = SavedBytecode` is around 220 bytes (seven `Vec`s, an `Option<String>`, an
-`Option<Arc<[u8]>>` and scalars). Objects are about 70 bytes and values 32
-bytes. A forged save whose `Chunks` length prefix is `u32::MAX` reserves about
-220 times the file size before reading the first element: a 100 MB input means
-about 22 GB. Under the default Linux overcommit heuristic, or the repo's own
-`ulimit -v` test cap, that allocation fails and the process aborts instead of
-returning `SnapshotError::DecodeError`.
-
-The comment in `read_vec` ("each element consumes at least one byte") is right
-about the count. The documented claim is about memory, and the code does not keep
-it.
-
-**Direction.** Cap by bytes: either `len.min(remaining / min_encoded_size::<T>())`
-with a per-type minimum encoded width, or skip the pre-reservation and let `push`
-grow the vector (amortised doubling is bounded by what is actually decoded).
+Lateral from the same wave: the save-golden test's failure diagnostic equates a
+traversal reordering with an unreadable save, which misdirects whoever reads
+the failure.
 
 ## SNP-007 - Identities rendered during load setup are silently replaced
 

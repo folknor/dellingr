@@ -40,6 +40,10 @@ Violations are reported as errors at load time, never silently truncated.
   numeric budget of `MAX_SYNTAX_DEPTH`, so nested functions hit it at the same
   boundary. Both raise `TooManySyntaxLevels`.
 - `MAX_LOCALS`, `MAX_UPVALUES`: per function.
+- `MAX_ASSIGNMENT_TARGETS`: 255 targets per assignment. The first excess target
+  raises `TooManyAssignmentTargets` with its count and the limit.
+- `MAX_REGISTERS`: 65534 registers per function, including temporaries.
+  Exceeding it raises `TooManyRegisters` with the requested count and the limit.
 - `MAX_NESTED`: direct child functions per chunk.
 - `MAX_LITERALS`: distinct entries per numeric pool and per string pool.
 - `MAX_FIXED_ARGS`, `MAX_FIXED_RESULTS`: fixed counts for calls and multiple

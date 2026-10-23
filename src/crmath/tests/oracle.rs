@@ -312,6 +312,40 @@ const PI_TIMES_2_1700_HEX: &str = concat!(
 const DOWN: Rounding = Rounding::TowardNegative;
 const UP: Rounding = Rounding::TowardPositive;
 
+/// libbeef's pi primitive returns zero from 688 bits upward. Even the
+/// externally reduced trig path still calls pi-dependent primitives, so no
+/// such function may escalate beyond the last safe Ziv step (512 bits).
+fn check_precision(f: Func, p: u64) -> Result<(), String> {
+    let cap = match f {
+        Func::Sin | Func::Cos | Func::Tan | Func::Asin | Func::Acos | Func::Atan | Func::Atan2 => {
+            512
+        }
+        Func::Exp | Func::Ln | Func::Log10 | Func::Pow => 4096,
+    };
+    if p > cap {
+        return Err(format!(
+            "{} oracle precision {p} exceeds its safe cap of {cap} bits",
+            f.name()
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn pi_dependent_oracles_refuse_unsafe_precision() {
+    for f in Func::ALL {
+        assert!(check_precision(f, 512).is_ok());
+        let pi_dependent = matches!(
+            f,
+            Func::Sin | Func::Cos | Func::Tan | Func::Asin | Func::Acos | Func::Atan | Func::Atan2
+        );
+        assert_eq!(check_precision(f, 1024).is_err(), pi_dependent);
+        if pi_dependent {
+            assert!(certify_at_precision(f, 0.5, 0.75, 1024).is_err());
+        }
+    }
+}
+
 /// Lower and upper bounds of the exact result at precision `p`.
 fn enclose(f: Func, x: f64, y: f64, p: u64) -> (BigFloat, BigFloat) {
     let bx = BigFloat::from_f64(x);
@@ -550,11 +584,15 @@ fn pow_is_exactly(x: f64, y: f64, m: &BigFloat) -> bool {
 /// The correctly rounded result, or a description of why it could not be
 /// certified.
 pub(crate) fn certify(f: Func, x: f64, y: f64) -> Result<f64, String> {
+    certify_at_precision(f, x, y, 128)
+}
+
+fn certify_at_precision(f: Func, x: f64, y: f64, mut p: u64) -> Result<f64, String> {
     if let Some(r) = special(f, x, y) {
         return Ok(r);
     }
-    let mut p = 128;
     loop {
+        check_precision(f, p)?;
         let (lo, hi) = enclose(f, x, y, p);
         let a = to_f64(&lo);
         let b = to_f64(&hi);

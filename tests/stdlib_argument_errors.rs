@@ -1,7 +1,7 @@
 //! Standard-library argument validation: integer-argument exactness, range
 //! errors on type-correct values, and the literal-pattern fast path.
 
-use dellingr::error::ErrorKind;
+use dellingr::error::{ErrorKind, ErrorValue, PrefixLocation};
 use dellingr::{ArgCount, RetCount, State};
 
 fn argument_message(code: &str) -> String {
@@ -51,6 +51,22 @@ fn range_and_union_argument_errors_name_the_invalid_value() {
         argument_message("return rawlen(1)"),
         "bad argument #1 to 'rawlen' (table or string expected)"
     );
+}
+
+#[test]
+fn error_nil_level_uses_the_default_and_preserves_the_script_message() {
+    let mut state = State::new();
+    dellingr::Program::compile(r#"error("original message", nil)"#, None)
+        .and_then(|program| state.load(&program))
+        .expect("regression script compiles");
+    let error = state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+        .expect_err("error raises the supplied message");
+    let ErrorKind::ScriptError { value, prefix } = error.kind() else {
+        panic!("expected the script error to be preserved, got {error}");
+    };
+    assert_eq!(value, &ErrorValue::String(b"original message".to_vec()));
+    assert!(matches!(prefix, PrefixLocation::TraceFrame(0)));
 }
 
 #[test]

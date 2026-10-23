@@ -36,11 +36,12 @@
 //!   value. Skipping builtin names would silently drop shadows.
 //! - **In-crate codec.** Little-endian, length-prefixed, `f64` by bit pattern
 //!   (NaNs canonicalized, -0.0 exact), explicit enum tags, bounds-checked with
-//!   reservations capped at remaining bytes. No `serde`/`bincode`. Two saves of
-//!   the same logical state are byte-identical with the same crate version,
-//!   because the diagnostic crate-version string is part of the blob. A host
-//!   that content-hashes saves across upgrades must hash the payload after
-//!   the header, or accept that a version bump changes the bytes.
+//!   initial vector reservations capped in bytes at remaining input. No
+//!   `serde`/`bincode`. Two saves of the same logical state are byte-identical
+//!   with the same crate version, because the diagnostic crate-version string
+//!   is part of the blob. A host that content-hashes saves across upgrades
+//!   must hash the payload after the header, or accept that a version bump
+//!   changes the bytes.
 
 use std::sync::Arc;
 
@@ -632,7 +633,11 @@ impl<'a> SaveBuilder<'a> {
         // `%p` identity on either through the arena; strings without an
         // identity add nothing to the payload.
         let mut identity_strings: Vec<Val> = self.state.meta_names.iter().collect();
-        for key in self.bytecode_ids.keys() {
+        // Address keys are lookup-only: arena ids carry graph traversal order.
+        // Sorting by address would make identity-only strings allocator-dependent.
+        let mut chunks: Vec<_> = self.bytecode_ids.iter().collect();
+        chunks.sort_unstable_by_key(|(_, id)| **id);
+        for (key, _) in chunks {
             if let Some(entry) = self.state.bytecode_caches.get(key) {
                 identity_strings.extend(entry.runtime.literals.iter().copied());
             }
@@ -2851,14 +2856,19 @@ fn write_vec<T>(
     Ok(())
 }
 
+fn decoded_vector_capacity<T>(len: usize, remaining: usize) -> usize {
+    len.min(remaining / std::mem::size_of::<T>().max(1))
+}
+
 fn read_vec<'a, T>(
     input: &mut Decoder<'a>,
     mut read_item: impl FnMut(&mut Decoder<'a>) -> Result<T, SnapshotError>,
 ) -> Result<Vec<T>, SnapshotError> {
     let len = input.read_len()?;
-    // Each element consumes at least one byte, so the true count cannot exceed
-    // the bytes left. Cap the reservation to defang a forged length prefix.
-    let mut out = Vec::with_capacity(len.min(input.remaining()));
+    // Cap the initial allocation in bytes, not elements: arena records can
+    // contain many Vec headers even when no element has been decoded yet.
+    let capacity = decoded_vector_capacity::<T>(len, input.remaining());
+    let mut out = Vec::with_capacity(capacity);
     for _ in 0..len {
         out.push(read_item(input)?);
     }
@@ -2873,6 +2883,68 @@ mod tests {
 
     fn no_setup(_: &mut State) -> std::result::Result<(), Infallible> {
         Ok(())
+    }
+
+    #[test]
+    fn decoded_vector_reservation_is_bounded_in_bytes() {
+        for remaining in [0, 1, 255, 1024, 1 << 20] {
+            let capacity = decoded_vector_capacity::<SavedBytecode>(u32::MAX as usize, remaining);
+            assert!(capacity * std::mem::size_of::<SavedBytecode>() <= remaining);
+        }
+        assert_eq!(decoded_vector_capacity::<SavedBytecode>(1, 1 << 20), 1);
+        assert_eq!(decoded_vector_capacity::<()>(4, 8), 4);
+    }
+
+    #[test]
+    fn literal_identity_strings_follow_chunk_ids_instead_of_addresses() {
+        let mut state = State::new();
+        let program = crate::Program::compile(
+            "f = function() return string.format('%p', 'identity-a') end; \
+             g = function() return string.format('%p', 'identity-b') end; f(); g()",
+            None,
+        )
+        .unwrap();
+        state.load(&program).unwrap();
+        state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
+        let mut chunks: Vec<_> = state
+            .bytecode_caches
+            .values()
+            .filter(|entry| {
+                entry.bytecode.string_literals.iter().any(|literal| {
+                    literal.as_slice() == b"identity-a" || literal.as_slice() == b"identity-b"
+                })
+            })
+            .map(|entry| Arc::clone(&entry.bytecode))
+            .collect();
+        assert_eq!(chunks.len(), 2);
+        chunks.sort_unstable_by_key(|chunk| std::cmp::Reverse(Arc::as_ptr(chunk) as usize));
+        let expected: Vec<_> = chunks
+            .iter()
+            .map(|chunk| {
+                chunk
+                    .string_literals
+                    .iter()
+                    .find(|literal| {
+                        literal.as_slice() == b"identity-a" || literal.as_slice() == b"identity-b"
+                    })
+                    .unwrap()
+                    .clone()
+            })
+            .collect();
+        let mut builder = SaveBuilder::new(&state);
+        // Force arena order opposite to address order on every allocator.
+        for chunk in &chunks {
+            builder.encode_bytecode(chunk).unwrap();
+        }
+        let payload = builder.finish().unwrap();
+        let actual: Vec<_> = payload
+            .strings
+            .into_iter()
+            .filter(|literal| {
+                literal.as_slice() == b"identity-a" || literal.as_slice() == b"identity-b"
+            })
+            .collect();
+        assert_eq!(actual, expected);
     }
 
     #[test]

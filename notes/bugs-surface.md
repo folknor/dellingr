@@ -22,86 +22,6 @@ matching docs/cli.md on argument parsing, streams and closed-pipe handling,
 native-calls.md says it checks. The surface hunter's stale "255 sentinel" finding
 is filed with the other reports of it as CMP-005 in notes/bugs-compiler.md.
 
-## SRF-001 - Hotpath harness: `MAX_WARM_BLOCKS` is not an upper bound
-
-**Claim broken.** The doc comment on `MAX_WARM_BLOCKS` in examples/hotpath.rs:
-"Upper bound on `WARM_BLOCK` marker pairs per run". AGENTS.md says the same:
-"batched `WARM_BLOCK` sub-spans bounded by `MAX_WARM_BLOCKS` in the harness
-source".
-
-**Mechanism.**
-
-```rust
-let block_size = (iterations / MAX_WARM_BLOCKS).max(1);
-...
-while done < iterations {
-    let n = block_size.min(iterations - done);
-```
-
-The block size uses floor division, so the block count is
-`ceil(iterations / floor(iterations / 32))`, which can be nearly twice the
-bound: `--iterations 63` gives block size 1, so 63 blocks; `--iterations 100`
-gives block size 3, so 34 blocks; `--iterations 95` gives block size 2, so 48
-blocks. Any count from 33 to 63 overshoots, and so do many larger non-multiples
-of 32. The default of 20 is under the bound, so it shows only once
-`--iterations` is passed.
-
-**Fix.** `iterations.div_ceil(MAX_WARM_BLOCKS)` for the block size (the last
-block is shorter), which gives at most 32 blocks. The `WARM_BLOCK` collapsed row
-in `brokkr sidecar --durations` then also stops mixing two block sizes in its
-min and max: today, with 100 iterations, 33 blocks of 3 calls and one block of 1
-call share a single min/max row.
-
-## SRF-002 - `scripts/hotbench.sh` discards the harness's exit status
-
-**Claims broken**
-
-- examples/hotpath.rs: "Exit status is 1 for a failed run and 2 for a usage
-  error. The process status lets the harness caller distinguish a complete run
-  from a failure."
-- AGENTS.md: the harness "exits nonzero if the script does not define a global
-  `_bench()` function".
-
-**Mechanism.** hotbench.sh, one of the two documented callers of the harness,
-runs `"$HOTPATH_BIN" "$SCRIPT" 2>&1` without checking `$?`, then goes on to the
-hyperfine pass, so the script's exit status is hyperfine's. A parse error, a
-missing `_bench`, a runtime error in the cold or warm phase, or a FIFO failure
-prints one stderr line inside the harness section; the wall-time table follows,
-and the script exits 0. Nothing downstream can tell that the KV half is missing
-or partial.
-
-**Fix.** Stop, or at least exit nonzero, when the harness fails.
-
-## SRF-003 - The static-analysis caveat understates what it leaves out
-
-LIB-005 and LIB-006 (notes/bugs-stdlib.md) cover nearby charging claims with
-different mechanisms.
-
-**Claims broken**
-
-- `CostAnalysis::caveat()`: "It excludes data-dependent native work in the
-  string, pattern, and table libraries".
-- docs/budget.md "Static analysis" uses the same wording.
-- docs/cli.md says the CLI prints this text as the `--analyze` warning.
-
-**Mechanism.** The wording implies that native charges which are not
-data-dependent are counted. They are not. `OP_CALL` is `OpcodeCost::Call`, whose
-`static_units` is 0, and the analyzer never looks at the callee. All of these add
-0 to `analyze_cost`:
-
-- every math library flat charge (budget.md: "each function charges a flat 1",
-  `math.floor`, `math.random` and the rest);
-- `table.insert`, `table.remove` and `table.pack` (flat 1 each);
-- the up-front `max(1, ...)` minimums of the string functions.
-
-A script whose cost is all `math.*` calls in a loop analyzes to cost 0, so a
-script author reading the warning will underestimate flat-charged library calls.
-The unit test `static_analysis_excludes_data_dependent_native_work` uses only
-`string.upper`, so it pins the narrow wording and misses this.
-
-**Fix.** The analyzer counts only opcode charges, so the caveat should say it
-excludes every native library charge, flat or data-dependent.
-
 ## SRF-004 - CLI: parse errors in run mode get a cost line, and the error prefix depends on the mode
 
 Minor.
@@ -135,32 +55,13 @@ something about unhandled failures that the CLI does not do.
 **Fix.** Narrow it to "the CLI's own exit paths use only 0 and 1", or to "never
 124".
 
-## SRF-006 - `scripts/notes_move.py` silently drops a section whose ID appears twice
+## SRF-006 - The notes helpers treat a `## ` line inside a code fence as a section heading
 
-**Claim at issue.** The header says "Fails before writing anything if a
-placeholder has no section, so a typo never silently no-ops." That contract is
-met, but the script's stated purpose is to move sections safely.
-
-**Mechanism.** If two source files both hold `## X-001 - ...`, both are cut out
-of their sources. In `sections[m.group(1)] = ...` the second overwrites the
-first, so after the rewrite the first copy is in neither the destination nor its
-source. That is silent data loss.
-
-**Fix.** Refuse duplicate IDs across sources, as the script already refuses
-missing ones.
-
-Related: notes_drop.py and notes_move.py both treat a `## ` line inside a fenced
-code block as a section heading. Low risk for findings documents, but the
-header's "A section runs from its `## ` heading" is literal.
-
-## SRF-007 - `scripts/native_calls.py` always exits 0
-
-Raised as a lateral observation outside the defect bar.
-
-It prints problems and stops, and the brokkr `script_check` relies on
-`match = "last-line"` against `ok`. A direct
-`python3 scripts/native_calls.py && ...` in any other context reads a failing
-inventory as a pass. Exiting 1 whenever problems are printed costs nothing.
+`scripts/notes_drop.py` and `scripts/notes_move.py` both start a new section at
+any line beginning `## `, including one inside a fenced code block. A finding
+that quotes such a line would be cut at it. Low risk for findings documents,
+but the headers' "A section runs from its `## ` heading" is literal. Tracking
+fence state while scanning would close it.
 
 ## SRF-008 - Hotpath harness: `@` chunk name and truncated `warm_avg_cost`
 
@@ -175,23 +76,6 @@ Raised as lateral observations outside the defect bar.
   whose per-call cost varies (state that grows across calls), the fingerprint
   hides changes smaller than `iterations` units. Either emit the total or emit the
   average with three decimals, like `warm_avg_us`.
-
-## SRF-009 - Maintainer-script smells: `frame_sizes.py --body`, `ab_pairs.py` order, duplicate `lib.sh` wrapper
-
-Raised as lateral observations outside the defect bar.
-
-- **`scripts/frame_sizes.py --body` over-blanks.**
-  `re.sub(r"\b[0-9a-f]{4,}\b", "ADDR", body)` also hits any whole word of four or
-  more letters from a-f, such as the x87 mnemonic `fadd` or the same kind of word
-  inside a demangled `<symbol>`, so two different instructions can diff as equal.
-  Matching only hex runs that contain a digit, or anchoring to objdump's address
-  columns, would avoid this.
-- **`scripts/ab_pairs.py` always runs A before B in every round.** That is
-  interleaved, but the slot is fixed, so any effect of a cell's position (thermal
-  or cache state left by the previous cell) always lands on the same arm.
-  Alternating the order in odd rounds (ABBA) removes that bias for free.
-- **`scripts/lib.sh` has two identical wrappers.** `dellingr_bin` only forwards to
-  `dellingr_bin_built`, and callers use both names. One can go.
 
 ## SRF-010 - Public API leftovers: `doc(hidden)` private module, `pub mod cli`, public test constant
 

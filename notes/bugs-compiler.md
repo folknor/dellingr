@@ -17,91 +17,6 @@ Filed from the 2026-10-23 defect hunt at a22d9c0 (scopes `frontend`,
 `codegen`, `vm-core`, `surface`). The hunters read the code statically and built
 or ran nothing, so every repro here is traced by hand, not executed.
 
-## CMP-001 - Unbounded multiple-assignment target count reaches InternalError, a debug panic and silent u16 truncation
-
-Reported independently by the `frontend` and `codegen` hunters. Their accounts
-are merged here.
-
-**Claims broken**
-
-- reference/error-reporting.md: "`InternalError` ... always means a dellingr
-  bug". Oversized but otherwise ordinary source gets the same report as a
-  compiler bug.
-- docs/limits.md "Source limits": "Violations are reported as errors at load
-  time, never silently truncated". The README's "Source limits" also says
-  per-function ceilings "are reported as syntax errors rather than silently
-  truncated". Every other source limit gets a typed `SyntaxError`
-  (`TooManyLocals`, `TooManyExpressions`, `AssignmentOffsetTooLarge`, ...);
-  this one has no limit kind.
-- `ParserFault::RegisterLimit` is listed among internal faults ("A function
-  needs more registers than an operand can name"), but source can reach it. It
-  is a limit, not an invariant.
-- Limit errors are supposed to carry the observed size and the limit. This one
-  carries neither, and is located at the end of the function
-  (`self.input.pos()` in `finish_chunk`), not at the statement.
-
-**Mechanism**
-
-`parse_assign` (parser/stmt.rs) collects any number of targets in a loop with
-no limit and no syntax-depth charge. The only per-target bound,
-`MAX_ASSIGNMENT_OFFSET`, applies only to `Field` and `Index` targets.
-`check_multi_assign` fires only when the last value is a call or vararg. So
-`a, a, ..., a = 1` with Local, Upval, Global or Builtin targets reaches codegen
-with an unbounded `targets.len()`.
-
-`codegen::multi_assign` calls `explist_to_regs(values, targets.len())`, which
-needs one fresh register per target:
-
-- `let missing = (want - have) as u16;` and `self.freereg = base + want as u16;`
-  truncate silently.
-- `multi_assign` stores from `src = values_base + index as u16`, which also
-  truncates silently. In debug it overflows and panics whenever
-  `values_base > 0` (a local declared first).
-- `reserve` fails with `ParserFault::RegisterLimit` once the frame reaches
-  `OPEN_COUNT`, and `finish_chunk` maps that to an internal fault.
-
-Outcome by target count N, at the top level (`nactive = 0`). The source for
-N = 65537 is about 130 KB, well under `MAX_SOURCE_BYTES`.
-
-| N | Outcome |
-|---|---|
-| up to 65534 | Compiles, with a frame of about N registers. |
-| 65535, 65536 | `reserve` fails with `CodegenError::Internal(ParserFault::RegisterLimit)`, which becomes `InternalError`. |
-| 65537 | `missing` truncates to 0. `reserve(0)` succeeds and emits `LOAD_NIL 1 0`. The verifier rejects it with `CountOperandInvalid`. |
-| 65538 and up | `missing` and `src` wrap, and the stores name registers past `max_stack`. The verifier rejects them with `RegisterOutOfRange`. |
-
-The verifier stops the wrapped bytecode from running, so nothing is silently
-miscompiled. But both verifier rejections go through
-`compiler.rs::validation_error`, which runs `debug_assert!(false, "{error}")`.
-A debug-built host (the test profile) therefore panics on this user input; in
-release it comes back as `InternalError(CompilerValidation)`.
-
-Reference Lua rejects long target lists with a syntax error, because
-`restassign` checks `nvars + nCcalls` against `LUAI_MAXCCALLS`.
-
-**Repro (traced):** the target `a` repeated 65537 times, comma-separated, then
-`= 1`.
-
-**Fix direction**
-
-- Bound the target list at parse time with a typed `SyntaxError`, at the parse
-  event that collects the targets. `MAX_EXPRESSIONS`, which already bounds the
-  value side, is the natural cap. Applying `MAX_ASSIGNMENT_OFFSET` to every
-  target would also work. Either is far below the register ceiling.
-- Make register exhaustion in codegen a typed, user-facing limit error
-  (reference Lua's "function or expression needs too many registers") instead
-  of a `ParserFault`. Only codegen knows register pressure, so the parser
-  cannot fully pre-check it. Today pressure from nesting is bounded only by
-  arithmetic: about 99 levels of `MAX_SYNTAX_DEPTH` at about 256 registers each
-  is near 25k (the frontend hunter estimates about 255 per 2 syntax units).
-  Nothing asserts that bound, so a typed error at `reserve` is the robust
-  backstop.
-- Replace the three `as u16` conversions in `explist_to_regs` and
-  `multi_assign` with checked ones.
-
-The codegen hunter notes the fix only rejects source that already fails today,
-so no replay changes.
-
 ## CMP-002 - `function t.x() ... end` and `function t:m() ... end` stamp the store with the `end` line
 
 From the `frontend` hunter.
@@ -204,6 +119,9 @@ dellingr, `local _ENV = {}` declares an unused local, and a later `x = 1` or
 different results and no diagnostic, which hurts the script author. `_ENV`
 appears nowhere in the README, docs/ or reference/.
 
+**Decided (user, 2026-10-23):** reject `_ENV` with a clear syntax error, and
+list `\u{XXXX}` and `<const>`/`<close>` as absent.
+
 **Fix direction:** list it under "Won't implement" or in compatibility.md.
 Better, have the parser reject `_ENV` as a declared local, parameter or
 assignment target with a clear syntax error, so a 5.2-style sandbox idiom fails
@@ -211,8 +129,8 @@ loudly instead of leaking to the globals.
 
 **Same documentation gap, but these fail loudly:** Lua 5.4's `\u{XXXX}` escape
 is rejected as "invalid escape sequence", and the local attributes `<const>` and
-`<close>` are rejected as a syntax error. Neither is listed as absent. See
-LIB-008 in notes/bugs-stdlib.md for the same gap in the library surface.
+`<close>` are rejected as a syntax error. Neither is listed as absent from the
+README's "Won't implement" list.
 
 ## CMP-005 - Stale "255 sentinel" rationale for the fixed-count limits
 
@@ -245,6 +163,9 @@ docs therefore tell a host about a reserved operand that does not exist.
 is a test for it), and the runtime accepts 255 arguments
 (`MAX_ARGUMENTS = 255`), but `f(v1, ..., v255)` is rejected at parse time with
 `TooManyArguments`.
+
+**Decided (user, 2026-10-23):** keep the 254 caps and restate the reason; do
+not lift them.
 
 **Fix direction:** restate the reason (for example the `u8` host count types and
 the `__call` receiver, or "kept to preserve the accepted program set"), or lift
@@ -283,41 +204,6 @@ does not match the code.
   falls back to ordinary construction past it). Both equal 255, so behaviour
   matches the text today, but the sentence describes the wrong mechanism and
   omits the constructor fallback, which is what that constant controls.
-
-## CMP-007 - `ValidationReason` variants that name the wrong defect
-
-From the `codegen` hunter. Minor.
-
-`ValidationReason` is public through `dellingr::snapshot`
-(`InvalidBytecodeReason::Validation`), so its variants are the host's diagnosis
-of a rejected save. The variant names and Display strings are claims, and two
-do not match the defect they report:
-
-- `OP_TFOR_CALL` with `b > 255` is reported as `TforCallWithoutResults`
-  ("TFOR_CALL requires at least one result"). The real defect is a count too
-  large for a `u8` (the `b == 0 || b > u16::from(u8::MAX)` arm in verify.rs).
-- `max_stack == OPEN_COUNT` is reported as `FrameTooSmall` ("frame reserves
-  fewer registers than its locals"). The real defect is a frame too large to be
-  encodable.
-
-Neither lets bad bytecode through; only the stated reason is wrong.
-
-Related, from the same hunter and outside the defect bar: unreachable codegen
-faults are labelled with unrelated `ParserFault` variants. `multi_assign` uses
-`LocalWithoutDeclaration` for a missing place register, and `return_stmt` uses
-`EmptyMultiAssignment` for a return of more than 255 values. Neither can fire
-today, but if one ever does, the report names the wrong invariant.
-
-## CMP-008 - A numeric `for` without a step can fail with "too many numbers" though the source adds no literal
-
-From the `frontend` hunter. Low severity; mostly a consistency note.
-
-`parse_numeric_for_step` calls `find_or_add_number(1.0)` for the implicit step.
-In a chunk whose number pool is full and lacks `1`, `for i = a, b do ... end`
-fails with `TooManyNumbers`, although the author wrote no new numeral. Folding
-already treats a full pool as non-fatal: `try_fold_literal` documents that "a
-full pool must leave otherwise valid source compilable". The implicit step gets
-no such treatment. It is reachable only at 65536 distinct numerals.
 
 ## CMP-009 - Codegen at the syntax budget is tested for only two tree shapes
 
@@ -363,3 +249,19 @@ Raised as lateral observations outside the defect bar.
   ("the most non-parameter locals the function has in scope at once"), so for a
   function with parameters the label undercounts what most readers take "local
   slots" to mean. Diagnostic label only, with no format guarantee.
+
+## CMP-011 - Register-limit errors are located at the end of the function; the assignment-offset check may now be redundant
+
+Laterals from the first resolution wave, which made register exhaustion a typed
+syntax error carrying the observed count and capped assignments at
+`MAX_ASSIGNMENT_TARGETS` (255) targets.
+
+- **Location.** The register-limit error is still located where `finish_chunk`
+  reports it, at the end of the function, not at the statement or expression
+  that ran out of registers. Every other limit error points at its source.
+- **Redundant check.** `MAX_ASSIGNMENT_OFFSET` bounds `Field` and `Index`
+  targets of a multiple assignment. With the target list capped at 255 the
+  largest reachable offset is 254, so the check cannot fire; a `const`
+  assertion now pins `MAX_ASSIGNMENT_TARGETS - 1 <= MAX_ASSIGNMENT_OFFSET` and
+  the comment in `parse_assign` says so. Open: drop the check and its error
+  kind, or keep both as a backstop.

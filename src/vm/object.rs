@@ -191,11 +191,9 @@ impl UpvaluePool {
 pub(super) struct Closure {
     pub(super) bytecode: Arc<Bytecode>,
     pub(super) runtime: Arc<BytecodeRuntime>,
-    /// `Arc<[..]>`, not `Vec`: the closure is cloned on every Lua-to-Lua
-    /// call (`as_lua_function`) and the upvalue list is never mutated after
-    /// construction - writes go through the `UpvaluePool` slots the refs
-    /// point at - so sharing turns a per-call heap allocation into a
-    /// refcount bump.
+    /// `Arc<[..]>` lets admitted frames share the immutable upvalue-reference
+    /// list with the closure. Writes go through the `UpvaluePool` slots the
+    /// refs point at, so the list never needs to be copied for a call.
     pub(super) upvalues: Arc<[UpvalueRef]>,
 }
 
@@ -406,9 +404,8 @@ impl GcHeap {
             .expect("Invalid ObjectPtr: object was freed (use-after-free detected)")
     }
 
-    /// Get the object as a Lua function (closure), if it is one.
-    #[hotpath::measure]
     /// Borrow the object as a Lua closure, if it is one, without cloning it.
+    #[hotpath::measure]
     pub(super) fn as_lua_function_ref(&self, ptr: ObjectPtr) -> Option<&Closure> {
         match &self.get(ptr).raw {
             RawObject::LuaFn(closure) => Some(closure),
@@ -416,6 +413,9 @@ impl GcHeap {
         }
     }
 
+    /// Get the object as a Lua function (closure), if it is one.
+    /// Test-only: runtime paths borrow through `as_lua_function_ref`.
+    #[cfg(test)]
     pub(super) fn as_lua_function(&self, ptr: ObjectPtr) -> Option<Closure> {
         match &self.get(ptr).raw {
             RawObject::LuaFn(closure) => Some((**closure).clone()),
@@ -527,7 +527,7 @@ impl GcHeap {
     }
 
     /// Mark an object as reachable. Call this for all root objects.
-    /// The upvalue_pool is needed to mark closed upvalues referenced by closures.
+    /// The worklist traversal follows children, including closure upvalues.
     #[hotpath::measure]
     pub(super) fn mark(&self, ptr: ObjectPtr, worklist: &mut Vec<ObjectPtr>) {
         if let Some(obj) = self.objects.get(ptr.0)

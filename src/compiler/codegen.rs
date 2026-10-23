@@ -29,10 +29,19 @@ use crate::instr::{
 pub(super) enum CodegenError {
     /// A jump spans `2^23` instructions or more.
     JumpTooFar,
-    Internal(ParserFault),
+    /// A function needs `count` registers, more than an operand can name.
+    TooManyRegisters {
+        count: usize,
+    },
+    /// Boxed so the variants stay within `variant_size_differences`.
+    Internal(Box<ParserFault>),
 }
 
 type Result<T> = std::result::Result<T, CodegenError>;
+
+// `reserve` admits frame tops below `OPEN_COUNT`; the published limit that
+// `TooManyRegisters` reports must name the same bound.
+const _: () = assert!(crate::limits::MAX_REGISTERS == OPEN_COUNT as usize - 1);
 
 /// Generate `body`'s code into `chunk`.
 pub(super) fn generate(chunk: &mut Bytecode, body: &FunctionBody) -> Result<()> {
@@ -118,17 +127,18 @@ impl Generator<'_> {
     }
 
     fn internal(fault: ParserFault) -> CodegenError {
-        CodegenError::Internal(fault)
+        CodegenError::Internal(Box::new(fault))
     }
 
     // Registers
 
     fn reserve(&mut self, n: u16) -> Result<u16> {
         let first = self.freereg;
-        self.freereg = first
-            .checked_add(n)
-            .filter(|&top| top < OPEN_COUNT)
-            .ok_or_else(|| Self::internal(ParserFault::RegisterLimit))?;
+        let count = usize::from(first) + usize::from(n);
+        self.freereg = match u16::try_from(count) {
+            Ok(top) if top < OPEN_COUNT => top,
+            _ => return Err(CodegenError::TooManyRegisters { count }),
+        };
         self.max_stack = self.max_stack.max(self.freereg);
         Ok(first)
     }
@@ -569,24 +579,26 @@ impl Generator<'_> {
     /// evaluated and dropped.
     fn explist_to_regs(&mut self, values: &[Expr], want: usize) -> Result<()> {
         let base = self.freereg;
+        let count = usize::from(base).saturating_add(want);
+        let want = u16::try_from(want).map_err(|_| CodegenError::TooManyRegisters { count })?;
         for (index, value) in values.iter().enumerate() {
             let val = self.expr(value)?;
             let last = index + 1 == values.len();
-            if last && value.is_multi() && want > index {
-                let needed = u8::try_from(want - index)
+            if last && value.is_multi() && usize::from(want) > index {
+                let needed = u8::try_from(usize::from(want) - index)
                     .map_err(|_| Self::internal(ParserFault::MultiValueTailMissingInstruction))?;
                 self.set_returns(val, RetCount::Fixed(needed))?;
             } else {
                 self.next_reg(val)?;
             }
         }
-        let have = usize::from(self.freereg - base);
+        let have = self.freereg - base;
         if have < want {
-            let missing = (want - have) as u16;
+            let missing = want - have;
             let reg = self.reserve(missing)?;
             self.emit(Instr::load_nil(reg, missing));
         } else if have > want {
-            self.freereg = base + want as u16;
+            self.freereg = base + want;
         }
         Ok(())
     }
@@ -669,7 +681,8 @@ impl Generator<'_> {
         let values_base = self.freereg;
         self.explist_to_regs(values, targets.len())?;
         for (index, (target, (obj, key))) in targets.iter().zip(&place_regs).enumerate().rev() {
-            let src = values_base + index as u16;
+            let count = usize::from(values_base).saturating_add(index);
+            let src = u16::try_from(count).map_err(|_| CodegenError::TooManyRegisters { count })?;
             self.line = line;
             match target {
                 Place::Local(reg) => {
@@ -687,13 +700,14 @@ impl Generator<'_> {
                     self.emit(Instr::set_builtin(src, *builtin));
                 }
                 Place::Field { name, .. } => {
-                    let obj =
-                        obj.ok_or_else(|| Self::internal(ParserFault::LocalWithoutDeclaration))?;
+                    let obj = obj.ok_or_else(|| {
+                        Self::internal(ParserFault::AssignmentPlaceRegistersMissing)
+                    })?;
                     self.emit(Instr::set_field(obj, *name, src, None));
                 }
                 Place::Index { .. } => {
                     let (Some(obj), Some(key)) = (*obj, *key) else {
-                        return Err(Self::internal(ParserFault::LocalWithoutDeclaration));
+                        return Err(Self::internal(ParserFault::AssignmentPlaceRegistersMissing));
                     };
                     self.emit(Instr::set_table(obj, key, src));
                 }
@@ -757,7 +771,7 @@ impl Generator<'_> {
                 let base = self.freereg;
                 let (last, fixed) = values
                     .split_last()
-                    .ok_or_else(|| Self::internal(ParserFault::EmptyMultiAssignment))?;
+                    .ok_or_else(|| Self::internal(ParserFault::EmptyReturnList))?;
                 for value in fixed {
                     let val = self.expr(value)?;
                     self.next_reg(val)?;
@@ -769,7 +783,7 @@ impl Generator<'_> {
                 } else {
                     self.next_reg(val)?;
                     let n = u8::try_from(values.len())
-                        .map_err(|_| Self::internal(ParserFault::EmptyMultiAssignment))?;
+                        .map_err(|_| Self::internal(ParserFault::ReturnCountOutOfRange))?;
                     RetCount::Fixed(n)
                 };
                 self.emit_at(Instr::ret(base, count), line);
@@ -1113,6 +1127,29 @@ impl Generator<'_> {
 #[cfg(test)]
 mod tests {
     use super::{CodegenError, Generator, MAX_JUMP_OFFSET};
+
+    #[test]
+    fn register_exhaustion_is_a_limit_and_preserves_the_allocator() {
+        let mut generator = Generator {
+            code: Vec::new(),
+            lines: Vec::new(),
+            line: 1,
+            freereg: 0,
+            nactive: 0,
+            max_stack: 0,
+            locals: &[],
+            loops: Vec::new(),
+        };
+        generator.reserve(u16::MAX - 1).expect("largest frame fits");
+        for extra in [1, 2] {
+            assert!(matches!(
+                generator.reserve(extra),
+                Err(CodegenError::TooManyRegisters { count })
+                    if count == usize::from(u16::MAX - 1) + usize::from(extra)
+            ));
+            assert_eq!(generator.freereg, u16::MAX - 1);
+        }
+    }
 
     /// A jump reaches exactly `MAX_JUMP_OFFSET` instructions forward; one
     /// further fails compilation rather than wrapping. No source this test

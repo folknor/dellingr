@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, OnceLock};
 
-use super::{STRING_LIBRARY_CAPACITY, arg_integer, check_any_named, check_type_named, opt_integer};
+use super::{STRING_LIBRARY_CAPACITY, arg_integer, check_type_named, opt_integer};
 use crate::compiler;
 use crate::error::{
     Error, ErrorKind, GmatchStateFault, InternalFault, LibraryError, PatternErrorDetail,
@@ -749,7 +749,6 @@ pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     }),
     // string.gsub(s, pattern, repl [, n])
     ("gsub", |state| {
-        check_any_named(state, 3, "gsub")?;
         let s = string_or_number_bytes(state, 1, "gsub")?;
         let pattern = string_or_number_bytes(state, 2, "gsub")?;
         state.consume_cost((s.len() + pattern.len()).max(1) as u64)?;
@@ -799,12 +798,6 @@ pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     }),
 ];
 
-/// The matcher for argument 2 of `find`, `match` or `gsub`.
-///
-/// A string pattern comes from the State's compiled-pattern cache; a number
-/// coerced to `pattern` has no interned key and compiles fresh. Compilation
-/// is free in the cost model either way, and a cached program raises its lazy
-/// malformed-pattern errors at exactly the points a fresh one would.
 #[inline(never)]
 fn gsub_empty_pattern(
     state: &mut State,
@@ -943,6 +936,12 @@ fn gsub_lua_pattern(
     Ok(2)
 }
 
+/// The matcher for argument 2 of `find`, `match` or `gsub`.
+///
+/// A string pattern comes from the State's compiled-pattern cache; a number
+/// coerced to `pattern` has no interned key and compiles fresh. Compilation
+/// is free in the cost model either way, and a cached program raises its lazy
+/// malformed-pattern errors at exactly the points a fresh one would.
 fn pattern_matcher(state: &mut State, pattern: &[u8]) -> Result<LuaPattern> {
     if state.typ(2) == LuaType::String {
         state.cached_pattern_matcher(2)

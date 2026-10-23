@@ -548,7 +548,7 @@ pub(crate) fn qint_tod(a: &Qint) -> f64 {
                 r *= 2.0;
                 e = h!("0x1p+1023");
             } else {
-                r = f64::MAX;
+                r = if a.sgn != 0 { -f64::MAX } else { f64::MAX };
                 e = f64::MAX;
             }
         } else {

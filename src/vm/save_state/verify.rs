@@ -473,6 +473,12 @@ fn validate_references(payload: &SavePayload) -> Result<(), SnapshotError> {
                     location,
                 ));
             };
+            // Do not bound logical length by the live span plus fixed slack:
+            // constructors append nil structurally, so valid live tables can
+            // have arbitrarily long nil tails (or no live span at all).
+            // Rejecting those would break save/load for valid states. This
+            // representation bound alone does not bound later gap allocations;
+            // handling allocation failure belongs to the table write path.
             // The stored span is canonical: consecutive keys inside the
             // logical array, starting and ending at a live slot.
             let first_slot = match entries.first() {

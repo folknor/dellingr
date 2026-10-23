@@ -116,8 +116,10 @@ native charges and compiler emission together.
 
 `analyze_cost` (and `dellingr --analyze`) sums each costed opcode once across
 the main chunk and every nested function body, whether or not invoked. Loops
-and branches count once. The estimate does not bound runtime cost and excludes
-data-dependent native work in the string, pattern and table libraries.
+and branches count once. Call opcodes have no static charge, and the analyzer
+does not inspect their callees, so all native library charges are excluded,
+both flat and data-dependent. The estimate does not bound runtime cost or
+estimate native-library cost.
 `CostAnalysis::caveat()` returns the same user-facing explanation printed by
 the CLI.
 

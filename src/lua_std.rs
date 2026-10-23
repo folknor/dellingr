@@ -1,7 +1,8 @@
 //! Lua's standard library.
 //!
 //! Version-sensitive compatibility decisions are per function: `string.format`
-//! follows Lua 5.4, `math.random` follows Lua 5.4's interval and error behavior,
+//! follows Lua 5.4, `math.random` follows Lua 5.4's interval and error behavior
+//! except that `math.random(0)` is rejected as an empty interval,
 //! `math.log(x, base)` follows Lua 5.2's general-base calculation, and
 //! `math.atan(y, x)` uses the Lua 5.3+ two-argument form. Global `unpack` is kept
 //! from Lua 5.2 as an alias, but it and `table.unpack` share one implementation

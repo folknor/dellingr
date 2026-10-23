@@ -30,8 +30,8 @@
 //! and the default floating-point environment (round to nearest, no
 //! flush-to-zero), which is also what Rust itself assumes. x87-only targets
 //! (i586 and older without SSE2) evaluate with excess range and are out of
-//! scope. NaN sign and payload bits are not part of the contract: no kernel
-//! branches on them, and the VM never lets a script observe them.
+//! scope. NaN sign and payload bits are not part of the contract: they never
+//! affect a non-NaN result, and the VM never lets a script observe them.
 
 // Exact floating-point comparisons are the algorithms here: rounding tests
 // compare two bounds for bit equality and special-case dispatch matches exact

@@ -1245,6 +1245,11 @@ impl Table {
             self.drop_dead_prefix();
         }
         if self.base + self.array.len() < self.vlen {
+            // A snapshot omits trailing nil slots, even after structural nil
+            // appends. The gap is therefore legitimate and unbounded by the
+            // saved span. Resetting this window would discard its live values.
+            // This allocation needs a fallible write boundary to handle an
+            // untrusted logical length without aborting on allocation failure.
             self.array.resize(self.vlen - self.base, Val::Nil);
         }
     }
@@ -2692,6 +2697,27 @@ mod tests {
             .unwrap();
         assert_eq!(t.version(), 2);
         assert_eq!(t.get_index(0).map(|(key, _)| key), Some(h(1)));
+    }
+
+    #[cfg(feature = "snapshot")]
+    #[test]
+    fn snapshot_live_span_does_not_bound_structural_nil_tail() {
+        let mut table = Table::default();
+        table.set_list(1, [Val::Bool(true)].into_iter()).unwrap();
+        for _ in 0..32 {
+            table
+                .set_list(table.vlen + 1, [Val::Nil].into_iter())
+                .unwrap();
+        }
+        let (len, slots, entries) = table.snapshot_entries();
+        assert_eq!((len, slots), (33, 1));
+        let mut loaded = Table::default();
+        loaded.rebuild_from_snapshot(len, slots, entries).unwrap();
+        // Resetting the window at append would erase key 1 on the loaded side.
+        table.insert(n(34), Val::Bool(true)).unwrap();
+        loaded.insert(n(34), Val::Bool(true)).unwrap();
+        assert_eq!(loaded.get(&n(1)), Val::Bool(true));
+        assert_eq!(table.snapshot_entries(), loaded.snapshot_entries());
     }
 
     #[cfg(feature = "snapshot")]
