@@ -13,6 +13,7 @@ use crate::vm::MetaName;
 // build keeps one. Release LTO folds it with global `unpack`'s identical
 // wrapper, and then reverse callback-name lookup resolves both to one id.
 fn table_unpack_values(state: &mut State) -> crate::Result<u8> {
+    // native-call: table_unpack_values->unpack_values
     super::unpack_values(state)
 }
 
@@ -39,6 +40,7 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         let num_args = state.get_top();
 
         if has_sequence_metamethods(state, 1)? {
+            // native-call: lib:table.insert->insert_through_metamethods
             return insert_through_metamethods(state, num_args);
         }
 
@@ -73,6 +75,7 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         state.consume_cost(1)?;
         check_type_named(state, 1, LuaType::Table, "remove")?;
         if has_sequence_metamethods(state, 1)? {
+            // native-call: lib:table.remove->remove_through_metamethods
             return remove_through_metamethods(state);
         }
         let len = state.table_len(1)?;
@@ -110,11 +113,13 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         let has_comp = check_optional_type_named(state, 2, LuaType::Function, "sort")?;
 
         if has_sequence_metamethods(state, 1)? {
+            // native-call: lib:table.sort->sort_through_metamethods
             return sort_through_metamethods(state, has_comp);
         }
 
         // Cost is charged inside table_sort BEFORE the comparator runs / the
         // table is mutated, so an exhausted budget blocks the sort.
+        // native-call: lib:table.sort->table_sort
         table_sort_result(state.table_sort(1, has_comp), has_comp)?;
         state.set_top(0)?;
         Ok(0)
@@ -167,6 +172,7 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     // reads raw.
     ("concat", |state| {
         check_type_named(state, 1, LuaType::Table, "concat")?;
+        // native-call: lib:table.concat->sequence_len
         let len = sequence_len(state, 1, LibraryFunction::Concat)?;
 
         let sep = if check_optional_type_named(state, 2, LuaType::String, "concat")? {
@@ -205,6 +211,7 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
             }
             state.consume_cost(1)?;
             state.push_number(idx as f64)?;
+            // native-call: lib:table.concat->get_table_unguarded
             state.get_table_unguarded(1)?;
             let typ = state.typ(-1);
             match typ {
@@ -302,6 +309,7 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
             for step in 0..count {
                 let i = if backwards { count - 1 - step } else { step };
                 state.consume_cost(1)?;
+                // native-call: lib:table.move->move_element:metamethods
                 move_element(state, f + i, t + i, dest_idx, honour_meta)?;
             }
         } else {
@@ -325,10 +333,12 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
             if backwards {
                 for step in 0..paid {
                     let i = count - 1 - step;
+                    // native-call: lib:table.move->move_element:raw-backward
                     move_element(state, f + i, t + i, dest_idx, false)?;
                 }
             } else {
                 for i in 0..paid {
+                    // native-call: lib:table.move->move_element:raw-forward
                     move_element(state, f + i, t + i, dest_idx, false)?;
                 }
             }
@@ -399,7 +409,9 @@ fn move_element(
     state.push_number(dest_key as f64)?;
     state.push_number(src_key as f64)?;
     if honour_meta {
+        // native-call: move_element->get_table_unguarded
         state.get_table_unguarded(1)?;
+        // native-call: move_element->set_index
         set_index(state, dest_idx)
     } else {
         state.get_table_raw(1)?;
@@ -460,6 +472,7 @@ pub(super) fn sequence_len(
     }
     state.push_value(idx)?;
     state.push_value(idx)?;
+    // native-call: sequence_len->call_unguarded
     state.call_unguarded(ArgCount::Fixed(2), RetCount::Fixed(1))?;
     // Lua's length dispatch passes the operand twice, and luaL_len converts
     // the result with lua_tointegerx, including numeral strings.
@@ -479,6 +492,7 @@ pub(super) fn sequence_len(
 /// Uses the VM's assignment dispatch so nested library and bytecode handlers
 /// share the same depth limit. Both operands stay rooted until dispatch ends.
 fn set_index(state: &mut State, table_idx: isize) -> Result<()> {
+    // native-call: set_index->set_table
     state.set_table(table_idx)
 }
 
@@ -486,6 +500,7 @@ fn set_index(state: &mut State, table_idx: isize) -> Result<()> {
 /// `tinsert`: length via `__len`, shifts through `__index`/`__newindex`.
 /// Charges like the raw path: the flat 1 already paid by the caller.
 fn insert_through_metamethods(state: &mut State, num_args: usize) -> Result<u8> {
+    // native-call: insert_through_metamethods->sequence_len
     let first_empty = sequence_len(state, 1, LibraryFunction::Insert)?.wrapping_add(1);
     // Lua evaluates the length even when the argument count is invalid.
     if num_args != 2 && num_args != 3 {
@@ -510,13 +525,16 @@ fn insert_through_metamethods(state: &mut State, num_args: usize) -> Result<u8> 
     while i > pos {
         state.push_number(i as f64)?;
         state.push_number((i - 1) as f64)?;
+        // native-call: insert_through_metamethods->get_table_unguarded
         state.get_table_unguarded(1)?;
+        // native-call: insert_through_metamethods->set_index:shift
         set_index(state, 1)?;
         i -= 1;
     }
     state.push_number(pos as f64)?;
     // The value is the last argument: index 3 with a position, else 2.
     state.push_value(if num_args == 3 { 3 } else { 2 })?;
+    // native-call: insert_through_metamethods->set_index:value
     set_index(state, 1)?;
     state.set_top(0)?;
     Ok(0)
@@ -525,6 +543,7 @@ fn insert_through_metamethods(state: &mut State, num_args: usize) -> Result<u8> 
 /// `table.remove` for a table with sequence metamethods, following Lua 5.4's
 /// `tremove`. Charges like the raw path.
 fn remove_through_metamethods(state: &mut State) -> Result<u8> {
+    // native-call: remove_through_metamethods->sequence_len
     let size = sequence_len(state, 1, LibraryFunction::Remove)?;
     let mut pos = opt_integer(state, 2, "remove")?.unwrap_or(size);
     // 5.4's unsigned check: for nonnegative lengths, pos == size or
@@ -535,16 +554,20 @@ fn remove_through_metamethods(state: &mut State) -> Result<u8> {
     check_sequence_keys(state, pos, size.max(pos), LibraryFunction::Remove)?;
     state.set_top(1)?;
     state.push_number(pos as f64)?;
+    // native-call: remove_through_metamethods->get_table_unguarded:removed
     state.get_table_unguarded(1)?; // Stack: [t, removed]
     while pos < size {
         state.push_number(pos as f64)?;
         state.push_number((pos + 1) as f64)?;
+        // native-call: remove_through_metamethods->get_table_unguarded:shift
         state.get_table_unguarded(1)?;
+        // native-call: remove_through_metamethods->set_index:shift
         set_index(state, 1)?;
         pos += 1;
     }
     state.push_number(pos as f64)?;
     state.push_nil()?;
+    // native-call: remove_through_metamethods->set_index:clear
     set_index(state, 1)?;
     state.remove(1)?;
     Ok(1)
@@ -558,6 +581,7 @@ fn remove_through_metamethods(state: &mut State) -> Result<u8> {
 /// same order and comparator call sequence. The charge is the original
 /// length, at least 1, paid before any read beyond `__len` or comparator call.
 fn sort_through_metamethods(state: &mut State, has_comp: bool) -> Result<u8> {
+    // native-call: sort_through_metamethods->sequence_len
     let len = sequence_len(state, 1, LibraryFunction::Sort)?;
     let n = state.checked_table_sort_len(len)?;
     state.consume_cost(len.max(1).cast_unsigned())?;
@@ -572,16 +596,19 @@ fn sort_through_metamethods(state: &mut State, has_comp: bool) -> Result<u8> {
     for i in 1..=len {
         state.push_number(i as f64)?;
         state.push_number(i as f64)?;
+        // native-call: sort_through_metamethods->get_table_unguarded
         state.get_table_unguarded(1)?;
         state.set_table_raw(s)?;
     }
 
+    // native-call: sort_through_metamethods->table_sort_scratch
     table_sort_result(state.table_sort_scratch(s, n, has_comp), has_comp)?;
 
     for i in 1..=len {
         state.push_number(i as f64)?;
         state.push_number(i as f64)?;
         state.get_table_raw(s)?;
+        // native-call: sort_through_metamethods->set_table
         state.set_table(1)?;
     }
     state.set_top(0)?;

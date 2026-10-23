@@ -89,6 +89,7 @@ impl State {
                     self.push_unchecked(len_handler);
                     self.push_unchecked(val);
                     self.push_unchecked(val);
+                    // native-call: instr_length->call_unguarded
                     self.call_unguarded(ArgCount::Fixed(2), RetCount::Fixed(1))?;
                     return Ok(());
                 }
@@ -144,6 +145,7 @@ impl State {
                 return Err(self.type_error(TypeError::TableIndex(typ)));
             }
         };
+        // native-call: instr_set_field->set_table_with_key
         self.set_table_with_key(idx, key, val, local_cost)?;
         // Calls preserve the caller's stack prefix: Lua frames start above
         // these operands, and Rust callbacks can index only their own frame.
@@ -266,6 +268,7 @@ impl State {
         let key = self.stack[index + 1];
 
         if !self.try_insert_table_direct(index, key, val)? {
+            // native-call: instr_set_table->set_table_with_key
             self.set_table_with_key(index, key, val, local_cost)?;
         }
 

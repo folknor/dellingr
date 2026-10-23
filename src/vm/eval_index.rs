@@ -79,12 +79,14 @@ impl State {
 
             self.push_unchecked(val);
             let table_idx = self.stack.len() - 1;
+            // native-call: instr_get_field->get_table_with_key
             self.get_table_with_key(table_idx, key, local_cost)?;
             let result = self.pop_val();
             self.pop_val();
             self.push_unchecked(result);
             Ok(())
         } else if val.as_string_ptr().is_some() {
+            // native-call: instr_get_field->index_string
             self.index_string(val, key, cache, local_cost, &mut false)
         } else {
             Err(self.type_error(TypeError::TableIndex(val.typ(&self.heap))))
@@ -157,6 +159,7 @@ impl State {
                 self.check_stack_space(1)?;
                 self.push_unchecked(handler);
                 let handler_idx = self.stack.len() - 1;
+                // native-call: index_string->get_table_with_key_tracking_call
                 self.get_table_with_key_tracking_call(
                     handler_idx,
                     key,
@@ -175,9 +178,11 @@ impl State {
                         .as_object_ptr()
                         .is_some_and(|ptr| self.heap.as_lua_function(ptr).is_some()) =>
             {
+                // native-call: index_string->call_string_index_handler
                 self.call_string_index_handler(handler, receiver, key, local_cost, handler_called)
             }
             Val::Str(_) => self.with_metamethod_depth(|state| {
+                // native-call: index_string->index_string
                 state.index_string(handler, key, None, local_cost, handler_called)
             }),
             Val::Nil => Err(self.type_error(TypeError::TableIndex(LuaType::String))),
@@ -203,6 +208,7 @@ impl State {
             state.push_unchecked(receiver);
             state.push_unchecked(key);
             *handler_called = true;
+            // native-call: call_string_index_handler->call_unguarded
             state.call_unguarded(ArgCount::Fixed(2), RetCount::Fixed(1))?;
             Ok(())
         })
@@ -485,6 +491,7 @@ impl State {
         if tbl_val.as_string_ptr().is_some() {
             // The receiver stays on the stack (rooted) until the result
             // replaces it below.
+            // native-call: instr_get_table->index_string
             self.index_string(tbl_val, key, None, local_cost, &mut false)?;
             let result = self.pop_val();
             self.stack[table_idx] = result;
@@ -508,6 +515,7 @@ impl State {
             return Ok(());
         }
 
+        // native-call: instr_get_table->get_table_with_key
         self.get_table_with_key(table_idx, key, local_cost)?;
         // Stack now: [... table, result]
         let result = self.pop_val();

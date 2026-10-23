@@ -58,6 +58,7 @@ impl State {
         key: Val,
         local_cost: &mut u64,
     ) -> Result<()> {
+        // native-call: get_table_with_key->get_table_with_key_tracking_call
         self.get_table_with_key_tracking_call(idx, key, local_cost, &mut false)
     }
 
@@ -97,6 +98,7 @@ impl State {
                     .map_or(Val::Nil, |mt| mt.get(&index_key));
 
                 if !matches!(index_handler, Val::Nil) {
+                    // native-call: get_table_with_key_tracking_call->handle_index_metamethod
                     return self.handle_index_metamethod(
                         index_handler,
                         idx,
@@ -123,6 +125,7 @@ impl State {
         handler_called: &mut bool,
     ) -> Result<()> {
         self.with_metamethod_depth(|state| {
+            // native-call: handle_index_metamethod->handle_index_metamethod_inner
             state.handle_index_metamethod_inner(handler, table_idx, key, local_cost, handler_called)
         })
     }
@@ -148,6 +151,7 @@ impl State {
                     let new_idx = self.stack.len() - 1;
                     // The enclosing boundary clears this handler temporary
                     // if recursive lookup fails.
+                    // native-call: handle_index_metamethod_inner->get_table_with_key_tracking_call
                     self.get_table_with_key_tracking_call(
                         new_idx,
                         key,
@@ -178,6 +182,7 @@ impl State {
                     self.push_unchecked(table_val);
                     self.push_unchecked(key);
                     *handler_called = true;
+                    // native-call: handle_index_metamethod_inner->call_unguarded:lua
                     self.call_unguarded(ArgCount::Fixed(2), RetCount::Fixed(1))?;
                     Ok(())
                 } else {
@@ -195,9 +200,11 @@ impl State {
                 self.push_unchecked(table_val);
                 self.push_unchecked(key);
                 *handler_called = true;
+                // native-call: handle_index_metamethod_inner->call_unguarded:rust
                 self.call_unguarded(ArgCount::Fixed(2), RetCount::Fixed(1))?;
                 Ok(())
             }
+            // native-call: handle_index_metamethod_inner->index_string
             Val::Str(_) => self.index_string(handler, key, None, local_cost, handler_called),
             _ => Err(self.type_error(super::TypeError::TableIndex(handler.typ(&self.heap)))),
         }
@@ -239,6 +246,7 @@ impl State {
                     .map_or(Val::Nil, |mt| mt.get(&newindex_key));
 
                 if !matches!(newindex_handler, Val::Nil) {
+                    // native-call: set_table_with_key->handle_newindex_metamethod
                     return self.handle_newindex_metamethod(
                         newindex_handler,
                         idx,
@@ -269,6 +277,7 @@ impl State {
         local_cost: &mut u64,
     ) -> Result<()> {
         self.with_metamethod_depth(|state| {
+            // native-call: handle_newindex_metamethod->handle_newindex_metamethod_inner
             state.handle_newindex_metamethod_inner(handler, table_idx, key, val, local_cost)
         })
     }
@@ -292,6 +301,7 @@ impl State {
                     self.check_stack_space(1)?;
                     self.push_unchecked(Val::Obj(ptr));
                     let new_idx = self.stack.len() - 1;
+                    // native-call: handle_newindex_metamethod_inner->set_table_with_key
                     self.set_table_with_key(new_idx, key, val, local_cost)?;
                     self.pop_n(1)?; // Remove the __newindex table
                     Ok(())
@@ -307,6 +317,7 @@ impl State {
                     self.push_unchecked(table_val);
                     self.push_unchecked(key);
                     self.push_unchecked(val);
+                    // native-call: handle_newindex_metamethod_inner->call_unguarded:lua
                     self.call_unguarded(ArgCount::Fixed(3), RetCount::Fixed(0))?;
                     Ok(())
                 } else {
@@ -324,6 +335,7 @@ impl State {
                 self.push_unchecked(table_val);
                 self.push_unchecked(key);
                 self.push_unchecked(val);
+                // native-call: handle_newindex_metamethod_inner->call_unguarded:rust
                 self.call_unguarded(ArgCount::Fixed(3), RetCount::Fixed(0))?;
                 Ok(())
             }

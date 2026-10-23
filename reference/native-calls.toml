@@ -1,0 +1,1322 @@
+# Inventory of the places where Rust calls back into Lua.
+#
+# reference/native-calls.md explains what this file is for and how to change
+# it; `python3 scripts/native_calls.py` checks it against src/ and
+# tests/native_stack.rs and prints `ok` when they agree (a `brokkr check`
+# script check).
+#
+# [[function]]  Every function that can reach a call into Lua: the caller
+#               closure of `State::call_unguarded` and `State::invoke_rust_fn`.
+#               `root` marks one that is also entered from outside the
+#               lexical call graph, with the evidence for how:
+#                 callback  a library callback, entered through a function
+#                           pointer by `invoke_rust_fn`
+#                 host-api  a public State method a host (or a host callback)
+#                           calls
+#                 binary    the CLI's `main`
+# [[edge]]      One call site, named by the `// native-call:` marker on or
+#               directly above it: `caller->callee`, plus `:tag` when one
+#               caller has several call sites of one callee. An edge is
+#               covered by the scenarios whose path runs it, or by the chain
+#               kinds or leaf variants it names, or it is excluded with a
+#               reason. Never both.
+# [segment]     Named runs of edges that scenario paths share; `@name` in a
+#               path expands to one.
+# [[scenario]]  One kind of native level in tests/native_stack.rs: its path
+#               is the ordered edges from one entry into `call_unguarded` to
+#               the next.
+
+# ---------------------------------------------------------------- functions
+
+[[function]]
+name = "call_unguarded"
+owner = "State"
+
+[[function]]
+name = "invoke_rust_fn"
+owner = "State"
+
+[[function]]
+name = "begin_call"
+owner = "State"
+
+[[function]]
+name = "begin_callable_call"
+owner = "State"
+
+[[function]]
+name = "call_from_lua"
+owner = "State"
+
+[[function]]
+name = "run_invocation"
+owner = "State"
+
+[[function]]
+name = "run"
+owner = "Frame"
+
+[[function]]
+name = "eval_batched"
+owner = "Frame"
+
+[[function]]
+name = "run_frame"
+owner = "Frame"
+
+[[function]]
+name = "call"
+owner = "State"
+root = "host-api"
+evidence = "State::call, a host's (and a host callback's) way to call a function"
+
+[[function]]
+name = "call_anchor"
+owner = "State"
+root = "host-api"
+evidence = "State::call_anchor, a host calling an anchored function"
+
+[[function]]
+name = "call_anchor_unguarded"
+owner = "State"
+
+[[function]]
+name = "get_table"
+owner = "State"
+root = "host-api"
+evidence = "State::get_table, a host read that runs __index"
+
+[[function]]
+name = "get_table_unguarded"
+owner = "State"
+
+[[function]]
+name = "tostring_bytes"
+owner = "State"
+root = "host-api"
+evidence = "State::tostring_bytes, a host rendering that runs __tostring"
+
+[[function]]
+name = "to_string_with_meta"
+owner = "State"
+root = "host-api"
+evidence = "State::to_string_with_meta, a host rendering that runs __tostring"
+
+[[function]]
+name = "tostring_bytes_unguarded"
+owner = "State"
+
+[[function]]
+name = "tostring_rendering"
+owner = "State"
+
+[[function]]
+name = "error_value"
+owner = "State"
+
+[[function]]
+name = "get_table_with_key"
+owner = "State"
+
+[[function]]
+name = "get_table_with_key_tracking_call"
+owner = "State"
+
+[[function]]
+name = "handle_index_metamethod"
+owner = "State"
+
+[[function]]
+name = "handle_index_metamethod_inner"
+owner = "State"
+
+[[function]]
+name = "index_string"
+owner = "State"
+
+[[function]]
+name = "call_string_index_handler"
+owner = "State"
+
+[[function]]
+name = "set_table"
+owner = "State"
+
+[[function]]
+name = "set_table_with_key"
+owner = "State"
+
+[[function]]
+name = "handle_newindex_metamethod"
+owner = "State"
+
+[[function]]
+name = "handle_newindex_metamethod_inner"
+owner = "State"
+
+[[function]]
+name = "instr_get_field"
+owner = "State"
+
+[[function]]
+name = "instr_get_table"
+owner = "State"
+
+[[function]]
+name = "instr_set_field"
+owner = "State"
+
+[[function]]
+name = "instr_set_table"
+owner = "State"
+
+[[function]]
+name = "instr_length"
+owner = "State"
+
+[[function]]
+name = "instr_tfor_call"
+owner = "State"
+
+[[function]]
+name = "instr_tfor_call_rust_fn"
+owner = "State"
+
+[[function]]
+name = "reg_get_field"
+owner = "State"
+
+[[function]]
+name = "get_field_slow"
+owner = "State"
+
+[[function]]
+name = "reg_get_table"
+owner = "State"
+
+[[function]]
+name = "get_table_slow"
+owner = "State"
+
+[[function]]
+name = "reg_set_field"
+owner = "State"
+
+[[function]]
+name = "set_field_slow"
+owner = "State"
+
+[[function]]
+name = "reg_set_table"
+owner = "State"
+
+[[function]]
+name = "reg_len"
+owner = "State"
+
+[[function]]
+name = "table_sort"
+owner = "State"
+
+[[function]]
+name = "table_sort_scratch"
+owner = "State"
+
+[[function]]
+name = "table_sort_values"
+owner = "State"
+
+[[function]]
+name = "table_sort_less"
+owner = "State"
+
+[[function]]
+name = "table_sort_heap"
+
+[[function]]
+name = "table_sort_sift_down"
+
+[[function]]
+name = "sequence_len"
+
+[[function]]
+name = "set_index"
+
+[[function]]
+name = "move_element"
+
+[[function]]
+name = "insert_through_metamethods"
+
+[[function]]
+name = "remove_through_metamethods"
+
+[[function]]
+name = "sort_through_metamethods"
+
+[[function]]
+name = "unpack_values"
+
+[[function]]
+name = "base_unpack_values"
+root = "callback"
+evidence = "registered as the global unpack"
+
+[[function]]
+name = "table_unpack_values"
+root = "callback"
+evidence = "registered as table.unpack"
+
+[[function]]
+name = "base_ipairs_iter"
+root = "callback"
+evidence = "the iterator ipairs returns, also registered by id for snapshots"
+
+[[function]]
+name = "format"
+root = "callback"
+evidence = "registered as string.format"
+
+[[function]]
+name = "format_argument"
+
+[[function]]
+name = "append_function_replacement"
+
+[[function]]
+name = "append_gsub_replacement"
+
+[[function]]
+name = "gsub_empty_pattern"
+
+[[function]]
+name = "gsub_plain_pattern"
+
+[[function]]
+name = "gsub_lua_pattern"
+
+[[function]]
+name = "push_gmatch_wrapper"
+
+[[function]]
+name = "lib:error"
+root = "callback"
+evidence = "the global error, a closure in NON_BUILTIN_GLOBALS"
+
+[[function]]
+name = "lib:print"
+root = "callback"
+evidence = "the global print, a closure registered by open_base"
+
+[[function]]
+name = "lib:tostring"
+root = "callback"
+evidence = "the global tostring, a closure registered by open_base"
+
+[[function]]
+name = "lib:string.gmatch"
+root = "callback"
+evidence = "string.gmatch, a closure in STRING_FUNCTIONS"
+
+[[function]]
+name = "lib:string.gsub"
+root = "callback"
+evidence = "string.gsub, a closure in STRING_FUNCTIONS"
+
+[[function]]
+name = "lib:table.concat"
+root = "callback"
+evidence = "table.concat, a closure in TABLE_FUNCTIONS"
+
+[[function]]
+name = "lib:table.insert"
+root = "callback"
+evidence = "table.insert, a closure in TABLE_FUNCTIONS"
+
+[[function]]
+name = "lib:table.move"
+root = "callback"
+evidence = "table.move, a closure in TABLE_FUNCTIONS"
+
+[[function]]
+name = "lib:table.remove"
+root = "callback"
+evidence = "table.remove, a closure in TABLE_FUNCTIONS"
+
+[[function]]
+name = "lib:table.sort"
+root = "callback"
+evidence = "table.sort, a closure in TABLE_FUNCTIONS"
+
+[[function]]
+name = "main"
+root = "binary"
+evidence = "the CLI entry point"
+
+# -------------------------------------------------------------------- edges
+#
+# Grouped by file. Edges that only scenarios cover carry nothing but their id.
+
+# src/vm/eval.rs
+[[edge]]
+id = "call->call_unguarded"
+
+[[edge]]
+id = "call_unguarded->begin_call"
+
+[[edge]]
+id = "call_unguarded->run_invocation"
+
+[[edge]]
+id = "call_from_lua->begin_call"
+
+[[edge]]
+id = "begin_call->invoke_rust_fn"
+
+[[edge]]
+id = "begin_call->begin_callable_call"
+
+[[edge]]
+id = "begin_callable_call->invoke_rust_fn"
+
+[[edge]]
+id = "run_invocation->run"
+
+# src/vm/frame.rs
+[[edge]]
+id = "run->eval_batched"
+
+[[edge]]
+id = "eval_batched->run_frame"
+
+[[edge]]
+id = "run_frame->reg_get_field:field"
+
+[[edge]]
+id = "run_frame->reg_get_field:self"
+
+[[edge]]
+id = "run_frame->reg_get_table"
+
+[[edge]]
+id = "run_frame->reg_set_field"
+
+[[edge]]
+id = "run_frame->reg_set_table"
+
+[[edge]]
+id = "run_frame->reg_len"
+
+[[edge]]
+id = "run_frame->instr_tfor_call"
+
+[[edge]]
+id = "run_frame->call_from_lua"
+
+# src/vm/registers.rs
+[[edge]]
+id = "reg_get_field->get_field_slow"
+
+[[edge]]
+id = "get_field_slow->instr_get_field"
+
+[[edge]]
+id = "reg_get_table->get_table_slow"
+
+[[edge]]
+id = "get_table_slow->instr_get_table"
+
+[[edge]]
+id = "reg_set_field->set_field_slow"
+
+[[edge]]
+id = "set_field_slow->instr_set_field"
+
+[[edge]]
+id = "reg_set_table->instr_set_table"
+
+[[edge]]
+id = "reg_len->instr_length"
+
+# src/vm/eval_index.rs
+[[edge]]
+id = "instr_get_field->get_table_with_key"
+
+[[edge]]
+id = "instr_get_field->index_string"
+
+[[edge]]
+id = "instr_get_table->index_string"
+
+[[edge]]
+id = "instr_get_table->get_table_with_key"
+
+[[edge]]
+id = "index_string->get_table_with_key_tracking_call"
+chains = ["string_table"]
+
+[[edge]]
+id = "index_string->call_string_index_handler"
+
+[[edge]]
+id = "index_string->index_string"
+chains = ["string"]
+
+[[edge]]
+id = "call_string_index_handler->call_unguarded"
+
+# src/vm/eval_store.rs
+[[edge]]
+id = "instr_length->call_unguarded"
+
+[[edge]]
+id = "instr_set_field->set_table_with_key"
+
+[[edge]]
+id = "instr_set_table->set_table_with_key"
+
+# src/vm/eval_control.rs
+[[edge]]
+id = "instr_tfor_call->instr_tfor_call_rust_fn"
+
+[[edge]]
+id = "instr_tfor_call->call_unguarded"
+
+[[edge]]
+id = "instr_tfor_call_rust_fn->invoke_rust_fn"
+
+# src/vm/metamethod.rs
+[[edge]]
+id = "get_table_with_key->get_table_with_key_tracking_call"
+
+[[edge]]
+id = "get_table_with_key_tracking_call->handle_index_metamethod"
+
+[[edge]]
+id = "handle_index_metamethod->handle_index_metamethod_inner"
+
+[[edge]]
+id = "handle_index_metamethod_inner->get_table_with_key_tracking_call"
+chains = ["index"]
+
+[[edge]]
+id = "handle_index_metamethod_inner->call_unguarded:lua"
+
+[[edge]]
+id = "handle_index_metamethod_inner->call_unguarded:rust"
+
+[[edge]]
+id = "handle_index_metamethod_inner->index_string"
+chains = ["string_table"]
+
+[[edge]]
+id = "set_table_with_key->handle_newindex_metamethod"
+
+[[edge]]
+id = "handle_newindex_metamethod->handle_newindex_metamethod_inner"
+
+[[edge]]
+id = "handle_newindex_metamethod_inner->set_table_with_key"
+chains = ["newindex"]
+
+[[edge]]
+id = "handle_newindex_metamethod_inner->call_unguarded:lua"
+
+[[edge]]
+id = "handle_newindex_metamethod_inner->call_unguarded:rust"
+
+# src/vm/anchor.rs
+[[edge]]
+id = "call_anchor->call_anchor_unguarded"
+
+[[edge]]
+id = "call_anchor_unguarded->call_unguarded"
+
+# src/vm/table_ops.rs
+[[edge]]
+id = "get_table->get_table_unguarded"
+
+[[edge]]
+id = "get_table_unguarded->index_string"
+
+[[edge]]
+id = "get_table_unguarded->get_table_with_key_tracking_call"
+
+[[edge]]
+id = "set_table->set_table_with_key"
+
+[[edge]]
+id = "table_sort->table_sort_values:comparator"
+
+[[edge]]
+id = "table_sort->table_sort_values:default"
+excluded = "no comparator: the default comparison only reads numbers and strings and calls nothing"
+
+[[edge]]
+id = "table_sort_values->table_sort_heap"
+
+[[edge]]
+id = "table_sort_scratch->table_sort_heap"
+
+[[edge]]
+id = "table_sort_heap->table_sort_sift_down:heapify"
+
+[[edge]]
+id = "table_sort_heap->table_sort_sift_down:sortdown"
+
+[[edge]]
+id = "table_sort_sift_down->table_sort_less:left"
+
+[[edge]]
+id = "table_sort_sift_down->table_sort_less:right"
+
+[[edge]]
+id = "table_sort_less->call_unguarded"
+
+[[edge]]
+id = "to_string_with_meta->tostring_bytes"
+
+[[edge]]
+id = "tostring_bytes->tostring_bytes_unguarded"
+
+[[edge]]
+id = "tostring_bytes_unguarded->tostring_rendering"
+
+[[edge]]
+id = "tostring_rendering->call_unguarded"
+
+[[edge]]
+id = "error_value->tostring_bytes_unguarded"
+
+# src/lua_std/basic.rs
+[[edge]]
+id = "base_unpack_values->unpack_values"
+
+[[edge]]
+id = "base_ipairs_iter->get_table_unguarded"
+
+[[edge]]
+id = "lib:error->error_value"
+
+[[edge]]
+id = "lib:print->tostring_bytes_unguarded"
+
+[[edge]]
+id = "lib:tostring->tostring_rendering"
+
+# src/lua_std.rs
+[[edge]]
+id = "unpack_values->sequence_len"
+
+[[edge]]
+id = "unpack_values->get_table_unguarded"
+
+# src/lua_std/string_format.rs
+[[edge]]
+id = "format->format_argument:percent"
+excluded = "a `%%` directive formats a literal percent sign and reads no argument"
+
+[[edge]]
+id = "format->format_argument:argument"
+
+[[edge]]
+id = "format_argument->tostring_bytes_unguarded"
+
+# src/lua_std/string.rs
+[[edge]]
+id = "append_function_replacement->call_unguarded:captures"
+
+[[edge]]
+id = "append_function_replacement->call_unguarded:whole"
+
+[[edge]]
+id = "append_gsub_replacement->get_table_unguarded"
+
+[[edge]]
+id = "append_gsub_replacement->append_function_replacement"
+
+[[edge]]
+id = "lib:string.gmatch->push_gmatch_wrapper:empty"
+leaves = ["gmatch", "gmatch_empty_refused"]
+
+[[edge]]
+id = "lib:string.gmatch->push_gmatch_wrapper:general"
+leaves = ["gmatch", "gmatch_refused"]
+
+[[edge]]
+id = "push_gmatch_wrapper->call_unguarded"
+leaves = ["gmatch", "gmatch_refused", "gmatch_empty_refused"]
+
+[[edge]]
+id = "lib:string.gsub->gsub_empty_pattern"
+
+[[edge]]
+id = "lib:string.gsub->gsub_plain_pattern"
+
+[[edge]]
+id = "lib:string.gsub->gsub_lua_pattern"
+
+[[edge]]
+id = "gsub_empty_pattern->append_gsub_replacement"
+
+[[edge]]
+id = "gsub_plain_pattern->append_gsub_replacement"
+
+[[edge]]
+id = "gsub_lua_pattern->append_gsub_replacement"
+
+# src/lua_std/table.rs
+[[edge]]
+id = "table_unpack_values->unpack_values"
+
+[[edge]]
+id = "lib:table.insert->insert_through_metamethods"
+
+[[edge]]
+id = "lib:table.remove->remove_through_metamethods"
+
+[[edge]]
+id = "lib:table.sort->sort_through_metamethods"
+
+[[edge]]
+id = "lib:table.sort->table_sort"
+
+[[edge]]
+id = "lib:table.concat->sequence_len"
+
+[[edge]]
+id = "lib:table.concat->get_table_unguarded"
+
+[[edge]]
+id = "lib:table.move->move_element:metamethods"
+
+[[edge]]
+id = "lib:table.move->move_element:raw-backward"
+excluded = "honour_meta is false here, so move_element copies with get_table_raw and set_table_raw"
+
+[[edge]]
+id = "lib:table.move->move_element:raw-forward"
+excluded = "honour_meta is false here, so move_element copies with get_table_raw and set_table_raw"
+
+[[edge]]
+id = "move_element->get_table_unguarded"
+
+[[edge]]
+id = "move_element->set_index"
+
+[[edge]]
+id = "sequence_len->call_unguarded"
+
+[[edge]]
+id = "set_index->set_table"
+
+[[edge]]
+id = "insert_through_metamethods->sequence_len"
+
+[[edge]]
+id = "insert_through_metamethods->get_table_unguarded"
+
+[[edge]]
+id = "insert_through_metamethods->set_index:shift"
+
+[[edge]]
+id = "insert_through_metamethods->set_index:value"
+
+[[edge]]
+id = "remove_through_metamethods->sequence_len"
+
+[[edge]]
+id = "remove_through_metamethods->get_table_unguarded:removed"
+
+[[edge]]
+id = "remove_through_metamethods->get_table_unguarded:shift"
+
+[[edge]]
+id = "remove_through_metamethods->set_index:shift"
+
+[[edge]]
+id = "remove_through_metamethods->set_index:clear"
+
+[[edge]]
+id = "sort_through_metamethods->sequence_len"
+
+[[edge]]
+id = "sort_through_metamethods->get_table_unguarded"
+
+[[edge]]
+id = "sort_through_metamethods->table_sort_scratch"
+
+[[edge]]
+id = "sort_through_metamethods->set_table"
+
+# src/main.rs
+[[edge]]
+id = "main->call"
+excluded = "the CLI's own call into the script: the host frames below its first call, which docs/limits.md leaves to the embedder"
+
+# ----------------------------------------------------------------- segments
+
+[segment]
+# A Lua function entered from Rust: the dispatch loop of a new invocation.
+lua = [
+    "call_unguarded->run_invocation",
+    "run_invocation->run",
+    "run->eval_batched",
+    "eval_batched->run_frame",
+]
+# Lua calling a Rust function, which runs to completion inside the loop.
+rust = [
+    "run_frame->call_from_lua",
+    "call_from_lua->begin_call",
+    "begin_call->invoke_rust_fn",
+]
+get_field = [
+    "run_frame->reg_get_field:field",
+    "reg_get_field->get_field_slow",
+    "get_field_slow->instr_get_field",
+]
+get_key = [
+    "run_frame->reg_get_table",
+    "reg_get_table->get_table_slow",
+    "get_table_slow->instr_get_table",
+]
+set_field = [
+    "run_frame->reg_set_field",
+    "reg_set_field->set_field_slow",
+    "set_field_slow->instr_set_field",
+    "instr_set_field->set_table_with_key",
+]
+# An __index function handler, from the lookup that found it.
+index_function = [
+    "get_table_with_key_tracking_call->handle_index_metamethod",
+    "handle_index_metamethod->handle_index_metamethod_inner",
+    "handle_index_metamethod_inner->call_unguarded:lua",
+]
+# A __newindex function handler, from the store that found it.
+newindex_function = [
+    "set_table_with_key->handle_newindex_metamethod",
+    "handle_newindex_metamethod->handle_newindex_metamethod_inner",
+    "handle_newindex_metamethod_inner->call_unguarded:lua",
+]
+# A library or host read through __index.
+read = [
+    "get_table_unguarded->get_table_with_key_tracking_call",
+    "get_table_with_key_tracking_call->handle_index_metamethod",
+    "handle_index_metamethod->handle_index_metamethod_inner",
+    "handle_index_metamethod_inner->call_unguarded:lua",
+]
+# A table-library write through __newindex.
+write = [
+    "set_index->set_table",
+    "set_table->set_table_with_key",
+    "set_table_with_key->handle_newindex_metamethod",
+    "handle_newindex_metamethod->handle_newindex_metamethod_inner",
+    "handle_newindex_metamethod_inner->call_unguarded:lua",
+]
+tostring = [
+    "tostring_bytes_unguarded->tostring_rendering",
+    "tostring_rendering->call_unguarded",
+]
+# A Rust handler, then the host callback's own State::call.
+rust_handler = [
+    "call_unguarded->begin_call",
+    "begin_call->invoke_rust_fn",
+    "call->call_unguarded",
+]
+string_handler = [
+    "index_string->call_string_index_handler",
+    "call_string_index_handler->call_unguarded",
+]
+sort_comparator = [
+    "table_sort_less->call_unguarded",
+]
+
+# ---------------------------------------------------------------- scenarios
+
+[[scenario]]
+name = "index_field"
+path = [
+    "@lua", "@get_field",
+    "instr_get_field->get_table_with_key",
+    "get_table_with_key->get_table_with_key_tracking_call",
+    "@index_function",
+]
+
+[[scenario]]
+name = "index_method"
+path = [
+    "@lua",
+    "run_frame->reg_get_field:self",
+    "reg_get_field->get_field_slow",
+    "get_field_slow->instr_get_field",
+    "instr_get_field->get_table_with_key",
+    "get_table_with_key->get_table_with_key_tracking_call",
+    "@index_function",
+]
+
+[[scenario]]
+name = "index_key"
+path = [
+    "@lua", "@get_key",
+    "instr_get_table->get_table_with_key",
+    "get_table_with_key->get_table_with_key_tracking_call",
+    "@index_function",
+]
+
+[[scenario]]
+name = "index_rust"
+path = [
+    "@lua", "@get_field",
+    "instr_get_field->get_table_with_key",
+    "get_table_with_key->get_table_with_key_tracking_call",
+    "get_table_with_key_tracking_call->handle_index_metamethod",
+    "handle_index_metamethod->handle_index_metamethod_inner",
+    "handle_index_metamethod_inner->call_unguarded:rust",
+    "@rust_handler",
+]
+
+[[scenario]]
+name = "newindex_field"
+path = ["@lua", "@set_field", "@newindex_function"]
+
+[[scenario]]
+name = "newindex_key"
+path = [
+    "@lua",
+    "run_frame->reg_set_table",
+    "reg_set_table->instr_set_table",
+    "instr_set_table->set_table_with_key",
+    "@newindex_function",
+]
+
+[[scenario]]
+name = "newindex_rust"
+path = [
+    "@lua", "@set_field",
+    "set_table_with_key->handle_newindex_metamethod",
+    "handle_newindex_metamethod->handle_newindex_metamethod_inner",
+    "handle_newindex_metamethod_inner->call_unguarded:rust",
+    "@rust_handler",
+]
+
+[[scenario]]
+name = "length"
+path = [
+    "@lua",
+    "run_frame->reg_len",
+    "reg_len->instr_length",
+    "instr_length->call_unguarded",
+]
+
+[[scenario]]
+name = "string_index_field"
+path = ["@lua", "@get_field", "instr_get_field->index_string", "@string_handler"]
+
+[[scenario]]
+name = "string_index_key"
+path = ["@lua", "@get_key", "instr_get_table->index_string", "@string_handler"]
+
+[[scenario]]
+name = "index_string_handler"
+path = [
+    "@lua", "@get_field",
+    "instr_get_field->get_table_with_key",
+    "get_table_with_key->get_table_with_key_tracking_call",
+    "get_table_with_key_tracking_call->handle_index_metamethod",
+    "handle_index_metamethod->handle_index_metamethod_inner",
+    "handle_index_metamethod_inner->index_string",
+    "@string_handler",
+]
+
+[[scenario]]
+name = "string_library_index"
+path = [
+    "@lua", "@get_field",
+    "instr_get_field->index_string",
+    "index_string->get_table_with_key_tracking_call",
+    "@index_function",
+]
+
+[[scenario]]
+name = "host_get_table"
+path = ["@lua", "@rust", "get_table->get_table_unguarded", "@read"]
+
+[[scenario]]
+name = "host_get_table_string"
+path = [
+    "@lua", "@rust",
+    "get_table->get_table_unguarded",
+    "get_table_unguarded->index_string",
+    "@string_handler",
+]
+
+[[scenario]]
+name = "host_call"
+path = ["@lua", "@rust", "call->call_unguarded"]
+
+[[scenario]]
+name = "host_anchor"
+path = [
+    "@lua", "@rust",
+    "call_anchor->call_anchor_unguarded",
+    "call_anchor_unguarded->call_unguarded",
+]
+
+[[scenario]]
+name = "host_tostring_bytes"
+path = ["@lua", "@rust", "tostring_bytes->tostring_bytes_unguarded", "@tostring"]
+
+[[scenario]]
+name = "host_to_string_with_meta"
+path = [
+    "@lua", "@rust",
+    "to_string_with_meta->tostring_bytes",
+    "tostring_bytes->tostring_bytes_unguarded",
+    "@tostring",
+]
+
+[[scenario]]
+name = "tostring"
+path = [
+    "@lua", "@rust",
+    "lib:tostring->tostring_rendering",
+    "tostring_rendering->call_unguarded",
+]
+
+[[scenario]]
+name = "print"
+path = ["@lua", "@rust", "lib:print->tostring_bytes_unguarded", "@tostring"]
+
+[[scenario]]
+name = "format"
+path = [
+    "@lua", "@rust",
+    "format->format_argument:argument",
+    "format_argument->tostring_bytes_unguarded",
+    "@tostring",
+]
+
+[[scenario]]
+name = "error_tostring"
+path = [
+    "@lua", "@rust",
+    "lib:error->error_value",
+    "error_value->tostring_bytes_unguarded",
+    "@tostring",
+]
+
+[[scenario]]
+name = "sort_comparator"
+path = [
+    "@lua", "@rust",
+    "lib:table.sort->table_sort",
+    "table_sort->table_sort_values:comparator",
+    "table_sort_values->table_sort_heap",
+    "table_sort_heap->table_sort_sift_down:heapify",
+    "table_sort_sift_down->table_sort_less:left",
+    "@sort_comparator",
+]
+
+[[scenario]]
+name = "sort_comparator_right"
+path = [
+    "@lua", "@rust",
+    "lib:table.sort->table_sort",
+    "table_sort->table_sort_values:comparator",
+    "table_sort_values->table_sort_heap",
+    "table_sort_heap->table_sort_sift_down:heapify",
+    "table_sort_sift_down->table_sort_less:right",
+    "@sort_comparator",
+]
+
+[[scenario]]
+name = "sort_comparator_sortdown"
+path = [
+    "@lua", "@rust",
+    "lib:table.sort->table_sort",
+    "table_sort->table_sort_values:comparator",
+    "table_sort_values->table_sort_heap",
+    "table_sort_heap->table_sort_sift_down:sortdown",
+    "table_sort_sift_down->table_sort_less:left",
+    "@sort_comparator",
+]
+
+[[scenario]]
+name = "callable_rust"
+path = [
+    "@lua",
+    "run_frame->call_from_lua",
+    "call_from_lua->begin_call",
+    "begin_call->begin_callable_call",
+    "begin_callable_call->invoke_rust_fn",
+    "lib:table.sort->table_sort",
+    "table_sort->table_sort_values:comparator",
+    "table_sort_values->table_sort_heap",
+    "table_sort_heap->table_sort_sift_down:heapify",
+    "table_sort_sift_down->table_sort_less:left",
+    "@sort_comparator",
+]
+
+[[scenario]]
+name = "sort_metamethods_comparator"
+path = [
+    "@lua", "@rust",
+    "lib:table.sort->sort_through_metamethods",
+    "sort_through_metamethods->table_sort_scratch",
+    "table_sort_scratch->table_sort_heap",
+    "table_sort_heap->table_sort_sift_down:heapify",
+    "table_sort_sift_down->table_sort_less:left",
+    "@sort_comparator",
+]
+
+[[scenario]]
+name = "sort_metamethods_length"
+path = [
+    "@lua", "@rust",
+    "lib:table.sort->sort_through_metamethods",
+    "sort_through_metamethods->sequence_len",
+    "sequence_len->call_unguarded",
+]
+
+[[scenario]]
+name = "sort_metamethods_read"
+path = [
+    "@lua", "@rust",
+    "lib:table.sort->sort_through_metamethods",
+    "sort_through_metamethods->get_table_unguarded",
+    "@read",
+]
+
+[[scenario]]
+name = "sort_metamethods_write"
+path = [
+    "@lua", "@rust",
+    "lib:table.sort->sort_through_metamethods",
+    "sort_through_metamethods->set_table",
+    "set_table->set_table_with_key",
+    "@newindex_function",
+]
+
+[[scenario]]
+name = "insert_length"
+path = [
+    "@lua", "@rust",
+    "lib:table.insert->insert_through_metamethods",
+    "insert_through_metamethods->sequence_len",
+    "sequence_len->call_unguarded",
+]
+
+[[scenario]]
+name = "insert_shift_read"
+path = [
+    "@lua", "@rust",
+    "lib:table.insert->insert_through_metamethods",
+    "insert_through_metamethods->get_table_unguarded",
+    "@read",
+]
+
+[[scenario]]
+name = "insert_shift_write"
+path = [
+    "@lua", "@rust",
+    "lib:table.insert->insert_through_metamethods",
+    "insert_through_metamethods->set_index:shift",
+    "@write",
+]
+
+[[scenario]]
+name = "insert_value"
+path = [
+    "@lua", "@rust",
+    "lib:table.insert->insert_through_metamethods",
+    "insert_through_metamethods->set_index:value",
+    "@write",
+]
+
+[[scenario]]
+name = "remove_length"
+path = [
+    "@lua", "@rust",
+    "lib:table.remove->remove_through_metamethods",
+    "remove_through_metamethods->sequence_len",
+    "sequence_len->call_unguarded",
+]
+
+[[scenario]]
+name = "remove_read"
+path = [
+    "@lua", "@rust",
+    "lib:table.remove->remove_through_metamethods",
+    "remove_through_metamethods->get_table_unguarded:removed",
+    "@read",
+]
+
+[[scenario]]
+name = "remove_shift_read"
+path = [
+    "@lua", "@rust",
+    "lib:table.remove->remove_through_metamethods",
+    "remove_through_metamethods->get_table_unguarded:shift",
+    "@read",
+]
+
+[[scenario]]
+name = "remove_shift_write"
+path = [
+    "@lua", "@rust",
+    "lib:table.remove->remove_through_metamethods",
+    "remove_through_metamethods->set_index:shift",
+    "@write",
+]
+
+[[scenario]]
+name = "remove_clear"
+path = [
+    "@lua", "@rust",
+    "lib:table.remove->remove_through_metamethods",
+    "remove_through_metamethods->set_index:clear",
+    "@write",
+]
+
+[[scenario]]
+name = "concat_length"
+path = [
+    "@lua", "@rust",
+    "lib:table.concat->sequence_len",
+    "sequence_len->call_unguarded",
+]
+
+[[scenario]]
+name = "concat_read"
+path = ["@lua", "@rust", "lib:table.concat->get_table_unguarded", "@read"]
+
+[[scenario]]
+name = "move_read"
+path = [
+    "@lua", "@rust",
+    "lib:table.move->move_element:metamethods",
+    "move_element->get_table_unguarded",
+    "@read",
+]
+
+[[scenario]]
+name = "move_write"
+path = [
+    "@lua", "@rust",
+    "lib:table.move->move_element:metamethods",
+    "move_element->set_index",
+    "@write",
+]
+
+[[scenario]]
+name = "unpack_length"
+path = [
+    "@lua", "@rust",
+    "table_unpack_values->unpack_values",
+    "unpack_values->sequence_len",
+    "sequence_len->call_unguarded",
+]
+
+[[scenario]]
+name = "unpack_read"
+path = [
+    "@lua", "@rust",
+    "base_unpack_values->unpack_values",
+    "unpack_values->get_table_unguarded",
+    "@read",
+]
+
+[[scenario]]
+name = "gsub_empty_function"
+path = [
+    "@lua", "@rust",
+    "lib:string.gsub->gsub_empty_pattern",
+    "gsub_empty_pattern->append_gsub_replacement",
+    "append_gsub_replacement->append_function_replacement",
+    "append_function_replacement->call_unguarded:whole",
+]
+
+[[scenario]]
+name = "gsub_plain_function"
+path = [
+    "@lua", "@rust",
+    "lib:string.gsub->gsub_plain_pattern",
+    "gsub_plain_pattern->append_gsub_replacement",
+    "append_gsub_replacement->append_function_replacement",
+    "append_function_replacement->call_unguarded:whole",
+]
+
+[[scenario]]
+name = "gsub_pattern_function"
+path = [
+    "@lua", "@rust",
+    "lib:string.gsub->gsub_lua_pattern",
+    "gsub_lua_pattern->append_gsub_replacement",
+    "append_gsub_replacement->append_function_replacement",
+    "append_function_replacement->call_unguarded:whole",
+]
+
+[[scenario]]
+name = "gsub_pattern_captures"
+path = [
+    "@lua", "@rust",
+    "lib:string.gsub->gsub_lua_pattern",
+    "gsub_lua_pattern->append_gsub_replacement",
+    "append_gsub_replacement->append_function_replacement",
+    "append_function_replacement->call_unguarded:captures",
+]
+
+[[scenario]]
+name = "gsub_empty_table"
+path = [
+    "@lua", "@rust",
+    "lib:string.gsub->gsub_empty_pattern",
+    "gsub_empty_pattern->append_gsub_replacement",
+    "append_gsub_replacement->get_table_unguarded",
+    "@read",
+]
+
+[[scenario]]
+name = "gsub_plain_table"
+path = [
+    "@lua", "@rust",
+    "lib:string.gsub->gsub_plain_pattern",
+    "gsub_plain_pattern->append_gsub_replacement",
+    "append_gsub_replacement->get_table_unguarded",
+    "@read",
+]
+
+[[scenario]]
+name = "gsub_pattern_table"
+path = [
+    "@lua", "@rust",
+    "lib:string.gsub->gsub_lua_pattern",
+    "gsub_lua_pattern->append_gsub_replacement",
+    "append_gsub_replacement->get_table_unguarded",
+    "@read",
+]
+
+[[scenario]]
+name = "tfor_lua"
+path = ["@lua", "run_frame->instr_tfor_call", "instr_tfor_call->call_unguarded"]
+
+[[scenario]]
+name = "tfor_ipairs"
+path = [
+    "@lua",
+    "run_frame->instr_tfor_call",
+    "instr_tfor_call->instr_tfor_call_rust_fn",
+    "instr_tfor_call_rust_fn->invoke_rust_fn",
+    "base_ipairs_iter->get_table_unguarded",
+    "@read",
+]
+
+[[scenario]]
+name = "tfor_host_iterator"
+path = [
+    "@lua",
+    "run_frame->instr_tfor_call",
+    "instr_tfor_call->instr_tfor_call_rust_fn",
+    "instr_tfor_call_rust_fn->invoke_rust_fn",
+    "call->call_unguarded",
+]

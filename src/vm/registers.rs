@@ -115,6 +115,7 @@ impl State {
         if self.get_field_direct(frame, dst, receiver, name, cache_slot) {
             return Ok(());
         }
+        // native-call: reg_get_field->get_field_slow
         self.get_field_slow(frame, dst, receiver, name, cache_slot, local_cost)
     }
 
@@ -174,6 +175,7 @@ impl State {
     ) -> Result<()> {
         self.check_stack_space(1)?;
         self.push_unchecked(receiver);
+        // native-call: get_field_slow->instr_get_field
         self.instr_get_field(frame, name, cache_slot, local_cost)?;
         self.pop_into(dst);
         Ok(())
@@ -199,6 +201,7 @@ impl State {
                 return Ok(());
             }
         }
+        // native-call: reg_get_table->get_table_slow
         self.get_table_slow(dst, tbl_val, key_val, local_cost)
     }
 
@@ -213,6 +216,7 @@ impl State {
         self.check_stack_space(2)?;
         self.push_unchecked(table);
         self.push_unchecked(key);
+        // native-call: get_table_slow->instr_get_table
         self.instr_get_table(local_cost)?;
         self.pop_into(dst);
         Ok(())
@@ -244,6 +248,7 @@ impl State {
                 return Ok(());
             }
         }
+        // native-call: reg_set_field->set_field_slow
         self.set_field_slow(frame, receiver, name, val, cache_slot, local_cost)
     }
 
@@ -260,6 +265,7 @@ impl State {
         self.check_stack_space(2)?;
         self.push_unchecked(receiver);
         self.push_unchecked(val);
+        // native-call: set_field_slow->instr_set_field
         self.instr_set_field(frame, 0, name, cache_slot, local_cost)
     }
 
@@ -281,6 +287,7 @@ impl State {
         self.push_unchecked(tbl_val);
         self.push_unchecked(key_val);
         self.push_unchecked(val);
+        // native-call: reg_set_table->instr_set_table
         self.instr_set_table(0, local_cost)
     }
 
@@ -403,6 +410,7 @@ impl State {
         }
         self.check_stack_space(1)?;
         self.push_unchecked(val);
+        // native-call: reg_len->instr_length
         self.instr_length(local_cost)?;
         self.pop_into(dst);
         Ok(())

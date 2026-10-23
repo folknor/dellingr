@@ -223,7 +223,7 @@ All notable changes to dellingr are documented here. The format follows
   so `MAX_CALL_DEPTH` (1000) is reached without native stack per level in
   every build profile and on any thread. What still runs on the native stack
   is every call made from Rust - host `call`/`call_anchor`,
-  `__index`/`__newindex`/`__len`/`__tostring`/`__pairs` handlers, generic-for
+  `__index`/`__newindex`/`__len`/`__tostring` handlers, generic-for
   iterator functions, `table.sort` comparators, `string.gsub` replacement
   functions - and those are now bounded by the new
   `limits::MAX_NATIVE_CALL_DEPTH` (150; reference Lua's `LUAI_MAXCCALLS` is

@@ -186,6 +186,7 @@ impl Frame {
         // Calls and returns flush before leaving, so a batch never outlives
         // the run of the frame that accrued it.
         let mut pending: u64 = 0;
+        // native-call: run->eval_batched
         let result = Self::eval_batched(frames, state, &mut pending);
         if result.is_err() && pending > 0 {
             // An error leaving the dispatch loop must still charge the work
@@ -225,6 +226,7 @@ impl Frame {
             // locates a fault from it, a returning callee decodes the caller's
             // pending call from it, and `return_to_caller` may pop the frame.
             let mut ip = frame.ip.get();
+            // native-call: eval_batched->run_frame
             let leave = Self::run_frame(frame, state, local_cost, &mut ip);
             frame.ip.set(ip);
             match leave? {
@@ -371,6 +373,7 @@ impl Frame {
                 Instr::OP_GET_FIELD => {
                     Self::record_call_site(state, *ip);
                     let receiver = state.stack[base + inst.b() as usize];
+                    // native-call: run_frame->reg_get_field:field
                     state.reg_get_field(
                         frame,
                         ra,
@@ -384,6 +387,7 @@ impl Frame {
                     Self::record_call_site(state, *ip);
                     let receiver = state.stack[base + inst.b() as usize];
                     state.stack[ra + 1] = receiver;
+                    // native-call: run_frame->reg_get_field:self
                     state.reg_get_field(
                         frame,
                         ra,
@@ -395,6 +399,7 @@ impl Frame {
                 }
                 Instr::OP_GET_TABLE => {
                     Self::record_call_site(state, *ip);
+                    // native-call: run_frame->reg_get_table
                     state.reg_get_table(
                         ra,
                         base + inst.b() as usize,
@@ -407,6 +412,7 @@ impl Frame {
                 Instr::OP_SET_FIELD => {
                     Self::record_call_site(state, *ip);
                     add_cost!(const { Instr::fixed_units(Instr::OP_SET_FIELD) });
+                    // native-call: run_frame->reg_set_field
                     state.reg_set_field(
                         frame,
                         ra,
@@ -419,6 +425,7 @@ impl Frame {
                 Instr::OP_SET_TABLE => {
                     Self::record_call_site(state, *ip);
                     add_cost!(const { Instr::fixed_units(Instr::OP_SET_TABLE) });
+                    // native-call: run_frame->reg_set_table
                     state.reg_set_table(
                         ra,
                         base + inst.b() as usize,
@@ -487,6 +494,7 @@ impl Frame {
                 }
                 Instr::OP_LEN => {
                     Self::record_call_site(state, *ip);
+                    // native-call: run_frame->reg_len
                     state.reg_len(ra, base + inst.b() as usize, local_cost)?;
                 }
 
@@ -541,6 +549,7 @@ impl Frame {
                 Instr::OP_TFOR_CALL => {
                     Self::record_call_site(state, *ip);
                     Self::flush_local_cost(state, local_cost)?;
+                    // native-call: run_frame->instr_tfor_call
                     state.instr_tfor_call(
                         ra,
                         inst.b() as u8,
@@ -557,6 +566,7 @@ impl Frame {
                     Self::flush_local_cost(state, local_cost)?;
                     let args = state.call_window(ra, inst.call_args())?;
                     let results = inst.call_results();
+                    // native-call: run_frame->call_from_lua
                     if state.call_from_lua(args, results, inst.call_is_method())? {
                         return Ok(Leave::Call);
                     }

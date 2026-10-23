@@ -358,6 +358,7 @@ fn main() {
 
     let result = compiled
         .and_then(|program| state.load(&program))
+        // native-call: main->call
         .and_then(|()| state.call(ArgCount::Fixed(0), RetCount::Fixed(0)));
 
     if !args.quiet {

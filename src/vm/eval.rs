@@ -44,6 +44,7 @@ impl State {
     /// propagates; a callback that catches a panic and returns normally gets
     /// its execution abandoned, and this call returns `StatePoisoned`.
     pub fn call(&mut self, num_args: ArgCount, num_ret_expected: RetCount) -> Result<()> {
+        // native-call: call->call_unguarded
         self.guarded(|state| state.call_unguarded(num_args, num_ret_expected))
     }
 
@@ -110,12 +111,14 @@ impl State {
             // `Frame::run`'s result, which grows this frame, live across
             // every native re-entry, in release.
             let result = 'call: {
+                // native-call: call_unguarded->begin_call
                 let admitted = match self.begin_call(idx, num_args, old_stack_bottom, false) {
                     Ok(admitted) => admitted,
                     Err(error) => break 'call Err(error),
                 };
                 let num_ret_actual = match admitted {
                     Some(n) => n,
+                    // native-call: call_unguarded->run_invocation
                     None => match self.run_invocation(old_stack_bottom) {
                         Ok(n) => n,
                         Err(error) => break 'call Err(error),
@@ -162,6 +165,7 @@ impl State {
     ) -> Result<bool> {
         let idx = self.call_base(num_args)?;
         let old_stack_bottom = self.stack_bottom;
+        // native-call: call_from_lua->begin_call
         match self.begin_call(idx, num_args, old_stack_bottom, method)? {
             Some(n) => {
                 self.finish_call(num_ret_expected, n)?;
@@ -207,12 +211,14 @@ impl State {
         let func_val = self.stack[idx];
         if let Val::RustFn(f) = func_val {
             self.stack.remove(idx);
+            // native-call: begin_call->invoke_rust_fn
             return self.invoke_rust_fn(f, idx, method).map(Some);
         }
         if let Some(bytecode) = self.lua_function_bytecode(func_val) {
             self.admit_lua_call(bytecode, num_args, old_stack_bottom)?;
             return Ok(None);
         }
+        // native-call: begin_call->begin_callable_call
         self.begin_callable_call(idx, num_args, old_stack_bottom, method)
     }
 
@@ -234,6 +240,7 @@ impl State {
                 // The Rust callback ABI: the callee's frame starts at the
                 // first argument, with the function value gone.
                 self.stack.remove(idx);
+                // native-call: begin_callable_call->invoke_rust_fn
                 break self.invoke_rust_fn(f, idx, method).map(Some);
             }
             if let Some(bytecode) = self.lua_function_bytecode(func_val) {
@@ -665,6 +672,7 @@ impl State {
     pub(super) fn run_invocation(&mut self, old_stack_bottom: usize) -> Result<u8> {
         let mut frames = self.frame_stacks.pop().unwrap_or_default();
         frames.push(self.admitted_frame());
+        // native-call: run_invocation->run
         let result = match Frame::run(&mut frames, self) {
             Ok((first, count)) => {
                 let frame = frames.last().expect("the entry frame returned");

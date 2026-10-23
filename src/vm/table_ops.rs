@@ -88,10 +88,12 @@ fn table_sort_heap<A: TableSortAccess>(
     comp_idx: Option<usize>,
 ) -> Result<()> {
     for root in (0..n / 2).rev() {
+        // native-call: table_sort_heap->table_sort_sift_down:heapify
         table_sort_sift_down(state, access, root, n, comp_idx)?;
     }
     for end in (1..n).rev() {
         table_sort_swap(state, access, 0, end)?;
+        // native-call: table_sort_heap->table_sort_sift_down:sortdown
         table_sort_sift_down(state, access, 0, end, comp_idx)?;
     }
     for index in 0..n / 2 {
@@ -115,6 +117,7 @@ fn table_sort_sift_down<A: TableSortAccess>(
         let mut smallest = root;
         let left_value = access.get(state, left)?;
         let smallest_value = access.get(state, smallest)?;
+        // native-call: table_sort_sift_down->table_sort_less:left
         if state.table_sort_less(left_value, smallest_value, comp_idx)? {
             smallest = left;
         }
@@ -122,6 +125,7 @@ fn table_sort_sift_down<A: TableSortAccess>(
         if right < end {
             let right_value = access.get(state, right)?;
             let smallest_value = access.get(state, smallest)?;
+            // native-call: table_sort_sift_down->table_sort_less:right
             if state.table_sort_less(right_value, smallest_value, comp_idx)? {
                 smallest = right;
             }
@@ -261,6 +265,7 @@ impl State {
     /// Guarded like [`State::call`]: refused on a poisoned State, and a
     /// panic out of a metamethod poisons it.
     pub fn get_table(&mut self, i: isize) -> Result<()> {
+        // native-call: get_table->get_table_unguarded
         self.guarded(|state| state.get_table_unguarded(i))
     }
 
@@ -282,8 +287,10 @@ impl State {
         let mut handler_called = false;
         let result = if is_string {
             let receiver = self.stack[idx];
+            // native-call: get_table_unguarded->index_string
             self.index_string(receiver, key, None, &mut local_cost, &mut handler_called)
         } else {
+            // native-call: get_table_unguarded->get_table_with_key_tracking_call
             self.get_table_with_key_tracking_call(idx, key, &mut local_cost, &mut handler_called)
         };
         if result.is_err() {
@@ -378,6 +385,7 @@ impl State {
         let key = self.stack[top - 2];
         let val = self.stack[top - 1];
         let mut local_cost = 0;
+        // native-call: set_table->set_table_with_key
         self.set_table_with_key(idx, key, val, &mut local_cost)?;
         self.stack.truncate(top - 2);
         Ok(())
@@ -622,6 +630,7 @@ impl State {
             Some(_) => {
                 let roots = arr.clone();
                 self.with_rooted_values(&roots, |state| {
+                    // native-call: table_sort->table_sort_values:comparator
                     state.table_sort_values(&mut arr, comp_idx)
                 })?;
             }
@@ -629,6 +638,7 @@ impl State {
             // string bytes: it cannot call Lua, allocate, or trigger GC, and the
             // source table holds every element until writeback. Rooting here
             // would just copy the array twice more for nothing.
+            // native-call: table_sort->table_sort_values:default
             None => self.table_sort_values(&mut arr, comp_idx)?,
         }
 
@@ -652,12 +662,14 @@ impl State {
     ) -> Result<()> {
         let table_idx = self.convert_idx(table_idx)?;
         let comp_idx = has_comp.then(|| self.convert_idx(2)).transpose()?;
+        // native-call: table_sort_scratch->table_sort_heap
         table_sort_heap(self, &mut ScratchTableSortAccess { table_idx }, n, comp_idx)
     }
 
     fn table_sort_values(&mut self, values: &mut [Val], comp_idx: Option<usize>) -> Result<()> {
         let n = values.len();
         let mut access = VecSortAccess { values };
+        // native-call: table_sort_values->table_sort_heap
         table_sort_heap(self, &mut access, n, comp_idx)
     }
 
@@ -683,6 +695,7 @@ impl State {
             self.push_unchecked(self.stack[comp_idx]);
             self.push_unchecked(a);
             self.push_unchecked(b);
+            // native-call: table_sort_less->call_unguarded
             self.call_unguarded(ArgCount::Fixed(2), RetCount::Fixed(1))?;
             return Ok(self.pop_val().truthy());
         }
@@ -707,6 +720,7 @@ impl State {
     /// panic out of `__tostring` poisons it.
     #[hotpath::measure]
     pub fn to_string_with_meta(&mut self, idx: isize) -> Result<String> {
+        // native-call: to_string_with_meta->tostring_bytes
         let raw = self.tostring_bytes(idx)?;
         Self::lossy_utf8_checked(&raw)
     }
@@ -726,12 +740,14 @@ impl State {
     /// Guarded like [`State::call`]: refused on a poisoned State, and a
     /// panic out of `__tostring` poisons it.
     pub fn tostring_bytes(&mut self, idx: isize) -> Result<Vec<u8>> {
+        // native-call: tostring_bytes->tostring_bytes_unguarded
         self.guarded(|state| state.tostring_bytes_unguarded(idx))
     }
 
     /// [`State::tostring_bytes`] without the poison boundary, for the
     /// standard library.
     pub(crate) fn tostring_bytes_unguarded(&mut self, idx: isize) -> Result<Vec<u8>> {
+        // native-call: tostring_bytes_unguarded->tostring_rendering
         match self.tostring_rendering(idx)? {
             // No handler ran, so `idx` still names the same string.
             TostringRendering::Itself => Ok(self.to_bytes(idx)?.to_vec()),
@@ -757,6 +773,7 @@ impl State {
             self.check_stack_space(2)?;
             self.push_unchecked(tostring_handler);
             self.push_unchecked(val);
+            // native-call: tostring_rendering->call_unguarded
             self.call_unguarded(ArgCount::Fixed(1), RetCount::Fixed(1))?;
             let result = self.pop_val();
             if matches!(
@@ -794,6 +811,7 @@ impl State {
             Val::RustFn(_) | Val::Obj(_) => {
                 // Read the type before any handler runs.
                 let value_type = val.typ(&self.heap);
+                // native-call: error_value->tostring_bytes_unguarded
                 let rendering = self.tostring_bytes_unguarded(idx)?;
                 ErrorValue::Object {
                     value_type,

@@ -126,6 +126,7 @@ impl State {
             {
                 return Ok(());
             }
+            // native-call: instr_tfor_call->instr_tfor_call_rust_fn
             return self.instr_tfor_call_rust_fn(f, base, state, control, num_vars);
         }
 
@@ -135,6 +136,7 @@ impl State {
         self.push_unchecked(control);
 
         // Call with 2 args (state, control), expecting num_vars returns
+        // native-call: instr_tfor_call->call_unguarded
         self.call_unguarded(ArgCount::Fixed(2), RetCount::Fixed(num_vars))?;
 
         // The call preserves caller slot positions (see call_unguarded); user code
@@ -257,6 +259,7 @@ impl State {
         self.push_unchecked(state);
         self.push_unchecked(control);
 
+        // native-call: instr_tfor_call_rust_fn->invoke_rust_fn
         let num_ret_reported = self.invoke_rust_fn(f, call_base, false)?;
 
         // This truncate is redundant: the error propagates into

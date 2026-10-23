@@ -80,6 +80,16 @@ hotpath harness and set by brokkr, is the only environment input in the
 repository. Script constants live in `scripts/lib.sh`; hyperfine uses a fixed warmup of
 2 runs.
 
+`scripts/native_calls.py` is the native-stack guard: it checks
+`reference/native-calls.toml`, the inventory of every function that can call
+back into Lua and every scenario `tests/native_stack.rs` runs, against `src/`
+and the test, and prints `ok` (a `brokkr check` script check). Every call to
+an inventoried function carries a `// native-call: <edge-id>` comment on or
+directly above it, which the `native-call-marker` textlint rule also
+enforces; `python3 scripts/native_calls.py sites` lists the call sites.
+reference/native-calls.md explains the inventory, the direct-call convention
+the lexical check relies on, and how to add a path.
+
 `scripts/notes_drop.py` and `scripts/notes_move.py` are maintainer helpers for
 the `notes/` working documents, run directly when needed; no gate invokes them.
 `scripts/frame_sizes.py <binary> <symbol substring>...` prints native frame
@@ -178,6 +188,7 @@ boundary and operand contract. Handler writes survive an error.
 
 - `tests/run_examples.rs` - runs every regular Lua file under `examples/` with the binary cargo built for the test run (`tests/common` owns the binary path and the shared, manifest-rooted example list; no test may reference `target/` or spawn cargo), in parallel worker threads. The shared list skips symlinks and orders relative paths by encoded bytes to match `find -type f` and `LC_ALL=C sort`. That includes the stress examples and the generated `parse/large_source.lua`. Each example runs under `scripts/test_limited.sh` (so its memory cap applies) with a fixed 60-second timeout. The runner uses at most eight workers, bounded by available parallelism and the number of examples. It fails on timeout, nonzero exit, unexpected stderr, if any stdout line ends with `: false`, or if a file defining `_bench()` prints no line ending in `: true`. Examples that print test results follow the convention `print("test name: " .. tostring(condition))`. Adding an example that prints a line ending in `: false` will fail this test.
 - `tests/error_handling.rs`, `gc_upvalues.rs`, `gsub_errors.rs`, `metamethod_errors.rs`, `rustfn_error.rs` - focused integration suites.
+- `tests/native_stack.rs` backs docs/limits.md's "Envelope": each path in `reference/native-calls.toml` recursed to `MAX_NATIVE_CALL_DEPTH` under every metamethod chain kind and deepest-point leaf, on `tests/common/stack.rs`'s profile-dependent thread size. `brokkr.toml` runs it in dev (the default and snapshot sweeps) and release (`release-native-stack` and `release-native-stack-snapshot`). A new call path into Lua needs a scenario there; reference/native-calls.md has the steps.
 - `tests/diff_test.rs` is the differential gate: it uses the same shared example list, and checks that its ordered paths match `scripts/diff_test.sh --list-examples`. It drives the shell gate over the whole corpus in partitions that run concurrently inside one test, once per `[[check]]` feature shape in `brokkr.toml` (there is no separate brokkr script check for it), and also checks malformed timeout rejection and nonempty marker reasons. The corpus partitions are compiled out under the `hotpath` feature. `scripts/diff_gate.sh` is an optional debug-build wrapper around `diff_test.sh` for direct runs; nothing in `brokkr check` invokes it. Mark intentional divergences with a `-- DIFF: <reason>` comment; dellingr must still succeed, but the references are skipped. A file carrying a `-- SKIP-DIFF: <reason>` line is not run by the differential gate. Reference Lua is required for unmarked examples; the test leaves that check, and its error message, to `diff_test.sh`.
 - `tests/bench_scripts.rs` checks the bench/ footer contract and that each `brokkr.toml` workload's `file` and `hotpath_file` give their `kernel` and shared helper functions matching `analyze_cost` fingerprints, which guards the same-kernel pairing described under Hotpath benchmarks.
 - Unit tests live alongside their modules (e.g. `src/vm/object.rs` has GC tests).

@@ -254,14 +254,57 @@ The runtime limits are sized so that all of them at once fit:
 
 "At once" means: the host call plus nested calls made from Rust up to
 `MAX_NATIVE_CALL_DEPTH`, through any of them (sort comparators, `gsub`
-replacement functions, metamethod handlers, iterator functions, a callback
-calling `State::call`), with an `__index` table chain held across them at
-`MAX_METAMETHOD_DEPTH`, and at the deepest point a pattern match near
-`MAXCCALLS`, collections with a chunk tree nested near `MAX_CHUNK_NESTING`
-alive, and the refusal of the next call with its traceback.
-`tests/native_stack.rs` drives exactly that for each kind of call it
-enumerates, in both settings, with and without the `snapshot` feature, on
-x86-64 Linux.
+replacement functions and replacement tables, metamethod handlers, table
+library reads, writes and lengths through metamethods, `tostring`, `print`,
+`string.format` and `error` rendering a value, iterator functions, a
+callback calling the host API), with an `__index` or `__newindex` table
+chain held across them so the metamethod depth is at `MAX_METAMETHOD_DEPTH`,
+and at the deepest point any one of:
+
+- a pattern match one call short of `MAXCCALLS` through each recursive item
+  kind (optional, greedy and minimal repetition), or its rejection at
+  `MAXCCALLS`;
+- a collection with a chunk tree nested to `MAX_CHUNK_NESTING` alive;
+- `string.gmatch` creating its iterator in the last native level (the first
+  call in a process also compiles the fixed wrapper chunk there), or refused
+  past it;
+- the refusal of the next call, through the same path as the levels below
+  it, or of the next metamethod step, with its traceback;
+- instead of a held chain, a string `__index` chain (the string metatable's
+  `__index` naming a string, alone or alternating with a table) that uses
+  the remaining metamethod depth and is refused.
+
+These deepest-point items are separate peaks, each measured on its own, not
+simultaneously live.
+
+How `tests/native_stack.rs` validates it, on x86-64 Linux:
+
+- The native stack a level costs is the frames on the compiled path that
+  made the call, so the unit of coverage is the path, not the call site.
+  Every path that can call back into Lua is listed, with its edges, in
+  `reference/native-calls.toml`; reference/native-calls.md describes the
+  guard that keeps that list current. The test runs each path on its own,
+  repeated up to the native limit (callthrough levels fill any remainder a
+  path's cycle leaves), with every held chain kind and every deepest-point
+  item.
+- Mixtures of paths need no runs of their own. A level of path `i` costs
+  `c_i` bytes and holds `m_i` metamethod units that a chain step would
+  otherwise spend at `s` bytes each, so the stack a mixture uses grows with
+  each level's `c_i - m_i * s`, and the worst mixture for a chain kind is the
+  homogeneous run of the path that maximizes it, which the test runs.
+- A Rust function used as a generic-for iterator runs without a native
+  level; the calls it makes into Lua are the levels (`ipairs` reading
+  through `__index`, a host iterator calling `State::call`), and both are
+  paths.
+- A `__call` chain through non-function values is resolved in a loop: each
+  step holds a metamethod unit while the call runs but adds no native frame,
+  so it is not a chain kind of its own.
+- It runs in both settings, each with and without the `snapshot` feature.
+  The `snapshot` runs validate that build configuration only.
+- The recurring cost per level is what its on-demand
+  `native_bytes_per_level` probe measures. Transient peaks (descent, return,
+  error construction, unwinding) are covered by the full-depth runs, not by
+  the probe.
 
 Parsing keeps the stricter promise: parsing at the syntax budget fits a
 2 MiB thread in both settings.

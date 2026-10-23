@@ -427,9 +427,11 @@ fn append_function_replacement(
         }
         let argument_count =
             crate::error::results_count(captures.len() - 1).map_err(|kind| state.error(kind))?;
+        // native-call: append_function_replacement->call_unguarded:captures
         state.call_unguarded(ArgCount::Fixed(argument_count), RetCount::Fixed(1))?;
     } else {
         push_capture_value(state, bytes, captures[0], StringPatternFunction::Gsub)?;
+        // native-call: append_function_replacement->call_unguarded:whole
         state.call_unguarded(ArgCount::Fixed(1), RetCount::Fixed(1))?;
     }
     let keep_original = gsub_replacement_keeps_original(state, -1);
@@ -491,6 +493,7 @@ fn append_gsub_replacement(
             preflight_capture_bytes(state, [key], StringPatternFunction::Gsub)?;
             state.push_value(3)?;
             push_capture_value(state, bytes, key, StringPatternFunction::Gsub)?;
+            // native-call: append_gsub_replacement->get_table_unguarded
             state.get_table_unguarded(-2)?;
             let keep_original = gsub_replacement_keeps_original(state, -1);
             if keep_original {
@@ -511,6 +514,7 @@ fn append_gsub_replacement(
             }
         }
         LuaType::Function => {
+            // native-call: append_gsub_replacement->append_function_replacement
             append_function_replacement(state, out, bytes, captures)?;
         }
         _ => append_capture_bytes(state, out, bytes, captures[0], StringPatternFunction::Gsub)?,
@@ -719,6 +723,7 @@ pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
             state.push_number(s.len() as f64)?;
             state.set_table_raw(-3)?;
 
+            // native-call: lib:string.gmatch->push_gmatch_wrapper:empty
             return push_gmatch_wrapper(state, gmatch_schema::EMPTY_ITERATOR_ID, gmatch_empty_iter);
         }
 
@@ -739,6 +744,7 @@ pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         state.push_number(init as f64)?;
         state.set_table_raw(-3)?;
 
+        // native-call: lib:string.gmatch->push_gmatch_wrapper:general
         push_gmatch_wrapper(state, gmatch_schema::ITERATOR_ID, gmatch_iter)
     }),
     // string.gsub(s, pattern, repl [, n])
@@ -781,10 +787,13 @@ pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         // byte. A finite budget can run out inside that tail, so the two
         // differ in where exhaustion is reported.
         if pattern.is_empty() {
+            // native-call: lib:string.gsub->gsub_empty_pattern
             gsub_empty_pattern(state, &s, &repl_type, max_replacements)
         } else if crate::patterns::is_plain(&pattern) {
+            // native-call: lib:string.gsub->gsub_plain_pattern
             gsub_plain_pattern(state, &s, &pattern, &repl_type, max_replacements)
         } else {
+            // native-call: lib:string.gsub->gsub_lua_pattern
             gsub_lua_pattern(state, &s, &pattern, &repl_type, max_replacements)
         }
     }),
@@ -809,6 +818,7 @@ fn gsub_empty_pattern(
     for i in 0..=s.len() {
         if max_replacements.is_none_or(|max| count < max) {
             let captures = [LuaCapture::Bytes { start: i, end: i }];
+            // native-call: gsub_empty_pattern->append_gsub_replacement
             append_gsub_replacement(state, &mut result, repl_type, s, &captures, &mut template)?;
             count += 1;
         }
@@ -851,6 +861,7 @@ fn gsub_plain_pattern(
         append_bytes(state, &mut result, &s[pos..start])?;
 
         let captures = [LuaCapture::Bytes { start, end }];
+        // native-call: gsub_plain_pattern->append_gsub_replacement
         append_gsub_replacement(state, &mut result, repl_type, s, &captures, &mut template)?;
 
         pos = end;
@@ -914,6 +925,7 @@ fn gsub_lua_pattern(
         append_bytes(state, &mut result, &s[pos..range.start])?;
         captures.clear();
         captures.extend((0..matcher.num_matches()).map(|i| matcher.capture(i)));
+        // native-call: gsub_lua_pattern->append_gsub_replacement
         append_gsub_replacement(state, &mut result, repl_type, s, &captures, &mut template)?;
         count += 1;
         pos = range.end;
@@ -972,6 +984,7 @@ fn push_gmatch_wrapper(
     state.push_lib_fn(iter_id, iter)?;
     state.push_value(1)?;
     state.remove(1)?;
+    // native-call: push_gmatch_wrapper->call_unguarded
     state.call_unguarded(ArgCount::Fixed(2), RetCount::Fixed(1))?;
     Ok(1)
 }
