@@ -259,6 +259,13 @@ impl State {
         let func_val = self.stack[idx];
         if let Val::RustFn(f) = func_val {
             entered.mark_entered();
+            // Removing the function shifts arguments, but preserves the shared
+            // Rust-call ABI: invoke_rust_fn receives the first argument slot
+            // and returns results into it. Keeping the function below that
+            // slot instead needs a separate result destination and coordinated
+            // cleanup changes, including the iterator's function-free path.
+            // Do not add that bookkeeping to native-live frames without
+            // measuring their sizes and checking refusal/unwind boundaries.
             self.stack.remove(idx);
             // native-call: begin_call->invoke_rust_fn
             return self.invoke_rust_fn(f, idx, method).map(Some);
@@ -291,7 +298,8 @@ impl State {
             let func_val = self.stack[idx];
             if let Val::RustFn(f) = func_val {
                 // The Rust callback ABI: the callee's frame starts at the
-                // first argument, with the function value gone.
+                // first argument, with the function value gone. Keep this
+                // consistent with the direct-function path's slot contract.
                 self.stack.remove(idx);
                 // native-call: begin_callable_call->invoke_rust_fn
                 break self.invoke_rust_fn(f, idx, method).map(Some);
@@ -474,8 +482,12 @@ impl State {
             return Err(error);
         }
         if reported < available {
-            // Keep the top `reported` values, in order, at call_base.
-            self.stack[call_base..].rotate_right(reported);
+            // Only the top `reported` values survive. Copy them in order,
+            // allowing overlap, rather than rotating discarded arguments and
+            // temporaries as well. Val is Copy and discarded slots own no GC
+            // resources; truncation below removes the duplicate root slots.
+            let kept_start = self.stack.len() - reported;
+            self.stack.copy_within(kept_start.., call_base);
             self.stack.truncate(call_base + reported);
         }
         self.stack_bottom = old_stack_bottom;
@@ -674,6 +686,11 @@ impl State {
     ///
     /// A one-line helper so the allocation has its own hotpath measurement
     /// point. `#[inline]` keeps plain builds at the original codegen.
+    /// A shared arena requires coordinated changes to State, CallInfo,
+    /// mark_gc_roots, snapshot quiescence and pop_activation: offsets must
+    /// release exactly the owning activation's values on return and unwind,
+    /// and inactive arena capacity must never become a GC root. Reusing storage
+    /// here alone cannot establish that ownership and root-set contract.
     #[hotpath::measure]
     #[inline]
     fn collect_varargs(&mut self, vararg_start: usize) -> Vec<Val> {

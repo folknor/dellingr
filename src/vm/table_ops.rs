@@ -6,7 +6,7 @@
 use super::lua_val::{PointerIdKey, RustFunc, Val};
 use super::table::{TableError, TableNext};
 use super::{Result, State, TypeError};
-use crate::error::{ErrorKind, ErrorValue, InternalFault, LibraryError};
+use crate::error::{Error, ErrorKind, ErrorValue, InternalFault, LibraryError};
 use crate::instr::{ArgCount, RetCount};
 
 /// How a value renders under `tostring`; see `State::tostring_rendering`.
@@ -26,6 +26,13 @@ trait TableSortAccess {
         index: usize,
         value: Val,
     ) -> std::result::Result<(), TableError>;
+}
+
+fn reserve_sort_values(values: &mut Vec<Val>, additional: usize) -> Result<()> {
+    values
+        .try_reserve_exact(additional)
+        .map_err(|_| Error::without_location(ErrorKind::TableGrowthFailed))?;
+    Ok(())
 }
 
 struct VecSortAccess<'a> {
@@ -631,7 +638,12 @@ impl State {
             // compared. `src/vm/tests.rs` covers a comparator that clears the
             // source table before collecting.
             Some(_) => {
-                let roots = arr.clone();
+                // Both copies can be as large as the sorted array. Make their
+                // growth fallible before copying or entering the comparator.
+                let mut roots = Vec::new();
+                reserve_sort_values(&mut roots, arr.len())?;
+                roots.extend_from_slice(&arr);
+                reserve_sort_values(&mut self.transient_roots.values, roots.len())?;
                 self.with_rooted_values(&roots, |state| {
                     // native-call: table_sort->table_sort_values:comparator
                     state.table_sort_values(&mut arr, comp_idx)
@@ -898,5 +910,19 @@ impl State {
     pub(super) fn alloc_table_with_capacity(&mut self, capacity: usize) -> Val {
         let obj = self.allocator().alloc_table_with_capacity(capacity);
         Val::Obj(obj)
+    }
+}
+
+#[cfg(test)]
+mod sort_root_tests {
+    use super::{ErrorKind, Val, reserve_sort_values};
+
+    #[test]
+    fn sort_root_reservation_reports_capacity_overflow() {
+        let mut roots = Vec::<Val>::new();
+        let error = reserve_sort_values(&mut roots, usize::MAX)
+            .expect_err("an unrepresentable sort root list must be rejected");
+        assert!(matches!(error.kind(), ErrorKind::TableGrowthFailed));
+        assert!(roots.is_empty());
     }
 }

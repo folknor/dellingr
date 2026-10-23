@@ -38,7 +38,7 @@ disallowed-methods = [
     { path = "f64::powi", reason = "Not specified to round once and lowered to a host routine. Use crate::crmath::pow or exact bit construction." },
     { path = "f64::cbrt", reason = "Platform libm results differ across hosts; there is no deterministic port." },
     { path = "f64::hypot", reason = "Platform libm results differ across hosts; there is no deterministic port." },
-    { path = "f64::mul_add", reason = "Can lower to a library fma that is not correctly rounded on some targets. Use crate::crmath::fma." },
+    { path = "f64::mul_add", reason = "Can lower to a library fma that is not correctly rounded on some targets. Use crate::crmath::soft_fma or a crmath kernel's hardware FMA backend." },
     { path = "f32::sin", reason = "Platform libm results differ across hosts." },
     { path = "f32::cos", reason = "Platform libm results differ across hosts." },
     { path = "f32::tan", reason = "Platform libm results differ across hosts." },

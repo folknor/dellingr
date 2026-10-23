@@ -353,6 +353,11 @@ impl State {
         let receiver_table = self.heap.as_table_ref(ptr)?;
         let receiver_metatable = receiver_table.get_metatable()?;
         let metatable = self.heap.as_table_ref(receiver_metatable)?;
+        // Do not cache a missing __index as a direct nil result here. Even a
+        // cold direct nil would bypass get_field_slow's stack preflight;
+        // warming a miss must never decide which lookup route is taken.
+        // Removing that slow route needs the same admission/headroom contract
+        // as the register-native handler paths, rather than a sticky miss IC.
         let (index_field_index, index_handler) = metatable.get_with_index(&index_key)?;
         let Some(index_table) = index_handler.as_object_ptr() else {
             if let Some(cache) = cache {

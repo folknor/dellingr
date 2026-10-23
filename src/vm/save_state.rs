@@ -838,14 +838,15 @@ impl<'a> SaveBuilder<'a> {
             // integer writes land, so it must round-trip; replaying the
             // upserts alone would rebuild only its live prefix.
             let (array_len, array_slots, entries) = table.snapshot_entries();
+            let (array_entries, slots) = entries.split_at(array_slots);
             let array = if array_len == 0 {
                 None
             } else {
                 Some((
                     array_len as u64,
-                    entries
-                        .into_iter()
-                        .take(array_slots)
+                    array_entries
+                        .iter()
+                        .copied()
                         .map(|(key, value)| {
                             Ok((
                                 self.encode_environment_root(key, &token)?,
@@ -862,14 +863,16 @@ impl<'a> SaveBuilder<'a> {
             // Values are part of this comparison deliberately: restore applies
             // these slots after upserts, including their values. Comparing only
             // keys would require a different restore contract, especially for
-            // transitions between live entries and tombstones.
-            let slots = table.snapshot_hash_slots();
-            let hash_slots = if slots == baseline.hash_slots {
+            // transitions between live entries and tombstones. Reuse the tail
+            // of the snapshot above instead of walking every physical slot
+            // again.
+            let hash_slots = if slots == baseline.hash_slots.as_slice() {
                 None
             } else {
                 Some(
                     slots
-                        .into_iter()
+                        .iter()
+                        .copied()
                         .map(|(key, value)| {
                             Ok((
                                 self.encode_environment_root(key, &token)?,
@@ -1870,8 +1873,9 @@ fn materialize_payload(
             })?;
             let metatable = table.get_metatable();
             let (array_len, array_slots, mut entries) = table.snapshot_entries();
-            entries.truncate(array_slots);
             // Keep setup-only fields after the saved slots, as for order deltas.
+            // Compact those fields in the physical hash snapshot in place so
+            // its slots are not rebuilt in a second table walk.
             let mut saved_keys: DetSet<TableKey> =
                 DetSet::with_capacity_and_hasher(saved.len(), FixedState::default());
             for (key, _) in &saved {
@@ -1879,17 +1883,23 @@ fn materialize_payload(
                     saved_keys.insert(TableKey::from_prevalidated(*key));
                 }
             }
-            let extra: Vec<_> = table
-                .snapshot_hash_slots()
-                .into_iter()
-                .filter(|(key, value)| {
-                    !matches!(key, Val::Nil)
-                        && !matches!(value, Val::Nil)
-                        && !saved_keys.contains(&TableKey::from_prevalidated(*key))
-                })
-                .collect();
+            let mut extra_end = array_slots;
+            for read in array_slots..entries.len() {
+                let (key, value) = entries[read];
+                if !matches!(key, Val::Nil)
+                    && !matches!(value, Val::Nil)
+                    && !saved_keys.contains(&TableKey::from_prevalidated(key))
+                {
+                    entries[extra_end] = (key, value);
+                    extra_end += 1;
+                }
+            }
+            let extra_count = extra_end - array_slots;
+            entries.truncate(extra_end);
             entries.extend(saved);
-            entries.extend(extra);
+            // Compaction leaves setup-only fields before saved slots; restore
+            // the required saved-then-extra order without allocating a buffer.
+            entries[array_slots..].rotate_left(extra_count);
             table
                 .rebuild_from_snapshot(array_len, array_slots, entries)
                 .map_err(|error| {

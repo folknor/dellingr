@@ -469,6 +469,10 @@ pub(super) struct Table {
     /// nil. Storage metadata only; nothing observable depends on it.
     lead: usize,
     /// Exact number of non-nil slots, independent of the bounded prefix hint.
+    /// This cannot be narrowed to u32: the window can exceed u32::MAX slots
+    /// on 64-bit hosts. The logical key limit needs 53 bits, as do base and
+    /// lead, so pairing these counters in one usize would truncate valid
+    /// tables. Keep this exact unless storage metadata is redesigned together.
     array_live: usize,
     storage: TableStorage,
     metatable: Option<ObjectPtr>,
@@ -1268,9 +1272,12 @@ impl Table {
     /// that tail on load nor discarding live slots is safe; the gap's
     /// allocation is what has to be able to fail.
     fn reserve_array(&mut self, len: usize) -> std::result::Result<(), TableError> {
-        self.array
-            .try_reserve(len.saturating_sub(self.array.len()))
-            .map_err(|_| TableError::GrowthFailed)
+        if len > self.array.capacity() {
+            self.array
+                .try_reserve(len - self.array.len())
+                .map_err(|_| TableError::GrowthFailed)?;
+        }
+        Ok(())
     }
 
     /// Refuse `n` more logical array keys past `MAX_ARRAY_LEN`.
@@ -1284,7 +1291,10 @@ impl Table {
     /// How many keys an append adds to the logical array: the appended key
     /// plus every live hash key `migrate_from_hash` will then pull in. Refused
     /// when that run would pass `MAX_ARRAY_LEN`, so migration itself never
-    /// has to check the limit.
+    /// has to check the limit. This read-only walk deliberately precedes
+    /// migration: both the complete reservation and the logical limit check
+    /// must succeed before any hash key is removed. Combining the walks
+    /// would need staging storage or rollback to preserve failure atomicity.
     fn append_growth(&self) -> std::result::Result<usize, TableError> {
         self.check_vlen_growth(1)?;
         let mut end = self.vlen + 1;
@@ -1330,6 +1340,20 @@ impl Table {
     fn append(&mut self, value: Val) -> std::result::Result<(), TableError> {
         self.check_vlen_growth(1)?;
         self.prepare_append()?;
+        if self.hash_live_len() == 0 {
+            // FIFO appends usually reuse capacity after dropping the dead
+            // prefix. Do not repeat the logical growth check or enter the
+            // hash migration preflight for this single-slot push.
+            if self.array.len() == self.array.capacity() {
+                self.reserve_array(self.array.len() + 1)?;
+            }
+            self.vlen += 1;
+            self.array.push(value);
+            self.array_live += usize::from(!matches!(value, Val::Nil));
+            #[cfg(debug_assertions)]
+            self.debug_assert_invariants();
+            return Ok(());
+        }
         self.reserve_append()?;
         self.vlen += 1;
         self.array.push(value);
@@ -1652,13 +1676,19 @@ impl Table {
         true
     }
 
+    /// Reserve a positional batch against the window the append will keep.
+    fn prepare_list_append(&mut self, count: usize) -> std::result::Result<(), TableError> {
+        self.prepare_append()?;
+        self.reserve_array(self.array.len().saturating_add(count))
+    }
+
     /// Stores the values of a table constructor's positional fields at keys
     /// `first..`. Like reference Lua, which presizes the array part for them,
     /// a nil positional value still occupies its array slot, so
     /// `#{1, nil, 3}` is 3.
     ///
-    /// When the batch reaches the append position, the array reserves room
-    /// for the batch's last key up front, so a constructor's positional part
+    /// When the batch reaches the append position, it prepares the window
+    /// before reserving room for the batch's last key, so its positional part
     /// costs one allocation rather than a doubling sequence. The reservation
     /// is capacity only: the per-key loop below still decides, key by key,
     /// between appending (nil included) and a hash insert, and migration after
@@ -1669,17 +1699,16 @@ impl Table {
         first: usize,
         mut values: impl ExactSizeIterator<Item = Val>,
     ) -> std::result::Result<(), TableError> {
-        let count = values.len();
-        if count > 0 && first <= self.vlen + 1 && self.base + self.array.len() == self.vlen {
-            let last = first.saturating_add(count - 1);
-            self.reserve_array(
-                self.array
-                    .len()
-                    .saturating_add(last.saturating_sub(self.vlen)),
-            )?;
-        }
         let mut key = first;
+        let mut reserved = false;
         while let Some(value) = values.next() {
+            if key == self.vlen + 1 && !reserved {
+                // Earlier writes can empty or repopulate the window. Release
+                // its dead storage before sizing the remaining batch, rather
+                // than reserving against slots the first append will drop.
+                self.prepare_list_append(1 + values.len())?;
+                reserved = true;
+            }
             if key == self.vlen + 1 && self.appends_are_plain() {
                 // Every remaining key is an append whose window preparation
                 // and hash migration would do nothing, so the rest of the
@@ -2559,6 +2588,26 @@ mod tests {
         // Appending nil is a no-op.
         t.array_insert(6, Val::Nil).unwrap();
         assert_eq!(t.array.len(), 5);
+    }
+
+    #[test]
+    fn positional_batch_reserves_after_releasing_dead_storage() {
+        let mut table = Table::default();
+        fill(&mut table, 1..=4096);
+        for key in (1..=4096).rev() {
+            table.insert(n(key), Val::Nil).unwrap();
+        }
+        assert_eq!(table.array_live, 0);
+        table.prepare_list_append(32).unwrap();
+        assert_eq!(table.base, 4096);
+        assert!(table.array.is_empty());
+        assert!(table.array.capacity() < 4096);
+        table
+            .set_list(4097, [Val::Nil, Val::Bool(true)].into_iter())
+            .unwrap();
+        assert_eq!(table.vlen, 4098);
+        assert_eq!(table.get(&n(4097)), Val::Nil);
+        assert_eq!(keys(&table), vec![n(4098)]);
     }
 
     #[test]

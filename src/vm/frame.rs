@@ -521,6 +521,14 @@ impl Frame {
                 Instr::OP_FOR_PREP => state.instr_for_prep(ra, ip, inst.sj())?,
                 Instr::OP_FOR_LOOP => state.instr_for_loop(ra, ip, inst.sj())?,
                 Instr::OP_TFOR_CALL => {
+                    // The next/ipairs fast paths need no call-site record or
+                    // cost flush. Deferring these to the fallback requires
+                    // carrying ip and local_cost through iterator helpers that
+                    // stay live across native re-entry. Keep the eager boundary
+                    // until that change's frame sizes can be measured: even a
+                    // redundant cleanup has affected this path's spill layout
+                    // (see instr_tfor_call_rust_fn). No call or refusal may
+                    // precede the deferred record and flush.
                     state.record_call_site(*ip);
                     Self::flush_local_cost(state, local_cost)?;
                     // native-call: run_frame->instr_tfor_call

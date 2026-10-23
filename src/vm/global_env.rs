@@ -26,7 +26,7 @@ use crate::det_hash::IndexMap;
 use crate::instr::Builtin;
 
 use super::Val;
-use super::caches::{GlobalLookupCacheEntry, GlobalLookupCacheSlot};
+use super::caches::{GlobalLookupCacheEntry, GlobalLookupCacheSlot, GlobalLookupIndex};
 use super::object::{GcHeap, Markable, ObjectPtr};
 
 #[derive(Clone, Copy)]
@@ -130,13 +130,19 @@ impl GlobalEnv {
             if let Some(cache) = cache {
                 cache.set(GlobalLookupCacheEntry {
                     globals_version: self.version,
-                    index,
+                    index: GlobalLookupIndex::Present(index),
                 });
             }
             return self
                 .globals
                 .get_index(index)
                 .map_or(Val::Nil, |(_, binding)| binding.val);
+        }
+        if let Some(cache) = cache {
+            cache.set(GlobalLookupCacheEntry {
+                globals_version: self.version,
+                index: GlobalLookupIndex::Absent(self.globals.len()),
+            });
         }
         Val::Nil
     }
@@ -147,9 +153,13 @@ impl GlobalEnv {
         if entry.globals_version != self.version {
             return None;
         }
-        self.globals
-            .get_index(entry.index)
-            .map(|(_, binding)| binding.val)
+        match entry.index {
+            GlobalLookupIndex::Present(index) => self
+                .globals
+                .get_index(index)
+                .map(|(_, binding)| binding.val),
+            GlobalLookupIndex::Absent(len) => (len == self.globals.len()).then_some(Val::Nil),
+        }
     }
 
     /// Overwrite the binding at `index`, keeping its slot, and account for a
@@ -242,7 +252,7 @@ impl GlobalEnv {
             if let Some(cache) = cache {
                 cache.set(GlobalLookupCacheEntry {
                     globals_version: self.version,
-                    index,
+                    index: GlobalLookupIndex::Present(index),
                 });
             }
         } else if !matches!(val, Val::Nil) {
@@ -259,7 +269,12 @@ impl GlobalEnv {
         if entry.globals_version != self.version {
             return false;
         }
-        self.write_at(entry.index, val)
+        // Store caches use the same entry type: an absence must never be
+        // treated as a writable index. Use the named insertion path instead.
+        match entry.index {
+            GlobalLookupIndex::Present(index) => self.write_at(index, val),
+            GlobalLookupIndex::Absent(_) => false,
+        }
     }
 
     /// Replace the setup environment with the saved bindings, in saved slot
@@ -374,5 +389,80 @@ mod tests {
         env.write("print".to_owned(), Val::Nil);
         assert_eq!(env.version, version);
         assert_eq!(env.read_cached(&cache), Some(Val::Num(7.0)));
+    }
+
+    #[test]
+    fn absent_global_cache_survives_value_writes_but_not_definition() {
+        let mut env = GlobalEnv::new();
+        env.write("existing".to_owned(), Val::Num(1.0));
+        let cache = GlobalLookupCacheSlot::default();
+        assert_eq!(env.read("optional", Some(&cache)), Val::Nil);
+        assert_eq!(env.read_cached(&cache), Some(Val::Nil));
+        env.write("optional".to_owned(), Val::Nil);
+        env.write("existing".to_owned(), Val::Num(2.0));
+        assert_eq!(env.read_cached(&cache), Some(Val::Nil));
+        assert!(!env.write_cached(&cache, Val::Num(3.0)));
+        env.write_named("optional", Val::Num(3.0), Some(&cache));
+        assert_eq!(env.read_cached(&cache), None);
+        assert_eq!(env.read("optional", Some(&cache)), Val::Num(3.0));
+        assert_eq!(env.read_cached(&cache), Some(Val::Num(3.0)));
+    }
+
+    #[test]
+    fn absent_global_cache_invalidates_on_host_definition() {
+        let mut env = GlobalEnv::new();
+        let cache = GlobalLookupCacheSlot::default();
+        env.read("optional", Some(&cache));
+        assert_eq!(env.read_cached(&cache), Some(Val::Nil));
+        env.write("optional".to_owned(), Val::Num(4.0));
+        assert_eq!(env.read_cached(&cache), None);
+        assert_eq!(env.read("optional", Some(&cache)), Val::Num(4.0));
+    }
+
+    #[test]
+    fn absent_global_cache_invalidates_on_compaction_at_equal_length() {
+        let mut env = GlobalEnv::new();
+        env.seal();
+        env.write("removed".to_owned(), Val::Num(1.0));
+        env.write("removed".to_owned(), Val::Nil);
+        let cache = GlobalLookupCacheSlot::default();
+        env.read("optional", Some(&cache));
+        assert_eq!(env.read_cached(&cache), Some(Val::Nil));
+        let len = env.len();
+        env.write("optional".to_owned(), Val::Num(5.0));
+        assert_eq!(env.len(), len);
+        assert_eq!(env.read_cached(&cache), None);
+        assert_eq!(env.read("optional", Some(&cache)), Val::Num(5.0));
+    }
+
+    #[test]
+    fn absent_global_cache_invalidates_on_both_environment_swaps() {
+        let mut env = GlobalEnv::new();
+        env.write("optional".to_owned(), Val::Num(6.0));
+        let saved = env.restrict(&[]);
+        let cache = GlobalLookupCacheSlot::default();
+        env.read("optional", Some(&cache));
+        assert_eq!(env.read_cached(&cache), Some(Val::Nil));
+        env.replace(saved);
+        assert_eq!(env.read_cached(&cache), None);
+        assert_eq!(env.read("optional", Some(&cache)), Val::Num(6.0));
+        let saved = env.restrict(&[]);
+        env.read("other", Some(&cache));
+        assert_eq!(env.read_cached(&cache), Some(Val::Nil));
+        env.replace(saved);
+        assert_eq!(env.read_cached(&cache), None);
+    }
+
+    #[cfg(feature = "snapshot")]
+    #[test]
+    fn absent_global_cache_invalidates_when_saved_bindings_replace_setup() {
+        let mut env = GlobalEnv::new();
+        env.begin_load_setup();
+        let cache = GlobalLookupCacheSlot::default();
+        env.read("optional", Some(&cache));
+        assert_eq!(env.read_cached(&cache), Some(Val::Nil));
+        env.restore(vec![("optional".to_owned(), Val::Num(7.0))], true);
+        assert_eq!(env.read_cached(&cache), None);
+        assert_eq!(env.read("optional", Some(&cache)), Val::Num(7.0));
     }
 }

@@ -274,34 +274,25 @@ rewrite.
   the same layering as RT-001 and RT-002, and the register-native rewrite
   proposed there removes it.
 
-## RT-015 - Inline caches that never populate: metatables without `__index`, and absent globals
-
-From the `dispatch` hunter (its L3 and L4). Raised as performance observations
-outside the defect bar.
-
-- A metatable without `__index` (one set only for `__call`, `__len` or
-  `__newindex`) never populates the method IC. `get_index_table_field_direct`
-  returns `None` before `set_method`, so every missing-field read on such objects
-  takes the full slow route every time.
-- Reads of absent globals are never cached. `GlobalEnv::read` populates only on a
-  hit, so `if OPTIONAL_FLAG then` pays `Builtin::from_name` plus a hash probe
-  every time.
-
 ## RT-016 - Call-path overheads: TFOR_CALL bookkeeping, vararg allocation, argument memmoves
 
-Raised as performance observations outside the defect bar.
+Raised as performance observations outside the defect bar. The fifth
+resolution wave replaced `invoke_rust_fn`'s whole-frame `rotate_right` with a
+copy of the retained results; the rest was deferred with comments in
+src/vm/eval.rs and src/vm/frame.rs, pending native-frame measurement:
 
 - **`OP_TFOR_CALL` bookkeeping** (dispatch hunter, L5). It records the call site
   and flushes the cost batch before it knows whether the `next` or `ipairs` fast
   path will answer. The fast paths call nothing, so both are wasted on common
   `pairs` and `ipairs` loops. Moving them into `instr_tfor_call_rust_fn` and the
-  Lua iterator path keeps the "record before any call" rule.
+  Lua iterator path keeps the "record before any call" rule. It touches
+  `Frame::run`'s live ranges, so measure `native_bytes_per_level` with it.
 - **Per-call allocations and memmoves** (dispatch hunter, L6).
   `collect_varargs` allocates a fresh `Vec` per vararg call, where a single
-  shared vararg arena with offsets in `CallInfo` would avoid it. `begin_call`'s
-  `self.stack.remove(idx)` memmoves the arguments for every Rust callee.
-  `invoke_rust_fn`'s `rotate_right` moves the callback's whole frame when it
-  returns fewer values than it left.
+  shared vararg arena with offsets in `CallInfo` would avoid it; that needs
+  coordinated State, `CallInfo`, GC-root and snapshot-quiescence changes.
+  `begin_call`'s `self.stack.remove(idx)` memmoves the arguments for every Rust
+  callee.
 
 ## RT-022 - Generic `call_unguarded` and the admission-reporting move need their on-demand checks
 
@@ -327,74 +318,37 @@ Fallible table growth also reshaped `append`, `insert` and
 `try_insert_table_direct` (inlined into `Frame::run`), so the
 `native_bytes_per_level` comparison covers that too.
 
-## RT-023 - Fallible array growth adds work to every append
+## RT-023 - Fallible array growth made the FIFO workload about a third slower
 
-Lateral from the third resolution wave's review. Every `Table::append` now runs
-`check_vlen_growth`, a `try_reserve` through `reserve_append`, and
-`append_growth`. For a table whose hash part has live entries, `append_growth`
-looks up `vlen + 2` to count the migration run, and `migrate_from_hash` then
-looks the same key up again to remove it: two lookups per append where there
-was one. Unmeasured. Measure with `brokkr dellingr --bench` on the table and
-allocation workloads (`fill`, `mixed`, `queue`, `short_tables`,
-`record_tables`) against the commit before the change, interleaved per the
-benchmarking rules, and fold the counting into the migration walk if the delta
-is real.
+**Measured** on plantasjen (performance governor), `brokkr dellingr --bench`,
+interleaved A/B cells, bench/ workloads, 100 ms reporting granularity:
 
-The fourth wave added an exact live-slot count to the array window, maintained
-on every window write, append, migration, shift and restore; measure it in the
-same pass. Its downward padding in `write_outside_window` now sizes from the
-live count, which never exceeds the old `len - lead` estimate and is smaller
-for a sparse window; the cost is more downward splices when pushing in front
-of a sparse window (logarithmic in the pushes, since the live count grows with
-each).
+| workload | bc4f1bf (before) | 9ae4e4b (fallible growth) | 717edae (plus live count) |
+|---|---|---|---|
+| queue | 2101, 2201, 2101, 2101 | 2701, 2801 | 2801, 2801, 2801 |
+| fill | 2601, 2601, 2501 | - | 2701, 2601, 2601 |
+| mixed | 3501 | - | 3601 |
+| record_tables | 3901 | - | 3801 |
+| benchmark | 6401 | - | 6401 |
 
-## RT-024 - `set_list` can reserve against a dead window before append releases it
+`queue` (append at the tail, nil write at the head, so the dead prefix is
+dropped repeatedly and the window moves) regressed by about 700 ms, roughly
++33%, sign-consistent in every pair, and the regression arrived with 9ae4e4b,
+the fallible-growth commit; the live count added little or nothing on top.
+Plain appends (`fill`) and the other table workloads are flat within the
+reporting step. So the cost is on the FIFO path specifically, not on appends
+in general: look at what fallible growth added around dead-prefix release and
+window moves - `reserve_append` / `try_reserve` sizing against a window that
+`prepare_append` is about to shrink, `append_growth` / `check_vlen_growth`
+per append, and any reserve that now runs before `drop_dead_prefix` and so
+reallocates instead of reusing the freed prefix. The `--hotpath` profile of
+examples/tables/queue.lua at 717edae shows only `table::insert` at about 10%
+of its instrumented run, since the growth helpers are inlined.
 
-Lateral from the fourth resolution wave. `set_list` reserves growth for its
-batch against the current window before `prepare_append` gets the chance to
-release an all-dead window. With a large dead window and a constructor batch
-that would restart it, the reservation sizes against storage that is about to
-be dropped, so a refusal (`TableGrowthFailed`) can fire where the post-release
-growth would have fit. Reserve after the release decision, or compute the
-reservation from the post-release shape.
+Also from the third wave's review, outside the FIFO path: for a table whose
+hash part has live entries, `append_growth` looks up `vlen + 2` to count the
+migration run and `migrate_from_hash` looks the same key up again; folding the
+count into the migration walk removes one lookup per such append.
 
-## RT-025 - `table.sort` with a comparator still clones the sequence infallibly
-
-Lateral from the fourth resolution wave's review. The raw sort path's copy
-(`Table::get_array`) is now fallible, so a forged huge border errors instead of
-aborting. But the comparator path then does `let roots = arr.clone();` in
-`table_sort` (src/vm/table_ops.rs), an infallible copy of the same size, so a
-sort with a comparator can still abort on a sequence `get_array` just managed
-to allocate. Reserve the clone fallibly too, or root the values without a full
-second copy.
-
-## RT-026 - Saves build an environment table's hash-slot list more than once
-
-Lateral from the fourth resolution wave's review. `encode_env_deltas` and the
-materialize order block each call `snapshot_entries()`, which builds the full
-hash-slot list and is then truncated to the array slots, and
-`encode_env_deltas` then calls `snapshot_hash_slots()` again. Minor host work
-per environment table per save or load; an array-only accessor would avoid it.
-
-## RT-028 - The array live count grew every heap object slot
-
-From the fourth resolution wave's gate. The exact window live count
-(`Table::array_live: usize`) made `Table` large enough that clippy's
-`large_enum_variant` fired on `RawObject` (src/vm/object.rs). The gate agent
-allowed the lint rather than boxing the table variant, since boxing adds an
-indirection on every table access. Either way the enum is sized by its largest
-variant, so every heap object slot - strings' and closures' included - grew by
-that field. Measure object-slot size and the alloc workloads against the parent
-commit. If it matters, pack the count into an existing field's spare bits or a
-narrower type alongside the window (the window length bounds it, and the
-window is a `Vec` whose length already fits), rather than boxing.
-
-## RT-027 - Errors in the gmatch wrapper's outer chunk are still located in `string.gmatch`
-
-Lateral from the fourth resolution wave's review. Errors raised through the
-gmatch iterator are now attributed to the script caller, but
-`is_gmatch_wrapper` matches only the iterator chunk, not the outer chunk that
-`push_gmatch_wrapper` runs to build the closure. An error there (budget
-exhaustion on its CLOSURE or RETURN during `string.gmatch(...)`) is still
-reported as `string.gmatch:<n>:`, the same class of misleading location.
-Recognise the outer chunk by identity too.
+Fixing this must keep growth fallible. Verify with the same interleaved
+`queue` cells against bc4f1bf.

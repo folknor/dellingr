@@ -22,8 +22,9 @@ end
 
 // This chunk is immutable. Runtime caches are State-local, and snapshot bytecode
 // ids are assigned per save, so sharing the Arc does not share mutable state.
-// Error reporting identifies the iterator bytecode by Arc identity and omits
-// this implementation frame, so lazy pattern failures point at the caller.
+// Error reporting identifies this outer chunk and the iterator bytecode by
+// Arc identity and omits these implementation frames, so lazy pattern
+// failures point at the caller.
 // It is process-global and compiled on the first gmatch in the process,
 // whichever State that is (a RustFunc cannot carry upvalues, hence the shim).
 // Compilation is deterministic and charges no cost, so which State pays for it
@@ -41,14 +42,16 @@ fn gmatch_wrapper() -> Arc<crate::compiler::Bytecode> {
 
 impl State {
     pub(crate) fn is_gmatch_wrapper(bytecode: &Arc<crate::compiler::Bytecode>) -> bool {
-        // Identity, never the source name: a user chunk may share the name.
+        // Recognize the outer construction chunk and its returned iterator by
+        // identity, never source name: a user chunk may share the name.
         // Snapshot load maps a restored iterator chunk onto this Arc (see
         // `gmatch_iterator_bytecode`), so restored iterators match too.
         GMATCH_WRAPPER.get().is_some_and(|wrapper| {
-            wrapper
-                .nested
-                .iter()
-                .any(|child| Arc::ptr_eq(child, bytecode))
+            Arc::ptr_eq(wrapper, bytecode)
+                || wrapper
+                    .nested
+                    .iter()
+                    .any(|child| Arc::ptr_eq(child, bytecode))
         })
     }
 }
@@ -1367,5 +1370,22 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn gmatch_error_frame_identity_includes_outer_and_iterator_chunks() {
+        let wrapper = gmatch_wrapper();
+        assert!(State::is_gmatch_wrapper(&wrapper));
+        let iterator = wrapper
+            .nested
+            .first()
+            .expect("the wrapper defines its iterator function");
+        assert!(State::is_gmatch_wrapper(iterator));
+
+        let same_named_user_chunk = Arc::new(
+            compiler::compile("return nil", Some(b"string.gmatch".as_slice()))
+                .expect("same-named user chunk compiles"),
+        );
+        assert!(!State::is_gmatch_wrapper(&same_named_user_chunk));
     }
 }

@@ -13,9 +13,9 @@
 //! 1. **Bit-identical results on every supported target.** Each kernel is a
 //!    fixed sequence of operations whose rounded results IEEE 754 specifies
 //!    exactly: binary64 `+ - * /` and `sqrt`, integer and bit manipulation,
-//!    and fused multiply-add through [`fma`]. Rust never contracts `a * b + c`
+//!    and fused multiply-add through `fma`. Rust never contracts `a * b + c`
 //!    into an FMA and never reassociates, so the sequence the source spells is
-//!    the sequence that runs. [`fma`] is either the hardware instruction or an
+//!    the sequence that runs. `fma` is either the hardware instruction or an
 //!    in-crate software implementation; both are the correctly rounded IEEE
 //!    operation, so they agree bit for bit. This property does not depend on
 //!    the kernels being correctly rounded.
@@ -184,7 +184,38 @@ pub(crate) const fn u128_lh(low: u64, high: u64) -> u128 {
     ((high as u128) << 64) | low as u128
 }
 
+// Select once at kernel entry. The instantiated helpers share the selected
+// target feature, so hardware FMA calls can inline within the whole kernel.
+#[cfg(any(
+    target_arch = "x86",
+    target_arch = "x86_64",
+    all(target_arch = "aarch64", target_feature = "neon")
+))]
+#[inline]
+fn kernel_hardware_available() -> bool {
+    #[cfg(test)]
+    match tests::forced_fma() {
+        tests::ForcedFma::Software => return false,
+        tests::ForcedFma::Hardware => {
+            assert!(hardware_fma(1.0, 1.0, 1.0).is_some());
+            return true;
+        }
+        tests::ForcedFma::Default => {}
+    }
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        cfg!(target_feature = "fma") || std::arch::is_x86_feature_detected!("fma")
+    }
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+    {
+        true
+    }
+}
+
 /// Fused multiply-add: `a * b + c` with a single rounding.
+///
+/// Kernels bind their FMA directly in each backend instead of calling this
+/// standalone dispatcher; keeping it here also tests independent FMA calls.
 ///
 /// On x86 the `vfmadd` instruction when the CPU has it (known at compile time
 /// when the build targets FMA, otherwise detected at run time), on aarch64 the
@@ -194,20 +225,18 @@ pub(crate) const fn u128_lh(low: u64, high: u64) -> u128 {
 /// it to a library call: that call reaches whichever `fma` symbol the link
 /// resolves, and compiler-builtins' generic one is not correctly rounded
 /// (rust-lang/compiler-builtins issue 1353).
+#[cfg(test)]
 #[inline(always)]
 pub(crate) fn fma(a: f64, b: f64, c: f64) -> f64 {
-    #[cfg(test)]
-    {
-        match tests::forced_fma() {
-            tests::ForcedFma::Software => return soft_fma(a, b, c),
-            tests::ForcedFma::Hardware => return hardware_fma_checked(a, b, c),
-            tests::ForcedFma::Default => {}
-        }
+    match tests::forced_fma() {
+        tests::ForcedFma::Software => return soft_fma(a, b, c),
+        tests::ForcedFma::Hardware => return hardware_fma_checked(a, b, c),
+        tests::ForcedFma::Default => {}
     }
     fma_dispatch(a, b, c)
 }
 
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(all(test, any(target_arch = "x86", target_arch = "x86_64")))]
 #[inline(always)]
 fn fma_dispatch(a: f64, b: f64, c: f64) -> f64 {
     // With the feature enabled at compile time the detection folds away and
@@ -229,11 +258,14 @@ fn fma_dispatch(a: f64, b: f64, c: f64) -> f64 {
     a.mul_add(b, c)
 }
 
-#[cfg(not(any(
-    all(target_arch = "aarch64", target_feature = "neon"),
-    target_arch = "x86",
-    target_arch = "x86_64"
-)))]
+#[cfg(all(
+    test,
+    not(any(
+        all(target_arch = "aarch64", target_feature = "neon"),
+        target_arch = "x86",
+        target_arch = "x86_64"
+    ))
+))]
 #[inline(always)]
 fn fma_dispatch(a: f64, b: f64, c: f64) -> f64 {
     soft_fma(a, b, c)
@@ -289,12 +321,9 @@ fn hardware_fma_checked(a: f64, b: f64, c: f64) -> f64 {
 /// Returns exactly what IEEE 754 `fusedMultiplyAdd` returns in
 /// round-to-nearest-even, including signed zeros, subnormal results, and
 /// products that overflow binary64 on their own but not after adding `c`.
-/// NaN payloads may differ from the hardware instruction's. aarch64 uses it
-/// only in tests.
-#[cfg_attr(
-    all(not(test), target_arch = "aarch64", target_feature = "neon"),
-    allow(dead_code)
-)]
+/// NaN payloads may differ from the hardware instruction's. Every kernel has
+/// a software instance built on it; aarch64 compiles that instance but
+/// selects it only in tests.
 pub(crate) fn soft_fma(a: f64, b: f64, c: f64) -> f64 {
     let a_bits = a.to_bits();
     let b_bits = b.to_bits();

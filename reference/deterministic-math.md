@@ -17,8 +17,8 @@ replay recorded on one host could branch differently on another.
 
 1. **Same bits on every supported host.** Each kernel is a fixed sequence of
    operations whose results IEEE 754 specifies exactly: binary64 `+ - * /` and
-   `sqrt`, integer and bit manipulation, and fused multiply-add through
-   `crmath::fma`. Rust never contracts `a * b + c` into an FMA and never
+   `sqrt`, integer and bit manipulation, and fused multiply-add through the
+   kernel's FMA backend. Rust never contracts `a * b + c` into an FMA and never
    reassociates floating-point expressions, so the sequence written is the
    sequence executed. This property does not rely on the kernels being
    correctly rounded.
@@ -38,8 +38,8 @@ replay recorded on one host could branch differently on another.
 
 ## FMA
 
-`crmath::fma` must be the correctly rounded IEEE operation everywhere, since
-CORE-MATH's error analysis depends on it:
+The FMA every kernel uses must be the correctly rounded IEEE operation
+everywhere, since CORE-MATH's error analysis depends on it:
 
 - x86/x86_64: the `vfmadd` instruction, chosen at compile time when the build
   targets FMA and otherwise after run-time CPU detection (std caches it);
@@ -51,6 +51,15 @@ All of these return the same bits, so the choice never reaches results.
 `f64::mul_add` is not used where it could become a library call: the `fma`
 symbol it would reach may be compiler-builtins' generic one, which is not
 correctly rounded (rust-lang/compiler-builtins issue 1353).
+
+Each elementary kernel selects its backend once at entry, not per operation.
+A macro instantiates one source body per backend, shared floating-point
+helpers included: a software instance on `soft_fma` everywhere, and a
+hardware instance on x86 and aarch64. The entry point takes the hardware
+instance when the check above allows it. On x86 every hardware helper carries
+the FMA target feature, so the instruction inlines throughout the kernel
+without a CPU check per operation. `crmath::fma`, the per-call dispatcher,
+exists only in test builds.
 
 ## Supported hosts
 
@@ -66,7 +75,8 @@ NaN's bits), and the VM never lets a script observe them.
 
 - The port is literal: C unsigned arithmetic becomes wrapping arithmetic,
   shifts that C leaves undefined at the limb width are made total, and every
-  `__builtin_fma` becomes `crmath::fma`.
+  `__builtin_fma` becomes a call to `fma`, which each kernel instance binds
+  to its backend.
 - Hex float literals are written as `h!("0x1.921fb54442d18p+0")`, evaluated at
   compile time by `crmath::hf`, which rejects any literal that is not exactly
   representable.

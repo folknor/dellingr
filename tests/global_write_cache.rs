@@ -125,3 +125,61 @@ fn warmed_method_route_keeps_table_reference_across_global_swaps() {
     run(&mut state, "read_method()");
     assert_eq!(global_number(&mut state, "method_value"), 7.0);
 }
+
+#[test]
+fn repeated_absent_global_reads_observe_later_definitions() {
+    let mut state = State::new();
+    run(
+        &mut state,
+        "function read_optional() observed = optional_value end; \
+         read_optional(); read_optional(); optional_value = 31; read_optional()",
+    );
+    assert_eq!(global_number(&mut state, "observed"), 31.0);
+    run(
+        &mut state,
+        "optional_value = nil; read_optional(); read_optional(); \
+         _G.optional_value = 32; read_optional()",
+    );
+    assert_eq!(global_number(&mut state, "observed"), 32.0);
+}
+
+#[test]
+fn restricted_global_miss_does_not_hide_restored_binding() {
+    let mut state = State::new();
+    run(
+        &mut state,
+        "optional_value = 33; \
+         function read_optional() observed = optional_value end; read_optional()",
+    );
+    state
+        .with_restricted_env(&["read_optional"], |restricted| {
+            run(restricted, "read_optional(); read_optional()");
+            restricted.get_global("observed").expect("lookup fits");
+            assert_eq!(restricted.typ(-1), dellingr::LuaType::Nil);
+            restricted.pop(1).expect("lookup result pops");
+        })
+        .expect("state is not poisoned");
+    run(&mut state, "read_optional()");
+    assert_eq!(global_number(&mut state, "observed"), 33.0);
+}
+
+#[cfg(feature = "snapshot")]
+#[test]
+fn absent_global_reader_observes_definition_after_snapshot_load() {
+    let mut state = State::new();
+    run(
+        &mut state,
+        "function read_optional() observed = optional_value end; \
+         read_optional(); read_optional()",
+    );
+    let save = state.save_state().expect("state saves");
+    let mut loaded = State::load_state(&save.bytes, Box::new(dellingr::DefaultCallbacks), |_| {
+        Ok::<(), std::convert::Infallible>(())
+    })
+    .expect("save loads");
+    run(
+        &mut loaded,
+        "read_optional(); optional_value = 34; read_optional()",
+    );
+    assert_eq!(global_number(&mut loaded, "observed"), 34.0);
+}

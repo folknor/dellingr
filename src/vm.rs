@@ -1095,10 +1095,10 @@ impl State {
     /// Called when an error occurs. Notifies host callbacks.
     pub(crate) fn host_error(&mut self, error: &mut Error) {
         if error.mark_reported() {
-            // The gmatch iterator shim is left out of error locations, so its
-            // chunk name must not fill in an error the caller's frame located
-            // (an unnamed caller included). A shim with no script caller keeps
-            // its own name, as its trace keeps its own frame.
+            // Gmatch implementation chunks are left out of error locations,
+            // so their names must not fill in an error the caller's frame
+            // located (an unnamed caller included). A shim with no script
+            // caller keeps its own name, as its trace keeps its own frame.
             let source = self
                 .call_stack
                 .iter()

@@ -10,7 +10,16 @@ use super::object::{GcHeap, ObjectPtr};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct GlobalLookupCacheEntry {
     pub(super) globals_version: u64,
-    pub(super) index: usize,
+    pub(super) index: GlobalLookupIndex,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum GlobalLookupIndex {
+    Present(usize),
+    /// No binding existed at this map length. Appending a binding invalidates
+    /// misses without invalidating positive slot caches. Compaction and swaps
+    /// are guarded separately by `globals_version`.
+    Absent(usize),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

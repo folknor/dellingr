@@ -1,8 +1,8 @@
 //! The software FMA against the hardware instruction and against exact
 //! big-float arithmetic.
 
-use super::{TestRng, same};
-use crate::crmath::{hardware_fma, soft_fma};
+use super::{TestRng, fma_modes, same, with_forced_fma};
+use crate::crmath::{fma, hardware_fma, soft_fma};
 use libbeef::{BigFloat, BigFormat, ExpBits, Precision, Rounding};
 
 /// `RN(a * b + c)` computed exactly with `libbeef` and rounded once.
@@ -100,6 +100,26 @@ fn random_operands() {
         check(a, b, c);
         check(a, b, -(a * b));
         check(a, b, (a * b) * pow2((rng.next_u64() % 200) as i32 - 100));
+    }
+}
+
+/// The standalone dispatcher, which no kernel calls, under every FMA path
+/// this host can run.
+#[test]
+fn standalone_dispatcher_matches_software() {
+    let mut rng = TestRng::new(0xd15_fa7c);
+    for _ in 0..2_000 {
+        let (a, b, c) = (rng.finite(), rng.finite(), rng.finite());
+        let soft = soft_fma(a, b, c);
+        for mode in fma_modes() {
+            let dispatched = with_forced_fma(mode, || fma(a, b, c));
+            assert!(
+                same(soft, dispatched),
+                "fma({a:e}, {b:e}, {c:e}) under {mode:?}: software {:#018x}, dispatched {:#018x}",
+                soft.to_bits(),
+                dispatched.to_bits()
+            );
+        }
     }
 }
 

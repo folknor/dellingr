@@ -198,6 +198,11 @@ pub(super) struct Closure {
 }
 
 /// The raw object data managed by GC.
+/// Tables and closures share these slots, so inline table metadata also
+/// affects closure storage. Strings use the separate StringPool and do not
+/// pay for this enum's largest variant. Boxing tables would add an allocation
+/// and indirection to every table, including small records; keep them inline
+/// unless measurements justify that tradeoff.
 #[allow(
     clippy::large_enum_variant,
     reason = "Table is stored inline so table access takes no extra indirection; the exact live-slot count pushed it past the lint threshold"

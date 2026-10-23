@@ -171,6 +171,21 @@ fn under_report_keeps_top_values_in_order() {
 }
 
 #[test]
+fn under_report_discards_many_arguments_without_disturbing_caller() {
+    let (mut state, _count) = counting_state();
+    state.push_string("caller").unwrap();
+    state.push_rust_fn(return_top_two).unwrap();
+    for n in 0..200 {
+        state.push_number(f64::from(n)).unwrap();
+    }
+    state.call(ArgCount::Fixed(200), RetCount::All).unwrap();
+    assert_eq!(state.get_top(), 3);
+    assert_eq!(state.to_string(1).unwrap(), "caller");
+    assert_eq!(state.to_number(2).unwrap(), 2.0);
+    assert_eq!(state.to_number(3).unwrap(), 3.0);
+}
+
+#[test]
 fn caller_side_padding_is_unchanged() {
     let (mut state, _count) = counting_state();
     state.push_rust_fn(return_top_two).unwrap();

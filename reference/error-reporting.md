@@ -4,14 +4,15 @@ Errors carry a structured `ErrorKind`, source location, and an optional stack
 trace. Their `Display` text is for diagnostics. It is not a stable identifier
 for an error or a cross-build log format.
 
-The built-in `string.gmatch` iterator shim is omitted from runtime error
-traces: lazy pattern errors use the script caller's call-site line. Recognition
-uses the shared iterator bytecode identity, so a user chunk named
-`string.gmatch` retains ordinary attribution. Snapshot load gives a restored
-iterator the shared identity: a chunk qualifies only when a closure of it
-captures the private gmatch iterator function and its contents equal this
-build's shim. An iterator saved by a build whose shim differs keeps its own
-bytecode and the shim location.
+The built-in `string.gmatch` wrapper and iterator shim are omitted from runtime
+error traces when a script caller exists: lazy pattern errors use the script
+caller's call-site line. Recognition uses the shared bytecode identities for
+the outer wrapper and its iterator, so a user chunk named `string.gmatch`
+retains ordinary attribution. Snapshot load gives a restored iterator the
+shared identity: a chunk qualifies only when a closure of it captures the
+private gmatch iterator function and its contents equal this build's shim. An
+iterator saved by a build whose shim differs keeps its own bytecode and the
+shim location.
 
 ## Kinds and exact bytes
 

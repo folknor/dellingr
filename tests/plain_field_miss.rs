@@ -146,3 +146,87 @@ fn plain_miss_only_charges_for_table_creation() {
     // NEW_TABLE costs one; GET_FIELD and RETURN are free.
     assert_eq!(state.cost_used(), 1);
 }
+
+#[test]
+fn repeated_field_misses_observe_own_writes_and_metatable_changes() {
+    let mut state = State::new();
+    assert!(run_bool(
+        &mut state,
+        r#"
+            local mt = { __len = function() return 0 end }
+            local t = setmetatable({}, mt)
+            local function read() return t.optional end
+            if read() ~= nil or read() ~= nil then return false end
+            t.optional = 11
+            if read() ~= 11 then return false end
+            t.optional = nil
+            if read() ~= nil then return false end
+            mt.__index = { optional = 12 }
+            if read() ~= 12 then return false end
+            mt.__index = nil
+            if read() ~= nil then return false end
+            mt.__index = function() return 13 end
+            if read() ~= 13 then return false end
+            mt.__index = nil
+            if read() ~= nil then return false end
+            setmetatable(t, { __index = { optional = 14 } })
+            if read() ~= 14 then return false end
+            setmetatable(t, nil)
+            if read() ~= nil then return false end
+            t.optional = 15
+            return read() == 15
+        "#,
+    ));
+}
+
+#[test]
+fn inherited_field_misses_observe_method_writes_and_handler_replacement() {
+    let mut state = State::new();
+    assert!(run_bool(
+        &mut state,
+        r#"
+            local methods = {}
+            local mt = { __index = methods }
+            local t = setmetatable({}, mt)
+            local function read() return t.optional end
+            if read() ~= nil or read() ~= nil then return false end
+            methods.optional = 21
+            if read() ~= 21 then return false end
+            methods.optional = nil
+            if read() ~= nil then return false end
+            mt.__index = { optional = 22 }
+            if read() ~= 22 then return false end
+            t.optional = 23
+            return read() == 23
+        "#,
+    ));
+}
+
+#[cfg(feature = "snapshot")]
+#[test]
+fn warmed_missing_field_observes_writes_after_snapshot_load() {
+    let mut state = State::new();
+    assert!(run_bool(
+        &mut state,
+        r#"
+            receiver = setmetatable({}, { __len = function() return 0 end })
+            function read_optional() return receiver.optional end
+            return read_optional() == nil and read_optional() == nil
+        "#,
+    ));
+    let save = state.save_state().expect("state saves");
+    let mut loaded = State::load_state(&save.bytes, Box::new(dellingr::DefaultCallbacks), |_| {
+        Ok::<(), std::convert::Infallible>(())
+    })
+    .expect("save loads");
+    assert!(run_bool(
+        &mut loaded,
+        r#"
+            if read_optional() ~= nil then return false end
+            getmetatable(receiver).__index = { optional = 41 }
+            if read_optional() ~= 41 then return false end
+            receiver.optional = 42
+            return read_optional() == 42
+        "#,
+    ));
+}

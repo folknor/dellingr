@@ -35,7 +35,8 @@ pub(crate) fn forced_fma() -> ForcedFma {
     FORCED_FMA.with(Cell::get)
 }
 
-/// Runs `f` with every [`super::fma`] call on this thread routed to `mode`.
+/// Runs `f` with every kernel entry on this thread selecting the `mode`
+/// backend, and every standalone [`super::fma`] call routed to it.
 pub(crate) fn with_forced_fma<T>(mode: ForcedFma, f: impl FnOnce() -> T) -> T {
     let previous = FORCED_FMA.with(|cell| cell.replace(mode));
     let result = f();
@@ -119,5 +120,52 @@ fn roundeven_finite_ties_to_even() {
         (-3.7, -4.0),
     ] {
         assert_eq!(roundeven_finite(x).to_bits(), r.to_bits(), "{x}");
+    }
+}
+
+// Count entries, rather than individual FMA operations, so a forced-mode test
+// detects a kernel accidentally bypassing whole-kernel backend selection.
+thread_local! {
+    static KERNEL_BACKENDS: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
+}
+
+pub(crate) fn record_kernel_backend(hardware: bool) {
+    KERNEL_BACKENDS.with(|cell| {
+        let (soft, hard) = cell.get();
+        cell.set((soft + usize::from(!hardware), hard + usize::from(hardware)));
+    });
+}
+
+#[test]
+fn kernel_dispatch_honors_forced_fma() {
+    for mode in fma_modes() {
+        if mode == ForcedFma::Default {
+            continue;
+        }
+        KERNEL_BACKENDS.with(|cell| cell.set((0, 0)));
+        with_forced_fma(mode, || {
+            let unary: [fn(f64) -> f64; 9] = [
+                super::acos,
+                super::asin,
+                super::atan,
+                super::cos,
+                super::exp,
+                super::ln,
+                super::log10,
+                super::sin,
+                super::tan,
+            ];
+            for kernel in unary {
+                assert!(kernel(0.5).is_finite());
+            }
+            assert!(super::atan2(0.5, 0.75).is_finite());
+            assert!(super::pow(0.5, 0.75).is_finite());
+        });
+        let expected = if mode == ForcedFma::Software {
+            (11, 0)
+        } else {
+            (0, 11)
+        };
+        KERNEL_BACKENDS.with(|cell| assert_eq!(cell.get(), expected));
     }
 }

@@ -439,6 +439,9 @@ All notable changes to dellingr are documented here. The format follows
   at the script line that called the iterator, and the internal shim frame is
   left out of the traceback. A user chunk named `string.gmatch` keeps its own
   locations, and an iterator restored from a snapshot is located the same way.
+  The same holds for an error inside `string.gmatch` while it builds the
+  iterator, such as budget exhaustion: it is located at the calling line, not
+  `string.gmatch:<n>:`.
 
 ### Added
 
