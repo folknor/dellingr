@@ -35,6 +35,18 @@ get deleted as they ship or stop being worth tracking.
   raw. Supporting it would mean GET/SET_GLOBAL honouring `__index` and
   `__newindex`, a feature decision rather than a fix.
 
+### Hosts can read through metamethods but not write through them
+
+Found 2026-10-24. The public API has `get_table`, which honours `__index`,
+but the only public store is `set_table_raw`; `State::set_table` (which
+honours `__newindex`) is `pub(crate)` and used only by the table library.
+An embedder therefore cannot store into a proxy or class table the way a
+script would. Exposing a public `set_table` needs the same treatment
+`get_table` got: a defined error boundary and operand contract, `on_error`
+reporting, a scenario in `reference/native-calls.toml` and
+`tests/native_stack.rs` for the handler call, and the `__newindex` depth rule
+pinned by `tests/newindex_depth_routes.rs`.
+
 ## Deferred forward-looking ideas
 
 ### `\u{XXX}` string escapes

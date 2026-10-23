@@ -85,8 +85,13 @@ Violations are reported as errors at load time, never silently truncated.
   to its own `__index`, and a function or string handler, each take one until
   the lookup ends. The same holds however the lookup is written (`t.k`,
   `t["k"]`, `t:k()`), for string receivers, host reads and library reads,
-  and whatever the site looked up before. Table-library writes through
-  metamethods share the limit.
+  and whatever the site looked up before. A `__newindex` step follows the
+  same rule: a handler table that takes the store into its own contents (it
+  holds the key, or has no `__newindex` to continue to) takes nothing, while
+  one that continues, and a function handler, each take one until the store
+  ends, for `t.k = v`, `t["k"] = v` and table-library writes alike. A
+  handler that can be neither indexed nor called, on either side, reports
+  its type error without taking a unit, so it does so at the limit too.
 - `MAX_ARGUMENTS`, `MAX_RESULTS`: values carried by one call or return.
   See below.
 

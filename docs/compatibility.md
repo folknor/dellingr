@@ -141,8 +141,8 @@ does.
 - Arithmetic, comparison and concat metamethods are not implemented. Index,
   newindex, call, len, tostring and metatable-protection fields are. Chains of index, newindex and
   non-function call steps are bounded by `limits::MAX_METAMETHOD_DEPTH`; an
-  `__index` table that answers from its own contents is not a step of its
-  own (see `limits.md`).
+  `__index` or `__newindex` table that answers or stores in its own contents
+  is not a step of its own (see `limits.md`).
 
 ## Character classes and locale
 

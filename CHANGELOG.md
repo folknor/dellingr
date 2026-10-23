@@ -715,6 +715,20 @@ All notable changes to dellingr are documented here. The format follows
   value-stack slot per table and no native stack per step. Inherited method
   calls through one site that serves several classes no longer slow the
   others down. Results and `cost_used` are otherwise unchanged.
+- **Replay-visible at the metamethod depth limit:** `__newindex` now counts
+  depth by the same rule as `__index`. A handler table that takes the store
+  into its own contents (it holds the key, or has no `__newindex` of its
+  own) takes no depth unit; a table that continues to its own `__newindex`
+  and a function handler each take one. Every handler dispatch used to take
+  one, so at `MAX_METAMETHOD_DEPTH` `obj.k` through a one-level `__index`
+  table succeeded while `obj.k = v` through a one-level `__newindex` table
+  raised `MetamethodDepthExceeded`. Compared with before, a store through a
+  chain of tables needs one unit fewer, on `t.k = v`, `t["k"] = v` and
+  table-library writes alike; a `__newindex` handler that is neither a table
+  nor callable reports its type error at the limit instead of the depth
+  error; and an error from the terminal table's raw insert (a NaN key, for
+  instance) is no longer masked by the depth error there. Results and
+  `cost_used` are otherwise unchanged.
 
 ## [0.5.0] - 2026-10-14
 

@@ -33,6 +33,10 @@ const CASES: &[(&str, &str)] = &[
         "newindex",
         "local t = setmetatable({}, {__newindex = function() observed = 8 end}) setmetatable({}, {__newindex = t}).x = 1 return observed",
     ),
+    (
+        "newindex_table",
+        "local s = {} setmetatable({}, {__newindex = setmetatable({}, {__newindex = s})}).x = 8 return s.x",
+    ),
     ("string", "return ('abc'):sub(1, 2)"),
     (
         "rust_iterator",

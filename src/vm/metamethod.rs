@@ -61,13 +61,14 @@ impl State {
     /// Take one unit of the metamethod depth, or refuse at the limit. The
     /// caller returns it.
     ///
-    /// Every `__newindex` handler dispatch takes one, and every `__index`
-    /// step that nests: a handler table that continues to its own
-    /// `__index`, a string handler, or a function handler. A terminal
-    /// `__index` table step, answered from the table's raw contents, takes
-    /// none (`State::resolve_index`). Function handlers count even though
-    /// they are calls, so a memoising `__index` that recurses through its
-    /// own table stops within `MAX_METAMETHOD_DEPTH` levels; a function
+    /// Every step that nests takes one: a handler table that continues to
+    /// its own `__index` or `__newindex`, a function handler, or an
+    /// `__index` string handler. A terminal table step, which answers or
+    /// stores in the table's raw contents, takes none
+    /// (`State::resolve_index`, `State::resolve_newindex`). Function
+    /// handlers count even though they are calls, so a memoising `__index`
+    /// that recurses through its own table stops within
+    /// `MAX_METAMETHOD_DEPTH` levels; a function
     /// handler is also a call made from Rust, so the lower
     /// `MAX_NATIVE_CALL_DEPTH` refuses that recursion first. That is
     /// deliberate and matches reference Lua, whose C call limit bounds the
@@ -440,14 +441,21 @@ impl State {
     /// Resolve a store into `target`, whose raw lookup missed and whose
     /// metatable names `handler` as its `__newindex`. Handler tables are
     /// followed in a loop, each read once: one that holds the key, or has no
-    /// `__newindex` of its own, takes the store raw. Every handler dispatch
-    /// takes a metamethod-depth unit before the handler is classified, so at
-    /// the limit the depth refusal wins over an invalid handler's type
-    /// error. A function handler ends the walk with its unit taken, cost
-    /// settled and the window `[handler, target, key, val]` pushed for a
-    /// call with three arguments and no results: `Some(units)`, which the
-    /// caller returns once the call ends. `None` is a completed store, every
-    /// unit already returned, as on error.
+    /// `__newindex` of its own, takes the store raw.
+    ///
+    /// This is where the depth rule for `__newindex` lives, the same as
+    /// `State::resolve_index`'s for reads. A terminal table step (the raw
+    /// store just described) calls nothing and recurses nowhere, so it takes
+    /// no unit; a table step that continues to its own `__newindex` takes
+    /// one, and so does a function handler. A handler that is neither a
+    /// table nor callable is rejected without one, so at the limit its type
+    /// error is what reports. The receiver's own lookup is not a step.
+    ///
+    /// A function handler ends the walk with its unit taken, cost settled
+    /// and the window `[handler, target, key, val]` pushed for a call with
+    /// three arguments and no results: `Some(units)`, which the caller
+    /// returns once the call ends. `None` is a completed store, every unit
+    /// already returned, as on error.
     #[hotpath::measure]
     #[inline(never)]
     pub(super) fn resolve_newindex(
@@ -482,8 +490,6 @@ impl State {
         units: &mut u32,
     ) -> Result<bool> {
         loop {
-            self.take_metamethod_unit()?;
-            *units += 1;
             let calls = match handler {
                 Val::Obj(ptr) => {
                     if self.heap.as_table_ref(ptr).is_some() {
@@ -494,11 +500,16 @@ impl State {
                         if matches!(existing, Val::Nil) {
                             let next = self.newindex_handler(ptr);
                             if !matches!(next, Val::Nil) {
+                                // A table step that continues holds a unit
+                                // until the store ends.
+                                self.take_metamethod_unit()?;
+                                *units += 1;
                                 target = handler;
                                 handler = next;
                                 continue;
                             }
                         }
+                        // A terminal table step stores raw and takes no unit.
                         self.heap
                             .as_table(ptr)
                             .expect("checked to be a table just above")
@@ -513,6 +524,8 @@ impl State {
             if !calls {
                 return Err(self.index_handler_error(handler));
             }
+            self.take_metamethod_unit()?;
+            *units += 1;
             // Settle batched cost first, then preflight, so a refusal leaves
             // no temporaries behind.
             Frame::flush_local_cost(self, local_cost)?;
