@@ -88,6 +88,9 @@ sizes (prologue `sub rsp` plus pushes) from a built binary's disassembly, with
 for an address-blanked body dump; `scripts/asm_diff.py` diffs two such dumps
 (`--slots` lists the `%rsp` slots each build uses). They need `objdump` and
 are how a `tests/native_stack.rs` probe delta gets attributed to a function.
+`scripts/perf_hot_lines.py <annotate-output> [min-percent] [context]` filters
+saved `perf annotate --stdio` output down to its hot instructions, which is how
+a `Frame::run` listing of several hundred KB becomes readable.
 
 Shell scripts live in `scripts/` and share `scripts/lib.sh`, which builds a
 cargo target and asks cargo for the artifact path (it needs `python3`), so no
