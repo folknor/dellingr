@@ -120,9 +120,11 @@ Measurement lesson worth keeping: on plantasjen (Zen 3) the first flattened
 version moved frames and records by value and lost 14-22% to store-forwarding
 stalls although callgrind instruction counts were within 1-4% of the
 recursive path; check `vm/eval.rs` comments before moving a `Frame` or
-`CallInfo` whole. Perf counters are not available to unprivileged users on
-that host; callgrind instruction-level counts plus objdump of the hot
-function located the stalls.
+`CallInfo` whole. Callgrind instruction-level counts plus objdump of the hot
+function located those stalls. `perf` works on that host only after
+`kernel.perf_event_paranoid` is lowered for the boot (the distribution
+default blocks unprivileged sampling); with it, `perf record` cycles plus
+`perf annotate` of `Frame::run` attribute stalls to instructions directly.
 
 Native-stack follow-up: `MAX_NATIVE_CALL_DEPTH` is 150, not reference Lua's
 200, because 200 did not fit 2 MiB in the dev profile. Dev-profile bytes per
@@ -239,6 +241,20 @@ record-shape access is on Map-storage tables (>4 fields), where the
 slow path's hash lookup is expensive enough to amortize the extra
 work, or (b) a way to add the cross-receiver path without
 perturbing the same-ptr branch's codegen.
+
+Both conditions may now hold (2026-10-23). For (b): since f92638c the
+register VM's `reg_get_field` inlines only the same-table hit, and every
+miss goes to the outlined `get_field_direct`, so a key-at-index check
+placed there, before the hash lookup, does not touch the hit path's
+codegen. For (a): `bench/record_tables` builds a fresh 8-field (Map)
+table per iteration and reads every field, so each read misses the
+identity cache and hashes; at a378895 (plantasjen, before the hash
+function was forced inline) `hash_table_key_value` and
+`IndexMap::get_index_of` were about 31% of its cycles, construction-side
+inserts included. Validation must read the live key at that slot in the current
+table (`get_index`, not the value-only `get_index_value`), treat a dead
+or nil slot as unanswered, and keep the metatable fallback. Restricting
+it to Map storage sidesteps reason 1.
 
 ### Compiler-recognized field-update fusion
 

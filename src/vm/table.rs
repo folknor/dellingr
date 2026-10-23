@@ -252,7 +252,13 @@ impl TableKey {
 /// normalized bits (so -0.0 and +0.0 collide), and other key types hash their
 /// pointer or scalar payload directly. `Val` deliberately has no `Hash` impl;
 /// this is the only hash of runtime key values.
-#[inline]
+///
+/// Forced inline: every hash-part lookup and insert runs it, and the `#[inline]`
+/// hint alone was dropped when unrelated changes reshaped the field-read miss
+/// path, which made a record-reading workload spend more cycles calling it
+/// than looking keys up. It is a scalar match that neither allocates nor
+/// re-enters, so it adds nothing to frames live across native re-entry.
+#[inline(always)]
 fn hash_table_key_value<H: Hasher>(value: Val, hasher: &mut H) {
     match value {
         Val::Nil => (),
