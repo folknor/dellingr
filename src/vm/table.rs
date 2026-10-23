@@ -823,9 +823,12 @@ impl Table {
     /// (`SlotPolicy::revive_in_place`), whose caller found the slot by its
     /// key under the current version; no index moves, so the version stays.
     /// False, changing nothing, for a vacant or missing slot. Outlined: the
-    /// global table's steady-state store is `set_at_index`.
+    /// global table's steady-state store is `set_at_index`. `value` is a
+    /// reference so its inlined callers in the dispatch loop can pass the
+    /// source register without a stack copy (`GlobalEnv::write_cached`).
     #[inline(never)]
-    pub(super) fn write_slot(&mut self, index: usize, value: Val) -> bool {
+    pub(super) fn write_slot(&mut self, index: usize, value: &Val) -> bool {
+        let value = *value;
         debug_assert!(
             matches!(&self.storage, TableStorage::Map(_, policy) if policy.revive_in_place),
             "only a table that revives keys in place writes slots directly"

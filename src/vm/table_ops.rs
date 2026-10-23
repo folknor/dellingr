@@ -962,12 +962,23 @@ impl State {
     }
 
     /// Allocates a new table on the heap.
+    ///
+    /// Never inlined, nor is `alloc_table_with_capacity`: NEW_TABLE and
+    /// NEW_TABLE_PRESIZED call them from `Frame::run`, a frame live on every
+    /// native re-entry, and inlined they build the whole heap object (an
+    /// empty `Table` in its wrapper) as a stack temporary of that frame
+    /// before moving it into the slot map. Outlined, that storage is only on
+    /// the stack while a table is being allocated.
     #[hotpath::measure]
+    #[inline(never)]
     pub(super) fn alloc_table(&mut self) -> Val {
         let obj = self.allocator().alloc_table();
         Val::Obj(obj)
     }
 
+    /// Allocates a new table with room for `capacity` hash entries; see
+    /// `alloc_table` for why it is never inlined.
+    #[inline(never)]
     pub(super) fn alloc_table_with_capacity(&mut self, capacity: usize) -> Val {
         let obj = self.allocator().alloc_table_with_capacity(capacity);
         Val::Obj(obj)

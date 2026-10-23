@@ -53,23 +53,26 @@ impl State {
         self.global_env.read(&self.heap, frame.literal(name), cache)
     }
 
-    /// Write global `name` through its lookup cache.
+    /// Write register `src` to global `name` through its lookup cache. The
+    /// cached store reads the register in place (see
+    /// `GlobalEnv::write_cached` for why it takes a reference).
     #[inline(always)]
     pub(super) fn write_global(
         &mut self,
         frame: &Frame,
         name: u16,
         cache_slot: Option<u8>,
-        val: Val,
+        src: usize,
     ) {
         let cache = frame.runtime.caches.global(cache_slot);
+        let val = &self.stack[src];
         if let Some(cache) = cache
             && self.global_env.write_cached(&mut self.heap, cache, val)
         {
             return;
         }
         self.global_env
-            .write(&mut self.heap, frame.literal(name), val, cache);
+            .write(&mut self.heap, frame.literal(name), *val, cache);
     }
 
     /// Take a handler's one result off the top into register `dst`.

@@ -239,12 +239,22 @@ impl GlobalEnv {
     /// Store through `cache` if it still names the key's slot. False when
     /// the caller must take the keyed path: no entry, a stale one, or an
     /// absence (never a writable index).
+    ///
+    /// `val` is a reference on purpose: the dispatch loop passes the source
+    /// register itself. Inlined into `Frame::run` (SET_GLOBAL, SET_BUILTIN),
+    /// a by-value `Val` bound for the outlined `Table::write_slot` needs an
+    /// addressable copy, and each inlined copy of this function kept its own
+    /// 16-byte stack temporary in that frame, which is live on every native
+    /// re-entry. A reference into the value stack needs none. Borrowing the
+    /// register is sound because nothing a global store reaches (table
+    /// lookup and mutation, the heap epoch, cache fills) runs Lua, collects,
+    /// calls the host or touches the value stack.
     #[inline(always)]
     pub(super) fn write_cached(
         &self,
         heap: &mut GcHeap,
         cache: &GlobalLookupCacheSlot,
-        val: Val,
+        val: &Val,
     ) -> bool {
         let Some(entry) = cache.get() else {
             return false;
@@ -264,7 +274,7 @@ impl GlobalEnv {
             // A live store over a live value, the steady state, needs no
             // tombstone accounting.
             GlobalLookupIndex::Present(index) => {
-                if matches!(val, Val::Nil) || !table.set_at_index(index, val) {
+                if matches!(val, Val::Nil) || !table.set_at_index(index, *val) {
                     table.write_slot(index, val);
                 }
                 true
@@ -286,7 +296,7 @@ impl GlobalEnv {
     ) {
         let table = self.contents_mut(heap);
         if let Some((index, _)) = table.hash_slot_of(&key) {
-            table.write_slot(index, val);
+            table.write_slot(index, &val);
             if let Some(cache) = cache {
                 cache.set(GlobalLookupCacheEntry {
                     version: table.version(),
@@ -322,11 +332,12 @@ impl GlobalEnv {
         val
     }
 
+    /// Store builtin `slot`; `val` is a reference for `write_cached`'s reason.
     #[inline(always)]
-    pub(super) fn write_builtin(&self, heap: &mut GcHeap, slot: u8, val: Val) {
+    pub(super) fn write_builtin(&self, heap: &mut GcHeap, slot: u8, val: &Val) {
         let cache = &self.builtin_caches[usize::from(slot)];
         if !self.write_cached(heap, cache, val) {
-            self.write(heap, self.builtin_key(slot), val, Some(cache));
+            self.write(heap, self.builtin_key(slot), *val, Some(cache));
         }
     }
 
@@ -344,7 +355,7 @@ impl GlobalEnv {
     /// the key is a builtin name.
     pub(super) fn write_key(&self, heap: &mut GcHeap, key: StringPtr, val: Val) {
         match self.builtin_names.iter().position(|name| *name == key) {
-            Some(slot) => self.write_builtin(heap, slot as u8, val),
+            Some(slot) => self.write_builtin(heap, slot as u8, &val),
             None => self.write(heap, Val::Str(key), val, None),
         }
     }
@@ -566,12 +577,12 @@ mod tests {
         let target = key(&mut state, "target");
         let env = &state.global_env;
         env.write(&mut state.heap, target, Val::Num(7.0), None);
-        env.write_builtin(&mut state.heap, Builtin::Print as u8, Val::Num(0.0));
+        env.write_builtin(&mut state.heap, Builtin::Print as u8, &Val::Num(0.0));
         let cache = GlobalLookupCacheSlot::default();
         env.read(&state.heap, target, Some(&cache));
-        env.write_builtin(&mut state.heap, Builtin::Print as u8, Val::Num(1.0));
+        env.write_builtin(&mut state.heap, Builtin::Print as u8, &Val::Num(1.0));
         assert_eq!(env.read_cached(&state.heap, &cache), Some(Val::Num(7.0)));
-        env.write_builtin(&mut state.heap, Builtin::Print as u8, Val::Nil);
+        env.write_builtin(&mut state.heap, Builtin::Print as u8, &Val::Nil);
         assert_eq!(env.read_cached(&state.heap, &cache), Some(Val::Num(7.0)));
     }
 
@@ -588,7 +599,7 @@ mod tests {
         env.write(&mut state.heap, optional, Val::Nil, None);
         env.write(&mut state.heap, existing, Val::Num(2.0), None);
         assert_eq!(env.read_cached(&state.heap, &cache), Some(Val::Nil));
-        assert!(!env.write_cached(&mut state.heap, &cache, Val::Num(3.0)));
+        assert!(!env.write_cached(&mut state.heap, &cache, &Val::Num(3.0)));
         env.write(&mut state.heap, optional, Val::Num(3.0), Some(&cache));
         assert_eq!(env.read_cached(&state.heap, &cache), None);
         assert_eq!(env.read(&state.heap, optional, Some(&cache)), Val::Num(3.0));
@@ -613,8 +624,8 @@ mod tests {
             // Revived through another path, in place: the cached slot sees it.
             env.write(&mut state.heap, removed, Val::Num(5.0), None);
             assert_eq!(env.read_cached(&state.heap, &cache), Some(Val::Num(5.0)));
-            assert!(env.write_cached(&mut state.heap, &cache, Val::Nil));
-            assert!(env.write_cached(&mut state.heap, &cache, Val::Num(6.0)));
+            assert!(env.write_cached(&mut state.heap, &cache, &Val::Nil));
+            assert!(env.write_cached(&mut state.heap, &cache, &Val::Num(6.0)));
             assert_eq!(env.read_cached(&state.heap, &cache), Some(Val::Num(6.0)));
             assert_eq!(env.len(&state.heap), slots);
         }

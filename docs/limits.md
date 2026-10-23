@@ -390,6 +390,13 @@ either setting, and the largest recurring cycle is 14,608 bytes in dev and
 3,552 in release (3,520 with snapshot). The loose bound is then about
 2.09 MiB in dev and 0.51 MiB in release.
 
+The latest (plantasjen, on top of 41ad774), taken when table allocation
+moved out of the dispatch frame and global stores began reading their
+source register in place, measures the largest recurring cycle at 13,552
+bytes in dev (also with snapshot) and 3,344 in release (3,360 with
+snapshot). The loose bound is then about 1.94 MiB in dev and 0.48 MiB in
+release.
+
 The release sort callback retains 32 bytes of frame growth for fallible
 array and root-copy allocation. The dispatch frame is 32 bytes smaller,
 and inlining the invocation driver into both call variants recovers the
