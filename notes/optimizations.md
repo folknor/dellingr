@@ -255,23 +255,71 @@ that legitimately nests calls made from Rust past 150.
 ### 8-byte NaN-boxed `Val` (C-O7)
 
 What: `Val` (`src/vm/lua_val.rs`) is 16 bytes (tag + payload). NaN-boxing
-(payloads in the NaN space of an f64: slotmap keys are 64-bit but their useful
-entropy fits 48-51 bits with an index/generation split; RustFn would need a
-registry index rather than a raw pointer) halves stack/table/upvalue memory
-traffic and makes `stack: Vec<Val>` copies twice as dense.
+(non-number payloads in the NaN space of an f64) halves stack, table and
+upvalue memory traffic, makes `stack: Vec<Val>` copies twice as dense, and
+removes the split tag/payload copies that miss store forwarding (see the
+16-byte `Val` copies entry above). It is the standard reason reference VMs
+beat tagged-enum interpreters on memory-bound workloads.
 
-Why deferred: full-rewrite class - touches every `match` on `Val` - but it is
-mechanical, determinism-neutral, and is the standard reason reference VMs beat
-tagged-enum interpreters on memory-bound workloads (`tables/fill` and
-`fields/same_obj_read` are the 2.6-3.8x-behind-lua5.2 benches). If judged too invasive, a cheaper
-intermediate is boxing only `Table` storage entries more densely; but the full
-version is where the payoff is.
+Why deferred: full-rewrite class. A read-only survey (2026-10-23, after
+6539ac7) put it at about 20 files in `src/vm`, heaviest in `table.rs`,
+`save_state.rs` and its verifier, `table_ops.rs`, `metamethod.rs`,
+`global_env.rs` and the dispatch code; `lua_std` and the compiler do not
+touch the VM's `Val` (`codegen.rs` has its own, unrelated one). The plan is
+to do it after the release that ships the register VM rather than bundle it
+in, because it needs no user migration (below).
 
-Note the RustFn registry index is a cost of this item, not a shared
-prerequisite: `Val::RustFn` compares and hashes by function address and
-renders as a constant `<function>`, so nothing outside NaN-boxing needs an id.
-Squeezing a raw `fn` pointer into the NaN payload is the part that would force
-one.
+Observable surface (the 2026-10-23 survey; re-check before starting):
+- **Invisible to scripts, replays, saves and the public API.** NaN never
+  renders with a sign or payload (`number_to_string`, `string.format`
+  including `%a` and `%q`), NaN is not a valid table key, and saves write
+  every NaN as `CANONICAL_NAN_BITS` (`saved_num_bits`). `tostring`/`%p` ids
+  for tables, functions and Rust functions come from the counter in
+  `format_pointer_ids`, not from handle bits or addresses. `pairs` follows
+  insertion order. The snapshot encoder is explicit per variant, so no
+  `FORMAT_VERSION` bump; `tests/save_golden.rs` compares saves byte for byte
+  and is the oracle. No charge depends on representation, so no
+  `COST_MODEL_VERSION` bump. `Val` is `pub(crate)`.
+- **The one host-visible edge:** a host that pushes a NaN with a nonzero
+  payload would get the canonical NaN back from `to_number`. Not replay
+  visible.
+
+Requirements the rewrite must meet:
+- **Canonicalize NaN where arbitrary bits enter:** `push_number`, and the
+  snapshot decoder (`decode_val`, `build_bytecode_node`), which today loads a
+  forged save's NaN payload verbatim. Harmless now; under NaN-boxing such bits
+  would decode as a pointer, so this becomes a safety requirement. Arithmetic
+  needs no canonicalization if the tag space avoids the two standard quiet
+  NaN patterns (`0x7FF8...` and `0xFFF8...`), since Rust arithmetic produces
+  only those or passes an input NaN through.
+- **Cache aliasing (the trap).** The field and set-field caches trust a
+  cached (table handle, table version, index) without re-checking the key,
+  and per-table versions start at 0. Today the slotmap's 32-bit generation
+  keeps a dead table's entry from matching a new table in the same slot.
+  Narrow the generation to fit a NaN-box payload and a wrap would let a stale
+  entry read or write the wrong table: wrong results that replays reproduce
+  faithfully. Fix it structurally: drop cache entries for objects the
+  collector frees (slots are only reused after sweep), so no entry outlives
+  its object and generation width only matters for catching bugs.
+- **Handles.** slotmap keys are 64 bits (index plus generation) and cannot
+  produce narrow keys, so objects (`GcHeap`) and the string pool need a
+  custom generational arena. Keeping a 32-bit index avoids a new limit on
+  live objects; a narrower index is a new cap that needs a docs/limits.md
+  entry and an error kind.
+- **Rust functions.** They compare and hash by address and are saved by
+  registered name. A per-State registry index or the raw pointer both work
+  unobservably; the raw pointer relies on user-space code addresses fitting
+  about 47 bits (true on x86-64 and aarch64 Linux and macOS today, not a Rust
+  guarantee), so it needs an assert or a fallback.
+- **Table storage.** `TableKeyKind::Live(Val)` / `Vacant(usize)` and the
+  `Option<Val>` uses need niche encodings, or tables stay 16 bytes per value
+  and lose most of the gain.
+- **Native stack.** Frames of `Frame::run` and the functions live across
+  native re-entry will move; re-measure against the docs/limits.md envelope
+  with `brokkr test native_bytes_per_level`.
+
+A cheaper intermediate, if the full version is judged too large, is denser
+`Table` storage entries alone; the full version is where the payoff is.
 
 ---
 
