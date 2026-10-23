@@ -1297,10 +1297,12 @@ impl Table {
     /// would need staging storage or rollback to preserve failure atomicity.
     fn append_growth(&self) -> std::result::Result<usize, TableError> {
         self.check_vlen_growth(1)?;
-        let mut end = self.vlen + 1;
         if self.hash_live_len() == 0 {
+            // With no live hash entries there is no migration run to count.
+            // In particular, positional constructors need no keyed probes.
             return Ok(1);
         }
+        let mut end = self.vlen + 1;
         while !matches!(self.get(&Val::Num((end + 1) as f64)), Val::Nil) {
             if end == MAX_ARRAY_LEN {
                 return Err(TableError::GrowthFailed);
@@ -1384,8 +1386,12 @@ impl Table {
     }
 
     /// Release dead storage and fill a saved nil tail after lead catch-up.
-    /// Not cold: `prepare_list_append` reaches it once per constructor batch
-    /// at the append position. The cold path is `append_slow`.
+    /// Cold: `append` reaches it only through `append_slow`, and
+    /// `prepare_list_append` skips it for the empty or plain windows
+    /// constructors normally have. Without the hint, bench/queue measured
+    /// 2601-2701 ms on plantasjen against 2101 ms with it (measured on top
+    /// of 30bbdcc), while constructor workloads were flat either way.
+    #[cold]
     #[inline(never)]
     fn prepare_append_after_lead(&mut self) -> std::result::Result<(), TableError> {
         let len = self.array.len();
@@ -1522,6 +1528,32 @@ impl Table {
             TableStorage::Map(map) => map.len(),
         };
         occupied - self.dead_count
+    }
+
+    /// A short constructor hash with no live numeric key cannot migrate into
+    /// a positional batch. Bound the scan by the batch size; larger hashes,
+    /// or ones holding a live numeric key, keep the per-key append path.
+    /// Dead slots cannot migrate, and a map's vacated slots carry a
+    /// `Vacant` key that has no value to inspect, so both are skipped by
+    /// their nil value.
+    fn list_hash_cannot_migrate(&self, count: usize) -> bool {
+        if self.hash_live_len() == 0 {
+            return true;
+        }
+        match &self.storage {
+            TableStorage::Inline { entries, len } => {
+                usize::from(*len) <= count
+                    && entries[..usize::from(*len)].iter().all(|(key, value)| {
+                        matches!(value, Val::Nil) || !matches!(key, Val::Num(_))
+                    })
+            }
+            TableStorage::Map(map) => {
+                map.len() <= count
+                    && map.iter().all(|(key, value)| {
+                        matches!(value, Val::Nil) || !matches!(key.as_live(), Some(Val::Num(_)))
+                    })
+            }
+        }
     }
 
     fn insert_into_map_with_tombstones(&mut self, key: TableKey, value: Val) {
@@ -1697,7 +1729,11 @@ impl Table {
 
     /// Reserve a positional batch against the window the append will keep.
     fn prepare_list_append(&mut self, count: usize) -> std::result::Result<(), TableError> {
-        self.prepare_append()?;
+        // Constructors normally have an empty or already plain window. Keep
+        // their reservation independent of the cold window-maintenance path.
+        if !(self.appends_are_plain() || self.array.is_empty() && self.base == self.vlen) {
+            self.prepare_append()?;
+        }
         self.reserve_array(self.array.len().saturating_add(count))
     }
 
@@ -1720,29 +1756,48 @@ impl Table {
     ) -> std::result::Result<(), TableError> {
         let mut key = first;
         let mut reserved = false;
+        // Set once the hash scan has refused: the per-key loop must not
+        // rescan the hash for every remaining value, which would make a
+        // large open batch quadratic in uncharged host work. An emptied hash
+        // still qualifies.
+        let mut hash_may_migrate = false;
         while let Some(value) = values.next() {
+            if key == self.vlen + 1
+                && (matches!(self.array.first(), Some(first) if !matches!(first, Val::Nil))
+                    && self.base + self.array.len() == self.vlen
+                    || self.array.is_empty()
+                        && self.base == self.vlen
+                        && !matches!(value, Val::Nil))
+                && (!hash_may_migrate || self.hash_live_len() == 0)
+            {
+                if self.list_hash_cannot_migrate(1 + values.len()) {
+                    // Every remaining key is an append whose window
+                    // preparation and hash migration would do nothing, so
+                    // the rest of the batch lands in one extend with the
+                    // same end state.
+                    let count = 1 + values.len();
+                    self.check_vlen_growth(count)?;
+                    self.reserve_array(self.array.len().saturating_add(count))?;
+                    self.vlen += count;
+                    let mut live = usize::from(!matches!(value, Val::Nil));
+                    self.array.push(value);
+                    // The complete batch was reserved fallibly above. Extend
+                    // can fill that storage without a capacity check for
+                    // every push; accumulate locally rather than writing
+                    // table metadata for every element.
+                    self.array.extend(values.inspect(|value| {
+                        live += usize::from(!matches!(value, Val::Nil));
+                    }));
+                    self.array_live += live;
+                    break;
+                }
+                hash_may_migrate = true;
+            }
             if key == self.vlen + 1 && !reserved {
-                // Earlier writes can empty or repopulate the window. Release
-                // its dead storage before sizing the remaining batch, rather
-                // than reserving against slots the first append will drop.
+                // The bulk path above needs no window maintenance. Other
+                // appends release dead storage before reserving the batch.
                 self.prepare_list_append(1 + values.len())?;
                 reserved = true;
-            }
-            if key == self.vlen + 1 && self.appends_are_plain() {
-                // Every remaining key is an append whose window preparation
-                // and hash migration would do nothing, so the rest of the
-                // batch lands in one extend with the same end state.
-                let count = 1 + values.len();
-                self.check_vlen_growth(count)?;
-                self.reserve_array(self.array.len().saturating_add(count))?;
-                self.vlen += count;
-                self.array_live += usize::from(!matches!(value, Val::Nil));
-                self.array.push(value);
-                for value in values {
-                    self.array_live += usize::from(!matches!(value, Val::Nil));
-                    self.array.push(value);
-                }
-                break;
             }
             if key == self.vlen + 1 {
                 self.append(value)?;
@@ -2519,14 +2574,33 @@ mod tests {
             }
         }
         let live = Val::Bool(true);
-        let batches: [&[Val]; 4] = [
+        let batches: [&[Val]; 6] = [
             &[live, Val::Nil, live, live],
             &[Val::Nil, live, live, Val::Nil],
             &[live; 9],
             &[Val::Nil, Val::Nil, live],
+            &[Val::Nil; 9],
+            &[live; 64],
         ];
-        let setups: [fn(&mut Table); 5] = [
+        let setups: [fn(&mut Table); 8] = [
             |_| {},
+            |t| t.insert(Val::Bool(false), Val::Bool(true)).unwrap(),
+            |t| {
+                *t = Table::with_capacity(INLINE_CAPACITY + 1);
+                t.insert(Val::Bool(false), Val::Bool(true)).unwrap();
+            },
+            |t| {
+                // A map whose live keys are nonnumeric but which also holds
+                // a Vacant slot (re-added key) and a dead numeric tombstone.
+                *t = Table::with_capacity(INLINE_CAPACITY + 1);
+                t.insert(Val::Bool(false), Val::Bool(true)).unwrap();
+                t.insert(Val::Bool(true), Val::Bool(true)).unwrap();
+                t.insert(h(1), Val::Bool(true)).unwrap();
+                t.insert(Val::Bool(true), Val::Nil).unwrap();
+                t.insert(Val::Bool(true), Val::Bool(true)).unwrap();
+                t.insert(h(1), Val::Nil).unwrap();
+                assert_eq!((map_slots(t), t.hash_live_len()), (4, 2));
+            },
             |t| fill(t, 1..=3),
             |t| t.insert(n(3), Val::Bool(false)).unwrap(),
             |t| fill_hash(t, 1..=2),
@@ -2547,11 +2621,18 @@ mod tests {
                 bulk.set_list(first, batch.iter().copied()).unwrap();
                 key_by_key(&mut reference, first, batch);
                 assert_eq!(bulk.array, reference.array);
+                assert_eq!(bulk.array_live, reference.array_live);
                 assert_eq!(
                     (bulk.base, bulk.vlen, bulk.lead),
                     (reference.base, reference.vlen, reference.lead)
                 );
                 assert_eq!(bulk.hash_live_len(), reference.hash_live_len());
+                assert_eq!(
+                    bulk.get(&Val::Bool(false)),
+                    reference.get(&Val::Bool(false))
+                );
+                assert_eq!(bulk.get(&Val::Bool(true)), reference.get(&Val::Bool(true)));
+                assert_eq!(keys(&bulk), keys(&reference));
                 for key in 1..=40 {
                     assert_eq!(bulk.get(&n(key)), reference.get(&n(key)));
                     assert_eq!(bulk.get(&h(key)), reference.get(&h(key)));
