@@ -541,6 +541,30 @@ collection actually costs before changing the cache.
 
 ## IC extensions (same shape as existing ICs)
 
+### String method calls always take the stack slow path
+
+What: `s:upper()` and every other method call on a string receiver is a
+`SELF` whose receiver is not a heap object, so the register VM's
+`get_field_direct` returns false at once and the op goes through
+`get_field_slow`: record the call site, push the receiver, run the
+stack-protocol `instr_get_field` (which reaches `index_string` and the
+string-method cache), then pop into the register. The cache usually
+answers without calling anything, but the push/pop round trip, the call
+site record and the extra native frame are paid every time.
+
+Sketch: answer a string-method cache hit in the register path, before
+`get_field_slow`, with the same validation `get_cached_string_method`
+does today (string metatable `__index` slot and library table version), and
+leave everything else - a cache miss, a function or string `__index`,
+chains - on the stack path, which keeps metamethod depth and the
+call-site record where a call can happen. Mind
+`reference/native-calls.toml`: if the hit path moves, the edges from
+`instr_get_field` to `index_string` stay for the miss path only.
+
+Measure with `bench/patterns`, whose kernel calls string methods in its hot
+loop (`self:match`, `:reverse()`, `:gsub()`, and a `:trim()` added to the
+string library), though its time is dominated by the matching itself.
+
 ### Table-library fallback IC for the hit path (merged with B-O4/C-O5)
 
 The miss-path half of this entry shipped 2026-07-26 (commit 11854a8): a

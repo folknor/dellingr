@@ -41,6 +41,10 @@ TEXTLINT_RULE = "native-call-marker"
 BOUNDARIES = [("State", "call_unguarded"), ("State", "invoke_rust_fn")]
 
 MARKER = re.compile(r"//\s*native-call:\s*(.*?)\s*$")
+# A comment that opens like a marker but does not parse as one (a missing
+# colon, say). Prose that merely mentions native calls, such as a doc comment
+# naming reference/native-calls.md, is not a marker attempt.
+NEAR_MARKER = re.compile(r"//(?![/!])\s*native[-_]call\b")
 EDGE_ID = re.compile(r"^([\w:.]+)->(\w+)(?::([\w-]+))?$")
 
 
@@ -403,7 +407,7 @@ def attach_markers(sources, sites, problems):
         for line, comment in s.comments.items():
             m = MARKER.search(comment)
             if not m:
-                if "native-call" in comment:
+                if NEAR_MARKER.match(comment.strip()):
                     problems.append(f"{s.rel}:{line}: malformed native-call marker")
                 continue
             ids = [part.strip() for part in m.group(1).split(",") if part.strip()]
