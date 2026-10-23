@@ -323,6 +323,8 @@ and at the deepest point any one of:
 - `string.gmatch` creating its iterator in the last native level (the first
   call in a process also compiles the fixed wrapper chunk there), or refused
   past it;
+- a `table.sort` default comparison failing inside the heap sort, which
+  builds its error with the sort frames live;
 - the refusal of the next call, through the same path as the levels below
   it, or of the next metamethod step, with its traceback;
 - instead of a held chain, a string `__index` chain (the string metatable's

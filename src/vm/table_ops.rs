@@ -6,7 +6,7 @@
 use super::lua_val::{PointerIdKey, RustFunc, Val};
 use super::table::{TableError, TableNext};
 use super::{Result, State, TypeError};
-use crate::error::{Error, ErrorKind, ErrorValue, InternalFault, LibraryError};
+use crate::error::{Error, ErrorKind, ErrorValue, InternalFault, LibraryError, LibraryFunction};
 use crate::instr::{ArgCount, RetCount};
 
 /// How a value renders under `tostring`; see `State::tostring_rendering`.
@@ -694,7 +694,8 @@ impl State {
                 })?;
             }
             // The default comparison only reads numbers and already-interned
-            // string bytes: it cannot call Lua, allocate, or trigger GC, and the
+            // string bytes: it cannot call Lua or trigger GC (its failure
+            // allocates only the Rust error, not VM objects), and the
             // source table holds every element until writeback. Rooting here
             // would just copy the array twice more for nothing.
             // native-call: table_sort->table_sort_values:default
@@ -762,11 +763,24 @@ impl State {
         match (a, b) {
             (Val::Num(a), Val::Num(b)) => Ok(a < b),
             (Val::Str(a), Val::Str(b)) => Ok(self.heap.get_string(a) < self.heap.get_string(b)),
-            (a, b) => Err(self.error(ErrorKind::TypeError(TypeError::Comparison(
-                a.typ(&self.heap),
-                b.typ(&self.heap),
-            )))),
+            (a, b) => Err(self.table_sort_comparison_error(a, b)),
         }
+    }
+
+    /// The failure of a comparison `table.sort` performs itself, attributed
+    /// to `Sort` here, where it is raised. Attribution belongs to this
+    /// construction site rather than to the sort's call scope: an error from
+    /// Lua the sort calls (a comparator, or a nested `table.sort` inside it)
+    /// propagates with whatever attribution it already carries, and the
+    /// notification `on_error` later receives is this same value. Outlined
+    /// and cold so the error path stays out of `table_sort_less`, whose frame
+    /// is live across every comparator re-entry.
+    #[cold]
+    #[inline(never)]
+    fn table_sort_comparison_error(&self, a: Val, b: Val) -> Error {
+        let (a, b) = (a.typ(&self.heap), b.typ(&self.heap));
+        self.error(ErrorKind::TypeError(TypeError::Comparison(a, b)))
+            .with_library_function(LibraryFunction::Sort)
     }
 
     /// Converts the value at the given index to a UTF-8 string, checking for

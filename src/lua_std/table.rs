@@ -4,7 +4,7 @@ use super::{arg_integer, check_optional_type_named, check_type_named, opt_intege
 use crate::LuaType;
 use crate::Result;
 use crate::State;
-use crate::error::{ArgDetail, ErrorKind, LibraryError, LibraryFunction, TypeError};
+use crate::error::{ArgDetail, LibraryError, LibraryFunction};
 use crate::instr::{ArgCount, RetCount};
 use crate::numeral::{MAX_EXACT_INTEGER, exact_i64, parse_lua_numeral};
 use crate::vm::MetaName;
@@ -125,7 +125,7 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         // re-entrant mutations unspecified, so they are not a compatibility
         // guarantee.
         // native-call: lib:table.sort->table_sort
-        table_sort_result(state.table_sort(1, has_comp), has_comp)?;
+        state.table_sort(1, has_comp)?;
         state.set_top(0)?;
         Ok(0)
     }),
@@ -619,7 +619,7 @@ fn sort_through_metamethods(state: &mut State, has_comp: bool) -> Result<u8> {
     }
 
     // native-call: sort_through_metamethods->table_sort_scratch
-    table_sort_result(state.table_sort_scratch(s, n, has_comp), has_comp)?;
+    state.table_sort_scratch(s, n, has_comp)?;
 
     for i in 1..=len {
         state.push_number(i as f64)?;
@@ -645,22 +645,4 @@ fn check_shift_distance(state: &State, distance: i64, function: LibraryFunction)
 
 fn position_out_of_bounds(state: &State, func_name: &str) -> crate::error::Error {
     super::argument_error(state, 2, func_name, ArgDetail::PositionOutOfBounds)
-}
-
-/// Retain the TypeError kind and wording while identifying default sort failures.
-fn table_sort_result<T>(result: Result<T>, has_comp: bool) -> Result<T> {
-    match result {
-        Ok(value) => Ok(value),
-        Err(mut error) => {
-            if !has_comp
-                && matches!(
-                    error.kind(),
-                    ErrorKind::TypeError(TypeError::Comparison(_, _))
-                )
-            {
-                error = error.with_library_function(LibraryFunction::Sort);
-            }
-            Err(error)
-        }
-    }
 }

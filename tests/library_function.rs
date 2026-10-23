@@ -1,8 +1,10 @@
 //! `Error::library_function` names the standard-library function behind every
 //! typed library failure that has one, and nothing else.
 
+use std::sync::{Arc, Mutex};
+
 use dellingr::error::{Error, ErrorKind, LibraryError, LibraryFunction, TypeError};
-use dellingr::{ArgCount, Program, RetCount, State};
+use dellingr::{ArgCount, HostCallbacks, Program, RetCount, State};
 
 fn run_error(code: &str) -> Error {
     let mut state = State::new();
@@ -114,6 +116,82 @@ fn default_sort_comparison_is_attributed_to_sort() {
         "table.sort(setmetatable({1, 'x'}, {__index = function() return nil end}))",
         Some(LibraryFunction::Sort),
     );
+}
+
+/// Records the attribution each `on_error` notification carried.
+struct AttributionRecorder(Arc<Mutex<Vec<Option<LibraryFunction>>>>);
+
+impl HostCallbacks for AttributionRecorder {
+    fn on_print(&mut self, _source: Option<&[u8]>, _line: u32, _message: &[u8]) {}
+
+    fn on_error(&mut self, error: &Error) {
+        self.0.lock().unwrap().push(error.library_function());
+    }
+}
+
+/// Only a comparison `table.sort` itself performs answers `Sort`. A
+/// comparison failing in Lua code that sort called (an `__index` read, a
+/// comparator) keeps its own attribution, even when that code is itself a
+/// default sort; and the one `on_error` notification carries the same
+/// attribution as the error the host receives.
+#[test]
+fn sort_attribution_follows_the_comparison_that_failed() {
+    let index_compares = "setmetatable({}, {\n\
+         __len = function() return 2 end,\n\
+         __index = function() return 1 < 'x' end,\n\
+         })";
+    let index_sorts = "setmetatable({}, {\n\
+         __len = function() return 2 end,\n\
+         __index = function() table.sort({1, 'x'}) return 1 end,\n\
+         })";
+    let cases = [
+        (
+            "table.sort({1, 'x'})".to_owned(),
+            Some(LibraryFunction::Sort),
+        ),
+        (
+            "table.sort(setmetatable({1, 'x'}, {__index = function() end}))".to_owned(),
+            Some(LibraryFunction::Sort),
+        ),
+        (format!("table.sort({index_compares})"), None),
+        (
+            format!("table.sort({index_compares}, function(a, b) return false end)"),
+            None,
+        ),
+        (
+            "table.sort({1, 2}, function(a, b) return a < 'x' end)".to_owned(),
+            None,
+        ),
+        (
+            format!("table.sort({index_sorts})"),
+            Some(LibraryFunction::Sort),
+        ),
+        (
+            "table.sort({1, 2}, function(a, b) table.sort({1, 'x'}) end)".to_owned(),
+            Some(LibraryFunction::Sort),
+        ),
+    ];
+    for (code, expected) in cases {
+        let notifications = Arc::new(Mutex::new(Vec::new()));
+        let mut state =
+            State::with_callbacks(Box::new(AttributionRecorder(Arc::clone(&notifications))));
+        Program::compile(&code, None)
+            .and_then(|program| state.load(&program))
+            .expect("test chunk compiles");
+        let error = state
+            .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+            .expect_err(&format!("expected an error from: {code}"));
+        assert!(
+            matches!(
+                error.kind(),
+                ErrorKind::TypeError(TypeError::Comparison(_, _))
+            ),
+            "{code}: {:?}",
+            error.kind()
+        );
+        assert_eq!(error.library_function(), expected, "{code}");
+        assert_eq!(*notifications.lock().unwrap(), vec![expected], "{code}");
+    }
 }
 
 #[test]

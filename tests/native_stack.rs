@@ -23,7 +23,7 @@
 //! exactly that sequence and its expected outcome. Steps whose callbacks
 //! return values check them in Lua.
 
-use dellingr::error::{ErrorKind, ErrorValue, PatternErrorDetail};
+use dellingr::error::{ErrorKind, ErrorValue, LibraryFunction, PatternErrorDetail, TypeError};
 use dellingr::limits::{
     MAX_CHUNK_NESTING, MAX_METAMETHOD_DEPTH, MAX_NATIVE_CALL_DEPTH, MAX_SYNTAX_DEPTH, MAXCCALLS,
 };
@@ -717,6 +717,7 @@ enum Outcome {
     NativeRefused,
     MetaRefused,
     PatternTooComplex,
+    SortComparison,
 }
 
 /// Work at the top of a held chain, with every native level in use
@@ -754,6 +755,15 @@ const LEAVES: &[Leaf] = &[
         meta_room: false,
         lua: "string.find(REJECT_SUBJECT, REJECT_PATTERN)",
         outcome: Outcome::PatternTooComplex,
+    },
+    Leaf {
+        // The default sort comparison fails at the bottom of the heap sort
+        // and builds its attributed error there, with the sort frames live.
+        name: "sort_compare_error",
+        headroom: 0,
+        meta_room: false,
+        lua: r#"table.sort({3, 1, 2, 5, 4, "x"})"#,
+        outcome: Outcome::SortComparison,
     },
     Leaf {
         // The scenario's own step once more: refused on its own path.
@@ -1097,6 +1107,21 @@ fn check(scenario: &Scenario, chain: &Chain, leaf: Option<&Leaf>, outcome: &Outc
             Err(ErrorKind::PatternError(PatternErrorDetail::MatchDepthExceeded)) => {}
             other => panic!("{label}: expected pattern too complex, got {other:?}"),
         },
+        Outcome::SortComparison => {
+            match kind {
+                Err(ErrorKind::TypeError(TypeError::Comparison(_, _))) => {}
+                other => panic!("{label}: expected a sort comparison error, got {other:?}"),
+            }
+            let attribution = result
+                .as_ref()
+                .err()
+                .and_then(dellingr::error::Error::library_function);
+            assert_eq!(
+                attribution,
+                Some(LibraryFunction::Sort),
+                "{label}: sort attribution"
+            );
+        }
     }
 
     if leaf.is_some_and(|leaf| leaf.name == "accept") {

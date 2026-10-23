@@ -133,6 +133,12 @@ xxh128 = "b02dfb55c808e62f08a1311046988351"
 hotpath_file = "examples/tables/queue.lua"
 hotpath_xxh128 = "53c18d7a34328f8d6917fab4d5eb0399"
 
+[dellingr.workloads.sort]
+file = "bench/sort.lua"
+xxh128 = "3186097866519fa8829611bd9b74512b"
+hotpath_file = "examples/tables/sort.lua"
+hotpath_xxh128 = "9ee20f2478eaf25b1c8886757bf5efc9"
+
 [dellingr.workloads.mixed]
 file = "bench/mixed.lua"
 xxh128 = "4193f315750f157ff7fb2b1ec6f30165"

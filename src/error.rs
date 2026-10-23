@@ -1350,9 +1350,10 @@ impl Error {
     /// For an [`ErrorKind::LibraryError`] this is [`LibraryError::function`].
     /// The one other attributed error is the [`TypeError::Comparison`] that
     /// `table.sort`'s default comparison raises, which answers `Sort`. Argument
-    /// errors name their function in [`ArgError::func_name`] instead, and an
-    /// error propagated out of a metamethod handler, comparator or other
-    /// callback the library called answers `None`.
+    /// errors name their function in [`ArgError::func_name`] instead. An error
+    /// propagated out of a metamethod handler, comparator or other callback
+    /// the library called keeps the attribution it already carries; the
+    /// calling library function adds none.
     pub fn library_function(&self) -> Option<LibraryFunction> {
         match &self.0.kind {
             ErrorKind::LibraryError(error) => error.function(),

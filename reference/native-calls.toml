@@ -414,7 +414,7 @@ id = "table_sort->table_sort_values:comparator"
 
 [[edge]]
 id = "table_sort->table_sort_values:default"
-excluded = "no comparator: the default comparison only reads numbers and strings and calls nothing"
+excluded = "no comparator: the default comparison only reads numbers and strings and cannot re-enter Lua"
 
 [[edge]]
 id = "table_sort_values->table_sort_heap"
