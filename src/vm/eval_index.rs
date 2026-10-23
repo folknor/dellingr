@@ -259,7 +259,7 @@ impl State {
         let tbl = self.heap.as_table_ref(entry.string_lib)?;
         let version = tbl.version();
         if entry.version == version {
-            return tbl.get_index(entry.index).map(|(_, val)| val);
+            return tbl.get_index_value(entry.index);
         }
         // Slow validation: re-read the key at the cached index. If still
         // the same method name, refresh the entry's version and use it.
@@ -276,6 +276,26 @@ impl State {
         }
     }
 
+    /// The own-field cache hit alone: same table, unchanged version, live
+    /// value. `None` is not a lookup result, only "not answered here"; the
+    /// caller must continue with the full lookup.
+    #[inline(always)]
+    pub(super) fn get_current_cached_field(
+        &self,
+        ptr: ObjectPtr,
+        cache: &FieldLookupCacheSlot,
+    ) -> Option<Val> {
+        let entry = cache.get_field()?;
+        if entry.table != ptr {
+            return None;
+        }
+        let tbl = self.heap.as_table_ref(ptr)?;
+        if entry.table_version != tbl.version() {
+            return None;
+        }
+        tbl.get_index_value(entry.index)
+    }
+
     #[inline(always)]
     pub(super) fn get_cached_field(
         &self,
@@ -290,7 +310,7 @@ impl State {
         let tbl = self.heap.as_table_ref(ptr)?;
         let table_version = tbl.version();
         if entry.table_version == table_version {
-            return tbl.get_index(entry.index).map(|(_, val)| val);
+            return tbl.get_index_value(entry.index);
         }
         let (cached_key, cached_val) = tbl.get_index(entry.index)?;
         if cached_key == key {
@@ -432,9 +452,7 @@ impl State {
         };
 
         if entry.method_table_version == method_table_version {
-            return method_table
-                .get_index(method_index)
-                .map(|(_, val)| Some(val));
+            return method_table.get_index_value(method_index).map(Some);
         }
 
         let (cached_key, method) = method_table.get_index(method_index)?;

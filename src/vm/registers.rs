@@ -90,7 +90,13 @@ impl State {
         Ok(())
     }
 
-    /// `R[dst] = receiver.name`.
+    /// `R[dst] = receiver.name`. Only a current own-field cache hit runs in
+    /// the dispatch loop; everything else is outlined, so the hit path does
+    /// not carry the frame and spills of the lookup ladder. A hint rather
+    /// than `inline(always)`: the dev profile ignores it, which keeps the
+    /// probe's unshared debug locals out of `Frame::run`, a frame live across
+    /// every native re-entry.
+    #[inline]
     pub(super) fn reg_get_field(
         &mut self,
         frame: &mut Frame,
@@ -100,23 +106,60 @@ impl State {
         cache_slot: Option<u8>,
         local_cost: &mut u64,
     ) -> Result<()> {
-        if let Some(ptr) = receiver.as_object_ptr() {
-            let key = frame.literal(name);
-            let cache = frame.runtime.caches.field(cache_slot);
-            if let Some((direct, has_metatable)) = self.get_table_field_direct(ptr, key, cache) {
-                if let Some(result) = direct {
-                    self.stack[dst] = result;
-                    return Ok(());
-                }
-                if !has_metatable {
-                    // A miss on a plain table is nil, exactly as `t["k"]`
-                    // and `rawget` see it.
-                    self.stack[dst] = Val::Nil;
-                    return Ok(());
-                }
-            }
+        if let Some(val) = self.field_cache_hit(frame, receiver, cache_slot) {
+            self.stack[dst] = val;
+            return Ok(());
+        }
+        // The direct miss returns before the stack path starts, so its frame
+        // is not live across the handler calls that path can make.
+        if self.get_field_direct(frame, dst, receiver, name, cache_slot) {
+            return Ok(());
         }
         self.get_field_slow(frame, dst, receiver, name, cache_slot, local_cost)
+    }
+
+    #[inline]
+    fn field_cache_hit(&self, frame: &Frame, receiver: Val, cache_slot: Option<u8>) -> Option<Val> {
+        let cache = frame.runtime.caches.field(cache_slot)?;
+        self.get_current_cached_field(receiver.as_object_ptr()?, cache)
+    }
+
+    /// The register-native part of a field read that missed the own-field
+    /// cache: the raw lookup (which refills that cache, and makes a plain
+    /// table's miss nil), then a direct `__index`-table lookup, both without
+    /// temporaries or handler calls. Only after the raw lookup has proved the
+    /// key absent may the method cache answer: a receiver's version does not
+    /// move when it gains a field, so nothing cheaper proves absence. False
+    /// leaves chains, handlers and string receivers to the stack path.
+    #[inline(never)]
+    fn get_field_direct(
+        &mut self,
+        frame: &Frame,
+        dst: usize,
+        receiver: Val,
+        name: u16,
+        cache_slot: Option<u8>,
+    ) -> bool {
+        let Some(ptr) = receiver.as_object_ptr() else {
+            return false;
+        };
+        let key = frame.literal(name);
+        let cache = frame.runtime.caches.field(cache_slot);
+        let Some((direct, has_metatable)) = self.get_table_field_direct(ptr, key, cache) else {
+            return false;
+        };
+        let result = match direct {
+            Some(result) => result,
+            // A miss on a plain table is nil, exactly as `t["k"]` and
+            // `rawget` see it.
+            None if !has_metatable => Val::Nil,
+            None => match self.get_index_table_field_direct(ptr, key, cache) {
+                Some(result) => result,
+                None => return false,
+            },
+        };
+        self.stack[dst] = result;
+        true
     }
 
     #[inline(never)]

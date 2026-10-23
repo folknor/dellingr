@@ -732,6 +732,29 @@ impl Table {
         }
     }
 
+    /// The value half of [`Self::get_index`], for cached reads that never look
+    /// at the key. `Option<Val>` comes back in two registers, whereas the
+    /// key/value pair goes through a stack out-parameter that the caller
+    /// re-reads as overlapping byte/word loads, defeating store forwarding.
+    #[inline]
+    pub(super) fn get_index_value(&self, index: usize) -> Option<Val> {
+        let value = if index & ARRAY_SLOT_TAG != 0 {
+            let position = self.window_position(index & !ARRAY_SLOT_TAG)?;
+            self.array[position]
+        } else {
+            match &self.storage {
+                TableStorage::Inline { entries, len } => {
+                    if index >= *len as usize {
+                        return None;
+                    }
+                    entries[index].1
+                }
+                TableStorage::Map(map) => *map.get_index(index)?.1,
+            }
+        };
+        (!matches!(value, Val::Nil)).then_some(value)
+    }
+
     /// Iterate live hash entries in insertion order with their physical slots.
     /// Dead keys are never yielded, so callers may safely dereference them.
     #[cfg(feature = "snapshot")]
