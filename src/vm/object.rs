@@ -198,6 +198,10 @@ pub(super) struct Closure {
 }
 
 /// The raw object data managed by GC.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Table is stored inline so table access takes no extra indirection; the exact live-slot count pushed it past the lint threshold"
+)]
 pub(super) enum RawObject {
     LuaFn(Box<Closure>),
     Table(Table),

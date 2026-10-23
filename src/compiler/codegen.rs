@@ -373,7 +373,9 @@ impl Generator<'_> {
                 first,
                 count,
                 values,
+                line,
             } => {
+                self.error_line = *line;
                 debug_assert_eq!(self.freereg, u16::from(*first));
                 let count = *count;
                 if values.is_empty() {
@@ -823,6 +825,9 @@ impl Generator<'_> {
 
     /// Generate a condition and return the jumps taken when it is false.
     fn cond_false(&mut self, cond: &Expr) -> Result<Vec<usize>> {
+        if cond.line != 0 {
+            self.error_line = cond.line;
+        }
         match &cond.kind {
             ExprKind::True | ExprKind::Num(_) | ExprKind::Str(_) => Ok(Vec::new()),
             ExprKind::Nil | ExprKind::False => Ok(vec![self.jump()]),
@@ -835,6 +840,7 @@ impl Generator<'_> {
                 for link in init {
                     acc = self.compare_value(link.op, acc, &link.rhs, link.line)?;
                 }
+                self.error_line = last.line;
                 let lhs = self.operand_before(acc, last.rhs.may_execute)?;
                 let (lhs_reg, lhs) = self.operand_reg(lhs)?;
                 let rhs = self.expr(&last.rhs)?;
@@ -858,6 +864,9 @@ impl Generator<'_> {
     // Expressions
 
     fn expr(&mut self, expr: &Expr) -> Result<Val> {
+        if expr.line != 0 {
+            self.error_line = expr.line;
+        }
         Ok(match &expr.kind {
             ExprKind::Nil => Val::Nil,
             ExprKind::True => Val::True,
@@ -912,6 +921,7 @@ impl Generator<'_> {
                 self.arith(ArithOp::Pow, acc, exponent, *line)?
             }
             ExprKind::Concat { operands, line } => {
+                self.error_line = *line;
                 let first = self.freereg;
                 for operand in operands {
                     let val = self.expr(operand)?;
@@ -1030,6 +1040,7 @@ impl Generator<'_> {
     fn suffix(&mut self, object: Val, suffix: &Suffix) -> Result<Val> {
         match suffix {
             Suffix::Field { name, line } => {
+                self.error_line = *line;
                 let reg = self.any_reg(object)?;
                 self.free_reg(reg);
                 Ok(Val::Reloc(
@@ -1037,6 +1048,7 @@ impl Generator<'_> {
                 ))
             }
             Suffix::Index { key, line } => {
+                self.error_line = *line;
                 let obj = self.operand_before(object, key.may_execute)?;
                 let (obj_reg, obj) = self.operand_reg(obj)?;
                 let k = self.expr(key)?;
@@ -1163,21 +1175,52 @@ impl Generator<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CodegenError, Generator, MAX_JUMP_OFFSET};
+    use super::{CodegenError, Generator, MAX_JUMP_OFFSET, OPEN_COUNT, Result, Val};
+    use crate::compiler::ast::{
+        CallSuffix, CompareChain, CompareLink, Expr, ExprKind, MethodSuffix, Stmt, Suffix,
+        TableAlloc, TableExpr, TableItem,
+    };
+    use crate::instr::{CompareOp, Instr};
 
-    #[test]
-    fn register_exhaustion_is_a_limit_and_preserves_the_allocator() {
-        let mut generator = Generator {
+    fn generator(freereg: u16) -> Generator<'static> {
+        Generator {
             code: Vec::new(),
             lines: Vec::new(),
             line: 1,
             error_line: 2,
-            freereg: 0,
+            freereg,
             nactive: 0,
-            max_stack: 0,
+            max_stack: freereg,
             locals: &[],
             loops: Vec::new(),
-        };
+        }
+    }
+
+    fn expression(kind: ExprKind, line: u32) -> Expr {
+        let mut expr = Expr::new(kind);
+        expr.line = line;
+        expr
+    }
+
+    fn number(line: u32) -> Expr {
+        expression(ExprKind::Num(0), line)
+    }
+
+    fn register_error<T>(result: Result<T>) -> (usize, u32) {
+        match result {
+            Err(CodegenError::TooManyRegisters { count, line }) => (count, line),
+            Err(error) => panic!("expected a register-limit error, got {error:?}"),
+            Ok(_) => panic!("expected a register-limit error"),
+        }
+    }
+
+    fn register_count() -> usize {
+        usize::from(OPEN_COUNT)
+    }
+
+    #[test]
+    fn register_exhaustion_is_a_limit_and_preserves_the_allocator() {
+        let mut generator = generator(0);
         generator.reserve(u16::MAX - 1).expect("largest frame fits");
         for extra in [1, 2] {
             assert!(matches!(
@@ -1189,23 +1232,208 @@ mod tests {
         }
     }
 
+    #[test]
+    fn local_expression_list_reports_the_failing_value_line() {
+        let mut values = std::iter::repeat_with(|| number(7))
+            .take(register_count() - 1)
+            .collect::<Vec<_>>();
+        values.push(number(13));
+        let mut generator = generator(0);
+
+        let (count, line) = register_error(generator.stmt(&Stmt::Local {
+            first: 0,
+            count: 1,
+            values,
+            line: 5,
+        }));
+
+        assert_eq!(count, register_count());
+        assert_eq!(line, 13);
+    }
+
+    #[test]
+    fn local_nil_reservation_reports_the_declaration_line() {
+        let mut generator = generator(0);
+        let (count, line) = register_error(generator.stmt(&Stmt::Local {
+            first: 0,
+            count: register_count(),
+            values: Vec::new(),
+            line: 17,
+        }));
+
+        assert_eq!(count, register_count());
+        assert_eq!(line, 17);
+    }
+
+    #[test]
+    fn concat_register_exhaustion_reports_the_operator_line() {
+        let concat = expression(
+            ExprKind::Concat {
+                operands: vec![number(0), number(0)],
+                line: 23,
+            },
+            4,
+        );
+        let mut generator = generator(OPEN_COUNT - 2);
+
+        let (count, line) = register_error(generator.expr(&concat));
+
+        assert_eq!(count, register_count());
+        assert_eq!(line, 23);
+    }
+
+    #[test]
+    fn logical_register_exhaustion_reports_the_expression_line() {
+        for kind in [
+            ExprKind::And(vec![number(0), number(0)]),
+            ExprKind::Or(vec![number(0), number(0)]),
+        ] {
+            let logical = expression(kind, 29);
+            let mut generator = generator(OPEN_COUNT - 1);
+
+            let (count, line) = register_error(generator.expr(&logical));
+
+            assert_eq!(count, register_count());
+            assert_eq!(line, 29);
+        }
+    }
+
+    #[test]
+    fn call_argument_register_exhaustion_reports_the_argument_line() {
+        let call = CallSuffix {
+            args: vec![number(31), number(32)],
+            line: 19,
+        };
+        let mut generator = generator(OPEN_COUNT - 2);
+
+        let (count, line) = register_error(generator.call(Val::Num(0), &call));
+
+        assert_eq!(count, register_count());
+        assert_eq!(line, 31);
+    }
+
+    #[test]
+    fn method_argument_register_exhaustion_reports_the_argument_line() {
+        let method = MethodSuffix {
+            name: 0,
+            lookup_line: 19,
+            args: vec![number(31), number(37)],
+            line: 20,
+        };
+        let mut generator = generator(OPEN_COUNT - 4);
+
+        let (count, line) = register_error(generator.method_call(Val::Num(0), &method));
+
+        assert_eq!(count, register_count());
+        assert_eq!(line, 37);
+        assert_eq!(generator.lines, vec![1, 19, 19]);
+    }
+
+    #[test]
+    fn return_value_register_exhaustion_reports_the_value_line() {
+        let values = [number(41), number(43)];
+        let mut generator = generator(OPEN_COUNT - 1);
+
+        let (count, line) = register_error(generator.return_stmt(&values, 19));
+
+        assert_eq!(count, register_count());
+        assert_eq!(line, 41);
+    }
+
+    #[test]
+    fn constructor_register_exhaustion_keeps_its_instruction_line() {
+        let table = expression(
+            ExprKind::Table(Box::new(TableExpr {
+                alloc: TableAlloc::Plain,
+                line: 47,
+                items: vec![TableItem::Positional(number(0))],
+            })),
+            47,
+        );
+        let mut generator = generator(OPEN_COUNT - 2);
+
+        let (count, line) = register_error(generator.expr(&table));
+
+        assert_eq!(count, register_count());
+        assert_eq!(line, 47);
+        assert_eq!(generator.lines, vec![47]);
+    }
+
+    #[test]
+    fn suffix_register_exhaustion_reports_the_suffix_line() {
+        let mut index_generator = generator(OPEN_COUNT - 1);
+        let index = Suffix::Index {
+            key: number(0),
+            line: 53,
+        };
+        let (count, line) = register_error(index_generator.suffix(Val::Num(0), &index));
+        assert_eq!(count, register_count());
+        assert_eq!(line, 53);
+
+        let mut field_generator = generator(OPEN_COUNT - 1);
+        let field = Suffix::Field { name: 0, line: 59 };
+        let (count, line) = register_error(field_generator.suffix(Val::Num(0), &field));
+        assert_eq!(count, register_count());
+        assert_eq!(line, 59);
+    }
+
+    #[test]
+    fn condition_comparison_register_exhaustion_reports_the_operator_line() {
+        let condition = expression(
+            ExprKind::Compare(Box::new(CompareChain {
+                first: number(0),
+                rest: vec![CompareLink {
+                    op: CompareOp::Eq,
+                    rhs: number(0),
+                    line: 61,
+                }],
+            })),
+            4,
+        );
+        let mut generator = generator(OPEN_COUNT - 2);
+
+        let (count, line) = register_error(generator.cond_false(&condition));
+
+        assert_eq!(count, register_count());
+        assert_eq!(line, 61);
+    }
+
+    #[test]
+    fn condition_value_register_exhaustion_reports_the_expression_line() {
+        let condition = expression(ExprKind::Upval(0), 63);
+        let mut generator = generator(OPEN_COUNT - 1);
+
+        let (count, line) = register_error(generator.cond_false(&condition));
+
+        assert_eq!(count, register_count());
+        assert_eq!(line, 63);
+    }
+
+    #[test]
+    fn register_error_hint_does_not_change_line_info_stamps() {
+        let mut generator = generator(OPEN_COUNT - 1);
+        generator.line = 3;
+        generator.emit(Instr::load_bool(0, true));
+        let value = generator
+            .expr(&number(67))
+            .expect("a literal itself needs no temporary register");
+
+        let (count, line) = register_error(generator.next_reg(value));
+
+        assert_eq!(count, register_count());
+        assert_eq!(line, 67);
+        assert_eq!(generator.lines, vec![3]);
+        assert_eq!(generator.line, 3);
+    }
+
     /// A jump reaches exactly `MAX_JUMP_OFFSET` instructions forward; one
     /// further fails compilation rather than wrapping. No source this test
     /// could compile reaches that far without gigabytes of tree, so the
     /// patch is driven directly.
     #[test]
     fn jump_patching_rejects_offsets_past_the_encoding() {
-        let mut generator = Generator {
-            code: Vec::new(),
-            lines: Vec::new(),
-            line: 1,
-            error_line: 0,
-            freereg: 0,
-            nactive: 0,
-            max_stack: 0,
-            locals: &[],
-            loops: Vec::new(),
-        };
+        let mut generator = generator(0);
+        generator.error_line = 0;
         let pc = generator.jump();
         let farthest = usize::try_from(MAX_JUMP_OFFSET).expect("the offset is positive") + 1;
         generator

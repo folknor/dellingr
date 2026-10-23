@@ -35,12 +35,20 @@ pub(super) struct LocalDecl {
 pub(super) struct Expr {
     pub(super) kind: ExprKind,
     pub(super) may_execute: bool,
+    /// The source line where `parse_expr` started, or zero for internal
+    /// subexpressions. Used only for codegen diagnostics and kept separate
+    /// from emitted instruction stamps.
+    pub(super) line: u32,
 }
 
 impl Expr {
     pub(super) fn new(kind: ExprKind) -> Self {
         let may_execute = kind.may_execute();
-        Self { kind, may_execute }
+        Self {
+            kind,
+            may_execute,
+            line: 0,
+        }
     }
 
     /// Whether this is a call or vararg whose value count follows its use.
@@ -304,6 +312,8 @@ pub(super) enum Stmt {
         first: u8,
         count: usize,
         values: Vec<Expr>,
+        /// The `local` keyword's line, for register-allocation diagnostics.
+        line: u32,
     },
     /// `local function name`: the local is in scope inside the body.
     LocalFunction {

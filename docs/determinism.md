@@ -66,14 +66,18 @@ are hosts and are exempt.
 
 `tostring` and `%p` of tables, closures and Rust functions render a state-local
 identity, not an address. It is stable across a snapshot round trip. Rust
-functions render as `function: 0x<id>`.
+functions render as `function: 0x<id>`. Identities rendered during load setup
+are merged with the saved ones: a value the save records takes its saved
+identity, and a setup that does not replay the saving State's initialization
+can print ids that do not hold after the load (see `save-state.md`).
 
 Rust functions are compared by code address, so `f == g` on host functions
 depends on the build: identical-code folding can make two distinct functions
 equal. Addresses themselves never reach output or ordering. See
 `compatibility.md` and `save-state.md`.
 
-Identities are never reused. Strings are interned and also get a `%p`
+Identities are never reused, short of a load whose setup differs from the
+saving State's initialization. Strings are interned and also get a `%p`
 identity, so a string that is dropped and later rebuilt with the same bytes
 keeps its id only if no collection ran in between. The metamethod event names
 (`__index`, `__newindex`, `__call`, `__len`, `__tostring`, `__metatable`) are

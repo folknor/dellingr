@@ -1095,9 +1095,16 @@ impl State {
     /// Called when an error occurs. Notifies host callbacks.
     pub(crate) fn host_error(&mut self, error: &mut Error) {
         if error.mark_reported() {
+            // The gmatch iterator shim is left out of error locations, so its
+            // chunk name must not fill in an error the caller's frame located
+            // (an unnamed caller included). A shim with no script caller keeps
+            // its own name, as its trace keeps its own frame.
             let source = self
                 .call_stack
-                .last()
+                .iter()
+                .rev()
+                .find(|info| !Self::is_gmatch_wrapper(&info.bytecode))
+                .or(self.call_stack.last())
                 .and_then(|info| info.bytecode.source.as_ref());
             error.attach_source_name_if_absent(source);
             self.callbacks.on_error(error);
@@ -1137,6 +1144,39 @@ impl State {
         let val = self.pop_val();
         self.set_global_value(name, val);
         Ok(())
+    }
+
+    /// Resolve a proxy key before changing the stack, borrowing its interned
+    /// bytes rather than allocating an owned name on each access.
+    pub(crate) fn global_proxy_read(&mut self) -> Result<bool> {
+        self.check_poisoned()?;
+        let key = self.convert_idx(2)?;
+        let Some(bytes) = self.stack[key].as_string(&self.heap) else {
+            return Ok(false);
+        };
+        let Ok(name) = str::from_utf8(bytes) else {
+            return Ok(false);
+        };
+        let value = self.global_env.read(name, None);
+        self.set_top(0)?;
+        self.push_val(value)?;
+        Ok(true)
+    }
+
+    /// Update through a borrowed proxy key. Only inserting a new binding owns
+    /// a name; existing bindings and nil writes to absent names allocate none.
+    pub(crate) fn global_proxy_write(&mut self) -> Result<bool> {
+        self.check_poisoned()?;
+        let key = self.convert_idx(2)?;
+        let value = self.stack[self.convert_idx(3)?];
+        let Some(bytes) = self.stack[key].as_string(&self.heap) else {
+            return Ok(false);
+        };
+        let Ok(name) = str::from_utf8(bytes) else {
+            return Ok(false);
+        };
+        self.global_env.write_named(name, value, None);
+        Ok(true)
     }
 
     /// Ends initialization of the current global environment.
@@ -1506,12 +1546,26 @@ impl State {
         let mut trace = Vec::with_capacity(self.call_stack.len() + 1);
 
         // First entry: the current frame where the error occurred
-        trace.push(current_frame.to_stack_frame());
+        // A host may call the iterator without a script caller. Keep its
+        // implementation location in that case rather than inventing one.
+        let shim_with_script_caller = Self::is_gmatch_wrapper(current_frame.bytecode())
+            && self
+                .call_stack
+                .iter()
+                .rev()
+                .skip(1)
+                .any(|info| !Self::is_gmatch_wrapper(&info.bytecode));
+        if !shim_with_script_caller {
+            trace.push(current_frame.to_stack_frame());
+        }
 
         // Add entries from call_stack (most recent first).
         // Skip the last entry (current function) since we already have it from current_frame.
         // The remaining entries are the callers, with ip pointing to their call sites.
         for call_info in self.call_stack.iter().rev().skip(1) {
+            if Self::is_gmatch_wrapper(&call_info.bytecode) {
+                continue;
+            }
             // Get line number from the ip (call site)
             let line = if call_info.ip > 0 {
                 call_info

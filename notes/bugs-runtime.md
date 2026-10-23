@@ -256,62 +256,6 @@ exactly one. There is no swallowing case.
 
 Then make the `on_error` doc say which one it is.
 
-## RT-010 - An all-dead array window grows instead of being released when the dead-prefix hint lags
-
-From the `tables` hunter.
-
-**Claims broken.** docs/limits.md, memory section: "an all-dead window is
-released at the next append or array write outside it, so a FIFO ... keeps
-storage proportional to its backlog". The doc comment on `write_outside_window`
-says the same: "An all-dead window restarts at `key`".
-
-**Mechanism.** "All dead" is tested as `self.lead == self.array.len()`, but
-`lead` is only a lower bound. It advances by at most `LEAD_CATCH_UP` (8) per nil
-write at the hint, and not at all for nil writes above it. Clearing a window
-from the top down leaves `lead` at about 9, however long the window is.
-`write_outside_window` does no catch-up of its own, so it takes the extend
-branch, and the downward pad uses `len - lead` as its "live span" estimate:
-
-```lua
-local q = {}
-for i = 1, 2000 do q[i] = i end
-for i = 1, 1000 do q[i] = nil end      -- hint tracks: lead = 1000
-q[2001] = true                          -- append drops the prefix: base = 1000, window keys 1001..2001
-for i = 2001, 1001, -1 do q[i] = nil end -- top-down clear: lead ends at 9, window is all nil
-q[1] = true                             -- outside the window, so it should restart there;
-                                        -- instead splices 1000 nils: window = 2001 slots, 1 live
-```
-
-Scaled up, a single SET charge doubles a large all-nil allocation that the doc
-says is released. That is host work out of proportion to its charge, and a
-direct contradiction of the documented release rule. The append path has the
-same blind spot: an all-nil window with a lagging hint is kept and pushed onto.
-limits.md's "after catching up within a bounded number of pushes" partly covers
-that case, though the bound is O(lag / 15) pushes, not a constant. The
-outside-window write has no catch-up at all.
-
-**Direction.** Replace the hint with an exact live count of the window, a
-`window_live: usize` maintained on every window write (nil to live, live to
-nil). That makes "all dead" O(1) and exact. `lead` can stay as a prefix-skip
-accelerator for `next` and `mark_values`, but release decisions should never
-depend on it. The downward pad in `write_outside_window` should then use the
-live count, not `len - lead`.
-
-## RT-012 - `set_metatable_of` rejects a bad metatable as "attempt to index a X value"
-
-From the `tables` hunter. Lower severity.
-
-`State::set_metatable_of` (table_ops.rs) returns
-`TypeError::TableIndex(other.typ())` when the value on top is neither a table nor
-nil. It returns the same error when the target is not a table, through
-`table_operand_below_top`. For a host passing a number as the metatable, the
-message reads "attempt to index a number value", but nothing was indexed.
-Scripts never see this, because `setmetatable` type-checks argument 2 first. For
-the host it is the misleading-message case AGENTS.md counts as a defect.
-
-**Direction.** Give it its own error kind, for example "metatable must be a
-table or nil".
-
 ## RT-014 - Every slow-path entry repeats the fast-path lookup
 
 From the `dispatch` hunter (its L1) and the `tables` hunter (its L2). Raised as
@@ -395,3 +339,62 @@ allocation workloads (`fill`, `mixed`, `queue`, `short_tables`,
 `record_tables`) against the commit before the change, interleaved per the
 benchmarking rules, and fold the counting into the migration walk if the delta
 is real.
+
+The fourth wave added an exact live-slot count to the array window, maintained
+on every window write, append, migration, shift and restore; measure it in the
+same pass. Its downward padding in `write_outside_window` now sizes from the
+live count, which never exceeds the old `len - lead` estimate and is smaller
+for a sparse window; the cost is more downward splices when pushing in front
+of a sparse window (logarithmic in the pushes, since the live count grows with
+each).
+
+## RT-024 - `set_list` can reserve against a dead window before append releases it
+
+Lateral from the fourth resolution wave. `set_list` reserves growth for its
+batch against the current window before `prepare_append` gets the chance to
+release an all-dead window. With a large dead window and a constructor batch
+that would restart it, the reservation sizes against storage that is about to
+be dropped, so a refusal (`TableGrowthFailed`) can fire where the post-release
+growth would have fit. Reserve after the release decision, or compute the
+reservation from the post-release shape.
+
+## RT-025 - `table.sort` with a comparator still clones the sequence infallibly
+
+Lateral from the fourth resolution wave's review. The raw sort path's copy
+(`Table::get_array`) is now fallible, so a forged huge border errors instead of
+aborting. But the comparator path then does `let roots = arr.clone();` in
+`table_sort` (src/vm/table_ops.rs), an infallible copy of the same size, so a
+sort with a comparator can still abort on a sequence `get_array` just managed
+to allocate. Reserve the clone fallibly too, or root the values without a full
+second copy.
+
+## RT-026 - Saves build an environment table's hash-slot list more than once
+
+Lateral from the fourth resolution wave's review. `encode_env_deltas` and the
+materialize order block each call `snapshot_entries()`, which builds the full
+hash-slot list and is then truncated to the array slots, and
+`encode_env_deltas` then calls `snapshot_hash_slots()` again. Minor host work
+per environment table per save or load; an array-only accessor would avoid it.
+
+## RT-028 - The array live count grew every heap object slot
+
+From the fourth resolution wave's gate. The exact window live count
+(`Table::array_live: usize`) made `Table` large enough that clippy's
+`large_enum_variant` fired on `RawObject` (src/vm/object.rs). The gate agent
+allowed the lint rather than boxing the table variant, since boxing adds an
+indirection on every table access. Either way the enum is sized by its largest
+variant, so every heap object slot - strings' and closures' included - grew by
+that field. Measure object-slot size and the alloc workloads against the parent
+commit. If it matters, pack the count into an existing field's spare bits or a
+narrower type alongside the window (the window length bounds it, and the
+window is a `Vec` whose length already fits), rather than boxing.
+
+## RT-027 - Errors in the gmatch wrapper's outer chunk are still located in `string.gmatch`
+
+Lateral from the fourth resolution wave's review. Errors raised through the
+gmatch iterator are now attributed to the script caller, but
+`is_gmatch_wrapper` matches only the iterator chunk, not the outer chunk that
+`push_gmatch_wrapper` runs to build the closure. An error there (budget
+exhaustion on its CLOSURE or RETURN during `string.gmatch(...)`) is still
+reported as `string.gmatch:<n>:`, the same class of misleading location.
+Recognise the outer chunk by identity too.

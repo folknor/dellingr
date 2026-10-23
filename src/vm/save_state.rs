@@ -275,14 +275,16 @@ impl SavePayload {
     }
 }
 
+type SavedArraySpan = (u64, Vec<(SavedVal, SavedVal)>);
+
 #[derive(Clone, Debug, PartialEq)]
 struct SavedEnvDelta {
     token: String,
     deleted: Vec<SavedVal>,
     upserts: Vec<(SavedVal, SavedVal)>,
     order: Option<Vec<SavedVal>>,
-    /// The table's whole array part, `Nil` for empty slots, when it has one.
-    array: Option<Vec<SavedVal>>,
+    /// Logical length and canonical live array span, including interior holes.
+    array: Option<SavedArraySpan>,
     hash_slots: Option<Vec<(SavedVal, SavedVal)>>,
     metatable: SavedMetatableDelta,
 }
@@ -831,19 +833,27 @@ impl<'a> SaveBuilder<'a> {
                     SavedMetatableDelta::Set(self.encode_environment_root(value, &token)?)
                 }
             };
-            // The array part's shape (its nil slots included) decides where
-            // later integer writes land, so it must round-trip; replaying the
+            // The array part's shape (its logical length and the canonical
+            // live span, interior nil slots included) decides where later
+            // integer writes land, so it must round-trip; replaying the
             // upserts alone would rebuild only its live prefix.
-            let virtual_array = table.virtual_array();
-            let array = if virtual_array.is_empty() {
+            let (array_len, array_slots, entries) = table.snapshot_entries();
+            let array = if array_len == 0 {
                 None
             } else {
-                Some(
-                    virtual_array
+                Some((
+                    array_len as u64,
+                    entries
                         .into_iter()
-                        .map(|value| self.encode_environment_root(value, &token))
+                        .take(array_slots)
+                        .map(|(key, value)| {
+                            Ok((
+                                self.encode_environment_root(key, &token)?,
+                                self.encode_environment_root(value, &token)?,
+                            ))
+                        })
                         .collect::<Result<Vec<_>, SaveError>>()?,
-                )
+                ))
             };
             // Preserve physical hash history even when the live contents match
             // the baseline: a cleared traversal cursor can name a dead slot.
@@ -1241,31 +1251,36 @@ impl<'a> SaveBuilder<'a> {
         for child in &bc.nested {
             nested.push(self.encode_bytecode(child)?);
         }
-        self.bytecode[id as usize] = SavedBytecode {
-            code: bc.code.iter().map(|inst| inst.raw()).collect(),
-            number_literals: bc
-                .number_literals
-                .iter()
-                .map(|n| saved_num_bits(*n))
-                .collect(),
-            string_literals: bc.string_literals.clone(),
-            table_templates: bc.table_templates.clone(),
-            global_cache_slots: bc.global_cache_slots,
-            field_cache_slots: bc.field_cache_slots,
-            set_field_cache_slots: bc.set_field_cache_slots,
-            tfor_cursor_slots: bc.tfor_cursor_slots,
-            num_params: bc.num_params,
-            num_locals: bc.num_locals,
-            max_stack: bc.max_stack,
-            nested,
-            upvalues: bc.upvalues.clone(),
-            is_vararg: bc.is_vararg,
-            name: bc.name.as_deref().map(str::to_owned),
-            defined_line: bc.defined_line,
-            source: bc.source.clone(),
-            line_info: bc.line_info.clone(),
-        };
+        self.bytecode[id as usize] = saved_bytecode_node(bc, nested);
         Ok(id)
+    }
+}
+
+/// The wire form of one chunk, given its children's arena ids.
+fn saved_bytecode_node(bc: &Bytecode, nested: Vec<u32>) -> SavedBytecode {
+    SavedBytecode {
+        code: bc.code.iter().map(|inst| inst.raw()).collect(),
+        number_literals: bc
+            .number_literals
+            .iter()
+            .map(|n| saved_num_bits(*n))
+            .collect(),
+        string_literals: bc.string_literals.clone(),
+        table_templates: bc.table_templates.clone(),
+        global_cache_slots: bc.global_cache_slots,
+        field_cache_slots: bc.field_cache_slots,
+        set_field_cache_slots: bc.set_field_cache_slots,
+        tfor_cursor_slots: bc.tfor_cursor_slots,
+        num_params: bc.num_params,
+        num_locals: bc.num_locals,
+        max_stack: bc.max_stack,
+        nested,
+        upvalues: bc.upvalues.clone(),
+        is_vararg: bc.is_vararg,
+        name: bc.name.as_deref().map(str::to_owned),
+        defined_line: bc.defined_line,
+        source: bc.source.clone(),
+        line_info: bc.line_info.clone(),
     }
 }
 
@@ -1688,7 +1703,7 @@ fn materialize_payload(
             }
         }
         if let Some(order) = &delta.order {
-            let (current, array, metatable) = {
+            let (current, array_len, array_slots, array, metatable) = {
                 let table = state.heap.as_table(ptr).ok_or_else(|| {
                     corrupt_arena(
                         CorruptionReason::Environment(EnvironmentCorruption::TokenNotTable),
@@ -1696,11 +1711,9 @@ fn materialize_payload(
                         SaveLocation::EnvironmentDeltas,
                     )
                 })?;
-                (
-                    table.entries(),
-                    table.virtual_array(),
-                    table.get_metatable(),
-                )
+                let (len, slots, mut entries) = table.snapshot_entries();
+                entries.truncate(slots);
+                (table.entries(), len, slots, entries, table.get_metatable())
             };
             let mut current_by_key = BTreeMap::new();
             for (key_index, (key, value)) in current.iter().copied().enumerate() {
@@ -1754,23 +1767,15 @@ fn materialize_payload(
                     SaveLocation::EnvironmentDeltas,
                 )
             })?;
-            // Reordering live hash entries must retain setup's array slots,
-            // including holes that are absent from `current`. With an empty
-            // array this is just `ordered`: it permutes the table's live hash
-            // keys, none of which can be the append key 1, so the exact-shape
-            // rebuild accepts it and re-derives no array part.
-            let mut entries: Vec<_> = array
-                .iter()
-                .enumerate()
-                .map(|(slot, value)| (Val::Num((slot + 1) as f64), *value))
-                .collect();
+            // Preserve the canonical array span while reordering hash entries.
+            let mut entries = array;
             entries.extend(
                 ordered
                     .into_iter()
-                    .filter(|(key, _)| runtime_array_slot(*key, array.len()).is_none()),
+                    .filter(|(key, _)| runtime_array_slot(*key, array_len).is_none()),
             );
             table
-                .rebuild_from_snapshot(array.len(), array.len(), entries)
+                .rebuild_from_snapshot(array_len, array_slots, entries)
                 .map_err(|error| {
                     invalid_environment_table(
                         &delta.token,
@@ -1783,13 +1788,17 @@ fn materialize_payload(
             // must retain a metatable that setup or a later library installed.
             table.set_metatable(metatable);
         }
-        if let Some(array) = &delta.array {
-            // Restore the saved array shape: the saved slots (nil ones
-            // included) first, then every other live entry in its current
-            // order. A live entry for a slot key is superseded by the slot.
-            let mut array = array
+        if let Some((array_len, span)) = &delta.array {
+            let array_len = usize::try_from(*array_len).map_err(|_| {
+                corrupt_arena(
+                    CorruptionReason::Table(TableCorruption::ArraySlotWrongKey),
+                    delta_index,
+                    SaveLocation::EnvironmentArray(delta_index),
+                )
+            })?;
+            let mut entries = span
                 .iter()
-                .map(|value| decode_val(value, &ctx))
+                .map(|(key, value)| Ok((decode_val(key, &ctx)?, decode_val(value, &ctx)?)))
                 .collect::<Result<Vec<_>, SnapshotError>>()?;
             let table = state.heap.as_table(ptr).ok_or_else(|| {
                 corrupt_arena(
@@ -1799,22 +1808,15 @@ fn materialize_payload(
                 )
             })?;
             let metatable = table.get_metatable();
-            // Setup can have added later slots. Retain their shape and values
-            // beyond the saved range, just like other setup-only entries.
-            let saved_len = array.len();
-            array.extend(table.virtual_array().into_iter().skip(saved_len));
-            let append_key = Val::Num((array.len() + 1) as f64);
+            // Keep setup-only keys beyond the saved range as normal writes.
+            // Do not reconstruct setup's discarded prefix or logical nil tail.
+            let append_key = Val::Num((array_len + 1) as f64);
             let append_value = table.get(&append_key);
-            let mut entries: Vec<(Val, Val)> = array
-                .iter()
-                .enumerate()
-                .map(|(slot, value)| (Val::Num((slot + 1) as f64), *value))
-                .collect();
             entries.extend(table.entries().into_iter().filter(|(key, _)| {
-                runtime_array_slot(*key, array.len()).is_none() && *key != append_key
+                runtime_array_slot(*key, array_len).is_none() && *key != append_key
             }));
             table
-                .rebuild_from_snapshot(array.len(), array.len(), entries)
+                .rebuild_from_snapshot(array_len, span.len(), entries)
                 .map_err(|error| {
                     invalid_environment_table(
                         &delta.token,
@@ -1823,8 +1825,6 @@ fn materialize_payload(
                         error,
                     )
                 })?;
-            // A saved append key is rejected by the verifier. A setup-only
-            // append key is legal and extends the restored shape normally.
             if !matches!(append_value, Val::Nil) {
                 table.insert(append_key, append_value).map_err(|error| {
                     invalid_environment_table(
@@ -1869,12 +1869,8 @@ fn materialize_payload(
                 )
             })?;
             let metatable = table.get_metatable();
-            let array = table.virtual_array();
-            let mut entries: Vec<_> = array
-                .iter()
-                .enumerate()
-                .map(|(index, value)| (Val::Num((index + 1) as f64), *value))
-                .collect();
+            let (array_len, array_slots, mut entries) = table.snapshot_entries();
+            entries.truncate(array_slots);
             // Keep setup-only fields after the saved slots, as for order deltas.
             let mut saved_keys: DetSet<TableKey> =
                 DetSet::with_capacity_and_hasher(saved.len(), FixedState::default());
@@ -1895,7 +1891,7 @@ fn materialize_payload(
             entries.extend(saved);
             entries.extend(extra);
             table
-                .rebuild_from_snapshot(array.len(), array.len(), entries)
+                .rebuild_from_snapshot(array_len, array_slots, entries)
                 .map_err(|error| {
                     invalid_environment_table(
                         &delta.token,
@@ -1969,17 +1965,27 @@ fn materialize_payload(
             continue;
         }
         let value = decode_val(saved, &ctx)?;
-        insert_runtime_key(
-            &mut seen_pointer_values,
-            value,
-            &state.heap,
-            index,
-            CorruptionReason::Duplicate {
-                entry: DuplicateEntry::FormatPointerValue,
-                form: KeyForm::Materialized,
-            },
-            SaveLocation::PointerIds,
-        )?;
+        // Two saved function ids resolve to one function when this build
+        // folds identical code that the saving build kept apart. The folded
+        // function keeps the smaller of their identities; the other id is
+        // retired like a skipped registration. Any other duplicate value is
+        // corruption, since the verifier already rejected saved duplicates.
+        let folded = matches!(saved, SavedVal::Fn(_))
+            && PointerIdKey::from_val(value)
+                .is_some_and(|key| format_pointer_ids.contains_key(&key));
+        if !folded {
+            insert_runtime_key(
+                &mut seen_pointer_values,
+                value,
+                &state.heap,
+                index,
+                CorruptionReason::Duplicate {
+                    entry: DuplicateEntry::FormatPointerValue,
+                    form: KeyForm::Materialized,
+                },
+                SaveLocation::PointerIds,
+            )?;
+        }
         if !seen_pointer_ids.insert(*id) {
             return Err(corrupt_arena(
                 CorruptionReason::Duplicate {
@@ -1998,12 +2004,70 @@ fn materialize_payload(
                 SaveLocation::PointerIds,
             )
         })?;
+        if folded {
+            let kept: &mut u64 = format_pointer_ids
+                .get_mut(&key)
+                .expect("a folded function already has an identity entry");
+            *kept = (*kept).min(*id);
+            continue;
+        }
         format_pointer_ids.insert(key, *id);
     }
-    state.format_pointer_ids = format_pointer_ids;
+    // Saved identities take precedence over the ones setup rendered: a value
+    // the save records keeps its saved id, which is the replay contract.
+    let setup_pointer_ids = std::mem::replace(&mut state.format_pointer_ids, format_pointer_ids);
     state.reset_in_flight();
     state.gc_collect();
+    merge_setup_pointer_ids(state, setup_pointer_ids, &seen_pointer_ids);
     Ok(())
+}
+
+/// Merge the identities load setup rendered into the restored ones.
+///
+/// Only values that survive the load and that the save does not record are
+/// considered: an anchor, a value reachable only from one, a setup-only
+/// global, a function setup newly registered. A setup that replays the
+/// saving State's initialization renders such a value with the id its
+/// counterpart held in the saving State, which no saved entry uses, so the
+/// value keeps that id and the loaded State continues exactly as the
+/// continuous run would. An id that a saved entry (or a retired saved
+/// registration) already holds can come only from a setup that differs; that
+/// value is re-keyed above the counter instead, so no two live values share
+/// an identity.
+///
+/// Kept ids are placed first, then the re-keyed ones in setup's rendering
+/// order, so a fresh id can never equal a kept one. Liveness is read straight
+/// after the final collection, before any allocation, so a swept handle
+/// cannot alias a new object. An exhausted counter leaves a value unrendered;
+/// its next rendering raises the ordinary exhaustion error.
+fn merge_setup_pointer_ids(
+    state: &mut State,
+    setup_pointer_ids: DetMap<PointerIdKey, u64>,
+    saved_ids: &BTreeSet<u64>,
+) {
+    let mut rekey = Vec::new();
+    for (key, id) in setup_pointer_ids {
+        if state.format_pointer_ids.contains_key(&key) || !state.heap.val_is_live(&key.as_val()) {
+            continue;
+        }
+        if saved_ids.contains(&id) {
+            rekey.push(key);
+            continue;
+        }
+        // Setup's own counter kept `id` below u64::MAX.
+        if let Some(next) = id.checked_add(1) {
+            state.next_format_pointer_id = state.next_format_pointer_id.max(next);
+        }
+        state.format_pointer_ids.insert(key, id);
+    }
+    for key in rekey {
+        let id = state.next_format_pointer_id;
+        let Some(next) = id.checked_add(1) else {
+            break;
+        };
+        state.next_format_pointer_id = next;
+        state.format_pointer_ids.insert(key, id);
+    }
 }
 
 fn upvalues_ref(upvalues: &[UpvalueRef], id: u32) -> Result<&UpvalueRef, SnapshotError> {
@@ -2158,6 +2222,23 @@ fn materialize_bytecode(
     let saved = payload.bytecode();
     let source_names = intern_bytecode_sources(saved);
     let mut out: Vec<Option<Arc<Bytecode>>> = vec![None; saved.len()];
+    // A gmatch iterator chunk becomes this process's shared iterator Arc, the
+    // identity error reporting uses to locate a lazy pattern failure at the
+    // script caller. Only the chunks of closures capturing a gmatch iterator
+    // function qualify, which no script-defined closure can, so an identical
+    // or same-named user chunk keeps its own Arc. A chunk that differs from
+    // this build's wrapper (a save from another build) loads as saved and
+    // its errors stay located in the synthetic chunk.
+    let iterator_chunks = payload.gmatch_iterator_chunks();
+    if !iterator_chunks.is_empty() {
+        let shared = crate::lua_std::gmatch_iterator_bytecode();
+        let shared_form = saved_bytecode_node(&shared, Vec::new());
+        for idx in iterator_chunks {
+            if saved.get(idx) == Some(&shared_form) {
+                out[idx] = Some(Arc::clone(&shared));
+            }
+        }
+    }
     let mut visiting = vec![false; saved.len()];
     for idx in 0..saved.len() {
         build_bytecode_tree(idx, saved, &source_names, &mut out, &mut visiting)?;
@@ -2698,13 +2779,17 @@ impl SavedEnvDelta {
             None => out.write_bool(false),
         }
         match &self.array {
-            Some(array) => {
+            Some((array_len, array)) => {
                 out.write_bool(true);
+                out.write_u64(*array_len);
                 write_vec(
                     out,
                     SaveCollection::EnvironmentArray,
                     array,
-                    |out, value| value.encode(out),
+                    |out, (key, value)| {
+                        key.encode(out)?;
+                        value.encode(out)
+                    },
                 )?;
             }
             None => out.write_bool(false),
@@ -2740,7 +2825,13 @@ impl SavedEnvDelta {
                 .transpose()?,
             array: input
                 .read_bool()?
-                .then(|| read_vec(input, SavedVal::decode))
+                .then(|| {
+                    let len = input.read_u64()?;
+                    let entries = read_vec(input, |input| {
+                        Ok((SavedVal::decode(input)?, SavedVal::decode(input)?))
+                    })?;
+                    Ok::<_, SnapshotError>((len, entries))
+                })
                 .transpose()?,
             hash_slots: input
                 .read_bool()?
@@ -4276,7 +4367,10 @@ mod tests {
                 deleted: vec![SavedVal::Str(1)],
                 upserts: vec![(SavedVal::Str(2), SavedVal::Obj(3))],
                 order: Some(vec![SavedVal::Str(2)]),
-                array: Some(vec![SavedVal::Nil, SavedVal::Bool(true)]),
+                array: Some((
+                    2,
+                    vec![(SavedVal::Num(2.0f64.to_bits()), SavedVal::Bool(true))],
+                )),
                 hash_slots: Some(vec![(SavedVal::Str(2), SavedVal::Nil)]),
                 metatable: SavedMetatableDelta::Set(SavedVal::EnvObj("table".to_string())),
             }

@@ -223,3 +223,70 @@ fn named_function_newindex_handler_reports_the_declaration_line() {
     let lines: Vec<u32> = events.prints.iter().map(|(_, line, _)| *line).collect();
     assert_eq!(lines, vec![2, 3, 5]);
 }
+
+#[test]
+fn gmatch_pattern_errors_point_at_the_script_caller() {
+    for source in [
+        "local iter = string.gmatch('a', '(')\niter()",
+        "local s = 'a'\nfor value in s:gmatch('(') do end",
+    ] {
+        let events = Arc::new(Mutex::new(Events::default()));
+        let mut state = State::with_callbacks(Box::new(Recorder(Arc::clone(&events))));
+        let program =
+            Program::compile(source, Some(b"iterator-caller".as_slice())).expect("caller compiles");
+        state.load(&program).expect("caller loads");
+        let error = state
+            .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+            .expect_err("unfinished capture fails lazily");
+        assert_eq!(error.source_name(), Some(b"iterator-caller".as_slice()));
+        assert_eq!(error.line_num(), 2);
+        assert_eq!(error.stack_trace()[0].line, 2);
+        assert!(error.to_string().starts_with("iterator-caller:2:"));
+        assert_eq!(
+            events.lock().expect("event lock is healthy").errors,
+            vec![Some(b"iterator-caller".to_vec())]
+        );
+    }
+}
+
+#[test]
+fn gmatch_pattern_errors_from_an_unnamed_caller_carry_no_shim_name() {
+    let events = Arc::new(Mutex::new(Events::default()));
+    let mut state = State::with_callbacks(Box::new(Recorder(Arc::clone(&events))));
+    let program = Program::compile("local s = 'a'\nfor value in s:gmatch('(') do end", None)
+        .expect("caller compiles");
+    state.load(&program).expect("caller loads");
+    let error = state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+        .expect_err("unfinished capture fails lazily");
+    assert_eq!(error.source_name(), None);
+    assert_eq!(error.line_num(), 2);
+    assert_eq!(error.stack_trace()[0].line, 2);
+    assert_eq!(
+        events.lock().expect("event lock is healthy").errors,
+        vec![None]
+    );
+}
+
+#[test]
+fn user_chunk_named_string_gmatch_keeps_its_own_error_location() {
+    let mut state = State::new();
+    // Initialize the shared wrapper before running a chunk with the same name.
+    load_and_run(&mut state, "string.gmatch('a', '.')", b"setup");
+    let program = Program::compile(
+        "\n\nerror('own failure')",
+        Some(b"string.gmatch".as_slice()),
+    )
+    .expect("user chunk compiles");
+    state.load(&program).expect("user chunk loads");
+    let error = state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+        .expect_err("user chunk fails");
+    assert_eq!(error.source_name(), Some(b"string.gmatch".as_slice()));
+    assert_eq!(error.stack_trace()[0].line, 3);
+    assert!(
+        error
+            .to_string()
+            .starts_with("string.gmatch:3: own failure")
+    );
+}

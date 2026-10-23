@@ -515,6 +515,42 @@ fn empty_gmatch_closure_survives_save_load() {
 }
 
 #[test]
+fn restored_gmatch_iterator_errors_point_at_the_script_caller() {
+    // The unfinished capture fails lazily, on the first call after the load.
+    // The restored iterator must be recognised as the gmatch wrapper, so the
+    // error lands on the calling script line, not in the synthetic chunk.
+    let mut state = State::new();
+    run(&mut state, "bad = string.gmatch('a', '(')");
+    let save = state.save_state().unwrap();
+    for (source, line) in [("\n\nbad()", 3), ("\nfor value in bad do end", 2)] {
+        let mut loaded =
+            State::load_state(&save.bytes, Box::new(DefaultCallbacks), no_setup).unwrap();
+        dellingr::Program::compile(source, Some(b"after-load".as_slice()))
+            .and_then(|program| loaded.load(&program))
+            .unwrap();
+        let error = loaded
+            .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+            .expect_err("unfinished capture fails lazily");
+        assert_eq!(error.source_name(), Some(b"after-load".as_slice()));
+        assert_eq!(error.line_num(), line);
+        assert_eq!(error.stack_trace()[0].line, line);
+        assert!(
+            error
+                .stack_trace()
+                .iter()
+                .all(|frame| frame.source.as_deref() != Some(b"string.gmatch".as_slice())),
+            "the wrapper frame stays hidden: {:?}",
+            error.stack_trace()
+        );
+        assert!(
+            error
+                .to_string()
+                .starts_with(&format!("after-load:{line}:"))
+        );
+    }
+}
+
+#[test]
 fn empty_state_round_trip_stays_empty() {
     let state = State::raw();
     let save = state.save_state().unwrap();
@@ -786,6 +822,83 @@ fn pointer_identities_and_counter_survive_save_load() {
     );
     // The collected object's id is intentionally not reused.
     assert_eq!(global_str(&mut loaded, "later_identity"), "table: 0x6");
+}
+
+#[test]
+fn setup_rendered_identities_are_rekeyed_above_the_saved_counter() {
+    let mut original = fresh();
+    run(
+        &mut original,
+        "t = {}; saved_identity = tostring(t); dead = {}; tostring(dead); dead = nil",
+    );
+    let save = original.save_state().unwrap();
+    let mut loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), |state| {
+        run(
+            state,
+            "setup_only = {}; setup_seen = tostring(setup_only); temp = {}; tostring(temp); temp = nil",
+        );
+        Ok::<(), std::convert::Infallible>(())
+    })
+    .unwrap();
+    run(
+        &mut loaded,
+        "t_after = tostring(t); setup_after = tostring(setup_only); later = tostring({})",
+    );
+    // The saved value keeps its saved identity.
+    assert_eq!(global_str(&mut loaded, "saved_identity"), "table: 0x1");
+    assert_eq!(global_str(&mut loaded, "t_after"), "table: 0x1");
+    // This setup differs from the saving State's: it rendered its own table
+    // as 0x1, which the save gives to `t`. The surviving table is re-keyed
+    // above the saved counter (3), so it collides with neither `t` nor the
+    // retired id 2. Setup's dead `temp` consumes no id.
+    assert_eq!(global_str(&mut loaded, "setup_seen"), "table: 0x1");
+    assert_eq!(global_str(&mut loaded, "setup_after"), "table: 0x3");
+    assert_eq!(global_str(&mut loaded, "later"), "table: 0x4");
+}
+
+/// Initialization shared by a State and the setup that loads its save:
+/// render a fresh table and keep it only through an anchor, which saves do
+/// not record.
+fn anchor_rendered_table(state: &mut State) -> (dellingr::Anchor, String) {
+    state.new_table().unwrap();
+    let rendered = state.to_string_with_meta(-1).unwrap();
+    (state.anchor().unwrap(), rendered)
+}
+
+#[test]
+fn replaying_setup_keeps_its_anchored_identities() {
+    let mut original = fresh();
+    let (original_anchor, original_rendered) = anchor_rendered_table(&mut original);
+    run(&mut original, "t = {}; saved_identity = tostring(t)");
+    let save = original.save_state().unwrap();
+    let mut from_setup = None;
+    let mut loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), |state| {
+        from_setup = Some(anchor_rendered_table(state));
+        Ok::<(), std::convert::Infallible>(())
+    })
+    .unwrap();
+    let (loaded_anchor, setup_rendered) = from_setup.expect("setup ran");
+    assert_eq!(setup_rendered, original_rendered);
+    assert_eq!(original_rendered, "table: 0x1");
+    // The loaded State continues exactly as the continuous run: the anchored
+    // table keeps the id setup gave it, and the next fresh id matches.
+    let continue_run = |state: &mut State, anchor: &dellingr::Anchor| {
+        state.push_anchor(anchor).unwrap();
+        let anchored = state.to_string_with_meta(-1).unwrap();
+        state.pop(1).unwrap();
+        state.new_table().unwrap();
+        let fresh_table = state.to_string_with_meta(-1).unwrap();
+        state.pop(1).unwrap();
+        (anchored, fresh_table)
+    };
+    assert_eq!(
+        continue_run(&mut loaded, &loaded_anchor),
+        continue_run(&mut original, &original_anchor)
+    );
+    assert_eq!(
+        loaded.save_state().unwrap().bytes,
+        original.save_state().unwrap().bytes
+    );
 }
 
 #[test]

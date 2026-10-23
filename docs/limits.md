@@ -171,10 +171,11 @@ capacity; what a collection frees is the payloads and entries it removes.
 - Reclaimed only by writes to the table, never by a collection: a live
   table's storage. The array part stores a window from its first live key
   to its last. An append drops a dead prefix once it makes up half the
-  window, and an all-dead window is released at the next append or array
-  write outside it, so a FIFO (`q[tail] = v; q[head] = nil`) keeps storage
+  window, so a FIFO (`q[tail] = v; q[head] = nil`) keeps storage
   proportional to its backlog, after catching up within a bounded number of
-  pushes when it starts from a large dead prefix. The window cannot skip
+  pushes when it starts from a large dead prefix. A window whose live slots
+  have all been cleared, in any order, is released at the next append or
+  array write outside it. The window cannot skip
   holes: one old key that stays alive keeps every slot from it to the
   newest key stored, and nil writes alone never release anything. The hash
   part compacts its tombstones once they reach its live count. Until then a

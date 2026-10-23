@@ -22,11 +22,8 @@ end
 
 // This chunk is immutable. Runtime caches are State-local, and snapshot bytecode
 // ids are assigned per save, so sharing the Arc does not share mutable state.
-// Its source name keeps the wrapper identifiable in traces. It also means an
-// error raised through the iterator, such as a lazy pattern error, is
-// currently located in this synthetic chunk rather than at the script's call
-// site. Moving that location belongs to the VM's error-location code, which
-// would have to recognise this frame by bytecode identity, not by name.
+// Error reporting identifies the iterator bytecode by Arc identity and omits
+// this implementation frame, so lazy pattern failures point at the caller.
 // It is process-global and compiled on the first gmatch in the process,
 // whichever State that is (a RustFunc cannot carry upvalues, hence the shim).
 // Compilation is deterministic and charges no cost, so which State pays for it
@@ -40,6 +37,35 @@ fn gmatch_wrapper() -> Arc<crate::compiler::Bytecode> {
                 .expect("the static gmatch wrapper source must compile"),
         )
     }))
+}
+
+impl State {
+    pub(crate) fn is_gmatch_wrapper(bytecode: &Arc<crate::compiler::Bytecode>) -> bool {
+        // Identity, never the source name: a user chunk may share the name.
+        // Snapshot load maps a restored iterator chunk onto this Arc (see
+        // `gmatch_iterator_bytecode`), so restored iterators match too.
+        GMATCH_WRAPPER.get().is_some_and(|wrapper| {
+            wrapper
+                .nested
+                .iter()
+                .any(|child| Arc::ptr_eq(child, bytecode))
+        })
+    }
+}
+
+/// The process-global bytecode of the iterator function the gmatch wrapper
+/// returns, compiling the wrapper if no gmatch has run yet. Snapshot load
+/// substitutes it for a restored iterator's chunk, so the restored closure
+/// shares the identity `State::is_gmatch_wrapper` recognises.
+#[cfg(feature = "snapshot")]
+pub(crate) fn gmatch_iterator_bytecode() -> Arc<crate::compiler::Bytecode> {
+    let wrapper = gmatch_wrapper();
+    Arc::clone(
+        wrapper
+            .nested
+            .first()
+            .expect("the gmatch wrapper source defines exactly one nested function"),
+    )
 }
 
 // Native costs in the stdlib are deliberately per-function literals, not a

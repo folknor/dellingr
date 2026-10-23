@@ -523,27 +523,8 @@ fn raw_metafield(state: &mut State, idx: isize) -> Result<bool> {
     }
 }
 
-/// The `globals` name for the `_G` key at stack index 2, if it has one.
-///
-/// `globals` is keyed by Rust `String`, so only string keys that are valid
-/// UTF-8 can name a global. Any other key - including a non-UTF-8 byte
-/// string - lives in the proxy table itself, the same way non-string keys
-/// do. Converting lossily instead would make `_G["\xff"]`, `_G["\xfe"]` and
-/// `_G["\u{FFFD}"]` alias one global. No identifier the lexer accepts is
-/// non-UTF-8, so such a key is never reachable as a bare global name anyway.
-fn utf8_global_key(state: &State) -> Result<Option<String>> {
-    if state.typ(2) != LuaType::String {
-        return Ok(None);
-    }
-    match str::from_utf8(state.to_bytes(2)?) {
-        // `to_bytes` borrows State's heap, while get_global/set_global need
-        // `&mut State`. Avoiding this owned key needs a byte-key State API that
-        // does the global lookup/update before mutating the VM stack.
-        Ok(name) => Ok(Some(name.to_owned())),
-        Err(_) => Ok(None),
-    }
-}
-
+// Only UTF-8 string keys name globals. Other keys remain raw proxy entries;
+// the State helpers borrow the key bytes without making lossy aliases.
 // The missing-argument errors of the `check_any_named` calls in this handler
 // and `global_env_newindex` cannot be reached from Lua: VM dispatch always
 // passes `__index` two arguments and `__newindex` three (a nil value included),
@@ -553,10 +534,7 @@ fn utf8_global_key(state: &State) -> Result<Option<String>> {
 // argument checks in Lua-callable library functions.
 fn global_env_index(state: &mut State) -> Result<u8> {
     check_any_named(state, 2, "_G.__index")?;
-    if let Some(key) = utf8_global_key(state)? {
-        state.set_top(0)?;
-        state.get_global(&key)?;
-    } else {
+    if !state.global_proxy_read()? {
         state.push_value(2)?;
         state.get_table_raw(1)?;
     }
@@ -568,10 +546,7 @@ fn global_env_index(state: &mut State) -> Result<u8> {
 fn global_env_newindex(state: &mut State) -> Result<u8> {
     check_any_named(state, 2, "_G.__newindex")?;
     check_any_named(state, 3, "_G.__newindex")?;
-    if let Some(key) = utf8_global_key(state)? {
-        state.push_value(3)?;
-        state.set_global(&key)?;
-    } else {
+    if !state.global_proxy_write()? {
         state.push_value(2)?;
         state.push_value(3)?;
         state.set_table_raw(1)?;

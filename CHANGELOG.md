@@ -30,7 +30,7 @@ All notable changes to dellingr are documented here. The format follows
     later, and `object_count`).
   - Jumps carry 24-bit offsets: `JumpTooFar` now means a span of 2^23
     instructions or more, where it was 2^15.
-  - Snapshot `FORMAT_VERSION` is 11: instruction words are 64-bit and each
+  - Snapshot `FORMAT_VERSION` was bumped: instruction words are 64-bit and each
     function records its register count. Older saves are rejected.
   - `limits::MAX_VERIFIER_MARKER_DEPTH` is removed: the verifier no longer
     simulates an operand stack.
@@ -403,6 +403,9 @@ All notable changes to dellingr are documented here. The format follows
   `TypeError::NumericForInitialValue`, `NumericForLimit` or `NumericForStep`
   (`numeric for loop step must be a number, got nil`) instead of
   `TypeError::Arithmetic`.
+- A host `set_metatable_of` with a metatable that is neither a table nor nil
+  raises the new `TypeError::InvalidMetatable` ("metatable must be a table or
+  nil") instead of `TypeError::TableIndex`.
 - `State::open_libs` inside `State::with_restricted_env` is refused with the
   new `ErrorKind::OpenLibsInRestrictedEnv`, before any state changes.
 - Every variable use of `_ENV` (read, assignment, local, parameter, loop
@@ -424,6 +427,18 @@ All notable changes to dellingr are documented here. The format follows
 - **Replay-visible (snapshot contents):** the `%p` and `tostring` identities
   of environment objects, and of values reachable only from them, survive a
   load, also when a global shadows the builtin. Saves carry those ids.
+- **Replay-visible (snapshot contents):** an environment-table delta saves its
+  array part as the logical length plus the span from the first live array
+  key to the last, as ordinary tables do, instead of every slot up to the
+  logical length (`FORMAT_VERSION` stays 12). On load the saved shape is
+  authoritative: nil slots setup left beyond it are no longer merged in, so a
+  load whose setup differs from the saving State's can place later integer
+  writes differently.
+- **Replay-visible (lines):** an error raised through a `string.gmatch`
+  iterator, such as a malformed pattern found on its first call, is located
+  at the script line that called the iterator, and the internal shim frame is
+  left out of the traceback. A user chunk named `string.gmatch` keeps its own
+  locations, and an iterator restored from a snapshot is located the same way.
 
 ### Added
 
@@ -515,7 +530,10 @@ All notable changes to dellingr are documented here. The format follows
 - The disassembly header names the non-parameter local count
   `non_param_locals` instead of `local_slots`.
 - `TooManyRegisters` reports the line of the construct that ran out of
-  registers instead of the function's last line.
+  registers, `local` statements and expressions included, instead of the
+  function's last line.
+- Reading a global through `_G`, or writing one that is already bound, no
+  longer allocates a host string per access.
 - `string.gsub`'s bad replacement capture names it: `invalid capture index
   %2` (was `invalid capture index`).
 - Snapshot errors in an environment delta's hash slots name the new
@@ -599,6 +617,24 @@ All notable changes to dellingr are documented here. The format follows
 - **Replay-visible:** a `string.gmatch` iterator whose result push is refused
   no longer skips the match or tears its saved position; the next call
   returns that match.
+- A table array whose live slots were cleared in any order, not only from the
+  front, now releases its stored window at the next append or array write
+  outside it. Storage only: results, `pairs` order and cost are unchanged,
+  and a write whose growth reservation used to fail may now succeed.
+- `table.sort` whose sequence copy cannot be allocated (an edited save's
+  impossible gap) raises `table growth failed` instead of aborting.
+- **Replay-visible (`%p` ids):** identities a `load_state` setup rendered are
+  merged with the saved ones instead of being dropped. A value the save
+  records takes its saved identity; any other value setup rendered that
+  survives the load, such as an anchored table, keeps its setup id, or gets a
+  fresh id above the saved counter when a saved value holds that id. A setup
+  that replays the saving State's initialization now continues with the same
+  ids as the saving State; before, such a value took a new id when next
+  rendered (`docs/save-state.md`).
+- Loading a save into a build that folds two rendered Rust functions the
+  saving build kept apart no longer fails as a duplicate: the folded function
+  keeps the smaller of the two identities. Two such functions used as keys of
+  one table still reject the load, now documented.
 
 ## [0.5.0] - 2026-10-14
 

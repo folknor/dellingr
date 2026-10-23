@@ -104,7 +104,12 @@ impl Parser<'_> {
     /// Parses a single expression.
     #[hotpath::measure]
     pub(super) fn parse_expr(&mut self) -> Result<Expr> {
-        self.with_syntax_level(1, Self::parse_expr_inner)
+        self.with_syntax_level(1, |parser| {
+            let line = parser.input.peek()?.line;
+            let mut expr = parser.parse_expr_inner()?;
+            expr.line = line;
+            Ok(expr)
+        })
     }
 
     fn parse_expr_inner(&mut self) -> Result<Expr> {

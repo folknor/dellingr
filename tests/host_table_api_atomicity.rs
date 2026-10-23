@@ -443,3 +443,22 @@ fn get_table_preserves_the_key_at_the_lua_call_depth_limit() {
         .unwrap();
     assert_eq!(state.get_top(), 0);
 }
+
+#[test]
+fn bad_metatable_reports_the_requirement_and_preserves_operands() {
+    let mut state = State::new();
+    state.new_table().unwrap();
+    state.push_number(7.0).unwrap();
+    let error = state.set_metatable_of(1).unwrap_err();
+    assert!(matches!(
+        error.kind(),
+        ErrorKind::TypeError(TypeError::InvalidMetatable)
+    ));
+    assert!(
+        error
+            .to_string()
+            .contains("metatable must be a table or nil")
+    );
+    assert_stack(&state, &[LuaType::Table, LuaType::Number]);
+    assert_eq!(state.to_number(2).unwrap(), 7.0);
+}

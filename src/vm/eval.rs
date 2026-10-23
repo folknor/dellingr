@@ -876,8 +876,19 @@ impl State {
         // traceback. Allocate metadata only here, outside the dispatch loop.
         error = frame.locate_fault(error);
         if error.stack_trace().is_empty() {
-            error = Self::locate_in_frame(error, frame);
-            error = error.with_stack_trace(self.build_stack_trace(frame));
+            let trace = self.build_stack_trace(frame);
+            if Self::is_gmatch_wrapper(frame.bytecode()) {
+                if let Some(caller) = trace.first() {
+                    if error.line_num() == 0 {
+                        let column = error.column();
+                        error = error.with_location(caller.line, column);
+                    }
+                    error = error.with_source_name(caller.source.clone());
+                }
+            } else {
+                error = Self::locate_in_frame(error, frame);
+            }
+            error = error.with_stack_trace(trace);
         }
         self.host_error(&mut error);
         error

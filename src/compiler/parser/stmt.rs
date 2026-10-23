@@ -101,7 +101,7 @@ impl<'a> Parser<'a> {
 
     /// Parses a `local` declaration.
     pub(super) fn parse_locals(&mut self) -> Result<Stmt> {
-        self.input.next()?; // `local` keyword
+        let line = self.input.next()?.line; // `local` keyword
 
         // Check for `local function name(...) ... end`
         if self.input.check_type(TokenKind::Function)? {
@@ -138,6 +138,7 @@ impl<'a> Parser<'a> {
             first,
             count,
             values,
+            line,
         })
     }
 

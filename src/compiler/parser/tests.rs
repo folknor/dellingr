@@ -1,3 +1,4 @@
+use super::super::ast::Stmt;
 use super::Bytecode;
 use super::DEEP_PARSE_TEST_STACK_BYTES;
 use super::Parser;
@@ -570,6 +571,40 @@ fn line_info_matches_code_len() {
         let chunk = parse_unfinalized(source).expect("line-info fixture must compile");
         assert_line_info_matches_code_len(&chunk);
     }
+}
+
+#[test]
+fn expression_source_line_is_stored_for_codegen_diagnostics() {
+    let source = b"\n  nil";
+    let mut parser = Parser {
+        input: TokenStream::new(source),
+        funcs: Default::default(),
+        source_name: None,
+        syntax_depth: 0,
+    };
+
+    let expr = parser.parse_expr().expect("nil expression parses");
+
+    assert_eq!(expr.line, 2);
+}
+
+#[test]
+fn local_statement_keeps_the_keyword_line_for_codegen_diagnostics() {
+    let source = b"\nlocal a";
+    let mut parser = Parser {
+        input: TokenStream::new(source),
+        funcs: Default::default(),
+        source_name: None,
+        syntax_depth: 0,
+    };
+    parser
+        .funcs
+        .frames
+        .push(super::state::FuncState::new(None, 0, false));
+
+    let stmt = parser.parse_locals().expect("local statement parses");
+
+    assert!(matches!(stmt, Stmt::Local { line: 2, .. }));
 }
 
 #[test]

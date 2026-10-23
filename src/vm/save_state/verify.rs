@@ -26,6 +26,30 @@ impl VerifiedSavePayload {
     pub(super) fn bytecode(&self) -> &[SavedBytecode] {
         &self.0.bytecode
     }
+    /// Chunk ids of closures that capture a gmatch iterator function. Those
+    /// functions are reachable only as the gmatch wrapper's upvalue, so such
+    /// a closure is a gmatch iterator; `validate_gmatch_iterators` has
+    /// checked its state.
+    pub(super) fn gmatch_iterator_chunks(&self) -> BTreeSet<usize> {
+        self.0
+            .objects
+            .iter()
+            .filter_map(|object| match object {
+                SavedObject::Closure { chunk, upvalues } => upvalues
+                    .iter()
+                    .any(|id| {
+                        matches!(
+                            self.0.upvalues.get(*id as usize),
+                            Some(super::SavedVal::Fn(name))
+                                if name == gmatch_schema::ITERATOR_ID
+                                    || name == gmatch_schema::EMPTY_ITERATOR_ID
+                        )
+                    })
+                    .then_some(*chunk as usize),
+                SavedObject::Table { .. } => None,
+            })
+            .collect()
+    }
 }
 
 impl BytecodeView for SavedBytecode {
@@ -325,7 +349,7 @@ fn validate_environment_deltas(payload: &SavePayload) -> Result<(), SnapshotErro
         }
         if let Some(slots) = &delta.hash_slots {
             let shape = super::SavedObject::Table {
-                array_len: delta.array.as_ref().map_or(0, |array| array.len() as u64),
+                array_len: delta.array.as_ref().map_or(0, |(len, _)| *len),
                 array_slots: 0,
                 entries: slots.clone(),
                 metatable: None,
@@ -340,18 +364,43 @@ fn validate_environment_deltas(payload: &SavePayload) -> Result<(), SnapshotErro
                 &SaveLocation::EnvironmentHashSlots(delta_index),
             )?;
         }
-        for value in delta.array.iter().flatten() {
-            validate_value(value, payload)?;
-        }
-        // The array describes shape, not a second independent set of writes.
-        // Require its live slots to agree with the upserts. Canonical library
-        // baselines contain only named fields, so every live numeric array
-        // slot is an upsert, including one added by host setup before saving.
-        let array = delta.array.as_deref().unwrap_or_default();
+        let (array_len, array) = delta
+            .array
+            .as_ref()
+            .map_or((0, &[][..]), |(len, entries)| (*len, entries.as_slice()));
+        let shape = super::SavedObject::Table {
+            array_len,
+            array_slots: u32::try_from(array.len()).map_err(|_| {
+                corrupt(
+                    CorruptionReason::Table(TableCorruption::ArraySlotWrongKey),
+                    delta_index,
+                    SaveLocation::EnvironmentArray(delta_index),
+                )
+            })?,
+            entries: array.to_vec(),
+            metatable: None,
+        };
+        // Share ordinary tables' length, canonical span, key and reference
+        // checks before using the length as a native index below.
+        validate_table_shape(
+            payload,
+            &shape,
+            delta_index,
+            &SaveLocation::EnvironmentArray(delta_index),
+        )?;
+        let array_len = usize::try_from(array_len).map_err(|_| {
+            corrupt(
+                CorruptionReason::Table(TableCorruption::ArraySlotWrongKey),
+                delta_index,
+                SaveLocation::EnvironmentArray(delta_index),
+            )
+        })?;
+        // Array shape is not an independent set of writes: every live slot
+        // must agree with its upsert, and no upsert may hide outside the span.
         let mut array_upserts = BTreeMap::new();
         for (entry_index, (key, value)) in delta.upserts.iter().enumerate() {
             if let super::SavedVal::Num(bits) = key {
-                if is_append_key(f64::from_bits(*bits), array.len()) {
+                if is_append_key(f64::from_bits(*bits), array_len) {
                     return Err(corrupt(
                         CorruptionReason::Environment(
                             EnvironmentCorruption::HashEntryBelongsInArray,
@@ -361,13 +410,18 @@ fn validate_environment_deltas(payload: &SavePayload) -> Result<(), SnapshotErro
                     ));
                 }
                 let n = f64::from_bits(*bits);
-                if let Some(slot) = array_index(n, array.len()) {
+                if let Some(slot) = array_index(n, array_len) {
                     array_upserts.insert(slot, value);
                 }
             }
         }
-        for (slot, value) in array.iter().enumerate() {
-            let upsert = array_upserts.get(&slot).copied();
+        for (key, value) in array {
+            let super::SavedVal::Num(bits) = key else {
+                unreachable!("verified span keys are numeric");
+            };
+            let slot = array_index(f64::from_bits(*bits), array_len)
+                .expect("verified span keys lie inside the logical array");
+            let upsert = array_upserts.remove(&slot);
             if (matches!(value, super::SavedVal::Nil) && upsert.is_some())
                 || (!matches!(value, super::SavedVal::Nil) && upsert != Some(value))
             {
@@ -378,12 +432,17 @@ fn validate_environment_deltas(payload: &SavePayload) -> Result<(), SnapshotErro
                 ));
             }
         }
+        if !array_upserts.is_empty() {
+            return Err(corrupt(
+                CorruptionReason::Environment(EnvironmentCorruption::ArrayDisagreesWithUpserts),
+                delta_index,
+                SaveLocation::EnvironmentArray(delta_index),
+            ));
+        }
         if let Some(order) = &delta.order {
             let mut ordered = order.iter();
-            for (slot, value) in array.iter().enumerate() {
-                if !matches!(value, super::SavedVal::Nil)
-                    && ordered.next() != Some(&super::SavedVal::Num(((slot + 1) as f64).to_bits()))
-                {
+            for (slot, (key, value)) in array.iter().enumerate() {
+                if !matches!(value, super::SavedVal::Nil) && ordered.next() != Some(key) {
                     return Err(corrupt(
                         CorruptionReason::Environment(
                             EnvironmentCorruption::OrderDisagreesWithArray,
@@ -396,7 +455,7 @@ fn validate_environment_deltas(payload: &SavePayload) -> Result<(), SnapshotErro
             for key in ordered {
                 if let super::SavedVal::Num(bits) = key {
                     let n = f64::from_bits(*bits);
-                    if array_index(n, array.len()).is_some() || is_append_key(n, array.len()) {
+                    if array_index(n, array_len).is_some() || is_append_key(n, array_len) {
                         return Err(corrupt(
                             CorruptionReason::Environment(
                                 EnvironmentCorruption::HashOrderBelongsInArray,
@@ -1177,11 +1236,14 @@ mod tests {
             deleted: Vec::new(),
             upserts: vec![(num(1.0), live.clone()), (num(3.0), live.clone())],
             order: Some(vec![num(1.0), num(3.0)]),
-            array: Some(vec![
-                live.clone(),
-                super::super::SavedVal::Nil,
-                live.clone(),
-            ]),
+            array: Some((
+                3,
+                vec![
+                    (num(1.0), live.clone()),
+                    (num(2.0), super::super::SavedVal::Nil),
+                    (num(3.0), live.clone()),
+                ],
+            )),
             hash_slots: None,
             metatable: super::super::SavedMetatableDelta::Unchanged,
         };

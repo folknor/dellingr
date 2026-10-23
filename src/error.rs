@@ -1191,6 +1191,8 @@ pub enum TypeError {
     Length(LuaType),
     /// Indexed (`t[k]`, `t.k`, `t:m`) into a non-table value.
     TableIndex(LuaType),
+    /// A host supplied a metatable that was neither a table nor nil.
+    InvalidMetatable,
     /// Used `NaN` as a table key.
     TableKeyNan,
     /// Used `nil` as a table key.
@@ -1909,6 +1911,7 @@ impl fmt::Display for TypeError {
             Concat(typ) => write!(f, "attempt to concatenate a {typ} value"),
             FunctionCall(typ) => write!(f, "attempt to call a {typ} value"),
             Length(typ) => write!(f, "attempt to get length of a {typ} value"),
+            InvalidMetatable => f.write_str("metatable must be a table or nil"),
             TableIndex(typ) => write!(f, "attempt to index a {typ} value"),
             TableKeyNan => write!(f, "table index was NaN"),
             TableKeyNil => write!(f, "table index was nil"),

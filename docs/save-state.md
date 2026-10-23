@@ -29,14 +29,16 @@ returns; the loaded State starts with an empty stack.
   - keys deleted from the baseline;
   - keys added or changed;
   - the key order, only when replaying the first two would not reproduce it;
-  - the whole logical array part, nil slots included, when there is one
-    (ordinary tables save only the span from their first live array key to
-    their last, plus the logical length; see Byte stability);
+  - the logical array length and the canonical span from its first live
+    array key to its last, including interior nil slots, just as for ordinary
+    tables (see Byte stability);
   - hash-slot history when it differs from the baseline, including dead keys,
     vacant positions and the map storage marker;
   - the metatable: unchanged, cleared, or replaced.
 - The array shape is saved because it decides where later integer writes
-  land.
+  land. For a saved array delta, that saved shape is authoritative. Setup-only
+  live keys beyond its logical length survive as ordinary writes, including
+  an append key; setup-only nil tails are not merged into the saved shape.
 - Adding a field to a library table in a later build does not corrupt old
   saves.
 - Globals are saved whole, in binding order, nil tombstones included. An
@@ -83,13 +85,28 @@ returns; the loaded State starts with an empty stack.
   address (intentional aliases, or identical-code folding in a release/LTO
   build), the lexicographically smallest id is written. A build that folds
   functions can therefore write different `Fn` ids than one that does not, so
-  snapshot bytes are only guaranteed identical across the same build, and a
-  folded pair loads back as the smaller id's function.
+  snapshot bytes are only guaranteed identical across the same build.
+- Loading a save into a build that folds two functions the saving build kept
+  apart resolves both ids to the one folded function. If both were rendered,
+  it keeps the smaller of their two rendered identities and retires the other.
+  If both are keys of the same table, dead keys and standard-library table
+  deltas included, the keys collide and the load is rejected.
 
 ## Load
 
 - Setup runs inside `load_state`; its closure returns `Result<(), E>`, surfaced
   as `LoadError::Setup(E)`. Anchors created there survive.
+- Setup may render identities (`tostring`, `%p`). After the load, a value the
+  save records renders with its saved identity, whatever setup printed for it.
+  Any other value setup rendered that survives the load (an anchor or a value
+  only it reaches, a setup-only global, a newly registered function) keeps its
+  setup identity unless a saved value holds that id; then it gets a fresh
+  identity above the saved counter, assigned in setup's rendering order. A
+  setup that replays the saving State's initialization renders each such
+  value with the id its counterpart had, so the loaded State continues as the
+  saving one would. A setup that differs can print an id that a saved value
+  also shows after the load, or that a value collected before the save had
+  shown; no two live values share an id.
 - Duplicate saved global names are rejected, not silently replaced.
 - Strings above `limits::MAX_STRING_BYTES` are rejected, also in saves written
   by earlier builds with the same format version.

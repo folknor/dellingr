@@ -504,7 +504,7 @@ impl State {
         let mt = match self.stack[self.stack.len() - 1] {
             Val::Nil => None,
             Val::Obj(ptr) if self.heap.as_table_ref(ptr).is_some() => Some(ptr),
-            other => return Err(self.type_error(TypeError::TableIndex(other.typ(&self.heap)))),
+            _ => return Err(self.type_error(TypeError::InvalidMetatable)),
         };
         self.stack[idx]
             .as_object_ptr()
@@ -607,7 +607,7 @@ impl State {
             .heap
             .as_table_ref(table_ptr)
             .expect("validated object pointer is a table")
-            .get_array();
+            .get_array()?;
 
         // Charge cost BEFORE running the comparator or mutating the table, so an
         // exhausted budget blocks the sort rather than letting it complete and

@@ -77,6 +77,8 @@ mod string_format;
 mod table;
 
 pub(crate) use basic::{base_ipairs_iter, base_next, open_base};
+#[cfg(feature = "snapshot")]
+pub(crate) use string::gmatch_iterator_bytecode;
 
 use crate::LuaType;
 use crate::Result;
