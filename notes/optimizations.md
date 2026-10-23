@@ -31,6 +31,14 @@ same_obj_read from about 3800 to 3600 (interleaved pairs, plantasjen), so
 part of that share was recoverable and part was the sample landing site of
 work in the handlers.
 
+Where it stands (2026-10-23): the cursor-in-a-local change (a378895) and
+recording call sites only on paths that can call (4794237) shipped; the
+bounds-check entry below was measured and is not pursued. What remains is
+in the single-digit-percent band that code-layout noise alone moves on these
+benches, so the program is parked: pick an entry up only with a workload
+where it shows clearly, and treat the NaN-boxed `Val` (under "Full coherent
+rewrites") as the larger lever for the same costs.
+
 Each suspect is independent. Work one at a time: perf before and after
 (`scripts/perf_hot_lines.py` filters the annotate output), interleaved
 `--bench` pairs on arithmetic, same_obj_read and the composite, and
