@@ -43,7 +43,7 @@ impl State {
     #[hotpath::measure]
     pub(super) fn instr_get_field(
         &mut self,
-        frame: &mut Frame,
+        frame: &Frame,
         field_id: u16,
         cache_slot: Option<u8>,
         local_cost: &mut u64,

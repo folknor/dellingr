@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::sync::Arc;
 
 // The constant folder and runtime dispatch use the arithmetic functions
@@ -28,8 +29,12 @@ pub(super) struct Frame {
     /// State-local literals and lookup caches shared by this bytecode's
     /// closures and active frames.
     pub(super) runtime: Arc<BytecodeRuntime>,
-    /// The index of the next (not current) instruction
-    ip: usize,
+    /// The index of the next (not current) instruction. While the frame runs,
+    /// the dispatch loop's local cursor is authoritative and this copy is
+    /// published only where something can read it: before a call suspends
+    /// the frame, before a return, and on every error escape. A `Cell`, so
+    /// the loop can hold the frame by shared reference alongside its code.
+    ip: Cell<usize>,
     /// The upvalues captured by this closure. Shared with the `Closure`
     /// (and any other active frames on it) - never mutated through the
     /// frame; writes go through the `UpvaluePool` slots.
@@ -54,7 +59,7 @@ impl Frame {
         Self {
             bytecode,
             runtime,
-            ip: 0,
+            ip: Cell::new(0),
             upvalues,
             stack_bottom,
             top,
@@ -73,7 +78,7 @@ impl Frame {
     #[cold]
     #[inline(never)]
     pub(super) fn locate_fault(&self, error: Error) -> Error {
-        let Some(instruction) = self.ip.checked_sub(1) else {
+        let Some(instruction) = self.ip.get().checked_sub(1) else {
             return error;
         };
         let Some(inst) = self.bytecode.code.get(instruction) else {
@@ -85,19 +90,19 @@ impl Frame {
     /// Get the current line number (1-indexed), or 0 if unknown.
     pub(super) fn current_line(&self) -> u32 {
         // ip points to the NEXT instruction, so use ip-1 for current
-        let idx = self.ip.saturating_sub(1);
+        let idx = self.ip.get().saturating_sub(1);
         self.bytecode.line_info.get(idx).copied().unwrap_or(0)
     }
 
-    /// Record the instruction currently dispatching a call into the active
-    /// call-stack entry, so outer traceback frames name the right call site.
-    /// Every opcode that can enter Lua through a call or metamethod must record
-    /// its instruction here before handing off; the regression test pins those
-    /// caller lines.
+    /// Record the instruction currently dispatching a call (`ip`, the
+    /// dispatch loop's cursor past it) into the active call-stack entry, so
+    /// outer traceback frames name the right call site. Every opcode that can
+    /// enter Lua through a call or metamethod must record its instruction
+    /// here before handing off; the regression test pins those caller lines.
     #[inline]
-    fn record_call_site(&self, state: &mut State) {
+    fn record_call_site(state: &mut State, ip: usize) {
         if let Some(call_info) = state.call_stack.last_mut() {
-            call_info.ip = self.ip;
+            call_info.ip = ip;
         }
     }
 
@@ -115,25 +120,19 @@ impl Frame {
     // again during dispatch. Like literal and register indexing, a verifier
     // regression here is a VM bug and may panic. Runtime values, host API
     // inputs and resource limits still require fallible checks.
-    /// Jump forward/back by a verified `offset` in instructions.
-    pub(super) fn jump(&mut self, offset: i32) {
-        self.ip = if offset >= 0 {
-            self.ip + offset as usize
+    /// The cursor `ip` moved forward/back by a verified `offset` in
+    /// instructions.
+    #[inline]
+    pub(super) fn jumped(ip: usize, offset: i32) -> usize {
+        if offset >= 0 {
+            ip + offset as usize
         } else {
-            self.ip - offset.unsigned_abs() as usize
-        };
-    }
-
-    /// Get the instruction at the instruction pointer, and advance the
-    /// instruction pointer accordingly.
-    fn get_instr(&mut self) -> Instr {
-        let i = self.bytecode.code[self.ip];
-        self.ip += 1;
-        i
+            ip - offset.unsigned_abs() as usize
+        }
     }
 
     #[must_use]
-    pub(super) fn get_nested_bytecode(&mut self, i: u16) -> Arc<Bytecode> {
+    pub(super) fn get_nested_bytecode(&self, i: u16) -> Arc<Bytecode> {
         Arc::clone(&self.bytecode.nested[i as usize])
     }
 
@@ -167,7 +166,7 @@ impl Frame {
     /// its bytecode is immutable, so the instruction can be read back rather
     /// than stored per activation.
     pub(super) fn pending_call_results(&self) -> RetCount {
-        self.bytecode.code[self.ip - 1].call_results()
+        self.bytecode.code[self.ip.get() - 1].call_results()
     }
 
     /// Run one dispatch-loop invocation over `frames`, which holds its entry
@@ -211,6 +210,51 @@ impl Frame {
         state: &mut State,
         local_cost: &mut u64,
     ) -> Result<(usize, usize)> {
+        // Lua calls and returns switch to another entry of `frames` and
+        // continue here: no native recursion and no re-entry of this function
+        // per call. Frames never move while they run; a pushed frame is
+        // written straight into its slot (`extend` from `once_with`), because
+        // a whole-frame move reads back fields the loop wrote one at a time
+        // with wide loads that cannot be store-forwarded.
+        loop {
+            let frame: &Frame = frames.last().expect("a running invocation has a frame");
+            // The authoritative cursor while the frame runs. Every `Result`
+            // exit from `run_frame`, a call, a return or an error (a panic
+            // poisons the State instead), publishes it to
+            // `Frame::ip` here, before anything can read that: the unwind
+            // locates a fault from it, a returning callee decodes the caller's
+            // pending call from it, and `return_to_caller` may pop the frame.
+            let mut ip = frame.ip.get();
+            let leave = Self::run_frame(frame, state, local_cost, &mut ip);
+            frame.ip.set(ip);
+            match leave? {
+                Leave::Call => frames.extend(std::iter::once_with(|| state.admitted_frame())),
+                Leave::Return { first, count } => {
+                    if frames.len() == 1 {
+                        // The entry frame: its Rust caller finishes the call.
+                        return Ok((first, count));
+                    }
+                    state.return_to_caller(frames, first, count)?;
+                }
+            }
+        }
+    }
+
+    /// Dispatch one activation of `frame` from the cursor `ip` until it calls
+    /// a Lua function (admitted, its frame for the caller to push) or
+    /// returns. Inlined, so `ip` stays a register for the whole run; the
+    /// caller publishes it on every exit, which is why nothing here writes
+    /// `Frame::ip` and every error simply propagates.
+    #[inline(always)]
+    fn run_frame(
+        frame: &Frame,
+        state: &mut State,
+        local_cost: &mut u64,
+        ip: &mut usize,
+    ) -> Result<Leave> {
+        let code: &[Instr] = &frame.bytecode.code;
+        let base = frame.stack_bottom;
+
         /// Macro to accumulate cost and flush when threshold is reached
         macro_rules! add_cost {
             ($cost:expr) => {{
@@ -232,9 +276,8 @@ impl Frame {
         // One arm per arithmetic opcode, each a direct call to its function
         // item with its operand kinds fixed.
         macro_rules! arith {
-            ($frame:ident, $inst:ident, $f:path, rr) => {{
+            ($inst:ident, $f:path, rr) => {{
                 add_cost!(1);
-                let base = $frame.stack_bottom;
                 let lhs = state.stack[base + $inst.b() as usize];
                 let rhs = state.stack[base + $inst.c() as usize];
                 match (lhs, rhs) {
@@ -244,20 +287,18 @@ impl Frame {
                     _ => return Err(state.arithmetic_operands_error(lhs, rhs)),
                 }
             }};
-            ($frame:ident, $inst:ident, $f:path, rk) => {{
+            ($inst:ident, $f:path, rk) => {{
                 add_cost!(1);
-                let base = $frame.stack_bottom;
                 let lhs = state.stack[base + $inst.b() as usize];
-                let y = $frame.get_number_constant($inst.c());
+                let y = frame.get_number_constant($inst.c());
                 match lhs {
                     Val::Num(x) => state.stack[base + $inst.a() as usize] = Val::Num($f(x, y)),
                     _ => return Err(state.arithmetic_operands_error(lhs, Val::Num(y))),
                 }
             }};
-            ($frame:ident, $inst:ident, $f:path, kr) => {{
+            ($inst:ident, $f:path, kr) => {{
                 add_cost!(1);
-                let base = $frame.stack_bottom;
-                let x = $frame.get_number_constant($inst.b());
+                let x = frame.get_number_constant($inst.b());
                 let rhs = state.stack[base + $inst.c() as usize];
                 match rhs {
                     Val::Num(y) => state.stack[base + $inst.a() as usize] = Val::Num($f(x, y)),
@@ -266,301 +307,289 @@ impl Frame {
             }};
         }
 
-        // Lua calls and returns switch `frame` to another entry of `frames`
-        // and continue here: no native recursion and no re-entry of this
-        // function per call. Frames never move while they run; a pushed
-        // frame is written straight into its slot (`extend` from
-        // `once_with`), because a whole-frame move reads back fields the loop
-        // wrote one at a time with wide loads that cannot be store-forwarded.
-        'frames: loop {
-            let frame = frames.last_mut().expect("a running invocation has a frame");
-            loop {
-                let inst = frame.get_instr();
-                let base = frame.stack_bottom;
-                let ra = base + inst.a() as usize;
-                match inst.opcode() {
-                    // Moves and constants
-                    Instr::OP_MOVE => {
-                        state.stack[ra] = state.stack[base + inst.b() as usize];
-                    }
-                    Instr::OP_LOAD_NIL => {
-                        state.stack[ra..ra + inst.b() as usize].fill(Val::Nil);
-                    }
-                    Instr::OP_LOAD_BOOL => state.stack[ra] = Val::Bool(inst.b() != 0),
-                    Instr::OP_LOAD_NUM => {
-                        state.stack[ra] = Val::Num(frame.get_number_constant(inst.b()));
-                    }
-                    Instr::OP_LOAD_STR => state.stack[ra] = frame.literal(inst.b()),
-
-                    // Upvalues
-                    Instr::OP_GET_UPVAL => {
-                        state.stack[ra] = state.upvalue_value(frame, inst.b());
-                    }
-                    Instr::OP_SET_UPVAL => {
-                        let val = state.stack[ra];
-                        state.set_upvalue_value(frame, inst.b(), val);
-                    }
-                    Instr::OP_CLOSE => state.close_upvalues(ra),
-
-                    // Globals and builtins
-                    Instr::OP_GET_GLOBAL => {
-                        state.stack[ra] = state.read_global(frame, inst.b(), inst.cache_slot());
-                    }
-                    Instr::OP_SET_GLOBAL => {
-                        let val = state.stack[ra];
-                        state.write_global(frame, inst.b(), inst.cache_slot(), val);
-                    }
-                    Instr::OP_GET_BUILTIN => {
-                        state.stack[ra] = state.global_env.builtin(inst.b() as u8);
-                    }
-                    Instr::OP_SET_BUILTIN => {
-                        let val = state.stack[ra];
-                        state.global_env.write_builtin(inst.b() as u8, val);
-                    }
-
-                    // Table creation
-                    Instr::OP_NEW_TABLE => {
-                        add_cost!(const { Instr::fixed_units(Instr::OP_NEW_TABLE) });
-                        state.stack[ra] = state.alloc_table();
-                    }
-                    Instr::OP_NEW_TABLE_PRESIZED => {
-                        add_cost!(const { Instr::fixed_units(Instr::OP_NEW_TABLE_PRESIZED) });
-                        // B is a hash-capacity hint: the constructor's keyed-field
-                        // count. The array part is reserved per SET_LIST batch.
-                        state.stack[ra] = state.alloc_table_with_capacity(inst.b() as usize);
-                    }
-                    Instr::OP_NEW_TABLE_TEMPLATE => {
-                        add_cost!(const { Instr::fixed_units(Instr::OP_NEW_TABLE_TEMPLATE) });
-                        state.reg_new_table_template(frame, ra, inst.b())?;
-                    }
-
-                    // Table reads
-                    Instr::OP_GET_FIELD => {
-                        frame.record_call_site(state);
-                        let receiver = state.stack[base + inst.b() as usize];
-                        state.reg_get_field(
-                            frame,
-                            ra,
-                            receiver,
-                            inst.c(),
-                            inst.cache_slot(),
-                            local_cost,
-                        )?;
-                    }
-                    Instr::OP_SELF => {
-                        frame.record_call_site(state);
-                        let receiver = state.stack[base + inst.b() as usize];
-                        state.stack[ra + 1] = receiver;
-                        state.reg_get_field(
-                            frame,
-                            ra,
-                            receiver,
-                            inst.c(),
-                            inst.cache_slot(),
-                            local_cost,
-                        )?;
-                    }
-                    Instr::OP_GET_TABLE => {
-                        frame.record_call_site(state);
-                        state.reg_get_table(
-                            ra,
-                            base + inst.b() as usize,
-                            base + inst.c() as usize,
-                            local_cost,
-                        )?;
-                    }
-
-                    // Table writes
-                    Instr::OP_SET_FIELD => {
-                        frame.record_call_site(state);
-                        add_cost!(const { Instr::fixed_units(Instr::OP_SET_FIELD) });
-                        state.reg_set_field(
-                            frame,
-                            ra,
-                            inst.b(),
-                            base + inst.c() as usize,
-                            inst.cache_slot(),
-                            local_cost,
-                        )?;
-                    }
-                    Instr::OP_SET_TABLE => {
-                        frame.record_call_site(state);
-                        add_cost!(const { Instr::fixed_units(Instr::OP_SET_TABLE) });
-                        state.reg_set_table(
-                            ra,
-                            base + inst.b() as usize,
-                            base + inst.c() as usize,
-                            local_cost,
-                        )?;
-                    }
-                    Instr::OP_INIT_FIELD => {
-                        add_cost!(const { Instr::fixed_units(Instr::OP_INIT_FIELD) });
-                        state.reg_init_field(frame, ra, inst.b(), base + inst.c() as usize)?;
-                    }
-                    Instr::OP_INIT_FIELD_PINNED => {
-                        add_cost!(const { Instr::fixed_units(Instr::OP_INIT_FIELD_PINNED) });
-                        state.reg_init_field_pinned(
-                            frame,
-                            ra,
-                            inst.b(),
-                            base + inst.c() as usize,
-                            inst.d(),
-                        )?;
-                    }
-                    Instr::OP_INIT_INDEX => {
-                        add_cost!(const { Instr::fixed_units(Instr::OP_INIT_INDEX) });
-                        state.reg_init_index(
-                            ra,
-                            base + inst.b() as usize,
-                            base + inst.c() as usize,
-                        )?;
-                    }
-                    Instr::OP_SET_LIST => {
-                        let count = match inst.set_list_count() {
-                            Some(count) => usize::from(count),
-                            None => state.stack.len() - (ra + 1),
-                        };
-                        add_cost!(count as u64);
-                        state.reg_set_list(ra, count, inst.c())?;
-                        if inst.set_list_count().is_none() {
-                            state.stack.resize(frame.top, Val::Nil);
-                        }
-                    }
-
-                    // Arithmetic
-                    Instr::OP_ADD_RR => arith!(frame, inst, lua_add, rr),
-                    Instr::OP_ADD_RK => arith!(frame, inst, lua_add, rk),
-                    Instr::OP_ADD_KR => arith!(frame, inst, lua_add, kr),
-                    Instr::OP_SUB_RR => arith!(frame, inst, lua_sub, rr),
-                    Instr::OP_SUB_RK => arith!(frame, inst, lua_sub, rk),
-                    Instr::OP_SUB_KR => arith!(frame, inst, lua_sub, kr),
-                    Instr::OP_MUL_RR => arith!(frame, inst, lua_mul, rr),
-                    Instr::OP_MUL_RK => arith!(frame, inst, lua_mul, rk),
-                    Instr::OP_MUL_KR => arith!(frame, inst, lua_mul, kr),
-                    Instr::OP_DIV_RR => arith!(frame, inst, lua_div, rr),
-                    Instr::OP_DIV_RK => arith!(frame, inst, lua_div, rk),
-                    Instr::OP_DIV_KR => arith!(frame, inst, lua_div, kr),
-                    Instr::OP_MOD_RR => arith!(frame, inst, lua_modulo, rr),
-                    Instr::OP_MOD_RK => arith!(frame, inst, lua_modulo, rk),
-                    Instr::OP_MOD_KR => arith!(frame, inst, lua_modulo, kr),
-                    Instr::OP_POW_RR => arith!(frame, inst, crate::crmath::pow, rr),
-                    Instr::OP_POW_RK => arith!(frame, inst, crate::crmath::pow, rk),
-                    Instr::OP_POW_KR => arith!(frame, inst, crate::crmath::pow, kr),
-                    Instr::OP_UNM => {
-                        add_cost!(const { Instr::fixed_units(Instr::OP_UNM) });
-                        match state.stack[base + inst.b() as usize] {
-                            Val::Num(n) => state.stack[ra] = Val::Num(-n),
-                            other => return Err(state.arithmetic_operands_error(other, other)),
-                        }
-                    }
-                    Instr::OP_NOT => {
-                        state.stack[ra] =
-                            Val::Bool(!state.stack[base + inst.b() as usize].truthy());
-                    }
-                    Instr::OP_LEN => {
-                        frame.record_call_site(state);
-                        state.reg_len(ra, base + inst.b() as usize, local_cost)?;
-                    }
-
-                    // The bytes `..` emits are deliberately uncharged: the
-                    // budget is a game-design instrument rather than a CPU
-                    // meter (docs/budget.md), and `..` is structural syntax
-                    // that a legible refactor must not make more expensive.
-                    // The size is still bounded by `checked_string_growth`
-                    // (MAX_STRING_BYTES), so the uncharged work is capped.
-                    Instr::OP_CONCAT => {
-                        state.reg_concat(ra, base + inst.b() as usize, inst.c() as usize)?;
-                    }
-
-                    // Comparisons
-                    Instr::OP_LT..=Instr::OP_NE => {
-                        let op = CompareOp::from_value_opcode(inst.opcode())
-                            .expect("the range holds the value comparisons");
-                        let lhs = state.stack[base + inst.b() as usize];
-                        let rhs = state.stack[base + inst.c() as usize];
-                        state.stack[ra] = Val::Bool(state.compare_vals(op, lhs, rhs)?);
-                    }
-
-                    // Control flow
-                    Instr::OP_JMP => frame.jump(inst.sj()),
-                    // Compare-and-branch: jump when the comparison is false.
-                    // One range arm with the variant decode outlined - per-
-                    // variant arms measurably perturbed the dispatch loop's
-                    // codegen in the stack VM.
-                    Instr::OP_BR_LT..=Instr::OP_BR_NE => {
-                        let op = CompareOp::from_branch_opcode(inst.opcode())
-                            .expect("the range holds the branch comparisons");
-                        let lhs = state.stack[ra];
-                        let rhs = state.stack[base + inst.b() as usize];
-                        if !state.compare_vals(op, lhs, rhs)? {
-                            frame.jump(inst.sj());
-                        }
-                    }
-                    Instr::OP_TEST_FALSE => {
-                        if !state.stack[ra].truthy() {
-                            frame.jump(inst.sj());
-                        }
-                    }
-                    Instr::OP_TEST_TRUE => {
-                        if state.stack[ra].truthy() {
-                            frame.jump(inst.sj());
-                        }
-                    }
-
-                    // `for` loops
-                    Instr::OP_FOR_PREP => state.instr_for_prep(frame, ra, inst.sj())?,
-                    Instr::OP_FOR_LOOP => state.instr_for_loop(frame, ra, inst.sj())?,
-                    Instr::OP_TFOR_CALL => {
-                        frame.record_call_site(state);
-                        Self::flush_local_cost(state, local_cost)?;
-                        state.instr_tfor_call(
-                            ra,
-                            inst.b() as u8,
-                            inst.cache_slot(),
-                            &frame.runtime.caches,
-                        )?;
-                    }
-                    Instr::OP_TFOR_LOOP => state.instr_tfor_loop(frame, ra, inst.sj()),
-
-                    // Functions (calls and returns)
-                    Instr::OP_CLOSURE => state.reg_closure(frame, ra, inst.b())?,
-                    Instr::OP_CALL => {
-                        frame.record_call_site(state);
-                        Self::flush_local_cost(state, local_cost)?;
-                        let args = state.call_window(ra, inst.call_args())?;
-                        let results = inst.call_results();
-                        if state.call_from_lua(args, results, inst.call_is_method())? {
-                            frames.extend(std::iter::once_with(|| state.admitted_frame()));
-                            continue 'frames;
-                        }
-                        if let RetCount::Fixed(_) = results {
-                            state.stack.resize(frame.top, Val::Nil);
-                        }
-                    }
-                    Instr::OP_RETURN => {
-                        // Flush any remaining accumulated cost before returning
-                        Self::flush_local_cost(state, local_cost)?;
-                        let count = match inst.return_count() {
-                            RetCount::Fixed(n) => usize::from(n),
-                            RetCount::All => state.stack.len() - ra,
-                        };
-                        if frames.len() == 1 {
-                            // The entry frame: its Rust caller finishes the call.
-                            return Ok((ra, count));
-                        }
-                        state.return_to_caller(frames, ra, count)?;
-                        continue 'frames;
-                    }
-                    Instr::OP_VARARG => {
-                        state.reg_vararg(ra, inst.vararg_count())?;
-                    }
-
-                    // Admission rejects unknown opcodes, including dead code.
-                    _ => unreachable!("verified bytecode contains an unknown opcode"),
+        loop {
+            let inst = code[*ip];
+            *ip += 1;
+            let ra = base + inst.a() as usize;
+            match inst.opcode() {
+                // Moves and constants
+                Instr::OP_MOVE => {
+                    state.stack[ra] = state.stack[base + inst.b() as usize];
                 }
+                Instr::OP_LOAD_NIL => {
+                    state.stack[ra..ra + inst.b() as usize].fill(Val::Nil);
+                }
+                Instr::OP_LOAD_BOOL => state.stack[ra] = Val::Bool(inst.b() != 0),
+                Instr::OP_LOAD_NUM => {
+                    state.stack[ra] = Val::Num(frame.get_number_constant(inst.b()));
+                }
+                Instr::OP_LOAD_STR => state.stack[ra] = frame.literal(inst.b()),
+
+                // Upvalues
+                Instr::OP_GET_UPVAL => {
+                    state.stack[ra] = state.upvalue_value(frame, inst.b());
+                }
+                Instr::OP_SET_UPVAL => {
+                    let val = state.stack[ra];
+                    state.set_upvalue_value(frame, inst.b(), val);
+                }
+                Instr::OP_CLOSE => state.close_upvalues(ra),
+
+                // Globals and builtins
+                Instr::OP_GET_GLOBAL => {
+                    state.stack[ra] = state.read_global(frame, inst.b(), inst.cache_slot());
+                }
+                Instr::OP_SET_GLOBAL => {
+                    let val = state.stack[ra];
+                    state.write_global(frame, inst.b(), inst.cache_slot(), val);
+                }
+                Instr::OP_GET_BUILTIN => {
+                    state.stack[ra] = state.global_env.builtin(inst.b() as u8);
+                }
+                Instr::OP_SET_BUILTIN => {
+                    let val = state.stack[ra];
+                    state.global_env.write_builtin(inst.b() as u8, val);
+                }
+
+                // Table creation
+                Instr::OP_NEW_TABLE => {
+                    add_cost!(const { Instr::fixed_units(Instr::OP_NEW_TABLE) });
+                    state.stack[ra] = state.alloc_table();
+                }
+                Instr::OP_NEW_TABLE_PRESIZED => {
+                    add_cost!(const { Instr::fixed_units(Instr::OP_NEW_TABLE_PRESIZED) });
+                    // B is a hash-capacity hint: the constructor's keyed-field
+                    // count. The array part is reserved per SET_LIST batch.
+                    state.stack[ra] = state.alloc_table_with_capacity(inst.b() as usize);
+                }
+                Instr::OP_NEW_TABLE_TEMPLATE => {
+                    add_cost!(const { Instr::fixed_units(Instr::OP_NEW_TABLE_TEMPLATE) });
+                    state.reg_new_table_template(frame, ra, inst.b())?;
+                }
+
+                // Table reads
+                Instr::OP_GET_FIELD => {
+                    Self::record_call_site(state, *ip);
+                    let receiver = state.stack[base + inst.b() as usize];
+                    state.reg_get_field(
+                        frame,
+                        ra,
+                        receiver,
+                        inst.c(),
+                        inst.cache_slot(),
+                        local_cost,
+                    )?;
+                }
+                Instr::OP_SELF => {
+                    Self::record_call_site(state, *ip);
+                    let receiver = state.stack[base + inst.b() as usize];
+                    state.stack[ra + 1] = receiver;
+                    state.reg_get_field(
+                        frame,
+                        ra,
+                        receiver,
+                        inst.c(),
+                        inst.cache_slot(),
+                        local_cost,
+                    )?;
+                }
+                Instr::OP_GET_TABLE => {
+                    Self::record_call_site(state, *ip);
+                    state.reg_get_table(
+                        ra,
+                        base + inst.b() as usize,
+                        base + inst.c() as usize,
+                        local_cost,
+                    )?;
+                }
+
+                // Table writes
+                Instr::OP_SET_FIELD => {
+                    Self::record_call_site(state, *ip);
+                    add_cost!(const { Instr::fixed_units(Instr::OP_SET_FIELD) });
+                    state.reg_set_field(
+                        frame,
+                        ra,
+                        inst.b(),
+                        base + inst.c() as usize,
+                        inst.cache_slot(),
+                        local_cost,
+                    )?;
+                }
+                Instr::OP_SET_TABLE => {
+                    Self::record_call_site(state, *ip);
+                    add_cost!(const { Instr::fixed_units(Instr::OP_SET_TABLE) });
+                    state.reg_set_table(
+                        ra,
+                        base + inst.b() as usize,
+                        base + inst.c() as usize,
+                        local_cost,
+                    )?;
+                }
+                Instr::OP_INIT_FIELD => {
+                    add_cost!(const { Instr::fixed_units(Instr::OP_INIT_FIELD) });
+                    state.reg_init_field(frame, ra, inst.b(), base + inst.c() as usize)?;
+                }
+                Instr::OP_INIT_FIELD_PINNED => {
+                    add_cost!(const { Instr::fixed_units(Instr::OP_INIT_FIELD_PINNED) });
+                    state.reg_init_field_pinned(
+                        frame,
+                        ra,
+                        inst.b(),
+                        base + inst.c() as usize,
+                        inst.d(),
+                    )?;
+                }
+                Instr::OP_INIT_INDEX => {
+                    add_cost!(const { Instr::fixed_units(Instr::OP_INIT_INDEX) });
+                    state.reg_init_index(ra, base + inst.b() as usize, base + inst.c() as usize)?;
+                }
+                Instr::OP_SET_LIST => {
+                    let count = match inst.set_list_count() {
+                        Some(count) => usize::from(count),
+                        None => state.stack.len() - (ra + 1),
+                    };
+                    add_cost!(count as u64);
+                    state.reg_set_list(ra, count, inst.c())?;
+                    if inst.set_list_count().is_none() {
+                        state.stack.resize(frame.top, Val::Nil);
+                    }
+                }
+
+                // Arithmetic
+                Instr::OP_ADD_RR => arith!(inst, lua_add, rr),
+                Instr::OP_ADD_RK => arith!(inst, lua_add, rk),
+                Instr::OP_ADD_KR => arith!(inst, lua_add, kr),
+                Instr::OP_SUB_RR => arith!(inst, lua_sub, rr),
+                Instr::OP_SUB_RK => arith!(inst, lua_sub, rk),
+                Instr::OP_SUB_KR => arith!(inst, lua_sub, kr),
+                Instr::OP_MUL_RR => arith!(inst, lua_mul, rr),
+                Instr::OP_MUL_RK => arith!(inst, lua_mul, rk),
+                Instr::OP_MUL_KR => arith!(inst, lua_mul, kr),
+                Instr::OP_DIV_RR => arith!(inst, lua_div, rr),
+                Instr::OP_DIV_RK => arith!(inst, lua_div, rk),
+                Instr::OP_DIV_KR => arith!(inst, lua_div, kr),
+                Instr::OP_MOD_RR => arith!(inst, lua_modulo, rr),
+                Instr::OP_MOD_RK => arith!(inst, lua_modulo, rk),
+                Instr::OP_MOD_KR => arith!(inst, lua_modulo, kr),
+                Instr::OP_POW_RR => arith!(inst, crate::crmath::pow, rr),
+                Instr::OP_POW_RK => arith!(inst, crate::crmath::pow, rk),
+                Instr::OP_POW_KR => arith!(inst, crate::crmath::pow, kr),
+                Instr::OP_UNM => {
+                    add_cost!(const { Instr::fixed_units(Instr::OP_UNM) });
+                    match state.stack[base + inst.b() as usize] {
+                        Val::Num(n) => state.stack[ra] = Val::Num(-n),
+                        other => return Err(state.arithmetic_operands_error(other, other)),
+                    }
+                }
+                Instr::OP_NOT => {
+                    state.stack[ra] = Val::Bool(!state.stack[base + inst.b() as usize].truthy());
+                }
+                Instr::OP_LEN => {
+                    Self::record_call_site(state, *ip);
+                    state.reg_len(ra, base + inst.b() as usize, local_cost)?;
+                }
+
+                // The bytes `..` emits are deliberately uncharged: the
+                // budget is a game-design instrument rather than a CPU
+                // meter (docs/budget.md), and `..` is structural syntax
+                // that a legible refactor must not make more expensive.
+                // The size is still bounded by `checked_string_growth`
+                // (MAX_STRING_BYTES), so the uncharged work is capped.
+                Instr::OP_CONCAT => {
+                    state.reg_concat(ra, base + inst.b() as usize, inst.c() as usize)?;
+                }
+
+                // Comparisons
+                Instr::OP_LT..=Instr::OP_NE => {
+                    let op = CompareOp::from_value_opcode(inst.opcode())
+                        .expect("the range holds the value comparisons");
+                    let lhs = state.stack[base + inst.b() as usize];
+                    let rhs = state.stack[base + inst.c() as usize];
+                    state.stack[ra] = Val::Bool(state.compare_vals(op, lhs, rhs)?);
+                }
+
+                // Control flow
+                Instr::OP_JMP => *ip = Self::jumped(*ip, inst.sj()),
+                // Compare-and-branch: jump when the comparison is false.
+                // One range arm with the variant decode outlined - per-
+                // variant arms measurably perturbed the dispatch loop's
+                // codegen in the stack VM.
+                Instr::OP_BR_LT..=Instr::OP_BR_NE => {
+                    let op = CompareOp::from_branch_opcode(inst.opcode())
+                        .expect("the range holds the branch comparisons");
+                    let lhs = state.stack[ra];
+                    let rhs = state.stack[base + inst.b() as usize];
+                    if !state.compare_vals(op, lhs, rhs)? {
+                        *ip = Self::jumped(*ip, inst.sj());
+                    }
+                }
+                Instr::OP_TEST_FALSE => {
+                    if !state.stack[ra].truthy() {
+                        *ip = Self::jumped(*ip, inst.sj());
+                    }
+                }
+                Instr::OP_TEST_TRUE => {
+                    if state.stack[ra].truthy() {
+                        *ip = Self::jumped(*ip, inst.sj());
+                    }
+                }
+
+                // `for` loops
+                Instr::OP_FOR_PREP => state.instr_for_prep(ra, ip, inst.sj())?,
+                Instr::OP_FOR_LOOP => state.instr_for_loop(ra, ip, inst.sj())?,
+                Instr::OP_TFOR_CALL => {
+                    Self::record_call_site(state, *ip);
+                    Self::flush_local_cost(state, local_cost)?;
+                    state.instr_tfor_call(
+                        ra,
+                        inst.b() as u8,
+                        inst.cache_slot(),
+                        &frame.runtime.caches,
+                    )?;
+                }
+                Instr::OP_TFOR_LOOP => state.instr_tfor_loop(ra, ip, inst.sj()),
+
+                // Functions (calls and returns)
+                Instr::OP_CLOSURE => state.reg_closure(frame, ra, inst.b())?,
+                Instr::OP_CALL => {
+                    Self::record_call_site(state, *ip);
+                    Self::flush_local_cost(state, local_cost)?;
+                    let args = state.call_window(ra, inst.call_args())?;
+                    let results = inst.call_results();
+                    if state.call_from_lua(args, results, inst.call_is_method())? {
+                        return Ok(Leave::Call);
+                    }
+                    if let RetCount::Fixed(_) = results {
+                        state.stack.resize(frame.top, Val::Nil);
+                    }
+                }
+                Instr::OP_RETURN => {
+                    // Flush any remaining accumulated cost before returning
+                    Self::flush_local_cost(state, local_cost)?;
+                    let count = match inst.return_count() {
+                        RetCount::Fixed(n) => usize::from(n),
+                        RetCount::All => state.stack.len() - ra,
+                    };
+                    return Ok(Leave::Return { first: ra, count });
+                }
+                Instr::OP_VARARG => {
+                    state.reg_vararg(ra, inst.vararg_count())?;
+                }
+
+                // Admission rejects unknown opcodes, including dead code.
+                _ => unreachable!("verified bytecode contains an unknown opcode"),
             }
         }
     }
+}
+
+/// How [`Frame::run_frame`] left its activation.
+enum Leave {
+    /// A Lua callee was admitted; its frame goes on top.
+    Call,
+    /// The activation returned `count` results from register index `first`.
+    Return { first: usize, count: usize },
 }
 
 impl State {
@@ -621,19 +650,7 @@ mod tests {
     #[test]
     fn jump_accepts_the_most_negative_offset() {
         let span = 1usize << 23;
-        let bytecode = Arc::new(Bytecode {
-            code: vec![Instr::ret(0, RetCount::Fixed(0)); span],
-            ..Bytecode::default()
-        });
-        let runtime = Arc::new(BytecodeRuntime {
-            literals: Box::new([]),
-            caches: crate::vm::caches::RuntimeCaches::new(&bytecode),
-        });
-        let mut frame = Frame::new(bytecode, runtime, Arc::from([]), 0);
-        frame.ip = span;
-
-        frame.jump(-(1 << 23));
-        assert_eq!(frame.ip, 0);
+        assert_eq!(Frame::jumped(span, -(1 << 23)), 0);
     }
 
     #[test]

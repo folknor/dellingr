@@ -99,7 +99,7 @@ impl State {
     #[inline]
     pub(super) fn reg_get_field(
         &mut self,
-        frame: &mut Frame,
+        frame: &Frame,
         dst: usize,
         receiver: Val,
         name: u16,
@@ -165,7 +165,7 @@ impl State {
     #[inline(never)]
     fn get_field_slow(
         &mut self,
-        frame: &mut Frame,
+        frame: &Frame,
         dst: usize,
         receiver: Val,
         name: u16,
@@ -442,7 +442,7 @@ impl State {
     }
 
     /// `R[dst] = closure of nested function `nested``.
-    pub(super) fn reg_closure(&mut self, frame: &mut Frame, dst: usize, nested: u16) -> Result<()> {
+    pub(super) fn reg_closure(&mut self, frame: &Frame, dst: usize, nested: u16) -> Result<()> {
         self.instr_closure(frame, nested)?;
         self.pop_into(dst);
         Ok(())

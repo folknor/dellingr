@@ -13,7 +13,7 @@ impl State {
     /// Push a closure of nested function `i`, capturing its upvalues from
     /// the running frame.
     #[hotpath::measure]
-    pub(super) fn instr_closure(&mut self, frame: &mut Frame, i: u16) -> Result<()> {
+    pub(super) fn instr_closure(&mut self, frame: &Frame, i: u16) -> Result<()> {
         let bytecode = frame.get_nested_bytecode(i);
         // Capture upvalues based on the bytecode's upvalue descriptors
         let mut captured_upvalues = Vec::with_capacity(bytecode.upvalues.len());
@@ -36,12 +36,13 @@ impl State {
 
     /// Numeric-for setup over the registers from `slot`: start, limit and
     /// step, then the visible variable. Checks the step, then the limit, then
-    /// the start, and jumps past the loop when it does not run.
+    /// the start, and moves the dispatch cursor `ip` past the loop when it
+    /// does not run.
     #[hotpath::measure]
     pub(super) fn instr_for_prep(
         &mut self,
-        frame: &mut Frame,
         slot: usize,
+        ip: &mut usize,
         body_len: i32,
     ) -> Result<()> {
         let start_val = self.stack[slot];
@@ -61,16 +62,18 @@ impl State {
                 self.stack[local_slot] = Val::Num(n);
             }
         } else {
-            frame.jump(body_len);
+            *ip = Frame::jumped(*ip, body_len);
         }
         Ok(())
     }
 
+    /// Numeric-for step; moves the dispatch cursor `ip` back to the body
+    /// while the loop continues.
     #[hotpath::measure]
     pub(super) fn instr_for_loop(
         &mut self,
-        frame: &mut Frame,
         slot: usize,
+        ip: &mut usize,
         offset: i32,
     ) -> Result<()> {
         let mut var = self.stack[slot].as_num().ok_or_else(|| {
@@ -86,7 +89,7 @@ impl State {
         if check_numeric_for_condition(var, limit, step) {
             self.stack[slot] = Val::Num(var);
             self.stack[slot + 3] = Val::Num(var);
-            frame.jump(offset);
+            *ip = Frame::jumped(*ip, offset);
         }
         Ok(())
     }
@@ -276,14 +279,15 @@ impl State {
         Ok(())
     }
 
-    /// TForLoop: If first loop variable is nil, jump. Otherwise update control var.
+    /// TForLoop: if the first loop variable is nil, move the dispatch cursor
+    /// `ip` out of the loop. Otherwise update the control variable.
     #[hotpath::measure]
-    pub(super) fn instr_tfor_loop(&mut self, frame: &mut Frame, base: usize, offset: i32) {
+    pub(super) fn instr_tfor_loop(&mut self, base: usize, ip: &mut usize, offset: i32) {
         let first_var = &self.stack[base + 3];
 
         if matches!(first_var, Val::Nil) {
             // Exit loop
-            frame.jump(offset);
+            *ip = Frame::jumped(*ip, offset);
         } else {
             // Update control variable with first loop variable
             self.stack[base + 2] = self.stack[base + 3];
