@@ -357,8 +357,9 @@ pub struct State {
     /// `Anchor` is caught.
     pub(super) registry: Registry,
     /// Lazily assigned deterministic identities used by `string.format("%p")`.
-    /// These values deliberately are not GC roots; generational keys prevent a
-    /// later allocation from aliasing an identity belonging to a freed value.
+    /// These values deliberately are not GC roots; every collection drops the
+    /// entries of values it freed, so a later allocation cannot alias an
+    /// identity belonging to a freed value.
     // Insertion order is serialized. Do not prune outside gc_collect: changing
     // which entries remain must not change snapshot traversal order. With GC
     // disabled, entries grow with observed objects, just as the heap does.
@@ -954,6 +955,32 @@ impl State {
         live.extend(self.pending_bytecode_caches.iter().copied());
         self.bytecode_caches
             .retain(|identity, _| live.contains(identity));
+    }
+
+    /// Clear every runtime cache entry that names an object or string the
+    /// sweep just freed (see `RuntimeCaches::drop_dead_entries`). Runs after
+    /// `sweep_bytecode_caches` and the heap sweep, before any allocation.
+    /// The map holds every runtime that can execute again: each runtime is
+    /// created into it, closures and frames take theirs from it, and an entry
+    /// is dropped only once no surviving closure, activation or pending
+    /// closure shell uses its bytecode. Debug builds check the closure half.
+    #[inline(never)]
+    #[hotpath::measure]
+    fn drop_dead_cache_entries(&self) {
+        for entry in self.bytecode_caches.values() {
+            entry.runtime.caches.drop_dead_entries(&self.heap);
+        }
+        #[cfg(debug_assertions)]
+        for closure in self.heap.closures() {
+            let identity = Arc::as_ptr(&closure.bytecode) as usize;
+            debug_assert!(
+                self.bytecode_caches
+                    .get(&identity)
+                    .is_some_and(|entry| Arc::ptr_eq(&entry.runtime, &closure.runtime)),
+                "a surviving closure's runtime is not the cached runtime for its bytecode, \
+                 so weak cache processing would miss it"
+            );
+        }
     }
 
     fn retain_bytecode_tree(live: &mut BTreeSet<usize>, bytecode: &Arc<Bytecode>) {
@@ -1581,6 +1608,218 @@ mod runtime_tests {
         assert_eq!(state.string_count(), names + 1);
         state.gc_collect();
         assert_eq!(state.string_count(), names);
+    }
+
+    /// One populated runtime cache cell, copied whole.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum CachedEntry {
+        Field(caches::FieldLookupCacheEntry),
+        SetField(caches::FieldLookupCacheEntry),
+        Method(caches::MethodLookupCacheEntry),
+        StringMethod(caches::StringMethodCacheEntry),
+        Tfor(caches::TforCursorEntry),
+    }
+
+    impl CachedEntry {
+        fn family(self) -> &'static str {
+            match self {
+                Self::Field(_) => "field",
+                Self::SetField(_) => "set-field",
+                Self::Method(_) => "method",
+                Self::StringMethod(_) => "string-method",
+                Self::Tfor(_) => "tfor cursor",
+            }
+        }
+
+        /// The handles the entry names, enumerated here independently of
+        /// the collector's own enumeration.
+        fn handles(self) -> Vec<Val> {
+            match self {
+                Self::Field(e) | Self::SetField(e) => vec![Val::Obj(e.table)],
+                Self::Method(e) => vec![Val::Obj(e.receiver_metatable), e.index_handler],
+                Self::StringMethod(e) => vec![Val::Obj(e.string_lib)],
+                Self::Tfor(e) => vec![Val::Obj(e.table)],
+            }
+        }
+    }
+
+    /// Every populated cell, keyed by (runtime identity, family, slot).
+    fn cache_cells(state: &State) -> Vec<((usize, &'static str, usize), CachedEntry)> {
+        let mut cells = Vec::new();
+        for (identity, entry) in &state.bytecode_caches {
+            let caches = &entry.runtime.caches;
+            let mut push = |slot: usize, cell: Option<CachedEntry>| {
+                if let Some(cell) = cell {
+                    cells.push(((*identity, cell.family(), slot), cell));
+                }
+            };
+            for (slot, cell) in caches.field_lookup.iter().enumerate() {
+                push(slot, cell.get_field().map(CachedEntry::Field));
+                push(slot, cell.get_method().map(CachedEntry::Method));
+                push(
+                    slot,
+                    cell.get_string_method().map(CachedEntry::StringMethod),
+                );
+            }
+            for (slot, cell) in caches.set_field_lookup.iter().enumerate() {
+                push(slot, cell.get().map(CachedEntry::SetField));
+            }
+            for (slot, cell) in caches.tfor_cursor.iter().enumerate() {
+                push(slot, cell.get().map(CachedEntry::Tfor));
+            }
+        }
+        cells
+    }
+
+    /// Cache handles are weak: a collection that frees a cached object must
+    /// clear every entry naming it, or a later object reusing its arena slot
+    /// with a wrapped generation would satisfy the entry's handle check.
+    /// Each family is warmed against objects that then become unreachable
+    /// while the functions holding the sites stay reachable, and against
+    /// objects that stay alive. Method entries name two handles, so each is
+    /// also exercised dying alone: handlers of every kind (table, function,
+    /// string) replaced under a surviving metatable, and a dead metatable
+    /// whose handler survives.
+    #[test]
+    fn collection_clears_cache_entries_naming_freed_objects() {
+        let mut state = State::new();
+        state.gc_disable_auto();
+        crate::Program::compile(
+            "function get(t) return t.k end \
+             function set(t) t.k = 2 end \
+             function method(t) return t.m end \
+             function smethod(s) return s.up end \
+             function iter(t) for _ in pairs(t) do end end \
+             function thandler(t) return t.z end \
+             function fhandler(t) return t.z end \
+             function shandler(t) return t.z end \
+             function mtdead(t) return t.m end \
+             local n = 1 \
+             get({ k = 1 }) set({ k = 1 }) \
+             method(setmetatable({}, { __index = { m = 1 } })) \
+             iter({ a = 1 }) \
+             local smt = getmetatable('') \
+             local lib = smt.__index \
+             smt.__index = { up = string.upper } \
+             smethod('x') \
+             smt.__index = lib \
+             mt_t = { __index = { m = 1 } } \
+             mt_f = { __index = function() return 1 end } \
+             mt_s = { __index = 'h' .. n } \
+             thandler(setmetatable({}, mt_t)) \
+             fhandler(setmetatable({}, mt_f)) \
+             shandler(setmetatable({}, mt_s)) \
+             mt_t.__index = nil mt_f.__index = nil mt_s.__index = nil \
+             keep_handler = { m = 1 } \
+             mtdead(setmetatable({}, { __index = keep_handler })) \
+             function get_live(t) return t.k end \
+             function set_live(t) t.k = 2 end \
+             function method_live(t) return t.m end \
+             function iter_live(t) for _ in pairs(t) do end end \
+             function smethod_live(s) return s.upper end \
+             keep = setmetatable({ k = 1 }, { __index = { m = 1 } }) \
+             get_live(keep) set_live(keep) method_live(keep) iter_live(keep) \
+             smethod_live('x')",
+            None,
+        )
+        .and_then(|program| state.load(&program))
+        .expect("cache warmup source compiles");
+        // A second copy keeps the chunk itself rooted, so every runtime
+        // survives the collection and only entries can be dropped.
+        state.push_value(-1).expect("chunk copy fits");
+        state
+            .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+            .expect("cache warmup runs");
+
+        let before = cache_cells(&state);
+        // Method handler kinds, read while every handler still resolves.
+        let handler_kinds: Vec<_> = before
+            .iter()
+            .map(|(_, cell)| match cell {
+                CachedEntry::Method(e) => match e.index_handler {
+                    Val::Obj(ptr) if state.heap.as_table_ref(ptr).is_some() => "table",
+                    Val::Obj(_) => "function",
+                    Val::Str(_) => "string",
+                    _ => "other",
+                },
+                _ => "",
+            })
+            .collect();
+        state.gc_collect();
+        let after = cache_cells(&state);
+
+        let live = |val: &Val| state.heap.val_is_live(val);
+        for family in [
+            "field",
+            "set-field",
+            "method",
+            "string-method",
+            "tfor cursor",
+        ] {
+            let cells = before.iter().filter(|((_, f, _), _)| *f == family);
+            type Cells<'a> = Vec<&'a ((usize, &'static str, usize), CachedEntry)>;
+            let (dead, alive): (Cells<'_>, Cells<'_>) =
+                cells.partition(|(_, cell)| !cell.handles().iter().all(live));
+            assert!(
+                !dead.is_empty(),
+                "{family}: no warmed entry named a freed object"
+            );
+            assert!(
+                !alive.is_empty(),
+                "{family}: no warmed entry named only survivors"
+            );
+        }
+        for (kind, label) in [
+            ("table", "a table handler"),
+            ("function", "a function handler"),
+            ("string", "a string handler"),
+        ] {
+            assert!(
+                before.iter().zip(&handler_kinds).any(|((_, cell), k)| {
+                    *k == kind
+                        && matches!(cell, CachedEntry::Method(e)
+                            if live(&Val::Obj(e.receiver_metatable)) && !live(&e.index_handler))
+                }),
+                "no method entry had {label} freed under a surviving metatable"
+            );
+        }
+        assert!(
+            before
+                .iter()
+                .any(|(_, cell)| matches!(cell, CachedEntry::Method(e)
+                if !live(&Val::Obj(e.receiver_metatable))
+                    && matches!(e.index_handler, Val::Obj(_))
+                    && live(&e.index_handler))),
+            "no method entry had a freed metatable with a surviving handler"
+        );
+
+        for (key, cell) in &before {
+            let kept = after.iter().find(|(k, _)| k == key).map(|(_, c)| c);
+            if cell.handles().iter().all(live) {
+                assert_eq!(
+                    kept,
+                    Some(cell),
+                    "{key:?}: a live entry changed or was dropped"
+                );
+            } else {
+                assert_eq!(kept, None, "{key:?}: an entry still names a freed object");
+            }
+        }
+        assert_eq!(
+            after.len(),
+            before
+                .iter()
+                .filter(|(_, c)| c.handles().iter().all(live))
+                .count(),
+            "collection must not create entries"
+        );
+        // The same invariant through the collector's own enumeration, which
+        // covers every family and handle field.
+        for entry in state.bytecode_caches.values() {
+            for val in entry.runtime.caches.named_handles() {
+                assert!(live(&val), "a cache entry names a freed value");
+            }
+        }
     }
 
     #[test]

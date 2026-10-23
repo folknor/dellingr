@@ -5,7 +5,7 @@ use std::cell::Cell;
 use crate::compiler::Bytecode;
 
 use super::lua_val::Val;
-use super::object::ObjectPtr;
+use super::object::{GcHeap, ObjectPtr};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct GlobalLookupCacheEntry {
@@ -136,7 +136,9 @@ impl SetFieldLookupCacheSlot {
 /// These are never shared across `State`s: cached `ObjectPtr` keys are only
 /// valid inside the heap of the State that wrote them, and version cells are
 /// keyed to that State's global environment version and table versions. They are never
-/// serialized and are rebuilt cold when a snapshot is loaded.
+/// serialized and are rebuilt cold when a snapshot is loaded. Their handles
+/// are weak: every collection clears the entries naming what it freed
+/// (`drop_dead_entries`), so no entry outlives its referent.
 ///
 /// The interior `Cell`s give cache writes a `&self`-only borrow shape, which
 /// matches the dispatch loop's invariants: simultaneous frames executing the
@@ -198,6 +200,154 @@ impl RuntimeCaches {
     #[inline(always)]
     pub(super) fn tfor_cursor(&self, slot: Option<u8>) -> Option<&TforCursorSlot> {
         self.tfor_cursor.get(usize::from(slot?))
+    }
+
+    /// Weak-reference processing for one runtime: clear every entry that
+    /// names an object or string the collector just freed.
+    ///
+    /// Cache handles are weak: they are never GC roots, and a hit trusts a
+    /// matching handle without re-reading the key. A generational handle
+    /// alone cannot keep a dead entry from matching a later object in the
+    /// same arena slot, because generations wrap. Clearing here, right after
+    /// the sweep, keeps the invariant that no entry outlives its referent:
+    /// entries start cold, are filled only with live handles, collection is
+    /// the only thing that frees, and the sweep leaves a freed slot vacant
+    /// until the next allocation, so `val_is_live` is exact at this point
+    /// whatever the generation width.
+    ///
+    /// Every struct is destructured without `..`, so a new cache family,
+    /// cell or handle field fails to compile until its verdict is decided.
+    pub(super) fn drop_dead_entries(&self, heap: &GcHeap) {
+        let Self {
+            global_lookup,
+            field_lookup,
+            set_field_lookup,
+            tfor_cursor,
+        } = self;
+        for slot in global_lookup {
+            let GlobalLookupCacheSlot { entry } = slot;
+            clear_dead(entry, heap);
+        }
+        for slot in field_lookup {
+            let FieldLookupCacheSlot {
+                field_entry,
+                method_entry,
+                string_method_entry,
+            } = slot;
+            clear_dead(field_entry, heap);
+            clear_dead(method_entry, heap);
+            clear_dead(string_method_entry, heap);
+        }
+        for slot in set_field_lookup {
+            let SetFieldLookupCacheSlot { entry } = slot;
+            clear_dead(entry, heap);
+        }
+        for slot in tfor_cursor {
+            let TforCursorSlot { entry } = slot;
+            clear_dead(entry, heap);
+        }
+    }
+
+    /// Every handle any entry of this runtime names, for tests that check
+    /// the weak-processing invariant.
+    #[cfg(test)]
+    pub(super) fn named_handles(&self) -> Vec<Val> {
+        fn push<E: CacheEntry + Copy>(cell: &Cell<Option<E>>, out: &mut Vec<Val>) {
+            if let Some(entry) = cell.get() {
+                entry.for_each_handle(&mut |val| out.push(val));
+            }
+        }
+        let mut out = Vec::new();
+        for slot in &self.global_lookup {
+            push(&slot.entry, &mut out);
+        }
+        for slot in &self.field_lookup {
+            push(&slot.field_entry, &mut out);
+            push(&slot.method_entry, &mut out);
+            push(&slot.string_method_entry, &mut out);
+        }
+        for slot in &self.set_field_lookup {
+            push(&slot.entry, &mut out);
+        }
+        for slot in &self.tfor_cursor {
+            push(&slot.entry, &mut out);
+        }
+        out
+    }
+}
+
+/// A cache entry's GC handles, enumerated by exhaustive destructuring.
+trait CacheEntry {
+    fn for_each_handle(&self, f: &mut dyn FnMut(Val));
+}
+
+impl CacheEntry for GlobalLookupCacheEntry {
+    fn for_each_handle(&self, _: &mut dyn FnMut(Val)) {
+        // Indexes the global environment, which is not a heap object; the
+        // version is a never-reset counter that advances across swaps.
+        let Self {
+            globals_version: _,
+            index: _,
+        } = self;
+    }
+}
+
+impl CacheEntry for FieldLookupCacheEntry {
+    fn for_each_handle(&self, f: &mut dyn FnMut(Val)) {
+        let Self {
+            table,
+            table_version: _,
+            index: _,
+        } = self;
+        f(Val::Obj(*table));
+    }
+}
+
+impl CacheEntry for MethodLookupCacheEntry {
+    fn for_each_handle(&self, f: &mut dyn FnMut(Val)) {
+        let Self {
+            receiver_metatable,
+            index_field_index: _,
+            index_handler,
+            method_table_version: _,
+            method_index: _,
+            globals_version: _,
+        } = self;
+        f(Val::Obj(*receiver_metatable));
+        // A table, function or string handler is a handle; other values
+        // are always live.
+        f(*index_handler);
+    }
+}
+
+impl CacheEntry for StringMethodCacheEntry {
+    fn for_each_handle(&self, f: &mut dyn FnMut(Val)) {
+        let Self {
+            string_lib,
+            version: _,
+            index: _,
+        } = self;
+        f(Val::Obj(*string_lib));
+    }
+}
+
+impl CacheEntry for TforCursorEntry {
+    fn for_each_handle(&self, f: &mut dyn FnMut(Val)) {
+        // The cursor is re-validated against the control key before use, so
+        // a stale one cannot give a wrong result; it is cleared anyway so the
+        // invariant holds for every family without a per-family argument.
+        let Self { table, index: _ } = self;
+        f(Val::Obj(*table));
+    }
+}
+
+fn clear_dead<E: CacheEntry + Copy>(cell: &Cell<Option<E>>, heap: &GcHeap) {
+    if let Some(entry) = cell.get() {
+        let mut live = true;
+        entry.for_each_handle(&mut |val| live &= heap.val_is_live(&val));
+        if !live {
+            cell.set(None);
+        }
     }
 }
 

@@ -104,13 +104,16 @@ impl State {
         self.sweep_bytecode_caches();
         // Sweep unmarked objects
         self.heap.collect();
+        // Weak references: clear cache entries naming what the sweep freed,
+        // before any allocation can reuse those slots.
+        self.drop_dead_cache_entries();
         // Pool slots not marked via a reachable closure or an open-upvalue
         // entry can never be read again; recycle them.
         self.upvalue_pool.sweep();
         // `format_pointer_ids` entries are deliberately not GC roots; an entry
-        // whose value no longer resolves can never be observed again (the
-        // generational key cannot alias a future allocation), so drop it to
-        // keep identity storage bounded by live `%p` usage.
+        // whose value no longer resolves can never be observed again, so drop
+        // it here, before a later allocation could reuse the key (generations
+        // wrap), and to keep identity storage bounded by live `%p` usage.
         self.format_pointer_ids
             .retain(|key, _| self.heap.val_is_live(&key.as_val()));
     }

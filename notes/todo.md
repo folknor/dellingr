@@ -6,30 +6,6 @@ get deleted as they ship or stop being worth tracking.
 
 ## Next up
 
-### Drop field-cache entries for objects the collector frees (before release)
-
-The field and set-field caches (`get_current_cached_field` /
-`get_cached_field` in `src/vm/eval_index.rs`, the set-field cache in
-`src/vm/eval_store.rs`) trust a cached (table handle, table version, slot)
-without re-checking the key, and per-table versions start at 0. What keeps a
-dead table's entry from matching a new table in the same arena slot is the
-slotmap's 32-bit generation, which wraps after about 2^31 reuses of one slot.
-A site whose entry goes untouched while its slot is reused that often, then
-runs with a new table in that slot at the same version and layout, would read
-or write the wrong field silently (replays reproduce it, so determinism
-holds; the result is just wrong). Remote, but long-running hosts that churn
-short-lived tables make it reachable.
-
-Fix: when a sweep frees an object, drop the cache entries that name it
-(field, set-field, method and string-method entries in `RuntimeCaches`,
-`src/vm/caches.rs`, which today survive collection; `sweep_bytecode_caches`
-only drops whole bytecode entries). Slots are reused only after sweep, so no
-entry can then outlive its object, and generation width only matters for
-catching bugs. The cost lands in collection, not the hot path. It is also a
-prerequisite of the NaN-boxed `Val` (notes/optimizations.md), which narrows
-handles. Spar it; the native-stack envelope and the GC root rules in
-AGENTS.md apply.
-
 ### Housekeeping left from the 2026-10-22 loops
 
 - libbeef 0.1.1 bugs the crmath test oracle works around, reported

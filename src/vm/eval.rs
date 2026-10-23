@@ -852,7 +852,15 @@ impl State {
         // closure becomes a root; the allocation itself never collects.
         // Nested captures finish beforehand.
         self.pending_bytecode_caches.push(identity);
+        let runtime_ptr = Arc::as_ptr(&runtime);
         let obj = self.allocator().alloc_lua_fn(bytecode, runtime, upvalues);
+        // A collection inside `allocator` must have kept this runtime as the
+        // cached one, or the weak cache processing would no longer reach it.
+        debug_assert!(
+            self.bytecode_caches
+                .get(&identity)
+                .is_some_and(|entry| std::ptr::eq(Arc::as_ptr(&entry.runtime), runtime_ptr))
+        );
         let pending = self
             .pending_bytecode_caches
             .pop()

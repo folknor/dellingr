@@ -250,9 +250,10 @@ impl State {
         // The cached library must still be the string metatable's `__index`.
         // A value write (`getmetatable("").__index = t`) does not move the
         // metatable's shape version, so compare the slot's value; a shape
-        // change (key added, removed or rehashed) misses on the version. The
-        // match also proves `string_lib` is still alive, ruling out a stale
-        // pointer reused by a later allocation.
+        // change (key added, removed or rehashed) misses on the version. That
+        // a matching `string_lib` is the cached table and not a later one in
+        // its arena slot rests on collection clearing entries that name freed
+        // objects (`RuntimeCaches::drop_dead_entries`), not on the generation.
         let (mt_version, slot) = self.string_mt_index_shape?;
         let mt = self.heap.as_table_ref(self.string_metatable?)?;
         if mt.version() != mt_version {

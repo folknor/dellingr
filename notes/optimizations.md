@@ -300,15 +300,17 @@ Requirements the rewrite must meet:
   needs no canonicalization if the tag space avoids the two standard quiet
   NaN patterns (`0x7FF8...` and `0xFFF8...`), since Rust arithmetic produces
   only those or passes an input NaN through.
-- **Cache aliasing (the trap).** The field and set-field caches trust a
-  cached (table handle, table version, index) without re-checking the key,
-  and per-table versions start at 0. Today the slotmap's 32-bit generation
-  keeps a dead table's entry from matching a new table in the same slot.
-  Narrow the generation to fit a NaN-box payload and a wrap would let a stale
-  entry read or write the wrong table: wrong results that replays reproduce
-  faithfully. Fix it structurally: drop cache entries for objects the
-  collector frees (slots are only reused after sweep), so no entry outlives
-  its object and generation width only matters for catching bugs.
+- **Cache aliasing (done).** The inline caches trust a cached handle
+  without re-checking the key, so a dead object's entry matching a new object
+  in the same slot would read or write the wrong field. Every collection now
+  clears the entries naming what it freed (`State::drop_dead_cache_entries`
+  over `RuntimeCaches::drop_dead_entries`, right after the heap sweep and
+  before any allocation can reuse a slot), so no entry outlives its object and
+  a narrower generation does not reopen it. Whatever replaces the arena must
+  keep the property it rests on: a freed slot stays vacant until the next
+  allocation, and liveness of a handle that was live before the sweep is
+  exact until then. Any new side table holding weak handles needs the same
+  pruning.
 - **Handles.** slotmap keys are 64 bits (index plus generation) and cannot
   produce narrow keys, so objects (`GcHeap`) and the string pool need a
   custom generational arena. Keeping a 32-bit index avoids a new limit on

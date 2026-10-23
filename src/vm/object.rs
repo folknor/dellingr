@@ -245,6 +245,10 @@ new_key_type! {
 /// - Each key contains a generation number
 /// - When a slot is freed and reused, the generation increments
 /// - Accessing with an old key panics instead of causing memory corruption
+///
+/// Generations wrap after about 2^31 reuses of one slot, so an old key is
+/// not an identity proof forever: anything holding handles weakly must drop
+/// them when the collector frees their referents (see `val_is_live`).
 #[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) struct ObjectPtr(pub(crate) ObjectKey);
 
@@ -638,13 +642,28 @@ impl GcHeap {
             .collect()
     }
 
+    /// Every closure in the heap, for the debug check that each one's runtime
+    /// is the State's cached runtime for its bytecode.
+    #[cfg(debug_assertions)]
+    pub(super) fn closures(&self) -> impl Iterator<Item = &Closure> {
+        self.objects
+            .values()
+            .filter_map(|object| match &object.raw {
+                RawObject::LuaFn(closure) => Some(&**closure),
+                RawObject::Table(_) => None,
+            })
+    }
+
     // ========================================================================
     // Memory tracking
     // ========================================================================
 
     /// Whether a Val's referent still resolves in the heap. Non-heap values
-    /// are always live. Generational keys make this safe to ask about values
-    /// that were deliberately not rooted (e.g. `format_pointer_ids`).
+    /// are always live. Exact for a value that was live before the latest
+    /// sweep, asked before the next allocation: a freed slot stays vacant
+    /// until then. A handle kept across later allocations can alias one,
+    /// since generations wrap; that is why weak side tables (runtime caches,
+    /// `format_pointer_ids`) are pruned with this at every collection.
     pub(super) fn val_is_live(&self, val: &Val) -> bool {
         match val {
             Val::Obj(ptr) => self.objects.contains_key(ptr.0),

@@ -470,6 +470,18 @@ All notable changes to dellingr are documented here. The format follows
   array dies still stores the span between them. On a 32-bit host, growing
   an array past 2^31 - 2 keys now panics with a message rather than
   exhausting memory.
+- A field read, field write or method lookup could return or overwrite the
+  wrong field of a table after very long table churn. Inline caches remember
+  a table by its heap handle, and only the handle's 32-bit generation told a
+  freed table from a new one in the same heap slot; after about 2^31 reuses
+  of one slot, a site whose cache entry had sat untouched all that time could
+  match the new table at the same shape version and use the old table's slot
+  layout. Reaching it takes a long-running State that frees and reallocates
+  tables on the order of billions of times, and replays reproduced the wrong
+  result. Every collection now drops the cache entries naming what it freed,
+  so no entry outlives its object. Results, `cost_used` and snapshots are
+  unchanged; collections do a little more work, proportional to the inline
+  caches of the live code.
 
 ## [0.5.0] - 2026-10-14
 
