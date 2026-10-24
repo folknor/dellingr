@@ -396,12 +396,38 @@ impl Layout {
     }
 }
 
+/// The pool indexed by an instruction operand.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OperandPool {
+    Number,
+    String,
+    Template,
+    Nested,
+    Upvalue,
+}
+
+#[derive(Clone, Copy)]
+enum PoolField {
+    B,
+    C,
+}
+
 #[derive(Clone, Copy)]
 struct OpcodeMetadata {
     layout: Layout,
     cost: OpcodeCost,
     arithmetic: Option<fn(f64, f64) -> f64>,
     foldable: bool,
+    pool: Option<(OperandPool, PoolField)>,
+}
+
+macro_rules! opcode_pool {
+    () => {
+        None
+    };
+    ($pool:ident, $field:ident) => {
+        Some((OperandPool::$pool, PoolField::$field))
+    };
 }
 
 macro_rules! opcode_arithmetic {
@@ -417,51 +443,52 @@ macro_rules! opcode_arithmetic {
 // Explicit numbers are snapshot data. Every opcode declares its operand
 // layout (which fixes its reserved bits), static charge, and, for the
 // arithmetic forms, the function the constant folder and the dispatch share.
+// Pool descriptors also drive verification and disassembly without changing encoding.
 macro_rules! opcode_rows {
     ($callback:ident) => {
         $callback! {
             OP_MOVE = 0, Ab, Free;
             OP_LOAD_NIL = 1, Ab, Free;
             OP_LOAD_BOOL = 2, Ab, Free;
-            OP_LOAD_NUM = 3, Ab, Free;
-            OP_LOAD_STR = 4, Ab, Free;
-            OP_GET_UPVAL = 5, Ab, Free;
-            OP_SET_UPVAL = 6, Ab, Free;
+            OP_LOAD_NUM = 3, Ab, Free {Number, B};
+            OP_LOAD_STR = 4, Ab, Free {String, B};
+            OP_GET_UPVAL = 5, Ab, Free {Upvalue, B};
+            OP_SET_UPVAL = 6, Ab, Free {Upvalue, B};
             OP_CLOSE = 7, A, Free;
-            OP_GET_GLOBAL = 8, Abd, Free;
-            OP_SET_GLOBAL = 9, Abd, Free;
+            OP_GET_GLOBAL = 8, Abd, Free {String, B};
+            OP_SET_GLOBAL = 9, Abd, Free {String, B};
             OP_GET_BUILTIN = 10, Ab, Free;
             OP_SET_BUILTIN = 11, Ab, Free;
             OP_NEW_TABLE = 12, A, TableCreation;
             OP_NEW_TABLE_PRESIZED = 13, Ab, TableCreation;
-            OP_NEW_TABLE_TEMPLATE = 14, Ab, TableCreation;
-            OP_GET_FIELD = 15, Abcd, Free;
+            OP_NEW_TABLE_TEMPLATE = 14, Ab, TableCreation {Template, B};
+            OP_GET_FIELD = 15, Abcd, Free {String, C};
             OP_GET_TABLE = 16, Abc, Free;
-            OP_SET_FIELD = 17, Abcd, TableWrite;
+            OP_SET_FIELD = 17, Abcd, TableWrite {String, B};
             OP_SET_TABLE = 18, Abc, TableWrite;
-            OP_INIT_FIELD = 19, Abc, TableWrite;
-            OP_INIT_FIELD_PINNED = 20, Abcd, TableWrite;
+            OP_INIT_FIELD = 19, Abc, TableWrite {String, B};
+            OP_INIT_FIELD_PINNED = 20, Abcd, TableWrite {String, B};
             OP_INIT_INDEX = 21, Abc, TableWrite;
             OP_SET_LIST = 22, Abc, ArrayElements;
-            OP_SELF = 23, Abcd, Free;
+            OP_SELF = 23, Abcd, Free {String, C};
             OP_ADD_RR = 24, Abc, Arithmetic [lua_add, true];
-            OP_ADD_RK = 25, Abc, Arithmetic [lua_add, true];
-            OP_ADD_KR = 26, Abc, Arithmetic [lua_add, true];
+            OP_ADD_RK = 25, Abc, Arithmetic [lua_add, true] {Number, C};
+            OP_ADD_KR = 26, Abc, Arithmetic [lua_add, true] {Number, B};
             OP_SUB_RR = 27, Abc, Arithmetic [lua_sub, true];
-            OP_SUB_RK = 28, Abc, Arithmetic [lua_sub, true];
-            OP_SUB_KR = 29, Abc, Arithmetic [lua_sub, true];
+            OP_SUB_RK = 28, Abc, Arithmetic [lua_sub, true] {Number, C};
+            OP_SUB_KR = 29, Abc, Arithmetic [lua_sub, true] {Number, B};
             OP_MUL_RR = 30, Abc, Arithmetic [lua_mul, true];
-            OP_MUL_RK = 31, Abc, Arithmetic [lua_mul, true];
-            OP_MUL_KR = 32, Abc, Arithmetic [lua_mul, true];
+            OP_MUL_RK = 31, Abc, Arithmetic [lua_mul, true] {Number, C};
+            OP_MUL_KR = 32, Abc, Arithmetic [lua_mul, true] {Number, B};
             OP_DIV_RR = 33, Abc, Arithmetic [lua_div, true];
-            OP_DIV_RK = 34, Abc, Arithmetic [lua_div, true];
-            OP_DIV_KR = 35, Abc, Arithmetic [lua_div, true];
+            OP_DIV_RK = 34, Abc, Arithmetic [lua_div, true] {Number, C};
+            OP_DIV_KR = 35, Abc, Arithmetic [lua_div, true] {Number, B};
             OP_MOD_RR = 36, Abc, Arithmetic [lua_modulo, true];
-            OP_MOD_RK = 37, Abc, Arithmetic [lua_modulo, true];
-            OP_MOD_KR = 38, Abc, Arithmetic [lua_modulo, true];
+            OP_MOD_RK = 37, Abc, Arithmetic [lua_modulo, true] {Number, C};
+            OP_MOD_KR = 38, Abc, Arithmetic [lua_modulo, true] {Number, B};
             OP_POW_RR = 39, Abc, Arithmetic [crate::crmath::pow, false];
-            OP_POW_RK = 40, Abc, Arithmetic [crate::crmath::pow, false];
-            OP_POW_KR = 41, Abc, Arithmetic [crate::crmath::pow, false];
+            OP_POW_RK = 40, Abc, Arithmetic [crate::crmath::pow, false] {Number, C};
+            OP_POW_KR = 41, Abc, Arithmetic [crate::crmath::pow, false] {Number, B};
             OP_UNM = 42, Ab, Negation;
             OP_NOT = 43, Ab, Free;
             OP_LEN = 44, Ab, Free;
@@ -488,7 +515,7 @@ macro_rules! opcode_rows {
             OP_CALL = 65, Abcd, Call;
             OP_RETURN = 66, Ab, Free;
             OP_VARARG = 67, Ab, Free;
-            OP_CLOSURE = 68, Ab, Free;
+            OP_CLOSURE = 68, Ab, Free {Nested, B};
         }
     };
 }
@@ -497,7 +524,7 @@ macro_rules! define_opcodes {
     (
         $(
             $name:ident = $number:literal, $layout:ident, $cost:ident
-                $([$arithmetic:path, $foldable:literal])?;
+                $([$arithmetic:path, $foldable:literal])? $({$pool:ident, $field:ident})?;
         )+
     ) => {
         impl Instr {
@@ -514,6 +541,7 @@ macro_rules! define_opcodes {
                         cost: OpcodeCost::$cost,
                         arithmetic,
                         foldable,
+                        pool: opcode_pool!($($pool, $field)?),
                     });
                 )+
                 entries
@@ -530,6 +558,18 @@ macro_rules! define_opcodes {
 opcode_rows!(define_opcodes);
 
 impl Instr {
+    /// The pool and decoded index declared by this opcode, if any.
+    pub(crate) const fn pool_operand(self) -> Option<(OperandPool, u16)> {
+        let Some(metadata) = Self::OPCODES[self.opcode() as usize] else {
+            return None;
+        };
+        match metadata.pool {
+            Some((pool, PoolField::B)) => Some((pool, self.b())),
+            Some((pool, PoolField::C)) => Some((pool, self.c())),
+            None => None,
+        }
+    }
+
     pub(crate) const fn known_opcode(opcode: u8) -> bool {
         Self::OPCODES[opcode as usize].is_some()
     }

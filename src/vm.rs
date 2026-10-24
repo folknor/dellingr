@@ -27,6 +27,8 @@ mod table;
 mod table_ops;
 
 pub use anchor::Anchor;
+#[cfg(feature = "fault-injection")]
+pub use fault_injection::{FaultEvent, FaultSite};
 pub use lua_val::LuaType;
 pub use lua_val::RustFunc;
 pub(crate) use lua_val::number_to_string;

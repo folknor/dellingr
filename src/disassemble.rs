@@ -15,7 +15,7 @@
 use std::fmt;
 
 use crate::compiler::{Bytecode, UpvalueDesc};
-use crate::instr::{ArgCount, ArithOp, ArithOperands, Instr, RetCount};
+use crate::instr::{ArgCount, Instr, OperandPool, RetCount};
 
 pub(crate) const OUT_OF_RANGE_ANNOTATION: &str = "<out of range>";
 
@@ -160,48 +160,30 @@ fn write_annotation(
             None => f.write_str(OUT_OF_RANGE_ANNOTATION),
         };
 
-    // Literal-pool operands, in the field each opcode keeps them in.
-    match op {
-        Instr::OP_LOAD_NUM => {
+    // Pool locations come from the opcode declaration; presentation stays
+    // explicit here because templates, children and literals render differently.
+    match inst.pool_operand() {
+        Some((OperandPool::Number, index)) => {
             notes.next(f)?;
-            write_number(f, inst.b())?;
+            write_number(f, index)?;
         }
-        Instr::OP_LOAD_STR
-        | Instr::OP_GET_GLOBAL
-        | Instr::OP_SET_GLOBAL
-        | Instr::OP_SET_FIELD
-        | Instr::OP_INIT_FIELD
-        | Instr::OP_INIT_FIELD_PINNED => {
+        Some((OperandPool::String, index)) => {
             notes.next(f)?;
-            write_string_ref(f, bc, inst.b())?;
+            write_string_ref(f, bc, index)?;
         }
-        Instr::OP_GET_FIELD | Instr::OP_SELF => {
+        Some((OperandPool::Template, index)) => {
             notes.next(f)?;
-            write_string_ref(f, bc, inst.c())?;
+            write!(f, "template {index}")?;
         }
-        Instr::OP_NEW_TABLE_TEMPLATE => {
+        Some((OperandPool::Nested, index)) => {
             notes.next(f)?;
-            write!(f, "template {}", inst.b())?;
-        }
-        Instr::OP_CLOSURE => {
-            notes.next(f)?;
-            if usize::from(inst.b()) < bc.nested.len() {
-                write!(f, "function {path}/{}", inst.b())?;
+            if usize::from(index) < bc.nested.len() {
+                write!(f, "function {path}/{index}")?;
             } else {
                 write!(f, "function {OUT_OF_RANGE_ANNOTATION}")?;
             }
         }
-        _ => match ArithOp::decode(op) {
-            Some((_, ArithOperands::RegConst)) => {
-                notes.next(f)?;
-                write_number(f, inst.c())?;
-            }
-            Some((_, ArithOperands::ConstReg)) => {
-                notes.next(f)?;
-                write_number(f, inst.b())?;
-            }
-            _ => {}
-        },
+        Some((OperandPool::Upvalue, _)) | None => {}
     }
 
     // Cache operands, decoded by `Instr`'s cache-slot decoder.
@@ -267,6 +249,7 @@ fn write_annotation(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::instr::{ArithOp, ArithOperands};
     use std::sync::Arc;
 
     fn annotate(bc: &Bytecode, pc: usize) -> String {
@@ -315,6 +298,46 @@ mod tests {
         assert_eq!(annotate(&bc, 7), "  ; uncached");
         assert_eq!(annotate(&bc, 8), "  ; cache slot 254");
         assert_eq!(annotate(&bc, 9), "  ; \"x\\n\\xff\", cache slot 5");
+    }
+
+    #[test]
+    fn pool_annotations_use_the_declared_field_without_exposing_upvalues() {
+        let bc = with_code(vec![
+            Instr::load_str(0, 0),
+            Instr::get_field(0, 9, 0, None),
+            Instr::self_(0, 9, 0, None),
+            Instr::set_field(0, 0, 9, None),
+            Instr::init_field(0, 0, 9),
+            Instr::init_field_pinned(0, 0, 9, 0),
+            Instr::get_upval(0, 0),
+            Instr::set_upval(0, 0),
+        ]);
+        for pc in [0, 4, 5] {
+            assert_eq!(annotate(&bc, pc), "  ; \"x\\n\\xff\"");
+        }
+        for pc in [1, 2, 3] {
+            assert_eq!(annotate(&bc, pc), "  ; \"x\\n\\xff\", uncached");
+        }
+        for pc in [6, 7] {
+            assert_eq!(annotate(&bc, pc), "");
+        }
+        for op in [
+            ArithOp::Add,
+            ArithOp::Sub,
+            ArithOp::Mul,
+            ArithOp::Div,
+            ArithOp::Mod,
+            ArithOp::Pow,
+        ] {
+            let bc = with_code(vec![
+                Instr::arith(op, ArithOperands::RegConst, 0, 9, 0),
+                Instr::arith(op, ArithOperands::ConstReg, 0, 0, 9),
+                Instr::arith(op, ArithOperands::RegReg, 0, 0, 0),
+            ]);
+            assert_eq!(annotate(&bc, 0), "  ; -0.0");
+            assert_eq!(annotate(&bc, 1), "  ; -0.0");
+            assert_eq!(annotate(&bc, 2), "");
+        }
     }
 
     #[test]

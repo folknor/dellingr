@@ -17,6 +17,7 @@ exclude = [
     "bench/",
     "notes/",
     "scripts/",
+    "fixtures/",
     "brokkr.toml",
     ".review.toml",
 ]
@@ -52,6 +53,7 @@ variant_size_differences = "deny"
 [lints.clippy]
 undocumented_unsafe_blocks = "deny"
 disallowed_methods = "deny"
+disallowed_types = "deny"
 uninlined_format_args = "deny"
 cloned_instead_of_copied = "deny"
 redundant_closure_for_method_calls = "deny"

@@ -9,6 +9,11 @@
 # release binary at research/lua-rs/target/release/lua-rs. The script builds
 # dellingr through brokkr.
 #
+# The default set is the ms-scale examples/ scripts. Its composite entry,
+# examples/composite/benchmark.lua, is not the file behind the README's
+# `benchmark` lua-rs figure: that capture timed examples/benchmark.lua, since
+# retired. Treat a composite result as a new row, not a continuation.
+#
 # Usage: ./research/bench_luars.sh                  # curated default set
 #        ./research/bench_luars.sh script1.lua ...  # explicit scripts
 #        ./research/bench_luars.sh --dry-run [...]   # validate, don't run
@@ -35,7 +40,7 @@ then
     scripts=("$@")
 else
     scripts=(
-        examples/benchmark.lua
+        examples/composite/benchmark.lua
         examples/numerics/arithmetic.lua
         examples/iter/pairs.lua
         examples/tables/fill.lua

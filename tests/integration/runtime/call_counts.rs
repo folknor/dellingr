@@ -1,4 +1,5 @@
 use dellingr::error::ErrorKind;
+use dellingr::limits::{MAX_ARGUMENTS, MAX_RESULTS};
 use dellingr::{ArgCount, RetCount, State};
 
 use crate::support;
@@ -18,11 +19,16 @@ fn expect_error(code: &str, expected: &str, kind_matches: fn(&ErrorKind) -> bool
 }
 
 fn too_many_arguments(kind: &ErrorKind) -> bool {
-    matches!(kind, ErrorKind::TooManyArguments { limit: 255 })
+    matches!(
+        kind,
+        ErrorKind::TooManyArguments {
+            limit: MAX_ARGUMENTS
+        }
+    )
 }
 
 fn too_many_results(kind: &ErrorKind) -> bool {
-    matches!(kind, ErrorKind::TooManyResults { limit: 255 })
+    matches!(kind, ErrorKind::TooManyResults { limit: MAX_RESULTS })
 }
 
 fn arg_error(kind: &ErrorKind) -> bool {
@@ -30,60 +36,62 @@ fn arg_error(kind: &ErrorKind) -> bool {
 }
 
 #[test]
-fn dynamic_call_accepts_255_arguments() {
-    // f receives 255 dynamic arguments; it must NOT itself re-expand them into
-    // another call (e.g. select("#", ...) would be a 256-arg call and hit the
-    // limit). Packing into a table and taking its length counts them safely.
+fn dynamic_call_accepts_max_arguments() {
+    // Packing into a table counts arguments without adding another call argument.
     let count = support::eval_number(
         r##"
         local t = {}
-        for i = 1, 255 do t[i] = i end
+        for i = 1, LIMIT do t[i] = i end
         local function f(...) local packed = {...} return #packed end
         return f(table.unpack(t))
-    "##,
+    "##
+        .replace("LIMIT", &MAX_ARGUMENTS.to_string()),
     );
-    assert_eq!(count, 255.0);
+    assert_eq!(count, f64::from(MAX_ARGUMENTS));
 }
 
 #[test]
-fn dynamic_call_rejects_256_arguments() {
+fn dynamic_call_rejects_arguments_above_the_cap() {
     expect_error(
-        r##"
+        &r##"
         local t = {}
-        for i = 1, 255 do t[i] = i end
+        for i = 1, LIMIT do t[i] = i end
         local function f(...) return select("#", ...) end
         return f(0, table.unpack(t))
-    "##,
+    "##
+        .replace("LIMIT", &MAX_ARGUMENTS.to_string()),
         "too many arguments (limit 255)",
         too_many_arguments,
     );
 }
 
 #[test]
-fn lua_return_rejects_256_results() {
+fn lua_return_rejects_results_above_the_cap() {
     expect_error(
-        r#"
+        &r#"
         local t = {}
-        for i = 1, 255 do t[i] = i end
+        for i = 1, LIMIT do t[i] = i end
         local function g() return 0, table.unpack(t) end
         return g()
-    "#,
+    "#
+        .replace("LIMIT", &MAX_RESULTS.to_string()),
         "too many results (limit 255)",
         too_many_results,
     );
 }
 
 #[test]
-fn callable_table_rejects_implicit_256th_argument() {
+fn callable_table_rejects_receiver_above_the_argument_cap() {
     expect_error(
-        r##"
+        &r##"
         local t = {}
-        for i = 1, 255 do t[i] = i end
+        for i = 1, LIMIT do t[i] = i end
         local callable = setmetatable({}, {
             __call = function(...) return select("#", ...) end,
         })
         return callable(table.unpack(t))
-    "##,
+    "##
+        .replace("LIMIT", &MAX_ARGUMENTS.to_string()),
         "too many arguments (limit 255)",
         too_many_arguments,
     );
@@ -94,16 +102,17 @@ fn unpack_rejects_oversized_range() {
     for code in [
         r#"
         local t = {}
-        for i = 1, 256 do t[i] = i end
+        for i = 1, OVER_LIMIT do t[i] = i end
         return unpack(t)
         "#,
         r#"
         local t = {}
-        for i = 1, 256 do t[i] = i end
+        for i = 1, OVER_LIMIT do t[i] = i end
         return table.unpack(t)
         "#,
     ] {
-        expect_error(code, "too many results (limit 255)", too_many_results);
+        let code = code.replace("OVER_LIMIT", &(usize::from(MAX_RESULTS) + 1).to_string());
+        expect_error(&code, "too many results (limit 255)", too_many_results);
     }
 }
 

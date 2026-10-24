@@ -1,6 +1,9 @@
 //! Regression tests for compiler limits that must fail gracefully.
 
 use dellingr::error::{ErrorKind, SyntaxError};
+use dellingr::limits::{
+    MAX_ASSIGNMENT_TARGETS, MAX_FIXED_ARGS, MAX_LOCALS, MAX_REGISTERS, MAX_TABLE_BATCH_SIZE,
+};
 use dellingr::{Program, State};
 
 use crate::support;
@@ -26,7 +29,7 @@ fn fixed_call_argument_limit_preserves_dynamic_calls() {
         &mut state,
         format!(
             "local f = function(...) return 1 end return f({})",
-            fixed_args(254)
+            fixed_args(MAX_FIXED_ARGS)
         ),
         1,
     );
@@ -36,7 +39,10 @@ fn fixed_call_argument_limit_preserves_dynamic_calls() {
     );
 
     expect_syntax_error(
-        &format!("local f = function(...) end return f({})", fixed_args(255)),
+        &format!(
+            "local f = function(...) end return f({})",
+            fixed_args(MAX_FIXED_ARGS + 1)
+        ),
         |kind| matches!(kind, SyntaxError::TooManyArguments),
     );
 
@@ -45,7 +51,7 @@ fn fixed_call_argument_limit_preserves_dynamic_calls() {
         &mut state,
         format!(
             "local t = {{ m = function(self, ...) return 1 end }} return t:m({})",
-            fixed_args(253)
+            fixed_args(MAX_FIXED_ARGS - 1)
         ),
         1,
     );
@@ -55,14 +61,16 @@ fn fixed_call_argument_limit_preserves_dynamic_calls() {
     );
 
     expect_syntax_error(
-        &format!("local t = {{}} return t:m({})", fixed_args(254)),
+        &format!("local t = {{}} return t:m({})", fixed_args(MAX_FIXED_ARGS)),
         |kind| matches!(kind, SyntaxError::TooManyArguments),
     );
 
-    // 255 explicit method arguments would make the old `num_args + 1` wrap past
-    // u8; it must be rejected, not silently misframed.
+    // An explicit method argument count above MAX_FIXED_ARGS must be rejected.
     expect_syntax_error(
-        &format!("local t = {{}} return t:m({})", fixed_args(255)),
+        &format!(
+            "local t = {{}} return t:m({})",
+            fixed_args(MAX_FIXED_ARGS + 1)
+        ),
         |kind| matches!(kind, SyntaxError::TooManyArguments),
     );
 
@@ -80,7 +88,7 @@ fn fixed_call_argument_limit_preserves_dynamic_calls() {
 
 #[test]
 fn parameter_limit_includes_method_self() {
-    let params = (0..255)
+    let params = (0..MAX_LOCALS)
         .map(|i| format!("p{i}"))
         .collect::<Vec<_>>()
         .join(",");
@@ -88,23 +96,24 @@ fn parameter_limit_includes_method_self() {
     support::eval(
         &mut state,
         format!(
-            "local function f({params}) return p253, p254 end return f({})",
-            fixed_args(254)
+            "local function f({params}) return p{}, p{} end return f({})",
+            MAX_LOCALS - 2,
+            MAX_LOCALS - 1,
+            fixed_args(MAX_LOCALS - 1)
         ),
         2,
     );
-    // Called with 254 arguments: the last explicit slot holds its value and the
-    // 255th parameter is nil-padded (num_params did not wrap).
+    // The last passed argument holds its value; the final parameter is nil-padded.
     assert_eq!(
         state
             .to_number(-2)
-            .expect("p253 should be the last passed argument"),
+            .expect("the last passed argument should retain its value"),
         1.0
     );
     assert_eq!(state.typ(-1), dellingr::LuaType::Nil);
     state.pop(2).unwrap();
 
-    let too_many = (0..256)
+    let too_many = (0..MAX_LOCALS + 1)
         .map(|i| format!("p{i}"))
         .collect::<Vec<_>>()
         .join(",");
@@ -112,7 +121,7 @@ fn parameter_limit_includes_method_self() {
         matches!(kind, SyntaxError::TooManyLocals)
     });
 
-    let method_params = (0..255)
+    let method_params = (0..MAX_LOCALS)
         .map(|i| format!("p{i}"))
         .collect::<Vec<_>>()
         .join(",");
@@ -140,6 +149,7 @@ fn long_control_flow_runs_as_a_smoke_test() {
 
 #[test]
 fn set_field_sites_past_the_cache_capacity_use_the_uncached_path() {
+    // MAX_CACHE_SLOTS is crate-private; these integration probes keep explicit sizes.
     let assignments = "t.x = nil\n".repeat(255);
     let source = format!("local t = {{}}\n{assignments}");
     let program =
@@ -160,25 +170,34 @@ fn set_field_sites_past_the_cache_capacity_use_the_uncached_path() {
 
 #[test]
 fn table_constructors_flush_array_batches_without_changing_values() {
-    let values = std::iter::repeat_n("1", 300).collect::<Vec<_>>().join(",");
-    let mut state = State::new();
-    support::eval(
-        &mut state,
-        format!("local t = {{{values}}} return #t, t[300]"),
-        2,
-    );
-    assert_eq!(
-        state.to_number(-2).expect("length should be numeric"),
-        300.0
-    );
-    assert_eq!(state.to_number(-1).expect("element should be numeric"), 1.0);
-
-    let prefix = std::iter::repeat_n("1", 255).collect::<Vec<_>>().join(",");
+    let values = std::iter::repeat_n("1", usize::from(MAX_TABLE_BATCH_SIZE) + 1)
+        .collect::<Vec<_>>()
+        .join(",");
     let mut state = State::new();
     support::eval(
         &mut state,
         format!(
-            "local t = {{{prefix}, named = 2, [999] = 3, 4}} return t[255], t[256], t.named, t[999]"
+            "local t = {{{values}}} return #t, t[{}]",
+            usize::from(MAX_TABLE_BATCH_SIZE) + 1
+        ),
+        2,
+    );
+    assert_eq!(
+        state.to_number(-2).expect("length should be numeric"),
+        f64::from(MAX_TABLE_BATCH_SIZE) + 1.0
+    );
+    assert_eq!(state.to_number(-1).expect("element should be numeric"), 1.0);
+
+    let prefix = std::iter::repeat_n("1", usize::from(MAX_TABLE_BATCH_SIZE))
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut state = State::new();
+    support::eval(
+        &mut state,
+        format!(
+            "local t = {{{prefix}, named = 2, [999] = 3, 4}} return t[{}], t[{}], t.named, t[999]",
+            MAX_TABLE_BATCH_SIZE,
+            usize::from(MAX_TABLE_BATCH_SIZE) + 1
         ),
         4,
     );
@@ -206,12 +225,17 @@ fn table_constructors_flush_array_batches_without_changing_values() {
 
 #[test]
 fn dynamic_table_tail_uses_the_batch_after_flushed_values() {
-    let prefix = std::iter::repeat_n("1", 255).collect::<Vec<_>>().join(",");
+    let prefix = std::iter::repeat_n("1", usize::from(MAX_TABLE_BATCH_SIZE))
+        .collect::<Vec<_>>()
+        .join(",");
     let mut state = State::new();
     support::eval(
         &mut state,
         format!(
-            "local function values() return 2, 3 end local t = {{{prefix}, values()}} return t[255], t[256], t[257]"
+            "local function values() return 2, 3 end local t = {{{prefix}, values()}} return t[{}], t[{}], t[{}]",
+            MAX_TABLE_BATCH_SIZE,
+            usize::from(MAX_TABLE_BATCH_SIZE) + 1,
+            usize::from(MAX_TABLE_BATCH_SIZE) + 2
         ),
         3,
     );
@@ -291,6 +315,7 @@ fn literal_pools_and_wide_field_keys_execute() {
 
 #[test]
 fn uncached_slots_templates_and_wide_set_field_at_execute() {
+    // MAX_CACHE_SLOTS is crate-private; these integration probes keep explicit sizes.
     let globals = (0..256)
         .map(|n| format!("g{n} = {n}"))
         .collect::<Vec<_>>()
@@ -373,16 +398,25 @@ fn uncached_slots_templates_and_wide_set_field_at_execute() {
 
 #[test]
 fn assignment_target_count_is_bounded_before_codegen() {
-    let targets = std::iter::repeat_n("a", 255).collect::<Vec<_>>().join(",");
+    let targets = std::iter::repeat_n("a", MAX_ASSIGNMENT_TARGETS)
+        .collect::<Vec<_>>()
+        .join(",");
     Program::compile(format!("local a; {targets} = 1"), None)
-        .expect("255 fixed assignment targets fit");
-    for count in [256, 65_535, 65_536, 65_537, 65_538] {
+        .expect("MAX_ASSIGNMENT_TARGETS fixed assignment targets fit");
+    for count in [
+        MAX_ASSIGNMENT_TARGETS + 1,
+        MAX_REGISTERS + 1,
+        MAX_REGISTERS + 2,
+        MAX_REGISTERS + 3,
+        MAX_REGISTERS + 4,
+    ] {
         let targets = std::iter::repeat_n("a", count)
             .collect::<Vec<_>>()
             .join(",");
         for prefix in ["", "local a; "] {
             expect_syntax_error(&format!("{prefix}{targets} = 1"), |kind| {
-                matches!(kind, SyntaxError::TooManyAssignmentTargets { count: 256 })
+                matches!(kind, SyntaxError::TooManyAssignmentTargets { count }
+                    if *count == MAX_ASSIGNMENT_TARGETS + 1)
             });
         }
     }

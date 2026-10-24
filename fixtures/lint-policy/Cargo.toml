@@ -1,0 +1,11 @@
+[package]
+name = "dellingr-lint-fixture"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+foldhash = { version = "0.2", default-features = false }
+hashbrown = { version = "0.17", default-features = false }

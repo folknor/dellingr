@@ -179,6 +179,8 @@ pub const MAX_ARGUMENTS: u8 = u8::MAX;
 /// the width is fixed.
 pub const MAX_RESULTS: u8 = u8::MAX;
 
+const _: () = assert!(MAX_RESULTS == u8::MAX);
+
 // Reference-pinned library limits. Keep these values and their error paths
 // aligned with the selected Lua library behavior.
 /// Reference Lua pattern matcher's maximum recursive call count.

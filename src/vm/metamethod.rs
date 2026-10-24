@@ -83,8 +83,11 @@ impl State {
         #[cfg(not(feature = "fault-injection"))]
         let injected = false;
         #[cfg(feature = "fault-injection")]
-        let injected =
-            self.inject_fault("metamethod", self.in_flight.metamethod_depth as usize, true);
+        let injected = self.inject_fault(
+            crate::FaultSite::Metamethod,
+            self.in_flight.metamethod_depth as usize,
+            true,
+        );
         if injected || self.in_flight.metamethod_depth >= MAX_METAMETHOD_DEPTH {
             return Err(self.error(ErrorKind::MetamethodDepthExceeded {
                 depth: self.in_flight.metamethod_depth,

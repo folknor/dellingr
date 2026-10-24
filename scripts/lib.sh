@@ -8,7 +8,9 @@
 
 # Per-process timeout for diff_test.sh, in timeout(1) syntax.
 readonly DEFAULT_DIFF_TIMEOUT=5s
-# Virtual-memory cap applied by test_limited.sh, in KiB (2 GiB).
+# Virtual-memory cap applied by test_limited.sh, in KiB (2 GiB). The example
+# runner reads this exact line (tests/integration/support/process.rs), so keep
+# it a bare `readonly TEST_LIMIT_KB=<integer>` assignment.
 readonly TEST_LIMIT_KB=2097152
 readonly HYPERFINE_WARMUP=2
 REFERENCE_LUAS=("lua5.2" "lua5.4")

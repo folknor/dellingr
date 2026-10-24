@@ -3,11 +3,43 @@ use std::cell::{Cell, RefCell};
 
 use super::State;
 
+/// A structural preflight reached during refusal testing.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FaultSite {
+    /// Entering a native invocation.
+    NativeDepth,
+    /// Following a metamethod handler.
+    Metamethod,
+    /// Following a callable table.
+    CallChain,
+    /// Admitting a Lua call.
+    CallDepth,
+    /// Reserving one stack slot.
+    StackSlot,
+    /// Reserving a batch of stack slots.
+    StackSpace,
+}
+
+/// A recorded structural preflight, including its refusal eligibility.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FaultEvent {
+    /// The preflight that was reached.
+    pub site: FaultSite,
+    /// The depth, stack length or requested space checked at this site.
+    pub argument: usize,
+    /// Whether this event advances the refusal countdown.
+    pub eligible: bool,
+    /// Whether this event refused the operation.
+    pub fired: bool,
+}
+
 #[derive(Default)]
 pub(super) struct FaultInjection {
     remaining: Cell<Option<u32>>,
     recording: Cell<bool>,
-    events: RefCell<Vec<(&'static str, usize, bool)>>,
+    events: RefCell<Vec<FaultEvent>>,
 }
 
 impl State {
@@ -33,13 +65,13 @@ impl State {
 
     /// Stop recording and retrieve the structural checks reached in order.
     #[doc(hidden)]
-    pub fn finish_fault_injection(&self) -> Vec<(&'static str, usize, bool)> {
+    pub fn finish_fault_injection(&self) -> Vec<FaultEvent> {
         self.fault_injection.remaining.set(None);
         self.fault_injection.recording.set(false);
         std::mem::take(&mut *self.fault_injection.events.borrow_mut())
     }
 
-    pub(super) fn inject_fault(&self, site: &'static str, argument: usize, eligible: bool) -> bool {
+    pub(super) fn inject_fault(&self, site: FaultSite, argument: usize, eligible: bool) -> bool {
         let fault = &self.fault_injection;
         if !fault.recording.get() {
             return false;
@@ -59,14 +91,19 @@ impl State {
         } else {
             false
         };
-        fault.events.borrow_mut().push((site, argument, fire));
+        fault.events.borrow_mut().push(FaultEvent {
+            site,
+            argument,
+            eligible,
+            fired: fire,
+        });
         fire
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::State;
+    use super::{FaultEvent, FaultSite, State};
     use crate::error::ErrorKind;
     use crate::{ArgCount, RetCount};
 
@@ -90,10 +127,30 @@ mod tests {
         assert_eq!(
             state.finish_fault_injection(),
             vec![
-                ("native_depth", 0, false),
-                ("stack_space", 0, false),
-                ("stack_slot", 0, true),
-                ("stack_slot", 0, false),
+                FaultEvent {
+                    site: FaultSite::NativeDepth,
+                    argument: 0,
+                    eligible: false,
+                    fired: false,
+                },
+                FaultEvent {
+                    site: FaultSite::StackSpace,
+                    argument: 0,
+                    eligible: true,
+                    fired: false,
+                },
+                FaultEvent {
+                    site: FaultSite::StackSlot,
+                    argument: 0,
+                    eligible: true,
+                    fired: true,
+                },
+                FaultEvent {
+                    site: FaultSite::StackSlot,
+                    argument: 0,
+                    eligible: true,
+                    fired: false,
+                },
             ]
         );
         state.push_nil().unwrap();
@@ -114,7 +171,12 @@ mod tests {
         ));
         assert_eq!(
             state.finish_fault_injection(),
-            vec![("stack_slot", 0, true)]
+            vec![FaultEvent {
+                site: FaultSite::StackSlot,
+                argument: 0,
+                eligible: true,
+                fired: true,
+            }]
         );
     }
 }

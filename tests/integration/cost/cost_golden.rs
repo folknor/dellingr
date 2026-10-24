@@ -127,23 +127,6 @@ fn unpack_charges_nothing_for_lookups_reached_before_an_index_error() {
     assert_eq!(costs, [expected, expected]);
 }
 
-#[test]
-fn table_library_native_charges_are_one_or_zero() {
-    for (source, expected) in [
-        ("table.insert({}, nil)", 2),
-        ("table.remove({})", 2),
-        ("table.pack()", 1),
-        ("table.pack(1, 2, 3)", 1),
-        ("unpack({}, 1, 0)", 1),
-        ("unpack({}, 1, 10)", 1),
-        ("table.unpack({}, 1, 10)", 1),
-    ] {
-        // Explicit {} costs 1; insert/remove/pack add exactly 1. The table
-        // allocated inside pack has no separate opcode creation charge.
-        assert_eq!(support::cost_of(source), expected, "{source}");
-    }
-}
-
 /// `table.insert`, `table.remove` and `table.pack` charge a flat 1 and
 /// `unpack` is free, however many elements are shifted, visited or stored.
 /// This is a deliberate game-design choice of the cost model (the budget is

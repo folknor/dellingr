@@ -25,6 +25,13 @@ get deleted as they ship or stop being worth tracking.
   lookups, no SET_GLOBAL inline cache). Both are hash-pinned workloads, so
   rewording them means re-hashing their `brokkr.toml` pins.
 - The README's `globals/write` ratio row predates the change and may be stale.
+- `bench/benchmark.lua`'s header cites `examples/benchmark.lua`, which was
+  deleted as an orphan (2026-10-24). The workload is hash-pinned; reword the
+  citation when it is next re-pinned.
+- The README `benchmark` ratio row (every column, lua-rs included) timed the
+  deleted `examples/benchmark.lua`; `scripts/bench.sh` and
+  `research/bench_luars.sh` now time `examples/composite/benchmark.lua`. The
+  row needs a fresh capture; the footnote explains the mismatch until then.
 - The compiler verifier still requires GET/SET_GLOBAL names to be UTF-8,
   although the runtime keys the global table with the interned literal and no
   longer needs it. Either drop the check or say why it stays.

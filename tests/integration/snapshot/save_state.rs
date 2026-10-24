@@ -1635,19 +1635,15 @@ fn corruption_sweep_never_panics() {
     );
     let bytes = state.save_state().unwrap().bytes;
 
-    // Consume the result without inspecting it: this sweep establishes only
-    // that every input below returns (a State or an error) without panicking.
-    // A panic during load fails the test. Allocation is neither bounded nor
-    // measured here.
+    // The decoder requires every field and exact input consumption. A proper
+    // prefix must fail even though the format has no trailing integrity hash.
     fn ignore(_: Result<State, LoadError>) {}
 
-    // Every proper prefix (each truncation length) loads without a panic.
+    // Every proper prefix (each truncation length) must be rejected.
     for len in 0..bytes.len() {
-        ignore(State::load_state(
-            &bytes[..len],
-            Box::new(DefaultCallbacks),
-            support::no_setup,
-        ));
+        let result =
+            State::load_state(&bytes[..len], Box::new(DefaultCallbacks), support::no_setup);
+        assert!(result.is_err(), "truncated prefix of {len} bytes loaded");
     }
     // A single-byte flip at every offset loads or errors without a panic.
     for i in 0..bytes.len() {

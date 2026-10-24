@@ -1,6 +1,7 @@
 //! The opcode batching interval must not change budget outcomes.
 
 use dellingr::error::ErrorKind;
+use dellingr::limits::COST_CHECK_INTERVAL;
 use dellingr::{ArgCount, RetCount, State};
 
 use crate::support;
@@ -35,7 +36,17 @@ fn opcode_cost_interval_matches_immediate_flush_across_budgets() {
     // Each statement emits one charged addition; global reads and writes are
     // free. These sizes put charges immediately before, at, and after interval
     // boundaries, including a second batch.
-    for additions in [1, 2, 63, 64, 65, 127, 128, 129] {
+    let interval = usize::try_from(COST_CHECK_INTERVAL).expect("cost interval fits in usize");
+    for additions in [
+        1,
+        2,
+        interval - 1,
+        interval,
+        interval + 1,
+        2 * interval - 1,
+        2 * interval,
+        2 * interval + 1,
+    ] {
         let source = arithmetic_program(additions);
 
         let mut count_only = State::new();

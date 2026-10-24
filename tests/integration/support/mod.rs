@@ -4,6 +4,8 @@
 //! native-stack test, the compiler's unit tests, the golden-regeneration
 //! example), so they stay self-contained and are included here by path.
 
+#[path = "../../common/error_boundary_cases.rs"]
+pub(crate) mod error_boundary_cases;
 #[path = "../../common/examples.rs"]
 pub(crate) mod examples;
 mod lua;

@@ -35,7 +35,7 @@ Run `./scripts/bench.sh` to reproduce on your own host. Sample run on AMD Ryzen 
 
 <sub>Rows marked `*` are diagnostic probes, not representative workloads. Each one deliberately isolates a single path that was unoptimized when the probe was written, so its ratio tracks one specific optimization target rather than what typical scripts see. Several of those paths have since been optimized, which is why some probes now sit among the cheaper rows. `calls/many_literals` calls a function carrying 32 string constants that returns from its first branch, concentrating its runtime in per-call literal handling. `parse/large_source` is a parse and codegen probe on generated source; its timing is a parse/codegen diagnostic rather than an execution benchmark.</sub>
 
-<sub>The `lua-rs` column was captured 2026-06-02 against [ianm199/lua-rs](https://github.com/ianm199/lua-rs) at commit [`98bd6bd`](https://github.com/ianm199/lua-rs/commit/98bd6bd); rows added since carry no `lua-rs` figure. Every other column was captured 2026-07-27 at commit `abf7c7b` on host `plantasjen`.</sub>
+<sub>The `lua-rs` column was captured 2026-06-02 against [ianm199/lua-rs](https://github.com/ianm199/lua-rs) at commit [`98bd6bd`](https://github.com/ianm199/lua-rs/commit/98bd6bd); rows added since carry no `lua-rs` figure. The `benchmark` row in every column timed `examples/benchmark.lua`, since retired; its successor `examples/composite/benchmark.lua` is a different file and has not been captured here. Every column other than `lua-rs` was captured 2026-07-27 at commit `abf7c7b` on host `plantasjen`.</sub>
 
 Note that recorded results always track the latest git head and may not match the released version.
 

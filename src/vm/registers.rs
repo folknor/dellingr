@@ -561,7 +561,12 @@ mod tests {
         assert_eq!(state.stack, original);
         assert_eq!(
             state.finish_fault_injection(),
-            vec![("stack_space", 1, true)]
+            vec![crate::FaultEvent {
+                site: crate::FaultSite::StackSpace,
+                argument: 1,
+                eligible: true,
+                fired: true,
+            }]
         );
     }
 }

@@ -10,7 +10,7 @@ use crate::instr::{ArgCount, ArithOp, ArithOperands, CompareOp, Instr, RetCount}
 use crate::limits::{
     MAX_ASSIGNMENT_TARGETS, MAX_CHUNK_NESTING, MAX_EXPRESSIONS, MAX_FIXED_ARGS, MAX_FIXED_RESULTS,
     MAX_LITERALS, MAX_LOCALS, MAX_NESTED, MAX_SOURCE_BYTES, MAX_TABLE_BATCH_SIZE,
-    MAX_TABLE_TEMPLATE_FIELDS, MAX_TABLE_TEMPLATES, SYNTAX_SUFFIX_COST,
+    MAX_TABLE_TEMPLATE_FIELDS, MAX_TABLE_TEMPLATES, MAX_UPVALUES, SYNTAX_SUFFIX_COST,
 };
 use crate::{LuaType, State};
 
@@ -771,20 +771,11 @@ fn parser_for_limit_test() -> Parser<'static> {
 fn literal_pool_limits_match_their_error_messages() {
     let max_literal_count = u32::try_from(MAX_LITERALS).expect("MAX_LITERALS fits in u32");
     let mut parser = parser_for_limit_test();
-    parser.funcs.chunk.number_literals = (0..max_literal_count - 1).map(f64::from).collect();
-    parser.funcs.literal_indices.numbers = parser
-        .funcs
-        .chunk
-        .number_literals
-        .iter()
-        .enumerate()
-        .map(|(index, number)| {
-            (
-                super::number_literal_key(*number).expect("limit fixture numbers are not NaN"),
-                u16::try_from(index).expect("literal test index fits in u16"),
-            )
-        })
-        .collect();
+    for number in 0..max_literal_count - 1 {
+        parser
+            .find_or_add_number(f64::from(number))
+            .expect("numbers below MAX_LITERALS must fit");
+    }
     assert_eq!(
         parser
             .find_or_add_number(f64::from(max_literal_count - 1))
@@ -801,9 +792,14 @@ fn literal_pool_limits_match_their_error_messages() {
     assert!(error.to_string().contains(&format!("limit {MAX_LITERALS}")));
 
     let mut parser = parser_for_limit_test();
-    parser.funcs.literal_indices.strings = (0..MAX_LITERALS - 1)
-        .map(|index| index.to_string().into_bytes())
-        .collect();
+    // Strings live in the interner until parser finalization moves them into
+    // the chunk; filling chunk.string_literals here would invent a state the
+    // parser never uses. Exercise insertion instead of assembling either pool.
+    for index in 0..MAX_LITERALS - 1 {
+        parser
+            .find_or_add_string_bytes(index.to_string().as_bytes())
+            .expect("strings below MAX_LITERALS must fit");
+    }
     assert_eq!(
         parser
             .find_or_add_string_bytes(b"last")
@@ -1045,14 +1041,17 @@ fn table_array_batch_limit_splits_at_the_encoded_count() {
 
 #[test]
 fn too_many_upvalues_errors() {
-    let err =
-        parse_unfinalized(&upvalue_program(200, 56)).expect_err("256 upvalues must be rejected");
+    let grandparent = MAX_UPVALUES / 2;
+    let parent = MAX_UPVALUES - grandparent;
+    let err = parse_unfinalized(&upvalue_program(grandparent, parent + 1))
+        .expect_err("upvalues above MAX_UPVALUES must be rejected");
     assert!(matches!(
         err.kind(),
         ErrorKind::SyntaxError(SyntaxError::TooManyUpvalues)
     ));
-    assert!(err.to_string().contains("limit 255"));
-    parse_unfinalized(&upvalue_program(200, 55)).expect("255 upvalues must remain supported");
+    assert!(err.to_string().contains(&format!("limit {MAX_UPVALUES}")));
+    parse_unfinalized(&upvalue_program(grandparent, parent))
+        .expect("MAX_UPVALUES upvalues must remain supported");
 }
 
 #[test]
@@ -1545,16 +1544,23 @@ fn chunk_depth(chunk: &Bytecode) -> usize {
 }
 
 #[test]
-fn return_255_literals_uses_a_fixed_count() {
-    let source = format!("return {}", vec!["1"; 255].join(","));
-    let bytecode = parse_unfinalized(&source).expect("255 literal returns remain accepted");
+fn return_max_expressions_literals_uses_a_fixed_count() {
+    let source = format!(
+        "return {}",
+        vec!["1"; usize::from(MAX_EXPRESSIONS)].join(",")
+    );
+    let bytecode =
+        parse_unfinalized(&source).expect("MAX_EXPRESSIONS literal returns remain accepted");
     assert_eq!(
         bytecode.code.last().copied(),
         Some(Instr::ret(0, RetCount::Fixed(0)))
     );
     let returns = opcodes(&bytecode, Instr::OP_RETURN);
-    assert_eq!(returns[0], Instr::ret(0, RetCount::Fixed(255)));
-    assert_eq!(opcodes(&bytecode, Instr::OP_LOAD_NUM).len(), 255);
+    assert_eq!(returns[0], Instr::ret(0, RetCount::Fixed(MAX_EXPRESSIONS)));
+    assert_eq!(
+        opcodes(&bytecode, Instr::OP_LOAD_NUM).len(),
+        usize::from(MAX_EXPRESSIONS)
+    );
 }
 
 #[test]

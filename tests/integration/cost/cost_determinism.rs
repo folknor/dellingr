@@ -1,6 +1,7 @@
 //! Regression coverage for budget accounting and saved gmatch iterator costs.
 
 use dellingr::State;
+use dellingr::limits::PATTERN_CACHE_ENTRIES;
 
 use crate::support::{self, run};
 
@@ -73,7 +74,7 @@ fn gmatch_resume_cost_ignores_fifo_cache_eviction() {
     call_iterator(&mut state, "iter");
     #[cfg(feature = "snapshot")]
     let saved = state.save_state().expect("iterator saves");
-    for i in 0..256 {
+    for i in 0..PATTERN_CACHE_ENTRIES {
         run(
             &mut state,
             format!("local other = string.gmatch('x', 'p{i}'); other()"),

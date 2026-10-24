@@ -11,7 +11,6 @@ use crate::support::{self, Recorder, examples};
 // generated source, rather than adding distinct snapshot continuation cases.
 // Keep the exclusions explicit so new examples enter the round trip by default.
 const SKIPPED: &[&str] = &[
-    "benchmark.lua",
     "stress_tables.lua",
     "stress_gc_stack.lua",
     "stress_rustfn.lua",

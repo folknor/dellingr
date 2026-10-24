@@ -297,30 +297,42 @@ mod tests {
 
     #[test]
     fn gmatch_string_checks_preserve_relative_indexes_in_nested_frames() {
+        use crate::instr::{ArgCount, RetCount};
+
         let mut state = crate::vm::State::new();
         state.push_nil().unwrap();
         state.push_nil().unwrap();
-        state.push_nil().unwrap();
-        state.in_flight.stack_bottom = 2;
-        assert_argument(
-            &state
-                .cached_pattern_matcher(1)
-                .err()
-                .expect("non-string pattern fails"),
-            1,
-        );
-        assert_argument(
-            &state.with_gmatch_matcher(1, 1, |_, _, _| ()).unwrap_err(),
-            1,
-        );
-        assert_argument(&state.to_bytes(1).unwrap_err(), 1);
-        assert_argument(&state.to_bytes(-1).unwrap_err(), -1);
-        assert_argument(&state.push_bytes_from_stack_range(1, 0..0).unwrap_err(), 1);
-        state.push_string("subject").unwrap();
-        assert_argument(
-            &state.with_gmatch_matcher(2, 1, |_, _, _| ()).unwrap_err(),
-            1,
-        );
+        state
+            .push_rust_fn(|state| {
+                state.push_rust_fn(|state| {
+                    assert_argument(
+                        &state
+                            .cached_pattern_matcher(1)
+                            .err()
+                            .expect("non-string pattern fails"),
+                        1,
+                    );
+                    assert_argument(
+                        &state.with_gmatch_matcher(1, 1, |_, _, _| ()).unwrap_err(),
+                        1,
+                    );
+                    assert_argument(&state.to_bytes(1).unwrap_err(), 1);
+                    assert_argument(&state.to_bytes(-1).unwrap_err(), -1);
+                    assert_argument(&state.push_bytes_from_stack_range(1, 0..0).unwrap_err(), 1);
+                    state.push_string("subject")?;
+                    assert_argument(
+                        &state.with_gmatch_matcher(2, 1, |_, _, _| ()).unwrap_err(),
+                        1,
+                    );
+                    Ok(0)
+                })?;
+                state.push_nil()?;
+                state.call(ArgCount::Fixed(1), RetCount::Fixed(0))?;
+                Ok(0)
+            })
+            .unwrap();
+        state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
+        assert_eq!(state.get_top(), 2, "nested calls preserve host operands");
     }
 
     #[test]

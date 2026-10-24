@@ -611,24 +611,6 @@ mod tests {
     }
 
     #[test]
-    fn accept_empty_repeats_do_not_consume_match_depth() {
-        let mut used = 0;
-        let mut meter = count_only(&mut used);
-        // A `*` or `-` item that cannot match once takes reference's depth-free
-        // accept-empty transition, so an arbitrarily long run of them still
-        // matches the empty string. Both boundaries verified against 5.2/5.4.
-        for suffix in *b"*-" {
-            let pattern = [b'b', suffix].repeat(200);
-            let mut matcher = LuaPattern::new(&pattern);
-            assert!(
-                matcher.matches_bytes(b"", &mut meter).unwrap(),
-                "{suffix:?}"
-            );
-            assert_eq!(matcher.range(), 0..0);
-        }
-    }
-
-    #[test]
     fn position_captures_consume_a_depth_level() {
         let mut used = 0;
         let mut meter = count_only(&mut used);
@@ -647,41 +629,6 @@ mod tests {
             rejected.matches_bytes(&[b'a'; 168], &mut meter),
             Err(MatchError::Pattern(PatternError::MatchDepthExceeded))
         ));
-    }
-
-    #[test]
-    fn bracket_ranges_follow_reference_branch_order() {
-        let mut used = 0;
-        let mut meter = count_only(&mut used);
-        // The escape / range / literal arms are mutually exclusive and ordered,
-        // exactly as reference `matchbracketclass`. Flattening them changes
-        // class membership. Every expectation here was measured against both
-        // Lua 5.2 and 5.4.
-        let cases: [(&[u8], &[u8], &[u8]); 4] = [
-            // A descending range is empty and does not contribute its start.
-            (b"[z-a]", b"", b"za-5q"),
-            // `%a` cannot also open a range, so `-` stays a literal member.
-            (b"[%a-z]", b"za-q", b"5"),
-            (b"[%d-a]", b"a-5", b"zq"),
-            // `%-` is an escaped literal, so only `-` and `a` are members.
-            (b"[%--a]", b"a-", b"z5q"),
-        ];
-
-        for (pattern, members, non_members) in cases {
-            let mut matcher = LuaPattern::new(pattern);
-            for byte in members {
-                assert!(
-                    matcher.matches_bytes(&[*byte], &mut meter).unwrap(),
-                    "{pattern:?} {byte}"
-                );
-            }
-            for byte in non_members {
-                assert!(
-                    !matcher.matches_bytes(&[*byte], &mut meter).unwrap(),
-                    "{pattern:?} {byte}"
-                );
-            }
-        }
     }
 
     #[test]

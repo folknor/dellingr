@@ -1,5 +1,5 @@
 use super::{Bytecode, UpvalueDesc};
-use crate::instr::{ArithOp, ArithOperands, Builtin, Instr, OPEN_COUNT};
+use crate::instr::{ArithOp, ArithOperands, Builtin, Instr, OPEN_COUNT, OperandPool};
 use crate::limits::{
     MAX_FIXED_ARGS, MAX_FIXED_RESULTS, MAX_FRAME_SLOTS, MAX_LITERALS, MAX_NESTED,
     MAX_TABLE_TEMPLATE_FIELDS, MAX_TABLE_TEMPLATES, MAX_UPVALUES,
@@ -576,10 +576,24 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
         *next += 1;
         Ok(())
     };
-    let string =
-        |pc: usize, value: u16| check_index(pc, value, strings, BytecodeOperand::StringLiteral);
-    let number =
-        |pc: usize, value: u16| check_index(pc, value, numbers, BytecodeOperand::NumberLiteral);
+    // Keep these calls at their original positions among register and semantic
+    // checks: their order determines the rejection reason for malformed input.
+    let pool = |pc: usize, inst: Instr| {
+        let Some((pool, index)) = inst.pool_operand() else {
+            debug_assert!(false, "pool-checking opcode declares its pool");
+            // Fail closed: skipping the bounds check would admit an
+            // unchecked literal index in release builds.
+            return Err(err(Some(pc), ValidationReason::UnknownOpcode));
+        };
+        let (len, operand) = match pool {
+            OperandPool::Number => (numbers, BytecodeOperand::NumberLiteral),
+            OperandPool::String => (strings, BytecodeOperand::StringLiteral),
+            OperandPool::Template => (view.table_templates().len(), BytecodeOperand::TableTemplate),
+            OperandPool::Nested => (view.nested_len(), BytecodeOperand::NestedChunk),
+            OperandPool::Upvalue => (view.upvalues_len(), BytecodeOperand::Upvalue),
+        };
+        check_index(pc, index, len, operand)
+    };
     let reg = |pc: usize, value: u16| check_registers(pc, value, 1, frame);
 
     for pc in 0..code_len {
@@ -610,10 +624,10 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
                 }
                 ArithOperands::RegConst => {
                     reg(pc, b)?;
-                    number(pc, c)?;
+                    pool(pc, inst)?;
                 }
                 ArithOperands::ConstReg => {
-                    number(pc, b)?;
+                    pool(pc, inst)?;
                     reg(pc, c)?;
                 }
             }
@@ -663,17 +677,14 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
                     return Err(err(Some(pc), ValidationReason::BooleanOperandInvalid));
                 }
             }
-            Instr::OP_LOAD_NUM => {
+            Instr::OP_LOAD_NUM
+            | Instr::OP_LOAD_STR
+            | Instr::OP_GET_UPVAL
+            | Instr::OP_SET_UPVAL
+            | Instr::OP_NEW_TABLE_TEMPLATE
+            | Instr::OP_CLOSURE => {
                 reg(pc, a)?;
-                number(pc, b)?;
-            }
-            Instr::OP_LOAD_STR => {
-                reg(pc, a)?;
-                string(pc, b)?;
-            }
-            Instr::OP_GET_UPVAL | Instr::OP_SET_UPVAL => {
-                reg(pc, a)?;
-                check_index(pc, b, view.upvalues_len(), BytecodeOperand::Upvalue)?;
+                pool(pc, inst)?;
             }
             Instr::OP_CLOSE => {
                 if usize::from(a) > frame {
@@ -682,7 +693,7 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
             }
             Instr::OP_GET_GLOBAL | Instr::OP_SET_GLOBAL => {
                 reg(pc, a)?;
-                string(pc, b)?;
+                pool(pc, inst)?;
                 // Check each name once: re-scanning a long name at every
                 // reference would cost references x name length. The first
                 // reference to a bad name still reports.
@@ -733,19 +744,10 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
                     return Err(err(Some(pc), ValidationReason::CountOperandInvalid));
                 }
             }
-            Instr::OP_NEW_TABLE_TEMPLATE => {
-                reg(pc, a)?;
-                check_index(
-                    pc,
-                    b,
-                    view.table_templates().len(),
-                    BytecodeOperand::TableTemplate,
-                )?;
-            }
             Instr::OP_GET_FIELD => {
                 reg(pc, a)?;
                 reg(pc, b)?;
-                string(pc, c)?;
+                pool(pc, inst)?;
                 sequential(
                     pc,
                     inst.cache_slot(),
@@ -756,7 +758,7 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
             Instr::OP_SELF => {
                 check_registers(pc, a, 2, frame)?;
                 reg(pc, b)?;
-                string(pc, c)?;
+                pool(pc, inst)?;
                 sequential(
                     pc,
                     inst.cache_slot(),
@@ -766,7 +768,7 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
             }
             Instr::OP_SET_FIELD => {
                 reg(pc, a)?;
-                string(pc, b)?;
+                pool(pc, inst)?;
                 reg(pc, c)?;
                 sequential(
                     pc,
@@ -777,7 +779,7 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
             }
             Instr::OP_INIT_FIELD | Instr::OP_INIT_FIELD_PINNED => {
                 reg(pc, a)?;
-                string(pc, b)?;
+                pool(pc, inst)?;
                 reg(pc, c)?;
             }
             Instr::OP_SET_LIST => {
@@ -833,10 +835,6 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
                 let count = count_operand(pc, b, MAX_FIXED_RESULTS)?;
                 check_registers(pc, a, count.unwrap_or(1).max(1), frame)?;
             }
-            Instr::OP_CLOSURE => {
-                reg(pc, a)?;
-                check_index(pc, b, view.nested_len(), BytecodeOperand::NestedChunk)?;
-            }
             _ => return Err(err(Some(pc), ValidationReason::UnknownOpcode)),
         }
 
@@ -889,6 +887,35 @@ mod tree_tests {
         validate_depth,
     };
     use crate::instr::{ArgCount, Instr, RetCount};
+
+    // validate_bytecode fails closed when a pool-checking opcode declares no
+    // pool; this catches table/verifier drift before admission does.
+    #[test]
+    fn pool_checking_opcodes_declare_a_pool() {
+        for opcode in [
+            Instr::OP_LOAD_NUM,
+            Instr::OP_LOAD_STR,
+            Instr::OP_GET_UPVAL,
+            Instr::OP_SET_UPVAL,
+            Instr::OP_NEW_TABLE_TEMPLATE,
+            Instr::OP_CLOSURE,
+            Instr::OP_GET_GLOBAL,
+            Instr::OP_SET_GLOBAL,
+            Instr::OP_GET_FIELD,
+            Instr::OP_SELF,
+            Instr::OP_SET_FIELD,
+            Instr::OP_INIT_FIELD,
+            Instr::OP_INIT_FIELD_PINNED,
+            Instr::OP_ADD_RK,
+            Instr::OP_ADD_KR,
+        ] {
+            let inst = Instr::from_raw(u64::from(opcode) << 56);
+            assert!(
+                inst.pool_operand().is_some(),
+                "opcode {opcode} declares no pool"
+            );
+        }
+    }
 
     #[test]
     fn child_captures_are_bounded_by_the_enclosing_frame() {

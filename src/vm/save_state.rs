@@ -4718,9 +4718,10 @@ mod tests {
 
     /// The objects reachable from the roots `save_coverage` calls
     /// `Serialized` are exactly the objects the save walker encoded or
-    /// tokenized. This checks the walker against the coverage decision for
-    /// every root kind the fixture populates; it cannot check a kind the
-    /// fixture leaves empty, and strings are outside the comparison.
+    /// tokenized. Every string reachable from those roots is in the string
+    /// arena or in a saved bytecode literal pool. This checks the walker
+    /// against the coverage decision for every root kind the fixture
+    /// populates; it cannot check a kind the fixture leaves empty.
     #[test]
     fn save_walker_encodes_exactly_what_serialized_roots_reach() {
         let mut state = State::new();
@@ -4729,13 +4730,17 @@ mod tests {
                 a = { 1, 2, 3 }
                 a.b = {}
                 a.b.back = a
+                a.note = "serialized-only-string"
                 local captured = { inner = {} }
-                keep = function() return a, captured end
+                keep = function() return a, captured, "closure-literal" end
+                string.format("%p", "closure-literal")
+                string.format("%p", "__call")
+                string.format("%p", "print")
                 m = math
                 junk = { x = {} }
                 junk = nil
                 shared = {}
-                orphan = { child = {} }
+                orphan = { child = {}, note = "anchor-only-string" }
                 string.extra = {}
             "#,
             None,
@@ -4754,13 +4759,61 @@ mod tests {
         let _orphan = state.anchor().expect("anchor orphan");
         state.push_nil().expect("push");
         state.set_global("orphan").expect("clear orphan");
+        state.seal_globals();
+        state.push_nil().expect("push");
+        state
+            .set_global("print")
+            .expect("delete pinned builtin name");
         state.gc_collect();
 
         let mut builder = SaveBuilder::new(&state);
         let walk = builder.walk().expect("walk");
         let mut saved: BTreeSet<ObjectPtr> = builder.object_ids.keys().copied().collect();
         saved.extend(builder.env_reverse.keys().copied());
+        let saved_strings: BTreeSet<_> = builder.string_ids.keys().copied().collect();
+        let mut encoded_strings = saved_strings.clone();
+        for literal in builder
+            .bytecode
+            .iter()
+            .flat_map(|chunk| chunk.string_literals.iter())
+        {
+            encoded_strings.insert(
+                state
+                    .heap
+                    .find_string(literal)
+                    .expect("a saved bytecode literal is interned in its State"),
+            );
+        }
         builder.into_payload(walk).expect("finish");
+
+        let serialized_only = state
+            .heap
+            .find_string(b"serialized-only-string")
+            .expect("the serialized graph keeps its string interned");
+        let anchor_only = state
+            .heap
+            .find_string(b"anchor-only-string")
+            .expect("the process-local anchor keeps its string interned");
+        let builtin_name = state
+            .heap
+            .find_string(b"print")
+            .expect("the sealed global pin keeps the builtin name interned");
+        let event_name = state
+            .heap
+            .find_string(b"__call")
+            .expect("the event-name root keeps its rendered identity interned");
+        let closure_literal = state
+            .heap
+            .find_string(b"closure-literal")
+            .expect("the saved closure keeps its literal interned");
+        assert!(saved_strings.contains(&serialized_only));
+        assert!(saved_strings.contains(&builtin_name));
+        assert!(saved_strings.contains(&event_name));
+        assert!(saved_strings.contains(&closure_literal));
+        assert!(state.global_env.pins().contains(&builtin_name));
+        assert!(!saved_strings.contains(&anchor_only));
+        assert!(!encoded_strings.contains(&anchor_only));
+        assert!(state.heap.val_is_live(&Val::Str(anchor_only)));
 
         // After the collection every colour is Unmarked, so this mark phase
         // starts clean; its marks are undone before anything can sweep.
@@ -4772,11 +4825,92 @@ mod tests {
         state
             .heap
             .drain_mark_worklist(&mut worklist, &state.upvalue_pool);
-        let reached = state.heap.take_marked_objects();
+        let (reached, reached_strings) = state.heap.take_marked_objects_and_strings();
         state.upvalue_pool.reset_marks();
 
         assert_eq!(reached, saved);
+        assert!(
+            reached_strings.is_subset(&encoded_strings),
+            "a string reachable from a serialized root is absent from the save arenas"
+        );
         // The orphan and its child are the only live objects left out.
         assert_eq!(state.object_count(), reached.len() + 2);
+    }
+
+    #[test]
+    fn load_setup_does_not_enter_environment_baselines() {
+        let state = State::new();
+        let save = state.save_state().expect("pristine state saves");
+        let loaded = State::load_state(
+            &save.bytes,
+            Box::new(crate::DefaultCallbacks),
+            |state| -> crate::Result<()> {
+                state.get_global("math")?;
+                state.push_string("setup_only")?;
+                state.push_boolean(true)?;
+                state.set_table_raw(-3)?;
+                Ok(())
+            },
+        )
+        .expect("setup mutation loads");
+        assert_eq!(
+            loaded.env_tokens.keys().copied().collect::<BTreeSet<_>>(),
+            loaded
+                .env_baselines
+                .keys()
+                .copied()
+                .collect::<BTreeSet<_>>()
+        );
+
+        let math = *loaded
+            .env_tokens
+            .iter()
+            .find(|(_, token)| token.as_str() == "math")
+            .expect("math has a canonical environment token")
+            .0;
+        let setup_key = Val::Str(
+            loaded
+                .heap
+                .find_string(b"setup_only")
+                .expect("setup interns its key"),
+        );
+        let baseline = loaded
+            .env_baselines
+            .get(&math)
+            .expect("math has a fresh environment baseline");
+        assert!(!baseline.entries.iter().any(|(key, _)| *key == setup_key));
+        assert_eq!(
+            loaded
+                .heap
+                .as_table_ref(math)
+                .expect("math is a table")
+                .get(&setup_key),
+            Val::Bool(true)
+        );
+
+        let resave = loaded.save_state().expect("setup mutation resaves");
+        let restored =
+            State::load_state(&resave.bytes, Box::new(crate::DefaultCallbacks), no_setup)
+                .expect("setup mutation survives a round trip");
+        let math = *restored
+            .env_tokens
+            .iter()
+            .find(|(_, token)| token.as_str() == "math")
+            .expect("restored math has a canonical environment token")
+            .0;
+        let setup_key = Val::Str(
+            restored
+                .heap
+                .find_string(b"setup_only")
+                .expect("resaved setup key is interned"),
+        );
+        assert_eq!(
+            restored
+                .heap
+                .as_table_ref(math)
+                .expect("restored math is a table")
+                .get(&setup_key),
+            Val::Bool(true)
+        );
     }
 }

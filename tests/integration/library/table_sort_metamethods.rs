@@ -130,6 +130,8 @@ fn proxy_sort_comparison_error_for_mixed_types() {
 
 #[test]
 fn proxy_sort_charges_like_raw_sort() {
+    // `proxy_sorts_backing_store_through_metamethods` checks that this
+    // route reads and writes through the proxy; this test isolates its charge.
     let plain = support::cost_of("local t = {5, 2, 9, 1, 7, 3, 8}; table.sort(t)");
     let proxied = support::cost_of(
         "local t = {5, 2, 9, 1, 7, 3, 8}; \
@@ -146,8 +148,22 @@ fn proxy_sort_charges_like_raw_sort() {
 #[test]
 fn table_with_unrelated_metatable_keeps_raw_sort() {
     let code = r#"
+        local comparator_started = false
+        local writes = 0
         local t = setmetatable({3, 1, 2}, {__tostring = function() return "x" end})
-        table.sort(t)
+        table.sort(t, function(a, b)
+            if not comparator_started then
+                comparator_started = true
+                rawset(t, 2, nil)
+                setmetatable(t, {__newindex = function(target, key, value)
+                    writes = writes + 1
+                    rawset(target, key, value)
+                end})
+            end
+            return a < b
+        end)
+        if not comparator_started then error("comparator did not run") end
+        if writes ~= 0 then error("raw sort used __newindex after comparison") end
         return t[1] * 100 + t[2] * 10 + t[3]
     "#;
     assert_eq!(support::eval_number(code), 123.0);

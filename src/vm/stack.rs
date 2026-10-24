@@ -454,7 +454,7 @@ impl State {
         #[cfg(not(feature = "fault-injection"))]
         let injected = false;
         #[cfg(feature = "fault-injection")]
-        let injected = self.inject_fault("stack_slot", self.stack.len(), true);
+        let injected = self.inject_fault(crate::FaultSite::StackSlot, self.stack.len(), true);
         if injected || self.stack.len() >= MAX_STACK_SIZE {
             return Err(self.error(ErrorKind::StackOverflow {
                 size: self.stack.len().saturating_add(1),
@@ -471,7 +471,7 @@ impl State {
         #[cfg(not(feature = "fault-injection"))]
         let injected = false;
         #[cfg(feature = "fault-injection")]
-        let injected = self.inject_fault("stack_space", n, true);
+        let injected = self.inject_fault(crate::FaultSite::StackSpace, n, true);
         if injected || new_size > MAX_STACK_SIZE {
             return Err(self.error(ErrorKind::StackOverflow {
                 size: new_size,

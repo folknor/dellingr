@@ -212,23 +212,6 @@ timeout itself is a real external-process deadline and cannot be virtualised.
 Enforceable: no; small, listed because the brief asks for every sleep that
 stands in for an event.
 
-## VC-014 - The memory cap is applied through a bash wrapper per example
-
-Reported by: check-machinery, corpus-harness.
-
-`run_examples` runs every example as `bash scripts/test_limited.sh <bin> ...` to
-apply `ulimit -v`: one extra bash and one `lib.sh` source per example per sweep.
-Where `ulimit -v` is unsupported (macOS, some containers, or a hard limit below
-2 GiB) every example fails with exit 2, one message per example. `TEST_LIMIT_KB`
-lives only in `lib.sh`, which is why the test must go through bash. `libc` is
-already a dev-dependency.
-
-Fix: apply `setrlimit(RLIMIT_AS)` in a `Command::pre_exec` hook; the constant
-moves to Rust, and `test_limited.sh` reads it from there or remains for manual
-use only.
-
-Enforceable: n/a.
-
 ## VC-015 - `.scratch/` is written by several tools, leaks, and has no owner
 
 Reported by: check-machinery, corpus-harness, native-stack-errors.
@@ -318,30 +301,6 @@ files in `examples/` as a test failure with a clear message.
 
 Enforceable: yes.
 
-## VC-022 - Orphaned and heavy corpus files
-
-Reported by: corpus-harness, snapshot.
-
-- `examples/demo_stack_trace.lua.txt` is renamed out of the corpus (it errors on
-  purpose) and referenced and run by nothing. Delete it, or turn it into an
-  expected-stderr test of stack-trace rendering.
-- `examples/benchmark.lua` (SKIP-DIFF, prints sums, no checks) is the original
-  of `bench/benchmark.lua` and `examples/composite/benchmark.lua`, likely the
-  heaviest top-level example in the debug build (1M-iteration loop plus
-  `fib(28)`), proves only "does not crash", and its header says "Run with
-  external timing: time lua examples/benchmark.lua", which the benchmarking
-  rules forbid. `bench/benchmark.lua`'s header cites it. Candidate for deletion
-  with the citation.
-- `examples/save_roundtrip.lua` never saves. It is the Lua twin of
-  `round_trip_preserves_data_graph_and_env_references` with the save removed,
-  prints `save roundtrip shape: true`, the CLI has no snapshot path
-  (`src/main.rs` has no `cfg(feature = "snapshot")`), and `git grep
-  save_roundtrip` is empty. It runs in `run_examples` and the diff gate in both
-  sweeps and proves nothing about saving. Delete it, or make it real via the
-  corpus save round trip in verif-goldens.md.
-
-Enforceable: no rule catches a name on its own.
-
 ## VC-023 - Workload headers do not classify themselves consistently
 
 Reported by: check-machinery, corpus-harness.
@@ -357,24 +316,3 @@ fixed set of classification prefixes (`-- Probe:`, `-- Historical probe:`,
 `-- Workload:`), applied when the pinned headers are next re-hashed.
 
 Enforceable: yes, by that test.
-
-## VC-024 - `regenerate_error_boundary` includes a test-suite module by path
-
-Reported by: the resolution loop's reconciler.
-
-`examples/regenerate_error_boundary.rs` includes
-`tests/integration/support/recorder.rs` and
-`tests/integration/failures/error_boundary.rs` by `#[path]`, so the tool and
-the test share one corpus and transcript renderer and cannot drift. AGENTS.md
-and `tests/integration/support/mod.rs` reserve that role for `tests/common/`,
-whose files are kept self-contained because another target includes them.
-`recorder.rs` is self-contained and could move; `error_boundary.rs` is a suite
-module, so including it couples the example to the suite's imports.
-
-Fix: move the corpus, the runner and the transcript renderer into a
-`tests/common/error_boundary_corpus.rs` shared by the suite and the example,
-the way `tests/common/save_golden_program.rs` is shared, and move
-`recorder.rs` to `tests/common/` if the example still needs it.
-
-Enforceable: a convention check that every `#[path]` include from `examples/`
-or another target points into `tests/common/`.

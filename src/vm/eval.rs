@@ -145,7 +145,7 @@ impl State {
         let injected = false;
         #[cfg(feature = "fault-injection")]
         let injected = self.inject_fault(
-            "native_depth",
+            crate::FaultSite::NativeDepth,
             self.in_flight.native_call_depth as usize,
             self.in_flight.native_call_depth > 0,
         );
@@ -381,8 +381,11 @@ impl State {
                 #[cfg(not(feature = "fault-injection"))]
                 let injected = false;
                 #[cfg(feature = "fault-injection")]
-                let injected =
-                    self.inject_fault("call_chain", self.in_flight.metamethod_depth as usize, true);
+                let injected = self.inject_fault(
+                    crate::FaultSite::CallChain,
+                    self.in_flight.metamethod_depth as usize,
+                    true,
+                );
                 if injected || self.in_flight.metamethod_depth >= MAX_METAMETHOD_DEPTH {
                     let error = self.error(ErrorKind::MetamethodDepthExceeded {
                         depth: self.in_flight.metamethod_depth,
@@ -606,7 +609,11 @@ impl State {
         #[cfg(not(feature = "fault-injection"))]
         let injected = false;
         #[cfg(feature = "fault-injection")]
-        let injected = self.inject_fault("call_depth", self.in_flight.call_depth as usize, true);
+        let injected = self.inject_fault(
+            crate::FaultSite::CallDepth,
+            self.in_flight.call_depth as usize,
+            true,
+        );
         if injected || self.in_flight.call_depth >= MAX_CALL_DEPTH {
             return Err(self.error(ErrorKind::CallDepthExceeded {
                 depth: self.in_flight.call_depth,

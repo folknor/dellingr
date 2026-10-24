@@ -1,7 +1,7 @@
 The files in this directory are Rust ports of binary64 functions from the
 CORE-MATH project (https://core-math.gitlabpages.inria.fr/,
-https://gitlab.inria.fr/core-math/core-math), taken at upstream commit
-0ce0cbc15935e24c656280e5a46c34e89f301b7a. The upstream sources carry these
+https://gitlab.inria.fr/core-math/core-math), taken at the upstream commit
+recorded in reference/core-math-pin.toml. The upstream sources carry these
 notices:
 
 sin.c            Copyright (c) 2022-2026 Paul Zimmermann and Tom Hubrecht and Alexei Sibidanov

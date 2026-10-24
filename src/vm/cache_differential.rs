@@ -33,9 +33,14 @@ impl Drop for HitMode {
     }
 }
 
-// The corpus includes stress workloads. Compare bounded prefixes as well as
-// completed programs so those workloads do not dominate a debug check.
-const COST_BUDGET: i64 = 10_000;
+// A larger per-example ceiling gives ordinary programs room to reach repeated
+// calls and cache hits, while keeping stress workloads and long debug kernels
+// bounded under the differential check's time cap.
+const COST_BUDGET: i64 = 100_000;
+// A floor on completed examples, so a budget or corpus change cannot silently
+// shrink the comparison back to prefixes. It was chosen as roughly half the
+// corpus; revisit it with the budget when either moves.
+const MIN_COMPLETED_EXAMPLES: usize = 40;
 
 fn execute(program: &Program, enabled: bool) -> (Vec<Vec<u8>>, u64, Option<String>) {
     let _mode = HitMode::new(enabled);
@@ -56,19 +61,27 @@ fn execute(program: &Program, enabled: bool) -> (Vec<Vec<u8>>, u64, Option<Strin
 
 #[test]
 fn corpus_inline_cache_differential() {
-    for path in examples_corpus::example_corpus() {
-        let source = std::fs::read(&path).expect("corpus source is readable");
+    let paths = examples_corpus::example_corpus();
+    let mut completed = 0;
+    for path in &paths {
+        let source = std::fs::read(path).expect("corpus source is readable");
         let name = path
             .strip_prefix(env!("CARGO_MANIFEST_DIR"))
             .expect("corpus source is in the project")
             .to_string_lossy();
         let program =
             Program::compile(&source, Some(name.as_bytes())).expect("corpus source compiles");
-        assert_eq!(
-            execute(&program, true),
-            execute(&program, false),
-            "{}",
-            path.display()
-        );
+        let with_hits = execute(&program, true);
+        let without_hits = execute(&program, false);
+        assert_eq!(with_hits, without_hits, "{}", path.display());
+        if with_hits.2.is_none() {
+            completed += 1;
+        }
     }
+    assert!(
+        completed >= MIN_COMPLETED_EXAMPLES,
+        "only {completed} of {} examples completed with cost budget {COST_BUDGET}; \
+         the floor is {MIN_COMPLETED_EXAMPLES}",
+        paths.len()
+    );
 }

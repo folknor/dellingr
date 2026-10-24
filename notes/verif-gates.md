@@ -27,51 +27,28 @@ them. Each entry names the scopes whose hunters reported it.
 
 Reported by: check-machinery, compiler-cost, library.
 
-- `allow-invalid = true` on `rand::rng`, `rand::thread_rng` and the four
-  `foldhash::{fast,quality}::{RandomState,SeedableRandomState}` entries. With
-  `rand` not a dependency, the first two cannot resolve and seal nothing; a
-  re-introduced `rand` would come in through `rand::random`,
-  `SeedableRng::from_os_rng`/`from_entropy` or `getrandom`, none of which is
-  listed. Whether the foldhash paths resolve depends on foldhash's features,
-  which an embedding host can change through unification. `allow-invalid`
-  hides both outcomes.
-- brokkr has a `[[fixture_lint]]` phase built for exactly this ("Those lints
-  fail open: a configured path that no longer resolves ... seals nothing",
-  `brokkr man conventions fixture_lint`). Dellingr does not use it (the check
-  log says `fixture-lint: not applicable`). No entry is proven to fire,
-  including the determinism-critical `f64::sin` family, `Instant::now` and
-  `HashMap`.
-- Host state that is not banned: `std::env::current_dir`, `temp_dir`,
-  `home_dir`, `std::process::id`, `std::thread::current().id()`,
-  `std::thread::available_parallelism`, and pointer-address values
-  (`<*const T>::addr`, `expose_provenance`). No use in `src/` today; a missing
-  guard, not a live bug.
-- `Result::unwrap_or` and `unwrap_or_default` are banned as error-discarding,
-  but `Result::unwrap_or_else(|_| ..)`, `map_or` and `map_or_else` discard the
-  error the same way and are allowed.
-- `[lints.clippy]` sets `disallowed_methods = "deny"` but not
-  `disallowed_types`, which defaults to warn. Inside brokkr every diagnostic
-  fails, so the gate is unaffected; a plain `cargo build`, rust-analyzer or a
-  consumer sees a banned `HashMap` as a warning and a banned `sin` as an error.
-- The libm ban is a name list. The f64 list is thorough; the f32 list lacks
-  `sinh` through `atanh`, `exp2`, `exp_m1`, `log2`, `log`, `ln_1p`, `cbrt`,
-  `hypot` and `sin_cos`. Any libm-backed method std stabilizes later
-  (`gamma`/`ln_gamma`/`erf`/`erfc`, unstable now) is not listed. The claim in
-  `reference/deterministic-math.md`, "nothing in the library calls the
-  platform libm", cannot be enforced by a name list.
+A `fixtures/lint-policy/` fixture now proves every method and type ban fires,
+`disallowed_types` is deny, the f32 list is complete, a dependency rule
+replaces the unresolvable `rand` bans, and a libm symbol check reads the
+release binaries. Remaining:
 
-Fix: add a `[[fixture_lint]]` crate that calls every banned path, with an
-`expect.toml`; drop `allow-invalid` wherever the fixture proves the path
-resolves; add the missing host-state paths and the error-discarding
-combinators; make `disallowed_types = "deny"`. For libm (library): a
-`[[script_check]]` on the release artifact listing undefined libm symbols
-(`nm --undefined-only`, or `objdump -d` for calls to `sin|cos|tan|exp|log|pow|
-cbrt|hypot|...`), allowing only `fmod`. That also catches LLVM lowering an
-intrinsic to a libcall, and dependencies doing so; it needs the toolchain's
-`nm` or `objdump`, which `scripts/frame_sizes.py` already assumes.
+- `allow-invalid = true` stays on the four foldhash `RandomState` entries until
+  the fixture has run and proven they resolve; drop it then.
+- Host state still unbanned: `std::env::current_dir`, `home_dir`,
+  `std::process::id`, `std::thread::available_parallelism` and pointer-address
+  values (`temp_dir` and `std::thread::current` are now banned). Banning
+  them needs scoped allows in `examples/regenerate_save_golden.rs`, the test
+  scratch and support code, the crmath sweeps and the native-stack probe.
+- The libm symbol check is gated only on the dev CLI binaries
+  (`corpus::libm_symbols`); the shipped release binaries need the manual
+  `scripts/check_libm_symbols.sh`, because a script check cannot get built
+  artifacts inside `brokkr check` (brokkr#20). It also sees linked CLI code
+  only, not library code the linker discarded.
 
-Enforceable: yes. That is what `fixture_lint` exists for; the symbol check is
-mechanical.
+Fix: drop foldhash's `allow-invalid` once the fixture proves it; add the
+host-state bans with their scoped allows in one wave.
+
+Enforceable: yes, by the fixture.
 
 ## VG-006 - Indirect calls into Lua are a reviewer-only rule
 
@@ -105,40 +82,6 @@ and a full build.
 Fix: textlint rules, or one pre-clippy `script_check`, for the marker-reason
 rule and the conventions. The corpus-equivalence test exists only because two
 walkers exist; the in-process gate rewrite in rewrites.md removes it.
-
-Enforceable: yes.
-
-## VG-011 - The CORE-MATH pin is written in five places, and the generated tables' "do not edit by hand" is unenforced
-
-Reported by: check-machinery, library.
-
-The sha `0ce0cbc1...` appears in `scripts/crmath_tables.py`
-(`CORE_MATH_COMMIT`), `src/crmath/tests/golden.rs` (`CORE_MATH_COMMIT`),
-`src/crmath/LICENSE-CORE-MATH`, `reference/deterministic-math.md` and the
-golden fixture header. Only the golden.rs constant is enforced, and only by an
-ignored corpus pin. No file records where `research/core-math` comes from
-(no clone URL; only `research/*/` in `.gitignore`).
-
-`reference/deterministic-math.md` says the tables "are not edited by hand" and
-tells the reader to run `--check`. `crmath_tables.py --check` runs only via the
-ignored `core_math_tables_match_pin`, which needs `python3` on PATH and
-`research/core-math` at the pinned commit. Nothing in `brokkr check` notices a
-hand edit to `src/crmath/tables/*.rs` unless it changes a golden row. Every
-sweep, the regenerator, the corpus pin and the table check resolve
-`CARGO_MANIFEST_DIR/research/core-math`, a gitignored sibling at a fixed
-layout; they fail loudly when it is missing.
-
-Fix options: single-source the pin, with the URL, in a small TOML both read,
-and record each generated table file's digest there, checked by a pre-clippy
-`script_check` that needs no checkout (check-machinery); or vendor the ~15
-MIT-licensed table-bearing upstream C files unmodified under
-`reference/core-math/` or `src/crmath/upstream/` and make `--check` a
-`[[script_check]]` with no network and no checkout (library); and a
-non-ignored unit test that `include_str!`s the script, the licence and the
-fixture and asserts each contains `CORE_MATH_COMMIT`, with the reference doc
-pointing at the constant instead of repeating the sha. The worst-case corpus
-(several million lines) should stay external; its readers are already pinned
-by count and digest.
 
 Enforceable: yes.
 

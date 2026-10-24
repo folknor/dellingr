@@ -2,6 +2,7 @@
 //! errors on type-correct values, and the literal-pattern fast path.
 
 use dellingr::error::{ArgDetail, ErrorKind, ErrorValue, PrefixLocation};
+use dellingr::limits::{MAX_ARGUMENTS, MAX_RESULTS};
 use dellingr::{ArgCount, RetCount, State};
 
 use crate::support;
@@ -203,28 +204,33 @@ fn host_argument_checks_name_direct_lua_and_iterator_callbacks() {
 }
 
 #[test]
-fn runtime_result_limit_accepts_255_and_rejects_256() {
+fn runtime_result_limit_accepts_the_cap_and_rejects_overflow() {
     use dellingr::error::results_count;
-    use dellingr::limits::MAX_RESULTS;
 
-    assert_eq!(MAX_RESULTS, u8::MAX);
-    assert_eq!(results_count(255).expect("255 fits the callback ABI"), 255);
-    let error = results_count(256).expect_err("256 exceeds the callback ABI");
-    assert!(matches!(error, ErrorKind::TooManyResults { limit: 255 }));
+    let maximum = usize::from(MAX_RESULTS);
+    assert_eq!(
+        results_count(maximum).expect("MAX_RESULTS fits the callback ABI"),
+        MAX_RESULTS
+    );
+    let error = results_count(maximum + 1).expect_err("count exceeds MAX_RESULTS");
+    assert!(matches!(
+        error,
+        ErrorKind::TooManyResults { limit: MAX_RESULTS }
+    ));
     assert_eq!(error.to_string(), "too many results (limit 255)");
 
-    for count in [255, 256] {
+    for count in [maximum, maximum + 1] {
         let mut state = State::new();
         support::load(&mut state, format!("return unpack({{}}, 1, {count})"));
         let result = state.call(ArgCount::Fixed(0), RetCount::All);
-        if count == 255 {
-            result.expect("255 results are supported");
-            assert_eq!(state.get_top(), 255);
+        if count == maximum {
+            result.expect("MAX_RESULTS results are supported");
+            assert_eq!(state.get_top(), maximum);
         } else {
-            let error = result.expect_err("256 results exceed the runtime limit");
+            let error = result.expect_err("results exceed MAX_RESULTS");
             assert!(matches!(
                 error.kind(),
-                ErrorKind::TooManyResults { limit: 255 }
+                ErrorKind::TooManyResults { limit: MAX_RESULTS }
             ));
             assert!(error.to_string().contains("too many results (limit 255)"));
         }
@@ -263,17 +269,22 @@ fn nested_native_dispatch_restores_outer_argument_name() {
 #[test]
 fn runtime_argument_limit_reports_typed_errors() {
     for code in [
-        "local function f(...) end; f(1, unpack({}, 1, 255))",
-        "local f = setmetatable({}, { __call = function(...) end }); f(unpack({}, 1, 255))",
+        "local function f(...) end; f(1, unpack({}, 1, LIMIT))",
+        "local f = setmetatable({}, { __call = function(...) end }); f(unpack({}, 1, LIMIT))",
     ] {
         let mut state = State::new();
-        support::load(&mut state, code);
+        support::load(
+            &mut state,
+            code.replace("LIMIT", &MAX_ARGUMENTS.to_string()),
+        );
         let error = state
             .call(ArgCount::Fixed(0), RetCount::Fixed(0))
-            .expect_err("256 arguments exceed the runtime limit");
+            .expect_err("arguments exceed MAX_ARGUMENTS");
         assert!(matches!(
             error.kind(),
-            ErrorKind::TooManyArguments { limit: 255 }
+            ErrorKind::TooManyArguments {
+                limit: MAX_ARGUMENTS
+            }
         ));
         assert!(error.to_string().contains("too many arguments (limit 255)"));
     }

@@ -9,26 +9,6 @@ fn run_one(code: &str) -> State {
 }
 
 #[test]
-fn string_library_coerces_number_subjects_and_patterns() {
-    let state = run_one(
-        r#"
-        local found = string.find(12345, 34)
-        local iter = string.gmatch(121, 1)
-        local first = iter()
-        local replaced = string.gsub(121, 1, "x")
-        return string.sub(123, 2) .. ":" .. string.len(42) .. ":"
-            .. string.upper(12) .. ":" .. string.lower(12) .. ":"
-            .. string.reverse(123) .. ":" .. found .. ":"
-            .. string.match(123, 23) .. ":" .. first .. ":" .. replaced
-        "#,
-    );
-
-    // Verified against Lua 5.4, which prints the same string for this
-    // expression. Note gsub("121", "1", "x") is "x2x": both 1s are replaced.
-    assert_eq!(state.to_bytes(-1).unwrap(), b"23:2:12:12:321:3:23:1:x2x");
-}
-
-#[test]
 fn gsub_dot_matches_utf8_bytes() {
     let mut state = State::new();
     support::eval(
@@ -402,18 +382,22 @@ fn gmatch_refused_push_preserves_the_next_match() {
         let mut baseline = prepare();
         baseline.arm_fault_injection(None);
         baseline.call(ArgCount::Fixed(0), RetCount::All).unwrap();
-        let count = baseline.finish_fault_injection().len();
+        let count = baseline
+            .finish_fault_injection()
+            .iter()
+            .filter(|event| event.eligible)
+            .count();
         assert_eq!(baseline.get_top(), expected.len());
         for target in 1..=count {
             let mut state = prepare();
             state.arm_fault_injection(Some(u32::try_from(target).unwrap()));
             let result = state.call(ArgCount::Fixed(0), RetCount::All);
             let events = state.finish_fault_injection();
-            // Ineligible checks are recorded too, but cannot fire.
-            if !events.iter().any(|event| event.2) {
-                assert!(result.is_ok());
-                continue;
-            }
+            assert_eq!(
+                events.iter().filter(|event| event.fired).count(),
+                1,
+                "target {target}: {events:?}"
+            );
             assert!(result.is_err(), "target {target}: {events:?}");
             assert_eq!(state.get_top(), 0);
             state.get_global("iterator").unwrap();

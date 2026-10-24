@@ -73,6 +73,9 @@ pub use vm::Anchor;
 pub use vm::LuaType;
 pub use vm::RustFunc;
 pub use vm::State;
+#[cfg(feature = "fault-injection")]
+#[doc(hidden)]
+pub use vm::{FaultEvent, FaultSite};
 #[cfg(feature = "snapshot")]
 pub use vm::{LoadError, SaveDiagnostics, SaveError, SaveState, SnapshotError, TableLoadLocation};
 

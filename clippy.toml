@@ -1,17 +1,24 @@
+# Result callbacks can explicitly handle an error (panic, resume_unwind,
+# PoisonError::into_inner); banning unwrap_or_else/map_or/map_or_else by name
+# would reject those handlers too. Review the callback's handling instead.
+# Additional host bans need scoped allows at their legitimate host sites first:
+# current_dir in regenerate_save_golden, process::id in the scratch helper,
+# available_parallelism in test support and math sweeps, and pointer addr in
+# the native-stack probe. Keep those changes with their owners.
 disallowed-methods = [
     { path = "std::panic::set_hook", reason = "Process-wide hook replacement can hide concurrent test failures. Use a scoped allow only for a permanent filtering installer." },
     { path = "std::panic::take_hook", reason = "Process-wide hook replacement can hide concurrent test failures. Use a scoped allow only for a permanent filtering installer." },
     { path = "core::result::Result::ok", reason = "Silently discards errors. Use `?` to propagate, or handle the error explicitly." },
     { path = "core::result::Result::unwrap_or", reason = "Silently discards errors. Handle the error explicitly, or use a scoped allow for an intentional fallback." },
     { path = "core::result::Result::unwrap_or_default", reason = "Silently discards errors. Handle the error explicitly, or use a scoped allow for an intentional fallback." },
-    { path = "rand::rng", reason = "Unseeded RNG breaks determinism. Use State.rng, seeded via set_rng_seed.", allow-invalid = true },
-    { path = "rand::thread_rng", reason = "Unseeded RNG breaks determinism. Use State.rng, seeded via set_rng_seed.", allow-invalid = true },
     { path = "std::env::args", reason = "Reading process arguments makes behavior depend on host process state." },
     { path = "std::env::args_os", reason = "Reading process arguments makes behavior depend on host process state." },
     { path = "std::env::var", reason = "Reading host environment makes behavior depend on process state." },
     { path = "std::env::var_os", reason = "Reading host environment makes behavior depend on process state." },
     { path = "std::env::vars", reason = "Reading host environment makes behavior depend on process state." },
     { path = "std::env::vars_os", reason = "Reading host environment makes behavior depend on process state." },
+    { path = "std::env::temp_dir", reason = "Host filesystem configuration must not affect deterministic library behavior." },
+    { path = "std::thread::current", reason = "Host thread identity must not affect deterministic library behavior." },
     { path = "std::time::Instant::now", reason = "Host timing must not affect deterministic library behavior." },
     { path = "std::time::SystemTime::now", reason = "Host time must not affect deterministic library behavior." },
     { path = "f64::sin", reason = "Platform libm results differ across hosts. Use crate::crmath::sin." },
@@ -41,6 +48,20 @@ disallowed-methods = [
     { path = "f64::cbrt", reason = "Platform libm results differ across hosts; there is no deterministic port." },
     { path = "f64::hypot", reason = "Platform libm results differ across hosts; there is no deterministic port." },
     { path = "f64::mul_add", reason = "Can lower to a library fma that is not correctly rounded on some targets. Use crate::crmath::soft_fma or a crmath kernel's hardware FMA backend." },
+    { path = "f32::sin_cos", reason = "Platform libm results differ across hosts." },
+    { path = "f32::sinh", reason = "Platform libm results differ across hosts." },
+    { path = "f32::cosh", reason = "Platform libm results differ across hosts." },
+    { path = "f32::tanh", reason = "Platform libm results differ across hosts." },
+    { path = "f32::asinh", reason = "Platform libm results differ across hosts." },
+    { path = "f32::acosh", reason = "Platform libm results differ across hosts." },
+    { path = "f32::atanh", reason = "Platform libm results differ across hosts." },
+    { path = "f32::exp2", reason = "Platform libm results differ across hosts." },
+    { path = "f32::exp_m1", reason = "Platform libm results differ across hosts." },
+    { path = "f32::log2", reason = "Platform libm results differ across hosts." },
+    { path = "f32::log", reason = "Platform libm results differ across hosts." },
+    { path = "f32::ln_1p", reason = "Platform libm results differ across hosts." },
+    { path = "f32::cbrt", reason = "Platform libm results differ across hosts." },
+    { path = "f32::hypot", reason = "Platform libm results differ across hosts." },
     { path = "f32::sin", reason = "Platform libm results differ across hosts." },
     { path = "f32::cos", reason = "Platform libm results differ across hosts." },
     { path = "f32::tan", reason = "Platform libm results differ across hosts." },
@@ -58,17 +79,16 @@ disallowed-methods = [
     { path = "std::io::stderr", reason = "Library output goes through HostCallbacks. Hosts and harnesses whose job is printing use a scoped allow." },
 ]
 
-# Determinism: ban non-deterministic collections
+# Determinism: ban non-deterministic collections. Re-export aliases share a
+# definition, so configure each type once; the fixture proves that definition.
+# Keep allow-invalid until a fixture run proves resolution on the gate toolchain.
 disallowed-types = [
-    { path = "std::collections::HashMap", reason = "Non-deterministic iteration order. Use IndexMap or BTreeMap instead." },
-    { path = "std::collections::HashSet", reason = "Non-deterministic iteration order. Use BTreeSet instead." },
     { path = "std::collections::hash_map::HashMap", reason = "Non-deterministic iteration order. Use IndexMap or BTreeMap instead." },
     { path = "std::collections::hash_set::HashSet", reason = "Non-deterministic iteration order. Use BTreeSet instead." },
     { path = "hashbrown::HashMap", reason = "Use det_hash::IndexMap or BTreeMap. Only hashbrown::HashTable with det_hash hashes is allowed." },
     { path = "hashbrown::HashSet", reason = "Use det_hash::IndexSet or BTreeSet. Only hashbrown::HashTable with det_hash hashes is allowed." },
     { path = "std::time::Instant", reason = "Host timing must not affect deterministic library behavior." },
     { path = "std::time::SystemTime", reason = "Host time must not affect deterministic library behavior." },
-    { path = "std::hash::RandomState", reason = "Randomized hash seeding breaks determinism. Use det_hash::IndexMap or BTreeMap instead." },
     { path = "std::collections::hash_map::RandomState", reason = "Randomized hash seeding breaks determinism. Use det_hash::IndexMap or BTreeMap instead." },
     { path = "foldhash::fast::RandomState", reason = "Randomized hash seeding breaks determinism. Use det_hash::FixedState.", allow-invalid = true },
     { path = "foldhash::fast::SeedableRandomState", reason = "Randomized hash seeding breaks determinism. Use det_hash::FixedState.", allow-invalid = true },

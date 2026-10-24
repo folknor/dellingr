@@ -28,17 +28,21 @@ Translations:
 --check compares all registered tables byte-for-byte without writing.
 --generate rewrites them. Both require research/core-math at CORE_MATH_COMMIT,
 including clean source files. No Rust formatter or build is needed.
+--check-pins verifies the reviewed table digests without an upstream checkout.
 """
 
 import difflib
+import hashlib
 import re
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 from write_if_changed import write_if_changed
 
-CORE_MATH_COMMIT = "0ce0cbc15935e24c656280e5a46c34e89f301b7a"
 ROOT = Path(__file__).resolve().parent.parent
+PIN = tomllib.loads((ROOT / "reference/core-math-pin.toml").read_text(encoding="utf-8"))
+CORE_MATH_COMMIT = PIN["commit"]
 
 # Output file -> (extra import, ordered source/name/Rust-name/kind/struct specs).
 TABLES = {
@@ -320,15 +324,26 @@ def translate(specs):
 
 def main():
     args = sys.argv[1:]
+    if args == ["--check-pins"]:
+        directory = ROOT / "src/crmath/tables"
+        expected = set(TABLES) | {"mod.rs"}
+        actual = {path.name for path in directory.glob("*.rs")}
+        if actual != expected or set(PIN["tables_sha256"]) != expected:
+            sys.exit("table registry, Rust files and pinned digests must cover the same files")
+        for filename, digest in PIN["tables_sha256"].items():
+            if hashlib.sha256((directory / filename).read_bytes()).hexdigest() != digest:
+                sys.exit(f"{filename}: generated table differs from reviewed digest")
+        print("generated table digests match reference/core-math-pin.toml")
+        return
     if args not in (["--check"], ["--generate"]):
         if not args or any(arg.startswith("--") and not arg.startswith(("--out=", "--use=")) for arg in args):
-            sys.exit("usage: crmath_tables.py --check | --generate | [--out=PATH] [--use=IMPORT] SPEC ...")
+            sys.exit("usage: crmath_tables.py --check-pins | --check | --generate | [--out=PATH] [--use=IMPORT] SPEC ...")
         translate(args)
         return
     checkout = ROOT / "research/core-math"
     pin = subprocess.check_output(["git", "-C", str(checkout), "rev-parse", "HEAD"], text=True).strip()
     if pin != CORE_MATH_COMMIT:
-        sys.exit(f"research/core-math must be at {CORE_MATH_COMMIT}, got {pin}")
+        sys.exit(f"clone {PIN['clone_url']} into research/core-math and check out {CORE_MATH_COMMIT}; got {pin}")
     source_paths = sorted({spec.split(":")[0] for _, specs in TABLES.values() for spec in specs})
     subprocess.run(
         ["git", "-C", str(checkout), "diff", "--exit-code", "HEAD", "--"]

@@ -160,19 +160,3 @@ sorted; add a check that every `pin` row is read by some test.
 
 Enforceable: the pin-consumer check by a test; the fingerprint scope is a
 design choice.
-
-## VD-022 - The inline-cache differential mostly compares budget-bounded prefixes
-
-Reported by: the resolution loop's reviewer.
-
-`src/vm/cache_differential.rs` runs each corpus example with cache hits on and
-off under one small cost budget, so most examples stop at `BudgetExceeded` and
-the comparison covers only their first few thousand charged units. Its comment
-says it compares "completed programs" as well; how many examples actually
-complete is not reported. Differences that only appear after warm-up (the
-cases caches exist for) may never be reached.
-
-Fix: report or assert how many examples complete; raise the budget, or run
-non-stress examples unbounded, as far as the 20-second cap allows.
-
-Enforceable: by an assertion on the completed count.

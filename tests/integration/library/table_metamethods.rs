@@ -160,9 +160,8 @@ fn metamethod_insert_allows_large_length_when_shift_distance_is_zero() {
 
 #[test]
 fn metamethod_path_charges_like_the_raw_path() {
-    // `__index` forces the metamethod path; `__tostring` keeps the fast path.
-    // Every key read here is present, so no handler runs and the two scripts
-    // differ only in which path the library takes.
+    // These dense fixtures isolate the operation charges. The companion
+    // behavior test below exercises the selected hooks on every operation.
     for op in [
         "table.insert(t, 1, 0)",
         "table.insert(t, 0)",
@@ -182,6 +181,67 @@ fn metamethod_path_charges_like_the_raw_path() {
             support::cost_of(script("__index")),
             "{op}: metamethod path charge differs from the fast path"
         );
+    }
+}
+
+#[test]
+fn sequence_path_variants_have_script_visible_behavior() {
+    let cases = [
+        (
+            "table.insert(t, 1, 0)",
+            "if t[1] ~= 0 or t[2] ~= 1 or t[6] ~= 5 then error('insert lost values') end",
+        ),
+        (
+            "table.insert(t, 0)",
+            "if t[6] ~= 0 then error('append lost value') end",
+        ),
+        (
+            "local removed = table.remove(t, 1)",
+            "if removed ~= 1 or t[1] ~= 2 or t[4] ~= 5 then error('remove lost values') end",
+        ),
+        (
+            "local removed = table.remove(t)",
+            "if removed ~= 5 or t[5] ~= nil then error('remove lost value') end",
+        ),
+        (
+            "table.move(t, 1, 5, 2)",
+            "if t[2] ~= 1 or t[6] ~= 5 then error('move lost values') end",
+        ),
+        (
+            "local joined = table.concat(t, ',')",
+            "if joined ~= '1,2,3,4,5' then error('concat lost values') end",
+        ),
+        (
+            "local a, b, c, d, e = table.unpack(t)",
+            "if a ~= 1 or b ~= 2 or c ~= 3 or d ~= 4 or e ~= 5 then error('unpack lost values') end",
+        ),
+    ];
+
+    for (op, raw_check) in cases {
+        let raw_script = format!(
+            "local t = {{1, 2, 3, 4, 5}}\n\
+             setmetatable(t, {{__tostring = function() error('unrelated hook ran') end}})\n\
+             {op}\n{raw_check}\n"
+        );
+        run(&raw_script).unwrap();
+
+        let meta_script = format!(
+            r#"
+            local reads, writes = 0, 0
+            local t = {{1, 2, [4] = 4}}
+            setmetatable(t, {{
+                __len = function() return 5 end,
+                __index = function(_, key) reads = reads + 1; return key * 10 end,
+                __newindex = function(target, key, value)
+                    writes = writes + 1
+                    rawset(target, key, value)
+                end,
+            }})
+            {op}
+            if reads == 0 and writes == 0 then error("sequence hooks were not observed") end
+            "#
+        );
+        run(&meta_script).unwrap();
     }
 }
 

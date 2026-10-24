@@ -1,5 +1,46 @@
 project = "dellingr"
 
+# These crates are absent, so Clippy paths into them cannot resolve. Refuse
+# their introduction at the dependency boundary instead of keeping no-op bans.
+[[dependency_rule]]
+name = "no-host-entropy"
+from = "dellingr"
+forbid = ["rand", "rand_core", "getrandom"]
+
+[[fixture_lint]]
+name = "determinism-policy"
+path = "fixtures/lint-policy"
+manifest = "fixtures/lint-policy/expect.toml"
+seed_lock = true
+lint_args = ["-W", "clippy::disallowed_methods", "-W", "clippy::disallowed_types"]
+
+[[fixture_lint.variant]]
+name = "walk-up"
+unset = ["CLIPPY_CONF_DIR"]
+
+[[fixture_lint.variant]]
+name = "explicit"
+env = { CLIPPY_CONF_DIR = "{root}" }
+
+[[script_check]]
+name = "lint-policy-inventory"
+command = "python3 -B fixtures/lint-policy/check_policy.py"
+expect = "ok"
+match = "last-line"
+stream = "stdout"
+
+# The binary half of the libm check is the integration test
+# corpus::libm_symbols, which inspects the dev binary each ordinary sweep
+# builds. scripts/check_libm_symbols.sh checks the release binaries but builds
+# them through `brokkr build`, which refuses to run beneath `brokkr check`, so
+# it is a manual command and not registered here.
+[[script_check]]
+name = "platform-libm-symbol-checker-tests"
+command = "python3 -B scripts/test_libm_symbols.py"
+expect = "ok"
+match = "last-line"
+stream = "stdout"
+
 # `brokkr check` runs each [[check]] entry as its own (clippy + test) pass with
 # the named feature shape. We sweep both feature configurations because
 # `snapshot` guards real code behind `cfg(feature = "snapshot")` *and*

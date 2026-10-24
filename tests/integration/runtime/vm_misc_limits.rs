@@ -1,6 +1,7 @@
 //! Runtime value-count cap, typed `error()` values and scope naming.
 
 use dellingr::error::{ErrorKind, ErrorValue};
+use dellingr::limits::MAX_RESULTS;
 use dellingr::{ArgCount, LuaType, RetCount, State};
 
 use crate::support;
@@ -12,16 +13,20 @@ fn lua_return_of_many_values_hits_documented_cap() {
         &mut state,
         r#"
         local t = {}
-        for i = 1, 255 do t[i] = i end
+        for i = 1, LIMIT do t[i] = i end
         local function many(...) return 0, ... end
         return many(table.unpack(t))
-    "#,
+    "#
+        .replace("LIMIT", &MAX_RESULTS.to_string()),
     );
     let error = state
         .call(ArgCount::Fixed(0), RetCount::All)
-        .expect_err("256 Lua results exceed the runtime cap");
+        .expect_err("Lua results above MAX_RESULTS exceed the runtime cap");
     assert!(
-        matches!(error.kind(), ErrorKind::TooManyResults { limit: 255 }),
+        matches!(
+            error.kind(),
+            ErrorKind::TooManyResults { limit: MAX_RESULTS }
+        ),
         "unexpected error: {error:?}"
     );
 }

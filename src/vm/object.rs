@@ -759,11 +759,16 @@ impl GcHeap {
         }
     }
 
-    /// Test-only: the objects a mark phase coloured, after which every
+    /// Test-only: the heap handles a mark phase coloured, after which every
     /// object and string colour is back to Unmarked, as a sweep would leave
     /// them, without freeing anything. The caller resets the upvalue pool.
     #[cfg(all(test, feature = "snapshot"))]
-    pub(super) fn take_marked_objects(&self) -> std::collections::BTreeSet<ObjectPtr> {
+    pub(super) fn take_marked_objects_and_strings(
+        &self,
+    ) -> (
+        std::collections::BTreeSet<ObjectPtr>,
+        std::collections::BTreeSet<StringPtr>,
+    ) {
         let mut marked = std::collections::BTreeSet::new();
         for (key, obj) in &self.objects {
             if obj.color.get() == Color::Reachable {
@@ -771,8 +776,14 @@ impl GcHeap {
             }
             obj.color.set(Color::Unmarked);
         }
+        let mut marked_strings = std::collections::BTreeSet::new();
+        for (key, entry) in &self.strings.strings {
+            if entry.color.get() == Color::Reachable {
+                marked_strings.insert(StringPtr(key));
+            }
+        }
         self.strings.reset_marks();
-        marked
+        (marked, marked_strings)
     }
 
     /// Number of GC-managed objects (tables and closures).

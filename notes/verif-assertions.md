@@ -55,43 +55,6 @@ favour of the corpus-wide cost golden in verif-goldens.md.
 
 Enforceable: no.
 
-## VA-003 - Boundary inputs hard-coded instead of derived from the public constants
-
-Reported by: native-stack-errors, compiler-cost, library.
-
-Each silently stops testing its boundary when the constant moves:
-
-- `cost_check_interval.rs`: additions `[1, 2, 63, 64, 65, 127, 128, 129]`,
-  "immediately before, at, and after interval boundaries", hard-code
-  `COST_CHECK_INTERVAL = 64`, which is public as
-  `dellingr::limits::COST_CHECK_INTERVAL` (`mid_run_budget_reset_sees_a_flushed_meter`
-  in `cost_golden.rs` does use the constant).
-- `cost_golden.rs` `arith_error_after_batch_flush`: "65 loop adds ... spanning
-  the 64-unit batch boundary", in a const string inside the fingerprinted corpus,
-  so it cannot be derived; an argument for moving boundary cases out of the corpus.
-- `cost_determinism.rs` eviction test: `for i in 0..256` is
-  `PATTERN_CACHE_ENTRIES` (public).
-- `src/compiler/parser/tests.rs`: `too_many_upvalues_errors` (200 + 56, "limit
-  255", should be `MAX_UPVALUES`, not even imported);
-  `return_255_literals_uses_a_fixed_count` (255, not `MAX_EXPRESSIONS`).
-- `compiler_limits.rs`: 254/253/255 argument counts, 255/256 parameters,
-  `TooManyAssignmentTargets { count: 256 }`, 300-entry constructors meant to
-  cross `MAX_TABLE_BATCH_SIZE`, 256 sites meant to cross `MAX_CACHE_SLOTS`.
-- `call_counts.rs`: `limit: 255` in `TooManyArguments`/`TooManyResults` matchers;
-  `vm_misc_limits.rs` asserts `TooManyResults { limit: 255 }`; `error_boundary.rs`'s
-  NATURAL corpus uses `unpack({}, 1, 255)` (should be `MAX_RESULTS` /
-  `MAX_ARGUMENTS`).
-- `runtime_result_limit_accepts_255_and_rejects_256` asserts `MAX_RESULTS ==
-  u8::MAX`, a fact about two constants that belongs as a `const _: () =
-  assert!` beside `MAX_RESULTS`, not a runtime test in a stdlib file.
-
-The rendered error strings ("too many arguments (limit 255)") are fine as message
-goldens; the boundary inputs are not.
-
-Enforceable: a textlint rule over `tests/**` and `src/**` test code flagging
-63/64/65, 254/255/256 and 65534/65535 inside `.repeat(`, `repeat_n(`, `0..N` and
-`1..=N` would catch most with few false positives; a heuristic, not a proof.
-
 ## VA-006 - Tests filed under the wrong subject, or named by sequence number
 
 Reported by: native-stack-errors, runtime, compiler-cost, library.
@@ -178,25 +141,6 @@ case in the integration crate.
 
 Enforceable: no.
 
-## VA-008 - The reentrant-opcode coverage guard checks its own copy of the sources
-
-Reported by: runtime, compiler-cost.
-
-`src/vm/frame.rs::reentry_accounting_sources_cover_the_intended_dispatch_opcodes`
-exists to prove that `tests/integration/cost/reentrant_opcode_accounting.rs`'s sources exercise
-`CALL`, `TFOR_CALL`, `LEN`, `GET_FIELD`, `GET_TABLE`, `SET_FIELD`, `SET_TABLE`
-and `SELF`. Its snippets are a hand copy that has already drifted: the integration
-cases prefix every source with `local prior = left + right\n`, use
-`indexed:method()` where the guard uses `receiver:method()`, and name the length
-case `LENGTH` where the guard says `LEN`. Edit the real case so it no longer emits
-`SELF` and the guard still passes.
-
-Fix: put the guard in `reentrant_opcode_accounting.rs` and run it over `CASES`
-themselves, using the public `Program::disassemble()` text (opcode names are
-printed) instead of `crate::compiler::compile`; delete the unit-test copy.
-
-Enforceable: yes, by construction once there is one list.
-
 ## VA-009 - Boolean-collapsed script results
 
 Reported by: runtime.
@@ -228,25 +172,6 @@ defines where).
 
 Enforceable: yes, the assertion is the enforcement.
 
-## VA-015 - Fault-event sites are strings, and eligibility is computed twice
-
-Reported by: native-stack-errors.
-
-`inject_fault(site: &'static str, argument, eligible)` records `(site, argument,
-fired)` and drops `eligible`. Consumers re-derive it: `error_boundary_fault_sweep`
-filters with `*site != "native_depth" || *argument > 0`, a copy of the rule in
-`eval.rs` (`self.native_call_depth > 0`); `string_bytes.rs` counts all events and
-skips targets that fired nothing. Two writers of one rule, keyed on a string.
-Renaming the site string makes the filter count ineligible events; the sweep then
-panics on `position(...).unwrap()` rather than silently passing, so it fails
-loudly, in the `instrumentation-faults` sweep.
-
-Fix: an `Event { site: FaultSite, argument: usize, eligible: bool, fired: bool }`
-with `FaultSite` an enum, returned by `finish_fault_injection`; consumers filter
-on `eligible`.
-
-Enforceable: by the type.
-
 ## VA-016 - Smaller items in the error suites
 
 Reported by: native-stack-errors.
@@ -262,25 +187,6 @@ Reported by: native-stack-errors.
 Enforceable: no.
 
 # Runtime
-
-## VA-023 - Path-parity tests do not prove the two paths differ
-
-Reported by: runtime.
-
-`table_metamethods.rs::metamethod_path_charges_like_the_raw_path` compares a
-`__tostring` table ("keeps the fast path") with an `__index` table (forces the
-metamethod path); `table_sort_metamethods.rs::proxy_sort_charges_like_raw_sort`
-and `table_with_unrelated_metatable_keeps_raw_sort` do the same for sort. Which
-path a table takes is not observable from the public API. If path selection
-changed so that any metatable (or none) routes through the metamethod path, both
-scripts take the same path and parity passes trivially.
-
-Fix: make each path evidence itself (a hole in the sequence so the `__index`
-handler runs and counts in one variant and is shown not to run in the other), or
-move the parity tests to a unit test reading a `cfg(test)` path counter, as
-`pattern_compilations` instruments the pattern cache.
-
-Enforceable: no general rule.
 
 ## VA-031 - Growth-limit coverage exists only under `snapshot`
 
@@ -302,24 +208,6 @@ directly, used by both sweeps; keep one snapshot-specific test for the load path
 
 Enforceable: no general rule.
 
-## VA-051 - Strings and env baselines sit outside the save inventory's checks
-
-Reported by: the agent that made State's root and in-flight inventories
-exhaustive (`src/vm/inventory.rs`).
-
-The weak tables are now an exhaustive `WeakTable` inventory. What remains:
-
-- `save_walker_encodes_exactly_what_serialized_roots_reach` compares objects
-  only, and only for the root kinds its fixture fills. Strings (pins, builtin
-  and event names, chunk literals) are outside it.
-- That env baselines can be rebuilt on load is a stated invariant of
-  `capture_env_tokens`, not something the code checks.
-
-Fix: extend the identity test to the string pool; check the env-baseline
-invariant on load or in a test.
-
-Enforceable: by those tests.
-
 # Compiler and cost
 
 ## VA-037 - `COST_CHECK_INTERVAL` has no injection point, so the batching test needs a hand model
@@ -339,82 +227,6 @@ over the corpus and the error corpus at a sweep of budgets (the sweep machinery 
 
 Enforceable: by the differential test.
 
-## VA-038 - Tests poke private state to build preconditions
-
-Reported by: compiler-cost.
-
-`gmatch_string_checks_preserve_relative_indexes_in_nested_frames` sets
-`state.stack_bottom = 2` directly; `literal_pool_limits_match_their_error_messages`
-fills `literal_indices.strings` without the matching `chunk.string_literals` (the
-number half fills both). Both construct states production cannot reach, so they
-can pass against invariants the real code never relies on, or fail when a
-representation changes without behaviour changing.
-
-Fix: reach the precondition through the public path (a nested Rust call for the
-stack bottom; real literals, or the 65,536-literal source the parser would see).
-
-Enforceable: no.
-
-## VA-039 - Three hand-maintained per-opcode operand descriptions
-
-Reported by: compiler-cost.
-
-`compiler/verify.rs` (which operand is a literal, a cache slot, a nested index),
-`disassemble.rs`'s `write_annotation` (the same mapping again) and the dispatch
-loop each know which field of which opcode means what. `opcode_rows!` already
-carries layout, cost and arithmetic function; adding operand kinds there and
-deriving the verifier's pool checks and the disassembly annotations from it removes
-two of the three copies.
-
-Enforceable: yes, structurally.
-
 # Library
 
-## VA-052 - Leftovers from the cost-fixture and oracle changes
-
-Reported by: the resolution loop's reviewer.
-
-- `src/crmath/tests/golden.rs::pinned_regression_inputs_survive_golden_regeneration`
-  no longer checks regeneration (that half was tautological and was removed);
-  only the golden-row lookup remains, so the name promises more than the body.
-- `tests/integration/cost/cost_golden.rs::table_library_native_charges_are_one_or_zero`
-  still hard-codes the seven table-library costs that the cost fixture's
-  `table_*` rows now pin: a second, unversioned copy.
-
-Fix: rename the crmath test to what it checks; make the table-library test
-read the fixture rows (or delete it in favour of them).
-
-Enforceable: no.
-
-## VA-042 - "Verified against Lua 5.2/5.4" expectations frozen in Rust literals
-
-Reported by: library.
-
-`bracket_ranges_follow_reference_branch_order`,
-`accept_empty_repeats_do_not_consume_match_depth`,
-`string_library_coerces_number_subjects_and_patterns`, the `*_match_lua_54` tests in
-`string_format.rs` and every row of `number_format_g14` say their expected values
-were "measured against both Lua 5.2 and 5.4". Those are one-time captures; the diff
-gate is the machine that keeps such captures honest, and these are outside it.
-
-Fix: move each script-level expectation that does not depend on a deliberate
-divergence into an unmarked `examples/` file; keep Rust tests for host-API and
-structured-error assertions.
-
-Enforceable: by the diff gate.
-
 # Snapshot
-
-## VA-053 - The corruption sweep never asserts that a truncated save is rejected
-
-Reported by: the resolution loop's reconciler.
-
-`tests/integration/snapshot/save_state.rs::corruption_sweep_never_panics`
-truncates a save at every prefix but only checks that load returns without
-panicking. Every proper prefix should be rejected; asserting `is_err()` for
-each is cheap and turns the old "must error" comment into a tested fact.
-
-Fix: assert rejection for every proper prefix; if some prefix loads, that is a
-finding about the integrity layer, not a reason to drop the assertion.
-
-Enforceable: by the assertion.

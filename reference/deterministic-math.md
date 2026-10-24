@@ -6,6 +6,14 @@ Every transcendental result a script can observe comes from `src/crmath/`:
 calls the platform libm for these, and `clippy.toml` bans the `f64`/`f32`
 transcendental methods, `powi` and `mul_add` so new code cannot slip back.
 
+The lints see only this crate's source, not dependencies or the libcalls LLVM
+emits, so `scripts/libm_symbols.py` checks the linked binary for platform libm
+transcendental symbols (`fmod`, `sqrt` and the other exact operations are
+allowed). `brokkr check` runs it, through the integration test
+`corpus::libm_symbols`, on the dev-profile CLI binary of the default and
+`snapshot` sweeps only. The fat-LTO release binaries are not gated: run
+`scripts/check_libm_symbols.sh` by hand, outside `brokkr check`, to check them.
+
 ## Why
 
 Game replays must reproduce bit for bit on any host. The Rust `f64` methods
@@ -85,10 +93,16 @@ NaN's bits), and the VM never lets a script observe them.
   `python3 scripts/crmath_tables.py --check` to verify the pinned upstream
   commit and source files, the table registry, and every generated table byte
   for byte; `--generate` rewrites the tables from that same pinned checkout.
+  `reference/core-math-pin.toml` single-sources the commit, clone URL and
+  reviewed table SHA-256 digests. The ordinary, checkout-free
+  `core_math_table_digests_match_pin` test runs
+  `python3 scripts/crmath_tables.py --check-pins` (Python 3.11 or later).
+  An intentional table update must review and update those digests alongside
+  regeneration; the generator does not rewrite the manifest.
 - Directed rounding, `errno`, exception flags and upstream's exception-flag
   save/restore are removed; only round-to-nearest is implemented.
-- The upstream commit and licence notices are in
-  `src/crmath/LICENSE-CORE-MATH`.
+- The upstream commit and clone URL are in `reference/core-math-pin.toml`;
+  licence notices are in `src/crmath/LICENSE-CORE-MATH`.
 
 ## Tests
 
@@ -112,10 +126,9 @@ NaN's bits), and the VM never lets a script observe them.
   require the explicit `crmath-sweeps` feature. Run them in release with
   `brokkr test crmath::tests::golden --release --features crmath-sweeps`.
   The worst-case sweeps read the checkout under `research/core-math`.
-  The checkout must be upstream commit
-  `0ce0cbc15935e24c656280e5a46c34e89f301b7a`, the one the port was taken at
-  (`CORE_MATH_COMMIT` in `src/crmath/tests/golden.rs`, which the golden
-  file's header also names). The reader pins each function's parsed input
+  The checkout must be the upstream commit in `reference/core-math-pin.toml`,
+  the one the port was taken at (which the golden file's header also names).
+  The reader pins each function's parsed input
   count and a digest of those inputs, so the sweeps, the regeneration and
   the cheaper `core_math_corpus_matches_pin` fail on a missing,
   damaged or different corpus instead of testing other inputs; nothing
