@@ -4,128 +4,80 @@
 //! native library charges and compiler emission (which opcodes a source turns
 //! into, e.g. constant folding). If one of these assertions fails, the cost of
 //! identical source changed: bump `COST_MODEL_VERSION`, document the new
-//! version in `src/cost_meter.rs`, and update the expected values here.
+//! version in `src/cost_meter.rs`, and update the versioned fixture.
+//!
+//! Snapshot equality and budget-derived expectations remain in their owning
+//! suites: they are relations, not independent absolute cost goldens to copy.
 
 use dellingr::error::ErrorKind;
 use dellingr::{ArgCount, COST_MODEL_VERSION, RetCount, State};
 
 use crate::support;
 
-/// Fingerprint of `CORPUS` together with `COST_MODEL_VERSION`. Refresh it
-/// whenever either changes.
-const COST_MODEL_GOLDEN_FINGERPRINT: u64 = 0x1328_bf4a_9cd2_c5fc;
+/// Versioned rows shared by source and native-call goldens.
+const FIXTURE: &str = include_str!("../../fixtures/cost_golden.txt");
 
-const CORPUS: &[(&str, &str, u64)] = &[
-    (
-        "folded_literals",
-        "local x = 60 * 1000 + -5 local y = x * 2",
-        1,
-    ),
-    ("literal_pow", "local x = 2 ^ 10 local y = -3 ^ 2 + 1", 4),
-    (
-        "loop_and_calls",
-        "local function f(a) return a + 1 end local s = 0 for i = 1, 100 do s = f(s) end",
-        100,
-    ),
-    (
-        "tables",
-        "local t = {} for i = 1, 50 do t[i] = i end local n = 0 for _, v in ipairs(t) do n = n + v end table.insert(t, 1, 0) table.concat(t, ',')",
-        296,
-    ),
-    (
-        "rawset",
-        "local t = {}; rawset(t, 1, 2)",
-        // One table creation and one flat rawset charge.
-        2,
-    ),
-    (
-        "strings_and_patterns",
-        "local s = 'hello world from lua' local a = s:find('wor') local b = s:gsub('o', '0') local c = s:match('(%a+) (%a+)') local u = s:upper()",
-        193,
-    ),
-    (
-        "gmatch",
-        "local n = 0 for w in string.gmatch('one two three four', '%a+') do n = n + #w end for w in string.gmatch('a b', '%a+') do n = n + 1 end",
-        103,
-    ),
-    (
-        "gmatch_leading_caret",
-        "local n = 0 for w in string.gmatch('^a^a', '^a') do n = n + #w end",
-        // The literal caret is charged as the one pattern byte it is, at
-        // creation and at first-call compilation.
-        26,
-    ),
-    (
-        "sequence_len_handler",
-        "local t = setmetatable({}, {__len = function() local n = 1 return n + 1 end}) table.insert(t, 7)",
-        // Two tables, one initializer write, one handler add and one append.
-        5,
-    ),
-    (
-        "quoted_integral",
-        "local s = string.format('%q', 1)",
-        // Two format bytes and one emitted decimal digit.
-        3,
-    ),
-];
+pub(super) struct Golden {
+    pub(super) kind: &'static str,
+    pub(super) name: &'static str,
+    pub(super) expected: Option<u64>,
+    pub(super) input: &'static str,
+}
 
-/// Sources that raise a runtime error after executing costed opcodes. The
-/// expected value counts every costed opcode that ran before the error, so it
-/// must not depend on the dispatch loop's cost batching interval.
-const ERROR_CORPUS: &[(&str, &str, u64)] = &[
-    (
-        "arith_error_after_add",
-        "local a, b = 1, nil local x = a + a local y = a + b",
-        // Two adds, including the failing one.
-        2,
-    ),
-    (
-        "index_nil_after_add",
-        "x = 2 local a = 1 + x local t = nil local b = t.k",
-        // One add; global writes and field reads are free.
-        1,
-    ),
-    (
-        "write_nil_after_add",
-        "local a = 1 local x = a + a local t = nil t.k = x",
-        // One add and the failing field write.
-        2,
-    ),
-    (
-        "nested_arith_error",
-        "local function f(a) local x = a + a return x + nil end local a = 1 local x = a + a f(x)",
-        // One caller add, one successful callee add and one failing add.
-        3,
-    ),
-    (
-        "arith_error_after_batch_flush",
-        "local n = 0 for i = 1, 65 do n = n + 1 end return n + nil",
-        // 65 loop adds and the failing add, spanning the 64-unit batch boundary.
-        66,
-    ),
-    (
-        "index_handler_error",
-        "local t = setmetatable({}, { __index = function(_, k) local n = 1 return n + k end }) local n = 1 local x = n + n local y = t.missing",
-        // Two tables, one initializer write, one caller add and one failing add.
-        5,
-    ),
-    (
-        "newindex_handler_error",
-        "local t = setmetatable({}, { __newindex = function(_, k, v) return v + k end }) local n = 1 local x = n + n t.missing = x",
-        // As above, plus the field write that invokes __newindex.
-        6,
-    ),
-    (
-        "length_handler_error",
-        "local t = setmetatable({}, { __len = function(t) local n = 1 return n + t end }) local n = 1 local x = n + n local y = #t",
-        // Two tables, one initializer write, one caller add and one failing add.
-        5,
-    ),
-];
+pub(super) fn goldens() -> Vec<Golden> {
+    let mut names = std::collections::BTreeSet::new();
+    FIXTURE
+        .lines()
+        .skip(1)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(|line| {
+            let fields: Vec<_> = line.splitn(4, '|').collect();
+            assert_eq!(fields.len(), 4, "malformed cost golden: {line}");
+            assert!(
+                names.insert((fields[0], fields[1])),
+                "duplicate golden: {line}"
+            );
+            let expected = if fields[2].is_empty() {
+                assert!(matches!(fields[0], "free" | "free_error"));
+                None
+            } else {
+                Some(
+                    fields[2]
+                        .parse()
+                        .expect("golden cost is an unsigned integer"),
+                )
+            };
+            assert!(matches!(
+                fields[0],
+                "run" | "error" | "failure" | "native" | "free" | "free_error" | "pin"
+            ));
+            Golden {
+                kind: fields[0],
+                name: fields[1],
+                expected,
+                input: fields[3],
+            }
+        })
+        .collect()
+}
+
+pub(super) fn pinned_cost(name: &str) -> u64 {
+    goldens()
+        .into_iter()
+        .find(|row| row.name == name)
+        .expect("named cost pin exists")
+        .expected
+        .expect("named pin has an expected cost")
+}
 
 #[test]
 fn cost_used_after_runtime_error_matches_golden_corpus() {
-    for &(name, source, expected) in ERROR_CORPUS {
+    for row in goldens()
+        .into_iter()
+        .filter(|row| matches!(row.kind, "error" | "failure"))
+    {
+        let (name, source) = (row.name, row.input);
+        let expected = row.expected.expect("error golden has a cost");
         let exact_budget = i64::try_from(expected).expect("golden cost fits in i64");
         for budget in [None, Some(exact_budget), Some(1_000)] {
             let mut state = State::new();
@@ -136,10 +88,12 @@ fn cost_used_after_runtime_error_matches_golden_corpus() {
             let error = state
                 .call(ArgCount::Fixed(0), RetCount::Fixed(0))
                 .expect_err("golden error source must fail at runtime");
-            assert!(
-                matches!(error.kind(), ErrorKind::TypeError(_)),
-                "{name} (budget {budget:?}): expected a type error, got {error:?}"
-            );
+            if row.kind == "error" {
+                assert!(
+                    matches!(error.kind(), ErrorKind::TypeError(_)),
+                    "{name} (budget {budget:?}): expected a type error, got {error:?}"
+                );
+            }
             assert_eq!(
                 state.cost_used(),
                 expected,
@@ -169,7 +123,8 @@ fn unpack_charges_nothing_for_lookups_reached_before_an_index_error() {
     }
     // Two tables, one field initializer, and the failing handler add.
     // The lookup itself adds no native charge.
-    assert_eq!(costs, [4, 4]);
+    let expected = pinned_cost("unpack_failed_lookup");
+    assert_eq!(costs, [expected, expected]);
 }
 
 #[test]
@@ -198,18 +153,19 @@ fn table_library_native_charges_are_one_or_zero() {
 #[test]
 fn table_library_charges_are_flat() {
     let setup = "local t = {} for i = 1, 50 do t[i] = i end";
-    let pairs: &[(&str, &str, &str, u64)] = &[
+    let pairs: &[(&str, &str, &str)] = &[
         // Front insert and append cost the same.
-        ("insert", "local d = -49", "local d = 1", 0),
+        ("insert", "local d = -49", "local d = 1"),
         // Front remove and pop cost the same.
-        ("remove", "local d = -49", "local d = 0", 0),
+        ("remove", "local d = -49", "local d = 0"),
         // unpack is free whatever the range.
-        ("unpack", "local j = 10", "local j = 1", 0),
-        ("unpack_empty", "local j = 1", "local j = 0", 0),
+        ("unpack", "local j = 10", "local j = 1"),
+        ("unpack_empty", "local j = 1", "local j = 0"),
         // pack costs 1 whatever the argument count.
-        ("pack", "local j = 10", "local j = 1", 0),
+        ("pack", "local j = 10", "local j = 1"),
     ];
-    for &(name, wide, narrow, expected) in pairs {
+    for &(name, wide, narrow) in pairs {
+        let expected = pinned_cost(&format!("flat:{name}"));
         let body = match name {
             "insert" => "local p = #t + d table.insert(t, p, 0)",
             "remove" => "local p = #t + d table.remove(t, p)",
@@ -230,9 +186,11 @@ fn table_library_charges_are_flat() {
 #[test]
 fn cost_used_matches_golden_corpus() {
     let mut drift = Vec::new();
-    for &(name, source, expected) in CORPUS {
+    for row in goldens().into_iter().filter(|row| row.kind == "run") {
+        let (name, source) = (row.name, row.input);
+        let expected = row.expected.expect("source golden has a cost");
         let mut state = State::new();
-        support::run(&mut state, source);
+        support::run(&mut state, source.replace("\\n", "\n"));
         let actual = state.cost_used();
         if actual != expected {
             drift.push(format!("{name}: expected {expected}, got {actual}"));
@@ -241,7 +199,7 @@ fn cost_used_matches_golden_corpus() {
     assert!(
         drift.is_empty(),
         "cost_used for identical source changed under COST_MODEL_VERSION {COST_MODEL_VERSION}; \
-         bump COST_MODEL_VERSION, document the new version, and update this table:\n{}",
+         bump COST_MODEL_VERSION, document the new version, and update the fixture:\n{}",
         drift.join("\n")
     );
 }
@@ -252,25 +210,87 @@ fn fingerprint_bytes(fingerprint: &mut u64, bytes: &[u8]) {
     }
 }
 
-fn golden_corpus_fingerprint() -> u64 {
+fn fixture_version(fixture: &str) -> u16 {
+    fixture
+        .lines()
+        .next()
+        .expect("cost fixture has a version")
+        .strip_prefix("cost_model=")
+        .expect("first line declares cost_model")
+        .parse()
+        .expect("cost model is a u16")
+}
+
+fn fixture_fingerprint(fixture: &str) -> u64 {
     let mut fingerprint = 0xcbf2_9ce4_8422_2325;
-    fingerprint_bytes(&mut fingerprint, &COST_MODEL_VERSION.to_le_bytes());
-    for &(_, source, expected) in CORPUS.iter().chain(ERROR_CORPUS.iter()) {
-        fingerprint_bytes(&mut fingerprint, source.as_bytes());
-        fingerprint_bytes(&mut fingerprint, &[0]);
-        fingerprint_bytes(&mut fingerprint, &expected.to_le_bytes());
+    for line in fixture.lines().skip(1) {
+        if !line.is_empty() && !line.starts_with('#') {
+            fingerprint_bytes(&mut fingerprint, line.as_bytes());
+            fingerprint_bytes(&mut fingerprint, b"\n");
+        }
     }
     fingerprint
 }
 
+/// Append-only record of (cost model version, fixture row fingerprint). A
+/// changed fixture row passes only by bumping `COST_MODEL_VERSION` and
+/// appending a new pair: the last entry must be the current version with the
+/// current fingerprint, and no fingerprint may appear under two versions.
+/// Never edit or remove an existing entry; a diff that does is the signal a
+/// reviewer looks for. The history starts at version 8, when this fixture
+/// replaced the in-test corpus.
+const COST_MODEL_HISTORY: &[(u16, u64)] = &[(8, 0x7731_8aae_9088_6a97)];
+
 #[test]
 fn golden_corpus_fingerprint_matches_cost_model_version() {
     assert_eq!(
-        golden_corpus_fingerprint(),
-        COST_MODEL_GOLDEN_FINGERPRINT,
-        "golden sources, expected costs, or COST_MODEL_VERSION changed; review the expected costs, \
-         bump the version for cost changes, and refresh the fingerprint in this test"
+        fixture_version(FIXTURE),
+        COST_MODEL_VERSION,
+        "the fixture's cost_model header must name the current version"
     );
+    assert!(
+        COST_MODEL_HISTORY
+            .windows(2)
+            .all(|pair| pair[0].0 < pair[1].0),
+        "COST_MODEL_HISTORY versions must strictly increase"
+    );
+    let fingerprint = fixture_fingerprint(FIXTURE);
+    for &(version, recorded) in COST_MODEL_HISTORY {
+        assert!(
+            version == COST_MODEL_VERSION || recorded != fingerprint,
+            "the fixture rows match those recorded for cost model {version}; \
+             a fingerprint belongs to exactly one version"
+        );
+    }
+    assert_eq!(
+        COST_MODEL_HISTORY.last(),
+        Some(&(COST_MODEL_VERSION, fingerprint)),
+        "cost fixture rows changed: bump COST_MODEL_VERSION, document it in \
+         src/cost_meter.rs, update the fixture header and append the new \
+         (version, fingerprint) pair to COST_MODEL_HISTORY"
+    );
+}
+
+#[test]
+fn changelog_declares_the_current_cost_model_once() {
+    let changelog = include_str!("../../../CHANGELOG.md");
+    let unreleased = changelog
+        .split("\n## ")
+        .nth(1)
+        .expect("Unreleased section exists");
+    let marker = "`COST_MODEL_VERSION` is ";
+    let versions: Vec<_> = unreleased
+        .split(marker)
+        .skip(1)
+        .map(|tail| {
+            tail.split(|ch: char| !ch.is_ascii_digit())
+                .next()
+                .expect("version follows marker")
+                .parse::<u16>()
+                .expect("documented cost model is numeric")
+        })
+        .collect();
+    assert_eq!(versions, [COST_MODEL_VERSION]);
 }
 
 /// A Rust callback running under a Lua caller always sees that caller's opcode
@@ -353,7 +373,7 @@ fn mid_run_budget_reset_sees_a_flushed_meter() {
         "post-reset cost must not depend on the pre-reset prefix: {results:?}"
     );
     let (used, remaining) = results[0];
-    assert_eq!(used, 4, "post-reset table creation, two writes and one add");
+    assert_eq!(used, pinned_cost("mid_run_budget_reset"), "post-reset work");
     assert_eq!(
         remaining,
         1_000_000 - i64::try_from(used).expect("cost fits in i64")

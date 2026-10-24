@@ -2,7 +2,7 @@
 
 use super::{GcHeap, Markable, ObjectPtr, StringPtr, UpvalueRef};
 use crate::compiler::Bytecode;
-use crate::vm::inventory::GcRoot;
+use crate::vm::inventory::{GcCleanup, GcRoot};
 use crate::vm::{BytecodeRuntime, State, Val};
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -167,27 +167,10 @@ impl State {
         // Weak references: clear cache entries naming what the sweep freed,
         // before any allocation can reuse those slots.
         self.drop_dead_cache_entries();
-        // Pattern keys are weak. Prune before any allocation can reuse a
-        // swept string slot; retain preserves insertion order, so the oldest
-        // surviving entry remains the next deterministic eviction victim.
-        let mut pattern_bytes = 0;
-        self.patterns.retain(|(ptr, _), entry| {
-            let live = self.heap.val_is_live(&Val::Str(*ptr));
-            if live {
-                pattern_bytes += entry.byte_len;
-            }
-            live
+        self.for_each_gc_cleanup(|cleanup| match cleanup {
+            GcCleanup::WeakTable(table, heap) => table.prune(heap),
+            GcCleanup::UpvaluePool(pool) => pool.sweep(),
         });
-        self.pattern_bytes = pattern_bytes;
-        // Pool slots not marked via a reachable closure or an open-upvalue
-        // entry can never be read again; recycle them.
-        self.upvalue_pool.sweep();
-        // `format_pointer_ids` entries are deliberately not GC roots; an entry
-        // whose value no longer resolves can never be observed again, so drop
-        // it here, before a later allocation could reuse the key (generations
-        // wrap), and to keep identity storage bounded by live `%p` usage.
-        self.format_pointer_ids
-            .retain(|key, _| self.heap.val_is_live(&key.as_val()));
     }
 }
 

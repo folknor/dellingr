@@ -50,12 +50,12 @@ test("escape \\n", #"\n" == 1)
 test("escape \\t", #"\t" == 1)
 test("escape \\\\", #"\\" == 1)
 
--- SKIP: long strings [[...]] not implemented yet
+-- SKIP: long strings [[...]] are intentionally unsupported
 -- local long_str = [[hello
 -- world]]
 -- test("long string [[...]]", #long_str > 5)
 
--- SKIP: long strings [=[...]=] not implemented yet
+-- SKIP: long strings [=[...]=] are intentionally unsupported
 -- local long_str2 = [=[contains [[brackets]]]=]
 -- test("long string [=[...]=]", #long_str2 > 0)
 

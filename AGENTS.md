@@ -75,10 +75,10 @@ reference tools are fixed as `lua5.2` and `lua5.4`.
 `scripts/lib.sh`. If that limit cannot be applied, the command fails with exit
 code 2.
 
-The scripts read no environment variables. `BROKKR_MARKER_FIFO`, read by the
-hotpath harness and set by brokkr, is the only environment input in the
-repository. Script constants live in `scripts/lib.sh`; hyperfine uses a fixed warmup of
-2 runs.
+The scripts read no environment variables of their own. The hotpath crate
+consumes `HOTPATH_OUTPUT_PATH`, set by brokkr, and the harness reads
+`BROKKR_MARKER_FIFO`, also set by brokkr. Script constants live in
+`scripts/lib.sh`; hyperfine uses a fixed warmup of 2 runs.
 
 `scripts/native_calls.py` is the native-stack guard: it checks
 `reference/native-calls.toml`, the inventory of every function that can call
@@ -87,6 +87,8 @@ and the test, and prints `ok` (a `brokkr check` script check). Every call to
 an inventoried function carries a `// native-call: <edge-id>` comment on or
 directly above it, which the `native-call-marker` textlint rule also
 enforces; `python3 scripts/native_calls.py sites` lists the call sites.
+`scripts/test_native_calls.py` holds fixture tests for its lexer and call
+model and runs as a separate `brokkr check` script check.
 reference/native-calls.md explains the inventory, the direct-call convention
 the lexical check relies on, and how to add a path.
 
@@ -195,7 +197,7 @@ boundary and operand contract. Handler writes survive an error.
 - There are two test targets. `tests/integration/` (`main.rs`) is one crate holding every suite that can share a process, as modules grouped by subject: `cli`, `compiler`, `corpus`, `cost`, `failures`, `host`, `library`, `runtime`, and `snapshot`, which compiles only under the `snapshot` feature. A focused run names a subject or a file by module path (`brokkr test snapshot::`, `brokkr test gc_upvalues::`); the filter is a substring, so no module may end with a subject's name (the library's unit tests still match by subject: `compiler::` also runs the compiler's unit tests). Its `support` module holds the CLI binary path, CLI spawning, scratch files, the shared compile-load-call helpers (`support::run`, `eval`, `run_error`, `eval_number`, `cost_of`, ...) and `Recorder`, a `HostCallbacks` that records prints and error notifications. `tests/native_stack.rs` is the other target, kept apart because the release sweeps build it alone and an overflow at the envelope's edge aborts its process. `tests/common/` holds only files another target also includes by path. `corpus::test_conventions` keeps that shape: no other top-level target, every source reached by `mod` declarations from `main.rs` (a `cfg` only on its allowlist), no dead-code allowances or file-level `cfg`s, and a `// process-global:` comment on every `static`, panic-hook, environment or working-directory use; `scripts/test_tree_anchor.py`, a `brokkr check` script check, confirms from outside the crate that those tests still compile and run. The suites share one process, so a new one must not leave state another test can observe.
 - `tests/integration/corpus/run_examples.rs` - runs every regular Lua file under `examples/` with the binary cargo built for the test run (`support` owns the binary path and `tests/common/examples.rs` the shared, manifest-rooted example list; no test may reference `target/` or spawn cargo), in parallel worker threads. The shared list skips symlinks and orders relative paths by encoded bytes to match `find -type f` and `LC_ALL=C sort`. That includes the stress examples and the generated `parse/large_source.lua`. Each example runs under `scripts/test_limited.sh` (so its memory cap applies) with a fixed 60-second timeout. The runner uses at most eight workers, bounded by available parallelism and the number of examples. It fails on timeout, nonzero exit, unexpected stderr, if any stdout line ends with `: false`, or if a file whose main chunk assigns a global `_bench` (read from its compiled bytecode, so a `local function _bench` does not count) prints no line ending in `: true`. Examples that print test results follow the convention `print("test name: " .. tostring(condition))`. Adding an example that prints a line ending in `: false` will fail this test.
 - `tests/native_stack.rs` backs docs/limits.md's "Envelope": each path in `reference/native-calls.toml` recursed to `MAX_NATIVE_CALL_DEPTH` under every metamethod chain kind and deepest-point leaf, on `tests/common/stack.rs`'s profile-dependent thread size. `brokkr.toml` runs it in dev (the default and snapshot sweeps) and release (`release-native-stack` and `release-native-stack-snapshot`). A new call path into Lua needs a scenario there; reference/native-calls.md has the steps.
-- `tests/integration/corpus/diff_test.rs` is the differential gate: it uses the same shared example list, and checks that its ordered paths match `scripts/diff_test.sh --list-examples`. It drives the shell gate over the whole corpus in partitions that run concurrently inside one test, once per `[[check]]` feature shape in `brokkr.toml` (there is no separate brokkr script check for it), and also checks malformed timeout rejection and nonempty marker reasons. The corpus partitions are compiled out under the `hotpath` feature. `scripts/diff_gate.sh` is an optional debug-build wrapper around `diff_test.sh` for direct runs; nothing in `brokkr check` invokes it. Mark intentional divergences with a `-- DIFF: <reason>` comment; dellingr must still succeed, but the references are skipped. A file carrying a `-- SKIP-DIFF: <reason>` line is not run by the differential gate. Reference Lua is required for unmarked examples; the test leaves that check, and its error message, to `diff_test.sh`.
+- `tests/integration/corpus/diff_test.rs` is the differential gate: it uses the same shared example list, and checks that its ordered paths match `scripts/diff_test.sh --list-examples`. It drives the shell gate over the whole corpus in partitions that run concurrently inside one test, once per `[[check]]` feature shape in `brokkr.toml` (there is no separate brokkr script check for it), and also checks malformed timeout rejection and nonempty marker reasons. The corpus partitions are compiled out under the `hotpath` feature, which `hotpath-alloc` also enables. `scripts/diff_gate.sh` is an optional debug-build wrapper around `diff_test.sh` for direct runs; nothing in `brokkr check` invokes it. Mark intentional divergences with a `-- DIFF: <reason>` comment; dellingr must still succeed, but the references are skipped. A file carrying a `-- SKIP-DIFF: <reason>` line is not run by the differential gate. Reference Lua is required for unmarked examples; the test leaves that check, and its error message, to `diff_test.sh`.
 - `tests/integration/corpus/bench_scripts.rs` checks every `xxh128` and `hotpath_xxh128` pin in `brokkr.toml` against the registered file bytes, the bench/ footer contract, that each bench/ file runs (its setup without the footer, then `_bench` with `local K` patched to 1, or its local `kernel()` once when it has no `K`, or else one full `_bench` call, each phase under a cost budget, loaded under the harness's bare-path chunk name), and that each `brokkr.toml` workload's `file` and `hotpath_file` give their `kernel` and shared helper functions matching `analyze_cost` fingerprints, which guards the same-kernel pairing described under Hotpath benchmarks.
 - Unit tests live alongside their modules (e.g. `src/vm/object.rs` has GC tests).
 - To intentionally refresh `tests/fixtures/save_golden_current.bin` after a
@@ -205,7 +207,8 @@ boundary and operand contract. Handler writes survive an error.
   functions, which changes the saved function ids.
 
 The non-default `fault-injection` feature is test infrastructure, never a
-production or native-stack-probe configuration. It adds a single-refusal
+production or native-stack-probe configuration; `src/lib.rs` refuses to
+compile it without debug assertions. It adds a single-refusal
 countdown and event log, armed after setup, to stack and depth preflights.
 `error_boundary_fault_sweep` checks every eligible event of each fail-fast
 corpus execution, including event identity, surviving operands, notification
@@ -215,6 +218,8 @@ separately by focused caught-and-continue tests. The curated
 with `snapshot`, `hotpath`, `hotpath-alloc` and `crmath-sweeps`: it compiles
 and lints every target under those features and runs only the refusal sweep,
 the gmatch recovery test and the library's fault-injection unit tests.
+`corpus::test_conventions` fails if a test compiled only under
+`fault-injection` is not selected by that shape's `only` list.
 
 The budget and natural-failure sweeps also run in ordinary check shapes.
 `brokkr test error_boundary --release` exercises them without debug checks;
@@ -256,8 +261,8 @@ examples/calls/            # global, local, method, vararg, fixedarg, many_liter
 examples/fields/           # same_obj_read, same_obj_write, polymorphic, ...
 examples/globals/          # write
 examples/iter/             # pairs, ipairs
-examples/tables/           # fill, mixed, numeric_index, queue, sort
-examples/alloc/            # closure, short_tables, record_tables, gc_churn
+examples/tables/           # table operation examples
+examples/alloc/            # allocation and GC examples
 examples/strings/          # mixed, patterns, literal_find
 examples/parse/            # large_source (+ generate.py, see below)
 examples/composite/        # benchmark (the seven-section mixed suite at ~1/100
@@ -266,18 +271,15 @@ examples/composite/        # benchmark (the seven-section mixed suite at ~1/100
 
 Benches come in two flavours, and the distinction matters when reading the
 README table. Most are *workload* benches, meant to look like plausible script
-code. A few are *diagnostic probes* written to isolate one known-unoptimized
-path so that a candidate optimization has something to measure against;
-`numerics/constants`, `globals/write`, `calls/many_literals`,
-`calls/loop_beside_closure`, `alloc/gc_churn` and `parse/large_source` are
-all probes. Their ratios against
-reference Lua are worst cases by construction, not representative numbers, and
-each carries a header comment naming the candidate it exists to measure and the
-sibling bench to compare it against. When a probe's candidate ships, the probe
-stays as the regression tracker for that fix: its header is rewritten to
-historical-probe status (`calls/many_literals`, `numerics/constants` and
-`globals/write` are there), and its `bench/` port's `K` is recalibrated back
-to the seconds scale so the verdict wall can still resolve a regression.
+code. A few are diagnostic probes written to isolate one path. Each probe's
+header describes the measured path and comparison or phase. The registered
+workload set lives in `brokkr.toml`; `ls examples/<category>/` lists the files
+in a category. Probe ratios against reference Lua are worst cases by
+construction, not representative numbers.
+When a probed candidate ships, the script can stay as a regression tracker;
+its header marks the historical status, and its `bench/` port's `K` is
+recalibrated back to the seconds scale so the verdict wall can still resolve a
+regression.
 
 `examples/parse/large_source.lua` is generated - regenerate with `python3
 examples/parse/generate.py`, do not edit it by hand. `brokkr check` verifies the
@@ -314,6 +316,11 @@ on the script via the regular binary (the hotpath stats table at exit
 otherwise dominates wall time). Don't invoke the `cargo run --example
 hotpath` command manually - run it via the script so the timing path
 stays consistent.
+
+`python3 scripts/ab_pairs.py <commit-a> <commit-b> <rounds> <workload>...`
+runs `brokkr dellingr --lua <workload> --bench --commit <commit>` serially,
+alternating A/B and B/A order by round for each workload. It stores the matched
+cells in `.brokkr/results.db`, which `brokkr results -n <cells>` can read.
 
 `research/bench_luars.sh` is a one-off comparison harness: same bench
 scripts and same hyperfine pass, but against [lua-rs](https://github.com/ianm199/lua-rs)

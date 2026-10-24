@@ -3,6 +3,8 @@
 use dellingr::error::ErrorKind;
 use dellingr::{ArgCount, RetCount, State};
 
+use super::cost_golden::pinned_cost;
+
 const SETUP: &str = r#"left = 1
 right = 2
 local function fail(...)
@@ -24,7 +26,6 @@ struct ReentryCase {
     name: &'static str,
     source: &'static str,
     budget: i64,
-    expected_used: u64,
 }
 
 const CASES: [ReentryCase; 9] = [
@@ -32,55 +33,46 @@ const CASES: [ReentryCase; 9] = [
         name: "CALL with __call",
         source: "local prior = left + right\ncallable()",
         budget: 3,
-        expected_used: 3,
     },
     ReentryCase {
         name: "TFOR_CALL with __call",
         source: "local prior = left + right\nfor item in iterator do end",
         budget: 3,
-        expected_used: 3,
     },
     ReentryCase {
         name: "LENGTH with __len",
         source: "local prior = left + right\nlocal result = #lengthy",
         budget: 3,
-        expected_used: 3,
     },
     ReentryCase {
         name: "GET_FIELD with __index",
         source: "local prior = left + right\nlocal result = indexed.field",
         budget: 3,
-        expected_used: 3,
     },
     ReentryCase {
         name: "SELF with __index",
         source: "local prior = left + right\nlocal result = indexed:method()",
         budget: 3,
-        expected_used: 3,
     },
     ReentryCase {
         name: "GET_TABLE with __index",
         source: "local prior = left + right\nlocal result = indexed[left]",
         budget: 3,
-        expected_used: 3,
     },
     ReentryCase {
         name: "SET_FIELD with __newindex",
         source: "local prior = left + right\nnew_indexed.field = right",
         budget: 4,
-        expected_used: 4,
     },
     ReentryCase {
         name: "multiple-assignment field store with __newindex",
         source: "local prior = left + right\nother.field, new_indexed.field = left, right",
         budget: 4,
-        expected_used: 4,
     },
     ReentryCase {
         name: "SET_TABLE with __newindex",
         source: "local prior = left + right\nnew_indexed[left] = right",
         budget: 4,
-        expected_used: 4,
     },
 ];
 
@@ -129,7 +121,7 @@ fn reentering_opcodes_preserve_call_sites_and_cost_prefixes() {
         assert_eq!(trace[1].line, 2, "{}: {trace:?}", case.name);
         assert_eq!(
             state.cost_used(),
-            case.expected_used,
+            pinned_cost(&format!("reentry:{}", case.name)),
             "{} must charge the prefix through the last admitted addition",
             case.name
         );

@@ -558,6 +558,261 @@ fn process_global_constructs_are_marked() {
     }
 }
 
+/// The instrumentation sweep filters tests by substring. Any test enabled
+/// by `fault-injection`, directly or through its containing module, must be
+/// selected by one of that sweep's `only` entries.
+#[test]
+fn fault_injection_tests_are_selected_by_the_instrumentation_sweep() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let document = crate::support::brokkr_config();
+    let checks = document
+        .get("check")
+        .and_then(toml::Value::as_array)
+        .expect("brokkr.toml should list check shapes");
+    let sweep = checks
+        .iter()
+        .find(|check| {
+            check.get("name").and_then(toml::Value::as_str) == Some("instrumentation-faults")
+        })
+        .expect("the instrumentation-faults check shape should exist");
+    let features = sweep
+        .get("features")
+        .and_then(toml::Value::as_array)
+        .expect("instrumentation-faults should list its features");
+    assert!(
+        features
+            .iter()
+            .any(|feature| feature.as_str() == Some("fault-injection")),
+        "instrumentation-faults must enable fault-injection"
+    );
+    assert!(
+        sweep.get("profile").is_none()
+            && document
+                .get("test")
+                .and_then(|settings| settings.get("debug"))
+                .and_then(toml::Value::as_bool)
+                == Some(true),
+        "instrumentation-faults must use the default dev profile"
+    );
+    let filters = sweep
+        .get("only")
+        .and_then(toml::Value::as_array)
+        .expect("instrumentation-faults should list the tests it runs")
+        .iter()
+        .map(|filter| {
+            filter
+                .as_str()
+                .expect("instrumentation-faults filters should be strings")
+        })
+        .collect::<Vec<_>>();
+
+    let mut sources = Vec::new();
+    collect_rust_files(&manifest_dir.join("src"), &mut sources);
+    collect_rust_files(&manifest_dir.join("tests/integration"), &mut sources);
+    let mut gated_modules = Vec::new();
+    for source_path in &sources {
+        let source = read(source_path);
+        let base = test_module_path(&manifest_dir, source_path);
+        let (modules, _) = fault_injection_items(&source, &base, false);
+        gated_modules.extend(modules);
+    }
+
+    let mut test_paths = BTreeSet::new();
+    for source_path in &sources {
+        let source = read(source_path);
+        let base = test_module_path(&manifest_dir, source_path);
+        let inherited_gate = gated_modules.iter().any(|module| base.starts_with(module));
+        let (_, tests) = fault_injection_items(&source, &base, inherited_gate);
+        test_paths.extend(tests);
+    }
+
+    assert!(
+        !test_paths.is_empty(),
+        "the instrumentation fault-injection tests should be discoverable"
+    );
+    for test_path in test_paths {
+        assert!(
+            filters.iter().any(|filter| test_path.contains(filter)),
+            "fault-injection test `{test_path}` is not selected by instrumentation-faults `only`"
+        );
+    }
+}
+
+/// The Rust module path represented by a source file in `src/` or
+/// `tests/integration/`.
+fn test_module_path(manifest_dir: &Path, source_path: &Path) -> Vec<String> {
+    let relative = source_path
+        .strip_prefix(manifest_dir)
+        .expect("a source path should be under the manifest directory");
+    let relative = if relative.starts_with("src") {
+        relative
+            .strip_prefix("src")
+            .expect("a library source should be under src/")
+    } else {
+        relative
+            .strip_prefix(Path::new("tests/integration"))
+            .expect("an integration source should be under tests/integration/")
+    };
+
+    let mut modules = relative
+        .parent()
+        .into_iter()
+        .flat_map(Path::components)
+        .map(|part| {
+            part.as_os_str()
+                .to_str()
+                .expect("Rust source paths should be UTF-8")
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    let file_name = relative
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("a Rust source path should have a UTF-8 file name");
+    let stem = Path::new(file_name)
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .expect("a Rust source file should have a UTF-8 stem");
+    if !matches!(stem, "lib" | "main" | "mod") {
+        modules.push(stem.to_owned());
+    }
+    modules
+}
+
+struct ModuleScope {
+    name: String,
+    body_depth: usize,
+    fault_injection: bool,
+}
+
+/// Finds feature-gated external modules and tests in one Rust source file.
+/// This follows module and function declarations after comments and literals
+/// have been blanked, while reading the original attribute text for cfgs.
+fn fault_injection_items(
+    source: &str,
+    base: &[String],
+    inherited_gate: bool,
+) -> (Vec<Vec<String>>, Vec<String>) {
+    let code = code_only(source);
+    let raw_lines: Vec<&str> = source.lines().collect();
+    let mut scopes: Vec<ModuleScope> = Vec::new();
+    let mut attributes: Vec<String> = Vec::new();
+    let mut gated_modules = Vec::new();
+    let mut tests = Vec::new();
+
+    for line in logical_lines(&code) {
+        while scopes
+            .last()
+            .is_some_and(|scope| scope.body_depth > line.depth)
+        {
+            scopes.pop();
+        }
+        let text = line.text.as_str();
+        if text.is_empty() {
+            continue;
+        }
+        if text.starts_with("#[") {
+            attributes.push(raw_lines[line.index..=line.end].join(" "));
+            continue;
+        }
+
+        let attribute_gate = attributes
+            .iter()
+            .any(|attribute| fault_injection_cfg(attribute));
+        let test_attribute = attributes
+            .iter()
+            .any(|attribute| attribute.contains("#[test]"));
+        let scope_gate = scopes.iter().any(|scope| scope.fault_injection);
+        let current_gate = inherited_gate || scope_gate;
+
+        if let Some((name, inline)) = declared_module(text) {
+            let module_gate = current_gate || attribute_gate;
+            let mut module_path = base.to_vec();
+            module_path.extend(scopes.iter().map(|scope| scope.name.clone()));
+            module_path.push(name.clone());
+            if inline {
+                let net_braces = text
+                    .chars()
+                    .map(|character| match character {
+                        '{' => 1isize,
+                        '}' => -1,
+                        _ => 0,
+                    })
+                    .sum::<isize>();
+                if net_braces > 0 {
+                    scopes.push(ModuleScope {
+                        name,
+                        body_depth: line.depth + 1,
+                        fault_injection: module_gate,
+                    });
+                }
+            } else if module_gate {
+                gated_modules.push(module_path);
+            }
+        } else if test_attribute
+            && (current_gate || attribute_gate)
+            && let Some(name) = declared_function(text)
+        {
+            let mut test_path = base.to_vec();
+            test_path.extend(scopes.iter().map(|scope| scope.name.clone()));
+            test_path.push(name);
+            tests.push(test_path.join("::"));
+        }
+
+        attributes.clear();
+    }
+
+    (gated_modules, tests)
+}
+
+fn fault_injection_cfg(attribute: &str) -> bool {
+    let Some(body) = attribute.trim().strip_prefix("#[") else {
+        return false;
+    };
+    let name = body
+        .split(|character: char| character == '(' || character == ']' || character.is_whitespace())
+        .next();
+    name == Some("cfg") && attribute.contains("fault-injection")
+}
+
+fn declared_module(line: &str) -> Option<(String, bool)> {
+    let words: Vec<&str> = tokens(line).collect();
+    let index = words.iter().position(|word| *word == "mod")?;
+    if words[..index].iter().any(|word| {
+        !matches!(
+            *word,
+            "pub" | "crate" | "super" | "self" | "in" | "unsafe" | "default"
+        )
+    }) {
+        return None;
+    }
+    let name = (*words.get(index + 1)?).to_owned();
+    let keyword = line.find("mod")?;
+    let tail = line[keyword + "mod".len()..].trim_start();
+    let tail = tail.strip_prefix(&name)?.trim_start();
+    if tail.starts_with('{') {
+        Some((name, true))
+    } else if tail.starts_with(';') {
+        Some((name, false))
+    } else {
+        None
+    }
+}
+
+fn declared_function(line: &str) -> Option<String> {
+    let words: Vec<&str> = tokens(line).collect();
+    let index = words.iter().position(|word| *word == "fn")?;
+    if words[..index].iter().any(|word| {
+        !matches!(
+            *word,
+            "pub" | "crate" | "super" | "self" | "in" | "async" | "unsafe" | "const" | "extern"
+        )
+    }) {
+        return None;
+    }
+    Some((*words.get(index + 1)?).to_owned())
+}
+
 /// Whether a line of code holds the `static` keyword (an item, whatever its
 /// attributes and visibility), as opposed to the `'static` lifetime.
 fn has_static_keyword(line: &str) -> bool {

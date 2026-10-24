@@ -32,14 +32,9 @@ use dellingr::{ArgCount, HostCallbacks, LuaType, Program, RetCount, State};
 #[path = "common/stack.rs"]
 mod stack;
 
-/// Thread stack for tests that parse at the syntax budget: 2 MiB in every
-/// repository profile, the stricter promise docs/limits.md keeps for parsing
-/// on its own. Instrumented builds wrap parser functions in timing guards and
-/// get more, as `src/compiler/parser.rs`'s unit-test constant does.
-#[cfg(not(any(feature = "hotpath", feature = "hotpath-alloc")))]
-const PARSE_TEST_STACK_BYTES: usize = 2 << 20;
-#[cfg(any(feature = "hotpath", feature = "hotpath-alloc"))]
-const PARSE_TEST_STACK_BYTES: usize = 8 << 20;
+#[path = "common/parse_stack.rs"]
+mod parse_stack;
+use parse_stack::PARSE_TEST_STACK_BYTES;
 
 /// One kind of native level: Lua that recurses into `deep(n + 1)` through
 /// one compiled caller path.

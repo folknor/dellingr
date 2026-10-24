@@ -1,45 +1,42 @@
-//! Fixed-input charge goldens for native standard-library calls.
+//! Fixed-input charge goldens and coverage of registered native functions.
+
+use std::collections::BTreeSet;
 
 use dellingr::{ArgCount, RetCount, State};
 
-#[derive(Clone, Copy)]
-enum Argument {
-    Boolean(bool),
-    Number(f64),
-    String(&'static str),
-    EmptyTable,
-}
+use super::cost_golden::goldens;
+use crate::support;
 
-fn call_cost(library: &str, function: &str, arguments: &[Argument]) -> u64 {
+fn call_cost(name: &str, arguments: &str) -> u64 {
     let mut state = State::new();
+    let (library, function) = name.split_once('.').expect("qualified native function");
     state
         .get_global(library)
         .expect("standard library table exists");
     state
         .push_string(function)
-        .expect("library field name fits on the stack");
+        .expect("field name fits on the stack");
     state
         .get_table(-2)
         .expect("standard library function exists");
-    for argument in arguments {
-        match argument {
-            Argument::Boolean(value) => state
-                .push_boolean(*value)
-                .expect("golden argument fits on the stack"),
-            Argument::Number(value) => state
-                .push_number(*value)
-                .expect("golden argument fits on the stack"),
-            Argument::String(value) => state
-                .push_string(value)
-                .expect("golden argument fits on the stack"),
-            Argument::EmptyTable => state
-                .new_table()
-                .expect("golden table argument fits on the stack"),
+    let mut argument_count = 0_u8;
+    if !arguments.is_empty() {
+        for argument in arguments.split(';') {
+            let (kind, value) = argument.split_once(':').expect("typed golden argument");
+            match kind {
+                "n" => state.push_number(value.parse().expect("numeric golden argument")),
+                "s" => state.push_string(value),
+                "b" => state.push_boolean(value.parse().expect("boolean golden argument")),
+                "t" => {
+                    assert!(value.is_empty(), "table argument must be empty");
+                    state.new_table()
+                }
+                _ => panic!("unknown golden argument kind: {kind}"),
+            }
+            .expect("golden argument fits on the stack");
+            argument_count += 1;
         }
     }
-
-    let argument_count =
-        u8::try_from(arguments.len()).expect("golden call arity fits in a fixed argument count");
     let before = state.cost_used();
     state
         .call(ArgCount::Fixed(argument_count), RetCount::Fixed(0))
@@ -48,175 +45,74 @@ fn call_cost(library: &str, function: &str, arguments: &[Argument]) -> u64 {
 }
 
 #[test]
-fn every_math_function_has_its_flat_charge() {
-    for function in [
-        "abs", "acos", "asin", "atan", "ceil", "cos", "deg", "exp", "floor", "log", "rad", "sin",
-        "sqrt", "tan",
-    ] {
+fn native_charges_match_versioned_fixed_inputs() {
+    for row in goldens().into_iter().filter(|row| row.kind == "native") {
         assert_eq!(
-            call_cost("math", function, &[Argument::Number(0.5)]),
-            1,
-            "math.{function}"
+            call_cost(row.name, row.input),
+            row.expected.expect("native golden has an expected cost"),
+            "{}",
+            row.name
         );
     }
-    for function in ["atan2", "fmod"] {
-        assert_eq!(
-            call_cost(
-                "math",
-                function,
-                &[Argument::Number(1.0), Argument::Number(2.0)]
-            ),
-            1,
-            "math.{function}"
-        );
-    }
-    for function in ["min", "max"] {
-        assert_eq!(
-            call_cost(
-                "math",
-                function,
-                &[Argument::Number(1.0), Argument::Number(2.0)]
-            ),
-            1,
-            "math.{function}"
-        );
-    }
-    assert_eq!(call_cost("math", "modf", &[Argument::Number(1.5)]), 1);
-    assert_eq!(call_cost("math", "random", &[]), 1);
 }
 
 #[test]
-fn string_function_charges_match_fixed_inputs() {
-    assert_eq!(
-        call_cost(
-            "string",
-            "sub",
-            &[
-                Argument::String("abc"),
-                Argument::Number(2.0),
-                Argument::Number(3.0),
-            ]
-        ),
-        2
-    );
-    assert_eq!(
-        call_cost(
-            "string",
-            "find",
-            &[
-                Argument::String("abc"),
-                Argument::String("a"),
-                Argument::Number(1.0),
-                Argument::Boolean(true),
-            ]
-        ),
-        6
-    );
-    assert_eq!(call_cost("string", "format", &[Argument::String("")]), 1);
-    assert_eq!(call_cost("string", "len", &[Argument::String("abc")]), 0);
-    for function in ["upper", "lower", "reverse"] {
-        assert_eq!(
-            call_cost("string", function, &[Argument::String("abc")]),
-            3,
-            "string.{function}"
-        );
+fn documented_free_base_calls_and_iterators_charge_nothing() {
+    for row in goldens()
+        .into_iter()
+        .filter(|row| matches!(row.kind, "free" | "free_error"))
+    {
+        let mut state = State::with_callbacks(Box::new(support::Recorder::default()));
+        support::load(&mut state, row.input);
+        // Supplying the table from Rust keeps opcode allocation out of the
+        // native-call probe. The ipairs row also invokes its returned iterator.
+        state.new_table().expect("probe table fits on the stack");
+        let result = state.call(ArgCount::Fixed(1), RetCount::Fixed(0));
+        if row.kind == "free_error" {
+            let error = result.expect_err("error probe raises a script error");
+            assert!(matches!(
+                error.kind(),
+                dellingr::error::ErrorKind::ScriptError { .. }
+            ));
+        } else {
+            result.expect("free-call probe succeeds");
+        }
+        assert_eq!(state.cost_used(), 0, "{}", row.name);
     }
-    assert_eq!(
-        call_cost(
-            "string",
-            "match",
-            &[Argument::String(""), Argument::String("")]
-        ),
-        2
-    );
-    assert_eq!(
-        call_cost(
-            "string",
-            "gmatch",
-            &[Argument::String(""), Argument::String("")]
-        ),
-        1
-    );
-    assert_eq!(
-        call_cost(
-            "string",
-            "gsub",
-            &[
-                Argument::String(""),
-                Argument::String(""),
-                Argument::String(""),
-            ]
-        ),
-        2
-    );
 }
 
 #[test]
-fn table_function_charges_match_fixed_inputs() {
-    assert_eq!(
-        call_cost(
-            "table",
-            "insert",
-            &[Argument::EmptyTable, Argument::Number(1.0)]
-        ),
-        1
-    );
-    assert_eq!(
-        call_cost(
-            "table",
-            "remove",
-            &[Argument::EmptyTable, Argument::Number(1.0)]
-        ),
-        1
-    );
-    assert_eq!(
-        call_cost(
-            "table",
-            "pack",
-            &[Argument::Number(1.0), Argument::Number(2.0)]
-        ),
-        1
-    );
-    assert_eq!(
-        call_cost(
-            "table",
-            "move",
-            &[
-                Argument::EmptyTable,
-                Argument::Number(1.0),
-                Argument::Number(0.0),
-                Argument::Number(1.0),
-            ]
-        ),
-        1
-    );
-    assert_eq!(
-        call_cost(
-            "table",
-            "concat",
-            &[Argument::EmptyTable, Argument::String("")]
-        ),
-        1
-    );
-    assert_eq!(call_cost("table", "sort", &[Argument::EmptyTable]), 1);
-}
-
-#[test]
-fn rawset_charges_one_for_a_table_write() {
+fn every_registered_function_has_a_charge_probe() {
     let mut state = State::new();
-    state
-        .get_global("rawset")
-        .expect("rawset is available in the base library");
-    state.new_table().expect("table argument fits on the stack");
-    state
-        .push_number(1.0)
-        .expect("key argument fits on the stack");
-    state
-        .push_number(2.0)
-        .expect("value argument fits on the stack");
-    state
-        .call(ArgCount::Fixed(3), RetCount::Fixed(0))
-        .expect("rawset should write a table entry");
-
-    assert_eq!(state.cost_used(), 1);
+    support::eval(
+        &mut state,
+        r#"
+        local names = ''
+        local function visit(prefix, library)
+            for name, value in pairs(library) do
+                if type(value) == 'function' then
+                    names = names .. prefix .. '.' .. name .. '\n'
+                end
+            end
+        end
+        visit('_G', _G)
+        visit('math', math)
+        visit('string', string)
+        visit('table', table)
+        return names
+        "#,
+        1,
+    );
+    let names = state.to_string(-1).expect("registry probe returns names");
+    let actual: BTreeSet<_> = names.lines().collect();
+    let rows = goldens();
+    let expected: BTreeSet<_> = rows
+        .iter()
+        .filter(|row| matches!(row.kind, "native" | "free" | "free_error"))
+        .map(|row| row.name)
+        .collect();
+    assert_eq!(
+        actual, expected,
+        "registered functions need a versioned charge probe with valid arguments"
+    );
 }

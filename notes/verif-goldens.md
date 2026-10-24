@@ -109,112 +109,6 @@ released list enforce it. The release process appends to the list.
 Enforceable: yes, as a test; editing a pinned hash stays possible but becomes a
 deliberate, visible act.
 
-## VD-004 - `COST_MODEL_VERSION` discipline covers 18 sources, and does not force a bump
-
-Reported by: compiler-cost.
-
-`docs/budget.md`: "It moves whenever `cost_used` for identical source changes."
-`src/cost_meter.rs` points at `tests/integration/cost/cost_golden.rs` as the check. What it
-enforces: `cost_used_matches_golden_corpus` and the error corpus pin 18 sources;
-`golden_corpus_fingerprint_matches_cost_model_version` hashes those sources,
-their expected costs and the version. Editing an expected cost forces a
-fingerprint edit in the same file, and the failure message asks for a version
-bump, but nothing requires it: update cost and fingerprint, leave the version,
-and every test passes.
-
-Every other cost pin is outside the fingerprint: `stdlib_cost_golden.rs` (every
-math/string/table flat charge), `string_charges.rs`
-(`basic_native_charges_are_exact`, gmatch caret 26, capture delta 600), the other
-tests in `cost_golden.rs` (`table_library_native_charges_are_one_or_zero`,
-`unpack_charges_nothing_...`, `mid_run_budget_reset_...`), `bytecode_caches.rs`
-(12), `reentrant_opcode_accounting.rs`, the `lib.rs` analysis tests, and
-`cost_used` assertions in about a dozen more files (`plain_field_miss`,
-`table_iteration`, `table_metamethods`, `global_write_cache`, `error_boundary`,
-`panic_poison`, `table_sort_metamethods`, `table_resolution`, `save_state`,
-`error_handling`, ...). Changing `math.floor`'s charge means editing
-`stdlib_cost_golden.rs`; no test asks for a bump.
-
-Stale facts in the same area: `tests/integration/cost/cost_golden.rs` says "Fingerprint of
-`CORPUS` together with `COST_MODEL_VERSION`", but the fingerprint also covers
-`ERROR_CORPUS`. `CHANGELOG.md` Unreleased says "`COST_MODEL_VERSION` is 7." in
-the register-VM entry and "`COST_MODEL_VERSION` is 8." in a later entry; the
-release will ship 8, so the first is false today. Three bumps (6, 7, 8) landed in
-one unreleased cycle; a host sees 5 then 8. The entries should say "a
-`COST_MODEL_VERSION` bump" and state the final number once.
-
-Fix: one cost golden as data, e.g. `tests/fixtures/cost_golden.txt` with
-`cost_model=<N>` on its first line, one row per pinned source, every cost pin
-above folded into it. The test fails unless `cost_model=` equals the constant;
-the fixture carries `fingerprint=<hash of rows>`, and the test keeps
-`COST_MODEL_HISTORY: &[(u16, u64)]`, failing if the current fingerprint appears
-under any other version or the current version's recorded fingerprint differs,
-so a changed table passes only by appending a new pair with a new number. (An
-in-place edit of the last pair stays possible; a script check against `git show
-HEAD:` would close it at the cost of a git dependency in the gate.) For the
-CHANGELOG, a test that greps the Unreleased section for "`COST_MODEL_VERSION` is
-N" and requires N to equal the constant, in the style of
-`documented_opcode_charges_match_static_units`.
-
-Enforceable: yes.
-
-## VD-005 - Native-charge lists are hand-mirrored with no completeness check
-
-Reported by: compiler-cost, library.
-
-`docs/budget.md` lists every math function's flat 1, every string and table
-function's rule, and the "Free by design" base functions.
-`stdlib_cost_golden.rs::every_math_function_has_its_flat_charge` mirrors the
-math list by hand; it matches `MATH_FUNCTIONS` today, but a new math function
-would go uncovered without any failure. The math `consume_cost(1)` comment says
-"every math function charges a flat 1"; nothing enforces it. Nothing iterates
-the library tables, though the registrations are declarative arrays
-(`lua_std/math.rs`, `string.rs`, `table.rs`; `basic.rs` via `add!`), so adding
-`math.tanh` or `table.find` with any charge passes every test. The base-library
-free list (`type`, `tonumber`, `tostring`, `print`, `select`, `next`, `pairs`,
-`ipairs`, `getmetatable`, `setmetatable`, `rawget`, `rawequal`, `rawlen`,
-`error`) has no cost pin at all; only `rawset`, `unpack` and `string.len` are
-pinned. A free function that starts charging changes replays and is caught only
-by incidental goldens.
-
-Fix: a completeness test that walks `_G`, `math`, `string` and `table` with
-`pairs` from a fresh State and requires every function value to have a row in
-the cost fixture (VD-004; a free function's row is 0), failing on any function
-it has no arity for; optionally check `docs/budget.md`'s lists against the same
-fixture.
-
-Enforceable: yes, by the test.
-
-## VD-006 - The dispatch loop's charges are not tied to the opcode cost table
-
-Reported by: compiler-cost.
-
-`src/instr.rs` declares each opcode's cost class once (`opcode_rows!`), and
-`static_units()`/`fixed_units()` derive from it; `analyze_cost` uses
-`static_units()`; `docs/budget.md`'s table is checked against `fixed_units` by
-`documented_opcode_charges_match_static_units`. But the runtime charge in
-`Frame::run_frame` is written arm by arm: the six costed table/negation arms use
-`add_cost!(const { Instr::fixed_units(OP) })`, the eighteen arithmetic arms use
-a literal `add_cost!(1)` inside `arith!`, and the `Free`/`Call` arms charge by
-omission. Reclassify `OP_CONCAT` or `OP_LEN`, or change `Arithmetic`'s units, and
-`analyze_cost`, the docs test and the opcode fixture follow while the runtime
-does not. Nothing checks "runtime charge per executed instruction ==
-`static_units()`"; the cost goldens catch only opcodes their sources execute.
-The docs claim "These rows describe the units returned by
-`Instr::static_units()`" is enforced; the stronger claim implied by
-`analyze_cost`'s documentation (that the static walk counts what execution
-charges) is not.
-
-Fix, in order of strength: charge `const { Instr::fixed_units(OP) }` in every
-arm (folding to zero in the free arms), or generate the dispatch arm skeleton
-from `opcode_rows!` so an arm cannot exist without its charge; an
-execution-count oracle (a test-infrastructure feature counting executed
-instructions per opcode, and a corpus test asserting
-`sum(static_units * executed) + native_charges == cost_used`); at minimum a
-`frame.rs` unit test that assembles a minimal verified chunk per fixed-class
-opcode and asserts the `cost_used` delta equals `fixed_units`.
-
-Enforceable: the first is structural; the others are tests.
-
 ## VD-007 - Determinism is pinned on one host, one target and one profile
 
 Reported by: check-machinery, compiler-cost, library.
@@ -283,29 +177,6 @@ corpus and would catch cache-key aliasing bugs. The resume half is held by the
 corpus save round trip (VD-009).
 
 Enforceable: yes, by the differential test.
-
-## VD-009 - No corpus-wide save round trip
-
-Reported by: snapshot.
-
-All save coverage comes from hand-built graphs in the snapshot suites plus about
-15 scattered `cfg(snapshot)` tests. The Lua examples, which exercise most of the
-VM's object shapes (stress tables, closures, upvalue scopes, metatable edge
-cases, gmatch, sort, queues), never pass through `save_state`. A save bug in a
-shape nobody hand-wrote is caught only if a game hits it.
-
-Fix: under `snapshot`, a corpus test or a `run_examples` mode through a CLI
-`--save-roundtrip` flag that exists only with the feature. Per example: run the
-top level; `save_state`, `load_state`, re-save and assert identical bytes; if it
-defines `_bench`, call it on both the original and the loaded State; compare
-outputs, `cost_used()` and a final save. That holds the "continues exactly"
-claim (VD-008), the byte-stability claim and the verifier's acceptance of
-everything the compiler emits (`compiler_saves_contain_no_closure_free_closes` is
-the one-chunk version today), gives the corruption sweep a real corpus to mutate,
-and makes the second (snapshot) sweep earn its cost.
-
-Enforceable: yes; the corpus walker is shared, so new examples are covered
-automatically.
 
 ## VD-012 - The gmatch schema is a persisted format with no golden, and its recognition fails open
 
@@ -378,3 +249,21 @@ check in verif-gates.md would at least record `fmod` as the one permitted libm
 import.
 
 Enforceable: yes, by a golden.
+
+## VD-021 - The cost fixture fingerprint covers row names and order
+
+Reported by: the resolution loop's reconciler.
+
+`tests/fixtures/cost_golden.txt`'s fingerprint hashes whole row lines,
+including each row's name and their order, so renaming or reordering a row
+without changing any cost forces a `COST_MODEL_VERSION` bump and a new
+`COST_MODEL_HISTORY` pair. Strict and safe, but it ties a cosmetic edit to a
+replay-visible version number. Also, nothing checks that a `pin` row's last
+column still names a test that reads it, and `pinned_cost` matches by name
+across kinds (names are unique today).
+
+Fix: decide whether the fingerprint should cover only (kind, input, expected),
+sorted; add a check that every `pin` row is read by some test.
+
+Enforceable: the pin-consumer check by a test; the fingerprint scope is a
+design choice.

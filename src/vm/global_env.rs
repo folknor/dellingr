@@ -563,12 +563,82 @@ impl Markable for GlobalEnv {
 #[cfg(test)]
 mod tests {
     use crate::State;
-    use crate::instr::Builtin;
+    use crate::instr::{ArgCount, Builtin, RetCount};
     use crate::vm::Val;
     use crate::vm::caches::GlobalLookupCacheSlot;
+    use std::sync::Arc;
 
     fn key(state: &mut State, name: &str) -> Val {
         state.alloc_string(name).expect("short name")
+    }
+
+    fn call_writer(state: &mut State, name: &str, value: f64) {
+        state.get_global(name).expect("writer exists");
+        state.push_number(value).expect("writer argument fits");
+        state
+            .call(ArgCount::Fixed(1), RetCount::Fixed(0))
+            .expect("writer runs");
+    }
+
+    #[test]
+    fn global_write_cache_is_filled_and_shared_by_writer_closures() {
+        let mut state = State::new();
+        crate::Program::compile(
+            "function make() return function(v) cache_target = v end end \
+             a = make(); b = make()",
+            None,
+        )
+        .and_then(|program| state.load(&program))
+        .expect("writer source compiles");
+        state
+            .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+            .expect("writer source runs");
+
+        state.get_global("a").expect("a exists");
+        let a = state.pop_val();
+        let a_runtime = Arc::clone(
+            &a.as_lua_function(&state.heap)
+                .expect("a is a closure")
+                .runtime,
+        );
+        state.get_global("b").expect("b exists");
+        let b = state.pop_val();
+        let b_runtime = Arc::clone(
+            &b.as_lua_function(&state.heap)
+                .expect("b is a closure")
+                .runtime,
+        );
+        assert!(Arc::ptr_eq(&a_runtime, &b_runtime));
+        let cache = a_runtime
+            .caches
+            .global_lookup
+            .first()
+            .expect("writer has a global cache slot");
+
+        call_writer(&mut state, "a", 1.0);
+        assert!(cache.get().is_none(), "inserting a new global stays cold");
+        call_writer(&mut state, "b", 2.0);
+        let entry = cache.get().expect("writer call fills its cache slot");
+        assert_eq!(
+            state.global_env.read_cached(&state.heap, cache),
+            Some(Val::Num(2.0))
+        );
+
+        call_writer(&mut state, "a", 3.0);
+        assert_eq!(cache.get(), Some(entry));
+        assert_eq!(
+            state.global_env.read_cached(&state.heap, cache),
+            Some(Val::Num(3.0))
+        );
+        assert!(
+            state
+                .global_env
+                .write_cached(&mut state.heap, cache, &Val::Num(4.0))
+        );
+        assert_eq!(
+            state.global_env.get(&state.heap, "cache_target"),
+            Some(Val::Num(4.0))
+        );
     }
 
     #[test]

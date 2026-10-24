@@ -242,11 +242,32 @@ impl Frame {
             }};
         }
 
+        // Keep the fixed charge in each arm a compile-time constant. In
+        // particular, a free opcode must not run add_cost!(0): its budget
+        // check could reject structural work. Range arms retain their shared
+        // body and require all members to have the same fixed charge.
+        macro_rules! fixed_cost {
+            ($first:expr $(, $last:expr)?) => {{
+                const UNITS: u64 = Instr::fixed_units($first);
+                $(
+                    const _: () = {
+                        let mut opcode = $first as usize;
+                        while opcode <= $last as usize {
+                            assert!(Instr::fixed_units(opcode as u8) == UNITS);
+                            opcode += 1;
+                        }
+                    };
+                )?
+                if UNITS != 0 {
+                    add_cost!(UNITS);
+                }
+            }};
+        }
+
         // One arm per arithmetic opcode, each a direct call to its function
         // item with its operand kinds fixed.
         macro_rules! arith {
             ($inst:ident, $f:path, rr) => {{
-                add_cost!(1);
                 let lhs = state.stack[base + $inst.b() as usize];
                 let rhs = state.stack[base + $inst.c() as usize];
                 match (lhs, rhs) {
@@ -257,7 +278,6 @@ impl Frame {
                 }
             }};
             ($inst:ident, $f:path, rk) => {{
-                add_cost!(1);
                 let lhs = state.stack[base + $inst.b() as usize];
                 let y = frame.get_number_constant($inst.c());
                 match lhs {
@@ -266,7 +286,6 @@ impl Frame {
                 }
             }};
             ($inst:ident, $f:path, kr) => {{
-                add_cost!(1);
                 let x = frame.get_number_constant($inst.b());
                 let rhs = state.stack[base + $inst.c() as usize];
                 match rhs {
@@ -283,38 +302,56 @@ impl Frame {
             match inst.opcode() {
                 // Moves and constants
                 Instr::OP_MOVE => {
+                    fixed_cost!(Instr::OP_MOVE);
                     state.stack[ra] = state.stack[base + inst.b() as usize];
                 }
                 Instr::OP_LOAD_NIL => {
+                    fixed_cost!(Instr::OP_LOAD_NIL);
                     state.stack[ra..ra + inst.b() as usize].fill(Val::Nil);
                 }
-                Instr::OP_LOAD_BOOL => state.stack[ra] = Val::Bool(inst.b() != 0),
+                Instr::OP_LOAD_BOOL => {
+                    fixed_cost!(Instr::OP_LOAD_BOOL);
+                    state.stack[ra] = Val::Bool(inst.b() != 0);
+                }
                 Instr::OP_LOAD_NUM => {
+                    fixed_cost!(Instr::OP_LOAD_NUM);
                     state.stack[ra] = Val::Num(frame.get_number_constant(inst.b()));
                 }
-                Instr::OP_LOAD_STR => state.stack[ra] = frame.literal(inst.b()),
+                Instr::OP_LOAD_STR => {
+                    fixed_cost!(Instr::OP_LOAD_STR);
+                    state.stack[ra] = frame.literal(inst.b());
+                }
 
                 // Upvalues
                 Instr::OP_GET_UPVAL => {
+                    fixed_cost!(Instr::OP_GET_UPVAL);
                     state.stack[ra] = state.upvalue_value(frame, inst.b());
                 }
                 Instr::OP_SET_UPVAL => {
+                    fixed_cost!(Instr::OP_SET_UPVAL);
                     let val = state.stack[ra];
                     state.set_upvalue_value(frame, inst.b(), val);
                 }
-                Instr::OP_CLOSE => state.close_upvalues(ra),
+                Instr::OP_CLOSE => {
+                    fixed_cost!(Instr::OP_CLOSE);
+                    state.close_upvalues(ra);
+                }
 
                 // Globals and builtins
                 Instr::OP_GET_GLOBAL => {
+                    fixed_cost!(Instr::OP_GET_GLOBAL);
                     state.stack[ra] = state.read_global(frame, inst.b(), inst.cache_slot());
                 }
                 Instr::OP_SET_GLOBAL => {
+                    fixed_cost!(Instr::OP_SET_GLOBAL);
                     state.write_global(frame, inst.b(), inst.cache_slot(), ra);
                 }
                 Instr::OP_GET_BUILTIN => {
+                    fixed_cost!(Instr::OP_GET_BUILTIN);
                     state.stack[ra] = state.global_env.read_builtin(&state.heap, inst.b() as u8);
                 }
                 Instr::OP_SET_BUILTIN => {
+                    fixed_cost!(Instr::OP_SET_BUILTIN);
                     state.global_env.write_builtin(
                         &mut state.heap,
                         inst.b() as u8,
@@ -324,17 +361,17 @@ impl Frame {
 
                 // Table creation
                 Instr::OP_NEW_TABLE => {
-                    add_cost!(const { Instr::fixed_units(Instr::OP_NEW_TABLE) });
+                    fixed_cost!(Instr::OP_NEW_TABLE);
                     state.stack[ra] = state.alloc_table();
                 }
                 Instr::OP_NEW_TABLE_PRESIZED => {
-                    add_cost!(const { Instr::fixed_units(Instr::OP_NEW_TABLE_PRESIZED) });
+                    fixed_cost!(Instr::OP_NEW_TABLE_PRESIZED);
                     // B is a hash-capacity hint: the constructor's keyed-field
                     // count. The array part is reserved per SET_LIST batch.
                     state.stack[ra] = state.alloc_table_with_capacity(inst.b() as usize);
                 }
                 Instr::OP_NEW_TABLE_TEMPLATE => {
-                    add_cost!(const { Instr::fixed_units(Instr::OP_NEW_TABLE_TEMPLATE) });
+                    fixed_cost!(Instr::OP_NEW_TABLE_TEMPLATE);
                     state.reg_new_table_template(frame, ra, inst.b());
                 }
 
@@ -344,17 +381,20 @@ impl Frame {
                 // site only on the path that can call out
                 // (`State::record_call_site`).
                 Instr::OP_GET_FIELD => {
+                    fixed_cost!(Instr::OP_GET_FIELD);
                     let receiver = state.stack[base + inst.b() as usize];
                     // native-call: run_frame->reg_get_field:field
                     state.reg_get_field(frame, inst, ra, receiver, local_cost, *ip)?;
                 }
                 Instr::OP_SELF => {
+                    fixed_cost!(Instr::OP_SELF);
                     let receiver = state.stack[base + inst.b() as usize];
                     state.stack[ra + 1] = receiver;
                     // native-call: run_frame->reg_get_field:self
                     state.reg_get_field(frame, inst, ra, receiver, local_cost, *ip)?;
                 }
                 Instr::OP_GET_TABLE => {
+                    fixed_cost!(Instr::OP_GET_TABLE);
                     // native-call: run_frame->reg_get_table
                     state.reg_get_table(
                         ra,
@@ -367,7 +407,7 @@ impl Frame {
 
                 // Table writes
                 Instr::OP_SET_FIELD => {
-                    add_cost!(const { Instr::fixed_units(Instr::OP_SET_FIELD) });
+                    fixed_cost!(Instr::OP_SET_FIELD);
                     // native-call: run_frame->reg_set_field
                     state.reg_set_field(
                         frame,
@@ -379,7 +419,7 @@ impl Frame {
                     )?;
                 }
                 Instr::OP_SET_TABLE => {
-                    add_cost!(const { Instr::fixed_units(Instr::OP_SET_TABLE) });
+                    fixed_cost!(Instr::OP_SET_TABLE);
                     // native-call: run_frame->reg_set_table
                     state.reg_set_table(
                         ra,
@@ -390,11 +430,11 @@ impl Frame {
                     )?;
                 }
                 Instr::OP_INIT_FIELD => {
-                    add_cost!(const { Instr::fixed_units(Instr::OP_INIT_FIELD) });
+                    fixed_cost!(Instr::OP_INIT_FIELD);
                     state.reg_init_field(frame, ra, inst.b(), base + inst.c() as usize)?;
                 }
                 Instr::OP_INIT_FIELD_PINNED => {
-                    add_cost!(const { Instr::fixed_units(Instr::OP_INIT_FIELD_PINNED) });
+                    fixed_cost!(Instr::OP_INIT_FIELD_PINNED);
                     state.reg_init_field_pinned(
                         frame,
                         ra,
@@ -404,10 +444,11 @@ impl Frame {
                     )?;
                 }
                 Instr::OP_INIT_INDEX => {
-                    add_cost!(const { Instr::fixed_units(Instr::OP_INIT_INDEX) });
+                    fixed_cost!(Instr::OP_INIT_INDEX);
                     state.reg_init_index(ra, base + inst.b() as usize, base + inst.c() as usize)?;
                 }
                 Instr::OP_SET_LIST => {
+                    fixed_cost!(Instr::OP_SET_LIST);
                     let count = match inst.set_list_count() {
                         Some(count) => usize::from(count),
                         None => state.stack.len() - (ra + 1),
@@ -420,35 +461,91 @@ impl Frame {
                 }
 
                 // Arithmetic
-                Instr::OP_ADD_RR => arith!(inst, lua_add, rr),
-                Instr::OP_ADD_RK => arith!(inst, lua_add, rk),
-                Instr::OP_ADD_KR => arith!(inst, lua_add, kr),
-                Instr::OP_SUB_RR => arith!(inst, lua_sub, rr),
-                Instr::OP_SUB_RK => arith!(inst, lua_sub, rk),
-                Instr::OP_SUB_KR => arith!(inst, lua_sub, kr),
-                Instr::OP_MUL_RR => arith!(inst, lua_mul, rr),
-                Instr::OP_MUL_RK => arith!(inst, lua_mul, rk),
-                Instr::OP_MUL_KR => arith!(inst, lua_mul, kr),
-                Instr::OP_DIV_RR => arith!(inst, lua_div, rr),
-                Instr::OP_DIV_RK => arith!(inst, lua_div, rk),
-                Instr::OP_DIV_KR => arith!(inst, lua_div, kr),
-                Instr::OP_MOD_RR => arith!(inst, lua_modulo, rr),
-                Instr::OP_MOD_RK => arith!(inst, lua_modulo, rk),
-                Instr::OP_MOD_KR => arith!(inst, lua_modulo, kr),
-                Instr::OP_POW_RR => arith!(inst, crate::crmath::pow, rr),
-                Instr::OP_POW_RK => arith!(inst, crate::crmath::pow, rk),
-                Instr::OP_POW_KR => arith!(inst, crate::crmath::pow, kr),
+                Instr::OP_ADD_RR => {
+                    fixed_cost!(Instr::OP_ADD_RR);
+                    arith!(inst, lua_add, rr);
+                }
+                Instr::OP_ADD_RK => {
+                    fixed_cost!(Instr::OP_ADD_RK);
+                    arith!(inst, lua_add, rk);
+                }
+                Instr::OP_ADD_KR => {
+                    fixed_cost!(Instr::OP_ADD_KR);
+                    arith!(inst, lua_add, kr);
+                }
+                Instr::OP_SUB_RR => {
+                    fixed_cost!(Instr::OP_SUB_RR);
+                    arith!(inst, lua_sub, rr);
+                }
+                Instr::OP_SUB_RK => {
+                    fixed_cost!(Instr::OP_SUB_RK);
+                    arith!(inst, lua_sub, rk);
+                }
+                Instr::OP_SUB_KR => {
+                    fixed_cost!(Instr::OP_SUB_KR);
+                    arith!(inst, lua_sub, kr);
+                }
+                Instr::OP_MUL_RR => {
+                    fixed_cost!(Instr::OP_MUL_RR);
+                    arith!(inst, lua_mul, rr);
+                }
+                Instr::OP_MUL_RK => {
+                    fixed_cost!(Instr::OP_MUL_RK);
+                    arith!(inst, lua_mul, rk);
+                }
+                Instr::OP_MUL_KR => {
+                    fixed_cost!(Instr::OP_MUL_KR);
+                    arith!(inst, lua_mul, kr);
+                }
+                Instr::OP_DIV_RR => {
+                    fixed_cost!(Instr::OP_DIV_RR);
+                    arith!(inst, lua_div, rr);
+                }
+                Instr::OP_DIV_RK => {
+                    fixed_cost!(Instr::OP_DIV_RK);
+                    arith!(inst, lua_div, rk);
+                }
+                Instr::OP_DIV_KR => {
+                    fixed_cost!(Instr::OP_DIV_KR);
+                    arith!(inst, lua_div, kr);
+                }
+                Instr::OP_MOD_RR => {
+                    fixed_cost!(Instr::OP_MOD_RR);
+                    arith!(inst, lua_modulo, rr);
+                }
+                Instr::OP_MOD_RK => {
+                    fixed_cost!(Instr::OP_MOD_RK);
+                    arith!(inst, lua_modulo, rk);
+                }
+                Instr::OP_MOD_KR => {
+                    fixed_cost!(Instr::OP_MOD_KR);
+                    arith!(inst, lua_modulo, kr);
+                }
+                Instr::OP_POW_RR => {
+                    fixed_cost!(Instr::OP_POW_RR);
+                    arith!(inst, crate::crmath::pow, rr);
+                }
+                Instr::OP_POW_RK => {
+                    fixed_cost!(Instr::OP_POW_RK);
+                    arith!(inst, crate::crmath::pow, rk);
+                }
+                Instr::OP_POW_KR => {
+                    fixed_cost!(Instr::OP_POW_KR);
+                    arith!(inst, crate::crmath::pow, kr);
+                }
                 Instr::OP_UNM => {
-                    add_cost!(const { Instr::fixed_units(Instr::OP_UNM) });
+                    fixed_cost!(Instr::OP_UNM);
                     match state.stack[base + inst.b() as usize] {
                         Val::Num(n) => state.stack[ra] = Val::Num(-n),
                         other => return Err(state.arithmetic_operands_error(other, other)),
                     }
                 }
                 Instr::OP_NOT => {
+                    fixed_cost!(Instr::OP_NOT);
                     state.stack[ra] = Val::Bool(!state.stack[base + inst.b() as usize].truthy());
                 }
                 Instr::OP_LEN => {
+                    fixed_cost!(Instr::OP_LEN);
                     // native-call: run_frame->reg_len
                     state.reg_len(ra, base + inst.b() as usize, local_cost, *ip)?;
                 }
@@ -460,11 +557,13 @@ impl Frame {
                 // The size is still bounded by `checked_string_growth`
                 // (MAX_STRING_BYTES), so the uncharged work is capped.
                 Instr::OP_CONCAT => {
+                    fixed_cost!(Instr::OP_CONCAT);
                     state.reg_concat(ra, base + inst.b() as usize, inst.c() as usize)?;
                 }
 
                 // Comparisons
                 Instr::OP_LT..=Instr::OP_NE => {
+                    fixed_cost!(Instr::OP_LT, Instr::OP_NE);
                     let op = CompareOp::from_value_opcode(inst.opcode())
                         .expect("the range holds the value comparisons");
                     let lhs = state.stack[base + inst.b() as usize];
@@ -473,12 +572,16 @@ impl Frame {
                 }
 
                 // Control flow
-                Instr::OP_JMP => *ip = Self::jumped(*ip, inst.sj()),
+                Instr::OP_JMP => {
+                    fixed_cost!(Instr::OP_JMP);
+                    *ip = Self::jumped(*ip, inst.sj());
+                }
                 // Compare-and-branch: jump when the comparison is false.
                 // One range arm with the variant decode outlined - per-
                 // variant arms measurably perturbed the dispatch loop's
                 // codegen in the stack VM.
                 Instr::OP_BR_LT..=Instr::OP_BR_NE => {
+                    fixed_cost!(Instr::OP_BR_LT, Instr::OP_BR_NE);
                     let op = CompareOp::from_branch_opcode(inst.opcode())
                         .expect("the range holds the branch comparisons");
                     let lhs = state.stack[ra];
@@ -488,20 +591,29 @@ impl Frame {
                     }
                 }
                 Instr::OP_TEST_FALSE => {
+                    fixed_cost!(Instr::OP_TEST_FALSE);
                     if !state.stack[ra].truthy() {
                         *ip = Self::jumped(*ip, inst.sj());
                     }
                 }
                 Instr::OP_TEST_TRUE => {
+                    fixed_cost!(Instr::OP_TEST_TRUE);
                     if state.stack[ra].truthy() {
                         *ip = Self::jumped(*ip, inst.sj());
                     }
                 }
 
                 // `for` loops
-                Instr::OP_FOR_PREP => state.instr_for_prep(ra, ip, inst.sj())?,
-                Instr::OP_FOR_LOOP => state.instr_for_loop(ra, ip, inst.sj())?,
+                Instr::OP_FOR_PREP => {
+                    fixed_cost!(Instr::OP_FOR_PREP);
+                    state.instr_for_prep(ra, ip, inst.sj())?;
+                }
+                Instr::OP_FOR_LOOP => {
+                    fixed_cost!(Instr::OP_FOR_LOOP);
+                    state.instr_for_loop(ra, ip, inst.sj())?;
+                }
                 Instr::OP_TFOR_CALL => {
+                    fixed_cost!(Instr::OP_TFOR_CALL);
                     // next/ipairs need no record or flush, but deferring this
                     // boundary into the iterator helper, or behind a separate
                     // fast-path probe here, grew the release Frame::run (see
@@ -521,11 +633,18 @@ impl Frame {
                         &frame.runtime.caches,
                     )?;
                 }
-                Instr::OP_TFOR_LOOP => state.instr_tfor_loop(ra, ip, inst.sj()),
+                Instr::OP_TFOR_LOOP => {
+                    fixed_cost!(Instr::OP_TFOR_LOOP);
+                    state.instr_tfor_loop(ra, ip, inst.sj());
+                }
 
                 // Functions (calls and returns)
-                Instr::OP_CLOSURE => state.reg_closure(frame, ra, inst.b())?,
+                Instr::OP_CLOSURE => {
+                    fixed_cost!(Instr::OP_CLOSURE);
+                    state.reg_closure(frame, ra, inst.b())?;
+                }
                 Instr::OP_CALL => {
+                    fixed_cost!(Instr::OP_CALL);
                     state.record_call_site(*ip);
                     Self::flush_local_cost(state, local_cost)?;
                     let args = state.call_window(ra, inst.call_args())?;
@@ -539,6 +658,7 @@ impl Frame {
                     }
                 }
                 Instr::OP_RETURN => {
+                    fixed_cost!(Instr::OP_RETURN);
                     // Flush any remaining accumulated cost before returning
                     Self::flush_local_cost(state, local_cost)?;
                     let count = match inst.return_count() {
@@ -548,6 +668,7 @@ impl Frame {
                     return Ok(Leave::Return { first: ra, count });
                 }
                 Instr::OP_VARARG => {
+                    fixed_cost!(Instr::OP_VARARG);
                     state.reg_vararg(ra, inst.vararg_count())?;
                 }
 

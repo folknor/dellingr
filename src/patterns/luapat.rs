@@ -93,7 +93,8 @@ impl ByteClass {
 /// differently there; this divergence is deliberate for determinism.
 ///
 /// Const form used to build the immutable table. The unit test below compares
-/// every table entry with the per-byte classifier it replaced.
+/// every table entry with the per-byte classifier it replaced; independent
+/// membership coverage lives in examples/strings/class_membership.lua.
 const fn table_match_class(ch: u8, class: u8) -> bool {
     let lower = class.to_ascii_lowercase();
     let result = match lower {
@@ -810,7 +811,7 @@ pub(super) fn str_match(
 }
 
 /// The per-byte classifier the static escape table replaced, kept as the
-/// test oracle for that table.
+/// mapping check for that table, not an independent membership oracle.
 #[cfg(test)]
 fn match_class(ch: u8, class: u8) -> bool {
     let result = match class.to_ascii_lowercase() {

@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Shared build and command-line helpers for the repository scripts.
 #
-# The scripts read no environment variables; their tunables are the constants
-# below, and per-run choices are command-line flags. The one environment input
-# in the repository is BROKKR_MARKER_FIFO, set by brokkr for the hotpath harness.
+# The scripts read no environment variables of their own; their tunables are
+# the constants below, and per-run choices are command-line flags. The hotpath
+# crate consumes HOTPATH_OUTPUT_PATH set by brokkr, and the harness reads
+# BROKKR_MARKER_FIFO, also set by brokkr.
 
 # Per-process timeout for diff_test.sh, in timeout(1) syntax.
 readonly DEFAULT_DIFF_TIMEOUT=5s

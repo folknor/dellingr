@@ -1,0 +1,164 @@
+cost_model=8
+# kind|name|expected|source or native arguments; source rows decode \n.
+# Comment lines are outside the fingerprint; they carry each row's reasoning.
+#
+# run: cost_used after running the source on a fresh State.
+run|folded_literals|1|local x = 60 * 1000 + -5 local y = x * 2
+run|literal_pow|4|local x = 2 ^ 10 local y = -3 ^ 2 + 1
+run|loop_and_calls|100|local function f(a) return a + 1 end local s = 0 for i = 1, 100 do s = f(s) end
+run|tables|296|local t = {} for i = 1, 50 do t[i] = i end local n = 0 for _, v in ipairs(t) do n = n + v end table.insert(t, 1, 0) table.concat(t, ',')
+# One table creation and one flat rawset charge.
+run|rawset|2|local t = {}; rawset(t, 1, 2)
+run|strings_and_patterns|193|local s = 'hello world from lua' local a = s:find('wor') local b = s:gsub('o', '0') local c = s:match('(%a+) (%a+)') local u = s:upper()
+run|gmatch|103|local n = 0 for w in string.gmatch('one two three four', '%a+') do n = n + #w end for w in string.gmatch('a b', '%a+') do n = n + 1 end
+# The literal caret is charged as the one pattern byte it is, at creation and
+# at first-call compilation.
+run|gmatch_leading_caret|26|local n = 0 for w in string.gmatch('^a^a', '^a') do n = n + #w end
+# Two tables, one initializer write, one handler add and one append.
+run|sequence_len_handler|5|local t = setmetatable({}, {__len = function() local n = 1 return n + 1 end}) table.insert(t, 7)
+# Two format bytes and one emitted decimal digit.
+run|quoted_integral|3|local s = string.format('%q', 1)
+# error: cost_used after a runtime type error, unbudgeted, at the exact budget
+# and under a loose one. Every costed opcode that ran before the error counts,
+# independent of the dispatch loop's batching interval.
+# Two adds, including the failing one.
+error|arith_error_after_add|2|local a, b = 1, nil local x = a + a local y = a + b
+# One add; global writes and field reads are free.
+error|index_nil_after_add|1|x = 2 local a = 1 + x local t = nil local b = t.k
+# One add and the failing field write.
+error|write_nil_after_add|2|local a = 1 local x = a + a local t = nil t.k = x
+# One caller add, one successful callee add and one failing add.
+error|nested_arith_error|3|local function f(a) local x = a + a return x + nil end local a = 1 local x = a + a f(x)
+# 65 loop adds and the failing add, spanning the 64-unit batch boundary.
+error|arith_error_after_batch_flush|66|local n = 0 for i = 1, 65 do n = n + 1 end return n + nil
+# Two tables, one initializer write, one caller add and one failing add.
+error|index_handler_error|5|local t = setmetatable({}, { __index = function(_, k) local n = 1 return n + k end }) local n = 1 local x = n + n local y = t.missing
+# As above, plus the field write that invokes __newindex.
+error|newindex_handler_error|6|local t = setmetatable({}, { __newindex = function(_, k, v) return v + k end }) local n = 1 local x = n + n t.missing = x
+# Two tables, one initializer write, one caller add and one failing add.
+error|length_handler_error|5|local t = setmetatable({}, { __len = function(t) local n = 1 return n + t end }) local n = 1 local x = n + n local y = #t
+# Table library sources; insert, remove and pack add a flat 1, unpack is free.
+run|table_insert|2|table.insert({}, nil)
+run|table_remove|2|table.remove({})
+run|table_pack_empty|1|table.pack()
+run|table_pack_values|1|table.pack(1, 2, 3)
+run|unpack_empty_range|1|unpack({}, 1, 0)
+run|unpack_missing_values|1|unpack({}, 1, 10)
+run|table_unpack_missing_values|1|table.unpack({}, 1, 10)
+# String library sources on empty and short inputs.
+run|upper_empty|1|return string.upper('')
+run|lower_empty|1|return string.lower('')
+run|reverse_empty|1|return string.reverse('')
+run|sub_empty|1|return string.sub('', 1, 0)
+run|find_empty|2|return string.find('', '')
+run|match_empty|2|return string.match('', '')
+run|gmatch_empty|1|return string.gmatch('', '')
+run|gsub_empty|2|return string.gsub('', '', '')
+run|format_empty|1|return string.format('')
+run|concat_empty|2|return table.concat({}, '')
+run|concat_empty_separator|2|return table.concat({}, 'x')
+run|concat_values|7|return table.concat({'a', 'b'}, '')
+run|concat_separator|10|return table.concat({'a', 'bb'}, ',')
+failure|concat_invalid_value|9|return table.concat({'a', false, 'bb'}, ',')
+# pin: a named value a specialized test reads through `pinned_cost`; the last
+# column names the consuming test. Most are cost deltas between two runs, not
+# absolute costs of one source.
+pin|gmatch_subject_doubling|1152|string_charges::gmatch_full_scan_is_linear_in_its_subject
+pin|match_captures|600|string_charges::captures_have_a_constant_cost_delta_independent_of_subject_size
+# Post-reset table creation, two writes and one add.
+pin|mid_run_budget_reset|4|cost_golden::mid_run_budget_reset_sees_a_flushed_meter
+# Two tables, one field initializer and the failing handler add; the lookup
+# itself adds no native charge.
+pin|unpack_failed_lookup|4|cost_golden::unpack_charges_nothing_for_lookups_reached_before_an_index_error
+pin|flat:insert|0|cost_golden::table_library_charges_are_flat
+pin|flat:remove|0|cost_golden::table_library_charges_are_flat
+pin|flat:unpack|0|cost_golden::table_library_charges_are_flat
+pin|flat:unpack_empty|0|cost_golden::table_library_charges_are_flat
+pin|flat:pack|0|cost_golden::table_library_charges_are_flat
+pin|len_large|0|string_charges::len_is_free_even_for_a_large_string
+pin|gsub_invalid_replacement|0|string_charges::gsub_rejects_an_invalid_replacement_before_charging
+pin|gmatch_caret_delta|2|string_charges::gmatch_leading_caret_is_charged_as_written
+pin|empty_find_match|4|string_charges::empty_find_and_match_charge_only_their_up_front_units
+pin|matcher_refusal|17|string_charges::matcher_refusal_is_a_budget_error_at_the_exact_budget
+# Fixed sources whose owning suites also assert them, pinned here under the
+# version contract.
+run|plain_field_miss|1|local t = {}; return t.unknown
+run|pairs_cursor|4|local t={a=1,b=2,c=3}; for k in pairs(t) do end; for k in pairs(t) do end
+run|global_writes|3|function writer(v) x = v + 1 + 1 + 1 end; writer(1)
+run|analysis_native_exclusion|6|math.floor(1.5); table.pack(1); string.upper('abcd')
+run|analysis_empty_set_list|1|local function f(...) return {...} end\nf()
+run|runtime_cache_population|12|\n        local a = { x = 1 }\n        local b = { x = 2 }\n        local function f(t)\n            t.y = 3\n            return { p = 4, q = 5 }\n        end\n        f(a)\n        f(b)\n    
+run|analysis_scoped_loop|3|local x = 0; for i = 1, 3 do do local y = i; x = x + y end end; return x
+run|analysis_open_results|0|local function f(...) return ... end; return f(1, f())
+run|analysis_closure_capture|0|local function make() local x = 1; return function() return x end end; return make()()
+run|table_move_empty|2|return table.move({}, 1, 0, 1)
+run|table_move_one|2|return table.move({}, 1, 1, 1)
+run|table_move_three|4|return table.move({}, 1, 3, 1)
+pin|reentry:CALL with __call|3|reentrant_opcode_accounting
+pin|reentry:TFOR_CALL with __call|3|reentrant_opcode_accounting
+pin|reentry:LENGTH with __len|3|reentrant_opcode_accounting
+pin|reentry:GET_FIELD with __index|3|reentrant_opcode_accounting
+pin|reentry:SELF with __index|3|reentrant_opcode_accounting
+pin|reentry:GET_TABLE with __index|3|reentrant_opcode_accounting
+pin|reentry:SET_FIELD with __newindex|4|reentrant_opcode_accounting
+pin|reentry:multiple-assignment field store with __newindex|4|reentrant_opcode_accounting
+pin|reentry:SET_TABLE with __newindex|4|reentrant_opcode_accounting
+# native: the charge of one call to a registered function, read by
+# stdlib_cost_golden.rs. Arguments: n:number, s:string (including empty),
+# b:boolean, t:empty table; semicolon separated.
+native|math.abs|1|n:0.5
+native|math.acos|1|n:0.5
+native|math.asin|1|n:0.5
+native|math.atan|1|n:0.5
+native|math.ceil|1|n:0.5
+native|math.cos|1|n:0.5
+native|math.deg|1|n:0.5
+native|math.exp|1|n:0.5
+native|math.floor|1|n:0.5
+native|math.log|1|n:0.5
+native|math.rad|1|n:0.5
+native|math.sin|1|n:0.5
+native|math.sqrt|1|n:0.5
+native|math.tan|1|n:0.5
+native|math.atan2|1|n:1;n:2
+native|math.fmod|1|n:1;n:2
+native|math.min|1|n:1;n:2
+native|math.max|1|n:1;n:2
+native|math.modf|1|n:1.5
+native|math.random|1|
+native|string.sub|2|s:abc;n:2;n:3
+native|string.find|6|s:abc;s:a;n:1;b:true
+native|string.format|1|s:
+native|string.len|0|s:abc
+native|string.upper|3|s:abc
+native|string.lower|3|s:abc
+native|string.reverse|3|s:abc
+native|string.match|2|s:;s:
+native|string.gmatch|1|s:;s:
+native|string.gsub|2|s:;s:;s:
+native|table.insert|1|t:;n:1
+native|table.remove|1|t:;n:1
+native|table.pack|1|n:1;n:2
+native|table.move|1|t:;n:1;n:0;n:1
+native|table.concat|1|t:;s:
+native|table.sort|1|t:
+native|_G.rawset|1|t:;n:1;n:2
+# free and free_error: functions docs/budget.md documents as free. The source
+# runs with one empty table as its vararg and must leave cost_used at 0;
+# free_error must raise its script error. The expected column stays empty.
+free|_G.type||return type(nil)
+free|_G.tonumber||return tonumber('1')
+free|_G.tostring||return tostring(1)
+free|_G.print||print()
+free|_G.select||return select('#', 1, 2)
+free|_G.next||return next(...)
+free|_G.pairs||return pairs(...)
+free|_G.ipairs||local iter, t, k = ipairs(...) return iter(t, k)
+free|_G.getmetatable||return getmetatable(...)
+free|_G.setmetatable||return setmetatable(..., nil)
+free|_G.rawget||return rawget(..., 1)
+free|_G.rawequal||return rawequal(1, 1)
+free|_G.rawlen||return rawlen(...)
+free|_G.unpack||return unpack(...)
+free|table.unpack||return table.unpack(...)
+free_error|_G.error||error('cost probe')

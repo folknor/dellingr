@@ -1,6 +1,8 @@
 //! A Rust callback's reported result count is validated against its frame.
 //! Over-reporting is a host bug and fails the call instead of being padded
-//! with nil; every RustFn call path shares that check.
+//! with nil; the callback entry paths that can reach RustFn are covered below.
+
+use std::collections::BTreeSet;
 
 use dellingr::error::{Error, ErrorKind};
 use dellingr::{ArgCount, RetCount, State};
@@ -11,6 +13,13 @@ use crate::support::{self, Recorder};
 fn over_report(state: &mut State) -> dellingr::Result<u8> {
     state.push_number(7.0)?;
     Ok(3)
+}
+
+/// Pushes one value and reports more results than any callback below has
+/// arguments plus pushes.
+fn over_report_max(state: &mut State) -> dellingr::Result<u8> {
+    state.push_number(7.0)?;
+    Ok(u8::MAX)
 }
 
 /// Generic-for iterator: pushes one value onto its two arguments, claims four.
@@ -59,6 +68,256 @@ fn assert_over_report(kind: &ErrorKind) {
         ),
         "unexpected error kind: {kind:?}"
     );
+}
+
+fn assert_max_over_report(kind: &ErrorKind, available: usize) {
+    match kind {
+        ErrorKind::ResultCountExceedsStack {
+            reported,
+            available: actual,
+        } => {
+            assert_eq!(*reported, u8::MAX);
+            assert_eq!(*actual, available);
+        }
+        other => panic!("unexpected error kind: {other:?}"),
+    }
+}
+
+struct LuaOverReportRoute {
+    edge: &'static str,
+    script: &'static str,
+    available: usize,
+}
+
+const LUA_OVER_REPORT_ROUTES: &[LuaOverReportRoute] = &[
+    LuaOverReportRoute {
+        edge: "index_call->call_unguarded",
+        script: "local t = setmetatable({}, {__index = bad}); return t.x",
+        available: 3,
+    },
+    LuaOverReportRoute {
+        edge: "newindex_call->call_unguarded",
+        script: "local t = setmetatable({}, {__newindex = bad}); t.x = 1",
+        available: 4,
+    },
+    LuaOverReportRoute {
+        edge: "begin_call->begin_callable_call",
+        script: "local f = setmetatable({}, {__call = bad}); return f()",
+        available: 2,
+    },
+    LuaOverReportRoute {
+        edge: "begin_callable_call->invoke_rust_fn",
+        script: "local f = setmetatable({}, {__call = bad}); return f()",
+        available: 2,
+    },
+    LuaOverReportRoute {
+        edge: "len_call->call_unguarded",
+        script: "return #setmetatable({}, {__len = bad})",
+        available: 3,
+    },
+    LuaOverReportRoute {
+        edge: "tostring_rendering->call_unguarded",
+        script: "return tostring(setmetatable({}, {__tostring = bad}))",
+        available: 2,
+    },
+    LuaOverReportRoute {
+        edge: "table_sort_less->call_unguarded",
+        script: "table.sort({2, 1}, bad)",
+        available: 3,
+    },
+    LuaOverReportRoute {
+        edge: "append_function_replacement->call_unguarded:whole",
+        script: "return string.gsub('a', 'a', bad)",
+        available: 2,
+    },
+    LuaOverReportRoute {
+        edge: "append_function_replacement->call_unguarded:captures",
+        script: "return string.gsub('a', '(a)', bad)",
+        available: 2,
+    },
+    LuaOverReportRoute {
+        edge: "get_table_unguarded->call_unguarded",
+        script: "local t = setmetatable({}, {__len = function() return 1 end, __index = bad}); return table.concat(t)",
+        available: 3,
+    },
+    LuaOverReportRoute {
+        edge: "set_table->call_unguarded",
+        script: "table.insert(setmetatable({}, {__len = function() return 0 end, __newindex = bad}), 'x')",
+        available: 4,
+    },
+    LuaOverReportRoute {
+        edge: "sequence_len->call_unguarded",
+        script: "table.insert(setmetatable({}, {__len = bad}), 'x')",
+        available: 3,
+    },
+];
+
+const EXISTING_OVER_REPORT_EDGES: &[&str] = &[
+    // Direct host call, also used by the nested host callback below.
+    "call->call_unguarded",
+    "call_unguarded->begin_call",
+    "begin_call->invoke_rust_fn",
+    // A Rust callback called by Lua and the generic-for Rust iterator path.
+    "call_from_lua->begin_call",
+    "instr_tfor_call->instr_tfor_call_rust_fn",
+    "instr_tfor_call_rust_fn->invoke_rust_fn",
+    // The anchored host entry added below.
+    "call_anchor_unguarded->call_unguarded",
+];
+
+fn native_call_inventory() -> toml::Value {
+    toml::from_str(include_str!("../../../reference/native-calls.toml"))
+        .expect("native call inventory is valid TOML")
+}
+
+fn inventory_rust_fn_entry_edges() -> BTreeSet<String> {
+    let inventory = native_call_inventory();
+    let edges = inventory
+        .get("edge")
+        .and_then(toml::Value::as_array)
+        .expect("native call inventory has edge entries");
+
+    let mut entry_edges = BTreeSet::new();
+    for edge in edges {
+        let Some(id) = edge.get("id").and_then(toml::Value::as_str) else {
+            continue;
+        };
+        if edge.get("excluded").is_some() {
+            continue;
+        }
+        let Some((_, target)) = id.split_once("->") else {
+            continue;
+        };
+        let target = target.split(':').next().unwrap_or(target);
+        // The generic-for call_unguarded arm handles non-RustFn iterators;
+        // gmatch calls its fixed Lua wrapper here, not a user callback.
+        let can_enter_rust_fn = (target == "call_unguarded"
+            && !matches!(
+                id,
+                "instr_tfor_call->call_unguarded" | "push_gmatch_wrapper->call_unguarded"
+            ))
+            || matches!(
+                target,
+                "invoke_rust_fn" | "begin_call" | "begin_callable_call" | "instr_tfor_call_rust_fn"
+            );
+        if can_enter_rust_fn {
+            entry_edges.insert(id.to_owned());
+        }
+    }
+    entry_edges
+}
+
+fn inventory_scenario_edges() -> BTreeSet<String> {
+    let inventory = native_call_inventory();
+    let scenarios = inventory
+        .get("scenario")
+        .and_then(toml::Value::as_array)
+        .expect("native call inventory has scenario entries");
+    let segments = inventory
+        .get("segment")
+        .and_then(toml::Value::as_table)
+        .expect("native call inventory has path segments");
+
+    let mut edges = BTreeSet::new();
+    for scenario in scenarios {
+        let path = scenario
+            .get("path")
+            .and_then(toml::Value::as_array)
+            .expect("each native call scenario has a path");
+        for item in path {
+            let item = item
+                .as_str()
+                .expect("native call scenario path entries are strings");
+            if let Some(segment_name) = item.strip_prefix('@') {
+                let segment = segments
+                    .get(segment_name)
+                    .and_then(toml::Value::as_array)
+                    .expect("native call scenario names an existing segment");
+                edges.extend(
+                    segment
+                        .iter()
+                        .filter_map(toml::Value::as_str)
+                        .map(str::to_owned),
+                );
+            } else {
+                edges.insert(item.to_owned());
+            }
+        }
+    }
+    edges
+}
+
+fn tested_rust_fn_entry_edges() -> BTreeSet<String> {
+    LUA_OVER_REPORT_ROUTES
+        .iter()
+        .map(|route| route.edge.to_owned())
+        .chain(
+            EXISTING_OVER_REPORT_EDGES
+                .iter()
+                .map(|edge| (*edge).to_owned()),
+        )
+        .collect()
+}
+
+fn run_lua_over_report(script: &str, available: usize) {
+    let (mut state, recorder) = Recorder::state();
+    state
+        .push_rust_fn(over_report_max)
+        .expect("the callback should fit");
+    state
+        .set_global("bad")
+        .expect("the callback should install");
+    support::load(&mut state, script);
+    let error = state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+        .expect_err("the Rust callback over-reports");
+    assert_max_over_report(error.kind(), available);
+    assert_eq!(recorder.error_count(), 1);
+}
+
+#[test]
+fn inventory_rust_fn_entry_edges_have_result_count_coverage() {
+    assert_eq!(
+        tested_rust_fn_entry_edges(),
+        inventory_rust_fn_entry_edges(),
+        "update the over-report routes when an inventoried RustFn entry is added"
+    );
+}
+
+#[test]
+fn inventoried_lua_routes_reject_rust_fn_over_report() {
+    let inventory_edges = inventory_rust_fn_entry_edges();
+    let scenario_edges = inventory_scenario_edges();
+    for route in LUA_OVER_REPORT_ROUTES {
+        assert!(
+            inventory_edges.contains(route.edge),
+            "route edge is absent from the native call inventory: {}",
+            route.edge
+        );
+        assert!(
+            scenario_edges.contains(route.edge),
+            "route edge has no native call inventory scenario: {}",
+            route.edge
+        );
+        run_lua_over_report(route.script, route.available);
+    }
+}
+
+#[test]
+fn call_anchor_rejects_over_report() {
+    let (mut state, recorder) = Recorder::state();
+    state
+        .push_rust_fn(over_report_max)
+        .expect("the callback should fit");
+    let anchor = state
+        .anchor_function()
+        .expect("the callback can be anchored");
+    let error = state
+        .call_anchor(&anchor, ArgCount::Fixed(0), RetCount::Fixed(0))
+        .expect_err("the anchored callback over-reports");
+    assert_max_over_report(error.kind(), 1);
+    assert_eq!(recorder.error_count(), 1);
+    assert_eq!(state.get_top(), 0);
 }
 
 #[test]

@@ -119,6 +119,26 @@ native charges and compiler emission together.
 - Snapshots load only under an exact match.
 - The doc comment on the constant carries the per-version history.
 
+`tests/fixtures/cost_golden.txt` pins source costs and fixed-input native
+charges. The cost tests also check that every function registered in `_G`,
+`math`, `string` and `table` has a call probe there; the documented free
+functions are probed for a zero charge, and the `ipairs` probe also calls the
+iterator it returns. Specialized tests read named pins (mostly cost deltas)
+from the same fixture, so those values are versioned too.
+
+Changing a fixture row requires a new version and an appended
+(version, fingerprint) pair in `COST_MODEL_HISTORY` in
+`tests/integration/cost/cost_golden.rs`. The test fails unless the last pair
+is the current version with the current rows' fingerprint, and fails if those
+rows match a fingerprint recorded under another version. The history is
+append-only by convention: editing an existing pair in place would hide a cost
+change under an old version, so a diff that touches one needs review.
+The Unreleased changelog section must state "`COST_MODEL_VERSION` is N"
+exactly once, with N the current version.
+These probes cover fixed inputs; they do not prove that every possible
+source keeps its cost. Changes outside their coverage still require review
+under the version contract above.
+
 ## Static analysis
 
 `analyze_cost` (and `dellingr --analyze`) sums each costed opcode once across

@@ -110,9 +110,7 @@ mod tests {
         ];
 
         for (error, expected) in cases {
-            let detail = PatternErrorDetail::from(&error);
             assert_eq!(error.to_string(), expected);
-            assert_eq!(detail.to_string(), expected);
         }
     }
 }

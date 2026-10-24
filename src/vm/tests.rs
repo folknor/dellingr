@@ -211,13 +211,18 @@ fn compaction_keeps_live_order_and_cached_writes() {
 fn restricted_env_counts_a_repeated_whitelist_name_once() {
     let mut state = State::new();
     state.seal_globals();
-    run_lua(&mut state, "x = 1; x = nil");
+    run_lua(&mut state, "x = 1; x = nil; y = 1");
+    let outer_slots = state.global_env.len(&state.heap);
     state
-        .with_restricted_env(&["x", "x"], |state| {
-            // Collection checks the tombstone count in debug builds.
+        .with_restricted_env(&["y", "y"], |state| {
+            assert_eq!(state.global_env.len(&state.heap), 1);
+            // The suspended outer table still has x's tombstone. Collection
+            // checks its count in debug builds.
             state.gc_collect();
+            assert_eq!(state.global_env.len(&state.heap), 1);
         })
         .unwrap();
+    assert_eq!(state.global_env.len(&state.heap), outer_slots);
 }
 
 #[test]

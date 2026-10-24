@@ -1,4 +1,4 @@
-//! The two inventories of `State`'s fields, each exhaustive by construction.
+//! The inventories of `State`'s fields, each exhaustive by construction.
 //!
 //! - [`State::for_each_gc_root`] answers "what does this field root?". It is
 //!   the single source of truth for the collector's root set (heap objects,
@@ -7,21 +7,24 @@
 //! - [`State::rest_state`] answers "how long does this field's content
 //!   live?": execution-lifetime ([`InFlight`]), host-held (allowed outside
 //!   execution, refused by a snapshot) or persistent.
+//! - [`State::for_each_gc_cleanup`] answers "what post-sweep cleanup does this
+//!   field need?": weak tables are pruned and the upvalue pool is swept.
 //!
-//! Both destructure `State` (and `InFlight`) without a rest pattern, so a new
-//! field fails to compile until it is named in each, either used or bound to
-//! `_` with the reason it needs nothing there. That forces a decision; it
-//! cannot prove the decision right.
+//! Each destructures `State` (and the root inventory also destructures
+//! `InFlight`) without a rest pattern, so a new field fails to compile until
+//! it is named in each, either used or bound to `_` with the reason it needs
+//! nothing there. That forces a decision; it cannot prove the decision right.
 
 use std::sync::Arc;
 
 use super::anchor::Registry;
 use super::global_env::{GlobalEnv, SuspendedEnv};
 use super::meta_name::MetaNames;
-use super::object::{ObjectPtr, UpvalueRef};
-use super::{CallInfo, RustFunc, State, Val};
+use super::object::{GcHeap, ObjectPtr, StringPtr, UpvaluePool, UpvalueRef};
+use super::{CallInfo, IndexMap, PatternCacheEntry, PointerIdKey, RustFunc, State, Val};
 use crate::compiler::Bytecode;
 use crate::limits::tuning;
+use crate::patterns::AnchorMode;
 
 /// Execution-lifetime state: what a call in progress holds, and nothing that
 /// outlives it. Every field is at its [`InFlight::new`] value once the
@@ -212,7 +215,118 @@ impl GcRoot<'_> {
     }
 }
 
+/// One State-owned weak table that must be pruned after the heap sweep.
+///
+/// This closed enum makes adding a weak table require adding its pruning
+/// behavior to [`WeakTable::prune`].
+pub(super) enum WeakTable<'a> {
+    /// Compiled string patterns keyed by interned strings.
+    Patterns {
+        entries: &'a mut IndexMap<(StringPtr, AnchorMode), PatternCacheEntry>,
+        byte_count: &'a mut usize,
+    },
+    /// Stable `%p` identities keyed by heap handles.
+    FormatPointerIds(&'a mut IndexMap<PointerIdKey, u64>),
+}
+
+impl WeakTable<'_> {
+    /// Drop entries whose referents were freed by the latest heap sweep.
+    pub(super) fn prune(self, heap: &GcHeap) {
+        match self {
+            WeakTable::Patterns {
+                entries,
+                byte_count,
+            } => {
+                // Pattern keys are weak. Prune before any allocation can reuse
+                // a swept string slot; retain preserves insertion order, so
+                // the oldest surviving entry remains the next eviction victim.
+                let mut pattern_bytes = 0;
+                entries.retain(|(ptr, _), entry| {
+                    let live = heap.val_is_live(&Val::Str(*ptr));
+                    if live {
+                        pattern_bytes += entry.byte_len;
+                    }
+                    live
+                });
+                *byte_count = pattern_bytes;
+            }
+            WeakTable::FormatPointerIds(entries) => {
+                // These entries are deliberately not GC roots. An entry whose
+                // value no longer resolves cannot be observed again, so drop
+                // it before a later allocation could reuse its key.
+                entries.retain(|key, _| heap.val_is_live(&key.as_val()));
+            }
+        }
+    }
+}
+
+/// An ordered piece of post-sweep GC cleanup.
+pub(super) enum GcCleanup<'a> {
+    /// A State-owned weak table.
+    WeakTable(WeakTable<'a>, &'a GcHeap),
+    /// Recycle unmarked upvalue-pool slots.
+    UpvaluePool(&'a mut UpvaluePool),
+}
+
 impl State {
+    /// Visit every post-sweep cleanup step in collection order. A new State
+    /// field fails to compile here until it is classified. Weak table variants
+    /// are closed and their pruning is exhaustive in [`WeakTable::prune`].
+    pub(super) fn for_each_gc_cleanup(&mut self, mut visit: impl for<'a> FnMut(GcCleanup<'a>)) {
+        // A field bound to `_` holds strong references or no heap handles,
+        // so a sweep leaves nothing in it to prune; `bytecode_caches` is the
+        // exception, whose weak cache cells `drop_dead_cache_entries` clears
+        // just before this runs.
+        let State {
+            #[cfg(feature = "fault-injection")]
+                fault_injection: _,
+            global_env: _,
+            string_metatable: _,
+            string_mt_index_shape: _,
+            meta_names: _,
+            stack: _,
+            in_flight: _,
+            heap,
+            bytecode_caches: _,
+            suspended_envs: _,
+            upvalue_pool,
+            cost: _,
+            patterns,
+            pattern_bytes,
+            #[cfg(test)]
+                pattern_compilations: _,
+            poisoned: _,
+            frame_stacks: _,
+            callbacks: _,
+            user_data: _,
+            rng: _,
+            registry: _,
+            format_pointer_ids,
+            next_format_pointer_id: _,
+            #[cfg(feature = "snapshot")]
+                rust_fns_by_id: _,
+            #[cfg(feature = "snapshot")]
+                rust_fn_ids_by_addr: _,
+            #[cfg(feature = "snapshot")]
+                env_tokens: _,
+            #[cfg(feature = "snapshot")]
+                env_baselines: _,
+        } = self;
+
+        visit(GcCleanup::WeakTable(
+            WeakTable::Patterns {
+                entries: patterns,
+                byte_count: pattern_bytes,
+            },
+            heap,
+        ));
+        visit(GcCleanup::UpvaluePool(upvalue_pool));
+        visit(GcCleanup::WeakTable(
+            WeakTable::FormatPointerIds(format_pointer_ids),
+            heap,
+        ));
+    }
+
     /// Visit every State-owned GC root. A new State or [`InFlight`] field
     /// fails to compile here until it is either visited or bound to `_` with
     /// the reason it roots nothing.
@@ -230,7 +344,7 @@ impl State {
             suspended_envs,
             upvalue_pool: _, // Slots are marked through closures and OpenUpvalue.
             cost: _,         // Counters only.
-            patterns: _,     // Weak: keys pruned in collect_garbage.
+            patterns: _,     // Weak: pruned by for_each_gc_cleanup after sweep.
             pattern_bytes: _,
             #[cfg(test)]
                 pattern_compilations: _,
@@ -240,7 +354,7 @@ impl State {
             user_data: _,    // Host-owned; the host cannot hold a Val.
             rng: _,
             registry,
-            format_pointer_ids: _, // Weak: entries pruned in collect_garbage.
+            format_pointer_ids: _, // Weak: pruned by for_each_gc_cleanup after sweep.
             next_format_pointer_id: _,
             #[cfg(feature = "snapshot")]
                 rust_fns_by_id: _, // Function pointers, not heap values.

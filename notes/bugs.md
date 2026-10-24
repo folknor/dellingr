@@ -21,49 +21,6 @@ runtime, library). Each entry names the scopes whose hunters reported it.
 
 ---
 
-## BUG-002 - `hotpath-alloc` does not enable this crate's `hotpath` feature, so `cfg(feature = "hotpath")` guards fail open
-
-Reported by: corpus-harness, native-stack-errors, compiler-cost.
-
-`Cargo.toml` defines `hotpath-alloc = ["hotpath/hotpath",
-"hotpath/hotpath-alloc"]`. That enables the dependency's features, not this
-crate's own `hotpath` feature. Under `--features hotpath-alloc` the measure
-guards are live (they key on the dependency's feature) while
-`cfg(feature = "hotpath")` is false. Guards spelled with `"hotpath"` alone
-therefore fail open under `hotpath-alloc`:
-
-- `tests/integration/corpus/diff_test.rs` compiles its corpus partitions out only for
-  `"hotpath"`, for the stated reason that instrumentation pushes the corpus
-  past the time budget. Under `hotpath-alloc` they compile in and run
-  instrumented, contrary to AGENTS.md ("The corpus partitions are compiled out
-  under the `hotpath` feature").
-- `src/compiler/parser.rs` sets `DEEP_PARSE_TEST_STACK_BYTES` to 8 MiB under
-  `cfg(feature = "hotpath")` only, so instrumented `hotpath-alloc` parser unit
-  tests parse at the syntax budget on 2 MiB with timing guards on every parser
-  frame, which is what the 8 MiB branch exists to prevent.
-  `tests/native_stack.rs` sets `PARSE_TEST_STACK_BYTES` (and
-  `tests/common/stack.rs` sets `LIMIT_TEST_STACK_BYTES`) to 8 MiB under
-  `hotpath` *or* `hotpath-alloc`, and says its constant matches "as
-  `src/compiler/parser.rs`'s unit-test constant does"; that parity claim is
-  false for `hotpath-alloc`.
-
-`tests/common/stack.rs`, `tests/native_stack.rs` and
-`tests/integration/failures/error_boundary.rs` spell both features and are
-correct, so the repository already knows; the guards disagree.
-
-Fix: `hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]`, so
-`cfg(feature = "hotpath")` means "instrumented" everywhere and the
-`any(hotpath, hotpath-alloc)` spellings collapse. Then keep the parse-test
-stack size in one place both the unit tests and the integration tests read (a
-`#[doc(hidden)] pub` constant in `limits`, a `cfg(test)` export, or a
-`tests/common/stack.rs` that `src/` includes the way it already includes
-`tests/common/examples.rs`).
-
-Enforceable: the feature implication is structural (Cargo enforces it). A
-textlint rule banning `feature = "hotpath-alloc"` inside `cfg(` anywhere except
-the allocator installs (`src/main.rs`, `examples/hotpath.rs`) keeps it so. One
-constant instead of two removes the drift.
-
 ## BUG-007 - Save bytes differ between dev and release builds of one version, while the docs and the golden say otherwise
 
 Reported by: corpus-harness, snapshot, compiler-cost.

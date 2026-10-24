@@ -32,7 +32,8 @@ All notable changes to dellingr are documented here. The format follows
     whole register frame when it is admitted, so a run that reaches
     `MAX_STACK_SIZE` now fails at the call that cannot reserve its frame,
     before the body runs. The surviving state, RNG position, error location,
-    traceback and `cost_used` of such runs differ. `COST_MODEL_VERSION` is 7.
+    traceback and `cost_used` of such runs differ. This requires a
+    `COST_MODEL_VERSION` bump.
   - Multiple-assignment nil padding no longer occupies the stack, and a
     fixed number of results returns into registers the caller already
     holds, so some assignments and calls that failed with `StackOverflow`
@@ -535,6 +536,12 @@ All notable changes to dellingr are documented here. The format follows
 
 ### Changed
 
+- The `hotpath-alloc` cargo feature now enables this crate's `hotpath`
+  feature, so every instrumentation guard keyed on `hotpath` also applies to
+  allocation-tracking builds.
+- The test-only `fault-injection` cargo feature now fails to compile without
+  debug assertions, so a dependency that enables it cannot reach a host's
+  release build.
 - **Replay-visible:** `math.sin`, `cos`, `tan`, `asin`, `acos`, `atan`,
   `atan2`, `exp`, `log` and the `^` operator no longer call the platform libm.
   They are in-crate ports of the CORE-MATH correctly rounded binary64

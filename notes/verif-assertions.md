@@ -330,39 +330,6 @@ move the parity tests to a unit test reading a `cfg(test)` path counter, as
 
 Enforceable: no general rule.
 
-## VA-024 - `global_write_cache.rs` names cache behaviour it cannot observe
-
-Reported by: runtime.
-
-`warm_writer_inserts_populates_then_hits_and_closures_share_the_site`,
-`append_and_g_proxy_writes_do_not_displace_a_warmed_global` and
-`builtin_rebind_does_not_disturb_a_warmed_writer` assert only final global values.
-With the cache disabled every one passes. They are correctness-under-caching
-tests, worth having, but the names promise "populates", "hits" and "shares the
-site". The unit tests in `src/vm/global_env.rs` and `src/vm.rs::runtime_tests`
-show the in-crate way to inspect cache cells (`read_cached`, `cache_cells`).
-
-Fix: rename to what they check, and add hit/share assertions as unit tests that
-can read `RuntimeCaches`.
-
-Enforceable: no.
-
-## VA-025 - `restricted_env_counts_a_repeated_whitelist_name_once` is vacuous without debug assertions
-
-Reported by: runtime.
-
-The test calls `gc_collect()` and asserts nothing; its comment says "Collection
-checks the tombstone count in debug builds". Under `brokkr test ... --release` it
-passes unconditionally. `src/vm/object.rs` and `src/vm/table.rs` gate their
-debug-assert-only tests with `#[cfg(debug_assertions)]`; this one does not. The
-gate runs lib unit tests only in dev, so the gap is in focused release runs.
-
-Fix: `#[cfg(debug_assertions)]` on the test, or assert the tombstone count directly
-through the `cfg(test)` `GlobalEnv::len`.
-
-Enforceable: partly; a convention check could require a test whose body has no
-`assert`/`expect_err`/`should_panic` to carry `cfg(debug_assertions)`.
-
 ## VA-029 - The cache-collection test's family list is still hand-maintained
 
 Reported by: runtime.
@@ -381,22 +348,6 @@ from what the warmup happened to fill), so adding a family fails the test until
 the list and the warmup cover it.
 
 Enforceable: yes, by that assertion.
-
-## VA-030 - "Every RustFn call path shares that check" covers four paths
-
-Reported by: runtime.
-
-`rust_fn_result_count.rs` module doc. Covered: direct host call, Lua call,
-generic-for iterator, nested host call. Not covered: a RustFn as a metamethod
-handler (`__index`, `__newindex`, `__call`, `__len`, `__tostring`), as a
-`table.sort` comparator or `gsub` replacement, through `call_anchor`.
-`reference/native-calls.toml` is the inventory of exactly those paths.
-
-Fix: drive the over-reporting function through every inventoried entry that can
-reach a RustFn, as `tests/native_stack.rs` walks the inventory.
-
-Enforceable: yes, if the scenario list is generated from (or checked against) the
-inventory, as `native_calls.py` does for `native_stack.rs`.
 
 ## VA-031 - Growth-limit coverage exists only under `snapshot`
 
@@ -418,27 +369,23 @@ directly, used by both sweeps; keep one snapshot-specific test for the load path
 
 Enforceable: no general rule.
 
-## VA-051 - Weak tables and strings sit outside the root inventory's checks
+## VA-051 - Strings and env baselines sit outside the save inventory's checks
 
 Reported by: the agent that made State's root and in-flight inventories
 exhaustive (`src/vm/inventory.rs`).
 
-`State::for_each_gc_root` and `rest_state` force every State field to be named,
-and `save_coverage` forces every `GcRoot` kind to be classified, but:
+The weak tables are now an exhaustive `WeakTable` inventory. What remains:
 
-- The weak tables (`patterns`, `format_pointer_ids`, ...) are only named as
-  pruned in `collect_garbage`; nothing forces a new weak table to actually be
-  pruned there.
 - `save_walker_encodes_exactly_what_serialized_roots_reach` compares objects
   only, and only for the root kinds its fixture fills. Strings (pins, builtin
   and event names, chunk literals) are outside it.
 - That env baselines can be rebuilt on load is a stated invariant of
   `capture_env_tokens`, not something the code checks.
 
-Fix: a `WeakTable` trait or enum that `collect_garbage` must iterate
-exhaustively; extend the identity test to the string pool.
+Fix: extend the identity test to the string pool; check the env-baseline
+invariant on load or in a test.
 
-Enforceable: the weak-table half structurally.
+Enforceable: by those tests.
 
 # Compiler and cost
 
@@ -518,42 +465,21 @@ Enforceable: yes, structurally.
 
 # Library
 
-## VA-040 - Library tests whose oracle is the code under test
+## VA-052 - Leftovers from the cost-fixture and oracle changes
 
-Reported by: library.
+Reported by: the resolution loop's reviewer.
 
-- `number_rendering::concat_number_rendering_matches_tostring_across_f64_classes`:
-  `tostring`, host `State::concat` (via `concat_values`), `OP_CONCAT` and
-  `Val::to_bytes_with_heap` all call `vm::lua_val::number_to_string`, so asserting
-  `concat == tostring` over 16k bit patterns cannot fail unless a second rendering
-  path appears, and would miss a fast path in `OP_CONCAT` since it calls the host
-  API, not Lua `..`. `string_format::format_general` is an independently written
-  `%g` engine (`format_scientific` plus `format_fixed`, sharing only core float
-  formatting with `format_g14`). Assert `tostring(x) == string.format("%.14g", x)`
-  over the same sweep plus a few thousand random bit patterns, through Lua `..` as
-  well.
-- `patterns::tests::plain_classifier_tracks_pattern_grammar_magic_bytes` loops over
-  `b"^$*+?.([%-)"`, byte for byte the production `PATTERN_MAGIC_BYTES`, never
-  consults the grammar its name mentions, and does not check the other 245 bytes.
-  For every byte assert `is_plain(&[b])` holds exactly when `LuaPattern::new(&[b])`
-  matches `[b]` as a one-byte literal at `0..1`; likewise `is_plain_for_find`
-  against `string.find`'s plain path.
-- `patterns::luapat::tests::escape_class_table_matches_the_per_byte_classifier`:
-  the oracle `match_class` and `table_match_class` are the same match statement
-  over the same `is_ascii_*` predicates, both calling
-  `numeral::is_lua_whitespace`. It checks the letter-to-index mapping, not the
-  replay-visible class membership (`%p`, `%c`, `%g`). Add an unmarked `examples/`
-  script printing, for each of the 22 class letters, the matching bytes in
-  `0..=255`, so the diff gate compares it with lua5.2/lua5.4 (`diff_test.sh` exports
-  `LC_ALL=C`).
-- `patterns::errors::tests::structured_details_keep_existing_display_text`:
-  `PatternError`'s `Display` is `PatternErrorDetail::from(self)`'s, so its two
-  assertions test one code path twice; drop one.
-- `golden::pinned_regression_inputs_survive_golden_regeneration`: the first half
-  asserts that `inputs` contains the pair it just read from `PINNED_REGRESSIONS`;
-  the second half (a row lookup in `GOLDEN`) is real.
+- `src/crmath/tests/golden.rs::pinned_regression_inputs_survive_golden_regeneration`
+  no longer checks regeneration (that half was tautological and was removed);
+  only the golden-row lookup remains, so the name promises more than the body.
+- `tests/integration/cost/cost_golden.rs::table_library_native_charges_are_one_or_zero`
+  still hard-codes the seven table-library costs that the cost fixture's
+  `table_*` rows now pin: a second, unversioned copy.
 
-Enforceable: the tests themselves; the class-membership check by the diff gate.
+Fix: rename the crmath test to what it checks; make the table-library test
+read the fixture rows (or delete it in favour of them).
+
+Enforceable: no.
 
 ## VA-042 - "Verified against Lua 5.2/5.4" expectations frozen in Rust literals
 

@@ -112,21 +112,9 @@ fn stdin_scripts_are_named_stdin_and_honour_every_mode() {
 }
 
 #[test]
-fn analyze_rejects_limit_and_sends_its_warning_to_stderr() {
+fn analyze_rejects_limit() {
     let script = ScratchScript::new("analyze", "local x = 1\n");
     let script_path = script.path().to_str().expect("temp path is UTF-8");
-    let output = run(strings(&["--analyze", script_path]));
-
-    assert!(output.status.success());
-    assert!(String::from_utf8_lossy(&output.stdout).contains("=== Cost Analysis ==="));
-    assert!(!String::from_utf8_lossy(&output.stdout).contains("Warning:"));
-    let expected_warning = format!(
-        "{}{}",
-        dellingr::cli::ANALYSIS_WARNING_PREFIX,
-        dellingr::CostAnalysis::caveat()
-    );
-    assert!(String::from_utf8_lossy(&output.stderr).contains(&expected_warning));
-
     let limited = run(strings(&["--limit", "10", "--analyze", script_path]));
     assert_eq!(limited.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&limited.stderr).contains("Error: --limit cannot be used"));

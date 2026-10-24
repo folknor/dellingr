@@ -87,13 +87,8 @@ struct WorkloadPair {
     hotpath_xxh128: String,
 }
 
-fn workload_pairs(root: &Path) -> Vec<WorkloadPair> {
-    let source =
-        fs::read_to_string(root.join("brokkr.toml")).expect("brokkr.toml should be readable");
-    // A whole document parses as a `Table`; `Value` parses a single TOML value.
-    let config = source
-        .parse::<toml::Table>()
-        .unwrap_or_else(|error| panic!("brokkr.toml is not valid TOML: {error}"));
+fn workload_pairs() -> Vec<WorkloadPair> {
+    let config = support::brokkr_config();
     let workloads = config
         .get("dellingr")
         .and_then(|dellingr| dellingr.get("workloads"))
@@ -183,10 +178,7 @@ fn one_kernel_source(source: &str) -> Result<(String, bool), String> {
             return Err("more than one local K declaration".to_owned());
         }
         let repeats = repeats.trim_start();
-        let digits = repeats
-            .bytes()
-            .take_while(u8::is_ascii_digit)
-            .count();
+        let digits = repeats.bytes().take_while(u8::is_ascii_digit).count();
         if digits == 0 {
             return Err("local K must have an integer value".to_owned());
         }
@@ -303,7 +295,7 @@ fn shared_helper_fingerprints(
 #[test]
 fn registered_workload_file_digests_match_brokkr_pins() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let pairs = workload_pairs(&root);
+    let pairs = workload_pairs();
 
     for pair in pairs {
         let workload_name = pair.name.as_str();
@@ -333,7 +325,7 @@ fn registered_workload_file_digests_match_brokkr_pins() {
 #[test]
 fn registered_workload_files_cover_bench_scripts() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let pairs = workload_pairs(&root);
+    let pairs = workload_pairs();
     let bench_dir = root.join("bench");
     let mut expected_files = bench_scripts(&bench_dir)
         .iter()
@@ -466,7 +458,7 @@ fn bench_scripts_parse_and_follow_the_standalone_footer_contract() {
 #[test]
 fn registered_workload_pairs_keep_kernel_cost_fingerprints_aligned() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let pairs = workload_pairs(&root);
+    let pairs = workload_pairs();
 
     for pair in pairs {
         if pair.file == pair.hotpath_file {

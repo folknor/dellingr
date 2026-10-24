@@ -188,26 +188,6 @@ annotation text as a `pub(crate) const` if the check stays.
 
 Enforceable: the shared constant makes the string check rename-proof.
 
-## VC-010 - `examples/hotpath.rs`'s unit tests never run
-
-Reported by: corpus-harness.
-
-`examples/hotpath.rs` has a `#[cfg(test)] mod tests` with five tests. The
-`[[example]] name = "hotpath"` entry has no `test = true`, examples default to
-`test = false`, and brokkr scopes every sweep to `cargo test --tests`. The
-accounting plan of the latest check (`plan.json`, 2119 expected executions)
-contains `local_count_label_distinguishes_parameters` but not
-`hotpath_requires_a_script_path`. These tests have never been part of a check.
-Whether clippy's `--all-targets` type-checks them depends on whether it builds
-examples in test mode, which the hunter did not confirm; if not, they may not
-compile.
-
-Fix: `test = true` on the `hotpath` example, or move `parse_args_from`,
-`run_metrics` and `write_kvs` into a module a real test target includes.
-
-Enforceable: yes. A check over `Cargo.toml` that any `[[example]]` whose source
-contains `#[cfg(test)]` sets `test = true`.
-
 ## VC-011 - Timeouts, the 20-second cap and hard-coded concurrency do not nest
 
 Reported by: check-machinery, corpus-harness.
@@ -345,20 +325,6 @@ Fix: keep the location, state that the prefix is the isolation, and reap stale
 
 Enforceable: n/a.
 
-## VC-017 - Captured output is unbounded
-
-Reported by: corpus-harness.
-
-`run_examples.rs` reads each child's stdout and stderr fully into memory;
-`diff_test.sh` redirects to files. A runaway print loop fills both until a
-timeout fires (the 70 MB leaked file in VC-015 was left by a killed run on
-2026-10-21).
-
-Fix: read with a limit and fail with "output exceeded N bytes", which also turns
-a runaway print loop into a fast, named failure.
-
-Enforceable: yes, by the limit.
-
 ## VC-018 - The gates depend on host tools resolved from `PATH`, unversioned
 
 Reported by: check-machinery, corpus-harness.
@@ -409,20 +375,6 @@ files in `examples/` as a test failure with a clear message.
 
 Enforceable: yes.
 
-## VC-021 - CLI suite duplicates and working-directory conventions
-
-Reported by: corpus-harness.
-
-- `cli::cli_arguments::analyze_rejects_limit_and_sends_its_warning_to_stderr`
-  and `cli::cli_output::analyze_warning_uses_the_library_caveat` both assert
-  the analyze warning equals `ANALYSIS_WARNING_PREFIX + CostAnalysis::caveat()`;
-  one is redundant.
-- `support::process::run` runs the CLI with `current_dir(".")`, whatever the harness cwd is
-  (cargo and brokkr both use the package root, so it works by convention);
-  `limited_command` pins `CARGO_MANIFEST_DIR`. Pick one.
-
-Enforceable: no.
-
 ## VC-022 - Orphaned and heavy corpus files
 
 Reported by: corpus-harness, snapshot.
@@ -447,36 +399,21 @@ Reported by: corpus-harness, snapshot.
 
 Enforceable: no rule catches a name on its own.
 
-## VC-023 - Stale comments and lists about the corpus
+## VC-023 - Workload headers do not classify themselves consistently
 
 Reported by: check-machinery, corpus-harness.
 
-- `examples/globals/write.lua`'s header describes `globals_version`, an
-  uncached `SET_GLOBAL`, UTF-8 validation and a fresh `String` per write.
-  `globals_version` no longer exists in `src/`, and `runtime::global_write_cache`
-  tests a global write cache. The file is pinned, so correcting the comment cuts
-  the workload's history (brokkr.md).
-- AGENTS.md's comment for `examples/alloc/` (`closure, short_tables,
-  record_tables, gc_churn`) omits `list_literals`, a registered workload; the
-  one for `examples/tables/` omits `metamethod_sequence`.
-- AGENTS.md's probe list (`numerics/constants`, `globals/write`,
-  `calls/many_literals`, `calls/loop_beside_closure`, `alloc/gc_churn`,
-  `parse/large_source`, each said to carry a header naming its candidate)
-  disagrees with the headers both ways: `calls/method_chain`,
-  `calls/method_polymorphic`, `fields/same_obj_read` and
-  `fields/same_obj_write` open with `-- Probe:` and are not listed;
-  `globals/write` opens with `-- Hypothesis:` (stale, above);
-  `calls/many_literals` calls itself a "Historical probe".
-- `feature_test.lua` still says "SKIP: long strings not implemented yet"; long
-  strings are in the README's won't-implement list, so "yet" misleads.
+AGENTS.md now points at the script headers for the probe classification
+instead of listing probes, but the headers are not uniform: some open with
+`-- Probe:`, `calls/many_literals` with "Historical probe", and
+`globals/write` with a stale `-- Hypothesis:` (its stale header is tracked in
+notes/todo.md, since rewording a pinned file cuts its history).
 
-Fix: replace the lists with pointers to their source of truth (`brokkr.toml`
-for workloads, `ls examples/`). If the probe classification is wanted, make the
-header the source.
+Fix: a test requiring every registered `hotpath_file` to open with one of a
+fixed set of classification prefixes (`-- Probe:`, `-- Historical probe:`,
+`-- Workload:`), applied when the pinned headers are next re-hashed.
 
-Enforceable: the header rule yes (a test requiring every `hotpath_file` to open
-with `-- Probe:` or `-- Workload:` and printing the list); the prose cannot be,
-so stop enumerating.
+Enforceable: yes, by that test.
 
 ## VC-024 - `regenerate_error_boundary` includes a test-suite module by path
 

@@ -690,14 +690,11 @@ fn number_literal_key(number: f64) -> Option<NumberLiteralKey> {
     }
 }
 
-/// Thread stack for unit tests that parse at the syntax-budget limit: the
-/// 2 MiB docs/limits.md promises for parsing in every repository profile,
-/// set explicitly so `RUST_MIN_STACK` cannot loosen it. Instrumented
-/// `hotpath` builds wrap parser functions in timing guards and get more.
-#[cfg(all(test, not(feature = "hotpath")))]
-pub(crate) const DEEP_PARSE_TEST_STACK_BYTES: usize = 2 << 20;
-#[cfg(all(test, feature = "hotpath"))]
-pub(crate) const DEEP_PARSE_TEST_STACK_BYTES: usize = 8 << 20;
+#[cfg(test)]
+#[path = "../../tests/common/parse_stack.rs"]
+mod parse_stack;
+#[cfg(test)]
+pub(crate) use parse_stack::PARSE_TEST_STACK_BYTES as DEEP_PARSE_TEST_STACK_BYTES;
 
 #[cfg(test)]
 mod tests;

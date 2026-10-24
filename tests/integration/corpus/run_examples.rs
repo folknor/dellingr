@@ -4,6 +4,8 @@ use std::fs;
 use std::io::Read;
 use std::path::Path;
 use std::process::{Child, ExitStatus, Output, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -13,6 +15,7 @@ use crate::support::{self, examples, process};
 
 const EXAMPLE_WORKERS: usize = 8;
 const EXAMPLE_TIMEOUT_MS: u64 = 60_000;
+const EXAMPLE_OUTPUT_LIMIT_BYTES: usize = 1024 * 1024;
 const POLL_INTERVAL_MS: u64 = 25;
 
 #[test]
@@ -41,21 +44,40 @@ fn run_feature_test_extended_in_process() {
         .expect("feature_test_extended.lua should execute successfully");
 }
 
-fn read_output<R>(mut reader: R) -> JoinHandle<Vec<u8>>
+fn read_output<R>(
+    mut reader: R,
+    captured_bytes: Arc<AtomicUsize>,
+    output_exceeded: Arc<AtomicBool>,
+) -> JoinHandle<Vec<u8>>
 where
     R: Read + Send + 'static,
 {
     std::thread::spawn(move || {
         let mut bytes = Vec::new();
-        reader
-            .read_to_end(&mut bytes)
-            .expect("example process output should be readable");
+        let mut buffer = [0; 8192];
+        loop {
+            let read = reader
+                .read(&mut buffer)
+                .expect("example process output should be readable");
+            if read == 0 {
+                break;
+            }
+
+            let previous = captured_bytes.fetch_add(read, Ordering::Relaxed);
+            let remaining = EXAMPLE_OUTPUT_LIMIT_BYTES.saturating_sub(previous);
+            let captured = read.min(remaining);
+            bytes.extend_from_slice(&buffer[..captured]);
+            if captured < read {
+                output_exceeded.store(true, Ordering::Release);
+            }
+        }
         bytes
     })
 }
 
 struct ExampleRun {
     output: Output,
+    output_exceeded: bool,
     timed_out: bool,
     timeout_ms: u64,
 }
@@ -88,12 +110,22 @@ fn run_example(path: &Path, timeout_ms: u64) -> Result<ExampleRun, String> {
         .stderr
         .take()
         .ok_or_else(|| "example stderr was not captured".to_string())?;
-    let stdout_reader = read_output(stdout);
-    let stderr_reader = read_output(stderr);
+    let captured_bytes = Arc::new(AtomicUsize::new(0));
+    let output_exceeded = Arc::new(AtomicBool::new(false));
+    let stdout_reader = read_output(
+        stdout,
+        Arc::clone(&captured_bytes),
+        Arc::clone(&output_exceeded),
+    );
+    let stderr_reader = read_output(stderr, captured_bytes, Arc::clone(&output_exceeded));
     let poll_count = timeout_ms.saturating_add(POLL_INTERVAL_MS - 1) / POLL_INTERVAL_MS;
     let mut status = None;
 
     for _ in 0..poll_count {
+        if output_exceeded.load(Ordering::Acquire) {
+            status = Some(stop_example(&mut child)?);
+            break;
+        }
         match child.try_wait() {
             Ok(Some(exit_status)) => {
                 status = Some(exit_status);
@@ -138,6 +170,7 @@ fn run_example(path: &Path, timeout_ms: u64) -> Result<ExampleRun, String> {
 
     Ok(ExampleRun {
         output,
+        output_exceeded: output_exceeded.load(Ordering::Acquire),
         timed_out,
         timeout_ms,
     })
@@ -191,7 +224,11 @@ fn check_example(path: &Path, timeout_ms: u64) -> Option<String> {
     let output = run.output;
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    if run.timed_out {
+    if run.output_exceeded {
+        Some(format!(
+            "{display}: stdout and stderr exceeded the combined output limit of {EXAMPLE_OUTPUT_LIMIT_BYTES} bytes"
+        ))
+    } else if run.timed_out {
         let stdout = String::from_utf8_lossy(&output.stdout);
         Some(format!(
             "{display}: timed out after {} ms\nstdout: {stdout}\nstderr: {stderr}",

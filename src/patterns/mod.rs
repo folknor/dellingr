@@ -149,13 +149,34 @@ mod tests {
 
     #[test]
     fn plain_classifier_tracks_pattern_grammar_magic_bytes() {
-        for byte in b"^$*+?.([%-)" {
-            assert!(!is_plain(&[*byte]), "{byte:?} is a pattern construct");
+        for byte in u8::MIN..=u8::MAX {
+            // Repeat markers are literal alone but active after an atom.
+            // Probe both contexts instead of duplicating the magic-byte list.
+            let mut literal = true;
+            for bytes in [vec![byte], vec![b'a', byte]] {
+                let mut matcher = LuaPattern::new(&bytes);
+                for subject in [
+                    vec![],
+                    vec![byte],
+                    vec![b'x'],
+                    vec![b'a'],
+                    vec![b'a', b'a'],
+                    vec![b'a', byte],
+                    vec![b'a', b'x'],
+                ] {
+                    let mut used = 0;
+                    let result = matcher.matches_bytes(&subject, &mut count_only(&mut used));
+                    let exact = matches!(result, Ok(true)) && matcher.range() == (0..bytes.len());
+                    if result.is_err() || exact != subject.starts_with(&bytes) {
+                        literal = false;
+                    }
+                }
+            }
+            assert_eq!(is_plain(&[byte]), literal, "byte {byte:#04x}");
+            // Find deliberately treats a closing capture as a literal.
+            assert_eq!(is_plain_for_find(&[byte]), literal || byte == b')');
         }
-        assert!(is_plain_for_find(b")"));
         assert!(!is_plain_for_find(b")*"));
-        assert!(is_plain(b"]"));
-        assert!(is_plain(b"literal bytes"));
     }
 
     /// Compile `pattern` (which never fails) and return the error matching it

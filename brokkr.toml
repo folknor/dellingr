@@ -270,6 +270,13 @@ pattern = '\bcargo\s+'
 paths = ["scripts/**", "research/*.sh"]
 message = "build and test through brokkr instead of invoking cargo directly"
 
+[[textlint]]
+name = "hotpath-alloc-only-at-allocator-install"
+pattern = 'feature\s*=\s*"hotpath-alloc"'
+paths = ["src/**/*.rs", "tests/**/*.rs", "examples/**/*.rs"]
+exclude = ["src/main.rs", "examples/hotpath.rs"]
+message = "hotpath-alloc implies hotpath; use hotpath for instrumentation guards"
+
 # Native-stack guard (reference/native-calls.md). Every direct call to a
 # function that can reach a call back into Lua carries a
 # `// native-call: <edge-id>` marker naming its edge in
@@ -299,6 +306,13 @@ match = "last-line"
 stream = "stdout"
 
 [[script_check]]
+name = "native-call-checker-tests"
+command = "python3 -B scripts/test_native_calls.py"
+expect = "ok"
+match = "last-line"
+stream = "stdout"
+
+[[script_check]]
 name = "notes-sections"
 command = "python3 -B scripts/test_notes_sections.py"
 expect = "ok"
@@ -321,7 +335,7 @@ command = "python3 examples/parse/generate.py --check"
 expect = "ok"
 match = "last-line"
 stream = "stdout"
-stage = "post-test"
+stage = "pre-clippy"
 
 [dellingr.workloads.rust_boundary]
 file = "bench/rust_boundary.lua"

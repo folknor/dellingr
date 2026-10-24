@@ -26,6 +26,18 @@ pub(crate) fn dellingr_bin() -> &'static str {
     env!("CARGO_BIN_EXE_dellingr")
 }
 
+/// The repository's `brokkr.toml`, parsed. Suites that check workload
+/// registrations or check shapes read it through this one loader.
+pub(crate) fn brokkr_config() -> toml::Table {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("brokkr.toml");
+    let source = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+    // A whole document parses as a `Table`; `Value` parses a single TOML value.
+    source
+        .parse::<toml::Table>()
+        .unwrap_or_else(|error| panic!("brokkr.toml is not valid TOML: {error}"))
+}
+
 /// Run `check` over `items` on scoped worker threads, at most `max_workers`
 /// and never more than the available parallelism or the item count, and
 /// return every failure in item order, so the report does not depend on

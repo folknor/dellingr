@@ -399,9 +399,15 @@ fn enclose(f: Func, x: f64, y: f64, p: u64) -> (BigFloat, BigFloat) {
             let l_hi = ax.log(big_format(p, UP));
             let by = BigFloat::from_f64(y);
             let (z_lo, z_hi) = if y >= 0.0 {
-                (by.mul(&l_lo, big_format(p, DOWN)), by.mul(&l_hi, big_format(p, UP)))
+                (
+                    by.mul(&l_lo, big_format(p, DOWN)),
+                    by.mul(&l_hi, big_format(p, UP)),
+                )
             } else {
-                (by.mul(&l_hi, big_format(p, DOWN)), by.mul(&l_lo, big_format(p, UP)))
+                (
+                    by.mul(&l_hi, big_format(p, DOWN)),
+                    by.mul(&l_lo, big_format(p, UP)),
+                )
             };
             // As for exp: far outside +-1e4 the bound is an overflow or an
             // underflow, beyond the big-float exponent range.

@@ -3,6 +3,7 @@
 use dellingr::error::{Error, ErrorKind, LibraryError};
 use dellingr::{ArgCount, LuaType, RetCount, State};
 
+use super::cost_golden::pinned_cost;
 use crate::support;
 
 fn run_with_budget(source: &str, budget: i64) -> (State, Error) {
@@ -20,7 +21,7 @@ fn len_is_free_even_for_a_large_string() {
     let subject = "a".repeat(16 * 1024);
     assert_eq!(
         support::cost_of(format!("return string.len('{subject}')")),
-        0
+        pinned_cost("len_large")
     );
 }
 
@@ -36,7 +37,7 @@ fn captures_have_a_constant_cost_delta_independent_of_subject_size() {
     let short_delta = cost(23, "(%a+)") - cost(23, "%a+");
     let long_delta = cost(1472, "(%a+)") - cost(1472, "%a+");
     assert_eq!(short_delta, long_delta);
-    assert_eq!(short_delta, 600);
+    assert_eq!(short_delta, pinned_cost("match_captures"));
 }
 
 /// The compile-once half of this check is a crate unit test, since the
@@ -50,7 +51,11 @@ fn gmatch_full_scan_is_linear_in_its_subject() {
 
     let short = cost(128);
     let long = cost(256);
-    assert_eq!(long - short, 1152, "{short} -> {long}");
+    assert_eq!(
+        long - short,
+        pinned_cost("gmatch_subject_doubling"),
+        "{short} -> {long}"
+    );
 }
 
 #[test]
@@ -100,7 +105,7 @@ fn gsub_rejects_an_invalid_replacement_before_charging() {
             error.to_string().contains("bad argument #3 to 'gsub'"),
             "unexpected error: {error}"
         );
-        assert_eq!(state.cost_used(), 0);
+        assert_eq!(state.cost_used(), pinned_cost("gsub_invalid_replacement"));
     }
 }
 
@@ -116,7 +121,7 @@ fn gmatch_leading_caret_is_charged_as_written() {
              if n ~= 4 then error('two literal-caret matches expected') end"
         ))
     }
-    assert_eq!(cost("%^a") - cost("^a"), 2);
+    assert_eq!(cost("%^a") - cost("^a"), pinned_cost("gmatch_caret_delta"));
     // Subject 4 + pattern 2 at creation, 2 to compile on the first call,
     // 5 + 5 + 2 matcher steps for two matches and the final miss, 2 + 2
     // returned match bytes, and the two loop adds.
@@ -148,7 +153,11 @@ fn empty_find_and_match_charge_only_their_up_front_units() {
         );
         state.get_global("result").expect("result is set");
         assert_eq!(state.to_string(-1).expect("result is a string"), results);
-        assert_eq!(support::cost_of(source), 4, "{source}");
+        assert_eq!(
+            support::cost_of(source),
+            pinned_cost("empty_find_match"),
+            "{source}"
+        );
     }
 }
 
@@ -162,7 +171,7 @@ fn matcher_refusal_is_a_budget_error_at_the_exact_budget() {
         .call(ArgCount::Fixed(0), RetCount::Fixed(1))
         .expect_err("pathological matcher exhausts its budget");
     assert!(matches!(error.kind(), ErrorKind::BudgetExceeded { .. }));
-    assert_eq!(state.cost_used(), 17);
+    assert_eq!(state.cost_used(), pinned_cost("matcher_refusal"));
 }
 
 #[test]

@@ -23,10 +23,16 @@ other receiver to every method named `f`. That is the direct-call convention
 reference/native-calls.md asks re-entering functions to follow.
 """
 
+import bisect
 import fnmatch
+import heapq
 import pathlib
 import re
 import sys
+
+if sys.version_info < (3, 11):
+    sys.exit("native_calls.py requires Python 3.11 or newer")
+
 import tomllib
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -193,11 +199,31 @@ class Source:
         self.lines = self.text.split("\n")
         self.code, comments = sanitize(self.text)
         self.comments = dict(comments)
+        self.code_lines = self.code.split("\n")
         self.newlines = [i for i, c in enumerate(self.code) if c == "\n"]
         self.tests = self.test_spans()
+        self.test_starts = [a for a, _ in self.tests]
+        self.test_ends = []
+        end = -1
+        for _, close in self.tests:
+            end = max(end, close)
+            self.test_ends.append(end)
         self.impls = self.impl_spans()
         self.fns = [f for f in self.functions() + self.closure_callbacks()
                     if not self.in_test(f.start)]
+        self.fn_points = sorted({point for f in self.fns
+                                 for point in (f.body_open + 1, f.body_close)})
+        starts = {}
+        for order, fn in enumerate(self.fns):
+            starts.setdefault(fn.body_open + 1, []).append((order, fn))
+        active = []
+        self.fn_at_point = []
+        for point in self.fn_points:
+            for order, fn in starts.get(point, []):
+                heapq.heappush(active, (-fn.body_open, order, fn))
+            while active and active[0][2].body_close <= point:
+                heapq.heappop(active)
+            self.fn_at_point.append(active[0][2] if active else None)
 
     def line_of(self, offset):
         lo, hi = 0, len(self.newlines)
@@ -221,7 +247,8 @@ class Source:
         return spans
 
     def in_test(self, offset):
-        return any(a <= offset < b for a, b in self.tests)
+        index = bisect.bisect_right(self.test_starts, offset) - 1
+        return index >= 0 and offset < self.test_ends[index]
 
     def impl_spans(self):
         spans = []
@@ -282,12 +309,8 @@ class Source:
         return out
 
     def enclosing(self, offset):
-        best = None
-        for f in self.fns:
-            if f.body_open < offset < f.body_close:
-                if best is None or f.body_open > best.body_open:
-                    best = f
-        return best
+        index = bisect.bisect_right(self.fn_points, offset) - 1
+        return self.fn_at_point[index] if index >= 0 else None
 
     def calls(self):
         """Every call-shaped token outside test code, as
@@ -404,13 +427,16 @@ def closure(sources):
     """The caller closure of the boundaries, and every call site into it."""
     calls = [(s, name, off, enc, owner)
              for s in sources for name, off, enc, owner in s.calls()]
+    by_name = {}
+    for call in calls:
+        by_name.setdefault(call[1], []).append(call)
     reached = {key: None for key in BOUNDARIES}
     queue = list(BOUNDARIES)
     sites = []
     toplevel = []
     while queue:
         key = queue.pop()
-        for s, name, off, enc, owner in calls:
+        for s, name, off, enc, owner in by_name.get(key[1], []):
             if not resolves(key, name, owner):
                 continue
             if enc is None:
@@ -452,7 +478,7 @@ def attach_markers(sources, sites, problems):
             if not ids:
                 problems.append(f"{s.rel}:{line}: native-call marker names no edge")
                 continue
-            code_line = s.code.split("\n")[line - 1]
+            code_line = s.code_lines[line - 1]
             trailing = code_line.strip() != ""
             targets = by_line.get((s.rel, line), []) if trailing else []
             if not trailing:
@@ -481,7 +507,7 @@ def attach_markers(sources, sites, problems):
                     fits[0].ids.append(edge_id)
 
 
-def scan_test_lists(problems):
+def scan_test_lists(problems, native_counts=None):
     """Names declared in tests/native_stack.rs: `const NAME: &[...] = &[`
     lists whose entries carry `name: "..."`."""
     text = TEST.read_text()
@@ -508,25 +534,36 @@ def scan_test_lists(problems):
         # nested structs must not manufacture scenario coverage.
         names = []
         depth = 0
-        for field in re.finditer(r'[{}\[\]()]|\bname\s*:', code[m.end():end]):
+        entry_name = None
+        entry_native = None
+        for field in re.finditer(r'[{}\[\]()]|\b(?:name|native)\s*:', code[m.end():end]):
             token = field.group()
             if token in ("{", "[", "("):
+                if depth == 0:
+                    entry_name = entry_native = None
                 depth += 1
             elif token in ("}", "]", ")"):
                 depth -= 1
+                if depth == 0 and const == "SCENARIOS" and entry_name is not None:
+                    if native_counts is not None:
+                        native_counts[entry_name] = entry_native
             elif depth == 1:
                 offset = m.end() + field.end()
+                if token.startswith("native"):
+                    value = re.match(r"\s*([0-9]+)\s*,", code[offset:])
+                    entry_native = int(value.group(1)) if value else None
+                    continue
                 name = re.match(r'\s*"([\w-]+)"', names_code[offset:])
                 if name:
                     names.append(name.group(1))
+                    entry_name = name.group(1)
         if len(names) != len(set(names)):
             problems.append(f"tests/native_stack.rs: duplicate names in {const}")
         lists[const] = names
     return lists
 
 
-def check_textlint(names, problems):
-    config = tomllib.loads(BROKKR.read_text())
+def check_textlint(names, problems, config):
     rules = [r for r in config.get("textlint", []) if r.get("name") == TEXTLINT_RULE]
     if len(rules) != 1:
         problems.append(f"brokkr.toml: expected one [[textlint]] rule named {TEXTLINT_RULE}")
@@ -593,6 +630,8 @@ def check_root(fn_entry, defs, sources, problems):
 
 def check():
     problems = []
+    config = tomllib.loads(BROKKR.read_text())
+    excludes = textlint_excludes(config)
     sources = production_sources()
     defs = definitions(sources)
     reached, sites, toplevel = closure(sources)
@@ -673,7 +712,8 @@ def check():
 
     # Edges and scenarios. A scenario covers the edges on its path; chains
     # and leaves cover the edges an edge entry names them for.
-    lists = scan_test_lists(problems)
+    native_counts = {}
+    lists = scan_test_lists(problems, native_counts)
     scenarios = set(lists["SCENARIOS"])
     chains = set(lists["CHAINS"])
     leaves = set(lists["LEAVES"])
@@ -715,6 +755,8 @@ def check():
             else:
                 path.append(item)
         check_path(name, path, edges, listed, problems)
+        if name in native_counts:
+            check_native_count(name, path, native_counts[name], problems)
         for edge_id in path:
             on_path.setdefault(edge_id, []).append(name)
     for name in sorted(set(segments) - used_segments):
@@ -736,32 +778,31 @@ def check():
                 f"inventory: edge {edge_id} is neither covered by a scenario, chain or "
                 "leaf nor excluded with a reason")
 
-    check_textlint(names, problems)
+    check_textlint(names, problems, config)
     for stray in textlint_strays(sources, sites, names):
-        if not stray_excluded(stray):
+        if not stray_excluded(stray, excludes):
             problems.append(
                 f"{stray}: matches the textlint pattern but calls no inventoried "
                 f"function; add its path to {TEXTLINT_RULE}'s exclude only if the "
                 "file can never call into Lua")
     for site in sites:
-        if stray_excluded(f"{site.where}:"):
+        if stray_excluded(f"{site.where}:", excludes):
             problems.append(
                 f"{site.where}: call into an inventoried function in a file the "
                 f"{TEXTLINT_RULE} rule excludes")
     return problems
 
 
-def textlint_excludes():
-    config = tomllib.loads(BROKKR.read_text())
+def textlint_excludes(config):
     for rule in config.get("textlint", []):
         if rule.get("name") == TEXTLINT_RULE:
             return rule.get("exclude", [])
     return []
 
 
-def stray_excluded(location):
+def stray_excluded(location, excludes):
     path = location.split(":", 1)[0]
-    return any(fnmatch.fnmatch(path, glob.replace("**", "*")) for glob in textlint_excludes())
+    return any(fnmatch.fnmatch(path, glob.replace("**", "*")) for glob in excludes)
 
 
 def check_path(name, path, edges, listed, problems):
@@ -776,7 +817,7 @@ def check_path(name, path, edges, listed, problems):
         parsed.append(EDGE_ID.match(edge_id).groups()[:2])
     if parsed[0][0] != "call_unguarded" or parsed[-1][1] != "call_unguarded":
         problems.append(
-            f"inventory: scenario {name}: a path is one native level, so it starts at "
+            f"inventory: scenario {name}: a cycle path starts at "
             "call_unguarded and ends with a call into it")
     roots = {key[1]: entry["root"] for key, entry in listed.items() if "root" in entry}
     for (_, callee), (caller, _) in zip(parsed, parsed[1:]):
@@ -789,18 +830,29 @@ def check_path(name, path, edges, listed, problems):
             f"inventory: scenario {name}: path breaks between ->{callee} and {caller}->")
 
 
+def check_native_count(name, path, native, problems):
+    count = sum(bool(EDGE_ID.fullmatch(edge)) and
+                EDGE_ID.fullmatch(edge).group(2) == "call_unguarded" for edge in path)
+    if native != count:
+        problems.append(f"tests/native_stack.rs: scenario {name}: native count {native!r} "
+                        f"does not match path's {count} calls into call_unguarded")
+
+
 def textlint_strays(sources, sites, names):
     """Lines the textlint rule would flag that call no inventoried function:
     a same-named function of another type."""
+    # Keep these conservative strays: the separate textlint gate cannot
+    # resolve receivers, so ignoring them here would leave an unexplained
+    # failure there. Narrowing policy needs receiver support in that gate.
     pattern = re.compile(textlint_pattern(names))
     definition = re.compile(rf"\bfn\s+(?:{'|'.join(sorted(names))})\b")
     site_lines = {(site.src.rel, site.line) for site in sites}
     strays = []
     for s in sources:
-        for number, line in enumerate(s.code.split("\n"), 1):
+        for number, line in enumerate(s.code_lines, 1):
             if not pattern.search(line) or definition.search(line):
                 continue
-            offset = sum(len(x) + 1 for x in s.code.split("\n")[:number - 1])
+            offset = 0 if number == 1 else s.newlines[number - 2] + 1
             if s.in_test(offset) or (s.rel, number) in site_lines:
                 continue
             strays.append(f"{s.rel}:{number}: {s.lines[number - 1].strip()}")

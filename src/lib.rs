@@ -29,6 +29,11 @@
 // banned in clippy.toml, with a scoped allow on `DefaultCallbacks::on_print`.
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
+// Fault injection is test instrumentation. Keep it out of release builds,
+// where dependency feature unification would otherwise expose it to hosts.
+#[cfg(all(feature = "fault-injection", not(debug_assertions)))]
+compile_error!("the fault-injection feature requires debug assertions");
+
 mod compiler;
 mod cost_meter;
 mod crmath;

@@ -17,7 +17,8 @@ kept current mechanically:
   `// native-call: <edge-id>` comment naming its edge.
 - `scripts/native_calls.py` checks the inventory against the source and the
   test and prints `ok` when they agree; `brokkr check` runs it as the
-  `native-call-inventory` script check.
+  `native-call-inventory` script check. Fixture tests for the lexical model
+  run through `scripts/test_native_calls.py` as a separate script check.
 - The `native-call-marker` textlint rule in `brokkr.toml` flags any call to
   an inventoried name without a marker, so an editor or a plain
   `brokkr check` points at the line before the script's report is read.
@@ -54,12 +55,14 @@ Each edge is either covered or excluded:
   (the default sort comparison, a raw `table.move` copy, the `%%` directive)
   or why it lies outside the envelope (the CLI's own call).
 
-A scenario's path is one native level: it starts at an edge out of
+A scenario's path is one recursion cycle: it starts at an edge out of
 `call_unguarded` and ends with an edge into it. Consecutive edges must
 connect, except that an edge into `invoke_rust_fn` may be followed by an
 edge out of a `callback` or `host-api` root, the function pointer the
 callback was entered through. Named `[segment]` runs of edges keep shared
-prefixes in one place; `@name` in a path expands one.
+prefixes in one place; `@name` in a path expands one. A cycle can take
+several native levels: its number of edges into `call_unguarded` must
+equal the scenario's `native` field in `tests/native_stack.rs`.
 
 ## What the script checks
 
@@ -77,7 +80,7 @@ prefixes in one place; `@name` in a path expands one.
   every edge id marks exactly one call, and every call site of one pair is
   tagged when there are several.
 - Every edge is covered or excluded, never both; every chain and leaf an
-  edge names exists; every scenario path connects.
+  edge names exists; every scenario path connects and its native count agrees with the test.
 - The scenarios in the inventory are exactly the `SCENARIOS` list of
   `tests/native_stack.rs`, and the chain and leaf names exist in its
   `CHAINS` and `LEAVES` lists.

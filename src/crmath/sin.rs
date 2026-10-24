@@ -335,8 +335,9 @@ pub(crate) fn sin(x: f64) -> f64 {
     if crate::crmath::kernel_hardware_available() {
         #[cfg(test)]
         crate::crmath::tests::record_kernel_backend(true);
-        // SAFETY: dispatch checks the required CPU feature, including forced test modes.
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        // SAFETY: kernel_hardware_available checked x86 FMA support before
+        // entering this branch. Forced hardware tests also check support.
         return unsafe { hardware::sin(x) };
         #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
         return hardware::sin(x);

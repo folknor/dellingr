@@ -28,7 +28,7 @@ codegen-units = 1
 
 [features]
 hotpath = ["hotpath/hotpath"]
-hotpath-alloc = ["hotpath/hotpath", "hotpath/hotpath-alloc"]
+hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
 snapshot = []
 fault-injection = []
 # Explicit opt-in for checkout-dependent and long-running math verification.
@@ -48,6 +48,7 @@ variant_size_differences = "deny"
 # Package-wide Clippy policy. Library-only, cfg-dependent lint settings stay in
 # src/lib.rs.
 [lints.clippy]
+undocumented_unsafe_blocks = "deny"
 disallowed_methods = "deny"
 uninlined_format_args = "deny"
 cloned_instead_of_copied = "deny"
@@ -110,6 +111,7 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 [[example]]
 name = "hotpath"
 path = "examples/hotpath.rs"
+test = true
 
 [[example]]
 name = "regenerate_save_golden"

@@ -11,7 +11,7 @@ fn call_writer(state: &mut State, name: &str, value: f64) {
 }
 
 #[test]
-fn warm_writer_inserts_populates_then_hits_and_closures_share_the_site() {
+fn writer_closures_update_the_same_global() {
     let mut state = State::new();
     support::run(
         &mut state,
@@ -24,7 +24,7 @@ fn warm_writer_inserts_populates_then_hits_and_closures_share_the_site() {
 }
 
 #[test]
-fn writer_repopulates_across_restricted_environment_swaps() {
+fn writer_updates_global_across_restricted_environment_swaps() {
     let mut state = State::new();
     support::run(&mut state, "x = 0; function writer(v) x = v end");
     call_writer(&mut state, "writer", 1.0);
@@ -40,7 +40,7 @@ fn writer_repopulates_across_restricted_environment_swaps() {
 }
 
 #[test]
-fn append_and_g_table_writes_do_not_displace_a_warmed_global() {
+fn unrelated_and_g_table_writes_preserve_writer_behavior() {
     let mut state = State::new();
     support::run(&mut state, "x = 0; function writer(v) x = v end");
     call_writer(&mut state, "writer", 1.0);
@@ -51,7 +51,7 @@ fn append_and_g_table_writes_do_not_displace_a_warmed_global() {
 }
 
 #[test]
-fn builtin_rebind_does_not_disturb_a_warmed_writer() {
+fn builtin_rebinding_preserves_writer_behavior() {
     let mut state = State::new();
     support::run(&mut state, "x = 0; function writer(v) x = v end");
     call_writer(&mut state, "writer", 1.0);

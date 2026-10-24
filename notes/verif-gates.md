@@ -140,45 +140,6 @@ intrinsic to a libcall, and dependencies doing so; it needs the toolchain's
 Enforceable: yes. That is what `fixture_lint` exists for; the symbol check is
 mechanical.
 
-## VG-003 - The fault-injection sweep runs a hand-listed set of tests
-
-Reported by: check-machinery, native-stack-errors, runtime, library.
-
-The curated `instrumentation-faults` `[[check]]` in `brokkr.toml` compiles and
-lints every target under `hotpath`, `hotpath-alloc`, `fault-injection` and
-`snapshot`, but runs only the tests its `only` list names
-(`failures::error_boundary::error_boundary_fault_sweep`,
-`library::string_bytes::gmatch_refused_push_preserves_the_next_match`,
-`vm::fault_injection::tests::`, `vm::registers::tests::`). A new
-fault-injection test anywhere else compiles there and never runs, in any
-sweep.
-
-Fix: a convention check that every `cfg(feature = "fault-injection")` test is
-matched by one of the sweep's `only` entries, or keep fault-injection tests in
-modules the list names by prefix.
-
-Enforceable: yes, by that check.
-
-## VG-004 - Test-only fault-injection API is reachable by any host through feature unification
-
-Reported by: native-stack-errors, runtime.
-
-`fault-injection` is an ordinary Cargo feature, and `arm_fault_injection` /
-`finish_fault_injection` are `pub` (`#[doc(hidden)]`). Any crate in an
-embedder's graph that enables `dellingr/fault-injection` turns them on in the
-game's VM, along with a branch on every stack and depth preflight. AGENTS.md
-says it "is test infrastructure, never a production ... configuration", but
-nothing stops it.
-
-Fix options: gate it on a rustc cfg (`--cfg dellingr_fault_injection`, set by a
-brokkr sweep's RUSTFLAGS) so dependency features cannot reach it (native); add
-`#[cfg(all(feature = "fault-injection", not(debug_assertions)))]
-compile_error!(...)` since the documented sweeps are all dev builds (runtime);
-or keep the feature with a `compile_error!` unless a second explicit opt-in cfg
-is present; or rename it to announce itself (`__test-fault-injection`).
-
-Enforceable: yes, structurally or by `compile_error!`.
-
 ## VG-006 - Indirect calls into Lua are a reviewer-only rule
 
 Reported by: check-machinery.
@@ -195,66 +156,6 @@ Fix (partial): a textlint rule flagging any inventoried name used as a value
 `native-call-marker`. Trait-object paths stay a review item.
 
 Enforceable: partly.
-
-## VG-007 - `native_calls.py` has no tests, and its alternation includes very common names
-
-Reported by: native-stack-errors, check-machinery.
-
-- The script's lexer (raw strings, char literals versus lifetimes, nested
-  block comments, closure callbacks spelled exactly `|state|`) is what every
-  marker and coverage claim rests on. A lexer regression that hides a new call
-  site passes silently; one that hides an existing site fails loudly. Unlike
-  `notes_sections.py` (tested by `test_notes_sections.py` as a script check),
-  it has no tests.
-- The textlint alternation includes `call`, `run`, `format`, `main`,
-  `get_table`, `set_table`. Any new method with one of those names on an
-  unrelated type becomes a "stray" the script asks to exclude by file. That
-  pushes toward excluding whole files, which is what `src/compiler/**` already
-  is. Receiver-aware matching (already modelled in the script) would let the
-  script, not the regex, decide.
-
-Fix: a fixture-based `test_native_calls.py` in the same `script_check` pattern;
-receiver-aware stray decisions.
-
-Enforceable: yes, by the script test.
-
-## VG-008 - The convention phase costs about 9 seconds per check and its script grows superlinearly
-
-Reported by: check-machinery, native-stack-errors.
-
-Both check logs report "gremlins (219 files), textlint (1 rule, 79 files),
-script-check (2 checks), publish cycle: ok in 9.1s", against 406ms for warm
-clippy and 1m10s for the whole warm check. The split of the 9.1s was not
-measured. `native_calls.py` is the main suspect:
-
-- `stray_excluded` calls `textlint_excludes()`, which re-reads and re-parses
-  `brokkr.toml` for each of about 100 marked sites and again per stray
-  candidate;
-- `attach_markers` does `s.code.split("\n")` once per comment, quadratic in
-  file size;
-- `textlint_strays` re-splits the file and sums line lengths per matching line,
-  also quadratic, and the common-name alternation (VG-007) means many matching
-  lines;
-- `closure()` rescans every call token in `src/` per reached key;
-  `enclosing()` and `in_test()` are linear scans per call;
-- `scan_test_lists` re-sanitizes the whole test file once per list (three
-  times).
-
-`src/vm/eval.rs`, `frame.rs` and `table_ops.rs` grow with the VM, so the cost
-rises faster than the tree. The script also imports `tomllib` without a
-version check, so on Python older than 3.11 it raises an ImportError traceback;
-`scripts/lib.sh::workload_hotpath_files` checks the version properly.
-
-Separately, `generated-large-source` runs at `stage = "post-test"` although it
-is a pure source comparison, so it is skipped whenever any test fails and
-reports last.
-
-Fix: index once per file (line starts, function spans sorted for bisection,
-call tokens grouped by name, parsed config passed in); add the Python version
-guard; move the generated-file check to `pre-clippy`.
-
-Enforceable: a script check's wall time is visible in the run log; no ceiling
-other than brokkr's 5-minute `script_check` limit applies.
 
 ## VG-009 - Source-only checks compile and run as integration tests in every sweep
 
@@ -346,17 +247,6 @@ Fix: `doctests = true` (dev sweeps only) or a `doc_only` entry, plus a
 `[rustdoc]` table.
 
 Enforceable: yes, in config.
-
-## VG-016 - No `unsafe` policy lint
-
-Reported by: check-machinery.
-
-There is `unsafe impl Sync for RuntimeCaches` (`src/vm/caches.rs`) and about 14
-`unsafe` calls into the hardware FMA kernels in `src/crmath/`. No
-`unsafe_code` level and no `clippy::undocumented_unsafe_blocks` is set, so a
-new `unsafe` needs neither a justification nor a review flag.
-
-Enforceable: yes, by lint level.
 
 ## VG-017 - Nothing checks the consumer's dependency graph stays free of the profiler's crates
 
@@ -452,35 +342,3 @@ carve-out, and the tool needs the same provenance discipline (hostname,
 commit) as `brokkr results`.
 
 Enforceable: partly. A deleted script cannot drift.
-
-## VG-022 - Smaller script and config drift
-
-Reported by: check-machinery.
-
-- `scripts/ab_pairs.py` is undocumented. AGENTS.md describes every other helper
-  script but not this one, which implements the CLAUDE.md "interleave matched
-  A/B cells" rule.
-- Two lists of reference interpreters: `scripts/lib.sh` has `REFERENCE_LUAS`
-  (5.2, 5.4) and `scripts/bench.sh` its own (5.5, 5.4, 5.2, luajit).
-- `.review.toml` holds only `[_audit] id = "40c9"`, has no comment naming its
-  consumer, and is excluded from the package. If the `review` tool owns it, a
-  one-line comment saying so would tell a reader whether it can be edited.
-
-Enforceable: no, beyond deduplicating the list.
-
-## VG-023 - "The only environment input" claims are false as stated
-
-Reported by: corpus-harness.
-
-`scripts/lib.sh` and AGENTS.md say `BROKKR_MARKER_FIFO` is "the only
-environment input in the repository" and that "the scripts read no environment
-variables". The harness also consumes `HOTPATH_OUTPUT_PATH` (through the
-`hotpath` crate; brokkr sets it); every script resolves `bash`, `lua5.2`,
-`lua5.4`, `timeout`, `python3` and `brokkr` through `PATH`; and the cargo
-brokkr drives reads `~/.cargo/config.toml` (see verif-native-stack.md on what that config
-changes).
-
-Fix: reword to "reads no environment variables of its own" and list what is
-resolved through `PATH`.
-
-Enforceable: no.

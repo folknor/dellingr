@@ -4,6 +4,7 @@
 //! subject's module under `cfg(feature = "snapshot")`, beside the cases it
 //! extends.
 
+mod corpus_roundtrip;
 mod ipairs_save_state;
 mod open_libs_registry;
 mod save_golden;

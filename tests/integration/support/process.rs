@@ -33,7 +33,7 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    run_from(Path::new("."), args)
+    run_from(Path::new(env!("CARGO_MANIFEST_DIR")), args)
 }
 
 pub(crate) fn run_from<I, S>(directory: &Path, args: I) -> Output

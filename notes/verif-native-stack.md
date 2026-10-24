@@ -62,22 +62,6 @@ The marker stays one token per call site, as the script and textlint parse it.
 Enforceable: yes; it would make the toml's coverage column true by
 construction.
 
-## VN-002 - "A scenario's path is one native level" is false for two scenarios
-
-Reported by: native-stack-errors.
-
-`reference/native-calls.md`: "A scenario's path is one native level: it starts
-at an edge out of `call_unguarded` and ends with an edge into it."
-`index_rust` and `newindex_rust` take two levels per cycle (`native: 2` in the
-test); their toml paths pass through `call_unguarded` in the middle via
-`@rust_handler`. The measurement section further down says so. The script does
-not cross-check a scenario's `native` count against its path.
-
-Fix: reword, and have the script read `native:` from each `Scenario` (it already
-parses those blocks) and compare it to the count of `->call_unguarded` edges.
-
-Enforceable: yes, in the script.
-
 ## VN-003 - The gmatch wrapper's compile-at-depth peak is measured once, by whichever test runs first
 
 Reported by: native-stack-errors, runtime, compiler-cost.

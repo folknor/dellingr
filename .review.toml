@@ -1,2 +1,3 @@
+# Consumed by the repository review tool; Cargo excludes this file from packages.
 [_audit]
 id = "40c9"
