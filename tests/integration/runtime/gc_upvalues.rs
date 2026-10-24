@@ -1,8 +1,4 @@
-//! Tests for GC handling of closed upvalues in closures.
-//!
-//! These tests verify that values captured in closures survive garbage collection
-//! even after the original scope has ended and the upvalue has been "closed"
-//! (moved from the stack to the upvalue pool).
+//! GC roots held by closures, executing callable values and active varargs.
 
 use dellingr::{ArgCount, RetCount, State};
 
@@ -26,86 +22,6 @@ fn install_force_next_gc(state: &mut State) {
         })
         .unwrap();
     state.set_global("force_next_gc").unwrap();
-}
-
-#[test]
-fn tombstoned_keys_and_values_are_not_gc_roots() {
-    // Dead slots retain their keys but never their values. Assignments keep
-    // the empty case inline. Eight fractional keys force map storage and keep
-    // compaction from removing the tombstones below.
-    for preset in [0, 8] {
-        let mut state = State::new();
-        state.gc_disable_auto();
-        support::run(
-            &mut state,
-            format!("t = {{}}; for i = 1, {preset} do t[i + 0.5] = i end"),
-        );
-        state.gc_collect();
-        let baseline = state.object_count();
-
-        // The map case leaves both a Vacant slot and a Live(key) tombstone.
-        support::run(
-            &mut state,
-            "local key = {}; local value = {}; t[key] = value; t[key] = nil; t[key] = value; t[key] = nil",
-        );
-        state.gc_collect();
-        // A dead slot keeps its key as a strong reference until compaction, so
-        // a cleared traversal control stays valid; the cleared value is not
-        // retained.
-        assert_eq!(state.object_count(), baseline + 1, "preset {preset}");
-
-        // Traverse and then force compaction with collected keys still in the
-        // dead slots. Neither path may dereference or expose those keys.
-        support::run(
-            &mut state,
-            format!(
-                "local count = 0; for k in pairs(t) do count = count + 1; t[k] = nil end; if count ~= {preset} then error('dead key escaped') end; t[0.5] = true",
-            ),
-        );
-    }
-}
-
-#[test]
-fn active_frame_string_literal_survives_explicit_gc() {
-    let mut state = State::new();
-    state.gc_disable_auto();
-    install_force_gc(&mut state);
-
-    support::eval(
-        &mut state,
-        r#"
-        force_gc()
-        return "literal after gc"
-    "#,
-        1,
-    );
-
-    assert_eq!(state.to_string(-1).unwrap(), "literal after gc");
-    state.pop(1).unwrap();
-}
-
-#[test]
-fn string_literals_are_reclaimed_one_collection_after_runtime_cache_sweep() {
-    let mut state = State::raw();
-    state.gc_disable_auto();
-
-    // A fresh State already holds its permanent interned strings.
-    let baseline = state.string_count();
-    support::run(
-        &mut state,
-        r#"
-        local temporary = "collect this literal after return"
-    "#,
-    );
-
-    assert!(state.string_count() > baseline);
-    state.gc_collect();
-    // The sweep drops the dead runtime bundle after root marking, so its
-    // literals intentionally survive this collection and disappear on the
-    // next one.
-    assert!(state.string_count() > baseline);
-    state.gc_collect();
-    assert_eq!(state.string_count(), baseline);
 }
 
 #[test]
@@ -483,91 +399,6 @@ fn many_closures_shared_upvalue() {
         // GC between calls
         state.gc_collect();
     }
-}
-
-#[test]
-fn block_upvalue_closes_before_slot_reuse() {
-    assert_eq!(
-        support::eval_number(
-            "do local x = 1; f = function() return x end end; local x = 2; return f()"
-        ),
-        1.0
-    );
-}
-
-#[test]
-fn if_arm_upvalue_closes_and_false_branch_reaches_next_arm() {
-    assert_eq!(
-        support::eval_number(
-            "if false then local x = 1; f = function() return x end elseif true then local x = 2; f = function() return x end else local x = 3; f = function() return x end end; local x = 4; return f()"
-        ),
-        2.0
-    );
-}
-
-#[test]
-fn numeric_for_closes_visible_variable_each_iteration() {
-    assert_eq!(
-        support::eval_number(
-            "t = {}; for i = 1, 3 do t[i] = function() return i end end; return t[1]() * 100 + t[2]() * 10 + t[3]()"
-        ),
-        123.0
-    );
-}
-
-#[test]
-fn generic_for_closes_all_visible_variables_each_iteration() {
-    assert_eq!(
-        support::eval_number(
-            "t = {}; for k, v in ipairs({10, 20, 30}) do t[k] = function() return k * 100 + v end end; return t[1]() + t[2]() + t[3]()"
-        ),
-        660.0
-    );
-}
-
-#[test]
-fn break_closes_nested_loop_local_before_slot_reuse() {
-    assert_eq!(
-        support::eval_number(
-            "while true do do local x = 7; f = function() return x end; break end end; local x = 8; return f()"
-        ),
-        7.0
-    );
-}
-
-#[test]
-fn while_iterations_keep_outer_upvalue_shared() {
-    assert_eq!(
-        support::eval_number(
-            "local counter = 0; while counter < 3 do counter = counter + 1; if counter == 1 then f = function() return counter end end end; return f() * 10 + counter"
-        ),
-        33.0
-    );
-}
-
-// Plain `if ... then ... end` with no following arm: the taken branch closes
-// its captured local via the level_down in close_if_arm's no-next-arm path.
-#[test]
-fn plain_if_arm_closes_captured_local_before_slot_reuse() {
-    assert_eq!(
-        support::eval_number(
-            "if true then local x = 1; f = function() return x end end; local x = 2; return f()"
-        ),
-        1.0
-    );
-}
-
-// break capturing a direct while-body local (not nested in a do): break's
-// pre-jump close handles it, and the loop's final level_down emits a second,
-// harmless close at the same base.
-#[test]
-fn break_closes_direct_while_local_before_slot_reuse() {
-    assert_eq!(
-        support::eval_number(
-            "while true do local x = 5; f = function() return x end; break end; local x = 6; return f()"
-        ),
-        5.0
-    );
 }
 
 #[test]

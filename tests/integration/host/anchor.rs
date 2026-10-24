@@ -365,7 +365,7 @@ fn anchor_type_reflects_underlying_value() {
 }
 
 #[test]
-fn determinism_two_states_same_sequence_same_output() {
+fn anchor_arithmetic_outputs_match_between_two_states() {
     fn run(state: &mut State) -> String {
         state.gc_disable_auto();
 

@@ -1,3 +1,7 @@
+//! The 255 argument and result limits: the accept side at the cap and the
+//! typed refusal above it, for literal, dynamic, callable-table and host
+//! calls and for `unpack` ranges.
+
 use dellingr::error::ErrorKind;
 use dellingr::limits::{MAX_ARGUMENTS, MAX_RESULTS};
 use dellingr::{ArgCount, RetCount, State};
@@ -35,6 +39,59 @@ fn arg_error(kind: &ErrorKind) -> bool {
     matches!(kind, ErrorKind::ArgError(_))
 }
 
+// -- At the cap --
+
+#[test]
+fn literal_return_and_unpack_keep_all_255_values() {
+    let values = (1..=255)
+        .map(|n| n.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    for source in [
+        format!("return {values}"),
+        format!("return table.unpack({{{values}}})"),
+    ] {
+        let mut state = State::new();
+        support::eval(&mut state, &source, 255);
+        assert_eq!(state.get_top(), 255);
+        assert_eq!(state.to_number(1).expect("first result is numeric"), 1.0);
+        assert_eq!(state.to_number(255).expect("last result is numeric"), 255.0);
+    }
+}
+
+#[test]
+fn host_call_accepts_255_fixed_arguments() {
+    let mut state = State::new();
+    support::eval(&mut state, "return function(...) return ... end", 1);
+    for n in 1..=255 {
+        state
+            .push_number(f64::from(n))
+            .expect("argument fits the stack");
+    }
+    state
+        .call(ArgCount::Fixed(255), RetCount::All)
+        .expect("host count is not a bytecode sentinel");
+    assert_eq!(state.get_top(), 255);
+    assert_eq!(
+        state.to_number(255).expect("last argument is returned"),
+        255.0
+    );
+}
+
+#[test]
+fn callable_table_receiver_can_make_255_runtime_arguments() {
+    let args = vec!["1"; 254].join(",");
+    let source = format!(
+        "local t = setmetatable({{}}, {{__call = function(...) local packed = {{...}}; return #packed end}}); return t({args})"
+    );
+    let mut state = State::new();
+    support::eval(&mut state, &source, 1);
+    assert_eq!(
+        state.to_number(1).expect("argument count is numeric"),
+        255.0
+    );
+}
+
 #[test]
 fn dynamic_call_accepts_max_arguments() {
     // Packing into a table counts arguments without adding another call argument.
@@ -51,6 +108,42 @@ fn dynamic_call_accepts_max_arguments() {
 }
 
 #[test]
+fn runtime_result_limit_accepts_the_cap_and_rejects_overflow() {
+    use dellingr::error::results_count;
+
+    let maximum = usize::from(MAX_RESULTS);
+    assert_eq!(
+        results_count(maximum).expect("MAX_RESULTS fits the callback ABI"),
+        MAX_RESULTS
+    );
+    let error = results_count(maximum + 1).expect_err("count exceeds MAX_RESULTS");
+    assert!(matches!(
+        error,
+        ErrorKind::TooManyResults { limit: MAX_RESULTS }
+    ));
+    assert_eq!(error.to_string(), "too many results (limit 255)");
+
+    for count in [maximum, maximum + 1] {
+        let mut state = State::new();
+        support::load(&mut state, format!("return unpack({{}}, 1, {count})"));
+        let result = state.call(ArgCount::Fixed(0), RetCount::All);
+        if count == maximum {
+            result.expect("MAX_RESULTS results are supported");
+            assert_eq!(state.get_top(), maximum);
+        } else {
+            let error = result.expect_err("results exceed MAX_RESULTS");
+            assert!(matches!(
+                error.kind(),
+                ErrorKind::TooManyResults { limit: MAX_RESULTS }
+            ));
+            assert!(error.to_string().contains("too many results (limit 255)"));
+        }
+    }
+}
+
+// -- Above the cap --
+
+#[test]
 fn dynamic_call_rejects_arguments_above_the_cap() {
     expect_error(
         &r##"
@@ -63,6 +156,30 @@ fn dynamic_call_rejects_arguments_above_the_cap() {
         "too many arguments (limit 255)",
         too_many_arguments,
     );
+}
+
+#[test]
+fn runtime_argument_limit_reports_typed_errors() {
+    for code in [
+        "local function f(...) end; f(1, unpack({}, 1, LIMIT))",
+        "local f = setmetatable({}, { __call = function(...) end }); f(unpack({}, 1, LIMIT))",
+    ] {
+        let mut state = State::new();
+        support::load(
+            &mut state,
+            code.replace("LIMIT", &MAX_ARGUMENTS.to_string()),
+        );
+        let error = state
+            .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+            .expect_err("arguments exceed MAX_ARGUMENTS");
+        assert!(matches!(
+            error.kind(),
+            ErrorKind::TooManyArguments {
+                limit: MAX_ARGUMENTS
+            }
+        ));
+        assert!(error.to_string().contains("too many arguments (limit 255)"));
+    }
 }
 
 #[test]

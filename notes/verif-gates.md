@@ -105,20 +105,3 @@ carve-out, and the tool needs the same provenance discipline (hostname,
 commit) as `brokkr results`.
 
 Enforceable: partly. A deleted script cannot drift.
-
-## VG-026 - A curated check shape whose filter matches nothing runs nothing
-
-Reported by: the resolution loop's reviewer.
-
-The `inline-cache-differential` and `cost-check-interval-differential` shapes
-in `brokkr.toml` are curated with an `only` filter naming one test each.
-Renaming or moving that test leaves the shape compiling and running zero
-tests, and the gate stays green. Only `instrumentation-faults` has a
-convention test (`fault_injection_tests_are_selected_by_the_instrumentation_sweep`)
-tying its filters to real tests.
-
-Fix: extend that convention test to every curated shape: each `only` entry
-must name at least one existing test, and every test gated on the shape's
-feature must be selected.
-
-Enforceable: yes, by that test.

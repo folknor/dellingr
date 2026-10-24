@@ -227,8 +227,10 @@ separately by focused caught-and-continue tests. The curated
 with `snapshot`, `hotpath`, `hotpath-alloc` and `crmath-sweeps`: it compiles
 and lints every target under those features and runs only the refusal sweep,
 the gmatch recovery test and the library's fault-injection unit tests.
-`corpus::test_conventions` fails if a test compiled only under
-`fault-injection` is not selected by that shape's `only` list.
+For every `curated = true` shape, `corpus::test_conventions` fails if an
+`only` entry matches no test in the shape's targets, or if a test gated on a
+shape feature that a selected test is gated on (here `fault-injection`) is not
+selected.
 
 The non-default `disable-inline-caches` feature is debug-only test
 infrastructure in the same sense (`src/lib.rs` refuses it without debug

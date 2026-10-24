@@ -86,7 +86,7 @@ fn consume_cost_saturates_large_host_charges() {
 }
 
 #[test]
-fn vm_test01() {
+fn compiled_assignment_stores_numeric_global() {
     let mut state = State::new();
     let input = compile_unnamed("a = 1").unwrap();
     state.eval_chunk(input, 0).unwrap();
@@ -248,7 +248,7 @@ fn restricted_env_counts_a_repeated_whitelist_name_once() {
 }
 
 #[test]
-fn vm_test02() {
+fn bytecode_concat_stores_joined_string() {
     let mut state = State::new();
     let input = Bytecode {
         code: vec![
@@ -268,7 +268,7 @@ fn vm_test02() {
 }
 
 #[test]
-fn vm_test04() {
+fn bytecode_equality_stores_true_for_equal_numbers() {
     let mut state = State::new();
     let input = Bytecode {
         code: vec![
@@ -291,7 +291,7 @@ fn vm_test04() {
 }
 
 #[test]
-fn vm_test05() {
+fn bytecode_test_false_evaluates_boolean_rhs() {
     let mut state = State::new();
     let input = Bytecode {
         code: vec![
@@ -314,7 +314,7 @@ fn vm_test05() {
 }
 
 #[test]
-fn vm_test06() {
+fn bytecode_test_false_continues_for_truthy_value() {
     let mut state = State::new();
     let code = vec![
         Instr::load_bool(0, true),
@@ -338,7 +338,7 @@ fn vm_test06() {
 }
 
 #[test]
-fn vm_test07() {
+fn bytecode_less_than_branch_distinguishes_equal_and_ordered_numbers() {
     let mut state = State::new();
     let code = vec![
         Instr::load_num(0, 0),
@@ -368,7 +368,7 @@ fn vm_test07() {
 }
 
 #[test]
-fn vm_test08() {
+fn bytecode_global_while_loop_reaches_limit() {
     let code = vec![
         // a = 0; while a < 10 do a = a + 1 end
         Instr::load_num(0, 2),
@@ -398,7 +398,7 @@ fn vm_test08() {
 }
 
 #[test]
-fn vm_test09() {
+fn bytecode_local_while_loop_reaches_limit() {
     // local a = 1
     // while a < 10 do
     //   a = a + 1
@@ -430,7 +430,7 @@ fn vm_test09() {
 }
 
 #[test]
-fn vm_test10() {
+fn bytecode_for_prep_skips_empty_positive_range() {
     let code = vec![
         // For loop control variables
         Instr::load_num(0, 0), // start = 6
@@ -466,7 +466,7 @@ fn vm_test10() {
 }
 
 #[test]
-fn vm_test11() {
+fn compiled_numeric_loop_accumulates_sum() {
     let text = "
         a = 0
         for i = 1, 3 do
@@ -1433,4 +1433,51 @@ fn find_match_gsub_and_gmatch_share_one_compiled_pattern() {
          for _ in string.gmatch(s, '%a+') do end",
     );
     assert_eq!(state.pattern_compilations(), 1);
+}
+
+fn assert_argument(error: &crate::error::Error, number: isize) {
+    match error.kind() {
+        crate::error::ErrorKind::ArgError(arg) => assert_eq!(arg.arg_number(), number),
+        kind => panic!("expected an argument error, got {kind:?}"),
+    }
+}
+
+#[test]
+fn gmatch_string_checks_preserve_relative_indexes_in_nested_frames() {
+    use crate::instr::{ArgCount, RetCount};
+
+    let mut state = crate::vm::State::new();
+    state.push_nil().unwrap();
+    state.push_nil().unwrap();
+    state
+        .push_rust_fn(|state| {
+            state.push_rust_fn(|state| {
+                assert_argument(
+                    &state
+                        .cached_pattern_matcher(1)
+                        .err()
+                        .expect("non-string pattern fails"),
+                    1,
+                );
+                assert_argument(
+                    &state.with_gmatch_matcher(1, 1, |_, _, _| ()).unwrap_err(),
+                    1,
+                );
+                assert_argument(&state.to_bytes(1).unwrap_err(), 1);
+                assert_argument(&state.to_bytes(-1).unwrap_err(), -1);
+                assert_argument(&state.push_bytes_from_stack_range(1, 0..0).unwrap_err(), 1);
+                state.push_string("subject")?;
+                assert_argument(
+                    &state.with_gmatch_matcher(2, 1, |_, _, _| ()).unwrap_err(),
+                    1,
+                );
+                Ok(0)
+            })?;
+            state.push_nil()?;
+            state.call(ArgCount::Fixed(1), RetCount::Fixed(0))?;
+            Ok(0)
+        })
+        .unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
+    assert_eq!(state.get_top(), 2, "nested calls preserve host operands");
 }

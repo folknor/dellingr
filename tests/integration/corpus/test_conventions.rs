@@ -520,53 +520,17 @@ fn process_global_constructs_are_marked() {
     }
 }
 
-/// The instrumentation sweep filters tests by substring. Any test enabled
-/// by `fault-injection`, directly or through its containing module, must be
-/// selected by one of that sweep's `only` entries.
+/// Curated check shapes filter tests by substring. Each filter must select an
+/// existing test, and feature gates on matched tests identify the families
+/// that the shape must keep selected.
 #[test]
-fn fault_injection_tests_are_selected_by_the_instrumentation_sweep() {
+fn curated_check_filters_select_existing_feature_gated_tests() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let document = crate::support::brokkr_config();
     let checks = document
         .get("check")
         .and_then(toml::Value::as_array)
         .expect("brokkr.toml should list check shapes");
-    let sweep = checks
-        .iter()
-        .find(|check| {
-            check.get("name").and_then(toml::Value::as_str) == Some("instrumentation-faults")
-        })
-        .expect("the instrumentation-faults check shape should exist");
-    let features = sweep
-        .get("features")
-        .and_then(toml::Value::as_array)
-        .expect("instrumentation-faults should list its features");
-    assert!(
-        features
-            .iter()
-            .any(|feature| feature.as_str() == Some("fault-injection")),
-        "instrumentation-faults must enable fault-injection"
-    );
-    assert!(
-        sweep.get("profile").is_none()
-            && document
-                .get("test")
-                .and_then(|settings| settings.get("debug"))
-                .and_then(toml::Value::as_bool)
-                == Some(true),
-        "instrumentation-faults must use the default dev profile"
-    );
-    let filters = sweep
-        .get("only")
-        .and_then(toml::Value::as_array)
-        .expect("instrumentation-faults should list the tests it runs")
-        .iter()
-        .map(|filter| {
-            filter
-                .as_str()
-                .expect("instrumentation-faults filters should be strings")
-        })
-        .collect::<Vec<_>>();
 
     let mut sources = Vec::new();
     collect_rust_files(&manifest_dir.join("src"), &mut sources);
@@ -575,28 +539,128 @@ fn fault_injection_tests_are_selected_by_the_instrumentation_sweep() {
     for source_path in &sources {
         let source = read(source_path);
         let base = test_module_path(&manifest_dir, source_path);
-        let (modules, _) = fault_injection_items(&source, &base, false);
-        gated_modules.extend(modules);
+        let is_library_source = source_path.starts_with(manifest_dir.join("src"));
+        let (modules, _) = feature_gated_items(&source, &base, &BTreeSet::new(), is_library_source);
+        gated_modules.extend(
+            modules
+                .into_iter()
+                .map(|(module, features)| (is_library_source, module, features)),
+        );
     }
 
-    let mut test_paths = BTreeSet::new();
+    let mut tests = Vec::new();
     for source_path in &sources {
         let source = read(source_path);
         let base = test_module_path(&manifest_dir, source_path);
-        let inherited_gate = gated_modules.iter().any(|module| base.starts_with(module));
-        let (_, tests) = fault_injection_items(&source, &base, inherited_gate);
-        test_paths.extend(tests);
+        let is_library_source = source_path.starts_with(manifest_dir.join("src"));
+        // The library and the integration crate share module names
+        // (`compiler`, say), so a gate only applies within its own crate.
+        let inherited_features = gated_modules
+            .iter()
+            .filter(|(library, module, _)| {
+                *library == is_library_source && base.starts_with(module)
+            })
+            .flat_map(|(_, _, features)| features.iter().cloned())
+            .collect();
+        let (_, source_tests) =
+            feature_gated_items(&source, &base, &inherited_features, is_library_source);
+        tests.extend(source_tests);
     }
 
-    assert!(
-        !test_paths.is_empty(),
-        "the instrumentation fault-injection tests should be discoverable"
-    );
-    for test_path in test_paths {
+    for check in checks
+        .iter()
+        .filter(|check| check.get("curated").and_then(toml::Value::as_bool) == Some(true))
+    {
+        let name = check
+            .get("name")
+            .and_then(toml::Value::as_str)
+            .expect("curated check shapes should have names");
         assert!(
-            filters.iter().any(|filter| test_path.contains(filter)),
-            "fault-injection test `{test_path}` is not selected by instrumentation-faults `only`"
+            check.get("profile").is_none()
+                && document
+                    .get("test")
+                    .and_then(|settings| settings.get("debug"))
+                    .and_then(toml::Value::as_bool)
+                    == Some(true),
+            "curated check shape `{name}` must use the default dev profile"
         );
+        let filters = check
+            .get("only")
+            .and_then(toml::Value::as_array)
+            .unwrap_or_else(|| panic!("curated check shape `{name}` should list its only filters"))
+            .iter()
+            .map(|filter| {
+                let filter = filter.as_str().unwrap_or_else(|| {
+                    panic!("curated check shape `{name}` filters should be strings")
+                });
+                assert!(
+                    !filter.is_empty(),
+                    "curated check shape `{name}` should not have an empty only filter"
+                );
+                filter
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            !filters.is_empty(),
+            "curated check shape `{name}` should list at least one only filter"
+        );
+
+        let shape_features = check
+            .get("features")
+            .and_then(toml::Value::as_array)
+            .into_iter()
+            .flatten()
+            .map(|feature| {
+                feature.as_str().unwrap_or_else(|| {
+                    panic!("curated check shape `{name}` features should be strings")
+                })
+            })
+            .collect::<BTreeSet<_>>();
+        let includes_library = check.get("lib_tests").and_then(toml::Value::as_bool) == Some(true);
+        let includes_integration = check
+            .get("tests")
+            .and_then(toml::Value::as_array)
+            .is_some_and(|targets| {
+                targets
+                    .iter()
+                    .any(|target| target.as_str() == Some("integration"))
+            });
+        let shape_tests = tests
+            .iter()
+            .filter(|test| {
+                if test.is_library {
+                    includes_library
+                } else {
+                    includes_integration
+                }
+            })
+            .collect::<Vec<_>>();
+        for filter in &filters {
+            assert!(
+                shape_tests.iter().any(|test| test.path.contains(filter)),
+                "curated check shape `{name}` only filter `{filter}` does not match a test in its selected targets"
+            );
+        }
+
+        let selected_features = shape_tests
+            .iter()
+            .filter(|test| filters.iter().any(|filter| test.path.contains(filter)))
+            .flat_map(|test| test.features.iter())
+            .filter(|feature| shape_features.contains(feature.as_str()))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+
+        for test in shape_tests.iter().filter(|test| {
+            test.features
+                .iter()
+                .any(|feature| selected_features.contains(feature))
+        }) {
+            assert!(
+                filters.iter().any(|filter| test.path.contains(filter)),
+                "feature-gated test `{}` is not selected by curated check shape `{name}` `only` filters",
+                test.path
+            );
+        }
     }
 }
 
@@ -644,17 +708,27 @@ fn test_module_path(manifest_dir: &Path, source_path: &Path) -> Vec<String> {
 struct ModuleScope {
     name: String,
     body_depth: usize,
-    fault_injection: bool,
+    features: BTreeSet<String>,
 }
+
+struct ScannedTest {
+    path: String,
+    features: BTreeSet<String>,
+    is_library: bool,
+}
+
+/// Gated external modules (path and features) found in one source file.
+type GatedModules = Vec<(Vec<String>, BTreeSet<String>)>;
 
 /// Finds feature-gated external modules and tests in one Rust source file.
 /// This follows module and function declarations after comments and literals
 /// have been blanked, while reading the original attribute text for cfgs.
-fn fault_injection_items(
+fn feature_gated_items(
     source: &str,
     base: &[String],
-    inherited_gate: bool,
-) -> (Vec<Vec<String>>, Vec<String>) {
+    inherited_features: &BTreeSet<String>,
+    is_library_source: bool,
+) -> (GatedModules, Vec<ScannedTest>) {
     let code = code_only(source);
     let raw_lines: Vec<&str> = source.lines().collect();
     let mut scopes: Vec<ModuleScope> = Vec::new();
@@ -678,17 +752,20 @@ fn fault_injection_items(
             continue;
         }
 
-        let attribute_gate = attributes
+        let attribute_features = attributes
             .iter()
-            .any(|attribute| fault_injection_cfg(attribute));
+            .flat_map(|attribute| cfg_feature_names(attribute))
+            .collect::<BTreeSet<_>>();
         let test_attribute = attributes
             .iter()
             .any(|attribute| attribute.contains("#[test]"));
-        let scope_gate = scopes.iter().any(|scope| scope.fault_injection);
-        let current_gate = inherited_gate || scope_gate;
+        let mut current_features = inherited_features.clone();
+        for scope in &scopes {
+            current_features.extend(scope.features.iter().cloned());
+        }
+        current_features.extend(attribute_features);
 
         if let Some((name, inline)) = declared_module(text) {
-            let module_gate = current_gate || attribute_gate;
             let mut module_path = base.to_vec();
             module_path.extend(scopes.iter().map(|scope| scope.name.clone()));
             module_path.push(name.clone());
@@ -705,20 +782,21 @@ fn fault_injection_items(
                     scopes.push(ModuleScope {
                         name,
                         body_depth: line.depth + 1,
-                        fault_injection: module_gate,
+                        features: current_features,
                     });
                 }
-            } else if module_gate {
-                gated_modules.push(module_path);
+            } else if !current_features.is_empty() {
+                gated_modules.push((module_path, current_features));
             }
-        } else if test_attribute
-            && (current_gate || attribute_gate)
-            && let Some(name) = declared_function(text)
-        {
+        } else if test_attribute && let Some(name) = declared_function(text) {
             let mut test_path = base.to_vec();
             test_path.extend(scopes.iter().map(|scope| scope.name.clone()));
             test_path.push(name);
-            tests.push(test_path.join("::"));
+            tests.push(ScannedTest {
+                path: test_path.join("::"),
+                features: current_features,
+                is_library: is_library_source,
+            });
         }
 
         attributes.clear();
@@ -727,14 +805,57 @@ fn fault_injection_items(
     (gated_modules, tests)
 }
 
-fn fault_injection_cfg(attribute: &str) -> bool {
-    let Some(body) = attribute.trim().strip_prefix("#[") else {
-        return false;
+/// The features a `#[cfg(...)]` attribute requires. A `feature = "x"` inside
+/// a `not(...)` excludes the item from that feature's builds rather than
+/// gating it on them, so negated occurrences are skipped.
+fn cfg_feature_names(attribute: &str) -> BTreeSet<String> {
+    let mut features = BTreeSet::new();
+    let trimmed = attribute.trim();
+    let Some(predicate) = trimmed.strip_prefix("#[cfg(") else {
+        return features;
     };
-    let name = body
-        .split(|character: char| character == '(' || character == ']' || character.is_whitespace())
-        .next();
-    name == Some("cfg") && attribute.contains("fault-injection")
+
+    let is_word = |character: char| character.is_alphanumeric() || character == '_';
+    // One entry per open parenthesis: whether that group is a `not(...)`.
+    let mut groups: Vec<bool> = Vec::new();
+    let mut rest = predicate;
+    while let Some(character) = rest.chars().next() {
+        if character == '(' {
+            groups.push(false);
+            rest = &rest[1..];
+        } else if character == ')' {
+            groups.pop();
+            rest = &rest[1..];
+        } else if character == '"' {
+            // A string outside `feature = "..."`; skip to its close.
+            let quoted = &rest[1..];
+            rest = match quoted.find('"') {
+                Some(close) => &quoted[close + 1..],
+                None => "",
+            };
+        } else if is_word(character) {
+            let length = rest.find(|c: char| !is_word(c)).unwrap_or(rest.len());
+            let word = &rest[..length];
+            rest = &rest[length..];
+            let after = rest.trim_start();
+            if word == "not" && after.starts_with('(') {
+                groups.push(true);
+                rest = &after[1..];
+            } else if word == "feature"
+                && let Some(value) = after.strip_prefix('=')
+                && let Some(value) = value.trim_start().strip_prefix('"')
+                && let Some(close) = value.find('"')
+            {
+                if !groups.contains(&true) {
+                    features.insert(value[..close].to_owned());
+                }
+                rest = &value[close + 1..];
+            }
+        } else {
+            rest = &rest[character.len_utf8()..];
+        }
+    }
+    features
 }
 
 fn declared_module(line: &str) -> Option<(String, bool)> {

@@ -355,7 +355,7 @@ fn table_concat_cost_is_identical_with_or_without_a_budget() {
 }
 
 #[test]
-fn count_only_costs_are_deterministic_across_runs() {
+fn gsub_count_only_cost_matches_between_fresh_states() {
     let source = "return string.gsub('ab ab ab', '(%a+)', '%1%1')";
     assert_eq!(support::cost_of(source), support::cost_of(source));
 }

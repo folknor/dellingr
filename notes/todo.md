@@ -71,7 +71,7 @@ not free Y" or "the cache was hit/evicted" but cannot assert the precondition
 happened: the GC-rooting tests in `gc_upvalues.rs`, `table_metamethods.rs`,
 `table_sort_metamethods.rs`, `src/vm/tests.rs`'s deep-chain test and
 `string_charges.rs`'s gsub test; the gmatch cache-eviction and cache-hit cost
-tests in `cost_determinism.rs` and `string_charges.rs`; and
+tests in `budget_and_iterator_charges.rs` and `string_charges.rs`; and
 `string_metatable`'s slot-reuse tests. Each could then assert its
 precondition, or construct the collision directly in a `vm/` unit test.
 

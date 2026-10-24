@@ -10,6 +10,7 @@ mod string_bytes;
 mod string_format;
 mod string_metatable;
 mod string_metatable_dispatch;
+mod table_and_numeric_regressions;
 mod table_insert_index;
 mod table_iteration;
 mod table_metamethods;

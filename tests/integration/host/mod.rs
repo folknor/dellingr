@@ -1,7 +1,8 @@
 mod anchor;
+mod callback_argument_names;
 mod caller_stack_isolation;
+mod concat_stack_indices;
 mod host_call_preflight;
-mod host_concat_count;
 mod host_error_reporting;
 mod host_frame_isolation;
 mod host_table_api_atomicity;

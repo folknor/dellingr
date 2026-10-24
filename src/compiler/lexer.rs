@@ -801,34 +801,34 @@ mod tests {
     }
 
     #[test]
-    fn test_lexer01() {
+    fn number_token_preserves_source_bounds() {
         let tokens = &[(LiteralNumber, 0, 2)];
         check_line("50", tokens);
     }
 
     #[test]
-    fn test_lexer02() {
+    fn mixed_identifier_number_keyword_tokens() {
         let input = "hi 4 false";
         let tokens = &[(Identifier, 0, 2), (LiteralNumber, 3, 1), (False, 5, 5)];
         check_line(input, tokens);
     }
 
     #[test]
-    fn test_lexer03() {
+    fn identifier_token_includes_trailing_digit() {
         let input = "hi5";
         let tokens = &[(Identifier, 0, 3)];
         check_line(input, tokens);
     }
 
     #[test]
-    fn test_lexer04() {
+    fn addition_tokens_preserve_operator_bounds() {
         let input = "5 + 5";
         let tokens = &[(LiteralNumber, 0, 1), (Plus, 2, 1), (LiteralNumber, 4, 1)];
         check_line(input, tokens);
     }
 
     #[test]
-    fn test_lexer05() {
+    fn or_expression_tokens_include_semicolon() {
         let input = "print 5 or 6;";
         let tokens = &[
             (Identifier, 0, 5),
@@ -841,7 +841,7 @@ mod tests {
     }
 
     #[test]
-    fn test_lexer06() {
+    fn named_constructor_tokens_preserve_bounds() {
         let input = "t = {x = 3}";
         let tokens = &[
             (Identifier, 0, 1),
@@ -1073,7 +1073,7 @@ mod tests {
     }
 
     #[test]
-    fn test_lexer08() {
+    fn constructor_tokens_include_trailing_comma() {
         let input = "print {x = 5,}";
         let tokens = &[
             (Identifier, 0, 5),
@@ -1088,7 +1088,7 @@ mod tests {
     }
 
     #[test]
-    fn test_lexer09() {
+    fn direct_call_tokens_record_line_breaks() {
         let input = "print()\nsome_other_function(an_argument)\n";
         let tokens = &[
             (Identifier, 0, 5),
@@ -1104,7 +1104,7 @@ mod tests {
     }
 
     #[test]
-    fn test_lexer10() {
+    fn number_tokens_record_blank_lines() {
         let input = "\n\n2\n456\n";
         let tokens = &[(LiteralNumber, 2, 1), (LiteralNumber, 4, 3)];
         let linebreaks = &[0, 1, 2, 4, 8];
@@ -1112,7 +1112,7 @@ mod tests {
     }
 
     #[test]
-    fn test_lexer11() {
+    fn comment_tokens_are_skipped_with_line_tracking() {
         let input = "-- basic test\nprint('hi' --comment\n )\n";
         let tokens = &[
             (Identifier, 14, 5),
@@ -1125,7 +1125,7 @@ mod tests {
     }
 
     #[test]
-    fn test_lexer12() {
+    fn parenthesized_call_tokens_record_line_breaks() {
         let input = "print()\n(some_other_function)(an_argument)\n";
         let tokens = &[
             (Identifier, 0, 5),

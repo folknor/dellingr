@@ -232,7 +232,7 @@ fn finalize_at_depth(bc: &mut Bytecode, depth: usize) -> Result<()> {
 }
 
 #[cfg(test)]
-mod runtime_cache_tests {
+mod tests {
     use super::*;
     use crate::error::{ErrorKind, SyntaxError};
     use crate::limits::{MAX_SYNTAX_DEPTH, SYNTAX_SUFFIX_COST};
