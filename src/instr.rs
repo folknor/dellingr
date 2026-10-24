@@ -1259,7 +1259,7 @@ mod tests {
             assert_eq!(
                 format!("format={format}"),
                 version,
-                "review the encoding fixture when changing the snapshot format"
+                "save header layout must expose the fixture format at bytes 4..6"
             );
         }
     }

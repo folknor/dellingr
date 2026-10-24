@@ -206,9 +206,11 @@ boundary and operand contract. Handler writes survive an error.
 - `tests/integration/corpus/diff_test.rs` is the differential gate: it uses the same shared example list, and checks that its ordered paths match `scripts/diff_test.sh --list-examples`. It drives the shell gate over the whole corpus in partitions that run concurrently inside one test, once per `[[check]]` feature shape in `brokkr.toml` (there is no separate brokkr script check for it), and also checks malformed timeout rejection and nonempty marker reasons. The corpus partitions are compiled out under the `hotpath` feature, which `hotpath-alloc` also enables. `scripts/diff_gate.sh` is an optional debug-build wrapper around `diff_test.sh` for direct runs; nothing in `brokkr check` invokes it. Mark intentional divergences with a `-- DIFF: <reason>` comment; dellingr must still succeed, and its output must differ from both references (a match fails as a stale marker). A file carrying a `-- SKIP-DIFF: <reason>` line is not run by the differential gate. Reference Lua is required for every example not marked SKIP-DIFF; the test leaves that check, and its error message, to `diff_test.sh`.
 - `tests/integration/corpus/bench_scripts.rs` checks every `xxh128` and `hotpath_xxh128` pin in `brokkr.toml` against the registered file bytes, the bench/ footer contract, that each bench/ file runs (its setup without the footer, then `_bench` with `local K` patched to 1, or its local `kernel()` once when it has no `K`, or else one full `_bench` call, each phase under a cost budget, loaded under the harness's bare-path chunk name), and that each `brokkr.toml` workload's `file` and `hotpath_file` give their `kernel` and shared helper functions matching `analyze_cost` fingerprints, which guards the same-kernel pairing described under Hotpath benchmarks.
 - Unit tests live alongside their modules (e.g. `src/vm/object.rs` has GC tests).
-- To intentionally refresh `tests/fixtures/save_golden_current.bin` after a
-  serializer format change, run
-  `brokkr run --debug --features snapshot regenerate_save_golden`. Use the
+- To intentionally refresh `tests/fixtures/save_golden_current.bin` and its
+  generated `.txt` companion after a reviewed save-output change, run
+  `brokkr run --debug --features snapshot regenerate_save_golden`. Never
+  regenerate the archived `save_released_v*.bin` fixtures
+  (docs/save-state.md). Use the
   debug profile the tests run under: release builds fold identical Rust
   functions, which changes the saved function ids.
 

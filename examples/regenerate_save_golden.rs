@@ -1,5 +1,6 @@
-//! Rewrite the checked-in save golden fixture after an intentional serializer
-//! format change.
+//! Rewrite the checked-in save golden fixture and its text companion after a
+//! reviewed save-output change. The archived released-format fixtures are
+//! never regenerated.
 
 use std::path::PathBuf;
 
@@ -25,5 +26,10 @@ fn main() {
         })
         .map(PathBuf::from)
         .expect("the current directory should be inside the dellingr repository");
-    output::write_changed(&root.join(save_golden_program::GOLDEN_FIXTURE), &bytes);
+    let fixture = root.join(save_golden_program::GOLDEN_FIXTURE);
+    output::write_changed(&fixture, &bytes);
+    output::write_changed(
+        &fixture.with_extension("txt"),
+        save_golden_program::golden_text(&bytes).as_bytes(),
+    );
 }

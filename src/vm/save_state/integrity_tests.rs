@@ -371,3 +371,162 @@ fn folded_functions_as_keys_of_one_table_are_rejected() {
         }))
     ));
 }
+
+// Decode the same checked-in bytes the integration test compares with a live
+// capture. Exhaustive enum matches make new wire variants require review.
+#[test]
+fn golden_payload_covers_persisted_graph_shapes() {
+    let bytes = include_bytes!("../../../tests/fixtures/save_golden_current.bin");
+    let mut decoder = Decoder::new(bytes);
+    decoder.read_magic_and_versions().expect("golden header");
+    decoder
+        .read_bytes(SnapshotField::EngineVersion)
+        .expect("engine label");
+    let payload = SavePayload::decode(&mut decoder).expect("golden payload");
+    decoder.finish().expect("no trailing bytes");
+    // Name all sections so a new payload section requires a coverage decision.
+    let SavePayload {
+        has_standard_environment,
+        rng_state: _,
+        cost: _,
+        strings: _,
+        bytecode: _,
+        upvalues: _,
+        objects: _,
+        globals: _,
+        global_pins: _,
+        globals_sealed: _,
+        env_deltas: _,
+        next_format_pointer_id,
+        format_pointer_ids: _,
+    } = &payload;
+    assert!(*has_standard_environment && *next_format_pointer_id > 1);
+    let mut values = [false; 7];
+    let mut objects = [false; 2];
+    let mut shared_upvalues = BTreeSet::new();
+    let mut has_shared_cell = false;
+    let mut has_tombstone = false;
+    let mut visit = |value: &SavedVal| {
+        values[match value {
+            SavedVal::Nil => 0,
+            SavedVal::Bool(_) => 1,
+            SavedVal::Num(_) => 2,
+            SavedVal::Str(_) => 3,
+            SavedVal::Obj(_) => 4,
+            SavedVal::Fn(_) => 5,
+            SavedVal::EnvObj(_) => 6,
+        }] = true;
+    };
+    for object in payload
+        .objects
+        .iter()
+        .chain(std::iter::once(&payload.globals))
+    {
+        match object {
+            SavedObject::Table {
+                array_slots,
+                entries,
+                metatable,
+                ..
+            } => {
+                objects[0] = true;
+                for (slot, (key, value)) in entries.iter().enumerate() {
+                    visit(key);
+                    visit(value);
+                    // An array slot may hold a nil hole; only a hash slot with
+                    // a live key and a nil value is a retained tombstone.
+                    has_tombstone |= slot >= *array_slots as usize
+                        && !matches!(key, SavedVal::Nil)
+                        && matches!(value, SavedVal::Nil);
+                }
+                if let Some(value) = metatable {
+                    visit(value);
+                }
+            }
+            SavedObject::Closure { upvalues, .. } => {
+                objects[1] = true;
+                for id in upvalues {
+                    has_shared_cell |= !shared_upvalues.insert(*id);
+                }
+            }
+        }
+    }
+    for value in &payload.upvalues {
+        visit(value);
+    }
+    assert!(values.into_iter().all(|seen| seen));
+    assert!(objects.into_iter().all(|seen| seen));
+    assert!(has_tombstone && has_shared_cell);
+    assert!(payload.globals_sealed && !payload.global_pins.is_empty());
+    let SavedObject::Table {
+        entries: global_entries,
+        ..
+    } = &payload.globals
+    else {
+        panic!("the global table is saved as a table");
+    };
+    assert!(
+        global_entries
+            .iter()
+            .any(|(key, _)| !matches!(key, SavedVal::Nil | SavedVal::Str(_))),
+        "the golden needs a non-string global key"
+    );
+    assert!(!payload.strings.is_empty() && !payload.bytecode.is_empty());
+    assert!(
+        payload
+            .format_pointer_ids
+            .iter()
+            .any(|(value, _)| matches!(value, SavedVal::Fn(_)))
+    );
+    let mut metatables = [false; 3];
+    for delta in &payload.env_deltas {
+        metatables[match &delta.metatable {
+            SavedMetatableDelta::Unchanged => 0,
+            SavedMetatableDelta::Cleared => 1,
+            SavedMetatableDelta::Set(_) => 2,
+        }] = true;
+    }
+    // Pristine tokenized library tables have no metatable to clear. The
+    // global table has one, but is saved whole rather than as an env delta.
+    // Cleared remains a wire variant; it cannot arise from this baseline.
+    assert!(metatables[0] && metatables[2]);
+    assert!(payload.env_deltas.iter().any(|delta| delta.array.is_some()));
+    assert!(
+        payload
+            .env_deltas
+            .iter()
+            .any(|delta| delta.hash_slots.is_some())
+    );
+    assert!(
+        payload
+            .env_deltas
+            .iter()
+            .any(|delta| !delta.deleted.is_empty())
+    );
+    assert!(
+        payload
+            .env_deltas
+            .iter()
+            .any(|delta| !delta.upserts.is_empty())
+    );
+    assert!(payload.env_deltas.iter().any(|delta| delta.order.is_some()));
+    let verified = verify::verify_payload(payload).expect("golden verifies");
+    // Both wrapper kinds must be recognized, not merely round-trip through
+    // the same runtime spelling. A missing capture must fail this check.
+    let chunks = verified.gmatch_iterator_chunks();
+    assert!(!chunks.is_empty());
+    let payload = verified.into_inner();
+    for id in [
+        crate::gmatch_schema::ITERATOR_ID,
+        crate::gmatch_schema::EMPTY_ITERATOR_ID,
+    ] {
+        assert!(payload.objects.iter().any(|object| match object {
+            SavedObject::Closure { chunk, upvalues } => {
+                chunks.contains(&(*chunk as usize)) && upvalues.iter().any(|index| {
+                    matches!(&payload.upvalues[*index as usize], SavedVal::Fn(name) if name == id)
+                })
+            }
+            SavedObject::Table { .. } => false,
+        }));
+    }
+}

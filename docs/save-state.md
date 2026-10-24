@@ -167,3 +167,31 @@ returns; the loaded State starts with an empty stack.
   the header, or accept that a version bump changes the bytes.
 - Saves are user-editable input. Authenticate them if tampering with future
   RNG outcomes matters.
+
+## Format release policy and golden review
+
+An unreleased format may change before shipping. Once it ships, a change to
+encoded fields, tags, persisted opcode encodings or iterator schemas needs a
+new format version. Compiler output, engine metadata and cost-model changes
+can change save bytes without changing the format.
+
+The released-format list in `tests/integration/snapshot/save_golden.rs` records
+formats 6 and 7. The 0.4.0 and 0.5.0 changelog sections, checked against the
+release trees at 3170f83 and 6c795d1, establish that list; earlier releases
+predate the snapshot feature. Their original binary fixtures are archived
+with fingerprints. They are historical evidence, not supported load formats.
+At release, archive the current debug golden under its format version and add
+its fingerprint to that list. Never regenerate a released fixture. While a
+listed fixture's format and cost-model versions are the current ones, the
+check loads it with the current build, saves it again and requires the same
+payload (everything after the engine label). A change in how saves are read
+or written therefore fails it; compiler, registration and golden-program
+changes do not, because they leave the archived save alone. Deliberate edits
+to the list or fingerprints still require compatibility review.
+
+The current golden pins the full debug save stream. Its generated text
+companion shows offsets, bytes and printable strings for review. Run
+`brokkr run --debug --features snapshot regenerate_save_golden` to update
+both, and inspect the text diff before accepting the change. Deterministic traversal reorders are
+replay-visible, but do not by themselves make old saves unreadable. Golden
+regeneration is not evidence that a format change is compatible.
