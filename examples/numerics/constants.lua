@@ -1,4 +1,4 @@
--- Historical probe, kept as the regression tracker for its fix. Literal-only
+-- Historical probe: kept as the regression tracker for its fix. Literal-only
 -- arithmetic in a hot loop: before parse-time constant folding (commit
 -- 2685dd6), `60 * 1000` and `-5` re-executed their operand loads and
 -- arithmetic on every iteration, each charging cost. The parser now folds
@@ -21,4 +21,4 @@ function _bench()
 end
 
 for i = 1, 700 do _bench() end
-print("numerics/constants: true")
+print("numerics/constants: " .. tostring(_bench()) .. ": true")

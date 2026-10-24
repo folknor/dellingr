@@ -27,4 +27,4 @@ function _bench()
 end
 
 for i = 1, 2500 do _bench() end
-print("fields/same_obj_cached: true")
+print("fields/same_obj_cached: " .. tostring(_bench()) .. ": true")

@@ -1,6 +1,6 @@
--- Allocates table literals with positional fields in a hot loop: a pure
--- list and a list with enough keyed fields to presize the hash part.
--- Useful for tracking how a constructor sizes its array part.
+-- Probe: table literals with positional fields allocated in a hot loop: a
+-- pure list, and a list with enough keyed fields to presize the hash part.
+-- Tracks how a constructor sizes its array part.
 
 function _bench()
     local sum = 0
@@ -13,4 +13,4 @@ function _bench()
 end
 
 for i = 1, 900 do _bench() end
-print("alloc/list_literals: true")
+print("alloc/list_literals: " .. tostring(_bench()) .. ": true")

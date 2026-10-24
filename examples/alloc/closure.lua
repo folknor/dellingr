@@ -1,6 +1,4 @@
--- Hypothesis: creating a closure inside a hot loop allocates a heap
--- LuaFunction object plus upvalue slots each iteration. Should produce
--- visibly more GC pressure than equivalent inline code.
+-- Workload: creates and calls a closure capturing a local each loop iteration.
 
 function _bench()
     local total = 0
@@ -15,4 +13,4 @@ function _bench()
 end
 
 for i = 1, 1000 do _bench() end
-print("alloc/closure: true")
+print("alloc/closure: " .. tostring(_bench()) .. ": true")

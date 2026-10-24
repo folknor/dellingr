@@ -11,7 +11,7 @@ Built with LLMs. See [LLM.md](LLM.md).
 
 ## Performance
 
-It's slower than reference Lua, but not dramatically so: roughly 1.4-3.8x behind lua5.2 on representative workloads. LuaJIT is obviously in its own league. dellingr is fast enough for continuous bounded execution of a few kilobytes of Lua code to let a game run at several thousand FPS.
+It's slower than reference Lua, but not dramatically so: roughly 1.4-3.3x behind lua5.2 on representative workloads. LuaJIT is obviously in its own league. dellingr is fast enough for continuous bounded execution of a few kilobytes of Lua code to let a game run at several thousand FPS.
 
 Run `./scripts/bench.sh` to reproduce on your own host. Sample run on AMD Ryzen 9 5900X / Linux 7.0:
 
@@ -25,7 +25,7 @@ Run `./scripts/bench.sh` to reproduce on your own host. Sample run on AMD Ryzen 
 | `strings/mixed`          |     34ms |    65ms |     2.77x |     3.02x |     1.97x |     2.95x |
 | `strings/patterns`       |     60ms |    22ms |     3.48x |     3.45x |     3.34x |     5.27x |
 | `strings/literal_find`   |     21ms |       - |     3.31x |     3.41x |     2.42x |     6.23x |
-| `fields/same_obj_read`   |    169ms |    61ms |     6.01x |     7.16x |     3.81x |    46.27x |
+| `fields/same_obj_read` * |    169ms |    61ms |     6.01x |     7.16x |     3.81x |    46.27x |
 | `globals/write` *        |     32ms |       - |     1.62x |     2.04x |     1.10x |    27.12x |
 | `calls/many_literals` *  |     57ms |       - |     4.40x |     4.39x |     2.70x |    61.03x |
 | `alloc/closure`          |     81ms |   126ms |     2.20x |     2.21x |     1.83x |     2.80x |

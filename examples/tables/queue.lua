@@ -1,4 +1,4 @@
--- FIFO queue kernel.
+-- Workload: FIFO queue kernel.
 -- A long-lived queue written the obvious way (q[tail] = v; q[head] = nil)
 -- that keeps a small backlog while its keys climb forever, with an occasional
 -- pairs walk over it. The queue persists across calls, so its history grows
@@ -27,4 +27,4 @@ function _bench()
 end
 
 for i = 1, 30 do _bench() end
-print("tables/queue: " .. tostring(q[head] ~= nil and q[tail] ~= nil and q[head - 1] == nil))
+print("tables/queue: " .. tostring(_bench()) .. ": " .. tostring(q[head] ~= nil and q[tail] ~= nil and q[head - 1] == nil))

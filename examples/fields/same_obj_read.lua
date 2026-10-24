@@ -1,7 +1,8 @@
 -- Probe: hot field reads on a single object.
 -- Unlike fields/polymorphic.lua (which iterates over a fresh table each step),
--- this bench accesses the same table repeatedly. A per-call-site inline cache
--- keyed on (table identity, field name) -> index hits every iteration here.
+-- this bench accesses the same table repeatedly. Each field-read site has a
+-- fixed field name and caches its slot index. The fast path checks table
+-- identity and version, then reads the live value from that slot.
 -- Compare directly against fields/same_obj_cached.lua, which hoists the field
 -- reads into locals once per outer iteration.
 
@@ -24,4 +25,4 @@ function _bench()
 end
 
 for i = 1, 800 do _bench() end
-print("fields/same_obj_read: true")
+print("fields/same_obj_read: " .. tostring(_bench()) .. ": true")

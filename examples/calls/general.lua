@@ -19,4 +19,4 @@ function _bench()
 end
 
 for i = 1, 35 do _bench() end
-print("calls/general: true")
+print("calls/general: " .. tostring(_bench()) .. ": true")

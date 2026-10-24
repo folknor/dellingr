@@ -1,4 +1,4 @@
--- Literal string.find kernel.
+-- Workload: literal string.find kernel.
 -- Exercises default-pattern calls whose patterns contain no magic
 -- characters, plus one-byte needles.
 
@@ -28,4 +28,4 @@ function _bench()
 end
 
 for i = 1, 100 do _bench() end
-print("strings/literal_find: true")
+print("strings/literal_find: " .. tostring(_bench()) .. ": true")

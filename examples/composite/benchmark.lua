@@ -1,9 +1,6 @@
--- Mixed composite kernel: the seven sections of bench/benchmark.lua at
--- ~1/100 scale, so one _bench call is instrumentation-safe (~2ms, not
--- ~170ms). Registered as the benchmark workload's hotpath_file in
--- brokkr.toml - the instrumented modes (--hotpath / --alloc) resolve this
--- file, --bench resolves the seconds-scale bench/ port. Same kernels in
--- the same proportions, so per-function percentages carry over.
+-- Workload: mixed composite kernel shared with bench/benchmark.lua.
+-- The verdict file repeats this exact kernel K times per _bench call,
+-- keeping every section in the same proportions for instrumented profiles.
 
 local function fib(n)
     if n < 2 then return n end
@@ -76,4 +73,4 @@ end
 
 -- Standalone: iterate enough for hyperfine resolution.
 for i = 1, 30 do _bench() end
-print("composite/benchmark: true")
+print("composite/benchmark: " .. tostring(_bench()) .. ": true")

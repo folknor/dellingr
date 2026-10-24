@@ -36,4 +36,4 @@ function _bench()
 end
 
 for i = 1, 130 do _bench() end
-print("tables/mixed: true")
+print("tables/mixed: " .. tostring(_bench()) .. ": true")

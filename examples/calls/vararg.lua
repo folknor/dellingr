@@ -1,6 +1,5 @@
--- Hypothesis: vararg functions go through dynamic ArgCount handling and
--- the pending call-base stack. A tight loop calling a vararg function
--- should expose any per-call overhead vs a fixed-arity equivalent.
+-- Probe: vararg functions collect extra arguments into the shared vararg arena.
+-- This kernel expands each call's values into a table, then sums them with ipairs.
 
 local function sum_varargs(...)
     local total = 0
@@ -19,4 +18,4 @@ function _bench()
 end
 
 for i = 1, 600 do _bench() end
-print("calls/vararg: true")
+print("calls/vararg: " .. tostring(_bench()) .. ": true")

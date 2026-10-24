@@ -1,4 +1,4 @@
--- Tight numeric kernel.
+-- Workload: tight numeric kernel.
 -- Exercises opcode dispatch, number boxing, and recursive call frame setup.
 -- No allocation, no string interning, no GC pressure.
 
@@ -17,4 +17,4 @@ end
 
 -- Standalone: iterate enough for hyperfine resolution.
 for i = 1, 30 do _bench() end
-print("arithmetic: true")
+print("numerics/arithmetic: " .. tostring(_bench()) .. ": true")

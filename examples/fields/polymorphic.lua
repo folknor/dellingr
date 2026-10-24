@@ -17,4 +17,4 @@ function _bench()
 end
 
 for i = 1, 300 do _bench() end
-print("fields/polymorphic: true")
+print("fields/polymorphic: " .. tostring(_bench()) .. ": true")

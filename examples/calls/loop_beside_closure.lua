@@ -1,4 +1,4 @@
--- Diagnostic probe: a function that builds one closure and also runs plain
+-- Historical probe: a function that builds one closure and also runs plain
 -- loops whose locals nothing captures. Before per-scope capture tracking the
 -- closure kept a CloseUpvalues in every iteration of those loops; compare
 -- against numerics/arithmetic, whose hot functions make no closure.
@@ -22,4 +22,4 @@ function _bench()
 end
 
 for i = 1, 300 do _bench() end
-print("calls/loop_beside_closure: true")
+print("calls/loop_beside_closure: " .. tostring(_bench()) .. ": true")

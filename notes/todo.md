@@ -20,14 +20,12 @@ get deleted as they ship or stop being worth tracking.
 
 ### Housekeeping left from the `_G`-as-real-table change (2026-10-23)
 
-- The header comments of `examples/globals/write.lua` and
-  `examples/calls/global.lua` still describe the old global store (IndexMap
-  lookups, no SET_GLOBAL inline cache). Both are hash-pinned workloads, so
-  rewording them means re-hashing their `brokkr.toml` pins.
 - The README's `globals/write` ratio row predates the change and may be stale.
-- `bench/benchmark.lua`'s header cites `examples/benchmark.lua`, which was
-  deleted as an orphan (2026-10-24). The workload is hash-pinned; reword the
-  citation when it is next re-pinned.
+- Several `bench/` verdict headers (arithmetic, pairs, fill, queue, mixed,
+  patterns, literal_find, closure, record_tables) still say "see that file
+  for the probe rationale", while their `examples/` partners are now
+  `-- Workload:`. Rewording them re-pins the verdict files and cuts their
+  stored history; do it the next time those workloads are re-pinned anyway.
 - The README `benchmark` ratio row (every column, lua-rs included) timed the
   deleted `examples/benchmark.lua`; `scripts/bench.sh` and
   `research/bench_luars.sh` now time `examples/composite/benchmark.lua`. The

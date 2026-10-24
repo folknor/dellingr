@@ -16,4 +16,4 @@ function _bench()
 end
 
 for i = 1, 1500 do _bench() end
-print("calls/local: true")
+print("calls/local: " .. tostring(_bench()) .. ": true")

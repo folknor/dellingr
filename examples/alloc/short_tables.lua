@@ -1,6 +1,5 @@
--- Hypothesis: allocating short-lived tables in a hot loop pressures the
--- mark-sweep GC. Useful baseline for "is GC the bottleneck?" questions.
--- Each iteration allocates a fresh 4-entry table and discards it.
+-- Probe: short-lived table allocation in a hot loop. Each iteration creates a
+-- fresh 4-entry table and discards it, driving allocation and garbage collection.
 
 function _bench()
     local sum = 0
@@ -12,4 +11,4 @@ function _bench()
 end
 
 for i = 1, 1200 do _bench() end
-print("alloc/short_tables: true")
+print("alloc/short_tables: " .. tostring(_bench()) .. ": true")

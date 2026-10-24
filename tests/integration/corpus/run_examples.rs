@@ -192,7 +192,7 @@ fn run_example(path: &Path, timeout_ms: u64) -> Result<ExampleRun, String> {
     })
 }
 
-fn defines_global_bench(source: &str) -> bool {
+pub(super) fn defines_global_bench(source: &str) -> bool {
     if !source.contains("_bench") {
         return false;
     }

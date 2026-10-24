@@ -1,12 +1,8 @@
--- Historical probe, kept as the regression tracker for its fix. Global
--- assignment once had no inline cache: every SET_GLOBAL paid name
--- validation, an allocation and a hash lookup while reads were already
--- cached. Per-site global write caches (commit 7ee46fd) made a warmed write
--- a validated in-place store; this file guards against the uncached path
--- coming back. `tally = tally + 1` pays a cached read and a cached write in
--- the same statement.
--- Compare against fields/same_obj_write.lua, which measures cached field
--- writes on a table rather than globals.
+-- Historical probe: global writes once validated and allocated names on
+-- every assignment. GET_GLOBAL and SET_GLOBAL now cache slots in the real
+-- global table, validating the table version before an in-place access.
+-- `tally = tally + 1` exercises both caches in the same statement.
+-- Compare against fields/same_obj_write.lua for cached ordinary table writes.
 
 counter = 0
 tally = 0
@@ -22,4 +18,4 @@ function _bench()
 end
 
 for i = 1, 900 do _bench() end
-print("globals/write: true")
+print("globals/write: " .. tostring(_bench()) .. ": true")

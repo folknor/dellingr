@@ -1,10 +1,11 @@
+-- Probe: parse and codegen time on a generated large chunk. Unlike every
+-- other bench in examples/, the interesting cost here is paid BEFORE _bench()
+-- ever runs, so read the harness's parse_us phase rather than warm_avg_us, and
+-- expect the standalone wall time to be dominated by parsing rather than
+-- execution.
+--
 -- GENERATED FILE - do not edit by hand.
 -- Regenerate with: python3 examples/parse/generate.py
---
--- Probe: parse and codegen time on a large chunk. Unlike every other bench in
--- examples/, the interesting cost here is paid BEFORE _bench() ever runs, so
--- read the harness's parse_us phase rather than warm_avg_us, and expect the
--- standalone wall time to be dominated by parsing rather than execution.
 --
 -- Shape: 200 top-level function definitions, each with several statements,
 -- several call sites, and a nested closure. See examples/parse/generate.py for
@@ -5035,4 +5036,4 @@ end
 -- Parsing dominates, so the standalone runner loops only enough to keep the
 -- executed portion non-trivial without hiding the parse cost.
 for i = 1, 20 do _bench() end
-print("parse/large_source: true")
+print("parse/large_source: " .. tostring(_bench()) .. ": true")

@@ -1,4 +1,4 @@
--- Historical probe, kept as the regression tracker for its fix. Until
+-- Historical probe: kept as the regression tracker for its fix. Until
 -- 2026-07-26 every Lua call re-interned ALL of the callee chunk's string
 -- literals and truncated them on return - cost proportional to the literal
 -- count, not to what the call touched. `classify` carries ~32 distinct
@@ -55,4 +55,4 @@ function _bench()
 end
 
 for i = 1, 700 do _bench() end
-print("calls/many_literals: true")
+print("calls/many_literals: " .. tostring(_bench()) .. ": true")

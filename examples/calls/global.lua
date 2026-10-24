@@ -1,6 +1,5 @@
--- Hypothesis: calling a user-defined global in a hot loop incurs a per-call
--- IndexMap lookup against `state.globals`, since only well-known builtins
--- (print, pairs, math, ...) get the Builtin-array fast path.
+-- Probe: calling a user-defined global through the global table read cache.
+-- A warm GET_GLOBAL validates the table version and reads its cached slot.
 -- Compare against calls/local.lua, which caches the same function in a local.
 
 function add_one(x)
@@ -16,4 +15,4 @@ function _bench()
 end
 
 for i = 1, 1500 do _bench() end
-print("calls/global: true")
+print("calls/global: " .. tostring(_bench()) .. ": true")

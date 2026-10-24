@@ -1,8 +1,10 @@
 -- Probe: one method-call site serving several classes, most answering the
 -- method one __index level up and one inheriting it from a base class two
--- levels up. Every one-level receiver should take the register fast path
--- whatever the site resolved for the two-level one, so this measures how
--- much the shared site costs the one-level classes. Compare with
+-- levels up. The site sees three receiver classes but its method inline
+-- cache holds two entries per site, so the classes contend for them: a class
+-- that misses is refilled over the entry used least recently and takes the
+-- full lookup meanwhile. This measures what the shared site costs when
+-- the classes outnumber the cache entries. Compare with
 -- calls/method.lua (one class, one level) and calls/method_chain.lua (one
 -- class, two levels).
 
@@ -53,4 +55,4 @@ function _bench()
 end
 
 for i = 1, 300 do _bench() end
-print("calls/method_polymorphic: true")
+print("calls/method_polymorphic: " .. tostring(_bench()) .. ": true")

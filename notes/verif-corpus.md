@@ -26,39 +26,6 @@ filed here until then. Each entry names the scopes whose hunters reported it.
 
 ---
 
-## VC-001 - 36 of the 39 kernel examples print a constant, so the diff gate compares nothing on them
-
-Reported by: corpus-harness.
-
-Every `.lua` under an `examples/` subdirectory except `tables/sort.lua`,
-`tables/queue.lua` and `tables/metamethod_sequence.lua` ends with an
-unconditional `print("<name>: true")` and contains no `error(` call and no
-conditional output. `_bench()` returns a value (a checksum, in most files) and
-the footer discards it. So:
-
-- `run_all_examples`' `: true` requirement for `_bench` files is satisfied by
-  the literal string; it proves only that the footer was reached.
-- `differential_examples` compares dellingr with lua5.2/lua5.4 on these files,
-  but the output is the same constant line whatever the kernel computed. If
-  `fib(20)` returned 0 or the arithmetic kernel produced NaN, all three runs
-  would print `arithmetic: true` and the gate would pass.
-- These are the files `diff_test.rs` deals into six of its seven partitions
-  because they are slow ("about a second each in the unoptimized test
-  profile"), so most of the differential gate's wall time is spent on files
-  whose compared output cannot differ.
-- `examples/numerics/arithmetic.lua` prints `arithmetic: true` while every
-  other kernel prints `category/name: true`; bench/ has a footer contract test,
-  examples/ does not.
-
-Fix: make the footer print the result, e.g.
-`print("numerics/arithmetic: " .. tostring(_bench()))`, or fold the 30 results
-into a checksum. Floats render the same in 5.2 and dellingr, so a 5.4-only
-`.0` difference falls under the existing either-reference rule.
-
-Enforceable: yes. Add to `bench_scripts.rs` (or a new examples-footer test) a
-rule that an examples/ `_bench` file's success line is not a string literal (it
-must concatenate a value), mirroring the bench/ footer contract.
-
 ## VC-003 - What `run_examples` accepts as a pass, and the DIFF/SKIP-DIFF files nothing else checks
 
 Reported by: check-machinery, corpus-harness, library.
@@ -106,30 +73,6 @@ Enforceable: yes. In `run_examples.rs`, require every DIFF/SKIP-DIFF file to
 print at least one line matching `: (true|false)$` or call `error(`, unless it
 is on an explicit smoke-test allowlist; or require every DIFF file to have an
 `.expected` sibling.
-
-## VC-007 - The fingerprint cannot see a kernel's scale, and the composite's "same proportions" claim is false
-
-Reported by: corpus-harness.
-
-`cost_fingerprint` captures op-class counts, instruction counts and nesting.
-Loop bounds are literals, so changing `for i = 1, 50000` to `for i = 1, 5000`
-inside a kernel leaves the fingerprint unchanged. `brokkr.toml` says wrapper
-repeat counts are "re-checked by eye"; kernel bounds are not covered either.
-
-`examples/composite/benchmark.lua`'s header says "Same kernels in the same
-proportions" as `bench/benchmark.lua`. Every section is scaled by 1/100 except
-section 3: `fib(19)` makes 13,529 calls against `fib(28)`'s 1,028,457, a ratio
-of 76, not 100. Recursive-call share in the hotpath file is about 1.3x what it
-is in the verdict file, so per-function percentages from `--hotpath` on
-`benchmark` do not carry over for the call path, the path most recent
-optimization work targets.
-
-Fix: compare `Program::disassemble()` text per function (literals included)
-for the ordinary pairs, whose kernel bodies are literally identical; keep the
-composite as the documented exception and fix its header, or pick a scale where
-the claim holds for every section.
-
-Enforceable: yes, a disassembly-equality assertion in `bench_scripts.rs`.
 
 ## VC-011 - Timeouts, the 20-second cap and hard-coded concurrency do not nest
 
@@ -180,8 +123,8 @@ hyperfine resolution", serving `scripts/bench.sh`'s ratio table. The test suite
 pays it every run: each of the 36 kernels runs 30 times in a debug build, in
 `run_all_examples` and again in `differential_examples` (plus 60 more reference
 executions), in both dev sweeps. At "about a second each" (diff_test.rs's own
-estimate) that is on the order of 150 CPU-seconds per check, repeating kernels
-whose output is a constant (VC-001). The whole test phase of the latest check
+estimate) that is on the order of 150 CPU-seconds per check, where one call per
+kernel would already prove its printed result. The whole test phase of the latest check
 took 55.2s wall across four sweeps.
 
 The verdict harness pays it too: `examples/hotpath.rs` runs the top level during
@@ -300,19 +243,3 @@ Fix: walk `git ls-files examples` (adds a git dependency), or treat untracked
 files in `examples/` as a test failure with a clear message.
 
 Enforceable: yes.
-
-## VC-023 - Workload headers do not classify themselves consistently
-
-Reported by: check-machinery, corpus-harness.
-
-AGENTS.md now points at the script headers for the probe classification
-instead of listing probes, but the headers are not uniform: some open with
-`-- Probe:`, `calls/many_literals` with "Historical probe", and
-`globals/write` with a stale `-- Hypothesis:` (its stale header is tracked in
-notes/todo.md, since rewording a pinned file cuts its history).
-
-Fix: a test requiring every registered `hotpath_file` to open with one of a
-fixed set of classification prefixes (`-- Probe:`, `-- Historical probe:`,
-`-- Workload:`), applied when the pinned headers are next re-hashed.
-
-Enforceable: yes, by that test.

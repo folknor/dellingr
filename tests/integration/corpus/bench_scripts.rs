@@ -292,6 +292,140 @@ fn shared_helper_fingerprints(
         .collect()
 }
 
+// The listing of top-level function `function_index` and every function nested
+// in it. Source lines, function names and the start function's parent binding
+// slots are dropped, since the verdict wrapper changes those; operands, literal
+// pools, cache slot counts and nested function bodies are kept.
+fn kernel_listing(source: &str, function_index: usize) -> String {
+    let program = Program::compile(source, None).expect("workload must compile");
+    let listing = program.disassemble().to_string();
+    let blocks = listing.split("\nfunction main/").collect::<Vec<_>>();
+    let path = function_index.to_string();
+    let child_prefix = format!("{path}/");
+    let child_reference = format!("main/{path}/");
+    let start = blocks
+        .iter()
+        .position(|block| block.split_whitespace().next() == Some(path.as_str()))
+        .unwrap_or_else(|| panic!("listing has no function main/{function_index}"));
+    let mut result = Vec::new();
+    for (index, block) in blocks.iter().enumerate().skip(start) {
+        let (header, body) = block.split_once('\n').expect("function header line");
+        let block_path = header.split_whitespace().next().expect("function path");
+        if index != start && !block_path.starts_with(&child_prefix) {
+            break;
+        }
+        result.push(
+            header
+                .split_once(" params=")
+                .expect("function header carries params")
+                .1
+                .to_owned(),
+        );
+        let mut in_code = false;
+        for line in body.lines().filter(|line| !line.trim().is_empty()) {
+            if line == "  code:" {
+                in_code = true;
+                result.push(line.to_owned());
+            } else if in_code {
+                let (pc, located) = line
+                    .split_once(" line ")
+                    .expect("code row carries a source line");
+                let (_, instruction) = located
+                    .split_once("  ")
+                    .expect("code row separates line and instruction");
+                result.push(format!("{pc}  {instruction}").replace(&child_reference, "child/"));
+            } else if index == start
+                && (line.contains(" parent local ") || line.contains(" parent upvalue "))
+            {
+                result.push(line.rsplit_once(' ').expect("parent binding").0.to_owned());
+            } else {
+                result.push(line.to_owned());
+            }
+        }
+    }
+    result.join("\n")
+}
+
+// Position of the top-level function `name`; the pair checks look helpers up
+// by name, so a repeated name would silently compare the wrong bodies.
+fn top_level_function_index(analysis: &dellingr::CostAnalysis, name: &str) -> usize {
+    let mut positions = analysis
+        .root
+        .nested
+        .iter()
+        .enumerate()
+        .filter(|(_, scope)| scope.name == name)
+        .map(|(index, _)| index);
+    let index = positions
+        .next()
+        .unwrap_or_else(|| panic!("cost analysis has no top-level function {name}"));
+    assert!(
+        positions.next().is_none(),
+        "top-level function name {name} is not unique"
+    );
+    index
+}
+
+#[test]
+fn kernel_listing_compares_bounds_and_nested_literals() {
+    let kernel = "function _bench() for i = 1, 10 do end return function() return 3 end end";
+    let baseline = kernel_listing(kernel, 0);
+    assert_ne!(baseline, kernel_listing(&kernel.replace("10", "20"), 0));
+    assert_ne!(
+        baseline,
+        kernel_listing(&kernel.replace("return 3", "return 4"), 0)
+    );
+    assert_eq!(
+        baseline,
+        kernel_listing(&format!("\n-- location changes\n{kernel}"), 0)
+    );
+    assert_eq!(
+        kernel_listing("local x = 1\nlocal function kernel() return x end", 0),
+        kernel_listing("local y, x = 1, 2\nlocal function kernel() return x end", 0),
+        "parent binding slots are wrapper detail"
+    );
+}
+
+#[test]
+fn examples_bench_success_lines_include_computed_results() {
+    let examples_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+    for path in support::examples::example_corpus() {
+        let source = fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+        if !super::run_examples::defines_global_bench(&source) {
+            continue;
+        }
+        let stem = path
+            .strip_prefix(&examples_root)
+            .expect("example corpus paths are under examples/")
+            .with_extension("")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let prefix = format!("print(\"{stem}: \" .. tostring(_bench()) .. ");
+        assert!(
+            source.lines().any(|line| line.starts_with(&prefix)),
+            "{} must print its computed bench result in its success line",
+            path.display()
+        );
+    }
+}
+
+#[test]
+fn registered_hotpath_headers_classify_the_measured_path() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for pair in workload_pairs() {
+        let source = fs::read_to_string(root.join(&pair.hotpath_file))
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", pair.hotpath_file));
+        assert!(
+            ["-- Probe:", "-- Historical probe:", "-- Workload:"]
+                .iter()
+                .any(|prefix| source.starts_with(prefix)),
+            "{} must open with a measured-path classification",
+            pair.hotpath_file
+        );
+    }
+}
+
 #[test]
 fn registered_workload_file_digests_match_brokkr_pins() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -501,8 +635,8 @@ fn registered_workload_pairs_keep_kernel_cost_fingerprints_aligned() {
 
         // Verdict files usually put the kernel in `kernel()` and call it from
         // `_bench()` K times. Hotpath examples put that same body directly in
-        // `_bench()`. The composite and parse probes use `_bench()` on both
-        // sides, so prefer the helper only when it exists.
+        // `_bench()`. A verdict file without a `kernel()` helper is compared
+        // `_bench()` to `_bench()`, so prefer the helper only when it exists.
         let bench_kernel_name = if bench_analysis
             .root
             .nested
@@ -515,6 +649,61 @@ fn registered_workload_pairs_keep_kernel_cost_fingerprints_aligned() {
         };
         let bench_kernel = scope(&bench_analysis, bench_kernel_name);
         let hotpath_kernel = scope(&hotpath_analysis, "_bench");
+        assert_eq!(
+            kernel_listing(
+                &bench_source,
+                top_level_function_index(&bench_analysis, bench_kernel_name)
+            ),
+            kernel_listing(
+                &hotpath_source,
+                top_level_function_index(&hotpath_analysis, "_bench")
+            ),
+            "workload {} kernel bytecode or literals differ between {} and {}",
+            pair.name,
+            pair.file,
+            pair.hotpath_file
+        );
+        let bench_helper_names = bench_analysis
+            .root
+            .nested
+            .iter()
+            .filter(|scope| !["_bench", "kernel"].contains(&scope.name.as_str()))
+            .map(|scope| scope.name.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        let hotpath_helper_names = hotpath_analysis
+            .root
+            .nested
+            .iter()
+            .filter(|scope| !["_bench", "kernel"].contains(&scope.name.as_str()))
+            .map(|scope| scope.name.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            bench_helper_names, hotpath_helper_names,
+            "workload {} helper functions changed between {} and {}",
+            pair.name, pair.file, pair.hotpath_file
+        );
+        for helper in bench_analysis
+            .root
+            .nested
+            .iter()
+            .filter(|scope| !["_bench", "kernel"].contains(&scope.name.as_str()))
+        {
+            assert_eq!(
+                kernel_listing(
+                    &bench_source,
+                    top_level_function_index(&bench_analysis, &helper.name)
+                ),
+                kernel_listing(
+                    &hotpath_source,
+                    top_level_function_index(&hotpath_analysis, &helper.name)
+                ),
+                "workload {} helper {} bytecode or literals differ between {} and {}",
+                pair.name,
+                helper.name,
+                pair.file,
+                pair.hotpath_file
+            );
+        }
         assert_eq!(
             cost_fingerprint(bench_kernel),
             cost_fingerprint(hotpath_kernel),

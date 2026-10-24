@@ -1,4 +1,4 @@
--- Table write/allocation kernel.
+-- Workload: table write/allocation kernel.
 -- Allocates fresh tables per call without generic iteration.
 
 local keys = {}
@@ -21,4 +21,4 @@ function _bench()
 end
 
 for i = 1, 130 do _bench() end
-print("tables/fill: true")
+print("tables/fill: " .. tostring(_bench()) .. ": true")

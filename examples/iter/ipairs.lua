@@ -1,5 +1,5 @@
--- ipairs iteration kernel.
--- Prebuilds one dense array, then sums it through the Rust-backed ipairs iterator.
+-- Probe: sum a prebuilt dense array through the ipairs generic-for loop. The
+-- VM has a direct table-iteration fast path for its standard iterator.
 
 local arr = {}
 for i = 1, 10000 do
@@ -15,4 +15,4 @@ function _bench()
 end
 
 for i = 1, 200 do _bench() end
-print("iter/ipairs: true")
+print("iter/ipairs: " .. tostring(_bench()) .. ": true")

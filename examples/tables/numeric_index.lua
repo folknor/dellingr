@@ -15,4 +15,4 @@ function _bench()
 end
 
 for i = 1, 250 do _bench() end
-print("tables/numeric_index: true")
+print("tables/numeric_index: " .. tostring(_bench()) .. ": true")

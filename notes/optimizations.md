@@ -137,7 +137,8 @@ use the same widths. The full answer is the 8-byte NaN-boxed `Val` under
 
 What: after A-O7 (commits fd4d333..6cc8493), `bench/arithmetic` measures
 4.0s vs 3.6s at pre-fusion 1efb68e in interleaved matched pairs
-(plantasjen), while `bench/benchmark` is flat and `--hotpath`
+(plantasjen), while `bench/benchmark` (its pre-2026-10-24 workload) is flat
+and `--hotpath`
 instrumented WARM blocks are consistently *faster* on the fused binary
 (15ms vs 17ms per block, -6 to -12%).
 
@@ -175,9 +176,10 @@ the instrumented build's warm average differed by only 1.3%. Same signature
 as above: a property of the binary, not of the executed path.
 
 Third instance (plantasjen, 2026-10-22): afcd2f0 against c2932f8 in two
-interleaved `--commit` pairs, `bench/benchmark` 7100/7100 vs 6900/6800 and
-`bench/constants` 3100/3100 vs 3000/3000, with the `arithmetic` control
-level. `--hotpath` on `constants` showed identical per-function shares (the
+interleaved `--commit` pairs, `bench/benchmark` 7100/7100 vs 6900/6800 (the
+pre-2026-10-24 `benchmark` workload, before it was re-pinned to repeat the
+composite kernel) and `bench/constants` 3100/3100 vs 3000/3000, with the
+`arithmetic` control level. `--hotpath` on `constants` showed identical per-function shares (the
 rest is the dispatch loop itself); on `benchmark` only
 `instr_branch_fused` moved (15 to 22 ns, unchanged code), and reading the
 compare operands in place, as `eval_float_float` does, did not move the

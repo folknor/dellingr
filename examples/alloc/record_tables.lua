@@ -1,4 +1,4 @@
--- Allocates larger record-shaped table literals in a hot loop.
+-- Workload: builds record-shaped table literals in a hot loop.
 -- Useful for tracking constructor pre-sizing and table promotion costs.
 
 function _bench()
@@ -20,4 +20,4 @@ function _bench()
 end
 
 for i = 1, 900 do _bench() end
-print("alloc/record_tables: true")
+print("alloc/record_tables: " .. tostring(_bench()) .. ": true")

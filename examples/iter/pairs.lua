@@ -1,4 +1,4 @@
--- pairs iteration kernel.
+-- Workload: pairs iteration kernel.
 -- Prebuilds a hash table once. Each benchmark call only iterates it, isolating
 -- generic-for and table-next behavior.
 
@@ -16,4 +16,4 @@ function _bench()
 end
 
 for i = 1, 600 do _bench() end
-print("iter/pairs: true")
+print("iter/pairs: " .. tostring(_bench()) .. ": true")

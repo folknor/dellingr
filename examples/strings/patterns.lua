@@ -1,4 +1,4 @@
--- String pattern kernel.
+-- Workload: string pattern kernel.
 -- Exercises lua-patterns across find/match/gsub/gmatch, with patterns
 -- that cover character classes, lazy/greedy quantifiers, optional
 -- captures, and backtracking - closer to real log/URL parsing.
@@ -77,4 +77,4 @@ function _bench()
 end
 
 for i = 1, 1500 do _bench() end
-print("strings/patterns: true")
+print("strings/patterns: " .. tostring(_bench()) .. ": true")

@@ -207,50 +207,51 @@ debug = true
 # workload; interpret its timing as a parse/codegen diagnostic, so both modes
 # use the same generated source.
 #
-# tests/integration/corpus/bench_scripts.rs checks matching cost fingerprints for each pair's
-# kernel and shared helpers. The wrappers are scaled differently (the composite
-# is ~1/100, the seconds-scale loops are calibrated per kernel), so re-check
-# their proportions by eye when either file changes; the fingerprints do not
-# compare wrapper repeat counts.
+# tests/integration/corpus/bench_scripts.rs checks matching bytecode and literal
+# pools for each pair's kernel and shared helpers as well as cost fingerprints.
+# Top-level setup and the verdict wrapper's repeat count (`K`, or a literal
+# bound in a wrapper without one) are not compared: the count is calibrated
+# per kernel for wall time, and setup is re-checked by eye when either file
+# changes.
 
 [dellingr]
 example = "hotpath"
 
 [dellingr.workloads.benchmark]
 file = "bench/benchmark.lua"
-xxh128 = "51b15378d6e75699f24b1fd2d025b30a"
+xxh128 = "14bf617d8736c9c3fa6f93242cd231f5"
 hotpath_file = "examples/composite/benchmark.lua"
-hotpath_xxh128 = "55ba2f0f8f1da674b5ec059e869c8d63"
+hotpath_xxh128 = "fd1b898cc308645a3135b078c4fd180a"
 
 [dellingr.workloads.arithmetic]
 file = "bench/arithmetic.lua"
 xxh128 = "5b241180b776f94825c7bc316347f1f4"
 hotpath_file = "examples/numerics/arithmetic.lua"
-hotpath_xxh128 = "05c3e1c32866e2a166fe2c764e1d5605"
+hotpath_xxh128 = "6377d75406074f15184e1f03a00f15b8"
 
 [dellingr.workloads.constants]
 file = "bench/constants.lua"
 xxh128 = "468576a94bddba291b96b604288b988c"
 hotpath_file = "examples/numerics/constants.lua"
-hotpath_xxh128 = "87b19adab31986fbe9154c2618ccb3ef"
+hotpath_xxh128 = "04a3cab7b19967cd1f71ad224c5a5ea6"
 
 [dellingr.workloads.math]
 file = "bench/math.lua"
 xxh128 = "3f1ae9f39d8bc1d7a5136967d7d46900"
 hotpath_file = "examples/numerics/math.lua"
-hotpath_xxh128 = "5a68562ecd5cb972846370183167701c"
+hotpath_xxh128 = "ae2f33864c810825e2b6ec753ece6b21"
 
 [dellingr.workloads.pairs]
 file = "bench/pairs.lua"
 xxh128 = "40f694a23ec14829b96e0403b9a0b6dd"
 hotpath_file = "examples/iter/pairs.lua"
-hotpath_xxh128 = "239e4f6fa2017c827649afa9399dc61a"
+hotpath_xxh128 = "92432fb93c475cc93053539e2fd235ae"
 
 [dellingr.workloads.fill]
 file = "bench/fill.lua"
 xxh128 = "2d409aa1bb5f82a2a841f80aa69f54a5"
 hotpath_file = "examples/tables/fill.lua"
-hotpath_xxh128 = "0ca74ee6bbe329be1e1a74d45b3ba364"
+hotpath_xxh128 = "79bb664bac707da02ad807c7e4f71f39"
 
 [dellingr.workloads.queue]
 # Never `--bench --commit` a ref older than 2bcc71e: before that commit the
@@ -259,109 +260,109 @@ hotpath_xxh128 = "0ca74ee6bbe329be1e1a74d45b3ba364"
 file = "bench/queue.lua"
 xxh128 = "b02dfb55c808e62f08a1311046988351"
 hotpath_file = "examples/tables/queue.lua"
-hotpath_xxh128 = "53c18d7a34328f8d6917fab4d5eb0399"
+hotpath_xxh128 = "0a3e2b4117a7ba5dfbb360c72feba99f"
 
 [dellingr.workloads.sort]
 file = "bench/sort.lua"
 xxh128 = "3186097866519fa8829611bd9b74512b"
 hotpath_file = "examples/tables/sort.lua"
-hotpath_xxh128 = "9ee20f2478eaf25b1c8886757bf5efc9"
+hotpath_xxh128 = "bf77465635b1c608fdd83f7614de9bff"
 
 [dellingr.workloads.mixed]
 file = "bench/mixed.lua"
 xxh128 = "4193f315750f157ff7fb2b1ec6f30165"
 hotpath_file = "examples/strings/mixed.lua"
-hotpath_xxh128 = "1fb45c66e5fcc6dfb9e12f5b95bae541"
+hotpath_xxh128 = "245208e07e6a7073a04075ee83f09964"
 
 [dellingr.workloads.patterns]
 file = "bench/patterns.lua"
 xxh128 = "42d9c2249ebdda7440c60d344725d9fb"
 hotpath_file = "examples/strings/patterns.lua"
-hotpath_xxh128 = "55d158d9860dc1c8371888b0d841f8ae"
+hotpath_xxh128 = "b30f9fbcb791eadddf21de1e129e1e79"
 
 [dellingr.workloads.literal_find]
 file = "bench/literal_find.lua"
 xxh128 = "c23da899a8d2925a4f1ec6ea872160d7"
 hotpath_file = "examples/strings/literal_find.lua"
-hotpath_xxh128 = "cb674cd90f685b7761df28ffaa10ac19"
+hotpath_xxh128 = "7b6bbdcb62ed6124c1393ab54363b92b"
 
 [dellingr.workloads.same_obj_read]
 file = "bench/same_obj_read.lua"
 xxh128 = "cdb6bfdf21a72c08d4b1d683d7d85d07"
 hotpath_file = "examples/fields/same_obj_read.lua"
-hotpath_xxh128 = "f3ab24014039d2327a870aa31e020d6b"
+hotpath_xxh128 = "0e00bfb5521a2b4f2e9c48b48581a2e5"
 
 [dellingr.workloads.method]
 file = "bench/method.lua"
 xxh128 = "04d0824886560a272b218449d5fbdd96"
 hotpath_file = "examples/calls/method.lua"
-hotpath_xxh128 = "6372dbfbd4aea331f0642f73b0662aa5"
+hotpath_xxh128 = "c0c9ba6ea8af339cedc61dab0d12cc26"
 
 [dellingr.workloads.method_chain]
 file = "bench/method_chain.lua"
 xxh128 = "592fe9284df75909e4e2ea2386da19b1"
 hotpath_file = "examples/calls/method_chain.lua"
-hotpath_xxh128 = "9b56093e886cde38db25b4f9103372b4"
+hotpath_xxh128 = "141a5a7aa1d8453a36135afe9b714c44"
 
 [dellingr.workloads.method_polymorphic]
 file = "bench/method_polymorphic.lua"
 xxh128 = "9a54ab4456ea475ecbb9335505a1a329"
 hotpath_file = "examples/calls/method_polymorphic.lua"
-hotpath_xxh128 = "191d9faa08b1dcc258ea0f89b583f9eb"
+hotpath_xxh128 = "6b6609c4b16cb1e7910c06fd99cd3d5f"
 
 [dellingr.workloads.write]
 file = "bench/write.lua"
 xxh128 = "5b7919b3243dd95d587bdc10b38f3a46"
 hotpath_file = "examples/globals/write.lua"
-hotpath_xxh128 = "b8cbb28c33f77bc0822275e6dd62e233"
+hotpath_xxh128 = "d1ae7f006614656eec29a9c4d8adcb28"
 
 [dellingr.workloads.global]
 file = "bench/global.lua"
 xxh128 = "1b5839ba84a8fdec0d702af4d3a16d64"
 hotpath_file = "examples/calls/global.lua"
-hotpath_xxh128 = "f3ba381b19862c5f269b97ebc129d6f0"
+hotpath_xxh128 = "c2dbedfee234dd0fef1acb770d658e5b"
 
 [dellingr.workloads.many_literals]
 file = "bench/many_literals.lua"
 xxh128 = "595df87ab2324092ce74b20a95818ec2"
 hotpath_file = "examples/calls/many_literals.lua"
-hotpath_xxh128 = "19aa377694a551e4817077fff79add56"
+hotpath_xxh128 = "c2e5719005d74bfbad110836376f3d11"
 
 [dellingr.workloads.loop_beside_closure]
 file = "bench/loop_beside_closure.lua"
 xxh128 = "d3641fef08461158df9f383cee08cd7b"
 hotpath_file = "examples/calls/loop_beside_closure.lua"
-hotpath_xxh128 = "909804e0909e64b7a58ed449a9175660"
+hotpath_xxh128 = "7dcad64f975e95ca6305fb01738c91db"
 
 [dellingr.workloads.closure]
 file = "bench/closure.lua"
 xxh128 = "5befb079865e20e3343cd9beaa8e84be"
 hotpath_file = "examples/alloc/closure.lua"
-hotpath_xxh128 = "c9f675b7d2b8509ef2538b9456a3b451"
+hotpath_xxh128 = "6c3b54c67fadaa55c51db6f64916d331"
 
 [dellingr.workloads.record_tables]
 file = "bench/record_tables.lua"
 xxh128 = "9ebd1f3da641203c82de3ee42b0c251c"
 hotpath_file = "examples/alloc/record_tables.lua"
-hotpath_xxh128 = "75c4136ff4e1c1308baecf9b7f2b2283"
+hotpath_xxh128 = "759fd927309e69e0623bf3eff2fcff13"
 
 [dellingr.workloads.list_literals]
 file = "bench/list_literals.lua"
 xxh128 = "69948cfa2e1cb8ea44e935f481d3fa16"
 hotpath_file = "examples/alloc/list_literals.lua"
-hotpath_xxh128 = "011d9bebb4c271ca3371e7101c3f5741"
+hotpath_xxh128 = "f1242d5988d552fa7c7f3d23855f9696"
 
 [dellingr.workloads.gc_churn]
 file = "bench/gc_churn.lua"
 xxh128 = "1ed1ab2e97827b61e317a94d3f197a5a"
 hotpath_file = "examples/alloc/gc_churn.lua"
-hotpath_xxh128 = "ad8dbf7692da5ff50632dd433c722968"
+hotpath_xxh128 = "9c89ca315d197f5c3bd4c31cfd79d065"
 
 [dellingr.workloads.large_source]
 file = "examples/parse/large_source.lua"
-xxh128 = "4df913d61046b591ea1f67ce6381e776"
+xxh128 = "3d87b6e87edaa28e17783d5c9a89b3d3"
 hotpath_file = "examples/parse/large_source.lua"
-hotpath_xxh128 = "4df913d61046b591ea1f67ce6381e776"
+hotpath_xxh128 = "3d87b6e87edaa28e17783d5c9a89b3d3"
 
 # `_G` is the global table itself, not a proxy in front of it; this keeps the
 # old wording from returning to code, comments and test names.
@@ -537,4 +538,4 @@ stage = "pre-clippy"
 file = "bench/rust_boundary.lua"
 xxh128 = "488c7cc9b818ba7a69cdede59b518cfd"
 hotpath_file = "examples/calls/rust_boundary.lua"
-hotpath_xxh128 = "bcb7102ce7484441339c7b03450b8a90"
+hotpath_xxh128 = "0443637fb717226cb1239958b85ee341"

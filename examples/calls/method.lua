@@ -1,6 +1,6 @@
--- Hypothesis: obj:method() desugars to a field lookup + call. Without
--- inline caching, every call hits the table's hash bucket. Compare with
--- a cached-method version (calls/method_cached.lua).
+-- Probe: obj:method() desugars to a method lookup + call. Every c:inc
+-- misses on the instance and resolves through the metatable's __index.
+-- Compare with a cached-method version (calls/method_cached.lua).
 
 local Counter = {}
 Counter.__index = Counter
@@ -26,4 +26,4 @@ function _bench()
 end
 
 for i = 1, 500 do _bench() end
-print("calls/method: true")
+print("calls/method: " .. tostring(_bench()) .. ": true")

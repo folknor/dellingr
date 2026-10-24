@@ -1,4 +1,4 @@
--- Default-comparison table.sort kernel.
+-- Workload: default-comparison table.sort kernel.
 -- Sorts fresh copies of a number list and a string list with no comparator,
 -- so the time goes to the heap sort and its built-in comparison.
 
@@ -37,4 +37,4 @@ table.sort(a)
 for i = 2, #a do
     if a[i - 1] > a[i] then ok = false end
 end
-print("tables/sort: " .. tostring(ok))
+print("tables/sort: " .. tostring(_bench()) .. ": " .. tostring(ok))

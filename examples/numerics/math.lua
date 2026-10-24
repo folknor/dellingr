@@ -1,8 +1,8 @@
--- Math library kernel: every transcendental the math library computes in
--- crate (src/crmath, ports of CORE-MATH's correctly rounded functions) plus
--- `^`, in the shapes game scripts use them - angles, headings, decay curves,
--- falloff. Nothing else registered calls them in a loop, so this is the
--- workload that tracks their cost.
+-- Workload: math library kernel. Calls every transcendental the library
+-- computes in crate (src/crmath, ports of CORE-MATH's correctly rounded
+-- functions) plus `^`, in the shapes game scripts use them - angles,
+-- headings, decay curves, falloff. The composite workload calls `math.sin`
+-- in a loop too, but this is the only one that covers the whole set.
 
 function _bench()
     local acc = 0
@@ -18,4 +18,4 @@ function _bench()
 end
 
 for i = 1, 300 do _bench() end
-print("numerics/math: true")
+print("numerics/math: " .. tostring(_bench()) .. ": true")

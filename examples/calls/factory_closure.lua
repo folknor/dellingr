@@ -1,10 +1,9 @@
--- Pins the RuntimeCaches-per-closure regression vs v0.1.0. Pre-split,
--- Rc<Chunk> carried caches inline so all closures of the same chunk
--- shared their field/global/method caches. Post-split, alloc_lua_fn
--- allocates a fresh Arc<RuntimeCaches> per closure, so factory
--- patterns - mk() returning a new closure each call - pay cold-cache
--- cost on every produced closure's first access. This bench measures
--- exactly that pattern.
+-- Historical probe: factory closures, mk() returning a new closure on
+-- every call. Inline caches once lived per closure, so every produced
+-- closure paid a cold-cache miss on its first field access. They now live
+-- per State and bytecode, shared by every closure of the same function, so
+-- a fresh closure starts warm; this file guards against per-closure caches
+-- coming back.
 
 local function mk()
     return function(t)
@@ -23,4 +22,4 @@ function _bench()
 end
 
 for i = 1, 1500 do _bench() end
-print("calls/factory_closure: true")
+print("calls/factory_closure: " .. tostring(_bench()) .. ": true")

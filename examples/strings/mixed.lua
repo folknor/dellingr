@@ -1,4 +1,4 @@
--- String manipulation kernel.
+-- Workload: string manipulation kernel.
 -- Exercises string interning, the `..` concat lowering, table.concat,
 -- and a handful of string library calls. Setup builds 500 unique keys
 -- once so per-iteration work focuses on concat / lookups.
@@ -39,4 +39,4 @@ function _bench()
 end
 
 for i = 1, 300 do _bench() end
-print("strings/mixed: true")
+print("strings/mixed: " .. tostring(_bench()) .. ": true")

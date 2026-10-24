@@ -1,5 +1,5 @@
--- Sibling of vararg.lua: equivalent total work but with fixed
--- arity, isolating the vararg dispatch overhead.
+-- Probe: fixed-arity four-argument calls in a tight summation loop, paired
+-- with calls/vararg.lua as separate kernels that do different work.
 
 local function sum_four(a, b, c, d)
     return a + b + c + d
@@ -14,4 +14,4 @@ function _bench()
 end
 
 for i = 1, 2500 do _bench() end
-print("calls/fixedarg: true")
+print("calls/fixedarg: " .. tostring(_bench()) .. ": true")

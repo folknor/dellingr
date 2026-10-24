@@ -1,8 +1,6 @@
 -- Probe: hot field writes on a single object.
--- Mirror of fields/same_obj_read.lua but for writes. A per-callsite SET_FIELD
--- inline cache keyed on (table identity, index) hits every iteration here.
--- The arithmetic baseline can be computed by comparing against
--- fields/same_obj_cached.lua (same shape, reads instead of writes).
+-- Each field-write site sees the same receiver and key, keeping its SET_FIELD
+-- cache warm.
 
 local entity = {
     pos_x = 1.5,
@@ -26,4 +24,4 @@ function _bench()
 end
 
 for i = 1, 700 do _bench() end
-print("fields/same_obj_write: true")
+print("fields/same_obj_write: " .. tostring(_bench()) .. ": true")

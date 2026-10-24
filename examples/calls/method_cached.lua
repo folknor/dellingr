@@ -1,6 +1,5 @@
--- Sibling of calls/method.lua: caches the bound function once and
--- calls it as a plain function. Removes per-iteration field lookup and
--- the colon-method dispatch.
+-- Probe: cache the method function once and call it as a plain function with
+-- the receiver passed explicitly, avoiding per-iteration method lookup.
 
 local Counter = {}
 Counter.__index = Counter
@@ -27,4 +26,4 @@ function _bench()
 end
 
 for i = 1, 700 do _bench() end
-print("calls/method_cached: true")
+print("calls/method_cached: " .. tostring(_bench()) .. ": true")

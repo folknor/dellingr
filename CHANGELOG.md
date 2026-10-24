@@ -26,6 +26,15 @@ All notable changes to dellingr are documented here. The format follows
   debug-only `native-call-trace` cargo feature records each executed edge, and
   a curated check runs every native-stack scenario under it to confirm the
   inventory's paths by execution.
+- Every `examples/` file that defines a global `_bench` prints its computed
+  `_bench()` result in its success line, so the differential gate compares a
+  value against lua5.2/lua5.4 instead of a constant string; a corpus test
+  enforces the footer shape. Each registered workload pair's kernel and shared
+  helpers must now match in bytecode and literal pools as well as in cost
+  fingerprint, and every registered `hotpath_file` opens with a `Probe:`,
+  `Historical probe:` or `Workload:` header. The `benchmark` verdict workload
+  now repeats the composite kernel of `examples/composite/benchmark.lua`
+  exactly, so its stored results before the re-pin do not compare.
 
 ### Changed (breaking)
 

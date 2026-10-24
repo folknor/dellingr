@@ -1,5 +1,6 @@
--- Calls made from Rust: function handlers, library callbacks, iterators,
--- and callable resolution in the same proportions in both workload files.
+-- Workload: calls made from Rust into Lua - function handlers, library
+-- callbacks, iterators and callable resolution - in the same proportions
+-- in both workload files.
 local indexed = setmetatable({}, {__index = function(_, k) return k end})
 local callable = setmetatable({}, {__call = setmetatable({}, {
     __call = function(_, _, x) return x end
@@ -20,4 +21,4 @@ function _bench()
     return sum
 end
 for i = 1, 30 do _bench() end
-print("calls/rust_boundary: true")
+print("calls/rust_boundary: " .. tostring(_bench()) .. ": true")
