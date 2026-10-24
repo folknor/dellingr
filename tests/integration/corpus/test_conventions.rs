@@ -198,9 +198,8 @@ fn tokens(line: &str) -> impl Iterator<Item = &str> {
         .filter(|token| !token.is_empty())
 }
 
-// Test filesystem mutations and CLI paths are checked before compilation by
+// Test filesystem writes and CLI paths are checked before compilation by
 // brokkr's test-scoped textlint rules, including unit tests under src/.
-// The scratch helper tests its path guard by behavior rather than source text.
 
 /// Cargo makes every `tests/*.rs` and `tests/*/main.rs` its own test binary.
 /// The suites share the integration crate. `native_stack` isolates stack

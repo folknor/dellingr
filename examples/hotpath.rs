@@ -1,5 +1,5 @@
 //! Bench harness for dellingr: the binary brokkr invokes for `--bench` /
-//! `--hotpath` / `--alloc` runs, and the KV source for scripts/hotbench.sh.
+//! `--hotpath` / `--alloc` runs.
 //!
 //! Loads a bench script that must define a global `_bench` function, then
 //! runs phases on one `State`:
@@ -10,7 +10,7 @@
 //!     `--iterations N`
 //!
 //! A script path is required and is resolved from the caller's working
-//! directory. brokkr and hotbench.sh both pass the registered file path.
+//! directory. brokkr passes the registered file path.
 //!
 //! Output:
 //!   - KV pairs on stderr for phase timings and heap/object brackets.
@@ -26,9 +26,9 @@
 //! so a cost change between runs of the "same" bench means the workload or
 //! the compiler changed, not the VM's speed.
 //!
-//! Run through `scripts/hotbench.sh <workload-name>` or a brokkr workload
-//! command; both resolve a `brokkr.toml` workload registration to the script
-//! path this harness requires.
+//! Run through a brokkr workload command (`brokkr dellingr --lua <workload>`),
+//! which resolves a `brokkr.toml` workload registration to the script path
+//! this harness requires.
 
 // A benchmark harness is a host process: it legitimately reads its own
 // command line, the marker FIFO from the environment, and wall-clock time.
@@ -421,6 +421,13 @@ fn main() {
     emit_marker("PARSE_END");
 
     // Phase 2: run the chunk to register `_bench` (and any per-script setup).
+    // This runs the script's whole top level, including its standalone footer
+    // (`for i = 1, N do _bench() end`). That footer is deliberate: it is what
+    // `brokkr dellingr` measures. The stored `elapsed` is the whole process,
+    // so for a seconds-scale bench/ file the footer is most of the verdict
+    // wall, and under `--hotpath`/`--alloc` the examples/ footer supplies most
+    // of the profiled events next to the few warm iterations below. Do not
+    // treat it as untimed warm-up overhead to trim.
     emit_marker("SETUP_START");
     if let Err(e) = state.call(ArgCount::Fixed(0), RetCount::Fixed(0)) {
         eprintln!("Chunk run error in {}: {e}", args.script_path.display());

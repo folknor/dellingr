@@ -65,9 +65,9 @@ registrations in brokkr.toml, each pinning TWO files (harness =
 `--hotpath`/`--alloc` resolve. The instrumented modes REFUSE a workload
 without the pair: hotpath's per-call event queue is unbounded, and a
 seconds-scale file under instrumentation backlogs 30+ GB of RAM (few-GB RSS
-peaks on ms-scale files are normal). The same math governs
-`scripts/hotbench.sh` and any manual `--features hotpath` run - point them
-at examples/ kernels, never at `bench/` files. Editing a registered script requires
+peaks on ms-scale files are normal). The same math governs any manual
+`--features hotpath` run - point it at examples/ kernels, never at `bench/`
+files. Editing a registered script requires
 updating its pin's hash in brokkr.toml; brokkr refuses on hash drift, naming
 the registration to re-register. Digests are xxh128: `xxhsum -H2 <file>`.
 
@@ -121,11 +121,13 @@ Querying results (`.brokkr/results.db`):
 
 ### Benchmarking rules
 
-- **Every benchmark, timing or calibration measurement goes through
-  `brokkr dellingr`.** Never hyperfine, `scripts/bench.sh`,
-  `scripts/hotbench.sh`, `time` or a hand-rolled loop, including for
-  calibrating a new workload's repeat count. A workload that is not
-  registered gets registered in brokkr.toml first.
+- **Every measurement of dellingr's own performance (benchmark, timing or
+  calibration) goes through `brokkr dellingr`.** Never hyperfine, `time` or a
+  hand-rolled loop, including for calibrating a new workload's repeat count.
+  A workload that is not registered gets registered in brokkr.toml first.
+  The one exception is the README's comparison against other interpreters:
+  `scripts/bench.sh` and `research/bench_luars.sh` exist only to regenerate
+  that table, run on request, and are not a way to measure dellingr itself.
 - **Never run benchmark or profiling commands in parallel.** One at a
   time, wait for completion.
 - **Interleave matched A/B cells.** `--bench N` is best-of-N within one

@@ -344,6 +344,12 @@ How `tests/native_stack.rs` validates it, on x86-64 Linux:
 
 - The native-stack tests fail before entering a deep stack path on other
   targets, naming x86-64 Linux as the target for this envelope.
+- The envelope is verified on the developer's machines, with whatever
+  toolchain and global cargo configuration (rustflags, linker, profile
+  overrides) those machines have. The repository pins neither a toolchain nor
+  any flags, and the measured frame sizes are a compiler and flag property, so
+  a different compiler version or flag set can move them. That is how it stays
+  until decided otherwise.
 - The native stack a level costs is the frames on the compiled path that
   made the call, so the unit of coverage is the path, not the call site.
   Every path that can call back into Lua is listed, with its edges, in

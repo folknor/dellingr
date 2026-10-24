@@ -3,10 +3,9 @@
 //! `corpus::test_conventions`.)
 
 use std::ffi::OsStr;
-#[cfg(unix)]
-use std::io;
+use std::io::{self, Write};
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Child, Command, Output, Stdio};
 #[cfg(unix)]
 use std::sync::OnceLock;
 
@@ -103,17 +102,56 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    run_from(Path::new(env!("CARGO_MANIFEST_DIR")), args)
+    command()
+        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")))
+        .args(args)
+        .output()
+        .expect("dellingr CLI should run")
 }
 
-pub(crate) fn run_from<I, S>(directory: &Path, args: I) -> Output
+/// Spawns the CLI with `source` already written to its stdin and the pipe
+/// closed, so the child sees end of input. Tests hand the CLI Lua source this
+/// way (as the script `-`) rather than through a file. Stdout and stderr are
+/// piped; the caller may drop either end or collect the output.
+pub(crate) fn spawn_stdin<I, S>(args: I, source: &[u8]) -> Child
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    command()
-        .current_dir(directory)
+    let mut child = command()
+        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")))
         .args(args)
-        .output()
-        .expect("dellingr CLI should run")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("dellingr CLI should run");
+    // Dropping the handle after the write closes the pipe. The CLI reads stdin
+    // to its end before running anything, so a short script cannot block. A
+    // run that is rejected at argument parsing never reads stdin and may have
+    // exited already; that broken pipe is the expected outcome, not a failure.
+    let written = child
+        .stdin
+        .take()
+        .expect("stdin was configured as a pipe")
+        .write_all(source);
+    if let Err(error) = written {
+        assert_eq!(
+            error.kind(),
+            io::ErrorKind::BrokenPipe,
+            "stdin input should be written"
+        );
+    }
+    child
+}
+
+/// Runs the CLI with `source` on stdin and collects its output.
+pub(crate) fn run_stdin<I, S>(args: I, source: impl AsRef<[u8]>) -> Output
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    spawn_stdin(args, source.as_ref())
+        .wait_with_output()
+        .expect("dellingr CLI should finish")
 }

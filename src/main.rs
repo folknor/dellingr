@@ -380,3 +380,98 @@ fn main() {
         report_error(error);
     }
 }
+
+// Argument parsing takes an `OsString` iterator, so every path-shaped case is
+// tested here with nothing on disk. End-to-end CLI tests feed Lua source on
+// stdin instead of writing script files.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Option<CliArgs>, String> {
+        parse_args(args.iter().map(OsString::from))
+    }
+
+    fn parsed(args: &[&str]) -> CliArgs {
+        parse(args)
+            .expect("arguments should parse")
+            .expect("arguments should not ask for help")
+    }
+
+    fn parse_error(args: &[&str]) -> String {
+        match parse(args) {
+            Err(error) => error,
+            Ok(_) => panic!("{args:?} should be rejected"),
+        }
+    }
+
+    fn file_name(args: &CliArgs) -> &OsStr {
+        match &args.input {
+            Input::File(path) => path,
+            Input::Stdin => panic!("expected a file input"),
+        }
+    }
+
+    #[test]
+    fn rejects_multiple_script_paths_instead_of_running_the_last() {
+        let error = parse_error(&["first.lua", "second.lua"]);
+        assert!(error.contains("only one input file"), "{error}");
+        assert!(error.contains("second.lua"), "{error}");
+    }
+
+    #[test]
+    fn terminator_allows_dash_paths() {
+        let error = parse_error(&["-script.lua"]);
+        assert!(error.contains("unknown option"), "{error}");
+
+        let with_terminator = parsed(&["--", "-script.lua"]);
+        assert_eq!(file_name(&with_terminator), OsStr::new("-script.lua"));
+        assert_eq!(with_terminator.input.chunk_name(), b"-script.lua");
+    }
+
+    #[test]
+    fn a_lone_dash_is_stdin_even_after_the_terminator() {
+        for args in [["-"].as_slice(), ["--", "-"].as_slice()] {
+            let parsed = parsed(args);
+            assert!(matches!(parsed.input, Input::Stdin), "{args:?}");
+            assert_eq!(parsed.input.chunk_name(), b"stdin");
+        }
+        // A file literally named `-` is reachable as `./-`.
+        let dash_file = parsed(&["./-"]);
+        assert_eq!(file_name(&dash_file), OsStr::new("./-"));
+    }
+
+    #[test]
+    fn a_missing_input_is_reported() {
+        assert_eq!(parse_error(&[]), "an input file is required");
+        assert_eq!(parse_error(&["--quiet"]), "an input file is required");
+    }
+
+    #[test]
+    fn a_missing_file_is_a_read_error_that_names_the_path() {
+        let args = parsed(&["no-such-directory/missing.lua"]);
+        let error = args
+            .input
+            .read()
+            .expect_err("a path that does not exist cannot be read");
+        assert!(
+            error.starts_with("reading no-such-directory/missing.lua: "),
+            "{error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_script_paths_keep_their_exact_bytes_as_the_chunk_name() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let path = OsString::from_vec(b"script-\xff.lua".to_vec());
+        let parsed = parse_args([path.clone()])
+            .expect("a non-UTF-8 path should parse")
+            .expect("a path is not a request for help");
+        assert_eq!(file_name(&parsed), path.as_os_str());
+        // The chunk name is the path's exact bytes; only diagnostics render
+        // it lossily.
+        assert_eq!(parsed.input.chunk_name(), b"script-\xff.lua");
+    }
+}

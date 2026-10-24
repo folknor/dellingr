@@ -505,6 +505,16 @@ fn bench_scripts_parse_and_follow_the_standalone_footer_contract() {
     let scripts = bench_scripts(&bench_dir);
     assert!(!scripts.is_empty(), "bench/ contains no Lua scripts");
 
+    // The 30-call footer is the measured workload, not untimed overhead, and
+    // the test suite deliberately pays for it. The hotpath harness runs the
+    // chunk's top level in its SETUP phase, so a bench/ file's footer is most
+    // of the seconds-scale wall that `brokkr dellingr` stores (the stored
+    // elapsed time is the whole harness process, SETUP included). Under
+    // `--hotpath` and `--alloc` the examples/ footer (calibrated per file,
+    // 20 to 2500 calls, not 30) supplies most of the profiled events, against
+    // only a few warm iterations. The standalone run is also what
+    // scripts/bench.sh and research/bench_luars.sh time under hyperfine.
+    // Shrinking the footer for the tests would change those measurements.
     let bench_function = hotpath_bench_function();
     let expected_loop = format!("for i = 1, 30 do {bench_function}() end");
     let mut scripts_to_execute = Vec::with_capacity(scripts.len());

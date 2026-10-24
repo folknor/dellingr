@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Bench-vs-Lua: wall-clock comparison against reference Lua 5.2 / 5.4 / 5.5
-# and LuaJIT. Requires hyperfine, lua5.2, lua5.4, lua5.5, luajit, jq on PATH.
+# and LuaJIT, run on request to regenerate the README's comparison table (it is
+# not how dellingr's own performance is measured; that goes through
+# `brokkr dellingr`). Each run records host, commit and dirty state in its
+# banner and in provenance.txt beside the JSON. Requires hyperfine, lua5.2, lua5.4, lua5.5, luajit, jq on PATH.
 # Builds dellingr release binary before running. Wraps hyperfine to extract
 # one-line summaries instead of dumping its full verbose tables.
 #
@@ -112,6 +115,15 @@ then
     echo "cannot create benchmark results directory: $results_dir" >&2
     exit 1
 fi
+
+# Provenance for the saved results: the banner above scrolls away, so the
+# commit and host also sit next to the per-script JSON.
+{
+    echo "host:   $(hostname -s)"
+    echo "date:   $(date '+%Y-%m-%dT%H:%M:%S%z')"
+    echo "commit: $(git rev-parse HEAD 2>/dev/null)"
+    echo "dirty:  $(git status --porcelain 2>/dev/null | wc -l) file(s)"
+} > "$results_dir/provenance.txt"
 
 # Benchmark run files are scratch output; retain only the ten newest runs.
 prune_bench_results() {

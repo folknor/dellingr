@@ -42,6 +42,24 @@ unset = ["CLIPPY_CONF_DIR"]
 name = "explicit"
 env = { CLIPPY_CONF_DIR = "{root}" }
 
+# `.scratch/` is gitignored and belongs to the developer; dellingr does not
+# police its contents, so every check starts by wiping it (the diff gate's
+# killed-run leftovers, the Python fixture tests' trees, old bench results).
+# The stage is the default pre-clippy one, and this entry is declared first:
+# entries at a stage run in declaration order, so it finishes before the
+# Python fixture tests below (which write there) start, and the test phase,
+# whose diff gate writes there, has not begun. A later stage (post-test) would
+# also be safe from deleting live files, but it is skipped when tests fail,
+# which is exactly when killed runs leak. A background stage would race the
+# fixture tests. Everything that writes to `.scratch/` recreates it.
+[[script_check]]
+name = "wipe-scratch"
+command = "rm -rf .scratch && echo ok"
+expect = "ok"
+match = "last-line"
+stream = "stdout"
+stage = "pre-clippy"
+
 [[script_check]]
 name = "lint-policy-inventory"
 command = "python3 -B fixtures/lint-policy/check_policy.py"
@@ -403,30 +421,30 @@ paths = ["src/**/*.rs", "tests/**/*.rs", "examples/**/*.rs"]
 exclude = ["src/main.rs", "examples/hotpath.rs"]
 message = "hotpath-alloc implies hotpath; use hotpath for instrumentation guards"
 
-# Test-only policy belongs here rather than in crate-wide Clippy bans: host
-# entry points and explicit fixture regenerators legitimately mutate files.
-# Keep Write::write_all available for memory buffers and child stdin pipes.
-# These are lexical guards, not alias resolution or a subprocess sandbox.
+# Tests do not write files: CLI tests feed Lua source on stdin, and anything
+# whose subject is a path is a unit test of argument parsing. Test-only policy
+# belongs here rather than in crate-wide Clippy bans: host entry points and
+# explicit fixture regenerators (examples/regenerate_*, examples/tools/output.rs)
+# legitimately write files and sit outside these paths. Write::write_all stays
+# available for memory buffers and child stdin pipes. These are lexical guards,
+# not alias resolution or a subprocess sandbox.
 [[textlint]]
-name = "test-filesystem-mutations-use-scratch"
-pattern = '::\s*(?:write|copy|rename|create|create_new|options|create_dir|create_dir_all|remove_file|remove_dir|remove_dir_all|hard_link|soft_link|symlink|symlink_file|symlink_dir|set_permissions)\b|\bOpenOptions\b|\.\s*(?:set_permissions|set_len)\s*\('
+name = "test-code-no-filesystem-writes"
+pattern = '\bfs\s*::\s*(?:write|copy|rename|create_dir|create_dir_all|remove_file|remove_dir|remove_dir_all|hard_link|soft_link|symlink|set_permissions)\b|\bFile\s*::\s*(?:create|create_new|options)\b|\bOpenOptions\b|\bcreate_dir(?:_all)?\b|\bCARGO_TARGET_TMPDIR\b|\btempfile\b'
 paths = ["src/**/*.rs", "tests/**/*.rs"]
-exclude = ["tests/integration/support/scratch.rs"]
-region = "code"
 test_code = "only"
 must_scan = ["src/compiler/parser/tests.rs", "tests/integration/cli/cli_arguments.rs"]
-message = "test filesystem mutations belong in tests/integration/support/scratch.rs"
+message = "tests must not write files: feed CLI source on stdin, or unit-test argument parsing"
 
-# Joining use statements catches bare imports and renamed mutators even when
-# the import wraps. Qualified calls above also catch renamed fs modules.
+# Joining use statements catches bare imports of the same primitives, which
+# the qualified-call rule above cannot see.
 [[textlint]]
-name = "test-filesystem-mutation-imports-use-scratch"
-pattern = '\b(?:write|copy|rename|create|create_new|options|OpenOptions|create_dir|create_dir_all|remove_file|remove_dir|remove_dir_all|hard_link|soft_link|symlink|symlink_file|symlink_dir|set_permissions)\b|\bfs\s*::[^;]*\*'
+name = "test-code-no-filesystem-write-imports"
+pattern = '\bfs\s*::[^;]*\b(?:write|copy|rename|create_dir|create_dir_all|remove_file|remove_dir|remove_dir_all|hard_link|soft_link|symlink|set_permissions|File|OpenOptions)\b|\bfs\s*::[^;]*\*'
 paths = ["src/**/*.rs", "tests/**/*.rs"]
-exclude = ["tests/integration/support/scratch.rs"]
 join_wrapped_use = true
 must_scan = ["src/compiler/parser/tests.rs", "tests/integration/cli/cli_arguments.rs"]
-message = "import filesystem mutation primitives only in the scratch helper"
+message = "tests must not import filesystem write primitives"
 
 [[textlint]]
 name = "test-cli-binary-path-use-support"
@@ -446,7 +464,7 @@ paths = ["src/**/*.rs", "tests/**/*.rs"]
 region = "string"
 test_code = "only"
 must_scan = ["src/compiler/parser/tests.rs", "tests/integration/cli/cli_arguments.rs"]
-message = "tests must use Cargo's artifact path or the scratch helper instead of target/ paths"
+message = "tests must use Cargo's artifact path instead of target/ paths"
 
 # Ban the executable literal rather than matching Command::new on one line:
 # command construction can wrap or use an imported alias.

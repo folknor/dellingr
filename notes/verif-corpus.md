@@ -136,48 +136,6 @@ Decision (2026-10-24): two steps, in order.
    runs a sweep's tests serially unless the sweep sets `test_threads`, so the
    kernels lose the in-test worker pool.
 
-## VC-012 - The 30-call standalone footer is paid by every check and every verdict launch
-
-Reported by: corpus-harness.
-
-Every examples/ kernel ends with `for i = 1, 30 do _bench() end`, "enough for
-hyperfine resolution", serving `scripts/bench.sh`'s ratio table. The test suite
-pays it every run: each of the 36 kernels runs 30 times in a debug build, in
-`run_all_examples` and again in `differential_examples` (plus 60 more reference
-executions), in both dev sweeps. At "about a second each" (diff_test.rs's own
-estimate) that is on the order of 150 CPU-seconds per check, where one call per
-kernel would already prove its printed result. The whole test phase of the latest check
-took 55.2s wall across four sweeps.
-
-The verdict harness pays it too: `examples/hotpath.rs` runs the top level during
-setup, so a `bench/` file's footer runs 30 seconds-scale calls before the cold
-call. In the forced `method` run at 7375bb4 on plantasjen, `elapsed_ms=3900.867`
-against `cold_call_us=75213` plus 20 warm calls at `warm_avg_us=75811.782`
-(about 1.59s): roughly 2.3s, about 59% of the launch, is untimed footer.
-`--bench 3` spends about 7s per workload on it.
-
-Fix: make the footer count an input. Chunks receive script arguments as `...`
-in both dellingr (if the CLI forwards them; today it rejects extra positionals)
-and reference Lua, so `local n = tonumber((...)) or 1` with `bench.sh` passing
-30 keeps hyperfine resolution where wanted and drops the footer to one call in
-tests and zero in the harness (the harness can set a global before setup).
-
-Enforceable: `bench_scripts.rs` already pins the bench/ footer text; extend it
-to the examples/ footers.
-
-Decision (2026-10-24): adjudicated against. The entry's premise is wrong: the
-footer is the measured workload, not untimed overhead. `brokkr dellingr`'s
-stored `elapsed` is the whole harness process, SETUP included, so a `bench/`
-file's 30-call footer is most of the seconds-scale verdict wall; under
-`--hotpath`/`--alloc` the examples/ footer (20 to 2500 calls, calibrated per
-file, not 30) supplies most of the profiled events against 20 warm
-iterations; and `scripts/bench.sh`, `scripts/hotbench.sh` and
-`research/bench_luars.sh` time the standalone run under hyperfine. The
-test-side cost is accepted; the VC-011 merge halves it by running each example
-once per sweep. Owed before removal: comments at the footer contract in
-`bench_scripts.rs` and at the SETUP phase in `examples/hotpath.rs` stating that
-the footer is what `brokkr dellingr`'s walls and profiles measure.
-
 ## VC-013 - `run_examples` polls the child every 25ms
 
 Reported by: check-machinery, corpus-harness.
@@ -189,66 +147,6 @@ timeout itself is a real external-process deadline and cannot be virtualised.
 
 Enforceable: no; small, listed because the brief asks for every sleep that
 stands in for an event.
-
-## VC-015 - `.scratch/` is written by several tools, leaks, and has no owner
-
-Reported by: check-machinery, corpus-harness, native-stack-errors.
-
-| Writer | Location | Problem | Should use |
-|---|---|---|---|
-| `scripts/diff_test.sh` via `differential_examples` | `.scratch/dellingr-diff-*` (three `mktemp` files per invocation, top level) | removed by an `EXIT` trap that brokkr's SIGKILL never runs; 18 leaked files now (six sets from 2026-10-21 and 22), one of them 70,691,826 bytes; bypasses the scratch convention because the write is in a shell child | no files (the in-process gate rewrite), or `--scratch <dir>` with `diff_test.rs` passing a `ScratchDirectory` under `CARGO_TARGET_TMPDIR`, or `.scratch/diff-test/` cleaned at start |
-| `scripts/bench.sh` | `.scratch/bench-results/<run>/` | fine: owns its subdir and prunes by pattern (GNU `find -printf`) | as is |
-| `error_boundary_transcript` via `scratch::write_boundary_transcript` | `.scratch/error-boundary/transcript.txt` | fixed path in a dir with many owners, last writer wins, nothing owns or cleans it; breaks the scratch helper's own rule; runs on focused `brokkr test` (bugs.md) | a `brokkr run` tool with an output path argument, or a committed golden (the transcript entry in verif-assertions.md), or `CARGO_TARGET_TMPDIR/error-boundary/` through `write_scratch_file` |
-
-`.scratch/` is the developer's scratch area (patches, perf data, notes; about
-200 entries today) with several tool owners (`research/bench_luars.sh` now also keeps its JSON
-under `.scratch/bench-luars/`), and nothing says which
-subtree belongs to whom; a cleanup by one tool can destroy another's state. The
-native-stack hunter notes the transcript's stated reason for the exception
-("must outlive the test process") does not hold: `CARGO_TARGET_TMPDIR` also
-persists across runs until `cargo clean`.
-
-Enforceable: a textlint rule over `scripts/**` and `tests/**` requiring
-`.scratch/<owner>/` and never bare `.scratch/` names; deleting the shell layer
-is the real enforcement for the diff gate.
-
-Decision (2026-10-24): `.scratch/` is gitignored and is the developer's area;
-dellingr does not police its contents and gets no ownership rules. Add a
-`[[script_check]]` that wipes it. The transcript row above is stale (the
-transcript is now `examples/regenerate_error_boundary.rs` with an explicit
-output path); the Python fixture tests (`test_native_calls.py`,
-`test_poison_contract.py`, `test_notes_sections.py`) also write there, which
-the wipe covers like everything else.
-
-## VC-016 - `CARGO_TARGET_TMPDIR` lives in a target directory shared by every project
-
-Reported by: check-machinery, corpus-harness.
-
-`CARGO_TARGET_TMPDIR` is `/media/folk/Banan/cargo/tmp`, inside a target
-directory shared by every project on the host (the `target` symlink points at
-`/media/folk/Banan/cargo/`, whose `tmp/` holds other projects' fixtures).
-`scratch.rs` handles collisions (`dellingr-cli-` prefix, pid, counter,
-`AlreadyExists` retry), so this is sound, but isolation is the prefix alone,
-another project's `cargo clean` wipes it, and a test killed by brokkr's SIGKILL
-at the 20s cap leaks its directory into shared space with no reaper.
-
-Fix: keep the location, state that the prefix is the isolation, and reap stale
-`dellingr-cli-*` dirs (pid no longer alive) in `ScratchDirectory::new`.
-
-Enforceable: n/a.
-
-Decision (2026-10-24): tests stop writing files. The CLI tests in
-`tests/integration/cli/` take their source as strings on stdin. The tests whose
-subject is the path itself (dash-named paths, the lone `-`, two positional
-scripts, the non-UTF-8 name, the missing file) become unit tests of
-`parse_args` in `src/main.rs`, which takes an `OsString` iterator, with nothing
-on disk. `tests/integration/support/scratch.rs` is deleted. Enforcement: a
-`[[textlint]]` in `brokkr.toml` forbidding filesystem writes in test code
-(`fs::write`, `File::create`, `OpenOptions`, `create_dir`,
-`CARGO_TARGET_TMPDIR`, `tempfile`) over `tests/**/*.rs`, and over
-`src/**/*.rs` with `test_code = "only"`, plus one line under AGENTS.md "Tests".
-`examples/regenerate_*` and `examples/tools/output.rs` write by design and stay
-outside those paths.
 
 ## VC-018 - The gates depend on host tools resolved from `PATH`, unversioned
 

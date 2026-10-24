@@ -8,6 +8,15 @@
 /// for spawned threads, with its release settings. `cfg(debug_assertions)`
 /// tells the two repository profiles apart here; it is not a definition of
 /// "unoptimized". Set explicitly so `RUST_MIN_STACK` cannot loosen it.
+///
+/// `debug_assertions` is a proxy for the profile, kept honest by this
+/// repository's `Cargo.toml`: the dev profile keeps debug assertions and the
+/// release profile drops them, so the proxy and the profile move together. A
+/// profile or host override that breaks that link (debug assertions in the
+/// release profile, an optimized dev profile, a custom profile with both) would
+/// silently select the other envelope while the sweep still reports its own
+/// name. That is accepted as unguarded: nothing here detects it, and the
+/// repository's own profiles do not do it.
 #[cfg(not(any(
     feature = "hotpath",
     feature = "fault-injection",

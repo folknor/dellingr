@@ -15,7 +15,6 @@ mod recorder;
 #[cfg(feature = "snapshot")]
 #[path = "../../common/save_golden_program.rs"]
 pub(crate) mod save_golden_program;
-pub(crate) mod scratch;
 #[path = "../../common/stack.rs"]
 pub(crate) mod stack;
 

@@ -40,34 +40,3 @@ rule and the conventions. The corpus-equivalence test exists only because two
 walkers exist; the in-process gate rewrite in rewrites.md removes it.
 
 Enforceable: yes.
-
-## VG-020 - The rules forbid the benchmarking tools the docs prescribe
-
-Reported by: check-machinery.
-
-The CLAUDE.md benchmarking rules say "Never hyperfine, `scripts/bench.sh`,
-`scripts/hotbench.sh`". AGENTS.md documents both scripts as the tools, and
-`brokkr man dellingr` says comparison against reference Lua is "not part of
-this surface - `scripts/bench.sh` in the dellingr repo owns that". The README
-ratio table and the `lua-rs` column (via `research/bench_luars.sh`) can
-therefore only be produced by a tool the rules forbid.
-
-`hotbench.sh` is fully superseded by `brokkr dellingr --lua W --hotpath`; its
-hyperfine half times the ms-scale `hotpath_file`, which the same rules say is
-below launch noise. `scripts/diff_gate.sh` is invoked by nothing, and `brokkr
-test differential_examples --debug` covers its job.
-
-Fix: delete `hotbench.sh` and `diff_gate.sh`. Decide whether vs-Lua ratios are a
-measurement the project still publishes; if so the rule needs an explicit
-carve-out, and the tool needs the same provenance discipline (hostname,
-commit) as `brokkr results`.
-
-Enforceable: partly. A deleted script cannot drift.
-
-Decision (2026-10-24): delete `scripts/hotbench.sh` and `scripts/diff_gate.sh`.
-Keep `scripts/bench.sh` and `research/bench_luars.sh` as the tools that
-reproduce the README's comparison against other interpreters, run on request.
-Reword the CLAUDE.md benchmarking rule so its scope is explicit: measurements of
-dellingr's own performance go through `brokkr dellingr`; those two scripts
-exist only to regenerate the README comparison. `bench.sh` records commit and
-hostname with its output.
