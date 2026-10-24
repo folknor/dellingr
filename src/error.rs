@@ -89,9 +89,6 @@ pub(crate) enum InternalFault {
     GmatchState(GmatchStateFault),
     #[cfg(feature = "snapshot")]
     SnapshotTable(SnapshotTableFault),
-    /// The standard library failed to register one of its own function ids.
-    #[cfg(feature = "snapshot")]
-    Registration(crate::SaveError),
     /// Injected by unit tests that need an internal error escaping dispatch.
     #[cfg(test)]
     Test,
@@ -186,8 +183,6 @@ impl fmt::Display for InternalFault {
             Self::GmatchState(fault) => write!(f, "invalid gmatch iterator state: {fault}"),
             #[cfg(feature = "snapshot")]
             Self::SnapshotTable(fault) => fmt::Display::fmt(fault, f),
-            #[cfg(feature = "snapshot")]
-            Self::Registration(error) => fmt::Display::fmt(error, f),
             #[cfg(test)]
             Self::Test => f.write_str("test fault"),
             Self::CaptureRangeOutsideString => {
@@ -536,7 +531,8 @@ pub enum ErrorKind {
     /// Lua pattern compilation or matching failed. The string function is
     /// available through [`Error::pattern_function`].
     PatternError(PatternErrorDetail),
-    /// An embedder registered one stable id for different Rust functions.
+    /// A stable Rust function id is already registered: `open_libs` found a
+    /// standard-library id the host had registered for its own function.
     DuplicateFunctionRegistration {
         /// The conflicting stable function id.
         id: String,
@@ -544,6 +540,15 @@ pub enum ErrorKind {
     /// Anchor handle belongs to a different `State`. Operations that need a
     /// live value return this rather than aliasing into the wrong slot.
     InvalidAnchor,
+    /// A [`RustFnHandle`](crate::RustFnHandle) belongs to a different
+    /// `State`, which includes a State loaded from a save of the one that
+    /// issued it.
+    InvalidRustFnHandle,
+    /// The State's Rust function table is full.
+    RustFunctionLimit {
+        /// The largest number of Rust functions one State holds.
+        limit: usize,
+    },
     /// Attempted to anchor `nil`. `nil` carries no GC weight and has no
     /// use case for a stable handle; embedders that need an "absent" value
     /// should use `Option<Anchor>`.
@@ -1706,6 +1711,15 @@ impl fmt::Display for ErrorKind {
                 write!(f, "duplicate Rust function registration: {id}")
             }
             InvalidAnchor => write!(f, "invalid anchor (issued by a different State)"),
+            InvalidRustFnHandle => {
+                write!(
+                    f,
+                    "invalid Rust function handle (issued by a different State)"
+                )
+            }
+            RustFunctionLimit { limit } => {
+                write!(f, "too many Rust functions (limit is {limit})")
+            }
             AnchorNil => {
                 write!(f, "cannot anchor nil")
             }

@@ -5,8 +5,9 @@
 //! except that `math.random(0)` is rejected as an empty interval,
 //! `math.log(x, base)` follows Lua 5.2's general-base calculation, and
 //! `math.atan(y, x)` uses the Lua 5.3+ two-argument form. Global `unpack` is kept
-//! from Lua 5.2 as an alias, but it and `table.unpack` share one implementation
-//! with Lua 5.4 semantics. The table library (`insert`, `remove`, `concat`,
+//! from Lua 5.2; it and `table.unpack` share one implementation with Lua 5.4
+//! semantics, but are two functions (unequal, with their own save ids), where
+//! Lua 5.2's are one. The table library (`insert`, `remove`, `concat`,
 //! `unpack`, `move`, `sort`) follows Lua 5.4's metamethod rules: lengths come from
 //! `__len`, reads go through `__index` and writes through `__newindex`, where
 //! Lua 5.2 reads raw. Sort handler calls have a different order from Lua 5.4.
@@ -76,7 +77,7 @@ mod string;
 mod string_format;
 mod table;
 
-pub(crate) use basic::{base_ipairs_iter, base_next, open_base};
+pub(crate) use basic::open_base;
 #[cfg(feature = "snapshot")]
 pub(crate) use string::gmatch_iterator_bytecode;
 
@@ -85,6 +86,7 @@ use crate::Result;
 use crate::State;
 use crate::error::{Error, ErrorKind};
 use crate::numeral::exact_i64;
+use crate::vm::RustFnId;
 
 /// Capacity reservations for the standard-library setup path.
 ///
@@ -130,15 +132,22 @@ const STDLIB_SETUP_HEADROOM: usize = 4;
 pub(crate) fn open_libs(state: &mut State) -> Result<()> {
     state.check_stack_space(STDLIB_SETUP_HEADROOM)?;
     // Runs before any mutation, so a rejected call leaves the State untouched.
+    // A host that registered an id the standard library uses (`"print"`,
+    // `"string.find"`, `"string.gmatch.iter"`, ...) on a raw State would
+    // otherwise end up with one id naming two functions. The host can still
+    // use the State after that error (`State::raw` followed by
+    // `register_rust_fn` and `open_libs` is the supported route), so the
+    // refusal comes before anything is bound or installed. Reopening binds
+    // every catalog id to its own entry again, which is no conflict.
     #[cfg(feature = "snapshot")]
-    check_registry_compatible(state)?;
-    open_libs_unchecked(state)
-}
-
-/// The installation sequence itself, with no preflight. Shared by `open_libs`
-/// and the registry dry run, so the dry run cannot drift from the real list of
-/// ids and functions.
-fn open_libs_unchecked(state: &mut State) -> Result<()> {
+    {
+        if let Some(id) = state.rust_fns.catalog_conflict() {
+            return Err(Error::without_location(
+                ErrorKind::DuplicateFunctionRegistration { id },
+            ));
+        }
+        state.rust_fns.bind_catalog();
+    }
     state.reserve_stdlib_capacity();
     open_base(state)?;
     math::open_math(state)?;
@@ -146,108 +155,145 @@ fn open_libs_unchecked(state: &mut State) -> Result<()> {
     table::open_table(state)
 }
 
-/// Dry run for the snapshot function registry.
-///
-/// A host that registered an id the standard library also uses (`"print"`,
-/// `"string.find"`, `"string.gmatch.iter"`, ...) for a different function would
-/// otherwise hit `DuplicateFunctionRegistration` partway through setup, with
-/// earlier libraries already installed as globals and their ids registered. The
-/// host can still use the State after that error (`State::raw` followed by
-/// `register_rust_fn` and `open_libs` is the supported route), so it must be
-/// all-or-nothing.
-///
-/// The standard library is opened on a scratch State, and every (id, function)
-/// pair it registered is compared with `state`'s registry. Re-registering the
-/// same id to the same function is idempotent, so reopening the libraries on a
-/// State that already has them passes. A State with an empty registry cannot
-/// conflict and skips the scratch build.
-/// Setup only installs values and registers function pointers: it executes no
-/// Lua or callbacks (opening the string library compiles the fixed gmatch
-/// wrapper chunk but does not run it). The scratch
-/// State owns its heap and registry; construction advances the process-global
-/// anchor state-id counter (observable only through `Anchor`'s `Debug` and
-/// `Hash`, which are documented as non-deterministic) but does not draw from the
-/// caller's RNG or alter its environment. Listing the library's (id, function)
-/// pairs as data would remove the scratch State, at the cost of a second list
-/// that must track the `open_*` functions; it was not worth that drift risk.
-#[cfg(feature = "snapshot")]
-fn check_registry_compatible(state: &State) -> Result<()> {
-    if state.rust_fns_by_id.is_empty() {
-        return Ok(());
-    }
-    let mut scratch = State::raw();
-    open_libs_unchecked(&mut scratch)?;
-    for (id, func) in &scratch.rust_fns_by_id {
-        if let Some(existing) = state.rust_fns_by_id.get(id)
-            && *existing as usize != *func as usize
-        {
-            return Err(Error::without_location(
-                ErrorKind::DuplicateFunctionRegistration { id: id.clone() },
-            ));
-        }
-    }
-    Ok(())
+/// The standard library's Rust function catalog: every library function, and
+/// every callback a library function returns rather than installs, at a fixed
+/// position. Every State's Rust function table starts with these entries in
+/// this order (`RustFnTable::new`), so a library value is the same handle in
+/// every State and every build, and the VM recognises `next` and the `ipairs`
+/// iterator by handle. Installation order is each `open_*` function's own,
+/// unchanged by the catalog order.
+struct CatalogSegment {
+    /// The library table whose name prefixes each stable save id, or `None`
+    /// for ids that are complete names.
+    #[cfg(feature = "snapshot")]
+    prefix: Option<&'static str>,
+    functions: &'static [(&'static str, crate::RustFunc)],
 }
 
-impl State {
-    // This stdlib helper centralizes the cfg choices. Enforcing the boundary by
-    // visibility requires moving it into vm before narrowing the table writers
-    // there to pub(super).
-    /// Installs a standard-library function and registers its stable snapshot id.
-    pub(super) fn register_lib_fn(
-        &mut self,
-        table_idx: isize,
-        lib_prefix: &str,
-        name: &str,
-        func: crate::RustFunc,
-    ) -> Result<()> {
-        #[cfg(feature = "snapshot")]
-        {
-            let id = format!("{lib_prefix}.{name}");
-            self.set_table_str_key_named_rust_fn(table_idx, name, &id, func)
-        }
-        #[cfg(not(feature = "snapshot"))]
-        {
-            let _ = lib_prefix;
-            self.set_table_str_key_rust_fn(table_idx, name, func)
-        }
-    }
+/// Callbacks library functions return: the `ipairs` iterator and the two
+/// `string.gmatch` iterators, which a saved gmatch closure captures.
+const RETURNED_CALLBACKS: &[(&str, crate::RustFunc)] = &[
+    ("ipairs.iter", basic::base_ipairs_iter),
+    (crate::gmatch_schema::ITERATOR_ID, string::gmatch_iter),
+    (
+        crate::gmatch_schema::EMPTY_ITERATOR_ID,
+        string::gmatch_empty_iter,
+    ),
+];
 
-    /// Registers a standard-library function id without storing the function.
-    pub(super) fn register_lib_fn_id(&mut self, id: &str, func: crate::RustFunc) -> Result<()> {
+const CATALOG: &[CatalogSegment] = &[
+    CatalogSegment {
         #[cfg(feature = "snapshot")]
-        self.register_rust_fn(id, func)
-            .map_err(Self::registration_error)?;
-        #[cfg(not(feature = "snapshot"))]
-        let _ = (id, func);
-        Ok(())
-    }
+        prefix: None,
+        functions: RETURNED_CALLBACKS,
+    },
+    CatalogSegment {
+        #[cfg(feature = "snapshot")]
+        prefix: None,
+        functions: basic::BASE_FUNCTIONS,
+    },
+    CatalogSegment {
+        #[cfg(feature = "snapshot")]
+        prefix: Some("math"),
+        functions: math::MATH_FUNCTIONS,
+    },
+    CatalogSegment {
+        #[cfg(feature = "snapshot")]
+        prefix: Some("string"),
+        functions: string::STRING_FUNCTIONS,
+    },
+    CatalogSegment {
+        #[cfg(feature = "snapshot")]
+        prefix: Some("table"),
+        functions: table::TABLE_FUNCTIONS,
+    },
+];
 
-    /// Pushes a standard-library function using the active snapshot policy.
-    pub(super) fn push_lib_fn(&mut self, id: &str, func: crate::RustFunc) -> Result<()> {
-        #[cfg(feature = "snapshot")]
-        self.push_named_rust_fn(id, func)?;
-        #[cfg(not(feature = "snapshot"))]
-        {
-            let _ = id;
-            self.push_rust_fn(func)?;
+const BASE_SEGMENT: usize = 1;
+const MATH_SEGMENT: usize = 2;
+const STRING_SEGMENT: usize = 3;
+const TABLE_SEGMENT: usize = 4;
+
+/// The catalog position of a segment's first entry.
+const fn segment_offset(segment: usize) -> usize {
+    let mut offset = 0;
+    let mut index = 0;
+    while index < segment {
+        offset += CATALOG[index].functions.len();
+        index += 1;
+    }
+    offset
+}
+
+/// The position of `name` in a segment, found at compile time.
+const fn position_in(functions: &[(&str, crate::RustFunc)], name: &str) -> usize {
+    let mut index = 0;
+    while index < functions.len() {
+        let candidate = functions[index].0.as_bytes();
+        let wanted = name.as_bytes();
+        if candidate.len() == wanted.len() {
+            let mut byte = 0;
+            while byte < wanted.len() && candidate[byte] == wanted[byte] {
+                byte += 1;
+            }
+            if byte == wanted.len() {
+                return index;
+            }
         }
-        Ok(())
+        index += 1;
     }
+    panic!("the catalog lists every recognised library function")
+}
 
-    /// Installs a standard-library global and registers its stable snapshot id.
-    pub(super) fn register_lib_global_fn(
-        &mut self,
-        name: &str,
-        func: crate::RustFunc,
-    ) -> Result<()> {
-        #[cfg(feature = "snapshot")]
-        self.set_global_named_rust_fn(name, name, func)
-            .map_err(Self::registration_error)?;
-        #[cfg(not(feature = "snapshot"))]
-        self.set_global_rust_fn(name, func)?;
-        Ok(())
+/// The `ipairs` iterator `ipairs` returns.
+pub(crate) const IPAIRS_ITER: RustFnId = RustFnId::catalog(0);
+/// The general `string.gmatch` iterator.
+const GMATCH_ITER: RustFnId = RustFnId::catalog(1);
+/// The `string.gmatch` iterator for an empty pattern.
+const GMATCH_EMPTY_ITER: RustFnId = RustFnId::catalog(2);
+/// Global `next`, which `pairs` also returns.
+pub(crate) const NEXT: RustFnId =
+    RustFnId::catalog(segment_offset(BASE_SEGMENT) + position_in(basic::BASE_FUNCTIONS, "next"));
+
+/// The handle of a segment's `index`th function.
+fn library_fn(segment: usize, index: usize) -> RustFnId {
+    debug_assert!(index < CATALOG[segment].functions.len());
+    RustFnId::catalog(segment_offset(segment) + index)
+}
+
+/// Every catalog function, in catalog order.
+pub(crate) fn catalog_functions() -> impl Iterator<Item = crate::RustFunc> {
+    CATALOG
+        .iter()
+        .flat_map(|segment| segment.functions.iter().map(|&(_, function)| function))
+}
+
+/// Every catalog entry with its stable save id (`math.sin`, `print`,
+/// `ipairs.iter`, ...).
+#[cfg(feature = "snapshot")]
+pub(crate) fn catalog_ids() -> impl Iterator<Item = (RustFnId, String)> {
+    CATALOG
+        .iter()
+        .flat_map(|segment| {
+            segment
+                .functions
+                .iter()
+                .map(move |&(name, _)| match segment.prefix {
+                    Some(prefix) => format!("{prefix}.{name}"),
+                    None => name.to_owned(),
+                })
+        })
+        .enumerate()
+        .map(|(index, id)| (RustFnId::catalog(index), id))
+}
+
+/// Installs each function of a library segment into the table on top of the
+/// stack, in the segment's order.
+fn install_library_functions(state: &mut State, segment: usize) -> Result<()> {
+    for (index, &(name, _)) in CATALOG[segment].functions.iter().enumerate() {
+        state.set_table_str_key_rust_fn(-1, name, library_fn(segment, index))?;
     }
+    Ok(())
 }
 
 /// Adds the known standard-library function name to a generic argument error.

@@ -9,9 +9,10 @@ use crate::instr::{ArgCount, RetCount};
 use crate::numeral::{MAX_EXACT_INTEGER, exact_i64, parse_lua_numeral};
 use crate::vm::MetaName;
 
-// A separate wrapper so `table.unpack` gets its own callback address where the
-// build keeps one. Release LTO folds it with global `unpack`'s identical
-// wrapper, and then reverse callback-name lookup resolves both to one id.
+// `table.unpack` and global `unpack` are separate catalog entries, so they are
+// distinct values with their own save ids whatever this wrapper compiles to
+// (release LTO merges it with the global's identical wrapper); the wrapper
+// only gives the native-call inventory its own edge.
 fn table_unpack_values(state: &mut State) -> crate::Result<u8> {
     crate::native_call!(
         "table_unpack_values->unpack_values",
@@ -385,9 +386,7 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
 
 pub(crate) fn open_table(state: &mut State) -> Result<()> {
     state.new_table_with_capacity(super::TABLE_LIBRARY_CAPACITY)?;
-    for &(name, func) in TABLE_FUNCTIONS {
-        state.register_lib_fn(-1, "table", name, func)?;
-    }
+    super::install_library_functions(state, super::TABLE_SEGMENT)?;
 
     // Set the table table as a global
     state.set_global("table")?;

@@ -18,6 +18,7 @@ use dellingr::limits::MAX_STACK_SIZE;
 use dellingr::{ArgCount, RetCount, State};
 
 use crate::support;
+use crate::support::PushNewRustFn;
 
 const SETUP: &str = r#"
 One = {greet = "one"}
@@ -44,7 +45,9 @@ fn empty_iterator(_: &mut State) -> dellingr::Result<u8> {
 
 fn state_with(extra: &str) -> State {
     let mut state = State::new();
-    state.push_rust_fn(empty_iterator).expect("iterator fits");
+    state
+        .push_new_rust_fn(empty_iterator)
+        .expect("iterator fits");
     state.set_global("empty_iterator").expect("iterator set");
     for source in [SETUP, extra] {
         support::run(&mut state, source);

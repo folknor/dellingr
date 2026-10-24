@@ -164,7 +164,7 @@ impl Val {
     pub(super) fn table_key(
         self,
     ) -> std::result::Result<
-        NormalizedTableKey<super::object::StringPtr, ObjectPtr, usize>,
+        NormalizedTableKey<super::object::StringPtr, ObjectPtr, super::RustFnId>,
         InvalidTableKey,
     > {
         let value = self;
@@ -174,7 +174,7 @@ impl Val {
             Val::Num(value) => TableKeyInput::Number(value),
             Val::Str(value) => TableKeyInput::String(value),
             Val::Obj(value) => TableKeyInput::Object(value),
-            Val::RustFn(value) => TableKeyInput::RustFn(value as usize),
+            Val::RustFn(value) => TableKeyInput::RustFn(value),
         };
         normalize_table_key(input)
     }
@@ -278,7 +278,7 @@ fn hash_table_key_value<H: Hasher>(value: Val, hasher: &mut H) {
         }
         Val::Str(ptr) => ptr.hash(hasher),
         Val::Obj(ptr) => ptr.hash(hasher),
-        Val::RustFn(func) => (func as usize).hash(hasher),
+        Val::RustFn(function) => function.hash(hasher),
     }
 }
 
@@ -3128,16 +3128,12 @@ mod tests {
         // updated value simply skips it, so the script-level test passes either
         // way. Cover both storage arms - inline scans linearly with PartialEq,
         // and Map probes with Hash, so only the second exercises Hash at all.
-        fn probe(_state: &mut crate::vm::State) -> crate::Result<u8> {
-            Ok(0)
-        }
-
         for preset in [0, 5] {
             let mut t = Table::default();
             fill_hash(&mut t, 1..=preset);
             let before = (1..=preset).count();
 
-            let key = Val::RustFn(probe);
+            let key = Val::RustFn(crate::vm::RustFnId::catalog(0));
             t.insert(key, Val::Num(1.0)).expect("first insert succeeds");
             assert_eq!(t.get(&key), Val::Num(1.0));
 

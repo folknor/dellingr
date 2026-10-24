@@ -5,8 +5,9 @@
 
 use std::sync::Arc;
 
+use super::RustFnId;
 use super::frame::Frame;
-use super::lua_val::{RustFunc, Val};
+use super::lua_val::Val;
 use super::object::{Upvalue, UpvalueRef};
 use super::{Bytecode, CallInfo, Error, ErrorKind, MAX_CALL_DEPTH, Result, State, TypeError};
 use crate::instr::{ArgCount, RetCount};
@@ -475,10 +476,11 @@ impl State {
     #[inline(never)]
     pub(super) fn invoke_rust_fn(
         &mut self,
-        f: RustFunc,
+        function: RustFnId,
         call_base: usize,
         method: bool,
     ) -> Result<u8> {
+        let f = self.rust_fns.function(function);
         let old_stack_bottom = self.in_flight.stack_bottom;
         self.in_flight.stack_bottom = call_base;
 
@@ -486,7 +488,7 @@ impl State {
         // both restored before a callback error propagates. Every stack index
         // and get_top() after this call is relative to stack_bottom, so the
         // callback result is handled explicitly rather than with `?`.
-        let previous_rust_fn = self.in_flight.active_rust_fn.replace(f);
+        let previous_rust_fn = self.in_flight.active_rust_fn.replace(function);
         let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self))) {
             Ok(result) => result,
             Err(payload) => {

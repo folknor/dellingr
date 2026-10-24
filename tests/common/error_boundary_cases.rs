@@ -154,6 +154,7 @@ pub(crate) fn run(
         ("oversized", oversized),
     ];
     for (name, callback) in callbacks {
+        let callback = state.add_rust_fn(callback).unwrap();
         state.push_rust_fn(callback).unwrap();
         state.set_global(name).unwrap();
     }

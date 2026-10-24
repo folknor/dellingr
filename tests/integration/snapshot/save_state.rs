@@ -7,6 +7,8 @@ use dellingr::{
 };
 
 use crate::support;
+use crate::support::PushNewRustFn;
+use crate::support::save_golden_program;
 
 /// The configured chain depth would need one native frame per link if a
 /// walker regressed to recursion, far beyond this stack in either profile.
@@ -765,7 +767,7 @@ fn unregistered_reachable_rust_function_fails_save() {
     }
 
     let mut state = State::new();
-    state.push_rust_fn(host_fn).unwrap();
+    state.push_new_rust_fn(host_fn).unwrap();
     state.set_global("host_fn").unwrap();
 
     let err = state.save_state().unwrap_err();
@@ -1224,7 +1226,9 @@ fn registered_host_function_reconnects_on_load() {
     let callbacks = Capture::default();
     let lines = Arc::clone(&callbacks.lines);
     let mut loaded = State::load_state(&save.bytes, Box::new(callbacks), |state| {
-        state.set_global_named_rust_fn("host_value", "game.host_value", host_value)
+        state
+            .set_global_named_rust_fn("host_value", "game.host_value", host_value)
+            .map(drop)
     })
     .unwrap();
     support::run(&mut loaded, "print(saved_host_value())");
@@ -1252,7 +1256,9 @@ fn load_setup_registration_errors_are_returned_directly() {
 
     let error = match State::load_state(&save.bytes, Box::new(DefaultCallbacks), |state| {
         state.register_rust_fn("game.host_fn", original_fn)?;
-        state.register_rust_fn("game.host_fn", conflicting_fn)
+        state
+            .register_rust_fn("game.host_fn", conflicting_fn)
+            .map(drop)
     }) {
         Ok(_) => panic!("conflicting setup registration must fail"),
         Err(error) => error,
@@ -1265,28 +1271,63 @@ fn load_setup_registration_errors_are_returned_directly() {
     );
 }
 
+/// Identity is registration, not code: one Rust function registered under two
+/// ids is two functions. Each compares unequal to the other, keys its own
+/// table slot, renders its own identity and saves under its own id, through
+/// save and load. Neither the bytes nor the loaded identities depend on the
+/// order the ids were registered in: a load whose setup registers them in the
+/// opposite order resaves the same payload.
 #[test]
-fn rust_function_save_id_is_independent_of_registration_order() {
+fn one_function_under_two_ids_is_two_functions() {
     fn host_fn(_state: &mut State) -> dellingr::Result<u8> {
         Ok(0)
     }
+    // Registers in `order`, installs `a_fn` then `z_fn` whatever the order.
+    fn install(state: &mut State, order: [&str; 2]) -> Result<(), Box<dyn std::error::Error>> {
+        for id in order {
+            state.register_rust_fn(id, host_fn)?;
+        }
+        for (global, id) in [("a_fn", "game.a"), ("z_fn", "game.z")] {
+            let handle = state.registered_rust_fn(id).ok_or("registered above")?;
+            state.push_rust_fn(handle)?;
+            state.set_global(global)?;
+        }
+        Ok(())
+    }
+    const PROGRAM: &str = r#"
+        keyed = { [a_fn] = "a", [z_fn] = "z" }
+        a_text, z_text = tostring(a_fn), tostring(z_fn)
+    "#;
+    const CHECK: &str = r#"
+        if a_fn == z_fn then error("two registrations compared equal") end
+        if keyed[a_fn] ~= "a" or keyed[z_fn] ~= "z" then error("keys collided") end
+        if tostring(a_fn) ~= a_text or tostring(z_fn) ~= z_text then
+            error("rendered identities changed")
+        end
+        if a_text == z_text then error("two registrations rendered alike") end
+    "#;
 
+    // Every save below is taken before CHECK runs, so the compared States
+    // have run the same code and carry the same cost counters.
     let mut first = State::new();
-    first.register_rust_fn("game.z", host_fn).unwrap();
-    first.register_rust_fn("game.a", host_fn).unwrap();
-    first.push_rust_fn(host_fn).unwrap();
-    first.set_global("host_fn").unwrap();
-
+    install(&mut first, ["game.z", "game.a"]).unwrap();
+    support::run(&mut first, PROGRAM);
     let mut second = State::new();
-    second.register_rust_fn("game.a", host_fn).unwrap();
-    second.register_rust_fn("game.z", host_fn).unwrap();
-    second.push_rust_fn(host_fn).unwrap();
-    second.set_global("host_fn").unwrap();
+    install(&mut second, ["game.a", "game.z"]).unwrap();
+    support::run(&mut second, PROGRAM);
+    let saved = first.save_state().unwrap().bytes;
+    assert_eq!(saved, second.save_state().unwrap().bytes);
+    support::run(&mut first, CHECK);
 
+    let mut loaded = State::load_state(&saved, Box::new(DefaultCallbacks), |state| {
+        install(state, ["game.a", "game.z"])
+    })
+    .unwrap();
     assert_eq!(
-        first.save_state().unwrap().bytes,
-        second.save_state().unwrap().bytes
+        save_golden_program::payload_after_header(&loaded.save_state().unwrap().bytes),
+        save_golden_program::payload_after_header(&saved)
     );
+    support::run(&mut loaded, CHECK);
 }
 
 // ---------------------------------------------------------------------------
@@ -1889,7 +1930,7 @@ fn dead_environment_function_keys_have_reachability_paths() {
     }
     for shadow in [false, true] {
         let mut state = State::new();
-        state.push_rust_fn(host_fn).unwrap();
+        state.push_new_rust_fn(host_fn).unwrap();
         state.set_global("host_fn").unwrap();
         support::run(
             &mut state,

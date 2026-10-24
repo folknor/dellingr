@@ -120,51 +120,6 @@ derived from one constant below the cap, and the runner can report the
 examples in flight before the cap kills the test. What only the rewrite gives
 is a focused `brokkr test <example>`.
 
-## RW-004 - Identify Rust functions by registry handle instead of code address
-
-Reported by: snapshot, runtime.
-
-`State.rust_fn_ids_by_addr: BTreeMap<usize, String>` keys identity on `func as
-usize`; every save of a `Val::RustFn` goes through it
-(`saved_reachable_pointer_value`). `Val::RustFn` equality and table-key hashing
-use `std::ptr::fn_addr_eq` (`lua_val.rs`), and `save_state.rs` and `vm.rs`
-compare `as usize` addresses. Rust gives no guarantee that one function has one
-address: identical functions can be merged, and inlined or generic functions
-can be instantiated in several codegen units. Consequences:
-
-- debug and release write different bytes (bugs.md "Save bytes differ between
-  dev and release builds");
-- load has a dedicated "folded functions" path (`materialize_payload`) and an
-  error for folded keys colliding in one table, with two integrity tests
-  (`folded_functions_*`) that simulate a build that cannot be produced on
-  demand;
-- `docs/save-state.md` needs two paragraphs of caveats;
-- a host that registers an `#[inline] fn` from one crate and pushes it from
-  another can hit `UnregisteredFunction` on a function it did register; no test
-  can catch that, because every test registers and pushes from one crate;
-- `f == g` for two host RustFns with identical bodies, and whether they collide
-  as table keys, can differ between dev and release builds of the same host: a
-  script-visible, build-dependent result.
-  `lua_val.rs::different_rust_functions_compare_unequal` uses two functions
-  with different bodies, so it cannot see this. The runtime hunter suggests at
-  least a line in `docs/determinism.md` and a release-run test with two
-  identical-bodied functions.
-
-Fix: `Val::RustFn` carries a `RustFnId(u32)` into a per-State table of
-`(stable id, fn pointer)` assigned at registration; an unregistered function
-gets a handle with no stable id and saving it still fails fast. Identity
-becomes registration; folding is irrelevant; the golden is
-profile-independent; the fold-handling load path, its error variant and its
-two integrity tests can go; `rawequal` between two registered ids of one
-function becomes a design decision instead of a linker accident; tests get an
-injection point (register two ids for one function). The snapshot hunter adds
-that `open_libs` under `snapshot` builds a whole scratch `State::raw()` and
-re-runs `open_libs_unchecked` whenever the registry is non-empty
-(`check_registry_compatible`); with registry handles the compatibility check
-could compare id lists without building a State.
-
-Enforceable: by the type system; `func as usize` as identity stops existing.
-
 ## RW-005 - Hold runtime limits in a value tests can lower
 
 Reported by: runtime, library, native-stack-errors (dissenting).

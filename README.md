@@ -130,8 +130,8 @@ continuation capture; no paused call stack, program counter, coroutine, anchor,
 callback, or host user-data handle survives a save/load. Anchors created inside
 the load setup closure do survive it. Hosts recreate
 callbacks and register the same named Rust functions during load setup - a
-reachable `RustFunc` must be registered with a stable id (e.g.
-`set_global_named_rust_fn`) or the save fails fast. The module doc on
+reachable Rust function must be registered with a stable id (e.g.
+`register_rust_fn` or `set_global_named_rust_fn`) or the save fails fast. The module doc on
 `src/vm/save_state.rs` covers the format and design; details are in
 [docs/save-state.md](docs/save-state.md).
 
@@ -170,7 +170,11 @@ dellingr = "0.5"
   error, not silent corruption.
 - `HostCallbacks` trait (`: Send`) - embedders redirect `print` (the
   script's exact bytes), hook errors, etc.
-- `RustFunc` - expose Rust functions to Lua scripts.
+- `RustFunc` - expose Rust functions to Lua scripts. `State::add_rust_fn`
+  (or, with `snapshot`, `register_rust_fn` under a stable id) creates a
+  function and returns its State-scoped `RustFnHandle`, which
+  `State::push_rust_fn` pushes. Identity is that entry, never the code
+  address, so `==` between host functions is the same in every build.
 - Typed errors - `ErrorKind::ScriptError` carries the value a script passed
   to `error()` (`ErrorValue`: nil, boolean, number, exact string bytes, or a
   table/function's type and rendering); library, syntax, argument and limit

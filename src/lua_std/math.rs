@@ -327,9 +327,7 @@ pub(crate) fn open_math(state: &mut State) -> Result<()> {
     // Create the math table
     state.new_table_with_capacity(MATH_LIBRARY_CAPACITY)?;
 
-    for &(name, func) in MATH_FUNCTIONS {
-        state.register_lib_fn(-1, "math", name, func)?;
-    }
+    super::install_library_functions(state, super::MATH_SEGMENT)?;
 
     for &(name, value) in MATH_CONSTANTS {
         state.set_table_str_key_number(-1, name, value)?;

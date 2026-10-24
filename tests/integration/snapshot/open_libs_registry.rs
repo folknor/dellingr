@@ -3,6 +3,8 @@
 use dellingr::error::ErrorKind;
 use dellingr::{LuaType, State};
 
+use crate::support;
+
 fn host_print(_state: &mut State) -> dellingr::Result<u8> {
     Ok(0)
 }
@@ -18,8 +20,8 @@ fn global_type(state: &mut State, name: &str) -> LuaType {
 fn conflicting_preregistered_id_leaves_state_untouched() {
     let mut state = State::raw();
     // "string.find" is registered by the string library, which opens after
-    // base and math; without the dry run those would already be installed.
-    state
+    // base and math; without the preflight those would already be installed.
+    let host = state
         .register_rust_fn("string.find", host_print)
         .expect("fresh registry");
     let top = state.get_top();
@@ -40,9 +42,23 @@ fn conflicting_preregistered_id_leaves_state_untouched() {
     state
         .register_rust_fn("print", host_print)
         .expect("failed setup must not register earlier functions");
-    state
-        .register_rust_fn("string.find", host_print)
-        .expect("the original registration must survive rejection");
+    assert_eq!(
+        state.registered_rust_fn("string.find"),
+        Some(host),
+        "the original registration must survive rejection"
+    );
+}
+
+#[test]
+fn the_smallest_conflicting_id_is_reported() {
+    let mut state = State::raw();
+    for id in ["table.unpack", "ipairs.iter", "print"] {
+        state.register_rust_fn(id, host_print).unwrap();
+    }
+    let error = state.open_libs().expect_err("ids conflict");
+    assert!(
+        matches!(error.kind(), ErrorKind::DuplicateFunctionRegistration { id } if id == "ipairs.iter")
+    );
 }
 
 #[test]
@@ -84,8 +100,16 @@ fn non_conflicting_preregistration_opens_normally() {
 #[test]
 fn reopening_libraries_accepts_existing_stdlib_registrations() {
     let mut state = State::new();
+    let print = state.registered_rust_fn("print").expect("open_libs ran");
+    support::run(&mut state, "old_print, old_next = print, next");
     state
         .open_libs()
-        .expect("same ids map to the same functions");
+        .expect("each id is bound to its own catalog entry");
     assert_eq!(global_type(&mut state, "string"), LuaType::Table);
+    // Reopening binds the same entries: values from before compare equal.
+    assert_eq!(state.registered_rust_fn("print"), Some(print));
+    support::run(
+        &mut state,
+        "if old_print ~= print or old_next ~= next then error('reopen changed identity') end",
+    );
 }

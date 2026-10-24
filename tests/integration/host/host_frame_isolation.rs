@@ -6,6 +6,7 @@ use dellingr::error::ErrorKind;
 use dellingr::{ArgCount, RetCount, State};
 
 use crate::support;
+use crate::support::PushNewRustFn;
 
 fn report(state: &mut State, name: &str, flag: bool) -> dellingr::Result<()> {
     state.push_number(if flag { 1.0 } else { 0.0 })?;
@@ -31,7 +32,7 @@ fn dynamic_call_from_callback(state: &mut State) -> dellingr::Result<u8> {
 #[test]
 fn host_dynamic_call_does_not_consume_callers_call_base() {
     let mut state = State::new();
-    state.push_rust_fn(dynamic_call_from_callback).unwrap();
+    state.push_new_rust_fn(dynamic_call_from_callback).unwrap();
     state.set_global("g").unwrap();
     support::run(
         &mut state,
@@ -74,7 +75,7 @@ fn set_global_on_empty_frame(state: &mut State) -> dellingr::Result<u8> {
 #[test]
 fn set_global_on_empty_callback_frame_is_rejected() {
     let mut state = State::new();
-    state.push_rust_fn(set_global_on_empty_frame).unwrap();
+    state.push_new_rust_fn(set_global_on_empty_frame).unwrap();
     state.set_global("g").unwrap();
     support::run(
         &mut state,
@@ -115,7 +116,7 @@ fn call_anchor_short_of_args(state: &mut State) -> dellingr::Result<u8> {
 #[test]
 fn call_anchor_checks_args_against_the_visible_frame() {
     let mut state = State::new();
-    state.push_rust_fn(call_anchor_short_of_args).unwrap();
+    state.push_new_rust_fn(call_anchor_short_of_args).unwrap();
     state.set_global("g").unwrap();
     support::run(
         &mut state,

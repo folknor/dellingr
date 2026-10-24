@@ -19,6 +19,7 @@ use dellingr::limits::{MAX_METAMETHOD_DEPTH, MAX_STACK_SIZE};
 use dellingr::{ArgCount, LuaType, RetCount, State};
 
 use crate::support;
+use crate::support::PushNewRustFn;
 
 const PRELUDE: &str = r#"
 local callable
@@ -298,7 +299,7 @@ fn a_failed_lookup_returns_every_unit_it_took() {
     // Each lookup fails after taking units, inside a callback that carries
     // on, then a lookup needing the remaining unit runs at the same depth.
     let mut state = state_with("");
-    state.push_rust_fn(try_index).expect("callback fits");
+    state.push_new_rust_fn(try_index).expect("callback fits");
     state.set_global("try_index").expect("callback set");
     for receiver in ["bad_chain", "bad", "function_behind_table"] {
         let expr = format!(

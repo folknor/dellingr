@@ -6,6 +6,7 @@ use dellingr::error::ErrorKind;
 use dellingr::{ArgCount, RetCount, State};
 
 use crate::support;
+use crate::support::PushNewRustFn;
 
 fn check_number(state: &mut State) -> dellingr::Result<u8> {
     state.check_type(1, dellingr::LuaType::Number)?;
@@ -13,7 +14,7 @@ fn check_number(state: &mut State) -> dellingr::Result<u8> {
 }
 
 fn install_callback(state: &mut State) {
-    state.push_rust_fn(check_number).expect("callback fits");
+    state.push_new_rust_fn(check_number).expect("callback fits");
     state.set_global("host_number").unwrap();
 }
 
@@ -72,7 +73,7 @@ fn nested_native_dispatch_restores_outer_argument_name() {
     let mut state = State::new();
     install_callback(&mut state);
     state
-        .push_rust_fn(nested_check_number)
+        .push_new_rust_fn(nested_check_number)
         .expect("callback fits");
     state.set_global("outer_number").unwrap();
     state
@@ -92,8 +93,11 @@ fn nested_native_dispatch_restores_outer_argument_name() {
 #[test]
 fn snapshot_registered_callback_uses_its_id_without_a_global() {
     let mut state = State::new();
+    let callback = state
+        .register_rust_fn("host.number", check_number)
+        .expect("the id is new");
     state
-        .push_named_rust_fn("host.number", check_number)
+        .push_rust_fn(callback)
         .expect("registered callback fits");
     state.push_boolean(false).expect("argument fits");
     let error = state

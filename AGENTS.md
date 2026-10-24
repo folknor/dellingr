@@ -170,6 +170,7 @@ Compilation pipeline: source bytes to `compiler::compile` (the parser builds eac
 - `in_flight.call_stack: Vec<CallInfo>` - one activation record per active Lua call, innermost last, across every dispatch-loop invocation: tracebacks, `print` locations and the bytecode-cache sweep read it; `vararg_stack` is one shared arena of extra arguments, each record owning the suffix from its `vararg_start` while innermost and releasing it on pop (its live length is a GC root)
 - `callbacks: Box<dyn HostCallbacks>` and a typed `user_data` slot
 - `rng: VmRng` (in-crate SplitMix64) seeded via `set_rng_seed`
+- `rust_fns: RustFnTable` (`vm/rust_fn.rs`) - the append-only Rust function table. A `Val::RustFn` is an index into it, never a code address: the standard library's catalog (`lua_std::CATALOG`) fills fixed positions at the front, and each `add_rust_fn` / `register_rust_fn` call appends a new entry with its own identity (the host holds a State-bound `RustFnHandle`). Under `snapshot` it maps stable save ids to entries, one id per entry. No function-pointer comparison decides identity, registration or a fast path
 
 **Calls do not recurse natively from Lua.** Each dispatch-loop invocation (`State::run_invocation`) runs over a frame stack of its own (pooled in `frame_stacks`): `OP_CALL` to a Lua function (directly or through `__call`) admits the callee, pushes its `Frame` and continues the same loop in it; `OP_RETURN` pops back to the caller. A Lua callee keeps its function value in its slot just below its frame (that roots it) and returns its results into that slot. Only calls made from Rust (`call_unguarded`: host calls, metamethod handlers, generic-for iterators, library callbacks) start a nested invocation on the native stack, and `limits::MAX_NATIVE_CALL_DEPTH` counts them. An invocation owns the activation records from its entry upwards and unwinds exactly those on error. The call path is sensitive to store-forwarding: frames and records are written in place and dropped in place, never moved whole (see the comments in `vm/eval.rs`). `limits::MAX_CALL_DEPTH` and `limits::MAX_STACK_SIZE` bound Lua calls and values; docs/limits.md "Native stack" states the native-stack envelope.
 
@@ -214,11 +215,11 @@ boundary and operand contract. Handler writes survive an error.
 - Unit tests live alongside their modules (e.g. `src/vm/object.rs` has GC tests).
 - To intentionally refresh `tests/fixtures/save_golden_current.bin` and its
   generated `.txt` companion after a reviewed save-output change, run
-  `brokkr run --debug --features snapshot regenerate_save_golden`. Never
+  `brokkr run --features snapshot regenerate_save_golden`. Never
   regenerate the archived `save_released_v*.bin` fixtures
-  (docs/save-state.md). Use the
-  debug profile the tests run under: release builds fold identical Rust
-  functions, which changes the saved function ids.
+  (docs/save-state.md). Any profile writes the same payload (saved Rust
+  functions are function-table ids, not code addresses), and the
+  `release-save-golden` check shape holds the release build to the fixture.
 
 The non-default `fault-injection` feature is test infrastructure, never a
 production or native-stack-probe configuration; `src/lib.rs` refuses to

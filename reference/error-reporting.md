@@ -71,24 +71,20 @@ its name while that callback is running. `check_optional_type` uses the same
 path when a present, non-nil value has the wrong type. Other errors returned
 directly by a callback are not given a function name automatically.
 
-The lookup uses the active Rust function pointer in this order:
+The lookup uses the active Rust function's function-table entry in this order:
 
 1. Scan current globals in their `IndexMap` order and return the first global
-   whose value is the same Rust function pointer.
-2. With the `snapshot` feature, if no global matches, look up the function
-   pointer in the reverse stable-id registry. When multiple ids share an
-   address, registration retains the lexicographically smallest id for this
-   reverse lookup.
+   whose value is the same entry.
+2. With the `snapshot` feature, if no global matches, use the entry's
+   registered stable id. An entry has at most one id.
 3. If neither lookup finds a name, leave the argument error anonymous.
 
 This is best-effort naming. Global aliases use the first matching global, and
 rebinding or removing globals can change the result. The snapshot registry is
 not present without the `snapshot` feature, so a callback held only in a table
 or otherwise registered by id can have a name in a snapshot build and no name
-in a build without that feature. The lookup also compares function-pointer
-addresses. Link-time optimization or identical-code folding can give distinct
-callbacks the same address, changing which matching global or registered id
-is reported between builds.
+in a build without that feature. The lookup compares entries, never code
+addresses, so the name does not depend on what the optimizer or linker merged.
 
 The standard-library argument validators that use `check_any_named`,
 `check_type_named`, `check_optional_type_named`, or `argument_error` explicitly

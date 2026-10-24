@@ -63,3 +63,11 @@ carve-out, and the tool needs the same provenance discipline (hostname,
 commit) as `brokkr results`.
 
 Enforceable: partly. A deleted script cannot drift.
+
+Decision (2026-10-24): delete `scripts/hotbench.sh` and `scripts/diff_gate.sh`.
+Keep `scripts/bench.sh` and `research/bench_luars.sh` as the tools that
+reproduce the README's comparison against other interpreters, run on request.
+Reword the CLAUDE.md benchmarking rule so its scope is explicit: measurements of
+dellingr's own performance go through `brokkr dellingr`; those two scripts
+exist only to regenerate the README comparison. `bench.sh` records commit and
+hostname with its output.

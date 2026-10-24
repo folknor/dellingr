@@ -1,4 +1,5 @@
 use super::Result;
+use super::RustFnId;
 use super::State;
 #[cfg(test)]
 use super::object::Closure;
@@ -108,7 +109,8 @@ pub(crate) enum Val {
     Bool(bool),
     Num(f64),
     Str(StringPtr),
-    RustFn(RustFunc),
+    /// An entry of the State's Rust function table (see `vm/rust_fn.rs`).
+    RustFn(RustFnId),
     Obj(ObjectPtr),
 }
 use Val::*;
@@ -218,7 +220,7 @@ impl PartialEq for Val {
             (Nil, Nil) => true,
             (Bool(a), Bool(b)) => a == b,
             (Num(a), Num(b)) => a == b,
-            (RustFn(a), RustFn(b)) => std::ptr::fn_addr_eq(*a, *b),
+            (RustFn(a), RustFn(b)) => a == b,
             (Obj(a), Obj(b)) => a == b,
             // String pointer equality works because strings are interned
             (Str(a), Str(b)) => a == b,
@@ -236,8 +238,8 @@ pub(crate) enum PointerIdKey {
     String(StringPtr),
     /// A garbage-collected object identity.
     Object(ObjectPtr),
-    /// A host-provided function identity.
-    RustFn(RustFunc),
+    /// A Rust function table entry.
+    RustFn(RustFnId),
 }
 
 impl PointerIdKey {
@@ -266,7 +268,7 @@ impl PartialEq for PointerIdKey {
         match (*self, *other) {
             (Self::String(a), Self::String(b)) => a == b,
             (Self::Object(a), Self::Object(b)) => a == b,
-            (Self::RustFn(a), Self::RustFn(b)) => std::ptr::fn_addr_eq(a, b),
+            (Self::RustFn(a), Self::RustFn(b)) => a == b,
             _ => false,
         }
     }
@@ -279,10 +281,9 @@ impl Hash for PointerIdKey {
         match self {
             Self::String(ptr) => ptr.hash(hasher),
             Self::Object(ptr) => ptr.hash(hasher),
-            // The address is ASLR-dependent. It may only feed hash-bucket
-            // layout; never replace a deterministic order with a hash-ordered
-            // container keyed on this.
-            Self::RustFn(func) => (*func as usize).hash(hasher),
+            // The entry index follows the order entries were created, so it
+            // may only feed hash-bucket layout, like the slotmap keys above.
+            Self::RustFn(function) => function.hash(hasher),
         }
     }
 }
@@ -348,15 +349,10 @@ mod tests {
         Ok(0)
     }
 
-    fn second_callback(state: &mut State) -> Result<u8> {
-        state.push_number(1.0)?;
-        Ok(1)
-    }
-
     #[test]
     fn rust_function_copies_compare_equal_and_hash_equal() {
-        let first = Val::RustFn(first_callback);
-        let second = Val::RustFn(first_callback);
+        let first = Val::RustFn(RustFnId::catalog(0));
+        let second = first;
         assert_eq!(first, second);
 
         let first = PointerIdKey::from_val(first).expect("Rust functions have pointer identity");
@@ -369,14 +365,23 @@ mod tests {
         assert_eq!(first_hash.0, second_hash.0);
     }
 
+    /// Identity is the table entry, not the code: two entries for one Rust
+    /// function are two values, and one entry pushed twice is one value.
     #[test]
-    fn different_rust_functions_compare_unequal() {
-        assert_ne!(Val::RustFn(first_callback), Val::RustFn(second_callback));
+    fn rust_function_identity_is_the_entry_not_the_function() {
+        let mut state = State::raw();
+        let first = state.add_rust_fn(first_callback).unwrap();
+        let second = state.add_rust_fn(first_callback).unwrap();
+        state.push_rust_fn(first).unwrap();
+        state.push_rust_fn(second).unwrap();
+        state.push_rust_fn(first).unwrap();
+        assert!(!state.raw_equal(1, 2));
+        assert!(state.raw_equal(1, 3));
     }
 
     #[test]
     fn rust_function_debug_rendering_is_opaque() {
-        let value = Val::RustFn(first_callback);
+        let value = Val::RustFn(RustFnId::catalog(0));
         assert_eq!(format!("{value:?}"), RUST_FN_DISPLAY);
     }
 

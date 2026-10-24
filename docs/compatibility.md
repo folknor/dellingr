@@ -154,12 +154,15 @@ does.
 
 ## Function identity
 
-- Host (Rust) functions are equal when they share a code address, so `f == g`
-  between two host functions whose code the linker folded (identical-code
-  folding, typical of release LTO builds) can differ from a build that does not
-  fold them. Aliases registered under several ids are equal by design.
-  Embedders that need distinct identity keep function bodies observably
-  distinct.
+- Host (Rust) functions are equal when they are the same entry of the State's
+  function table, not when they share a code address as light C functions do
+  in reference Lua. Each `add_rust_fn` or `register_rust_fn` call creates a new
+  function, so one Rust function added twice, or registered under two ids,
+  gives two unequal values; pushing one handle repeatedly gives equal values.
+  Identity is therefore the same in every build, whatever the optimizer or
+  linker merges.
+- Global `unpack` and `table.unpack` share their implementation but are two
+  functions: `unpack == table.unpack` is false. In Lua 5.2 it is true.
 
 ## Table library
 

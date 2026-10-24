@@ -15,6 +15,7 @@ use dellingr::error::{Error, ErrorKind};
 use dellingr::{ArgCount, HostCallbacks, RetCount, State};
 
 use crate::support;
+use crate::support::PushNewRustFn;
 
 const PANIC_MESSAGE: &str = "deliberate test panic";
 
@@ -64,7 +65,7 @@ fn swallowing_fn(state: &mut State) -> dellingr::Result<u8> {
 fn state_with(fns: &[(&str, dellingr::RustFunc)], source: &str) -> State {
     let mut state = State::new();
     for (name, f) in fns {
-        state.push_rust_fn(*f).expect("room for a function");
+        state.push_new_rust_fn(*f).expect("room for a function");
         state.set_global(name).expect("global install");
     }
     support::run(&mut state, source);
@@ -296,7 +297,9 @@ fn panicking_on_error_from_a_host_tostring_poisons_the_state() {
     // raised after the callback's own unwind guard, so only the public
     // boundary of tostring_bytes can mark it.
     let mut state = State::with_callbacks(Box::new(PanickingOnError));
-    state.push_rust_fn(failing_fn).expect("room for a function");
+    state
+        .push_new_rust_fn(failing_fn)
+        .expect("room for a function");
     state.set_global("fail").expect("global install");
     support::run(&mut state, "t = setmetatable({}, { __tostring = fail })");
     state.get_global("t").expect("t is defined");
@@ -314,7 +317,7 @@ fn load_setup_that_swallows_a_panic_is_refused() {
         &save.bytes,
         Box::new(dellingr::DefaultCallbacks),
         |state| -> dellingr::Result<()> {
-            state.push_rust_fn(panicking_fn)?;
+            state.push_new_rust_fn(panicking_fn)?;
             let caught = catch_unwind(AssertUnwindSafe(|| {
                 state.call(ArgCount::Fixed(0), RetCount::Fixed(0))
             }));

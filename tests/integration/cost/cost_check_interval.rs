@@ -95,6 +95,7 @@ fn opcode_cost_interval_matches_immediate_flush_across_budgets() {
 #[cfg(feature = "cost-check-interval")]
 #[test]
 fn corpus_cost_check_interval_differential() {
+    use crate::support::PushNewRustFn;
     use dellingr::{Program, with_cost_check_interval};
 
     fn execute(
@@ -113,7 +114,7 @@ fn corpus_cost_check_interval_differential() {
                 ("oversized", support::error_boundary_cases::oversized),
             ];
             for (name, callback) in callbacks {
-                state.push_rust_fn(callback).unwrap();
+                state.push_new_rust_fn(callback).unwrap();
                 state.set_global(name).unwrap();
             }
             if source.contains("large") {

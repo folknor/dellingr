@@ -3,7 +3,8 @@
 //! This module contains methods for creating and manipulating Lua tables,
 //! including metamethod-aware operations.
 
-use super::lua_val::{PointerIdKey, RustFunc, Val};
+use super::RustFnId;
+use super::lua_val::{PointerIdKey, Val};
 use super::table::{TableError, TableNext};
 use super::{Result, State, TypeError};
 use crate::error::{Error, ErrorKind, ErrorValue, InternalFault, LibraryError, LibraryFunction};
@@ -215,27 +216,13 @@ impl State {
         })
     }
 
-    #[cfg(not(feature = "snapshot"))]
     pub(crate) fn set_table_str_key_rust_fn(
         &mut self,
         table_idx: isize,
         name: &str,
-        func: RustFunc,
+        function: RustFnId,
     ) -> Result<()> {
-        self.set_table_str_key_value(table_idx, name, Val::RustFn(func))
-    }
-
-    #[cfg(feature = "snapshot")]
-    pub(crate) fn set_table_str_key_named_rust_fn(
-        &mut self,
-        table_idx: isize,
-        name: &str,
-        id: &str,
-        func: RustFunc,
-    ) -> Result<()> {
-        self.register_rust_fn(id, func)
-            .map_err(Self::registration_error)?;
-        self.set_table_str_key_value(table_idx, name, Val::RustFn(func))
+        self.set_table_str_key_value(table_idx, name, Val::RustFn(function))
     }
 
     pub(crate) fn set_table_str_key_number(
@@ -971,8 +958,8 @@ impl State {
         let i = self.convert_idx(idx)?;
         let val = self.stack[i];
         // Rust functions get the same state-local identity as closures, so
-        // distinct builtins (unequal under `==`, which compares addresses)
-        // render distinctly. The id map is keyed by the function value and is
+        // distinct builtins (unequal under `==`, which compares function
+        // table entries) render distinctly. The id map is keyed by the function value and is
         // saved state: a registered RustFn reachable at save time encodes as
         // a registry token, so its id survives save and load.
         // Strings and primitives render from the heap alone; only functions

@@ -18,9 +18,12 @@ fn typed_argument_detail_preserves_variant_and_rendering() {
     );
 }
 
+/// A second registration of an id is refused whichever function it names,
+/// the same one included: registration never compares function pointers. The
+/// original binding is untouched.
 #[cfg(feature = "snapshot")]
 #[test]
-fn duplicate_named_push_preserves_id_and_stack() {
+fn duplicate_registration_preserves_the_original_binding() {
     fn first(_state: &mut dellingr::State) -> dellingr::Result<u8> {
         Ok(0)
     }
@@ -29,18 +32,26 @@ fn duplicate_named_push_preserves_id_and_stack() {
     }
 
     let mut state = dellingr::State::new();
-    state
+    let original = state
         .register_rust_fn("host.same", first)
         .expect("first registration succeeds");
+    let functions: [dellingr::RustFunc; 2] = [second, first];
+    for function in functions {
+        let error = state
+            .register_rust_fn("host.same", function)
+            .expect_err("id conflicts");
+        assert_eq!(
+            error,
+            dellingr::SaveError::DuplicateFunctionRegistration {
+                id: "host.same".to_owned()
+            }
+        );
+        assert_eq!(error.to_string(), "id host.same is already registered");
+    }
+    assert_eq!(state.registered_rust_fn("host.same"), Some(original));
     let top = state.get_top();
-    let error = state
-        .push_named_rust_fn("host.same", second)
-        .expect_err("id conflicts");
-    assert!(
-        matches!(error.kind(), ErrorKind::DuplicateFunctionRegistration { id } if id == "host.same")
-    );
-    assert_eq!(state.get_top(), top);
     state
-        .push_named_rust_fn("host.same", first)
+        .push_rust_fn(original)
         .expect("original binding remains");
+    assert_eq!(state.get_top(), top + 1);
 }

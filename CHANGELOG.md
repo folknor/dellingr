@@ -38,6 +38,31 @@ All notable changes to dellingr are documented here. The format follows
 
 ### Changed (breaking)
 
+- Rust function identity is a State-owned function-table entry, never a code
+  address. `State::add_rust_fn` (and, under `snapshot`,
+  `State::register_rust_fn`) creates a function and returns a State-bound
+  `RustFnHandle`; `State::push_rust_fn` now takes that handle, and a handle
+  from another State fails with `ErrorKind::InvalidRustFnHandle`.
+  `push_named_rust_fn` is removed. `register_rust_fn` and
+  `set_global_named_rust_fn` return the handle, and registering an id the
+  State already has always fails with `DuplicateFunctionRegistration`, without
+  comparing function pointers (re-registering the same function under the
+  same id used to succeed). `State::registered_rust_fn` looks a handle up by
+  id. The standard library's functions are fixed catalog entries in every
+  State, so `open_libs` checks the host's ids against the catalog without
+  building a scratch State.
+  - **Replay-visible in release builds:** release LTO merged the identical
+    wrappers behind global `unpack` and `table.unpack`, so there the two
+    compared equal, shared one table key and one rendered identity, and saved
+    both as `table.unpack`. They are now two functions in every build, as dev
+    builds already had them, and saves write each one's own id. Saved bytes
+    no longer depend on the build profile; dev-build saves of the
+    standard library are unchanged, and the save golden is pinned in a release
+    sweep too. One host function registered under two ids is now two unequal
+    functions saving under their own ids (it used to be one value saving as
+    the smallest id); one added twice is two functions.
+  - The save format is unchanged. The fold-handling load path is gone: two
+    saved function ids now always load as two functions.
 - Register VM. The compiler builds a syntax tree per function and generates
   64-bit register bytecode from it (locals live in registers, constant
   operands are separate opcodes, comparisons branch in one instruction), in

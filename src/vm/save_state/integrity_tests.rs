@@ -314,64 +314,6 @@ fn environment_array_span_rejects_noncanonical_or_inconsistent_shapes() {
     }
 }
 
-fn folded_host_fn(_: &mut State) -> crate::Result<u8> {
-    Ok(0)
-}
-
-/// Encode `payload` as a save and load it into a State whose setup registers
-/// `folded_host_fn` under both `host.a` and `host.b`, as a build that folds
-/// two functions the saving build kept apart would.
-fn load_into_folding_build(payload: &SavePayload) -> Result<State, LoadError<SaveError>> {
-    let bytes = encode_fixture(payload);
-    State::load_state(&bytes, Box::new(crate::DefaultCallbacks), |state| {
-        state.register_rust_fn("host.a", folded_host_fn)?;
-        state.register_rust_fn("host.b", folded_host_fn)
-    })
-}
-
-fn encode_fixture(payload: &SavePayload) -> Vec<u8> {
-    encode_save(payload).expect("fixture payload encodes")
-}
-
-#[test]
-fn folded_functions_keep_the_smaller_rendered_identity() {
-    let mut payload = empty_payload();
-    payload.next_format_pointer_id = 3;
-    payload.format_pointer_ids = vec![
-        (SavedVal::Fn("host.b".to_owned()), 2),
-        (SavedVal::Fn("host.a".to_owned()), 1),
-    ];
-    let mut loaded = load_into_folding_build(&payload).expect("folded identities load");
-    assert_eq!(loaded.next_format_pointer_id, 3);
-    loaded.push_val(Val::RustFn(folded_host_fn)).unwrap();
-    assert_eq!(loaded.format_pointer_id(-1).unwrap(), Some(1));
-    assert_eq!(loaded.format_pointer_ids.len(), 1);
-}
-
-#[test]
-fn folded_functions_as_keys_of_one_table_are_rejected() {
-    let mut payload = empty_payload();
-    payload.objects = vec![SavedObject::Table {
-        array_len: 0,
-        array_slots: 0,
-        entries: vec![
-            (SavedVal::Fn("host.a".to_owned()), SavedVal::Bool(true)),
-            (SavedVal::Fn("host.b".to_owned()), SavedVal::Bool(true)),
-        ],
-        metatable: None,
-    }];
-    assert!(matches!(
-        load_into_folding_build(&payload),
-        Err(LoadError::Snapshot(SnapshotError::CorruptArena {
-            reason: CorruptionReason::Duplicate {
-                entry: DuplicateEntry::TableKey,
-                form: KeyForm::Materialized,
-            },
-            ..
-        }))
-    ));
-}
-
 // Decode the same checked-in bytes the integration test compares with a live
 // capture. Exhaustive enum matches make new wire variants require review.
 #[test]

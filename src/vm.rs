@@ -20,6 +20,7 @@ mod metamethod;
 mod object;
 mod registers;
 mod rng;
+mod rust_fn;
 #[cfg(feature = "snapshot")]
 mod save_state;
 mod stack;
@@ -32,6 +33,9 @@ pub use fault_injection::{FaultEvent, FaultSite};
 pub use lua_val::LuaType;
 pub use lua_val::RustFunc;
 pub(crate) use lua_val::number_to_string;
+pub use rust_fn::RustFnHandle;
+pub(crate) use rust_fn::RustFnId;
+use rust_fn::RustFnTable;
 #[cfg(feature = "snapshot")]
 pub use save_state::{
     CorruptionReason, DecodeReason, DuplicateEntry, EnvironmentCorruption, GmatchCorruption,
@@ -244,20 +248,13 @@ pub struct State {
     // disabled, entries grow with observed objects, just as the heap does.
     pub(super) format_pointer_ids: IndexMap<PointerIdKey, u64>,
     pub(super) next_format_pointer_id: u64,
-    /// Stable ids for Rust functions that are allowed to survive save/load.
-    #[cfg(feature = "snapshot")]
-    // Registrations persist even while unreachable: the host may push the same
-    // function again, and snapshots must still resolve its stable name. An
-    // unregister API needs an explicit host lifetime contract; automatic
-    // pruning would change save success and reverse-name selection.
-    pub(super) rust_fns_by_id: BTreeMap<String, RustFunc>,
-    /// Reverse address lookup for save-time Rust function naming.
-    ///
-    /// Keyed by function address, which is ASLR-dependent: probe it only
-    /// (`get`/`insert`). Never iterate it or derive an order from it, since
-    /// that order would differ between processes and leak into snapshot bytes.
-    #[cfg(feature = "snapshot")]
-    pub(super) rust_fn_ids_by_addr: BTreeMap<usize, String>,
+    /// Every Rust function a value of this State can hold: the standard
+    /// library catalog, then the host's entries, with their stable save ids
+    /// under `snapshot` (see `vm/rust_fn.rs`). Entries persist even while
+    /// unreachable: the host may push a handle again, and snapshots must
+    /// still resolve its stable id. An unregister API would need an explicit
+    /// host lifetime contract.
+    pub(super) rust_fns: RustFnTable,
     /// Canonical environment objects (library tables, `_G`'s metatable, and
     /// the shared string metatable; the global table's token is permanent and
     /// not kept here) captured after each successful open_libs,
@@ -472,10 +469,7 @@ impl State {
             registry: Registry::new(state_id),
             format_pointer_ids: IndexMap::default(),
             next_format_pointer_id: 1,
-            #[cfg(feature = "snapshot")]
-            rust_fns_by_id: BTreeMap::new(),
-            #[cfg(feature = "snapshot")]
-            rust_fn_ids_by_addr: BTreeMap::new(),
+            rust_fns: RustFnTable::new(state_id),
             #[cfg(feature = "snapshot")]
             env_tokens: BTreeMap::new(),
             #[cfg(feature = "snapshot")]
@@ -671,7 +665,7 @@ impl State {
     ///
     /// // A RustFunc is a plain function pointer, so the callback reaches the
     /// // collector through the State rather than by capturing it.
-    /// state.push_rust_fn(|state| {
+    /// let turn = state.add_rust_fn(|state| {
     ///     let turn = state.to_number(1)?;
     ///     state
     ///         .user_data_mut::<CommandCollector>()
@@ -680,6 +674,7 @@ impl State {
     ///         .push(turn);
     ///     Ok(0)
     /// })?;
+    /// state.push_rust_fn(turn)?;
     /// state.set_global("turn")?;
     ///
     /// let program = Program::compile("turn(0.5) turn(-0.25)", None)?;
@@ -1085,45 +1080,67 @@ impl State {
 
     // Keep native context out of CallInfo: those entries represent Lua frames,
     // and widening them would add work and storage to every Lua call. Capture
-    // only a function pointer at Rust dispatch; resolve names on errors only.
-    // RustFn values carry no registration identity. Multiple global aliases
-    // (or functions merged by LTO) therefore use the first live binding to
-    // that address in global table order whose key is a UTF-8 string; an
-    // unregistered callback stays anonymous. Snapshot ids are a fallback, not
-    // names inferred from the Lua caller.
+    // only the function's handle at Rust dispatch; resolve names on errors
+    // only. Several global aliases of one handle use the first live binding to
+    // it in global table order whose key is a UTF-8 string; a callback no
+    // global names falls back to its snapshot id, or stays anonymous. Neither
+    // is a name inferred from the Lua caller.
     pub(crate) fn active_rust_function_name(&self) -> Option<String> {
         let function = self.in_flight.active_rust_fn?;
         for (name, value) in self.global_env.live_string_bindings(&self.heap) {
             if let Val::RustFn(candidate) = value
-                && candidate as usize == function as usize
+                && candidate == function
                 && let Ok(name) = str::from_utf8(self.heap.get_string(name))
             {
                 return Some(name.to_owned());
             }
         }
         #[cfg(feature = "snapshot")]
-        if let Some(name) = self.rust_fn_ids_by_addr.get(&(function as usize)) {
-            return Some(name.clone());
+        if let Some(id) = self.rust_fns.save_id(function) {
+            return Some(id.to_owned());
         }
         None
     }
 
-    #[cfg(not(feature = "snapshot"))]
-    pub(crate) fn set_global_rust_fn(&mut self, name: &str, func: RustFunc) -> Result<()> {
-        self.set_global_value(name, Val::RustFn(func))
+    /// Install the catalog or host function `function` as global `name`.
+    pub(crate) fn set_global_rust_fn(&mut self, name: &str, function: RustFnId) -> Result<()> {
+        self.set_global_value(name, Val::RustFn(function))
     }
 
-    /// Register a Rust function under a stable id and install it as a global.
+    /// Creates a new Rust function entry and returns its handle; push it with
+    /// [`State::push_rust_fn`]. Every call creates a new function identity,
+    /// even for a function already added: values of two handles compare
+    /// unequal from Lua, while every push of one handle is the same value.
+    /// Entries live as long as the State, so create a handle once, during
+    /// setup, rather than per call.
     ///
-    /// Save/load uses `id` to resolve reachable [`RustFunc`] values across
-    /// processes; ids should be stable strings owned by the embedder.
+    /// The entry has no stable id, so a save that reaches it fails with
+    /// `SaveError::UnregisteredFunction`; under the `snapshot` feature,
+    /// `State::register_rust_fn` creates one that saves. Fails with
+    /// [`ErrorKind::RustFunctionLimit`] once the State holds
+    /// `u32::MAX` entries, changing nothing.
+    pub fn add_rust_fn(&mut self, function: RustFunc) -> Result<RustFnHandle> {
+        self.check_poisoned()?;
+        self.rust_fns.add(function).ok_or_else(|| {
+            Error::without_location(ErrorKind::RustFunctionLimit {
+                limit: RustFnTable::CAPACITY,
+            })
+        })
+    }
+
+    /// Register a Rust function under a stable id and install it as global
+    /// `name`, returning its handle (see [`State::register_rust_fn`]).
+    ///
+    /// The id must be new to this State. To install one registered function
+    /// under a second global name, push its handle and call
+    /// [`State::set_global`].
     #[cfg(feature = "snapshot")]
     pub fn set_global_named_rust_fn(
         &mut self,
         name: &str,
         id: &str,
         func: RustFunc,
-    ) -> std::result::Result<(), SaveError> {
+    ) -> std::result::Result<RustFnHandle, SaveError> {
         if self.poisoned {
             return Err(SaveError::StatePoisoned);
         }
@@ -1135,39 +1152,41 @@ impl State {
                 limit: crate::limits::MAX_STRING_BYTES,
             });
         }
-        self.register_rust_fn(id, func)?;
+        let handle = self.register_rust_fn(id, func)?;
+        let function = self
+            .rust_fns
+            .resolve(handle)
+            .expect("this State issued the handle it just registered");
         // The length is checked, and a Rust function needs no rooting while
         // interning collects.
         let key = self.allocator().alloc_string(name.as_bytes());
         self.global_env
-            .write_key(&mut self.heap, key, Val::RustFn(func));
-        Ok(())
+            .write_key(&mut self.heap, key, Val::RustFn(function));
+        Ok(handle)
     }
 
-    /// Converts a registration failure into an execution-API error, keeping
-    /// the conflicting id of a duplicate registration structured.
-    #[cfg(feature = "snapshot")]
-    pub(crate) fn registration_error(err: SaveError) -> Error {
-        match err {
-            SaveError::DuplicateFunctionRegistration { id } => {
-                Error::without_location(ErrorKind::DuplicateFunctionRegistration { id })
-            }
-            other => Error::internal_fault(super::error::InternalFault::Registration(other)),
-        }
-    }
-
-    /// Register a Rust function id without installing the function anywhere.
+    /// Register a Rust function under a stable id without installing it
+    /// anywhere, and return its handle; push it with [`State::push_rust_fn`].
     ///
-    /// This is useful when the host pushes or stores the function manually but
-    /// still wants it to survive save/load if Lua makes it reachable.
-    /// Ids exceeding [`crate::limits::MAX_SAVE_IDENTIFIER_BYTES`] are rejected
-    /// before either registry is changed.
+    /// Save and load resolve the function by `id`: a save writes the id of
+    /// every registered function it reaches, and a load resolves it through
+    /// the registrations its setup made. Ids should be stable strings owned by
+    /// the embedder. Like [`State::add_rust_fn`], registration creates a new
+    /// function identity: registering one Rust function under two ids gives
+    /// two functions that compare unequal from Lua and save under their own
+    /// ids.
+    ///
+    /// The id must be new to this State, including the standard library's ids
+    /// once `open_libs` ran: an id that is already registered fails with
+    /// `SaveError::DuplicateFunctionRegistration`, whatever function it names.
+    /// Ids exceeding [`crate::limits::MAX_SAVE_IDENTIFIER_BYTES`] are
+    /// rejected. A rejected registration changes nothing.
     #[cfg(feature = "snapshot")]
     pub fn register_rust_fn(
         &mut self,
         id: &str,
         func: RustFunc,
-    ) -> std::result::Result<(), save_state::SaveError> {
+    ) -> std::result::Result<RustFnHandle, save_state::SaveError> {
         if self.poisoned {
             return Err(save_state::SaveError::StatePoisoned);
         }
@@ -1178,54 +1197,37 @@ impl State {
                 limit: crate::limits::MAX_SAVE_IDENTIFIER_BYTES,
             });
         }
-        let addr = func as usize;
         // Keep SaveError in this public signature: load setup closures
-        // propagate it. Execution-API wrappers convert it with
-        // `registration_error`, which keeps the id structured. Moving the type
-        // needs a coordinated API migration rather than a local change.
-        // An id collision binds one id to two different function addresses
-        // (an embedder bug). Re-registering the
-        // same id->fn pair is idempotent.
-        if let Some(existing_func) = self.rust_fns_by_id.get(id) {
-            if *existing_func as usize != addr {
-                return Err(save_state::SaveError::DuplicateFunctionRegistration {
-                    id: id.to_string(),
-                });
-            }
-            return Ok(());
+        // propagate it. Moving the type needs a coordinated API migration
+        // rather than a local change. An id names one function entry, so a
+        // second registration of an id is refused without comparing function
+        // pointers: one Rust function need not have one address.
+        if self.rust_fns.is_bound(id) {
+            return Err(save_state::SaveError::DuplicateFunctionRegistration {
+                id: id.to_string(),
+            });
         }
-        self.rust_fns_by_id.insert(id.to_string(), func);
-        // Several ids may legitimately share one address: intentional aliasing,
-        // or identical-code folding collapsing distinct fns under release LTO.
-        // Both are behaviorally safe (same code), so we never error here; we
-        // keep the lexicographically-smallest id as the reverse name so saves
-        // stay deterministic regardless of registration order.
-        // Consequence: distinct host functions folded to one address both save
-        // as the smallest id, so a build that does not fold them loads the
-        // second as the first, and Lua == between them can differ from the
-        // saving build. Embedders needing distinct identity must keep function
-        // bodies observably distinct; a thin wrapper around a shared body is
-        // not enough (table.unpack and base unpack have separate wrappers, and
-        // release LTO folds them). Refusing shared addresses would break
-        // aliasing and release LTO builds.
-        // Rust function identity is by address everywhere: `Val` equality
-        // (script-visible `f == g`), the TFORCALL fast paths for next and the
-        // ipairs iterator, the active-function name, and this reverse map. The
-        // smallest-id rule makes `Fn` ids in save bytes depend on whether the
-        // build folded functions, so cross-build snapshot bytes are only
-        // guaranteed identical for the same build (see docs/save-state.md).
-        match self.rust_fn_ids_by_addr.get(&addr) {
-            Some(existing_id) if existing_id.as_str() <= id => {}
-            _ => {
-                self.rust_fn_ids_by_addr.insert(addr, id.to_string());
-            }
-        }
-        Ok(())
+        self.rust_fns
+            .register(id, func)
+            .ok_or(save_state::SaveError::TooLarge {
+                collection: save_state::SaveCollection::RustFunctions,
+                count: RustFnTable::CAPACITY,
+                limit: RustFnTable::CAPACITY,
+            })
+    }
+
+    /// The handle of the function registered under `id`, if any: a host
+    /// entry from [`State::register_rust_fn`], or a standard-library function
+    /// once `open_libs` ran (`"print"`, `"math.sin"`, ...).
+    #[cfg(feature = "snapshot")]
+    pub fn registered_rust_fn(&self, id: &str) -> Option<RustFnHandle> {
+        self.rust_fns
+            .lookup(id)
+            .map(|function| self.rust_fns.handle_of(function))
     }
 
     /// Store global `name`. Interning the name may collect, so a heap `val`
     /// must be rooted by the caller.
-    #[cfg(any(test, not(feature = "snapshot")))]
     pub(super) fn set_global_value(&mut self, name: &str, val: Val) -> Result<()> {
         if let Some(key) = self.global_name_key(name, val)? {
             self.global_env.write_key(&mut self.heap, key, val);

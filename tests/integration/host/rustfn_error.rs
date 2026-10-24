@@ -3,6 +3,7 @@
 use dellingr::error::{Error, ErrorKind};
 use dellingr::{ArgCount, LuaType, RetCount, State};
 
+use crate::support::PushNewRustFn;
 use crate::support::{self, Recorder};
 
 fn boom_fn(_state: &mut State) -> dellingr::Result<u8> {
@@ -14,7 +15,7 @@ fn host_direct_rustfn_error_notifies_on_error_once() {
     // A Rust function that fails when the host calls it directly (no Lua frame)
     // must still notify on_error, consistently with the Lua-reached case.
     let (mut state, recorder) = Recorder::state();
-    state.push_rust_fn(boom_fn).unwrap();
+    state.push_new_rust_fn(boom_fn).unwrap();
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect_err("rust fn errors");
@@ -26,7 +27,7 @@ fn lua_reached_rustfn_error_notifies_on_error_once() {
     // The same failure reached through Lua must fire on_error exactly once, not
     // twice: the Lua frame notifies, and State::call must not also notify.
     let (mut state, recorder) = Recorder::state();
-    state.push_rust_fn(boom_fn).unwrap();
+    state.push_new_rust_fn(boom_fn).unwrap();
     state.set_global("boom").unwrap();
     support::load(&mut state, "return boom()");
     state
@@ -106,7 +107,7 @@ fn iterator_with_256_visible_values(state: &mut State) -> dellingr::Result<u8> {
 fn generic_for_rust_iterator_keeps_its_topmost_reported_result() {
     let mut state = State::new();
     state
-        .push_rust_fn(iterator_with_256_visible_values)
+        .push_new_rust_fn(iterator_with_256_visible_values)
         .unwrap();
     state.set_global("overfull_iter").unwrap();
     support::eval(
@@ -129,7 +130,7 @@ fn rustfn_error_restores_stack_bottom() {
 
     // Register a Rust function that returns an error.
     state
-        .push_rust_fn(|_state| {
+        .push_new_rust_fn(|_state| {
             Err(Error::without_location(ErrorKind::HostError(
                 "intentional error".into(),
             )))
@@ -165,7 +166,7 @@ fn stack_operations_after_rustfn_error() {
 
     // Register a Rust function that returns an error.
     state
-        .push_rust_fn(|_state| {
+        .push_new_rust_fn(|_state| {
             Err(Error::without_location(ErrorKind::HostError(
                 "intentional error".into(),
             )))
@@ -197,7 +198,7 @@ fn rustfn_error_with_arguments_clears_call_frame() {
     let top_before = state.get_top();
 
     state
-        .push_rust_fn(|state| {
+        .push_new_rust_fn(|state| {
             assert_eq!(state.get_top(), 3);
             assert_eq!(state.to_string(1).unwrap(), "alpha");
             assert_eq!(state.to_number(2).unwrap(), 23.0);
@@ -296,7 +297,7 @@ fn multiple_rustfn_errors() {
 
     // Register error function
     state
-        .push_rust_fn(|_state| {
+        .push_new_rust_fn(|_state| {
             Err(Error::without_location(ErrorKind::HostError(
                 "error".into(),
             )))
@@ -325,7 +326,7 @@ fn nested_dynamic_callback_error_clears_all_call_frames() {
     let mut state = State::new();
 
     state
-        .push_rust_fn(|state| {
+        .push_new_rust_fn(|state| {
             assert_eq!(state.get_top(), 8);
             assert_eq!(state.to_string(1).unwrap(), "inner");
             assert_eq!(state.to_string(2).unwrap(), "m1");
@@ -383,7 +384,7 @@ fn rustfn_called_inside_dynamic_arg_sees_only_its_arguments() {
     let mut state = State::new();
 
     state
-        .push_rust_fn(|state| {
+        .push_new_rust_fn(|state| {
             let top = state.get_top() as f64;
             assert_eq!(state.to_string(1).unwrap(), "a");
             assert_eq!(state.to_string(2).unwrap(), "b");
@@ -425,7 +426,7 @@ fn rustfn_table_field_called_inside_dynamic_arg_sees_only_its_arguments() {
         .push_string("arg_probe")
         .expect("short test string fits");
     state
-        .push_rust_fn(|state| {
+        .push_new_rust_fn(|state| {
             assert_eq!(state.get_top(), 3);
             assert_eq!(state.to_string(1).unwrap(), "hello");
             assert_eq!(state.to_string(2).unwrap(), "l");

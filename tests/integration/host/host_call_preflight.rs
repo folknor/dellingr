@@ -4,6 +4,7 @@
 use dellingr::error::ErrorKind;
 use dellingr::{ArgCount, RetCount, State};
 
+use crate::support::PushNewRustFn;
 use crate::support::{self, Recorder};
 
 #[test]
@@ -89,7 +90,7 @@ fn rust_call_releases_callee_slot_before_callback_push() {
     let cap = dellingr::limits::MAX_STACK_SIZE;
     state.set_top((cap - 2) as isize).unwrap();
     state
-        .push_rust_fn(|state| {
+        .push_new_rust_fn(|state| {
             assert_eq!(state.to_number(1)?, 42.0);
             state.push_number(23.0)?;
             Ok(1)

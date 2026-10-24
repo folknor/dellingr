@@ -52,7 +52,9 @@ fn rust_function_held_only_by_host_keeps_its_identity() {
 
     // The host still holds the function and hands it back after load.
     let mut loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), |state| {
-        state.set_global_named_rust_fn("handed_back", "game.host_fn", host_fn)
+        state
+            .set_global_named_rust_fn("handed_back", "game.host_fn", host_fn)
+            .map(drop)
     })
     .unwrap();
     support::run(

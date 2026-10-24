@@ -116,7 +116,7 @@ mod tests {
         }
 
         let mut state = State::new();
-        state.push_rust_fn(callback).unwrap();
+        state.push_new_rust_fn(callback).unwrap();
         state.arm_fault_injection(Some(2));
         let error = state
             .call(ArgCount::Fixed(0), RetCount::Fixed(0))

@@ -7,6 +7,7 @@ use std::collections::BTreeSet;
 use dellingr::error::{Error, ErrorKind};
 use dellingr::{ArgCount, RetCount, State};
 
+use crate::support::PushNewRustFn;
 use crate::support::{self, Recorder};
 
 /// Pushes one value and claims three.
@@ -45,7 +46,7 @@ fn return_top_two(state: &mut State) -> dellingr::Result<u8> {
 /// intact before propagating the error.
 fn nested_over_report(state: &mut State) -> dellingr::Result<u8> {
     state.push_number(42.0)?;
-    state.push_rust_fn(over_report)?;
+    state.push_new_rust_fn(over_report)?;
     let error = state
         .call(ArgCount::Fixed(0), RetCount::Fixed(1))
         .expect_err("inner callback over-reports");
@@ -262,7 +263,7 @@ fn tested_rust_fn_entry_edges() -> BTreeSet<String> {
 fn run_lua_over_report(script: &str, available: usize) {
     let (mut state, recorder) = Recorder::state();
     state
-        .push_rust_fn(over_report_max)
+        .push_new_rust_fn(over_report_max)
         .expect("the callback should fit");
     state
         .set_global("bad")
@@ -307,7 +308,7 @@ fn inventoried_lua_routes_reject_rust_fn_over_report() {
 fn call_anchor_rejects_over_report() {
     let (mut state, recorder) = Recorder::state();
     state
-        .push_rust_fn(over_report_max)
+        .push_new_rust_fn(over_report_max)
         .expect("the callback should fit");
     let anchor = state
         .anchor_function()
@@ -324,7 +325,7 @@ fn call_anchor_rejects_over_report() {
 fn direct_host_call_rejects_over_report() {
     let (mut state, recorder) = Recorder::state();
     state.push_string("below").unwrap();
-    state.push_rust_fn(over_report).unwrap();
+    state.push_new_rust_fn(over_report).unwrap();
     let error = state
         .call(ArgCount::Fixed(0), RetCount::All)
         .expect_err("over-report fails");
@@ -336,7 +337,7 @@ fn direct_host_call_rejects_over_report() {
 #[test]
 fn lua_call_rejects_over_report() {
     let (mut state, recorder) = Recorder::state();
-    state.push_rust_fn(over_report).unwrap();
+    state.push_new_rust_fn(over_report).unwrap();
     state.set_global("bad").unwrap();
     support::load(&mut state, "local a, b, c = bad()");
     let error = state
@@ -350,7 +351,7 @@ fn lua_call_rejects_over_report() {
 #[test]
 fn generic_for_iterator_rejects_over_report() {
     let (mut state, recorder) = Recorder::state();
-    state.push_rust_fn(over_report_iterator).unwrap();
+    state.push_new_rust_fn(over_report_iterator).unwrap();
     state.set_global("bad").unwrap();
     support::load(&mut state, "for k, v in bad do error('unreachable') end");
     let error = state
@@ -376,7 +377,7 @@ fn generic_for_iterator_rejects_over_report() {
 #[test]
 fn nested_over_report_restores_outer_frame_and_reports_once() {
     let (mut state, recorder) = Recorder::state();
-    state.push_rust_fn(nested_over_report).unwrap();
+    state.push_new_rust_fn(nested_over_report).unwrap();
     let error = state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect_err("inner failure propagates");
@@ -388,7 +389,7 @@ fn nested_over_report_restores_outer_frame_and_reports_once() {
 #[test]
 fn arguments_count_as_results() {
     let (mut state, _recorder) = Recorder::state();
-    state.push_rust_fn(return_args).unwrap();
+    state.push_new_rust_fn(return_args).unwrap();
     state.push_number(1.0).unwrap();
     state.push_number(2.0).unwrap();
     state.call(ArgCount::Fixed(2), RetCount::All).unwrap();
@@ -400,7 +401,7 @@ fn arguments_count_as_results() {
 #[test]
 fn under_report_keeps_top_values_in_order() {
     let (mut state, _recorder) = Recorder::state();
-    state.push_rust_fn(return_top_two).unwrap();
+    state.push_new_rust_fn(return_top_two).unwrap();
     state.push_number(9.0).unwrap();
     state.call(ArgCount::Fixed(1), RetCount::All).unwrap();
     assert_eq!(state.get_top(), 2);
@@ -412,7 +413,7 @@ fn under_report_keeps_top_values_in_order() {
 fn under_report_discards_many_arguments_without_disturbing_caller() {
     let (mut state, _recorder) = Recorder::state();
     state.push_string("caller").unwrap();
-    state.push_rust_fn(return_top_two).unwrap();
+    state.push_new_rust_fn(return_top_two).unwrap();
     for n in 0..200 {
         state.push_number(f64::from(n)).unwrap();
     }
@@ -426,7 +427,7 @@ fn under_report_discards_many_arguments_without_disturbing_caller() {
 #[test]
 fn caller_side_padding_is_unchanged() {
     let (mut state, _recorder) = Recorder::state();
-    state.push_rust_fn(return_top_two).unwrap();
+    state.push_new_rust_fn(return_top_two).unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(4)).unwrap();
     assert_eq!(state.get_top(), 4);
     assert_eq!(state.to_number(1).unwrap(), 2.0);

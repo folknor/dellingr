@@ -16,6 +16,7 @@ use dellingr::limits::MAX_METAMETHOD_DEPTH;
 use dellingr::{ArgCount, RetCount, State};
 
 use crate::support;
+use crate::support::PushNewRustFn;
 
 const PRELUDE: &str = r#"
 local callable
@@ -299,7 +300,7 @@ fn a_failed_store_returns_every_unit_it_took() {
     let mut state = state_with(
         "function store_probe(o) if o == 'nan' then key_site(two, 0/0) else field_site(o) end end",
     );
-    state.push_rust_fn(try_store).expect("callback fits");
+    state.push_new_rust_fn(try_store).expect("callback fits");
     state.set_global("try_store").expect("callback set");
     for receiver in ["bad_chain", "bad", "'nan'"] {
         let store = format!(

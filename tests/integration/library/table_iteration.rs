@@ -1,6 +1,7 @@
 use dellingr::{ArgCount, RetCount, State};
 
 use crate::support;
+use crate::support::PushNewRustFn;
 
 #[test]
 fn filter_in_place_survives_inline_and_map_tombstones() {
@@ -36,7 +37,7 @@ fn collectable_tombstone_key_survives_next_control_lookup() {
     let mut state = State::new();
     state.gc_disable_auto();
     state
-        .push_rust_fn(|state| {
+        .push_new_rust_fn(|state| {
             state.gc_collect();
             Ok(0)
         })

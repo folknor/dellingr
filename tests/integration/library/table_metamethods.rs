@@ -10,6 +10,7 @@ use dellingr::error::{ErrorKind, LibraryError, LibraryFunction};
 use dellingr::{ArgCount, RetCount, State};
 
 use crate::support;
+use crate::support::PushNewRustFn;
 
 fn run(code: &str) -> dellingr::Result<()> {
     let mut state = State::new();
@@ -360,7 +361,7 @@ fn negative_len_removals_charge_the_flat_cost() {
 fn sequence_values_stay_rooted_across_allocating_handlers() {
     let mut state = State::new();
     state
-        .push_rust_fn(|state| {
+        .push_new_rust_fn(|state| {
             state.gc_collect();
             Ok(0)
         })

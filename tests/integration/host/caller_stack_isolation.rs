@@ -3,6 +3,7 @@
 use dellingr::{ArgCount, RetCount, State};
 
 use crate::support;
+use crate::support::PushNewRustFn;
 
 fn churn(state: &mut State) -> dellingr::Result<u8> {
     let below = -(state.get_top() as isize) - 1;
@@ -36,7 +37,7 @@ fn run(state: &mut State, source: &str) {
 #[test]
 fn caller_operands_survive_rust_metamethods_and_iterators() {
     let mut state = State::new();
-    state.push_rust_fn(churn).unwrap();
+    state.push_new_rust_fn(churn).unwrap();
     state.set_global("churn").unwrap();
     run(
         &mut state,

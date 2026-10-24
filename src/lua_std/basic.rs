@@ -66,10 +66,9 @@ fn parse_integer_with_base(bytes: &[u8], base: u32) -> Option<f64> {
     if negative { Some(-value) } else { Some(value) }
 }
 
-// A separate wrapper so the global name gets its own callback address where the
-// build keeps one. Active callback-name lookup and snapshot reverse lookup are
-// keyed by the Rust function address. Release LTO folds it with
-// `table.unpack`'s identical wrapper, so there both resolve to one id.
+// Global `unpack` and `table.unpack` are separate catalog entries, so they are
+// distinct values with their own save ids whatever this wrapper compiles to;
+// the wrapper only gives the native-call inventory its own edge.
 fn base_unpack_values(state: &mut State) -> Result<u8> {
     crate::native_call!(
         "base_unpack_values->unpack_values",
@@ -80,9 +79,8 @@ fn base_unpack_values(state: &mut State) -> Result<u8> {
 pub(crate) fn base_ipairs(state: &mut State) -> Result<u8> {
     check_type_named(state, 1, LuaType::Table, "ipairs")?;
     state.set_top(1)?;
-    // `open_base` registered this id once; pushing directly avoids another
-    // snapshot registry lookup on every ipairs call.
-    state.push_rust_fn(base_ipairs_iter)?;
+    // The catalog's iterator entry: the generic-for fast path recognises it.
+    state.push_rust_fn_id(super::IPAIRS_ITER)?;
     // Swap the table and function
     state.push_value(1)?;
     state.remove(1)?;
@@ -144,7 +142,8 @@ pub(crate) fn base_pairs(state: &mut State) -> Result<u8> {
     check_type_named(state, 1, LuaType::Table, "pairs")?;
     state.set_top(1)?;
     // Return: next function, table, nil
-    state.push_rust_fn(base_next)?;
+    // Global `next`'s own catalog entry, so `pairs(t) == next` holds.
+    state.push_rust_fn_id(super::NEXT)?;
     state.push_value(1)?; // table
     state.push_nil()?; // initial key
     // Stack: [table, next, table, nil]
@@ -157,7 +156,38 @@ pub(crate) fn base_pairs(state: &mut State) -> Result<u8> {
 pub(super) const GLOBAL_ENV_PROTECTION_FIELDS: &[(&str, bool)] =
     &[(MetaName::Metatable.as_str(), false)];
 
-pub(super) const NON_BUILTIN_GLOBALS: &[(&str, crate::RustFunc)] = &[
+/// The standard globals that have no `Builtin` slot.
+pub(super) const NON_BUILTIN_GLOBALS: &[&str] = &["error"];
+
+/// The base library's globals, in installation order. Each is also a
+/// standard-library catalog entry whose stable save id is its global name.
+pub(super) const BASE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
+    ("ipairs", base_ipairs),
+    ("next", base_next),
+    ("pairs", base_pairs),
+    // Receives any number of arguments, and prints their values to `stdout`.
+    // Output is routed through host callbacks, allowing the game engine to
+    // redirect print output to per-script consoles.
+    ("print", |state| {
+        let top = state.top_isize();
+        let mut message = Vec::new();
+        for stack_index in 1..=top {
+            if stack_index != 1 {
+                crate::limits::checked_string_growth(message.len(), 1)?;
+                message.push(b'\t');
+            }
+            // The host receives the exact bytes, so the joined message is
+            // bounded by the string cap on its raw length.
+            let part = crate::native_call!(
+                "lib:print->tostring_bytes_unguarded",
+                state.tostring_bytes_unguarded(stack_index)
+            )?;
+            crate::limits::checked_string_growth(message.len(), part.len())?;
+            message.extend_from_slice(&part);
+        }
+        state.host_print(&message);
+        Ok(0)
+    }),
     // Raises an error with the given message.
     ("error", |state| {
         // The value is built before the level argument is validated, so a
@@ -194,59 +224,16 @@ pub(super) const NON_BUILTIN_GLOBALS: &[(&str, crate::RustFunc)] = &[
             prefix: prefix_location,
         }))
     }),
-];
-
-pub(crate) fn open_base(state: &mut State) -> Result<()> {
-    macro_rules! add {
-        ($name:expr, $func:expr) => {
-            state.register_lib_global_fn($name, $func)?;
-        };
-    }
-
-    state.register_lib_fn_id("ipairs.iter", base_ipairs_iter)?;
-    add!("ipairs", base_ipairs);
-    add!("next", base_next);
-    add!("pairs", base_pairs);
-
-    // Receives any number of arguments, and prints their values to `stdout`.
-    // Output is routed through host callbacks, allowing the game engine to
-    // redirect print output to per-script consoles.
-    add!("print", |state| {
-        let top = state.top_isize();
-        let mut message = Vec::new();
-        for stack_index in 1..=top {
-            if stack_index != 1 {
-                crate::limits::checked_string_growth(message.len(), 1)?;
-                message.push(b'\t');
-            }
-            // The host receives the exact bytes, so the joined message is
-            // bounded by the string cap on its raw length.
-            let part = crate::native_call!(
-                "lib:print->tostring_bytes_unguarded",
-                state.tostring_bytes_unguarded(stack_index)
-            )?;
-            crate::limits::checked_string_growth(message.len(), part.len())?;
-            message.extend_from_slice(&part);
-        }
-        state.host_print(&message);
-        Ok(0)
-    });
-
-    for &(name, func) in NON_BUILTIN_GLOBALS {
-        state.register_lib_global_fn(name, func)?;
-    }
-
     // Returns the type of its only argument, coded as a string.
-    add!("type", |state| {
+    ("type", |state| {
         check_any_named(state, 1, "type")?;
         let typ = state.typ(1);
         state.set_top(0)?;
         state.push_string(typ.as_str())?;
         Ok(1)
-    });
-
+    }),
     // Converts a value to a number, or a string in the given base to a number.
-    add!("tonumber", |state| {
+    ("tonumber", |state| {
         check_any_named(state, 1, "tonumber")?;
         if !state.is_none_or_nil(2)? {
             check_type_named(state, 1, LuaType::String, "tonumber")?;
@@ -298,10 +285,9 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
                 Ok(1)
             }
         }
-    });
-
+    }),
     // Converts any value to its string representation.
-    add!("tostring", |state| {
+    ("tostring", |state| {
         check_any_named(state, 1, "tostring")?;
         match crate::native_call!(
             "lib:tostring->tostring_rendering",
@@ -317,30 +303,27 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
             }
         }
         Ok(1)
-    });
-
+    }),
     // unpack(list [, i [, j]])
     //
     // Returns list[i], list[i+1], ..., list[j]. Defaults to 1..#list. The
     // implementation is shared with `table.unpack`; see `unpack_values` for
     // its length and lookup behavior.
-    add!("unpack", base_unpack_values);
-
+    ("unpack", base_unpack_values),
     // getmetatable(object)
     // Returns the value's metatable (tables or strings), respecting protection.
-    add!("getmetatable", |state| {
+    ("getmetatable", |state| {
         check_any_named(state, 1, "getmetatable")?;
         state.set_top(1)?;
         raw_metafield(state, 1)?;
         // Stack: [object, metatable_or_nil]
         state.remove(1)?;
         Ok(1)
-    });
-
+    }),
     // setmetatable(table, metatable)
     // Sets the metatable for the given table. metatable can be nil to remove it.
     // Returns the table.
-    add!("setmetatable", |state| {
+    ("setmetatable", |state| {
         check_type_named(state, 1, LuaType::Table, "setmetatable")?;
         check_any_named(state, 2, "setmetatable")?;
         state.check_type_in(2, &[LuaType::Table, LuaType::Nil], "setmetatable")?;
@@ -355,11 +338,10 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
         state.set_metatable_of(1)?;
         // Stack: [table]
         Ok(1)
-    });
-
+    }),
     // rawget(table, index)
     // Gets the value of table[index] without invoking __index metamethod.
-    add!("rawget", |state| {
+    ("rawget", |state| {
         check_type_named(state, 1, LuaType::Table, "rawget")?;
         check_any_named(state, 2, "rawget")?;
         state.set_top(2)?;
@@ -371,12 +353,11 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
         state.remove(1)?;
         state.remove(1)?;
         Ok(1)
-    });
-
+    }),
     // rawset(table, index, value)
     // Sets table[index] = value without invoking __newindex metamethod.
     // Returns the table.
-    add!("rawset", |state| {
+    ("rawset", |state| {
         state.consume_cost(1)?;
         check_type_named(state, 1, LuaType::Table, "rawset")?;
         check_any_named(state, 2, "rawset")?;
@@ -386,22 +367,20 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
         state.set_table_raw(1)?;
         // Stack: [table]
         Ok(1)
-    });
-
+    }),
     // rawequal(v1, v2)
     // Returns true if v1 and v2 are primitively equal (without __eq metamethod).
-    add!("rawequal", |state| {
+    ("rawequal", |state| {
         check_any_named(state, 1, "rawequal")?;
         check_any_named(state, 2, "rawequal")?;
         let equal = state.raw_equal(1, 2);
         state.set_top(0)?;
         state.push_boolean(equal)?;
         Ok(1)
-    });
-
+    }),
     // rawlen(v)
     // Returns the length of a table or string without invoking __len metamethod.
-    add!("rawlen", |state| {
+    ("rawlen", |state| {
         check_any_named(state, 1, "rawlen")?;
         let typ = state.typ(1);
         let len = match typ {
@@ -419,12 +398,11 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
         state.set_top(0)?;
         state.push_number(len as f64)?;
         Ok(1)
-    });
-
+    }),
     // select(index, ...)
     // If index is a number, returns all arguments after argument number index.
     // If index is "#", returns the total number of extra arguments.
-    add!("select", |state| {
+    ("select", |state| {
         check_any_named(state, 1, "select")?;
         let num_args = state.get_top();
 
@@ -475,7 +453,13 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
         state.remove_bottom(start_pos - 1)?;
 
         crate::error::results_count(count).map_err(|kind| state.error(kind))
-    });
+    }),
+];
+
+pub(crate) fn open_base(state: &mut State) -> Result<()> {
+    for (index, &(name, _)) in BASE_FUNCTIONS.iter().enumerate() {
+        state.set_global_rust_fn(name, super::library_fn(super::BASE_SEGMENT, index))?;
+    }
 
     // _G - the global table itself, so `pairs(_G)`, `rawget(_G, k)` and
     // `rawset(_G, k, v)` see and change the real globals.

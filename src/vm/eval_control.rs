@@ -1,12 +1,11 @@
 use super::super::error::TypeError;
 use super::Result;
+use super::RustFnId;
 use super::State;
 use super::Val;
 use super::caches::{RuntimeCaches, TforCursorEntry, TforCursorSlot};
 use super::frame::Frame;
-use super::lua_val::RustFunc;
 use crate::instr::{ArgCount, RetCount};
-use crate::lua_std::{base_ipairs_iter, base_next};
 
 impl State {
     /// Numeric-for setup over the registers from `slot`: start, limit and
@@ -88,18 +87,16 @@ impl State {
         let control = self.stack[base + 2];
 
         if let Val::RustFn(f) = iterator {
-            // Identity is by function address (the same contract as `Val`
-            // equality and snapshot naming). The fast paths are semantically
-            // transparent: if identical-code folding made another function
-            // share these addresses, it would be identical code anyway.
-            let base_next_fn: RustFunc = base_next;
-            let base_ipairs_iter_fn: RustFunc = base_ipairs_iter;
-            if std::ptr::fn_addr_eq(f, base_next_fn)
+            // The catalog entries of `next` and the `ipairs` iterator, the
+            // same identity `Val` equality and snapshot naming use. The fast
+            // paths are semantically transparent: each does what its entry's
+            // function does.
+            if f == crate::lua_std::NEXT
                 && self.instr_tfor_call_next(base, state, control, num_vars, cursor_slot, caches)
             {
                 return Ok(());
             }
-            if std::ptr::fn_addr_eq(f, base_ipairs_iter_fn)
+            if f == crate::lua_std::IPAIRS_ITER
                 && self.instr_tfor_call_ipairs(base, state, control, num_vars)
             {
                 return Ok(());
@@ -242,7 +239,7 @@ impl State {
 
     pub(super) fn instr_tfor_call_rust_fn(
         &mut self,
-        f: RustFunc,
+        f: RustFnId,
         base: usize,
         state: Val,
         control: Val,

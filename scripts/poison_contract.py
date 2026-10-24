@@ -23,7 +23,7 @@ SAFE_INFALLIBLE = {
     "gc_set_policy", "gc_set_auto_threshold", "gc_disable_auto",
     "current_source", "seal_globals", "globals_sealed", "is_poisoned",
     "error", "get_top", "to_boolean", "typ", "raw_equal", "release_anchor",
-    "anchor_type", "anchor_count",
+    "anchor_type", "anchor_count", "registered_rust_fn",
     # Collection explicitly becomes a no-op after poisoning.
     "gc_collect",
     # Debug-only instrumentation controls, not script execution.

@@ -13,11 +13,9 @@ mod save_golden_program;
 mod output;
 
 fn main() {
-    // Release builds can fold identical Rust functions, which changes saved
-    // function ids; the golden must come from the profile the tests run under.
-    if !cfg!(debug_assertions) {
-        panic!("save golden regeneration requires --debug");
-    }
+    // Any profile writes the same payload: saved Rust functions are function
+    // table ids, never code addresses, and the release sweep checks the
+    // fixture too.
     let bytes = save_golden_program::golden_bytes();
     // brokkr --commit builds this example from a worktree but runs it in the
     // caller's checkout, so find the repository from the runtime directory.

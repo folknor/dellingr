@@ -33,12 +33,12 @@ pub enum SaveError {
         /// Best-effort path to the value that made the function reachable.
         reachable_from: String,
     },
-    /// One save/load id was registered for two different Rust functions.
+    /// A save/load id is already registered in this State.
     ///
     /// Registration currently reports this through `SaveError` because the
     /// registration API and its error type are outside this module's scope.
     DuplicateFunctionRegistration {
-        /// The id that was bound to conflicting function addresses.
+        /// The id that was already registered.
         id: String,
     },
     /// A reachable upvalue was still open.
@@ -78,7 +78,7 @@ impl fmt::Display for SaveError {
             SaveError::DuplicateFunctionRegistration { id } => {
                 f.write_str("id ")?;
                 write_bounded_user_text(f, id)?;
-                f.write_str(" registered for two different Rust functions")
+                f.write_str(" is already registered")
             }
             SaveError::OpenUpvalueReachable => write!(f, "open upvalue reachable during save"),
             SaveError::Internal(reason) => write!(f, "save encode invariant failed: {reason}"),
@@ -189,6 +189,8 @@ pub enum SaveCollection {
     EnvironmentDeltas,
     /// The rendered pointer identity records.
     FormatPointerIds,
+    /// The State's Rust function table, which registration extends.
+    RustFunctions,
     /// An environment delta's deleted keys.
     EnvironmentDeletedKeys,
     /// An environment delta's upserts.
@@ -231,6 +233,7 @@ impl fmt::Display for SaveCollection {
             Self::Globals => "globals",
             Self::EnvironmentDeltas => "environment deltas",
             Self::FormatPointerIds => "format pointer ids",
+            Self::RustFunctions => "Rust functions",
             Self::EnvironmentDeletedKeys => "environment deleted keys",
             Self::EnvironmentUpserts => "environment upserts",
             Self::EnvironmentOrder => "environment order",

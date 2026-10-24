@@ -18,11 +18,14 @@
 //!   two-pass allocate-then-fill so cyclic graphs resolve. Those allocators
 //!   never run GC, which is what keeps the half-built graph alive until the
 //!   final collect.
-//! - **RustFns need stable ids.** A raw `fn` address is meaningless across
-//!   runs, so a reachable `Val::RustFn` is saved as a registered id (see
-//!   [`State::register_rust_fn`]) and the save fails fast if one is
-//!   unregistered. The stdlib registers itself under dotted paths
-//!   (`math.sin`, ...) during `open_libs`.
+//! - **RustFns need stable ids.** A `Val::RustFn` is an entry of the State's
+//!   Rust function table, never a code address (see `vm/rust_fn.rs`), so a
+//!   reachable one is saved as its entry's registered id (see
+//!   [`State::register_rust_fn`]) and the save fails fast if the entry has
+//!   none. The stdlib's catalog entries get their ids under dotted paths
+//!   (`math.sin`, ...) during `open_libs`. An id names one entry, so no build
+//!   difference (optimizer or linker merging of identical functions) can
+//!   change which id a value saves as.
 //! - **Environment objects are rebuilt, not copied.** `math`/`string`/`table`,
 //!   `_G`'s metatable and the shared string metatable are reconstructed by
 //!   `open_libs` on load and referenced by token. The object->token map is
@@ -40,11 +43,13 @@
 //! - **In-crate codec.** Little-endian, length-prefixed, `f64` by bit pattern
 //!   (NaNs canonicalized, -0.0 exact), explicit enum tags, bounds-checked with
 //!   initial vector reservations capped in bytes at remaining input. No
-//!   `serde`/`bincode`. Two saves of the same logical state are byte-identical
-//!   with the same crate version, because the diagnostic crate-version string
-//!   is part of the blob. A host that content-hashes saves across upgrades
-//!   must hash the payload after the header, or accept that a version bump
-//!   changes the bytes.
+//!   `serde`/`bincode`. Two saves of the same logical state written by the
+//!   same crate version are byte-identical, whatever profile built it: nothing
+//!   in the payload depends on addresses or build options. The header carries
+//!   the diagnostic crate-version string, so saves of one state by two crate
+//!   versions differ in their header even when the payload is the same. A
+//!   host that content-hashes saves across upgrades must hash the payload
+//!   after the header, or accept that a version bump changes the bytes.
 
 use std::sync::Arc;
 
@@ -52,8 +57,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::det_hash::{FixedState, IndexMap as DetMap, IndexSet as DetSet, map_with_capacity};
 
+use super::RustFnId;
 use super::inventory::GcRoot;
-use super::lua_val::RustFunc;
 use super::object::{GcHeap, RawObject, StringPtr, Upvalue, UpvalueRef};
 use super::rng::VmRng;
 use super::table::{
@@ -456,7 +461,7 @@ impl<'a> PathFinder<'a> {
         root: Val,
         global: &str,
         environment: bool,
-        target_function: RustFunc,
+        target_function: RustFnId,
     ) -> Option<String> {
         let segment = if environment {
             PathSegment::Environment(truncate_utf8(global, MAX_PATH_GLOBAL_BYTES))
@@ -468,12 +473,10 @@ impl<'a> PathFinder<'a> {
             val: root,
             path: root_path,
         }];
-        let target_address = target_function as usize;
-
         while let Some(task) = tasks.pop() {
             match task {
                 PathTask::Value { val, path } => match val {
-                    Val::RustFn(function) if function as usize == target_address => {
+                    Val::RustFn(function) if function == target_function => {
                         return Some(render_path(&self.breadcrumbs, path));
                     }
                     Val::Obj(ptr) if self.env_reverse.contains_key(&ptr) => {
@@ -862,12 +865,11 @@ impl<'a> SaveBuilder<'a> {
     fn saved_reachable_pointer_value(&self, value: Val) -> Option<SavedVal> {
         match value {
             Val::Str(ptr) => self.string_ids.get(&ptr).copied().map(SavedVal::Str),
-            Val::RustFn(func) => self
+            Val::RustFn(function) => self
                 .state
-                .rust_fn_ids_by_addr
-                .get(&(func as usize))
-                .cloned()
-                .map(SavedVal::Fn),
+                .rust_fns
+                .save_id(function)
+                .map(|id| SavedVal::Fn(id.to_owned())),
             Val::Obj(ptr) => self
                 .env_reverse
                 .get(&ptr)
@@ -1143,17 +1145,16 @@ impl<'a> SaveBuilder<'a> {
                         Val::Bool(b) => Ok(SavedVal::Bool(b)),
                         Val::Num(n) => Ok(SavedVal::Num(saved_num_bits(n))),
                         Val::Str(ptr) => self.string_id(ptr).map(SavedVal::Str),
-                        Val::RustFn(func) => {
-                            let addr = func as usize;
-                            let Some(id) = self.state.rust_fn_ids_by_addr.get(&addr) else {
+                        Val::RustFn(function) => {
+                            let Some(id) = self.state.rust_fns.save_id(function) else {
                                 let reachable_from = PathFinder::new(self.state, &self.env_reverse)
-                                    .find(root, global, environment, func)
+                                    .find(root, global, environment, function)
                                     .ok_or(SaveError::from(
                                         SaveFault::UnregisteredFunctionPathNotFound,
                                     ))?;
                                 return Err(SaveError::UnregisteredFunction { reachable_from });
                             };
-                            Ok(SavedVal::Fn(id.clone()))
+                            Ok(SavedVal::Fn(id.to_owned()))
                         }
                         Val::Obj(ptr) => {
                             if let Some(token) = self.env_reverse.get(&ptr) {
@@ -1661,7 +1662,7 @@ fn materialize_payload(
     // The only collection is after all globals, deltas and setup anchors are
     // rooted, at the end of this function.
     let env_forward = build_env_forward(state);
-    let fn_forward = state.rust_fns_by_id.clone();
+    let fn_forward = state.rust_fns.ids().clone();
 
     let bytecode = materialize_bytecode(&payload)?;
     let payload = payload.into_inner();
@@ -1805,10 +1806,11 @@ fn materialize_payload(
             .ok_or_else(|| SnapshotError::UnknownEnvObject(delta.token.clone()))?;
         // Deliberately repeats the verifier's duplicate and disjointness
         // checks, now on resolved runtime values. The verifier compares saved
-        // keys, which can differ while naming the same runtime key: two `Fn`
-        // ids that resolve to one address (identical-code folding) or two
-        // environment tokens for one object. The reason strings differ because
-        // this pass reports the materialized form.
+        // keys, and environment tokens resolve through the loading State, so
+        // saved uniqueness alone does not prove runtime uniqueness. (Two `Fn`
+        // ids never name one value: each id names its own function table
+        // entry.) The reason strings differ because this pass reports the
+        // materialized form.
         let mut deleted_keys = BTreeSet::new();
         for (key_index, key) in delta.deleted.iter().enumerate() {
             insert_runtime_key(
@@ -2168,7 +2170,7 @@ fn materialize_payload(
         // id is simply retired (it stays below next_format_pointer_id and is
         // never reissued) instead of failing the load.
         if let SavedVal::Fn(name) = saved
-            && !ctx.fn_forward.contains_key(name)
+            && !ctx.fn_forward.contains_key(name.as_str())
         {
             if !seen_pointer_ids.insert(*id) {
                 return Err(corrupt_arena(
@@ -2183,27 +2185,20 @@ fn materialize_payload(
             continue;
         }
         let value = decode_val(saved, &ctx)?;
-        // Two saved function ids resolve to one function when this build
-        // folds identical code that the saving build kept apart. The folded
-        // function keeps the smaller of their identities; the other id is
-        // retired like a skipped registration. Any other duplicate value is
-        // corruption, since the verifier already rejected saved duplicates.
-        let folded = matches!(saved, SavedVal::Fn(_))
-            && PointerIdKey::from_val(value)
-                .is_some_and(|key| format_pointer_ids.contains_key(&key));
-        if !folded {
-            insert_runtime_key(
-                &mut seen_pointer_values,
-                value,
-                &state.heap,
-                index,
-                CorruptionReason::Duplicate {
-                    entry: DuplicateEntry::FormatPointerValue,
-                    form: KeyForm::Materialized,
-                },
-                SaveLocation::PointerIds,
-            )?;
-        }
+        // A duplicate value is corruption: the verifier already rejected
+        // saved duplicates, and distinct function ids resolve to distinct
+        // function table entries; this rechecks the resolved values.
+        insert_runtime_key(
+            &mut seen_pointer_values,
+            value,
+            &state.heap,
+            index,
+            CorruptionReason::Duplicate {
+                entry: DuplicateEntry::FormatPointerValue,
+                form: KeyForm::Materialized,
+            },
+            SaveLocation::PointerIds,
+        )?;
         if !seen_pointer_ids.insert(*id) {
             return Err(corrupt_arena(
                 CorruptionReason::Duplicate {
@@ -2222,13 +2217,6 @@ fn materialize_payload(
                 SaveLocation::PointerIds,
             )
         })?;
-        if folded {
-            let kept: &mut u64 = format_pointer_ids
-                .get_mut(&key)
-                .expect("a folded function already has an identity entry");
-            *kept = (*kept).min(*id);
-            continue;
-        }
         format_pointer_ids.insert(key, *id);
     }
     // Saved identities take precedence over the ones setup rendered: a value
@@ -2403,7 +2391,7 @@ struct DecodeCtx<'a> {
     strings: &'a [super::object::StringPtr],
     objects: &'a [ObjectPtr],
     env_forward: &'a BTreeMap<String, ObjectPtr>,
-    fn_forward: &'a BTreeMap<String, RustFunc>,
+    fn_forward: &'a BTreeMap<Box<str>, RustFnId>,
 }
 
 #[derive(Eq, Ord, PartialEq, PartialOrd)]
@@ -2458,7 +2446,7 @@ fn invalid_key_error(
     }
 }
 
-type RuntimeTableKey = NormalizedTableKey<Vec<u8>, ObjectPtr, usize>;
+type RuntimeTableKey = NormalizedTableKey<Vec<u8>, ObjectPtr, RustFnId>;
 
 fn runtime_table_key(
     value: Val,
@@ -2512,7 +2500,7 @@ fn decode_val(saved: &SavedVal, ctx: &DecodeCtx<'_>) -> Result<Val, SnapshotErro
         SavedVal::Obj(id) => Ok(Val::Obj(*object_ref(ctx.objects, *id)?)),
         SavedVal::Fn(id) => ctx
             .fn_forward
-            .get(id)
+            .get(id.as_str())
             .copied()
             .map(Val::RustFn)
             .ok_or_else(|| SnapshotError::UnknownFunction(id.clone())),

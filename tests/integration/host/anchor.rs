@@ -4,6 +4,7 @@ use dellingr::error::ErrorKind;
 use dellingr::{Anchor, ArgCount, LuaType, RetCount, State};
 
 use crate::support;
+use crate::support::PushNewRustFn;
 
 /// Anchor a fresh table and return the handle with the object count it
 /// raised the heap to.
@@ -155,7 +156,7 @@ fn callback_dropping_an_anchor_mid_execution_is_collected_safely() {
         Ok(0)
     }
     let mut state = State::new();
-    state.push_rust_fn(churn).unwrap();
+    state.push_new_rust_fn(churn).unwrap();
     state.set_global("churn").unwrap();
     support::run(
         &mut state,
@@ -216,7 +217,7 @@ fn anchor_function_accepts_lua_function() {
 fn anchor_function_accepts_rust_function() {
     let mut state = State::new();
     state
-        .push_rust_fn(|state| {
+        .push_new_rust_fn(|state| {
             state.push_number(7.0).unwrap();
             Ok(1)
         })

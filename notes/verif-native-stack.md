@@ -45,6 +45,11 @@ profiles are named rather than inferred.
 
 Enforceable: yes.
 
+Decision (2026-10-24): no action. Owed before removal: a comment at
+`LIMIT_TEST_STACK_BYTES` in `tests/common/stack.rs` stating that the
+repository's profiles keep `debug_assertions` and the profile in step, and that
+a profile or host override breaking that link is accepted as unguarded.
+
 ## VN-006 - The release envelope is validated for a profile no embedder ships
 
 Reported by: native-stack-errors.
@@ -61,6 +66,17 @@ Fix: run the release envelope sweep under Cargo's default release settings too
 restored), or state the envelope for that profile instead.
 
 Enforceable: yes, as a `[[check]]` shape.
+
+Decision (2026-10-24): change the repository's defaults instead. Delete
+`[profile.release]`'s `lto = "fat"` and `codegen-units = 1` (`opt-level = 3`
+is already the default, so the section goes), so the existing release sweeps
+certify the profile an embedder most likely builds. Consequences to handle with
+the change: every `brokkr dellingr` number shifts and comparisons across the
+change measure profile and code together; measured numbers in
+`reference/performance.md` and the README state the profile they were taken
+under; the release envelope and the per-cycle figures in `docs/limits.md` and
+`reference/native-calls.md` are re-measured. No opt-in fat-LTO profile until
+something needs one.
 
 ## VN-007 - The envelope depends on build inputs the repository neither pins nor records
 
@@ -98,6 +114,12 @@ table's home for measured numbers over time), leaving native-calls.md with the
 guard and one current table; drop the scenario count.
 
 Enforceable: the pin is structural; the rest is editorial.
+
+Decision (2026-10-24): no toolchain pin and no flag override. dellingr is
+developed on several hosts; `docs/limits.md` states that the envelope is
+verified on the developer's machines, with their toolchains and global cargo
+configuration, and that it stays that way until decided otherwise. The
+`native-calls.md` cleanup (third bullet) is not decided yet.
 
 ## VN-009 - At-cap probes refill a million slots per attempt
 

@@ -70,6 +70,19 @@ these covers aarch64 execution without a runner.
 
 Enforceable: yes, as `[[check]]` entries and a `compile_error!`.
 
+Decision (2026-10-24):
+- Run the cost golden, the crmath golden and the opcode-encoding fixture in a
+  release `[[check]]` with an `only` filter (the save golden already has
+  `release-save-golden`), and add a corpus-wide cost golden, every example's
+  cost, produced by the merged corpus test (VC-011 in verif-corpus.md).
+- Add a `cargo clippy --target aarch64-unknown-linux-gnu` shape so the aarch64
+  arms are compiled and linted.
+- Add `compile_error!` for `target_arch = "x86"` without `sse2` in
+  `crmath/mod.rs`.
+- Optional, alongside the aarch64 shape: one `dispatch!` macro replacing the
+  per-kernel dispatch copies.
+- musl, i686 and qemu runs only if a player platform needs them.
+
 ## VD-018 - The host's floating-point environment is assumed, never detected
 
 Reported by: library.
@@ -89,6 +102,15 @@ subnormal-times-one probe detects DAZ) returning an error or panicking in debug;
 a unit test that sets MXCSR FTZ on x86 and expects the refusal.
 
 Enforceable: by the probe plus that test.
+
+Decision (2026-10-24, provisional): probe at `State` creation and every call
+into Lua (`black_box`ed checks for FTZ, DAZ and directed rounding), returning a
+dedicated host-environment error that is charged nothing and is not an ordinary
+script error. It lives in the prologue every public fallible method already has
+for the poison contract. A test sets FTZ on x86_64 and expects the refusal.
+CHANGELOG entry; `docs/determinism.md` says the contract is enforced. Resetting
+MXCSR on entry is rejected: changing the FP environment is undefined behaviour
+in Rust, and the reset is x86-only.
 
 ## VD-019 - `%` and `math.fmod` lower to the platform `fmod` with no edge-case golden
 

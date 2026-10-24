@@ -3,10 +3,11 @@
 use dellingr::{ArgCount, RetCount, State};
 
 use crate::support;
+use crate::support::PushNewRustFn;
 
 fn install_force_gc(state: &mut State) {
     state
-        .push_rust_fn(|state| {
+        .push_new_rust_fn(|state| {
             state.gc_collect();
             Ok(0)
         })
@@ -16,7 +17,7 @@ fn install_force_gc(state: &mut State) {
 
 fn install_force_next_gc(state: &mut State) {
     state
-        .push_rust_fn(|state| {
+        .push_new_rust_fn(|state| {
             state.gc_set_threshold(1);
             Ok(0)
         })
@@ -407,7 +408,7 @@ fn nested_vararg_arena_roots_and_releases_each_activation() {
     install_force_gc(&mut state);
     // Collect, then report how many tables and closures are still reachable.
     state
-        .push_rust_fn(|state| {
+        .push_new_rust_fn(|state| {
             state.gc_collect();
             state.push_number(state.object_count() as f64)?;
             Ok(1)

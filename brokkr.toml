@@ -167,6 +167,18 @@ profile = "release"
 features = ["snapshot"]
 tests = ["native_stack", "libm_symbols"]
 
+# The save golden in an optimized build. Saved Rust functions are function
+# table ids, not code addresses, so fat-LTO folding of identical functions
+# (base `unpack` and `table.unpack`) must not change the pinned payload; this
+# shape holds the release build to the same fixture as the dev sweeps.
+[[check]]
+name = "release-save-golden"
+profile = "release"
+features = ["snapshot"]
+tests = ["integration"]
+lib_tests = false
+only = ["snapshot::save_golden::"]
+
 [bin]
 default = "dellingr"
 install = ["dellingr"]

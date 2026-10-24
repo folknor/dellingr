@@ -5,6 +5,21 @@
 use dellingr::error::Error;
 use dellingr::{ArgCount, RetCount, State};
 
+/// Test shorthand for a Rust function a test pushes once or a few times:
+/// create its entry and push it. Each call creates a new function identity
+/// (see `State::add_rust_fn`); a test that compares identities keeps the
+/// handle instead.
+pub(crate) trait PushNewRustFn {
+    fn push_new_rust_fn(&mut self, function: dellingr::RustFunc) -> dellingr::Result<()>;
+}
+
+impl PushNewRustFn for State {
+    fn push_new_rust_fn(&mut self, function: dellingr::RustFunc) -> dellingr::Result<()> {
+        let handle = self.add_rust_fn(function)?;
+        self.push_rust_fn(handle)
+    }
+}
+
 /// Compile `source` as an unnamed chunk and push it onto `state`'s stack.
 pub(crate) fn load(state: &mut State, source: impl AsRef<[u8]>) {
     let source = source.as_ref();

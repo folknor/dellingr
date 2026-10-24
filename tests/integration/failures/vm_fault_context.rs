@@ -3,6 +3,7 @@
 //! `internal_fault_keeps_innermost_instruction` covers that case, because only
 //! dellingr can construct an internal error.
 
+use crate::support::PushNewRustFn;
 use dellingr::error::{Error, ErrorKind};
 use dellingr::{ArgCount, Program, RetCount, State};
 
@@ -15,7 +16,7 @@ fn host_failure(_state: &mut State) -> dellingr::Result<u8> {
 #[test]
 fn host_callback_failure_has_no_vm_fault() {
     let mut state = State::new();
-    state.push_rust_fn(host_failure).unwrap();
+    state.push_new_rust_fn(host_failure).unwrap();
     state.set_global("fail_host").unwrap();
     let program = Program::compile(
         "local function inner() return fail_host() end\n\

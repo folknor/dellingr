@@ -16,9 +16,9 @@
 //!
 //! Hash values are not a stable contract (they may change with a foldhash
 //! upgrade, target architecture, or endianness), so nothing may persist them
-//! or let them reach program-visible order. `Val::RustFn` keys hash by
-//! function address, which ASLR moves between processes; that only affects
-//! layout, never order.
+//! or let them reach program-visible order. `Val::RustFn` keys hash by their
+//! State's function-table index, which follows the order entries were
+//! created; that only affects layout, never order.
 
 /// Deterministic, fixed-seed hasher used by the crate's map and set aliases.
 pub(crate) type FixedState = foldhash::fast::FixedState;

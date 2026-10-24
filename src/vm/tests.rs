@@ -593,6 +593,11 @@ fn gc_preserves_nested_suspended_environments() {
 /// True only if `val` is a table that is still resolvable on the heap. Used by
 /// the GC-root tests, where checking the `Val` variant alone would pass against
 /// a dangling pointer.
+fn set_global_fn(state: &mut State, name: &str, function: crate::RustFunc) {
+    state.push_new_rust_fn(function).unwrap();
+    state.set_global(name).unwrap();
+}
+
 fn live_table(state: &State, val: Val) -> bool {
     val.as_object_ptr()
         .and_then(|ptr| state.heap.as_table_ref(ptr))
@@ -602,9 +607,7 @@ fn live_table(state: &State, val: Val) -> bool {
 #[test]
 fn gc_preserves_frame_varargs() {
     let mut state = State::new();
-    state
-        .set_global_value("force_gc", Val::RustFn(force_gc))
-        .unwrap();
+    set_global_fn(&mut state, "force_gc", force_gc);
     let input = compile_unnamed(
         r#"
         local function f(...)
@@ -624,9 +627,7 @@ fn gc_preserves_frame_varargs() {
 #[test]
 fn table_sort_array_survives_comparator_collection() {
     let mut state = State::new();
-    state
-        .set_global_value("force_gc", Val::RustFn(force_gc))
-        .unwrap();
+    set_global_fn(&mut state, "force_gc", force_gc);
     let input = compile_unnamed(
         r#"
         local t = {}
@@ -918,7 +919,8 @@ fn every_push_type_is_rejected_at_the_cap() {
     assert_eq!(state.get_top(), top);
     assert!(state.push_boolean(true).is_err());
     assert_eq!(state.get_top(), top);
-    assert!(state.push_rust_fn(force_gc).is_err());
+    let force_gc_handle = state.add_rust_fn(force_gc).unwrap();
+    assert!(state.push_rust_fn(force_gc_handle).is_err());
     assert_eq!(state.get_top(), top);
     assert!(state.push_string("x").is_err());
     assert_eq!(state.get_top(), top);
@@ -1078,43 +1080,54 @@ fn open_libs_with_values_on_the_stack_targets_its_own_g_table() {
     );
 }
 
-/// A rejected `push_named_rust_fn` must not leave the id registered. That is
-/// not directly observable, but it is visible through a save: an unregistered
-/// reachable `RustFunc` fails the save, so if the rejected push had registered
-/// the id anyway, the save below would succeed instead.
+/// A rejected registration changes neither the function table nor the id
+/// map: a second registration of an id is refused whatever function it
+/// names, without comparing function pointers, and an over-long id is refused
+/// before anything is appended.
 #[cfg(feature = "snapshot")]
 #[test]
-fn a_rejected_named_push_does_not_register_the_function() {
+fn a_rejected_registration_changes_nothing() {
     fn host_fn(_state: &mut State) -> crate::Result<u8> {
         Ok(0)
     }
 
     let mut state = State::new();
-    state
-        .set_top(MAX_STACK_SIZE as isize)
-        .expect("filling to the cap");
-    assert!(
-        state.push_named_rust_fn("host.fn", host_fn).is_err(),
-        "the named push must be rejected at the cap"
-    );
+    let first = state.register_rust_fn("host.fn", host_fn).unwrap();
+    let entries = state.rust_fns.next_entry_for_test();
+    assert!(matches!(
+        state.register_rust_fn("host.fn", host_fn),
+        Err(crate::vm::save_state::SaveError::DuplicateFunctionRegistration { id }) if id == "host.fn"
+    ));
+    let long_id = "x".repeat(crate::limits::MAX_SAVE_IDENTIFIER_BYTES + 1);
+    assert!(matches!(
+        state.register_rust_fn(&long_id, host_fn),
+        Err(crate::vm::save_state::SaveError::FieldSizeExceeded { .. })
+    ));
+    assert_eq!(state.rust_fns.next_entry_for_test(), entries);
+    assert_eq!(state.registered_rust_fn("host.fn"), Some(first));
+    assert_eq!(state.registered_rust_fn(&long_id), None);
+}
 
-    // Back below the cap, reach the same function without an id.
-    state.set_top(0).expect("shrinking is always allowed");
-    state
-        .push_rust_fn(host_fn)
-        .expect("room again below the cap");
-    state.set_global("host_fn").unwrap();
+/// A handle from another State is refused before the stack changes, even
+/// when that State's table has an entry at the same index.
+#[test]
+fn a_wrong_state_rust_fn_handle_is_refused() {
+    fn host_fn(_state: &mut State) -> crate::Result<u8> {
+        Ok(0)
+    }
 
-    let err = state
-        .save_state()
-        .expect_err("the id must not have been registered by the rejected push");
-    assert!(
-        matches!(
-            err,
-            crate::vm::save_state::SaveError::UnregisteredFunction { .. }
-        ),
-        "expected UnregisteredFunction, got {err:?}"
-    );
+    let mut issuer = State::raw();
+    let mut other = State::raw();
+    let handle = issuer.add_rust_fn(host_fn).unwrap();
+    other.add_rust_fn(host_fn).unwrap();
+    let error = other.push_rust_fn(handle).unwrap_err();
+    assert!(matches!(
+        error.kind(),
+        crate::error::ErrorKind::InvalidRustFnHandle
+    ));
+    assert_eq!(other.get_top(), 0);
+    issuer.push_rust_fn(handle).unwrap();
+    assert_eq!(issuer.get_top(), 1);
 }
 
 #[test]
@@ -1172,9 +1185,7 @@ fn gc_sweeps_dead_upvalue_pool_slots_and_reuses_them() {
 #[test]
 fn live_upvalues_survive_the_pool_sweep_and_keep_working() {
     let mut state = State::new();
-    state
-        .set_global_value("force_gc", Val::RustFn(force_gc))
-        .unwrap();
+    set_global_fn(&mut state, "force_gc", force_gc);
     let input = compile_unnamed(
         r#"
         local n = 10
@@ -1205,9 +1216,7 @@ fn length_metamethod_preflights_three_slots_at_the_stack_cap() {
 
     let mut state = State::new();
     state.set_user_data(0usize);
-    state
-        .set_global_value("len_handler", Val::RustFn(len_handler))
-        .unwrap();
+    set_global_fn(&mut state, "len_handler", len_handler);
     crate::Program::compile("t = setmetatable({}, { __len = len_handler })", None)
         .and_then(|program| state.load(&program))
         .unwrap();
@@ -1359,7 +1368,7 @@ fn internal_failure(_state: &mut State) -> crate::Result<u8> {
 #[test]
 fn internal_fault_keeps_innermost_instruction() {
     let mut state = State::new();
-    state.push_rust_fn(internal_failure).unwrap();
+    state.push_new_rust_fn(internal_failure).unwrap();
     state.set_global("fail_internal").unwrap();
     let program = crate::Program::compile(
         "local function inner() return fail_internal() end\n\
@@ -1450,8 +1459,8 @@ fn gmatch_string_checks_preserve_relative_indexes_in_nested_frames() {
     state.push_nil().unwrap();
     state.push_nil().unwrap();
     state
-        .push_rust_fn(|state| {
-            state.push_rust_fn(|state| {
+        .push_new_rust_fn(|state| {
+            state.push_new_rust_fn(|state| {
                 assert_argument(
                     &state
                         .cached_pattern_matcher(1)

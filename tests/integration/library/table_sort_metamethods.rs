@@ -4,6 +4,7 @@
 use dellingr::{ArgCount, RetCount, State};
 
 use crate::support;
+use crate::support::PushNewRustFn;
 
 #[test]
 fn proxy_sorts_backing_store_through_metamethods() {
@@ -72,7 +73,7 @@ fn proxy_sort_is_deterministic_and_matches_raw_order() {
 fn proxy_sort_roots_scratch_values_across_handler_and_comparator_gc() {
     let mut state = State::new();
     state
-        .push_rust_fn(|state| {
+        .push_new_rust_fn(|state| {
             state.gc_collect();
             Ok(0)
         })

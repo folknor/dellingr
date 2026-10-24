@@ -7,6 +7,7 @@ use dellingr::error::ErrorKind;
 use dellingr::limits::MAX_STRING_BYTES;
 use dellingr::{ArgCount, LuaType, RetCount, State};
 
+use crate::support::PushNewRustFn;
 use crate::support::{self, run_error, stack};
 
 fn assert_pattern_error(code: &str, message: &str) {
@@ -118,7 +119,7 @@ fn malformed_pattern_capture_errors_are_pattern_errors() {
 #[test]
 fn call_rejects_missing_fixed_arguments_without_panicking() {
     let mut state = State::new();
-    state.push_rust_fn(|_state| Ok(0)).unwrap();
+    state.push_new_rust_fn(|_state| Ok(0)).unwrap();
 
     let err = state
         .call(ArgCount::Fixed(1), RetCount::Fixed(0))
@@ -134,7 +135,7 @@ fn call_rejects_missing_fixed_arguments_without_panicking() {
 #[test]
 fn public_call_rejects_dynamic_without_base_without_panicking() {
     let mut state = State::new();
-    state.push_rust_fn(|_state| Ok(0)).unwrap();
+    state.push_new_rust_fn(|_state| Ok(0)).unwrap();
 
     let err = state
         .call(ArgCount::Dynamic, RetCount::Fixed(0))

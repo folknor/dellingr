@@ -1,6 +1,7 @@
 use dellingr::{SaveError, State};
 
 use crate::support;
+use crate::support::PushNewRustFn;
 
 fn unregistered(_state: &mut State) -> dellingr::Result<u8> {
     Ok(0)
@@ -24,7 +25,7 @@ fn nested_unregistered_function_path_is_rendered_from_its_root() {
         .push_bytes("callback")
         .expect("callback key string allocates");
     state
-        .push_rust_fn(unregistered)
+        .push_new_rust_fn(unregistered)
         .expect("callback fits on the stack");
     state
         .set_table_raw(-3)
@@ -51,7 +52,7 @@ fn nested_unregistered_function_path_is_rendered_from_its_root() {
 fn unregistered_function_path_in_closed_upvalue_is_rendered() {
     let mut state = State::new();
     state
-        .push_rust_fn(unregistered)
+        .push_new_rust_fn(unregistered)
         .expect("callback fits on the stack");
     state.set_global("seed").expect("callback is installed");
     support::run(

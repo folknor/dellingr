@@ -4,6 +4,7 @@
 use dellingr::State;
 
 use crate::support;
+use crate::support::PushNewRustFn;
 
 #[test]
 fn tombstoned_keys_and_values_are_not_gc_roots() {
@@ -87,7 +88,7 @@ fn string_literals_are_reclaimed_one_collection_after_runtime_cache_sweep() {
 
 fn install_force_gc(state: &mut State) {
     state
-        .push_rust_fn(|state| {
+        .push_new_rust_fn(|state| {
             state.gc_collect();
             Ok(0)
         })

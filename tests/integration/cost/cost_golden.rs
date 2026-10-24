@@ -13,6 +13,7 @@ use dellingr::error::ErrorKind;
 use dellingr::{ArgCount, COST_MODEL_VERSION, RetCount, State};
 
 use crate::support;
+use crate::support::PushNewRustFn;
 
 /// Versioned rows shared by source and native-call goldens.
 const FIXTURE: &str = include_str!("../../fixtures/cost_golden.txt");
@@ -436,7 +437,7 @@ fn mid_run_budget_reset_sees_a_flushed_meter() {
             let mut state = State::new();
             state.set_cost_budget(1_000_000);
             state.set_user_data(prefix + setup_cost);
-            state.push_rust_fn(reset).unwrap();
+            state.push_new_rust_fn(reset).unwrap();
             state.set_global("reset").unwrap();
             support::run(
                 &mut state,

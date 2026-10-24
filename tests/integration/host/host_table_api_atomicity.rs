@@ -5,6 +5,7 @@
 use dellingr::error::{ErrorKind, TypeError};
 use dellingr::{LuaType, State};
 
+use crate::support::PushNewRustFn;
 use crate::support::{self, stack};
 
 /// Stack: [number 7, table]. Index 1 is a non-table target.
@@ -353,9 +354,9 @@ fn recurse_host_read(state: &mut State) -> dellingr::Result<u8> {
 fn host_read_native_refusal() -> dellingr::Result<()> {
     for handler in ["function() return 1 end", "tostring"] {
         let mut state = State::new();
-        state.push_rust_fn(probe_native_read_refusal)?;
+        state.push_new_rust_fn(probe_native_read_refusal)?;
         state.set_global("probe")?;
-        state.push_rust_fn(recurse_host_read)?;
+        state.push_new_rust_fn(recurse_host_read)?;
         state.set_global("step")?;
         dellingr::Program::compile(
             format!(
@@ -395,7 +396,7 @@ fn probe_lua_read_refusal(state: &mut State) -> dellingr::Result<u8> {
 #[test]
 fn get_table_preserves_the_key_at_the_lua_call_depth_limit() {
     let mut state = State::new();
-    state.push_rust_fn(probe_lua_read_refusal).unwrap();
+    state.push_new_rust_fn(probe_lua_read_refusal).unwrap();
     state.set_global("probe").unwrap();
     support::run(
         &mut state,

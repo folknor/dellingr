@@ -1,18 +1,21 @@
-//! Pins the debug-profile save payload, including compiler output and
-//! registrations. Compatibility metadata is checked separately. Deterministic graph
-//! reorders also change this pin, even when round-trip tests still pass.
-//! Review the generated text companion before accepting any regeneration.
+//! Pins the save payload, including compiler output, standard-library
+//! function ids and the cost the golden program is charged. Compatibility
+//! metadata is checked separately. Deterministic graph reorders also change
+//! this pin, even when round-trip tests still pass. Review the generated text
+//! companion before accepting any regeneration.
 //!
 //! Object ids are assigned at first encounter, so the fixture encodes the exact
 //! depth-first preorder: for a table, each entry's key subtree then its value
 //! subtree in storage order, and the metatable only after every entry; for a
 //! closure, its bytecode and then its upvalues in vector order.
 //!
+//! The payload is the same in every build profile: a saved Rust function is
+//! its function table entry's id, never its code address, so identical-code
+//! folding in an optimized build cannot reach the bytes. brokkr.toml runs this
+//! module in a release sweep as well as the dev ones to keep it that way.
+//!
 //! To refresh deliberately after a reviewed save-output change, run
-//! `brokkr run --debug --features snapshot regenerate_save_golden`. The
-//! fixture must come from the profile the tests run under: a release build
-//! can fold identical Rust functions (`unpack` and `table.unpack`), and the
-//! save then writes the smallest id for both, so its bytes differ.
+//! `brokkr run --features snapshot regenerate_save_golden` (any profile).
 
 use std::path::PathBuf;
 
@@ -65,12 +68,9 @@ fn every_save_fixture_is_declared_and_referenced() {
 
 // After a reviewed save-output change, regenerate the binary golden and its
 // text companion with
-// `brokkr run --debug --features snapshot regenerate_save_golden`.
+// `brokkr run --features snapshot regenerate_save_golden`.
 #[test]
 fn save_traversal_order_matches_golden_fixture() {
-    if !cfg!(debug_assertions) {
-        return;
-    }
     let expected = std::fs::read(current_fixture_path()).expect(
         "golden fixture missing; run the explicit regeneration example with the snapshot feature",
     );
@@ -86,16 +86,19 @@ fn save_traversal_order_matches_golden_fixture() {
     assert_eq!(
         payload_after_header(&actual),
         payload_after_header(&expected),
-        "save output changed: review traversal, compiler output, registrations, \
-         payload changes before regenerating both fixtures"
+        "save output changed. Any of these changes it: the save format or \
+         traversal order, compiler output, standard-library function ids, the \
+         golden program, or the charges the program incurs (a cost-model change, \
+         whether or not it bumps COST_MODEL_VERSION). Saved bytes are \
+         replay-visible: review the text companion's diff and call the change out \
+         before regenerating both fixtures. A traversal reorder alone does not \
+         make old saves unreadable; the released-format check below decides \
+         compatibility."
     );
 }
 
 #[test]
 fn golden_fixture_round_trips() {
-    if !cfg!(debug_assertions) {
-        return;
-    }
     let mut bytes = std::fs::read(current_fixture_path()).expect("current fixture is present");
     // The current golden pins payload, not compatibility metadata. The load
     // probe exercises that payload under the current cost model; archived
@@ -188,7 +191,7 @@ fn released_formats_are_frozen() {
             (hash ^ u64::from(*byte)).wrapping_mul(0x100_0000_01b3)
         });
         assert_eq!(hash, archive.fingerprint, "released fixture changed");
-        if !cfg!(debug_assertions) || frozen[4..8] != current[4..8] {
+        if frozen[4..8] != current[4..8] {
             eprintln!(
                 "historical archive {}: fingerprint checked; load requires matching format and cost model",
                 archive.file

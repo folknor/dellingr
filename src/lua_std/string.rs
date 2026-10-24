@@ -563,8 +563,8 @@ fn append_gsub_replacement(
     Ok(())
 }
 
-// Keep registration order stable: it determines table iteration order and
-// snapshot baselines.
+// Keep this order stable: it is the installation order, which determines table
+// iteration order and snapshot baselines, and the catalog positions.
 pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     // string.sub(s, i [, j])
     ("sub", |state| {
@@ -765,7 +765,7 @@ pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
             state.set_table_raw(-3)?;
             return crate::native_call!(
                 "lib:string.gmatch->push_gmatch_wrapper:empty",
-                push_gmatch_wrapper(state, gmatch_schema::EMPTY_ITERATOR_ID, gmatch_empty_iter)
+                push_gmatch_wrapper(state, super::GMATCH_EMPTY_ITER)
             );
         }
 
@@ -787,7 +787,7 @@ pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         state.set_table_raw(-3)?;
         crate::native_call!(
             "lib:string.gmatch->push_gmatch_wrapper:general",
-            push_gmatch_wrapper(state, gmatch_schema::ITERATOR_ID, gmatch_iter)
+            push_gmatch_wrapper(state, super::GMATCH_ITER)
         )
     }),
     // string.gsub(s, pattern, repl [, n])
@@ -1009,15 +1009,10 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
     // Create the string table
     state.new_table_with_capacity(STRING_LIBRARY_CAPACITY)?;
 
-    for &(name, func) in STRING_FUNCTIONS {
-        state.register_lib_fn(-1, "string", name, func)?;
-    }
-
-    // Register the gmatch iterator functions up front so a persisted gmatch
-    // closure (which captures one of them as an upvalue) can be resolved on
-    // snapshot load, not only after gmatch has run once.
-    state.register_lib_fn_id(gmatch_schema::ITERATOR_ID, gmatch_iter)?;
-    state.register_lib_fn_id(gmatch_schema::EMPTY_ITERATOR_ID, gmatch_empty_iter)?;
+    // The gmatch iterators are catalog entries, so `open_libs` binds their ids
+    // before any gmatch runs and a persisted gmatch closure (which captures
+    // one of them as an upvalue) resolves on snapshot load.
+    super::install_library_functions(state, super::STRING_SEGMENT)?;
 
     // Strings index through a shared metatable whose `__index` is this table,
     // captured here: rebinding or hiding the global `string` later does not
@@ -1027,20 +1022,17 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
     // Set the string table as a global
     state.set_global("string")?;
 
-    // Compile the wrapper during setup, after string function registration.
-    // Compilation has no State cost accounting and registers no functions, so
-    // this preserves script costs and the standard library registration order.
+    // Compile the wrapper during setup, after the string functions are
+    // installed. Compilation has no State cost accounting and touches neither
+    // the heap nor the Rust function table, so this preserves script costs and
+    // the standard library's installation order.
     drop(gmatch_wrapper());
     Ok(())
 }
 
-fn push_gmatch_wrapper(
-    state: &mut State,
-    iter_id: &str,
-    iter: fn(&mut State) -> Result<u8>,
-) -> Result<u8> {
+fn push_gmatch_wrapper(state: &mut State, iterator: crate::vm::RustFnId) -> Result<u8> {
     state.push_chunk(gmatch_wrapper())?;
-    state.push_lib_fn(iter_id, iter)?;
+    state.push_rust_fn_id(iterator)?;
     state.push_value(1)?;
     state.remove(1)?;
     crate::native_call!(
@@ -1084,7 +1076,7 @@ fn gmatch_state_index(
         .ok_or_else(|| invalid_gmatch_state(GmatchStateFault::NumberFieldOutOfRange(field)))
 }
 
-fn gmatch_empty_iter(state: &mut State) -> Result<u8> {
+pub(super) fn gmatch_empty_iter(state: &mut State) -> Result<u8> {
     check_type_named(state, 1, LuaType::Table, "gmatch")?;
 
     state.push_string(gmatch_schema::POSITION_FIELD)?;
@@ -1128,7 +1120,7 @@ fn gmatch_empty_iter(state: &mut State) -> Result<u8> {
     Ok(1)
 }
 
-fn gmatch_iter(state: &mut State) -> Result<u8> {
+pub(super) fn gmatch_iter(state: &mut State) -> Result<u8> {
     check_type_named(state, 1, LuaType::Table, "gmatch")?;
 
     push_gmatch_string_field(state, gmatch_schema::SUBJECT_FIELD)?;

@@ -5,8 +5,8 @@
 
 use std::cmp::Ordering;
 
-use super::lua_val::{RustFunc, Val};
-use super::{ErrorKind, MAX_STACK_SIZE, Result, State};
+use super::lua_val::Val;
+use super::{ErrorKind, MAX_STACK_SIZE, Result, RustFnHandle, RustFnId, State};
 use crate::error::InternalFault;
 
 impl State {
@@ -164,22 +164,34 @@ impl State {
         self.push_bytes(copied)
     }
 
-    /// Pushes a Rust function onto the stack.
-    pub fn push_rust_fn(&mut self, f: RustFunc) -> Result<()> {
+    /// Pushes the Rust function a handle names (see [`State::add_rust_fn`]).
+    /// Every push of one handle is the same Lua value. A handle another State
+    /// issued fails with [`ErrorKind::InvalidRustFnHandle`] and changes
+    /// nothing.
+    ///
+    /// [`ErrorKind::InvalidRustFnHandle`]: crate::error::ErrorKind::InvalidRustFnHandle
+    pub fn push_rust_fn(&mut self, handle: RustFnHandle) -> Result<()> {
         self.check_poisoned()?;
+        let function = self
+            .rust_fns
+            .resolve(handle)
+            .ok_or_else(|| self.error(ErrorKind::InvalidRustFnHandle))?;
         self.check_stack_slot()?;
-        self.push_unchecked(Val::RustFn(f));
+        self.push_unchecked(Val::RustFn(function));
         Ok(())
     }
 
-    /// Register and push a Rust function with a stable save/load id.
-    #[cfg(feature = "snapshot")]
-    pub fn push_named_rust_fn(&mut self, id: &str, f: RustFunc) -> Result<()> {
-        self.check_poisoned()?;
+    /// Test shorthand: create a new Rust function entry and push it.
+    #[cfg(test)]
+    pub(crate) fn push_new_rust_fn(&mut self, function: super::RustFunc) -> Result<()> {
+        let handle = self.add_rust_fn(function)?;
+        self.push_rust_fn(handle)
+    }
+
+    /// Pushes a catalog or host function by its table entry.
+    pub(crate) fn push_rust_fn_id(&mut self, function: RustFnId) -> Result<()> {
         self.check_stack_slot()?;
-        self.register_rust_fn(id, f)
-            .map_err(Self::registration_error)?;
-        self.push_unchecked(Val::RustFn(f));
+        self.push_unchecked(Val::RustFn(function));
         Ok(())
     }
 

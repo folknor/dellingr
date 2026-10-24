@@ -85,26 +85,35 @@ returns; the loaded State starts with an empty stack.
 
 ## Rust functions
 
-- A reachable `RustFunc` is saved by its registered stable id. An unregistered
-  one fails the save.
-- The standard library registers itself under dotted paths (`math.sin`,
-  `ipairs.iter`, ...) during `open_libs`, including iterator callbacks returned
-  by library functions. `open_libs` rejects conflicting registrations before
-  installing anything, leaving the stack, globals, heap and registry unchanged.
+- A Rust function value is an entry of its State's function table, never a
+  code address. `State::add_rust_fn` and `State::register_rust_fn` each create
+  a new entry and return a `RustFnHandle` that `State::push_rust_fn` pushes;
+  every push of one handle is the same value, and two entries are two
+  functions even when they wrap the same Rust function. Identity therefore
+  does not depend on how the binary was built: the optimizer or linker merging
+  identical functions changes no `==` result, table key, rendered identity or
+  saved id.
+- A reachable Rust function is saved by its entry's registered stable id. One
+  without an id (`add_rust_fn`) fails the save.
+- An id names one entry, and registering an id the State already has fails
+  with `DuplicateFunctionRegistration`, whatever function it names. To install
+  one registered function under several names, push its handle for each.
+- The standard library's functions, including the iterator callbacks library
+  functions return, are fixed catalog entries in every State. `open_libs` gives
+  them their ids under dotted paths (`math.sin`, `ipairs.iter`, ...); global
+  `unpack` and `table.unpack` are separate entries with their own ids. A raw
+  State may register those ids for host functions before opening the
+  libraries; `open_libs` then refuses with the smallest conflicting id before
+  installing anything, leaving the stack, globals, heap and registry
+  unchanged. Reopening the libraries binds each id to its own entry again.
 - A save records the rendered identity (`tostring`, `%p`) of every registered
   Rust function that has been printed, including one only the host still
   holds. Passing it back in after a load prints the same `function: 0x...`.
 - On load, a recorded function that setup no longer registers is skipped.
-- Rust function identity is by code address. When several ids share one
-  address (intentional aliases, or identical-code folding in a release/LTO
-  build), the lexicographically smallest id is written. A build that folds
-  functions can therefore write different `Fn` ids than one that does not, so
-  snapshot bytes are only guaranteed identical across the same build.
-- Loading a save into a build that folds two functions the saving build kept
-  apart resolves both ids to the one folded function. If both were rendered,
-  it keeps the smaller of their two rendered identities and retires the other.
-  If both are keys of the same table, dead keys and standard-library table
-  deltas included, the keys collide and the load is rejected.
+- A handle is bound to the State that issued it; a loaded State's setup
+  creates its own handles, by registering the same ids. A function added
+  without an id has no identity across a save: setup can add it again, but
+  that is a new function, and its old rendered identity is not restored.
 
 ## Load
 
@@ -154,8 +163,10 @@ returns; the loaded State starts with an empty stack.
 - The codec is little-endian and length-prefixed, with explicit enum tags.
   It is bounds-checked. Initial vector reservations, measured in bytes, are
   capped at the remaining input; vectors then grow as elements are decoded.
-- Two saves of the same logical state are byte-identical with the same crate
-  version. The crate version string is part of the blob.
+- Two saves of the same logical state written by the same crate version are
+  byte-identical, whichever build profile compiled it: no address or build
+  option reaches the bytes. The header carries the crate version string, so
+  two crate versions write different headers even for an identical payload.
 - A table saves its logical array length and the slots from its first live
   array key to its last, never where its stored window happens to sit, so a
   stored array window history does not reach the bytes. Hash slots preserve
@@ -180,7 +191,7 @@ formats 6 and 7. The 0.4.0 and 0.5.0 changelog sections, checked against the
 release trees at 3170f83 and 6c795d1, establish that list; earlier releases
 predate the snapshot feature. Their original binary fixtures are archived
 with fingerprints. They are historical evidence, not supported load formats.
-At every release, archive the current debug golden for each new
+At every release, archive the current golden for each new
 (format version, cost-model version) pair and add its file name, both version
 words and fingerprint to that list. Use `save_released_v<format>_cost<cost>.bin`
 for new archives; the original archive names stay unchanged. A cost-model-only
@@ -192,9 +203,8 @@ listed fixture's format and cost-model versions are the current ones, the
 check loads it with the current build, saves it again and requires the same
 payload (everything after the engine label). Historical pairs still have
 their fingerprints and header words checked; a diagnostic explains when the
-load check cannot run. The load/resave check uses debug builds because release
-linker folding can change function ids. A change in how saves are read
-or written therefore fails it; compiler, registration and golden-program
+load check cannot run. A change in how saves are read or written therefore
+fails it; compiler, registration and golden-program
 changes do not, because they leave the archived save alone. Deliberate edits
 to the list or fingerprints still require compatibility review.
 
@@ -210,8 +220,10 @@ release-tree instruction source, because it predates the encoding fixture;
 the next released format has its original encoding fixture. These records are
 historical evidence and must never be regenerated from current declarations.
 
-The current golden pins the debug save payload after the header, with the
-format word checked separately. Engine and cost-model header metadata do not
+The current golden pins the save payload after the header, with the format
+word checked separately. The payload is the same in every build profile, and
+the `release-save-golden` check shape in `brokkr.toml` holds an optimized
+build to the fixture alongside the dev sweeps. Engine and cost-model header metadata do not
 participate in this pin. The load probe uses the current cost-model header on
 this payload; released archives always retain strict, original headers.
 The generated text companion lists string, bytecode, upvalue and object arenas
@@ -220,9 +232,10 @@ identities. Each bytecode record is summarized by encoded length and FNV-1a
 hash so compiler changes stay local in the diff. The reader is test tooling,
 not the production decoder; complete consumption is checked. Both the
 regenerator and the golden test use the same reader. Run
-`brokkr run --debug --features snapshot regenerate_save_golden` to update
-both, and inspect the text diff before accepting the change. The regenerator
-refuses release builds, and payload comparisons run only with debug assertions.
-Deterministic traversal reorders are
+`brokkr run --features snapshot regenerate_save_golden` (any profile) to
+update both, and inspect the text diff before accepting the change. Besides
+format and traversal changes, compiler output, standard-library function ids,
+the golden program and the charges it incurs (a cost-model change) all change
+the payload. Deterministic traversal reorders are
 replay-visible, but do not by themselves make old saves unreadable. Golden
 regeneration is not evidence that a format change is compatible.

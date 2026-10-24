@@ -21,7 +21,7 @@ use super::anchor::Registry;
 use super::global_env::{GlobalEnv, SuspendedEnv};
 use super::meta_name::MetaNames;
 use super::object::{GcHeap, ObjectPtr, StringPtr, UpvaluePool, UpvalueRef};
-use super::{CallInfo, IndexMap, PatternCacheEntry, PointerIdKey, RustFunc, State, Val};
+use super::{CallInfo, IndexMap, PatternCacheEntry, PointerIdKey, RustFnId, State, Val};
 use crate::compiler::Bytecode;
 use crate::limits::tuning;
 use crate::patterns::AnchorMode;
@@ -64,7 +64,7 @@ pub(crate) struct InFlight {
     /// `MAX_NATIVE_CALL_DEPTH`; see docs/limits.md, "Native stack".
     pub(crate) native_call_depth: u32,
     /// Active native callback, restored across nested Rust calls.
-    pub(crate) active_rust_fn: Option<RustFunc>,
+    pub(crate) active_rust_fn: Option<RustFnId>,
 }
 
 impl InFlight {
@@ -83,9 +83,7 @@ impl InFlight {
         }
     }
 
-    /// Whether every field is at its [`InFlight::new`] value. Presence, not
-    /// equality: `active_rust_fn` is a function pointer, and comparing those
-    /// is unreliable.
+    /// Whether every field is at its [`InFlight::new`] value.
     #[cfg(any(debug_assertions, feature = "snapshot"))]
     pub(super) fn is_at_rest(&self) -> bool {
         let Self {
@@ -303,10 +301,7 @@ impl State {
             registry: _,
             format_pointer_ids,
             next_format_pointer_id: _,
-            #[cfg(feature = "snapshot")]
-                rust_fns_by_id: _,
-            #[cfg(feature = "snapshot")]
-                rust_fn_ids_by_addr: _,
+            rust_fns: _,
             #[cfg(feature = "snapshot")]
                 env_tokens: _,
             #[cfg(feature = "snapshot")]
@@ -356,10 +351,7 @@ impl State {
             registry,
             format_pointer_ids: _, // Weak: pruned by for_each_gc_cleanup after sweep.
             next_format_pointer_id: _,
-            #[cfg(feature = "snapshot")]
-                rust_fns_by_id: _, // Function pointers, not heap values.
-            #[cfg(feature = "snapshot")]
-                rust_fn_ids_by_addr: _,
+            rust_fns: _, // Function pointers and ids, not heap values; never pruned.
             #[cfg(feature = "snapshot")]
             env_tokens,
             #[cfg(feature = "snapshot")]
@@ -376,7 +368,7 @@ impl State {
             metamethod_depth: _,
             call_depth: _,
             native_call_depth: _,
-            active_rust_fn: _, // A function pointer, not a heap value.
+            active_rust_fn: _, // A function table entry, not a heap value.
         } = in_flight;
 
         visit(GcRoot::Stack(stack));
@@ -445,10 +437,7 @@ impl State {
             registry: _, // Host-owned handles; allowed in a snapshot, not saved.
             format_pointer_ids: _,
             next_format_pointer_id: _,
-            #[cfg(feature = "snapshot")]
-                rust_fns_by_id: _,
-            #[cfg(feature = "snapshot")]
-                rust_fn_ids_by_addr: _,
+            rust_fns: _, // Persistent: entries live as long as the State.
             #[cfg(feature = "snapshot")]
                 env_tokens: _,
             #[cfg(feature = "snapshot")]
@@ -508,9 +497,6 @@ mod tests {
     #[cfg(feature = "snapshot")]
     #[test]
     fn each_in_flight_field_breaks_rest_and_clears() {
-        fn noop(_: &mut State) -> crate::Result<u8> {
-            Ok(0)
-        }
         fn dirty() -> InFlight {
             let mut state = State::raw();
             let closure = loaded_closure(&mut state, "");
@@ -529,7 +515,7 @@ mod tests {
                 metamethod_depth: 1,
                 call_depth: 1,
                 native_call_depth: 1,
-                active_rust_fn: Some(noop),
+                active_rust_fn: Some(RustFnId::catalog(0)),
             }
         }
         fn check(mut single: InFlight) {

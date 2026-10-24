@@ -71,9 +71,11 @@ are merged with the saved ones: a value the save records takes its saved
 identity, and a setup that does not replay the saving State's initialization
 can print ids that do not hold after the load (see `save-state.md`).
 
-Rust functions are compared by code address, so `f == g` on host functions
-depends on the build: identical-code folding can make two distinct functions
-equal. Addresses themselves never reach output or ordering. See
+Rust functions are compared by their entry in the State's function table,
+never by code address: each `add_rust_fn` or `register_rust_fn` call creates a
+new function, and every push of its handle is the same value. `f == g`, table
+keys and rendered identities of host functions therefore do not depend on the
+build, even when the optimizer or linker merges identical functions. See
 `compatibility.md` and `save-state.md`.
 
 Identities are never reused, short of a load whose setup differs from the

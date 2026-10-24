@@ -3,6 +3,7 @@
 use dellingr::error::ErrorKind;
 use dellingr::{ArgCount, LuaType, RetCount, State};
 
+use crate::support::PushNewRustFn;
 use crate::support::Recorder;
 use crate::support::error_boundary_cases::{CASES, boundary_transcript, fail, natural, run};
 
@@ -118,7 +119,7 @@ fn recover(state: &mut State) -> dellingr::Result<u8> {
     let mode = *state.user_data::<u8>().unwrap();
     match mode {
         0 => {
-            state.push_rust_fn(fail)?;
+            state.push_new_rust_fn(fail)?;
             state
                 .call(ArgCount::Fixed(0), RetCount::Fixed(0))
                 .expect_err("nested callback fails");
@@ -190,7 +191,7 @@ fn error_boundary_caught_recovery_preserves_outer_owners() {
             let callbacks: [(&str, dellingr::RustFunc); 3] =
                 [("recover", recover), ("fail", fail), ("empty", empty)];
             for (name, function) in callbacks {
-                state.push_rust_fn(function).unwrap();
+                state.push_new_rust_fn(function).unwrap();
                 state.set_global(name).unwrap();
             }
             let depth = dellingr::limits::MAX_METAMETHOD_DEPTH + if chained { 0 } else { 1 };
@@ -334,7 +335,7 @@ fn error_boundary_chained_result_padding_fits_a_lua_caller_and_reports_to_a_host
         .join(",");
     for kind in ["lua", "rust", "host"] {
         let (mut state, recorder) = Recorder::state();
-        state.push_rust_fn(empty).unwrap();
+        state.push_new_rust_fn(empty).unwrap();
         state.set_global("empty").unwrap();
         let terminal = if kind == "rust" {
             "empty"

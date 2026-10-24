@@ -3,6 +3,7 @@
 use dellingr::error::{Error, ErrorKind, ErrorValue, LibraryError};
 use dellingr::{ArgCount, RetCount, State};
 
+use crate::support::PushNewRustFn;
 use crate::support::{self, Recorder, stack};
 
 fn fail_fn(_state: &mut State) -> dellingr::Result<u8> {
@@ -43,7 +44,7 @@ fn host_call_of_cyclic_call_metamethod_notifies_once() {
 fn host_call_through_callable_table_chain_notifies_once() {
     let (mut state, recorder) = Recorder::state();
     state
-        .push_rust_fn(fail_fn)
+        .push_new_rust_fn(fail_fn)
         .expect("the Rust function should push");
     state.set_global("fail").unwrap();
     support::run(
@@ -90,7 +91,7 @@ fn host_call_through_chain_into_failing_lua_function_notifies_once() {
 fn host_table_read_through_failing_rust_index_notifies_once() {
     let (mut state, recorder) = Recorder::state();
     state
-        .push_rust_fn(fail_fn)
+        .push_new_rust_fn(fail_fn)
         .expect("the Rust function should push");
     state.set_global("fail").unwrap();
     support::run(&mut state, "indexed = setmetatable({}, { __index = fail })");
@@ -111,7 +112,7 @@ fn host_table_read_through_failing_rust_index_notifies_once() {
 fn host_call_through_direct_rust_call_metamethod_notifies_once() {
     let (mut state, recorder) = Recorder::state();
     state
-        .push_rust_fn(fail_fn)
+        .push_new_rust_fn(fail_fn)
         .expect("the Rust function should push");
     state.set_global("fail").unwrap();
     support::run(&mut state, "callable = setmetatable({}, { __call = fail })");
@@ -149,7 +150,7 @@ fn call_non_callable(state: &mut State) -> dellingr::Result<u8> {
 fn rust_callback_propagating_nested_call_failure_notifies_once() {
     let (mut state, recorder) = Recorder::state();
     state
-        .push_rust_fn(call_non_callable)
+        .push_new_rust_fn(call_non_callable)
         .expect("callback fits");
     let error = state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
@@ -170,7 +171,7 @@ fn malformed_host_call_does_not_notify() {
 }
 
 fn call_failing_callback(state: &mut State) -> dellingr::Result<u8> {
-    state.push_rust_fn(fail_fn)?;
+    state.push_new_rust_fn(fail_fn)?;
     state.call(ArgCount::Fixed(0), RetCount::Fixed(0))?;
     Ok(0)
 }
@@ -179,7 +180,7 @@ fn call_failing_callback(state: &mut State) -> dellingr::Result<u8> {
 fn rust_callback_propagating_nested_rust_failure_notifies_once() {
     let (mut state, recorder) = Recorder::state();
     state
-        .push_rust_fn(call_failing_callback)
+        .push_new_rust_fn(call_failing_callback)
         .expect("callback fits");
     let error = state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
@@ -205,7 +206,9 @@ fn fail_with_trace(_state: &mut State) -> dellingr::Result<u8> {
 fn host_supplied_trace_does_not_suppress_notification() {
     for through_lua in [false, true] {
         let (mut state, recorder) = Recorder::state();
-        state.push_rust_fn(fail_with_trace).expect("callback fits");
+        state
+            .push_new_rust_fn(fail_with_trace)
+            .expect("callback fits");
         if through_lua {
             state.set_global("fail").unwrap();
             support::load(&mut state, "fail()");
@@ -237,7 +240,9 @@ fn execution_stack_preflights_notify_once() {
                 );
             }
             1 => {
-                state.push_rust_fn(return_nothing).expect("callback fits");
+                state
+                    .push_new_rust_fn(return_nothing)
+                    .expect("callback fits");
                 state.set_global("target").unwrap();
             }
             2 => {
@@ -314,13 +319,13 @@ fn return_saved_error(state: &mut State) -> dellingr::Result<u8> {
 #[test]
 fn returning_the_same_error_value_preserves_reporting_state() {
     let (mut state, recorder) = Recorder::state();
-    state.push_rust_fn(fail_fn).expect("callback fits");
+    state.push_new_rust_fn(fail_fn).expect("callback fits");
     let error = state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect_err("first call fails");
     state.set_user_data(Some(error));
     state
-        .push_rust_fn(return_saved_error)
+        .push_new_rust_fn(return_saved_error)
         .expect("callback fits");
     let _error = state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
@@ -348,7 +353,7 @@ fn nonfunction_chain_resolution_and_admission_report_once() {
                 ),
             );
             if admission {
-                state.push_rust_fn(host_admit).unwrap();
+                state.push_new_rust_fn(host_admit).unwrap();
                 state.set_global("host_admit").unwrap();
                 // Fill Lua activation depth without holding chain units at
                 // intervening levels; the final admission exercises either
@@ -509,7 +514,7 @@ fn attempt_chain_arguments(state: &mut State) -> dellingr::Result<()> {
 }
 
 fn attempt_rust_error(state: &mut State) -> dellingr::Result<()> {
-    state.push_rust_fn(fail_fn)?;
+    state.push_new_rust_fn(fail_fn)?;
     state.call(ArgCount::Fixed(0), RetCount::Fixed(0))
 }
 
@@ -518,7 +523,7 @@ fn attempt_rust_error(state: &mut State) -> dellingr::Result<()> {
 fn attempt_result_padding(state: &mut State) -> dellingr::Result<()> {
     while state.push_nil().is_ok() {}
     state.pop(1)?;
-    state.push_rust_fn(return_nothing)?;
+    state.push_new_rust_fn(return_nothing)?;
     state.call(ArgCount::Fixed(0), RetCount::Fixed(2))
 }
 
@@ -588,9 +593,9 @@ enum Mode {
 /// Run `attempt` in `mode`; return the failure and the notifications.
 fn run_attempt(attempt: Attempt, mode: Mode) -> (Error, Vec<String>) {
     let (mut state, recorder) = Recorder::state();
-    state.push_rust_fn(fail_fn).unwrap();
+    state.push_new_rust_fn(fail_fn).unwrap();
     state.set_global("fail").unwrap();
-    state.push_rust_fn(swallow).unwrap();
+    state.push_new_rust_fn(swallow).unwrap();
     state.set_global("swallow").unwrap();
     dellingr::Program::compile(HARNESS_SETUP, Some(b"setup"))
         .and_then(|program| state.load(&program))
@@ -612,7 +617,7 @@ fn run_attempt(attempt: Attempt, mode: Mode) -> (Error, Vec<String>) {
                     .and_then(|program| state.load(&program))
                     .unwrap();
             } else {
-                state.push_rust_fn(swallow).unwrap();
+                state.push_new_rust_fn(swallow).unwrap();
             }
             state
                 .call(ArgCount::Fixed(0), RetCount::Fixed(0))
@@ -722,7 +727,7 @@ fn host_api_misuse_does_not_notify_at_any_depth() {
 /// Each level calls itself again through `State::call` until the native
 /// call depth limit refuses the call; the deepest level handles that error.
 fn recurse_until_refused(state: &mut State) -> dellingr::Result<u8> {
-    state.push_rust_fn(recurse_until_refused)?;
+    state.push_new_rust_fn(recurse_until_refused)?;
     if let Err(error) = state.call(ArgCount::Fixed(0), RetCount::Fixed(0)) {
         state
             .user_data_mut::<Vec<Error>>()
@@ -739,13 +744,13 @@ fn handled_native_call_depth_refusal_notifies_once() {
             let (mut state, recorder) = Recorder::state();
             state.set_user_data(Vec::<Error>::new());
             if from_lua {
-                state.push_rust_fn(recurse_until_refused).unwrap();
+                state.push_new_rust_fn(recurse_until_refused).unwrap();
                 state.set_global("recurse").unwrap();
                 dellingr::Program::compile("local before = 1\nrecurse()", Some(b"depth-caller"))
                     .and_then(|program| state.load(&program))
                     .unwrap();
             } else {
-                state.push_rust_fn(recurse_until_refused).unwrap();
+                state.push_new_rust_fn(recurse_until_refused).unwrap();
             }
             state
                 .call(ArgCount::Fixed(0), RetCount::Fixed(0))

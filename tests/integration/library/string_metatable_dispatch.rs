@@ -7,6 +7,7 @@ use dellingr::limits::MAX_STRING_BYTES;
 use dellingr::{ArgCount, LuaType, RetCount, State};
 
 use crate::support;
+use crate::support::PushNewRustFn;
 
 #[test]
 fn host_get_table_on_string_matches_the_opcode() {
@@ -171,7 +172,7 @@ fn string_call_roots_the_receiver_and_active_handler_during_gc() {
     }
 
     let mut state = State::new();
-    state.push_rust_fn(collect).unwrap();
+    state.push_new_rust_fn(collect).unwrap();
     state.set_global("collect").unwrap();
     support::run(
         &mut state,

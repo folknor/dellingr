@@ -318,11 +318,8 @@ Requirements the rewrite must meet:
   custom generational arena. Keeping a 32-bit index avoids a new limit on
   live objects; a narrower index is a new cap that needs a docs/limits.md
   entry and an error kind.
-- **Rust functions.** They compare and hash by address and are saved by
-  registered name. A per-State registry index or the raw pointer both work
-  unobservably; the raw pointer relies on user-space code addresses fitting
-  about 47 bits (true on x86-64 and aarch64 Linux and macOS today, not a Rust
-  guarantee), so it needs an assert or a fallback.
+- **Rust functions.** A `Val::RustFn` is already a 32-bit index into the
+  State's function table (`vm/rust_fn.rs`), so it narrows without change.
 - **Table storage.** `TableKeyKind::Live(Val)` / `Vacant(usize)` and the
   `Option<Val>` uses need niche encodings, or tables stay 16 bytes per value
   and lose most of the gain.
