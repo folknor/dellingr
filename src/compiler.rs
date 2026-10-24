@@ -467,47 +467,37 @@ mod tests {
 
     #[test]
     fn compiler_examples_verify_and_disassemble() {
-        let paths = crate::examples_corpus::example_corpus();
-        // Without this the corpus proof passes vacuously if the walk finds
-        // nothing, which is exactly the failure mode that would let a verifier
-        // that rejects real compiler output reach a release.
+        let examples = crate::example_list::EXAMPLES;
+        // Without this the corpus proof passes vacuously if the list is
+        // emptied, which is exactly the failure mode that would let a
+        // verifier that rejects real compiler output reach a release.
         assert!(
-            paths.len() > 20,
+            examples.len() > 20,
             "the example corpus is the proof that the verifier accepts real \
              compiler output; found only {} sources",
-            paths.len()
+            examples.len()
         );
         let mut seen = OpenShapes::default();
-        let manifest_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        for path in paths {
-            let source = std::fs::read(&path).expect("example source must be readable");
-            let relative_path = path
-                .strip_prefix(manifest_root)
-                .expect("example paths must be rooted at the manifest");
-            let source_name = relative_path.as_os_str().as_encoded_bytes();
-            let bytecode =
-                compile(&source, Some(source_name)).expect("example source must compile");
+        for example in examples {
+            let source = std::fs::read(example.path).expect("example source must be readable");
+            let relative_path = example.relative;
+            let bytecode = compile(&source, Some(relative_path.as_bytes()))
+                .expect("example source must compile");
             assert_verified_tree(&bytecode, &mut seen);
 
             let text = crate::Disassembly::new(&bytecode).to_string();
-            assert!(
-                text.starts_with("function main "),
-                "{}",
-                relative_path.display()
-            );
+            assert!(text.starts_with("function main "), "{relative_path}");
             for line in text.lines() {
                 assert!(
                     line.is_empty()
                         || line.starts_with("function main ")
                         || line.starts_with("function main/")
                         || line.starts_with("  "),
-                    "{}: malformed listing line {line:?}",
-                    relative_path.display()
+                    "{relative_path}: malformed listing line {line:?}"
                 );
                 assert!(
                     !line.contains(crate::disassemble::OUT_OF_RANGE_ANNOTATION),
-                    "{}: {line:?}",
-                    relative_path.display()
+                    "{relative_path}: {line:?}"
                 );
             }
         }

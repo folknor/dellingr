@@ -103,9 +103,36 @@ stream = "stdout"
 #                   `cfg(not(feature = "snapshot"))` code paths.
 #  - "snapshot" = the save/load subsystem enabled, covering save_state.rs,
 #                   the env/fn registry, and the integration + codec tests.
+#
+# Each shape's example corpus gate, one test per example under
+# `corpus::run_examples::standalone::`, runs in a sibling sweep of the same
+# build, "default-corpus" and "snapshot-corpus", which runs only those tests
+# in the parallel lane; the shape's main sweep skips them, and the rest of the
+# crate (million-slot at-cap tests and their memory peaks included) stays
+# serial. The corpus tests spend their time in the CLI and reference Lua
+# processes they start, so they overlap well. The test
+# `corpus::run_examples::standalone_tests_run_in_one_parallel_lane_per_shape`
+# holds these entries to that partition.
+#
+# Every dev entry of these two shapes, doc twins included, pins
+# `feature_unification = "workspace"`. brokkr promotes a parallel sweep that
+# selects the whole workspace to workspace unification on its own, and its
+# clippy and rustdoc dedupe keys include the unification mode, so without the
+# pin each sibling is linted and documented as a shape of its own. (For this
+# one-package workspace the mode builds the same artifacts as cargo's default;
+# pinning `selected` on the siblings instead rebuilt the integration binary
+# under different content on every check.)
 
 [[check]]
 name = "default"
+skip = ["corpus::run_examples::standalone::"]
+feature_unification = "workspace"
+
+[[check]]
+name = "default-corpus"
+only = ["corpus::run_examples::standalone::"]
+parallel = {}
+feature_unification = "workspace"
 
 [[check]]
 name = "snapshot"
@@ -114,18 +141,31 @@ features = ["snapshot"]
 # changes can affect any test using the stdlib, _G or RNG names, as well as
 # saving, corpus round trips and cost goldens. New feature-sensitive tests are
 # picked up automatically, without an allowlist that can silently lose them.
-# Keep this unfiltered until feature independence has a mechanical contract;
-# module names and the absence of cfg in a test do not prove independence.
+# Keep the shape running every test until feature independence has a
+# mechanical contract; module names and the absence of cfg in a test do not
+# prove independence. The one filter is the corpus partition above:
+# "snapshot-corpus" runs exactly what it skips.
+skip = ["corpus::run_examples::standalone::"]
+feature_unification = "workspace"
+
+[[check]]
+name = "snapshot-corpus"
+features = ["snapshot"]
+only = ["corpus::run_examples::standalone::"]
+parallel = {}
+feature_unification = "workspace"
 
 # Explicit dev lanes keep doctests out of instrumentation and release probes.
 [[check]]
 name = "docs-default"
 doc_only = true
+feature_unification = "workspace"
 
 [[check]]
 name = "docs-snapshot"
 features = ["snapshot"]
 doc_only = true
+feature_unification = "workspace"
 
 # Compile and lint instrumentation and refusal hooks in one extra dev shape.
 # Run only refusal tests: the ordinary sweeps already cover the corpus, and
@@ -533,6 +573,30 @@ paths = ["examples/**/*.lua"]
 must_scan = ["examples/math.lua"]
 message = "a -- DIFF: or -- SKIP-DIFF: marker needs a reason after the colon"
 
+# No Rust code enumerates the example corpus itself: tests/common/examples.rs
+# is its only list, kept equal to the files on disk by the `example-list`
+# script check. The first rule refuses the old walker's name and a read_dir
+# that mentions the examples tree on its line; the second refuses a string
+# literal naming the examples directory itself ("examples", "/examples/"),
+# which a walk would need for its root, while file paths such as
+# "examples/parse/large_source.lua" stay legal. The list's includers spell
+# each source path from one list entry, so they need no directory literal.
+# Lexical guards: a root assembled some other way is not seen.
+[[textlint]]
+name = "example-corpus-only-from-the-list"
+pattern = '\bexample_corpus\b|\bread_dir\b.*\bexamples\b'
+paths = ["src/**/*.rs", "tests/**/*.rs", "examples/**/*.rs"]
+must_scan = ["tests/integration/corpus/run_examples.rs", "src/lib.rs"]
+message = "enumerate the example corpus through tests/common/examples.rs, not by walking examples/"
+
+[[textlint]]
+name = "no-examples-directory-literal"
+pattern = '"/?examples/?"'
+paths = ["src/**/*.rs", "tests/**/*.rs", "examples/**/*.rs"]
+region = "string"
+must_scan = ["tests/integration/support/mod.rs", "tests/integration/corpus/bench_scripts.rs"]
+message = "name examples by their list entries in tests/common/examples.rs; no Rust code builds the examples directory path"
+
 # Free callback values are legitimate registration sites. Guard qualified
 # method values separately, without banning those registrations. The native
 # inventory checker verifies this alternation alongside the call rule below.
@@ -608,6 +672,29 @@ stream = "stdout"
 [[script_check]]
 name = "test-tree-anchor"
 command = "python3 -B scripts/test_tree_anchor.py"
+expect = "ok"
+match = "last-line"
+stream = "stdout"
+
+# tests/common/examples.rs is the example corpus's only enumeration (every
+# Rust consumer includes it; the corpus gate expands it into one test per
+# example). This keeps it equal to the .lua files under examples/, so a new
+# example, or a stray untracked one, fails here until it is listed
+# (`python3 scripts/example_list.py --write`) or removed. No git: the list is
+# compared with what is on disk.
+[[script_check]]
+name = "example-list"
+command = "python3 -B scripts/example_list.py"
+expect = "ok"
+match = "last-line"
+stream = "stdout"
+stage = "pre-clippy"
+
+# Its fixture tests write their trees under .scratch/; declared after
+# wipe-scratch, at the same stage, so they run after the wipe.
+[[script_check]]
+name = "example-list-checker-tests"
+command = "python3 -B scripts/test_example_list.py"
 expect = "ok"
 match = "last-line"
 stream = "stdout"

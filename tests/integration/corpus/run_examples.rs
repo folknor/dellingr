@@ -1,13 +1,18 @@
-//! The example corpus gate. Every Lua file under `examples/` runs through the
-//! CLI once and must pass the example conventions (`check_cli_run`); every
-//! file not marked `-- SKIP-DIFF:` is then run by reference Lua 5.2 and 5.4
-//! and compared with the CLI's output in memory (`compare_with_references`).
-//! `brokkr check` runs it in every sweep whose selection includes it.
+//! The example corpus gate: one test per example, in `standalone`, expanded
+//! from the checked-in list `tests/common/examples.rs`. Each example runs
+//! through the CLI once and must pass the example conventions
+//! (`check_cli_run`); an example not marked `-- SKIP-DIFF:` is then run by
+//! reference Lua 5.2 and 5.4 and compared with the CLI's output in memory
+//! (`compare_with_references`). `brokkr test standalone::calls_global` runs
+//! one example.
 //!
-//! `check_example` depends on one path and a deadline, so the corpus can
-//! become one test per example. Until then `run_all_examples` runs the whole
-//! corpus in one test, under one deadline below brokkr's per-test cap, and
-//! names the examples still running or not started when it passes.
+//! `brokkr check` runs the standalone tests in their own lane per feature
+//! shape: the default and snapshot sweeps skip them, and a sibling sweep of
+//! each shape runs only them, several at a time (`parallel` in `brokkr.toml`).
+//! They spend their time in child processes, so they overlap well, while the
+//! rest of the crate, at-cap memory tests included, stays serial.
+//! `standalone_tests_run_in_one_parallel_lane_per_shape` holds `brokkr.toml`
+//! to that partition.
 //!
 //! The comparison is compiled out under the `hotpath` feature: it instruments
 //! every call in the CLI binary, and output equivalence says nothing about
@@ -24,26 +29,66 @@ use crate::support::process::ReferenceLua;
 use crate::support::process::{self, Cut, Deadline, End};
 use crate::support::{self, examples};
 
-const EXAMPLE_WORKERS: usize = 8;
 /// The limit on one process's stdout and stderr together.
 const OUTPUT_LIMIT_BYTES: usize = 1024 * 1024;
 /// brokkr's hard per-test wall-time cap (`brokkr man hygiene`). brokkr does
-/// not export it, so this restates it.
+/// not export it, so this restates it, and the assertion below only relates
+/// the two local constants.
 const BROKKR_PER_TEST_CAP: Duration = Duration::from_secs(20);
-/// The whole corpus shares this deadline, measured from the start of the
-/// test. It sits far enough inside the cap that a slow or hung example is
-/// reported by name, with the rest of the corpus's verdicts, instead of being
-/// killed by brokkr's watchdog with the whole test as the suspect.
-const CORPUS_DEADLINE: Duration = Duration::from_secs(15);
-const _: () = assert!(CORPUS_DEADLINE.as_secs() + 5 <= BROKKR_PER_TEST_CAP.as_secs());
+/// The processes of one example share this deadline, measured from the start
+/// of its test: none starts after it, and one still running at it is killed.
+/// A test that passes brokkr's cap stops the whole `brokkr check` run, every
+/// other example's verdict with it; a hang inside the deadline is that
+/// example's own failure, naming the process. It bounds child execution and
+/// output capture, not the in-process compile or a child the kernel will not
+/// reap, which brokkr's watchdog still covers. `brokkr test --timeout` raises
+/// brokkr's cap but not this deadline.
+const EXAMPLE_DEADLINE: Duration = Duration::from_secs(15);
+const _: () = assert!(EXAMPLE_DEADLINE.as_secs() + 5 <= BROKKR_PER_TEST_CAP.as_secs());
+
+/// One test per listed example. The module holds the expansion and nothing
+/// else, so its path is exactly the selector of the corpus lanes.
+mod standalone {
+    /// This module's path, from which the lane selector is derived.
+    pub(super) const MODULE: &str = module_path!();
+
+    macro_rules! examples {
+        ($($name:ident: $path:literal,)*) => {
+            $(
+                #[test]
+                fn $name() {
+                    super::run_example($path, concat!(env!("CARGO_MANIFEST_DIR"), "/", $path));
+                }
+            )*
+        };
+    }
+
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/common/examples.rs"
+    ));
+}
+
+/// The libtest filter that selects exactly the standalone tests.
+fn standalone_selector() -> String {
+    let (_crate, module) = standalone::MODULE
+        .split_once("::")
+        .expect("a module path starts with its crate");
+    format!("{module}::")
+}
+
+fn run_example(relative: &str, path: &str) {
+    let deadline = Deadline::after(EXAMPLE_DEADLINE);
+    if let Err(failure) = check_example(relative, Path::new(path), deadline) {
+        panic!("{failure}");
+    }
+}
 
 #[test]
 fn run_feature_test_extended_in_process() {
-    let feature_test = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("examples")
-        .join("feature_test_extended.lua");
+    let feature_test = examples::find("examples/feature_test_extended.lua").path;
     let source =
-        fs::read_to_string(&feature_test).expect("Failed to read feature_test_extended.lua");
+        fs::read_to_string(feature_test).expect("Failed to read feature_test_extended.lua");
     let (mut state, recorder) = support::Recorder::state();
     support::run(&mut state, &source);
 
@@ -157,60 +202,44 @@ fn comparison(source: &str) -> Result<Comparison, String> {
     }
 }
 
-/// The verdict on one example.
-enum Outcome {
-    Passed,
-    Failed(String),
-    /// The deadline passed while the example was running; the text says which
-    /// process it was in.
-    Unfinished(String),
-    /// The deadline had passed before the example started.
-    NotStarted,
-}
-
 /// Runs one example through the CLI and, unless it is marked SKIP-DIFF,
-/// through both references, and judges it. Every process is started only
-/// while the deadline has not passed.
-fn check_example(path: &Path, deadline: Deadline) -> Outcome {
-    if deadline.passed() {
-        return Outcome::NotStarted;
-    }
-    let display = display_path(path);
-    let source = match fs::read_to_string(path) {
-        Ok(source) => source,
-        Err(error) => return Outcome::Failed(format!("{display}: could not read source: {error}")),
-    };
-    let comparison = match comparison(&source) {
-        Ok(comparison) => comparison,
-        Err(error) => return Outcome::Failed(format!("{display}: {error}")),
-    };
+/// through both references, and judges it. `display` is its
+/// repository-relative path. Every process is started only while the
+/// deadline has not passed.
+fn check_example(display: &str, path: &Path, deadline: Deadline) -> Result<(), String> {
+    let source = fs::read_to_string(path)
+        .map_err(|error| format!("{display}: could not read source: {error}"))?;
+    let comparison = comparison(&source).map_err(|error| format!("{display}: {error}"))?;
     let defines_bench = defines_global_bench(&source);
 
-    if deadline.passed() {
-        return Outcome::NotStarted;
-    }
-    let run = match process::capture(
+    // `capture` starts nothing once the deadline has passed.
+    let run = process::capture(
         process::limited_command().arg("--quiet").arg(path),
         OUTPUT_LIMIT_BYTES,
         deadline,
-    ) {
-        Ok(run) => run,
-        Err(error) => return Outcome::Failed(format!("{display}: dellingr: {error}")),
-    };
-    if let Some(failure) = check_cli_run(&display, &run, defines_bench) {
-        return failure;
-    }
-    compare_with_references(path, &display, comparison, &run.stdout, deadline)
+    )
+    .map_err(|error| {
+        format!(
+            "{display}: dellingr (example deadline {}s): {error}",
+            EXAMPLE_DEADLINE.as_secs()
+        )
+    })?;
+    check_cli_run(display, &run, defines_bench)?;
+    compare_with_references(path, display, comparison, &run.stdout, deadline)
 }
 
 /// The example conventions for the CLI run: it exits 0 and writes nothing to
 /// stderr; no stdout line ends in `: false` (examples print
 /// `name: <condition>`); and a file whose main chunk assigns a global `_bench`
 /// prints a line ending in `: true`.
-fn check_cli_run(display: &str, run: &process::Captured, defines_bench: bool) -> Option<Outcome> {
+fn check_cli_run(
+    display: &str,
+    run: &process::Captured,
+    defines_bench: bool,
+) -> Result<(), String> {
     let status = match &run.end {
         End::Exited(status) => status,
-        End::Cut(cut) => return Some(cut_outcome(display, "dellingr", cut, run)),
+        End::Cut(cut) => return Err(cut_failure(display, "dellingr", cut, run)),
     };
     let stdout = String::from_utf8_lossy(&run.stdout);
     let stderr = String::from_utf8_lossy(&run.stderr);
@@ -226,28 +255,32 @@ fn check_cli_run(display: &str, run: &process::Captured, defines_bench: bool) ->
     } else if defines_bench && !stdout.lines().any(|line| line.ends_with(": true")) {
         format!("{display}: _bench example did not print a success line\noutput: {stdout}")
     } else {
-        return None;
+        return Ok(());
     };
-    Some(Outcome::Failed(failure))
+    Err(failure)
 }
 
-/// The verdict on a process whose capture was cut short.
-fn cut_outcome(display: &str, program: &str, cut: &Cut, run: &process::Captured) -> Outcome {
+/// The failure of a process whose capture was cut short.
+fn cut_failure(display: &str, program: &str, cut: &Cut, run: &process::Captured) -> String {
     let output: String = [("stdout", &run.stdout), ("stderr", &run.stderr)]
         .into_iter()
         .filter(|(_, bytes)| !bytes.is_empty())
         .map(|(name, bytes)| format!("\n{name}: {}", String::from_utf8_lossy(bytes)))
         .collect();
+    let deadline = EXAMPLE_DEADLINE.as_secs();
     match cut {
-        Cut::OutputExceeded => Outcome::Failed(format!(
+        Cut::OutputExceeded => format!(
             "{display}: {program}: stdout and stderr exceeded the combined output limit of {OUTPUT_LIMIT_BYTES} bytes"
-        )),
+        ),
         Cut::Unfinished => {
-            Outcome::Unfinished(format!("{display}: {program} was still running{output}"))
+            format!(
+                "{display}: {program} was still running at the {deadline}s example deadline{output}"
+            )
         }
-        Cut::CaptureUnfinished(status) => Outcome::Unfinished(format!(
-            "{display}: {program} exited ({status}), but its output had not been read to the end{output}"
-        )),
+        Cut::CaptureUnfinished(status) => format!(
+            "{display}: {program} exited ({status}), but its output had not been read to the end \
+             by the {deadline}s example deadline{output}"
+        ),
     }
 }
 
@@ -277,41 +310,32 @@ fn compare_with_references(
     comparison: Comparison,
     ours: &[u8],
     deadline: Deadline,
-) -> Outcome {
+) -> Result<(), String> {
     if matches!(comparison, Comparison::Skipped) {
-        return Outcome::Passed;
+        return Ok(());
     }
     let mut matched = Vec::new();
     let mut mismatches = Vec::new();
     for lua in ReferenceLua::ALL {
-        if deadline.passed() {
-            return Outcome::Unfinished(format!(
-                "{display}: {} had not started (dellingr passed)",
-                lua.label()
-            ));
-        }
-        let mut command = match process::reference_command(lua, path) {
-            Ok(command) => command,
-            Err(error) => return Outcome::Failed(format!("{display}: {error}")),
-        };
-        let run = match process::capture(&mut command, OUTPUT_LIMIT_BYTES, deadline) {
-            Ok(run) => run,
-            // A start failure is usually a missing interpreter, so name the
-            // executable.
-            Err(error) => {
-                return Outcome::Failed(format!(
-                    "{display}: {} ({}): {error}",
+        let mut command =
+            process::reference_command(lua, path).map_err(|error| format!("{display}: {error}"))?;
+        // A start failure is usually a missing interpreter, so name the
+        // executable. `capture` starts nothing once the deadline has passed.
+        let run =
+            process::capture(&mut command, OUTPUT_LIMIT_BYTES, deadline).map_err(|error| {
+                format!(
+                    "{display}: {} ({}, example deadline {}s, dellingr passed): {error}",
                     lua.label(),
-                    lua.program()
-                ));
-            }
-        };
+                    lua.program(),
+                    EXAMPLE_DEADLINE.as_secs()
+                )
+            })?;
         let status = match &run.end {
             End::Exited(status) => *status,
-            End::Cut(cut) => return cut_outcome(display, lua.label(), cut, &run),
+            End::Cut(cut) => return Err(cut_failure(display, lua.label(), cut, &run)),
         };
         let Some(code) = status.code() else {
-            return Outcome::Failed(format!(
+            return Err(format!(
                 "{display}: {} did not exit normally ({status})",
                 lua.label()
             ));
@@ -323,15 +347,15 @@ fn compare_with_references(
         }
     }
     match comparison {
-        Comparison::Compared if matched.is_empty() => Outcome::Failed(format!(
+        Comparison::Compared if matched.is_empty() => Err(format!(
             "{display}: output matches neither reference\n{}",
             mismatches.join("\n")
         )),
-        Comparison::Diverges if !matched.is_empty() => Outcome::Failed(format!(
+        Comparison::Diverges if !matched.is_empty() => Err(format!(
             "{display}: stale DIFF marker; output matches {}",
             matched.join(" and ")
         )),
-        _ => Outcome::Passed,
+        _ => Ok(()),
     }
 }
 
@@ -343,8 +367,8 @@ fn compare_with_references(
     _comparison: Comparison,
     _ours: &[u8],
     _deadline: Deadline,
-) -> Outcome {
-    Outcome::Passed
+) -> Result<(), String> {
+    Ok(())
 }
 
 /// How a reference's run differs from the CLI's: its exit code, its stderr
@@ -380,52 +404,213 @@ fn describe_mismatch(label: &str, code: i32, run: &process::Captured, ours: &[u8
     text
 }
 
-fn display_path(path: &Path) -> String {
-    path.strip_prefix(Path::new(env!("CARGO_MANIFEST_DIR")))
-        .expect("example corpus paths must be rooted at the crate manifest")
-        .display()
-        .to_string()
+/// A string list in a `[[check]]` entry, if the key is present.
+fn check_list<'a>(check: &'a toml::Table, key: &str) -> Option<Vec<&'a str>> {
+    check.get(key).map(|value| {
+        value
+            .as_array()
+            .unwrap_or_else(|| panic!("brokkr.toml [[check]] {key} should be a list"))
+            .iter()
+            .map(|item| {
+                item.as_str()
+                    .unwrap_or_else(|| panic!("brokkr.toml [[check]] {key} should hold strings"))
+            })
+            .collect()
+    })
 }
 
-/// The whole corpus in one test; see the module comment.
+/// What decides which build a `[[check]]` entry tests: its features (as a
+/// set), defaults, profile, target selection and feature unification as
+/// written. brokkr's `auto` (an absent key) promotes a parallel sweep of the
+/// whole workspace to `workspace` under `brokkr check` but not under
+/// `brokkr test` or `-p`, so only the same written mode builds the same thing
+/// everywhere.
+fn build_shape(check: &toml::Table) -> String {
+    let mut features = check_list(check, "features").unwrap_or_default();
+    features.sort_unstable();
+    let unification = check
+        .get("feature_unification")
+        .and_then(toml::Value::as_str)
+        .unwrap_or("auto");
+    format!(
+        "features {features:?}, unification {unification}, no_default_features {:?}, \
+         profile {:?}, tests {:?}, lib_tests {:?}",
+        check
+            .get("no_default_features")
+            .and_then(toml::Value::as_bool)
+            .unwrap_or(false),
+        check.get("profile").and_then(toml::Value::as_str),
+        check_list(check, "tests"),
+        check.get("lib_tests").and_then(toml::Value::as_bool),
+    )
+}
+
+/// `brokkr check` runs the standalone tests once per feature shape, in a lane
+/// of their own (see the module comment). Every sweep that runs the
+/// integration crate without an `only` filter skips them; each such sweep has
+/// exactly one sibling of the same build that runs only them, in brokkr's
+/// shared-process parallel lane; and no other sweep names or selects them.
+/// The selector comes from the module's own path, so renaming the module
+/// fails here rather than moving the corpus into the serial lane or out of
+/// both. brokkr refuses a sweep in which no test ran, which covers an
+/// expansion that produced no tests.
 #[test]
-fn run_all_examples() {
-    let deadline = Deadline::after(CORPUS_DEADLINE);
-    let files = examples::example_corpus();
-    assert!(!files.is_empty(), "no .lua files found under examples/");
+fn standalone_tests_run_in_one_parallel_lane_per_shape() {
+    let selector = standalone_selector();
+    let standalone_tests: Vec<String> = examples::EXAMPLES
+        .iter()
+        .map(|example| format!("{selector}{}", example.name))
+        .collect();
+    let config = support::brokkr_config();
+    let checks = config
+        .get("check")
+        .and_then(toml::Value::as_array)
+        .expect("brokkr.toml should list check shapes");
 
-    let outcomes = support::parallel_map(&files, EXAMPLE_WORKERS, |path| {
-        check_example(path, deadline)
-    });
+    let mut parents = Vec::new();
+    let mut siblings = Vec::new();
+    for check in checks {
+        let check = check
+            .as_table()
+            .expect("brokkr.toml [[check]] entries are tables");
+        let name = check
+            .get("name")
+            .and_then(toml::Value::as_str)
+            .expect("brokkr.toml [[check]] entries have names");
+        let skip = check_list(check, "skip").unwrap_or_default();
+        let only = check_list(check, "only");
+        let doc_only = check.get("doc_only").and_then(toml::Value::as_bool) == Some(true);
+        // Without `tests`, an entry runs every harness, unless `lib_tests`
+        // narrows it to the library's.
+        let runs_integration = !doc_only
+            && match check_list(check, "tests") {
+                Some(tests) => tests.contains(&"integration"),
+                None => check.get("lib_tests").and_then(toml::Value::as_bool) != Some(true),
+            };
 
-    let mut failures = Vec::new();
-    let mut unfinished = Vec::new();
-    let mut not_started = Vec::new();
-    for (path, outcome) in files.iter().zip(outcomes) {
-        match outcome {
-            Outcome::Passed => {}
-            Outcome::Failed(failure) => failures.push(failure),
-            Outcome::Unfinished(report) => unfinished.push(report),
-            Outcome::NotStarted => not_started.push(display_path(path)),
+        if only.as_deref() == Some(&[selector.as_str()]) {
+            assert!(
+                runs_integration,
+                "[[check]] {name} selects the standalone tests but does not run the integration crate"
+            );
+            assert!(
+                check.get("parallel").is_some_and(toml::Value::is_table),
+                "[[check]] {name} runs the standalone tests and needs `parallel = {{}}`"
+            );
+            assert!(
+                check
+                    .get("harness")
+                    .is_none_or(|harness| harness.as_str() == Some("libtest")),
+                "[[check]] {name} must run the standalone tests in the shared-process libtest lane"
+            );
+            assert!(
+                skip.is_empty(),
+                "[[check]] {name} runs the standalone tests and skips nothing"
+            );
+            assert!(
+                check
+                    .get("feature_unification")
+                    .and_then(toml::Value::as_str)
+                    .is_some_and(|mode| mode != "auto"),
+                "[[check]] {name} must pin feature_unification, as its main sweep does: under \
+                 auto, brokkr check promotes the parallel lane to workspace unification"
+            );
+            siblings.push((name, build_shape(check)));
+            continue;
+        }
+        let selects_standalone = |filter: &str| {
+            standalone_tests
+                .iter()
+                .any(|test| test.contains(filter) || filter.contains(selector.as_str()))
+        };
+        if runs_integration && only.is_none() {
+            assert!(
+                skip.contains(&selector.as_str()),
+                "[[check]] {name} runs the integration crate and must skip {selector:?}, \
+                 which its standalone sibling runs"
+            );
+            // The rest of the crate, at-cap memory tests included, runs one
+            // test at a time in one process.
+            assert!(
+                check.get("parallel").is_none()
+                    && check
+                        .get("harness")
+                        .is_none_or(|harness| harness.as_str() == Some("libtest")),
+                "[[check]] {name} runs the integration crate and must stay in the serial libtest lane"
+            );
+            parents.push((name, build_shape(check)));
+        } else {
+            assert!(
+                !skip.iter().any(|filter| selects_standalone(filter)),
+                "[[check]] {name} names the standalone tests in skip"
+            );
+        }
+        if runs_integration && let Some(only) = &only {
+            assert!(
+                !only.iter().any(|filter| selects_standalone(filter)),
+                "[[check]] {name} selects standalone tests; only their own lanes may"
+            );
         }
     }
-    if !unfinished.is_empty() || !not_started.is_empty() {
-        failures.push(format!(
-            "the corpus deadline of {}s (brokkr's per-test cap is {}s) passed with {} example(s) \
-             unfinished and {} not started\n\nunfinished:\n{}\n\nnot started:\n{}",
-            CORPUS_DEADLINE.as_secs(),
-            BROKKR_PER_TEST_CAP.as_secs(),
-            unfinished.len(),
-            not_started.len(),
-            unfinished.join("\n\n"),
-            not_started.join("\n")
-        ));
+
+    assert!(!parents.is_empty(), "no sweep runs the integration crate");
+    let profiles = config
+        .get("test")
+        .and_then(|test| test.get("profiles"))
+        .and_then(toml::Value::as_table);
+    // A profile's key, as brokkr resolves it through `extends` (child wins).
+    let resolved = |profile: &str, key: &str| -> Option<toml::Value> {
+        let profiles = profiles?;
+        let mut current = profile.to_owned();
+        let mut seen = Vec::new();
+        loop {
+            let settings = profiles.get(&current)?.as_table()?;
+            if let Some(value) = settings.get(key) {
+                return Some(value.clone());
+            }
+            seen.push(current.clone());
+            current = settings.get("extends")?.as_str()?.to_owned();
+            if seen.contains(&current) {
+                return None;
+            }
+        }
+    };
+    for profile in profiles.into_iter().flat_map(toml::Table::keys) {
+        let sweeps_value = resolved(profile, "sweeps");
+        let sweeps = sweeps_value
+            .as_ref()
+            .and_then(toml::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(toml::Value::as_str)
+            .collect::<Vec<_>>();
+        let threads = resolved(profile, "test_threads").and_then(|value| value.as_integer());
+        assert!(
+            threads.is_none_or(|threads| threads == 1)
+                || !parents.iter().any(|(parent, _)| sweeps.contains(parent)),
+            "profile {profile} runs a serial integration sweep with test_threads {threads:?}"
+        );
     }
-    assert!(
-        failures.is_empty(),
-        "\n{} problem(s) in the {}-example corpus:\n\n{}",
-        failures.len(),
-        files.len(),
-        failures.join("\n\n")
-    );
+    for (parent, shape) in &parents {
+        let matching: Vec<&str> = siblings
+            .iter()
+            .filter(|(_, sibling_shape)| sibling_shape == shape)
+            .map(|(name, _)| *name)
+            .collect();
+        assert_eq!(
+            matching.len(),
+            1,
+            "[[check]] {parent} ({shape}) needs exactly one standalone sibling of the same build, found {matching:?}"
+        );
+    }
+    for (sibling, shape) in &siblings {
+        assert_eq!(
+            parents
+                .iter()
+                .filter(|(_, parent_shape)| parent_shape == shape)
+                .count(),
+            1,
+            "standalone sweep {sibling} ({shape}) needs exactly one sweep of the same build that skips it"
+        );
+    }
 }

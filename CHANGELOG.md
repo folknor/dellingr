@@ -8,18 +8,30 @@ All notable changes to dellingr are documented here. The format follows
 
 ### Testing
 
-- The example runner and the differential gate are one Rust test,
-  `run_all_examples`: each example runs through the CLI once, and every file
-  not marked `-- SKIP-DIFF:` is compared with `lua5.2` and `lua5.4`, spawned
-  from Rust, in memory. A reference now matches only when it exits 0 with
-  empty stderr and the same stdout, rather than on combined output with its
-  exit status ignored. The references run under `LC_ALL=C`, `-E`, the
-  address-space cap and a zero process limit, so a script cannot start a
-  process through them. The whole corpus shares one 15-second deadline below
-  brokkr's 20-second per-test cap, replacing the 60-second per-example and
-  5-second per-process timeouts, and a failure names every example
-  unfinished or not started. `scripts/diff_test.sh` is a manual tool outside
-  the gate; the tests of its argument parser and file walk are gone.
+- The example runner and the differential gate are one Rust test per
+  example, `corpus::run_examples::standalone::<name>`: each example runs
+  through the CLI once, and every file not marked `-- SKIP-DIFF:` is compared
+  with `lua5.2` and `lua5.4`, spawned from Rust, in memory. A reference now
+  matches only when it exits 0 with empty stderr and the same stdout, rather
+  than on combined output with its exit status ignored. The references run
+  under `LC_ALL=C`, `-E`, the address-space cap and a zero process limit, so a
+  script cannot start a process through them. Each example's processes share
+  a 15-second deadline below brokkr's 20-second per-test cap, replacing the
+  60-second per-example and 5-second per-process timeouts, so a hung example
+  fails alone and by name. `brokkr check` runs these tests in their own
+  parallel lane per feature shape (`default-corpus`, `snapshot-corpus`), with
+  the rest of the integration crate still serial. `scripts/diff_test.sh` is a
+  manual tool outside the gate; the tests of its argument parser and file
+  walk are gone.
+- The example corpus is a checked-in list, `tests/common/examples.rs`,
+  instead of a directory walk: every corpus test reads it, the snapshot
+  round trip is one test per example and now covers the stress examples and
+  `parse/large_source.lua` it used to skip, and the `example-list`
+  script check (`scripts/example_list.py`, which also regenerates it) fails
+  while it differs from the `.lua` files on disk, so an untracked file can no
+  longer join the gate on one host. Textlint rules keep Rust code from
+  walking `examples/`, and `scripts/diff_test.sh` reads the list when given
+  no paths.
 - A pre-clippy script check, `scripts/check_tools.py`, names any missing gate
   tool before anything compiles and pins the reference Luas' releases and
   compatibility globals. bash and GNU `timeout` are no longer gate

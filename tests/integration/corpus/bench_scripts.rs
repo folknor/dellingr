@@ -388,24 +388,23 @@ fn kernel_listing_compares_bounds_and_nested_literals() {
 
 #[test]
 fn examples_bench_success_lines_include_computed_results() {
-    let examples_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
-    for path in support::examples::example_corpus() {
-        let source = fs::read_to_string(&path)
-            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+    for example in support::examples::EXAMPLES {
+        let source = fs::read_to_string(example.path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", example.relative));
         if !super::run_examples::defines_global_bench(&source) {
             continue;
         }
-        let stem = path
-            .strip_prefix(&examples_root)
-            .expect("example corpus paths are under examples/")
-            .with_extension("")
-            .to_string_lossy()
-            .replace('\\', "/");
+        // The path below examples/, without `.lua`.
+        let stem = example
+            .relative
+            .split_once('/')
+            .and_then(|(_, below)| below.strip_suffix(".lua"))
+            .expect("listed examples are .lua files under examples/");
         let prefix = format!("print(\"{stem}: \" .. tostring(_bench()) .. ");
         assert!(
             source.lines().any(|line| line.starts_with(&prefix)),
             "{} must print its computed bench result in its success line",
-            path.display()
+            example.relative
         );
     }
 }

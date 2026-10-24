@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use crate::examples_corpus;
+use crate::example_list::EXAMPLES;
 use crate::{ArgCount, HostCallbacks, Program, RetCount, State};
 
 #[derive(Clone, Default)]
@@ -61,19 +61,14 @@ fn execute(program: &Program, enabled: bool) -> (Vec<Vec<u8>>, u64, Option<Strin
 
 #[test]
 fn corpus_inline_cache_differential() {
-    let paths = examples_corpus::example_corpus();
     let mut completed = 0;
-    for path in &paths {
-        let source = std::fs::read(path).expect("corpus source is readable");
-        let name = path
-            .strip_prefix(env!("CARGO_MANIFEST_DIR"))
-            .expect("corpus source is in the project")
-            .to_string_lossy();
-        let program =
-            Program::compile(&source, Some(name.as_bytes())).expect("corpus source compiles");
+    for example in EXAMPLES {
+        let source = std::fs::read(example.path).expect("corpus source is readable");
+        let program = Program::compile(&source, Some(example.relative.as_bytes()))
+            .expect("corpus source compiles");
         let with_hits = execute(&program, true);
         let without_hits = execute(&program, false);
-        assert_eq!(with_hits, without_hits, "{}", path.display());
+        assert_eq!(with_hits, without_hits, "{}", example.relative);
         if with_hits.2.is_none() {
             completed += 1;
         }
@@ -82,6 +77,6 @@ fn corpus_inline_cache_differential() {
         completed >= MIN_COMPLETED_EXAMPLES,
         "only {completed} of {} examples completed with cost budget {COST_BUDGET}; \
          the floor is {MIN_COMPLETED_EXAMPLES}",
-        paths.len()
+        EXAMPLES.len()
     );
 }

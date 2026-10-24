@@ -95,10 +95,26 @@ mod patterns;
 mod vm;
 mod vm_aux;
 
-/// The integration tests' examples-corpus walker, compiled once into the
-/// library's unit tests so they share its traversal and ordering policy.
+/// The example corpus for the library's unit tests, from the checked-in list
+/// the integration tests also read (`tests/common/examples.rs`).
 #[cfg(test)]
-mod examples_corpus {
+mod example_list {
+    /// A listed example: its repository-relative path and its source path.
+    pub(crate) struct Example {
+        pub(crate) relative: &'static str,
+        pub(crate) path: &'static str,
+    }
+
+    macro_rules! examples {
+        ($($name:ident: $path:literal,)*) => {
+            /// Every listed example, in list order.
+            pub(crate) const EXAMPLES: &[Example] = &[$(Example {
+                relative: $path,
+                path: concat!(env!("CARGO_MANIFEST_DIR"), "/", $path),
+            },)*];
+        };
+    }
+
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/common/examples.rs"

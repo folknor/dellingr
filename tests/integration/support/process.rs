@@ -25,30 +25,60 @@ pub(crate) const ERROR_PREFIX: &str = "Error: ";
 /// Prefix of the CLI's cost summary line.
 pub(crate) const COST_USED_PREFIX: &str = "Cost used: ";
 
+/// The probe's deadline. It prints one line, so this only has to outlast a
+/// loaded host; it is well inside brokkr's per-test cap, so a hung probe fails
+/// the test that ran it instead of stopping the run.
+const PROBE_DEADLINE: Duration = Duration::from_secs(5);
+/// The probe's output limit, far above the one line it prints.
+const PROBE_OUTPUT_LIMIT: usize = 1024;
+
 /// Asks the CLI which snapshot shape it was built with and refuses a binary
 /// whose shape differs from this test harness (see `super::dellingr_bin`).
-pub(super) fn probe_snapshot_shape(binary: &str) {
-    let output = Command::new(binary)
-        .arg("--internal-snapshot-shape")
-        .output()
-        .expect("Cargo-built CLI should report its snapshot shape");
-    assert!(
-        output.status.success(),
-        "CLI snapshot shape probe failed: {output:?}"
-    );
-    assert!(
-        output.stderr.is_empty(),
-        "CLI snapshot shape probe wrote stderr: {output:?}"
-    );
-    let expected: &[u8] = if cfg!(feature = "snapshot") {
-        b"snapshot=1\n"
-    } else {
-        b"snapshot=0\n"
+/// The command is built here rather than through `command()`, which would
+/// re-enter `dellingr_bin` while it initialises.
+pub(super) fn probe_snapshot_shape(binary: &str) -> Result<(), String> {
+    let mut command = Command::new(binary);
+    command.arg("--internal-snapshot-shape");
+    let run = capture(
+        &mut command,
+        PROBE_OUTPUT_LIMIT,
+        Deadline::after(PROBE_DEADLINE),
+    )
+    .map_err(|error| format!("CLI snapshot shape probe: {error}"))?;
+    let status = match run.end {
+        End::Exited(status) => status,
+        End::Cut(Cut::OutputExceeded) => {
+            return Err(format!(
+                "CLI snapshot shape probe printed more than {PROBE_OUTPUT_LIMIT} bytes: {:?}",
+                String::from_utf8_lossy(&run.stdout)
+            ));
+        }
+        End::Cut(Cut::Unfinished | Cut::CaptureUnfinished(_)) => {
+            return Err(format!(
+                "CLI snapshot shape probe did not finish within {}s",
+                PROBE_DEADLINE.as_secs()
+            ));
+        }
     };
-    assert_eq!(
-        output.stdout, expected,
-        "Cargo-built CLI snapshot shape differs from the test harness; rebuild this shape"
-    );
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    if !status.success() || !run.stderr.is_empty() {
+        return Err(format!(
+            "CLI snapshot shape probe failed ({status}): stdout {stdout:?}, stderr {stderr:?}"
+        ));
+    }
+    let expected = if cfg!(feature = "snapshot") {
+        "snapshot=1\n"
+    } else {
+        "snapshot=0\n"
+    };
+    if stdout != expected {
+        return Err(format!(
+            "Cargo-built CLI snapshot shape differs from the test harness ({stdout:?}, \
+             expected {expected:?}); rebuild this shape"
+        ));
+    }
+    Ok(())
 }
 
 /// A `Command` for the CLI binary Cargo built for this test run, for tests
@@ -286,8 +316,9 @@ const STREAM_NAMES: [&str; 2] = ["stdout", "stderr"];
 /// Runs `command` with stdin closed and stdout and stderr captured separately,
 /// until it exits, its combined output passes `output_limit` bytes, or
 /// `deadline` passes; in the last two cases it is killed. The child is reaped
-/// on every path. An `Err` is an operational failure: the process could not
-/// be started, its output could not be read, or its wait failed.
+/// on every path. An `Err` is an operational failure: the deadline had
+/// already passed (nothing is started), the process could not be started, its
+/// output could not be read, or its wait failed.
 ///
 /// Waiting blocks on the output readers' events, so a process that exits
 /// wakes the wait at once. Containment is the direct child: the CLI cannot
@@ -303,6 +334,11 @@ pub(crate) fn capture(
     output_limit: usize,
     deadline: Deadline,
 ) -> Result<Captured, String> {
+    // Building the command can wait (on the snapshot-shape probe, say), so
+    // the deadline is checked here, where the process would start.
+    if deadline.passed() {
+        return Err("not started: the deadline had passed".to_string());
+    }
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

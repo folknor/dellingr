@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
 # Differential test: dellingr vs reference Lua 5.2 and 5.4.
 #
-# A manual tool. The gate's reference comparison is the example corpus test,
-# tests/integration/corpus/run_examples.rs, which brokkr check runs; this
-# script is for comparing chosen files or directories by hand, and it owns
-# its own requirements (bash, GNU timeout unless --timeout 0, lua5.2, lua5.4).
+# A manual tool. The gate's reference comparison is the example corpus
+# tests, tests/integration/corpus/run_examples.rs, which brokkr check runs;
+# this script is for comparing chosen files or directories by hand, and it
+# owns its own requirements (bash, GNU timeout unless --timeout 0, lua5.2,
+# lua5.4, and python3 to read the example list when no paths are given).
 #
-# Walks examples/**/*.lua, running each script through dellingr and comparing
-# ordinary examples with the fixed reference runtimes. A file passes when
+# Without arguments it takes the example corpus from its checked-in list,
+# tests/common/examples.rs (through scripts/example_list.py --paths); a
+# directory argument is walked for its .lua files. It runs each script
+# through dellingr and compares ordinary examples with the fixed reference
+# runtimes. A file passes when
 # its dellingr output matches either reference. Files tagged with -- DIFF:
 # <reason> are expected to differ from both references; matching either one
 # reports a stale marker after dellingr exits successfully. Files tagged with
@@ -22,8 +26,8 @@
 # marked with -- DIFF: <reason>.
 #
 # It compares each process's stdout and stderr together and ignores the
-# references' exit status; the corpus test compares stream by stream and
-# requires a matching reference to exit 0, so on a reference that errors
+# references' exit status; the corpus tests compare stream by stream and
+# require a matching reference to exit 0, so on a reference that errors
 # silently or writes to stderr the two can disagree.
 #
 # Usage: diff_test.sh [--bin <path>] [--timeout <time>] [file-or-dir...]
@@ -148,7 +152,16 @@ if [ "$#" -gt 0 ]; then
         fi
     done
 else
-    append_lua_files examples
+    # Captured whole first, so a list that fails to parse stops the run
+    # instead of leaving a partial corpus that could report ok.
+    if ! listed="$(python3 -B scripts/example_list.py --paths)"; then
+        echo "FAIL: cannot read the example list: $listed"
+        exit 1
+    fi
+    while IFS= read -r file
+    do
+        scripts+=("$file")
+    done <<< "$listed"
 fi
 set +u
 script_count="${#scripts[@]}"

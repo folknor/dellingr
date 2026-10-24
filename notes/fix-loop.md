@@ -26,8 +26,8 @@ One loop:
     `brokkr check`, commit.
 
 `brokkr check` is the whole gate. Its test phase includes the example corpus
-test (`tests/integration/corpus/run_examples.rs`), which compares the whole
-corpus with reference Lua 5.2/5.4 in the default and snapshot sweeps, so the
+tests (`tests/integration/corpus/run_examples.rs`), which compare the whole
+corpus with reference Lua 5.2/5.4 in both feature shapes, so the
 differential comparison is already covered - do not also run
 `./scripts/diff_test.sh`.
 

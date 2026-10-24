@@ -1,14 +1,12 @@
 //! Helpers shared by the suites of this crate.
 //!
 //! The files under `tests/common/` are also compiled by another target (the
-//! native-stack test, the release libm symbol test, the compiler's unit tests,
+//! native-stack test, the release libm symbol test, the library's unit tests,
 //! the golden-regeneration example), so they stay self-contained and are
 //! included by path, here or by the suite that uses them.
 
 #[path = "../../common/error_boundary_cases.rs"]
 pub(crate) mod error_boundary_cases;
-#[path = "../../common/examples.rs"]
-pub(crate) mod examples;
 mod lua;
 pub(crate) mod process;
 mod recorder;
@@ -21,18 +19,61 @@ pub(crate) mod stack;
 pub(crate) use lua::*;
 pub(crate) use recorder::Recorder;
 
+/// The example corpus, from the checked-in list `tests/common/examples.rs`
+/// (which the library's unit tests read too). Suites that run every example
+/// in one test iterate `EXAMPLES`; a suite with one test per example expands
+/// the list with its own `examples!` macro.
+pub(crate) mod examples {
+    /// A listed example.
+    pub(crate) struct Example {
+        /// The test name the list gives it.
+        pub(crate) name: &'static str,
+        /// Its repository-relative path, which is also its chunk name.
+        pub(crate) relative: &'static str,
+        /// Its source path.
+        pub(crate) path: &'static str,
+    }
+
+    macro_rules! examples {
+        ($($name:ident: $path:literal,)*) => {
+            /// Every listed example, in list order.
+            pub(crate) const EXAMPLES: &[Example] = &[$(Example {
+                name: stringify!($name),
+                relative: $path,
+                path: concat!(env!("CARGO_MANIFEST_DIR"), "/", $path),
+            },)*];
+        };
+    }
+
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/common/examples.rs"
+    ));
+
+    /// The listed example at a repository-relative path.
+    pub(crate) fn find(relative: &str) -> &'static Example {
+        EXAMPLES
+            .iter()
+            .find(|example| example.relative == relative)
+            .unwrap_or_else(|| panic!("{relative} is not in tests/common/examples.rs"))
+    }
+}
+
 /// The `dellingr` binary Cargo built for this test run. Tests must use this
 /// rather than a `target/` path, which may hold a stale binary from another
 /// profile, checkout or commit. Cargo's uplifted path can also be overwritten
 /// by another feature build, so refuse a mismatched snapshot shape here. The
-/// probe runs once per test process; the corpus test asks for the path once
-/// per example.
+/// probe runs once per test process, under its own deadline, and its verdict
+/// is kept: concurrent corpus tests waiting on it all see the same failure at
+/// once instead of each re-running a probe that hung.
 pub(crate) fn dellingr_bin() -> &'static str {
     // The binary and the harness's feature shape are fixed for the process.
-    // process-global: a write-once record that the shape probe passed.
-    static PROBED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    // process-global: a write-once record of the shape probe's verdict.
+    static PROBED: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
     let binary = env!("CARGO_BIN_EXE_dellingr");
-    PROBED.get_or_init(|| process::probe_snapshot_shape(binary));
+    if let Err(failure) = PROBED.get_or_init(|| process::probe_snapshot_shape(binary)) {
+        panic!("{failure}");
+    }
     binary
 }
 

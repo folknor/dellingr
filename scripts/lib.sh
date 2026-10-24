@@ -160,8 +160,9 @@ shell_quote() {
     printf '%q' "$1"
 }
 
-# Regular files only, in C-locale byte order (the order of the Rust corpus
-# list in tests/common/examples.rs).
+# Regular files only, in C-locale byte order. For the directories
+# diff_test.sh is given; the corpus itself is listed in
+# tests/common/examples.rs.
 sorted_lua_files() {
     if [ "$#" -ne 1 ]; then
         echo "usage: sorted_lua_files <directory>" >&2

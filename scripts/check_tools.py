@@ -13,7 +13,7 @@ pipelines - `scripts/diff_test.sh`, `scripts/bench.sh`,
 - python3 3.11 or newer: the script checks, and the tests that run
   `scripts/libm_symbols.py` and `scripts/crmath_tables.py --check-pins`
   (3.11 for `tomllib`).
-- lua5.2 and lua5.4: the example corpus test compares every unmarked example
+- lua5.2 and lua5.4: the example corpus tests compare every unmarked example
   with both. Their output decides that verdict, so the release and the
   compatibility flags they were built with are pinned: a host whose reference
   prints differently fails here rather than as a corpus mismatch.

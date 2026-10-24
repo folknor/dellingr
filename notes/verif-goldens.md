@@ -74,7 +74,8 @@ Decision (2026-10-24):
 - Run the cost golden, the crmath golden and the opcode-encoding fixture in a
   release `[[check]]` with an `only` filter (the save golden already has
   `release-save-golden`), and add a corpus-wide cost golden, every example's
-  cost, produced by the merged corpus test (VC-011 in verif-corpus.md).
+  cost, produced by the corpus gate (`corpus::run_examples`, now one test
+  per example).
 - Add a `cargo clippy --target aarch64-unknown-linux-gnu` shape so the aarch64
   arms are compiled and linted.
 - Add `compile_error!` for `target_arch = "x86"` without `sse2` in

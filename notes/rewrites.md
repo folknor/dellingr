@@ -26,10 +26,10 @@ the scopes whose hunters proposed it.
 
 Reported by: check-machinery, corpus-harness, library.
 
-The corpus test (`run_all_examples` in `tests/integration/corpus/run_examples.rs`)
-runs each example through dellingr once and spawns `lua5.2` and `lua5.4` from
-Rust for every file not marked SKIP-DIFF, comparing in memory. That still
-leaves:
+The corpus gate (one test per example in `corpus::run_examples::standalone`,
+`tests/integration/corpus/run_examples.rs`) runs each example through
+dellingr once and spawns `lua5.2` and `lua5.4` from Rust for every file not
+marked SKIP-DIFF, comparing in memory. That still leaves:
 
 - reference Lua as a gate host requirement, pinned by
   `scripts/check_tools.py` (release and compatibility globals), so a host
@@ -37,7 +37,7 @@ leaves:
   move;
 - about two reference runs per compared example per dev sweep, producing the
   same bytes every time, because reference output does not depend on
-  dellingr's build (the snapshot sweep repeats them);
+  dellingr's build (the snapshot shape's corpus lane repeats them);
 - DIFF-marked files escaping comparison entirely: they are only checked to
   match neither reference.
 
@@ -54,54 +54,6 @@ accepts as a pass in verif-corpus.md.
 
 Enforceable: yes. The refresh script's check mode and a test that every example
 has expected output; the source-hash header makes staleness a test failure.
-
-## RW-003 - One generated `#[test]` per example
-
-Reported by: corpus-harness, check-machinery.
-
-`run_all_examples` runs the whole corpus (dellingr and both reference Luas per
-example) as one libtest test with its own worker pool, because brokkr runs
-test binaries with one test thread. Costs: no focused run of one example
-(`brokkr test calls_method` matches nothing); no per-example 20s cap, so the
-whole corpus shares one deadline inside one cap, and the pool hard-codes its
-concurrency (see the timeout and concurrency entry in verif-corpus.md, whose
-decision takes the checked-in-list form of this rewrite).
-
-Fix: generate one `#[test]` per example from a `build.rs` that walks
-`examples/` and emits `include!`-able test functions (with
-`cargo:rerun-if-changed=examples`). Each example then has a name, its own cap
-and attribution, and can run alone; concurrency becomes brokkr's job
-(`test_threads`, `parallel = { budget }`, or a `harness = "nextest"` sweep that
-runs process-per-test). The same generated list can feed the
-compiler-verification, disassembly, cost-golden and save-round-trip passes.
-
-Enforceable: structural; the walker becomes the only enumeration.
-
-Open costs, from `brokkr man test-lanes` (checked after the integration
-merge, which put both corpus tests in the shared `integration` crate):
-
-- brokkr sweeps are serial unless a profile sets `test_threads`; `brokkr test`
-  is always serial. Split into one test per example on a serial sweep, the
-  debug kernels (about a second each) plus three processes per compared
-  example would add on the order of a minute per dev sweep, in both dev
-  sweeps, against today's 8 in-test workers.
-- Recovering that wall time means `test_threads` on the dev sweeps, which
-  parallelises every test of the integration crate, including the
-  million-slot at-cap tests and their memory peaks. The manual warns that a
-  CPU-starved (not hung) test can trip the 20s wall-clock cap under heavy
-  `test_threads`.
-- `harness = "nextest"` runs process-per-test concurrently but, per the manual,
-  retires the shared-process lane that detects process-global-state contention,
-  which the merged crate now relies on.
-- A `build.rs` runs in every consumer's build of the library; the alternative
-  is a checked-in generated list with a `--check` test, like
-  `examples/parse/large_source.lua`.
-- Each per-example test still spawns three interpreters (dellingr and the two
-  references) unless the expected-output rewrite above lands first.
-
-The corpus test already reports the examples unfinished or not started when
-its deadline passes, below the cap. What only the rewrite gives
-is a focused `brokkr test <example>`.
 
 ## RW-005 - Hold runtime limits in a value tests can lower
 

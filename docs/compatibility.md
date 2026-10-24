@@ -5,7 +5,7 @@ here is a bug. Features that are absent altogether are listed in the README
 under "Won't implement".
 
 `brokkr check` compares the output of every example not marked
-`-- SKIP-DIFF:` with Lua 5.2 and 5.4 (the example corpus test in
+`-- SKIP-DIFF:` with Lua 5.2 and 5.4 (the example corpus tests in
 `tests/integration/corpus/run_examples.rs`); intentional differences carry a
 `-- DIFF:` comment in the example.
 

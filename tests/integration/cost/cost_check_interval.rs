@@ -149,14 +149,14 @@ fn corpus_cost_check_interval_differential() {
         2 * interval + 1,
         4 * interval + 1,
     ];
-    for path in support::examples::example_corpus() {
-        let source = std::fs::read(&path).unwrap();
+    for example in support::examples::EXAMPLES {
+        let source = std::fs::read(example.path).unwrap();
         let program = Program::compile(&source, Some(b"interval-corpus")).unwrap();
         for budget in budgets {
             let immediate = with_cost_check_interval(1, || execute(&program, budget, None));
             let batched =
                 with_cost_check_interval(COST_CHECK_INTERVAL, || execute(&program, budget, None));
-            assert_eq!(immediate, batched, "{} budget={budget}", path.display());
+            assert_eq!(immediate, batched, "{} budget={budget}", example.relative);
         }
     }
 

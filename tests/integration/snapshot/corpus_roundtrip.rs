@@ -1,22 +1,31 @@
-//! Corpus snapshots are compared only within this process and build. In
-//! particular, Rust function folding can change saved ids between profiles.
-
-use std::path::Path;
+//! Every example saved after its setup, restored, and continued on both
+//! states, one test per example (`examples::<name>`), expanded from the
+//! checked-in list `tests/common/examples.rs`. Corpus snapshots are compared
+//! only within this process and build. In particular, Rust function folding
+//! can change saved ids between profiles.
 
 use dellingr::{ArgCount, LuaType, Program, RetCount, State};
 
-use crate::support::{self, Recorder, examples};
+use crate::support::{self, Recorder};
 
-// These standalone workloads spend their time in stress loops or parsing a
-// generated source, rather than adding distinct snapshot continuation cases.
-// Keep the exclusions explicit so new examples enter the round trip by default.
-const SKIPPED: &[&str] = &[
-    "stress_tables.lua",
-    "stress_gc_stack.lua",
-    "stress_rustfn.lua",
-    "upvalue_stress.lua",
-    "parse/large_source.lua",
-];
+/// One round trip per listed example.
+mod examples {
+    macro_rules! examples {
+        ($($name:ident: $path:literal,)*) => {
+            $(
+                #[test]
+                fn $name() {
+                    super::round_trip($path, concat!(env!("CARGO_MANIFEST_DIR"), "/", $path));
+                }
+            )*
+        };
+    }
+
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/common/examples.rs"
+    ));
+}
 
 fn bounded_source(source: &str) -> String {
     // The kernels' standalone timing footers repeat a single call. Run that
@@ -40,11 +49,8 @@ fn bounded_source(source: &str) -> String {
         .join("\n")
 }
 
-fn round_trip(path: &Path) {
-    let name = path
-        .strip_prefix(env!("CARGO_MANIFEST_DIR"))
-        .expect("the shared example list is manifest-rooted")
-        .to_string_lossy();
+/// `name` is the example's repository-relative path, its chunk name.
+fn round_trip(name: &str, path: &str) {
     let source = std::fs::read_to_string(path).expect("example source is readable");
     let program = Program::compile(bounded_source(&source), Some(name.as_bytes()))
         .unwrap_or_else(|error| panic!("{name}: compile: {error}"));
@@ -125,55 +131,4 @@ fn round_trip(path: &Path) {
             .bytes,
         "{name}: continued save"
     );
-}
-
-fn bucket(index: usize) {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
-    // Separate tests bound work under the per-test dev-sweep timeout, without
-    // depending on worker parallelism. Every shared-list entry gets a bucket.
-    let paths = examples::example_corpus();
-    assert!(!paths.is_empty(), "the example corpus must not be empty");
-    for path in paths
-        .iter()
-        .enumerate()
-        .filter_map(|(position, path)| (position % 8 == index).then_some(path))
-    {
-        let relative = path.strip_prefix(&root).expect("example is under examples");
-        if !SKIPPED.iter().any(|skip| relative == Path::new(skip)) {
-            round_trip(path);
-        }
-    }
-}
-
-#[test]
-fn corpus_roundtrip_0() {
-    bucket(0);
-}
-#[test]
-fn corpus_roundtrip_1() {
-    bucket(1);
-}
-#[test]
-fn corpus_roundtrip_2() {
-    bucket(2);
-}
-#[test]
-fn corpus_roundtrip_3() {
-    bucket(3);
-}
-#[test]
-fn corpus_roundtrip_4() {
-    bucket(4);
-}
-#[test]
-fn corpus_roundtrip_5() {
-    bucket(5);
-}
-#[test]
-fn corpus_roundtrip_6() {
-    bucket(6);
-}
-#[test]
-fn corpus_roundtrip_7() {
-    bucket(7);
 }
