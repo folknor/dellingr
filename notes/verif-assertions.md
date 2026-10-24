@@ -192,23 +192,6 @@ Enforceable: no general rule.
 
 # Compiler and cost
 
-## VA-037 - `COST_CHECK_INTERVAL` has no injection point, so the batching test needs a hand model
-
-Reported by: compiler-cost.
-
-`cost_check_interval.rs` cannot run the VM at interval 1 and 64 and compare,
-because the interval is a crate-private constant; it compares against
-`immediate_flush_reference`, a hand-written unit-at-a-time model. The model is
-independent and correct but covers only a straight line of global-add statements;
-the documented property ("the interval does not change the charged prefix or
-`cost_used` at `BudgetExceeded`") is general.
-
-Fix: a test-infrastructure feature that sets the interval to 1, and a differential
-over the corpus and the error corpus at a sweep of budgets (the sweep machinery in
-`error_boundary.rs` already walks budgets). The production constant stays fixed.
-
-Enforceable: by the differential test.
-
 # Library
 
 # Snapshot

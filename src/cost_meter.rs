@@ -34,6 +34,65 @@
 /// its subject and pattern.
 pub const COST_MODEL_VERSION: u16 = 8;
 
+/// Debug-only dispatch batching controls and charged-opcode observations.
+#[cfg(feature = "cost-check-interval")]
+pub(crate) mod interval_test {
+    use std::cell::{Cell, RefCell};
+
+    // process-global: thread-local test controls isolate concurrent test runs.
+    // Outside a `with_cost_check_interval` scope the production interval
+    // applies, so the feature alone changes no test's behavior.
+    thread_local! {
+        static INTERVAL: Cell<u64> =
+            const { Cell::new(crate::limits::tuning::COST_CHECK_INTERVAL) };
+        static PREFIX: RefCell<Option<Vec<(usize, u64)>>> = const { RefCell::new(None) };
+    }
+
+    pub(crate) fn interval() -> u64 {
+        INTERVAL.get()
+    }
+
+    pub(crate) fn record(ip: usize, cost: u64) {
+        PREFIX.with_borrow_mut(|prefix| {
+            if let Some(prefix) = prefix {
+                prefix.push((ip, cost));
+            }
+        });
+    }
+
+    struct Restore {
+        interval: u64,
+        prefix: Option<Vec<(usize, u64)>>,
+    }
+
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            INTERVAL.set(self.interval);
+            PREFIX.set(self.prefix.take());
+        }
+    }
+
+    /// Runs test work with a batching interval, returning its accepted opcode
+    /// charge sites (instruction cursor and units) in execution order.
+    /// Thread-local controls are restored on return or panic, including nesting.
+    #[doc(hidden)]
+    pub fn with_cost_check_interval<T>(
+        interval: u64,
+        work: impl FnOnce() -> T,
+    ) -> (T, Vec<(usize, u64)>) {
+        assert!(interval > 0, "a batching interval must be positive");
+        let _restore = Restore {
+            interval: INTERVAL.replace(interval),
+            prefix: PREFIX.replace(Some(Vec::new())),
+        };
+        let result = work();
+        let prefix = PREFIX
+            .take()
+            .expect("the observation scope owns its prefix");
+        (result, prefix)
+    }
+}
+
 /// Owned runtime accounting, with one representation of an optional budget.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct CostState {

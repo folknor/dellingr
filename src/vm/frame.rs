@@ -14,6 +14,7 @@ use super::State;
 use super::Val;
 use super::object::UpvalueRef;
 use crate::instr::{ArgCount, CompareOp, RetCount};
+#[cfg(not(feature = "cost-check-interval"))]
 use crate::limits::tuning;
 
 /// A `Frame` represents a single stack-frame of a Lua function.
@@ -223,6 +224,18 @@ impl Frame {
     ) -> Result<Leave> {
         let code: &[Instr] = &frame.bytecode.code;
         let base = frame.stack_bottom;
+        #[cfg(not(feature = "cost-check-interval"))]
+        macro_rules! check_interval {
+            () => {
+                tuning::COST_CHECK_INTERVAL
+            };
+        }
+        #[cfg(feature = "cost-check-interval")]
+        macro_rules! check_interval {
+            () => {
+                crate::cost_meter::interval_test::interval()
+            };
+        }
 
         /// Macro to accumulate cost and flush when threshold is reached
         macro_rules! add_cost {
@@ -234,11 +247,13 @@ impl Frame {
                 // it, so the interval does not change the charged prefix or
                 // `cost_used` at `BudgetExceeded`; any other error settles the
                 // pending batch in `Frame::run`.
-                if next >= tuning::COST_CHECK_INTERVAL || state.cost_batch_needs_flush(next) {
+                if next >= check_interval!() || state.cost_batch_needs_flush(next) {
                     Self::settle_cost(state, local_cost, next)?;
                 } else {
                     *local_cost = next;
                 }
+                #[cfg(feature = "cost-check-interval")]
+                crate::cost_meter::interval_test::record(*ip, $cost);
             }};
         }
 

@@ -1,4 +1,5 @@
 """Fixture tests for the lexical native-call inventory guard."""
+import re
 import sys
 import tempfile
 import unittest
@@ -30,6 +31,23 @@ class SourceFixture(unittest.TestCase):
 
 
 class NativeCallTests(SourceFixture):
+    def test_method_values_are_distinct_from_calls_and_callback_registration(self):
+        pattern = re.compile(guard.method_value_pattern({"call_unguarded", "format"}))
+        for source in ["let f = State::call_unguarded;",
+                       "take(Self::call_unguarded)",
+                       "[Frame::call_unguarded, other]",
+                       "State::call_unguarded as Callback",
+                       "take(State::call_unguarded::<T>)"]:
+            with self.subTest(source=source):
+                self.assertIsNotNone(pattern.search(source))
+        for source in ["State::call_unguarded(state)",
+                       "Self::call_unguarded::<T>(state)",
+                       "fn call_unguarded() {}",
+                       '("format", string_format::format)',
+                       "register(format)"]:
+            with self.subTest(source=source):
+                self.assertIsNone(pattern.search(source))
+
     def test_lexer_blanks_literals_nested_comments_but_keeps_offsets(self):
         text = '''fn live<'a>() {
  let a = br##"call_unguarded() { // hidden }"##;

@@ -23,9 +23,41 @@ pub(crate) use recorder::Recorder;
 
 /// The `dellingr` binary Cargo built for this test run. Tests must use this
 /// rather than a `target/` path, which may hold a stale binary from another
-/// profile, checkout or commit.
+/// profile, checkout or commit. Cargo's uplifted path can also be overwritten
+/// by another feature build, so refuse a mismatched snapshot shape here. The
+/// probe runs once per test process; the corpus runners ask for the path once
+/// per spawned example.
 pub(crate) fn dellingr_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_dellingr")
+    // The binary and the harness's feature shape are fixed for the process.
+    // process-global: a write-once record that the shape probe passed.
+    static PROBED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    let binary = env!("CARGO_BIN_EXE_dellingr");
+    PROBED.get_or_init(|| probe_snapshot_shape(binary));
+    binary
+}
+
+fn probe_snapshot_shape(binary: &str) {
+    let output = std::process::Command::new(binary)
+        .arg("--internal-snapshot-shape")
+        .output()
+        .expect("Cargo-built CLI should report its snapshot shape");
+    assert!(
+        output.status.success(),
+        "CLI snapshot shape probe failed: {output:?}"
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "CLI snapshot shape probe wrote stderr: {output:?}"
+    );
+    let expected: &[u8] = if cfg!(feature = "snapshot") {
+        b"snapshot=1\n"
+    } else {
+        b"snapshot=0\n"
+    };
+    assert_eq!(
+        output.stdout, expected,
+        "Cargo-built CLI snapshot shape differs from the test harness; rebuild this shape"
+    );
 }
 
 /// The repository's `brokkr.toml`, parsed. Suites that check workload

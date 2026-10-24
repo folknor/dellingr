@@ -314,6 +314,19 @@ impl HostCallbacks for CliCallbacks {
 // the ban on process arguments guards the library.
 #[allow(clippy::disallowed_methods)]
 fn main() {
+    // Internal harness handshake, deliberately absent from user help. Keep the
+    // response limited to the feature that changes the ordinary CLI semantics.
+    if env::args_os()
+        .skip(1)
+        .eq([OsString::from("--internal-snapshot-shape")])
+    {
+        write_stdout_or_exit(if cfg!(feature = "snapshot") {
+            "snapshot=1\n"
+        } else {
+            "snapshot=0\n"
+        });
+        return;
+    }
     let args = match parse_args(env::args_os().skip(1)) {
         Ok(Some(args)) => args,
         Ok(None) => {

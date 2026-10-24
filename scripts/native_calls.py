@@ -41,6 +41,7 @@ INVENTORY = ROOT / "reference" / "native-calls.toml"
 TEST = ROOT / "tests" / "native_stack.rs"
 BROKKR = ROOT / "brokkr.toml"
 TEXTLINT_RULE = "native-call-marker"
+METHOD_VALUE_RULE = "native-call-method-value"
 
 # The execution boundaries: every call made from Rust goes through the first,
 # and every Rust callback invocation through the second.
@@ -564,11 +565,25 @@ def scan_test_lists(problems, native_counts=None):
 
 
 def check_textlint(names, problems, config):
+    value_rules = [r for r in config.get("textlint", [])
+                   if r.get("name") == METHOD_VALUE_RULE]
+    expected_value = method_value_pattern(names)
+    if len(value_rules) != 1 or value_rules[0].get("pattern") != expected_value:
+        problems.append(
+            f"brokkr.toml: {METHOD_VALUE_RULE} must track the inventory; "
+            f"expected pattern = '{expected_value}'")
     rules = [r for r in config.get("textlint", []) if r.get("name") == TEXTLINT_RULE]
     if len(rules) != 1:
         problems.append(f"brokkr.toml: expected one [[textlint]] rule named {TEXTLINT_RULE}")
         return
     rule = rules[0]
+    # The tripwire must cover the same sources as the call rule, or a
+    # narrowed scope would silently exempt files the inventory scans.
+    for value_rule in value_rules[:1]:
+        for key in ("paths", "exclude", "region", "test_code"):
+            if value_rule.get(key) != rule.get(key):
+                problems.append(
+                    f"brokkr.toml: {METHOD_VALUE_RULE} {key} must match {TEXTLINT_RULE}'s")
     expected = textlint_pattern(names)
     if rule.get("pattern") != expected:
         problems.append(
@@ -587,6 +602,13 @@ def check_textlint(names, problems, config):
 
 def textlint_pattern(names):
     return rf"\b(?:{'|'.join(sorted(names))})\s*(?:::\s*<[^>]*>\s*)?\("
+
+
+def method_value_pattern(names):
+    # Callback registration intentionally takes free functions as values.
+    # Restrict this tripwire to the owners used by the direct-call convention.
+    return (rf"\b(?:State|Self|Frame)\s*::\s*(?:{'|'.join(sorted(names))})"
+            r"\s*(?:::\s*<[^>]*>\s*)?(?:[,;)\]}]|as\b)")
 
 
 ROOT_KINDS = {"callback", "host-api", "binary"}

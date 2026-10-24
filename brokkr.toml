@@ -75,6 +75,12 @@ name = "default"
 [[check]]
 name = "snapshot"
 features = ["snapshot"]
+# Selection rule: run every test admitted by this feature shape. Registration
+# changes can affect any test using the stdlib, _G or RNG names, as well as
+# saving, corpus round trips and cost goldens. New feature-sensitive tests are
+# picked up automatically, without an allowlist that can silently lose them.
+# Keep this unfiltered until feature independence has a mechanical contract;
+# module names and the absence of cfg in a test do not prove independence.
 
 # Explicit dev lanes keep doctests out of instrumentation and release probes.
 [[check]]
@@ -115,6 +121,22 @@ name = "inline-cache-differential"
 features = ["disable-inline-caches"]
 lib_tests = true
 only = ["vm::cache_differential::corpus_inline_cache_differential"]
+curated = true
+
+# Opcode-batching differential. Under `cost-check-interval` the dispatch loop
+# reads its flush interval from a thread-local control (the production value
+# unless overridden) instead of the constant, so one dev build runs each
+# corpus program, boundary case and natural failure at interval 1 and at the
+# production interval over a sweep of budgets, and compares prints, cost,
+# errors and the accepted charge sites. The feature is debug-only
+# (compile_error) and appears in no other shape; this shape runs only the
+# differential from the integration crate.
+[[check]]
+name = "cost-check-interval-differential"
+features = ["cost-check-interval"]
+tests = ["integration"]
+lib_tests = false
+only = ["cost::cost_check_interval::corpus_cost_check_interval_differential"]
 curated = true
 
 # The native-stack envelope (docs/limits.md "Envelope") is 4 MiB in dev and
@@ -409,6 +431,18 @@ region = "string"
 test_code = "only"
 must_scan = ["src/compiler/parser/tests.rs", "tests/integration/cli/cli_arguments.rs"]
 message = "tests must use the artifacts Cargo already built instead of spawning cargo"
+
+# Free callback values are legitimate registration sites. Guard qualified
+# method values separately, without banning those registrations. The native
+# inventory checker verifies this alternation alongside the call rule below.
+[[textlint]]
+name = "native-call-method-value"
+pattern = '\b(?:State|Self|Frame)\s*::\s*(?:append_function_replacement|append_gsub_replacement|base_ipairs_iter|base_unpack_values|begin_call|begin_callable_call|call|call_anchor|call_anchor_unguarded|call_from_lua|call_unguarded|error_value|eval_batched|format|format_argument|get_table|get_table_unguarded|gsub_empty_pattern|gsub_lua_pattern|gsub_plain_pattern|index_call|insert_through_metamethods|instr_tfor_call|instr_tfor_call_rust_fn|invoke_rust_fn|len_call|main|move_element|newindex_call|push_gmatch_wrapper|reg_get_field|reg_get_table|reg_len|reg_set_field|reg_set_table|remove_through_metamethods|run|run_frame|run_invocation|sequence_len|set_index|set_table|sort_through_metamethods|table_sort|table_sort_heap|table_sort_less|table_sort_scratch|table_sort_sift_down|table_sort_values|table_unpack_values|to_string_with_meta|tostring_bytes|tostring_bytes_unguarded|tostring_rendering|unpack_values)\s*(?:::\s*<[^>]*>\s*)?(?:[,;)\]}]|as\b)'
+paths = ["src/**/*.rs"]
+exclude = ["src/compiler/**"]
+region = "code"
+test_code = "skip"
+message = "keep re-entering methods as direct calls so the native-call inventory sees their edges"
 
 # Native-stack guard (reference/native-calls.md). Every direct call to a
 # function that can reach a call back into Lua carries a

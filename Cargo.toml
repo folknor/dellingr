@@ -36,6 +36,8 @@ snapshot = []
 fault-injection = []
 # Debug-only infrastructure for the inline-cache differential.
 disable-inline-caches = []
+# Debug-only infrastructure for the opcode-batching differential.
+cost-check-interval = []
 # Explicit opt-in for checkout-dependent and long-running math verification.
 crmath-sweeps = []
 

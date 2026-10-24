@@ -22,6 +22,11 @@ kept current mechanically:
 - The `native-call-marker` textlint rule in `brokkr.toml` flags any call to
   an inventoried name without a marker, so an editor or a plain
   `brokkr check` points at the line before the script's report is read.
+- The `native-call-method-value` textlint rule flags qualified method values
+  on `State`, `Self` and `Frame` using the same inventoried names. The script
+  checks that its alternation stays current too, and that it scans the same
+  files and regions as the call rule. This is a tripwire for
+  turning a direct method call into an invisible function-pointer call.
 
 Markers are comments. Adding one never changes code: frames that stay live
 across a native re-entry are size-sensitive (AGENTS.md, "Hotpath
@@ -129,6 +134,13 @@ helper is attributed to the function that wrote it. A host closure
 reaches Lua through the `host-api` roots. The table sort's
 `TableSortAccess` implementations read and write raw. A new indirect call
 that can reach Lua needs this guard extended before it lands.
+
+A blanket ban on inventoried names used as values would reject the callback
+registrations the inventory explicitly requires: the base ipairs iterator,
+the base and table unpack callbacks, and string format. The method-value
+tripwire therefore leaves free functions and other qualified owners to
+review. Aliased owners, wrapped paths and new trait-object entry paths also
+need review; this lexical rule is not a compiler call graph.
 
 ## Adding a path
 

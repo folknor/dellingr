@@ -36,6 +36,8 @@
 compile_error!("the fault-injection feature requires debug assertions");
 #[cfg(all(feature = "disable-inline-caches", not(debug_assertions)))]
 compile_error!("the disable-inline-caches feature requires debug assertions");
+#[cfg(all(feature = "cost-check-interval", not(debug_assertions)))]
+compile_error!("the cost-check-interval feature requires debug assertions");
 
 mod compiler;
 mod cost_meter;
@@ -66,6 +68,9 @@ mod examples_corpus {
 pub mod error;
 
 pub use cost_meter::COST_MODEL_VERSION;
+#[cfg(feature = "cost-check-interval")]
+#[doc(hidden)]
+pub use cost_meter::interval_test::with_cost_check_interval;
 pub use disassemble::Disassembly;
 pub use host::{DefaultCallbacks, HostCallbacks};
 pub use instr::{ArgCount, RetCount};

@@ -115,10 +115,10 @@ const NATURAL_FIXED: &[(&str, &str)] = &[
     ("push_size", "return oversized()"),
 ];
 
-fn overreport(_: &mut State) -> dellingr::Result<u8> {
+pub(crate) fn overreport(_: &mut State) -> dellingr::Result<u8> {
     Ok(1)
 }
-fn oversized(state: &mut State) -> dellingr::Result<u8> {
+pub(crate) fn oversized(state: &mut State) -> dellingr::Result<u8> {
     state.push_bytes(vec![b'x'; dellingr::limits::MAX_STRING_BYTES + 1])?;
     Ok(1)
 }

@@ -50,23 +50,6 @@ host-state bans with their scoped allows in one wave.
 
 Enforceable: yes, by the fixture.
 
-## VG-006 - Indirect calls into Lua are a reviewer-only rule
-
-Reported by: check-machinery.
-
-`reference/native-calls.md`: "A new indirect call that can reach Lua needs this
-guard extended before it lands." Nothing detects a new indirect path. Storing
-`State::call_unguarded` in a variable, passing an inventoried function as a
-`fn` value, or a new `dyn` trait whose implementation re-enters: none is a
-lexical call, so neither the script nor the textlint rule sees it.
-
-Fix (partial): a textlint rule flagging any inventoried name used as a value
-(followed by neither `(` nor `::<`), with the same generated alternation;
-`native_calls.py` can verify that rule's pattern as it already does for
-`native-call-marker`. Trait-object paths stay a review item.
-
-Enforceable: partly.
-
 ## VG-009 - Source-only checks compile and run as integration tests in every sweep
 
 Reported by: check-machinery.
@@ -100,63 +83,6 @@ Fix: a transitive dependency rule once brokkr offers one.
 
 Enforceable: blocked on brokkr#21.
 
-## VG-018 - The default and snapshot sweeps share one `CARGO_BIN_EXE_dellingr` path
-
-Reported by: check-machinery, corpus-harness, snapshot.
-
-Both check logs show, for every sweep on every run: "prepare: sweep 'default':
-rebuilt before listing - /media/folk/Banan/cargo/debug/dellingr has other
-content", and the same for `snapshot`, and for the two release sweeps
-(`.../release/dellingr has other content`). Each feature shape's `cargo test
---no-run` re-uplifts `target/<profile>/dellingr`, so the binary
-`CARGO_BIN_EXE_dellingr` names belongs to whichever shape built last.
-
-`tests/integration/corpus/diff_test.rs`'s claim that "the corpus is checked against the CLI build
-of that shape" holds only because brokkr runs sweeps serially and re-uplifts
-between them, and because nothing else writes that path mid-run. Under plain
-`cargo test`, a parallel sweep layout, a `brokkr run --debug` between prepare
-and run, an editor-driven build, or a `brokkr test` in one shape during a check
-in the other, a snapshot test can drive the default CLI (or the reverse) and
-pass. Cost today: a relink per sweep on every check.
-
-Fix options: give the `snapshot` sweeps their own target dir (`[[check]] env =
-{ CARGO_TARGET_DIR = ... }`; the manual forbids it only alongside `rustflags`),
-which costs disk and removes the re-uplift (check-machinery, snapshot); have
-tests find the binary through the deps-hashed artifact cargo reports rather
-than the uplifted path (snapshot); have the CLI report its feature shape
-(`dellingr --build-info`, or a line in `--help`) and have `run_examples` and
-`diff_test` assert it matches `cfg!(feature = "snapshot")` before running
-anything (corpus-harness).
-
-Enforceable: yes, in config or by that assertion.
-
-## VG-019 - The snapshot sweep repeats the default sweep and adds little
-
-Reported by: snapshot, compiler-cost.
-
-The last check log shows 968 tests in `default` and 1145 in `snapshot`. The
-snapshot sweep re-runs the whole default suite, including `run_examples` and
-the diff gate (with the reference Luas re-run, whose output cannot depend on
-dellingr's features), and adds about 177 snapshot tests. The `brokkr.toml`
-comment justifies the sweep by the `cfg(not(feature = "snapshot"))` sides
-(stdlib registration, `_G` metatable, RNG naming), which is true for clippy and
-compile; for the test run it means 968 tests whose behaviour mostly cannot
-differ. Nothing in `src/compiler/` except `verify.rs` has a `snapshot` cfg, so
-every parser, lexer, codegen and depth test runs identically twice. The
-duplicate run of the cost goldens is useful (cost does not depend on the
-feature, which changes stdlib registration), but only by accident. The test
-phase was 55.2s across four sweeps; the snapshot share is plausibly close to
-half (not in the log).
-
-Fix: make the second run earn its cost (the corpus save round trip in
-verif-goldens.md; an explicit cross-shape cost equality); run the reference-Lua
-half of the diff gate once per check, not per shape; restrict the snapshot
-sweep with `tests = [...]`, `lib_tests`, or `skip`/`only` filters. (brokkr's
-`exclude_tests` drops whole test targets and only on lanes that run their
-binaries themselves, so it cannot drop subjects inside the integration crate.)
-
-Enforceable: yes, in `brokkr.toml`.
-
 ## VG-020 - The rules forbid the benchmarking tools the docs prescribe
 
 Reported by: check-machinery.
@@ -179,3 +105,20 @@ carve-out, and the tool needs the same provenance discipline (hostname,
 commit) as `brokkr results`.
 
 Enforceable: partly. A deleted script cannot drift.
+
+## VG-026 - A curated check shape whose filter matches nothing runs nothing
+
+Reported by: the resolution loop's reviewer.
+
+The `inline-cache-differential` and `cost-check-interval-differential` shapes
+in `brokkr.toml` are curated with an `only` filter naming one test each.
+Renaming or moving that test leaves the shape compiling and running zero
+tests, and the gate stays green. Only `instrumentation-faults` has a
+convention test (`fault_injection_tests_are_selected_by_the_instrumentation_sweep`)
+tying its filters to real tests.
+
+Fix: extend that convention test to every curated shape: each `only` entry
+must name at least one existing test, and every test gated on the shape's
+feature must be selected.
+
+Enforceable: yes, by that test.

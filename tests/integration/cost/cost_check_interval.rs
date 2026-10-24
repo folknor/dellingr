@@ -89,3 +89,106 @@ fn opcode_cost_interval_matches_immediate_flush_across_budgets() {
         }
     }
 }
+
+/// Keep the sweep bounded in charged work, including stress examples. Compile
+/// each example once and reuse its Program in both modes and every budget.
+#[cfg(feature = "cost-check-interval")]
+#[test]
+fn corpus_cost_check_interval_differential() {
+    use dellingr::{Program, with_cost_check_interval};
+
+    fn execute(
+        program: &Program,
+        budget: i64,
+        natural: Option<&str>,
+    ) -> (Vec<Vec<u8>>, u64, Option<String>) {
+        let (mut state, recorder) = support::Recorder::state();
+        if let Some(source) = natural {
+            // The natural cases' callbacks, as `error_boundary_cases::run`
+            // registers them; that runner rejects non-budget errors under a
+            // budget, so the natural rows execute here.
+            let callbacks: [(&str, dellingr::RustFunc); 3] = [
+                ("fail", support::error_boundary_cases::fail),
+                ("overreport", support::error_boundary_cases::overreport),
+                ("oversized", support::error_boundary_cases::oversized),
+            ];
+            for (name, callback) in callbacks {
+                state.push_rust_fn(callback).unwrap();
+                state.set_global(name).unwrap();
+            }
+            if source.contains("large") {
+                state
+                    .push_bytes(vec![b'x'; dellingr::limits::MAX_STRING_BYTES / 2 + 1])
+                    .unwrap();
+                state.set_global("large").unwrap();
+            }
+        }
+        state.load(program).unwrap();
+        state.set_cost_budget(budget);
+        let error = state
+            .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+            .err()
+            .map(|error| error.to_string());
+        (recorder.prints(), state.cost_used(), error)
+    }
+
+    let interval = i64::try_from(COST_CHECK_INTERVAL).expect("interval fits in i64");
+    let budgets = [
+        -1,
+        0,
+        1,
+        2,
+        3,
+        7,
+        interval - 1,
+        interval,
+        interval + 1,
+        2 * interval - 1,
+        2 * interval,
+        2 * interval + 1,
+        4 * interval + 1,
+    ];
+    for path in support::examples::example_corpus() {
+        let source = std::fs::read(&path).unwrap();
+        let program = Program::compile(&source, Some(b"interval-corpus")).unwrap();
+        for budget in budgets {
+            let immediate = with_cost_check_interval(1, || execute(&program, budget, None));
+            let batched =
+                with_cost_check_interval(COST_CHECK_INTERVAL, || execute(&program, budget, None));
+            assert_eq!(immediate, batched, "{} budget={budget}", path.display());
+        }
+    }
+
+    // The shared boundary runner also checks surviving operands, handler
+    // writes, notification counts and reuse after each failed call. These
+    // cases are small, so walk every prefix up to completion, as the boundary
+    // sweep does, rather than only the interval edges.
+    for &(name, source) in support::error_boundary_cases::CASES {
+        let complete = support::error_boundary_cases::run(name, source, None, None).cost;
+        let complete = i64::try_from(complete).expect("boundary case cost fits in i64");
+        for budget in -1..=complete + 1 {
+            let run = || {
+                let outcome = support::error_boundary_cases::run(name, source, Some(budget), None);
+                (outcome.cost, outcome.transcript)
+            };
+            assert_eq!(
+                with_cost_check_interval(1, run),
+                with_cost_check_interval(COST_CHECK_INTERVAL, run),
+                "boundary {name} budget={budget}"
+            );
+        }
+    }
+    for (name, source) in support::error_boundary_cases::natural() {
+        let program = Program::compile(&source, Some(b"interval-natural")).unwrap();
+        // Include unbounded execution so each natural failure actually occurs;
+        // small budgets also exercise the prefixes that stop before it.
+        for budget in budgets.into_iter().chain([i64::MAX]) {
+            let run = || execute(&program, budget, Some(&source));
+            assert_eq!(
+                with_cost_check_interval(1, run),
+                with_cost_check_interval(COST_CHECK_INTERVAL, run),
+                "natural failure {name} budget={budget}"
+            );
+        }
+    }
+}

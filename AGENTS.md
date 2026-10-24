@@ -239,6 +239,20 @@ with hits on and off in one build and compares prints, cost and errors. The
 curated `inline-cache-differential` shape is the only one that enables it and
 runs only that test: other cache tests would fail with hits off.
 
+The non-default `cost-check-interval` feature is debug-only test
+infrastructure too (`src/lib.rs` refuses it without debug assertions). With it
+off, the dispatch loop's flush test is the plain comparison against
+`tuning::COST_CHECK_INTERVAL`; with it on, the loop reads the interval from a
+thread-local control (the production value unless overridden) and records
+each accepted opcode charge. The doc-hidden `with_cost_check_interval` runs a
+closure under a given interval and returns those charge sites, so
+`cost::cost_check_interval::corpus_cost_check_interval_differential` runs the
+example corpus, the boundary cases and the natural failures at interval 1 and
+at the production interval over a sweep of budgets in one build and compares
+prints, cost, errors and charge sites. The curated
+`cost-check-interval-differential` shape is the only one that enables it and
+runs only that test.
+
 The budget and natural-failure sweeps also run in ordinary check shapes.
 `brokkr test error_boundary --release` exercises them without debug checks;
 `brokkr test native_bytes_per_level` (also with `--release`) prints the
