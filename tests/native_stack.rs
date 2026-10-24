@@ -32,6 +32,15 @@ use dellingr::{ArgCount, HostCallbacks, LuaType, Program, RetCount, State};
 #[path = "common/stack.rs"]
 mod stack;
 
+/// Thread stack for tests that parse at the syntax budget: 2 MiB in every
+/// repository profile, the stricter promise docs/limits.md keeps for parsing
+/// on its own. Instrumented builds wrap parser functions in timing guards and
+/// get more, as `src/compiler/parser.rs`'s unit-test constant does.
+#[cfg(not(any(feature = "hotpath", feature = "hotpath-alloc")))]
+const PARSE_TEST_STACK_BYTES: usize = 2 << 20;
+#[cfg(any(feature = "hotpath", feature = "hotpath-alloc"))]
+const PARSE_TEST_STACK_BYTES: usize = 8 << 20;
+
 /// One kind of native level: Lua that recurses into `deep(n + 1)` through
 /// one compiled caller path.
 struct Scenario {
@@ -1195,7 +1204,7 @@ fn recursive_index_function_stops_at_the_native_call_limit() {
 /// of `MAX_SYNTAX_DEPTH`.
 #[test]
 fn deepest_nested_functions_parse_on_the_parse_test_stack() {
-    stack::on_parse_test_stack("deepest_nested_functions", || {
+    stack::on_stack("deepest_nested_functions", PARSE_TEST_STACK_BYTES, || {
         let source = |depth: usize| {
             format!(
                 "local outer = 1 {}return outer{}",

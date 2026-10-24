@@ -67,7 +67,7 @@ guards are live (they key on the dependency's feature) while
 `cfg(feature = "hotpath")` is false. Guards spelled with `"hotpath"` alone
 therefore fail open under `hotpath-alloc`:
 
-- `tests/diff_test.rs` compiles its corpus partitions out only for
+- `tests/integration/corpus/diff_test.rs` compiles its corpus partitions out only for
   `"hotpath"`, for the stated reason that instrumentation pushes the corpus
   past the time budget. Under `hotpath-alloc` they compile in and run
   instrumented, contrary to AGENTS.md ("The corpus partitions are compiled out
@@ -76,14 +76,15 @@ therefore fail open under `hotpath-alloc`:
   `cfg(feature = "hotpath")` only, so instrumented `hotpath-alloc` parser unit
   tests parse at the syntax budget on 2 MiB with timing guards on every parser
   frame, which is what the 8 MiB branch exists to prevent.
-  `tests/common/stack.rs` sets `PARSE_TEST_STACK_BYTES` and
-  `LIMIT_TEST_STACK_BYTES` to 8 MiB under `hotpath` *or* `hotpath-alloc`, and
-  says its constant matches "as `src/compiler/parser.rs`'s unit-test constant
-  does"; that parity claim is false for `hotpath-alloc`.
-- `tests/common/mod.rs`'s `cfg_attr(feature = "hotpath", allow(dead_code))`.
+  `tests/native_stack.rs` sets `PARSE_TEST_STACK_BYTES` (and
+  `tests/common/stack.rs` sets `LIMIT_TEST_STACK_BYTES`) to 8 MiB under
+  `hotpath` *or* `hotpath-alloc`, and says its constant matches "as
+  `src/compiler/parser.rs`'s unit-test constant does"; that parity claim is
+  false for `hotpath-alloc`.
 
-`tests/common/stack.rs` and `tests/error_boundary.rs` spell both features and
-are correct, so the repository already knows; the guards disagree.
+`tests/common/stack.rs`, `tests/native_stack.rs` and
+`tests/integration/errors/error_boundary.rs` spell both features and are
+correct, so the repository already knows; the guards disagree.
 
 Fix: `hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]`, so
 `cfg(feature = "hotpath")` means "instrumented" everywhere and the
@@ -157,14 +158,15 @@ against:
   release") in the dev profile by default, which hits the 20s per-test cap and
   stops the run. `brokkr test sweep`, `pin`, `tables` and `oracle` each pull in
   some of the long-running or Python-spawning ignored tests.
-- `tests/error_boundary.rs::error_boundary_transcript` is
+- `failures::error_boundary::error_boundary_transcript` (integration crate) is
   `#[ignore = "on-demand transcript ..."]` and writes
   `.scratch/error-boundary/transcript.txt` through
   `scratch::write_boundary_transcript`. The documented focused command
   `brokkr test error_boundary` (dev profile, the repository default) matches
   and runs it, so it writes into the source tree as a side effect. AGENTS.md's
   `--release` form avoids it only because the test is compiled out without
-  `debug_assertions`.
+  `debug_assertions`. With the suites merged into one crate, a subject filter
+  (`brokkr test failures::`) reaches it too.
 
 The save golden already uses the safe pattern: a `regenerate_save_golden`
 example.

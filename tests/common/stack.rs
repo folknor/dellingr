@@ -1,3 +1,7 @@
+// Included by path from `tests/native_stack.rs` and the integration crate's
+// support module; every item here is used by both, so neither crate needs a
+// dead-code allowance for it.
+
 /// Thread stack for tests that drive a runtime recursion limit to its
 /// boundary: the native stack docs/limits.md states every runtime limit fits
 /// in, 4 MiB with this repository's dev settings and 2 MiB, the Rust default
@@ -26,31 +30,15 @@ pub(crate) const LIMIT_TEST_STACK_BYTES: usize = if cfg!(debug_assertions) {
 ))]
 pub(crate) const LIMIT_TEST_STACK_BYTES: usize = 8 << 20;
 
-/// Thread stack for tests that parse at the syntax budget: 2 MiB in every
-/// repository profile, the stricter promise docs/limits.md keeps for parsing
-/// on its own. Instrumented builds wrap parser functions in timing guards and
-/// get more, as `src/compiler/parser.rs`'s unit-test constant does.
-#[cfg(not(any(feature = "hotpath", feature = "hotpath-alloc")))]
-pub(crate) const PARSE_TEST_STACK_BYTES: usize = 2 << 20;
-#[cfg(any(feature = "hotpath", feature = "hotpath-alloc"))]
-pub(crate) const PARSE_TEST_STACK_BYTES: usize = 8 << 20;
-
 /// Run `f` on a named thread with [`LIMIT_TEST_STACK_BYTES`] of stack. A
 /// native stack overflow aborts the whole test process; the runtime's abort
 /// message names the thread, which attributes it to the test.
-#[allow(dead_code)]
 pub(crate) fn on_limit_test_stack(name: &str, f: impl FnOnce() + Send + 'static) {
     on_stack(name, LIMIT_TEST_STACK_BYTES, f);
 }
 
-/// Run `f` on a named thread with [`PARSE_TEST_STACK_BYTES`] of stack.
-#[allow(dead_code)]
-pub(crate) fn on_parse_test_stack(name: &str, f: impl FnOnce() + Send + 'static) {
-    on_stack(name, PARSE_TEST_STACK_BYTES, f);
-}
-
-#[allow(dead_code)]
-fn on_stack(name: &str, bytes: usize, f: impl FnOnce() + Send + 'static) {
+/// Run `f` on a named thread with `bytes` of stack.
+pub(crate) fn on_stack(name: &str, bytes: usize, f: impl FnOnce() + Send + 'static) {
     std::thread::Builder::new()
         .name(name.to_owned())
         .stack_size(bytes)

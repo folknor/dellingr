@@ -6,6 +6,19 @@ All notable changes to dellingr are documented here. The format follows
 
 ## [Unreleased]
 
+### Testing
+
+- The integration tests are one crate, `tests/integration`, instead of one
+  binary per file: each former file is a module, grouped by subject (`cli`,
+  `compiler`, `corpus`, `cost`, `failures`, `host`, `library`, `runtime`,
+  `snapshot`), so a focused run can select a subject by module path. The
+  snapshot suites are gated by a `cfg` on their module instead of compiling to
+  empty binaries in the default sweep. `tests/native_stack.rs` stays its own
+  target. A shared `support` module replaces the per-file compile-load-call
+  helpers and error and print recorders, and a convention test keeps the tree
+  to the two targets, every source reachable from `main.rs`, no dead-code
+  allowances, and process-wide state marked.
+
 ### Changed (breaking)
 
 - Register VM. The compiler builds a syntax tree per function and generates

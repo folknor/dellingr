@@ -402,7 +402,7 @@ Reported by: check-machinery, snapshot.
 because they carry the corpus `run_examples.rs` and the diff gate execute. Yet
 the package excludes `scripts/` (which holds `diff_test.sh`, driven by
 `tests/diff_test.rs`, and `test_limited.sh`, driven by
-`tests/common/cli.rs::limited_command`), `bench/` and `brokkr.toml` (both read
+`tests/integration/support/process.rs::limited_command`), `bench/` and `brokkr.toml` (both read
 by `tests/bench_scripts.rs`). `cargo test` on the published crate therefore
 fails in at least three binaries; `cargo package` verifies only that the crate
 builds. Meanwhile keeping `tests/` ships `tests/fixtures/crmath_golden.txt`

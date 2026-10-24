@@ -48,7 +48,7 @@ default_package = "dellingr"
 debug = true
 
 [gremlins]
-exclude = ["tests/string_bytes.rs"]
+exclude = ["tests/integration/library/string_bytes.rs"]
 
 # Benchmarking harness: `brokkr dellingr --lua <name> --bench|--hotpath|--alloc`.
 # brokkr builds the cargo example target below (plain for --bench, with the
@@ -79,7 +79,7 @@ exclude = ["tests/string_bytes.rs"]
 # workload; interpret its timing as a parse/codegen diagnostic, so both modes
 # use the same generated source.
 #
-# tests/bench_scripts.rs checks matching cost fingerprints for each pair's
+# tests/integration/corpus/bench_scripts.rs checks matching cost fingerprints for each pair's
 # kernel and shared helpers. The wrappers are scaled differently (the composite
 # is ~1/100, the seconds-scale loops are calibrated per kernel), so re-check
 # their proportions by eye when either file changes; the fingerprints do not
@@ -266,6 +266,16 @@ stream = "stdout"
 [[script_check]]
 name = "notes-sections"
 command = "python3 -B scripts/test_notes_sections.py"
+expect = "ok"
+match = "last-line"
+stream = "stdout"
+
+# The integration crate's convention tests police its module tree, so they
+# cannot report their own removal; this checks from outside that they still
+# compile and run.
+[[script_check]]
+name = "test-tree-anchor"
+command = "python3 -B scripts/test_tree_anchor.py"
 expect = "ok"
 match = "last-line"
 stream = "stdout"

@@ -1,0 +1,260 @@
+//! Integration tests that run all Lua example files.
+
+use std::fs;
+use std::io::Read;
+use std::path::Path;
+use std::process::{Child, ExitStatus, Output, Stdio};
+use std::thread::JoinHandle;
+use std::time::Duration;
+
+use crate::support::{examples, process};
+
+const EXAMPLE_WORKERS: usize = 8;
+const EXAMPLE_TIMEOUT_MS: u64 = 60_000;
+const POLL_INTERVAL_MS: u64 = 25;
+
+#[test]
+fn run_feature_test_extended_in_process() {
+    let examples_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+    let feature_test = examples::example_corpus()
+        .into_iter()
+        .find(|path| {
+            path.strip_prefix(&examples_dir)
+                .is_ok_and(|relative| relative == Path::new("feature_test_extended.lua"))
+        })
+        .expect("feature_test_extended.lua must be present in the example corpus");
+    let source =
+        fs::read_to_string(&feature_test).expect("Failed to read feature_test_extended.lua");
+    let mut state = dellingr::State::new();
+    let source_name = feature_test
+        .strip_prefix(Path::new(env!("CARGO_MANIFEST_DIR")))
+        .expect("example corpus paths must be rooted at the crate manifest")
+        .display()
+        .to_string();
+    dellingr::Program::compile(&source, Some(source_name.as_bytes()))
+        .and_then(|program| state.load(&program))
+        .expect("feature_test_extended.lua should load successfully");
+    state
+        .call(dellingr::ArgCount::Fixed(0), dellingr::RetCount::Fixed(0))
+        .expect("feature_test_extended.lua should execute successfully");
+}
+
+fn read_output<R>(mut reader: R) -> JoinHandle<Vec<u8>>
+where
+    R: Read + Send + 'static,
+{
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        reader
+            .read_to_end(&mut bytes)
+            .expect("example process output should be readable");
+        bytes
+    })
+}
+
+struct ExampleRun {
+    output: Output,
+    timed_out: bool,
+    timeout_ms: u64,
+}
+
+fn stop_example(child: &mut Child) -> Result<ExitStatus, String> {
+    if let Err(error) = child.kill()
+        && error.kind() != std::io::ErrorKind::InvalidInput
+    {
+        return Err(format!("could not stop example process: {error}"));
+    }
+    child
+        .wait()
+        .map_err(|error| format!("could not wait for stopped example: {error}"))
+}
+
+fn run_example(path: &Path, timeout_ms: u64) -> Result<ExampleRun, String> {
+    let mut child = process::limited_command()
+        .arg("--quiet")
+        .arg(path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("could not start dellingr example: {error}"))?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "example stdout was not captured".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "example stderr was not captured".to_string())?;
+    let stdout_reader = read_output(stdout);
+    let stderr_reader = read_output(stderr);
+    let poll_count = timeout_ms.saturating_add(POLL_INTERVAL_MS - 1) / POLL_INTERVAL_MS;
+    let mut status = None;
+
+    for _ in 0..poll_count {
+        match child.try_wait() {
+            Ok(Some(exit_status)) => {
+                status = Some(exit_status);
+                break;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(POLL_INTERVAL_MS)),
+            Err(error) => {
+                if let Err(stop_error) = stop_example(&mut child) {
+                    return Err(format!(
+                        "could not check example process: {error}; {stop_error}"
+                    ));
+                }
+                let stdout_result = stdout_reader.join();
+                let stderr_result = stderr_reader.join();
+                if stdout_result.is_err() || stderr_result.is_err() {
+                    return Err(format!(
+                        "could not check example process: {error}; output reader panicked"
+                    ));
+                }
+                return Err(format!("could not check example process: {error}"));
+            }
+        }
+    }
+
+    let timed_out = status.is_none();
+    if timed_out {
+        status = Some(stop_example(&mut child)?);
+    }
+
+    let stdout = stdout_reader
+        .join()
+        .map_err(|_| "example stdout reader panicked".to_string())?;
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| "example stderr reader panicked".to_string())?;
+    let output = Output {
+        status: status
+            .ok_or_else(|| "example process status unavailable after waiting".to_string())?,
+        stdout,
+        stderr,
+    };
+
+    Ok(ExampleRun {
+        output,
+        timed_out,
+        timeout_ms,
+    })
+}
+
+fn check_example(path: &Path, timeout_ms: u64) -> Option<String> {
+    let display = path
+        .strip_prefix(Path::new(env!("CARGO_MANIFEST_DIR")))
+        .expect("example corpus paths must be rooted at the crate manifest")
+        .display();
+
+    println!("Running: {display}");
+
+    let source = match fs::read_to_string(path) {
+        Ok(source) => source,
+        Err(error) => return Some(format!("{display}: could not read source: {error}")),
+    };
+    let defines_bench = source.lines().any(|line| {
+        let line = line.trim_start();
+        line.starts_with("function _bench(") || line.starts_with("local function _bench(")
+    });
+    let run = match run_example(path, timeout_ms) {
+        Ok(run) => run,
+        Err(error) => return Some(format!("{display}: {error}")),
+    };
+    let output = run.output;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    if run.timed_out {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Some(format!(
+            "{display}: timed out after {} ms\nstdout: {stdout}\nstderr: {stderr}",
+            run.timeout_ms
+        ))
+    } else if !output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Some(format!(
+            "{}: exit code {:?}\nstdout: {}\nstderr: {}",
+            display,
+            output.status.code(),
+            stdout,
+            stderr
+        ))
+    } else if !stderr.is_empty() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Some(format!(
+            "{display}: unexpected stderr\nstdout: {stdout}\nstderr: {stderr}"
+        ))
+    } else {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Example assertions follow the convention `name: false`.
+        if stdout.lines().any(|line| line.ends_with(": false")) {
+            Some(format!(
+                "{display}: test assertion failed\noutput: {stdout}"
+            ))
+        } else if defines_bench && !stdout.lines().any(|line| line.ends_with(": true")) {
+            Some(format!(
+                "{display}: _bench example did not print a success line\noutput: {stdout}"
+            ))
+        } else {
+            None
+        }
+    }
+}
+
+fn example_worker_count(file_count: usize) -> usize {
+    let available =
+        std::thread::available_parallelism().map_or(EXAMPLE_WORKERS, std::num::NonZeroUsize::get);
+    available.min(EXAMPLE_WORKERS).min(file_count)
+}
+
+fn run_examples_bucket(name: &str) {
+    let files = examples::example_corpus();
+
+    assert!(
+        !files.is_empty(),
+        "No .lua files found in examples bucket {name}"
+    );
+
+    // Keep stress workload concurrency bounded by available parallelism.
+    let workers = example_worker_count(files.len());
+    let timeout_ms = EXAMPLE_TIMEOUT_MS;
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let mut failures: Vec<(usize, String)> = std::thread::scope(|scope| {
+        let handles = (0..workers)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut local = Vec::new();
+                    loop {
+                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(path) = files.get(i) else { break };
+                        if let Some(failure) = check_example(path, timeout_ms) {
+                            local.push((i, failure));
+                        }
+                    }
+                    local
+                })
+            })
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .flat_map(|handle| handle.join().expect("example worker panicked"))
+            .collect()
+    });
+    failures.sort_by_key(|(i, _)| *i);
+    let failures: Vec<String> = failures.into_iter().map(|(_, failure)| failure).collect();
+
+    if !failures.is_empty() {
+        panic!(
+            "\n{} example(s) failed:\n\n{}",
+            failures.len(),
+            failures.join("\n\n")
+        );
+    }
+
+    println!("\nAll {} examples passed in {name}!", files.len());
+}
+
+#[test]
+fn run_all_examples() {
+    run_examples_bucket("all");
+}

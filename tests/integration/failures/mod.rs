@@ -1,0 +1,9 @@
+mod diagnostic_texts;
+mod error_boundary;
+mod error_construction;
+mod error_handling;
+mod hygiene_errors;
+mod library_function;
+mod metamethod_errors;
+mod source_attribution;
+mod vm_fault_context;

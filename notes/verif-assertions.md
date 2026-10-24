@@ -51,9 +51,9 @@ Alternatively give `DefaultCallbacks` a sibling that writes via `print!`, which
 libtest captures.
 
 Enforceable: a rule that no test outside the CLI suites uses `DefaultCallbacks`,
-or that the shared support module is the only place a State is constructed (with
-the binary merge in rewrites.md). A grep for `State::new()` in files whose Lua
-calls `print` is crude.
+or that the integration crate's `support` module (which now has a recording
+`Recorder` callbacks type) is the only place a State is constructed. A grep for
+`State::new()` in files whose Lua calls `print` is crude.
 
 ## VA-002 - "Deterministic" tests that compare a run with itself
 
@@ -74,7 +74,7 @@ worth something, but the names promise more.
 - `anchor.rs::determinism_two_states_same_sequence_same_output`: the compared
   output is three arithmetic results (`6,105,9`) no anchor-slot behaviour can
   change;
-- `string_cost.rs::count_only_costs_are_deterministic_across_runs`: runs one gsub
+- `string_charges.rs::count_only_costs_are_deterministic_across_runs`: runs one gsub
   source twice in two fresh States; there is no process-wide state on the gsub
   path.
 
@@ -173,13 +173,13 @@ cache was hit/evicted", but nothing lets them assert the precondition happened:
   `src/vm/tests.rs::auto_gc_marks_a_deep_lua_table_chain_iteratively` arrange
   collections with `gc_set_threshold(1)` or a `force_gc` RustFn; the deep-chain
   test relies on automatic collection happening at a depth large enough to matter.
-  `string_cost.rs::gsub_keeps_its_pattern_across_collections_in_its_replacement`
+  `string_charges.rs::gsub_keeps_its_pattern_across_collections_in_its_replacement`
   has no proof a collection ran during the replacement.
 - `cost_determinism.rs::gmatch_resume_cost_ignores_fifo_cache_eviction` assumes
   256 distinct patterns evict the iterator's pattern;
   `gmatch_first_use_cost_ignores_a_shared_pattern_cache_hit` has no proof of a hit;
-  `string_cost.rs::refusal_leaves_snapshot_state_quiescent` says "matcher refusal
-  occurs after the cache hit", unverified. `string_cost.rs` says twice "The
+  `string_charges.rs::refusal_leaves_snapshot_state_quiescent` says "matcher refusal
+  occurs after the cache hit", unverified. `string_charges.rs` says twice "The
   compile-once half of this check is a crate unit test, since the compilation
   counter is test-only instrumentation": the property is split across two
   binaries because of where the counter lives.
@@ -242,7 +242,9 @@ A focused run by subject misses these, and coverage reads under a misleading nam
 - `vm_test01`..`vm_test11` (`src/vm/tests.rs`) and `test_lexer01`..`test_lexer12`
   (`lexer.rs`) say nothing about what each covers.
 
-Fix: rename and relocate during the binary merge in rewrites.md.
+Fix: rename and relocate. The integration suites are now modules of one crate
+grouped by subject (`tests/integration/<subject>/`), so moving a test is a cut
+and paste; the merge moved whole files only.
 
 Enforceable: no, beyond a textlint ban on `fn (vm_)?test_?[a-z]*[0-9]+\(` in
 `src/**`.
@@ -259,7 +261,7 @@ coverage:
   also pin the column), and its three long-string sources the same three as
   `long_strings_return_an_error_at_the_opening_bracket` (`lexer.rs`, which pins
   line and column). It proves only that `Program::compile` surfaces the same
-  kind, at the cost of one integration binary.
+  kind.
 - `error_handling.rs` message tests with disjunctions almost any message meets
   (`error_msg_unexpected_token_includes_context`: `contains("expected") ||
   contains("near")`; `error_msg_missing_end_keyword`: `<eof>` or `expected`;
@@ -285,9 +287,9 @@ coverage:
 - `anchor.rs::dropped_anchor_slot_is_recycled_without_collecting` (see VA-019).
 
 Fix: keep the stronger copy; delete or reduce the other to one public-API smoke
-case in a merged binary.
+case in the integration crate.
 
-Enforceable: no; merging binaries makes the duplication visible.
+Enforceable: no.
 
 ## VA-008 - The reentrant-opcode coverage guard checks its own copy of the sources
 
@@ -314,7 +316,7 @@ Reported by: runtime.
 
 Many tests return `cond and 1 or 0` or one boolean from a long chain of checks, so
 a failure says only `0 != 1`. The `error("what broke")` pattern some tests use
-(`global_env_proxy.rs`, `table_metamethods.rs`) reports which check failed at no
+(`global_table.rs`, `table_metamethods.rs`) reports which check failed at no
 extra cost.
 
 Enforceable: no.
@@ -439,10 +441,6 @@ Reported by: native-stack-errors.
 - `error_boundary.rs` sets up the `large` global only when the case source
   contains the substring `large`. It fails loudly when wrong; setup keyed on a
   name.
-- `host_call_preflight.rs` and `rustfn_error.rs` count notifications with
-  `Arc<Mutex<usize>>` where an `AtomicUsize` (as `host_error_reporting.rs`'s
-  `ErrorCounter` uses) would do; three copies of one counter callback could be one
-  helper in `tests/common/`. Cosmetic.
 
 Enforceable: no.
 
@@ -646,8 +644,7 @@ Enforceable: no.
 Reported by: runtime.
 
 `_G` is the real global table (41ad774; AGENTS.md, `global_env.rs`). Still saying
-"proxy": the file name `tests/global_env_proxy.rs` (its module doc is updated);
-`src/vm/tests.rs::open_libs_with_values_on_the_stack_targets_its_own_g_table`
+"proxy": `src/vm/tests.rs::open_libs_with_values_on_the_stack_targets_its_own_g_table`
 (message `"_G keeps its proxy metatable"`);
 `global_write_cache.rs::append_and_g_proxy_writes_do_not_displace_a_warmed_global`
 and the `proxy_marker` global in `builtin_rebind_does_not_disturb_a_warmed_writer`;
@@ -771,7 +768,7 @@ into a State nobody keeps) catches the first shape.
 
 Reported by: compiler-cost.
 
-`string_cost.rs`. Each run is `match call { Ok(_) | Err(_) => {} }` and only the
+`string_charges.rs`. Each run is `match call { Ok(_) | Err(_) => {} }` and only the
 two `cost_used` values are compared. "Some cases in this list fail on an invalid
 element on purpose", but nothing checks which case fails or where; if the first
 case started failing at its first instruction in both modes, both report the same
@@ -786,7 +783,7 @@ Enforceable: a textlint pattern banning `Ok(_) | Err(_) => {}` in tests.
 
 Reported by: compiler-cost.
 
-`bytecode_runtime.rs`. The doc says the second execution "re-parses (a fresh
+`bytecode_caches.rs`. The doc says the second execution "re-parses (a fresh
 Bytecode identity) while the State already carries warm entries for identical
 code". Runtime entries are keyed by `Arc::as_ptr(bytecode)`
 (`State::resolve_bytecode_runtime`), so a re-parse gets a brand-new cold runtime;
@@ -806,7 +803,7 @@ Reported by: compiler-cost.
 - `zero_static_cost_generic_for_is_not_labeled_free` (`src/lib.rs`) asserts
   `!rendered.contains("(free)")`; no code path emits "(free)" any more. A
   tripwire, not coverage.
-- `gmatch_full_scan_is_linear_in_its_subject` (`string_cost.rs`) accepts
+- `gmatch_full_scan_is_linear_in_its_subject` (`string_charges.rs`) accepts
   `long <= 3 * short` for a doubling; a quadratic term small next to the fixed
   per-iteration charges passes. Pin the exact `cost(256) - cost(128)`.
 - `decimal_and_hex_literals_use_the_shared_numeral_parser` compares the parser's

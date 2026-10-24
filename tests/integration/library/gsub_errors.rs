@@ -1,0 +1,516 @@
+//! Tests for string.gsub error propagation and nil/false handling.
+//!
+//! Verifies that:
+//! - Errors in replacement functions are propagated (not swallowed)
+//! - Errors in table lookups via metamethods are propagated
+//! - nil/false results from functions and tables keep the original match
+
+use dellingr::error::ErrorKind;
+use dellingr::{ArgCount, RetCount, State};
+
+use crate::support;
+
+// -- Error propagation tests --
+
+#[test]
+fn gsub_function_error_is_propagated() {
+    let mut state = State::new();
+    support::load(
+        &mut state,
+        r#"
+        return string.gsub("hello world", "%w+", function(m)
+            error("boom")
+        end)
+    "#,
+    );
+    let result = state.call(ArgCount::Fixed(0), RetCount::Fixed(2));
+    assert!(
+        result.is_err(),
+        "gsub should propagate replacement function errors"
+    );
+}
+
+#[test]
+fn gsub_function_budget_error_is_propagated() {
+    let mut state = State::new();
+    state.set_cost_budget(50);
+    support::load(
+        &mut state,
+        r#"
+        -- replacement function that burns budget with a tight loop
+        return string.gsub("aaa", "%w", function(m)
+            local x = 0
+            for i = 1, 10000 do x = x + i end
+            return m
+        end)
+    "#,
+    );
+    let result = state.call(ArgCount::Fixed(0), RetCount::Fixed(2));
+    assert!(
+        result.is_err(),
+        "gsub should propagate budget exceeded errors"
+    );
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err.kind(), ErrorKind::BudgetExceeded { .. }),
+        "Expected BudgetExceeded, got: {err}"
+    );
+}
+
+#[test]
+fn gsub_table_metamethod_error_is_propagated() {
+    let mut state = State::new();
+    support::load(
+        &mut state,
+        r#"
+        local t = setmetatable({}, {
+            __index = function(self, key)
+                error("metamethod error")
+            end
+        })
+        return string.gsub("hello", "%w+", t)
+    "#,
+    );
+    let result = state.call(ArgCount::Fixed(0), RetCount::Fixed(2));
+    assert!(
+        result.is_err(),
+        "gsub should propagate table metamethod errors"
+    );
+}
+
+// -- nil/false handling tests --
+
+#[test]
+fn gsub_function_nil_keeps_original() {
+    let mut state = State::new();
+    support::eval(
+        &mut state,
+        r#"
+        return string.gsub("hello world", "%w+", function(m)
+            if m == "hello" then return nil end
+            return string.upper(m)
+        end)
+    "#,
+        2,
+    );
+    let result = state.to_string(-2).unwrap();
+    assert_eq!(
+        result, "hello WORLD",
+        "nil return should keep original match"
+    );
+}
+
+#[test]
+fn gsub_function_false_keeps_original() {
+    let mut state = State::new();
+    support::eval(
+        &mut state,
+        r#"
+        return string.gsub("hello world", "%w+", function(m)
+            if m == "hello" then return false end
+            return string.upper(m)
+        end)
+    "#,
+        2,
+    );
+    let result = state.to_string(-2).unwrap();
+    assert_eq!(
+        result, "hello WORLD",
+        "false return should keep original match"
+    );
+}
+
+#[test]
+fn gsub_table_nil_keeps_original() {
+    let mut state = State::new();
+    support::eval(
+        &mut state,
+        r#"
+        local t = { world = "WORLD" }
+        -- "hello" is not in the table, so it should stay as-is
+        return string.gsub("hello world", "%w+", t)
+    "#,
+        2,
+    );
+    let result = state.to_string(-2).unwrap();
+    assert_eq!(
+        result, "hello WORLD",
+        "missing table key should keep original match"
+    );
+}
+
+#[test]
+fn gsub_table_false_keeps_original() {
+    let mut state = State::new();
+    support::eval(
+        &mut state,
+        r#"
+        local t = { hello = false, world = "WORLD" }
+        return string.gsub("hello world", "%w+", t)
+    "#,
+        2,
+    );
+    let result = state.to_string(-2).unwrap();
+    assert_eq!(
+        result, "hello WORLD",
+        "false table value should keep original match"
+    );
+}
+
+// -- Basic correctness tests --
+
+#[test]
+fn gsub_function_replacement_works() {
+    let mut state = State::new();
+    support::eval(
+        &mut state,
+        r#"
+        return string.gsub("hello world", "%w+", function(m)
+            return string.upper(m)
+        end)
+    "#,
+        2,
+    );
+    let result = state.to_string(-2).unwrap();
+    let count = state.to_number(-1).unwrap();
+    assert_eq!(result, "HELLO WORLD");
+    assert_eq!(count, 2.0);
+}
+
+#[test]
+fn gsub_table_replacement_works() {
+    let mut state = State::new();
+    support::eval(
+        &mut state,
+        r#"
+        local t = { hello = "HI", world = "EARTH" }
+        return string.gsub("hello world", "%w+", t)
+    "#,
+        2,
+    );
+    let result = state.to_string(-2).unwrap();
+    let count = state.to_number(-1).unwrap();
+    assert_eq!(result, "HI EARTH");
+    assert_eq!(count, 2.0);
+}
+
+#[test]
+fn gsub_string_replacement_works() {
+    let mut state = State::new();
+    support::eval(
+        &mut state,
+        r#"return string.gsub("hello world", "world", "earth")"#,
+        2,
+    );
+    let result = state.to_string(-2).unwrap();
+    let count = state.to_number(-1).unwrap();
+    assert_eq!(result, "hello earth");
+    assert_eq!(count, 1.0);
+}
+
+#[test]
+fn gsub_number_replacement_is_coerced_to_a_string() {
+    let mut state = State::new();
+    support::eval(&mut state, r#"return string.gsub("aba", "a", 12)"#, 2);
+    assert_eq!(state.to_bytes(-2).unwrap(), b"12b12");
+    assert_eq!(state.to_number(-1).unwrap(), 2.0);
+}
+
+#[test]
+fn gsub_string_replacement_replaces_all_matches() {
+    let mut state = State::new();
+    support::eval(
+        &mut state,
+        r#"
+        local result, count = string.gsub("hello", "l", "L")
+        return result, count
+    "#,
+        2,
+    );
+    let result = state.to_string(-2).unwrap();
+    let count = state.to_number(-1).unwrap();
+    assert_eq!(result, "heLLo");
+    assert_eq!(count, 2.0);
+}
+
+#[test]
+fn gsub_string_replacement_inside_dynamic_argument() {
+    let mut state = State::new();
+    dellingr::Program::compile(
+        r#"
+        local function test(name, condition)
+            if condition then
+                print("[PASS] " .. name)
+            else
+                print("[FAIL] " .. name)
+                error("Test failed: " .. name)
+            end
+        end
+
+        local a1,a2,a3,a4,a5,a6,a7,a8,a9,a10,a11,a12,a13,a14,a15,a16,a17,a18,a19,a20
+
+        test("pattern captures", (function()
+            local a, b = string.match("hello world", "(%a+) (%a+)")
+            return a == "hello" and b == "world"
+        end)())
+
+        test("pattern gsub count", (function()
+            local result, count = string.gsub("hello", "l", "L")
+            return result == "heLLo" and count == 2
+        end)())
+    "#,
+        Some(b"dynamic-gsub.lua".as_slice()),
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
+}
+
+#[test]
+fn gsub_with_captures_function() {
+    let mut state = State::new();
+    support::eval(
+        &mut state,
+        r#"
+        return string.gsub("2+3=5", "(%d+)", function(n)
+            return tostring(tonumber(n) * 10)
+        end)
+    "#,
+        2,
+    );
+    let result = state.to_string(-2).unwrap();
+    assert_eq!(result, "20+30=50");
+}
+
+fn assert_runtime_error(code: &str, expected: &str) {
+    let mut state = State::new();
+    support::load(&mut state, code);
+    let err = state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(2))
+        .unwrap_err();
+    assert!(
+        err.to_string().contains(expected),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn gsub_checks_subject_and_pattern_before_the_replacement() {
+    for (code, argument_number) in [
+        (r#"return string.gsub()"#, 1),
+        (r#"return string.gsub("x", {})"#, 2),
+    ] {
+        let mut state = State::new();
+        support::load(&mut state, code);
+        let error = state
+            .call(ArgCount::Fixed(0), RetCount::Fixed(2))
+            .expect_err("invalid subject or pattern fails");
+        let ErrorKind::ArgError(argument) = error.kind() else {
+            panic!("expected an argument error for {code}, got {error}");
+        };
+        assert_eq!(argument.arg_number(), argument_number, "{code}");
+        assert!(
+            argument.to_string().contains("to 'gsub'"),
+            "{code}: {argument}"
+        );
+    }
+}
+
+#[test]
+fn malformed_patterns_are_pattern_errors_in_all_wrappers() {
+    for code in [
+        r#"return string.find("abc", "[")"#,
+        r#"return string.match("abc", "[")"#,
+        r#"for _ in string.gmatch("abc", "[") do end"#,
+        r#"return string.gsub("abc", "[", "x")"#,
+    ] {
+        assert_runtime_error(code, "malformed pattern");
+        let mut state = State::new();
+        support::load(&mut state, code);
+        let err = state
+            .call(ArgCount::Fixed(0), RetCount::Fixed(2))
+            .unwrap_err();
+        assert!(
+            matches!(err.kind(), ErrorKind::PatternError(_)),
+            "{code}: {err:?}"
+        );
+    }
+}
+
+#[test]
+fn unclosed_captures_error_only_when_a_caller_reads_them() {
+    // Reference raises "unfinished capture" from `get_onecapture`, so every
+    // wrapper that returns all captures errors, while a gsub string
+    // replacement errors only if it names the unclosed capture. The non-error
+    // half lives in examples/pattern_lazy_validation.lua.
+    for code in [
+        r#"return string.find("abc", "(a")"#,
+        r#"return string.match("abc", "(a")"#,
+        r#"for _ in string.gmatch("abc", "(a") do end"#,
+        r#"return string.gsub("abc", "(a", "%1")"#,
+        r#"return string.gsub("abc", "(a)(b", "%2")"#,
+        r#"return string.gsub("abc", "(a", {})"#,
+        r#"return string.gsub("abc", "(a", function() end)"#,
+    ] {
+        let mut state = State::new();
+        support::load(&mut state, code);
+        let err = state
+            .call(ArgCount::Fixed(0), RetCount::Fixed(2))
+            .unwrap_err();
+        assert!(
+            matches!(err.kind(), ErrorKind::PatternError(_)),
+            "{code}: {err:?}"
+        );
+        assert!(
+            err.to_string().contains("unfinished capture"),
+            "{code}: {err}"
+        );
+    }
+}
+
+#[test]
+fn malformed_pattern_tails_error_only_when_reached() {
+    // A malformed point behind a prefix that matches raises; behind one that
+    // never matches it is never reached (examples/pattern_lazy_validation.lua).
+    for (code, expected) in [
+        (
+            r#"return string.find("xabc", "x%1")"#,
+            "invalid capture index %1",
+        ),
+        (r#"return string.find("xabc", "x[")"#, "missing ']'"),
+        (
+            r#"return string.match("ab", "a)")"#,
+            "invalid pattern capture",
+        ),
+    ] {
+        assert_runtime_error(code, expected);
+    }
+}
+
+#[test]
+fn gsub_validates_replacement_grammar_only_for_actual_replacements() {
+    for replacement in ["%q", "%"] {
+        assert_runtime_error(
+            &format!(r#"return string.gsub("a", "a", "{replacement}")"#),
+            "invalid use of '%'",
+        );
+    }
+    let mut state = State::new();
+    support::load(&mut state, r#"return string.gsub("a", "(a)", "%2")"#);
+    let err = state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(2))
+        .unwrap_err();
+    assert!(
+        matches!(
+            err.kind(),
+            ErrorKind::LibraryError(error) if error.to_string() == "invalid capture index %2"
+        ),
+        "expected runtime invalid capture index error, got {err:?}"
+    );
+    assert_eq!(err.kind().to_string(), "invalid capture index %2");
+
+    // A bad replacement is not validated when there is no match or the
+    // substitution limit is zero. Bind each gsub's two results to locals so all
+    // four values survive (a non-final call in a return list is truncated to
+    // one value).
+    let mut state = State::new();
+    support::eval(
+        &mut state,
+        r#"
+            local s1, c1 = string.gsub("a", "b", "%q")
+            local s2, c2 = string.gsub("a", "a", "%q", 0)
+            return s1, c1, s2, c2
+            "#,
+        4,
+    );
+    assert_eq!(state.to_bytes(-4).unwrap(), b"a");
+    assert_eq!(state.to_number(-3).unwrap(), 0.0);
+    assert_eq!(state.to_bytes(-2).unwrap(), b"a");
+    assert_eq!(state.to_number(-1).unwrap(), 0.0);
+}
+
+#[test]
+fn gsub_zero_limit_skips_pattern_and_replacement_validation() {
+    let mut state = State::new();
+    support::eval(
+        &mut state,
+        r#"
+            local s1, c1 = string.gsub("abc", "[", "x", 0)
+            local s2, c2 = string.gsub("a", "a", "%q", 0)
+            return s1, c1, s2, c2
+            "#,
+        4,
+    );
+    assert_eq!(state.to_bytes(-4).unwrap(), b"abc");
+    assert_eq!(state.to_number(-3).unwrap(), 0.0);
+    assert_eq!(state.to_bytes(-2).unwrap(), b"a");
+    assert_eq!(state.to_number(-1).unwrap(), 0.0);
+}
+
+#[test]
+fn gsub_rejects_invalid_replacement_types_before_matching() {
+    for code in [
+        r#"return string.gsub("abc", "z", false)"#,
+        r#"return string.gsub("abc", "z", nil)"#,
+        r#"return string.gsub("abc", "[", false, 0)"#,
+    ] {
+        assert_runtime_error(code, "bad argument #3 to 'gsub'");
+        assert_runtime_error(code, "string/function/table expected");
+    }
+}
+
+#[test]
+fn gsub_rejects_invalid_function_and_table_replacement_values() {
+    assert_runtime_error(
+        r#"return string.gsub("abc", "(b)", function() return true end)"#,
+        "invalid replacement value (a boolean)",
+    );
+    assert_runtime_error(
+        r#"return string.gsub("abc", "(b)", { b = {} })"#,
+        "invalid replacement value (a table)",
+    );
+}
+
+#[test]
+fn gsub_leading_caret_matches_only_at_subject_start() {
+    let mut state = State::new();
+    support::eval(
+        &mut state,
+        r#"
+            local a, ac = string.gsub("aa", "^a", "X")
+            local b, bc = string.gsub("ba", "^a", "X")
+            local c, cc = string.gsub("abc", "^", "X")
+            local d, dc = string.gsub("^a^a", "%^a", "X")
+            return a, ac, b, bc, c, cc, d, dc
+            "#,
+        8,
+    );
+    assert_eq!(state.to_bytes(-8).unwrap(), b"Xa");
+    assert_eq!(state.to_number(-7).unwrap(), 1.0);
+    assert_eq!(state.to_bytes(-6).unwrap(), b"ba");
+    assert_eq!(state.to_number(-5).unwrap(), 0.0);
+    assert_eq!(state.to_bytes(-4).unwrap(), b"Xabc");
+    assert_eq!(state.to_number(-3).unwrap(), 1.0);
+    assert_eq!(state.to_bytes(-2).unwrap(), b"XX");
+    assert_eq!(state.to_number(-1).unwrap(), 2.0);
+}
+
+#[test]
+fn gsub_position_captures_and_replacement_escapes() {
+    let mut state = State::new();
+    support::eval(
+        &mut state,
+        r#"
+            local a = string.gsub("ab", "()a", "<%0:%1:%%>")
+            local b = string.gsub("ab", "a", "<%1>")
+            local c = string.gsub("ab", "()(a)", function(pos, value) return pos .. value end)
+            local d = string.gsub("ab", "()(a)", {[1] = "table"})
+            return a, b, c, d
+            "#,
+        4,
+    );
+    assert_eq!(state.to_bytes(-4).unwrap(), b"<a:1:%>b");
+    assert_eq!(state.to_bytes(-3).unwrap(), b"<a>b");
+    assert_eq!(state.to_bytes(-2).unwrap(), b"1ab");
+    assert_eq!(state.to_bytes(-1).unwrap(), b"tableb");
+}

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Optional debug-build wrapper for the differential corpus.
 #
-# `brokkr check` runs the corpus through `tests/diff_test.rs` for each feature
+# `brokkr check` runs the corpus through `tests/integration/corpus/diff_test.rs` for each feature
 # shape. This wrapper supports direct runs with a DEBUG binary. VM semantics are
 # the same, but the default per-process timeout can make a slow debug run time
 # out where release passes; pass `--timeout` to change the threshold.

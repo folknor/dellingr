@@ -3,7 +3,7 @@
 Findings from the verification hunt about everything that runs the
 `examples/` and `bench/` corpora: `tests/run_examples.rs`, `tests/diff_test.rs`
 and `scripts/diff_test.sh`, `tests/bench_scripts.rs`,
-`tests/disassemble_corpus.rs`, `examples/hotpath.rs`, the CLI suites,
+`tests/integration/corpus/disassembly.rs`, `examples/hotpath.rs`, the CLI suites,
 `tests/common/`, and the Lua files themselves. Several entries would be removed
 by the in-process gate and per-example test rewrites in rewrites.md; they stay
 filed here until then. Each entry names the scopes whose hunters reported it.
@@ -230,7 +230,7 @@ named exceptions, and the set of names equals what brokkr resolves.
 
 Enforceable: yes, as a test.
 
-## VC-009 - `disassemble_corpus` checks one thing that cannot happen, and the corpus is compiled three times
+## VC-009 - `corpus::disassembly` checks one thing that cannot happen, and the corpus is compiled three times
 
 Reported by: corpus-harness, compiler-cost.
 
@@ -249,8 +249,8 @@ disassembly check, the open-shape census and a corpus cost golden together.
 
 Smaller inconsistencies in the same walks: `src/compiler.rs`'s corpus test
 reads with `read_to_string`, so a non-UTF-8 example (legal Lua source) would
-panic there while `disassemble_corpus` (`fs::read`) accepts it; chunk names
-differ per walker (absolute path in `disassemble_corpus`, `None` in the
+panic there while `corpus::disassembly` (`fs::read`) accepts it; chunk names
+differ per walker (absolute path in `corpus::disassembly`, `None` in the
 compiler test, manifest-relative in `run_feature_test_extended_in_process`),
 and the absolute one would embed the developer's directory in any future
 golden.

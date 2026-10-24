@@ -5,7 +5,7 @@
 /// The version covers everything that decides the cost of identical source -
 /// per-opcode charges, native library charges, and compiler emission (which
 /// opcodes a source compiles to). Hosts may key stored cost fingerprints on
-/// it; snapshots require an exact match. `tests/cost_golden.rs` checks a
+/// it; snapshots require an exact match. `tests/integration/cost/cost_golden.rs` checks a
 /// fixed corpus and fingerprints its sources, expected costs, and this version.
 ///
 /// Version 1 was the original implicit model. Version 2 charges native string

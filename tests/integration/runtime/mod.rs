@@ -1,0 +1,13 @@
+mod bytecode_caches;
+mod call_counts;
+mod count_encoding;
+mod frame_reservation;
+mod gc_policy;
+mod gc_upvalues;
+mod global_table;
+mod global_write_cache;
+mod index_depth_routes;
+mod newindex_depth_routes;
+mod plain_field_miss;
+mod vm_depth_regressions;
+mod vm_misc_limits;

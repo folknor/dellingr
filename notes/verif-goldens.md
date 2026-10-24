@@ -139,10 +139,10 @@ bump, but nothing requires it: update cost and fingerprint, leave the version,
 and every test passes.
 
 Every other cost pin is outside the fingerprint: `stdlib_cost_golden.rs` (every
-math/string/table flat charge), `string_cost.rs`
+math/string/table flat charge), `string_charges.rs`
 (`basic_native_charges_are_exact`, gmatch caret 26, capture delta 600), the other
 tests in `cost_golden.rs` (`table_library_native_charges_are_one_or_zero`,
-`unpack_charges_nothing_...`, `mid_run_budget_reset_...`), `bytecode_runtime.rs`
+`unpack_charges_nothing_...`, `mid_run_budget_reset_...`), `bytecode_caches.rs`
 (12), `reentrant_opcode_accounting.rs`, the `lib.rs` analysis tests, and
 `cost_used` assertions in about a dozen more files (`plain_field_miss`,
 `table_iteration`, `table_metamethods`, `global_write_cache`, `error_boundary`,
@@ -285,7 +285,7 @@ Reported by: compiler-cost, snapshot.
 returns and costs, its stack need and metamethod depth "never depend on which
 values the site saw before", and a State resumed from a snapshot "continues
 exactly as the State that saved it would have". The evidence is hand-written
-cases (`bytecode_runtime.rs`, `global_write_cache.rs`, `plain_field_miss.rs`;
+cases (`bytecode_caches.rs`, `global_write_cache.rs`, `plain_field_miss.rs`;
 gmatch charges in `tests/cost_determinism.rs`; output and bytes in a handful of
 save tests). No test compares `cost_used()` after a continuation through cold
 caches against a continuous run. (The one test that claims warm-across-executions
