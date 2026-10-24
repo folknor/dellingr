@@ -476,6 +476,8 @@ fn core_math_table_digests_match_pin() {
 
 #[cfg(test)]
 fn check_table_script(mode: &str) {
+    // process-spawn-exception: one of the two python3 spawns brokkr.toml's
+    // test-processes-through-support rule names; whether it stays is undecided.
     let output = std::process::Command::new("python3")
         .arg(concat!(
             env!("CARGO_MANIFEST_DIR"),

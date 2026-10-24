@@ -4,11 +4,12 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Returns the example Lua files in the same order as the shell differential gate.
+/// Returns the example Lua files, in a host-independent order.
 ///
 /// Paths are absolute and rooted at the crate manifest. Directory and file
-/// symlinks are skipped, matching `find -type f`, and ordering compares the
-/// relative path bytes, matching `LC_ALL=C sort`.
+/// symlinks are skipped, as `find -type f` skips them, and ordering compares
+/// the relative path bytes, as `LC_ALL=C sort` does (`scripts/lib.sh` lists
+/// the corpus the same way for the manual `scripts/diff_test.sh`).
 pub(crate) fn example_corpus() -> Vec<PathBuf> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
     let mut paths = Vec::new();

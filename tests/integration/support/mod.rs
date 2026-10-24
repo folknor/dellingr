@@ -25,39 +25,15 @@ pub(crate) use recorder::Recorder;
 /// rather than a `target/` path, which may hold a stale binary from another
 /// profile, checkout or commit. Cargo's uplifted path can also be overwritten
 /// by another feature build, so refuse a mismatched snapshot shape here. The
-/// probe runs once per test process; the corpus runners ask for the path once
-/// per spawned example.
+/// probe runs once per test process; the corpus test asks for the path once
+/// per example.
 pub(crate) fn dellingr_bin() -> &'static str {
     // The binary and the harness's feature shape are fixed for the process.
     // process-global: a write-once record that the shape probe passed.
     static PROBED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     let binary = env!("CARGO_BIN_EXE_dellingr");
-    PROBED.get_or_init(|| probe_snapshot_shape(binary));
+    PROBED.get_or_init(|| process::probe_snapshot_shape(binary));
     binary
-}
-
-fn probe_snapshot_shape(binary: &str) {
-    let output = std::process::Command::new(binary)
-        .arg("--internal-snapshot-shape")
-        .output()
-        .expect("Cargo-built CLI should report its snapshot shape");
-    assert!(
-        output.status.success(),
-        "CLI snapshot shape probe failed: {output:?}"
-    );
-    assert!(
-        output.stderr.is_empty(),
-        "CLI snapshot shape probe wrote stderr: {output:?}"
-    );
-    let expected: &[u8] = if cfg!(feature = "snapshot") {
-        b"snapshot=1\n"
-    } else {
-        b"snapshot=0\n"
-    };
-    assert_eq!(
-        output.stdout, expected,
-        "Cargo-built CLI snapshot shape differs from the test harness; rebuild this shape"
-    );
 }
 
 /// The repository's `brokkr.toml`, parsed. Suites that check workload
@@ -81,6 +57,21 @@ pub(crate) fn parallel_failures<T: Sync>(
     max_workers: usize,
     check: impl Fn(&T) -> Option<String> + Sync,
 ) -> Vec<String> {
+    parallel_map(items, max_workers, check)
+        .into_iter()
+        .flatten()
+        .collect()
+}
+
+/// Run `map` over `items` on scoped worker threads, at most `max_workers`
+/// and never more than the available parallelism or the item count, and
+/// return the results in item order, so a report does not depend on
+/// scheduling.
+pub(crate) fn parallel_map<T: Sync, R: Send>(
+    items: &[T],
+    max_workers: usize,
+    map: impl Fn(&T) -> R + Sync,
+) -> Vec<R> {
     #[allow(
         clippy::disallowed_methods,
         reason = "The harness sizes workers to the host; results remain in item order."
@@ -89,7 +80,7 @@ pub(crate) fn parallel_failures<T: Sync>(
         std::thread::available_parallelism().map_or(max_workers, std::num::NonZeroUsize::get);
     let workers = available.min(max_workers).min(items.len());
     let next = std::sync::atomic::AtomicUsize::new(0);
-    let mut failures: Vec<(usize, String)> = std::thread::scope(|scope| {
+    let mut results: Vec<(usize, R)> = std::thread::scope(|scope| {
         let handles = (0..workers)
             .map(|_| {
                 scope.spawn(|| {
@@ -97,9 +88,7 @@ pub(crate) fn parallel_failures<T: Sync>(
                     loop {
                         let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         let Some(item) = items.get(index) else { break };
-                        if let Some(failure) = check(item) {
-                            local.push((index, failure));
-                        }
+                        local.push((index, map(item)));
                     }
                     local
                 })
@@ -110,6 +99,6 @@ pub(crate) fn parallel_failures<T: Sync>(
             .flat_map(|handle| handle.join().expect("worker thread panicked"))
             .collect()
     });
-    failures.sort_by_key(|(index, _)| *index);
-    failures.into_iter().map(|(_, failure)| failure).collect()
+    results.sort_by_key(|(index, _)| *index);
+    results.into_iter().map(|(_, result)| result).collect()
 }

@@ -2,7 +2,7 @@
 
 Findings from the verification hunt about everything that runs the
 `examples/` and `bench/` corpora: the integration crate's `corpus` subject
-(`run_examples.rs`, `diff_test.rs`, `bench_scripts.rs`, `disassembly.rs` under
+(`run_examples.rs`, `bench_scripts.rs`, `disassembly.rs` under
 `tests/integration/corpus/`), `scripts/diff_test.sh`, `examples/hotpath.rs`,
 the `cli` subject, `tests/integration/support/` and `tests/common/`, and the
 Lua files themselves. Several entries would be removed
@@ -36,11 +36,10 @@ that rule a condition that evaluates to `nil` prints `name: nil` and passes,
 and a non-bench example that prints nothing passes.
 
 A `-- DIFF:` or `-- SKIP-DIFF:` marker removes the reference comparison for the
-whole file (11 files: 5 SKIP-DIFF, 6 DIFF). The diff gate then checks only that
-a DIFF file exits 0 (the `has_diff` branch), which repeats `run_examples` with
-a weaker condition, so for these files the `: false` rule is all that remains.
-One divergence removes every other assertion in the file from differential
-coverage. Several marked files print in shapes that rule never sees:
+whole file. The corpus test then checks of a DIFF file only that its output
+matches neither reference, which any single divergent line satisfies, so for
+these files the `: false` rule is all that remains. One divergence removes
+every other assertion in the file from differential coverage. Several marked files print in shapes that rule never sees:
 
 - `examples/math.lua` (DIFF, number formatting and RNG): prints `label =\t<value>`
   via `print(a, b)`. No line can end in `: false`; every `math.sin(...)` and
@@ -53,9 +52,9 @@ coverage. Several marked files print in shapes that rule never sees:
 - `examples/upvalue_stress.lua` (SKIP-DIFF): ~30 value prints with expected
   values in comments, banner unconditional; nothing in it looks
   dellingr-specific.
-- `examples/stress_tables.lua`, `stress_rustfn.lua`, `stress_gc_stack.lua`,
-  `examples/benchmark.lua` (SKIP-DIFF): progress banners and an unconditional
-  `PASS`. Smoke tests by design, but nothing records that.
+- `examples/stress_tables.lua`, `stress_rustfn.lua`, `stress_gc_stack.lua`
+  (SKIP-DIFF): progress banners and an unconditional `PASS`. Smoke tests by
+  design, but nothing records that.
 - `feature_test.lua` is excluded for a global `unpack`,
   `feature_test_extended.lua` for semicolons.
 
@@ -78,137 +77,60 @@ is on an explicit smoke-test allowlist; or require every DIFF file to have an
 
 Reported by: check-machinery, corpus-harness.
 
-`run_examples.rs` gives each example `EXAMPLE_TIMEOUT_MS = 60_000`, and AGENTS.md
-repeats "with a fixed 60-second timeout". brokkr's per-test cap is a hard 20
-seconds and stops the whole run on a breach (`brokkr man hygiene`), and
-`run_all_examples` is one test running the entire corpus. So a hung example is
-killed by brokkr's watchdog at 20s, never by the runner at 60s; the runner's
-diagnostic (which example, its output) is never produced, and brokkr reports
-`run_all_examples` as the suspect. The whole corpus, all workers, must finish
-inside 20s, and nothing in the repository states that budget.
+`run_all_examples` (`tests/integration/corpus/run_examples.rs`) is still one
+test running the entire corpus: each example through dellingr and, unless
+SKIP-DIFF, both reference Luas, on `min(8, available_parallelism, files)`
+in-test workers. brokkr's per-test cap is a hard 20 seconds (`brokkr man
+hygiene`), so the test carries one `CORPUS_DEADLINE` of 15s, const-asserted
+5s below a restated `BROKKR_PER_TEST_CAP`, and on expiry names every example
+unfinished (and in which process) or not started. That gives attribution, but
+the whole corpus still has to fit inside one test's cap on every host: on a
+host with few cores, or under heavy load, the fixed deadline is reached and
+the gate fails, and one slow example costs the verdicts of every example not
+yet started. Measured on plantasjen (2026-10-24, uncommitted tree on
+9746eb7): 4.96s in the default sweep and 4.82s in the snapshot sweep of
+`brokkr check`; under `brokkr test`, 11.5s in the hotpath-instrumented
+`instrumentation-faults` shape (comparison compiled out), which `brokkr check`
+filters it out of, so that margin is only exercised by focused runs.
 
-`differential_examples` runs seven `diff_test.sh` partitions concurrently inside
-one test sharing the same 20s, with `DEFAULT_DIFF_TIMEOUT=5s` per process from
-`lib.sh`. `run_examples` uses `min(8, available_parallelism, files)` workers;
-`diff_test.rs` always runs `KERNEL_PARTITIONS + 1 = 7` pipelines regardless of
-core count, each running dellingr and two references serially. On plantasjen
-(12 physical cores) both have headroom. On a 4-core host the seven partitions
-oversubscribe, the debug kernels (about a second each unloaded) approach the 5s
-timeout, and the result is `TIMEOUT` failures or a cap breach that read as
-regressions or hangs. The partition rule (subdirectory means kernel, top level
-means fast) is a naming heuristic: `tables/metamethod_sequence.lua` is a fast
-correctness file classified as a kernel; `examples/benchmark.lua` is a heavy
-top-level file (SKIP-DIFF, so it happens not to matter).
+Enforceable: the deadline/cap assertion is a convention, since brokkr cannot
+export its cap.
 
-The per-test cap (20s), per-example timeout (60s), per-process diff timeout
-(5s), poll interval (25ms) and partition count (6) are independent constants in
-three files and two languages; their real relationship is written nowhere.
+Decision (2026-10-24), remaining step: split the test into one `#[test]` per
+example, generated by a macro from a checked-in list of example paths
+(`check_example(path, deadline)` already takes one path). The list becomes
+the single enumeration: every consumer of today's `example_corpus()` (the
+compiler unit test, `cache_differential`, `corpus_roundtrip`,
+`cost_check_interval`, `bench_scripts`, `run_all_examples`) reads it, and a
+`[[script_check]]` keeps it equal to the `.lua` files on disk. Each example
+then has a name, a focused `brokkr test` run and brokkr's own 20s cap, which
+replaces the corpus deadline and the in-test worker pool. Open cost: brokkr
+runs a sweep's tests serially unless the sweep sets `test_threads`, so the
+kernels lose the in-test worker pool.
 
-Fix: one test per example (the per-example rewrite in rewrites.md), each with
-its own cap and name; short of that, derive per-example timeouts from one
-constant below 20s, derive the partition count from `available_parallelism`,
-and partition by measured or declared weight. Reword AGENTS.md to state the
-actual bound.
-
-Enforceable: a constant shared by both tests and asserted below a named
-`BROKKR_PER_TEST_CAP_SECS` documents the coupling; brokkr cannot export its cap,
-so that is a convention, not a proof.
-
-Decision (2026-10-24): two steps, in order.
-
-1. Merge `run_all_examples` and `differential_examples` into one Rust-driven
-   corpus test. Each example runs through dellingr once, under the address-space
-   cap and the output limit, with stderr captured separately; `run_examples`'
-   pass rules apply; for files not marked SKIP-DIFF, `lua5.2` and `lua5.4` are
-   spawned directly from Rust and compared in memory. Sweeps where comparison
-   is compiled out today (hotpath) apply only the pass rules. `diff_test.sh`
-   leaves the gate and stays a manual tool. This is RW-002 option 1 in
-   rewrites.md; its option 2 (checked-in expected output) is a separate, later
-   decision tied to VC-003.
-2. Split that test into one `#[test]` per example, generated by a macro from a
-   checked-in list of example paths. The list becomes the single enumeration:
-   every consumer of today's `example_corpus()` (the compiler unit test,
-   `cache_differential`, `corpus_roundtrip`, `cost_check_interval`,
-   `bench_scripts`) reads it, and a `[[script_check]]` keeps it equal to the
-   `.lua` files on disk. Each example then has a name, a focused
-   `brokkr test` run and brokkr's own 20s cap, which replaces the 60s runner
-   timeout, the partition count and the 5s gate timeout. Open cost: brokkr
-   runs a sweep's tests serially unless the sweep sets `test_threads`, so the
-   kernels lose the in-test worker pool.
-
-## VC-013 - `run_examples` polls the child every 25ms
+## VC-019 - Tests that spawn tools rather than the product
 
 Reported by: check-machinery, corpus-harness.
 
-`run_example` polls `try_wait` every 25ms, adding a mean 12.5ms (up to 25ms) per
-example and spinning a thread. A waiter thread with a channel and
-`recv_timeout`, or a blocking wait with a deadline, removes the sleep. The
-timeout itself is a real external-process deadline and cannot be virtualised.
-
-Enforceable: no; small, listed because the brief asks for every sleep that
-stands in for an event.
-
-## VC-018 - The gates depend on host tools resolved from `PATH`, unversioned
-
-Reported by: check-machinery, corpus-harness.
-
-- `lua5.2` and `lua5.4` under exactly those names (Debian naming). Which patch
-  release, and which distro compat flags (`LUA_COMPAT_ALL` changes the globals
-  5.2 has), decides which reference "matches"; a patch release that changes
-  `%g` rendering or an error message changes the gate's verdict with no
-  repository change. `research/lua-5.2` and `research/lua-5.4` are local
-  checkouts nothing builds from.
-- `bash`, GNU `timeout`, `grep`, `diff`, `sed`, `sort`, `find`, `mktemp`.
-- `python3` for `generated-large-source` and `native-call-inventory` (3.11+ for
-  `tomllib`).
-
-Fix: the in-process expected-output gate (rewrites.md) removes the reference
-Lua and coreutils from the standard check and confines reference versions to the
-refresh script, which records `lua5.x -v` beside the outputs.
-
-Enforceable: yes, with recorded versions checked by the refresh tool.
-
-Decision (2026-10-24): `brokkr.toml` verifies that everything a green `brokkr
-check` needs is installed: a pre-clippy `[[script_check]]` (e.g.
-`python3 scripts/check_tools.py`, sentinel `ok`) checks `lua5.2` and `lua5.4`,
-including their `-v` output against versions pinned in the script, `bash` and
-GNU `timeout` while `diff_test.sh` is still in the gate, and python3 3.11 or
-newer, and names whatever is missing before anything compiles. Scripts outside
-brokkr's pipelines (`bench.sh`, `bench_luars.sh`, manual `diff_test.sh` runs)
-are responsible for their own requirements.
-
-## VC-019 - Tests of the shell tool rather than the product
-
-Reported by: check-machinery, corpus-harness.
-
-`malformed_timeout_is_rejected_once_before_other_checks` and
-`shell_and_rust_example_corpora_match` test `diff_test.sh`'s argument parser and
-its `find | sort` walk; they exist because the gate is split between a Rust
-walker and a shell walker that must agree. Every `diff_test.sh` run from
-`corpus::diff_test` now passes `--bin` (the timeout probe passes `/dev/null`),
-so none can fall through to a build, but nothing requires the next one to.
-
-Fix: the in-process gate rewrite deletes the need for both tests.
-
-Enforceable: a textlint rule can require `--bin` on every `diff_test.sh`
-invocation in `tests/`.
-
-Decision (2026-10-24): resolved by the VC-011 merge, which deletes both tests
-with the gate's dependency on `diff_test.sh`. Rust code may not spawn shell
-tools: a `[[textlint]]` forbids `Command::new` with a literal program name in
-test code, so the only spawns are `support::process` launching the dellingr
-binary and the reference Luas. The rule also catches the two `python3` spawns
-(`tests/common/libm_symbols.rs`, `src/crmath/tests/golden.rs`), which need a
-decision of their own.
+The `test-processes-through-support` textlint rules in `brokkr.toml` keep
+every process a Rust test starts in `tests/integration/support/process.rs`
+(the CLI and the reference Luas), except two `python3` spawns that carry a
+`process-spawn-exception:` marker: `tests/common/libm_symbols.rs` runs
+`scripts/libm_symbols.py` (which runs `nm`) on a linked CLI binary, and
+`src/crmath/tests/golden.rs` runs `scripts/crmath_tables.py --check-pins` (and
+`--check` under `crmath-sweeps`). Undecided: keep them as test-time spawns,
+port them to Rust, or move them to script checks (the libm one needs the
+binary of the sweep that built it, which is why it is a test). When decided,
+drop the marker and the rule's exception with them.
 
 ## VC-020 - The corpus walk is a filesystem walk, so untracked files join the gate
 
 Reported by: corpus-harness.
 
-The corpus is enumerated by `tests/common/examples.rs` and by
-`sorted_lua_files` in `lib.sh`, both over the filesystem. An untracked `.lua`
-dropped into `examples/` (a scratch repro, say) joins every gate on that host
-and no other.
+The gate enumerates the corpus with `tests/common/examples.rs`, a filesystem
+walk (`sorted_lua_files` in `lib.sh` walks it the same way, for the manual
+`diff_test.sh` only). An untracked `.lua` dropped into `examples/` (a scratch
+repro, say) joins every gate on that host and no other.
 
 Fix: walk `git ls-files examples` (adds a git dependency), or treat untracked
 files in `examples/` as a test failure with a clear message.

@@ -1,11 +1,17 @@
 #!/usr/bin/env bash
 # Differential test: dellingr vs reference Lua 5.2 and 5.4.
 #
+# A manual tool. The gate's reference comparison is the example corpus test,
+# tests/integration/corpus/run_examples.rs, which brokkr check runs; this
+# script is for comparing chosen files or directories by hand, and it owns
+# its own requirements (bash, GNU timeout unless --timeout 0, lua5.2, lua5.4).
+#
 # Walks examples/**/*.lua, running each script through dellingr and comparing
 # ordinary examples with the fixed reference runtimes. A file passes when
 # its dellingr output matches either reference. Files tagged with -- DIFF:
 # <reason> are expected to differ from both references; matching either one
-# reports a stale marker after dellingr exits successfully.
+# reports a stale marker after dellingr exits successfully. Files tagged with
+# -- SKIP-DIFF: <reason> are not compared.
 #
 # Accepting either reference is deliberate: dellingr is a Lua 5.2/5.4 hybrid
 # (the README's "Won't implement" list removes most of what separates the two),
@@ -15,16 +21,19 @@
 # agree cannot hide a regression, and a deliberate divergence is already
 # marked with -- DIFF: <reason>.
 #
+# It compares each process's stdout and stderr together and ignores the
+# references' exit status; the corpus test compares stream by stream and
+# requires a matching reference to exit 0, so on a reference that errors
+# silently or writes to stderr the two can disagree.
+#
 # Usage: diff_test.sh [--bin <path>] [--timeout <time>] [file-or-dir...]
 #   --bin <path>                  use an already-built binary instead of building
 #   --timeout <time>              per-process timeout in timeout(1) syntax
 #                                 (default is in lib.sh); 0 disables it
 #
-# Internal input mode:
-#   --list-examples               print the default example paths and exit
-#
 # Output is intentionally terse: prints "ok" on success, or one failure line
-# per failing script. Invalid timeout configuration exits 2; gate failures exit 1.
+# per failing script. Invalid timeout configuration exits 2; comparison
+# failures exit 1.
 
 set -u
 
@@ -47,14 +56,6 @@ append_lua_files() {
         scripts+=("$file")
     done < <(sorted_lua_files "$root")
 }
-
-if [ "$#" -eq 1 ] && [ "$1" = "--list-examples" ]; then
-    append_lua_files examples
-    if [ "${#scripts[@]}" -gt 0 ]; then
-        printf '%s\n' "${scripts[@]}"
-    fi
-    exit 0
-fi
 
 OUR_LUA=""
 DIFF_TIMEOUT="$DEFAULT_DIFF_TIMEOUT"

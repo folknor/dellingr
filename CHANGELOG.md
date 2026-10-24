@@ -8,6 +8,27 @@ All notable changes to dellingr are documented here. The format follows
 
 ### Testing
 
+- The example runner and the differential gate are one Rust test,
+  `run_all_examples`: each example runs through the CLI once, and every file
+  not marked `-- SKIP-DIFF:` is compared with `lua5.2` and `lua5.4`, spawned
+  from Rust, in memory. A reference now matches only when it exits 0 with
+  empty stderr and the same stdout, rather than on combined output with its
+  exit status ignored. The references run under `LC_ALL=C`, `-E`, the
+  address-space cap and a zero process limit, so a script cannot start a
+  process through them. The whole corpus shares one 15-second deadline below
+  brokkr's 20-second per-test cap, replacing the 60-second per-example and
+  5-second per-process timeouts, and a failure names every example
+  unfinished or not started. `scripts/diff_test.sh` is a manual tool outside
+  the gate; the tests of its argument parser and file walk are gone.
+- A pre-clippy script check, `scripts/check_tools.py`, names any missing gate
+  tool before anything compiles and pins the reference Luas' releases and
+  compatibility globals. bash and GNU `timeout` are no longer gate
+  requirements, and the `.scratch/` wipe no longer needs `rm`.
+- Textlint rules keep every process a Rust test starts in
+  `tests/integration/support/process.rs` (two marked `python3` spawns
+  excepted) and report a DIFF or SKIP-DIFF marker without a reason before
+  anything compiles.
+
 - The integration tests are one crate, `tests/integration`, instead of one
   binary per file: each former file is a module, grouped by subject (`cli`,
   `compiler`, `corpus`, `cost`, `failures`, `host`, `library`, `runtime`,

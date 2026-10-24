@@ -43,18 +43,32 @@ name = "explicit"
 env = { CLIPPY_CONF_DIR = "{root}" }
 
 # `.scratch/` is gitignored and belongs to the developer; dellingr does not
-# police its contents, so every check starts by wiping it (the diff gate's
-# killed-run leftovers, the Python fixture tests' trees, old bench results).
-# The stage is the default pre-clippy one, and this entry is declared first:
-# entries at a stage run in declaration order, so it finishes before the
-# Python fixture tests below (which write there) start, and the test phase,
-# whose diff gate writes there, has not begun. A later stage (post-test) would
-# also be safe from deleting live files, but it is skipped when tests fail,
-# which is exactly when killed runs leak. A background stage would race the
-# fixture tests. Everything that writes to `.scratch/` recreates it.
+# police its contents, so every check starts by wiping it (killed manual runs
+# of scripts/diff_test.sh, the Python fixture tests' trees, old bench
+# results). The stage is the default pre-clippy one, and this entry is
+# declared first: entries at a stage run in declaration order, so it finishes
+# before the Python fixture tests below (which write there) start. Tests do
+# not write files, so the test phase never touches it. A later stage
+# (post-test) would also be safe from deleting live files, but it is skipped
+# when tests fail. A background stage would race the fixture tests.
+# Everything that writes to `.scratch/` recreates it. Python does the removal,
+# so the gate needs no tool beyond the ones check-tools below verifies.
 [[script_check]]
 name = "wipe-scratch"
-command = "rm -rf .scratch && echo ok"
+command = '''python3 -B -c "import pathlib, shutil; p = pathlib.Path('.scratch'); p.unlink() if p.is_symlink() or p.is_file() else shutil.rmtree(p) if p.exists() else None; print('ok')"'''
+expect = "ok"
+match = "last-line"
+stream = "stdout"
+stage = "pre-clippy"
+
+# Every external tool the gate needs, with the reference Luas' release and
+# compatibility flags pinned (the script's docstring lists what each tool is
+# for). It runs before anything compiles, so a host missing one learns which
+# here instead of from a failure deep in a test. Script checks at the same
+# stage all run, so this names the problem first but does not stop the rest.
+[[script_check]]
+name = "check-tools"
+command = "python3 -B scripts/check_tools.py"
 expect = "ok"
 match = "last-line"
 stream = "stdout"
@@ -476,6 +490,48 @@ region = "string"
 test_code = "only"
 must_scan = ["src/compiler/parser/tests.rs", "tests/integration/cli/cli_arguments.rs"]
 message = "tests must use the artifacts Cargo already built instead of spawning cargo"
+
+# The gate owns the processes it starts: the Cargo-built CLI and the reference
+# Luas, both constructed in tests/integration/support/process.rs, which bounds
+# and contains them. Any other `Command` construction under src/ or tests/
+# (production code spawns nothing either) is refused, shell tools included.
+# Two python3 spawns are allowed by their `process-spawn-exception:` marker
+# and are the only sites that may carry it: tests/common/libm_symbols.rs
+# (scripts/libm_symbols.py on a linked binary) and src/crmath/tests/golden.rs
+# (scripts/crmath_tables.py --check-pins). Whether they stay test-time spawns
+# is undecided. These are lexical guards: a call wrapped across lines or
+# built inside a macro is not seen.
+[[textlint]]
+name = "test-processes-through-support"
+pattern = '\bCommand\s*::\s*new\b'
+paths = ["src/**/*.rs", "tests/**/*.rs"]
+exclude = ["tests/integration/support/process.rs"]
+region = "code"
+allow_marker = "process-spawn-exception:"
+allow_marker_above = 2
+must_scan = ["tests/common/libm_symbols.rs", "src/crmath/tests/golden.rs"]
+message = "start processes through tests/integration/support/process.rs"
+
+# The import half of the rule above: an aliased `Command` import would let a
+# call through under another name.
+[[textlint]]
+name = "test-processes-through-support-imports"
+pattern = '\bprocess\s*::[^;]*\bCommand\b'
+paths = ["src/**/*.rs", "tests/**/*.rs"]
+exclude = ["tests/integration/support/process.rs"]
+join_wrapped_use = true
+must_scan = ["tests/integration/support/mod.rs"]
+message = "import std::process::Command only in tests/integration/support/process.rs"
+
+# Every DIFF and SKIP-DIFF marker in the example corpus carries a reason. The
+# corpus test refuses an empty one too; this reports it before anything
+# compiles. The whitespace set matches the test's `str::trim_ascii`.
+[[textlint]]
+name = "diff-marker-needs-reason"
+pattern = '^-- (?:SKIP-)?DIFF:[\t\n\x0C\r ]*$'
+paths = ["examples/**/*.lua"]
+must_scan = ["examples/math.lua"]
+message = "a -- DIFF: or -- SKIP-DIFF: marker needs a reason after the colon"
 
 # Free callback values are legitimate registration sites. Guard qualified
 # method values separately, without banning those registrations. The native

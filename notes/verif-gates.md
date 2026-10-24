@@ -28,15 +28,11 @@ them. Each entry names the scopes whose hunters reported it.
 Reported by: check-machinery.
 
 These inspect files only, yet are compiled and run once per dev sweep: every
-test in
-`corpus::test_conventions` (more of them since the integration merge),
-`diff_test.rs::diff_markers_have_nonempty_reasons`,
-`diff_test.rs::shell_and_rust_example_corpora_match`, and
-`diff_test.rs::malformed_timeout_is_rejected...`. They fail late, after clippy
-and a full build.
+test in `corpus::test_conventions` (more of them since the integration merge).
+They fail late, after clippy and a full build. (The DIFF/SKIP-DIFF marker
+reason rule already has its pre-clippy home, the `diff-marker-needs-reason`
+textlint rule.)
 
-Fix: textlint rules, or one pre-clippy `script_check`, for the marker-reason
-rule and the conventions. The corpus-equivalence test exists only because two
-walkers exist; the in-process gate rewrite in rewrites.md removes it.
+Fix: textlint rules, or one pre-clippy `script_check`, for the conventions.
 
 Enforceable: yes.

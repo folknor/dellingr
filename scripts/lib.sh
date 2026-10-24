@@ -6,7 +6,7 @@
 # crate consumes HOTPATH_OUTPUT_PATH set by brokkr, and the harness reads
 # BROKKR_MARKER_FIFO, also set by brokkr.
 
-# Per-process timeout for diff_test.sh, in timeout(1) syntax.
+# Per-process timeout for manual diff_test.sh runs, in timeout(1) syntax.
 readonly DEFAULT_DIFF_TIMEOUT=5s
 # Virtual-memory cap applied by test_limited.sh, in KiB (2 GiB). The example
 # runner reads this exact line (tests/integration/support/process.rs), so keep
@@ -160,7 +160,8 @@ shell_quote() {
     printf '%q' "$1"
 }
 
-# Match tests/common::example_corpus: regular files only and C-locale byte order.
+# Regular files only, in C-locale byte order (the order of the Rust corpus
+# list in tests/common/examples.rs).
 sorted_lua_files() {
     if [ "$#" -ne 1 ]; then
         echo "usage: sorted_lua_files <directory>" >&2

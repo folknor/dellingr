@@ -1,22 +1,41 @@
-//! Integration tests that run all Lua example files.
+//! The example corpus gate. Every Lua file under `examples/` runs through the
+//! CLI once and must pass the example conventions (`check_cli_run`); every
+//! file not marked `-- SKIP-DIFF:` is then run by reference Lua 5.2 and 5.4
+//! and compared with the CLI's output in memory (`compare_with_references`).
+//! `brokkr check` runs it in every sweep whose selection includes it.
+//!
+//! `check_example` depends on one path and a deadline, so the corpus can
+//! become one test per example. Until then `run_all_examples` runs the whole
+//! corpus in one test, under one deadline below brokkr's per-test cap, and
+//! names the examples still running or not started when it passes.
+//!
+//! The comparison is compiled out under the `hotpath` feature: it instruments
+//! every call in the CLI binary, and output equivalence says nothing about
+//! instrumentation. The pass rules still apply there.
 
 use std::fs;
-use std::io::Read;
 use std::path::Path;
-use std::process::{Child, ExitStatus, Output, Stdio};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::thread::JoinHandle;
 use std::time::Duration;
 
 use dellingr::Program;
 
-use crate::support::{self, examples, process};
+#[cfg(not(feature = "hotpath"))]
+use crate::support::process::ReferenceLua;
+use crate::support::process::{self, Cut, Deadline, End};
+use crate::support::{self, examples};
 
 const EXAMPLE_WORKERS: usize = 8;
-const EXAMPLE_TIMEOUT_MS: u64 = 60_000;
-const EXAMPLE_OUTPUT_LIMIT_BYTES: usize = 1024 * 1024;
-const POLL_INTERVAL_MS: u64 = 25;
+/// The limit on one process's stdout and stderr together.
+const OUTPUT_LIMIT_BYTES: usize = 1024 * 1024;
+/// brokkr's hard per-test wall-time cap (`brokkr man hygiene`). brokkr does
+/// not export it, so this restates it.
+const BROKKR_PER_TEST_CAP: Duration = Duration::from_secs(20);
+/// The whole corpus shares this deadline, measured from the start of the
+/// test. It sits far enough inside the cap that a slow or hung example is
+/// reported by name, with the rest of the corpus's verdicts, instead of being
+/// killed by brokkr's watchdog with the whole test as the suspect.
+const CORPUS_DEADLINE: Duration = Duration::from_secs(15);
+const _: () = assert!(CORPUS_DEADLINE.as_secs() + 5 <= BROKKR_PER_TEST_CAP.as_secs());
 
 #[test]
 fn run_feature_test_extended_in_process() {
@@ -60,138 +79,6 @@ fn run_feature_test_extended_in_process() {
     );
 }
 
-fn read_output<R>(
-    mut reader: R,
-    captured_bytes: Arc<AtomicUsize>,
-    output_exceeded: Arc<AtomicBool>,
-) -> JoinHandle<Vec<u8>>
-where
-    R: Read + Send + 'static,
-{
-    std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let mut buffer = [0; 8192];
-        loop {
-            let read = reader
-                .read(&mut buffer)
-                .expect("example process output should be readable");
-            if read == 0 {
-                break;
-            }
-
-            let previous = captured_bytes.fetch_add(read, Ordering::Relaxed);
-            let remaining = EXAMPLE_OUTPUT_LIMIT_BYTES.saturating_sub(previous);
-            let captured = read.min(remaining);
-            bytes.extend_from_slice(&buffer[..captured]);
-            if captured < read {
-                output_exceeded.store(true, Ordering::Release);
-            }
-        }
-        bytes
-    })
-}
-
-struct ExampleRun {
-    output: Output,
-    output_exceeded: bool,
-    timed_out: bool,
-    timeout_ms: u64,
-}
-
-fn stop_example(child: &mut Child) -> Result<ExitStatus, String> {
-    if let Err(error) = child.kill()
-        && error.kind() != std::io::ErrorKind::InvalidInput
-    {
-        return Err(format!("could not stop example process: {error}"));
-    }
-    child
-        .wait()
-        .map_err(|error| format!("could not wait for stopped example: {error}"))
-}
-
-fn run_example(path: &Path, timeout_ms: u64) -> Result<ExampleRun, String> {
-    let mut child = process::limited_command()
-        .arg("--quiet")
-        .arg(path)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("could not start dellingr example: {error}"))?;
-
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "example stdout was not captured".to_string())?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| "example stderr was not captured".to_string())?;
-    let captured_bytes = Arc::new(AtomicUsize::new(0));
-    let output_exceeded = Arc::new(AtomicBool::new(false));
-    let stdout_reader = read_output(
-        stdout,
-        Arc::clone(&captured_bytes),
-        Arc::clone(&output_exceeded),
-    );
-    let stderr_reader = read_output(stderr, captured_bytes, Arc::clone(&output_exceeded));
-    let poll_count = timeout_ms.saturating_add(POLL_INTERVAL_MS - 1) / POLL_INTERVAL_MS;
-    let mut status = None;
-
-    for _ in 0..poll_count {
-        if output_exceeded.load(Ordering::Acquire) {
-            status = Some(stop_example(&mut child)?);
-            break;
-        }
-        match child.try_wait() {
-            Ok(Some(exit_status)) => {
-                status = Some(exit_status);
-                break;
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(POLL_INTERVAL_MS)),
-            Err(error) => {
-                if let Err(stop_error) = stop_example(&mut child) {
-                    return Err(format!(
-                        "could not check example process: {error}; {stop_error}"
-                    ));
-                }
-                let stdout_result = stdout_reader.join();
-                let stderr_result = stderr_reader.join();
-                if stdout_result.is_err() || stderr_result.is_err() {
-                    return Err(format!(
-                        "could not check example process: {error}; output reader panicked"
-                    ));
-                }
-                return Err(format!("could not check example process: {error}"));
-            }
-        }
-    }
-
-    let timed_out = status.is_none();
-    if timed_out {
-        status = Some(stop_example(&mut child)?);
-    }
-
-    let stdout = stdout_reader
-        .join()
-        .map_err(|_| "example stdout reader panicked".to_string())?;
-    let stderr = stderr_reader
-        .join()
-        .map_err(|_| "example stderr reader panicked".to_string())?;
-    let output = Output {
-        status: status
-            .ok_or_else(|| "example process status unavailable after waiting".to_string())?,
-        stdout,
-        stderr,
-    };
-
-    Ok(ExampleRun {
-        output,
-        output_exceeded: output_exceeded.load(Ordering::Acquire),
-        timed_out,
-        timeout_ms,
-    })
-}
-
 pub(super) fn defines_global_bench(source: &str) -> bool {
     if !source.contains("_bench") {
         return false;
@@ -220,92 +107,325 @@ pub(super) fn defines_global_bench(source: &str) -> bool {
     })
 }
 
-fn check_example(path: &Path, timeout_ms: u64) -> Option<String> {
-    let display = path
-        .strip_prefix(Path::new(env!("CARGO_MANIFEST_DIR")))
-        .expect("example corpus paths must be rooted at the crate manifest")
-        .display();
+/// How an example takes part in the reference comparison, from its marker
+/// lines: `-- DIFF: <reason>` declares a deliberate divergence, and
+/// `-- SKIP-DIFF: <reason>` keeps the file out of the comparison.
+#[derive(Clone, Copy)]
+enum Comparison {
+    /// Unmarked: the output must match at least one reference.
+    Compared,
+    /// `-- DIFF:`: the output must match neither reference; a match means
+    /// the marker is stale.
+    Diverges,
+    /// `-- SKIP-DIFF:`: not compared.
+    Skipped,
+}
 
-    println!("Running: {display}");
-
-    let source = match fs::read_to_string(path) {
-        Ok(source) => source,
-        Err(error) => return Some(format!("{display}: could not read source: {error}")),
-    };
-    let defines_bench = defines_global_bench(&source);
-    let run = match run_example(path, timeout_ms) {
-        Ok(run) => run,
-        Err(error) => return Some(format!("{display}: {error}")),
-    };
-    let output = run.output;
-    let stderr = String::from_utf8_lossy(&output.stderr);
-
-    if run.output_exceeded {
-        Some(format!(
-            "{display}: stdout and stderr exceeded the combined output limit of {EXAMPLE_OUTPUT_LIMIT_BYTES} bytes"
-        ))
-    } else if run.timed_out {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        Some(format!(
-            "{display}: timed out after {} ms\nstdout: {stdout}\nstderr: {stderr}",
-            run.timeout_ms
-        ))
-    } else if !output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        Some(format!(
-            "{}: exit code {:?}\nstdout: {}\nstderr: {}",
-            display,
-            output.status.code(),
-            stdout,
-            stderr
-        ))
-    } else if !stderr.is_empty() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        Some(format!(
-            "{display}: unexpected stderr\nstdout: {stdout}\nstderr: {stderr}"
-        ))
-    } else {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        // Example assertions follow the convention `name: false`.
-        if stdout.lines().any(|line| line.ends_with(": false")) {
-            Some(format!(
-                "{display}: test assertion failed\noutput: {stdout}"
-            ))
-        } else if defines_bench && !stdout.lines().any(|line| line.ends_with(": true")) {
-            Some(format!(
-                "{display}: _bench example did not print a success line\noutput: {stdout}"
-            ))
+/// Reads the markers of `source`. Every marker needs a reason; whitespace is
+/// `str::trim_ascii`'s set, the same one the `diff-marker-needs-reason`
+/// textlint rule in `brokkr.toml` uses, which reports the same mistake before
+/// anything compiles. A file may not carry both kinds.
+fn comparison(source: &str) -> Result<Comparison, String> {
+    let mut diverges = false;
+    let mut skipped = false;
+    let mut without_reason = Vec::new();
+    for (index, line) in source.lines().enumerate() {
+        let reason = if let Some(reason) = line.strip_prefix("-- DIFF:") {
+            diverges = true;
+            reason
+        } else if let Some(reason) = line.strip_prefix("-- SKIP-DIFF:") {
+            skipped = true;
+            reason
         } else {
-            None
+            continue;
+        };
+        if reason.trim_ascii().is_empty() {
+            without_reason.push((index + 1).to_string());
         }
     }
-}
-
-fn run_examples_bucket(name: &str) {
-    let files = examples::example_corpus();
-
-    assert!(
-        !files.is_empty(),
-        "No .lua files found in examples bucket {name}"
-    );
-
-    // Keep stress workload concurrency bounded by available parallelism.
-    let failures = support::parallel_failures(&files, EXAMPLE_WORKERS, |path| {
-        check_example(path, EXAMPLE_TIMEOUT_MS)
-    });
-
-    if !failures.is_empty() {
-        panic!(
-            "\n{} example(s) failed:\n\n{}",
-            failures.len(),
-            failures.join("\n\n")
-        );
+    if !without_reason.is_empty() {
+        return Err(format!(
+            "DIFF and SKIP-DIFF markers need a reason (line {})",
+            without_reason.join(", ")
+        ));
     }
-
-    println!("\nAll {} examples passed in {name}!", files.len());
+    match (diverges, skipped) {
+        (true, true) => Err("carries both a DIFF and a SKIP-DIFF marker".to_string()),
+        (true, false) => Ok(Comparison::Diverges),
+        (false, true) => Ok(Comparison::Skipped),
+        (false, false) => Ok(Comparison::Compared),
+    }
 }
 
+/// The verdict on one example.
+enum Outcome {
+    Passed,
+    Failed(String),
+    /// The deadline passed while the example was running; the text says which
+    /// process it was in.
+    Unfinished(String),
+    /// The deadline had passed before the example started.
+    NotStarted,
+}
+
+/// Runs one example through the CLI and, unless it is marked SKIP-DIFF,
+/// through both references, and judges it. Every process is started only
+/// while the deadline has not passed.
+fn check_example(path: &Path, deadline: Deadline) -> Outcome {
+    if deadline.passed() {
+        return Outcome::NotStarted;
+    }
+    let display = display_path(path);
+    let source = match fs::read_to_string(path) {
+        Ok(source) => source,
+        Err(error) => return Outcome::Failed(format!("{display}: could not read source: {error}")),
+    };
+    let comparison = match comparison(&source) {
+        Ok(comparison) => comparison,
+        Err(error) => return Outcome::Failed(format!("{display}: {error}")),
+    };
+    let defines_bench = defines_global_bench(&source);
+
+    if deadline.passed() {
+        return Outcome::NotStarted;
+    }
+    let run = match process::capture(
+        process::limited_command().arg("--quiet").arg(path),
+        OUTPUT_LIMIT_BYTES,
+        deadline,
+    ) {
+        Ok(run) => run,
+        Err(error) => return Outcome::Failed(format!("{display}: dellingr: {error}")),
+    };
+    if let Some(failure) = check_cli_run(&display, &run, defines_bench) {
+        return failure;
+    }
+    compare_with_references(path, &display, comparison, &run.stdout, deadline)
+}
+
+/// The example conventions for the CLI run: it exits 0 and writes nothing to
+/// stderr; no stdout line ends in `: false` (examples print
+/// `name: <condition>`); and a file whose main chunk assigns a global `_bench`
+/// prints a line ending in `: true`.
+fn check_cli_run(display: &str, run: &process::Captured, defines_bench: bool) -> Option<Outcome> {
+    let status = match &run.end {
+        End::Exited(status) => status,
+        End::Cut(cut) => return Some(cut_outcome(display, "dellingr", cut, run)),
+    };
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    let failure = if !status.success() {
+        format!(
+            "{display}: exit code {:?}\nstdout: {stdout}\nstderr: {stderr}",
+            status.code()
+        )
+    } else if !stderr.is_empty() {
+        format!("{display}: unexpected stderr\nstdout: {stdout}\nstderr: {stderr}")
+    } else if stdout.lines().any(|line| line.ends_with(": false")) {
+        format!("{display}: test assertion failed\noutput: {stdout}")
+    } else if defines_bench && !stdout.lines().any(|line| line.ends_with(": true")) {
+        format!("{display}: _bench example did not print a success line\noutput: {stdout}")
+    } else {
+        return None;
+    };
+    Some(Outcome::Failed(failure))
+}
+
+/// The verdict on a process whose capture was cut short.
+fn cut_outcome(display: &str, program: &str, cut: &Cut, run: &process::Captured) -> Outcome {
+    let output: String = [("stdout", &run.stdout), ("stderr", &run.stderr)]
+        .into_iter()
+        .filter(|(_, bytes)| !bytes.is_empty())
+        .map(|(name, bytes)| format!("\n{name}: {}", String::from_utf8_lossy(bytes)))
+        .collect();
+    match cut {
+        Cut::OutputExceeded => Outcome::Failed(format!(
+            "{display}: {program}: stdout and stderr exceeded the combined output limit of {OUTPUT_LIMIT_BYTES} bytes"
+        )),
+        Cut::Unfinished => {
+            Outcome::Unfinished(format!("{display}: {program} was still running{output}"))
+        }
+        Cut::CaptureUnfinished(status) => Outcome::Unfinished(format!(
+            "{display}: {program} exited ({status}), but its output had not been read to the end{output}"
+        )),
+    }
+}
+
+/// Compares the CLI's stdout with both references, run under the conditions
+/// `process::reference_command` documents.
+///
+/// A reference matches when it exits 0, writes nothing to stderr and prints
+/// exactly the CLI's stdout. The CLI has already passed with exit 0 and empty
+/// stderr, so this compares everything both processes produced, stream by
+/// stream. A reference that exits nonzero with an error message is ordinary
+/// divergence (Lua 5.4 rejects a zero for-loop step that dellingr skips, for
+/// instance). A reference that cannot be judged - it could not start, was
+/// killed by a signal, overflowed its output or was cut by the deadline -
+/// fails the example whatever the other reference did, so broken reference
+/// infrastructure can neither validate a DIFF marker nor hide behind the
+/// other reference's match.
+///
+/// Both references are accepted because dellingr is a Lua 5.2/5.4 hybrid
+/// (the README's "Won't implement" list removes most of what separates the
+/// two), and where they disagree, which one dellingr follows is a per-feature
+/// decision rather than a global one. A file where both agree cannot hide a
+/// regression, and a deliberate divergence is marked with `-- DIFF:`.
+#[cfg(not(feature = "hotpath"))]
+fn compare_with_references(
+    path: &Path,
+    display: &str,
+    comparison: Comparison,
+    ours: &[u8],
+    deadline: Deadline,
+) -> Outcome {
+    if matches!(comparison, Comparison::Skipped) {
+        return Outcome::Passed;
+    }
+    let mut matched = Vec::new();
+    let mut mismatches = Vec::new();
+    for lua in ReferenceLua::ALL {
+        if deadline.passed() {
+            return Outcome::Unfinished(format!(
+                "{display}: {} had not started (dellingr passed)",
+                lua.label()
+            ));
+        }
+        let mut command = match process::reference_command(lua, path) {
+            Ok(command) => command,
+            Err(error) => return Outcome::Failed(format!("{display}: {error}")),
+        };
+        let run = match process::capture(&mut command, OUTPUT_LIMIT_BYTES, deadline) {
+            Ok(run) => run,
+            // A start failure is usually a missing interpreter, so name the
+            // executable.
+            Err(error) => {
+                return Outcome::Failed(format!(
+                    "{display}: {} ({}): {error}",
+                    lua.label(),
+                    lua.program()
+                ));
+            }
+        };
+        let status = match &run.end {
+            End::Exited(status) => *status,
+            End::Cut(cut) => return cut_outcome(display, lua.label(), cut, &run),
+        };
+        let Some(code) = status.code() else {
+            return Outcome::Failed(format!(
+                "{display}: {} did not exit normally ({status})",
+                lua.label()
+            ));
+        };
+        if code == 0 && run.stderr.is_empty() && run.stdout == ours {
+            matched.push(lua.label());
+        } else {
+            mismatches.push(describe_mismatch(lua.label(), code, &run, ours));
+        }
+    }
+    match comparison {
+        Comparison::Compared if matched.is_empty() => Outcome::Failed(format!(
+            "{display}: output matches neither reference\n{}",
+            mismatches.join("\n")
+        )),
+        Comparison::Diverges if !matched.is_empty() => Outcome::Failed(format!(
+            "{display}: stale DIFF marker; output matches {}",
+            matched.join(" and ")
+        )),
+        _ => Outcome::Passed,
+    }
+}
+
+/// Without the comparison (see the module comment), the pass rules decide.
+#[cfg(feature = "hotpath")]
+fn compare_with_references(
+    _path: &Path,
+    _display: &str,
+    _comparison: Comparison,
+    _ours: &[u8],
+    _deadline: Deadline,
+) -> Outcome {
+    Outcome::Passed
+}
+
+/// How a reference's run differs from the CLI's: its exit code, its stderr
+/// and the first stdout line that differs.
+#[cfg(not(feature = "hotpath"))]
+fn describe_mismatch(label: &str, code: i32, run: &process::Captured, ours: &[u8]) -> String {
+    let mut text = format!("  {label}: exit code {code}");
+    if !run.stderr.is_empty() {
+        text.push_str(&format!(
+            ", stderr: {}",
+            String::from_utf8_lossy(&run.stderr).trim_end()
+        ));
+    }
+    if run.stdout != ours {
+        let ours: Vec<&[u8]> = ours.split(|byte| *byte == b'\n').collect();
+        let theirs: Vec<&[u8]> = run.stdout.split(|byte| *byte == b'\n').collect();
+        let line = (0..ours.len().max(theirs.len()))
+            .find(|&index| ours.get(index) != theirs.get(index))
+            .unwrap_or(0);
+        let show = |lines: &[&[u8]]| {
+            lines.get(line).map_or_else(
+                || "<end of output>".to_string(),
+                |text| format!("{:?}", String::from_utf8_lossy(text)),
+            )
+        };
+        text.push_str(&format!(
+            "\n    first difference at stdout line {}\n    dellingr: {}\n    {label}: {}",
+            line + 1,
+            show(&ours),
+            show(&theirs)
+        ));
+    }
+    text
+}
+
+fn display_path(path: &Path) -> String {
+    path.strip_prefix(Path::new(env!("CARGO_MANIFEST_DIR")))
+        .expect("example corpus paths must be rooted at the crate manifest")
+        .display()
+        .to_string()
+}
+
+/// The whole corpus in one test; see the module comment.
 #[test]
 fn run_all_examples() {
-    run_examples_bucket("all");
+    let deadline = Deadline::after(CORPUS_DEADLINE);
+    let files = examples::example_corpus();
+    assert!(!files.is_empty(), "no .lua files found under examples/");
+
+    let outcomes = support::parallel_map(&files, EXAMPLE_WORKERS, |path| {
+        check_example(path, deadline)
+    });
+
+    let mut failures = Vec::new();
+    let mut unfinished = Vec::new();
+    let mut not_started = Vec::new();
+    for (path, outcome) in files.iter().zip(outcomes) {
+        match outcome {
+            Outcome::Passed => {}
+            Outcome::Failed(failure) => failures.push(failure),
+            Outcome::Unfinished(report) => unfinished.push(report),
+            Outcome::NotStarted => not_started.push(display_path(path)),
+        }
+    }
+    if !unfinished.is_empty() || !not_started.is_empty() {
+        failures.push(format!(
+            "the corpus deadline of {}s (brokkr's per-test cap is {}s) passed with {} example(s) \
+             unfinished and {} not started\n\nunfinished:\n{}\n\nnot started:\n{}",
+            CORPUS_DEADLINE.as_secs(),
+            BROKKR_PER_TEST_CAP.as_secs(),
+            unfinished.len(),
+            not_started.len(),
+            unfinished.join("\n\n"),
+            not_started.join("\n")
+        ));
+    }
+    assert!(
+        failures.is_empty(),
+        "\n{} problem(s) in the {}-example corpus:\n\n{}",
+        failures.len(),
+        files.len(),
+        failures.join("\n\n")
+    );
 }
